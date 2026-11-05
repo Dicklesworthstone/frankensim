@@ -683,23 +683,32 @@ fn coherent_transmitting_wall_work_separates_heat_from_outgoing_backing_flux() {
         FluidTransportState::try_new(medium().density, 1005.0, 0.0257, 1.81e-5).unwrap(),
         1.4,
     ).unwrap();
-    let receiver = gas.acoustic();
     let law = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
     let omega = TAU * 700.0;
     let rates = [C64::new(0.8e-6, 0.3e-6), C64::new(-0.2e-6, 0.7e-6)];
-    for lossy in [false, true] {
+    for (near_release, lossy) in [(false, false), (false, true), (true, false), (true, true)] {
+        let receiver = FluidAcousticState::try_new(
+            medium().density * if near_release { 1e-10 } else { 1.0 },
+            medium().sound_speed,
+        ).unwrap();
         let (surface, sources, traces, _) = fixture(0, Some([0.06, 0.0, 0.02]));
-        let mut native_layers = vec![Layer::FluidGap { thickness_m: 0.025 }];
-        let mut owned_layers = vec![LocalWallLayer::FluidGap { thickness_m: 0.025 }];
+        let gap = if near_release { 0.0 } else { 0.025 };
+        let mut native_layers = vec![Layer::FluidGap { thickness_m: gap }];
+        let mut owned_layers = vec![LocalWallLayer::FluidGap { thickness_m: gap }];
         if lossy {
-            native_layers.insert(0, Layer::Porous { law: &law, thickness_m: 0.03 });
-            owned_layers.insert(0, LocalWallLayer::Porous { law: law.clone(), thickness_m: 0.03 });
+            let thickness_m = if near_release { 1e-14 } else { 0.03 };
+            native_layers.insert(0, Layer::Porous { law: &law, thickness_m });
+            owned_layers.insert(0, LocalWallLayer::Porous { law: law.clone(), thickness_m });
         }
         let allowance = owned_layers.len();
         let native = TransmittingLayers::new(&gas, &receiver, omega, &native_layers).unwrap();
         let material = native.normal_surface_power(
             LayerAbsorptionBudget { max_layers: allowance }, || false,
         ).unwrap();
+        let incident_partition = native.layer_absorption(
+            1.0, 1.0, LayerAbsorptionBudget { max_layers: allowance }, || false,
+        ).unwrap();
+        assert_eq!(material.normalized_admittance.abs() >= 1.0 / det::sqrt(f64::EPSILON), near_release);
         let passive: Vec<_> = (0..surface.areas().len())
             .map(|panel| traces.iter().all(|trace| trace[panel] == 0.0))
             .collect();
@@ -734,8 +743,10 @@ fn coherent_transmitting_wall_work_separates_heat_from_outgoing_backing_flux() {
         assert_eq!(partition.boundary_work.outward_power_w, legacy.outward_power_w);
         assert_eq!(partition.absorption_layers, allowance);
 
-        // Independent contraction of retained TOTAL pressures with native
-        // surface conductances. Sum complex fields first, retaining interference.
+        // Independent native material oracle: ordinary total pressure, or the
+        // actual incoming characteristic (p-rho*c*v)/2 near pressure release.
+        // The latter does not use the implementation's bounded pair inverse.
+        // Sum complex fields first, retaining interference in both charts.
         let mut pressure_weight = 0.0;
         let mut incoherent_weight = 0.0;
         for (panel, &is_passive) in passive.iter().enumerate() {
@@ -744,15 +755,26 @@ fn coherent_transmitting_wall_work_separates_heat_from_outgoing_backing_flux() {
             }
             let mut pressure = C64::ZERO;
             for (source, &rate) in rates.iter().enumerate() {
-                let field = response.solutions()[source].pressure[panel] * rate;
+                let solution = &response.solutions()[source];
+                let field = if near_release {
+                    (solution.pressure[panel]
+                        - solution.velocity[panel].scale(medium().density * medium().sound_speed))
+                        .scale(0.5) * rate
+                } else {
+                    solution.pressure[panel] * rate
+                };
                 pressure = pressure + field;
                 incoherent_weight += field.norm_sq() * surface.areas()[panel];
             }
             pressure_weight += pressure.norm_sq() * surface.areas()[panel];
         }
         let weight = pressure_weight / (2.0 * medium().density * medium().sound_speed);
-        let expected_heat = weight * material.absorbed_conductance;
-        let expected_transmission = weight * material.transmitted_conductance;
+        let expected_heat = weight * if near_release {
+            incident_partition.absorbed_fraction
+        } else { material.absorbed_conductance };
+        let expected_transmission = weight * if near_release {
+            incident_partition.transmitted_fraction
+        } else { material.transmitted_conductance };
         let scale = partition.accepted_power_w;
         assert!(scale > 0.0);
         assert!(partition.transmitted_power_w > 0.0);
@@ -786,4 +808,95 @@ fn coherent_transmitting_wall_work_separates_heat_from_outgoing_backing_flux() {
             &rates, work, allowance, &cancelled,
         ).is_err());
     }
+}
+
+#[test]
+fn resonant_pressure_node_retains_wall_velocity_and_finite_window_beat_work() {
+    use crate::observation_transfers::HarmonicExposureFactorStatistics;
+    use fs_fft::harmonic_window::HarmonicWindow;
+
+    let (surface, sources, traces, _) = fixture(0, Some([0.06, 0.0, 0.02]));
+    let omega = 4096.0;
+    let other_omega = 5120.0;
+    let passive: Vec<_> = (0..surface.areas().len())
+        .map(|panel| traces.iter().all(|trace| trace[panel] == 0.0))
+        .collect();
+    let boundary = LocalBoundary::try_new_iterative(
+        medium(),
+        vec![LocalWall::Rigid, LocalWall::Mechanical(WallPin {
+            surface_density: 1.0,
+            stiffness_per_area: omega * omega,
+            resistance: 0.0,
+        })],
+        passive.iter().map(|&value| usize::from(value)).collect(),
+    ).unwrap();
+    assert!(boundary.normalized_admittance(omega, || false).is_err());
+    let gate = CancelGate::new_clock_free();
+    let owner = IterativeBoundaryObservation::for_surface(
+        &surface, medium(), &sources, &traces, &receivers(), boundary, options(128), &gate,
+    ).unwrap();
+    let panels = surface.areas().len();
+    let a = owner.solve_frequency(omega, 4 * panels, &gate).unwrap();
+    let b = owner.solve_frequency(other_omega, 4 * panels, &gate).unwrap();
+    assert!(a.reports().iter().chain(b.reports()).all(|report| report.solve.converged_euclidean()));
+    let rates_a = [C64::new(3e-6, -2e-6), C64::new(-1e-6, 4e-6)];
+    let rates_b = [C64::new(2e-6, 1e-6), C64::new(-3e-6, -2e-6)];
+    let zero_heat = a.coherent_boundary_power(&rates_a, u64::MAX, &gate).unwrap();
+    assert_eq!(zero_heat.accepted_power_w(), 0.0);
+    let partition = a.coherent_boundary_power_partition(&rates_a, u64::MAX, 0, &gate).unwrap();
+    assert_eq!(partition.accepted_power_w, 0.0);
+    assert_eq!(partition.irreversible_loss_power_w, 0.0);
+    assert_eq!(partition.transmitted_power_w, 0.0);
+
+    let lines = [
+        BoundaryWorkExposureLine { response: &a, rates: &rates_a },
+        BoundaryWorkExposureLine { response: &b, rates: &rates_b },
+    ];
+    // One proper coordinate retains beats while removing carrier-sum terms.
+    // Both individual lossless lines have zero stationary wall work.
+    let factor = BoundaryWorkExposureFactor {
+        lines: &lines,
+        statistics: HarmonicExposureFactorStatistics::ProperComplex,
+    };
+    let prepared = PreparedBoundaryWorkExposure::new(
+        &a, "resonant-wall-clock", &[], &[factor], exposure_limits(panels), &gate,
+    ).unwrap();
+    let start = 0.00013;
+    let duration = 0.00017;
+    let window = HarmonicWindow::new(start, duration).unwrap();
+    let observed = prepared.observe_window(window, &gate).unwrap();
+
+    // Independent analytic integration of the retained physical traces.
+    // p_a is exactly zero at every passive panel, but v_a is not: its
+    // cross-frequency work against p_b must survive preparation.
+    let mut cross = C64::ZERO;
+    let mut scale = 0.0;
+    let mut wall_velocity_norm = 0.0;
+    for (panel, &is_passive) in passive.iter().enumerate() {
+        if !is_passive { continue; }
+        let mut pressure_b = C64::ZERO;
+        let mut inward_a = C64::ZERO;
+        for source in 0..sources.len() {
+            assert_eq!(a.solutions()[source].pressure[panel], C64::ZERO);
+            pressure_b = pressure_b + b.solutions()[source].pressure[panel] * rates_b[source];
+            inward_a = inward_a - a.solutions()[source].velocity[panel] * rates_a[source];
+        }
+        let product = (pressure_b * inward_a.conj()).scale(surface.areas()[panel]);
+        cross = cross + product;
+        scale += product.abs();
+        wall_velocity_norm += inward_a.norm_sq();
+    }
+    assert!(wall_velocity_norm > 0.0);
+    let difference = other_omega - omega;
+    let half_phase = difference * duration * 0.5;
+    let center_phase = difference * (start + duration * 0.5);
+    let kernel = C64::new(center_phase.cos(), -center_phase.sin())
+        .scale(half_phase.sin() / half_phase);
+    let expected = 0.5 * (cross * kernel).re;
+    assert!(expected.abs() > 1e-5 * scale);
+    assert!((observed.wall_power_w - expected).abs() < 2e-11 * scale);
+    let cycle = prepared.observe_window(
+        HarmonicWindow::new(start, TAU / 1024.0).unwrap(), &gate,
+    ).unwrap();
+    assert!(cycle.wall_power_w.abs() < 2e-12 * scale);
 }

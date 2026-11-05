@@ -50,6 +50,9 @@ pub mod vibration;
 /// Held uniform pressure on the entire original material-domain boundary.
 pub mod pressure;
 
+/// Conservative spatial gravity with the original reference mass inventory.
+pub mod gravity;
+
 #[cfg(test)]
 mod pressure_tests;
 
@@ -158,15 +161,15 @@ impl<L: MixedFiniteStrainPotential> Clone for MixedUpProblem<'_, L> {
 /// Raw physical residual and consistent tangent, including constrained rows.
 #[derive(Clone, Debug)]
 pub struct MixedUpEvaluation {
-    /// Material force minus the external follower force when evaluated through
-    /// the held-boundary-pressure adapter; otherwise the material force alone.
+    /// Material force minus external pressure and gravity forces when evaluated
+    /// through those adapters; otherwise the material force alone.
     pub internal_forces_n: Vec<f64>,
     pub pressure_residual_m3: Vec<f64>,
     /// All displacement DOFs followed by pressures in `pressure_nodes()` order.
     pub tangent: Option<Csr>,
     /// Original material mixed saddle potential [J], not necessarily physical
-    /// stored energy. The boundary pressure's separate loading potential q V
-    /// is never included here.
+    /// stored energy. Separate gravity and boundary-pressure loading potentials
+    /// are never included here.
     pub potential_j: f64,
     pub min_det_f: f64,
 }
@@ -195,6 +198,11 @@ pub enum MixedUpError {
         element: usize,
         point: usize,
         error: MaterialError,
+    },
+    Gravity {
+        element: usize,
+        point: usize,
+        error: super::HyperTetError,
     },
     Direct(LdltError),
     KktInertia {
@@ -225,6 +233,11 @@ impl core::fmt::Display for MixedUpError {
                 f,
                 "mixed material element {element}, point {point}: {error}"
             ),
+            Self::Gravity {
+                element,
+                point,
+                error,
+            } => write!(f, "mixed gravity element {element}, point {point}: {error}"),
             Self::Direct(error) => write!(f, "mixed KKT factorization: {error}"),
             Self::KktInertia { expected, got } => {
                 write!(f, "mixed KKT inertia {got:?}, expected {expected:?}")
@@ -276,6 +289,7 @@ pub struct PreparedMixedUpProblem<'a, L: MixedFiniteStrainPotential = Hyperelast
     gauge_component: Vec<bool>,
     work_scale_j: f64,
     boundary_pressure: Option<pressure::UniformBoundaryPressure>,
+    gravity: Option<gravity::HeldMixedGravity<'a>>,
 }
 
 impl<'a, L: MixedFiniteStrainPotential> MixedUpProblem<'a, L> {
@@ -459,6 +473,7 @@ impl<'a, L: MixedFiniteStrainPotential> MixedUpProblem<'a, L> {
             gauge_component,
             work_scale_j,
             boundary_pressure: None,
+            gravity: None,
         })
     }
 
@@ -587,6 +602,23 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
                 };
                 potential_j += point.weight_m3 * state.potential_pa;
                 min_det_f = min_det_f.min(state.volume_ratio);
+                if let Some(gravity) = self.gravity {
+                    let (mass, sample) = gravity.sample(
+                        e,
+                        q,
+                        element,
+                        point,
+                        self.problem.nodes_m,
+                        displacement_m,
+                    )?;
+                    gravity::add_point(
+                        &point.shapes,
+                        load * mass,
+                        sample,
+                        &mut local_r,
+                        with_tangent.then_some(&mut local_k),
+                    );
+                }
                 if let Some(pressure) = self.boundary_pressure {
                     // q V is an external loading potential. Keep the original
                     // material/pressure-dual energy and source domain intact.
@@ -862,7 +894,7 @@ impl<L: MixedFiniteStrainPotential> PreparedMixedUpProblem<'_, L> {
             let result = newton.run_controlled(
                 &endpoint,
                 self.problem.settings.maximum_newton_iterations,
-                &mut || cx.checkpoint().is_err(),
+                &mut || cx.checkpoint().is_err() || endpoint.cancelled(),
             );
             checkpoint(cx)?;
             if let Some(error) = endpoint.fatal_error.borrow_mut().take() {
@@ -983,6 +1015,10 @@ struct Endpoint<'p, 'a, 'c, 'scope, L: MixedFiniteStrainPotential> {
 }
 
 impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
+    fn cancelled(&self) -> bool {
+        matches!(*self.fatal_error.borrow(), Some(MixedUpError::Cancelled))
+    }
+
     fn physical_state(&self, x: &[f64]) -> Result<(Vec<[f64; 3]>, Vec<f64>), MixedUpError> {
         if x.len() != self.prepared.free.len() || x.iter().any(|v| !v.is_finite()) {
             return Err(invalid("native mixed Newton state is invalid"));
@@ -1004,6 +1040,9 @@ impl<L: MixedFiniteStrainPotential> Endpoint<'_, '_, '_, '_, L> {
 
     fn ensure_linearization(&self, x: &[f64]) -> Result<(), MixedUpError> {
         checkpoint(self.cx)?;
+        if self.cancelled() {
+            return Err(MixedUpError::Cancelled);
+        }
         if self
             .linearization
             .borrow()
@@ -1111,6 +1150,10 @@ impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_
     }
 
     fn residual(&self, x: &[f64], residual: &mut [f64]) {
+        if self.cancelled() {
+            residual.fill(f64::NAN);
+            return;
+        }
         let result = self.physical_state(x).and_then(|(u, p)| {
             self.prepared
                 .evaluate_at_load(&u, &p, false, self.inertia, self.load, self.cx)
@@ -1130,6 +1173,11 @@ impl<L: MixedFiniteStrainPotential> NonlinearProblem for Endpoint<'_, '_, '_, '_
             }
             Err(error) => {
                 residual.fill(f64::NAN);
+                // A cancelled source is not a backtrackable constitutive-domain
+                // trial. Retain it for the native stop callback and final error.
+                if error == MixedUpError::Cancelled {
+                    *self.fatal_error.borrow_mut() = Some(MixedUpError::Cancelled);
+                }
                 *self.trial_error.borrow_mut() = Some(error);
             }
         }

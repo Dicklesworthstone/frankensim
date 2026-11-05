@@ -226,23 +226,3 @@ fn native_transient_contact_refuses_late_source_exit_without_a_completed_field()
     let (completed, _) = receipt(&f, 71);
     assert_eq!(completed.get("transient").unwrap().str_field("status"), Some("completed"));
 }
-
-#[test]
-fn native_transient_contact_keeps_material_derivatives_explicit() {
-    let f = fixture(false, 0.5);
-    for (ordinal, output) in [
-        "temperature-final-material-adjoint",
-        "temperature-sampled-peak-material-adjoint",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let (source, contact, ledger) = prepare(&f, 80 + ordinal, Some(output));
-        let result = run(&f, &source, &contact, &ledger);
-        assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
-        assert!(
-            format!("{}{}", result.stdout, result.stderr)
-                .contains("cli-solve-conduction-contact-composition")
-        );
-    }
-}

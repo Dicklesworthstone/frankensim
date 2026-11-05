@@ -7,6 +7,9 @@ mod diffusion_tests;
 mod transport_tests;
 #[path = "flow/gas_law.rs"]
 mod gas_law_tests;
+#[cfg(feature = "molecular-transport")]
+#[path = "flow/molecular.rs"]
+mod molecular_tests;
 
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::*;

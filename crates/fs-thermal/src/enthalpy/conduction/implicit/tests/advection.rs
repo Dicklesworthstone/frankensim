@@ -1,4 +1,5 @@
 use super::*;
+use crate::enthalpy::advection::reconstruction::{AxialCellStencil, LimitedEnthalpyReconstruction};
 use crate::enthalpy::advection::{Advected, MassBoundary, MassFlow};
 
 fn circulating<O>(inner: O, rate: f64) -> Advected<O> {
@@ -410,15 +411,15 @@ fn open_flow(cells: usize, rate: f64, incoming_h: f64) -> Advected<()> {
         vec![
             MassBoundary::Inlet {
                 id: cells as u64,
-                cell: CellId(0),
-                kg_s: rate,
+                cell: CellId(if rate > 0.0 { 0 } else { cells as u64 - 1 }),
+                kg_s: rate.abs(),
                 material_id: MaterialId(0),
                 specific_h_j_kg: incoming_h,
             },
             MassBoundary::Outlet {
                 id: cells as u64 + 1,
-                cell: CellId(cells as u64 - 1),
-                kg_s: rate,
+                cell: CellId(if rate > 0.0 { cells as u64 - 1 } else { 0 }),
+                kg_s: rate.abs(),
             },
         ],
         cells + 1,
@@ -760,4 +761,348 @@ fn implicit_upwind_preserves_failure_rollback_and_explicit_source_ownership() {
     assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, 400.0);
     assert_eq!(flow.audit().substeps, 0);
     assert_eq!(source.energy_j, 0.0);
+}
+
+fn axial_plan(thermal: &DepositionSimulation<'_>) -> LimitedEnthalpyReconstruction {
+    let ids: Vec<_> = thermal.cells().keys().copied().collect();
+    let stencils: Vec<_> = ids
+        .windows(3)
+        .map(|ids| AxialCellStencil {
+            previous: ids[0],
+            cell: ids[1],
+            next: ids[2],
+        })
+        .collect();
+    LimitedEnthalpyReconstruction::try_new(thermal, &stencils, ids.len(), || Ok(())).unwrap()
+}
+
+#[test]
+fn implicit_limited_advection_differentiates_the_actual_endpoint_and_flow_direction() {
+    let law = Law {
+        nonlinear_k: true,
+        plateau: true,
+    };
+    for rate in [7.0, -7.0] {
+        let (mut thermal, conduction) =
+            setup(&law, &[200.0, 250.0, 400.0, 500.0, 700.0], None, vec![]);
+        for (i, mass) in [1.0, 2.0, 1.5, 0.75, 3.0].into_iter().enumerate() {
+            thermal.cells.get_mut(&CellId(i as u64)).unwrap().mass_kg = mass;
+        }
+        let flow = open_flow(5, rate, 450.0);
+        let plan = axial_plan(&thermal);
+        let graph = ImplicitConductionChain::prepare(
+            &thermal,
+            &conduction,
+            &[(MaterialId(0), &law)],
+            LinearTopology::Graph(ImplicitConductionLinearControls::default()),
+            || Ok(()),
+        )
+        .unwrap()
+        .with_implicit_advection_reconstruction(&thermal, &flow, &plan, || Ok(()))
+        .unwrap();
+        let step = BackwardEulerStep::new(&thermal, 0.7, || Ok(())).unwrap();
+        // These candidate increments change the active minmod branches at
+        // cells 1 and 2. A tangent frozen at the starting state is incorrect.
+        let energy = [-1.0, 102.0, -80.0, 7.0, -3.0];
+        let mut report = empty_report();
+        let mut workspace = ImplicitConductionWorkspace::new(5).unwrap();
+        let trial = graph
+            .evaluate(
+                &step,
+                &energy,
+                &BTreeMap::new(),
+                &[],
+                false,
+                controls(1.0),
+                &mut report,
+                &mut || Ok(()),
+            )
+            .unwrap();
+        graph
+            .jacobian(&thermal, trial.payload(), 0.7, &mut workspace, &mut || {
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            workspace
+                .graph_entries
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|&(row, col, value)| row.abs_diff(col) > 1 && value != 0.0)
+        );
+        for col in 0..5 {
+            let mut plus = energy;
+            let mut minus = energy;
+            plus[col] += 1e-3;
+            minus[col] -= 1e-3;
+            let a = graph
+                .evaluate(
+                    &step,
+                    &plus,
+                    &BTreeMap::new(),
+                    &[],
+                    false,
+                    controls(1.0),
+                    &mut report,
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            let b = graph
+                .evaluate(
+                    &step,
+                    &minus,
+                    &BTreeMap::new(),
+                    &[],
+                    false,
+                    controls(1.0),
+                    &mut report,
+                    &mut || Ok(()),
+                )
+                .unwrap();
+            for row in 0..5 {
+                let analytic = if row == col {
+                    workspace.diagonal[row]
+                } else {
+                    workspace
+                        .graph_entries
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .filter(|&&(r, c, _)| r == row && c == col)
+                        .map(|entry| entry.2)
+                        .sum()
+                };
+                near(
+                    analytic,
+                    (a.residual_j()[row] - b.residual_j()[row]) / 0.002,
+                    1e-8,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn implicit_limited_latent_channel_closes_the_large_step_affine_balance() {
+    for datum in [0.0, 1e9] {
+        let law = ShiftedLaw {
+            base: Law {
+                nonlinear_k: true,
+                plateau: true,
+            },
+            datum,
+        };
+        for rate in [2.0, -2.0] {
+            let mut initial = [350.0, 420.0, 410.0, 420.0, 410.0];
+            let mut expected = [350.0, 360.0, 370.0, 380.0, 390.0];
+            if rate < 0.0 {
+                initial.reverse();
+                expected.reverse();
+            }
+            let initial = initial.map(|h| h + datum);
+            let (thermal, conduction) = setup(&law, &initial, None, vec![]);
+            let flow = open_flow(5, rate, 350.0 + datum);
+            let plan = axial_plan(&thermal);
+            let graph = ImplicitConductionGraph::new(
+                &thermal,
+                &conduction,
+                &[(MaterialId(0), &law)],
+                ImplicitConductionLinearControls::default(),
+                || Ok(()),
+            )
+            .unwrap()
+            .with_implicit_advection_reconstruction(&thermal, &flow, &plan, || Ok(()))
+            .unwrap();
+            let mut workspace = ImplicitConductionWorkspace::new(5).unwrap();
+            let mut policy = controls(2.0);
+            policy.cell_tolerance_j = 1e-6;
+            policy.total_tolerance_j = 5e-6;
+            let mut calls = 0;
+            let (next, report) = graph
+                .advance_to(&thermal, 2.0, policy, &mut workspace, || {
+                    calls += 1;
+                    Ok(())
+                })
+                .unwrap();
+            // At the affine endpoint, the interior outlet traces are
+            // 365, 375 and 385 J/kg. The boundary donors remain 350 and 390.
+            // With mdot*dt=4 kg, the five independently balanced cell stores
+            // are exactly the authored initial values above. T stays 300 K:
+            // this transports latent enthalpy, with zero conductive power.
+            for (i, h) in expected.into_iter().enumerate() {
+                near(
+                    next.cells()[&CellId(i as u64)].specific_h_j_kg - datum,
+                    h,
+                    2e-6,
+                );
+                near(next.temperature_k(CellId(i as u64)).unwrap(), 300.0, 0.0);
+            }
+            near(report.energy.external_heat_j, -160.0, 5e-6);
+            near(report.energy.stored_energy_change_j, -160.0, 5e-6);
+            near(report.energy.residual_j, 0.0, 5e-6);
+            assert_eq!(report.energy.substeps, 1); // Courant = 4.
+            assert_eq!(flow.audit().substeps, 0);
+            if datum == 0.0 && rate > 0.0 {
+                let mut cancel_calls = 0;
+                assert!(matches!(
+                    graph.advance_to(&thermal, 2.0, policy, &mut workspace, || {
+                        cancel_calls += 1;
+                        if cancel_calls + 1 == calls {
+                            Err(DepositionError::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    }),
+                    Err(ImplicitConductionError::Thermal(DepositionError::Cancelled))
+                ));
+                assert_eq!(thermal.time_s(), 0.0);
+                for (i, h) in initial.into_iter().enumerate() {
+                    assert_eq!(thermal.cells()[&CellId(i as u64)].specific_h_j_kg, h);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn implicit_limited_loop_refines_a_transported_wave_with_less_spatial_diffusion() {
+    use std::f64::consts::{PI, TAU};
+    let law = Law {
+        nonlinear_k: false,
+        plateau: false,
+    };
+    let mut limited_errors = Vec::new();
+    for n in [16, 32] {
+        let nf = n as f64;
+        // Unit-perimeter polygon, rho*A=1: mdot=1 gives axial speed 1.
+        let radius = 1.0 / (2.0 * nf * (PI / nf).sin());
+        let vertices: Vec<_> = (0..n)
+            .map(|i| {
+                let angle = TAU * i as f64 / nf;
+                [radius * angle.cos(), radius * angle.sin(), 0.0]
+            })
+            .collect();
+        let amplitude = 20.0 * (PI / nf).sin() / (PI / nf);
+        let average =
+            |i: usize, time: f64| 300.0 + amplitude * (TAU * ((i as f64 + 0.5) / nf - time)).sin();
+        let events = (0..n)
+            .map(|i| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id: CellId(i as u64),
+                    material_id: MaterialId(0),
+                    body_id: 0,
+                    segment_id: i as u64,
+                    mass_kg: 1.0 / nf,
+                    specific_h_j_kg: average(i, 0.0),
+                    geometry: CellGeometry {
+                        start_m: vertices[i],
+                        end_m: vertices[(i + 1) % n],
+                        volume_m3: 1.0 / nf,
+                        surface_area_m2: 1.0,
+                    },
+                    boundary: boundary(None),
+                }),
+            })
+            .collect();
+        let thermal = DepositionSimulation::new(
+            events,
+            &[(MaterialId(0), &law)],
+            DepositionBudget {
+                max_cells: n,
+                max_links: n,
+                max_events: n,
+                max_substeps: 4096,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 1.0,
+                energy_tolerance_j: 1e-9,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+        let conduction =
+            ConductionObserver::new(&thermal, &[(MaterialId(0), &law)], &[], &[], || Ok(()))
+                .unwrap();
+        let flow = Advected::new(
+            (),
+            (0..n)
+                .map(|i| MassFlow {
+                    id: i as u64,
+                    a: CellId(i as u64),
+                    b: CellId(((i + 1) % n) as u64),
+                    kg_s: 1.0,
+                })
+                .collect(),
+            n,
+        )
+        .unwrap();
+        let stencils: Vec<_> = (0..n)
+            .map(|i| AxialCellStencil {
+                previous: CellId(((i + n - 1) % n) as u64),
+                cell: CellId(i as u64),
+                next: CellId(((i + 1) % n) as u64),
+            })
+            .collect();
+        let plan =
+            LimitedEnthalpyReconstruction::try_new(&thermal, &stencils, n, || Ok(())).unwrap();
+        let bind = || {
+            ImplicitConductionGraph::new(
+                &thermal,
+                &conduction,
+                &[(MaterialId(0), &law)],
+                ImplicitConductionLinearControls::default(),
+                || Ok(()),
+            )
+            .unwrap()
+        };
+        let upwind = bind()
+            .with_implicit_advection(&thermal, &flow, || Ok(()))
+            .unwrap();
+        let limited = bind()
+            .with_implicit_advection_reconstruction(&thermal, &flow, &plan, || Ok(()))
+            .unwrap();
+        let mut errors = Vec::new();
+        for graph in [&upwind, &limited] {
+            let mut workspace = ImplicitConductionWorkspace::new(n).unwrap();
+            // dt scales as dx² so first-order BE time error cannot mask
+            // the spatial comparison; this is not a large-step accuracy claim.
+            let (next, report) = graph
+                .advance_to(
+                    &thermal,
+                    0.125,
+                    controls(0.5 / nf.powi(2)),
+                    &mut workspace,
+                    || Ok(()),
+                )
+                .unwrap();
+            errors.push(
+                (0..n)
+                    .map(|i| {
+                        (next.cells()[&CellId(i as u64)].specific_h_j_kg - average(i, 0.125)).abs()
+                    })
+                    .sum::<f64>()
+                    / nf,
+            );
+            near(report.energy.external_heat_j, 0.0, 0.0);
+            near(report.energy.stored_energy_change_j, 0.0, 1e-8);
+        }
+        assert!(
+            errors[1] < 0.5 * errors[0],
+            "n={n}: upwind={}, limited={}",
+            errors[0],
+            errors[1]
+        );
+        limited_errors.push(errors[1]);
+    }
+    assert!(
+        limited_errors[1] < 0.5 * limited_errors[0],
+        "{limited_errors:?}"
+    );
 }

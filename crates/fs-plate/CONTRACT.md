@@ -92,6 +92,21 @@ load work. A Maxwell-port oscillator test checks frequency-dependent stiffness,
 phase and power around the original loaded resonance; a tied-body test retains
 mutual loading and tests the error from dropping those entries.
 
+The loaded port factor also supplies `solve_with_frequency_derivative`: the
+original component source slopes and complete constitutive `dZ/domega` enter
+the shared same-factor tangent. An explicit zero matrix declares a locally
+constant load; missing/nonfinite entries refuse. Both original physical flow
+and reaction derivatives are reconstructed, including supported/slave DOFs,
+and physical source/glue/load work slopes are independently balanced. Output
+and observation limits precede physical allocation. Fixed component receivers
+use the shared compensated transfer projection; physical port flow and effort
+also expose amplitude/slope pairs for local resonance/antiresonance refinement.
+The receiver, geometry, accepted branch and retained basis stay fixed. These
+local response extrema do not certify complete spectra or modal-tail error.
+Focused tests compare an analytic dispersive Maxwell-loaded shell at DC and
+around resonance, distinguish its displacement and flow peaks, and compare a
+phased nonmatching-tie/mutual-port tangent against frequency differences.
+
 The port owner consumes the caller's attachment vectors without copying them,
 with separate cold projection/payload limits and common per-frequency factor
 limits. Pointwise Hermitian PSD admission is a numerical check only. Port order,
@@ -639,6 +654,63 @@ factorial-moment affine velocity/director integration through degree five,
 frame changes, three subdivision levels, sparse positive-definite supported
 mass, and explicit legacy profile equivalence.
 
+### Graded reference density in CST/DKT shells
+
+`assemble_shell[_sections|_materials]_with_reference_density` and
+`MeshShell::assemble_with_reference_density` accept three positive densities
+[kg/m³] in each original facet's corner order. The P1 field replaces only the
+section's scalar reference density; neighboring facets may disagree at a shared
+vertex, so material interfaces are not averaged together. The existing elastic
+sections, support map and consistent translational/director mass remain the
+owners of stiffness, dynamics and modal normalization. These entry points are
+explicitly consistent-only; legacy lumped APIs retain their original behavior.
+
+Measured shells integrate P1 density and P1 thickness together. Sixteen positive
+Gauss–Duffy points integrate `rho*h*Ni*Nj` and `rho*h^3*Ni*Nj/12` through degree
+six, including the existing relative drilling-rate gauge, which still vanishes
+for all six rigid motions. Uniform density delegates to the original mass
+kernel and retains its arithmetic, including measured nonuniform thickness.
+`MeshShell::mass_with_reference_density_kg` integrates the same reference
+inventory analytically, including density/thickness correlation. The survey's
+original `mass_kg` continues to describe its original piecewise constant
+materials; the explicit field does not mutate that specimen or invent a source
+measurement, live thermal density update or mass-transfer law.
+
+`tests/shell_reference_density.rs` checks independent complete spatial inertia,
+degree-six director storage, equal-mass redistribution, sharp interface and
+uniform-limit equivalence, malformed fields, density-scaled native elastic
+eigenvalues and the existing mass-normalized acoustic pressure port. No new
+eigensolver, acoustic model or time integrator is introduced; those consumers
+receive the resulting physical mass matrix.
+
+### Layered CST/DKT reference density and first mass moment
+
+`ReferenceDensityMoments` and the `*_with_reference_density_moments` assembly
+entry points extend that same mass owner to asymmetric coatings and layered
+inventories. The immutable carrier stores `qk = integral rho*s^k ds`, all in
+kg/m³, where `s = z/h` follows the mesh normal and its declared reference plane.
+`from_laminate` consumes the existing material owner's `I0/I1/I2` without
+reintegrating or replacing its layers. Local thickness scales the source's
+layer fractions and reference offset. A positive-definite moment block is
+required: `q0 > 0`, `q2 > 0`, and `q0*q2 > q1²`; `q1` remains signed.
+
+The physical moments `h*q0`, `h²*q1`, and `h³*q2` are integrated with the same
+positive degree-six rule and measured P1 thickness. Kinetic velocity is
+`u_dot + z*(theta_dot cross normal)`, so the first moment supplies the signed
+translation/director mass blocks. It is not a stiffness, damping, or added
+normal-spin inertia. The original relative drilling gauge retains the second
+moment scale and vanishes for rigid motion. Symmetric uniform-through-thickness
+inputs delegate to the preceding scalar/P1-density kernel exactly.
+
+These APIs change inertia only. Independent CST/DKT elastic sections remain
+explicit; full laminate A/B/D constitutive coupling and transverse shear use
+the existing MITC `ShearShellSection::from_laminate` path. The mesh and moments
+must describe the same reference plane and normal; reversing a normal reverses
+the first moment for an unchanged physical inventory. Tests in
+`shell_layered_density.rs` cover independent full spatial moments, graded
+density/thickness correlation, layer reversal, reference-plane shifts, normal
+orientation, homogeneous limits, and the existing modal/acoustic consumers.
+
 ### Three-dimensional beam inertia
 
 `shell::stiffened::timoshenko::{segment_matrices, assemble_beam_chain}` and
@@ -921,11 +993,17 @@ independent world resultants, work/power, subdivision and late-point rollback.
 MITC membrane, bending and transverse-shear loss admit positive-semidefinite
 tensors through the shared material resultant owner, preserving physically
 undamped strain directions without regularization. `project_viscosity`
-evaluates each 18-by-18 element action once per retained mode and then
-projects every cross term. Its conservative per-facet work expression is
-`1_000_000 + 324*n + 18*n*n`, plus input coverage; this is an operation-count
-improvement, not a measured runtime claim. Native affine membrane-energy
-checks verify active directions, null modes and complete modal congruence.
+expands the elastic bubble coordinates, evaluates each original quadrature
+strain map once, and applies the original constitutive square factors to each
+mode's strain before forming the modal Gram matrix. This retains resolved weak
+loss that dense nodal assembly followed by projection can erase through
+cancellation. Every modal cross term remains; exactly zero factor columns are
+skipped without a magnitude cutoff. Temporary channel storage is linear in the
+mode count, and projection remains quadratic in that count. The conservative
+per-facet work expression is `1_000_000 + 4096*n + 84*n*n`, plus input coverage,
+including all seven quadrature points and twelve factor slots. Affine
+membrane-energy checks verify active directions, exact null modes, full modal
+congruence and relative accuracy of representable weak material loss.
 
 ## Shared DKT curvature quadrature
 

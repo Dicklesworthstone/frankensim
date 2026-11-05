@@ -1,0 +1,52 @@
+frankensim.matdb-source.v1
+observation	identity	Sulfite SO3(2-), NBS individual aqueous ion	NBS Table 14:S, Sulfur (Prepared 1964), SO3(2-) state ao	The source molar mass is 80.0622 g/mol. One S and three O atoms carry charge -2. This ion is not neutral sulfur trioxide, sulfate SO4(2-), hydrogen sulfite HSO3-, thiosulfate or a bulk sodium-sulfite reagent.
+observation	standard	Literal NBS 298.15 K standard-state row	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The source gives formation enthalpy -635.5 kJ/mol, independent formation Gibbs energy -486.5 kJ/mol and conventional ionic entropy -29. J/(mol K). The negative entropy is retained: individual-ion values use the H+(aq)-zero convention and are not absolute species entropies. No heat capacity, confidence distribution or cross-species covariance is tabulated. The ao reference is hypothetical unit molality at infinite dilution, not a measured finite-concentration solution.
+observation	scope	Matched NBS reference state only	NBS sections 5.5-5.8; https://doi.org/10.18434/M32124	All claims require 298.15 K and 1 bar. These values support declared acid-base and oxidation endpoints, not rate constants, oxygen-transfer rates, copper catalysis, flotation depression, metal-bound/WAD cyanide removal, reagent assay or plant performance. Sulfite oxygen consumption and productive cyanide oxidation remain distinct extents; one cannot consume the same original inventory twice.
+scalar	molar-mass	identity,scope	mass	80.0622	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-635.5	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-486.5	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	-29.	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	standard-entropy	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	standard-entropy	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	standard-entropy	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1

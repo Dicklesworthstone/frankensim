@@ -24,6 +24,31 @@ open motional screening, and the signed electrical/mechanical/Joule split under
 common biases larger than the physical drops. This changes numerical gauge
 handling, not the admitted fixed-geometry Ohmic/material/motion models.
 
+## Stationary resistive interfaces beside moving conductors
+
+Planar and spatial `solve_with_motion` now admit original finite-resistance
+contacts when BOTH adjacent original cells have exactly zero prescribed velocity.
+Moving bulk elsewhere retains `J = Sigma(E + u cross B)`; a moving or sliding
+contact still refuses even when its magnetic field is zero. The admitted
+zero-thickness stationary interface retains its original source, paired traces,
+exact P1 current and `integral([V]^2/R'')` heat. Its mechanical work is zero.
+
+Both moving-field owners expose `contact_response` and `contact_power_w`.
+Cell Joule arrays contain only bulk heat; total `joule_power_w` includes bulk
+and surface heat once. `electrical_power_w` remains the signed BULK integral
+of laboratory `E.J`. Boundary and Hodge work compare that integral PLUS
+surface work with the terminal supply, and the complete balance remains
+`terminal = bulk heat + contact heat + mechanical output`.
+The spatial owned snapshot retains these original surface results for explicit
+thermal partition by the coupling owner.
+
+Independent planar and tetrahedral series references exercise stationary parity,
+shorted braking, loaded generation, motoring, exact contact jumps/heat and
+refusal of motion on either contact side. A current-driven planar case also
+crosses the contact with one component reference under a common voltage larger
+than its physical drops. These are synthetic quasistatic model checks, with
+no sliding-contact, frictional heating, moving occupancy or induction claim.
+
 ## Resolved electrostatic forces, motion and floating electrodes
 
 The native planar and spatial electric fields now expose `virtual_work` for a
@@ -110,7 +135,8 @@ vertices; the native sparse solve and its iteration limits remain authoritative.
 This is a nonrelativistic fixed-domain DC snapshot with prescribed piecewise
 constant B and velocity. It does not evolve induction, magnetic sources,
 mechanics, finite moving interfaces or thermal advection. Finite-resistance
-contacts refuse pending an owned moving-surface work/heat law. G0/G1/G3/G4
+contacts require stationary adjacent cells as described above; motion at either
+surface still needs an owned moving-surface work/heat law. G0/G1/G3/G4
 fixtures in `tests/spatial_conduction/motion.rs` cover open-circuit screening,
 shorted braking, loaded generation, motoring, layered current drive, anisotropic
 scene rotation/volume scaling, stationary parity and transactional refusals.
@@ -730,6 +756,21 @@ regression checks an independently derived heterogeneous/contact matrix,
 floating electrodes, polarity, gauge invariance, local heat and work bounds.
 This remains a frozen-source stationary Ohmic response, without induction or
 field-dependent constitutive feedback.
+
+`SpatialConductanceMatrix::prepare_current_control` closes mixed terminal
+drives on that same response: an arbitrary proper subset prescribes signed
+total current while the remaining electrodes prescribe voltage. Its bounded,
+diagonally equilibrated current block is factored once and reused. A floating
+electrode is the zero-total-current case, with potentially nonzero currents
+between its faces. No repeated field solve, local insulation approximation or
+independent resistor fit is introduced. The accepted original field retains
+bulk/contact Joule heating and all simultaneous-drive cross terms. Separate
+actual-state checks enforce the authored currents and terminal work, including
+current-source work. Common bias is removed before solving and heat recovery;
+returned nodal voltages use the existing terminal-zero reference convention.
+The heterogeneous/contact series oracle covers voltage-driven floating
+electrodes, nonzero signed injection, several current controls, a controlled
+reference terminal, source-work/local-heat closure and cancellation/retry.
 
 Actual cell E=-grad(V), J=sigma E and volume-integrated E.J remain unsmoothed.
 Acceptance separately checks free-node/current balance, recovered versus Hodge
@@ -2555,14 +2596,23 @@ a conductivity attached from another material snapshot.
 samples at the incident face of an original `PlanarDielectricLayers`. The input
 is one explicitly periodic, band-limited rectangular cell in physical metres;
 x varies fastest. Both grid dimensions are powers of two, capped at 4096 to
-bound a single uninterruptible FFT pencil. All incident Fourier bins must lie
-strictly inside the incident light cone. No modes are silently removed,
-windowed or renormalized. A caller approximating an isolated beam must resolve
+bound a single uninterruptible FFT pencil. Every nonzero incident Fourier mode
+must lie strictly inside the incident light cone. Exactly zero unsupported
+bins may oversample that spectrum; they retain their physical wavevectors and
+FFT positions without evaluating an invalid film response or dividing by an
+absent longitudinal wave number. No tolerance removes small nonzero modes,
+including analysis-FFT residuals. No modes are silently removed, windowed or
+renormalized. A caller approximating an isolated beam must resolve
 its bandwidth and converge the cell/padding independently; an authored hard
 aperture's unresolved high spatial frequencies are not synthesized.
 
-The original `fs-fft` plans analyze both complex components once. Every mode
-uses its actual conserved transverse wave number and its own TE/TM response
+The original `fs-fft` plans analyze both complex sampled components once.
+`prepare_modes` instead accepts authored peak Ex/Ey Fourier amplitudes in V/m,
+with the same signed FFT order and negative Nyquist convention, without an
+extra 1/N factor or analysis FFT. This permits explicit band-limited
+interference fields on fine observation grids without inferring a source
+filter. Every supported mode uses its conserved transverse wave number and
+TE/TM response
 from the original source/material/film owner. Complex amplitudes combine before
 forming intensity. Source epsilon and mu remain distinct; scalar refractive
 index or normal-incidence transmission cannot replace their vector response.
@@ -2589,6 +2639,9 @@ after propagation into an absorbing exit is computed from the actual field,
 without relabeling it as film absorption. Local flux retains interference and
 its sign. Numerical-storage and FFT-work budgets precede allocation; source
 response work is bounded by the admitted grid and original 64-layer maximum.
+Storage and work limits conservatively cover the full declared grid. Dormant
+bins retain empty entries in the shared film and two-sided response caches;
+field, heat, force, coherence and exposure queries preserve their zero fields.
 Cancellation polls between rows, pencils and bounded mode batches, publishing
 no partial field. Further planes require six separable FFTs and linear modal
 work, with no repeated constitutive or film solve. This is an operation-count
@@ -2599,7 +2652,11 @@ signed power, and evanescent decay. Source-backed integration regressions cover
 original-film reduction, an independent direct Fourier diffraction series,
 TIR, exact critical TE/TM fields and finite tangential flux, independent
 critical-load film matrices, both one-sided critical limits, Debye film/exit
-loss, budgets and cancellation. Their Cargo execution
+loss, budgets and cancellation. Oversampling regressions additionally cover
+uniform sampled/modal equivalence, analytic opposite-mode fringes and finite
+apertures, coherent versus independent-factor observations, interior electric
+nodes under counterillumination, smallest-subnormal unsupported-mode refusal,
+budget boundaries, cancellation and replay. Their Cargo execution
 requires the workspace constellation dependencies. This feature does not add
 transients, incident near-field excitation, rough/finite film edges, arbitrary
 three-dimensional scattering, or empirical material-frequency qualification.
@@ -2612,8 +2669,9 @@ The physical field is that envelope times `exp(-i*k_carrier·x)`. Every
 Fourier wavevector receives the carrier before its original TE/TM film solve,
 Snell refraction, vector Maxwell reconstruction and propagation. Incidence
 angles are therefore continuous rather than quantized to the envelope's FFT
-bins. The complete shifted grid must fit inside the incident light cone;
-critical and evanescent exit waves retain their existing physical treatment.
+bins. Every occupied shifted mode must fit inside the incident light cone;
+exactly empty unsupported bins retain their positions without a film solve.
+Critical and evanescent exit waves retain their existing physical treatment.
 The original `prepare` is exactly the zero-carrier case.
 
 Carrier phases retain double-double products during argument reduction and
@@ -2627,12 +2685,69 @@ Cycle-mean aperture kernels cancel the common carrier analytically and retain
 the original envelope-bin differences, including separations below the
 carrier's floating-point spacing. Direct mutual-coherence observations retain
 the envelope phase separately and apply the carrier once per observation.
-Finite-window real-field exposures explicitly refuse nonzero carriers because
-their current full-cell sum-frequency kernel assumes an unshifted integer
-lattice. No paraxial approximation, discarded modes, near-field incident
+Finite-window exposures admit a shared carrier across their original lines
+and covariance banks, retaining both real-field spatial sum and difference
+terms. No paraxial approximation, discarded modes, near-field incident
 excitation or finite-edge diffraction is introduced. Focused controls cover
 arbitrary oblique Snell/Fresnel fields, Brewster cancellation, TIR decay,
 interior and two-sided fields, source-cache identity and resource refusals.
+
+### Finite-window observations of refracting carrier beams
+
+The original exposure owner now admits nonzero transverse carriers shared by
+all lines and covariance factors. The same grouped Maxwell fields, source
+clock, material responses and uniform/triangular shutter kernels feed exterior
+observations, simultaneous illumination, film interiors, finite apertures,
+polarization/control observations, energy flux, Maxwell stress, field momentum
+and its weighted rate. Real
+sources retain sum and difference terms; only an authored proper-complex
+factor removes the real-field sum term.
+
+Spatial kernels retain double-double shifted wavenumbers and the original
+envelope offsets. Continuous cell power, stress and momentum now share a
+separable centered cosine/sine Gram operator for nonzero real carriers.
+Its x and y contractions cost O(F*N*(width+height)), followed by O(N*F²)
+frequency products, replacing the former O(N²*F²) full-cell contraction.
+The source-bank pair-work getter and cap count N*F² + F*N*(width+height)
+when the carrier is nonzero, and retain exactly N*F² at zero carrier.
+Axis matrices, center phases, retained DD coefficients, vector headers and
+reusable dual-Gram scratch are admitted before allocation. Finite DD results
+and cancellation are checked before publication. Proper-bank cell products
+cancel the common carrier analytically and keep sparse O(N*F²) work.
+Ensemble query admission counts N*F² for each proper bank and adds carrier
+axis work only for the mean and real factors. Workspace remains conservatively
+bounded by the generic prepared bank; preparing that reusable owner still
+admits its separate deterministic carrier cache.
+No extra material query, film solve or synthesis FFT is introduced.
+
+Continuous film heat uses original envelope offsets for conjugate products
+and DD carrier-shifted arguments for real sum products; the common carrier
+center phase rotates completed sum coefficients. Nonzero real banks on
+`ContinuousPeriodicCell` use the exact rectangle over the declared cell,
+charging D(N²+1) times their frequency-pair count. Proper banks retain D*N
+work per frequency pair, independently within a mixed bank. Original sampled
+area and depth quadrature semantics remain; irreversible Debye/Joule heat is
+still separated from stored/reversible material energy.
+
+Individual stress planes and finite patches retain all six independent tensor
+components. Field-momentum volume-rate and joint stress/momentum observations
+admit the same carrier source. The joint query shares the spatially contracted
+DD fields between both observables, retaining carrier-sum and beat derivatives
+under the original uniform or triangular shutter. The periodic two-plane
+boundary-resultant shortcut still refuses nonzero carriers because lateral stresses cannot
+be assumed to cancel for finite-window real fields. These observations do not
+infer a closed-surface mechanical force or thermal feedback.
+Focused controls compare independent spatial/time Fresnel quadrature, two-face
+standing waves, analytic tensor stresses and actual material-reservoir heat.
+Additional regressions use independent positive-time sinc/phase products to
+check continuous power, all stress/momentum components and weighted rates;
+they retain mixed real/proper factors and verify exact new work admission,
+cancellation and reuse. A separate public control test reconstructs actual
+complex-weighted beams and checks energy gradients/Hessian actions against
+finite-aperture energy. An original-film Debye/Joule test checks real versus
+proper carrier heat and exact film work. These new consumer regressions await
+native execution; the shared shifted harmonic-kernel tests passed in a bounded
+build using the actual mathematical kernel.
 
 ### Finite detector apertures preserve spatial interference
 
@@ -2746,10 +2861,15 @@ must debit the reported absorption only once.
 `PlanarAngularSpectrum::prepare_illumination` adds an explicitly coherent
 right-face Ex/Ey grid to an original left-face beam. Both fields share the
 original frequency, transverse coordinates, periodic cell and phasor clock.
-Every spatial bin uses the existing `PreparedLayerIllumination` for both TE
-and TM, with fixed tangential axes on both faces. Both complete exterior light
-cones must propagate in lossless media; critical, evanescent and lossy source
-ports refuse even when a supplied amplitude is zero. No bin is discarded.
+Every supported spatial bin uses the existing `PreparedLayerIllumination` for
+both TE and TM, with fixed tangential axes on both faces.
+`prepare_illumination_modes` accepts the right-face peak Fourier amplitudes
+directly, with the same ordering and normalization as `prepare_modes`.
+Both exterior media must remain lossless, including for a dark source. Every
+bin occupied from either face must propagate in both exterior ports; an
+occupied critical or evanescent port refuses even when the other face is dark.
+Only bins exactly empty on both faces may bypass an unsupported two-port solve,
+retaining their original grid positions. No nonzero coefficient is discarded.
 
 The prepared owner reports positive incoming/outgoing watts per face and
 original positive per-film absorption. Each outgoing field is the coherent sum
@@ -2859,14 +2979,16 @@ An in-place O(L log L) preparation groups source indices by frequency while
 preserving their original order within each group; subsequent queries visit
 each source exactly once. All reserved index/offset storage is budgeted.
 Temporal kernels are cached per distinct frequency pair. For L lines, F distinct
-frequencies and N spatial samples, query work is O(L*N + F*N*log N + F²*N),
+frequencies and N spatial samples, zero-carrier query work is
+O(L*N + F*N*log N + F²*N); nonzero real carriers add the separable pass above,
 with explicit line, modal, pair, FFT and numerical-storage budgets. This is an
 operation count, not measured throughput. Cancellation returns no partial field.
 
 Results contain real componentwise mean-square E/H, signed mean Poynting flux
 and integrated mean normal watts over the original periodic cell. The integrated
-watts use exact spatial orthogonality of the represented signed Fourier modes,
-before their quadratic products are sampled. In particular, a negative Nyquist
+watts use exact products of the represented signed Fourier modes before their
+quadratic products are sampled. At zero carrier, sparse spatial orthogonality
+applies. In particular, a negative Nyquist
 mode is not paired with itself as though it had a positive-frequency spatial
 partner. Opposite modes are combined into real sine/cosine quadratures and use
 the original stable temporal Gram kernel, preserving subcycle standing-wave
@@ -2979,11 +3101,16 @@ storage. At most 4096 authored frequency groups are sorted. With R banks,
 G authored groups, F distinct frequencies, N samples, S source layers and P
 poles, preparation costs `O(R*S + G*log(1+G) + F*N*S + F*P)`.
 A depth query costs
-`O(N + R + sum_r(L_r*(N+S) + F_r*N*log(N) + (P+1)*F_r²*N + F_r*log(1+F)))`.
+`O(N + R + sum_r(L_r*(N+S) + F_r*N*log(N) + (P+1)*F_r²*N + F_r*log(1+F)))`,
+plus sum_real F_r*N*(width+height) for a nonzero common carrier. The layer's
+reservoir-pair cap counts N*sum(F_r²)*(3+P) plus that spatial pass once;
+proper factors add no spatial pass and poles do not multiply its work.
 The S term covers structural source checks when original stack pointers differ.
 Additional storage is
-`O(F*N + F*P + N*max_r(F_r) + max_r(F_r²) + N + G)`, excluding other complete
-borrowed owners and allocator overhead. Cancellation publishes no partial plane.
+`O(F*N + F*P + N*max_r(F_r) + max_r(F_r²) + N + G)`, with conditional
+O(width²+height²) cached carrier axes and the admitted DD field representation.
+Other complete borrowed owners and allocator overhead are excluded.
+Cancellation publishes no partial plane.
 
 These are settled prescribed harmonics at fixed parameters, without a switch-on
 solution, inferred initial polarization history, temperature update or thermal
@@ -3256,8 +3383,10 @@ This electromagnetic stress excludes mechanical medium pressure,
 electrostriction and magnetostriction. Results expose local pascals, traction
 on validated unit normals, and continuous integrals over the original
 transverse periodic cell in newtons. Signed Fourier modes and exact spatial
-orthogonality integrate the represented band-limited quadratic fields before
-sampling; an unpaired negative Nyquist mode is not its own opposite.
+products integrate the represented quadratic fields before sampling: sparse
+orthogonality applies at zero carrier and to proper factors, while real carrier
+observations use the shared separable Gram pass. An unpaired negative Nyquist
+mode is not its own opposite.
 Integrated stress can therefore differ from summing the returned local
 samples. This does not add an isolated finite-aperture edge model or certify
 physical spatial convergence.
@@ -3271,16 +3400,19 @@ For a uniform vacuum shutter, mechanical force additionally requires
 corresponding weighted momentum rate. Material-filled interiors need their
 own consistent field/material momentum law. None is inferred or set to zero.
 
-Original exposure admission bounds N*F² frequency-pair units. Each stress
+Original exposure admission bounds N*F² temporal frequency-pair units plus
+the conditional separable carrier work described above. Each stress
 query performs twelve local and at most twenty-four additional modal scalar
 temporal contractions per admitted unit, at most thirty-six total. DD
 arithmetic is retained through factor accumulation, continuous-cell
 integration, trace subtraction and subtraction of boundary resultants.
 Equal-frequency grouping and synthesis reuse the original exposure owner.
 One bank's modal fields are integrated and then synthesized once in place:
-no second field bank, FFT, constitutive solve or film solve is added.
-Work remains O(sum_r(L_r*N + F_r*N*log N + F_r²*N)), with O(N) additional
-output/accumulation. Original work caps remain authoritative. The explicit
+no extra FFT, constitutive solve or film solve is added. A nonzero real carrier
+also retains its admitted centered and contracted DD coefficient planes.
+Work is O(sum_r(L_r*N + F_r*N*log N + F_r²*N)), plus the admitted
+sum_real F_r*N*(width+height) carrier pass, with O(N) output/accumulation.
+Original work caps remain authoritative. The explicit
 stress-workspace cap includes two spatial-quadrature work arrays and three
 six-component modal accumulators and admits the complete query before
 allocation. The two-face resultant performs two separately admitted plane
@@ -3625,7 +3757,9 @@ query does not advance mechanics or debit energy.
 The original fields/temporal kernels are reused without new film solves.
 One real/proper bank is streamed at a time; its exact modal integral precedes
 in-place synthesis of the original point samples, without a second retained
-bank or additional FFT. The original N*F² pair-work units remain authoritative.
+bank or additional FFT at zero carrier. Nonzero real carriers retain the
+admitted DD cell representation. The original N*F² temporal units plus the
+conditional F*N*(width+height) spatial units remain authoritative.
 The fixed modal pass contracts Q <= 2*N spatial quadratures as well as N point
 samples: each real scalar-pair vector density/rate uses eighteen products,
 and each proper pair uses at most twelve. The additional complete-workspace
@@ -3697,11 +3831,14 @@ frequency differentiation and signed Nyquist integration.
 The joint workspace cap includes both DD accumulation planes and outputs,
 one original reconstruction/FFT workspace, the momentum frequency coefficients
 and conservative modal scratch. It equals the two individual workspace
-bounds less one original workspace bound. Preparation's N*F² pair-work
-admission remains authoritative; at most ninety real or seventy-two proper
+bounds less one original workspace bound. The nonzero-carrier DD cell
+representation is shared by both observables. Preparation's N*F² temporal
+pair work and conditional F*N*(width+height) spatial work remain authoritative;
+at most ninety real or seventy-two proper
 scalar temporal products occur per admitted pair unit across point and
-modal observations. Work remains O(sum_r(L_r*N + F_r*N*log N + F_r²*N)).
-Avoiding a duplicate field reconstruction/cache/FFT is a source-level work
+modal observations. Work is O(sum_r(L_r*N + F_r*N*log N + F_r²*N)), plus
+conditional separable carrier work once per real bank. Avoiding a duplicate
+field reconstruction/cache/FFT is a source-level work
 reduction, not a measured wall-clock speedup claim. Cancellation or a failure
 in either observable returns no partial pair.
 
@@ -4079,6 +4216,29 @@ darkness and transactional refusal. These synthetic constitutive checks do not
 qualify a measured substrate or infer thermal evolution.
 
 ### Two-point electric coherence and explicitly analyzed interference
+
+`AngularSpectrumCoherence::prepare_interferometer` extends those same Maxwell
+observations to 1–4096 explicitly analyzed arms. Preparation retains the DD
+complex analyzer amplitude for every original factor/arm pair. Readings apply
+the supplied complex amplitude gains and sum each factor's arm fields before
+its positive cycle-averaged square. All coherent arm cross terms survive;
+independent source factors still add only as second moments. No splitter gain,
+free-space path, energy normalization or source statistics are inferred.
+
+For F factors, A arms and N Fourier modes, preparation admits F*A*N mode
+reconstructions and retained O(F*A) storage before allocation. Repeated gain or
+phase scans cost O(F*A), without allocation, FFT, material solves or new field
+reconstruction. Limits include the retained amplitudes and the existing
+conservative reconstruction workspace. Every arm is validated for dark banks,
+and cancellation checks bound arm/mode work and precede publication. This is
+monochromatic electric mean square, not detector watts or back-action; changed
+sources, observation geometry or analyzers require preparation again.
+
+Focused G1/G3 tests compare three-arm fringe scans with the analytic geometric
+sum for independent uniform and oblique waves, verify one-/two-arm parity,
+retain a 2^-59 dark-port residual and a common gain-phase invariance. G0/G4
+checks exercise exact work/storage boundaries, invalid dark-source arms and
+gains, cancellation and source reuse.
 
 The original monochromatic source-factor owner now exposes
 `AngularSpectrumCoherence::mutual_coherence` between two exterior observations.

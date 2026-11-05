@@ -1,6 +1,9 @@
 //! Synthetic material and pressure substitutions in the native contact field.
 //! These manufactured laws test the integration; they are not empirical claims.
 use super::*;
+
+#[path = "contacts/motion.rs"]
+mod motion;
 use fs_em::conduction::{ConductionContact, motion::ConductionMotion};
 use fs_matdb::{InterfaceSystemCard, SurfaceSpec, SystemContext};
 use fs_material::electrical_interface::{
@@ -439,7 +442,7 @@ fn contacts_refuse_duplicate_nonmatching_perfect_and_unsupported_sources() {
             &[(0, 0.0), (3, 0.0), (5, 1.0), (6, 1.0)],
             &[],
             ConductionMotion {
-                velocity_m_s: &[[0.0; 2]; 4],
+                velocity_m_s: &[[0.0, 1.0]; 4],
                 normal_flux_density_t: &[0.0; 4]
             },
             controls(),

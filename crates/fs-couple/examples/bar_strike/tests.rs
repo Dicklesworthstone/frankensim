@@ -412,3 +412,42 @@ fn wood_comes_from_the_cited_packs_and_inexact_units_are_refused() {
     .unwrap_err();
     assert!(err.contains("unit"), "a percent is not converted: {err}");
 }
+
+/// A long bar whose cut edge falls past the middle of its end cell. A lower-face midpoint there sits .28 mm from the
+/// lower face and 4.45 mm from the end face, yet nearer the end as a fraction: .012 of the thickness against .009
+/// of the length. Snapping by the fraction moved it onto the end face and folded the element.
+#[test]
+fn surface_snap_takes_the_nearest_face_in_metres() {
+    use fs_solid::linear3::tet10::BoundaryProjection;
+    let card = long_bar_with_steep_cut_edge();
+    let a = bar::point(&card, [0.0, 1.0 / 6.0, 0.0]);
+    let b = bar::point(&card, [1.0 / 56.0, 1.0 / 6.0, 0.0]);
+    let mid: [f64; 3] = core::array::from_fn(|k| f64::midpoint(a[k], b[k]));
+    let snapped = bar::Surface(&card).project(mid).expect("a snap");
+    let lower_face = bar::point(&card, [mid[0] / card.length_m, 1.0 / 6.0, 0.0]);
+    for k in 0..3 {
+        assert!(
+            (snapped[k] - lower_face[k]).abs() < 1e-12,
+            "{snapped:?} against {lower_face:?}"
+        );
+    }
+    let mesh = bar::mesh(&card, card.mesh_counts);
+    let wood = bar::material(&card, card.density_kg_m3).expect("the blank's wood");
+    bar::with_cx(|cx| bar::assemble(&card, &mesh, &wood, cx))
+        .map(|_| ())
+        .expect("every Jacobian positive");
+}
+
+fn long_bar_with_steep_cut_edge() -> Card {
+    let mut card = blank();
+    card.length_m = 0.498475;
+    card.width_m = 0.0635;
+    card.thickness_m = 0.023368;
+    card.profile = Profile::Arc {
+        stone_radius_m: 1.6834942755977116,
+        middle_thickness_m: 0.005562,
+        straight_length_m: 0.0,
+    };
+    card.mesh_counts = [56, 6, 3];
+    card
+}

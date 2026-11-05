@@ -7,6 +7,7 @@
 use super::{AssemblyVibration, checkpoint};
 use fs_exec::Cx;
 use fs_math::c64::C64;
+use fs_modal::harmonic::resonance::HarmonicTransferSample;
 use fs_modal::harmonic::{
     HarmonicFrequencyControls, HarmonicFrequencyResponse, HarmonicResponse,
     HarmonicResponseControls, PreparedHarmonicResponse,
@@ -78,6 +79,50 @@ pub struct AssemblyHarmonicFrequencyResponse {
     pub average_component_power_w: f64,
     /// Independently accumulated source-work derivative [W per rad/s].
     pub average_component_power_derivative: f64,
+}
+
+impl AssemblyHarmonicFrequencyResponse {
+    /// Observe a fixed real receiver on one original physical component. The
+    /// complete original DOF order includes supported/slave coordinates; the
+    /// motion has already passed through the accepted support/tie map. Shared
+    /// compensated projection preserves weak survivors of modal cancellation.
+    /// Receiver weights and geometry are held fixed as frequency changes.
+    pub fn component_displacement_transfer(
+        &self,
+        component: usize,
+        receiver: &[f64],
+    ) -> Result<HarmonicTransferSample, String> {
+        let values = self
+            .perturbation_displacements
+            .get(component)
+            .ok_or("assembled harmonic receiver component is out of range")?;
+        let derivatives = self
+            .displacement_derivatives
+            .get(component)
+            .ok_or("assembled harmonic receiver displacement tangent is missing")?;
+        HarmonicTransferSample::project_real(receiver, values, derivatives)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Observe physical velocity and its exact frequency slope at a fixed real
+    /// component receiver. The slope includes the exp(-i*w*t) kinematic term;
+    /// velocity and displacement resonances are not identified with each other.
+    pub fn component_velocity_transfer(
+        &self,
+        component: usize,
+        receiver: &[f64],
+    ) -> Result<HarmonicTransferSample, String> {
+        let values = self
+            .velocities
+            .get(component)
+            .ok_or("assembled harmonic receiver component is out of range")?;
+        let derivatives = self
+            .velocity_derivatives
+            .get(component)
+            .ok_or("assembled harmonic receiver velocity tangent is missing")?;
+        HarmonicTransferSample::project_real(receiver, values, derivatives)
+            .map_err(|e| e.to_string())
+    }
 }
 
 impl<'v, 'body> AssemblyHarmonicModel<'v, 'body> {
@@ -189,6 +234,25 @@ impl PreparedAssemblyHarmonicResponse<'_, '_, '_> {
         controls: HarmonicFrequencyControls,
         cx: &Cx<'_>,
     ) -> Result<AssemblyHarmonicFrequencyResponse, String> {
+        self.solve_frequency(
+            component_loads,
+            component_load_derivatives,
+            None,
+            controls,
+            cx,
+        )
+    }
+
+    // The original physical source/observation path is shared by unloaded and
+    // port-loaded responses. The latter supplies its full constitutive slope.
+    fn solve_frequency(
+        &self,
+        component_loads: &[&[C64]],
+        component_load_derivatives: Option<&[&[C64]]>,
+        impedance_derivative: Option<&[C64]>,
+        controls: HarmonicFrequencyControls,
+        cx: &Cx<'_>,
+    ) -> Result<AssemblyHarmonicFrequencyResponse, String> {
         let force = self.project_loads(component_loads, cx)?;
         let force_derivative = component_load_derivatives
             .map(|loads| self.project_loads(loads, cx))
@@ -198,7 +262,7 @@ impl PreparedAssemblyHarmonicResponse<'_, '_, '_> {
             .solve_with_frequency_derivative(
                 &force,
                 force_derivative.as_deref(),
-                None,
+                impedance_derivative,
                 controls,
                 cx,
             )

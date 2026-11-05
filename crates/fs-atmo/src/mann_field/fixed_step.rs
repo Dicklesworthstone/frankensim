@@ -17,7 +17,7 @@ use fs_rand::{STREAM_SEMANTICS_VERSION, Stream, StreamCheckpoint};
 use std::sync::Arc;
 
 mod average;
-pub use average::{FIXED_STEP_MANN_AVERAGE_KERNEL, MannStepAverage};
+pub use average::{FIXED_STEP_MANN_AVERAGE_KERNEL, MannStepAverage, TranslatingMannStepAverage};
 
 /// Separate innovation namespace; no existing 120 Hz stream is changed.
 pub const FIXED_STEP_MANN_KERNEL: u32 = 0x4d46_5354;

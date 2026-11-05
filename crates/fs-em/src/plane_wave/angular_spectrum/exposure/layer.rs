@@ -6,7 +6,7 @@
 //! contains the signed change of electromagnetic/polarization storage.
 
 use super::*;
-use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayerField};
+use crate::plane_wave::layers::FIELD_PREPARATION_WORKSPACE_BYTES;
 
 mod reservoir;
 use reservoir::{LossLaw, PoleTransfer};
@@ -32,8 +32,9 @@ pub struct AngularSpectrumExposureLayerLimits {
     pub maximum_frequency_groups: usize,
     pub maximum_frequency_layer_mode_pairs: usize,
     pub maximum_point_line_pairs: usize,
-    /// N * sum(F_r²) * (3 + P), with P original Debye poles. The three base
-    /// channels cover the vector field and its instantaneous E/H stores.
+    /// N * sum(F_r²) * (3 + P), with P original Debye poles, plus
+    /// sum_real F_r*N*(width+height) for a nonzero common carrier. The three
+    /// base channels cover the vector field and its instantaneous E/H stores.
     pub maximum_point_reservoir_frequency_pairs: usize,
     pub maximum_workspace_bytes: usize,
     pub maximum_fft_work: u64,
@@ -175,21 +176,23 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         let mut groups = 0_usize;
         let mut point_line_pairs = 0_usize;
         let mut pairs = 0_usize;
+        let mut carrier_pairs = 0_usize;
         let mut field_fft_work = 0_u64;
         let mut query_workspace = anchor.workspace_bytes();
         let extra_kernel_bytes = core::mem::size_of::<MomentKernel<HarmonicProduct>>()
             .max(core::mem::size_of::<MomentKernel<ProperHarmonicProduct>>())
             .saturating_sub(core::mem::size_of::<HarmonicProduct>());
-        for bank in mean.into_iter().chain(factors.iter()) {
+        for (bank, proper) in ensemble::banks(mean, factors, statistics) {
             poll(cancelled)?;
             if bank.anchor.grid() != anchor.grid()
+                || bank.anchor.carrier_rad_m != anchor.carrier_rad_m
                 || !bank
                     .anchor
                     .source()
                     .same_sources_and_geometry(anchor.source())
             {
                 return Err(bad(
-                    "film exposure requires the same original materials, layers and grid",
+                    "film exposure requires the same original materials, layers, grid and carrier",
                 ));
             }
             groups = groups
@@ -199,13 +202,24 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 .checked_mul(bank.line_count())
                 .and_then(|v| v.checked_add(point_line_pairs))
                 .ok_or_else(|| bad("film exposure line work overflow"))?;
-            pairs = pairs
-                .checked_add(bank.point_frequency_pairs())
+            let f = bank.frequency_count();
+            let bank_pairs = n
+                .checked_mul(f)
+                .and_then(|v| v.checked_mul(f))
                 .ok_or_else(|| bad("film exposure pair work overflow"))?;
+            pairs = pairs
+                .checked_add(bank_pairs)
+                .ok_or_else(|| bad("film exposure pair work overflow"))?;
+            if !proper {
+                carrier_pairs = bank
+                    .point_frequency_pairs()
+                    .checked_sub(bank_pairs)
+                    .and_then(|v| carrier_pairs.checked_add(v))
+                    .ok_or_else(|| bad("film exposure carrier work overflow"))?;
+            }
             field_fft_work = field_fft_work
                 .checked_add(bank.field_fft_work())
                 .ok_or_else(|| bad("film exposure FFT work overflow"))?;
-            let f = bank.frequency_count();
             let scratch = f
                 .checked_mul(f)
                 .and_then(|v| v.checked_mul(extra_kernel_bytes))
@@ -220,6 +234,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         }
         let point_reservoir_frequency_pairs = pairs
             .checked_mul(law.poles.len() + 3)
+            .and_then(|v| v.checked_add(carrier_pairs))
             .ok_or_else(|| bad("film exposure reservoir work overflow"))?;
         let index_bytes = groups
             .checked_mul(core::mem::size_of::<ExposureLine<'_, '_, '_>>())
@@ -275,7 +290,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             .checked_mul(per_frequency_pairs)
             .ok_or_else(|| bad("film exposure preparation work overflow"))?;
         let shared_layer_bytes = n
-            .checked_mul(core::mem::size_of::<[PreparedLayerField<'_, '_>; 2]>())
+            .checked_mul(core::mem::size_of::<
+                super::super::layers::PreparedMode<'_, '_>,
+            >())
             .and_then(|v| v.checked_mul(one_sided_count))
             .ok_or_else(|| bad("film exposure workspace overflow"))?;
         let cache_bytes = law
@@ -558,13 +575,17 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             mapping.push(index);
             filtered.push([C64::ZERO; 6]);
         }
-        let normal_power = integrate_cell_power(
-            self.anchor.grid(),
-            &fields,
-            &kernels,
-            |kernel, a, b| product_parts(kernel.product, a, b),
-            cancelled,
-        )?;
+        let normal_power = {
+            let carrier = bank.carrier_fields(&fields, proper, cancelled)?;
+            integrate_cell_power(
+                self.anchor.grid(),
+                &fields,
+                carrier.as_ref(),
+                &kernels,
+                |kernel, a, b| product_parts(kernel.product, a, b),
+                cancelled,
+            )?
+        };
         for (group, field) in fields.iter_mut().enumerate() {
             bank.synthesize_frequency_field(group, field, cancelled)?;
         }

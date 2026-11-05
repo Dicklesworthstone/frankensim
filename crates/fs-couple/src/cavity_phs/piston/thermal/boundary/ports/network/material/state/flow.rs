@@ -7,6 +7,9 @@ pub mod snapshot;
 pub mod diffusion;
 /// Joint nozzle and molecular transport with one shared species budget.
 pub mod transport;
+/// Continuum molecular species and reciprocal heat transport on live chambers.
+#[cfg(feature = "molecular-transport")]
+pub mod molecular;
 
 use super::*;
 use super::super::exchange::{MaterialExchangeSample, gas_law::GasSurface};
@@ -25,6 +28,8 @@ pub enum MaterialFlowError {
     Diffusion(fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::DiffusionNetworkError),
     AdaptiveDiffusion(fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::adaptive::DiffusionNetworkAdvanceError),
     Transport(fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportError),
+    #[cfg(feature = "molecular-transport")]
+    Molecular(fs_gas::material::transport::parcel::ParcelMolecularError),
     Exchange(ReactiveExchangeError),
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
@@ -36,6 +41,17 @@ impl core::fmt::Display for MaterialFlowError {
 }
 impl std::error::Error for MaterialFlowError {}
 
+#[cfg(feature = "molecular-transport")]
+impl From<fs_gas::material::transport::parcel::ParcelMolecularError> for MaterialFlowError {
+    fn from(error: fs_gas::material::transport::parcel::ParcelMolecularError) -> Self {
+        use fs_gas::material::transport::parcel::ParcelMolecularError;
+        match error {
+            ParcelMolecularError::Cancelled => Self::Cancelled,
+            other => Self::Molecular(other),
+        }
+    }
+}
+
 /// A transport refusal when the following assembly uses a caller-selected
 /// gas heat law. Existing nozzle errors remain distinct from typed heat-law
 /// source errors; no string conversion or fallback coefficient is introduced.
@@ -44,6 +60,8 @@ pub enum MaterialGasLawFlowError<E> {
     Invalid(&'static str),
     Flow(GasNetworkError),
     Transport(fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::GasTransportError),
+    #[cfg(feature = "molecular-transport")]
+    Molecular(fs_gas::material::transport::parcel::ParcelMolecularError),
     Exchange(ReactiveExchangeError<E>),
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
@@ -54,6 +72,16 @@ impl<E: core::fmt::Debug> core::fmt::Display for MaterialGasLawFlowError<E> {
     }
 }
 impl<E: core::fmt::Debug> std::error::Error for MaterialGasLawFlowError<E> {}
+#[cfg(feature = "molecular-transport")]
+impl<E> From<fs_gas::material::transport::parcel::ParcelMolecularError> for MaterialGasLawFlowError<E> {
+    fn from(error: fs_gas::material::transport::parcel::ParcelMolecularError) -> Self {
+        use fs_gas::material::transport::parcel::ParcelMolecularError;
+        match error {
+            ParcelMolecularError::Cancelled => Self::Cancelled,
+            other => Self::Molecular(other),
+        }
+    }
+}
 impl<E> From<GasNetworkError> for MaterialGasLawFlowError<E> {
     fn from(error: GasNetworkError) -> Self {
         match error { GasNetworkError::Cancelled => Self::Cancelled, other => Self::Flow(other) }
@@ -348,13 +376,13 @@ impl<'m> MaterialExchangeState<'m> {
             }
             if moved.contains(&id) {
                 // Replace the post-transfer account with ONE whole-interval tick.
-                // Even net-zero mass can carry species/enthalpy through this node.
+                // Net-zero mass or heat can still conceal additional stream ports.
                 after.ports = before.ports.clone();
                 after.ports.accept(crate::port_adoption::StepAccount {
                     tick: before.ports.next_tick(), duration_s: dt,
                     storage_change_j: Some(du + dk), loss_j: Some(0.0), included_work_j: 0.0,
                     entropy_change_j_k: ds, tolerance_j: Some(controls.total_energy_tolerance_j),
-                    unavailable: Some("gas network mass exchange needs stream ports; use the whole-assembly flow balance"),
+                    unavailable: Some("gas network species/heat transport needs stream ports; use the whole-assembly flow balance"),
                 }, [crate::port_adoption::PortTransfer::work(
                     mechanical.external_force_work_j - mechanical.exterior_pressure_work_j, true),
                     crate::port_adoption::PortTransfer::heat(mechanical.gas.supplied_heat_j,

@@ -230,6 +230,9 @@ fn spatial(
                             let p = reconstruct(k, 0.5 * sign);
                             gas.hllc_spatial_flux_from_primitive(p, p, &mut *cancelled)?
                         }
+                        (_, BoundaryCondition::PressureOutlet { .. }) => {
+                            unreachable!("admitted pressure outlet has an immutable source binding")
+                        }
                     }
                 }
             }

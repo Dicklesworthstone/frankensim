@@ -20,6 +20,8 @@ use fs_thermal::enthalpy::*;
 
 #[path = "circuit_thermoelectric/motion.rs"]
 mod motion_tests;
+#[path = "circuit_thermoelectric/piezoelectric.rs"]
+mod piezoelectric_tests;
 #[path = "circuit_thermoelectric/graph.rs"]
 mod graph_tests;
 #[path = "circuit_thermoelectric/heat.rs"]

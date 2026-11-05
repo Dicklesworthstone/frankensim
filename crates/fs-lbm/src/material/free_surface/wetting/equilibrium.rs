@@ -1,8 +1,9 @@
 //! Local thermal equilibrium uses the original wall and source transaction.
 //!
-//! The native thermal owner already retains and checks a constant liquid/gas
-//! tension at every source evaluation. Only the actual temperature coordinate
-//! changes here; reversible work is not reinterpreted as a measured angle,
+//! The native thermal owner retains and checks the actual liquid/gas tension.
+//! It is constant or admitted by a compatible thermal-capillarity owner.
+//! The same local source temperature supplies work and tension; reversible
+//! work is not reinterpreted as a measured angle,
 //! contact-line friction, hysteresis or heat.
 
 use super::*;
@@ -27,6 +28,7 @@ impl<'m> WettingBinding<'m> {
         origin: EquilibriumAngleOrigin,
         selection: MaterialPropertySelection,
         temperature_axis: &str,
+        evolving_surface_tension: bool,
         maximum_wall_cells: usize,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
@@ -62,12 +64,16 @@ impl<'m> WettingBinding<'m> {
                     .ok_or(Error::Invalid(
                         "equilibrium adhesion requires original liquid/gas tension",
                     ))?;
-            if !tension.source_axes().is_empty()
-                || tension.answer().receipt.decision
-                    != fs_matdb::EvaluationDecision::ConstantWithinValidity
+            // The thermal owner has already pinned and admitted the SAME
+            // source's temperature axis. Only its uniform or sidewall graph
+            // mode can evolve it with the admitted contact-angle geometry.
+            if !evolving_surface_tension
+                && (!tension.source_axes().is_empty()
+                    || tension.answer().receipt.decision
+                        != fs_matdb::EvaluationDecision::ConstantWithinValidity)
             {
                 return Err(Error::Invalid(
-                    "thermal equilibrium adhesion requires the native constant tension source",
+                    "thermal adhesion needs constant tension or its compatible thermal owner",
                 ));
             }
         }
@@ -122,9 +128,13 @@ impl WettingPhysics<'_> {
         let applied_angle_radians = match equilibrium.origin {
             EquilibriumAngleOrigin::SourcedAngle => value,
             EquilibriumAngleOrigin::YoungDupre => {
-                let sigma = equilibrium.surface_tension_n_m.ok_or(Error::Invalid(
-                    "equilibrium adhesion requires liquid/gas tension",
-                ))?;
+                let sigma = temperature
+                    .map_or(equilibrium.surface_tension_n_m, |(_, state)| {
+                        state.surface_tension_n_m
+                    })
+                    .ok_or(Error::Invalid(
+                        "equilibrium adhesion requires liquid/gas tension",
+                    ))?;
                 YoungDupreLaw::new(value, sigma)
                     .map_err(|_| {
                         Error::Invalid(

@@ -320,6 +320,7 @@ pub struct ContactProblem<'a> {
 }
 
 /// The converged record: displacements plus the auditable evidence.
+#[derive(Clone)]
 pub struct ContactSolution {
     /// Nodal displacements (flat, 2 per node).
     pub u: Vec<f64>,
@@ -340,6 +341,12 @@ pub struct ContactSolution {
     /// −Σ f_t·(u−reference_u−surface_displacement).
     /// This incremental diagnostic is not trajectory-integrated heat.
     pub friction_work: f64,
+    /// The same nonnegative relative work in original nodal order. Inactive
+    /// nodes and disabled friction contribute zero. For an SI plane-strain
+    /// problem these values are J/m of out-of-plane depth; a thermal consumer
+    /// must supply the physical depth and its heat-conversion fraction.
+    /// Their ordered sum is exactly `friction_work`.
+    pub friction_work_per_node: Vec<f64>,
     /// Signed endpoint work supplied by prescribed obstacle material motion,
     /// Σ f_t·surface_displacement, where f_t is the force on the solid.
     /// The body's friction work plus `friction_work` equals this value.
@@ -384,6 +391,9 @@ impl ContactWork {
 /// work integrals advance together only after the equilibrium solve succeeds.
 /// There is no inertia, exact static-friction constraint, thermal allocation,
 /// or inferred obstacle trajectory. The finite regularization permits creep.
+/// Cloning retains the same immutable problem and copies all accepted state,
+/// so a coupled physical trial can advance privately before joint acceptance.
+#[derive(Clone)]
 pub struct ContactTrajectory<'p, 'a> {
     problem: &'p ContactProblem<'a>,
     regularization_speed: f64,
@@ -474,6 +484,21 @@ impl<'p, 'a> ContactTrajectory<'p, 'a> {
     #[must_use]
     pub fn sliding_distance(&self) -> &[f64] {
         &self.sliding_distance
+    }
+
+    /// Whether this accepted node lies inside the original barrier's activation
+    /// distance. This queries the native obstacle and does not certify contact
+    /// along an unresolved path or imply zero geometric separation.
+    ///
+    /// # Errors
+    /// A node outside the original mesh or an invalid obstacle evaluation.
+    pub fn is_contact_active(&self, node: usize) -> Result<bool, SolidError> {
+        if node >= self.problem.node_count() {
+            return Err(SolidError::InvalidInput {
+                what: "contact activity query names a node outside the original mesh".to_string(),
+            });
+        }
+        Ok(self.problem.sdf_value(&self.u, node)? < self.problem.barrier.dhat)
     }
 
     /// Sum of endpoint friction-force/displacement products since construction.
@@ -1364,12 +1389,13 @@ impl ContactProblem<'_> {
             }
         }
         let mut friction_residual = vec![0.0; ndof];
-        let friction_work = if let Some(lag) = &lag {
+        let friction_work_per_node = if let Some(lag) = &lag {
             lag.add_residual(&u, &mut friction_residual);
-            lag.work(&u)
+            lag.work_per_node(&u)
         } else {
-            0.0
+            vec![0.0; n]
         };
+        let friction_work = friction_work_per_node.iter().sum::<f64>();
         // f_t is the negative residual. Its work on the solid and on the
         // prescribed surface closes W_body + D_relative = W_support.
         let friction_support_work = surface_displacement.map_or(0.0, |displacements| {
@@ -1406,6 +1432,7 @@ impl ContactProblem<'_> {
             reactions,
             friction_reactions,
             friction_work,
+            friction_work_per_node,
             friction_support_work,
             sliding_distance_increment,
             friction_sources: lag.and_then(|lag| lag.sources).unwrap_or_default(),
@@ -1688,7 +1715,7 @@ impl<'a> FrictionLag<'a> {
         }
     }
 
-    fn work(&self, u: &[f64]) -> f64 {
+    fn work_per_node(&self, u: &[f64]) -> Vec<f64> {
         self.frames
             .iter()
             .enumerate()
@@ -1696,7 +1723,7 @@ impl<'a> FrictionLag<'a> {
                 let slip = self.slip(u, i);
                 self.coefficient(i) * lambda * self.huber_d1(slip) * slip
             })
-            .sum()
+            .collect()
     }
 }
 
@@ -1841,7 +1868,7 @@ mod tests {
                     );
                 }
             }
-            assert!(lag.work(&u) >= 0.0);
+            assert!(lag.work_per_node(&u).iter().all(|&work| work >= 0.0));
 
             // Independently check the search model's global upper bound;
             // the derivative checks above continue to use the true Hessian.

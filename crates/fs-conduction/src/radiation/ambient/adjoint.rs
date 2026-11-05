@@ -5,7 +5,7 @@
 use super::{AmbientRadiationPatch, ConductionError, ConductionProblem, Cx,
     ScalarField, ThermalBc, ThermalInterfaces, finite, poll, radiation_error,
     STEFAN_BOLTZMANN_W_M2_K4};
-use crate::LinearConfig;
+use crate::{LinearConfig, ThermalBoundary};
 use crate::adjoint::{RobinGradient, RobinResponse};
 use std::collections::BTreeSet;
 
@@ -32,6 +32,25 @@ pub struct AmbientRadiationGradient {
     /// card value is a control; its query temperature, identity and validity
     /// domain are fixed. At parameter limits only feasible directions apply.
     pub emissivities: Vec<f64>,
+}
+
+/// Exact unchanged-field ambient-radiation boundary and its mean feedback.
+///
+/// Separating boundary binding from the transposed solve lets a complete live
+/// contact tangent share the same radiation law and original-control remapping.
+/// This value does not solve or certify the thermal endpoint. Its consumer must
+/// validate the physical residual, solve the complete transpose, then remap the
+/// combined Robin controls through this same binding.
+pub struct AmbientRadiationLinearization {
+    boundary: ThermalBoundary,
+    regions: Vec<String>,
+    h_slopes: Vec<f64>,
+    reference_slopes: Vec<f64>,
+    reference_feedback: Option<Vec<f64>>,
+    physical: Vec<(f64, f64, f64, f64)>,
+    radiative: Vec<Option<(usize, f64, f64)>>,
+    patches: Vec<AmbientRadiationPatch>,
+    vertices: usize,
 }
 
 fn invalid(what: &str) -> ConductionError {
@@ -150,6 +169,41 @@ fn pullback(
     convective_mean_slopes_w_m2_k2: &[f64], reference_feedback: Option<&[f64]>,
     patches: &[AmbientRadiationPatch], nodal_weights: &[f64], max_feedback_entries: usize,
 ) -> Result<AmbientRadiationGradient, ConductionError> {
+    let bound = AmbientRadiationLinearization::bind(cx, problem, temperature, regions,
+        convective_mean_slopes_w_m2_k2, reference_feedback, patches, max_feedback_entries)?;
+    let combined_problem = ConductionProblem { boundary: bound.boundary(), ..problem };
+    let gradient = if let Some(feedback) = bound.reference_feedback() {
+        RobinResponse::pullback_mean_robin_with_reference_feedback(cx, combined_problem,
+            interfaces, linear, temperature, regions, bound.coefficient_mean_slopes(),
+            bound.local_reference_slopes(), feedback, nodal_weights, max_feedback_entries)?
+    } else {
+        RobinResponse::pullback_mean_robin(cx, combined_problem, interfaces,
+            linear, temperature, regions, bound.coefficient_mean_slopes(),
+            bound.local_reference_slopes(), nodal_weights, max_feedback_entries)?
+    };
+    bound.remap_gradient(cx, gradient, linear)
+}
+
+impl AmbientRadiationLinearization {
+    /// Rebuild the physical area-mean secant boundary at `temperature`.
+    ///
+    /// The boundary is the original convection/zero-flux partition; the selected
+    /// regions must contain every radiating and mean-dependent convection trace.
+    /// Slopes are dh_c/dmean(T), and optional row-major reference feedback is the
+    /// derivative of the ORIGINAL convective references. Radiation contributes
+    /// its own coefficient/reference slopes and scales each feedback row by
+    /// h_c/(h_c+h_rad). Zero-flux radiating traces have no convective controls.
+    ///
+    /// The original two- or four-factor entry allowance and 64-trace cap apply.
+    /// Smoothness/domain checks remain attached to the selected emissivity card.
+    /// No primal field, contact law, material law or source selection is changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
+        regions: &[&str], convective_mean_slopes_w_m2_k2: &[f64],
+        reference_feedback: Option<&[f64]>, patches: &[AmbientRadiationPatch],
+        max_feedback_entries: usize,
+    ) -> Result<Self, ConductionError> {
     poll(cx, 0)?;
     let n = problem.mesh.vertex_count();
     let factors = if reference_feedback.is_some() { 4 } else { 2 };
@@ -159,12 +213,12 @@ fn pullback(
     {
         return Err(invalid("ambient adjoint exceeds the factor-entry/64-region limit or has no patches"));
     }
-    if temperature.len() != n || nodal_weights.len() != n
+    if temperature.len() != n
         || convective_mean_slopes_w_m2_k2.len() != regions.len()
     {
-        return Err(invalid("ambient adjoint field, goal or convection-slope length differs from its binding"));
+        return Err(invalid("ambient adjoint field or convection-slope length differs from its binding"));
     }
-    for (i, &value) in temperature.iter().chain(nodal_weights)
+    for (i, &value) in temperature.iter()
         .chain(convective_mean_slopes_w_m2_k2).enumerate()
     {
         if i % 512 == 0 { poll(cx, i)?; }
@@ -252,9 +306,8 @@ fn pullback(
             physical.push((hc, tc, hc, tc));
         }
     }
-    let combined = problem.boundary.with_radiative_robin_replacements(&replacements)?;
-    let combined_problem = ConductionProblem { boundary: &combined, ..problem };
-    let mut gradient = if let Some(feedback) = reference_feedback {
+    let boundary = problem.boundary.with_radiative_robin_replacements(&replacements)?;
+    let reference_feedback = if let Some(feedback) = reference_feedback {
         let m = regions.len();
         let mut combined_feedback = Vec::with_capacity(feedback.len());
         for (i, &(hc, _, h, _)) in physical.iter().enumerate() {
@@ -263,21 +316,65 @@ fn pullback(
                 combined_feedback.push(finite((hc/h)*entry, "combined convective feedback")?);
             }
         }
-        RobinResponse::pullback_mean_robin_with_reference_feedback(cx, combined_problem,
-            interfaces, linear, temperature, regions, &h_slopes, &reference_slopes,
-            &combined_feedback, nodal_weights, max_feedback_entries)?
+        Some(combined_feedback)
     } else {
-        RobinResponse::pullback_mean_robin(cx, combined_problem, interfaces,
-            linear, temperature, regions, &h_slopes, &reference_slopes, nodal_weights,
-            max_feedback_entries)?
+        None
     };
-    let mut reservoirs = Vec::with_capacity(patches.len());
-    let mut emissivities = Vec::with_capacity(patches.len());
-    for (j, patch) in patches.iter().enumerate() {
+    poll(cx, n)?;
+    Ok(Self { boundary, regions: regions.iter().map(|name| (*name).to_owned()).collect(),
+        h_slopes, reference_slopes, reference_feedback, physical, radiative,
+        patches: patches.to_vec(), vertices: n })
+    }
+
+    /// Fresh physical secant boundary for the complete thermal/contact response.
+    #[must_use]
+    pub const fn boundary(&self) -> &ThermalBoundary { &self.boundary }
+    /// Selected thermal trace order, including any radiation-only traces.
+    #[must_use]
+    pub fn regions(&self) -> &[String] { &self.regions }
+    /// Derivatives of the combined coefficients with respect to local wall mean.
+    #[must_use]
+    pub fn coefficient_mean_slopes(&self) -> &[f64] { &self.h_slopes }
+    /// Local weighted-reference slopes, excluding additional reference feedback.
+    #[must_use]
+    pub fn local_reference_slopes(&self) -> &[f64] { &self.reference_slopes }
+    /// Additional reference feedback with each original convection row weighted.
+    #[must_use]
+    pub fn reference_feedback(&self) -> Option<&[f64]> { self.reference_feedback.as_deref() }
+
+    /// Recover original convection, emissivity and bath controls from ONE dual.
+    ///
+    /// The supplied gradient must differentiate this binding's combined Robin
+    /// rows through the complete state operator, in `regions()` order. Length,
+    /// finiteness and the requested dual residual are checked; this is not an
+    /// independent proof that an arbitrary caller's dual belongs to that solve.
+    pub fn remap_gradient(
+        &self, cx: &Cx<'_>, mut gradient: RobinGradient, linear: LinearConfig,
+    ) -> Result<AmbientRadiationGradient, ConductionError> {
+    poll(cx, 0)?;
+    if gradient.nodal_load.len() != self.vertices
+        || gradient.references.len() != self.regions.len()
+        || gradient.log_htc.len() != self.regions.len()
+        || !linear.tolerance.is_finite() || linear.tolerance <= 0.0
+        || !gradient.relative_residual.is_finite()
+        || gradient.relative_residual < 0.0
+        || gradient.relative_residual > linear.tolerance
+    {
+        return Err(invalid("ambient gradient must retain the bound nodal/trace layout and meet its dual residual target"));
+    }
+    for (i, &value) in gradient.nodal_load.iter().chain(&gradient.references)
+        .chain(&gradient.log_htc).enumerate()
+    {
+        if i % 512 == 0 { poll(cx, i)?; }
+        finite(value, "ambient gradient input")?;
+    }
+    let mut reservoirs = Vec::with_capacity(self.patches.len());
+    let mut emissivities = Vec::with_capacity(self.patches.len());
+    for (j, patch) in self.patches.iter().enumerate() {
         poll(cx, j)?;
-        let (i, hr, hr_ambient) = radiative[j]
+        let (i, hr, hr_ambient) = self.radiative[j]
             .ok_or_else(|| invalid("radiation derivative is missing its bound trace"))?;
-        let (hc, tc, h, reference) = physical[i];
+        let (hc, tc, h, reference) = self.physical[i];
         let g_ref = gradient.references[i];
         let g_log = gradient.log_htc[i];
         let reservoir = patch.ambient_temperature_k();
@@ -293,10 +390,11 @@ fn pullback(
     }
     poll(cx, gradient.iterations)?;
     Ok(AmbientRadiationGradient {
-        regions: regions.iter().map(|name| (*name).to_owned()).collect(),
+        regions: self.regions.clone(),
         convection: gradient,
-        radiation_regions: patches.iter().map(|patch| patch.region().to_owned()).collect(),
+        radiation_regions: self.patches.iter().map(|patch| patch.region().to_owned()).collect(),
         reservoir_temperatures: reservoirs,
         emissivities,
     })
+    }
 }

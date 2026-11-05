@@ -1,0 +1,16 @@
+frankensim.matdb-manifest.v3
+pack_id	sibx-ixom-solid-reference
+redistribution	permitted	Selected attributed numerical facts and original interpretation only; no source prose, images or table layout is redistributed
+citation	IXOM, SODIUM ISOBUTYL XANTHATE, product code 000033039301, Safety Data Sheet revision 8, 2023-11-24; composition section 3 page 2 https://sds.ixom.com/pdf/shess-en-mtr-UGHS-000033039301.pdf; water-solubility entry section 9 page 7 https://sds.ixom.com/pdf/shess-en-mtr-ZGHS-000033039301.pdf; accessed 2026-11-05
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	collector-reference	properties.tsv	material-tsv-v1
+property	sibx_min	sibx-product-component-mass-fraction-minimum	dimensional
+property	naoh_max	sodium-hydroxide-product-component-mass-fraction-maximum	dimensional
+property	solubility	sibx-water-solubility-reported-approximate-mass-per-volume	dimensional
+axis	product	source-ixom-sibx-solid-product	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	lot_qualified	source-lot-qualified	dimensional
+axis	temperature	temperature	absolute-temperature
+axis	pressure_known	source-test-pressure-known	dimensional
+axis	volume_basis_known	source-solubility-volume-basis-known	dimensional
+axis	approximate	source-approximate-value	dimensional

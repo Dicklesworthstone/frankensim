@@ -13,7 +13,10 @@ pub use contact::{SpatialConductionContact, SpatialConductionContactResponse};
 mod terminals;
 pub use terminals::SpatialResistance;
 mod matrix;
-pub use matrix::{SpatialConductanceControls, SpatialConductanceMatrix};
+pub use matrix::{
+    SpatialConductanceControls, SpatialConductanceMatrix, SpatialMixedConductance,
+    SpatialMixedConductanceControls,
+};
 pub mod motion;
 
 use super::{
@@ -466,11 +469,14 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         for contact in &contacts {
             check(cancelled)?;
             power_w = finite(power_w + contact.power_w)?;
+            if let Some(transfer) = transfer.as_mut() {
+                transfer.contact_power_w = finite(transfer.contact_power_w + contact.power_w)?;
+            }
         }
         let (accounted_power_w, electrical_power_w, work_pairing_residual_w) = match &transfer {
             Some(transfer) => (
                 finite(power_w + transfer.mechanical_power_w)?,
-                transfer.electrical_power_w,
+                finite(transfer.electrical_power_w + transfer.contact_power_w)?,
                 transfer.work_pairing_residual_w,
             ),
             None => (power_w, power_w, 0.0),

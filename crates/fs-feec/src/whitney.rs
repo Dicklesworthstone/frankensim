@@ -174,13 +174,27 @@ pub fn mass_matrix(complex: &TetComplex, geo: &ElementGeometry, degree: u8) -> C
     let n = crate::cochain::cell_count(complex, degree);
     let mut coo = Coo::new(n, n);
     for m in 0..complex.tets.len() {
-        element_mass_entries(complex, geo, degree, m, None, &mut |row, col, value| {
-            coo.push(row, col, value);
-            Ok::<(), core::convert::Infallible>(())
-        })
+        element_mass_entries(
+            complex,
+            geo,
+            degree,
+            m,
+            ElementWeight::Unit,
+            &mut |row, col, value| {
+                coo.push(row, col, value);
+                Ok::<(), core::convert::Infallible>(())
+            },
+        )
         .expect("infallible unweighted assembly");
     }
     coo.assemble()
+}
+
+/// Normalized material supplied by the checked weighted assembler.
+pub(crate) enum ElementWeight<'a> {
+    Unit,
+    Tensor(&'a [[f64; 3]; 3]),
+    AffineScalar([f64; 4]),
 }
 
 /// One shared closed-form Whitney element rule. The ordinary mass matrix
@@ -191,17 +205,46 @@ pub(crate) fn element_mass_entries<E>(
     geo: &ElementGeometry,
     degree: u8,
     m: usize,
-    tensor: Option<&[[f64; 3]; 3]>,
+    weight: ElementWeight<'_>,
     emit: &mut impl FnMut(usize, usize, f64) -> Result<(), E>,
 ) -> Result<(), E> {
-    let pairing = |a, b| match tensor {
-        None => dot(a, b),
-        Some(tensor) => dot(a, tensor.map(|row| dot(row, b))),
+    let pairing = |a, b| match &weight {
+        ElementWeight::Tensor(tensor) => dot(a, tensor.map(|row| dot(row, b))),
+        _ => dot(a, b),
     };
-    // ∫ λ_p λ_q dV = V/20·(1 + δ_pq) — the only scalar integral needed.
     let tet = complex.tets[m];
     let vol = geo.vol_signed[m].abs();
-    let s = |p: usize, q: usize| -> f64 { if p == q { vol / 10.0 } else { vol / 20.0 } };
+    // For rho = sum(rho_a lambda_a), exact cubic simplex moments give
+    // ∫ rho λ_p λ_q = V(1+δ_pq)(sum(rho_a)+rho_p+rho_q)/120.
+    // Cache ten distinct moments once; no extra quadrature or allocation is
+    // required for vector forms. Normalization keeps the density sum bounded.
+    let affine_moments = if let ElementWeight::AffineScalar(values) = &weight {
+        let sum: f64 = values.iter().sum();
+        let mut moments = [[0.0; 4]; 4];
+        for p in 0..4 {
+            for q in p..4 {
+                let value =
+                    (vol / if p == q { 60.0 } else { 120.0 }) * (sum + values[p] + values[q]);
+                moments[p][q] = value;
+                moments[q][p] = value;
+            }
+        }
+        Some(moments)
+    } else {
+        None
+    };
+    let s = |p: usize, q: usize| -> f64 {
+        match &affine_moments {
+            Some(moments) => moments[p][q],
+            None => {
+                if p == q {
+                    vol / 10.0
+                } else {
+                    vol / 20.0
+                }
+            }
+        }
+    };
     match degree {
         0 => {
             for a in 0..4 {
@@ -222,7 +265,7 @@ pub(crate) fn element_mass_entries<E>(
                 }
             }
             let mut weighted_gram = [[0.0; 4]; 4];
-            let gr = if tensor.is_some() {
+            let gr = if matches!(weight, ElementWeight::Tensor(_)) {
                 for a in 0..4 {
                     for b in a..4 {
                         let value = pairing(geo.grads[m][a], geo.grads[m][b]);
@@ -282,7 +325,11 @@ pub(crate) fn element_mass_entries<E>(
             }
         }
         3 => {
-            emit(m, m, 1.0 / vol)?;
+            let average = match weight {
+                ElementWeight::AffineScalar(values) => values.iter().sum::<f64>() / 4.0,
+                _ => 1.0,
+            };
+            emit(m, m, average / vol)?;
         }
         _ => panic!("mass_matrix degree must be 0..=3"),
     }

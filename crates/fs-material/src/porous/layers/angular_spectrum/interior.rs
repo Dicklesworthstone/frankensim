@@ -8,10 +8,12 @@
 
 use super::{
     AcousticSpectrumError, AcousticSpectrumSample, FieldSum, PlaneField, PreparedAcousticSpectrum,
-    poll, propagation,
+    PreparedPlaneWave, poll, propagation,
 };
 use crate::porous::layers::transmission::{LogAmplitude, log_scaled};
-use crate::porous::layers::{Layer, LayerTransfer, MAX_LAYERS, PreparedLayer, finite};
+use crate::porous::layers::{
+    Layer, LayerTransfer, MAX_LAYERS, PreparedLayer, RigidBackedLayers, finite,
+};
 use fs_math::{c64::C64, dd::Dd, det};
 
 struct LayerWave {
@@ -43,6 +45,12 @@ pub struct AcousticLayerSample {
 pub struct PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
     spectrum: &'s PreparedAcousticSpectrum<'p, 'a>,
     layer_index: usize,
+    fields: PreparedLayerFields,
+}
+
+// Shared local field/heat owner. Stack-specific boundary solves supply the
+// original two face states and complex entrance amplitude, never a fitted loss.
+pub(in crate::porous::layers) struct PreparedLayerFields {
     waves: Vec<LayerWave>,
     heat_scales: [f64; 2],
 }
@@ -66,89 +74,76 @@ impl<'p, 'a> PreparedAcousticSpectrum<'p, 'a> {
             .ok_or(AcousticSpectrumError::Invalid(
                 "interior observation needs an original layer index",
             ))?;
-        let density = if let Some(response) = layer.porous {
-            response.dynamic_density_kg_m3()
-        } else {
-            C64::from_re(
-                layer
-                    .fluid
-                    .unwrap_or(prepared.fluid.acoustic())
-                    .density_kg_m3(),
-            )
-        };
-        let compliance = layer.porous.map_or(C64::ZERO, |response| {
-            response.dynamic_bulk_modulus_pa().recip()
-        });
-        // Square roots retain a weak field times a strong loss coefficient
-        // without first squaring an unweighted field. Preparation reuses the
-        // same original material snapshot; observations need no extra query.
-        let heat_scales = [-density.im, -compliance.im].map(|loss| {
-            if loss == 0.0 {
-                0.0
-            } else {
-                det::exp(0.5 * (det::ln(prepared.omega) + det::ln(loss) - core::f64::consts::LN_2))
-            }
-        });
-        let mut waves = Vec::with_capacity(self.components.len());
-        for wave in &self.components {
-            poll(cancelled)?;
-            let mut transfers = [LayerTransfer::default(); MAX_LAYERS];
-            self.stack.scattering_with_layers::<AcousticSpectrumError>(
-                wave.cosine,
-                |index, step| {
+        let fields = PreparedLayerFields::prepare(
+            prepared,
+            layer,
+            &self.components,
+            cancelled,
+            |wave, cancelled| {
+                let mut transfers = [LayerTransfer::default(); MAX_LAYERS];
+                self.stack.scattering_with_layers::<AcousticSpectrumError>(
+                    wave.cosine,
+                    |index, step| {
+                        poll(cancelled)?;
+                        transfers[index] = step;
+                        Ok(())
+                    },
+                )?;
+                let first = transfers[0];
+                let mut amplitude = LogAmplitude::new(0.0);
+                amplitude
+                    .multiply(C64::from_re(2.0) / (first.front_pressure + first.front_velocity))?;
+                amplitude.multiply(wave.incident.pressure)?;
+                for (source, step) in prepared.layers[..layer_index]
+                    .iter()
+                    .zip(&transfers[..layer_index])
+                {
                     poll(cancelled)?;
-                    transfers[index] = step;
-                    Ok(())
-                },
-            )?;
-            let first = transfers[0];
-            let mut amplitude = LogAmplitude::new(0.0);
-            amplitude
-                .multiply(C64::from_re(2.0) / (first.front_pressure + first.front_velocity))?;
-            amplitude.multiply(wave.incident.pressure)?;
-            for (source, step) in prepared.layers[..layer_index]
-                .iter()
-                .zip(&transfers[..layer_index])
-            {
-                poll(cancelled)?;
-                let thickness = source.source.thickness_m();
-                if thickness == 0.0 {
-                    continue;
+                    let thickness = source.source.thickness_m();
+                    if thickness == 0.0 {
+                        continue;
+                    }
+                    if step.normal_wavenumber.im == 0.0 {
+                        amplitude.add(-log_scaled(16.0, step.normalization));
+                    } else {
+                        amplitude.add(
+                            step.normal_wavenumber.im * thickness
+                                - log_scaled(8.0, step.normalization),
+                        );
+                        amplitude.rotate(-step.normal_wavenumber.re * thickness);
+                    }
                 }
-                if step.normal_wavenumber.im == 0.0 {
-                    amplitude.add(-log_scaled(16.0, step.normalization));
-                } else {
-                    amplitude.add(
-                        step.normal_wavenumber.im * thickness - log_scaled(8.0, step.normalization),
-                    );
-                    amplitude.rotate(-step.normal_wavenumber.re * thickness);
-                }
-            }
-            let tangential_velocity_per_pa = wave
-                .tangential_wavenumber
-                .map(|k| C64::from_re(k / prepared.omega) / density);
-            if tangential_velocity_per_pa.iter().any(|&v| !finite(v)) {
-                return Err(AcousticSpectrumError::Invalid(
-                    "interior tangential acoustic momentum is unrepresentable",
-                ));
-            }
-            waves.push(LayerWave {
-                transfer: transfers[layer_index],
-                front_amplitude: amplitude,
-                tangential_velocity_per_pa,
-            });
-        }
-        poll(cancelled)?;
+                Ok((transfers[layer_index], amplitude))
+            },
+        )?;
         Ok(PreparedLayerAcousticSpectrum {
             spectrum: self,
             layer_index,
-            waves,
-            heat_scales,
+            fields,
         })
     }
 }
 
 impl<'s, 'p, 'a> PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
+    pub(super) fn heat_scales(&self) -> [f64; 2] {
+        self.fields.heat_scales
+    }
+
+    pub(super) fn component_field(
+        &self,
+        index: usize,
+        depth: f64,
+    ) -> Result<PlaneField, AcousticSpectrumError> {
+        let prepared = self.spectrum.stack.prepared_layers();
+        PreparedLayerFields::component_field(
+            prepared,
+            &prepared.layers[self.layer_index],
+            &self.spectrum.components[index],
+            &self.fields.waves[index],
+            depth,
+        )
+    }
+
     /// The original prepared coherent incident/reflected/transmitted spectrum.
     pub const fn spectrum(&self) -> &'s PreparedAcousticSpectrum<'p, 'a> {
         self.spectrum
@@ -171,8 +166,101 @@ impl<'s, 'p, 'a> PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
         position_m: [f64; 3],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AcousticLayerSample, AcousticSpectrumError> {
+        let prepared = self.spectrum.stack.prepared_layers();
+        self.fields.field_with_heat(
+            prepared,
+            &prepared.layers[self.layer_index],
+            &self.spectrum.components,
+            position_m,
+            cancelled,
+        )
+    }
+
+    /// Pressure and all velocity components at `[x,y,z]` in metres, where
+    /// `z` is depth from THIS layer's front face and `0 <= z <= thickness`.
+    /// The transverse origin is unchanged from the original entrance plane.
+    /// Both faces are included; a zero-thickness identity admits only z=0.
+    /// The complete complex fields are summed before forming intensity,
+    /// retaining internal standing waves and evanescent tunnelling.
+    pub fn field(
+        &self,
+        position_m: [f64; 3],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
+        let prepared = self.spectrum.stack.prepared_layers();
+        self.fields.field(
+            prepared,
+            &prepared.layers[self.layer_index],
+            &self.spectrum.components,
+            position_m,
+            cancelled,
+        )
+    }
+}
+
+impl PreparedLayerFields {
+    pub(in crate::porous::layers) fn prepare<C: FnMut() -> bool>(
+        prepared: &RigidBackedLayers<'_>,
+        layer: &PreparedLayer<'_>,
+        components: &[PreparedPlaneWave],
+        cancelled: &mut C,
+        mut resolve: impl FnMut(
+            &PreparedPlaneWave,
+            &mut C,
+        ) -> Result<(LayerTransfer, LogAmplitude), AcousticSpectrumError>,
+    ) -> Result<Self, AcousticSpectrumError> {
+        let density = if let Some(response) = layer.porous {
+            response.dynamic_density_kg_m3()
+        } else {
+            C64::from_re(
+                layer
+                    .fluid
+                    .unwrap_or(prepared.fluid.acoustic())
+                    .density_kg_m3(),
+            )
+        };
+        let compliance = layer.porous.map_or(C64::ZERO, |response| {
+            response.dynamic_bulk_modulus_pa().recip()
+        });
+        // Weight before squaring; a weak field can have representable heat.
+        let heat_scales = [-density.im, -compliance.im].map(|loss| {
+            if loss == 0.0 {
+                0.0
+            } else {
+                det::exp(0.5 * (det::ln(prepared.omega) + det::ln(loss) - core::f64::consts::LN_2))
+            }
+        });
+        let mut waves = Vec::with_capacity(components.len());
+        for wave in components {
+            poll(cancelled)?;
+            let (transfer, front_amplitude) = resolve(wave, cancelled)?;
+            let tangential_velocity_per_pa = wave
+                .tangential_wavenumber
+                .map(|k| C64::from_re(k / prepared.omega) / density);
+            if tangential_velocity_per_pa.iter().any(|&v| !finite(v)) {
+                return Err(AcousticSpectrumError::Invalid(
+                    "interior tangential acoustic momentum is unrepresentable",
+                ));
+            }
+            waves.push(LayerWave {
+                transfer,
+                front_amplitude,
+                tangential_velocity_per_pa,
+            });
+        }
         poll(cancelled)?;
-        let layer = &self.spectrum.stack.prepared_layers().layers[self.layer_index];
+        Ok(Self { waves, heat_scales })
+    }
+
+    pub(in crate::porous::layers) fn field_with_heat(
+        &self,
+        prepared: &RigidBackedLayers<'_>,
+        layer: &PreparedLayer<'_>,
+        components: &[PreparedPlaneWave],
+        position_m: [f64; 3],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<AcousticLayerSample, AcousticSpectrumError> {
+        poll(cancelled)?;
         if layer.source.thickness_m() == 0.0 {
             return Err(AcousticSpectrumError::Invalid(
                 "a zero-thickness layer has no interior heat density",
@@ -183,7 +271,7 @@ impl<'s, 'p, 'a> PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
                 "interior passive constitutive heat is unrepresentable",
             ));
         }
-        let field = self.field(position_m, cancelled)?;
+        let field = self.field(prepared, layer, components, position_m, cancelled)?;
         let viscous = field
             .particle_velocity_m_s
             .into_iter()
@@ -205,20 +293,15 @@ impl<'s, 'p, 'a> PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
         })
     }
 
-    /// Pressure and all velocity components at `[x,y,z]` in metres, where
-    /// `z` is depth from THIS layer's front face and `0 <= z <= thickness`.
-    /// The transverse origin is unchanged from the original entrance plane.
-    /// Both faces are included; a zero-thickness identity admits only z=0.
-    /// The complete complex fields are summed before forming intensity,
-    /// retaining internal standing waves and evanescent tunnelling.
-    pub fn field(
+    pub(in crate::porous::layers) fn field(
         &self,
+        prepared: &RigidBackedLayers<'_>,
+        layer: &PreparedLayer<'_>,
+        components: &[PreparedPlaneWave],
         position_m: [f64; 3],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<AcousticSpectrumSample, AcousticSpectrumError> {
         poll(cancelled)?;
-        let prepared = self.spectrum.stack.prepared_layers();
-        let layer = &prepared.layers[self.layer_index];
         let thickness = layer.source.thickness_m();
         let depth = position_m[2];
         if position_m.iter().any(|x| !x.is_finite()) || depth < 0.0 || depth > thickness {
@@ -227,79 +310,96 @@ impl<'s, 'p, 'a> PreparedLayerAcousticSpectrum<'s, 'p, 'a> {
             ));
         }
         let mut sum = FieldSum([Dd::ZERO; 8]);
-        for (component, local) in self.spectrum.components.iter().zip(&self.waves) {
+        for (component, local) in components.iter().zip(&self.waves) {
             poll(cancelled)?;
             if local.front_amplitude.log == f64::NEG_INFINITY {
                 continue;
             }
-            let step = local.transfer;
-            let mut amplitude = local.front_amplitude.clone();
-            let (pressure, normal_velocity) = if depth == 0.0 {
-                (step.front_pressure, step.front_velocity)
-            } else {
-                // An inverse local matrix is well conditioned over an
-                // optically short distance. It also preserves a small depth
-                // that would round away in thickness-depth for a long layer.
-                let forward = -step.normal_wavenumber.im * depth <= 0.5;
-                let distance = if forward { depth } else { thickness - depth };
-                let partial = PreparedLayer {
-                    source: match layer.source {
-                        Layer::Porous { law, .. } => Layer::Porous {
-                            law,
-                            thickness_m: distance,
-                        },
-                        Layer::FluidGap { .. } => Layer::FluidGap {
-                            thickness_m: distance,
-                        },
-                        Layer::FluidLayer { fluid, .. } => Layer::FluidLayer {
-                            fluid,
-                            thickness_m: distance,
-                        },
-                    },
-                    ..*layer
-                };
-                // J T(d) J = T(-d), J=diag(1,-1), so the existing bounded
-                // backward matrix also supplies the forward solution.
-                let (p0, v0) = if forward {
-                    (step.front_pressure, -step.front_velocity)
-                } else {
-                    (step.back_pressure, step.back_velocity)
-                };
-                let (p, v, scale, kn) =
-                    prepared.propagate_layer(&partial, component.cosine, p0, v0)?;
-                if forward {
-                    amplitude.add(log_scaled(if kn.im == 0.0 { 16.0 } else { 8.0 }, scale));
-                    if kn.im != 0.0 {
-                        amplitude.add(-kn.im * depth);
-                        amplitude.rotate(kn.re * depth);
-                    }
-                } else {
-                    // Cancel full-minus-remaining distances symbolically.
-                    // Even an opaque layer can have a finite entrance field.
-                    amplitude.add(det::ln(scale) - det::ln(step.normalization));
-                    amplitude.add(kn.im * depth);
-                    amplitude.rotate(-kn.re * depth);
-                }
-                (p, if forward { -v } else { v })
-            };
-            let field = PlaneField {
-                pressure: amplitude.coefficient(pressure, 0.0)?,
-                velocity: [
-                    amplitude.coefficient(pressure * local.tangential_velocity_per_pa[0], 0.0)?,
-                    amplitude.coefficient(pressure * local.tangential_velocity_per_pa[1], 0.0)?,
-                    amplitude.coefficient(
-                        normal_velocity,
-                        det::ln(component.cosine) - det::ln(prepared.z0),
-                    )?,
-                ],
-            };
             sum.add(
-                field,
+                Self::component_field(prepared, layer, component, local, depth)?,
                 propagation(component, [position_m[0], position_m[1], 0.0], C64::ZERO)?,
             )?;
         }
         let sample = sum.finish()?;
         poll(cancelled)?;
         Ok(sample)
+    }
+
+    // The same original local propagation serves point and finite-window
+    // observations. This is at x=y=0; callers apply the transverse phase.
+    fn component_field(
+        prepared: &RigidBackedLayers<'_>,
+        layer: &PreparedLayer<'_>,
+        component: &PreparedPlaneWave,
+        local: &LayerWave,
+        depth: f64,
+    ) -> Result<PlaneField, AcousticSpectrumError> {
+        let thickness = layer.source.thickness_m();
+        if local.front_amplitude.log == f64::NEG_INFINITY {
+            return Ok(PlaneField {
+                pressure: C64::ZERO,
+                velocity: [C64::ZERO; 3],
+            });
+        }
+        let step = local.transfer;
+        let mut amplitude = local.front_amplitude.clone();
+        let (pressure, normal_velocity) = if depth == 0.0 {
+            (step.front_pressure, step.front_velocity)
+        } else {
+            // An inverse local matrix is well conditioned over an
+            // optically short distance. It also preserves a small depth
+            // that would round away in thickness-depth for a long layer.
+            let forward = -step.normal_wavenumber.im * depth <= 0.5;
+            let distance = if forward { depth } else { thickness - depth };
+            let partial = PreparedLayer {
+                source: match layer.source {
+                    Layer::Porous { law, .. } => Layer::Porous {
+                        law,
+                        thickness_m: distance,
+                    },
+                    Layer::FluidGap { .. } => Layer::FluidGap {
+                        thickness_m: distance,
+                    },
+                    Layer::FluidLayer { fluid, .. } => Layer::FluidLayer {
+                        fluid,
+                        thickness_m: distance,
+                    },
+                },
+                ..*layer
+            };
+            // J T(d) J = T(-d), J=diag(1,-1), so the existing bounded
+            // backward matrix also supplies the forward solution.
+            let (p0, v0) = if forward {
+                (step.front_pressure, -step.front_velocity)
+            } else {
+                (step.back_pressure, step.back_velocity)
+            };
+            let (p, v, scale, kn) = prepared.propagate_layer(&partial, component.cosine, p0, v0)?;
+            if forward {
+                amplitude.add(log_scaled(if kn.im == 0.0 { 16.0 } else { 8.0 }, scale));
+                if kn.im != 0.0 {
+                    amplitude.add(-kn.im * depth);
+                    amplitude.rotate(kn.re * depth);
+                }
+            } else {
+                // Cancel full-minus-remaining distances symbolically.
+                // Even an opaque layer can have a finite entrance field.
+                amplitude.add(det::ln(scale) - det::ln(step.normalization));
+                amplitude.add(kn.im * depth);
+                amplitude.rotate(-kn.re * depth);
+            }
+            (p, if forward { -v } else { v })
+        };
+        Ok(PlaneField {
+            pressure: amplitude.coefficient(pressure, 0.0)?,
+            velocity: [
+                amplitude.coefficient(pressure * local.tangential_velocity_per_pa[0], 0.0)?,
+                amplitude.coefficient(pressure * local.tangential_velocity_per_pa[1], 0.0)?,
+                amplitude.coefficient(
+                    normal_velocity,
+                    det::ln(component.cosine) - det::ln(prepared.z0),
+                )?,
+            ],
+        })
     }
 }

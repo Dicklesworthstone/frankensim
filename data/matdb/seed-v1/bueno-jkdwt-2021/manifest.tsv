@@ -1,0 +1,13 @@
+frankensim.matdb-manifest.v3
+pack_id	bueno-jkdwt-2021
+redistribution	permitted	Attributed numerical facts from an open-access CC-BY-4.0 article; normalized units and original scope annotations; no figures or source prose reproduced
+citation	Bueno, M.; Torvela, J.; Chandramohan, R.; Chavez Matus, T.; Liedes, T.; Powell, M. (2021), The double wheel breakage test, Minerals Engineering 168, 106905; Tables 5-7 (JKDWT columns only); https://doi.org/10.1016/j.mineng.2021.106905; institutional copy https://oulurepo.oulu.fi/bitstream/handle/10024/30832/nbnfi-fe2021060132567.pdf?sequence=1; accessed 2026-11-05
+license	CC-BY-4.0
+source	jkdwt-test-rows	properties.tsv	material-tsv-v1
+property	asymptote	jk-drop-weight-asymptotic-t10-fraction	dimensional
+property	sensitivity	jk-drop-weight-impact-energy-sensitivity	dimensional
+axis	ore	source-bueno-ore	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	pressure_known	source-test-pressure-known	dimensional
+axis	operating_ore	operating-ore-qualified	dimensional
+axis	historical	historical-testwork-reference	dimensional

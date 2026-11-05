@@ -100,6 +100,54 @@ fn same(a: &FreeSurface, b: &FreeSurface) {
 }
 
 #[test]
+fn g1_native_default_carries_signed_conversion_mass_and_momentum() {
+    let gate = CancelGate::new_clock_free();
+    for policy in [
+        ConversionRedistribution2::ConservativeLocal,
+        ConversionRedistribution2::ConservativeLocalAngular,
+    ] {
+        for source_mass in [1.25, -0.06] {
+            let mut initial = front(source_mass);
+            initial.set_conversion_redistribution(policy).unwrap();
+            // Isolate conversion from the physical force and gas traction of
+            // the native stream. Signed liquid mass supplies the inertia.
+            let mut transported = initial.clone();
+            transported.stream_step(Some(&gate)).unwrap();
+            let before = inventory(&transported);
+
+            let mut accepted = initial.clone();
+            accepted.step();
+            let after = inventory(&accepted);
+            assert!((after.0 - before.0).abs() < 3e-13);
+            for d in 0..2 {
+                assert!(
+                    (after.1[d] - before.1[d]).abs() < 3e-14,
+                    "default conversion changed physical momentum: before={before:?}, after={after:?}"
+                );
+            }
+            if policy == ConversionRedistribution2::ConservativeLocalAngular {
+                assert!((after.2 - before.2).abs() < 3e-13);
+            }
+            let source = accepted.grid.idx(3, 3);
+            assert_eq!(
+                accepted.grid.flags[source],
+                if source_mass > 0.0 {
+                    Cell::Fluid
+                } else {
+                    Cell::Gas
+                }
+            );
+            assert_eq!(accepted.carry, 0.0);
+
+            let mut explicit = initial;
+            let report = explicit.step_with_momentum(&gate).unwrap();
+            assert!(report.routes > 0 && report.redistributed_mass > 0.0);
+            same(&accepted, &explicit);
+        }
+    }
+}
+
+#[test]
 fn g1_g3_loaded_front_separates_traction_from_signed_conversion_momentum() {
     let gate = CancelGate::new_clock_free();
     for policy in [
@@ -185,7 +233,11 @@ fn g1_g3_loaded_front_separates_traction_from_signed_conversion_momentum() {
             // physical pressure torque is never included in a remap defect.
             let before_conversion = inventory(&transported);
             let mut accepted = initial.clone();
-            let report = accepted
+            accepted
+                .step_with_gas_link_pressure(&gate, 0.05, pressure)
+                .unwrap();
+            let mut explicit = initial.clone();
+            let report = explicit
                 .step_with_gas_link_pressure_and_momentum(&gate, 0.05, pressure)
                 .unwrap();
             let after = inventory(&accepted);
@@ -202,6 +254,7 @@ fn g1_g3_loaded_front_separates_traction_from_signed_conversion_momentum() {
                 assert_eq!(report.absolute_angular_momentum_defect, None);
             }
             assert!((after.3 - before_conversion.3 - report.kinetic_energy_change).abs() < 3e-15);
+            same(&accepted, &explicit);
             assert_eq!(accepted.carry, 0.0);
             let source = accepted.grid.idx(3, 3);
             assert_eq!(
@@ -221,16 +274,66 @@ fn g1_g3_loaded_front_separates_traction_from_signed_conversion_momentum() {
             assert_eq!(zero_report, unforced.step_with_momentum(&gate).unwrap());
             same(&zero, &unforced);
             let mut cell = initial.clone();
-            let mut link = initial;
-            let a = cell
+            cell.step_with_gas_pressure(&gate, 0.05, |_| Ok(0.001))
+                .unwrap();
+            let mut link = initial.clone();
+            link.step_with_gas_link_pressure(&gate, 0.05, |_| Ok(0.001))
+                .unwrap();
+            same(&cell, &link);
+            let mut explicit_cell = initial.clone();
+            let a = explicit_cell
                 .step_with_gas_pressure_and_momentum(&gate, 0.05, |_| Ok(0.001))
                 .unwrap();
-            let b = link
+            let mut explicit_link = initial;
+            let b = explicit_link
                 .step_with_gas_link_pressure_and_momentum(&gate, 0.05, |_| Ok(0.001))
                 .unwrap();
             assert_eq!(a, b);
-            same(&cell, &link);
+            same(&cell, &explicit_cell);
+            same(&link, &explicit_link);
         }
+    }
+}
+
+#[test]
+fn g4_native_defaults_refuse_missing_conversion_capacity_without_publication() {
+    let mut grid = Grid::uniform(3, 3, 0.8);
+    grid.periodic_x = false;
+    grid.periodic_y = false;
+    grid.flags.fill(Cell::Wall);
+    grid.flags[4] = Cell::Interface;
+    grid.flags[5] = Cell::Gas;
+    let mut initial = FreeSurface::new(grid, 0.0, ContactModel::Neutral);
+    initial.mass[4] = 3.0; // Two units of excess cannot fit the one gas neighbor.
+    let mut flow = initial.clone();
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| flow.step())).is_err());
+    same(&flow, &initial);
+
+    for by_link in [false, true] {
+        let gate = CancelGate::new_clock_free();
+        let mut flow = initial.clone();
+        let visits = std::cell::Cell::new(0);
+        let pressure = || {
+            visits.set(visits.get() + 1);
+            Ok(0.001)
+        };
+        let result = if by_link {
+            flow.step_with_gas_link_pressure(&gate, 0.05, |_| pressure())
+        } else {
+            flow.step_with_gas_pressure(&gate, 0.05, |_| pressure())
+        };
+        assert!(
+            visits.get() > 0,
+            "the physical pressure stage must complete"
+        );
+        assert_eq!(
+            result,
+            Err(FreeSurfacePressureError2::Invalid {
+                coordinates: None,
+                reason: "insufficient adjacent mass/capacity; refine or remap",
+            })
+        );
+        same(&flow, &initial);
     }
 }
 

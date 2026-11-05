@@ -54,6 +54,8 @@ use crate::MaterialError;
 /// Resolve the existing rigid-frame law in a shared, changing fluid state.
 pub mod gas;
 pub use gas::{PorousFluidLaw, PorousFluidResponse};
+/// Positive causal realization of the original rigid-frame JCA/JCAL law.
+pub mod diffusive;
 /// Coherent rigid-backed porous/fluid multilayers and oblique reflection.
 pub mod layers;
 /// Typed intrinsic permeability and conservative, compressible Darcy barriers.
@@ -352,8 +354,15 @@ impl PorousCard {
         omega: f64,
         thickness_m: f64,
     ) -> Result<C64, MaterialError> {
-        let (zc, k) = self.characteristic(ambient, omega)?;
-        rigid_surface_from_characteristic(zc, k, thickness_m)
+        let density = self.effective_density(ambient, omega)?;
+        let bulk = self.effective_bulk(ambient, omega)?;
+        rigid_surface_from_response(
+            density,
+            bulk,
+            omega,
+            thickness_m,
+            characteristic_from_response(density, bulk, omega),
+        )
     }
 
     /// Normal-incidence absorption coefficient of the rigid-backed
@@ -378,9 +387,20 @@ impl PorousCard {
         }
         let omega = core::f64::consts::TAU * f_hz;
         let zs = self.surface_impedance_rigid(ambient, omega, thickness_m)?;
-        let z0 = C64::new(ambient.rho0 * ambient.c0, 0.0);
-        let r = (zs - z0) / (zs + z0);
-        Ok(1.0 - r.norm_sq())
+        let z0 = ambient.rho0 * ambient.c0;
+        if !(z0.is_finite() && z0 > 0.0 && zs.re.is_finite() && zs.im.is_finite() && zs.re >= 0.0) {
+            return Err(MaterialError::State {
+                what: "rigid-backed absorption requires finite passive surface and incident impedances"
+                    .into(),
+            });
+        }
+        // Boundary work: alpha = 4 Z0 Re(Zs) / |Zs + Z0|^2. Computing
+        // 1-|R|^2 erases weak physical absorption once |R| rounds to one.
+        // Common scaling also avoids overflow for a thin layer's compliance.
+        let scale = z0.max(zs.re).max(zs.im.abs());
+        let surface = C64::new(zs.re / scale, zs.im / scale);
+        let incident = z0 / scale;
+        Ok((4.0 * incident) * surface.re / C64::new(surface.re + incident, surface.im).norm_sq())
     }
 }
 
@@ -391,17 +411,42 @@ fn characteristic_from_response(density: C64, bulk: C64, omega: f64) -> (C64, C6
     )
 }
 
-fn rigid_surface_from_characteristic(
-    impedance: C64,
-    wavenumber: C64,
+fn rigid_surface_from_response(
+    density: C64,
+    bulk: C64,
+    omega: f64,
     thickness_m: f64,
+    (impedance, wavenumber): (C64, C64),
 ) -> Result<C64, MaterialError> {
     if !(thickness_m.is_finite() && thickness_m > 0.0) {
         return Err(MaterialError::Parameters {
             what: "layer thickness must be positive".to_string(),
         });
     }
-    let gamma_d = C64::new(0.0, 1.0) * wavenumber.scale(thickness_m);
+    let kd = wavenumber.scale(thickness_m);
+    if kd.re.abs().max(kd.im.abs()) <= 0.05 && kd.norm_sq() <= 0.0025 {
+        // -i Zc cot(kd) = K/(i omega d) + i omega rho d *
+        // [1/3 + (kd)^2/45 + 2(kd)^4/945 + (kd)^6/4725 + 2(kd)^8/93555].
+        // Keep the exact constitutive K and rho: reconstructing K from Zc/k
+        // subtracts O(1/d) terms and can turn O(d) viscous resistance negative
+        // when thermal relaxation vanishes. This is the convergent cotangent
+        // evaluation of the same finite layer, not a thin-layer material law.
+        // At |kd| <= 0.05 the omitted bracket term is < 2.2e-19.
+        let kd2 = kd * kd;
+        let series = C64::from_re(1.0 / 3.0)
+            + kd2
+                * (C64::from_re(1.0 / 45.0)
+                    + kd2
+                        * (C64::from_re(2.0 / 945.0)
+                            + kd2 * (C64::from_re(1.0 / 4725.0) + kd2.scale(2.0 / 93555.0))));
+        let compliance = C64::new(
+            (bulk.im / omega) / thickness_m,
+            (-bulk.re / omega) / thickness_m,
+        );
+        let inertia = C64::new(-density.im, density.re).scale(omega * thickness_m);
+        return Ok(compliance + inertia * series);
+    }
+    let gamma_d = C64::new(0.0, 1.0) * kd;
     Ok(impedance * coth_c(gamma_d))
 }
 
@@ -627,5 +672,74 @@ mod porous_tests {
             assert!(a1 > 0.0 && a1 < 1.0);
         }
         println!("{{\"suite\":\"fs-material\",\"case\":\"pa-006-cards\",\"verdict\":\"pass\"}}");
+    }
+
+    #[test]
+    fn pa_007_thin_rigid_layer_keeps_viscous_resistance_and_absorption() {
+        let card = PorousCard::melamine_uf_nguyen2024();
+        // Cp=Cv isolates viscous work. Its pressure field is uniform to
+        // leading order, with velocity growing linearly away from the rigid
+        // backing. Integrating that velocity squared gives the independent
+        // resistance -omega Im(rho) d/3 and alpha proportional to d^3.
+        let ambient = PorousAmbient {
+            gamma: 1.0,
+            c0: det::sqrt(AIR.p0 / AIR.rho0),
+            ..AIR
+        };
+        for frequency in [150.0, 500.0, 1600.0] {
+            let omega = core::f64::consts::TAU * frequency;
+            let density = card.effective_density(ambient, omega).unwrap();
+            let bulk = card.effective_bulk(ambient, omega).unwrap();
+            assert_eq!(bulk.im, 0.0);
+            for thickness in [1.0e-6, 1.0e-8, 1.0e-10, 1.0e-100] {
+                let surface = card
+                    .surface_impedance_rigid(ambient, omega, thickness)
+                    .unwrap();
+                let expected_resistance = (-omega * density.im) * (thickness / 3.0);
+                assert!(surface.re > 0.0, "positive viscous work: {surface:?}");
+                assert!((surface.re / expected_resistance - 1.0).abs() < 3.0e-8);
+                let compliance_admittance = (omega * thickness) / bulk.re;
+                let expected_absorption = 4.0
+                    * (ambient.rho0 * ambient.c0)
+                    * expected_resistance
+                    * compliance_admittance
+                    * compliance_admittance;
+                let absorption = card
+                    .absorption_normal(ambient, frequency, thickness)
+                    .unwrap();
+                assert!(absorption > 0.0, "weak viscous absorption at d={thickness}");
+                assert!((absorption / expected_absorption - 1.0).abs() < 3.0e-8);
+            }
+        }
+    }
+
+    #[test]
+    fn pa_008_weak_thermal_absorption_survives_large_compliance() {
+        let card = PorousCard::melamine_uf_nguyen2024();
+        let frequency = 500.0;
+        let omega = core::f64::consts::TAU * frequency;
+        let bulk = card.effective_bulk(AIR, omega).unwrap();
+        // The other independent thin-layer limit is uniform compressional
+        // heating: alpha/d -> 4 Z0 omega Im(K)/|K|^2. Very small depths also
+        // exercise surface impedances whose squared magnitude overflows.
+        let absorption_per_m = 4.0 * (AIR.rho0 * AIR.c0) * omega * bulk.im / bulk.norm_sq();
+        for thickness in [1.0e-9, 1.0e-25, 1.0e-100, 1.0e-200] {
+            let absorption = card.absorption_normal(AIR, frequency, thickness).unwrap();
+            assert!(absorption.is_finite() && absorption > 0.0);
+            assert!((absorption / (absorption_per_m * thickness) - 1.0).abs() < 3.0e-8);
+        }
+        for impedance in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                card.absorption_normal(
+                    PorousAmbient {
+                        c0: impedance,
+                        ..AIR
+                    },
+                    frequency,
+                    0.03
+                )
+                .is_err()
+            );
+        }
     }
 }

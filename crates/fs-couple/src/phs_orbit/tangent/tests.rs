@@ -1,8 +1,12 @@
 use super::*;
-use crate::phs_orbit::{audit_forced_orbit, solve_forced_harmonic_balance_scaled_seeded};
+use crate::phs_orbit::{
+    audit_forced_orbit, solve_forced_harmonic_balance_scaled_seeded,
+    solve_forced_shooting_variational,
+};
 use core::cell::Cell;
 use fs_math::{c64::C64, det};
-use fs_orbit::{OrbitError, OrbitProblem};
+use fs_nlmodal::{SosModalStorage, StressChannel};
+use fs_orbit::{OrbitError, OrbitProblem, ShootBudget, VariationalShootControls};
 use fs_phs::{QuadraticStorage, Storage};
 use std::rc::Rc;
 
@@ -223,6 +227,155 @@ fn original_nonlinear_hessian_recovers_manufactured_multiharmonic_force_and_work
         let audit = audit_forced_orbit(&system, &input, orbit, 256).unwrap();
         assert!((audit.mean_resistance_loss_w / exact_loss - 1.0).abs() < 1e-8);
         assert!(audit.relative_power_residual < 1e-8);
+    }
+}
+
+#[test]
+fn assembled_modal_storage_supplies_hb_and_variational_tangents_without_a_second_law() {
+    let (stiffness, cubic, damping, omega, amplitude): (f64, f64, f64, f64, f64) =
+        (4.0, 10.0, 0.3, 1.3, 0.4);
+    let storage = SosModalStorage {
+        omegas: vec![stiffness.sqrt()],
+        channels: vec![StressChannel {
+            coefficient: cubic,
+            coupling: vec![1.0],
+        }],
+    };
+    let system =
+        fs_nlmodal::assemble(storage, &[damping / (2.0 * stiffness.sqrt())], &[1.0]).unwrap();
+    let (sin_phase, cos_phase) = det::sin_cos(0.37);
+    let q1 = C64::new(0.5 * amplitude * cos_phase, 0.5 * amplitude * sin_phase);
+    let p1 = C64::new(0.0, omega) * q1;
+    // Substituting q=A*cos(omega*t+phase) into the ORIGINAL unit-mass law
+    // requires both fundamental and third-harmonic physical forcing.
+    let f1 = q1
+        * C64::new(
+            stiffness - omega * omega + 0.75 * cubic * amplitude * amplitude,
+            damping * omega,
+        );
+    let f3 = (q1 * q1 * q1).scale(cubic);
+    let input = PeriodicPortInput::new(omega, vec![vec![C64::ZERO, f1, C64::ZERO, f3]]).unwrap();
+    let problem = forced_problem(&system, &input).unwrap();
+    let action = problem
+        .island_state_jacobian()
+        .expect("boxed native modal tangent");
+    let mut tangent = [f64::NAN; 4];
+    assert!(action(&problem, 0.0, &[0.3, -0.2], &mut tangent));
+    for (actual, expected) in tangent.iter().zip([0.0, 1.0, -6.7, -damping]) {
+        assert!((actual - expected).abs() < 1e-14);
+    }
+    let budget = HbBudget {
+        harmonics: 3,
+        tolerance: 1e-11,
+        ..HbBudget::default()
+    };
+    let mut seed = vec![0.0; 14];
+    seed[2] = 0.8 * q1.re;
+    seed[3] = 0.8 * p1.re;
+    seed[4] = 0.8 * q1.im;
+    seed[5] = 0.8 * p1.im;
+    let response =
+        solve_forced_harmonic_balance_scaled_seeded(&system, &input, seed, &budget, &scales(omega))
+            .unwrap();
+    for (state, expected) in [(0, q1), (1, p1)] {
+        assert!((response.orbit.coeffs[state][1] - expected).abs() < 1e-9);
+        for (n, coefficient) in response.orbit.coeffs[state].iter().enumerate() {
+            if n != 1 {
+                assert!(coefficient.abs() < 1e-9);
+            }
+        }
+    }
+    let audit = audit_forced_orbit(&system, &input, &response.orbit, 256).unwrap();
+    let loss = 0.5 * damping * omega * omega * amplitude * amplitude;
+    assert!((audit.mean_resistance_loss_w / loss - 1.0).abs() < 1e-8);
+    assert!(audit.relative_power_residual < 1e-8);
+
+    // The ordinary variational owner discovers the SAME boxed action and
+    // propagates all state directions at its actual RK4 stages.
+    let period = 2.0 * core::f64::consts::PI / omega;
+    let expected = [2.0 * q1.re, 2.0 * p1.re];
+    let shot = solve_forced_shooting_variational(
+        &system,
+        &input,
+        &expected,
+        &ShootBudget {
+            steps_per_period: 512,
+            max_newton: 12,
+            tolerance: 1e-11,
+        },
+        &VariationalShootControls {
+            state_scales: vec![1.0, 2.0],
+            period_scale: period,
+            minimum_autonomous_excursion: 0.01,
+            maximum_dimension: 2,
+            maximum_payload_bytes: 100_000,
+            maximum_work: 100_000_000,
+            maximum_period_maps: 32,
+        },
+        || false,
+    )
+    .unwrap();
+    for (actual, expected) in shot.orbit.x0.iter().zip(expected) {
+        assert!((actual - expected).abs() < 2e-7);
+    }
+    assert!(shot.jacobian_evaluations > 0);
+    let m = &shot.monodromy;
+    let determinant = m[0] * m[3] - m[1] * m[2];
+    // The continuous vector-field divergence is exactly -damping even
+    // though the quartic stiffness varies throughout the original orbit.
+    assert!((determinant / (-damping * period).exp() - 1.0).abs() < 3e-7);
+}
+
+struct RefusingNativeStorage {
+    incomplete: bool,
+}
+impl Storage for RefusingNativeStorage {
+    fn hamiltonian(&self, x: &[f64]) -> f64 {
+        0.5 * (x[0] * x[0] + x[1] * x[1])
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        out.copy_from_slice(x);
+    }
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        Some(self)
+    }
+}
+impl ContinuousStorageTangent for RefusingNativeStorage {
+    fn apply(&self, _: &[f64], _: &[f64], out: &mut [f64]) -> bool {
+        if self.incomplete {
+            out[0] = 1.0;
+        }
+        self.incomplete
+    }
+}
+
+#[test]
+fn native_storage_tangent_refusal_cannot_fall_back_to_numerical_columns() {
+    let input = PeriodicPortInput::new(1.3, vec![vec![C64::ZERO, C64::from_re(0.5)]]).unwrap();
+    let budget = HbBudget {
+        harmonics: 1,
+        ..HbBudget::default()
+    };
+    for incomplete in [false, true] {
+        let system = PortHamiltonian::new(
+            2,
+            1,
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, 0.3],
+            vec![0.0, 1.0],
+            Box::new(RefusingNativeStorage { incomplete }),
+        )
+        .unwrap();
+        assert!(matches!(
+            solve_forced_harmonic_balance_scaled_seeded(
+                &system,
+                &input,
+                vec![0.0; 6],
+                &budget,
+                &scales(1.3),
+            ),
+            Err(PhsOrbitError::Orbit(OrbitError::TangentRefused { .. }))
+        ));
     }
 }
 

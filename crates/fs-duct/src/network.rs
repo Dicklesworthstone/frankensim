@@ -911,6 +911,10 @@ fn norm_inf(a: &[C64], n: usize) -> f64 {
 // Full inverse columns are already needed for the N-port solve and allow an
 // actual infinity-norm condition computation, rather than a diagonal heuristic.
 fn inverse(a: &[C64], n: usize) -> Result<(Vec<C64>, f64), DuctError> {
+    inverse_with_limit(a, n, MAX_NETWORK_CONDITION)
+}
+
+fn inverse_with_limit(a: &[C64], n: usize, maximum_condition: f64) -> Result<(Vec<C64>, f64), DuctError> {
     if n == 0 || a.iter().any(|&z| !finite(z)) {
         return Err(DuctError::Singular);
     }
@@ -930,7 +934,7 @@ fn inverse(a: &[C64], n: usize) -> Result<(Vec<C64>, f64), DuctError> {
         }
     }
     let condition = norm_inf(&scaled, n) * norm_inf(&inv, n);
-    if !condition.is_finite() || condition > MAX_NETWORK_CONDITION {
+    if !condition.is_finite() || condition > maximum_condition {
         return Err(DuctError::Singular);
     }
     for v in &mut inv {
@@ -1021,10 +1025,10 @@ fn network_chain_scattering(
     Ok((s, condition, chain.min_shear_number))
 }
 
-struct WaveEdge {
-    ends: [Option<usize>; 2],
-    two_port: crate::compose::TwoPort,
-    condition: f64,
+pub(crate) struct WaveEdge {
+    pub(crate) ends: [Option<usize>; 2],
+    pub(crate) two_port: crate::compose::TwoPort,
+    pub(crate) condition: f64,
 }
 
 // A half-wave edge has singular I+S although its loaded graph can be regular.
@@ -1076,10 +1080,11 @@ fn wave_equations(
     Ok((a, n, reference))
 }
 
-fn wave_pressure_inverse(
+pub(crate) fn wave_pressure_inverse(
     boundary_y: &[C64],
     pressures: usize,
     edges: &[WaveEdge],
+    maximum_condition: f64,
 ) -> Result<(Vec<C64>, f64), DuctError> {
     let (mut a, n, reference) = wave_equations(boundary_y, pressures, edges, 0)?;
     let mut source_scale = vec![0.0; pressures];
@@ -1095,7 +1100,7 @@ fn wave_pressure_inverse(
             source_scale[row] = reference / scale;
         }
     }
-    let (inv, condition) = inverse(&a, n)?;
+    let (inv, condition) = inverse_with_limit(&a, n, maximum_condition)?;
     let mut pressure_inverse = vec![C64::ZERO; pressures * pressures];
     for i in 0..pressures {
         for j in 0..pressures {
@@ -1518,7 +1523,7 @@ fn network_port_impedance_bound(
         Ok(result) => result,
         Err(DuctError::Singular) => {
             keep_waves = true;
-            let result = wave_pressure_inverse(&boundary_y, n, &wave_edges)?;
+            let result = wave_pressure_inverse(&boundary_y, n, &wave_edges, MAX_NETWORK_CONDITION)?;
             for ((_, condition), edge) in edge_conditions.iter_mut().zip(&wave_edges) {
                 *condition = edge.condition;
             }

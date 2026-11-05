@@ -1,5 +1,77 @@
 # CONTRACT: fs-conduction
 
+## Capacity adjoints with live contacts and ambient radiation
+
+The complete `ContactCapacityLinearization` composes with the existing ambient
+coefficient/reference feedback and remapping on the unchanged physical endpoint.
+The watt-coordinate dual supplies source, whole contact-law, capacity and old-
+temperature contractions without another timestep factor. Both independent
+contact-temperature partials and nonlinear bulk conductivity remain in the
+same transpose. The original endpoint residual and energy gates remain in force.
+
+`tests/temperature_contact/radiation/capacity_adjoint.rs` compares six independent
+controls against complete perturbed histories: whole resistance-law scale,
+source scale, emissivity, reservoir temperature, total capacity and uniform
+initial temperature. It covers vacuum curve/Newton and Robin source-surface
+fixed-point histories, with a final and an earlier selected state. No primal
+field or accepted old state is replaced. Native runtime execution remains
+required; this discrete derivative supplies no temporal-error certificate.
+
+## Complete steady contact and ambient-radiation adjoints
+
+`AmbientRadiationLinearization` binds the existing area-mean secant at an
+unchanged field and exposes the physical boundary, coefficient/reference slopes,
+and weighted convection-reference feedback separately from the transpose solve.
+The original ambient adjoint entries now use this same binding and remapping.
+
+Rebinding that physical boundary through `linearize_steady_endpoint` retains
+both contact-temperature partials and heterogeneous bulk K'(T). The existing
+contact/Robin feedback owner supplies one complete dual; the ambient owner
+then recovers original convection, absolute emissivity and independent bath
+controls. Radiation-only traces have exactly zero convective derivatives.
+No new primal solve, contact model, radiation solver or field mutation occurs.
+
+Existing source smoothness, domain, cancellation, trace and work allowances
+remain in force. Remapping checks nodal/trace layout, finite controls and the
+dual residual; it does not independently authenticate an arbitrary supplied
+dual. `tests/temperature_contact/radiation/adjoint.rs` compares four physical
+controls against fresh nonlinear solves with and without convection, and checks
+stale endpoints, insufficient work and malformed dual refusals. Native runtime
+execution remains required. This is a local discrete steady derivative, without
+a continuum, unique-maximum or gradient-error certificate.
+
+## Prescribed temperatures through live contact laws
+
+`ContactSteadyLinearization<'a>` retains its exact original conduction problem.
+Its `prescribed_temperature_pullback_with_flux_feedback` contracts the same
+complete nodal dual as the selected goal with all prescribed-temperature
+columns. The result is `w_D - J_FD^T lambda_F`, including the direct fixed-node
+objective, nonlinear bulk conductivity, frozen contact once, both source-law
+temperature partials, and the original Robin/reference and mean-flux feedback.
+Fixed vertices remain in every wall observation. No second primal or dual solve
+or field mutation occurs, and another problem cannot replace the retained one.
+
+The existing static Robin lift shares the checked contraction and keeps its
+public signature. The work cap includes both bulk/contact CSR entries and the
+live-law correction; it is not a peak-memory bound. Source smoothness, physical
+endpoint, shape, fixed-node dual and cancellation gates remain authoritative.
+`tests/temperature_contact_tangent/prescribed.rs` compares fresh bath solves on
+both sides of an asymmetric temperature law with nonlinear conductivity and
+Robin/flux feedback. It checks the direct prescribed-node term and explicitly
+omitted contact/feedback columns. Native execution remains required; the lift
+does not certify the provenance of an arbitrary caller-supplied dual.
+
+## Fully prescribed steady fields
+
+The steady spatial solver and its initial-field preparation accept meshes with
+no free temperature degrees of freedom. The solve still assembles and validates
+the original physical operator at the prescribed temperatures, including bulk
+material laws, sources and boundary/interface exchange. It returns the prescribed
+field and its reservoir heat reactions with zero nonlinear/Krylov iterations.
+The zero free-node residual says that no temperature equations remain; it does
+not certify the continuum accuracy of a coarse, fully constrained mesh. Separate
+adjoint, verification and coupled-owner admission limits remain unchanged.
+
 ## Heat-imbalance solves for linear transient conduction
 
 The theta march solves `(C + theta*dt*K) delta_T = dt*(b - K*T_old)` with zero
@@ -35,10 +107,28 @@ The existing source-slope, cancellation, trace-element and feedback-memory gates
 remain in force. `tests/temperature_contact/radiation/enclosure/adjoint.rs`
 compares contact, source, emissivity and bath derivatives with independent
 physical re-solves on mixed Robin/flux surfaces with nonlinear conductivity.
-This is a local discrete steady derivative, with no pointwise/ambient contact
-radiation adjoint, trajectory derivative or continuum error certificate.
+This is a local discrete steady derivative. The ambient composition above and
+capacity trajectory composition below have separate owners; pointwise contact
+radiation and continuum error certificates are not supplied by this entry.
 
 ## Capacity storage with open reflected radiation and live contacts
+
+`ContactCapacityLinearization::pullback_with_robin_and_flux_feedback_and_resistance_controls`
+now composes the complete stored-energy/contact response with the existing
+enclosure mean-Robin and mean-flux factors. One original endpoint transpose
+supplies source, history, total-capacity and whole-contact-law controls;
+`EnclosureRadiationLinearization` remaps independent physical emissivities and
+the single open-bath temperature. The unchanged accepted field is revalidated
+against its original joule/energy targets before any derivative is used.
+The retained capacity matrix includes declared volume and bonded surface
+storage, without a second time factor or reconstructed volume-only operator.
+
+The existing enclosure/contact adjoint fixture reverses three nonuniform steps
+with nonlinear bulk transport, live source contacts, mixed Robin/flux patches
+and nonuniform surface capacity. Independent complete trajectory perturbations
+check contact, source, emissivity, bath, capacity and initial-temperature
+controls. A stale endpoint or insufficient factor allowance refuses. Native
+execution remains required; syntax checks do not establish a numerical pass.
 
 The existing backward-Euler enclosure owner now accepts `OpenDiffuseEnclosure`
 alongside closed exchange. `advance_prescribed_with_open_enclosure_radiation`
@@ -64,8 +154,9 @@ Cancellation, source refusal or exhausted work publishes no accepted endpoint.
 Focused regressions in `tests/temperature_contact/radiation.rs` use independent
 two-surface gray exchange and original nodal assembly to check both heat signs,
 source-curve/surface agreement, prescribed reactions, work and rollback. Native
-execution remains pending; syntax checks establish no runtime pass. This adds
-no open-capacity radiation adjoint, pointwise model or temporal-error certificate.
+execution remains pending; syntax checks establish no runtime pass. The complete
+discrete adjoint above preserves this forward owner; no pointwise model or
+temporal-error certificate is added.
 
 ## Live source contacts with open radiative cavities
 
@@ -1263,8 +1354,11 @@ cell temperatures to source-defined common- or mixed-mode bond weakening. Each
 complete update retains the original ordered interface card, selected claims,
 nonthermal coordinates, area, jump and irreversible history. The successor's
 temperature must equal the explicitly weighted two-cell temperature returned by
-`interface_temperature_k`; a stale or substituted source refuses. The original
-cohesive temperature law supplies fixed-jump parameter work, storage change and
+`interface_temperature_k`; a stale or substituted source refuses. Difference-first
+weighted interpolation is exact for equal temperatures and
+receiving-side endpoint weights, so a uniform field at a source-domain boundary
+cannot drift outside it through weighted-sum roundoff.
+The original cohesive temperature law supplies fixed-jump parameter work, storage change and
 new damage loss, integrated on original area with a declared joule gate.
 Thermal failure immediately opens the existing thermal contact or selects its
 separately declared closed-failed conductance. Cooling cannot heal or rebond it.
@@ -1453,6 +1547,30 @@ checked arithmetic. This is an entry allowance, not a peak allocator/RSS proof.
 A latent plateau still has zero direct temperature seed while energetic
 enthalpy history and its boundary parameter sensitivities can remain nonzero.
 
+`BackwardEuler::with_surface_heat_capacity` adds thermally thin, perfectly
+bonded coating storage on original boundary-face slots. `ArealHeatCapacity`
+declares finite nonnegative J/(m²·K), and `SurfaceHeatCapacity` supplies uniform
+or P1 face coefficients in the original vertex order. The exact row-sum moment
+is `A (2 C_i + C_j + C_k) / 12`, preserving the correlation of a P1 capacity
+(or thickness) with the temperature trace. It is added to the existing volume
+capacitance; linear/nonlinear endpoints, contacts, radiation, prescribed-node
+reactions and discrete adjoints therefore share one combined storage operator.
+The prescribed reaction includes the surface energy change divided by the
+step duration. Empty and zero additions preserve the original operator exactly.
+
+The surface shares the solid boundary temperature: perfect thermal bonding
+and negligible through-thickness gradients are explicit model assumptions.
+This is frozen linear storage, with no separate film temperature, added
+contact resistance, tangential film conduction, moving geometry or latent
+heat. Storage in a separately meshed coating must not be added again.
+`SurfaceHeatCapacity::from_material` binds three declared nonnegative reference
+thicknesses to an already admitted constant `MaterialHeatCapacity`; it retains
+the original density/Cp source and intersects temperature support at every face
+vertex with a nonzero storage moment. It never samples a varying caloric law
+and freezes it. Duplicate faces within one addition, disjoint active source
+domains, non-finite/unrepresentable moments and cancellation refuse preparation.
+Successive additions intentionally accumulate further layer storage.
+
 `transient::MaterialHeatCapacity` resolves constant density and specific heat
 from one immutable material card at an explicit reference state, then pins both
 selected sources at the endpoints of a declared positive temperature interval.
@@ -1510,6 +1628,26 @@ capacity approximation; it does not exactly multiply two independent P1
 fields. Values refer to the same supplied reference volume throughout the run;
 current-state density cannot change closed-body mass. This explicit field
 carries no material-source receipt and introduces no expansion or phase change.
+
+`HeatCapacity::MaterialVolumeFractions` and
+`BackwardEuler::material_volume_fractions` bind fixed P1 constituent volume
+fractions to original `MaterialHeatCapacity` sources. This explicitly declares
+a stationary, nonreacting composite at local thermal equilibrium with additive
+reference volumes and no heat of mixing. Its capacity is
+`C_vol = sum(phi_i rho_i Cp_i)`, consistent with constituent masses; separately
+averaging density and Cp and multiplying them is not this physical model.
+Fractions lie in `[0,1]` and sum to one at each vertex within `64*f64::EPSILON`,
+without clipping or normalization. The resulting P1 capacity uses the same
+exact nodal row moments, assembled once and reused by theta, backward-Euler,
+history and duty-cycle owners. All constituent source bundles survive; their
+temperature domains constrain every vertex of a tet where that constituent's
+P1 fraction is nonzero. Entirely absent constituents add no domain restriction.
+This conservative support check covers mixed interiors even when one corner's
+fraction is zero. Conductivity remains independently declared, and no evolving
+composition, expansion, reaction or latent heat is inferred. Regressions in
+`tests/material_volume_fraction_capacity.rs` check mass-correct composite
+heating, independent constituent-energy conservation, immutable preparation,
+source retention and active-support admission.
 
 `duty::march_duty_cycle_with_capacity` uses that same prepared storage for
 scheduled volumetric power. Uniform, per-element, material-ID and source-bound

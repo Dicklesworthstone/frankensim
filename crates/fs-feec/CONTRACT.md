@@ -56,13 +56,22 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   primal measures: positive on EVERY valid mesh, low-order —
   monotonicity-first). Tradeoffs stated at the definition.
 - `weighted::{CellWeight, WeightedMass, WeightedStar, weighted_mass_matrix}`
-  adds piecewise-constant material weights on tetrahedra: positive scalar
+  adds cellwise material weights on tetrahedra: positive scalar
   weights for degrees 0–3 and symmetric positive-definite Cartesian tensors
   for the vector proxies of degrees 1 and 2. The Galerkin-star entry point
   `hodge::weighted_galerkin_star` uses the same implementation. Coefficient
   jumps are integrated per element before shared degrees of freedom are
   summed. The ordinary and weighted paths share one closed-form Whitney
   element rule; the ordinary path retains its previous arithmetic order.
+  `CellWeight::AffineScalar` retains four positive scalar samples in stored
+  tetrahedron order, with independent values on either side of an interface.
+  Exact cubic barycentric moments integrate this spatial density through all
+  four Whitney degrees; centroid averaging would change kinetic energy and
+  the center of mass. Constant affine data uses the original scalar path.
+  The same field is integrated by hierarchical H1 mass and diffusion using
+  the existing exact-degree Duffy rule through order six. Reference density
+  must be paired with reference geometry by the physical owner; no implicit
+  current/reference conversion or deformation law is supplied here.
 - `weighted2::{CellWeight2, weighted_mass_matrix_2d}` supplies scalar degrees
   0–2 and SPD 2×2 tensor degree-1 pairings on `TriComplex2`. Canonical edge
   orientation follows the complex. Planar thickness and the affine radial
@@ -70,6 +79,13 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   centroid-scaled planar mass is not used for an axisymmetric cell. Top forms
   are normalized by the oriented embedded area, not the thickness/radial
   volume. The topology stays two-dimensional.
+  `CellWeight2::AffineScalar` supplies three positive cell-local samples in
+  stored face order. Planar and axisymmetric mass integrate density with the
+  physical measure using exact cubic and quartic barycentric moments,
+  respectively. Axisymmetric top-form normalization retains the same joint
+  density/radius integral. Uniform samples preserve the original scalar path;
+  Cartesian polynomial energy oracles cover all three form degrees and both
+  metrics, with face-order and invalid-density controls.
 - `WeightedMass` retains coefficient dimensions and matrix-entry dimensions
   `coefficient_dims * metre^(3-2k)` for both tetrahedra and the physically
   weighted `Metric2` pairings. `output_dims` checks propagation to a dual
@@ -106,8 +122,13 @@ orientation and coordinate scaling, positivity/refusal boundaries, resource
 limits, and cancellation with deterministic retry (G0/G3/G4). The 3-D battery
 also solves an anisotropic manufactured diffusion problem through the actual
 `d0^T M1 d0` composition and checks second-order refinement (G1).
+Affine-density controls check first mass moments, nonuniform kinetic energy,
+independent volume quadrature for every Whitney degree, interface jumps,
+orientation, the exact constant limit and positivity/cancellation refusals.
+`tests/material_highorder.rs` compares the H1 restriction with closed-form
+Whitney integration and checks higher-mode energy using an overintegrated rule.
 
-This is the piecewise-constant, lowest-order bulk-operator slice of
+This includes the constant/affine scalar bulk-operator slice of
 `frankensim-ext-feec-weighted-operators-vxth`. It does not close that bead's
 high-order, nonlinear/quadrature-point, constitutive-history, or full
 formulation proof lanes. Incidence is unchanged, so its exact algebraic
@@ -1816,3 +1837,97 @@ mechanical walls, and resource/overlap/source-binding refusals. Native execution
 remains pending in the current environment; source
 review and pinned rustfmt parsing establish neither numerical test passage nor
 full material or shell-model validity.
+
+## Exact pressure-release acoustic modes (M2.4-W1a / pexfp.93)
+
+`HelmholtzFe::modes_with_pressure_release` and
+`HeterogeneousHelmholtzFe::modes_with_pressure_release` impose exact homogeneous
+Dirichlet pressure on explicitly selected original boundary triangles. Every
+nonzero hierarchical face trace is eliminated, including vertex, edge and face
+coordinates through P4. All remaining faces are rigid. The common constraint
+map restricts the original sparse stiffness and consistent mass; it introduces
+no penalty, large admittance, resampled medium or spurious boundary eigenvalue.
+The heterogeneous pencil retains `1/rho` inside stiffness and `1/(rho c^2)` in
+mass, including conforming material interfaces.
+
+The original modal solver supplies free-equation residuals and inertia counts.
+Returned shapes use full original coordinates with exact zeros on constrained
+entries; constrained equation rows represent boundary reactions. Distinct
+`PressureReleaseModes` and `HeterogeneousPressureReleaseModes` wrappers retain
+canonical faces and free-DOF counts. They cannot be passed directly to the
+existing rigid-wall reduced constructor, whose static vectors are unconstrained.
+Empty face sets preserve the original rigid solver's eigenpairs. Repeated,
+internal or missing faces, an empty free space, and cancellation refuse without
+mutating the original operator. Cancellation brackets the native eigensolver;
+its existing single-call cancellation granularity is unchanged.
+
+Focused tests specify quarter/half-wave duct spectra over three P2 mesh rungs,
+mixed 3-D box modes, a closed-form density-interface resonance, original-mass
+normalization, P1--P4 trace elimination, winding invariance and refusal paths.
+This boundary is an explicit ideal `p=0` condition, not an opening-radiation or
+end-correction model. Curved/isoparametric geometry and the remaining M2.4-W1a
+qualification requirements remain outside this increment.
+
+`HeterogeneousHelmholtzFe::prepare_with_pressure_release` applies the same
+original trace constraints to driven harmonic fields. It factors only the free
+pressure coordinates and lifts exact zeros into the complete original field.
+The retained density and compressibility operators, passive complex admittances,
+spatial velocity traces and distributed volume sources remain physical; neither
+material interfaces nor sources are resampled. Dense factor limits count the
+free coordinates, while original sparse operators and lifted vectors retain
+their separately documented storage. Empty constraints preserve the original
+preparation and solution arithmetic.
+
+An ideal pressure-release face cannot simultaneously own an admittance or an
+imposed velocity. Adjacent faces may share constrained edge or vertex traces.
+Residual correction checks only the free equations; eliminated rows carry
+boundary reactions. Stored energy and signed input work use the full original
+operators, and the zero-pressure reactions do no work. Cancellation leaves a
+prepared factor reusable and does not publish a partial field.
+
+Driven regressions specify mesh-converged standing-wave pressure and both stored
+energy components, a conforming density/sound-speed interface with independent
+transfer-matrix pressure and passive boundary heat, P4 traces, original volume
+sources, dense-memory bounds and conflicting-law refusals. An ideal zero-pressure
+termination is still not a finite-opening radiation or end-correction model.
+
+`HeterogeneousHelmholtzFe::prepare_time_with_pressure_release` extends the same
+trace elimination to sparse midpoint evolution. The original positive-definite
+effective operator is factored only on free coordinates, with its native sparse
+memory limits; pressure, potential, sources and physical work retain their full
+original coordinates. Free-equation residual corrections lift exact zeros into
+the constrained pressure trace. No dense mass inverse or extra modal basis is
+introduced, and the existing mechanical-wall path keeps its empty constraint
+map and original ordering.
+
+This time owner explicitly admits zero pressure AND zero pressure-potential
+trace. Since `p = psi_dot`, zero pressure alone would permit a time-independent
+nonzero potential trace; arbitrary stationary flow components are outside this
+entry point. Imported states must choose a compatible potential gauge and are
+refused rather than projected when a constrained coefficient is nonzero. State
+identity, passive boundary work, original volume-source work and transactional
+cancellation checks remain in force. Empty release sets preserve the original
+warm-step path without extra source-face sorting or repeated finite-state scans.
+
+Transient regressions separate spatial mode accuracy from midpoint temporal
+phase refinement, verify conserved acoustic energy, and compare a forced P2
+polynomial pressure/potential solution with independent kinetic, compression,
+volume-input and passive-wall work. They also exercise strict high-order state
+admission, conflicting laws, free-DOF limits and reusable factors after refusal.
+
+`prepare_time_with_walls_and_pressure_release` composes these same constraints
+with the original causal mechanical and Maxwell-memory wall owner. Mechanical,
+real-admittance and pressure-release faces are disjoint, while adjacent patches
+may share original trace coordinates. Every wall displacement, velocity and
+memory coordinate remains present even on an edge shared with a constrained
+fluid trace. The original consistent face mass, wall storage, actual resistor
+and relaxation heat, and signed fluid-to-wall work remain unchanged.
+
+The condensed acoustic solve uses the free fluid coordinates and its existing
+factor budget; wall and memory limits still admit their complete trace spaces.
+The mechanical step explicitly refuses velocity forcing on release faces before
+calling the common projected solve. Empty release maps use the original wall
+path. Tests specify an exact positive-stiffness spring-balanced wall with an
+accelerating fluid at independent area/amplitude scales, a nonuniform Maxwell
+memory pulse adjoining a release edge with irreversible heat and acoustic
+energy transfer, and full-state/overlap/resource/cancellation refusals.

@@ -37,7 +37,7 @@
 //! microphone <x_m> <y_m> <z_m> <radial_rings> <angular_points> <max_frequency_hz>
 //! subglottal <time_s> <pressure_pa>                  (repeat, strictly increasing time)
 //! tension_modulation <rate_hz> <relative_amplitude>  (optional; vibrato)
-//! tension_flutter <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional; slow pitch movement of a straight tone)
+//! tension_flutter <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional; pitch movement, adds to any vibrato)
 //! tension_flutter_second <seed> <centre_hz> <bandwidth_hz> <sd_rel>  (optional, needs tension_flutter; a second filter)
 //! fold_mapping bilateral                             (optional; the fold line is one fold of a pair)
 //! fold_shape <sine|rigid> <uniform|tapered>          (optional, two_mass only; the gap varies along the fold)
@@ -91,7 +91,8 @@
 //! `1 + y`, with `y` of stationary standard deviation `sd_rel`, set once per output sample. It is not per-cycle
 //! jitter: the filter's bandwidth is a few hertz, so `y` has no steps. The row moves the tension, not the pitch
 //! directly: the card, not this code, says how `sd_rel` was derived from a pitch extent, which depends on the note.
-//! A card declares this row or `tension_modulation`, not both. Without the key the tension is never touched and a
+//! On a card with `tension_modulation` the two add: the stiffnesses scale by `1 + a sin(2 pi r t) + y`, one tension set
+//! once per output sample. Without the key the tension is never touched and a
 //! performance is bit-identical to one written before the key existed; `sd_rel` 0 is bit-identical as well.
 //!
 //! `tension_flutter_second` is a second filter on that same gesture, for a card that models two bands of movement: the
@@ -560,11 +561,6 @@ impl VoiceDescription {
         if tension_flutter_second.is_some() && tension_flutter.is_none() {
             return Err("tension_flutter_second needs tension_flutter: it adds to that row".into());
         }
-        if tension_modulation.is_some() && tension_flutter.is_some() {
-            return Err(
-                "tension_modulation and tension_flutter both set the fold tension: a card declares one gesture".into(),
-            );
-        }
         Ok(Self {
             output_rate_hz,
             samples,
@@ -964,22 +960,28 @@ impl VoicePerformance {
         for j in 0..self.ratio {
             let t = self.steps as f64 / f64::from(self.mechanics_rate);
             // The gesture is far slower than the audio clock, so the tension is set once per output sample.
-            if let (0, Some((rate_hz, amplitude))) = (j, self.tension_modulation) {
-                let tension = 1.0 + amplitude * det::sin(core::f64::consts::TAU * rate_hz * t);
-                self.island
-                    .set_tension(tension)
-                    .map_err(|e| format!("fold tension refused: {e:?}"))?;
-            }
-            if let (0, Some(flutter)) = (j, self.tension_flutter.as_mut()) {
-                let first = flutter.next_relative();
-                // No sum with zero when the row is absent: such a card keeps the first row's value bit for bit.
-                let y = match self.tension_flutter_second.as_mut() {
-                    Some(second) => first + second.next_relative(),
-                    None => first,
+            if j == 0 {
+                let vibrato = self
+                    .tension_modulation
+                    .map(|(rate_hz, amplitude)| amplitude * det::sin(core::f64::consts::TAU * rate_hz * t));
+                let flutter = self.tension_flutter.as_mut().map(|flutter| {
+                    let first = flutter.next_relative();
+                    // No sum with zero when the row is absent: such a card keeps the first row's value bit for bit.
+                    match self.tension_flutter_second.as_mut() {
+                        Some(second) => first + second.next_relative(),
+                        None => first,
+                    }
+                });
+                // The same: only a card with both gestures takes the sum, and only such a card was refused before it.
+                let moved = match (vibrato, flutter) {
+                    (Some(v), Some(y)) => Some(v + y),
+                    (one, None) | (None, one) => one,
                 };
-                self.island
-                    .set_tension(1.0 + y)
-                    .map_err(|e| format!("fold tension refused: {e:?}"))?;
+                if let Some(moved) = moved {
+                    self.island
+                        .set_tension(1.0 + moved)
+                        .map_err(|e| format!("fold tension refused: {e:?}"))?;
+                }
             }
             let gesture = self.schedule.at(t);
             let mut drive = gesture;
@@ -1523,8 +1525,6 @@ mod tests {
             ("tension_flutter 7 4 1.3 -0.01\n", "sd"),
             ("tension_flutter 7 4 1.3 0.06\n", "sd"),
             ("tension_flutter 7 4 1.3 0.02\ntension_flutter 8 4 1.3 0.02\n", "only appear once"),
-            ("tension_flutter 7 4 1.3 0.02\ntension_modulation 5.9 0.08\n", "one gesture"),
-            ("tension_modulation 5.9 0.08\ntension_flutter 7 4 1.3 0.02\n", "one gesture"),
         ] {
             let error = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect_err(extra);
             assert!(error.contains(needle), "{extra:?} -> {error}");
@@ -1611,6 +1611,47 @@ mod tests {
         let sum: Vec<f64> = y1.iter().zip(&y2).map(|(a, b)| a + b).collect();
         assert_eq!(bits(&both), bits(&render_by_hand(&plain, &sum)), "two rows add");
         assert_ne!(bits(&both), bits(&one), "the second row must reach the pressure");
+    }
+
+    /// A plain card with its tension set by hand before each output sample: `vibrato` is the old law written out, at the
+    /// time the engine reads it, and `y` adds to it. With no vibrato this is `render_by_hand`.
+    fn render_by_hand_with_vibrato(text: &str, vibrato: (f64, f64), y: &[f64]) -> Vec<f64> {
+        let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+        let mut performance = description.build().expect("builds");
+        let mut out = vec![0.0; description.samples as usize];
+        let (rate_hz, amplitude) = vibrato;
+        for (n, sample) in out.iter_mut().enumerate() {
+            let t = performance.steps as f64 / f64::from(performance.mechanics_rate);
+            let v = amplitude * det::sin(core::f64::consts::TAU * rate_hz * t);
+            performance.island.set_tension(1.0 + (v + y[n])).expect("tension");
+            performance.block(core::slice::from_mut(sample)).expect("renders");
+        }
+        out
+    }
+
+    /// Vibrato alone still plays its old law. A card with both takes one tension, the sum, in either order of its lines:
+    /// the row does not overwrite the vibrato, and a silent row or a silent vibrato leaves the other bit for bit.
+    #[test]
+    fn vibrato_and_flutter_add_on_one_tension_and_alone_stay_bit_identical() {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let plain = modulation_text("");
+        let n = VoiceDescription::from_bytes(plain.as_bytes()).expect("parses").samples as usize;
+        let row = TensionFlutterCard { seed: 7, centre_hz: 20.0, bandwidth_hz: 20.0, sd_rel: 0.005 };
+        let y = flutter_written_out(row, 0, 48_000, n);
+        let alone = render(&modulation_text("tension_modulation 5.9 0.11\n"));
+        let by_hand = render_by_hand_with_vibrato(&plain, (5.9, 0.11), &vec![0.0; n]);
+        assert_eq!(bits(&alone), bits(&by_hand), "vibrato alone");
+        let both = render(&modulation_text("tension_modulation 5.9 0.11\ntension_flutter 7 20 20 0.005\n"));
+        let swapped = render(&modulation_text("tension_flutter 7 20 20 0.005\ntension_modulation 5.9 0.11\n"));
+        assert_eq!(bits(&both), bits(&swapped), "line order");
+        assert_eq!(bits(&both), bits(&render_by_hand_with_vibrato(&plain, (5.9, 0.11), &y)), "the two add");
+        assert_ne!(bits(&both), bits(&alone), "the row must reach the pressure");
+        let row_alone = render(&modulation_text("tension_flutter 7 20 20 0.005\n"));
+        assert_ne!(bits(&both), bits(&row_alone), "the vibrato must survive the row");
+        let silent_row = render(&modulation_text("tension_modulation 5.9 0.11\ntension_flutter 7 20 20 0\n"));
+        assert_eq!(bits(&alone), bits(&silent_row), "a silent row");
+        let silent_vibrato = render(&modulation_text("tension_modulation 5.9 0\ntension_flutter 7 20 20 0.005\n"));
+        assert_eq!(bits(&row_alone), bits(&silent_vibrato), "a silent vibrato");
     }
 
     /// Same seed, same filter, and the two rows still don't correlate; each keeps its stated spread.

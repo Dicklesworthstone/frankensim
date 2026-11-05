@@ -3,8 +3,9 @@
 //! The active cell centers occupy a uniform Cartesian box between two
 //! impermeable, no-slip walls half a normal cell outside the first/last center.
 //! The other two axes are periodic and statistically homogeneous. Both wall
-//! velocities are spatially uniform; tangential motion is allowed. Scalar wall
-//! data are independently uniform fixed values or zero normal derivatives.
+//! velocities are spatially uniform; tangential motion is allowed. Each scalar
+//! wall selects uniform fixed values, zero physical normal derivatives, or
+//! reconstruction of the normal derivative from fluid values alone.
 //!
 //! Only the two tangential directions are test filtered: nine equal cell
 //! averages, with widths `(3hp, 3hq, hn)`. As on the periodic path the model
@@ -26,11 +27,16 @@
 //! does NOT survive density-weighted filtering: the filtered scalar therefore
 //! uses a second-order, three-fluid-point normal derivative at such walls,
 //! without imposing a wall condition on the Favre quotient. Its physical
-//! counterpart uses the declared zero wall derivative. This retains derivative
-//! truncation error; it does not claim exact discrete Favre commutation or
-//! remove implicit grid-filter effects. Nor does it model curved walls, corners, variable grid
-//! widths, spatially varying wall data, wall functions, or near-wall resolution
-//! error. Scalar eddy diffusion and isotropic eddy viscosity retain their
+//! counterpart uses the declared zero wall derivative. For a native flux/film
+//! or coupled wall law, `ScalarWall::Interior` reconstructs both gradients from
+//! fluid values without inferring a material-dependent boundary gradient or
+//! substituting a mean wall temperature. The native transport still imposes
+//! its actual wall law; each wall selects its derivative policy independently.
+//! This retains derivative truncation error; it does not claim exact discrete
+//! Favre commutation or remove implicit grid-filter effects. Nor does it model
+//! curved walls, corners, variable grid widths, prescribed spatially varying
+//! wall data, wall functions, or near-wall resolution error. Scalar eddy
+//! diffusion and isotropic eddy viscosity retain their
 //! scale-similarity and aspect-ratio limitations; this is exploratory LES.
 
 use super::scalar::{DynamicScalarConfig, DynamicScalarReport, PeriodicDynamicScalar};
@@ -40,7 +46,7 @@ use super::*;
 #[path = "channel/components.rs"]
 pub mod components;
 
-/// Spatially uniform scalar data at one physical half-cell wall.
+/// Scalar derivative policy at one physical half-cell wall.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScalarWall {
     /// Prescribed value in the same units as the cell scalar.
@@ -49,6 +55,12 @@ pub enum ScalarWall {
     /// Requires at least three normal fluid cells for the filtered quotient's
     /// independent one-sided derivative; it is not assigned a Neumann datum.
     ZeroGradient,
+    /// Reconstruct the normal derivative from three fluid centers at both
+    /// physical and Favre-filtered levels, without prescribing a scalar value
+    /// or gradient at the wall. The native transport owns its flux/film or
+    /// coupled wall law. Requires three normal fluid cells; this second-order
+    /// cell derivative is not a wall value or a new transport boundary condition.
+    Interior,
 }
 
 /// Momentum controls; fitting over each homogeneous plane is intrinsic.
@@ -188,6 +200,8 @@ impl ChannelDynamicSgs {
     /// Fit momentum and scalar diffusion from one same-time field. No public
     /// path can consume stale normalized flow scratch. Both outputs require
     /// success, and any refusal leaves the caller's source fields unchanged.
+    /// Either ZeroGradient or Interior wall requires three normal fluid cells,
+    /// including when a uniform field would otherwise give an exact-zero fit.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare_with_scalar(
         &mut self,
@@ -211,9 +225,13 @@ impl ChannelDynamicSgs {
                 "channel scalar and flow geometry differ",
             ));
         }
-        if scalar_walls.contains(&ScalarWall::ZeroGradient) && self.shape()[self.normal_axis] < 3 {
+        if self.shape()[self.normal_axis] < 3
+            && scalar_walls
+                .iter()
+                .any(|wall| matches!(wall, ScalarWall::ZeroGradient | ScalarWall::Interior))
+        {
             return Err(DynamicSgsError::Invalid(
-                "Neumann scalar filtering requires three normal fluid cells",
+                "scalar wall reconstruction requires three normal fluid cells",
             ));
         }
         let scalar_scale = scalar_workspace.inner.normalize_with_walls(
@@ -313,13 +331,26 @@ impl AxisStencil {
                 let difference = value(high) - value(low);
                 self.checked(difference, 0.5 * difference * self.metric)
             }
-            StencilSpan::Wall { near, side, .. } => {
+            StencilSpan::Wall { near, far, side } => {
                 let center = value(self.cell);
                 let neighbor = value(near);
                 let sign = if side == 0 { 1.0 } else { -1.0 };
                 let unscaled = match walls[side] {
                     ScalarWall::Value(wall) => sign * ((center - wall) + (neighbor - wall) / 3.0),
                     ScalarWall::ZeroGradient => sign * 0.5 * (neighbor - center),
+                    ScalarWall::Interior => {
+                        let far = far.ok_or(DynamicSgsError::Invalid(
+                            "interior scalar wall derivatives require three normal fluid cells",
+                        ))?;
+                        let d1 = neighbor - center;
+                        let d2 = value(far) - center;
+                        let difference = if side == 0 {
+                            4.0 * d1 - d2
+                        } else {
+                            d2 - 4.0 * d1
+                        };
+                        return self.checked(difference, 0.5 * difference * self.metric);
+                    }
                 };
                 self.checked(unscaled, unscaled * self.metric)
             }
@@ -343,20 +374,7 @@ impl AxisStencil {
     // composition gradients when an impermeable wall constrains a coupled
     // molecular flux (including thermal diffusion), rather than grad(Y).
     pub(super) fn interior_scalar_derivative(self, field: &[f64]) -> Result<f64, DynamicSgsError> {
-        if let StencilSpan::Wall { near, far, side } = self.span {
-            let far = far.ok_or(DynamicSgsError::Invalid(
-                "interior scalar wall derivatives require three normal fluid cells",
-            ))?;
-            let d1 = field[near] - field[self.cell];
-            let d2 = field[far] - field[self.cell];
-            let difference = if side == 0 {
-                4.0 * d1 - d2
-            } else {
-                d2 - 4.0 * d1
-            };
-            return self.checked(difference, 0.5 * difference * self.metric);
-        }
-        self.derivative(|j| field[j], [ScalarWall::ZeroGradient; 2])
+        self.derivative(|j| field[j], [ScalarWall::Interior; 2])
     }
 }
 
@@ -420,7 +438,8 @@ impl FilterGeometry {
 
     // Exact derivative of the quadratic through a half-cell Dirichlet wall,
     // this center and its interior neighbor. ZeroGradient instead supplies
-    // the derivative at the wall; no periodic ghost is ever used normally.
+    // the derivative at the wall. Interior uses three fluid centers without
+    // any wall datum; no periodic ghost is ever used in the normal direction.
     pub(super) fn stencil(
         self,
         shape: [usize; 3],

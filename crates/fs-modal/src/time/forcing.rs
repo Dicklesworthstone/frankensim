@@ -223,6 +223,41 @@ impl LinearForceTransition {
         self.motion(state, force_start, force_end).map(|(next, _, _)| next)
     }
 
+    /// Same-window velocity relation under a constant generalized force.
+    ///
+    /// Returns `(mean, mobility)` such that adding a held force `extra` to
+    /// `held_force` gives `mean_velocity = mean + mobility * extra`.
+    /// This is the exact displacement increment divided by the duration,
+    /// which is power-conjugate to a held force. It is not endpoint velocity.
+    ///
+    /// The cached entire-function coefficients form the force imbalance and
+    /// increment directly, without subtracting two absolute positions or
+    /// dividing by stiffness. Consequently an equilibrium-scale displacement
+    /// cannot erase a resolved velocity or a small held-force response.
+    /// The relation allocates nothing and advances no state.
+    ///
+    /// # Errors
+    /// Nonfinite state/force or an unrepresentable scaled input or relation.
+    pub fn held_force_mean_velocity_relation(
+        &self,
+        state: ModalAcousticState,
+        held_force: f64,
+    ) -> Result<(f64, f64), ModalAcousticTimeError> {
+        let q = state.displacement_m_sqrt_kg;
+        let v = state.velocity_m_sqrt_kg_per_s;
+        if ![q, v, held_force].into_iter().all(f64::is_finite) {
+            return Err(invalid("held-force mean relation requires finite state and force"));
+        }
+        let impulse = self.duration_s * held_force;
+        let restoring = (self.angular_frequency_rad_s * q) * self.transition.angle;
+        let mean = self.transition.b * v + self.transition.g * (impulse - restoring);
+        let mobility = self.duration_s * self.transition.g;
+        if ![impulse, restoring, mean, mobility].into_iter().all(f64::is_finite) {
+            return Err(invalid("held-force mean relation must be representable"));
+        }
+        Ok((mean, mobility))
+    }
+
     fn motion(
         &self,
         state: ModalAcousticState,

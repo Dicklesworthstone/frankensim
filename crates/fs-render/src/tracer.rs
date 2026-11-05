@@ -114,6 +114,7 @@ pub use sharding::{
     render_motion_shard, render_static_shard,
 };
 mod bdpt;
+mod coated_diffuse;
 mod initial_medium;
 #[cfg(test)]
 mod immersed_wave_tests;
@@ -970,6 +971,16 @@ pub enum Material {
         /// black and white. Wavelengths and interpolation remain explicit.
         reflectance: crate::spectral::SpectralReflectance,
     },
+    /// Smooth lossless dielectric coat over a spectral depolarizing diffuse
+    /// substrate. The collapsed layer retains entry/exit Fresnel, Snell etendue
+    /// and every internal diffuse return. The actual exterior medium must match
+    /// the declared constant index; both reflection branches stay in that medium.
+    CoatedDiffuse {
+        /// Prepared constant indices and cached hemispherical escape.
+        coating: crate::coated_diffuse::SmoothDiffuseCoating,
+        /// Original wavelength-resolved substrate reflectance in [0,1].
+        reflectance: crate::spectral::SpectralReflectance,
+    },
     /// Explicit opaque gray/diffuse equilibrium surface. It emits physical
     /// Planck radiance and still reflects with albedo `1-emissivity`.
     /// `Primitive::emission` must be absent: this is its sole emission owner.
@@ -1061,6 +1072,17 @@ impl Material {
             Self::SpectralDiffuse { reflectance } => {
                 // Additive tag: existing material identities remain unchanged.
                 hasher.update(&[8]);
+                hasher.update(&[reflectance.knots().len() as u8]);
+                for &(wavelength_nm, value) in reflectance.knots() {
+                    update_material_scalar(&mut hasher, wavelength_nm);
+                    update_material_scalar(&mut hasher, value);
+                }
+            }
+            Self::CoatedDiffuse { coating, reflectance } => {
+                hasher.update(&[11]);
+                hasher.update(b"smooth-diffuse-coating.v1");
+                update_material_scalar(&mut hasher, coating.exterior_index());
+                update_material_scalar(&mut hasher, coating.coating_index());
                 hasher.update(&[reflectance.knots().len() as u8]);
                 for &(wavelength_nm, value) in reflectance.knots() {
                     update_material_scalar(&mut hasher, wavelength_nm);
@@ -9513,7 +9535,8 @@ impl AovAlbedoCache {
                     ]))
                 }
             }
-            Material::Conductor { .. }
+            Material::CoatedDiffuse { .. }
+            | Material::Conductor { .. }
             | Material::BrushedConductor { .. }
             | Material::Dielectric { .. } => Ok(None),
         }) {
@@ -10684,6 +10707,20 @@ fn discover_parallel_slab(
     first_hit: SceneIntersection,
     ray_time: Option<&PathTime>,
 ) -> Result<ParallelSlab, TracerError> {
+    discover_parallel_slab_with_probe(scene, first_ray, first_hit, |probe| {
+        intersect(scene, cx, probe, ray_time)
+    })
+}
+
+/// Share the original slab admission while allowing selected-image consumers
+/// to discover the authored body independently of unrelated occluders. The
+/// caller still owns full-scene visibility along the solved optical path.
+fn discover_parallel_slab_with_probe(
+    scene: &Scene,
+    first_ray: &Ray,
+    first_hit: SceneIntersection,
+    intersect_probe: impl FnOnce(&Ray) -> Result<Option<SceneIntersection>, TracerError>,
+) -> Result<ParallelSlab, TracerError> {
     let boundary_primitive = first_hit.primitive_index;
     require_instanced_mesh_face_witness(
         scene,
@@ -10695,6 +10732,7 @@ fn discover_parallel_slab(
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::CoatedDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. }
         | Material::Ggx { .. }
@@ -10724,7 +10762,7 @@ fn discover_parallel_slab(
         origin: first_hit.spawn_boundary_ray(entry_frame.geometric, axis),
         dir: axis,
     };
-    let Some(opposite) = intersect(scene, cx, &probe, ray_time)? else {
+    let Some(opposite) = intersect_probe(&probe)? else {
         return Err(slab_nee_refusal(
             boundary_primitive,
             "normal probe escaped before finding the opposite interface",
@@ -11596,6 +11634,7 @@ fn discover_planar_manifold_boundary(
         Material::Dielectric { glass, surface } => (glass, surface),
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::CoatedDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. }
         | Material::Ggx { .. }
@@ -14021,6 +14060,7 @@ fn trace_path_with_regions<'scene>(
                                 incoming_travel: direction,
                             },
                             &lambdas,
+                            None,
                             &rng,
                         )?;
                         for lane in 0..PACKET {
@@ -14051,6 +14091,7 @@ fn trace_path_with_regions<'scene>(
                             incoming_travel: direction,
                         },
                         &lambdas,
+                        None,
                         &rng,
                         #[cfg(feature = "photometry")]
                         fixtures,
@@ -14483,6 +14524,7 @@ fn trace_path_with_regions<'scene>(
             )?),
             Material::Lambertian { .. }
             | Material::SpectralDiffuse { .. }
+            | Material::CoatedDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
@@ -14491,6 +14533,13 @@ fn trace_path_with_regions<'scene>(
         };
         let smooth_conductor = matches!(prim.material,
             Material::Conductor { surface, .. } if surface.is_delta());
+        // A split path has one physical wavelength at this coated surface.
+        // Filter material responses only; the full packet still owns every
+        // medium transmittance, free-flight proposal and MIS escape density.
+        let coated_active_lane = match prim.material {
+            Material::CoatedDiffuse { .. } => active_lane,
+            _ => None,
+        };
         #[cfg(feature = "volumes")]
         let transmitted_region = dielectric_boundary.map(|boundary| {
             MediumRegion::transmitted(&medium_stack, boundary.transition, medium, scene_media)
@@ -14539,6 +14588,7 @@ fn trace_path_with_regions<'scene>(
                         incoming_ray: &ray,
                     },
                     &lambdas,
+                    coated_active_lane,
                     &rng,
                 )?;
                 for lane in 0..PACKET {
@@ -14602,6 +14652,7 @@ fn trace_path_with_regions<'scene>(
                     hit.point,
                     receiver,
                     &lambdas,
+                    coated_active_lane,
                     &rng,
                     #[cfg(feature = "photometry")]
                     fixtures,
@@ -14829,6 +14880,7 @@ fn trace_path_with_regions<'scene>(
                 }
                 Material::Lambertian { .. }
                 | Material::SpectralDiffuse { .. }
+                | Material::CoatedDiffuse { .. }
                 | Material::GrayDiffuseThermal { .. }
                 | Material::SpectralDiffuseThermal { .. }
                 | Material::Ggx { .. }
@@ -15035,6 +15087,9 @@ fn trace_path_with_regions<'scene>(
                                         direct.target
                                     {
                                         for (k, &l) in lambdas.iter().enumerate() {
+                                            if coated_active_lane.is_some_and(|active| active != k) {
+                                                continue;
+                                            }
                                             let f = opaque_bsdf_eval(
                                                 &prim.material,
                                                 n,
@@ -15079,6 +15134,9 @@ fn trace_path_with_regions<'scene>(
                                     // Keep the ambient opaque tracer-v1 arithmetic
                                     // bit-for-bit identical to its frozen path.
                                     for (k, &l) in lambdas.iter().enumerate() {
+                                        if coated_active_lane.is_some_and(|active| active != k) {
+                                            continue;
+                                        }
                                         let f = opaque_bsdf_eval(
                                             &prim.material,
                                             n,
@@ -15670,6 +15728,38 @@ fn trace_path_with_regions<'scene>(
                     apply_medium_transition(&mut medium_stack, boundary.transition)?;
                 }
                 previous_bsdf = Some(next_previous_bsdf);
+                prev_origin = hit.point;
+                segment_origin = hit.point;
+                ray = Ray {
+                    origin: intersection.spawn_boundary_ray(frame.geometric, sampled.direction),
+                    dir: sampled.direction,
+                };
+            }
+            Material::CoatedDiffuse { coating, reflectance } => {
+                let Some(sampled) = coated_diffuse::sample(coating, n, wo, u1, u2)? else {
+                    break;
+                };
+                let incident = medium_stack.last().map(|entry| *entry.glass);
+                for (lane, &lambda) in lambdas.iter().enumerate() {
+                    if throughput[lane] == 0.0 {
+                        continue;
+                    }
+                    coated_diffuse::admit_medium(coating, incident, lambda)?;
+                    let rho = reflectance.at(lambda).map_err(|_| TracerError::InvalidInput)?;
+                    throughput[lane] *= sampled.weight(coating, rho)?;
+                }
+                previous_bsdf = Some(PreviousBsdf {
+                    #[cfg(feature = "volumes")]
+                    volume_emission_competitor: !sampled.delta && has_volume_source_nee,
+                    pdf: if sampled.delta {
+                        DirectionalPdfPair::delta()
+                    } else {
+                        DirectionalPdfPair::continuous(sampled.pdf_fwd, sampled.pdf_rev)
+                            .ok_or(TracerError::InvalidInput)?
+                    },
+                    opaque_source_geometric_normal: Some(n),
+                    smooth_slab: None,
+                });
                 prev_origin = hit.point;
                 segment_origin = hit.point;
                 ray = Ray {
@@ -19724,6 +19814,10 @@ mod tests {
         let materials = [
             Material::Lambertian { reflectance: lift_rgb([0.2, 0.4, 0.8]) },
             Material::SpectralDiffuse { reflectance: diffuse },
+            Material::CoatedDiffuse {
+                coating: crate::coated_diffuse::SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap(),
+                reflectance: diffuse,
+            },
             Material::Ggx { reflectance: lift_rgb([0.3; 3]), alpha: 0.25 },
             Material::Conductor { optics: bare, surface: ConductorSurface::SMOOTH },
             Material::Conductor { optics: coated, surface: ConductorSurface::SMOOTH },
@@ -22498,6 +22592,7 @@ fn bsdf_eval(mat: &Material, n: Vec3, wo: Vec3, wi: Vec3, lambda: f64) -> f64 {
         // These families use fallible wavelength admission in opaque_bsdf_eval.
         Material::SpectralDiffuse { .. }
         | Material::SpectralDiffuseThermal { .. }
+        | Material::CoatedDiffuse { .. }
         | Material::Conductor { .. }
         | Material::BrushedConductor { .. } => 0.0,
         Material::Dielectric { .. } => 0.0,
@@ -22531,6 +22626,16 @@ fn opaque_bsdf_eval(
     incident_medium: Option<DielectricGlass>,
     brushed: Option<&crate::surface_detail::ShadingFrame>,
 ) -> Result<f64, TracerError> {
+    if let Material::CoatedDiffuse { coating, reflectance } = mat {
+        coated_diffuse::admit_medium(*coating, incident_medium, lambda)?;
+        let rho = reflectance.at(lambda).map_err(|_| TracerError::InvalidInput)?;
+        let (cos_o, cos_i) = (n.dot(wo), n.dot(wi));
+        return if cos_o <= 0.0 || cos_i <= 0.0 {
+            Ok(0.0)
+        } else {
+            Ok(coating.diffuse_brdf(cos_o.clamp(0.0, 1.0), cos_i.clamp(0.0, 1.0), rho)?)
+        };
+    }
     if let Material::SpectralDiffuse { reflectance } = mat {
         let reflectance = reflectance
             .at(lambda)
@@ -22646,6 +22751,7 @@ fn bsdf_pdf(
         | Material::SpectralDiffuse { .. }
         | Material::GrayDiffuseThermal { .. }
         | Material::SpectralDiffuseThermal { .. } => cos_i / PI,
+        Material::CoatedDiffuse { coating, .. } => coated_diffuse::pdf(*coating, n, wo, wi),
         Material::Ggx { alpha, .. } => {
             let hsum = Vec3::new(wo.x + wi.x, wo.y + wi.y, wo.z + wi.z);
             let hn = hsum.norm();
@@ -22756,7 +22862,9 @@ fn bsdf_sample(
                 None => sample_ggx_vndf_reflection(n, wo, detail.alpha_pair().0, u1, u2),
             }
         }
-        Material::Dielectric { .. } => None,
+        // Mixed mirror/diffuse events use the explicit event-bearing adapter,
+        // as smooth dielectric/conductor events do above their continuous path.
+        Material::CoatedDiffuse { .. } | Material::Dielectric { .. } => None,
     }
 }
 

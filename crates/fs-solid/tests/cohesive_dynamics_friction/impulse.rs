@@ -98,12 +98,20 @@ fn impacted_damaged_motion_retains_sourced_viscosity_and_regularized_friction() 
 
 #[test]
 fn an_impulse_stopping_a_sliding_bond_allows_original_static_capacity_to_recapture() {
+    for difference_step_m in [1e-12, 1e-7, 0.5] {
+        impulse_recapture(difference_step_m);
+    }
+}
+
+fn impulse_recapture(difference_step_m: f64) {
     let (_, source) = sourced([0.6; 2], [0.3; 2], true);
     let elastic = Scalar(10.0);
     let mass = Scalar(0.1);
     let system = system(&elastic, &source, true);
+    let mut config = mechanical();
+    config.difference_step_m = difference_step_m;
     let motion = compressed(&system, 0.002)
-        .into_dynamics(&mass, vec![0.02], 2.0, mechanical())
+        .into_dynamics(&mass, vec![0.02], 2.0, config)
         .unwrap()
         .with_damaged_area_coulomb_controlled(
             &[Some(CoulombActivation::Sliding)],
@@ -156,6 +164,7 @@ fn an_impulse_stopping_a_sliding_bond_allows_original_static_capacity_to_recaptu
         .motion
         .advance_controlled(&[force], &[[-COMPRESSION, 0.0, 0.0]], 0.001, &mut || false)
         .unwrap();
+    assert!(held.analytic_jacobian_evaluations > 0);
     close(held.motion.state().displacements_m()[0], old_u, 1e-12);
     close(held.motion.velocity_m_s()[0], 0.0, 1e-10);
     let contact = held.motion.damaged_area_coulomb_states().unwrap()[0];

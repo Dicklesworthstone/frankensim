@@ -12,10 +12,10 @@ use fs_material::sheet::{
     SheetLaw, THICKNESS, resolve_sheet,
 };
 use fs_material::state_point::{
-    MaterialPropertySelection as Pick, ScalarAdmissibility, ScalarPropertyRequirement,
-    resolve_material_state_point,
+    MaterialPropertySelection as Pick, MeanThermalExpansionStrain, ScalarAdmissibility,
+    ScalarPropertyRequirement, resolve_material_state_point, resolve_mean_thermal_expansion_strain,
 };
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec, Temperature};
 
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const MU: f64 = 3.0e5;
@@ -866,4 +866,415 @@ fn exact_membrane_selection_retains_source_identity_reference_mass_and_refusals(
     assert_eq!(a.resultants_n_m, b.resultants_n_m);
     assert_eq!(a.tangent_n_m, b.tangent_n_m);
     assert_eq!(heavy.areal_density_kg_m2(), 2.4);
+}
+
+#[test]
+fn natural_reference_matches_independent_reductions_and_free_expansion() {
+    let c = card("neo-hookean-log", 0.0013, 0.24);
+    let g: [f64; 3] = [1.12, 1.07, 0.93];
+    let volume = g.iter().product::<f64>();
+    let q = [1.0 / g[0].powi(2), 1.0 / g[1].powi(2), 1.0 / (g[0] * g[1])];
+    let free = [0.5 * (g[0].powi(2) - 1.0), 0.5 * (g[1].powi(2) - 1.0), 0.0];
+    for exact in [false, true] {
+        let original = if exact {
+            bind_incompressible(&c)
+        } else {
+            bind(&c)
+        };
+        let selected = original
+            .clone()
+            .with_hyperelastic_reference_stretches(g)
+            .unwrap();
+        let law = selected.membrane_law().unwrap();
+        assert_eq!(selected.material(), original.material());
+        assert_eq!(
+            selected.areal_density_kg_m2(),
+            original.areal_density_kg_m2()
+        );
+        assert_eq!(selected.thickness_m(), original.thickness_m());
+        for e in [[0.0; 3], free, [0.23, -0.01, 0.12], [0.11, 0.21, -0.15]] {
+            // Independent C_e=G_in^-T C G_in^-1 and linear Green-strain
+            // pullback of the analytic C-space oracle; no Piola map is used.
+            let elastic = [
+                0.5 * ((1.0 + 2.0 * e[0]) * q[0] - 1.0),
+                0.5 * ((1.0 + 2.0 * e[1]) * q[1] - 1.0),
+                e[2] * q[2],
+            ];
+            let (energy, stress, tangent) = if exact {
+                incompressible_neo_hookean_oracle(elastic, 0.0013 * volume)
+            } else {
+                neo_hookean_oracle(elastic, 0.0013 * volume)
+            };
+            let actual = law.response(e).unwrap();
+            close(actual.energy_j_m2, energy, 3e-10, 3e-12);
+            for i in 0..3 {
+                close(actual.resultants_n_m[i], stress[i] * q[i], 3e-9, 3e-11);
+                for j in 0..3 {
+                    close(
+                        actual.tangent_n_m[3 * i + j],
+                        tangent[3 * i + j] * q[i] * q[j],
+                        3e-8,
+                        3e-11,
+                    );
+                }
+            }
+            law.admit_linearization(e).unwrap();
+        }
+        let relaxed = law.response(free).unwrap();
+        close(relaxed.energy_j_m2, 0.0, 3e-10, 0.0);
+        for n in relaxed.resultants_n_m {
+            close(n, 0.0, 3e-9, 0.0);
+        }
+        let constrained = law.response([0.0; 3]).unwrap();
+        assert!(constrained.resultants_n_m[0] < 0.0 && constrained.resultants_n_m[1] < 0.0);
+        assert!(constrained.resultants_n_m[0] != constrained.resultants_n_m[1]);
+    }
+}
+
+#[test]
+fn natural_reference_retains_native_model_tangents_domains_and_identity_limit() {
+    let e = [0.23, 0.10, 0.09];
+    for kind in [
+        "neo-hookean-log",
+        "mooney-rivlin-decoupled",
+        "ogden-decoupled",
+        "hgo-dispersed",
+    ] {
+        let c = card(kind, 0.0013, 0.24);
+        for exact in [false, true] {
+            let original = if exact {
+                bind_incompressible(&c)
+            } else {
+                bind(&c)
+            };
+            let identity = original
+                .clone()
+                .with_hyperelastic_reference_stretches([1.0; 3])
+                .unwrap();
+            let a = original.membrane_law().unwrap().response(e).unwrap();
+            let b = identity.membrane_law().unwrap().response(e).unwrap();
+            assert_eq!(a.energy_j_m2.to_bits(), b.energy_j_m2.to_bits());
+            assert_eq!(
+                a.resultants_n_m.map(f64::to_bits),
+                b.resultants_n_m.map(f64::to_bits)
+            );
+            assert_eq!(
+                a.tangent_n_m.map(f64::to_bits),
+                b.tangent_n_m.map(f64::to_bits)
+            );
+            let selected = original
+                .with_hyperelastic_reference_stretches([1.08, 0.96, 1.03])
+                .unwrap();
+            let law = selected.membrane_law().unwrap();
+            let r = law.response(e).unwrap();
+            law.admit_linearization(e).unwrap();
+            let h = 2e-6;
+            for col in 0..3 {
+                let mut lo = e;
+                lo[col] -= h;
+                let mut hi = e;
+                hi[col] += h;
+                let a = law.response(lo).unwrap();
+                let b = law.response(hi).unwrap();
+                close(
+                    (b.energy_j_m2 - a.energy_j_m2) / (2.0 * h),
+                    r.resultants_n_m[col],
+                    3e-6,
+                    3e-7,
+                );
+                for row in 0..3 {
+                    close(
+                        (b.resultants_n_m[row] - a.resultants_n_m[row]) / (2.0 * h),
+                        r.tangent_n_m[3 * row + col],
+                        3e-5,
+                        4e-7,
+                    );
+                    close(
+                        r.tangent_n_m[3 * row + col],
+                        r.tangent_n_m[3 * col + row],
+                        3e-10,
+                        3e-12,
+                    );
+                }
+            }
+        }
+    }
+    // Native elastic limits belong to Fe, not the total geometric stretch.
+    let c = card("neo-hookean-log", 0.0013, 0.24);
+    let large = bind_incompressible(&c)
+        .with_hyperelastic_reference_stretches([6.0, 6.0, 1.0])
+        .unwrap();
+    let free = [17.5, 17.5, 0.0];
+    assert!(
+        bind_incompressible(&c)
+            .membrane_law()
+            .unwrap()
+            .response(free)
+            .is_err()
+    );
+    large
+        .membrane_law()
+        .unwrap()
+        .admit_linearization(free)
+        .unwrap();
+    let contracted = bind(&c)
+        .with_hyperelastic_reference_stretches([0.1, 0.1, 1.0])
+        .unwrap();
+    assert!(
+        contracted
+            .membrane_law()
+            .unwrap()
+            .response([0.0; 3])
+            .is_err()
+    );
+    let c = card("hgo-dispersed", 0.0013, 0.24);
+    let g: [f64; 3] = [1.1, 1.05, 0.97];
+    let e = [0.5 * (g[0] * g[0] - 1.0), 0.5 * (g[1] * g[1] - 1.0), 0.0];
+    let fibres = bind_incompressible(&c)
+        .with_hyperelastic_reference_stretches(g)
+        .unwrap()
+        .membrane_law()
+        .unwrap();
+    assert!(fibres.response(e).is_ok());
+    assert!(
+        fibres.admit_linearization(e).is_err(),
+        "activation remains at the elastic natural state"
+    );
+}
+
+const MEAN_AXES: [&str; 3] = ["mean_warp", "mean_weft", "mean_normal"];
+const MEAN_ALPHA: [f64; 3] = [0.01, 0.004, -0.002];
+
+fn natural_thermal_card(conditioned: bool) -> MaterialCard {
+    let temperature = QuantitySpec::dimensional(Temperature::DIMS);
+    let inverse_temperature = Dims([0, 0, 0, -1, 0, 0]);
+    let mut claims = ClaimSet::new();
+    for (name, value, dims) in [
+        (AREAL_DENSITY, 0.24, Dims([-2, 1, 0, 0, 0, 0])),
+        (THICKNESS, 0.0013, Dims([1, 0, 0, 0, 0, 0])),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(290.0, value), (310.0, 0.6 * value)],
+                    dims,
+                },
+                interpolation: InterpolationPolicy::LinearInside,
+                validity: ValidityDomain::unconstrained().with_quantity(
+                    "T",
+                    temperature,
+                    290.0,
+                    310.0,
+                ),
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: provenance(),
+            })
+            .unwrap();
+    }
+    let mut domain = ValidityDomain::unconstrained()
+        .with_quantity("T_reference", temperature, 290.0, 320.0)
+        .with_quantity("T_endpoint", temperature, 290.0, 320.0);
+    if conditioned {
+        domain = domain.with("strain", 0.0, 0.2);
+    }
+    for (name, alpha) in MEAN_AXES.into_iter().zip(MEAN_ALPHA) {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, inverse_temperature),
+                value: PropertyValue::Scalar {
+                    value: alpha,
+                    dims: inverse_temperature,
+                },
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                validity: domain.clone(),
+                uncertainty: UncertaintyModel::Unstated,
+                observations: vec![],
+                provenance: provenance(),
+            })
+            .unwrap();
+    }
+    MaterialCard::assemble(
+        card("neo-hookean-log", 0.0013, 0.24).id().clone(),
+        claims,
+        vec![model("neo-hookean-log")],
+    )
+    .unwrap()
+}
+
+fn natural_thermal_sources(
+    c: &MaterialCard,
+    start: f64,
+    end: f64,
+    conditioned: bool,
+) -> [MeanThermalExpansionStrain; 3] {
+    let temperature = QuantitySpec::dimensional(Temperature::DIMS);
+    let mut point = QueryPoint::new()
+        .with_quantity("T_reference", temperature, start)
+        .unwrap()
+        .with_quantity("T_endpoint", temperature, end)
+        .unwrap();
+    if conditioned {
+        point = point.with("strain", 0.1).unwrap();
+    }
+    MEAN_AXES.map(|name| {
+        resolve_mean_thermal_expansion_strain(
+            c,
+            &PropertyKey::new(name, Dims([0, 0, 0, -1, 0, 0])),
+            &point,
+            "T_reference",
+            "T_endpoint",
+            Pick::SingleClaimOnly,
+        )
+        .unwrap()
+    })
+}
+
+fn natural_thermal_sheet(c: &MaterialCard, conditioned: bool) -> ResolvedSheet {
+    let mut point = QueryPoint::new()
+        .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 290.0)
+        .unwrap();
+    if conditioned {
+        point = point.with("strain", 0.1).unwrap();
+    }
+    resolve_sheet(
+        c,
+        &point,
+        SheetCapabilities {
+            membrane: false,
+            bending: false,
+        },
+        Pick::SingleClaimOnly,
+    )
+    .unwrap()
+    .with_incompressible_hyperelastic_membrane(c, 0, controls())
+    .unwrap()
+}
+
+#[test]
+fn source_mean_thermal_reference_retains_original_inventory_and_endpoint_context() {
+    let c = natural_thermal_card(false);
+    let original = natural_thermal_sheet(&c, false);
+    let expansion = natural_thermal_sources(&c, 290.0, 300.0, false);
+    let selected = original
+        .clone()
+        .with_hyperelastic_mean_thermal_expansion(
+            &c,
+            expansion.clone(),
+            "T_reference",
+            "T_endpoint",
+        )
+        .unwrap();
+    let law = selected.membrane_law().unwrap();
+    let MembraneLaw::Hyperelastic(bound) = &law else {
+        panic!("wrong law")
+    };
+    let g = MEAN_ALPHA.map(|alpha| 1.0 + 10.0 * alpha);
+    assert_eq!(bound.reference_stretches(), g);
+    assert_eq!(bound.mean_thermal_expansion(), Some(&expansion));
+    assert_eq!(
+        bound.mean_thermal_temperature_axes(),
+        Some(["T_reference", "T_endpoint"])
+    );
+    assert_eq!(bound.material(), original.material());
+    assert_eq!(bound.model().model_card(), &c.models()[0]);
+    assert_eq!(
+        bound.model().context(),
+        &QueryPoint::new()
+            .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 300.0)
+            .unwrap()
+    );
+    assert_eq!(selected.areal_density_kg_m2(), 0.24);
+    assert_eq!(selected.thickness_m(), 0.0013);
+    let current = original
+        .material()
+        .at_query_point(&c, bound.model().context())
+        .unwrap();
+    assert!(
+        current.property(AREAL_DENSITY).unwrap().value_si() < selected.areal_density_kg_m2(),
+        "refreshing density at the thermal endpoint would change the reference inventory"
+    );
+    let raw = original
+        .clone()
+        .with_hyperelastic_reference_stretches(g)
+        .unwrap();
+    assert_ne!(
+        selected, raw,
+        "thermal source and endpoint identity survive identical mechanics"
+    );
+    let e = [0.18, 0.12, 0.07];
+    let a = law.response(e).unwrap();
+    let b = raw.membrane_law().unwrap().response(e).unwrap();
+    assert_eq!(a.energy_j_m2.to_bits(), b.energy_j_m2.to_bits());
+    assert_eq!(
+        a.resultants_n_m.map(f64::to_bits),
+        b.resultants_n_m.map(f64::to_bits)
+    );
+    assert_eq!(
+        a.tangent_n_m.map(f64::to_bits),
+        b.tangent_n_m.map(f64::to_bits)
+    );
+
+    let bind_sources = |card: &MaterialCard, sources| {
+        original.clone().with_hyperelastic_mean_thermal_expansion(
+            card,
+            sources,
+            "T_reference",
+            "T_endpoint",
+        )
+    };
+    assert!(bind_sources(&card("neo-hookean-log", 0.0013, 0.25), expansion.clone()).is_err());
+    let mut mixed = expansion.clone();
+    mixed[1] = natural_thermal_sources(&c, 290.0, 305.0, false)[1].clone();
+    assert!(bind_sources(&c, mixed).is_err());
+    assert!(bind_sources(&c, natural_thermal_sources(&c, 295.0, 300.0, false)).is_err());
+    assert!(
+        bind_sources(&c, natural_thermal_sources(&c, 290.0, 315.0, false)).is_err(),
+        "the finite endpoint source does not extend the elastic model's temperature domain"
+    );
+    assert!(
+        original
+            .clone()
+            .with_hyperelastic_mean_thermal_expansion(&c, expansion, "T_endpoint", "T_reference")
+            .is_err()
+    );
+    let conditioned = natural_thermal_card(true);
+    assert!(
+        natural_thermal_sheet(&conditioned, true)
+            .with_hyperelastic_mean_thermal_expansion(
+                &conditioned,
+                natural_thermal_sources(&conditioned, 290.0, 300.0, true),
+                "T_reference",
+                "T_endpoint"
+            )
+            .is_err()
+    );
+    for g in [
+        [0.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+        [f64::NAN, 1.0, 1.0],
+        [f64::INFINITY, 1.0, 1.0],
+        [1e200; 3],
+        [1e-200; 3],
+    ] {
+        assert!(
+            original
+                .clone()
+                .with_hyperelastic_reference_stretches(g)
+                .is_err()
+        );
+    }
+    assert!(
+        selected
+            .with_hyperelastic_reference_stretches([1.0; 3])
+            .is_err()
+    );
+    assert!(
+        reference(&card("neo-hookean-log", 0.0013, 0.24))
+            .with_hyperelastic_reference_stretches([1.0; 3])
+            .is_err()
+    );
 }

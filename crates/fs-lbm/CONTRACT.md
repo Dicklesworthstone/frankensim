@@ -583,7 +583,9 @@ remain active when existing callers add pressure. One private candidate serves
 pressure, conversion and SI admission before publication. Original authored
 pressure errors and cancellation retain `MaterialLbmError::FreeSurfacePressure2`;
 local conversion refusals retain their native reason. Source and scaling errors
-are unchanged. Native pressure-only APIs retain their documented legacy scope.
+are unchanged. Native pressure convenience APIs use the same conservative
+candidate and retain their existing error type, including the original
+conversion refusal reason without a pressure-cell coordinate.
 
 ## Prescribed gas traction with conservative D2Q9 conversion
 
@@ -654,7 +656,7 @@ explicit local angular step. The native and material
 `ConversionRedistribution2::ConservativeLocalAngular` through the common
 momentum candidate, including prescribed cell/link gas pressure and subsequent
 source-owned wetting composition. `ConservativeLocal` remains the default.
-Legacy native mass-only stepping retains its historical behavior.
+Native ordinary and pressure convenience steps also honor this selection.
 
 The original signed, capacity-bounded adjacent transport still owns mass and
 linear momentum. Sparse components contain only actual nonzero transfer routes;
@@ -886,9 +888,11 @@ frozen-bulk semantics, including the fluid's eddy contribution exactly once.
 Native and resolved-field energy entry points share one bounded contact
 iteration. Each trial reuses the original conservative fixed-resistance solve;
 transient trials retain the original stored-energy history. There is no second
-time integrator, interfacial storage or additional source of heat. Duplicate
-face ownership, compact aliases and through-flow use the existing face-contact
-admission. A failed query, cancellation or exhausted iteration publishes no
+time integrator, interfacial storage or additional source of heat. Explicit
+compact case/board joints add to the package branch resistance; their source
+queries use the actual package and outside surfaces after the junction drop.
+Duplicate ownership, compact sides/internal aliases and through-flow remain
+refused. A failed query, cancellation or exhausted iteration publishes no
 candidate and changes no caller-owned setup or thermal history.
 
 Acceptance checks both the relative difference between source and assembled
@@ -931,6 +935,23 @@ These remain frozen-property Boussinesq solvers: the density-departure check
 does not establish phase/EOS support or bound future external heating. Focused
 `material_buoyancy` tests exercise real 2-D/3-D evolution, pressure/composition
 substitution, signed forces, off-center source temperature and atomic refresh.
+
+The native `ThermalLbm` and `ThermalLbm3` also admit a finite nonzero
+`set_buoyancy_direction` vector, normalized once before stepping. The vector
+points opposite physical gravity; the existing signed `gbeta` and temperature
+coordinate still determine the force magnitude. Defaults remain +y in 2-D
+and +z in 3-D. Inclined layers and heated vertical channels therefore use the
+same thermal populations, material scaling, local/tensor transport and Guo
+force integration as the horizontal slab. Changing direction preserves the
+current physical state; the next step rebinds the half-source frame without
+an additional impulse. Checked source snapshots retain the direction, and
+external-force admission checks every component of the total buoyancy/load.
+The Rayleigh diagnostic retains its full coefficient; multiplying by the
+wall-normal direction component gives its normal projection. The original
+Rayleigh–Bénard onset bracket is not an inclined-channel stability criterion.
+`directional_buoyancy` tests compare vertical-channel counterflow with the
+analytic cubic viscous profile, grid refinement, rotated/reversed force
+directions and exact per-step impulse through checked source advances.
 
 `BoundaryGrid3::rebind_shear_relaxation` extends uniform transport refresh to
 the original tiled boundary/moving-body solver. It delegates to the existing
@@ -2940,10 +2961,10 @@ scalars with dynamic subgrid-scale models*, CTR Annual Research Briefs,
 section 2.1. It does not copy that paper's spectral discretization or claim
 its channel-flow accuracy.
 
-Normal derivatives use the quadratic through the two nearest fluid centres
-and the actual halfway boundary condition. Each preparation supplies both
-uniform wall velocities and independent scalar `Value` or `ZeroGradient`
-conditions. A scalar zero-gradient wall requires three normal fluid cells:
+Declared velocity and scalar wall derivatives use the quadratic through the
+two nearest fluid centres and the halfway boundary condition. Each preparation supplies both
+uniform wall velocities and independent scalar `Value`, `ZeroGradient`, or
+`Interior` policies. A scalar zero-gradient wall requires three normal fluid cells:
 the filtered scalar uses a second-order one-sided derivative of its actual
 Favre-filtered interior values there. Density weighting need not preserve the
 physical scalar's zero normal gradient, so that boundary condition is not
@@ -2954,6 +2975,19 @@ walls differ. Filtering, strain and scalar gradients share the same geometry;
 scalar diffusivity remains independently fitted even when momentum transport
 is zero. The existing explicit no-backscatter policy, coefficient admission
 bounds, finite-value checks and exploratory-use restriction remain in force.
+
+`Interior` reconstructs the wall-adjacent cell derivative from three current
+fluid centres at both physical and Favre-filtered levels. It is exact for a
+quadratic and second-order for smooth resolved fields; it supplies neither a
+wall temperature nor a transport boundary law. Flux/film and coupled-flux
+owners can use it without deriving a gradient from a diffusivity still being
+fitted, substituting a reservoir for the surface, or consuming an old wall
+report. The opposite wall retains its own independent policy. Three normal
+fluid cells are admitted before uniform-field shortcuts whenever interior
+reconstruction is needed; two cells remain sufficient for two fixed values.
+Kernel regressions cover mixed policies along every normal axis, analytic
+Favre density covariance, affine and reversed scalar coordinates, and early
+refusal of insufficient normal resolution.
 
 The reused numerical storage remains 136 bytes per fluid cell for momentum
 and 64 for one scalar, with actual-capacity admission. Plane reduction is
@@ -3296,7 +3330,23 @@ LVEL and transient SGS and reports the actual retained value. The constant
 ratio remains an authored model assumption, not a universal material law;
 see [NASA Wind-US Prandtl controls](https://www.grc.nasa.gov/www/winddocs/user/keywords/prandtl.html).
 A caller-supplied nonzero eddy-conductivity field refuses instead of being
-combined or overwritten. No SGS dissipation heating, turbulent scalar-variance
+combined or overwritten. Resolved-SGS marches select
+`ThermalSetup::eddy_wall_treatment = EddyWallTreatment::Molecular`: fixed and
+film domain walls, ordinary fluid/solid interfaces, compact package surfaces
+and explicit stationary thermal joints retain their molecular fluid half-cell
+resistance. Fluid/fluid mixing and open-face diffusion still use the effective
+conductivity. This is a resolved-wall boundary condition, requiring adequate
+near-wall resolution, not a new coarse-grid heat-transfer correlation. The
+default `EffectiveConductivity` policy preserves existing equilibrium LVEL
+behavior; an explicitly requested equilibrium thermal wall function and the
+resolved molecular policy cannot be combined.
+
+The accepted molecular wall coefficients remain separate from effective cell
+conductivity. Source-contact surface queries, nonlinear solid half-cell laws,
+compact links, heat observers and material endpoint flux corrections all use
+the same accepted wall coefficients. In particular, a molecular conductivity
+change cannot disappear from the endpoint audit merely because an opposing
+eddy-conductivity change keeps their sum constant. No SGS dissipation heating, turbulent scalar-variance
 equation, equilibrium thermal wall law, calibrated turbulent channel profile,
 or resolved turbulent spectrum is claimed. The existing first-order thermal
 coupling and power-law/upwind convection limits still apply; the caller must
@@ -3307,6 +3357,11 @@ quadratic Neumann gradients, native MAC normal derivatives, WALE's pure-shear
 zero, physical Smagorinsky viscosity, exact disabled flow identity, admission
 and cap refusals, and a moving-wall flow/heat step compared against an
 independently supplied turbulent-conductivity energy solve.
+The thermal face-contact battery additionally checks graded molecular wall and
+film resistances, retained interior/open-face mixing, ordinary and compact
+solid interfaces, and source queries at the molecular interface surfaces.
+An endpoint regression retains the changed wall heat at equal total cell
+conductivity; the heated moving-wall transient checks the automatic SGS policy.
 
 `MaterialChtFluid::march_natural_convection_with_sgs` uses the same native
 transient owner with source-dependent molecular viscosity and conductivity.
@@ -3521,6 +3576,48 @@ Focused G0/G1 regressions exercise all six wall orientations and both work
 signs, cancelling heat/work, an evolving adiabatic Couette field and refused
 wall-law rollback. The independent steady temperature-profile qualification
 remains `couette_viscous_heating_profile`.
+
+**Prescribed open faces (pexfp.138).**
+`set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],
+Cartesian velocity [m/s] and temperature [K] of a uniform exterior ghost plane.
+The face lies halfway between its ghost centre and the adjacent fluid centre.
+Only one non-periodic axis with periodic transverse domain edges is admitted;
+internal solid masks may describe a nozzle/channel but must not touch the open
+plane. Solid/open junctions, intersecting open/wall domain edges, moving open
+faces and manufactured volume sources are refused. Prescribed reservoir and
+characteristic boundary modes are mutually exclusive in either attachment order.
+`None` restores a stationary wall. Incoming populations use non-equilibrium
+extrapolation (Guo, Zheng & Shi 2002, Chinese Physics 11, 366–374,
+doi:10.1088/1009-1963/11/4/310), including the post-collision half-force shift.
+The same exterior state enters the centred thermal-pressure face force and the
+total-energy face flux (enthalpy, extrapolated stress work, and conduction).
+Caloric energy and face transport use the grid's gas owner, including NASA9
+when supplied. Changing a boundary restarts flux history and adjusts the
+pre-collision half-force moment without changing the fluid's physical velocity
+or energy. Refused updates leave the state and prior boundary intact.
+
+`EnergyLedger::open_energy_j` reports the signed net energy entering prescribed
+faces, separately from `wall_heat_j` and characteristic `open_boundary_energy_j`;
+the conservation residual subtracts all three. With prescribed faces the legacy
+`viscous_heating_j` remainder also contains kinetic energy transport and is
+**not** a physical viscous-heating measurement.
+The `nsf3::open::tests` checks cover uniform throughflow in both directions on
+all three axes (G0, error < 1e-11, sealed-wall negative control), heat input
+and the total-energy balance (G0, relative residual < 1e-12), boundary-update
+refusals and velocity preservation, and worker-count equality (G5).
+The existing thermochemical suite also exercises open throughflow away from the
+caloric reference temperature, arbitrary formation-energy offsets and refusal
+outside source pressure support. A fixed-domain pulse at 64/128/256 cells reports
+the prescribed boundary's reflection; it does not assert a transparency band.
+The native 20 mm-domain, sigma=1 mm Gaussian diagnostic measured amplitude
+ratios 0.68695 / 0.81251 / 0.90254 at dx=0.3125 / 0.15625 / 0.078125 mm
+(-3.26 / -1.80 / -0.89 dB): reflection increases with refinement. This broadband
+packet result is not frequency-resolved R(f) over an instrument's declared band.
+These are boundary-implementation checks, not a spatial convergence ladder,
+characteristic zone-to-DG coupling, < -40 dB reflection qualification, jet
+validation, or instrument/audio evidence. A prescribed exterior state generally
+reflects acoustic waves. The separate characteristic mode has its own contract
+and qualification limits below; it is not replaced by this primitive.
 
 **Prescribed open faces (pexfp.138).**
 `set_open_face(axis, high, Some(NsfOpenState))` declares the density [kg/m³],
@@ -4124,10 +4221,16 @@ The checked source owner snapshots both the active laws and last accepted
 report. It admits active fluid temperatures, prescribed wall temperatures,
 and every resolved wall trace against the caller's scalar interval. A late
 refusal preserves the original populations, histories, wall laws and report.
-The channel dynamic SGS filter consumes active prescribed-temperature or
-zero-flux conditions; it refuses nonzero flux and film laws until its filter
-supports their local traces. Other ordinary/source thermal steps use the
-same wall streaming operator in both dimensions.
+The channel dynamic SGS filter retains declared temperatures and zero-flux
+conditions independently at each wall. For nonzero flux/film walls it uses
+three-fluid-centre reconstruction of both physical and Favre scalar gradients.
+The original reflected-pair operator still applies actual surface heat, and
+the same source transaction admits temperature, Mach, cancellation and heat
+balance before publishing state. The filter neither invents a wall trace nor
+adds modeled mechanical dissipation as a heat source. Its zero-diffusion path
+retains ordinary transport and local molecular rates; physical-unit and
+source-resolved material adapters use the same coupling. Other ordinary/source
+thermal steps share the original wall streaming operator in both dimensions.
 
 `MaterialThermalWall` provides the same laws in SI through the retained
 material slab. It converts signed `q''` by `dt/(rho*Cp*dx*DeltaT)` and `h`
@@ -5236,10 +5339,11 @@ jumps, solid/fluid observations and an independent transient storage balance.
 
 Compact-component links integrate the native conductivity law of the outside
 solid's half cell in series with the declared junction-to-board or
-junction-to-case resistor. Its area-specific resistance is `R_junction * A_total`;
-the existing analytic film law resolves the outside surface without a nested
-iteration. Each face receives its correct parallel area share, and the collapsed
-package adds no bulk resistance. Frozen material fields and fluid links retain
+junction-to-case resistor and any explicit case/board contact. The combined
+area-specific resistance is `R_junction * A_total + R_contact''`; the existing
+analytic film law resolves the outside surface without a nested bulk iteration.
+Each face receives its correct parallel area share, and the collapsed package
+adds no bulk resistance. Frozen material fields and fluid links retain
 their declared coefficients. Junction powers, fixed-cell reactions and observers
 all use the same stored links. Ordinary boundary conditions on collapsed component
 sides contribute no heat, matching the assembly's adiabatic side ownership.
@@ -5336,15 +5440,28 @@ like any solid, but its interior is collapsed. One extra unknown per
 component, the junction, receives the power and reaches every cell beyond
 the case-top face through `R_jc` and every cell beyond the board face
 through `R_jb`. Each resistor is split over its face in proportion to area
-and placed in series with the outside cell's half width:
-`G = 1 / (R A_face / A_cell + dx / (2 k A_cell))`. The sides are
-adiabatic; the box cells report the junction temperature through identity
-rows. `EnergySolution::junctions` gives the junction temperature and the
+and placed in series with the outside cell's half width. An explicit
+`face_contacts` or `source_face_contacts` entry may add a package/TIM joint:
+`G = A_cell / (R A_face + R_contact'' + dx / (2 k))`, with zero added
+contact resistance when no joint is declared. The sides are adiabatic; the box
+cells report the junction temperature through identity rows. `EnergySolution::junctions` gives the junction temperature and the
 case and board heats; `solid_to_fluid_heat_w` counts the case links into
 fluid instead of the collapsed cells. Refusals: a box that holds fluid,
 overlaps or sits on another component, or puts its case or board face on
 the domain boundary; power, sinks or fixed temperatures inside a box; a
 physical transient without an explicitly declared positive junction capacity.
+
+For an outward package heat flux `q`, the case/board surface is
+`T_package = T_junction - q R A_face`; the outside surface is
+`T_outside = T_package - q R_contact''`. Source laws query these surfaces in
+their declared order, retain the original source context, and never query a
+collapsed alias as bulk material. Fixed and source contacts share the stored
+branch links, nonlinear outside half-cell law, conductivity-defect audit and
+native storage equations. Contact layers add no heat or capacity. Sides,
+internal aliases, two compact components and conflicting face owners refuse.
+`tests/compact_contacts.rs` checks independent graded anisotropic series
+networks, surface-only nonlinear source support and reversed order, and closed
+fixed/source transients through both resolved-field and native marches.
 
 `heat_capacity_j_k: Some(C_j)` adds a constant lumped junction storage law to
 the same resistive model. `march_energy` and `march_conjugate` solve
@@ -7564,8 +7681,10 @@ Focused command:
 `with_equilibrium_planar_wetting` adds an explicitly equilibrium alternative
 on that same thermal/native transaction. It selects either an original
 equilibrium-angle claim or the existing Young--Dupre law from reversible
-`equilibrium-work-of-adhesion` W(T) and the SAME source-declared constant
-liquid/gas tension retained by the thermal material bundle. The actual local
+`equilibrium-work-of-adhesion` W(T) and the SAME liquid/gas tension retained
+by the thermal material bundle. Ordinary attachment requires constant sigma;
+the explicit uniform thermal-capillarity entry below or the bounded sidewall
+height graph can evolve it. The actual local
 liquid caloric temperature refreshes the selected interface claim before
 collision, at conductive substeps, and after advection. Source substitution,
 loss of partial wetting (`0 < W < 2 sigma`), and the original tension source's
@@ -7579,9 +7698,9 @@ receipt, without fabricated hysteresis claims or a contact-speed query.
 This boundary does not need a resolved contact-line velocity, and therefore
 does not reject locally flat filling stencils merely for a zero tangential
 gradient. Adding Cox dynamics refuses rather than turning equilibrium work
-into a measured advancing/receding bracket. The separate thermocapillary
-geometry remains incompatible: varying sigma requires that original owner,
-not freezing a temperature-dependent tension source here. The local-cell
+into a measured advancing/receding bracket. The separate planar and local
+thermocapillary geometries remain incompatible with imposed wall angles;
+the height-graph sidewall domain is specified below. The local-cell
 interface-temperature approximation, stationary homogeneous-wall assumption
 and absence of closed surface-energy/heat accounting remain explicit.
 
@@ -7591,6 +7710,33 @@ cover constant-source native parity, local W(T) feedback into the same
 momentum step with conserved mass and explicit heat, original-source and
 partial-wetting rollback/retry, and refusal of an implicit Cox extension.
 They are synthetic numerical tests, not experimental wetting validation.
+
+`free_surface3_from_cells_with_uniform_thermal_capillarity` extends that same
+owner to time-varying sigma(T) in the exact zero-Marangoni domain. Every actual
+wet-cell source value must agree exactly in SI units before lattice conversion,
+at initial admission, every conductive thermal substep, and both native step
+endpoints. No tolerance, averaging or suppressed tangential stress admits a
+spatial mismatch. Complete source bundles and original selected claims remain
+pinned. Native capillary-wave/density/pressure admission still applies to the
+resulting field before publication.
+
+The same local sigma(T) reaches native Laplace pressure and Young--Dupre
+W(T)/sigma(T). Storage-free wet-interface ghosts refresh from adjacent real
+liquid using the existing enthalpy extension; difference-first interpolation
+preserves a uniform donor temperature exactly without adding mass or heat.
+Genuinely dry wall ghosts retain their declared reference context. Uniform
+capillarity needs no graph or local PLIC reconstruction and retains ordinary
+native conversion/mass routes. It adds no tangential Guo load and no separate
+surface-energy or heating model. Separately solved surface temperatures still
+require their original geometric stress owner. Nonuniform tension remains
+unsupported with an imposed wall angle and refuses atomically.
+
+Three additional native regressions in the same equilibrium test module
+specify homogeneous W(T)/sigma(T) heating with the actual pressure coefficient,
+nonconstant-ratio hot-state angle, constant-sigma trajectory/receipt parity,
+and complete rollback for local/interior-substep gradients, original tension
+source exit, loss of partial wetting and cancellation. These are authored
+numerical regressions; native execution remains unverified in this environment.
 
 
 ### Source-bound DC current on the free-surface thermal trajectory
@@ -8464,17 +8610,21 @@ order, use fixed-size neighbor storage and take the final rounding remainder
 locally. The redistribution cost depends on converted cells and their stencil,
 without another whole-domain interface scan.
 
-New D3Q19 constructors select `ConversionRedistribution3::Local`.
+New D3Q19 constructors select `ConversionRedistribution3::ConservativeLocal`.
+The named `Local` policy explicitly retains its former mass-only arithmetic.
 `with_conversion_redistribution(LegacyGlobal)` explicitly reproduces historical
 version-1 trajectories, including their nonlocal pooling. The frozen pour
 sentinel selects this replay mode and retains its original four-quadrant hash;
 new locality and thermal regressions exercise the corrected default. The
-independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 5 for the current default;
+independent `FREE_SURFACE3_BIT_SEMANTICS_VERSION` is 6 for the current default;
 version 2 introduced local redistribution, and version 3 corrects the density
 and force handling of fresh-cell initialization described below. Version 4
 uses the physical Guo frame in gas-pressure reconstruction as described above.
 Version 5 retains actual positive density in fill fractions and actual total
 mass in relative conservation diagnostics, without an absolute numerical floor.
+Version 6 selects bounded physical momentum conversion for both binary-occupancy
+and transferred-cell constructors. Ordinary and cell/link-pressure steps thereby
+reuse the existing atomic conservative candidate without requiring an opt-in.
 Explicit `LegacyGlobal` replay retains its historical conversion and
 gas-pressure arithmetic, leaving the unchanged D3Q19 core, boundary and sparse
 goldens untouched.
@@ -8514,14 +8664,37 @@ adds no vessel dynamics, thermal work or total-energy closure. Focused G0/G1/G3
 regressions cover acceleration ramps across density/unit choices, pressure
 source moments at changing endpoints, held-load parity and atomic retry.
 
+### Spatial actual-density acceleration on the original free surface
+
+`BodyAccelerationField3` shares uniform and affine `a(x) = a0 + G(x - x0)`
+loading on the native D3Q19 free surface. The affine owner stores constant-size
+coefficients, with no dense spatial buffer or per-cell material callback.
+Ordinary steps hold the field; endpoint advances retain old collision force
+and use each cell's next actual density times its next local acceleration in
+accepted velocity and gas-pressure reconstruction. Newly wet cells evaluate
+the field at their own centres. Native centres are `i + 1/2`; SI centres are
+`(i + 1/2) dx` in the original zero-origin Cartesian grid. SI conversion maps
+`a0` by `dt²/dx`, `G` by `dt²`, and `x0` by `1/dx` once per field binding.
+Piston relocation holds that world-coordinate field fixed and zero-time
+reframes transported populations at their destinations before the physical
+momentum audit. Uniform fields retain their existing population arithmetic.
+The shared owner excludes independent force and rigid-frame ownership;
+candidate refusal or cancellation retains the prior field and trajectory.
+This prescribed position-dependent load does not supply Coriolis coupling or
+thermodynamic density expansion. Eight regression definitions cover independent
+density/momentum endpoints, local pressure moments, new interfaces, relocation,
+uniform parity, ownership/rollback and SI scaling. Scoped formatting and
+whitespace checks passed; native compilation and execution remain outstanding.
+
 D3Q19 records direct donor/recipient mass routes, including reversed routes for
 conversion debt. The original extensive enthalpy transport consumes these same
-routes, avoiding temperature mixing through a shared zero-storage pool. Excess
-or debt with no adjacent recipient remains explicit unregioned carry; without
-spatial provenance it is not injected into another component on a later step.
-This preserves the total numerical mass ledger but does not claim resolved
-geometry for orphan carry, momentum conservation during cell conversion or a
-conservative capillary surface-energy discretization.
+routes, avoiding temperature mixing through a shared zero-storage pool. The
+explicit historical `Local` policy retains excess or debt without an adjacent
+recipient as unregioned carry; without spatial provenance it is not injected
+into another component on a later step. That mass-only policy does not preserve
+conversion momentum or resolve orphan geometry. The default conservative policy
+refuses unlocated carry or unavailable adjacent capacity before publication.
+Neither policy supplies a conservative capillary surface-energy discretization.
 
 Focused G0 tests cover both conversion signs, disconnected-drop locality,
 per-node mass-route balances, orphan carry retention and scalar D3Q19 tension
@@ -8530,10 +8703,11 @@ components and reverse-debt cycles against analytic local energy balances.
 
 ### Bounded local conversion carries physical liquid momentum
 
-`ConversionRedistribution3::ConservativeLocal` is an explicit native timestep
-option, also selectable on `MaterialFreeSurface3` or the already bound
-`MaterialFreeSurfaceEnthalpy3`. Existing Local and LegacyGlobal trajectories retain their arithmetic.
-The new mode completes signed over/undershoots at zero conversion tolerance and
+`ConversionRedistribution3::ConservativeLocal` is the native constructor and
+timestep default, also selectable on `MaterialFreeSurface3` or the already bound
+`MaterialFreeSurfaceEnthalpy3`. Explicit Local and LegacyGlobal conversion
+rules retain their arithmetic. The conservative mode completes signed
+over/undershoots at zero conversion tolerance and
 routes each excess/debt only to adjacent interfaces with actual available
 capacity/mass. Dry ghosts cannot pay debt, full cells cannot overfill, and no
 unlocated carry or distant component supplies a missing recipient.
@@ -8558,7 +8732,10 @@ integrator's momentum/energy balance, angular momentum, capillary surface energy
 or phase-density volume sources. Native regressions cover unequal densities, Guo
 forces, advancing/receding and disconnected fronts, actual before/routes/after
 mass continuity, a real collision/stream/conversion step, zero-pressure replay,
-co-moving identity and late public-step rollback.
+co-moving identity and late public-step rollback. These regressions use the
+actual constructor defaults; binary ingress separately checks advancing and
+receding momentum under force, and both pressure entries retain conservative
+conversion and late-refusal atomicity without a policy override.
 
 `ConversionRedistribution3::ConservativeLocalAngular` extends that native
 conversion with angular closure. It preserves signed tracked mass, Guo physical
@@ -8640,28 +8817,34 @@ mass/linear-momentum defects. Numerical conversion loss is not physical heat.
 The receipt excludes collision/streaming, pressure traction and imposed forces.
 The linear-only policy does not preserve first mass moments or angular momentum;
 the opt-in angular policy adds local angular closure without preserving first
-mass moments. The historical `step` retains its existing conversion behavior.
+mass moments. Native `step` and the cell/link gas-pressure convenience entries
+use this same conservative conversion owner.
 
 Seven focused G0/G1/G3 regressions cover unequal-density advancing and receding
 fronts, signed debt, physical boosts and forcing, independent droplets, periodic
 capacity aliases, retained physical stress, native zero-conversion replay,
 cancellation and newly wet-cell refusal.
 
-### Material D2Q9 defaults carry conversion momentum
+### Native and material D2Q9 defaults carry conversion momentum
 
-`MaterialFreeSurface2::step` and `MaterialFreeSurfaceWetting2::step_with_gate`
-delegate to their existing `step_with_momentum` owners. Ordinary material
+`FreeSurface::step`, `MaterialFreeSurface2::step` and
+`MaterialFreeSurfaceWetting2::step_with_gate` delegate to their existing
+`step_with_momentum` owners. Ordinary native and material
 stepping therefore carries signed donor momentum through actual adjacent
-conversion capacity, admits the existing SI conversion account, and publishes
-one complete candidate. Dynamic wetting publishes the same candidate together
-with its accepted source queries, contact geometry and angle history.
+conversion capacity and publishes one complete candidate. Material stepping
+also admits the existing SI conversion account. Dynamic wetting publishes the
+same candidate together with its accepted source queries, contact geometry and
+angle history.
 
-The native `FreeSurface::step` remains the historical replay entry. Material
-`step` preserves its convenience signature and panics on a conservative refusal
-without publishing the proposal; the existing explicit momentum entry provides
-typed cancellation and refinement refusals. The wetting convenience entry
-retains its original error type and canonical cancellation classification.
-No additional lattice clone or duplicate conversion-report owner is introduced.
+Native `step` replaces its former mass-only conversion and reuses one staged
+surface. Its convenience signature and the material `step` signatures remain;
+conservative refusal panics without publishing the proposal. Explicit momentum
+entries provide typed cancellation and refinement refusals. Native cell/link
+pressure convenience entries similarly discard only the conversion receipt,
+retaining physical gas traction, the selected angular policy, and their existing
+error type. No extra clone is added to the already staged pressure path.
+The wetting convenience entry retains its original error type and canonical
+cancellation classification.
 
 `resolved_linear_momentum_kg_per_s` sums actual liquid mass times Guo-corrected
 velocity and converts to SI momentum per unit out-of-plane depth (kg/s). Gas,
@@ -8669,14 +8852,25 @@ walls and unlocated carry have no represented liquid momentum. External forces
 and wall/pressure traction can change the observation; it does not certify
 whole-step or angular-momentum conservation.
 
-The material regressions compare default and explicit conservative evolution
-through actual nonzero conversion routes, check SI momentum against physical
+Native regressions independently measure signed liquid momentum before and
+after advancing/receding conversions, including body forcing and real pressure
+force/torque. They exercise ordinary and both pressure defaults, selected angular
+closure and complete rollback when local capacity is unavailable. Material
+regressions compare default and explicit conservative evolution through actual
+nonzero conversion routes, check SI momentum against physical
 cell observations, and preserve wetting-source refusal and cancellation
 atomicity. Native capillary fixtures cover all four wall orientations and the
 existing material parameters; the gravity fixture starts at physical rest in
 the held-force frame before evolving real drop conversions.
 
 ### Density-consistent physical state at free-surface ingress and conversion
+
+`FreeSurface3::from_cells` closes the canonical population sum to each supplied
+density before applying the Guo force frame. Tracked mass remains the authored
+`fill*density`; a full interface therefore has no rounding-only excess to
+convert. The existing bounded density-closure owner is shared with strain
+initialization. Forced/unforced ingress regressions check exact density and
+mass, physical momentum, and absence of spurious conversion across density scales.
 
 Newly wet D2Q9 cells and default D3Q19 cells average their neighbors' physical
 velocities, including each neighbor's own `F/(2 rho)` correction. They then
@@ -8789,6 +8983,31 @@ pressure cells, including empty ghosts; bulk caloric temperatures remain
 unchanged. A dense column buffer and two bounded cell passes avoid a global
 surface solve or per-cell allocation.
 
+`with_equilibrium_planar_wetting` also admits one planar SIDE wall on this
+graph. The original interface W(T) or equilibrium-angle claim and original
+liquid sigma(T) use the same actual local caloric temperature. Every positive
+occupied interface cell in a wall column must give exactly one angle; separate
+columns may differ. Missing angle samples, through-band angle differences and
+a graph-normal wall refuse. The two end columns touching another side wall
+must remain exactly neutral (pi/2); nonneutral two-wall corners are unresolved.
+At an XMin wall with liquid below a z graph, the imposed slope is
+`h_x = -cot(theta)*sqrt(1+h_y^2)`, with the corresponding signs for the opposite
+wall, liquid side and axis rotations. This slope supplies the SAME graph
+normal, actual area and tangential gradient projection. Its total slope still
+obeys the declared finite-slope envelope. Native normal pressure keeps its
+existing smoothed-VOF angle-ghost curvature and original column sigma; this is
+the same continuum angle, not a shared discrete variational surface-energy law.
+
+Initial attachment, each heated flow preparation and the advected endpoint
+install the current angle BEFORE reconstructing graph traction. The original
+single candidate lattice and native force rebind retain physical momentum;
+the next collision supplies the actual impulse. Storage-free wet ghosts use
+the same enthalpy extension at attachment and heated endpoints. A separately
+solved interface-temperature stress boundary is refused with graph wetting,
+because it has no matching solid/liquid temperature closure for W(T). Source,
+geometry or endpoint refusal rolls back populations, heat, force, pressure
+coefficients and the original wetting receipts together.
+
 Source/geometry/slope/carry/cancellation refusal discards the entire candidate.
 Raw interface fractions must remain monotone and in [0,1]. Before endpoint
 geometry, the material candidate resolves native conversion hysteresis through
@@ -8804,6 +9023,13 @@ and volume scaling, quadratic mixed slopes, constant sigma, all orientations,
 pressure/traction consistency and geometry refusal. Material regressions check
 SI traction, conservative mass/enthalpy evolution, exact uniform-sigma baseline
 population bits, source-validity refusal and cancellation rollback.
+The sidewall extension adds analytical normal/area/traction checks across all
+axis and wall orientations, an independent affine VOF-pressure check, and
+thermal source, same-interval impulse and atomic corner/band/slope regressions.
+The six direct native curvature-source tests pass; the broader native graph
+and thermal integration regressions are authored but unexecuted under the
+dependency-build resource limit. These checks are numerical, not experimental
+wetting validation.
 
 ### Local thermocapillary traction on detached interfaces
 
@@ -12399,3 +12625,100 @@ partition refusal, and late cancellation. Full native fs-lbm production/unit
 sources with `turbulent-inflow`, plus `material_boundary_sgs` and `boundary_sgs`
 integration targets, typecheck after merging concurrent boundary changes.
 These runtime tests were not executed in this session.
+
+## Prescribed thermal plates with source-owned viscous self-heating
+
+`PlatesGrid3::set_plate_motion` retains uniform tangential velocities on both
+fixed halfway z-plates and an explicit torque origin. The original BGK/TRT
+collision and pull stream use `f_in = f_out + 2 w rho (e.u_wall)/cs²` with
+post-collision density. Complete tangential planes introduce no modeled mass
+source. A boundary-only preflight uses that same reflection, admits finite
+positive-density/Mach-bounded endpoint populations, and accumulates compensated
+per-plane momentum, angular impulse and work before publication. It adds no
+population buffer or wall map. Zero drives preserve stationary population bits;
+invalid drives and rejected native steps retain accepted state and receipts.
+
+The original thermal/source candidate snapshot carries this drive and its last
+accepted receipt. `MaterialSlab3::set_plate_motion_si` uses the retained dx/dt;
+`last_plate_exchange_si` converts the actual native exchange with the retained
+rho0, cell volume and time unit. Negative wall work is energy supplied by the
+prescribed actuator. The existing `step_with_material_rheology_and_viscous_heating`
+resolves the same actual-temperature, force-corrected shear material for momentum
+and `mu*gamma_dot²` heat. Wall work is not added again as thermal power. Both
+source epochs, thermal wall exchange, populations and mechanical plate receipt
+publish together through the existing checked material transaction, including
+late native failure, endpoint-source refusal and cancellation. Low-level thermal
+steps retain their original nontransactional status; native failures now return
+through `ThermalForcingError::Flow3` to the checked owner instead of panicking.
+
+Focused regression definitions cover the analytic Couette velocity and viscous
+heating temperature profile under refinement, independent physical wall work and
+heat conversion, retained thermal Carreau-Yasuda feedback, stationary bit parity,
+and native/late-cancellation refusal followed by exact retry. They use declared
+synthetic material calibrations, not experimental validation. This fixed-geometry,
+low-Mach, generalized-Newtonian path adds no swept-cell transport, finite actuator
+reservoir, elastic memory, numerical-loss heating or transient total-energy proof.
+
+## Independent bulk viscosity in the dense D2Q9 central-moment solver
+
+`CollisionModel2::CentralMomentBulk { bulk_tau }` separates the second-moment
+trace from the deviatoric modes. The shear modes retain each cell's `Grid::tau`;
+the trace uses the finite material relaxation time `bulk_tau > 1/2`. Third and
+fourth central moments keep their original equilibrium treatment. The original
+`CentralMoment` option remains exactly the `bulk_tau = 1` arithmetic, including
+forcing and streaming. The bulk reciprocal is prepared once per collision sweep.
+
+In dimension D, `nu = cs² (tau_s - 1/2)` and
+`zeta/rho = (2/D) cs² (tau_b - 1/2)` in lattice units. Therefore D2Q9 uses
+`zeta/rho = cs² (bulk_tau - 1/2)`, not the D3 factor `2/3`. For planar flow in a
+three-dimensional material, the corresponding two-dimensional coefficient is
+`zeta_2/rho = zeta_3/rho + nu/3`. Scale the appropriate dimensional kinematic
+coefficient by `dt/dx²` before inverting the D2 relaxation law. Linear isothermal
+longitudinal waves decay at `Gamma = (nu + zeta_2/rho) k²/2`; transverse waves
+retain `nu k²` attenuation. The planar 3-D conversion therefore recovers
+`Gamma = (4nu/3 + zeta_3/rho) k²/2` without confusing dimensional conventions.
+
+The same physical-population Guo transform applies each force moment at its own
+relaxation rate. Uniform and spatial rheology remove isotropic stress from the
+shear-tau-dependent deviatoric part, reconstruct dilation using the configured
+bulk tau, and retain the existing full strain invariant `sqrt(2 D:D)` for the
+constitutive solve. Changing bulk tau must not be misinterpreted as material
+shear thinning. The checked endpoint-force step rejects invalid bulk relaxation
+before numerical proposal work; the low-level collide API retains its assert
+contract for invalid relaxation parameters.
+
+Focused regressions cover independently manufactured trace/shear relaxation
+under Guo forcing, compatibility at unity, two-wavelength continuum sound decay,
+shear-wave and force-driven channel viscosity, source ramps/reversals, and
+uniform/spatial mixed-strain rheology. This is a weakly compressible isothermal
+bulk-viscosity capability; it supplies no thermal acoustic attenuation or
+frequency-dependent molecular relaxation. D3Q19 and D3Q27 retain their existing
+collision contracts.
+
+## Independent bulk viscosity in the D3Q19 central-moment solver
+
+`CollisionModel3::CentralMomentBulk { shear_rate, bulk_rate, higher_order_rate }`
+relaxes the five deviatoric second moments independently of their trace. All
+three rates must be finite and strictly between zero and two. In lattice units,
+`nu = (1/shear_rate - 1/2)/3` and
+`zeta/rho = (2/9) (1/bulk_rate - 1/2)`; the latter is also exposed by
+`kinematic_bulk_viscosity`. The existing models retain their original bulk/shear
+relation. Equal bulk and shear rates preserve the original central-moment
+population arithmetic, including the selected higher-order rate and Guo force
+transform. The extra relaxation corrects only the isotropic second moment.
+
+Native material and lattice SGS shear rebinding preserve the independently
+configured bulk and higher-order rates. Curved-wall source rheology extracts
+the deviatoric stress numerator and fixed dilation from the physical Guo stress,
+then queries the original constitutive source at their combined `sqrt(2 D:D)`
+rate. The bounded local solve retains source-domain, iteration and cancellation
+refusals; zero fixed dilation preserves the original source-query arithmetic.
+Compression therefore cannot be reinterpreted as shear solely because a different
+bulk relaxation was configured. Native boundary and immersed-solid relaxation
+continue to use the shear rate for their viscous response. The separate
+free-surface stress SGS path retains its explicit BGK/TRT-only admission.
+
+This is a weakly compressible, isothermal collision capability. Longitudinal
+continuum waves decay at `Gamma = (4nu/3 + zeta/rho) k²/2`, while transverse waves
+decay at `nu k²`. It does not add a thermal equation, molecular relaxation,
+temperature-dependent bulk-viscosity sampling or bulk dissipation heating.

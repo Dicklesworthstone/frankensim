@@ -21,7 +21,7 @@
 //! physical work. This effective admittance is never reported as wall heat.
 //!
 //! Patches have constant coefficients and disjoint original faces, including
-//! disjointness from real Robin patches. Adjacent mechanical patches retain
+//! disjointness from real Robin and pressure-release patches. Adjacent mechanical patches retain
 //! independent states at their shared edges. Imposed velocity may share a
 //! wall face. This is the declared local wall law, not shell bending, lateral
 //! elastic waves, a material fit, or a moving fluid mesh. Relaxation coefficients
@@ -216,13 +216,43 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: MechanicalTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_time_with_walls_and_pressure_release(
+            duration_s,
+            resistive,
+            boundaries,
+            &[],
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare causal distributed walls together with exact pressure-release faces.
+    /// Release faces impose zero pressure and zero pressure-potential trace on
+    /// every original hierarchical trace DOF. Imported states must satisfy both;
+    /// a stationary flow potential is never silently projected away.
+    ///
+    /// Mechanical, real Robin and pressure-release faces must be disjoint.
+    /// Adjacent patches may share edges; every mechanical displacement, velocity
+    /// and Maxwell memory coordinate is retained independently of the fluid
+    /// constraint. Imposed velocity may share a mechanical face but cannot share
+    /// a pressure-release face. The acoustic factor budget counts free fluid
+    /// DOFs; the original wall and memory budgets still count their complete traces.
+    pub fn prepare_time_with_walls_and_pressure_release<'m>(
+        &'m self,
+        duration_s: f64,
+        resistive: &[ResistiveBoundary],
+        boundaries: &[MechanicalBoundary],
+        pressure_release_faces: &[[u32; 3]],
+        limits: MechanicalTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedMechanicalTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         if !duration_s.is_finite() || duration_s <= 0.0 || limits.max_wall_dofs == 0 {
             return Err(
                 invalid("positive mechanical time step and wall DOF limit required").into(),
             );
         }
-        if self.ndof() > limits.acoustic.max_dofs {
+        if pressure_release_faces.is_empty() && self.ndof() > limits.acoustic.max_dofs {
             return Err(HeterogeneousError::Limit {
                 what: "transient pressure degrees of freedom",
                 requested: self.ndof(),
@@ -230,6 +260,14 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             });
         }
         let mut seen = BTreeSet::new();
+        for &face in pressure_release_faces {
+            poll(cancelled)?;
+            let mut key = face;
+            key.sort_unstable();
+            if !seen.insert(key) {
+                return Err(invalid("pressure-release faces must be unique").into());
+            }
+        }
         for faces in resistive
             .iter()
             .map(|b| &b.faces)
@@ -240,7 +278,10 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 let mut key = face;
                 key.sort_unstable();
                 if !seen.insert(key) {
-                    return Err(invalid("mechanical and real Robin faces must be disjoint").into());
+                    return Err(invalid(
+                        "mechanical, real Robin and pressure-release faces must be disjoint",
+                    )
+                    .into());
                 }
             }
         }
@@ -369,7 +410,13 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 relaxation,
             });
         }
-        let condensed = self.prepare_time(duration_s, &effective, limits.acoustic, cancelled)?;
+        let condensed = self.prepare_time_with_pressure_release(
+            duration_s,
+            &effective,
+            pressure_release_faces,
+            limits.acoustic,
+            cancelled,
+        )?;
         Ok(PreparedMechanicalTime {
             condensed,
             conductance,
@@ -551,6 +598,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         poll(cancelled)?;
         self.validate_state(initial)?;
         let core = &self.condensed;
+        core.admit_velocity_faces(inward_velocity, cancelled)?;
         let h = self.duration_s();
         let source = core.model.geometry.boundary_linear_load(inward_velocity)?;
         let mut load = source.clone();
@@ -832,5 +880,7 @@ fn balance(
     Ok(())
 }
 
+#[cfg(test)]
+mod pressure_release_tests;
 #[cfg(test)]
 mod tests;

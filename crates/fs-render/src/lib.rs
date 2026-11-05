@@ -49,6 +49,9 @@ pub mod tlas;
 pub mod aov;
 #[cfg(feature = "tracer")]
 pub mod conductor;
+/// Smooth dielectric coats over a spectral, depolarizing diffuse substrate.
+#[cfg(feature = "tracer")]
+pub mod coated_diffuse;
 #[cfg(feature = "tracer")]
 pub mod dielectric;
 #[cfg(feature = "differentiable")]

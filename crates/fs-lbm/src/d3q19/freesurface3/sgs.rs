@@ -119,7 +119,9 @@ impl FreeSurface3 {
         let model = self.collision_model();
         let molecular_tau = match model {
             CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
-            CollisionModel3::CentralMoment { .. } | CollisionModel3::ReducedCumulant { .. } => {
+            CollisionModel3::CentralMoment { .. }
+            | CollisionModel3::CentralMomentBulk { .. }
+            | CollisionModel3::ReducedCumulant { .. } => {
                 return Err(FreeSurfaceSgsError3::Invalid(
                     "free-surface stress SGS requires native BGK or TRT collision",
                 ));

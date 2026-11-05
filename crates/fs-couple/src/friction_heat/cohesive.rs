@@ -1,6 +1,6 @@
-//! Deformable adhesive reclosure and original finite-body caloric transport.
+//! Deformable adhesive motion and original finite-body caloric transport.
 //!
-//! One native mechanical proposal supplies the actual per-patch friction and
+//! The closed-contact driver supplies actual native per-patch friction and
 //! surviving-bond viscous losses. The existing massless-face heat network solves
 //! their temperatures and signed exchange with finite bodies. Intrinsic fracture
 //! work remains outside the caloric account: creating damaged surfaces is not
@@ -12,6 +12,9 @@
 //! material assignment with its thermal face; a reduced jump map alone cannot
 //! reconstruct world placement. Opening, moving contact coverage, finite bond
 //! thermal resistance/storage and strong thermal feedback need their own owners.
+//! The [`cooling`] composition connects native opening/debonding/reclosure to
+//! the existing fracture-cooling owner, including explicit fracture/viscosity
+//! heat partitions and continued detached motion on the original thermal cells.
 
 use super::network::{
     FrictionHeatNetworkInput, FrictionHeatNetworkReport, FrictionHeatNetworkStep,
@@ -31,6 +34,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Complete deformable stopping paths and their finite-body heat destinations.
 pub mod interval;
+
+/// Native debonding/reclosure, original cooling and explicit loss conversion.
+pub mod cooling;
 
 /// Same canonical link-keyed conductivity/other-source inputs as rigid heat.
 pub use super::hertz::multiple::{

@@ -36,9 +36,17 @@ pub mod source;
 #[path = "comminution/breakage.rs"]
 pub mod breakage;
 
+/// Specimen-bound JK drop-weight impact response and specific-energy inversion.
+#[path = "comminution/drop_weight.rs"]
+pub mod drop_weight;
+
 /// Constant selection-rate population balances over the original daughter classes.
 #[path = "comminution/kinetics.rs"]
 pub mod kinetics;
+
+/// Experimentally fitted Austin selection/daughter laws on a source-declared grid.
+#[path = "comminution/austin.rs"]
+pub mod austin;
 
 /// Source-explicit collection of a size-resolved stream into mineral leach charges.
 #[path = "comminution/leach_charge.rs"]

@@ -25,6 +25,7 @@ use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
 
 pub(super) mod area;
 pub(crate) mod geometry;
+pub(crate) mod slab;
 mod point_sampling;
 
 #[cfg(test)]
@@ -546,6 +547,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
                     incident_medium: initial_stack.last().map(|entry| *entry.glass),
                 },
                 &wavelengths,
+                None,
                 &state.rng,
             )?;
             Some(packet_radiance_to_photometric_xyz(

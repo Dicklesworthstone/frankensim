@@ -1083,6 +1083,19 @@ impl ModalAirLoad {
                     }
                     None => 0.0,
                 };
+                let viscous_resistance = match viscous {
+                    Some((areal_density, coincidence_hz)) => {
+                        let layer = crate::air_loss::plate_viscous_layer(
+                            areal_density,
+                            omega,
+                            omega / (2.0 * std::f64::consts::PI * coincidence_hz),
+                            2,
+                            gas,
+                        )?;
+                        layer.loss_factor * modal_mass * omega
+                    }
+                    None => 0.0,
+                };
                 retained.push(Retained {
                     shape: index,
                     sine,
@@ -1356,6 +1369,13 @@ impl ModalAirLoad {
             };
             receipt.push(format!(
                 "head viscous layer: exact linear Stokes face loss on both faces, eta {low:.3e} to {high:.3e} at each retained mode's loaded frequency; {uncovered}, so their decays stay upper bounds; every retained mode is below coincidence"
+            ));
+        }
+        if viscous.is_some() {
+            let (low, high) = retained.iter().map(|r| r.viscous_resistance / (r.mass * r.omega))
+                .fold((f64::INFINITY, 0.0_f64), |(lo, hi), eta| (lo.min(eta), hi.max(eta)));
+            receipt.push(format!(
+                "head viscous layer: exact linear Stokes face loss on both faces, eta {low:.3e} to {high:.3e} at each retained mode's loaded frequency; m = 0 and dropped shapes carry none, so their decays stay upper bounds; every retained mode is below coincidence"
             ));
         }
         receipt.push(format!(

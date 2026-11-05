@@ -1,0 +1,23 @@
+frankensim.matdb-source.v1
+observation	identity	IXOM sodium isobutyl xanthate, CAS 25306-75-6, product 000033039301	Supplier SDS revision 8	This is the commercial solid SIBX product, separate from potassium amyl xanthate and from a formulated aqueous collector feed. No mineral selectivity, recovery, reaction rate or operating dose is provided.
+observation	composition	IXOM SIBX composition bounds	SDS section 3 weight-percent bounds	The stated lower limit for SIBX is 90 weight percent and upper limit for sodium hydroxide is 1 weight percent. These are separate one-sided bounds, not an exact composition, uniform distribution or actual lot analysis. The unlisted balance is not assigned to water or other species.
+observation	solubility	IXOM SIBX approximate water-solubility entry at 20 C	SDS section 9 approximate mass-per-volume value	The approximately 500 g/L entry is retained at 293.15 K with unstated statistical uncertainty. The source does not identify whether the litre is solvent volume or final solution volume, test pressure, electrolyte composition or an equilibrium protocol. Preserve this reported quantity without converting it to a saturation mass fraction, density, temperature law or flotation dose.
+scalar	sibx-minimum	identity,composition	sibx_min	0.90	1	constant
+uncertainty	sibx-minimum	unstated	-	-	-	-
+validity	sibx-minimum	product	1	1	1
+validity	sibx-minimum	reference	1	1	1
+validity	sibx-minimum	lot_qualified	0	0	1
+scalar	naoh-maximum	identity,composition	naoh_max	0.01	1	constant
+uncertainty	naoh-maximum	unstated	-	-	-	-
+validity	naoh-maximum	product	1	1	1
+validity	naoh-maximum	reference	1	1	1
+validity	naoh-maximum	lot_qualified	0	0	1
+scalar	approximate-water-solubility	identity,solubility	solubility	500	g/L	constant
+uncertainty	approximate-water-solubility	unstated	-	-	-	-
+validity	approximate-water-solubility	product	1	1	1
+validity	approximate-water-solubility	reference	1	1	1
+validity	approximate-water-solubility	lot_qualified	0	0	1
+validity	approximate-water-solubility	temperature	293.15	293.15	K
+validity	approximate-water-solubility	pressure_known	0	0	1
+validity	approximate-water-solubility	volume_basis_known	0	0	1
+validity	approximate-water-solubility	approximate	1	1	1

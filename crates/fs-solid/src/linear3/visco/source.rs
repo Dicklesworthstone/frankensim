@@ -204,6 +204,7 @@ impl ViscoElements {
             elements,
             equilibrium,
             full_mass: self.full_mass.clone(),
+            reference_nodes_m: self.reference_nodes_m.clone(),
             full_dofs: self.full_dofs,
             internal_variables: self.internal_variables,
             static_constraint_error: self.static_constraint_error.clone(),

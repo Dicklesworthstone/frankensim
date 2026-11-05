@@ -120,6 +120,47 @@ fn balance(report: &ReactiveStepReport3d) {
 }
 
 #[test]
+fn g0_pressure_outlet_sets_reactive_interval_without_spending_a_coupling_retry() {
+    // This equal-caloric equilibrium cannot release heat. The lower pressure
+    // boundary itself sets a faster wave bound than the initial cell sound speed.
+    let (gas, mechanism) = mechanism(0.0, 2.0, 0.0);
+    let grid = CartesianGrid::new(2, 2, 2, 0.5, 0.5, 0.5).unwrap();
+    let mut flow = coupled(
+        field(
+            gas,
+            grid,
+            Boundaries3d {
+                x: AxisBoundaries::Ends {
+                    lower: BoundaryCondition::Reflecting,
+                    upper: BoundaryCondition::PressureOutlet { pressure_pa: 0.02 },
+                },
+                y: AxisBoundaries::Periodic,
+                z: AxisBoundaries::Periodic,
+            },
+            |_| ([0.5, 0.5], [0.0; 3], 1.0),
+        ),
+        mechanism,
+    );
+    let controls = ReactiveStepControl {
+        transport: StepControl {
+            cfl: 0.2,
+            reconstruction: fs_gas::dynamics::Reconstruction::FirstOrder,
+            maximum_halvings: 0,
+        },
+        maximum_coupling_retries: 0,
+    };
+    let old_cell_only_interval = 0.8 * controls.transport.cfl / (6.0 * 1.4_f64.sqrt());
+    let report = flow.step(Time::new(1.0), controls, || false).unwrap();
+    assert!(report.elapsed.value() < old_cell_only_interval);
+    assert_eq!(report.coupling_retries, 0);
+    assert_eq!(report.transport.halvings, 0);
+    assert!(report.transport.maximum_cfl <= controls.transport.cfl * (1.0 + 1e-13));
+    assert!(report.after.mass() < report.before.mass());
+    assert_eq!(report.chemistry.cell_solves, 2 * flow.flow().cell_count());
+    balance(&report);
+}
+
+#[test]
 fn g1_heat_release_changes_wave_cfl_and_matches_original_homogeneous_reactor() {
     let mut flow = uniform();
     let volume = flow.flow().grid().cell_volume();

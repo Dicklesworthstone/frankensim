@@ -28,6 +28,178 @@ fn quadratic(matrix: &Csr, values: &[f64]) -> f64 {
     values.iter().zip(product).map(|(a, b)| a * b).sum()
 }
 
+#[test]
+fn affine_density_preserves_mass_center_and_nonuniform_kinetic_energy() {
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let density = [2.0, 5.0, 7.0, 11.0];
+    let mass = weighted_mass_matrix(
+        &complex,
+        &geo,
+        0,
+        &[CellWeight::AffineScalar(density)],
+        Dims([-3, 1, 0, 0, 0, 0]),
+        LIMITS,
+        &mut || false,
+    )
+    .unwrap();
+    assert_eq!(mass.entry_dims(), Dims([0, 1, 0, 0, 0, 0]));
+    let mut rows = vec![0.0; 4];
+    mass.matrix().spmv(&[1.0; 4], &mut rows);
+    let volume = geo.vol_signed[0].abs();
+    let sum: f64 = density.iter().sum();
+    near(rows.iter().sum(), volume * sum / 4.0);
+    for a in 0..4 {
+        // First moment of mass, not uniform sharing of total element mass.
+        near(
+            rows[complex.tets[0][a] as usize],
+            volume * (sum + density[a]) / 20.0,
+        );
+    }
+    let velocity = [0.0, 1.0, 0.0, 0.0];
+    let a = complex.tets[0].iter().position(|&v| v == 1).unwrap();
+    near(
+        quadratic(mass.matrix(), &velocity),
+        volume * (sum + 2.0 * density[a]) / 60.0,
+    );
+    let averaged = weighted_mass_matrix(
+        &complex,
+        &geo,
+        0,
+        &[CellWeight::Scalar(sum / 4.0)],
+        Dims([-3, 1, 0, 0, 0, 0]),
+        LIMITS,
+        &mut || false,
+    )
+    .unwrap();
+    assert!(
+        (quadratic(mass.matrix(), &velocity) - quadratic(averaged.matrix(), &velocity)).abs()
+            > 1e-4
+    );
+}
+
+#[test]
+fn affine_weights_all_form_degrees_match_independent_volume_quadrature() {
+    use fs_feec::highorder::simplex::duffy_quadrature;
+    let (complex, positions) = two_tets();
+    let geo = element_geometry(&complex, &positions);
+    // Different cell values intentionally retain an interface jump.
+    let density = [[2.0, 5.0, 7.0, 11.0], [13.0, 3.0, 17.0, 2.0]];
+    let weights = density.map(CellWeight::AffineScalar);
+    let field = |degree, p: [f64; 3]| match degree {
+        0 => [1.0 + 0.2 * p[0] + p[2], 0.0, 0.0],
+        1 => [1.0 + p[2], 2.0, -0.5 - p[0]], // constant + rotation
+        2 => [1.0 + 0.3 * p[0], -2.0 + 0.3 * p[1], 0.5 + 0.3 * p[2]],
+        _ => [1.4, 0.0, 0.0],
+    };
+    for degree in 0..=3 {
+        let values = match degree {
+            0 => deram0(&positions, &|p| field(0, p)[0]),
+            1 => deram1(&complex, &positions, &|p| field(1, p)),
+            2 => deram2(&complex, &positions, &|p| field(2, p)),
+            _ => geo.vol_signed.iter().map(|v| 1.4 * v.abs()).collect(),
+        };
+        let mut expected = 0.0;
+        for (cell, tet) in complex.tets.iter().enumerate() {
+            for (lambda, w) in duffy_quadrature(4) {
+                let point = std::array::from_fn(|j| {
+                    (0..4)
+                        .map(|a| lambda[a] * positions[tet[a] as usize][j])
+                        .sum()
+                });
+                let rho: f64 = (0..4).map(|a| lambda[a] * density[cell][a]).sum();
+                let squared: f64 = field(degree, point).iter().map(|v| v * v).sum();
+                expected += w * 6.0 * geo.vol_signed[cell].abs() * rho * squared;
+            }
+        }
+        let mass = weighted_mass_matrix(
+            &complex,
+            &geo,
+            degree,
+            &weights,
+            Dims::NONE,
+            LIMITS,
+            &mut || false,
+        )
+        .unwrap();
+        near(quadratic(mass.matrix(), &values), expected);
+        let matrix = mass.matrix().to_dense();
+        let n = values.len();
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(matrix[i * n + j].to_bits(), matrix[j * n + i].to_bits());
+            }
+        }
+    }
+}
+
+#[test]
+fn affine_density_orientation_constant_limit_and_refusals() {
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let reversed = TetComplex::from_tets(4, vec![[0, 2, 1, 3]]);
+    let reversed_geo = element_geometry(&reversed, &positions);
+    for degree in 0..=3 {
+        let assemble = |complex, geo, weight| {
+            weighted_mass_matrix(
+                complex,
+                geo,
+                degree,
+                &[weight],
+                Dims::NONE,
+                LIMITS,
+                &mut || false,
+            )
+            .unwrap()
+            .matrix()
+            .to_dense()
+        };
+        let original = assemble(
+            &complex,
+            &geo,
+            CellWeight::AffineScalar([2.0, 5.0, 7.0, 11.0]),
+        );
+        let reverse = assemble(
+            &reversed,
+            &reversed_geo,
+            CellWeight::AffineScalar([2.0, 7.0, 5.0, 11.0]),
+        );
+        for (&a, &b) in original.iter().zip(&reverse) {
+            near(a, b);
+        }
+        assert_eq!(
+            assemble(&complex, &geo, CellWeight::AffineScalar([7.0; 4])),
+            assemble(&complex, &geo, CellWeight::Scalar(7.0)),
+        );
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                weighted_mass_matrix(
+                    &complex,
+                    &geo,
+                    degree,
+                    &[CellWeight::AffineScalar([1.0, bad, 2.0, 3.0])],
+                    Dims::NONE,
+                    LIMITS,
+                    &mut || false,
+                ),
+                Err(WeightedError::InvalidCoefficient { cell: 0, .. })
+            ));
+        }
+        assert!(matches!(
+            weighted_mass_matrix(
+                &complex,
+                &geo,
+                degree,
+                &[CellWeight::AffineScalar([1.0, 2.0, 3.0, 4.0])],
+                Dims::NONE,
+                LIMITS,
+                &mut || true,
+            ),
+            Err(WeightedError::Cancelled)
+        ));
+    }
+}
+
 fn tensor_energy(tensor: [[f64; 3]; 3], vector: [f64; 3]) -> f64 {
     (0..3)
         .map(|i| {

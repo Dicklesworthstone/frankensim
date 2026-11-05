@@ -1,0 +1,24 @@
+frankensim.matdb-source.v1
+observation	identity	Crystalline sodium metabisulfite Na2S2O5	NBS Table 99:Na, Sodium (Prepared 1980), Na2S2O5 state cr	The source molar mass is 190.1046 g/mol. The pure crystalline formula retains two sodium atoms, two sulfur atoms and five oxygen atoms. It is neither NaHSO3 nor an already dissolved bisulfite solution, nor commercial product of assumed purity.
+observation	standard	Only the supplied reference formation enthalpy	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The crystalline row gives formation enthalpy -1478.2 kJ/mol at 298.15 K. Formation Gibbs energy, entropy and heat capacity are absent and remain unavailable. The adjacent in-700-H2O row has a different enthalpy and solvent basis; it is not used for this solid. No equilibrium constant can be derived from the supplied enthalpy alone.
+observation	scope	Pure-source reference with finite hydrated dissolution	NBS sections 5.5-5.8; https://doi.org/10.18434/M32124	Claims require 298.15 K and 1 bar. A declared dissolution extent consumes one H2O and produces two Na+ and two HSO3- per formula unit. Source-reference reaction heat does not assert dissolution completion, solubility, mixing heat, commercial assay, catalyst kinetics, pH, oxygen transfer or cyanide-treatment efficiency. Statistical uncertainty and covariance are unstated.
+scalar	molar-mass	identity,scope	mass	190.1046	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-1478.2	kJ/mol	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1

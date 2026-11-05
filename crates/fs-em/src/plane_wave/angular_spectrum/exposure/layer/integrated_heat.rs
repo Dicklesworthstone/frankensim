@@ -29,15 +29,17 @@ pub enum AngularSpectrumHeatAreaQuadrature<'q> {
     /// products can alias even when the represented electric field is resolved.
     PeriodicCell,
     /// Continuous integral over the full original periodic cell. Difference
-    /// products pair equal signed Fourier modes; sum products pair opposite
-    /// modes. A negative Nyquist mode has no positive partner. This avoids
-    /// transverse product aliasing and requires no spatial synthesis FFTs.
+    /// products pair equal signed Fourier modes. With zero carrier, sum
+    /// products pair opposite modes; a negative Nyquist mode has no positive
+    /// partner. A nonzero carrier retains all real-field sum products through
+    /// the continuous rectangle integral over this cell. Proper-complex factors
+    /// retain the linear-work difference integral. No spatial FFT is needed.
     /// Depth integration still uses the explicitly authored quadrature below.
     ContinuousPeriodicCell,
     /// Exact continuous integral over a uniform axis-aligned rectangle in the
     /// original x/y coordinates. Both sum and difference spatial interference
     /// are retained, including between distinct Fourier modes. The rectangle
-    /// observes the original periodic continuation and may cross cell edges;
+    /// observes the original envelope and carrier and may cross cell edges;
     /// it does not impose a new field/material boundary at the patch edges.
     ContinuousRectangle(AngularSpectrumAperture),
     /// Per-cell areas [m²], each in [0,dx*dy]. Zero masks a cell; positive
@@ -72,6 +74,8 @@ pub struct AngularSpectrumIntegratedHeatLimits {
     /// ContinuousPeriodicCell visits Fourier modes instead of field samples.
     /// ContinuousRectangle visits N² ordered mode pairs plus one center-field
     /// product at each frequency pair and depth; it charges N²+1 rather than N.
+    /// ContinuousPeriodicCell uses that same charge for real banks with a
+    /// nonzero carrier; its proper-complex banks still cost N per pair/depth.
     pub maximum_spatial_point_frequency_pairs: usize,
     /// Selected reservoirs * sum F_r*(F_r+1)/2, cached once for all depths.
     pub maximum_reservoir_frequency_pairs: usize,
@@ -200,8 +204,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
     /// full/partial original cells or a continuous rectangle. Each bank-frequency
     /// plane is reconstructed once per depth, independent of the reservoir count.
     /// ContinuousPeriodicCell retains its modal vectors and integrates signed
-    /// Fourier products directly; a continuous rectangle retains all mode pairs
-    /// and their original spatial phases. Sampled supports synthesize fields.
+    /// Fourier products directly. Its nonzero-carrier real banks and continuous
+    /// rectangles retain all mode pairs and original spatial phases. Sampled
+    /// supports synthesize fields.
     ///
     /// Reservoir transfer products are cached per frequency pair; spatial
     /// E_f dot conj(E_g) and E_f dot E_g are contracted once and then weighted
@@ -239,6 +244,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             0
         };
         let mut pair_count = 0usize;
+        let mut real_pair_count = 0usize;
         let mut generated = 0usize;
         let mut maximum_pairs = 0usize;
         let mut maximum_frequencies = 0usize;
@@ -250,6 +256,11 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 pair_count = pair_count
                     .checked_add(pairs)
                     .ok_or_else(|| bad("integrated heat pair work overflows"))?;
+                if !proper {
+                    real_pair_count = real_pair_count
+                        .checked_add(pairs)
+                        .ok_or_else(|| bad("integrated heat real-pair work overflows"))?;
+                }
                 maximum_pairs = maximum_pairs.max(pairs);
                 maximum_frequencies = maximum_frequencies.max(f);
                 generated = pairs
@@ -267,11 +278,25 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
             AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
                 | AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(_)
         );
+        let shifted_cell = matches!(
+            quadrature.transverse,
+            AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell
+        ) && self.anchor.carrier_rad_m != [0.0; 2]
+            && real_pair_count != 0;
         let rectangle = match quadrature.transverse {
             AngularSpectrumHeatAreaQuadrature::ContinuousRectangle(aperture)
                 if active && pair_count != 0 =>
             {
                 Some(aperture)
+            }
+            AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell if shifted_cell => {
+                Some(AngularSpectrumAperture::try_new(
+                    [0.0; 2],
+                    [
+                        volume.grid.width as f64 * volume.grid.spacing_m[0],
+                        volume.grid.height as f64 * volume.grid.spacing_m[1],
+                    ],
+                )?)
             }
             _ => None,
         };
@@ -292,8 +317,20 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
         } else {
             volume.points
         };
-        let spatial_work = pair_count
+        let rectangle_pairs = if shifted_cell {
+            real_pair_count
+        } else if rectangle.is_some() {
+            pair_count
+        } else {
+            0
+        };
+        let spatial_work = rectangle_pairs
             .checked_mul(spatial_points)
+            .and_then(|v| {
+                (pair_count - rectangle_pairs)
+                    .checked_mul(volume.points)
+                    .and_then(|linear| v.checked_add(linear))
+            })
             .and_then(|v| v.checked_mul(depths))
             .ok_or_else(|| bad("integrated heat spatial work overflows"))?;
         let reservoir_work = pair_count
@@ -361,8 +398,9 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                 rectangle::PreparedRectangle::prepare(
                     volume.grid,
                     aperture,
-                    |i| self.anchor.modes[i].kx,
-                    |i| self.anchor.modes[i * volume.grid.width].ky,
+                    self.anchor.carrier_rad_m,
+                    |i| self.anchor.envelope_wavenumber(0, i),
+                    |i| self.anchor.envelope_wavenumber(1, i),
                     &mut cancelled,
                 )
             })
@@ -400,7 +438,7 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumExposureLayer<'e, 'b, 's, 'm> {
                         cancelled,
                     )
                 };
-                if let Some(rectangle) = &rectangle {
+                if let Some(rectangle) = rectangle.as_ref().filter(|_| !shifted_cell || !proper) {
                     rectangle.contract_bank(
                         &bank.frequencies,
                         proper,

@@ -41,7 +41,10 @@ use super::{
     SpeciesNetworkHeatTransfer, SpeciesNetworkSolve, SpeciesNetworkStep, SpeciesNetworkTransfer,
     inventory,
 };
-use dusty_gas::{DustyGasNetworkError, DustyGasNetworkLink, DustyGasNetworkLinkStep};
+use dusty_gas::{
+    DustyGasNetworkError, DustyGasNetworkLink, DustyGasNetworkLinkStep,
+    LayeredDustyGasNetworkLink, LayeredDustyGasNetworkLinkStep,
+};
 use effusion::{EffusionNetworkError, EffusionNetworkLink, EffusionNetworkLinkStep};
 use membrane::{MembraneNetworkError, MembraneNetworkLink, MembraneNetworkLinkStep};
 use porous::{PorousNetworkError, PorousNetworkLink, PorousNetworkLinkStep};
@@ -61,6 +64,7 @@ pub struct GasTransportPaths<'a> {
     pub porous: &'a [PorousNetworkLink<'a>],
     pub membranes: &'a [MembraneNetworkLink<'a>],
     pub dusty_gas: &'a [DustyGasNetworkLink<'a>],
+    pub layered_dusty_gas: &'a [LayeredDustyGasNetworkLink<'a>],
     pub effusion: &'a [EffusionNetworkLink<'a>],
 }
 
@@ -165,6 +169,8 @@ pub struct GasTransportStep {
     pub membranes: Vec<MembraneNetworkLinkStep>,
     /// Coupled fluxes in the stationary-solid frame, without a zero-sum constraint.
     pub dusty_gas: Vec<DustyGasNetworkLinkStep>,
+    /// Ordered heterogeneous porous stacks using integrated Dusty-Gas resistance.
+    pub layered_dusty_gas: Vec<LayeredDustyGasNetworkLinkStep>,
     /// Both original molecular beams and their kinetic energy convention.
     pub effusion: Vec<EffusionNetworkLinkStep>,
     /// Partial enthalpies and separately identified molecular energy corrections
@@ -225,6 +231,10 @@ impl GasTransportStep {
                 .any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
             || self
                 .dusty_gas
+                .iter()
+                .any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
+            || self
+                .layered_dusty_gas
                 .iter()
                 .any(|row| row.parcels.iter().any(|id| !parcels.contains_key(id)))
             || self

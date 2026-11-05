@@ -1293,6 +1293,12 @@ refuses unresolvable radius/separation or time ranges. Six G0/G1/G3 tests cover
 interior crossings, oblique entry, grazing, misses, initial-contact modes,
 near-touch cancellation, rotation, and large/small length scaling.
 
+The transverse geometry uses compensated differences of products. Parallel
+input directions therefore retain zero cross product instead of acquiring a
+rounding offset that grows as separation/radius when the contact normal is
+formed. A rotated central-flight regression checks the normal and absence of
+an artificial orbital angular impulse across large and small length scales.
+
 This is analytic floating-point sphere geometry. It does not certify arbitrary
 shapes, accelerating relative trajectories, or general motion tubes; the
 mechanics owner still checks the actual event geometry and momentum response.
@@ -1746,7 +1752,7 @@ trials atomic and runtime continuation allocation-free.
 
 This is a quasistatic failure handoff under constant mode-independent adhesion
 energy. It does not resolve inertial snap trajectories, post-slip JKR behavior,
-partial slip, changing shear-stage motion or empirical mixed-mode toughness.
+partial slip or empirical mixed-mode toughness.
 Six focused original-source tests recover the pure-normal finite-spring limit,
 check complete energy gradients/stiffness and independent normal-work
 quadrature, retain release across subdivision, and cover source/refusal/retry.
@@ -1765,6 +1771,65 @@ temperatures and spring work, thermal-cycle recovery, detached release retention
 and atomic source/domain/stability/cancellation refusals. This is endpoint
 continuation; an intervening thermal path, thermal expansion and snap dynamics
 remain outside the model.
+
+`JkrPullOffFixture::advance_tangential_stage` now follows a complete straight
+vector shear-stage segment while holding the actual accepted normal stage.
+Original sources and apparatus stiffnesses stay fixed; contact area, normal
+tip motion and both spring stores follow the same coupled equilibrium. Actual
+actuator work is the total potential change, with no normal-stage work or new
+release. A single connected stable branch is established from the strictly
+log-concave relation between squared shear-stage magnitude and contact radius.
+Endpoint slip/fold screens and a conservative interior minimum-magnitude check
+also reject reversals that would exceed the radius cap between valid endpoints.
+One original evaluation budget covers the old state, the single successor
+construction, the interior check and the new equilibrium. Exact no-ops reuse
+the fixture; detached motion preserves cumulative release and never reattaches.
+Five focused regressions cover independent force-work quadrature, reversal and
+rotation, an interior radius violation, first slip/fold and atomic refusals,
+and detached history. This owner refuses an inadmissible whole segment; it does
+not manufacture post-slip or post-fold motion.
+
+`advance_tangential_stage_until_event` now locates the first sourced gross-slip
+or apparatus-radius boundary on that same vector loading segment. Analytic
+normal-spring elimination and bounded scalar radius roots avoid rebuilding a
+fixture at every probe. A stable quadratic chooses the outward intersection
+after any initial unloading/reversal. The result retains the canonical last
+admitted response, a numerical critical-radius bracket, actual reversible
+actuator work and unused vector travel. A relative 128-epsilon stage guard
+keeps the response on the supported side of the numerical boundary; it does
+not regularize friction or claim exact radius accuracy at a fold. One original
+work budget covers all queries and the single successor. Physical event kinds
+remain distinct from source/applicability errors. Boundary storage and prior
+cumulative release stay owned; no post-slip motion, snap, new release or heat
+destination is inferred. Four focused tests compare against the independent
+normal-withdrawal boundary, check reaction-work quadrature, vector reversal and
+subdivision, initial/detached history, and atomic domain/budget/cancel refusal.
+
+`withdraw_and_shear_until_event` advances the normal and both tangential stages
+SIMULTANEOUSLY on one straight path. Attached paths require nonincreasing normal
+stage and nondecreasing shear-stage magnitude from the start; a nonmonotone
+combined path refuses rather than trusting its endpoints. Eliminating both tips
+makes the original Griffith residual a quadratic in path fraction at each
+radius. On its tensile domain that residual is strictly convex in radius and
+nondecreasing along the declared loading direction. The retained radius thus
+decreases to a unique fold, while the original static-capacity ratio increases.
+Bounded scalar radius roots locate the first slip/fold with no source query or
+fixture reconstruction inside the search. Original radius/applicability screens,
+decreasing indentation and convex nominal-strain bounds admit the entire prefix.
+
+The `JkrCombinedStageTransition` carries the canonical source/response pair,
+critical-radius bracket, event fraction and all THREE untraversed stage
+increments. Its work is the change in complete contact-plus-apparatus potential,
+including `N dD_n` as well as both shear-stage contributions. Numerical retreat
+from the event uses a 128-epsilon stage-coordinate allowance; held coordinates
+remain bit-exact. All queries and the single successor share the original work
+budget. Detached paths keep their cumulative release and never rebond; attached
+event handoffs retain storage without inventing slip, snap dynamics or heat.
+Four native G1/G3/G4 regressions check independent normal-withdrawal boundaries,
+three-component reaction-work quadrature, subdivision and tangent rotation,
+single-axis recovery, initial/zero-capacity limits, detached history, and atomic
+nonmonotone/source/budget/cancellation refusal. The source-selected native
+pull-off test target passes all 23 tests, including the previous 19 regressions.
 
 ## Dynamic wetting, contact-line pinning and mechanical adhesion
 
@@ -2424,6 +2489,28 @@ integrator, or a geometry/CCD owner.
 Focused exact-source tests exercise loaded rest, static/sliding/breakaway
 friction, full off-diagonal inertia, shared contacts, elastic midpoint storage,
 fixed derivative actions, final replay, errors, cancellation and resource limits.
+
+### Work-conjugate sustained directional friction
+
+`sustained::elliptic::EllipticForceCoordinates` prepares an oriented Coulomb
+ellipse for the same sustained solver. Physical tangent force is `f = A q`;
+physical slip/velocity is transformed by `A^T`, retaining `f dot s = q dot s'`.
+The normalized principal columns retain the original directional coefficients
+without forming a cancellation-prone symmetric squared metric. Normal force
+and gap are unchanged. The complete original mechanical trace and its transpose
+must both use this map; applying it only to a friction limit would change the
+physical law. The fs-solid dense, complete-spectrum and prescribed-support
+owners consume these coordinates through their original held-force responses.
+
+Equal coefficients use exact identity, including zero friction. Unequal
+coefficients must both be positive with a representable inverse. A singly-zero
+ellipse is explicitly refused in this sustained lane; unlike the separate
+instantaneous impact owner, it has no auxiliary free-axis construction. Invalid
+axes, coefficients and non-finite force/path transformations refuse. The map
+does not introduce material stiffness, thermal allocation or a second dynamics
+solver. Native contact/path admission and original work checks remain mandatory.
+Focused coordinate tests specify ellipse support, conjugate work, inverse
+mapping, exact isotropic reduction and singular-input refusal.
 
 
 ## Complete simultaneous impulse response and work reductions

@@ -842,6 +842,14 @@ actual drifted endpoint and returns its original load receipt with its
 wrench. Gravity acts once through the native owner. Each body torque uses
 its own endpoint axes, so its world impulse is rotated at that endpoint.
 
+The staged owner retains the linear half-kick in double-double precision until
+both the position contraction and endpoint kick finish. Representable resultant
+impulses survive half-kicks below the stored momentum's rounding threshold;
+cancelling endpoint forces also retain the original momentum. Position
+is rounded after adding the original position, preserving a small displacement
+when large drift and origin offsets cancel. Callback views and accepted states
+keep their original `f64` representation; no extra substeps or allocation occur.
+
 For smooth configuration-only loads this is a symmetric second-order
 splitting. Spin plus orbital momentum changes only through the
 two physical endpoint impulses, up to floating-point error. The free map
@@ -1395,6 +1403,15 @@ reductions must be finite and representable. A compiled load can be reused at
 any body attitude; both moment evaluation and each subsequent step have
 constant work independent of the number of input points. This is an algorithmic
 complexity statement, not a machine-specific performance measurement.
+
+First moments retain both multiplication and summation tails using the existing
+double-double arithmetic owner. Torque contractions, midpoint load/Jacobian
+evaluation and endpoint force work carry those tails until forming the native
+resultant. Thus nearly radial forces and large opposing point loads retain a
+representable residual couple instead of silently losing its angular impulse.
+Exactly cancelling colocated forces still produce zero force and torque. This
+does not add precision to the stored native state or certify arbitrary dynamic
+range; nonfinite products and reductions retain their original refusals.
 
 `RigidBodyIntegrator::step_spatial` delegates its endpoint momentum half-kicks
 and Hamiltonian free-rotation map to the original `step_verlet_with` owner.
@@ -4781,6 +4798,35 @@ recoil/storage and pose-owned continuation, integrated-area attachment and
 detachment with all cross responses, static support, tangent gauge/body indices,
 and source/geometry/torsion/sliding/cancellation/budget refusal with retry.
 Native execution remains subject to the existing dependency build limitation.
+
+## Native JKR normal attachment and pull-off
+
+`tangential_friction::adhesive::jkr_normal_motion::PreparedRigidJkrPair`
+condenses actual masses, full inertia tensors and reaction arms into the
+original `fs-contact` JKR normal trajectory. Geometry markers and an immutable
+approach datum authenticate accepted source history. Equal/opposite forces act
+at the common midpoint reaction plane. The original impulse and its first time
+moment restore native momenta and COM, angular and marker travel through smooth
+motion, capture, reversal and pull-off. A whole-interval midpoint impulse does
+not replace that event-resolved travel.
+
+Independent checks close native kinetic work, integrated original contact work,
+normal storage plus explicit snap release, individual impulses and total pair
+linear/angular momentum at the held geometry. Snap release supplies no impulse
+and is not automatically assigned to heat. Successful preparation is stack-only;
+original scalar substep/root/event budgets bound the trajectory. Cancellation or
+late refusal publishes no body or history update; application publishes both
+body momenta and the source branch together.
+
+This remains frictionless JKR with one fixed normal Jacobian. No tangential force
+or free spin couple is supplied. The pose owner must consume travel and refresh
+geometry before continuation; stale geometry refuses. No finite-rotation pose
+integration, contact discovery, hidden support, junction shear or measured
+specimen calibration is claimed. The six G1/G3/G4 groups in
+`tests/adhesive_jkr_normal_motion.rs` exercise exact detached flight, analytic
+initial attraction and snap/rebound energy, full off-axis inertia, first-moment
+travel, world-frame/body-index covariance, geometry-owned continuation and
+source/budget/cancellation refusal with deterministic retry.
 
 ## Prepared thermal trials of adhesive transients
 

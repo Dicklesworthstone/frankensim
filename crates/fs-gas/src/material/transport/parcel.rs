@@ -138,6 +138,26 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
         &self.face
     }
 
+    /// Re-admit an actual parcel after an enclosing reaction, heat or motion step.
+    ///
+    /// Every active species must retain this owner's original caloric source.
+    /// The original face qualifies its actual composition, temperature, pressure,
+    /// binary diffusion and thermal-cross sources without transporting inventory
+    /// or advancing time. Only reusable workspace and normal last-query receipts
+    /// may change, including on a refused qualification.
+    pub fn qualify_parcel(
+        &mut self,
+        parcel: &ClosedGasParcel,
+        controls: MaxwellStefanSolveV1,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ParcelMolecularError> {
+        poll(&mut cancelled)?;
+        let partial = self.partial_densities(parcel)?;
+        self.face
+            .qualify_primitive(primitive(parcel, &partial), controls, &mut cancelled)?;
+        poll(&mut cancelled)
+    }
+
     /// Sample every continuum and native path from one unchanged inventory.
     ///
     /// Continuum faces use zero bulk velocity and no viscous work. Native paths
@@ -177,14 +197,7 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
             &mut cancelled,
         )?;
         for &id in sampled.traces.keys() {
-            poll(&mut cancelled)?;
-            let parcel = &candidate.parcels()[&id];
-            let partial = self.partial_densities(parcel)?;
-            self.face.qualify_primitive(
-                primitive(parcel, &partial),
-                controls.face,
-                &mut cancelled,
-            )?;
+            self.qualify_parcel(&candidate.parcels()[&id], controls.face, &mut cancelled)?;
         }
         poll(&mut cancelled)?;
         let (parcels, transport) = candidate.into_parts();

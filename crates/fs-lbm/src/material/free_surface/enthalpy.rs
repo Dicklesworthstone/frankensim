@@ -924,7 +924,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
     #[allow(clippy::too_many_arguments)]
     fn prepare_enthalpy_tick_with_frame(
         &self,
-        heated: BTreeMap<MassLocation3, f64>,
+        mut heated: BTreeMap<MassLocation3, f64>,
         external: f64,
         viscous: f64,
         body_heat: f64,
@@ -960,9 +960,25 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let masses = self.flow.lattice.mass_snapshot();
         let mass_unit = self.flow.scaling.mass_unit_kg();
         let before = total(&masses, &self.h, mass_unit)?;
-        let mut resolved = self.resolve_states_with_surface(
-            &self.flow.lattice, &heated, &masses, &mut surface, gate,
-        )?;
+        let graph_wetting = self.wetting.is_some()
+            && self.height_graph_thermocapillary_surface().is_some();
+        if self.uniform_thermal_capillarity() || graph_wetting {
+            // Storage-free interface ghosts follow adjacent real liquid; an
+            // old ghost temperature cannot create a fictitious sigma gradient
+            // after homogeneous heating. No physical mass or heat is changed.
+            extend_empty_ghosts(&masses, &mut heated, &self.h, true)?;
+        }
+        let mut resolved = self.resolve_liquid_states(&self.flow.lattice, &heated, &masses, gate)?;
+        // A contact-angle graph needs its CURRENT thermal boundary before
+        // reconstructing surface normals and Marangoni stress. This is the
+        // existing private candidate, not an extra population clone.
+        let mut lattice = self.flow.lattice.clone();
+        let prepared_wetting = if graph_wetting {
+            self.prepare_wetting(&mut lattice, &resolved.states, wetting_outer_gas, gate)?
+        } else {
+            None
+        };
+        self.resolve_surface_fields(&lattice, &mut resolved, &mut surface, gate)?;
         if let Some(additional) = additional_forces {
             let reference = self.flow.lattice.reference_force();
             let forces = resolved.forces.get_or_insert_with(|| masses.keys().filter_map(|location| {
@@ -987,7 +1003,6 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         // Native activation/conversion and the companion solve operate on one
         // private candidate. No accepted populations, carry or source state move
         // until every endpoint query and conservation gate has passed.
-        let mut lattice = self.flow.lattice.clone();
         if let Some(frame) = frame {
             self.prepare_frame_forces(&mut lattice, &resolved, frame, gate)?;
             // The shared frame owner has already installed the COMPLETE force;
@@ -997,9 +1012,9 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         if let Some(surface_tensions) = resolved.surface_tensions {
             lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
-        let prepared_wetting = self.prepare_wetting(
-            &mut lattice, &resolved.states, wetting_outer_gas, gate,
-        )?;
+        let prepared_wetting = if graph_wetting { prepared_wetting } else {
+            self.prepare_wetting(&mut lattice, &resolved.states, wetting_outer_gas, gate)?
+        };
         let (mut trace, wall_exchange) = match wall {
             Some(boundary) => {
                 let (trace, exchange) = boundary.step(
@@ -1016,7 +1031,7 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
                 None,
             ),
         };
-        if self.thermocapillary.is_some() {
+        if self.thermocapillary.is_some() && !self.uniform_thermal_capillarity() {
             // Resolve native conversion hysteresis through the SAME mass
             // routes before reconstructing geometry or advecting enthalpy.
             // The candidate stays private until all endpoint gates pass.
@@ -1025,10 +1040,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         admit_masses(&trace.after, self.controls.max_cells)?;
         let (mut h, outcome) = transport::advect(&trace, &heated, self.controls, gate)?;
         h.retain(|key, _| trace.after.contains_key(key));
-        extend_empty_ghosts(&trace.after, &mut h, &heated)?;
-        let endpoint = self.resolve_states_with_surface(
-            &lattice, &h, &trace.after, &mut surface, gate,
+        extend_empty_ghosts(
+            &trace.after, &mut h, &heated, self.uniform_thermal_capillarity() || graph_wetting,
         )?;
+        let mut endpoint = self.resolve_liquid_states(&lattice, &h, &trace.after, gate)?;
+        let accepted_wetting = if graph_wetting {
+            self.endpoint_wetting(prepared_wetting.as_ref(), &mut lattice, &endpoint.states, gate)?
+        } else {
+            None
+        };
+        self.resolve_surface_fields(&lattice, &mut endpoint, &mut surface, gate)?;
         if let Some(surface_tensions) = endpoint.surface_tensions {
             lattice.rebind_surface_tensions(surface_tensions, gate)?;
         }
@@ -1054,19 +1075,8 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         let magnetic_motion = self.electrical.as_ref().map(|core|
             core.admit_motion(&self.flow.lattice, &lattice, &self.flow.scaling, gate)
         ).transpose()?.flatten();
-        let accepted_wetting = match prepared_wetting {
-            Some(binding) => {
-                let temperatures = wetting::temperatures(
-                    &endpoint.states, self.law.temperature_axis(), gate,
-                )?;
-                Some(binding.at_endpoint(
-                    &mut lattice,
-                    &self.flow.scaling,
-                    Some((self.law.temperature_axis(), &temperatures)),
-                    gate,
-                )?)
-            }
-            None => None,
+        let accepted_wetting = if graph_wetting { accepted_wetting } else {
+            self.endpoint_wetting(prepared_wetting.as_ref(), &mut lattice, &endpoint.states, gate)?
         };
         let endpoint_masses = lattice.mass_snapshot();
         admit_masses(&endpoint_masses, self.controls.max_cells)?;
@@ -1137,15 +1147,16 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
         masses: &BTreeMap<MassLocation3, f64>,
         gate: &CancelGate,
     ) -> Result<ResolvedFlowMaterials, Error> {
-        self.resolve_states_with_surface(lattice, h, masses, &mut None, gate)
+        let mut resolved = self.resolve_liquid_states(lattice, h, masses, gate)?;
+        self.resolve_surface_fields(lattice, &mut resolved, &mut None, gate)?;
+        Ok(resolved)
     }
 
-    fn resolve_states_with_surface(
+    fn resolve_liquid_states(
         &self,
         lattice: &FreeSurface3,
         h: &BTreeMap<MassLocation3, f64>,
         masses: &BTreeMap<MassLocation3, f64>,
-        surface: &mut Option<&mut SurfaceTensionResolver<'_>>,
         gate: &CancelGate,
     ) -> Result<ResolvedFlowMaterials, Error> {
         let mut states = BTreeMap::new();
@@ -1196,20 +1207,30 @@ impl<'s, 'm> MaterialFreeSurfaceEnthalpy3<'s, 'm> {
             }
             states.insert(location, state);
         }
-        let solved_tensions = match surface.as_mut() {
-            Some(resolve) => Some(resolve(lattice, &states, gate)?),
-            None => None,
-        };
-        let surface_tensions = self.resolve_thermocapillarity(
-            lattice, &states, &mut forces, solved_tensions, gate,
-        )?;
         Ok(ResolvedFlowMaterials {
             states,
             tau,
             forces,
-            surface_tensions,
+            surface_tensions: None,
             rheology,
         })
+    }
+
+    fn resolve_surface_fields(
+        &self,
+        lattice: &FreeSurface3,
+        resolved: &mut ResolvedFlowMaterials,
+        surface: &mut Option<&mut SurfaceTensionResolver<'_>>,
+        gate: &CancelGate,
+    ) -> Result<(), Error> {
+        let solved_tensions = match surface.as_mut() {
+            Some(resolve) => Some(resolve(lattice, &resolved.states, gate)?),
+            None => None,
+        };
+        resolved.surface_tensions = self.resolve_thermocapillarity(
+            lattice, &resolved.states, &mut resolved.forces, solved_tensions, gate,
+        )?;
+        Ok(())
     }
 }
 
@@ -1317,6 +1338,7 @@ fn extend_empty_ghosts(
     masses: &BTreeMap<MassLocation3, f64>,
     h: &mut BTreeMap<MassLocation3, f64>,
     old_h: &BTreeMap<MassLocation3, f64>,
+    refresh_existing: bool,
 ) -> Result<(), Error> {
     let donors: BTreeMap<_, _> = masses
         .iter()
@@ -1329,12 +1351,15 @@ fn extend_empty_ghosts(
         })
         .collect();
     for (&key, &mass) in masses {
-        if mass != 0.0 || key == MassLocation3::Carry || h.contains_key(&key) {
+        if mass != 0.0 || key == MassLocation3::Carry
+            || !refresh_existing && h.contains_key(&key)
+        {
             continue;
         }
         let p = FreeSurface3::transport_coordinates(key).expect("cell");
         let mut energy = 0.0;
         let mut weight = 0.0;
+        let mut reference = None;
         for &(dx, dy, dz) in &crate::d3q19::E3[1..] {
             let q = [
                 p[0] as i64 + i64::from(dx),
@@ -1345,12 +1370,14 @@ fn extend_empty_ghosts(
                 continue;
             }
             if let Some(&(m, specific)) = donors.get(&q.map(|v| v as usize)) {
-                energy += m * specific;
+                // Difference-first interpolation preserves a uniform thermal
+                // field exactly even when neighboring liquid masses differ.
+                energy += m * (specific - *reference.get_or_insert(specific));
                 weight += m;
             }
         }
         let value = if weight > 0.0 {
-            energy / weight
+            reference.expect("positive donor weight") + energy / weight
         } else {
             *old_h.get(&key).ok_or(Error::Invalid(
                 "new empty interface has no supported thermal neighbor",

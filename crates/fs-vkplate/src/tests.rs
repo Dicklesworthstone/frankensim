@@ -121,7 +121,7 @@ fn g0_affine_mount_energy_and_admission() {
 
 #[test]
 fn g3_streaming_filter_matches_offline_phase_and_clones() {
-    for factor in [1,2,3,4,6,8] {
+    for factor in [1,2,3,4,6,8,12,16,24,32] {
         let input:Vec<_>=(0..512*factor).map(|i| (0.31*i as f64).sin()+0.2*(1.13*i as f64).cos()).collect();
         let reference=decimate(&input,factor);
         let mut filter=StreamingDecimator::new(factor);
@@ -136,7 +136,7 @@ fn g3_streaming_filter_matches_offline_phase_and_clones() {
             }
             if i%factor==0 { output.push(filter.value()); }
         }
-        let delay=if factor==1 {0}else{16};
+        let delay=if factor==1 {0}else{DECIMATION_RADIUS_FRAMES};
         for (i,x) in output.iter().enumerate().skip(delay) {
             assert_eq!(x.to_bits(),reference[i-delay].to_bits(),"factor {factor}, frame {i}");
         }
@@ -147,7 +147,7 @@ fn g3_streaming_filter_matches_offline_phase_and_clones() {
 fn g3_live_internal_clock_matches_offline_and_arbitrary_output_blocks() {
     let mut a=crate::live::Live::new("snare-off",8.0).unwrap();
     assert!(a.ins.rate>=96_000.0);
-    assert_eq!(a.filter_latency_frames(),16);
+    assert_eq!(a.filter_latency_frames(),DECIMATION_RADIUS_FRAMES);
     a.strike(0.3*a.radius,0.0,2.0);
     let mut b=a.clone();
     let mut raw=a.ins.clone();
@@ -157,7 +157,9 @@ fn g3_live_internal_clock_matches_offline_and_arbitrary_output_blocks() {
     let reference=decimate(&source,factor);
     let mut x=vec![0.0_f32;512];a.render(&mut x,1.0);
     assert!(x.iter().any(|x| *x!=0.0));
-    for i in 16..512 { assert_eq!(x[i].to_bits(),(reference[i-16] as f32).to_bits()); }
+    for i in DECIMATION_RADIUS_FRAMES..512 {
+        assert_eq!(x[i].to_bits(),(reference[i-DECIMATION_RADIUS_FRAMES] as f32).to_bits());
+    }
     let mut y=vec![0.0_f32;512];
     b.render(&mut y[..193],1.0);
     let mut copied=b.clone();
@@ -202,15 +204,19 @@ fn g3_cavity_port_floor_pressure_matches_direct_plus_image() {
         ins.mics.extend([reflected, Mic::new(pos), Mic::new(image)]);
         ins.prepare();
 
-        assert_eq!(ins.mics[0].ptaps.len(), direct_paths + 1);
-        assert_eq!(ins.mics[1].ptaps.len(), direct_paths);
-        assert_eq!(ins.mics[2].ptaps.len(), 1);
-        let (_, image_delay, lo, hi) = ins.mics[2].ptaps[0];
+        // Each noninteger propagation filter is exported as two tap pairs.
+        assert_eq!(ins.mics[0].ptaps.len(), 2 * (direct_paths + 1));
+        assert_eq!(ins.mics[1].ptaps.len(), 2 * direct_paths);
+        assert_eq!(ins.mics[2].ptaps.len(), 2);
+        let image_delay = ins.mics[2].ptaps[0].1;
         let distance = image.iter().map(|x| x * x).sum::<f64>().sqrt();
-        assert_eq!(image_delay, (distance / ins.gas.sound_speed * ins.rate).floor() as usize);
-        assert!(((lo + hi) * 2.0 * PI * distance / ins.gas.density - 1.0).abs() < 1e-14);
-        assert!(lo >= 0.0 && hi >= 0.0, "rigid pressure reflection preserves polarity");
-        assert!(ins.mics[0].ring.len() > image_delay + 1);
+        let gain = ins.mics[2].ptaps.iter().map(|t| t.2 + t.3).sum::<f64>();
+        let delay_moment = ins.mics[2].ptaps.iter()
+            .map(|t| t.1 as f64 * t.2 + (t.1 + 1) as f64 * t.3).sum::<f64>() / gain;
+        assert!((delay_moment - distance / ins.gas.sound_speed * ins.rate).abs() < 1e-12);
+        assert!((gain * 2.0 * PI * distance / ins.gas.density - 1.0).abs() < 1e-14);
+        assert!(gain > 0.0, "rigid pressure reflection preserves polarity");
+        assert!(ins.mics[0].ring.len() > image_delay + 3);
 
         let mut sample = [0.0; 3];
         let mut image_peak = 0.0_f64;
@@ -221,13 +227,115 @@ fn g3_cavity_port_floor_pressure_matches_direct_plus_image() {
             assert!((sample[0] - expected).abs() <= 1e-13 * expected.abs().max(1.0),
                 "floor pressure must superpose direct and retarded image: {sample:?}");
             if n < image_delay {
-                assert_eq!(sample[2], 0.0, "the reflected sound cannot arrive early");
+                assert_eq!(sample[2], 0.0, "no reflected sound outside the causal interpolation support");
             }
             image_peak = image_peak.max(sample[2].abs());
             total_peak = total_peak.max(sample[0].abs());
         }
         assert!(image_peak > 1e-6 && total_peak > 1e-6, "the reflection must be live");
     }
+}
+
+fn oscillating_radiating_patch(facing: f64) -> Instrument {
+    let mut ins = Instrument::new(48_000.0);
+    let mut body = Body::point("radiating patch", 0.002);
+    body.h = 0.02;
+    body.area = body.h * body.h;
+    body.radiates = true;
+    body.facing = facing;
+    body.w[0] = 1e-4;
+    body.wp[0] = body.w[0];
+    body.sync();
+    let source = ins.add(body);
+    ins.links.push(Link { a: (source, 0), b: None, k: 100.0, c: 0.0 });
+    ins
+}
+
+#[test]
+fn g3_unbaffled_opposite_faces_have_equal_and_opposite_pressure() {
+    for facing in [1.0, -1.0] {
+        let mut ins = oscillating_radiating_patch(facing);
+        // The symmetry plane belongs to the actual rest surface, not its origin.
+        ins.bodies[0].origin[2] = 0.25;
+        ins.bodies[0].rest_z[0] = 0.125;
+        let z = 0.25 + facing * 0.125;
+        let front = [0.3, 0.4, z + facing * 0.75];
+        let back = [0.3, 0.4, z - facing * 0.75];
+        ins.mics.extend([Mic::new(front), Mic::new(back)]);
+        for pos in [front, back, [1.0, 1.0, z]] {
+            let mut mic = Mic::new(pos);
+            mic.unbaffled = Some(0.08);
+            ins.mics.push(mic);
+        }
+        let image = ins.image();
+        assert_eq!(image.mics[0].taps.len(), 2, "a baffle retains its facing hemisphere");
+        assert!(image.mics[1].taps.is_empty(), "a baffle blocks its back hemisphere");
+        assert!(image.mics[4].taps.is_empty(), "the sheet plane is an odd-symmetry node");
+        let front_taps = &image.mics[2].taps;
+        let back_taps = &image.mics[3].taps;
+        assert_eq!(front_taps.len(), 2);
+        assert_eq!(front_taps.len(), back_taps.len());
+        for (front_tap, back_tap) in front_taps.iter().zip(back_taps) {
+            assert_eq!(front_tap.2, back_tap.2);
+            assert_eq!(front_tap.3, -back_tap.3);
+            assert_eq!(front_tap.4, -back_tap.4);
+        }
+        let first_arrival = front_taps[0].2;
+        // Signed taps also reach the exported stepper; no additional runtime state is needed.
+        assert_eq!(image.mics[3].taps, ins.mics[3].taps);
+
+        let mut sample = [0.0; 5];
+        let mut peak = 0.0_f64;
+        for n in 0..512 {
+            ins.step(&mut sample);
+            assert_eq!(sample[2], -sample[3], "opposite pressure on sample {n}");
+            assert_eq!(sample[1], 0.0);
+            assert_eq!(sample[4], 0.0);
+            if n < first_arrival { assert_eq!(sample[2], 0.0); }
+            peak = peak.max(sample[2].abs());
+        }
+        assert!(peak > 1e-9, "the unbaffled source must actually radiate");
+    }
+}
+
+#[test]
+fn g3_unbaffled_floor_carries_the_delayed_opposite_face() {
+    let mut ins = oscillating_radiating_patch(1.0);
+    let floor = floor_z(-0.25);
+    let pos = [0.1, 0.25, 0.6];
+    let image = floor.image(pos);
+    for (pos, reflected) in [(pos, true), (pos, false), (image, false)] {
+        let mut mic = Mic::new(pos);
+        mic.unbaffled = Some(0.08);
+        if reflected { mic.floor = Some(floor); }
+        ins.mics.push(mic);
+    }
+    ins.prepare();
+    assert_eq!(ins.mics[0].taps.len(), 4);
+    assert_eq!(ins.mics[1].taps.len(), 2);
+    assert_eq!(ins.mics[2].taps.len(), 2);
+    let image_delay = ins.mics[2].taps[0].2;
+    assert!(image_delay > ins.mics[1].taps[0].2);
+    let gain = ins.mics[2].taps.iter().map(|t| t.3 + t.4).sum::<f64>();
+    assert!(gain < 0.0, "the back face, not the rigid reflection, inverts pressure");
+    let distance = image.iter().map(|x| x * x).sum::<f64>().sqrt();
+    let expected = -ins.gas.density * ins.bodies[0].area / (2.0 * PI * distance) / ins.k().powi(2);
+    assert!((gain / expected - 1.0).abs() < 1e-14);
+    let delay_moment = ins.mics[2].taps.iter()
+        .map(|t| t.2 as f64 * t.3 + (t.2 + 1) as f64 * t.4).sum::<f64>() / gain;
+    assert!((delay_moment - distance / ins.gas.sound_speed * ins.rate).abs() < 1e-12);
+
+    let mut sample = [0.0; 3];
+    let mut image_peak = 0.0_f64;
+    for n in 0..512 {
+        ins.step(&mut sample);
+        let expected = sample[1] + sample[2];
+        assert!((sample[0] - expected).abs() < 1e-14,
+            "floor sound must superpose direct and signed reflected paths: {sample:?}");
+        if n < image_delay { assert_eq!(sample[2], 0.0); }
+        image_peak = image_peak.max(sample[2].abs());
+    }
+    assert!(image_peak > 1e-9, "the previously missing reflected face must be audible");
 }
 
 #[test]

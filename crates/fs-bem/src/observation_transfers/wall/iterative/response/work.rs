@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::ComplexSum;
+use crate::observation_transfers::wall::boundary::WallWorkCoordinates;
 
 /// Cycle-average work for peak phasors in the original source coordinates.
 /// These are integrals of the retained discrete boundary fields, not error
@@ -66,7 +67,10 @@ impl IterativeBoundaryResponse<'_, '_> {
     /// Integrate coherent finite-source work in O(sources * panels), retaining
     /// the phase and cross terms that sums of per-source powers would discard.
     /// The original material owner supplies beta = rho*c/Z at this frequency;
-    /// accepted work is integral Re(beta)*|p|²/(2*rho*c) dA. This cheap query
+    /// accepted work is integral Re(beta)*|p|²/(2*rho*c) dA where finite and
+    /// well scaled. At pressure nodes, its bounded reflection coordinates use
+    /// both retained pressure and velocity without a division by pressure.
+    /// This cheap query
     /// does not integrate porous heat: use coherent_boundary_power_partition
     /// to distinguish irreversible loss from receiving-fluid transmission.
     /// Actual normal velocity
@@ -92,7 +96,8 @@ impl IterativeBoundaryResponse<'_, '_> {
     }
 
     /// Separate outgoing transmission from irreversible loss using the same
-    /// coherent TOTAL boundary pressure as the retained work calculation.
+    /// coherent total boundary fields as the retained work calculation.
+    /// Native incident-wave loss fractions remain finite at pressure nodes.
     /// The native material owner integrates positive viscous/thermal loss only
     /// on request. maximum_absorption_layers bounds declared layers summed over
     /// distinct transmitting laws, including identities; zero admits an empty
@@ -171,10 +176,10 @@ impl IterativeBoundaryResponse<'_, '_> {
         } else {
             (None, 0)
         };
-        let beta = if let Some(coefficients) = &partition {
-            coefficients.iter().map(|value| value.admittance).collect()
+        let coordinates = if let Some(coefficients) = &partition {
+            coefficients.iter().map(|value| value.coordinates).collect()
         } else {
-            boundary.normalized_admittance(self.omega, || gate.is_requested())?
+            boundary.work_coordinates(self.omega, || gate.is_requested())?
         };
         let rho_c = self.medium().density * self.medium().sound_speed;
         let mut sums = [ComplexSum::default(); 6];
@@ -236,10 +241,16 @@ impl IterativeBoundaryResponse<'_, '_> {
             let [pressure, velocity, drive] = combined;
             let input = work(pressure, drive, area, false)?;
             let outward = work(pressure, velocity, area, false)?;
+            let amplitude = match coordinates[panel] {
+                WallWorkCoordinates::Pressure(_) => pressure,
+                WallWorkCoordinates::Reflection { reflection, .. } => {
+                    reflected_amplitude(pressure, velocity, drive, rho_c, reflection)?
+                }
+            };
             let absorbed = product(
-                pressure.value.norm_sq(),
-                2 * pressure.exponent,
-                &[0.5, area, beta[panel].re],
+                amplitude.value.norm_sq(),
+                2 * amplitude.exponent,
+                &[0.5, area, coordinates[panel].accepted_conductance()],
                 rho_c,
             )?;
             sums[0].add(C64::from_re(input));
@@ -255,8 +266,8 @@ impl IterativeBoundaryResponse<'_, '_> {
                     coefficient.transmitted_conductance,
                 ].into_iter().enumerate() {
                     let value = product(
-                        pressure.value.norm_sq(),
-                        2 * pressure.exponent,
+                        amplitude.value.norm_sq(),
+                        2 * amplitude.exponent,
                         &[0.5, area, conductance],
                         rho_c,
                     )?;
@@ -340,6 +351,55 @@ impl ScaledField {
             exponent,
         })
     }
+
+    fn multiplied(self, coefficient: C64) -> Result<Self, IterativeObservationError> {
+        let coefficient = Self::new(coefficient)?;
+        let mut value = Self::new(self.value * coefficient.value)?;
+        if value.value != C64::ZERO {
+            value.exponent += self.exponent + coefficient.exponent;
+        }
+        Ok(value)
+    }
+
+    fn sum(terms: &[Self]) -> Result<Self, IterativeObservationError> {
+        let exponent = terms.iter().filter(|term| term.value != C64::ZERO)
+            .map(|term| term.exponent).max().unwrap_or(0);
+        let mut sum = ComplexSum::default();
+        for term in terms {
+            if term.value != C64::ZERO {
+                sum.add(C64::new(
+                    scale(term.value.re, term.exponent - exponent)?,
+                    scale(term.value.im, term.exponent - exponent)?,
+                ));
+            }
+        }
+        let mut value = Self::new(sum.finish())?;
+        if value.value != C64::ZERO {
+            value.exponent += exponent;
+        }
+        Ok(value)
+    }
+}
+
+// Invert the native bounded material pair, then evaluate material work in
+// those coordinates. This does not replace accepted work by input-outward:
+// the independent constitutive conductance still exposes a trace defect.
+fn reflected_amplitude(
+    pressure: ScaledField,
+    velocity: ScaledField,
+    drive: ScaledField,
+    rho_c: f64,
+    reflection: C64,
+) -> Result<ScaledField, IterativeObservationError> {
+    let a = (C64::ONE + reflection).scale(0.5);
+    let b = (C64::ONE - reflection).scale(0.5);
+    let norm = a.norm_sq() + b.norm_sq();
+    let ambient = C64::from_re(rho_c);
+    ScaledField::sum(&[
+        pressure.multiplied(a.conj())?,
+        drive.multiplied(b.conj())?.multiplied(ambient)?,
+        velocity.multiplied(-b.conj())?.multiplied(ambient)?,
+    ])?.multiplied(C64::from_re(1.0 / norm))
 }
 
 // The exponent of the largest component, including subnormal binary64 values.

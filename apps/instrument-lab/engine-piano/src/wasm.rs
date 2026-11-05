@@ -321,6 +321,7 @@ impl PianoEngine {
             frequency_axis, frequency_hz).map_err(|e| JsError::new(&e))?;
         let materials = StringMaterials::from_packed_bytes(pack_bytes, pack_lengths,
             geometry, &point, viscosity_property).map_err(|e| JsError::new(&e))?;
+        let gas = preparation::resolve_atmosphere_record(gas_record).map_err(|e| JsError::new(&e))?;
         prepared_engine(sample_rate, board, board_coordinates, course_mode_budget,
             max_dynamic_modes, full_scale_pa, substeps, scale_csv, tuning, gas,
             Some(Arc::new(materials)), string_stretching, damper_specification)

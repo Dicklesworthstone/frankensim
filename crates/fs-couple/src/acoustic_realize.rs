@@ -13,6 +13,8 @@ pub mod thermoelastic;
 pub mod concentric;
 /// Regional reed-bore media and a physical exterior microphone on the same assembly.
 pub mod duct_observer;
+/// Native bell and tone-hole harmonics through the original Rayleigh receiver.
+pub mod duct_harmonic;
 mod thermal_step;
 mod dirac_body;
 mod reed_ode;

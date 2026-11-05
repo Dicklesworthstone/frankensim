@@ -372,3 +372,255 @@ fn missing_observables_work_floors_and_late_cancellation_preserve_input() {
         0.0
     );
 }
+
+#[test]
+fn sdirk2_adaptive_cooling_reduces_error_without_enthalpy_datum_bias() {
+    let law = Law { datum: 0.0, latent: false, phase: false };
+    let (thermal, observer) = setup(&law, &[400.0], Some(300.0), vec![]);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let mut loose = policy(1.0, 0.5);
+    loose.relative_tolerance = 0.001;
+    let mut tight = policy(1.0, 0.0005);
+    tight.relative_tolerance = 0.00001;
+    let (a, ra) = chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, loose, &mut workspace, || Ok(()),
+    ).unwrap();
+    let (b, rb) = chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, tight, &mut workspace, || Ok(()),
+    ).unwrap();
+    let exact = 300.0 + 100.0 * (-1.0_f64).exp();
+    let error_a = (a.temperature_k(CellId(0)).unwrap() - exact).abs();
+    let error_b = (b.temperature_k(CellId(0)).unwrap() - exact).abs();
+    assert!(error_b < 0.1 * error_a, "loose={error_a}, tight={error_b}");
+    assert_eq!(ra.accepted_comparisons, 1);
+    assert!(rb.accepted_comparisons > ra.accepted_comparisons);
+    assert!(rb.accuracy_rejections > 0 && rb.maximum_accepted_normalized_error <= 1.0);
+    assert_eq!(rb.solve.energy.substeps, 2 * rb.accepted_comparisons);
+    assert!(rb.solve.residual_evaluations >= 18 * rb.accepted_comparisons);
+    near(rb.solve.energy.external_heat_j, b.cells()[&CellId(0)].specific_h_j_kg - 400.0, 1e-9);
+    assert!(!rb.solve.entropy.has_unclassified_sources);
+
+    let shifted = Law { datum: 8192.0, latent: false, phase: false };
+    let (old, observer) = setup(&shifted, &[8592.0], Some(300.0), vec![]);
+    let chain = ImplicitConductionChain::new(
+        &old, &observer, &[(MaterialId(0), &shifted)], || Ok(()),
+    ).unwrap();
+    let (same, shifted_report) = chain.advance_sdirk2_adaptive_to(
+        &old, 1.0, tight, &mut workspace, || Ok(()),
+    ).unwrap();
+    near(same.temperature_k(CellId(0)).unwrap(), b.temperature_k(CellId(0)).unwrap(), 2e-8);
+    assert_eq!(shifted_report.accepted_comparisons, rb.accepted_comparisons);
+    assert_eq!(shifted_report.accuracy_rejections, rb.accuracy_rejections);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn sdirk2_phase_accuracy_resolves_latent_inventory_without_temperature_signal() {
+    let law = Law { datum: 0.0, latent: true, phase: true };
+    let (thermal, observer) = setup(&law, &[400.0], Some(250.0), vec![]);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let mut loose = policy(1.0, 1000.0);
+    loose.phase_fraction_absolute_tolerance = Some(0.001);
+    let mut tight = loose;
+    tight.phase_fraction_absolute_tolerance = Some(0.000001);
+    let (a, ra) = chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, loose, &mut workspace, || Ok(()),
+    ).unwrap();
+    let (b, rb) = chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, tight, &mut workspace, || Ok(()),
+    ).unwrap();
+    let exact = 600.0 - 200.0 * 0.25_f64.exp();
+    let error_a = (a.cells()[&CellId(0)].specific_h_j_kg - exact).abs();
+    let error_b = (b.cells()[&CellId(0)].specific_h_j_kg - exact).abs();
+    assert!(error_b < 0.1 * error_a, "loose={error_a}, tight={error_b}");
+    assert!(rb.accepted_comparisons > ra.accepted_comparisons && rb.accuracy_rejections > 0);
+    assert_eq!(a.temperature_k(CellId(0)).unwrap(), 300.0);
+    assert_eq!(b.temperature_k(CellId(0)).unwrap(), 300.0);
+    assert_eq!(rb.last_error.unwrap().maximum_temperature_difference_k, 0.0);
+    assert!(rb.last_error.unwrap().maximum_phase_fraction_difference.unwrap() > 0.0);
+    assert!(rb.maximum_accepted_normalized_error <= 1.0);
+    let heat = b.cells()[&CellId(0)].specific_h_j_kg - 400.0;
+    near(rb.solve.energy.external_heat_j, heat, 1e-9);
+    near(rb.solve.entropy.thermal_storage_change_j_k, heat / 300.0, 1e-12);
+    near(rb.solve.entropy.reservoir_entropy_input_j_k, heat / 250.0, 1e-12);
+    assert!(rb.solve.entropy.conduction_generation_j_k > 0.0);
+}
+
+#[test]
+fn sdirk2_adaptive_graph_preserves_mean_and_native_sparse_work_budget() {
+    let law = Law { datum: 0.0, latent: false, phase: false };
+    let (thermal, observer) = setup(&law, &[400.0, 300.0, 200.0], None, vec![]);
+    let graph = ImplicitConductionGraph::new(
+        &thermal, &observer, &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(), || Ok(()),
+    ).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    let (next, report) = graph.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, policy(1.0, 0.0005), &mut workspace, || Ok(()),
+    ).unwrap();
+    // [1,0,-1] is an eigenmode with decay rate 1/s for the sealed three-cell
+    // path. The middle cell and mass-weighted mean remain exactly stationary.
+    let contrast = 100.0 * (-1.0_f64).exp();
+    near(next.temperature_k(CellId(0)).unwrap(), 300.0 + contrast, 0.04);
+    near(next.temperature_k(CellId(1)).unwrap(), 300.0, 1e-10);
+    near(next.temperature_k(CellId(2)).unwrap(), 300.0 - contrast, 0.04);
+    near(report.solve.energy.external_heat_j, 0.0, 0.0);
+    near(report.solve.energy.stored_energy_change_j, 0.0, 1e-9);
+    assert!(report.solve.linear_iterations > 0);
+    assert!(report.maximum_accepted_normalized_error <= 1.0);
+    assert_eq!(report.solve.energy.substeps, 2 * report.accepted_comparisons);
+    assert_eq!(thermal.time_s(), 0.0);
+}
+
+#[test]
+fn sdirk2_unequal_representable_halves_use_second_order_fine_only_accounts() {
+    let law = Law { datum: 0.0, latent: false, phase: false };
+    let (mut thermal, observer) = setup(&law, &[400.0], Some(300.0), vec![]);
+    thermal.time_s = 2.0_f64.powi(52);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let (next, report) = chain.advance_sdirk2_adaptive_to(
+        &thermal, thermal.time_s + 7.0, policy(7.0, 1000.0), &mut workspace, || Ok(()),
+    ).unwrap();
+    // At this clock, midpoint rounding gives spans 4 and 3. Both retain a
+    // representable SDIRK stage; spans 2 and 1 would not admit every stage.
+    let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
+    let r = |h: f64| (1.0 - (1.0 - 2.0 * gamma) * h) / (1.0 + gamma * h).powi(2);
+    let fine = 300.0 + 100.0 * r(4.0) * r(3.0);
+    let coarse = 300.0 + 100.0 * r(7.0);
+    let correction = (4.0_f64.powi(3) + 3.0_f64.powi(3)) / (3.0 * 4.0 * 3.0 * 7.0);
+    near(next.temperature_k(CellId(0)).unwrap(), fine, 1e-11);
+    near(report.last_error.unwrap().normalized, correction * (fine - coarse).abs() / 1000.0, 1e-13);
+    near(report.solve.energy.external_heat_j, fine - 400.0, 1e-9);
+    near(report.solve.entropy.reservoir_entropy_input_j_k, (fine - 400.0) / 300.0, 1e-12);
+    near(report.solve.entropy.thermal_storage_change_j_k, (fine / 400.0).ln(), 1e-12);
+    assert_eq!(report.accepted_comparisons, 1);
+    assert_eq!(report.solve.energy.substeps, 2);
+    assert!(report.solve.residual_evaluations >= 18);
+}
+
+#[test]
+fn sdirk2_adaptive_work_accuracy_and_cancellation_refusals_publish_no_prefix() {
+    let law = Law { datum: 0.0, latent: false, phase: false };
+    let (thermal, observer) = setup(&law, &[400.0], Some(300.0), vec![]);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    let before = thermal.cells().clone();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let mut work = policy(1.0, 1000.0);
+    // Six stages each need an initial, converged and entropy-audited residual.
+    // A ceiling of 17 must refuse, even after the first fine half succeeded.
+    work.step.maximum_residual_evaluations = 17;
+    assert!(matches!(chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, work, &mut workspace, || Ok(()),
+    ), Err(AdaptiveImplicitConductionError::Implicit(
+        ImplicitConductionError::Thermal(DepositionError::Budget(_))
+    ))));
+    let mut floor = policy(1.0, 1e-8);
+    floor.step.minimum_dt_s = 1.0;
+    assert!(matches!(chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, floor, &mut workspace, || Ok(()),
+    ), Err(AdaptiveImplicitConductionError::TimeAccuracy { .. })));
+    let mut attempts = policy(1.0, 1e-8);
+    attempts.maximum_trials = 1;
+    assert!(matches!(chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, attempts, &mut workspace, || Ok(()),
+    ), Err(AdaptiveImplicitConductionError::TrialBudget)));
+    let mut missing = policy(1.0, 1.0);
+    missing.phase_fraction_absolute_tolerance = Some(0.01);
+    assert!(matches!(chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, missing, &mut workspace, || Ok(()),
+    ), Err(AdaptiveImplicitConductionError::Invalid(_))));
+
+    let mut checks = 0;
+    chain.advance_sdirk2_adaptive_to(&thermal, 1.0, policy(1.0, 1000.0), &mut workspace, || {
+        checks += 1;
+        Ok(())
+    }).unwrap();
+    let last = checks;
+    checks = 0;
+    assert!(matches!(chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, policy(1.0, 1000.0), &mut workspace, || {
+            checks += 1;
+            if checks == last { Err(DepositionError::Cancelled) } else { Ok(()) }
+        },
+    ), Err(AdaptiveImplicitConductionError::Implicit(
+        ImplicitConductionError::Thermal(DepositionError::Cancelled)
+    ))));
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(thermal.cells(), &before);
+}
+
+#[test]
+fn sdirk2_adaptive_preflights_entire_window_before_events_or_stage_work() {
+    let law = Law { datum: 0.0, latent: false, phase: false };
+    for event_time in [0.35, 1.0] {
+        let event = TimedEvent {
+            time_s: event_time,
+            event: Event::Boundary(CellId(0), Boundary {
+                ambient_k: 300.0, htc_w_m2_k: 0.0, source_w: 0.0,
+                reservoir: Some(Reservoir {
+                    area_m2: 1.0, conductance_w_k: 0.0, temperature_k: 500.0,
+                }),
+            }),
+        };
+        let (thermal, observer) = setup(&law, &[400.0], Some(300.0), vec![event]);
+        let chain = ImplicitConductionChain::new(
+            &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+        ).unwrap();
+        let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+        let mut checks = 0;
+        let result = chain.advance_sdirk2_adaptive_to(
+            &thermal, 1.0, policy(0.1, 1.0), &mut workspace, || {
+                checks += 1;
+                if checks > 1 { Err(DepositionError::Cancelled) } else { Ok(()) }
+            },
+        );
+        assert!(matches!(result, Err(AdaptiveImplicitConductionError::Implicit(
+            ImplicitConductionError::Invalid(_)
+        ))));
+        assert_eq!(checks, 1);
+        assert_eq!(thermal.time_s(), 0.0);
+        assert_eq!(thermal.cells()[&CellId(0)].boundary.reservoir.unwrap().temperature_k, 300.0);
+    }
+
+    use crate::enthalpy::advection::{Advected, MassFlow};
+    let (thermal, observer) = setup(&law, &[400.0, 300.0], None, vec![]);
+    let flow = Advected::new((), vec![
+        MassFlow { id: 0, a: CellId(0), b: CellId(1), kg_s: 1.0 },
+        MassFlow { id: 1, a: CellId(1), b: CellId(0), kg_s: 1.0 },
+    ], 2).unwrap();
+    let chain = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap().with_implicit_advection(&thermal, &flow, || Ok(())).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    assert!(matches!(chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, policy(0.1, 1.0), &mut workspace, || Ok(()),
+    ), Err(AdaptiveImplicitConductionError::Implicit(ImplicitConductionError::Invalid(_)))));
+
+    let (thermal, observer) = setup(&law, &[400.0], Some(300.0), vec![TimedEvent {
+        time_s: 0.5,
+        event: Event::Boundary(CellId(0), Boundary {
+            ambient_k: 300.0, htc_w_m2_k: 1.0, source_w: 1.0,
+            reservoir: Some(Reservoir {
+                area_m2: 1.0, conductance_w_k: 0.0, temperature_k: 300.0,
+            }),
+        }),
+    }]);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &observer, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    assert!(matches!(chain.advance_sdirk2_adaptive_to(
+        &thermal, 1.0, policy(0.1, 1.0), &mut workspace, || Ok(()),
+    ), Err(AdaptiveImplicitConductionError::Implicit(ImplicitConductionError::Invalid(_)))));
+}

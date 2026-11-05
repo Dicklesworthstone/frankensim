@@ -289,9 +289,10 @@ impl HarmonicModel {
         let mut port_output = vec![C64::ZERO; self.m];
         for (p, output) in port_output.iter_mut().enumerate() {
             poll(&mut cancelled)?;
-            for (i, &e) in effort.iter().enumerate() {
-                *output = *output + e.scale(self.g[i * self.m + p]);
-            }
+            *output = super::port_output(&self.g, self.m, p, &effort)
+                .map_err(|_| HarmonicPoleError::Invalid {
+                    what: "physical pole port output is not representable",
+                })?;
         }
         let decay_power_residual_w = 2.0 * s.re * stored_energy_j + dissipated_power_w;
         if effort.iter().chain(&port_output).any(|&z| !finite(z))

@@ -17,8 +17,11 @@ use fs_math::{c64::C64, dd::Dd};
 mod array;
 pub use array::{
     HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
-    HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS, MAX_PRESSURE_ARRAY_TAPS,
-    PreparedHarmonicPressureArray, WindowedHarmonicPressureArray,
+    HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits,
+    HarmonicPressureCorrelationPair, HarmonicPressureTap, MAX_PRESSURE_ARRAY_CHANNELS,
+    MAX_PRESSURE_ARRAY_TAPS, MAX_PRESSURE_CORRELATION_PAIRS, PreparedHarmonicPressureArray,
+    PreparedHarmonicPressureCorrelations, WindowedHarmonicPressureArray,
+    WindowedHarmonicPressureCorrelations,
 };
 
 mod readout;

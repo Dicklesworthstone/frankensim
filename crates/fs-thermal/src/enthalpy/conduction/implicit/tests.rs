@@ -1192,6 +1192,9 @@ fn observed_refusals_preserve_native_state_and_source_history() {
 #[path = "tests/ambient.rs"]
 mod ambient;
 
+#[path = "tests/radiation.rs"]
+mod radiation;
+
 #[path = "tests/advection.rs"]
 mod advection;
 

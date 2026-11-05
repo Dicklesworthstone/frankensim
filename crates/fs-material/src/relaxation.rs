@@ -868,13 +868,16 @@ impl RelaxationState {
     /// classical limit. The separate thermal diffusion mode is not returned.
     ///
     /// Evaluation is allocation-free and bounded by the original reservoir
-    /// count. The continuum, constant-transport and relaxation-data validity
+    /// count and a fixed acoustic-continuation work allowance. The continuum,
+    /// constant-transport and relaxation-data validity
     /// remain the caller's responsibility. Parabolic transport does not imply
     /// a finite wavefront at the equilibrium `range / sound_speed` delay.
-    /// Complex calorics require a positive-real discriminant along the
-    /// zero-transport continuation; stronger mixed modes refuse until their
-    /// acoustic branch can be explicitly continued. Real calorics retain the
-    /// existing full thermoviscous branch policy.
+    /// Complex calorics follow the acoustic root from zero transport at the
+    /// requested frequency. A separated discriminant uses the direct fast
+    /// path; bounded continuation handles principal-square-root cut crossings.
+    /// Coalescing or unresolved branches and exhausted continuation work
+    /// refuse. This pointwise selection is not a proof of global frequency
+    /// analyticity. Real calorics retain the existing thermoviscous policy.
     ///
     /// # Errors
     /// As [`Self::relaxing_wavenumber`], plus unresolved acoustic/thermal roots.

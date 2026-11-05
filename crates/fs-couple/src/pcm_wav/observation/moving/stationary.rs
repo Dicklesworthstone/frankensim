@@ -15,23 +15,10 @@
 use super::*;
 use fs_aeroac::curle3d::CompactForceObserver;
 use fs_aeroac::curle3d::moving::trajectory::IdealReflectionObserver;
-use fs_bem::{helmholtz::Medium, near_field::FirstOrder};
-use fs_math::c64::C64;
+use fs_bem::near_field::FirstOrder;
 
 /// Co-located instantaneous fields at one physical receiver time.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct StationaryCompactSample {
-    /// Original arrival time [s], without filter delay compensation.
-    pub receiver_time_s: f64,
-    /// Coherent acoustic pressure perturbation [Pa].
-    pub pressure_pa: f64,
-    /// Coherent Cartesian particle velocity [m/s].
-    pub particle_velocity_m_s: [f64; 3],
-    /// Signed instantaneous intensity `p u` [W/m²], not a sum of source powers.
-    pub instantaneous_intensity_w_m2: [f64; 3],
-    /// Pa-equivalent output of the declared ideal first-order microphone.
-    pub microphone_pressure_pa: f64,
-}
+pub type StationaryCompactSample = super::field::CompactFieldSample;
 
 struct Transfer {
     source_index: usize,
@@ -487,39 +474,13 @@ impl<'a> StationaryCompactRenderer<'a> {
                 }
             }
         }
-        let pressure_pa = pressure.to_f64();
-        let particle_velocity_m_s = velocity.map(Dd::to_f64);
-        let instantaneous_intensity_w_m2 = particle_velocity_m_s.map(|v| pressure_pa * v);
-        if !pressure_pa.is_finite()
-            || particle_velocity_m_s
-                .iter()
-                .chain(&instantaneous_intensity_w_m2)
-                .any(|x| !x.is_finite())
-        {
-            return Err(sizing(
-                "coherent stationary pressure, velocity or intensity is unrepresentable",
-            ));
-        }
-        let medium = self.original.observer.medium();
-        let microphone_pressure_pa = self
-            .microphone
-            .observe(
-                C64::new(pressure_pa, 0.0),
-                particle_velocity_m_s.map(|v| C64::new(v, 0.0)),
-                Medium {
-                    density: medium.density_kg_m3(),
-                    sound_speed: medium.sound_speed_m_s(),
-                },
-            )
-            .map_err(|_| sizing("stationary first-order microphone output is unrepresentable"))?
-            .re;
-        Ok(StationaryCompactSample {
-            receiver_time_s: time,
-            pressure_pa,
-            particle_velocity_m_s,
-            instantaneous_intensity_w_m2,
-            microphone_pressure_pa,
-        })
+        StationaryCompactSample::observe(
+            time,
+            pressure,
+            velocity,
+            self.microphone,
+            self.original.observer.medium(),
+        )
     }
 }
 

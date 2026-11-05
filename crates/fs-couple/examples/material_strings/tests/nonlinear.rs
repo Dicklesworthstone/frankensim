@@ -229,7 +229,7 @@ fn retained_axial_modes_equilibrate_with_the_same_force_loaded_string() {
         let build=||compile(cx,gate,input::Spec::parse(text.as_bytes()).unwrap(),7800.0);
         let mut direct=build();let bank=direct.performance.bank();
         assert!(bank.source().bank().longitudinal_waves().is_some());
-        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,12,2]);
+        assert_eq!(bank.system().components().iter().map(|m|m.modes().len()).collect::<Vec<_>>(),vec![3,2,1,12,2,8]);
         assert!(bank.system().components()[4].states().iter().any(|s|s.displacement_m_sqrt_kg!=0.0));
         assert!(bank.longitudinal_observation(0).unwrap().minimum_tension_n>0.0);
         let report=bank.system().nonlinear_preload_diagnostics().unwrap();

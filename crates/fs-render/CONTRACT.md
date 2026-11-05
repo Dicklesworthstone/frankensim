@@ -2888,6 +2888,32 @@ unsupported infrared properties, multiple-scattered reabsorption or
 material-temperature feedback. Scattered power remains radiation and is never
 converted to heat.
 
+### Prompt fluorescence and absorbed heat
+
+`volumes::heating::fluorescence::{FluorescenceSource, FluorescentOpticalHeating}`
+adds prompt Stokes fluorescence to original exact beam deposition and the same
+native enthalpy observer. The supplied source retains its identity, excitation
+and temperature domains, photon quantum yield, and 1–16 discrete emission
+nodes with normalized photon weights. Escaping power uses each emitted photon's
+energy relative to the absorbed pump photon. Positive nonradiative and Stokes
+losses alone heat mapped cells, preserving small heat without subtracting
+nearly equal radiant powers. The full absorbed pump account remains separate;
+native accepted substeps integrate heat and escaping radiation transactionally
+on the same clock, without repeating optical traversal.
+
+The absorption-only grid must describe the complete fixed, open, index-one,
+non-scattering optical environment. Every occupied cell must have exactly zero
+absorption at every emitted wavelength, including cells outside the pump ray.
+An absorption view stripped from a reflecting, refracting or scattering scene
+does not establish this model. Self-absorption, unsupported wavelengths,
+anti-Stokes emission, mismatched medium identity, scattered pump power,
+excessive preparation counts, cancellation and temperature-domain escape
+refuse. This consumer does not infer fluorescence lifetime or excited-state
+storage, saturation, bleaching, cascades or calibrated source data. Independent
+photon/energy closure, native temperature response, thin/opaque and yield limits,
+one-ULP Stokes heat, domain refusals and transactional rollback have focused
+regressions in `tests/optical_heating/fluorescence.rs`.
+
 ### Temperature-dependent optical heating
 
 `volumes::heating::feedback::TemperatureOpticalHeating` retains source-bound
@@ -5335,6 +5361,15 @@ point-connection estimator remains absent. The public direct-only
 `PhotometricScene` retains its opaque-material admission rather than presenting
 straight-through or missing refractive transport as total illumination.
 
+Photometry semantics v10 and path semantics v14 also refuse active point
+fixtures with `ConductorSurface::SMOOTH`. A mirror's delta reflection has no
+finite BSDF density for the straight point-source connection, and a sampled
+mirror continuation cannot hit an ideal point emitter. Omitting that reflected
+light must not produce an accepted calibrated luminance or illuminance result.
+Rough metal retains its ordinary point-source connections; dark point fixtures
+do not impose this restriction. Smooth metal with finite emitters retains
+native reflected paths and the original wavelength-dependent Fresnel loss.
+
 `Material::BrushedConductor` uses its existing body-local tangent frame for
 calibrated point/area connections and BSDF sampling, including rigid placement.
 The original optical table, surface detail and medium-index conventions remain
@@ -7393,3 +7428,75 @@ Each joint element uses one original barycentric admission and the same coordina
 The existing IF97/IAPWS jets retain compressibility, thermal expansion and the full mixed optical Hessian. Continuous original nodal pressure and temperature preserve phase index across an internal face, so the shared crossing-time/saltation transport applies without a Fresnel event. A pressure-gradient jump now participates in the native unresolved-face bundle-endpoint refusal even when the temperature gradient is unchanged. Glass and fixed-pressure water retain their existing predicate. Original phase/group paths, Beer loss, face/step/query budgets and cancellation remain under the shared transport owners; the joint route adds no per-ray workspace allocation.
 
 Five focused controls cover liquid/vapor many-cell propagation with nonparallel source gradients in both tetrahedron orientations, pressure-only gradient-jump bundles against neighboring primal rays, exact same-side departure-collar field pairing, the native pressure-only unresolved-face guard, and source/contact/phase/work refusals. Exterior and duplicated-contact faces still terminate; a true pressure jump does not become a continuous face transition. This frozen-snapshot route supplies neither a fluid closure nor a pressure solve, moving-fluid optics, cross-phase continuation, global point locator or optical law for discontinuous contacts.
+
+## Smooth dielectric coats over diffuse substrates
+
+`SmoothDiffuseCoating` declares constant dimensionless indices
+`1 <= n_exterior <= n_coating` for a smooth, lossless, geometrically collapsed
+dielectric above the original wavelength-resolved, depolarizing Lambertian
+substrate. Its actual surrounding phase index must agree. Both reflection
+branches remain in that medium; this material never changes the bulk-medium
+stack or invents a thermal-emission law.
+
+The original native Fresnel owner supplies entry and exit transmission.
+Construction caches internal escape
+`E = (n_exterior/n_coating)^2 * 2*integral(mu*T(mu), mu=0..1)`
+using bounded Gauss-Legendre refinement on the external hemisphere. Repeated
+internal returns use the cancellation-resistant
+`D = (1-rho) + rho*E`, giving continuous reciprocal reflection
+`rho*(n_exterior/n_coating)^2*T_in*T_out/(pi*D)`, alongside native mirror
+Fresnel. This is the physical nonlinear smooth-plastic model described in
+[Mitsuba's material reference](https://mitsuba.readthedocs.io/en/latest/src/generated/plugins_bsdfs.html#smooth-plastic-material-plastic).
+The cached quadrature is a convergence check, not a certified enclosure or
+measured-material claim. Ray queries perform no angular integration or allocation.
+
+Native polarized scene/camera transport retains full entry s/p response,
+substrate depolarization and polarization on escape. Scalar
+`Material::CoatedDiffuse`, spectral path continuation and BDPT share the same
+law, with a discrete mirror branch and unconditional continuous density
+`diffuse_mass*cos(theta)/pi`. Forward/reverse densities, emitting-surface
+addition, material identity, actual-medium admission and existing receiver
+lighting remain explicit. The smaller sampling branch lies next to zero, so
+a mirror mass rounded to one cannot erase weak diffuse support. The polarized
+sampler normalizes small-probability transmission before applying it to Stokes
+power, retaining finite grazing and subnormal conditional power.
+
+After spectral splitting, only active coated material responses are queried;
+the original complete packet still determines every medium/source query,
+free-flight proposal and MIS escape density. Calibrated jobs refuse active
+point fixtures with a nonzero coating mirror because specular point-source
+connections are absent. Exactly matched-index coats reduce to the original
+diffuse law. Intermediate analytic bundle mirror plans still refuse this mixed
+material; ordinary sampled continuation and continuous bundle receivers apply.
+
+Independent numerical controls cover flux integrals, white-furnace conservation,
+internal returns, reciprocity, matched/black limits, full Stokes frames,
+conditional grazing/subnormal power and mixed forward/reverse PDFs. Native
+scene, scalar Material and BDPT integration regressions are also present.
+The model supplies no finite thickness, coherent interference, roughness,
+bulk absorption or lateral displacement.
+
+## Selected point-fixture transmission through ordinary scene glass
+
+`PhotometricSource::transmitted_slab_irradiance` measures one selected image
+through the two smooth parallel broad faces of a named static mesh instance in
+the ordinary `tracer::Scene`. The original slab owner solves each of the 80
+native wavelengths and supplies receiving area per source solid angle; the
+actual source intensity, native s/p Mueller transmission history, original
+surface coatings and Beer loss then supply spectral irradiance and CIE lux.
+The first face's induced polarization survives the second face. Geometry and
+its acceleration are prepared once; spectral queries allocate no workspace.
+
+Body-only slab discovery cannot make unrelated chord or normal-probe blockers
+into optical occlusion. All three solved physical segments retain original
+scene visibility and endpoint exclusion. Source and receiver must be in vacuum
+on opposite sides; the full refracted distance is budgeted. Opaque blockers
+produce zero bins; unsupported media, roughness, nonparallel/edge exits,
+back-facing receivers and cancellation refuse the complete reading.
+The returned spectrum is the selected two-transmission image, with no claim to
+total illuminance, reflected/internal-return images, bulk interference,
+scattering, calibration bounds or a certified numerical enclosure. Existing
+path jobs retain their stricter point-fixture/glass admission. Focused controls
+cover analytic axial spreading, independent oblique Snell rays and angular
+finite differences, retained s/p power, dispersion, native visibility and
+physical-domain/work refusals.

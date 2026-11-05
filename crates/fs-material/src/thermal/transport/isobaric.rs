@@ -18,7 +18,8 @@
 pub mod expansion;
 
 use super::{
-    SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point, capacity::CapacityCurve,
+    SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point,
+    capacity::{CapacityCurve, CapacityInverse},
     positive, source_line,
 };
 use fs_blake3::{ContentHash, DomainHasher};
@@ -54,6 +55,7 @@ pub struct IsobaricHeatCapacityLaw {
     pressure_pa: f64,
     datum_temperature_k: f64,
     enthalpy_span: [f64; 2],
+    inverse: Option<CapacityInverse>,
     maximum_slope: f64,
     identity: ContentHash,
 }
@@ -157,7 +159,8 @@ impl IsobaricHeatCapacityLaw {
             ));
         }
         let pressure_pa = query.lower.axes()[query.pressure_axis];
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.isobaric-cp-law.v1");
+        let inverse = CapacityInverse::new(&curve, datum_temperature_k).ok();
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.isobaric-cp-law.v2");
         hash.update(card.content_hash().as_bytes());
         for axis in [query.temperature_axis, query.pressure_axis] {
             hash.update(&(axis.len() as u64).to_le_bytes());
@@ -179,6 +182,7 @@ impl IsobaricHeatCapacityLaw {
             pressure_pa,
             datum_temperature_k,
             enthalpy_span,
+            inverse,
             maximum_slope,
             identity: hash.finalize(),
         })
@@ -269,6 +273,10 @@ impl IsobaricHeatCapacityLaw {
 }
 
 impl ThermalLaw for IsobaricHeatCapacityLaw {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        Some(*self.identity.as_bytes())
+    }
+
     fn storage_basis(&self) -> ThermalStorageBasis {
         ThermalStorageBasis::Enthalpy
     }
@@ -285,7 +293,10 @@ impl ThermalLaw for IsobaricHeatCapacityLaw {
         if specific_h_j_kg == high {
             return Ok(hot);
         }
-        self.temperature_after_specific_heat(self.datum_temperature_k, specific_h_j_kg)
+        self.inverse.as_ref().map_or_else(
+            || self.temperature_after_specific_heat(self.datum_temperature_k, specific_h_j_kg),
+            |inverse| inverse.temperature(&CapacityCurve::new(&self.knots), specific_h_j_kg),
+        )
             .map_err(|_| DepositionError::MaterialDomain)
     }
 
@@ -386,6 +397,12 @@ mod tests {
                 assert_eq!(law.material_card_identity(), card.content_hash());
                 assert_eq!(law.query_endpoints(), &[lower, upper]);
                 assert_eq!(law.query_endpoints()[0].axis_quantities()["p"], pressure);
+                assert_eq!(law.caloric_identity(), Some(*law.identity().as_bytes()));
+                for target in [290.0, 293.25, 300.0, 306.75, 310.0] {
+                    let h = law.specific_enthalpy_j_kg(target).unwrap();
+                    assert!((law.temperature_k(h).unwrap() - target).abs()
+                        <= 4.0 * f64::EPSILON * target);
+                }
                 assert!((law.specific_enthalpy_change_j_kg(300.0, 310.0).unwrap() - 30.0).abs() < 1e-13);
                 assert!((law.specific_enthalpy_change_j_kg(305.0, 300.0).unwrap() + 12.5).abs() < 1e-13);
             }

@@ -34,6 +34,18 @@ The terminal load is explicit in Pa s/m3 and may come from the material-driven
 BEM owner or a supported tabulated load. `None` closes the end; zero releases
 pressure. A rigid cap retains its physical pressure transfer and zero flow.
 
+`fluid::{input_reflection_load,input_reflection_load_with_loss}` returns the
+same material chain's direct input wave reflection, in its positive real inlet
+reference. `input_reflection_boundary` shares one original thermoviscous
+snapshot with the selected radiation, porous or other native terminal owner.
+No complete-duct impedance is formed, so a lossless pressure antinode remains
+a finite reflection even when its input pressure/flow ratio is singular.
+`InputReflection::referenced_to` changes the real numerical reference without
+passing through that pole. This does not change the original complex fluid or
+wall impedance. The existing condition and work limits still apply, and
+`compose_chain_reflection_controlled` polls cancellation during composition
+and the load-to-input recurrence.
+
 The original material error is retained as `FluidDuctError::Material`; native
 geometry, wall, conditioning and work refusals remain `FluidDuctError::Duct`.
 Cancellation is checked before material admission and at each segment/slice
@@ -102,6 +114,32 @@ independent Poiseuille/inertance/compliance limits. A gas with viscous shear
 above ten but thermal shear below ten must now refuse consistently through
 both public entry points; full Bessel remains available at that same state.
 
+### Homogeneous bulk viscosity with traction ports
+
+`fluid::bulk::BulkTractionCylinder` propagates the original
+`ClassicalBulkAbsorption::thermoviscous_wave` acoustic mode through a uniform,
+constant-area cylinder. The prepared response uses the native stable wave
+basis, complex LU, scattering and load composition; no growing exponential or
+weak-loss attenuation fit replaces that solve. Its mechanical effort is total
+compressive traction `t = p - (4 mu/3 + zeta) du/dx`, paired with volume flow.
+The exposed scattering matrix and loads explicitly use traction, with positive
+real reference `rho c/area`; the internal pressure-named algebra stays private.
+`BulkTractionResponse` separately reconstructs inlet/outlet thermodynamic
+pressure using the material's same pressure/traction ratio for both traveling
+directions. The generic pressure-port `*_with_wavenumber` path assumes inviscid
+longitudinal momentum and must not silently receive a viscous traction law.
+
+Radius, length and frequency must be positive and finite. Original material,
+geometry and composition refusals propagate; unresolved pressure reconstruction
+refuses. `None` imposes zero outlet volume flow within the acoustic subspace.
+Thermal end conditions, the independent thermal mode, transverse/wall diffusion,
+variable area and material interfaces are outside this constant-medium model.
+Traction/flow work is mechanical power; the independent thermal acoustic-energy
+flux is not included in this port. Native tests check matched traction,
+pressure and transmitted flow, segment splitting including opaque propagation,
+and exact viscous-heating integrals against mechanical work for reflecting and
+zero-flow loads, with invalid geometry/frequency/load refusal.
+
 ### Regional shared-fluid pressure and flow
 
 `fluid::regional::{duct_chain,input_impedance_load}` and their `_with_loss`
@@ -114,6 +152,13 @@ physical impedances, so the original composer enforces pressure/volume-flow
 continuity and interface reflection without averaging materials or synthesizing
 a GasState. A single work cap covers every region, slice and profile step;
 cancellation and original source failures publish no partial chain.
+`input_reflection_load` and its `_with_loss` counterpart retain that same
+regional solve directly in reflection coordinates, including at input
+impedance poles. Their reference belongs to the first region; each terminal
+load still belongs to the actual outlet material. The focused
+`fluid_acoustics::reflection` regressions cover gas and liquid pressure
+antinodes, interface phase and transmitted power, thermoviscous/mechanical
+wall response, coherent terminal material evaluation and sweep cancellation.
 
 Sources may be heterogeneous trait-object references. Interfaces coincide with
 authored segment ends. These are prescribed frozen backgrounds whose mechanical
@@ -172,8 +217,17 @@ Lefebvre, Scavone and Kergomard (Acta Acustica 99, 2013, arXiv 1207.5490, "TMMI"
 Eq. 16, `Z_nm = j k rho c exp(-j k d) / (eps pi d)`, conjugated here for
 `e^{-i omega t}`, with `eps = 2` as printed for every pair of openings (4 is a
 full space). Each hole keeps its own chimney, loss, wall, local gas and flanged
-self radiation as the diagonal term; the bore between consecutive openings is
-solved exactly as admittance two-ports on one nodal system, so `eps -> infinity`
+self radiation as the diagonal term. The bore retains its original scattering
+two-ports and uses the small admittance/nodal solve where that elimination is
+regular. At isolated half/full-wave run poles or a singular nodal solve, it
+reuses the graph owner's pressure/flow scattering constraints, applying all
+coupled aperture loads before inversion. The fallback inherits the 800-unknown
+graph cap and uses the caller's bound on the equilibrated complete system;
+regular frequencies retain the original nodal work and arithmetic. It does not
+remove genuine loaded-system poles or extend the radiation law's scope.
+A G2 fixture near 858 Hz checks all four half/full-wave phase combinations
+against an analytic two-aperture radiation matrix, retaining signed mouth
+flows and input/bell pressures for radiating and closed ends. Thus `eps -> infinity`
 reproduces the independent response to rounding (tested to 1e-8 on both fields,
 both terminations, response, reflection and hole flows). Response, reflection
 and the hole mouth flows use the coupled solve (reported as `Scattering`); it
@@ -2185,16 +2239,25 @@ NASA-9 source and adds what a played bore needs:
 - **Wall memory.** Per distinct cell radius, the `fs_phs::ZkDiffusiveBasis`
   binding of the gas's own density, viscosity, gamma and Prandtl number on a
   declared band and error: viscous drag plus series arms on the momentum,
-  shunt arms on the pressure. Each cell's arms advance between accepted steps
+  thermal drag plus series arms on temperature relative to the room wall.
+  Each cell's arms advance between accepted steps
   by the exact propagator `exp(G dt)` of a symmetric negative-semidefinite
   generator, held in the generator's eigen-coordinates (fs-la cyclic Jacobi,
   residual-checked): a step replaces the mean coordinate along one row of the
   eigenbasis and decays each coordinate by `exp(lambda dt) <= 1`, so it is
   contractive and costs O(arms) per cell. Only dissipated arm energy heats the
   gas (the arms store the boundary-layer kinetic energy); thermal exchange
-  changes pressure at fixed density. Finite viscous heating and subsequent
-  wall heat exchange use the original NASA-9 caloric inversion and integral
-  of Cv(T), including source-temperature admission; a frozen local gamma is
+  changes temperature at the current cell density. The thermal kernel is
+  `H(s)=gamma*s*F_t/(1-F_t)`, obtained from the same positive series spectrum
+  at thermal diffusivity `nu/Pr`, with gamma multiplying drag and gains. The
+  independent band admission covers this kernel. Its coupling to the original
+  density equation retains the acoustic compliance
+  `[1+(gamma-1)*F_t]/(gamma*p0)`. Temperature coordinates keep transported
+  density from reinterpreting thermal history as heat, and constant-density
+  cooling reaches the wall temperature instead of retaining a pressure offset.
+  Finite viscous heating and subsequent wall heat exchange use the original
+  NASA-9 caloric inversion and integral of Cv(T), including source-temperature
+  admission; a frozen local gamma is
   not substituted for either finite energy change. Zero thermal exchange
   retains the conservative viscous energy transfer without a caloric round
   trip. The update is transactional (`apply_cell_sources`), including every
@@ -2220,16 +2283,20 @@ Tests (`nonlinear::bore::tests`): the piston weights sum to one and reproduce
 keep exact volume and move faces off steps; wall propagators equal an
 independent Taylor exponential of their generator within 1e-13, square to the
 doubled step and never grow energy; a step the field cannot take refuses by
-name; `g3`: a small-amplitude bore (48 wall poles, 20-8000 Hz, 1 %) reproduces the
-transfer-matrix input impedance (Bessel loss, the same piston load) on the
-first six peaks within 10 cents and 1.5 dB, measured +0.17 to +1.69 cents and -0.27 to -0.65 dB (wall
-admitted at 6.2e-4 complex, 7.3e-4 loss); `g2`: a 2 kPa,
+name; `g3`: a small-amplitude bore (48 wall poles, 20-8000 Hz, 1 %) is compared
+with the transfer-matrix input impedance (Bessel loss, the same piston load)
+on the first six peaks, with limits of 10 cents and 1.5 dB; `g2`: a 2 kPa,
 1 kHz sinusoid steepens to the lossless shock distance `rho c^3/(beta omega p)`
 within 5 %, measured 3.2394 m against
 3.2317 m (+0.24 %). The caloric wall regressions compare heating and cooling
 against an independent analytic Cv(T) integral, combine viscous heating with
 thermal exchange, preserve total gas energy for pure drag, and refuse an
 out-of-domain thermal endpoint without publishing any cell or wall history.
+Density regressions preserve zero heat across isothermal density variations,
+retain thermal history through density changes, and reach the wall temperature
+at different densities. A bounded frequency oracle compares the actual thermal
+generator with the exact Bessel acoustic compliance across density, gamma and
+the admitted band.
 
 ### Conservative molecular transport in nonlinear bores
 
@@ -3827,3 +3894,11 @@ convergence, finite reflection at an actual discrete impedance pole, coherent
 signed multiport work and factor reuse, zero-flow unselected ports, original
 viscothermal/Maxwell absorption, and malformed-input/resource/cancellation
 regressions. Native execution of these new full DG tests is pending.
+
+### Native transient porous specimens and intrinsic heat
+
+`DgDuct::from_porous_material` binds an admitted porous realization and its original fluid source to the existing constant-area DG owner. Full specimen area carries superficial volume flow; porosity is included once in effective storage. The shared uniform positive-arm stamp advances pressure, flow and every material memory in one native DenseSeries exponential. No circular-wall loss is added. Complete harmonic/scattering/pole consumers retain the same operator and admitted material band. `porous_dissipated_power_w` reports separate viscous and thermal source powers; the legacy aggregate loss also includes them.
+
+`prepare_porous_heat` independently integrates static drag and each original positive source square on that complete trajectory. It reports viscous and thermal joules without advancing state or allocating total energy deficit to heat. Caller-owned scratch permits allocation-free warm observation. Both caches share the declared byte/work budget; the existing positive-integral owner requires at most 128 complete state coordinates and never truncates arms to fit. Thermal deposition and live temperature/source refresh remain receiving-owner transactions. Circular-wall model getters do not imply losslessness when absent; intrinsic porous memory has its own source/model view.
+
+Six production-source material tests and five native stamp/propagation/source-integral tests passed. The latter use the actual DenseSeries and positive heat kernels with a prescribed skew acoustic image; full DG geometry/scattering integration regressions are authored but remain unrun because sibling Cargo dependencies are unavailable.

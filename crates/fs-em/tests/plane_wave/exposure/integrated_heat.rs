@@ -7,6 +7,7 @@ use fs_em::plane_wave::angular_spectrum::{
 };
 use fs_fft::harmonic_window::HarmonicWindowProfile;
 
+mod carrier;
 mod rectangle;
 
 fn integrated_limits() -> AngularSpectrumIntegratedHeatLimits {
@@ -426,5 +427,190 @@ fn g3_depth_refinement_matches_original_absorbed_watts_and_owner_survives_refusa
             .evaluate(0.17)
             .unwrap(),
         value
+    );
+}
+
+#[test]
+fn g1_carrier_cell_heat_retains_real_sum_terms_and_proper_difference_terms() {
+    let medium = material(1.0, 1.0);
+    let (dielectric, conductor) = heat_material();
+    let omega = [2.0, 2.3];
+    let stacks = omega.map(|frequency| {
+        PlanarDielectricLayers::try_new(
+            &medium,
+            DielectricResponse::Lossless(&medium),
+            frequency,
+            &[DielectricLayer {
+                response: DielectricResponse::DebyeWithOhmic {
+                    dielectric: &dielectric,
+                    conductor: &conductor,
+                },
+                thickness_m: 0.31,
+            }],
+        )
+        .unwrap()
+    });
+    let carrier = [0.17, 0.0];
+    let amplitudes = [C64::new(0.7, 0.1), C64::new(-0.2, 0.4)];
+    let lines = [0, 1].map(|i| {
+        PlanarAngularSpectrum::prepare_with_carrier(
+            &stacks[i],
+            grid(),
+            carrier,
+            &[[C64::ZERO, amplitudes[i]]; 4],
+            AngularSpectrumLimits {
+                maximum_grid_points: 4096,
+                maximum_workspace_bytes: 4 << 20,
+                maximum_fft_work: 1 << 20,
+            },
+            || false,
+        )
+        .unwrap()
+    });
+    let banks = [AngularSpectrumExposure::try_new(&lines[0], &lines, limits(), || false).unwrap()];
+    let real_layer = banks[0].prepare_layer(0, heat_limits(), || false).unwrap();
+    let ensemble = AngularSpectrumExposureEnsemble::try_new(
+        &lines[0],
+        None,
+        &banks,
+        ensemble_limits(),
+        || false,
+    )
+    .unwrap();
+    let proper_layer = ensemble.prepare_layer(0, heat_limits(), || false).unwrap();
+    let reservoir_pairs = 4 * 2 * 2 * 4; // N*F²*(three stores + one Debye pole).
+    assert_eq!(
+        proper_layer.point_reservoir_frequency_pairs(),
+        reservoir_pairs
+    );
+    assert_eq!(
+        real_layer.point_reservoir_frequency_pairs(),
+        reservoir_pairs + 2 * 4 * (4 + 1),
+    );
+    let depth = simpson(0.31, 8);
+    let volume = Volume {
+        depth_span_m: [0.0, 0.31],
+        depth_samples: &depth,
+        transverse: Areas::ContinuousPeriodicCell,
+    };
+    let sparse_work = depth.len() * 4 * 3;
+    let sparse = AngularSpectrumIntegratedHeatLimits {
+        maximum_fft_work: 0,
+        maximum_spatial_point_frequency_pairs: sparse_work,
+        ..integrated_limits()
+    };
+    // A real shifted cell must admit its actual dense spatial sum terms.
+    // Proper factors cancel the common carrier and keep the sparse mode path.
+    assert!(
+        real_layer
+            .integrated_heat_spectrum(volume, Channel::Total, sparse, || false)
+            .is_err()
+    );
+    let proper = proper_layer
+        .integrated_heat_spectrum(volume, Channel::Total, sparse, || false)
+        .unwrap();
+    let real = real_layer
+        .integrated_heat_spectrum(
+            volume,
+            Channel::Total,
+            AngularSpectrumIntegratedHeatLimits {
+                maximum_spatial_point_frequency_pairs: depth.len() * 17 * 3,
+                ..sparse
+            },
+            || false,
+        )
+        .unwrap();
+    let native = [&lines[0], &lines[1]].map(|line| {
+        line.prepare_layer(
+            0,
+            AngularSpectrumLayerLimits {
+                maximum_layer_mode_pairs: 4096,
+                maximum_workspace_bytes: 4 << 20,
+                maximum_fft_work: 1 << 20,
+            },
+            || false,
+        )
+        .unwrap()
+    });
+    let cell_width = grid().width as f64 * grid().spacing_m[0];
+    let area = cell_width * grid().height as f64 * grid().spacing_m[1];
+    let phase = |angle: f64| C64::new(angle.cos(), angle.sin());
+    let sinc = |value: f64| {
+        if value == 0.0 {
+            1.0
+        } else {
+            value.sin() / value
+        }
+    };
+    // Independent continuous spatial product: the carrier cancels in
+    // E_a conj(E_b), but E_a E_b keeps exp(-2i*k*x) over the actual cell.
+    let spatial_sum = phase(-carrier[0] * cell_width).scale(sinc(carrier[0] * cell_width));
+    let instantaneous = |a: C64, b: C64, wa: f64, wb: f64, time: f64, proper: bool| {
+        let difference = a * b.conj() * phase((wa - wb) * time);
+        let sum = if proper {
+            C64::ZERO
+        } else {
+            a * b * phase((wa + wb) * time) * spatial_sum
+        };
+        0.5 * (difference.re + sum.re)
+    };
+    let times = [0.0, 0.17, 0.6, 1.4];
+    let mut expected_real = [0.0; 4];
+    let mut expected_proper = [0.0; 4];
+    for sample in &depth {
+        let fields = native
+            .each_ref()
+            .map(|layer| layer.field(sample.depth_m, || false).unwrap());
+        let electric = fields
+            .each_ref()
+            .map(|field| field.field().electric_v_per_m()[0]);
+        // Original Debye ODE: P=delta*E/(1+i*omega*tau);
+        // irreversible heat is sigma*E_real² + (tau/delta)*Pdot_real².
+        let current = [0, 1].map(|i| {
+            electric[i].map(|e| e * C64::new(0.0, omega[i] * 0.7) / C64::new(1.0, omega[i] * 0.4))
+        });
+        for (time_index, &time) in times.iter().enumerate() {
+            for i in 0..2 {
+                for j in 0..2 {
+                    for c in 0..3 {
+                        for (proper, expected) in [
+                            (false, &mut expected_real[time_index]),
+                            (true, &mut expected_proper[time_index]),
+                        ] {
+                            *expected += area
+                                * sample.weight_m
+                                * (0.3
+                                    * instantaneous(
+                                        electric[i][c],
+                                        electric[j][c],
+                                        omega[i],
+                                        omega[j],
+                                        time,
+                                        proper,
+                                    )
+                                    + (0.4 / 0.7)
+                                        * instantaneous(
+                                            current[i][c],
+                                            current[j][c],
+                                            omega[i],
+                                            omega[j],
+                                            time,
+                                            proper,
+                                        ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut difference = 0.0_f64;
+    for (i, &time) in times.iter().enumerate() {
+        near(real.evaluate(time).unwrap(), expected_real[i], 3e-11);
+        near(proper.evaluate(time).unwrap(), expected_proper[i], 3e-11);
+        difference = difference.max((expected_real[i] - expected_proper[i]).abs());
+    }
+    assert!(
+        difference > 1e-3,
+        "real carrier sum terms were cycle-averaged away"
     );
 }

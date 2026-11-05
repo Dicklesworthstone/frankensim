@@ -19,6 +19,9 @@ ERB_FMAX_HZ = 16000.0
 ERB_RANGE_DB = 50.0  # levels this far under a window's loudest band are clamped (erb_spectrogram_db)
 HNR_MODULATION_HZ = 14.0  # hnr_band: sidebands nearer a partial than this (vibrato, tremolo) are the tone, not noise
 HNR_MOVING_CENTS = 3.0  # flatten_pitch removed at least this much pitch movement: a player sustains the note
+MODAL_LINES_MAX = 12  # modal_lines keeps at most this many lines, the strongest
+MODAL_LINES_FLOOR = 1e-6  # modal_lines drops peaks under this fraction of the strongest one's power (-60 dB)
+MODAL_LINES_F_HI_HZ = 16000.0  # modal_lines reads peaks under this frequency
 
 
 class GraderRefusalError(ValueError):
@@ -507,6 +510,35 @@ def flatten_pitch(
     return out, float(f_inst.mean() / fr), excursion_c
 
 
+def modal_lines(
+    y: np.ndarray,
+    f0: float,
+    *,
+    sr: int = SR,
+    n_modes: int = MODAL_LINES_MAX,
+    f_hi: float = MODAL_LINES_F_HI_HZ,
+) -> list[float]:
+    """Strongest spectral peaks of the first 0.6 s, for bars and plates whose modes are not integer multiples.
+
+    The peaks above f0 / 2 and under f_hi with at least MODAL_LINES_FLOOR of the strongest peak's power, taken strongest
+    first and at least 3 % apart, at most n_modes of them, in rising order. decompose's partial read of an inharmonic
+    note (partial_freq_cents) and the HNR mask of the same note (hnr_band, instrgrade-7) both use it, so they see the
+    same lines."""
+    seg = y[: int(0.6 * sr)]
+    nfft = 1 << 17
+    S = np.abs(np.fft.rfft(seg * np.hanning(len(seg)), nfft)) ** 2
+    fr = np.fft.rfftfreq(nfft, 1 / sr)
+    pk = np.flatnonzero((S[1:-1] > S[:-2]) & (S[1:-1] >= S[2:])) + 1
+    pk = pk[(fr[pk] > 0.5 * f0) & (fr[pk] < f_hi) & (S[pk] > S.max() * MODAL_LINES_FLOOR)]
+    picked: list[float] = []
+    for i in pk[np.argsort(S[pk])[::-1]]:
+        if all(abs(fr[i] - q) > 0.03 * q for q in picked):
+            picked.append(float(fr[i]))
+        if len(picked) >= n_modes:
+            break
+    return sorted(picked)
+
+
 def hnr_band(
     x: np.ndarray,
     partials: list[Partial] | list[tuple[int, float]],
@@ -514,6 +546,7 @@ def hnr_band(
     *,
     sr: int = SR,
     harmonic_law: tuple[float, float] | None = None,
+    inharmonic_lines: tuple[float, list[float]] | None = None,
 ) -> float:
     if band is None:
         raise MissingBandSplitFrequency("IRPGRADE_BAND_SPLIT_MISSING: band cannot be None")
@@ -538,6 +571,16 @@ def hnr_band(
     # `harmonic_law` (f0, B) masks every line of f_k = k f0 sqrt(1 + B k^2) in the band, tracked or not (instrgrade-5): the
     # tracker stops at 30 partials and skips weak ones, and a harmonic it never tracked read as noise (a clarinet D3 with
     # strong lines from 4.4 to 10 kHz measured 37.5 dB and masks to 66.3 dB, where the recording has 35).
+    # `inharmonic_lines` (f1, lines) masks a bar's own lines, the modal_lines its partial read returns, to
+    # HNR_MODULATION_HZ either side, and nothing else (instrgrade-7). A xylophone's or marimba's modes aren't k f1, so the
+    # tracker's windows around k f1 kept a mode or lost it as the pitch read moved: a rendered Gb2 bar's strongest line,
+    # its third mode at 9.26 f1, counted as noise or tone with the read, and the bar's HNR was 9.6 dB at a 91.2 Hz read,
+    # 45.1 at its own 92.49 and 57.8 at 93.1. The pitch isn't flattened, because a struck bar's modes don't follow one
+    # moving pitch.
+    if inharmonic_lines is not None:
+        f1, lines = inharmonic_lines
+        tracked = [(max(1, int(round(f / f1))), float(f)) for f in lines]
+        return _hnr_masked(x, 1.0, 0.0, tracked, f_lo, f_hi, sr, None, f0_hz=f1)
     return max(
         _hnr_masked(x, 1.0, 0.0, partials, f_lo, f_hi, sr, harmonic_law),
         _hnr_masked(*flatten_pitch(x, partials, sr=sr), partials, f_lo, f_hi, sr, harmonic_law),
@@ -553,13 +596,17 @@ def _hnr_masked(
     f_hi: float,
     sr: int,
     harmonic_law: tuple[float, float] | None = None,
+    *,
+    f0_hz: float | None = None,
 ) -> float:
+    """HNR of xw [dB] with every line within the mask's half-width of a partial counted as tone. The half-width follows
+    the pitch, f0_hz when given, else the lowest f_k / k among the partials."""
     win = blackman_harris(len(xw))
     spec = np.abs(np.fft.rfft(xw * win)) ** 2
     freqs = np.fft.rfftfreq(len(xw), 1.0 / sr)
     df = float(freqs[1] - freqs[0])
     tracked = [(int(p.k), float(p.mean_f_hz)) if isinstance(p, Partial) else (int(p[0]), float(p[1])) for p in partials]
-    f0 = min((fk / k for k, fk in tracked if k > 0), default=math.inf) * scale
+    f0 = (f0_hz if f0_hz is not None else min((fk / k for k, fk in tracked if k > 0), default=math.inf)) * scale
     half = max(3.5 * df, min(HNR_MODULATION_HZ, 0.25 * f0))
     ref = _pitch_reference(partials)
     hm = np.zeros_like(freqs, dtype=bool)

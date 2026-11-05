@@ -1,0 +1,15 @@
+frankensim.matdb-manifest.v3
+pack_id	copper-sulfate-pentahydrate-ixom-reference
+redistribution	permitted	Selected attributed numerical facts and original interpretation only; no source prose, images or table layout is redistributed
+citation	IXOM Operations Pty Ltd, COPPER SULPHATE PENTAHYDRATE, product code 000031007601, Safety Data Sheet revision 8, 2022-08-04, composition section 3 page 2 and relative density section 9 page 6; https://sds.ixom.com/pdf/shess-en-mtr-UGHS-000031007601.pdf; accessed 2026-11-05
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	activator-product-reference	properties.tsv	material-tsv-v1
+property	pentahydrate_min	copper-sulfate-pentahydrate-product-component-mass-fraction-minimum	dimensional
+property	relative_density	relative-density-reported	dimensional
+axis	product	source-ixom-copper-sulfate-pentahydrate-product	dimensional
+axis	hydration	source-hydration-water-moles-per-formula-unit	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	lot_qualified	source-lot-qualified	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	pressure_known	source-test-pressure-known	dimensional
+axis	reference_density_known	source-relative-density-reference-known	dimensional

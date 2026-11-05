@@ -28,12 +28,20 @@ pub(super) struct ShearDissipation {
 }
 
 impl ShearDissipation {
-    pub(super) fn power(&self, membrane: [f64; 3], bending: [f64; 3], shear: [f64; 2]) -> f64 {
+    fn channels(&self, membrane: [f64; 3], bending: [f64; 3], shear: [f64; 2]) -> [f64; 12] {
         let strain = [membrane[0], membrane[1], membrane[2], bending[0], bending[1], bending[2]];
+        let mut channels = [0.0; 12];
+        for column in 0..6 {
+            channels[column] = (0..6).map(|row| self.coupled[row][column] * strain[row]).sum();
+            channels[6+column] = self.shear[0][column] * shear[0] + self.shear[1][column] * shear[1];
+        }
+        channels
+    }
+
+    pub(super) fn power(&self, membrane: [f64; 3], bending: [f64; 3], shear: [f64; 2]) -> f64 {
+        let channels = self.channels(membrane, bending, shear);
         (0..6).map(|column| {
-            let coupled: f64 = (0..6).map(|row| self.coupled[row][column] * strain[row]).sum();
-            let transverse = self.shear[0][column] * shear[0] + self.shear[1][column] * shear[1];
-            coupled * coupled + transverse * transverse
+            channels[column] * channels[column] + channels[6+column] * channels[6+column]
         }).sum()
     }
 }
@@ -130,8 +138,8 @@ pub const MAX_VISCOSITY_MODES: usize = 1024;
 /// This is cold computation, not a wall-clock promise.
 pub fn projection_terms(nodes: usize, triangles: usize, modes: usize) -> Option<usize> {
     triangles.checked_mul(1_000_000usize.checked_add(
-        324usize.checked_mul(modes)?)?.checked_add(
-        18usize.checked_mul(modes)?.checked_mul(modes)?)?)?
+        4096usize.checked_mul(modes)?)?.checked_add(
+        84usize.checked_mul(modes)?.checked_mul(modes)?)?)?
         .checked_add(6usize.checked_mul(nodes)?.checked_mul(modes)?)
 }
 
@@ -174,30 +182,57 @@ pub fn project_viscosity(
         if cancelled() { return Err(PlateError::Cancelled); }
         if viscosity[e].is_zero() { continue; }
         let g = mesh.facet(e)?;
-        let c = element::viscosity_matrix(mesh, tri, &g, tri.map(|i| directors.vectors[i]),
-            &sections[e], &viscosity[e], &mut cancelled)?;
-        let local: Vec<[f64; 18]> = modes.iter().map(|p|
-            core::array::from_fn(|i| p[6*tri[i/6]+i%6])).collect();
-        // One element action per mode, followed by its Gram projection. The
-        // previous pairwise contraction repeated the 18x18 action n times.
-        let mut action = Vec::with_capacity(n);
-        for vector in &local {
-            if cancelled() { return Err(PlateError::Cancelled); }
-            let row: [f64; 18] = core::array::from_fn(|a|
-                (0..18).map(|b| c[a][b]*vector[b]).sum());
-            if row.iter().any(|v| !v.is_finite()) {
-                return Err(bad("shell viscosity element action overflow"));
-            }
-            action.push(row);
+        let field = element::PreparedStrainField::new(mesh, tri, g,
+            tri.map(|i| directors.vectors[i]), &sections[e], &mut cancelled)?;
+        let law = viscosity[e].dissipation()?;
+        let active: Vec<usize> = (0..12).filter(|&column| {
+            if column < 6 { law.coupled.iter().any(|row| row[column] != 0.0) }
+            else { law.shear[..2].iter().any(|row| row[column-6] != 0.0) }
+        }).collect();
+        let local: Vec<[f64; 20]> = modes.iter().map(|p| {
+            let nodal = core::array::from_fn(|i| p[6*tri[i/6]+i%6]);
+            field.expand(&nodal)
+        }).collect();
+        if local.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(bad("shell viscosity elastic expansion overflow"));
         }
-        for i in 0..n {
+        let mut channels = vec![[0.0; 12]; n];
+        for (lambda, weight) in element::stiffness_rule() {
             if cancelled() { return Err(PlateError::Cancelled); }
-            for j in i..n {
-                let mut value = 0.0;
-                for a in 0..18 { value += local[i][a]*action[j][a]; }
-                out[n*i+j] += value;
-                if !out[n*i+j].is_finite() { return Err(bad("shell modal viscosity overflow")); }
-                out[n*j+i] = out[n*i+j];
+            // Evaluate the ORIGINAL strain map once per quadrature point.
+            // Form strain before constitutive factors: dense C assembly followed
+            // by a modal contraction can erase resolved weak material channels.
+            let basis: [([f64; 3], [f64; 3], [f64; 2]); 20] = core::array::from_fn(|column| {
+                let mut unit = [0.0; 20];
+                unit[column] = 1.0;
+                field.eval(&unit, lambda[1], lambda[2])
+            });
+            let scale = det::sqrt(g.area_m2) * det::sqrt(weight);
+            for (mode, rate) in local.iter().enumerate() {
+                if cancelled() { return Err(PlateError::Cancelled); }
+                let mut membrane = [0.0; 3];
+                let mut bending = [0.0; 3];
+                let mut shear = [0.0; 2];
+                for (column, &value) in rate.iter().enumerate() {
+                    for k in 0..3 {
+                        membrane[k] += basis[column].0[k] * value;
+                        bending[k] += basis[column].1[k] * value;
+                    }
+                    for k in 0..2 { shear[k] += basis[column].2[k] * value; }
+                }
+                channels[mode] = law.channels(membrane, bending, shear).map(|v| scale*v);
+                if channels[mode].iter().any(|v| !v.is_finite()) {
+                    return Err(bad("shell viscosity strain channel overflow"));
+                }
+            }
+            for i in 0..n {
+                if cancelled() { return Err(PlateError::Cancelled); }
+                for j in i..n {
+                    let value: f64 = active.iter().map(|&k| channels[i][k]*channels[j][k]).sum();
+                    out[n*i+j] += value;
+                    if !out[n*i+j].is_finite() { return Err(bad("shell modal viscosity overflow")); }
+                    out[n*j+i] = out[n*i+j];
+                }
             }
         }
     }
@@ -223,6 +258,42 @@ mod tests {
         let power = law.dissipation().unwrap().power([-1.0, 1.0, 0.0], [0.0; 3], [0.0; 2]);
         assert!(power > 0.0);
         assert!((power / expected - 1.0).abs() < 4e-15, "{power:e} vs {expected:e}");
+    }
+
+    #[test]
+    fn g0_modal_projection_preserves_resolved_weak_loss_and_exact_null_strain() {
+        let mesh = ShellMesh::new(vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0]], vec![[0, 1, 2]]).unwrap();
+        let directors = NodalDirectors::new(&mesh, vec![[0.0, 0.0, 1.0]; 3], 0.9).unwrap();
+        let amplitudes = [1.0, -2.0, 0.0, 0.5];
+        let modes: Vec<Vec<f64>> = amplitudes.iter().map(|amplitude| {
+            mesh.nodes.iter().flat_map(|p| [-amplitude*p[0], amplitude*p[1],
+                0.0, 0.0, 0.0, 0.0]).collect()
+        }).collect();
+        for diagonal in [1.0, 1.0 + 1e-14, 1.0 + 1e-15] {
+            let law = ShearShellViscosity::new(
+                [1.0, 1.0, 0.0, 1.0, diagonal, 0.0, 0.0, 0.0, 0.0],
+                [0.0; 9], [0.0; 3],
+            ).unwrap();
+            let projected = project_viscosity(&mesh, &directors, &[section()], &[law],
+                &modes, MitcBudget { max_nodes: 3, max_triangles: 1 },
+                2_000_000, || false).unwrap();
+            for (i, a) in amplitudes.iter().enumerate() {
+                for (j, b) in amplitudes.iter().enumerate() {
+                    // Constant physical strain [-a,a,0]: the original tensor
+                    // dissipates area * (V22-V12) * a*b. Assembling a dense
+                    // nodal C first loses 1--10% of this resolved weak channel.
+                    let expected = 0.5 * (diagonal - 1.0) * a * b;
+                    let actual = projected[amplitudes.len()*i+j];
+                    if expected == 0.0 {
+                        assert_eq!(actual, 0.0, "undamped strain acquired loss");
+                    } else {
+                        assert!((actual / expected - 1.0).abs() < 1e-12,
+                            "projected {actual:e} vs original tensor {expected:e}");
+                    }
+                }
+            }
+        }
     }
 
     fn section() -> ShearShellSection {

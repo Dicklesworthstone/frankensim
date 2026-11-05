@@ -41,12 +41,15 @@ pub use report::{
 pub use crate::tracer::photometric::FixtureMedium as PathMedium;
 
 /// Version of fixture-path admission, units and progressive accumulation.
+/// Version 14 refuses active ideal point fixtures with smooth metal mirrors;
+/// finite emitters and rough metal reflection keep their existing transport.
 /// Version 13 adds opt-in streaming inverse-CDF point-source selection. The
 /// existing full sum and reservoir policy retain their arithmetic and sample
 /// addresses. Native projector diffusion, tabulated diffuse reflectance, phase
 /// laws, CIE observer, physical camera, splitters and filters remain authoritative.
-/// Active point fixtures with glass still require missing specular connections.
-pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 13;
+/// Active point fixtures with glass, smooth metal mirrors or unmatched smooth
+/// diffuse coatings still require missing specular connections.
+pub const PHOTOMETRIC_PATH_SEMANTICS_VERSION: u32 = 14;
 
 /// Maximum sampled point-fixture connections at one surface or volume vertex.
 /// The bounded proposal storage is local to that path, with no per-vertex heap

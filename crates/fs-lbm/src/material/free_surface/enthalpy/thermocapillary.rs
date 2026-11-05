@@ -5,6 +5,9 @@
 //! sampled on each admitted graph or local PLIC patch. Bulk material states
 //! retain their actual caloric temperature. Normal pressure and tangential
 //! traction share that surface sigma; neither supplies inferred capillary heat.
+//! The uniform mode admits time-varying sigma only while every wet-cell source
+//! gives exactly the same value. Its zero tangential stress needs no separate
+//! surface reconstruction and composes with native equilibrium wall wetting.
 
 use super::*;
 use crate::d3q19::freesurface3::thermocapillary::{
@@ -49,7 +52,11 @@ pub struct PlanarThermocapillarity {
 /// both Laplace pressure and the full two-dimensional surface gradient.
 ///
 /// This is a resolved graph reduction, not an arbitrary-drop or overhang model.
-/// Internal solid walls, imposed contact angles and a nonzero mass carry refuse.
+/// Internal solid walls and a nonzero mass carry refuse. An explicitly attached
+/// equilibrium angle can close one planar side wall: its complete interface
+/// band must share one angle per column, and its slope obeys the same envelope.
+/// End columns meeting a second side wall must have exactly neutral pi/2
+/// angles; nonneutral two-wall corners need a separate resolved boundary law.
 /// Raw interface fractions must remain in [0,1] and monotone along each column.
 /// Before endpoint reconstruction, native over/underfill is resolved through
 /// local conservative mass routes and the same enthalpy transport solve.
@@ -74,6 +81,7 @@ pub struct HeightGraphThermocapillarity {
 
 #[derive(Clone, Copy)]
 pub(super) enum ThermocapillarySurface {
+    Uniform,
     Planar(PlanarThermocapillarity),
     HeightGraph(HeightGraphThermocapillarity),
     Local(LocalThermocapillarity),
@@ -147,6 +155,54 @@ impl PlanarThermocapillarity {
 }
 
 impl<'s> MaterialFreeSurfaceScaling<'s> {
+    /// Evolve sigma(T) while its actual source value remains spatially uniform.
+    ///
+    /// Every wet cell must give EXACTLY the same physical surface tension at
+    /// initial admission, every thermal substep and both native step endpoints.
+    /// No tolerance, spatial averaging or suppressed Marangoni force is hidden:
+    /// a spatial difference refuses the whole candidate. Time-varying uniform
+    /// tension updates the existing Laplace pressure; its surface gradient is
+    /// identically zero. This supports the existing arbitrary free surface and
+    /// an explicitly attached equilibrium planar wall, without borrowing the
+    /// incompatible planar/height-graph/local thermocapillary geometry owners.
+    ///
+    /// Bulk caloric temperature supplies sigma and wall adhesion together.
+    /// Separately solved surface temperatures require a surface-geometry owner.
+    /// Constant sigma preserves the ordinary native trajectory. No capillary
+    /// work is added as heat or claimed as a closed total-energy balance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn free_surface3_from_cells_with_uniform_thermal_capillarity<'m>(
+        self,
+        domain: MaterialFreeSurfaceDomain3<'_>,
+        initial: &[MaterialFreeSurfaceInitialCell3],
+        law: &'m LiquidTemperatureLaw<'m>,
+        caloric: &'m EquilibriumEnthalpyPhaseCurve,
+        controls: FreeSurfaceEnthalpyControls,
+        buoyancy: Option<BoussinesqConfig<3>>,
+        rheology: Option<rheology::RheologySolve>,
+        initial_h: impl Fn([usize; 3]) -> f64,
+        cx: &Cx<'_>,
+        gate: &CancelGate,
+    ) -> Result<MaterialFreeSurfaceEnthalpy3<'s, 'm>, Error> {
+        poll(gate)?;
+        let binding = rheology
+            .map(|solve| rheology::RheologyBinding::try_new(self.material(), law, solve))
+            .transpose()?;
+        let flow = self.free_surface3_from_cells_inner(domain, initial, cx)?;
+        let result = flow.with_enthalpy_model(
+            law,
+            caloric,
+            controls,
+            initial_h,
+            buoyancy,
+            binding,
+            Some(ThermocapillarySurface::Uniform),
+            gate,
+        )?;
+        cx.checkpoint().map_err(|_| FreeSurfaceError3::Cancelled)?;
+        Ok(result)
+    }
+
     /// Evolve source-bound thermocapillary stress on locally resolved interfaces.
     ///
     /// This uses the same native flow, material refresh, mass routes and thermal
@@ -292,6 +348,12 @@ impl<'s> MaterialFreeSurfaceScaling<'s> {
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+    /// Whether thermal capillarity requires an exactly uniform source sigma.
+    #[must_use]
+    pub const fn uniform_thermal_capillarity(&self) -> bool {
+        matches!(self.thermocapillary, Some(ThermocapillarySurface::Uniform))
+    }
+
     /// Retained local interface/source reconstruction controls, if selected.
     #[must_use]
     pub const fn local_thermocapillary_surface(&self) -> Option<LocalThermocapillarity> {
@@ -344,16 +406,30 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         };
         let scaling = &self.flow.scaling;
         let surface_samples = solved_tensions.is_some();
+        if surface_samples && self.wetting.is_some() {
+            return Err(Error::Invalid(
+                "thermal graph wetting requires work and tension at the same bulk source temperature",
+            ));
+        }
+        if self.uniform_thermal_capillarity() && surface_samples {
+            return Err(Error::Invalid(
+                "uniform thermal capillarity uses the actual bulk source temperature",
+            ));
+        }
         let mut tensions =
             if let Some(tensions) = solved_tensions {
                 tensions
             } else {
                 let mut tensions = BTreeMap::new();
+                let mut uniform = None;
                 for (&location, state) in states {
                     poll(gate)?;
                     let MassLocation3::Cell(key, lane) = location else {
                         continue;
                     };
+                    if self.uniform_thermal_capillarity() {
+                        admit_uniform_surface_tension(&mut uniform, state)?;
+                    }
                     let sigma = state.material().property(SURFACE_TENSION_PROPERTY).ok_or(
                         Error::Invalid("evolving surface tension left the shared material bundle"),
                     )?;
@@ -367,6 +443,9 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                 tensions
             };
         let extra = match surface {
+            // Native pressure admission/rebinding remains the only mechanical
+            // owner here. A uniform coefficient has no tangential load.
+            ThermocapillarySurface::Uniform => return Ok(Some(tensions)),
             ThermocapillarySurface::Planar(surface) => lattice.planar_marangoni_forces(
                 surface.native(scaling.cell_size_m())?,
                 &tensions,
@@ -416,4 +495,34 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         }
         Ok(Some(tensions))
     }
+}
+
+/// Shared by complete native snapshots and every thermal-substep sample.
+/// Compare SI source values before lattice conversion can round them together.
+pub(super) fn admit_uniform_surface_tension(
+    reference: &mut Option<f64>,
+    state: &ResolvedLiquidState,
+) -> Result<(), Error> {
+    let sigma = state
+        .material()
+        .property(SURFACE_TENSION_PROPERTY)
+        .ok_or(Error::Invalid(
+            "uniform capillarity lost its original tension source",
+        ))?
+        .value_si();
+    if !sigma.is_finite() || sigma <= 0.0 {
+        return Err(Error::Invalid(
+            "uniform capillarity needs finite positive tension",
+        ));
+    }
+    if let Some(previous) = *reference {
+        if sigma != previous {
+            return Err(Error::Invalid(
+                "spatially varying tension requires resolved thermocapillary geometry",
+            ));
+        }
+    } else {
+        *reference = Some(sigma);
+    }
+    Ok(())
 }

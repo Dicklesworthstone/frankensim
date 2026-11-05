@@ -9,7 +9,11 @@ use super::modes::fields_from_tangential;
 use super::*;
 use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayerField};
 
-/// Preparation visits two polarizations of every mode and every source layer.
+// Unsupported zero source bins retain their FFT positions without inventing
+// an incidence angle or evaluating an unused constitutive response.
+pub(super) type PreparedMode<'s, 'm> = Option<[PreparedLayerField<'s, 'm>; 2]>;
+
+/// Preparation work is bounded by two polarizations of every mode/source layer.
 /// The byte cap includes the borrowed beam's numerical workspace, the selected
 /// layer cache, fixed preparation scratch and one returned E/H/heat plane.
 /// Other simultaneously retained planes and allocator overhead are excluded.
@@ -30,7 +34,7 @@ pub type AngularSpectrumLayerField = AngularSpectrumAbsorptionField;
 pub struct PreparedAngularSpectrumLayer<'b, 's, 'm> {
     beam: &'b PlanarAngularSpectrum<'s, 'm>,
     layer_index: usize,
-    modes: Vec<[PreparedLayerField<'s, 'm>; 2]>,
+    modes: Vec<PreparedMode<'s, 'm>>,
     omega_epsilon: C64,
     omega_mu: f64,
     heat_coefficient: f64,
@@ -58,8 +62,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             .checked_mul(2)
             .and_then(|v| v.checked_mul(self.source.layer_count()))
             .ok_or_else(|| bad("internal field preparation work overflow"))?;
-        let per_point =
-            core::mem::size_of::<[PreparedLayerField<'_, '_>; 2]>() + core::mem::size_of::<f64>();
+        let per_point = core::mem::size_of::<PreparedMode<'_, '_>>() + core::mem::size_of::<f64>();
         let workspace_bytes = n
             .checked_mul(per_point)
             .and_then(|v| v.checked_add(self.workspace_bytes))
@@ -99,6 +102,10 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
         for mode in &self.modes {
             // One source response is capped at 64 original layers.
             poll(&mut cancelled)?;
+            if mode.is_dormant() {
+                modes.push(None);
+                continue;
+            }
             let cosine = mode.incidence_cosine;
             let te = self
                 .source
@@ -111,7 +118,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             absorbed_power_w += area
                 * (amplitudes[0].norm_sq() * te.absorbed_power_w_m2()
                     + amplitudes[1].norm_sq() * tm.absorbed_power_w_m2());
-            modes.push([te, tm]);
+            modes.push(Some([te, tm]));
         }
         if !absorbed_power_w.is_finite() || absorbed_power_w < 0.0 {
             return Err(bad("selected layer beam absorption is unrepresentable"));
@@ -143,6 +150,7 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
     pub fn absorbed_power_w(&self) -> f64 {
         self.absorbed_power_w
     }
+
     /// Cycle-mean watts absorbed between two depths in this original film,
     /// integrated continuously over the beam's complete periodic cell.
     ///
@@ -164,6 +172,22 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, AngularSpectrumError> {
         poll(&mut cancelled)?;
+        let thickness_m = self
+            .beam
+            .source
+            .layer(self.layer_index)
+            .unwrap()
+            .thickness_m;
+        if !start_depth_m.is_finite()
+            || !end_depth_m.is_finite()
+            || start_depth_m < 0.0
+            || end_depth_m < start_depth_m
+            || end_depth_m > thickness_m
+        {
+            return Err(bad(
+                "depth interval must be ordered and inside the original film",
+            ));
+        }
         let grid = self.beam.grid;
         let area =
             (grid.width as f64 * grid.spacing_m[0]) * (grid.height as f64 * grid.spacing_m[1]);
@@ -172,6 +196,9 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
+            let Some(prepared) = prepared else {
+                continue;
+            };
             let amplitudes = polarized(mode.incident_e, basis(mode.kx, mode.ky));
             for p in 0..2 {
                 let absorbed = prepared[p]
@@ -236,6 +263,9 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
+            let Some(prepared) = prepared else {
+                continue;
+            };
             let amplitudes = polarized(mode.incident_e, basis(mode.kx, mode.ky));
             for p in 0..2 {
                 sum = sum
@@ -275,6 +305,11 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
+            let Some(prepared) = prepared else {
+                electric.push([C64::ZERO; 3]);
+                magnetic.push([C64::ZERO; 3]);
+                continue;
+            };
             let p = basis(mode.kx, mode.ky);
             let amplitude = polarized(mode.incident_e, p);
             let te = prepared[0].field(depth_m)?;

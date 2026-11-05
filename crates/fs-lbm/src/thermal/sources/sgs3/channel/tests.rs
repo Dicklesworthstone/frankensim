@@ -85,8 +85,18 @@ fn seed(state: &mut ThermalLbm3) {
 #[test]
 fn g0_zero_channel_fit_retains_original_source_steps_and_local_rates_bitwise() {
     let gate = CancelGate::new_clock_free();
-    for local in [false, true] {
+    let flux_and_film = [
+        ThermalWall::HeatFlux(0.0002),
+        ThermalWall::Convective { transfer: 0.03, ambient: 0.1 },
+    ];
+    for (local, walls) in [
+        (false, None), (true, None),
+        (false, Some(flux_and_film)), (true, Some(flux_and_film)),
+    ] {
         let mut reference = ThermalLbm3::slab(4, 3, 4, 0.8, 0.9, 0.0);
+        if let Some(walls) = walls {
+            reference.set_thermal_walls(walls).unwrap();
+        }
         let mut actual = reference.snapshot().0;
         let n = actual.gpop.len();
         let mut work = actual.thermal_channel_sgs_workspace(usize::MAX).unwrap();
@@ -123,6 +133,8 @@ fn g0_zero_channel_fit_retains_original_source_steps_and_local_rates_bitwise() {
         assert_eq!(result.sgs.transport.momentum.maximum_eddy_viscosity_lu, 0.0);
         assert_eq!(result.sgs.transport.maximum_eddy_diffusivity_lu, 0.0);
         assert_eq!(bits(&actual), bits(&reference));
+        assert_eq!(actual.thermal_walls(), reference.thermal_walls());
+        assert_eq!(actual.last_wall_exchange(), reference.last_wall_exchange());
         assert_eq!(pointer, work.relaxation().thermal.as_ptr());
     }
 }
@@ -349,34 +361,141 @@ fn g0_channel_sgs_insulation_uses_native_neumann_filter_and_zero_wall_heat() {
 }
 
 #[test]
-fn g4_channel_sgs_refuses_unresolved_flux_or_film_traces_without_publication() {
+fn g1_channel_sgs_flux_and_film_walls_reach_original_filter_transport_and_heat_balance() {
     let gate = CancelGate::new_clock_free();
-    let mut state = ThermalLbm3::slab(5, 4, 5, 0.8, 0.9, 0.0);
-    seed(&mut state);
-    let n = state.gpop.len();
-    let mut work = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
-    for wall in [
-        ThermalWall::HeatFlux(0.0001),
-        ThermalWall::Convective {
-            transfer: 0.03,
-            ambient: 0.0,
-        },
+    for (walls, scalar_walls) in [
+        (
+            [ThermalWall::HeatFlux(0.0002), ThermalWall::Temperature(0.2)],
+            [ScalarWall::Interior, ScalarWall::Value(0.2)],
+        ),
+        (
+            [
+                ThermalWall::Temperature(0.8),
+                ThermalWall::Convective { transfer: 0.03, ambient: 0.1 },
+            ],
+            [ScalarWall::Value(0.8), ScalarWall::Interior],
+        ),
+        (
+            [
+                ThermalWall::HeatFlux(0.0002),
+                ThermalWall::Convective { transfer: 0.03, ambient: 0.1 },
+            ],
+            [ScalarWall::Interior; 2],
+        ),
     ] {
-        let walls = [wall, ThermalWall::Temperature(0.0)];
+        let mut state = ThermalLbm3::slab(5, 4, 5, 0.8, 0.9, 0.0);
+        seed(&mut state);
         state.set_thermal_walls(walls).unwrap();
+        let n = state.gpop.len();
+        let plane = state.grid.nx * state.grid.ny;
+        let original_rates = state.grid.tau.clone();
+        let original_thermal_rate = state.tau_g;
+        let before: f64 = state.gpop[plane..n - plane].iter().flatten().sum();
+        let mut transport_oracle = state.snapshot().0;
+        let mut work = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+        let mut filter_oracle = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+        let mut momentum = vec![0.8; n];
+        let mut thermal = vec![0.9; n];
+        for cell in plane..n - plane {
+            momentum[cell] += 0.001 * (cell % 5) as f64;
+            thermal[cell] += 0.001 * (cell % 7) as f64;
+        }
+        let molecular = RelaxationField { momentum: &momentum, thermal: &thermal };
+        let prepared = state
+            .prepare_thermal_channel_sgs(config(), Some(molecular), &mut work, &gate)
+            .unwrap();
+        let (momentum_fit, heat_fit) = filter_oracle.filter
+            .prepare_with_scalar(
+                config().momentum, config().heat,
+                &work.density, &work.velocity, [[0.0; 3]; 2], &work.temperature,
+                scalar_walls, &mut filter_oracle.scalar, || gate.is_requested(),
+            )
+            .unwrap();
+        assert_eq!(prepared.momentum_fit, momentum_fit);
+        assert_eq!(prepared.heat_fit, heat_fit);
+        assert_eq!(work.filter.viscosities(), filter_oracle.filter.viscosities());
+        assert_eq!(work.scalar.diffusivities(), filter_oracle.scalar.diffusivities());
+        assert!(prepared.transport.maximum_eddy_diffusivity_lu > 0.0);
+        // The wall policy cannot suppress independent positive heat diffusion
+        // in the second layer where the momentum fit is backscatter-limited.
+        for active in plane..2 * plane {
+            let cell = active + plane;
+            assert_eq!(work.filter.viscosities()[active], 0.0);
+            assert!(work.scalar.diffusivities()[active] > 0.0);
+            assert_eq!(work.momentum[cell].to_bits(), momentum[cell].to_bits());
+            assert!(work.thermal[cell] > thermal[cell]);
+        }
+        let mut heat = vec![0.0001; n];
+        heat[..plane].fill(0.0);
+        heat[n - plane..].fill(0.0);
+        let force = vec![[-2e-5, 1e-5, 0.0]; n];
+        let expected = transport_oracle
+            .step_with_sources_and_transport(&heat, &force, work.relaxation(), limits(n))
+            .unwrap();
+        let result = state
+            .step_with_sources_and_channel_sgs(
+                &heat, &force, config(), Some(molecular), &mut work, limits(n), &gate,
+            )
+            .unwrap();
+        assert_eq!(result.sgs, prepared);
+        assert_eq!(result.heat, expected);
+        assert_eq!(bits(&state), bits(&transport_oracle));
+        assert_eq!(state.last_wall_exchange(), transport_oracle.last_wall_exchange());
+        assert_eq!(state.thermal_walls(), walls);
+        assert_eq!(state.grid.tau, original_rates);
+        assert_eq!(state.tau_g.to_bits(), original_thermal_rate.to_bits());
+
+        let exchange = state.last_wall_exchange().unwrap();
+        let measured = [result.heat.bottom_wall, result.heat.top_wall];
+        for side in 0..2 {
+            assert_eq!(measured[side], exchange[side].heat_in);
+            let expected = match walls[side] {
+                ThermalWall::HeatFlux(flux) => flux * plane as f64,
+                ThermalWall::Convective { transfer, ambient } => {
+                    transfer * plane as f64 * (ambient - exchange[side].mean_temperature)
+                }
+                ThermalWall::Temperature(value) => {
+                    assert!((exchange[side].mean_temperature - value).abs() < 2e-15);
+                    continue;
+                }
+                ThermalWall::Adiabatic => unreachable!(),
+            };
+            assert!((measured[side] - expected).abs() < 2e-14);
+        }
+        let after: f64 = state.gpop[plane..n - plane].iter().flatten().sum();
+        let prescribed = 0.0001 * (n - 2 * plane) as f64;
+        assert!((result.heat.source - prescribed).abs() < 2e-17);
+        assert!((result.heat.stored_change - (after - before)).abs() < 2e-12);
+        assert!((after - before - prescribed - measured[0] - measured[1]).abs() < 2e-12);
+        assert!(result.heat.defect.abs() < 2e-12);
+    }
+}
+
+#[test]
+fn g4_thin_channel_flux_and_film_refusal_preserves_state_laws_and_accepted_exchange() {
+    let gate = CancelGate::new_clock_free();
+    for wall in [
+        ThermalWall::HeatFlux(0.0002),
+        ThermalWall::Convective { transfer: 0.03, ambient: 0.1 },
+    ] {
+        let mut state = ThermalLbm3::slab(3, 3, 2, 0.8, 0.9, 0.0);
+        let walls = [wall, ThermalWall::Temperature(0.2)];
+        state.set_thermal_walls(walls).unwrap();
+        let n = state.gpop.len();
+        let heat = vec![0.0; n];
+        let force = vec![[0.0; 3]; n];
+        // The transport wall law itself supports two fluid layers. Only the
+        // SGS interior derivative requires a third center.
+        state.step_with_sources(&heat, &force, limits(n)).unwrap();
         let before = bits(&state);
         let exchange = state.last_wall_exchange();
+        assert!(exchange.is_some());
+        let mut work = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
         assert!(matches!(
             state.step_with_sources_and_channel_sgs(
-                &vec![0.0; n],
-                &vec![[0.0; 3]; n],
-                config(),
-                None,
-                &mut work,
-                limits(n),
-                &gate,
+                &heat, &force, config(), None, &mut work, limits(n), &gate,
             ),
-            Err(ThermalSgsError::Invalid(_))
+            Err(ThermalSgsError::Dynamic(DynamicSgsError::Invalid(_)))
         ));
         assert_eq!(bits(&state), before);
         assert_eq!(state.thermal_walls(), walls);
@@ -472,17 +591,28 @@ fn g0_channel_budget_heat_cap_source_cancellation_and_retry_are_atomic() {
 }
 
 #[test]
-fn g1_channel_post_step_mach_refusal_keeps_original_state() {
+fn g1_channel_post_step_mach_refusal_keeps_flux_film_reports_and_continuation() {
     let gate = CancelGate::new_clock_free();
     let mut state = ThermalLbm3::slab(3, 3, 4, 0.8, 0.9, 0.0);
-    let before = bits(&state);
+    let walls = [
+        ThermalWall::HeatFlux(0.0002),
+        ThermalWall::Convective { transfer: 0.03, ambient: 0.1 },
+    ];
+    state.set_thermal_walls(walls).unwrap();
     let n = state.gpop.len();
+    let heat = vec![0.0; n];
+    let quiet = vec![[0.0; 3]; n];
+    state.step_with_sources(&heat, &quiet, limits(n)).unwrap();
+    let before = bits(&state);
+    let exchange = state.last_wall_exchange();
+    assert!(exchange.is_some());
+    let mut reference = state.snapshot().0;
     let mut work = state.thermal_channel_sgs_workspace(usize::MAX).unwrap();
     let mut settings = config();
     settings.maximum_mach = 0.001;
     assert!(matches!(
         state.step_with_sources_and_channel_sgs(
-            &vec![0.0; n],
+            &heat,
             &vec![[0.002, 0.0, 0.0]; n],
             settings,
             None,
@@ -493,6 +623,25 @@ fn g1_channel_post_step_mach_refusal_keeps_original_state() {
         Err(ThermalSgsError::Mach { .. })
     ));
     assert_eq!(bits(&state), before);
+    assert_eq!(state.thermal_walls(), walls);
+    assert_eq!(state.last_wall_exchange(), exchange);
+    // A subsequent accepted step must also retain the pre-refusal advective
+    // history; visible populations alone cannot establish that rollback.
+    let mut fresh = reference.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+    let expected = reference
+        .step_with_sources_and_channel_sgs(
+            &heat, &quiet, config(), None, &mut fresh, limits(n), &gate,
+        )
+        .unwrap();
+    let actual = state
+        .step_with_sources_and_channel_sgs(
+            &heat, &quiet, config(), None, &mut work, limits(n), &gate,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(bits(&state), bits(&reference));
+    assert_eq!(state.thermal_walls(), reference.thermal_walls());
+    assert_eq!(state.last_wall_exchange(), reference.last_wall_exchange());
 }
 
 #[test]

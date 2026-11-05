@@ -1,13 +1,35 @@
 # Mineral processing: public sources and callable physics
 
+The [ball-mill kinetics guide](MINING_AUSTIN_GRINDING.md) adds three
+experimental Assiros quartz calibrations with 24 claims for selection
+frequencies, daughter distributions and the exact source size grid. They drive
+the existing batch population balance under the original mill and charge
+conditions, preserving unresolved fines and the source-reported PSD mismatch.
+
+The [pyrrhotite guide](MINING_PYRRHOTITE.md) adds three matched NBS material
+profiles and four conserved endpoints for FeS/Fe7S8 oxidation and ferric attack.
+Finite oxidant inventories, direct proton production, standard reaction heat
+and Gibbs sums retain the original mineral phase and formula-unit basis.
+
+The [nonideal residence guide](MINING_NONIDEAL_RESIDENCE.md) adds unequal
+active/stagnant tank volumes, explicit bypass and exchange during flow stops.
+Its callable forward model independently accounts for outlet and retained
+material through feed pulses, shutdowns, restarts and flushing.
+
 Manufacturer [grinding-media records](MINING_GRINDING_MEDIA.md) now supply
 discrete forged-ball masses, geometry and hardness specifications, plus a
 separate theoretical SAG charge packing-density reference. They support
 media inventories without substituting ball hardness for ore work index.
 
-The [MIBC frother reference](MINING_FLOTATION_REAGENTS.md) supplies product
-density endpoints, minimum purity and separately named saturated-phase mass
-fractions for explicit dosing and material accounting.
+The [flotation-reagent reference](MINING_FLOTATION_REAGENTS.md) supplies MIBC
+frother, solid and liquid PAX, SIBX and copper sulfate pentahydrate profiles.
+Product concentrations, composition bounds, hydrate identity and physical
+property bases remain distinct for explicit dosing and material accounting.
+
+The [drop-weight reference](MINING_DROP_WEIGHT.md) supplies five published ore
+calibrations and a source-bound JK impact-response card with specific-energy
+inversion. It complements the Bond ball-mill model while retaining each
+original specimen and the distinction between t10 and a full product PSD.
 
 The [cassiterite reduction guide](MINING_TIN_REDUCTION.md) connects five
 compatible USGS material packs to CO reduction, graphite gasification and
@@ -21,6 +43,11 @@ stirred-tank trains, with retained rate classes and bounded numerical work.
 Peroxide oxidation, cyanate hydrolysis and ammonia speciation now have matched
 material references and finite-inventory and coupled-pH examples; see
 [cyanide treatment](MINING_CYANIDE_TREATMENT.md).
+
+The [sulfite-treatment guide](MINING_SULFITE_TREATMENT.md) adds matched NBS
+bisulfite/sulfite and crystalline sodium-reagent sources. Its runnable SO2/air
+endpoint keeps reagent preparation, finite dissolved oxygen, productive and
+side oxidation, sulfate, sodium and proton equivalents in separate accounts.
 
 Native-silver cyanidation and shared-zinc gold/silver cementation now have
 matched material references, finite-inventory reactions and a runnable

@@ -98,9 +98,6 @@ pub(super) fn lower(
         if time.enthalpy.is_some() {
             return Err(bad("open total-enthalpy histories require spatial-model pointwise; regional-capacity histories use the shared area-mean enclosure owner"));
         }
-        if spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint")) {
-            return Err(bad("open area-mean capacity radiation does not expose trajectory adjoints"));
-        }
     }
     if spec
         .solver

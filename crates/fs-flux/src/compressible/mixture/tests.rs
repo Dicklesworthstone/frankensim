@@ -1,7 +1,9 @@
 use super::*;
 
+mod contact_equilibrium;
 mod molecular;
 mod molecular_coupled;
+mod pressure_outlet;
 mod reactive;
 mod reservoir;
 use crate::compressible::{AxisBoundaries, Euler2d, FrozenGas, SIDES, State};

@@ -63,12 +63,32 @@ Node count alone does not establish audio-band fidelity.
   on half the difference of the heads' outward volume velocities, `D` from the piece's closed-body
   table, each head's own share taken off the volume shapes' baffled load. It is an estimate: free-field
   law, no floor, `w` the membrane-law lower hybrid. An optional port models a vented front head.
+- **Vented cavity modes**: `kit::attach_cavity_modes` couples the optional vent to every retained
+  pressure mode, as well as uniform compression. The projection is the mode's mean over the
+  circular aperture, including its position, finite radius and axial sign. Its transpose applies
+  that same pressure to the vent, so flow changes the cavity and the cavity drives flow with one
+  reciprocal work balance. The acoustic coordinates, heads and vent use the same time level;
+  timestep admission includes the vent's additional modal stiffness. The modes replace the
+  plug's interior end correction, retaining its throat and exterior correction, so the interior
+  air mass is counted once. Unresolved near-aperture inertia requires cutoff convergence;
+  attachment is allowed once per vent, before stepping. This retains the existing
+  linear lumped-port, full-head structural and truncated rigid-cylinder basis approximations;
+  it does not resolve the membrane cutout, port-edge flow or nonlinear jet losses.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
-  A microphone hears only surfaces facing it. Over a rigid floor (any plane, `floor_z`, `floor_y`)
-  it also hears, by the floor's image, the surfaces facing that image.
-  A cymbal is not in a baffle: its microphones apply the unbaffled-disc limit (a dipole,
-  `(4/3pi) ka` times the baffled field, for `ka << 1`), joined to the baffled field for `ka >> 1`
-  by a first-order high-pass with `tau = 4a/(3 pi c)`.
+  A baffled microphone hears only surfaces facing it. Over a rigid floor (any plane,
+  `floor_z`, `floor_y`) it also hears, by the floor's image, the surfaces facing that image.
+  Direct and reflected head and port paths use four-coefficient cubic fractional delays before
+  pressure summation, reducing frequency-dependent gain and phase errors in interference.
+  Coefficients are prepared once; stepping only scatters into the existing pressure ring.
+  Integer delays stay exact; paths below one sample of flight use causal linear interpolation.
+  This polynomial FIR approximation has a one-sample leading lobe. It is not an antialias
+  filter, an exact wavefront, or a qualification of the instrument's broadband radiation model.
+  A cymbal is not in a baffle: its microphones hear both faces with opposite pressure polarity,
+  including the delayed back-face sound reflected by a floor. They apply the unbaffled-disc
+  axial amplitude limit (`(4/3pi) ka` times the baffled field for `ka << 1`), joined to the
+  baffled field for `ka >> 1` by a first-order high-pass with `tau = 4a/(3 pi c)`.
+  This receiver approximation does not resolve edge diffraction or the low-frequency dipole's
+  angular directivity; it is not a full exterior acoustic solve.
 
 ## Shared atmosphere
 
@@ -618,7 +638,12 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 
 `live::Live` is one piece on a grid with spacing multiplied by `scale`, struck anywhere on its
 playing surface. It retains the preset's internal physics substeps and returns 48 kHz audio.
-Substepped output uses the offline sinc kernel with 16 output frames of causal filter delay;
+Substepped output uses the offline sinc kernel with 32 output frames of causal filter delay.
+Its retained band is 0–21.6 kHz at 48 kHz output, with at most 0.0022 dB gain error;
+frequencies from 26.4 kHz up to the internal Nyquist limit are suppressed by at least 74 dB.
+Symmetric tap pairs keep one multiplication per pair,
+so the longer kernel has the previous filter's multiplication count while preserving upper
+harmonics. This is output anti-aliasing, not a remedy for unresolved mechanical frequencies;
 filter history and fixed 128-frame sleep windows survive arbitrary caller block sizes and clones.
 It stops stepping once its motion and microphone output have decayed. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their

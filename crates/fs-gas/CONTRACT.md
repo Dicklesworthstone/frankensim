@@ -2863,6 +2863,37 @@ solution of the continuously refreshed Colebrook law and checks first-order
 constitutive convergence. A G4 endpoint-domain regression checks the actual cells, finite walls
 and previous report after refusal.
 
+### Turbulent gas-wall heat transfer from the current mixture
+
+`CircularWallModel::Gnielinski(CircularGnielinskiWall)` explicitly selects
+coupled smooth-pipe friction and turbulent heat transfer. Each original source
+interval evaluates `Re = rho |u-u_wall| D / mu` and `Pr = mu Cp / k` from its
+current mixture. `Cp` comes from the original NASA calorics and composition;
+it is neither `Cv` nor a constant-gamma substitute. The smooth-pipe Darcy
+factor `(0.79 ln(Re)-1.64)^-2` drives both the momentum loss and Gnielinski's
+Nusselt relation. The existing gas/finite-wall transaction then uses the
+cell's complete wetted area `4 V/D`, including its original solid resistance
+when material wall conduction is bound. No new heat source duplicates the
+existing conversion of relative kinetic energy to sensible energy.
+
+Reference: Gnielinski (1976), *International Chemical Engineering* 16(2),
+359–368, turbulent pipe-flow heat-transfer correlation.
+The implemented range is deliberately narrower: authored Re within 1e4..1e6,
+Pr within 0.5..200, and wall-relative Mach at most 0.3. Original circular
+geometry must agree and branch length/diameter must be at least ten. Fully
+developed smooth flow and modest wall-to-bulk property variation are modeling
+assumptions; the length check does not prove development. This path does not
+extend the heat correlation to rough pipes, transition, swirl, strong property
+variation or oscillatory boundary layers. The existing Colebrook option keeps
+its independently authored Nusselt number.
+
+G1 regressions check the published friction/heat relations and the Pr=1 limit.
+G3/G4 native-network tests check live-property and slip response, finite-wall
+energy exchange, moving-frame consistency and complete rollback on domain
+exit. The constitutive coefficients retain the source owner's first-order
+interval lag. These are numerical checks of an Estimated correlation, not
+experimental gas-pipe validation or a resolved-turbulence claim.
+
 ### Existing source composition
 
 `DissipatingNetwork1d::step_with_wall` performs W/2, D/2, A, D/2, W/2.
@@ -4626,3 +4657,42 @@ and latent walls, mechanical evolution at zero thermal exposure, independent
 species-datum invariance, whole-call budgets, source refusal and final
 cancellation with deterministic retry. They use the existing synthetic binary
 constitutive fixture and do not claim experimental-mixture validation.
+
+
+## Opt-in pressure equilibrium at transported mixture contacts
+
+`MixtureEuler1d::step_with_contact_equilibrium` adds a bounded alternative for
+stationary, constant-area inviscid transport. The default `step` remains fully
+conservative and retains its unequal-caloric contact-pressure limitation.
+The option uses the same species and momentum fluxes, HLLC/HLL wave closure,
+canonical species order and original NASA-9 calorics.
+
+A recipient is eligible only when both actual traces on every incident face
+match its original pressure and full velocity within the caller's tolerance.
+Velocity differences are scaled by sound speed, never by the bulk speed.
+HLL fallback, physical boundary cells and later-stage mismatches disable the
+correction. Pressure or velocity variations exceeding that tolerance retain the
+conservative update.
+It reconstructs energy from the transported species and represented momenta
+at the original pressure after each forward-Euler stage and the final SSP
+average. All source-temperature and kinetic-energy precision gates still apply.
+
+`ContactWorkspace` is prepared once under an explicit byte budget; subsequent
+attempts allocate no numerical storage. `ContactEquilibriumControl` requires
+a finite positive relative tolerance at most 1e-6 and a finite nonnegative
+absolute energy-defect budget per accepted step. The `ContactCorrection`
+receipt reports the signed energy defect, sum of absolute corrections and
+number of distinct corrected cells. Stage corrections receive weights
+1/2, 1/2 and 1, respectively, and each uses the physical cell volume.
+Opposing corrections cannot conceal work from the absolute budget.
+
+The native energy residual continues to include this numerical defect.
+`corrected_energy_residual_j` subtracts the separately reported signed defect;
+the correction is not physical heat or mechanical work. Budget failures halve
+the step without forcing MUSCL to first order. Refusal or cancellation leaves
+accepted cells and time untouched. Source-inversion hints are private scratch.
+
+This Estimated option does not establish fully discrete entropy stability,
+general multicomponent shock accuracy, or equilibrium preservation outside
+admitted contacts. Variable-area, moving-mesh, body-force, reacting, molecular,
+piston and network compositions retain their original transport methods.

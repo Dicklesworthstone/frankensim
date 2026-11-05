@@ -153,17 +153,11 @@ impl PreparedHarmonicPole<'_> {
             dh += (dv[i].conj() * self.effort[i]).re + 0.5 * (v[i].conj() * dqv[i]).re;
         }
         let mut output = vec![C64::ZERO; m];
-        for p in 0..m {
+        for (p, value) in output.iter_mut().enumerate() {
             check_cancel(&mut cancelled)?;
-            let mut correction = C64::ZERO;
-            for i in 0..n {
-                accumulate(
-                    &mut output[p],
-                    &mut correction,
-                    effort[i].scale(model.g[i * m + p])
-                        + self.effort[i].scale(at(direction.ports, i * m + p)),
-                );
-            }
+            *value = crate::harmonic::port_output_tangent(
+                &model.g, m, p, &effort, direction.ports, &self.effort,
+            )?;
         }
         let mut dd = 0.0;
         for i in 0..n {

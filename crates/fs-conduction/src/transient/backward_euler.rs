@@ -15,6 +15,9 @@
 //! the transient operator, and boundary-node storage enters the reaction heat.
 //! The original `advance` entry point still requires constant prescribed data.
 
+mod surface_capacity;
+pub use surface_capacity::{ArealHeatCapacity, SurfaceHeatCapacity};
+
 mod nonlinear;
 pub use nonlinear::{NonlinearStepConfig, NonlinearStepSolution};
 mod adjoint;
@@ -135,6 +138,32 @@ impl<'m> BackwardEuler<'m> {
         Ok(Self { mesh, capacity, material_capacities: Vec::new(), capacity_temperature_spans: None })
     }
 
+    /// Prepare a stationary composite in local thermal equilibrium from
+    /// positive source densities/Cp and P1 constituent volume fractions.
+    /// Storage is `sum(phi_i * rho_i * Cp_i)` per reference volume, integrated
+    /// by the existing exact nodal assembler once. No mixture conductivity,
+    /// current-density update, expansion or heat of mixing is inferred.
+    ///
+    /// Fractions sum to one within floating-point roundoff, without clipping
+    /// or renormalization. A constituent present at any corner constrains the
+    /// temperature of the entire tet; an absent constituent imposes no domain.
+    /// Original source bundles and these support intersections are retained for
+    /// every step, including nonlinear/radiative endpoints and boundary histories.
+    pub fn material_volume_fractions(
+        cx: &Cx<'_>, mesh: &'m ConductionMesh,
+        constituents: &[super::MaterialHeatCapacityVolumeFraction<'_>],
+    ) -> Result<Self, ConductionError> {
+        let prepared = super::capacity::mixture::prepare(cx, mesh, constituents)?;
+        let mut storage = Self::nodal(cx, mesh, &prepared.capacities)?;
+        for (index, constituent) in constituents.iter().enumerate() {
+            if index % 512 == 0 { poll(cx, index)?; }
+            storage.material_capacities.push(constituent.source.clone());
+        }
+        storage.capacity_temperature_spans = Some(prepared.spans);
+        poll(cx, mesh.vertex_count())?;
+        Ok(storage)
+    }
+
     /// Bind source-derived constant heat storage uniformly without discarding
     /// the material card, selected density/Cp claims or temperature domain.
     pub fn uniform_material(cx: &Cx<'_>, mesh: &'m ConductionMesh, source: &MaterialHeatCapacity)
@@ -185,7 +214,8 @@ impl<'m> BackwardEuler<'m> {
     // Theta and duty-cycle owners share this prepared P1 storage and source admission.
     pub(crate) fn capacitance(&self) -> &Csr { &self.capacity }
 
-    /// Retained density/Cp source bundles. Empty for explicitly declared storage.
+    /// Retained volume and surface density/Cp source bundles.
+    /// Empty when all storage is explicitly declared.
     #[must_use]
     pub fn material_capacities(&self) -> &[MaterialHeatCapacity] { &self.material_capacities }
 

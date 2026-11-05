@@ -21,6 +21,43 @@ fn close(actual: f64, expected: f64, scale: f64) {
 }
 
 #[test]
+fn g1_held_force_mean_relation_matches_analytic_oscillator_and_retains_small_motion() {
+    let (omega, zeta, duration) = (3.0_f64, 0.2_f64, 0.4_f64);
+    let initial = state(0.1, -0.3);
+    let prepared = LinearForceTransition::try_new(omega, zeta, duration).unwrap();
+    let (base, mobility) = prepared.held_force_mean_velocity_relation(initial, 2.0).unwrap();
+    let damped = omega * (1.0 - zeta * zeta).sqrt();
+    let retention = (-zeta * omega * duration).exp();
+    let displacement = |force: f64| {
+        let equilibrium = force / omega.powi(2);
+        let y = initial.displacement_m_sqrt_kg - equilibrium;
+        let q = equilibrium + retention * (y * (damped * duration).cos()
+            + (initial.velocity_m_sqrt_kg_per_s + zeta * omega * y)
+                * (damped * duration).sin() / damped);
+        q - initial.displacement_m_sqrt_kg
+    };
+    for extra in [-3.0, 0.0, 1.4] {
+        close(base + mobility * extra, displacement(2.0 + extra) / duration, 1.0);
+    }
+    assert!(mobility > 0.0);
+
+    // Absolute endpoint displacement cannot resolve this motion at all.
+    // A power port must still retain its mean velocity and force mobility.
+    let (omega, duration, q) = (2.0_f64.powi(-10), 2.0_f64.powi(-12), 2.0_f64.powi(60));
+    let force = omega * omega * q;
+    let initial = state(q, 0.75);
+    let prepared = LinearForceTransition::try_new(omega, 0.0, duration).unwrap();
+    let (mean, mobility) = prepared.held_force_mean_velocity_relation(initial, force).unwrap();
+    let endpoint = prepared.advance(initial, force, force).unwrap();
+    assert_eq!(endpoint.displacement_m_sqrt_kg, q);
+    let angle = omega * duration;
+    close(mean, 0.75 * angle.sin() / angle, 1.0);
+    close(mobility, 2.0 * (0.5 * angle).sin().powi(2) / (omega * omega * duration), duration);
+    assert!(prepared.held_force_mean_velocity_relation(state(f64::NAN, 0.0), 0.0).is_err());
+    assert!(prepared.held_force_mean_velocity_relation(initial, f64::INFINITY).is_err());
+}
+
+#[test]
 fn g1_explicit_free_drag_retains_decay_distance_and_physical_heat() {
     // With zero stiffness, v=v0*exp(-c*t), q=q0+v0*(1-exp(-c*t))/c,
     // and heat is the kinetic-energy loss. expm1 retains the independent

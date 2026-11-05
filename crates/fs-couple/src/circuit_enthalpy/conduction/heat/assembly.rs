@@ -1,4 +1,7 @@
 //! Nonlinear spatial current and field storage through the shared heat owner.
+mod motion;
+pub use motion::step_spatial_moving_conduction_candidate;
+
 use super::*;
 use crate::circuit_enthalpy::contacts::heat::HeatAssembly;
 

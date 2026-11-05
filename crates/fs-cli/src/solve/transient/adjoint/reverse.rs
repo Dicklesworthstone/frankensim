@@ -6,11 +6,12 @@ use super::{Objective, Selected, Tape, finite, flux_controls, select, storage_by
 use crate::solve::conjugate::ConjugatePath;
 use crate::solve::natural::NaturalLaw;
 use crate::solve::radiation::LoweredRadiation;
+use super::super::enclosure::Model as EnclosureModel;
 use fs_conduction::adjoint::robin::RobinResponse;
 use fs_conduction::interface::temperature::TemperatureContacts;
-use fs_conduction::radiation::{EnclosureRadiationLinearization, GrayDiffuseEnclosure};
+use fs_conduction::radiation::EnclosureRadiationLinearization;
 use fs_conduction::transient::backward_euler::{BackwardEuler, NonlinearStepConfig, StepConfig};
-use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, ThermalInterfaces};
+use fs_conduction::{ConductionProblem, PowerMap, ScalarField, ThermalBc, ThermalBoundary, ThermalInterfaces};
 use fs_exec::Cx;
 use fs_project::{ProjectSpec, TransientBoundaryTarget};
 use std::collections::BTreeMap;
@@ -26,6 +27,22 @@ mod report;
 
 pub(in crate::solve::transient) use contact::storage_bytes as contact_storage_bytes;
 
+/// Ambient secants also need the wall means of original radiation-only traces.
+/// Their algebraic Robin rows carry radiation; they do not create convection
+/// parameters. Forward memory admission and reverse binding share this order.
+pub(in crate::solve::transient) fn feedback_regions<'a>(
+    boundary: &'a ThermalBoundary, radiation: Option<&LoweredRadiation>,
+) -> Vec<&'a str> {
+    boundary.conditions().iter().enumerate().filter_map(|(index, condition)| {
+        let name = boundary.region_names()[index].as_str();
+        let radiating_zero_flux = matches!(condition,
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(value) } if *value == 0.0)
+            && radiation.is_some_and(|lowering| !lowering.is_enclosure()
+                && lowering.patches.iter().any(|patch| patch.region() == name));
+        (matches!(condition, ThermalBc::Robin { .. }) || radiating_zero_flux).then_some(name)
+    }).collect()
+}
+
 pub(in crate::solve::transient) struct NaturalCoupling<'a> {
     pub(in crate::solve::transient) laws: &'a [NaturalLaw],
     pub(in crate::solve::transient) pressure_pa: f64,
@@ -38,13 +55,22 @@ pub(in crate::solve::transient) fn natural_storage_bytes(
 }
 
 pub(in crate::solve::transient) fn radiation_storage_bytes(
-    n: usize, ports: usize, patches: usize, is_enclosure: bool,
+    n: usize, ports: usize, patches: usize, is_enclosure: bool, open: bool,
 ) -> Result<usize, SolveRefusal> {
     let bytes = if is_enclosure {
         radiation::enclosure_storage_bytes(n, ports, patches)?
     } else {
         radiation::storage_bytes(n, ports, patches)?
     };
+    // The independent bath adds one dense radiosity row/column and its
+    // controls, but no FEM trace or node-by-patch feedback factor.
+    let bytes = if open {
+        if !is_enclosure { return Err(bad("a black reservoir requires its enclosure owner")); }
+        let rows = u64::try_from(patches).map_err(|_| bad("enclosure patch count overflows"))?;
+        rows.checked_mul(2).and_then(|v| v.checked_add(1)).and_then(|v| v.checked_mul(64))
+            .and_then(|v| v.checked_add(4096)).and_then(|v| bytes.checked_add(v))
+            .ok_or_else(|| bad("open enclosure reverse workspace overflows"))?
+    } else { bytes };
     usize::try_from(bytes)
         .map_err(|_| bad("native capacity radiation workspace does not fit this platform"))
 }
@@ -143,7 +169,7 @@ pub(in crate::solve::transient) fn finish(
     region_ids: &BTreeMap<String, u32>,
     goal_region: u32,
     radiation: Option<&LoweredRadiation>,
-    enclosure: Option<&GrayDiffuseEnclosure>,
+    enclosure: Option<&EnclosureModel>,
     natural: Option<&NaturalCoupling<'_>>,
     airflow: Option<&ConjugatePath>,
     tape: &Tape,
@@ -162,18 +188,19 @@ pub(in crate::solve::transient) fn finish(
         || labels.len() != problem.mesh.element_count() {
         return Err(bad("transient adjoint mesh, trajectory or time-grid identity differs"));
     }
-    if radiation.is_some_and(LoweredRadiation::is_enclosure) != enclosure.is_some() {
+    if radiation.is_some_and(LoweredRadiation::is_enclosure) != enclosure.is_some()
+        || radiation.is_some_and(|row| row.open_ambient_temperature_k().is_some())
+            != enclosure.is_some_and(EnclosureModel::is_open)
+    {
         return Err(bad("capacity adjoint lost its exact bound enclosure model"));
     }
     if temperature_contacts.is_some()
         && (interfaces.is_some()
-            || radiation.is_some()
             || natural.is_some()
-            || airflow.is_some()
-            || objective.material_controls())
+            || airflow.is_some())
     {
         return Err(bad(
-            "capacity contact adjoints require their original live sources with prescribed or scheduled boundaries; derived boundary and material-control compositions are unsupported",
+            "capacity contact adjoints require original live sources with prescribed or scheduled boundaries and optional area-mean ambient or enclosure radiation; derived-convection compositions are unsupported",
         ));
     }
     let coupled = temperature_contacts.is_some()
@@ -219,16 +246,15 @@ pub(in crate::solve::transient) fn finish(
         names.push(name);
         bases.push(values);
     }
-    let ports: Vec<&str> = problem.boundary.conditions().iter().enumerate()
-        .filter_map(|(i, condition)| matches!(condition, ThermalBc::Robin { .. })
-            .then_some(problem.boundary.region_names()[i].as_str())).collect();
+    let ports = feedback_regions(problem.boundary, radiation);
     if ports.len() > 64 { return Err(bad("transient adjoint exceeds 64 boundary controls")); }
     let reference_histories: Vec<bool> = ports.iter().map(|&name|
         policy.boundary_schedules.iter().any(|row|
             row.target == name && row.kind == TransientBoundaryTarget::ConvectionTemperature))
         .collect();
     let radiation_workspace = radiation.map(|lowering|
-        radiation_storage_bytes(n, ports.len(), lowering.surface_count(), lowering.is_enclosure()))
+        radiation_storage_bytes(n, ports.len(), lowering.surface_count(), lowering.is_enclosure(),
+            lowering.open_ambient_temperature_k().is_some()))
         .transpose()?.unwrap_or(0);
     let natural_workspace = natural.map(|coupling|
         natural_storage_bytes(n, ports.len(), coupling.laws.len()))
@@ -261,6 +287,14 @@ pub(in crate::solve::transient) fn finish(
         })
         .transpose()?
         .unwrap_or(0);
+    // Live material controls retain one additional physical source evaluation
+    // while the complete endpoint tangent is alive. Conservatively reserve
+    // the existing contact allowance again; the fixed-owner report is unchanged.
+    let material_workspace = material_workspace.checked_add(
+        if objective.material_controls() && temperature_contacts.is_some() {
+            contact_workspace
+        } else { 0 },
+    ).ok_or_else(|| bad("live capacity material-control workspace overflows"))?;
     let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
         .checked_add(radiation_workspace)
         .and_then(|value| value.checked_add(natural_workspace))
@@ -273,15 +307,22 @@ pub(in crate::solve::transient) fn finish(
     let patch_count = radiation.map_or(0, LoweredRadiation::surface_count);
     let mut emissivities = vec![0.0; patch_count];
     let mut reservoirs = vec![0.0; patch_count];
+    let mut black_environment = 0.0;
     let mut natural_ambients = vec![0.0; natural.map_or(0, |coupling| coupling.laws.len())];
     let mut air_controls = airflow.map(|path| air_controls::Controls::new(cx, spec, path, deadline))
         .transpose()?;
     // Bind even for an initial selected peak so zero controls retain physical
     // identities. Ordinary capacity reports do not acquire this extra work.
     let mut material_controls = if objective.material_controls() {
-        Some(material_controls::Controls::new(
-            cx, spec, problem, interfaces, labels, region_ids, &tape.states[0], deadline,
-        )?)
+        Some(if let Some(contacts) = temperature_contacts {
+            material_controls::Controls::new_live_capacity(
+                cx, spec, problem, contacts, labels, region_ids, &tape.states[0], deadline,
+            )?
+        } else {
+            material_controls::Controls::new(
+                cx, spec, problem, interfaces, labels, region_ids, &tape.states[0], deadline,
+            )?
+        })
     } else { None };
     let mut prescribed_controls = prescribed_controls::Controls::new(cx, spec, problem, deadline)?;
     let mut flux_controls = flux_controls::Controls::new(cx, spec, problem, deadline)?;
@@ -289,7 +330,9 @@ pub(in crate::solve::transient) fn finish(
         let owned = natural.is_some_and(|coupling|
             coupling.laws.iter().any(|law| law.target == name))
             || airflow.is_some_and(|path| path.segments.iter().any(|segment| segment.target == name));
-        (!owned).then_some(index)
+        let original_robin = problem.boundary.region_names().iter().position(|value| value == name)
+            .is_some_and(|region| matches!(problem.boundary.conditions()[region], ThermalBc::Robin { .. }));
+        (original_robin && !owned).then_some(index)
     }).collect();
     // Enclosure flux feedback is independent of the convective port layout:
     // vacuum walls need two node-by-patch factors even with no Robin controls.
@@ -356,18 +399,20 @@ pub(in crate::solve::transient) fn finish(
         // A whole-body heat balance cannot detect cancelling nodal defects.
         // This single audit keeps original convection, gray radiation, and
         // actual transported air heat distinct; no primal solve is repeated.
-        let physical = if coupled && temperature_contacts.is_none() {
-            let audit = if let Some(model) = enclosure {
-                let lowering = radiation.ok_or_else(|| bad("capacity enclosure lost its controls"))?;
-                engine.evaluate_prescribed_enclosure_endpoint(
-                    cx, convection_problem, interfaces, &tape.states[index], expected, dt, config,
-                    model, lowering.config,
-                ).map_err(lower)?.physical
+        let physical = if coupled && (temperature_contacts.is_none()
+            || radiation.is_some_and(|lowering| !lowering.is_enclosure())) {
+            let audit = if let Some(contacts) = temperature_contacts {
+                // Query physical resistance values only for this residual
+                // audit. The later endpoint owner supplies their full tangent.
+                super::super::contact::evaluate(
+                    cx, engine, convection_problem, contacts, &tape.states[index], expected,
+                    dt, config, radiation, enclosure, deadline,
+                )?.0
             } else {
-                engine.evaluate_prescribed_endpoint(
-                    cx, convection_problem, interfaces, &tape.states[index], expected, dt, config,
-                    radiation.map(|lowering| lowering.patches.as_slice()),
-                ).map_err(lower)?
+                super::super::radiative::evaluate(
+                    cx, engine, convection_problem, interfaces, &tape.states[index], expected,
+                    dt, config, radiation, enclosure, deadline,
+                )?
             };
             let target = tape.physical_targets_j[index];
             if !target.is_finite() || target < 0.0
@@ -389,12 +434,16 @@ pub(in crate::solve::transient) fn finish(
         };
         let enclosure_bound = enclosure.map(|model| {
             let lowering = radiation.ok_or_else(|| bad("capacity enclosure lost its declaration"))?;
-            EnclosureRadiationLinearization::bind(
-                cx, convection_problem, config.linear, expected, &ports,
-                natural_bound.as_ref().map_or(zero_ports.as_slice(), |bound| &bound.h_mean_slopes),
-                air_bound.as_ref().map_or(zero_feedback.as_slice(), |bound| &bound.reference_feedback),
-                model, lowering.config.balance_tolerance_w, feedback_entry_cap,
-            ).map_err(lower)
+            let h_slopes = natural_bound.as_ref().map_or(zero_ports.as_slice(), |bound| &bound.h_mean_slopes);
+            let reference_feedback = air_bound.as_ref().map_or(zero_feedback.as_slice(), |bound| &bound.reference_feedback);
+            match model {
+                EnclosureModel::Closed(model) => EnclosureRadiationLinearization::bind(
+                    cx, convection_problem, config.linear, expected, &ports, h_slopes,
+                    reference_feedback, model, lowering.config.balance_tolerance_w, feedback_entry_cap),
+                EnclosureModel::Open(model, ambient) => EnclosureRadiationLinearization::bind_open(
+                    cx, convection_problem, config.linear, expected, &ports, h_slopes,
+                    reference_feedback, model, *ambient, lowering.config.balance_tolerance_w, feedback_entry_cap),
+            }.map_err(lower)
         }).transpose()?;
         let bound = if let Some(lowering) = radiation.filter(|lowering| !lowering.is_enclosure()) {
             Some(radiation::bind(
@@ -412,7 +461,11 @@ pub(in crate::solve::transient) fn finish(
         // the same capacity/bulk tangent. It never reconstructs a primal.
         let contact_step = temperature_contacts.map(|contacts|
             engine.linearize_temperature_contact_endpoint(
-                cx, step_problem, contacts, &tape.states[index], expected, dt, config,
+                cx, ConductionProblem {
+                    boundary: if let Some(bound) = &enclosure_bound { bound.boundary() }
+                        else { bound.as_ref().map_or(convection_problem.boundary, |bound| &bound.boundary) },
+                    ..convection_problem
+                }, contacts, &tape.states[index], expected, dt, config,
                 tape.physical_targets_j[index], &ports, max_contact_pairs,
             ).map_err(lower)).transpose()?;
         let ordinary_step = if contact_step.is_some() {
@@ -461,6 +514,10 @@ pub(in crate::solve::transient) fn finish(
                 }
                 emissivities[i] = finite(emissivities[i] + physical.emissivities[i])?;
             }
+            if physical.ambient_temperature.is_some() != model.is_open() {
+                return Err(bad("capacity radiation derivative lost its independent black reservoir"));
+            }
+            black_environment = finite(black_environment + physical.ambient_temperature.unwrap_or(0.0))?;
             radiosity_iterations = radiosity_iterations.checked_add(physical.radiosity_iterations)
                 .ok_or_else(|| bad("capacity enclosure reverse work overflows"))?;
             worst_radiosity_dual = worst_radiosity_dual.max(physical.radiosity_relative_residual);
@@ -609,7 +666,7 @@ pub(in crate::solve::transient) fn finish(
     let radiation = radiation.map(|lowering| {
         if let Some(model) = enclosure {
             enclosure::fragment(
-                lowering, model, &emissivities, selected.state,
+                lowering, model, &emissivities, black_environment, selected.state,
                 radiosity_iterations, worst_radiosity_dual,
             )
         } else {

@@ -71,16 +71,23 @@ pub fn rung_counts(card: &Card, rung: usize) -> [usize; 3] {
 
 /// Boundary mid-edge nodes are snapped back onto the bar's surface: on the curved lower face a straight
 /// midpoint would leave a P1 geometry error under the quadratic field. On a prism this is the identity.
-struct Surface<'a>(&'a Card);
+/// The face is the nearest in metres, since a fraction of the length and a fraction of the thickness don't compare.
+pub struct Surface<'a>(pub &'a Card);
 
 impl BoundaryProjection for Surface<'_> {
     fn project(&self, p: [f64; 3]) -> Result<[f64; 3], TetElasticError> {
-        let mut u = reference(self.0, p);
+        let card = self.0;
+        let mut u = reference(card, p);
+        let h = card
+            .profile
+            .thickness(card.length_m, card.thickness_m, p[0]);
+        let size = [card.length_m, card.width_m, h];
+        let metres = |a: usize| u[a].min(1.0 - u[a]) * size[a];
         let axis = (0..3)
-            .min_by(|&a, &b| u[a].min(1.0 - u[a]).total_cmp(&u[b].min(1.0 - u[b])))
+            .min_by(|&a, &b| metres(a).total_cmp(&metres(b)))
             .unwrap_or(0);
         u[axis] = if u[axis] < 0.5 { 0.0 } else { 1.0 };
-        Ok(point(self.0, u))
+        Ok(point(card, u))
     }
 }
 

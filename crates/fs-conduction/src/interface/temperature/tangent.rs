@@ -61,6 +61,37 @@ impl<'a> ContactCapacityLinearization<'a> {
             )?;
         Ok(ContactCapacityGradient { transport, resistance_multipliers })
     }
+
+    /// Compose original mean-Robin and independent mean-flux feedback with the
+    /// complete capacity, bulk and contact tangent in one transposed solve.
+    ///
+    /// Bind the fresh physical boundary at the unchanged endpoint first. The
+    /// boundary owner supplies its state derivatives and remaps the returned
+    /// partials to original convection, emissivity and reservoir controls.
+    /// This admits reflected radiation on both Robin and prescribed-flux
+    /// patches without replacing contact by a frozen resistance. The same
+    /// watt-coordinate dual contracts each whole contact-law multiplier; no
+    /// additional dt belongs in resistance, source or history pullbacks.
+    /// Existing feedback storage, contact/source-slope and work gates apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pullback_with_robin_and_flux_feedback_and_resistance_controls(
+        &self, cx: &Cx<'_>, htc_wall_derivatives: &[f64],
+        reference_wall_derivatives: &[f64], reference_feedback: &[f64],
+        flux_feedback: Option<&crate::adjoint::robin::MeanFluxFeedback>,
+        nodal_weights: &[f64], max_feedback_entries: usize, max_face_pairs: usize,
+    ) -> Result<ContactCapacityGradient, ConductionError> {
+        poll(cx, 0)?;
+        if self.contact.trace_elements() > max_face_pairs {
+            return Err(invalid("<contact-adjoint>", "contact controls exceed the trace-element allowance"));
+        }
+        let transport = self.step.pullback_with_robin_and_flux_feedback(cx,
+            htc_wall_derivatives, reference_wall_derivatives, reference_feedback,
+            flux_feedback, nodal_weights, max_feedback_entries)?;
+        let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
+            .resistance_scale_pullback(cx, self.contact.temperature(), &transport.nodal_load,
+                max_face_pairs)?;
+        Ok(ContactCapacityGradient { transport, resistance_multipliers })
+    }
 }
 
 enum ContactDerivative<'a> {

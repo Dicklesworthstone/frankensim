@@ -50,7 +50,7 @@ pub(in crate::solve::transient) fn storage_bytes(
     nodes: usize, ports: usize, patches: usize,
 ) -> Result<u64, SolveRefusal> {
     if nodes == 0 || ports == 0 || ports > 64 || patches == 0 || patches > ports {
-        return Err(bad("capacity radiation adjoint requires one to 64 bound Robin ports and patches"));
+        return Err(bad("capacity radiation adjoint requires one to 64 bound convection or radiation-only regions and patches"));
     }
     let nodes = u64::try_from(nodes).map_err(|_| bad("capacity radiation node count overflows"))?;
     let ports = ports as u64;
@@ -152,11 +152,25 @@ pub(super) fn bind(
         || vec![0.0; regions.len()], |slopes| slopes.to_vec(),
     );
     let mut local_reference_slopes = vec![0.0; regions.len()];
-    for &name in regions {
+    for (port, &name) in regions.iter().enumerate() {
         poll(cx, deadline)?;
         let region = problem.boundary.region_names().iter().position(|value| value == name)
             .ok_or_else(|| bad("capacity radiation has an unknown control region"))?;
-        let (convection_h, convection_reference) = uniform_row(problem.boundary, region)?;
+        let (convection_h, convection_reference) = match &problem.boundary.conditions()[region] {
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(value) } if *value == 0.0 => {
+                let patch = lowering.patches.iter().find(|patch| patch.region() == name)
+                    .ok_or_else(|| bad("a selected zero-flux region requires its original radiation patch"))?;
+                if h_mean_slopes[port] != 0.0
+                    || reference_feedback[port * regions.len()..(port + 1) * regions.len()]
+                        .iter().any(|&value| value != 0.0)
+                {
+                    return Err(bad("a radiation-only region has no convection slope or reference feedback"));
+                }
+                // This reference is inert: every convection term has hc=0.
+                (0.0, patch.ambient_temperature_k())
+            },
+            _ => uniform_row(problem.boundary, region)?,
+        };
         let (combined_h, combined_reference) = uniform_row(&boundary, region)?;
         if convection_h < 0.0 || combined_h <= 0.0 {
             return Err(bad("capacity radiation requires nonnegative convection and positive combined coefficients"));

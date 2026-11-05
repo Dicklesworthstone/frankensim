@@ -1,5 +1,10 @@
 //! Matching original tetrahedra, two source-side states and their actual heat.
 //! The laws below are manufactured integration fixtures, not measured data.
+#[path = "contacts/mixed.rs"]
+mod mixed;
+#[path = "contacts/motion.rs"]
+mod motion;
+
 use super::*;
 use fs_conduction::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS as THERMAL_RD,

@@ -1,9 +1,8 @@
-//! Focused G0/G3 shell spatial-operator battery (frankensim-b8bxd.9.1).
+//! Focused G0/G1/G3 shell spatial-operator battery (frankensim-b8bxd.9.1).
 //!
-//! These checks deliberately use a single flat triangle: its six rigid modes
-//! are known without an eigen-solver oracle, while the assembled matrix still
-//! exercises typed inertia, membrane/bending terms, damping, reduction, and
-//! refusal boundaries used by the Euler-disc base.
+//! Single-triangle checks know the six rigid modes without an eigen-solver
+//! oracle. Affine patches on refined and rotated meshes independently exercise
+//! plane-stress elasticity. Bending remains a surrogate with no continuum claim.
 
 use fs_solid::{
     AssemblyBudget, DampingModel, OperatorDiagnostics, ShellError, ShellIdentity, ShellMaterial,
@@ -373,4 +372,137 @@ fn shell_004_conditioning_can_be_explicitly_bounded_without_refusing_assembly() 
         assembly.diagnostics,
         OperatorDiagnostics::NotComputed { .. }
     ));
+}
+
+#[test]
+fn shell_g1_membrane_affine_patch_has_exact_plane_stress_energy_under_refinement_and_rotation() {
+    // Formula-disjoint oracle: integrate the continuum plane-stress density
+    // over a parallelogram, independent of triangle shapes or stiffness entries.
+    let frames = [
+        ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        (
+            [1.0 / 3.0, 2.0 / 3.0, -2.0 / 3.0],
+            [2.0 / 3.0, 1.0 / 3.0, 2.0 / 3.0],
+        ),
+    ];
+    for n in [1, 2, 4] {
+        for (tangent, bitangent) in frames {
+            for poisson in [-0.7, 0.0, 0.33, 0.499] {
+                let mut model = plate();
+                model.material.poisson_ratio = poisson;
+                model.budget.max_conditioning_dofs = 0;
+                let coordinates: Vec<[f64; 2]> = (0..=n)
+                    .flat_map(|j| {
+                        (0..=n).map(move |i| {
+                            [
+                                (i as f64 + 0.3 * j as f64) / n as f64,
+                                0.8 * j as f64 / n as f64,
+                            ]
+                        })
+                    })
+                    .collect();
+                model.nodes = coordinates
+                    .iter()
+                    .map(|&[x, y]| ShellNode {
+                        position_m: core::array::from_fn(|c| {
+                            [0.4, -0.7, 1.2][c] + tangent[c] * x + bitangent[c] * y
+                        }),
+                    })
+                    .collect();
+                model.triangles = (0..n)
+                    .flat_map(|j| {
+                        (0..n).flat_map(move |i| {
+                            let a = j * (n + 1) + i;
+                            [[a, a + 1, a + n + 2], [a, a + n + 2, a + n + 1]]
+                        })
+                    })
+                    .collect();
+                let stiffness = model.assemble().unwrap().full_stiffness;
+                for [ex, ey, exy] in [
+                    [0.002, -poisson * 0.002, 0.0],
+                    [0.002, 0.002, 0.0],
+                    [0.0, 0.0, 0.003],
+                    [0.002, -0.001, 0.003],
+                ] {
+                    let u: Vec<_> = coordinates
+                        .iter()
+                        .flat_map(|&[x, y]| {
+                            let ut = ex * x + exy * y;
+                            let ub = exy * x + ey * y;
+                            [
+                                ut * tangent[0] + ub * bitangent[0],
+                                ut * tangent[1] + ub * bitangent[1],
+                                ut * tangent[2] + ub * bitangent[2],
+                                0.0,
+                                0.0,
+                                0.0,
+                            ]
+                        })
+                        .collect();
+                    let e = model.material.youngs_modulus_pa;
+                    let expected = 0.8
+                        * model.thickness_m
+                        * e
+                        * (0.5 * (ex * ex + ey * ey + 2.0 * poisson * ex * ey)
+                            / (1.0 - poisson * poisson)
+                            + exy * exy / (1.0 + poisson));
+                    let energy = stiffness.quadratic_energy(&u);
+                    assert!(
+                        (energy / expected - 1.0).abs() < 2e-12,
+                        "n={n}, nu={poisson}, strain={:?}: {energy} != {expected}",
+                        [ex, ey, exy]
+                    );
+                    let forces = stiffness.apply(&u);
+                    let force_scale = e * model.thickness_m * 0.003;
+                    for j in 1..n {
+                        for i in 1..n {
+                            let node = j * (n + 1) + i;
+                            assert!(
+                                forces[6 * node..6 * node + 6]
+                                    .iter()
+                                    .all(|f| f.abs() < 2e-12 * force_scale),
+                                "constant-stress patch has an unbalanced interior node"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn shell_g1_membrane_uniaxial_traction_recovers_poisson_contraction() {
+    for poisson in [-0.7, 0.0, 0.33, 0.499] {
+        let mut model = plate();
+        model.material.poisson_ratio = poisson;
+        let strain = 0.002;
+        let u: Vec<_> = model
+            .nodes
+            .iter()
+            .flat_map(|node| {
+                [
+                    strain * node.position_m[0],
+                    -poisson * strain * node.position_m[1],
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ]
+            })
+            .collect();
+        let force = model.assemble().unwrap().full_stiffness.apply(&u);
+        let axial = 0.5 * model.material.youngs_modulus_pa * model.thickness_m * strain;
+        for (index, actual) in force.into_iter().enumerate() {
+            let expected = match index {
+                0 => -axial,
+                6 => axial,
+                _ => 0.0,
+            };
+            assert!(
+                (actual - expected).abs() < 1e-12 * axial,
+                "nu={poisson}, dof={index}: {actual} != {expected}"
+            );
+        }
+    }
 }

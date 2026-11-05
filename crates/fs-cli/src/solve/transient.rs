@@ -48,7 +48,7 @@ pub(super) mod spatial;
 mod workload;
 use workload::{TimeGrids, Workload};
 
-pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. A forward sampled peak covers the original initial field and every accepted fine endpoint in the requirement region, retaining the earliest exact tie. It is a sampled-time observation and does not bound unsampled temperatures. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model. Declared closed/open gray-diffuse enclosures use the shared reflected-radiosity owner with genuine declared volumetric capacity, original convection and prescribed-flux heat, and an independent fresh endpoint residual and storage-energy gate. The explicit black environment has no solid trace or capacity; only physical-surface radiation enters the solid outward sum and original convection alone heats air. Every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, latent heat, open-capacity radiation adjoint or undeclared transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
+pub(super) const NO_CLAIM: &str = "Estimated finite-mesh final-time temperature from backward Euler with declared temperature-independent regional heat capacity and the bound conductivity evaluated at each endpoint. Temperature-dependent conductivity uses residual-gated Newton/FGMRES with the full k'(T) tangent and immutable physical history. Explicit regional power histories replace delivered watts on their named volume regions; both grids land on every workload switch. A forward sampled peak covers the original initial field and every accepted fine endpoint in the requirement region, retaining the earliest exact tie. It is a sampled-time observation and does not bound unsampled temperatures. The nested-grid final-maximum difference estimates temporal error at assumed order one; it is not a spatial error bound, observed-order proof, continuum or continuous-time maximum bound, validated heat capacity, or compliance certificate. Prescribed temperatures are endpoint data, including their discrete boundary-node storage reaction. Declared ambient radiation uses the shared area-mean gray-patch model. Declared closed/open gray-diffuse enclosures use the shared reflected-radiosity owner with genuine declared volumetric capacity, original convection and prescribed-flux heat, and an independent fresh endpoint residual and storage-energy gate. The explicit black environment has no solid trace or capacity; only physical-surface radiation enters the solid outward sum and original convection alone heats air. Every coupling trial retains the same physical history. Declared airflow uses quasi-steady branch transport at the retained flow-network operating point, with solid storage, a full nodal residual gate at actual marched references and a separate actual-air energy gate. Declared natural convection evaluates its admitted card at each endpoint and checks the full physical free residual and energy balance; exact equilibrium and out-of-domain Rayleigh states remain refused. Natural reservoirs and forced-air paths on distinct patches compose through the same stored solid: every natural update encloses a complete air solve, and the outer endpoint is independently checked under actual natural coefficients and actual air-law references with a separate air-enthalpy energy gate. The final air row describes its last natural iteration; natural and trajectory counters include all nested responses without advancing physical history. No airflow storage, time-varying fan dynamics, latent heat or undeclared transient adjoint is inferred. Endpoint heat storage is reported separately from numerical energy closure; transient energy_residual_j is the checked storage-minus-net-input balance.";
 
 pub(super) struct NativeTransientResult {
     pub(super) solution: radiation::SolidSolution,
@@ -887,6 +887,14 @@ pub(super) fn solve(
             additional = additional.checked_add(adjoint::material_control_storage_bytes(
                 spec, problem.mesh.vertex_count(), problem.mesh.element_count(),
             )?).ok_or_else(|| bad("combined material-control adjoint memory estimate overflows"))?;
+            if temperature_contacts.is_some() {
+                // The original live source evaluation coexists with the full
+                // endpoint tangent during each material-control contraction.
+                additional = additional.checked_add(adjoint::contact_storage_bytes(
+                    problem.mesh.vertex_count(), problem.mesh.element_count(), max_contact_pairs,
+                    linear.restart,
+                )?).ok_or_else(|| bad("live material-control source workspace overflows"))?;
+            }
         }
         if temperature_contacts.is_some() {
             additional = additional.checked_add(adjoint::contact_storage_bytes(
@@ -894,12 +902,11 @@ pub(super) fn solve(
                 linear.restart,
             )?).ok_or_else(|| bad("combined contact adjoint memory estimate overflows"))?;
         }
-        let ports = problem.boundary.conditions().iter()
-            .filter(|condition| matches!(condition, fs_conduction::ThermalBc::Robin { .. }))
-            .count();
+        let ports = adjoint::feedback_regions(problem.boundary, radiation).len();
         if let Some(lowering) = radiation {
             additional = additional.checked_add(adjoint::radiation_storage_bytes(
                 problem.mesh.vertex_count(), ports, lowering.surface_count(), lowering.is_enclosure(),
+                lowering.open_ambient_temperature_k().is_some(),
             )?).ok_or_else(|| bad("combined radiative adjoint memory estimate overflows"))?;
         }
         if natural_requested {
@@ -1115,7 +1122,6 @@ pub(super) fn solve(
     )?;
     let adjoint_fragment = match objective {
         Some(objective) => {
-            let closed_enclosure = enclosure.as_ref().map(enclosure::Model::closed).transpose()?;
             let tape = fine.tape.as_ref().ok_or_else(|| bad("requested transient adjoint lost its fine history"))?;
             let natural_coupling = natural_requested.then_some(adjoint::NaturalCoupling {
                 laws: natural, pressure_pa,
@@ -1124,7 +1130,7 @@ pub(super) fn solve(
                 temperature_contacts, max_contact_pairs, &grids.fine,
                 workload.as_ref(), StepConfig { linear, energy_tolerance_j: policy.energy_tolerance.value },
                 nonlinear, labels, region_ids, goal_region.expect("admitted goal region"),
-                radiation, closed_enclosure, natural_coupling.as_ref(), airflow, tape, objective, deadline)?;
+                radiation, enclosure.as_ref(), natural_coupling.as_ref(), airflow, tape, objective, deadline)?;
             format!(",\"adjoint\":{derivative}")
         }
         None => String::new(),

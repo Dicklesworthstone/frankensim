@@ -1,5 +1,36 @@
 # fs-solid CONTRACT
 
+## Nonlinear source-bound membrane motion
+
+`membrane::dynamics::MembraneMotion` advances the original total-Lagrangian
+membrane energy with `fs-time::verlet_momentum_step`. Reference lumped inertia,
+grain, source laws and finite-strain geometric stiffening retain their existing
+owners. Only free coordinates are integrated; stationary support values are
+eliminated exactly, and inconsistent initial support motion refuses. Cloning
+retains a complete deterministic checkpoint.
+
+The two momentum kicks use the original material gradient. The first reuses
+the accepted gradient of the immutable patch; the endpoint evaluates the full
+nonlinear law once. Geometry, force and integrator work buffers are allocated
+at preparation and reused. Failed state/domain checks or cancellation cannot
+publish displacement, momentum, time, energy or an invalid cached force.
+
+Each step reports stored and kinetic energy, exact held-dead-load work, support
+impulse from the same kicks, and the signed energy/work defect. Stationary
+supports do no work. This second-order symplectic explicit lane introduces no
+physical damping and does not claim exact energy conservation, automatic time
+step stability, real-time throughput, spatial convergence or experimental
+validation. Moving supports, follower pressure, contact and material-history
+evolution are outside this entry. The original native constitutive costs and
+admission domains still apply.
+
+G1/G3 regressions in `tests/membrane/dynamics.rs` compare a four-triangle sheet
+against the independent nonlinear Duffing energy-integral period on three time
+rungs, including pure geometric restoring force at zero prestretch. Additional
+checks cover source stiffness/mass scaling, linear and angular momentum,
+time reversal, held-load work/support impulse, checkpoint replay and refusal
+rollback. These are manufactured mechanics checks, not measured drum sounds.
+
 ## Original interface friction in quasistatic obstacle contact
 
 `contact::ContactProblem::solve_timed_from_with_sources` and
@@ -35,6 +66,15 @@ secant speed and endpoint work require temporal refinement. Source failures and
 unconverged lags publish no trajectory state or work. Constant sources preserve the original
 coefficient path; focused G1/G3/G4 contact tests exercise native equilibria,
 local temperature/pressure/speed response, final-query closure and rollback.
+
+The same final Huber traction supplies `friction_work_per_node` in original
+nodal order; its ordered sum is the existing `friction_work`. Inactive nodes
+and disabled friction contribute zero. SI plane-strain work is J/m of physical
+depth, so conversion to heat requires an explicit depth and heat fraction.
+`ContactTrajectory` can be cloned for a private coupled trial while retaining
+the immutable original problem and all accepted distance, displacement and
+work. This permits joint mechanics/thermal acceptance without aging the
+accepted interface during thermal iterations.
 
 ## Graded reference density on native HEX8 solids
 
@@ -226,6 +266,38 @@ with cross mass and load partition, native continuation, and transactional
 refusal including the original whole-supported energy gate. Geometry/event
 discovery and allocation of frictional loss to thermal owners remain separate.
 
+### Sustained directional Coulomb ellipses
+
+`advance_sustained_elliptic_contacts` on `ExactLinearSolid`,
+`CompleteSpectralSolid` and `SupportedSpectralSolid` resolves an oriented
+two-principal-coefficient friction ellipse through the same original held-force
+flow. The shared fs-contact coordinates use physical force `f = A q` and
+conjugate point trace `A^T J`, preserving every original normal/tangent and
+cross-contact mechanical coupling. The existing simultaneous force solve,
+native inertia/stiffness/viscosity and complete support work remain authoritative.
+The extra staging is bounded O(contact count * original DOFs); no exponential,
+factorization, modal cutoff or artificial contact compliance is added.
+
+The mandatory callback receives original physical contacts, forces, actual
+gap/slip and original native motion. Before calling it, the adapter reconstructs
+the original transpose load and checks physical relative and moving-surface
+work against the transformed response. Sticking path/velocity tolerances are
+conservatively tightened by the smallest tangent scale. Transformation,
+physical-work, budget and callback refusals all precede native atomic acceptance.
+The result explicitly separates physical forces/paths from the transformed
+solver receipt; native motion and work accounts retain their original units.
+
+Equal coefficients preserve the existing isotropic response exactly, including
+the frictionless case. Unequal coefficients must both be positive; a single
+free-slip axis is refused rather than assigned an artificial coefficient.
+Principal directions and coefficients are held for the interval. This lane
+does not discover geometry/events, infer temperature or wear evolution, or
+allocate mechanical frictional loss to heat. The caller still admits the full
+trajectory and fixed directional law. Analytical point regressions specify
+directional breakaway, static holding, oblique maximum dissipation, translating
+surface work, tangent-frame covariance, isotropic reduction and atomic refusal.
+Runtime verification is recorded with the implementation commit.
+
 ## Native quadratic Maxwell force, contact and pressure drift
 
 `MixedViscoTetMotion::force_kick_candidate` integrates the accepted original
@@ -295,14 +367,40 @@ signed supported quadratic loads on a deformed body and one retained Maxwell
 history update. Independent polynomial moment arithmetic and source formatting
 were checked; native Rust execution remains unverified under the resource blocker.
 
+## Graded inventory in quadratic Maxwell motion
+
+`MixedViscoTetMotion::try_new_with_reference_density` binds four positive P1
+corner densities per original tetrahedron to the native signed consistent P2
+mass. The original cached quadrature supplies geometry, displacement shapes and
+barycentric density samples. Density and mass remain immutable across native
+finite-compliance and exact-incompressible motion, impulses, force kicks and
+drift. Graded affine maps require the existing four-point Duffy rule; graded
+curved maps require six points per direction. Constant profiles preserve the
+original scalar mass path's arithmetic.
+
+`reference_corner_density_kg_m3` returns the complete retained profile.
+`reference_density_kg_m3` reports reference-volume-weighted cell means; it does
+not replace the density field in physical inertia. `reference_acceleration_load_n`
+applies the same full consistent mass to authored nodal acceleration, including
+held coordinates and signed corner entries. A held gravity or acceleration load
+therefore preserves the original body's force resultant and torque without
+changing material inventory as the body deforms. Evolving force fields still
+require their own force-law owner.
+
+Independent barycentric polynomial integrals check every affine and curved
+mass coefficient. Focused native fixtures exercise the graded centroid,
+finite-compliance and exact-pressure acceleration, momentum balance, retained
+Maxwell history through impulse, scalar equality and explicit admission refusals.
+
 ## Current-area pressure on finite-deformation membranes
 
 Source-bound hyperelastic sheets can explicitly select exact incompressibility
 with `ResolvedSheet::with_incompressible_hyperelastic_membrane`. The existing
 3-D `MembranePatch` consumes the native constrained material potential and
 tangent through the same material-axis Green strain as its finite-compliance
-path. Current normal thickness contracts inversely with area, transverse shears
-relax for tilted fibres, and reference areal mass remains unchanged. No large
+path. At unchanged natural reference, normal thickness contracts inversely
+with area. Transverse shears relax for tilted fibres and reference areal mass
+remains unchanged. No large
 bulk penalty, extra stiffness or inferred bending model enters the solve.
 Dead-load equilibrium, current-area pressure and loaded small-vibration modes
 therefore share the same explicit material choice, supports and reference mass.
@@ -314,6 +412,19 @@ energy, support reactions and the loaded modal eigenvalue under fixed-rim
 pressure. These are discrete manufactured controls; they do not establish
 continuum convergence, material calibration, wrinkling or finite-amplitude
 vibration. Full native test execution requires the complete workspace.
+
+A source-bound hyperelastic sheet may also carry an explicit finite natural
+reference, including three retained mean-thermal-expansion endpoints. The
+same native membrane mechanics then consumes its pulled-back constitutive
+energy, resultants and tangent. The installed mesh, reference thickness and
+areal mass remain original; only the elastic part Fe=F G^-1 sets constitutive
+stretch and fibre activation. Exact incompressibility acts on Fe and permits
+total det(F)=det(G). Source temperatures/axis roles and the endpoint material
+context stay in the shared immutable material carrier. Native consumer tests
+cover tilted-fibre frame/tangent behavior and an independently derived heated
+pressure-loaded pyramid equilibrium and modal stiffness with unchanged inertia.
+This is fixed-endpoint mechanical preparation; it supplies no heat integrator,
+evolving thermal work or added wrinkling/bending law.
 
 `MembranePatch::solve_with_pressure` uses the original membrane material,
 kinematics and Newton--Krylov owner with a uniform held pressure jump. Pressure
@@ -864,38 +975,92 @@ equivalence and finite-deformation support reactions with independent formulas.
 These synthetic regressions require native execution; they do not establish
 experimental material calibration or mesh convergence.
 
+## Conservative gravity on mixed P2/P1 solids
+
+`MixedUpProblem::prepare_with_gravity` binds one positive reference density per
+Tet10 element and the original stationary `GravityField3`, optionally composed
+with uniform pressure on the complete closed material boundary. The native
+mixed preparation and solver retain their pressure space, volumetric treatment,
+pressure gauges, source domains and stable-KKT admission. Gravity acts only on
+displacement; it adds no pressure mass or bulk penalty.
+
+Current sampling uses the original cached quadratic shapes and positive
+reference quadrature, with translation-stable relative coordinates. Force
+and its spatial derivative enter the existing 34-by-34 element block and sparse
+scatter directly. The same density, shapes and weights supply consistent modal
+mass, including the signed quadratic shape contributions. Current det(F)
+never multiplies the fixed material mass. General nonlinear fields and curved
+geometry retain the declared reference quadrature approximation.
+
+The wrapper exposes evaluation and native static solves, plus finite-compliance
+and exact-incompressible vibration, each with optional accepted initial iterates.
+Both modal paths consume the SAME loaded equilibrium and tangent; original
+pressure condensation or exact-constraint projection and full residual gates
+remain intact. Results retain the exact density/field through `HeldMixedGravity`.
+Static results report gravitational and boundary-pressure potentials separately
+from the original material saddle potential.
+
+Field-domain and gradient errors retain element/point attribution. Callback
+cancellation remains canonical and sticky within the native solve, participates
+in its existing stop callback and prevents further field sampling. Refusals
+publish no altered input state. This is external gravity for equilibrium and
+small vibration; self-gravity, changing sources and gravity-loaded motion are
+not introduced.
+
+Native `mixed_gravity` regressions include independent rational Tet10 moments,
+force/potential derivatives, harmonic-field frequency shifts, exact-mode bulk
+independence, pressure gauges, combined-pressure reactions and source/cancellation
+refusals. Bounded original-source kernel checks cover sampling and element
+assembly; the complete static/modal integration tests remain unexecuted until
+the workspace sibling dependencies are available.
+
 ## Native three-dimensional hyperelastic continuation
 
 `HyperTetProblem::prepare_continuation` binds the original prepared P1
 tetrahedra, hyperelastic material adapters, homogeneous supports and dead
 nodal/reference-volume loads to the existing bordered pseudo-arclength owner.
-Explicit positive displacement and force scales define dimensionless free
-coordinates and force residuals. Fixed coordinates are eliminated from the
-path metric; their original applied loads remain in the recovered reactions.
-The native consistent tangent is restricted directly in canonical sparse-row
-order and scaled by L/F, without another material law or repeated COO sorting.
+`prepare_continuation_with_loads` additionally retains native current-area
+pressure and stationary spatial gravity. The pressure surface must match the
+exact reference geometry; original elementwise or P1 nodal density is bound
+once into fixed reference gravity weights. No current-volume mass update or
+cell-average replacement occurs.
 
+Explicit positive displacement and force scales define q=u/L and
+r=(f_int-lambda*f_ext(u))/F. Both the complete displacement tangent
+(K_int-lambda*K_ext)*L/F and the current parameter derivative f_ext(u)/F
+enter every bordered Newton linearization. Material, pressure and gravity
+rows are merged directly in canonical sparse order without another global
+COO buffer, sort or dense intermediate. The parameter scales the held force;
+spatial origins and free-surface planes remain fixed even for negative lambda.
+Nonuniform face patches retain their original nonsymmetric tangent.
+
+Fixed coordinates are eliminated from the path metric, while all supported
+dead, pressure and gravity loads remain in recovered reactions. `held_loads`
+retains the exact original bindings, including explicit zero fields.
 `start_from` admits an actual physical equilibrium against the same force
 equation. `advance` returns a complete candidate, preserving its input even
 when a later requested step fails or is cancelled. `response` recovers metres,
-newtons, stored energy, det F and explicit free-force residuals. The existing
-public `PathState` contains dimensionless free coordinates and trace values;
-its tangent and step control survive split/resume. `PathResidual::checkpoint`
-adds a backward-compatible cancellation hook at corrector and controlled
-FGMRES boundaries; dense factorizations remain bounded leaves of at most
-1024 coordinates. Original element-attributed material errors survive the
-generic continuation boundary.
+newtons, original material stored energy, det F and free-force residuals.
 
-The native `hyper3_continuation` tests include independently derived
-Neo-Hookean lateral contraction, energy/reactions, extreme physical rescaling,
-force/tangent derivatives, checkpoint/cancellation refusals and a descending
-branch past the original logarithmic Neo-Hookean law's large-dilation fold.
-That fold is a constitutive verification fixture, not calibrated rubber
-behavior or a geometric-buckling result. Event locations remain diagnostics;
-no mixed-incompressibility, follower-load continuation, moving supports,
-branch-uniqueness or continuum stability certificate is supplied. Full native
-assembly/API tests require the complete workspace; generic numerical-kernel
-execution alone does not establish that broader coverage.
+The public `PathState` retains dimensionless free coordinates and complete
+trace, tangent and step control for split/resume. `PathResidual::load_vector_at`
+admits state-dependent parameter derivatives while its default preserves
+constant dead loads. Checkpoints run at corrector and controlled FGMRES
+boundaries; dense factorizations remain bounded leaves. Original
+element-attributed material errors survive the generic boundary. The existing
+Cholesky branch diagnostic skips nonsymmetric or oversized tangents; it does
+not interpret a skipped measurement as a change of definiteness.
+
+Native `hyper3_continuation` tests include independent finite-strain force,
+energy/reactions, scaling, pressure/gravity derivatives, hydrostatic load
+turning points, field-domain refusals and atomic cancellation. These folds
+verify the declared constitutive/loading equations; they do not validate
+calibrated rubber behavior or geometric buckling. Generic original-source
+tests additionally exercise nonlinear parameter amplitudes, follower folds,
+bit-identical dead-load compatibility and sparse cancellation. Full native
+assembly/API tests require the complete workspace. Moving supports, evolving
+temperature/history, mixed incompressibility, branch uniqueness and continuum
+stability or flutter certificates remain outside this path interface.
 
 ## Prepared finite-deformation reference geometry
 
@@ -2918,14 +3083,16 @@ cancellation, budget and late-jump rollback.
   resolution stays with the scenario consumer.
 - `shell` (bead frankensim-b8bxd.9.1): a safe-Rust, deterministic,
   flat, single-patch triangular **estimate-only surrogate** for the Euler-disc
-  base. It combines lumped inertia, edge-spring in-plane resistance, and
-  normal-slope/rotation penalties; it is not a CST plane-stress membrane or a
-  Kirchhoff--Love/isotropic continuum discretisation.
+  base. It combines lumped inertia, CST isotropic plane-stress membrane
+  elasticity, and normal-slope/rotation penalties. The in-plane operator
+  reproduces constant-strain energy and equilibrium with the material's
+  actual Poisson coupling, including auxetic ratios. The bending/rotation
+  terms remain a surrogate, not a Kirchhoff--Love continuum discretisation.
   `ShellPlate::assemble` returns type-separated dense
   `ShellMatrix<Mass>`, `ShellMatrix<Stiffness>`, and optional Rayleigh
   `ShellMatrix<Damping>` operators in node-major `(x,y,z,rx,ry,rz)` order.
-  Each triangle contributes edge-spring, normal-slope, and rotation-gradient
-  surrogate energy; translational and rotary inertia are lumped from the
+  Each triangle contributes exact affine plane-stress membrane energy plus
+  normal-slope and rotation-gradient surrogate energy; translational and rotary inertia are lumped from the
   material card. `ShellSupport` applies three distinct, normal-aligned point
   pinned supports by reducing all translations at those nodes while retaining
   rotations; its normal identifies the plate side and it does not claim a
@@ -3442,7 +3609,13 @@ or experimentally validated material-response claim.
     makes the raw mass array positive-definite. A single free triangular panel has the six
     infinitesimal rigid motions in its stiffness null space; the focused
     `shell_operator` battery verifies this and independently reconstructs the
-    quadratic energy from `Kx`.
+    quadratic energy from `Kx`. Its G1 membrane patch checks compare continuum
+    plane-stress energy on three spatial rungs under normal, biaxial, shear,
+    and combined strains, with positive and negative Poisson ratios and a
+    jointly rotated geometry/displacement frame. Interior forces balance,
+    and prescribed uniaxial extension with Poisson contraction reproduces the
+    independent traction resultant. These checks qualify only the in-plane
+    CST response, not the bending surrogate.
 
 ## Error model
 
@@ -3677,7 +3850,7 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
   integration successor); LOBPCG preconditioning hooks.
 - Plate/shell buckling references (needs bending elements — the
   shells bead); the 2D canonical here is the strut.
-- CST plane-stress patch accuracy, Kirchhoff--Love/isotropic-continuum claims,
+- Kirchhoff--Love/bending-continuum claims,
   physical condition-number authority, curved shells, multi-patch/mortar joins,
   NURBS geometry, transverse-shear
   (thick/Reissner--Mindlin) behavior, nonlinear/finite-rotation response,
@@ -5535,13 +5708,44 @@ The original material path derivative supplies the action
 are cached at each exact Newton iterate and reused throughout FGMRES; all
 original sparse jump columns and native mass/elastic couplings remain present.
 No global dense tangent or positive-definite softening approximation is used.
-Explicitly unsupported material switches and active damaged-area friction or
-Coulomb paths retain the existing fallible numerical-difference adapter.
+Velocity-regularized damaged-area friction differentiates the original
+path-integrated damaged compression together with the full vector slip law.
+Its local block retains normal/shear coupling, changing damaged area and the
+transverse derivative of the saturated slip direction; zero slip in the linear
+regularization branch has its finite shear slope. These contributions share
+the same cached material block and leave the physical force and work unchanged.
+Ideal Coulomb retains its independent reaction coordinates `lambda = k z`.
+The augmented action differentiates the original natural map
+`lambda - projection(lambda + k delta_g_t, mu P)` through both disk-interior
+sticking and disk-exterior sliding, including the original pressure gradient.
+Mechanical rows retain `A B_t^T d_lambda`; constraint rows retain both the
+jump and reaction-coordinate blocks. The cache keys the complete augmented
+iterate, and a changed static/kinetic coefficient starts a new solve/cache.
+Zero-coefficient bindings add no coordinates and use the exact original native
+mechanical action. No friction spring, regularization, or extra storage is added.
+Explicitly unsupported material switches, the Huber speed corner and Coulomb
+disk boundary retain the existing fallible numerical-difference adapter.
 Residuals and analytic actions/preparation attempts share the original
 operator-evaluation allowance; numerical fallback counts its actual residual
 calls. The complete physical endpoint is independently replayed before
 acceptance. A source, stencil, cancellation or work-budget refusal preserves
 the original accepted motion and material history.
+
+The G1 friction regression reconstructs a three-coordinate inertial reclosure
+from independent momentum equations, including changing compression and both
+linear-regularized and saturated shear. It reproduces native displacement,
+velocity and friction work while remaining bit-identical under widely different
+inactive numerical-difference scales. Retained partial damage and physical
+viscosity retain their separate original loss accounts. This establishes the
+solver path and derivative behavior, not a wall-clock speedup or specimen
+calibration.
+
+The ideal-Coulomb regressions also require exact zero-capacity equivalence and
+static recapture after a stopping impulse, including finite-difference scales
+which would be inadmissible as physical constitutive probes. The reaction stays
+within the original static capacity with unchanged accepted damage/history and
+zero frictional heat during the held interval. Independent natural-map derivative
+checks cover pressure coupling, tangent rotation, and projection boundaries.
 
 The step reports original kinetic, bulk and cohesive endpoint energies,
 intrinsic fracture loss, physical bond-viscosity loss, optional damaged-area
@@ -5566,7 +5770,13 @@ material law while retaining mass, velocity, history and clock. Original normal
 compression remains available on reclosure. The default is the existing
 frictionless penalty law; the explicit sourced damaged-area extension below
 adds residual shear resistance. Neither is exact nonpenetration or newly
-discovered contact. Immutable
+discovered contact. Accepted failure also releases the material's former
+opening/shear separation and dashpot-rate restrictions; its independent normal
+penetration bound and the structural displacement/velocity bounds still apply.
+Native P1 regressions continue both free bodies' mass-weighted centres beyond
+the adhesive range with unchanged momenta, and source-temperature regression
+retains the detached displacement, original claims and spent fracture work.
+Immutable
 candidate publication makes late cancellation, material-domain refusal, failed
 work gates and exhausted solves leave the entire accepted trajectory intact.
 
@@ -6917,3 +7127,53 @@ zero-only/empty spectra, and source/budget/cancellation refusals. New modules
 passed pinned Rust formatting and syntax parsing. Full dependency compilation
 and those integration executions remain outstanding in this constrained session;
 the leaf checks are not a full native frame validation or performance benchmark.
+
+## Native frame hereditary time histories
+
+`PreparedFrameResonance::prepare_transient` and
+`PreparedFrameRelaxation::prepare_transient` retain the original assembled
+descriptor and prepare the existing complete `fs-phs` quadratic flow and its
+integral observers for one fixed clock. Every native displacement, momentum,
+original material memory and ordinary boundary state advances together under
+held nodal forces. Off-diagonal consistent inertia, nonproportional viscosity,
+Maxwell reaction and mutual boundary structure remain intact. No modal loss
+ratio, fitted impedance or split held-velocity constitutive update replaces the
+source. Algebraic boundary constraints explicitly refuse this ordinary time
+path; AC/pole support is unchanged. Material time evolution requires an explicit
+continuous-law support band `[0, f64::MAX]` rad/s, without extrapolating a finite
+measured frequency band.
+
+Native reports retain kinetic, equilibrium and attached storage, independently
+integrated original frame and attached resistance heat, held-force work, zero
+stationary-support work, a polarized storage change and original integrated
+q/p residuals. Each Maxwell coordinate also retains its original element,
+layer, source-arm and strain identity, elastic/viscous extension, opposing
+force, storage and interval heat. Material and boundary heat are subaccounts
+of attached heat, never additional energy charges. Explicit relaxed,
+unrelaxed or per-coordinate initial history and complete-state restart retain
+dark constrained memory. Time, motion and all memory observations publish
+together after all gates; refusal leaves the accepted history unchanged.
+Preparation has explicit complete dimension, byte and work bounds. Successful
+warm steps allocate no memory and prepare no exponential. Reference geometry,
+fixed temperature and stationary supports apply; no thermal destination is
+invented by this mechanical runtime.
+
+Five focused regression definitions cover all three analytic coupled Maxwell
+decay rates with and without held forcing; dark memory and explicit startup;
+full two-member consistent mass, nonproportional viscosity and mutual boundary
+heat against independent physical-equation integration; refusal/retry; and
+finite-frequency/algebraic boundary refusal. Three small native checks of the
+unmodified production heat-form helpers, linked to the existing production
+`fs_math` artifact, passed for nonproportional mass pullback, mutual Q/R cross
+terms and exact source partition. These do not execute the complete prepared
+flow. Full native integration execution remains outstanding in this
+resource-constrained environment.
+
+## Original element partitions of native viscoelastic heat
+
+`ViscoForceStep.element_steps` exposes storage, mean mechanical/eigenstrain
+work and true Kelvin–Voigt/Maxwell heat in original element connectivity order.
+`ViscoElements` retains each element's mass and volume from the same
+consistent-mass quadrature. Existing aggregate accounts are unchanged; element
+receipts partition those accounts and are not added again. The native element
+regression suite is authored; full Cargo execution remains outstanding.

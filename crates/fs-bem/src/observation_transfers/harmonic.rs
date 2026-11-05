@@ -526,17 +526,20 @@ pub(super) mod welch;
 
 mod exposure;
 pub use exposure::{
-    HarmonicMomentumLimits, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
-    HarmonicWaveMomentumStorage, HarmonicWaveMomentumTransfer,
-    PreparedHarmonicSurfaceWaveMomentum, PreparedHarmonicVolumeWaveMomentum,
     HarmonicAveragedField, HarmonicExposureFactorStatistics, HarmonicExposureLimits,
-    HarmonicExposureLine, HarmonicExposureMoments, HarmonicPressureArrayLimits,
-    HarmonicPressureChannel, HarmonicPressureChannelMoments, HarmonicPressureTap,
-    HarmonicReadoutCovariance, HarmonicReadoutLimits, HarmonicReceiverPair,
-    HarmonicSurfacePowerLimits, HarmonicSurfaceQuadrature, MAX_PRESSURE_ARRAY_CHANNELS,
-    MAX_PRESSURE_ARRAY_TAPS, MAX_READOUT_RECEIVER_PAIRS, MAX_SURFACE_QUADRATURE_POINTS,
-    PreparedHarmonicExposure, PreparedHarmonicPressureArray, PreparedHarmonicSurfacePower,
-    WindowedHarmonicExposure, WindowedHarmonicPressureArray, WindowedHarmonicReadout,
+    HarmonicExposureLine, HarmonicExposureMoments, HarmonicMomentumLimits,
+    HarmonicPressureArrayLimits, HarmonicPressureChannel, HarmonicPressureChannelMoments,
+    HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits,
+    HarmonicPressureCorrelationPair, HarmonicPressureTap, HarmonicReadoutCovariance,
+    HarmonicReadoutLimits, HarmonicReceiverPair, HarmonicSurfacePowerLimits,
+    HarmonicSurfaceQuadrature, HarmonicVolumeQuadrature, HarmonicWaveMomentumFlux,
+    HarmonicWaveMomentumStorage, HarmonicWaveMomentumTransfer, MAX_PRESSURE_ARRAY_CHANNELS,
+    MAX_PRESSURE_ARRAY_TAPS, MAX_PRESSURE_CORRELATION_PAIRS, MAX_READOUT_RECEIVER_PAIRS,
+    MAX_SURFACE_QUADRATURE_POINTS, PreparedHarmonicExposure, PreparedHarmonicPressureArray,
+    PreparedHarmonicPressureCorrelations, PreparedHarmonicSurfacePower,
+    PreparedHarmonicSurfaceWaveMomentum, PreparedHarmonicVolumeWaveMomentum,
+    WindowedHarmonicExposure, WindowedHarmonicPressureArray, WindowedHarmonicPressureCorrelations,
+    WindowedHarmonicReadout,
 };
 
 #[cfg(test)]

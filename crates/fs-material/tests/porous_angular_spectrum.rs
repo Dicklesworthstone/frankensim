@@ -14,6 +14,9 @@ use fs_math::c64::C64;
 
 const OMEGA: f64 = core::f64::consts::TAU * 1000.0;
 
+#[path = "porous_angular_spectrum/aperture.rs"]
+mod aperture;
+
 fn fluid() -> ThermoviscousFluidState {
     // Explicit analytic fixture; no measured material claim.
     ThermoviscousFluidState::from_heat_capacity_ratio(

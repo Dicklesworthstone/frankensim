@@ -1237,12 +1237,26 @@ joule gates remain active. Bath heat/entropy and conductive generation use the
 two positive stage weights; exact caloric entropy storage is measured from the
 original initial state and the temporal entropy defect remains explicit.
 
-This entry point admits fixed-mass source-free chains/graphs, including their
-existing nonlinear bulk, contact and integrated interface laws, with constant
-ambient/reservoir temperatures. Attached implicit advection, nonzero authored
-sources and pending events at or before the requested target refuse explicitly;
-no observer or mass-advection hook is exposed. Nonlinear failure may halve a
-complete two-stage interval, but this is not an error-controlled adaptive method. Second-order time accuracy
+This entry point admits fixed-mass chains/graphs, including their existing
+nonlinear bulk, contact and integrated interface laws, with piecewise-constant
+authored cell source/sink powers and constant ambient/reservoir temperatures. Sources enter both
+native stages with the same positive weights as conduction; each joule is
+counted once in the external energy account. Their entropy remains explicitly
+unclassified at-cell heat, not an inferred reservoir entropy or dissipation law.
+Source-only `Event::Boundary` changes split each interval at the exact event
+time. Both stages integrate the left-limit power before processing the event
+through the original timeline/observer. Simultaneous changes retain authored
+order; target-time events change the returned source without delivering heat
+at the new power. Prepared material, geometry and boundary bindings remain
+unchanged. One whole-window preflight, with bounded cancellation polling,
+rejects changes to ambient, film or reservoir declarations, unknown cells and
+all topology/birth events before stage work. The same whole-call step and
+nonlinear work budgets cover every source interval; events never renew them.
+The nonadaptive constant-source path avoids event processing/cloning at steps
+where no event is due. No external observer or mass-advection hook is exposed;
+attached implicit advection still refuses. Complete-interval halving in
+`advance_sdirk2_to` handles nonlinear failure; it does not estimate temporal
+accuracy. Second-order time accuracy
 requires a smooth admitted solution and independent timestep refinement;
 constitutive/phase corners may lower it. L-stability is not unconditional
 positivity, monotonicity or a maximum-principle guarantee: every stage retains
@@ -1252,8 +1266,53 @@ Focused regressions compare unequal-capacity equilibration and bath cooling
 against independent analytic stage solutions, including physical weighted
 entropy. Periodic graph Fourier decay and nonlinear `k(T)` cooling demonstrate
 second-order temporal refinement. Stiff modal damping, latent-plateau storage,
-second-stage domain/work rollback and unsupported source/event refusal exercise
-the stated admission boundary.
+second-stage domain/work rollback and unsupported event refusal exercise the
+stated admission boundary. Constant heating/cooling regressions cover unequal
+capacities with independent two-stage temperatures and entropy, driven bath
+relaxation with a three-rung second-order ladder and adaptive accuracy, and
+latent-plateau storage with a large caloric reference datum.
+Scheduled-source regressions independently integrate heater/sink joules across
+non-grid-aligned and simultaneous events, target-time changes and continuation
+on all chain/graph and fixed/adaptive entry points. A piecewise exponential
+bath solution retains second-order temporal refinement. Late unsupported
+events, whole-call step budgets and cancellation during a long source-schedule
+preflight refuse without publishing a prefix.
+
+#### Adaptive second-order network diffusion
+
+`advance_sdirk2_adaptive_to` on the same chain and graph owners adds local
+h/T/phase error control through the existing `AdaptiveConductionStepper`.
+Each comparison uses one full and two half native SDIRK2 intervals, sharing
+all six stages' residual/linear work budgets. Only the conservative fine pair
+contributes accepted heat, entropy and physical step counts; no Richardson
+state or rejected/coarse history is published. The original independent local,
+interval-total and whole-call energy gates remain active.
+
+`ConductionTimeOrder` defaults to first order, preserving the backward-Euler
+factor and IEEE square-root controller for existing adapters. SDIRK2 selects
+second order: actual representable half spans `a,b` use fine-error factor
+`(a³+b³)/(3ab(a+b))`, equal to `1/3` for equal halves, and cubic local-error
+scaling with the existing safety/growth/reduction bounds. The factor uses a
+dimensionless ratio to avoid cubing seconds. Bounded deterministic bisection
+within the existing controller limits avoids platform cube-root/transcendental
+arithmetic and overflow from multiplying a large normalized error.
+
+The complete requested window is checked before the generic controller can
+process an event or compute a comparison. The generic controller already clips
+both coarse and fine trajectories at source events and processes them only
+after accepting the preceding interval. Attached implicit advection and all
+other events through the target remain outside SDIRK2's admitted scope even if
+an initial comparison would end sooner. The new adapter shares
+the original material observables and change-based, caloric-datum-invariant
+error scales. It adds no phase proxy, source splitting or global accuracy bound;
+constitutive corners and spatial error still require independent refinement.
+
+Focused native regressions cover accuracy/tolerance refinement, latent inventory
+at constant temperature, caloric datum shifts, sparse graph conservation,
+unequal representable half spans, shared six-stage work ceilings, late rollback
+and complete-window refusal. The production order arithmetic also has directly
+executable standalone tests for first-order compatibility, second-order scaling,
+extreme finite spans and invalid controller inputs.
 
 ## Additional material conductances on the native explicit timeline
 
@@ -1593,6 +1652,39 @@ closure. This remains a fixed-geometry, first-order thermal reduction; no
 spatial convergence or empirical material-accuracy claim follows from its
 algebraic energy residual.
 
+### Nonlinear ambient radiation on the original enthalpy graph
+
+`boundary::GrayAmbientBoundary` supplies a complete exterior heat flux to the
+same implicit boundary seam. A bounded scalar solve resolves the exterior
+surface temperature through the original cellwise `k(h)`, centre-to-face
+distance and optional coating/contact resistance. Convection and gray radiation
+then act in parallel at that surface. The explicitly fixed emissivity and htc
+are used once; authored htc and another radiation source must not also own the
+selected channel. Air and the large black radiative surroundings share the
+actual bath temperature supplied by the original boundary, including its events.
+
+Factored fourth-power differences retain near-equilibrium exchange. The
+allocation-free analytic tangent includes both `dT/dh` and `dk/dh`; phase-driven
+conductivity changes can affect heat flux even at a latent plateau. The
+original chain/graph solver, enthalpy storage, nonlinear convergence controls,
+adaptive time owner and heat/entropy accounts remain authoritative. A surface
+response exposes temperature, separate convective/radiative powers, applied
+power and closure residual; these are descriptions of the same transfer, never
+extra energy credits. Invalid data, exhausted surface work and cancellation
+return no response or accepted thermal candidate.
+
+This uses the native cellwise conductivity approximation, not an integrated
+within-cell `k(T)` profile. It assumes an opaque gray surface with a complete
+view of one isothermal surrounding, fixed geometry and no surface heat capacity.
+Separate radiative/convective bath temperatures, variable emissivity, finite
+enclosure reflections and spectral photon entropy require their own closures.
+The existing thermal entropy account describes bulk/bath entropy exchange,
+not a spectral radiation field. G1/G3 regressions independently reconstruct
+Stefan-Boltzmann plus film heat and the material tangent, exercise sharp latent
+storage on chain and graph paths, and refine adaptive cooling toward a separate
+continuous calorimetry integral. This is numerical verification, not material
+validation. The boundary relation follows [MOOSE's radiation formulation](https://mooseframework.inl.gov/docs/site/source/components/HSBoundaryRadiation.html).
+
 ## Implicit upwind enthalpy with native conduction
 
 `ImplicitConductionChain::with_implicit_advection` and its graph counterpart
@@ -1624,5 +1716,36 @@ The `fs-lbm` flow-enthalpy integration regression binds actual material-driven
 SIMPLEC face fluxes to the same implicit owner, checking serial latent inventory
 and inlet-minus-outlet joules at Courant 10 in one accepted interval. These are
 synthetic numerical checks, not experimental validation or throughput claims.
+
+## Limited axial convection in the native implicit graph
+
+`ImplicitConductionGraph::with_implicit_advection_reconstruction` binds the
+existing `LimitedEnthalpyReconstruction` to the same nonlinear conduction and
+enthalpy residual. Every trial evaluates the actual endpoint face enthalpy and
+its active-minmod tangent together. The original upwind/component-reference
+derivative remains compiled once; sparse face corrections retain equal opposite
+heat accounts and the original cell-mass conversion to joule coordinates.
+No finite-difference Jacobian, dense matrix, separate energy store or frozen
+starting-state reconstruction is introduced.
+
+The limiter is continuous and piecewise linear. Equal nonzero slopes select
+the left active derivative; a zero or opposite-sign slope selects the flat
+branch. These are deterministic generalized derivatives at limiter switches,
+not claims of classical differentiability. The existing Newton line search,
+interval retries, adaptive controller and local/total joule gates remain active.
+The wider stencil uses the graph's nonsymmetric sparse solver; the direct
+tridiagonal chain retains its upwind API. An empty reconstruction preserves the
+original upwind arithmetic.
+
+Original face-domain, geometry, fixed-mass, junction, external-gradient and
+unsupported-carrier refusals apply on each trial. The frozen flow and supplied
+observer histories remain unchanged. G1/G3/G4 regressions compare the complete
+endpoint Jacobian against finite differences after limiter branches change,
+resolve a reversed/datum-shifted latent channel at Courant four against an
+independent affine endpoint balance, and refine a circulating cell-average
+sine wave against its exact translation and the upwind result. Late cancellation
+retains the original thermal history. Backward Euler remains first-order in
+time; these bounded checks do not establish a global TVD, arbitrary-source
+maximum-principle, experimental-validation or throughput claim.
 
 

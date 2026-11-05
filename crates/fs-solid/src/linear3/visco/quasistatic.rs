@@ -375,7 +375,7 @@ pub(super) fn assemble_tangents(
 
 // One existing CG owner and true-residual gate for both load-control paths.
 pub(super) fn solve_linear(
-    operator: &CsrOp,
+    operator: &impl LinearOp,
     preconditioner: &Jacobi,
     rhs: &[f64],
     scale: f64,

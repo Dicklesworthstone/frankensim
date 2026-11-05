@@ -16,7 +16,28 @@ pub use section::ShellSection;
 use section::Section;
 /// Consistent midsurface/director inertia and the numerical drilling gauge.
 pub mod inertia;
-pub use inertia::CstDktMass;
+pub use inertia::{CstDktMass, ReferenceDensityMoments};
+use inertia::ReferenceInertia;
+
+impl ReferenceDensityMoments {
+    /// Consume the existing laminate owner's exact mass moments, normalized by
+    /// its total reference thickness. Applying these values with thickness `h`
+    /// scales every layer and the reference offset by `h/source_thickness`.
+    /// Layer fractions and the sign of the source's first moment are retained.
+    /// The mesh must represent that declared reference surface and normal.
+    ///
+    /// This adapter supplies inertia only. CST/DKT stiffness stays independently
+    /// declared; full laminate A/B/D and transverse shear use the existing
+    /// [`mitc::ShearShellSection::from_laminate`] constitutive path.
+    /// # Errors
+    /// Unrepresentable normalization or nonpositive mass variance.
+    pub fn from_laminate(section: &fs_material::laminate::LaminateSection)
+        -> Result<Self, PlateError> {
+        let h = section.total_thickness_m();
+        Self::new(section.i0_kg_m2() / h, section.i1_kg_m() / h / h,
+            section.i2_kg() / h / h / h)
+    }
+}
 
 /// Radially sampled shells, thickness fields and explicit surface indentations.
 pub mod profile;
@@ -216,6 +237,83 @@ pub fn assemble_shell_materials_with_mass(mesh: &ShellMesh, sections: &[ShellSec
     boundary_nodes: &[usize], support: ShellSupport, mass: CstDktMass) -> Result<ShellModel, PlateError> {
     assemble_with_inertia(mesh, sections, false, boundary_nodes, support, DRILLING_ALPHA, mass, None)
 }
+
+/// Homogeneous stiffness/thickness with an explicit P1 reference-density field.
+/// Each facet supplies three positive densities [kg/m³] in its original corner
+/// order; neighboring facets need not agree at a material interface. The field
+/// replaces the section's scalar density in consistent inertia only.
+/// # Errors
+/// Invalid sections, geometry, density count/values, support or inertia arithmetic.
+pub fn assemble_shell_with_reference_density(mesh: &ShellMesh, section: &PlateSection,
+    reference_corner_density_kg_m3: &[[f64;3]], boundary_nodes: &[usize], support: ShellSupport)
+    -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia(mesh, core::slice::from_ref(section), true, boundary_nodes,
+        support, DRILLING_ALPHA, CstDktMass::Consistent, None, Some(ReferenceInertia::Density(reference_corner_density_kg_m3)))
+}
+
+/// Piecewise stiffness/thickness with the same explicit P1 reference inventory.
+/// The original consistent translational/director mass and drilling-rate gauge
+/// integrate density locally; cell means do not replace mass or its moments.
+/// Density is fixed reference data, not a live mass-transfer or thermal law.
+/// # Errors
+/// Invalid sections, geometry, density count/values, support or inertia arithmetic.
+pub fn assemble_shell_sections_with_reference_density(mesh: &ShellMesh, sections: &[PlateSection],
+    reference_corner_density_kg_m3: &[[f64;3]], boundary_nodes: &[usize], support: ShellSupport)
+    -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia(mesh, sections, false, boundary_nodes,
+        support, DRILLING_ALPHA, CstDktMass::Consistent, None, Some(ReferenceInertia::Density(reference_corner_density_kg_m3)))
+}
+
+/// Independent membrane/bending sections with the same graded reference inertia.
+/// No elastic coefficient or effective membrane/bending relation is inferred
+/// from density. All mode and pressure-port consumers retain this actual mass.
+/// # Errors
+/// Invalid sections, geometry, density count/values, support or inertia arithmetic.
+pub fn assemble_shell_materials_with_reference_density(mesh: &ShellMesh, sections: &[ShellSection],
+    reference_corner_density_kg_m3: &[[f64;3]], boundary_nodes: &[usize], support: ShellSupport)
+    -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia(mesh, sections, false, boundary_nodes,
+        support, DRILLING_ALPHA, CstDktMass::Consistent, None, Some(ReferenceInertia::Density(reference_corner_density_kg_m3)))
+}
+
+/// Independently declared uniform stiffness/thickness with layered inertia.
+/// Three normalized density-moment values per facet are P1 fields in original
+/// corner order. Consistent mass retains the signed first moment, including
+/// translation/director coupling from an asymmetric coating or reference offset.
+/// # Errors
+/// Invalid section, geometry, moment count, support, or inertia arithmetic.
+pub fn assemble_shell_with_reference_density_moments(mesh: &ShellMesh, section: &PlateSection,
+    reference_corner_moments: &[[ReferenceDensityMoments;3]], boundary_nodes: &[usize], support: ShellSupport)
+    -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia(mesh, core::slice::from_ref(section), true, boundary_nodes,
+        support, DRILLING_ALPHA, CstDktMass::Consistent, None, Some(ReferenceInertia::Moments(reference_corner_moments)))
+}
+
+/// Per-facet elastic sections with the same full reference density moments.
+/// The section thickness scales the normalized layer geometry; no elastic
+/// modulus or membrane/bending coupling is inferred from these mass moments.
+/// # Errors
+/// Invalid sections, geometry, moment count, support, or inertia arithmetic.
+pub fn assemble_shell_sections_with_reference_density_moments(mesh: &ShellMesh, sections: &[PlateSection],
+    reference_corner_moments: &[[ReferenceDensityMoments;3]], boundary_nodes: &[usize], support: ShellSupport)
+    -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia(mesh, sections, false, boundary_nodes,
+        support, DRILLING_ALPHA, CstDktMass::Consistent, None, Some(ReferenceInertia::Moments(reference_corner_moments)))
+}
+
+/// Independent membrane/bending sections with layered, possibly graded inertia.
+/// All original modal and pressure consumers receive this consistent mass.
+/// This supplies no laminate B stiffness; use the MITC laminate constitutive
+/// adapter when the physical specimen requires that elastic coupling.
+/// # Errors
+/// Invalid sections, geometry, moment count, support, or inertia arithmetic.
+pub fn assemble_shell_materials_with_reference_density_moments(mesh: &ShellMesh, sections: &[ShellSection],
+    reference_corner_moments: &[[ReferenceDensityMoments;3]], boundary_nodes: &[usize], support: ShellSupport)
+    -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia(mesh, sections, false, boundary_nodes,
+        support, DRILLING_ALPHA, CstDktMass::Consistent, None, Some(ReferenceInertia::Moments(reference_corner_moments)))
+}
+
 fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
     assemble_with_alpha(mesh, sections, uniform, boundary_nodes, support, DRILLING_ALPHA)
@@ -229,10 +327,25 @@ fn assemble_with_inertia<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: 
     boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64, inertia: CstDktMass,
     nodal_thickness: Option<&[f64]>)
     -> Result<ShellModel, PlateError> {
+    assemble_with_reference_inertia(mesh, sections, uniform, boundary_nodes, support,
+        drilling_alpha, inertia, nodal_thickness, None)
+}
+
+#[allow(clippy::too_many_arguments)] // The same assembly with explicit reference fields, never a second mass owner.
+fn assemble_with_reference_inertia<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
+    boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64, inertia: CstDktMass,
+    nodal_thickness: Option<&[f64]>, reference_inertia: Option<ReferenceInertia<'_>>)
+    -> Result<ShellModel, PlateError> {
     mesh.validate()?;
     if let Some(h) = nodal_thickness {
         if h.len() != mesh.nodes.len() || h.iter().any(|v| !v.is_finite() || *v <= 0.0) {
             return Err(PlateError::BadSection { what: "shell inertia requires positive finite thickness at every node" });
+        }
+    }
+    if let Some(field) = reference_inertia {
+        field.validate(mesh.tris.len())?;
+        if inertia != CstDktMass::Consistent {
+            return Err(PlateError::BadSection { what: "graded reference density requires consistent shell inertia" });
         }
     }
     let expected = if uniform { 1 } else { mesh.tris.len() };
@@ -258,9 +371,11 @@ fn assemble_with_inertia<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: 
         let g = mesh.facet(e)?;
         let local = local_stiffness_with_alpha(&g,section,e,drilling_alpha)?;
         let local_mass = if inertia == CstDktMass::Consistent {
-            Some(match nodal_thickness {
-                Some(h) => self::inertia::consistent_mass_with_thickness(&g, section.plate(), tri.map(|i| h[i]))?,
-                None => self::inertia::consistent_mass(&g, section.plate())?,
+            Some(match (nodal_thickness, reference_inertia) {
+                (thickness, Some(field)) => field.consistent_mass_at(
+                    e, &g, section.plate(), thickness.map(|h| tri.map(|i| h[i])))?,
+                (Some(h), None) => self::inertia::consistent_mass_with_thickness(&g, section.plate(), tri.map(|i| h[i]))?,
+                (None, None) => self::inertia::consistent_mass(&g, section.plate())?,
             })
         } else { None };
         // Transform translations and physical axial rotations with the same R.

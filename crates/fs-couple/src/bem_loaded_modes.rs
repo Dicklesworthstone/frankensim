@@ -40,7 +40,10 @@ mod memory;
 mod harmonic;
 mod molecular;
 mod pencil;
-pub use harmonic::{BemHarmonicOptions, BemHarmonicPower, BemHarmonicResponse};
+pub use harmonic::{
+    BemHarmonicFrequencyOptions, BemHarmonicFrequencyResponse, BemHarmonicOptions,
+    BemHarmonicPower, BemHarmonicPowerDerivative, BemHarmonicResponse,
+};
 pub use molecular::{
     MolecularIncidentLimits, MolecularIncidentPower, MolecularIncidentResponse,
     MolecularLoadedResponse, MolecularModesError, MolecularModesPower,

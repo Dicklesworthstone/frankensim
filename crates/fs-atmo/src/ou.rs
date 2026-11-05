@@ -60,8 +60,23 @@ impl OuMode {
                 "sigma_st >= 0 and tau > 0 (integral-scale / mean-speed gives tau)",
             ));
         }
-        let rho = det::exp(-1.0 / (TICK_HZ * tau_s));
-        let sigma_innov = sigma_st * det::sqrt(1.0 - rho * rho);
+        let ticks_per_correlation = TICK_HZ * tau_s;
+        let decay = if ticks_per_correlation.is_finite() {
+            1.0 / ticks_per_correlation
+        } else {
+            (1.0 / TICK_HZ) / tau_s
+        };
+        let rho = det::exp(-decay);
+        // Below sqrt(eps), subtracting rho² from one loses many significant
+        // bits, eventually rounding nonzero innovations to zero.
+        // Keep the historical arithmetic outside that cancellation regime so
+        // ordinary existing realizations and their pinned replay stay intact.
+        let variance_factor = if decay < det::sqrt(f64::EPSILON) {
+            -det::expm1(-2.0 * decay)
+        } else {
+            1.0 - rho * rho
+        };
+        let sigma_innov = sigma_st * det::sqrt(variance_factor);
         Ok(OuMode {
             rho,
             sigma_innov,

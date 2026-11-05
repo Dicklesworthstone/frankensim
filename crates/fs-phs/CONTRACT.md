@@ -1,5 +1,23 @@
 # fs-phs — Contract
 
+## Signed physical port observation
+
+`PortHamiltonian::output_from_effort_into` is the allocation-free owner of
+`G^T effort` for original real port outputs. It reuses the existing physical-map
+two-word accumulator, retaining product/FMA remainders and signed cancellation.
+Direct ODE/descriptor observation, ordinary/prepared discrete-gradient outputs,
+and complex harmonic response use the same contraction arithmetic. Complete
+effort dimensions and finite representable arithmetic are required; no small
+coefficient is discarded. The periodic pHS adapter consumes this owner for
+feedback, work audit and nonlinear output spectra, so a weak overtone survives
+cancellation of stronger modal contributions. This adds no physical mode,
+changes no constitutive law, and is not an arbitrary-precision guarantee.
+
+Focused regressions in `prepared_step` and `harmonic_response` use exact signed
+mode cancellation, a known product remainder, direct/prepared parity, and an
+independent complex relaxation response. Workspace outputs remain unpublished
+on refusal; the low-level effort contraction documents its scratch semantics.
+
 ## Explicit synchronous converter gate cycles
 
 `circuit::converter::switching::PreparedSwitchCycle` advances the original
@@ -363,6 +381,11 @@ and bounded sign-bracket bisection. Every trial retains the same complete
 descriptor equations, mutual storage, physical dissipation and material memory.
 The observation weights are never normalized, and their interference is retained.
 A stationary candidate is reused while its actual numerical sign bracket shrinks.
+Frequency resolution alone does not accept a peak: the dimensionless local
+log-amplitude slope times bracket width must also be at most `1/8`. A narrow
+finite response continues refining, while an off-grid lossless pole's divergent
+slope cannot masquerade as a finite maximum. This additional resolution check
+does not certify a forward amplitude error or impose a physical linewidth.
 
 The optional conventional half-power bandwidth resolves both squared-amplitude
 half-height crossings inside the supplied interval and reports peak/width as a
@@ -380,6 +403,9 @@ linewidth, complex excitation/observation scaling, replay and refusals. Numerica
 brackets are not interval-arithmetic certificates. The caller must isolate the
 desired peak; this query does not enumerate all peaks or prove uniqueness in a
 multimode interval, validate a continuum model, or establish nonlinear resonance.
+Source-owned and native survey regressions also reject unsampled lossless poles;
+a finite velocity resonance with Q about `1.2e9` and linewidth 100 times narrower
+than the frequency tolerance retains its gain under `1e-120..1e120` source scales.
 
 `ScatteringModel::driven_resonance` applies the same bounded search to the fully
 closed wave-boundary model. Its fixed real `ScatteringObservation` can select
@@ -1614,6 +1640,38 @@ The authored exact-flow regression checks exponential decay of a nonzero
 uncoupled history, unchanged mechanical coordinates, independently integrated
 heat and the original energy balance. Native execution remains unverified for
 this increment.
+
+## Continuous tangents of the original storage law
+
+`Storage::continuous_tangent` optionally exposes a `ContinuousStorageTangent`
+owned by the same boxed Hamiltonian/gradient. Its action is the complete
+continuous derivative `D(gradient H)(x) v` in original state coordinates,
+including every nonlinear and material-memory contribution. The default is
+unsupported. This capability supplies neither a discrete-gradient endpoint
+Jacobian nor permission to replace nonlinear storage with its quadratic part.
+Declared action failure or incomplete/nonfinite output refuses analytic use;
+consumers must not silently switch a declared action to finite differences.
+
+`QuadraticStorage` applies its original sparse-row Q, including admitted tiny
+asymmetry, without allocation. `SumStorage` retains the capability only when
+both complete child laws supply it and composes their original directional
+derivatives over the exact state split. Immutable shared-storage handles delegate
+it unchanged. Composition uses no state copies, symmetrization, numerical
+probes or altered physical coefficients. Input dimensions and finite inputs
+are checked before slice access; all successful output components are finite.
+Callback work and scratch remain owner responsibilities. This local derivative
+does not establish harmonic truncation, temporal accuracy or orbit stability.
+
+Original Maxwell composition preserves a supported base tangent and adds the
+complete arm derivative. With `b(x)=sqrt(k)*strain(x)`, `e=b(x)-z` and
+`delta_e=gradient(b).v_x-v_z`, it adds
+`delta_e*gradient(b)+e*Hessian(b)*v_x` to the base effort direction and
+`-delta_e` to the original memory row. Nonlinear strain retains the actual
+prestress-dependent curvature and both state/memory cross derivatives. Linear
+arms allocate no scratch. Mapped arms lazily allocate two base-dimension
+derivative vectors per action and reuse them across all mapped arms; incomplete
+or nonfinite map derivatives refuse. No memory coordinate, dissipation law,
+equilibrium stiffness or stored prestress is eliminated or replaced.
 
 ## Immutable constitutive sharing for transactional preparation
 

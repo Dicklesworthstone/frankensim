@@ -223,7 +223,7 @@ fn mean_tangent(
 // retains its original initiation sensitivity. Normal compression has
 // unit_q_n=0. Scaling avoids squaring a metre/energy radius or differentiating
 // through the root's numerical bracketing/clamps.
-fn crossing(
+pub(super) fn crossing(
     old: [f64; 3],
     end: [f64; 3],
     weights: [f64; 3],

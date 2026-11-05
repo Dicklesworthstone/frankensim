@@ -50,12 +50,14 @@ const W: [f64; Q] = [
     1.0 / 36.0,
 ];
 
-const ALL_MODES: [CollisionModel2; 5] = [
+const ALL_MODES: [CollisionModel2; 7] = [
     CollisionModel2::Bgk,
     CollisionModel2::Regularized,
     CollisionModel2::RecursiveRegularized,
     CollisionModel2::Trt { magic: 0.25 },
     CollisionModel2::CentralMoment,
+    CollisionModel2::CentralMomentBulk { bulk_tau: 0.7 },
+    CollisionModel2::CentralMomentBulk { bulk_tau: 1.8 },
 ];
 
 /// A population set whose non-equilibrium is EXACTLY the
@@ -363,6 +365,147 @@ fn shear_wave_viscosity_identity_all_modes() {
     }
 }
 
+/// The force transform must precede independent trace/deviatoric relaxation.
+/// Manufacture physical second moments, then remove the Guo half-source to
+/// obtain the stored state; inspect the actual physical collision output.
+#[test]
+fn central_moment_bulk_relaxes_trace_independently_under_force() {
+    let rho = 1.3;
+    let u = [0.04, -0.03];
+    let stress = [[0.003, -0.002], [-0.002, -0.001]];
+    for tau in [0.56, 0.9, 1.7] {
+        for bulk_tau in [0.6, 1.0, 1.8] {
+            for force in [[0.0; 2], [0.001, -0.002]] {
+                let source = raw_guo_source(u, force);
+                let mut state = hermite_state(rho, u, stress);
+                for q in 0..Q {
+                    state[q] -= 0.5 * source[q];
+                }
+                let mut grid = Grid::uniform(2, 2, tau);
+                grid.collision = CollisionModel2::CentralMomentBulk { bulk_tau };
+                grid.f.fill(state);
+                grid.fext.fill(force);
+                let mut post = Vec::new();
+                grid.collide_into(&mut post);
+                let mut second = [[0.0; 2]; 2];
+                for q in 0..Q {
+                    let physical = post[0][q] - 0.5 * source[q];
+                    let c = [f64::from(E[q].0) - u[0], f64::from(E[q].1) - u[1]];
+                    for a in 0..2 {
+                        for b in 0..2 {
+                            second[a][b] += c[a] * c[b] * physical;
+                        }
+                    }
+                }
+                let trace = 2.0 * rho * CS2
+                    + (1.0 - 1.0 / bulk_tau) * (stress[0][0] + stress[1][1]);
+                let difference = (1.0 - 1.0 / tau) * (stress[0][0] - stress[1][1]);
+                let xy = (1.0 - 1.0 / tau) * stress[0][1];
+                assert!((second[0][0] + second[1][1] - trace).abs() < 2e-14);
+                assert!((second[0][0] - second[1][1] - difference).abs() < 2e-14);
+                assert!((second[0][1] - xy).abs() < 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
+fn central_moment_bulk_unity_preserves_legacy_population_bits() {
+    for tau in [0.56, 0.8, 1.7] {
+        let mut legacy = Grid::uniform(7, 5, tau);
+        legacy.collision = CollisionModel2::CentralMoment;
+        legacy.g = [0.0001, -0.0002];
+        for (i, f) in legacy.f.iter_mut().enumerate() {
+            *f = hermite_state(
+                0.9 + 0.01 * i as f64,
+                [0.01, -0.02],
+                [[0.0003, -0.0002], [-0.0002, -0.0001]],
+            );
+            legacy.fext[i] = [0.0003, 0.0001];
+        }
+        let mut explicit = legacy.clone();
+        explicit.collision = CollisionModel2::CentralMomentBulk { bulk_tau: 1.0 };
+        let mut legacy_scratch = Vec::new();
+        let mut explicit_scratch = Vec::new();
+        for _ in 0..12 {
+            legacy.step(&mut legacy_scratch);
+            explicit.step(&mut explicit_scratch);
+            for (old, new) in legacy.f.iter().flatten().zip(explicit.f.iter().flatten()) {
+                assert_eq!(old.to_bits(), new.to_bits());
+            }
+        }
+    }
+}
+
+/// Project the right-moving isothermal acoustic characteristic on its spatial
+/// Fourier mode. Its modulus removes phase error from the attenuation estimate.
+fn acoustic_amplitude(grid: &Grid) -> f64 {
+    let mut component = [0.0_f64; 2];
+    for x in 0..grid.nx {
+        let m = grid.moments(grid.idx(x, 0));
+        let right_wave = (m.rho - 1.0) + m.u[0] / CS2.sqrt();
+        let phase = std::f64::consts::TAU * x as f64 / grid.nx as f64;
+        component[0] += right_wave * phase.cos();
+        component[1] += right_wave * phase.sin();
+    }
+    2.0 * component[0].hypot(component[1]) / grid.nx as f64
+}
+
+/// Linearized 2-D isothermal Navier-Stokes predicts longitudinal attenuation
+/// Gamma = (nu_shear + zeta/rho) k² / 2. This is an independent continuum
+/// oracle for actual collision + streaming, with two wavelengths to bound
+/// truncation error. The existing shear-wave test verifies nu separately.
+#[test]
+fn central_moment_sound_decay_recovers_material_bulk_viscosity() {
+    let shear_tau = 0.68;
+    for nx in [64, 128] {
+        for bulk_tau in [0.6, 1.0, 1.8] {
+            let mut grid = Grid::uniform(nx, 2, shear_tau);
+            grid.collision = CollisionModel2::CentralMomentBulk { bulk_tau };
+            let k = std::f64::consts::TAU / nx as f64;
+            for y in 0..grid.ny {
+                for x in 0..nx {
+                    let perturbation = 1e-6 * (k * x as f64).cos();
+                    let i = grid.idx(x, y);
+                    grid.f[i] = equilibrium(1.0 + perturbation, CS2.sqrt() * perturbation, 0.0);
+                }
+            }
+            let mut scratch = Vec::new();
+            let (start, end) = (32, 320);
+            for _ in 0..start {
+                grid.step(&mut scratch);
+            }
+            let initial = acoustic_amplitude(&grid);
+            for _ in start..end {
+                grid.step(&mut scratch);
+            }
+            let final_amplitude = acoustic_amplitude(&grid);
+            assert!(final_amplitude > 0.0 && final_amplitude < initial);
+            let measured = (initial / final_amplitude).ln() / (end - start) as f64;
+            let nu = CS2 * (shear_tau - 0.5);
+            let bulk_nu = CS2 * (bulk_tau - 0.5);
+            let expected = 0.5 * (nu + bulk_nu) * k * k;
+            let relative_error = (measured / expected - 1.0).abs();
+            assert!(
+                relative_error < 0.02,
+                "nx={nx}, bulk_tau={bulk_tau}: attenuation {measured} vs {expected} ({relative_error})"
+            );
+        }
+    }
+}
+
+#[test]
+fn central_moment_rejects_invalid_bulk_relaxation() {
+    for bulk_tau in [0.0, 0.5, -1.0, f64::INFINITY, f64::NAN] {
+        let grid = {
+            let mut grid = Grid::uniform(2, 2, 0.8);
+            grid.collision = CollisionModel2::CentralMomentBulk { bulk_tau };
+            grid
+        };
+        assert!(std::panic::catch_unwind(|| grid.collide_into(&mut Vec::new())).is_err());
+    }
+}
+
 /// Doubly periodic double shear layer (Minion–Brown style); `sharp`
 /// controls the layer width (80 -> about 1.2 cells: unresolved).
 fn shear_layer_grid(mode: CollisionModel2, sharp: f64, tau: f64, u0: f64) -> Grid {
@@ -456,6 +599,8 @@ fn new_modes_determinism_bitwise() {
         CollisionModel2::RecursiveRegularized,
         CollisionModel2::Trt { magic: 0.25 },
         CollisionModel2::CentralMoment,
+        CollisionModel2::CentralMomentBulk { bulk_tau: 0.7 },
+        CollisionModel2::CentralMomentBulk { bulk_tau: 1.8 },
     ] {
         let run = || {
             let mut grid = shear_layer_grid(mode, 20.0, 0.51, 0.05);

@@ -113,3 +113,131 @@ fn complete_live_contact_enclosure_dual_matches_independent_physical_resolves() 
         }
     });
 }
+
+/// Three original accepted capacity steps; controls are contact/source scales,
+/// cold emissivity, black-bath kelvin, total capacity scale and initial kelvin.
+fn capacity_sample(cx: &Cx<'_>, open: bool, control: [f64; 6], reverse: bool)
+    -> (f64, Option<[f64; 6]>)
+{
+    use fs_conduction::transient::backward_euler::{ArealHeatCapacity, SurfaceHeatCapacity};
+    let mesh = mesh();
+    let boundary = boundary(&mesh, false);
+    let material = material(true);
+    let card = scaled_card(control[0]);
+    let contacts = contacts(cx, &mesh, &boundary, &card);
+    let cold = RadiationSurface::new(&mesh, "cold",
+        |f| f.centroid[2] < 0.0 && f.centroid[1] == 0.0,
+        patch_with_emissivity(control[2]).emissivity().clone()).unwrap();
+    let hot = RadiationSurface::new(&mesh, "hot",
+        |f| f.centroid[2] > 0.0 && f.centroid[1] == 0.0,
+        patch().emissivity().clone()).unwrap();
+    let coating = SurfaceHeatCapacity::nodal(cold.face_slots()[0],
+        [1.0, 2.0, 4.0].map(|value| ArealHeatCapacity::declared(value * control[4]).unwrap()));
+    let engine = BackwardEuler::per_element(cx, &mesh,
+        &[10.0, 20.0].map(|value| VolumetricHeatCapacity::declared(value * control[4]).unwrap()))
+        .unwrap().with_surface_heat_capacity(cx, &[coating]).unwrap();
+    let factors = ViewFactorMatrix::infinite_parallel_plates(cold.area_m2()).unwrap();
+    let closed = GrayDiffuseEnclosure::new(vec![cold, hot], factors).unwrap();
+    let opened = OpenDiffuseEnclosure::new(cx, closed.surfaces().to_vec(),
+        vec![vec![0.0, 0.25], vec![0.25, 0.0]],
+        ViewFactorEvidence::Analytic { geometry: "synthetic reciprocal open exchange".into() },
+        ViewFactorTolerance::default()).unwrap();
+    let config = StepConfig { energy_tolerance_j: 1e-9, ..step_config() };
+    let coupling = ContactIterationConfig { residual_tolerance_j: 1e-9, ..coupling() };
+    let radiation_config = AmbientRadiationConfig { max_iterations: 256,
+        temperature_tolerance_k: 1e-12, balance_tolerance_w: 1e-9,
+        ..AmbientRadiationConfig::default() };
+    let steps = [(0.1, 1.0), (0.25, 0.3), (0.15, 0.0)];
+    let mut history = vec![old().into_iter().map(|t| t + control[5]).collect::<Vec<_>>()];
+    let mut targets = Vec::new();
+    for (dt, power) in steps {
+        let source = ScalarField::Nodal(vec![0., 0., 0., 0.,
+            30. * control[1] * power, 30. * control[1] * power,
+            30. * control[1] * power, 30. * control[1] * power]);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &material, element_materials: None, source: &source };
+        let previous = history.last().unwrap();
+        let solved = if open {
+            contacts.advance_capacity_newton_with_open_enclosure_radiation(cx, &engine,
+                problem, previous, dt, config, nonlinear(), coupling, 1,
+                &opened, control[3], radiation_config).unwrap()
+        } else {
+            contacts.advance_capacity_newton_with_enclosure_radiation(cx, &engine,
+                problem, previous, dt, config, nonlinear(), coupling, 1,
+                &closed, radiation_config).unwrap()
+        };
+        targets.push(solved.physical_residual_tolerance_j);
+        history.push(solved.conduction.temperature);
+    }
+    let goal = history.last().unwrap()[7];
+    if !reverse { return (goal, None); }
+    let mut carry = vec![0.0; 8];
+    carry[7] = 1.0;
+    let mut derivatives = [0.0; 6];
+    for (index, (dt, power)) in steps.into_iter().enumerate().rev() {
+        let source = ScalarField::Nodal(vec![0., 0., 0., 0.,
+            30. * power, 30. * power, 30. * power, 30. * power]);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &boundary,
+            material: &material, element_materials: None, source: &source };
+        let temperature = &history[index + 1];
+        let radiation = if open {
+            EnclosureRadiationLinearization::bind_open(cx, problem, config.linear,
+                temperature, &["cold"], &[0.], &[0.], &opened, control[3], 1e-9, 4096).unwrap()
+        } else {
+            EnclosureRadiationLinearization::bind(cx, problem, config.linear,
+                temperature, &["cold"], &[0.], &[0.], &closed, 1e-9, 4096).unwrap()
+        };
+        assert!(radiation.flux_feedback().is_some(), "hot patch has no fictitious convection");
+        let physical = ConductionProblem { boundary: radiation.boundary(), ..problem };
+        let response = engine.linearize_temperature_contact_endpoint(cx, physical,
+            &contacts, &history[index], temperature, dt, config, targets[index], &["cold"], 1).unwrap();
+        assert_eq!(response.primal().temperature, *temperature);
+        assert_eq!(response.primal().krylov_iterations, 0);
+        let full = response.pullback_with_robin_and_flux_feedback_and_resistance_controls(cx,
+            radiation.convective_mean_slopes(), radiation.local_reference_slopes(),
+            radiation.reference_feedback(), radiation.flux_feedback(), &carry, 4096, 1).unwrap();
+        derivatives[0] += full.resistance_multipliers[0].derivative;
+        let full = radiation.remap_gradient(cx, full.transport, config.linear).unwrap();
+        derivatives[1] += response.source_multiplier_pullback(cx, &full.convection.nodal_load).unwrap();
+        derivatives[2] += full.emissivities[0];
+        derivatives[3] += full.ambient_temperature.unwrap_or(0.0);
+        derivatives[4] += response.capacity_multiplier_pullback(cx, &full.convection.nodal_load).unwrap();
+        carry = response.previous_temperature_pullback(cx, &full.convection.nodal_load).unwrap();
+        if index == 2 {
+            let mut stale = temperature.clone();
+            stale[7] += 0.1;
+            assert!(engine.linearize_temperature_contact_endpoint(cx, physical, &contacts,
+                &history[index], &stale, dt, config, targets[index], &["cold"], 1).is_err());
+            assert!(response.pullback_with_robin_and_flux_feedback_and_resistance_controls(cx,
+                radiation.convective_mean_slopes(), radiation.local_reference_slopes(),
+                radiation.reference_feedback(), radiation.flux_feedback(), &[0.; 8], 0, 1).is_err());
+        }
+    }
+    derivatives[5] = carry.iter().sum();
+    (goal, Some(derivatives))
+}
+
+#[test]
+fn capacity_contact_enclosure_reverse_keeps_coating_storage_and_complete_history() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let nominal = [1.0, 1.0, 0.2, 295.0, 1.0, 0.0];
+        for open in [false, true] {
+            let (goal, derivatives) = capacity_sample(cx, open, nominal, true);
+            near(goal, capacity_sample(cx, open, nominal, false).0, 0.0);
+            let derivatives = derivatives.unwrap();
+            for (coordinate, step) in [0.001, 0.001, 0.0002, 0.002, 0.001, 0.002].into_iter().enumerate() {
+                if coordinate == 3 && !open { continue; }
+                let mut low = nominal;
+                let mut high = nominal;
+                low[coordinate] -= step;
+                high[coordinate] += step;
+                let expected = (capacity_sample(cx, open, high, false).0
+                    - capacity_sample(cx, open, low, false).0) / (2.0 * step);
+                assert!((derivatives[coordinate] - expected).abs()
+                    < 3e-4 * expected.abs().max(0.01),
+                    "open={open}, coordinate={coordinate}: complete history {} versus physical resolves {expected}",
+                    derivatives[coordinate]);
+            }
+        }
+    });
+}

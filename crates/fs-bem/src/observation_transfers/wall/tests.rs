@@ -814,7 +814,7 @@ fn transmitting_wall_retains_native_phase_receiver_and_independent_power_channel
         ).unwrap();
         let (power, layers) = boundary.power_coefficients(omega, 2, || false).unwrap();
         assert_eq!(layers, 2); // Two layers per distinct law, not per panel.
-        assert_eq!(power[0].admittance, beta[0]);
+        assert_eq!(power[0].coordinates, boundary::WallWorkCoordinates::Pressure(beta[0]));
         assert_eq!(power[0].irreversible_conductance, original.absorbed_conductance);
         assert_eq!(power[0].transmitted_conductance, original.transmitted_conductance);
         assert!(power[0].irreversible_conductance > 0.0);
@@ -853,7 +853,7 @@ fn transmitting_wall_retains_native_phase_receiver_and_independent_power_channel
     }).unwrap();
     let (power, count) = matched.power_coefficients(omega, 0, || false).unwrap();
     assert_eq!(count, 0);
-    assert_eq!(power[0].admittance, C64::ONE);
+    assert_eq!(power[0].coordinates, boundary::WallWorkCoordinates::Pressure(C64::ONE));
     assert_eq!(power[0].irreversible_conductance, 0.0);
     assert_eq!(power[0].transmitted_conductance, 1.0);
     assert_eq!(matched.pressure_reflection(omega, || false).unwrap(),
@@ -875,6 +875,7 @@ fn transmitting_treatment_reaches_dense_and_iterative_receiver_fields() {
         > 1.0 / det::sqrt(f64::EPSILON));
     let (power, count) = pressure_release_limit.power_coefficients(omega, 0, || false).unwrap();
     assert_eq!(count, 0);
+    assert!(matches!(power[0].coordinates, boundary::WallWorkCoordinates::Reflection { .. }));
     assert_eq!(power[0].irreversible_conductance, 0.0);
     assert!(power[0].transmitted_conductance > 0.0);
     let reflection_chart = LocalBoundaryObservation::for_scattering(

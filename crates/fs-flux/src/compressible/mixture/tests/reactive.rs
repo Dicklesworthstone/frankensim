@@ -108,6 +108,46 @@ fn coupled_balance(report: &ReactiveStepReport) {
 }
 
 #[test]
+fn g0_pressure_outlet_sets_reactive_interval_without_spending_a_coupling_retry() {
+    // Equal A/B calorics and amounts are an exact zero-heat equilibrium. Only
+    // the prescribed expansion wave can shorten this otherwise uniform field.
+    let mechanism = make_mechanism(0.0, 2.0, 3.5);
+    let grid = CartesianGrid::new(2, 2, 0.5, 0.5, 1.0).unwrap();
+    let mut flow = reactive(
+        raw_field(
+            &mechanism,
+            grid,
+            Boundaries2d {
+                x: AxisBoundaries::Ends {
+                    lower: BoundaryCondition::Reflecting,
+                    upper: BoundaryCondition::PressureOutlet { pressure_pa: 0.02 },
+                },
+                y: AxisBoundaries::Periodic,
+            },
+            |_| ([0.5, 0.5, 0.0], [0.0; 2], 1.0),
+        ),
+        &mechanism,
+    );
+    let controls = ReactiveStepControl {
+        transport: StepControl {
+            cfl: 0.2,
+            reconstruction: Reconstruction::FirstOrder,
+            maximum_halvings: 0,
+        },
+        maximum_coupling_retries: 0,
+    };
+    let old_cell_only_interval = 0.8 * controls.transport.cfl / (4.0 * 1.4_f64.sqrt());
+    let report = flow.step(Time::new(1.0), controls, || false).unwrap();
+    assert!(report.elapsed.value() < old_cell_only_interval);
+    assert_eq!(report.coupling_retries, 0);
+    assert_eq!(report.transport.halvings, 0);
+    assert!(report.transport.maximum_cfl <= controls.transport.cfl * (1.0 + 1e-13));
+    assert!(report.after.mass() < report.before.mass());
+    assert_eq!(report.chemistry.cell_solves, 2 * flow.flow().cell_count());
+    coupled_balance(&report);
+}
+
+#[test]
 fn g1_exothermic_planar_gas_restarts_at_one_duration_and_retains_both_momenta() {
     let mechanism = make_mechanism(40.0, 500.0, 3.5);
     let mut flow = uniform(&mechanism);

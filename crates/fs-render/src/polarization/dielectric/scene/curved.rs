@@ -893,6 +893,18 @@ impl<'a> CurvedPolarizedScene<'a> {
                     result.beam = next.beam;
                     (DielectricEvent::Reflection, next.pdf_solid_angle, false)
                 }
+                Interaction::CoatedDiffuse { medium, reflectance, coating } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: instance.object_id(), expected: medium, actual: result.medium,
+                        }.into());
+                    }
+                    let rho = self.reflectances[reflectance].at(result.beam.wavelength_nm())
+                        .map_err(|_| BeamError::Dielectric(crate::dielectric::DielectricError::InvalidWavelength))?;
+                    let next = result.beam.sample_coated_diffuse(witness.normal, coating, rho, samples(event))?;
+                    result.beam = next.beam;
+                    (next.event, next.pdf, next.delta)
+                }
                 Interaction::SmoothConductor { optics, medium } => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {

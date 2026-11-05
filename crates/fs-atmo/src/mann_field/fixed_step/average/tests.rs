@@ -321,3 +321,206 @@ fn budgets_mismatch_and_every_cancellation_boundary_preserve_both_accepted_state
     assert_eq!(source, reference);
     assert_eq!(average, reference_average);
 }
+
+#[test]
+fn translating_probe_matches_a_stationary_probe_in_the_galilean_frame_and_replays() {
+    for velocity in [[7.0, -2.0, 1.0], [7.0, -2.0, 0.0]] {
+        let mut source = field(49);
+        let mut ordinary = source.clone();
+        let mut transformed = source.checkpoint();
+        transformed.model = MannSpectralModel::build(
+            17,
+            MANN_TARGET_V1,
+            source.model().quadrature(),
+            core::array::from_fn(|i| source.advection_mps()[i] - velocity[i]),
+        )
+        .unwrap();
+        let mut reference = FixedStepMannField::resume(transformed, 88 * 8).unwrap();
+        let mut moving =
+            TranslatingMannStepAverage::prepare(&source, velocity, 104 * 8, || false).unwrap();
+        let mut fixed = MannStepAverage::prepare(&reference, 104 * 8, || false).unwrap();
+        let edges = [[0.2, 0.1, 0.0], [-0.1, 0.15, 0.0], [0.0, 0.0, 0.1]];
+        let filter = MannBoxFilter::prepare(source.model(), edges, 64, || false).unwrap();
+        let reference_filter =
+            MannBoxFilter::prepare(reference.model(), edges, 64, || false).unwrap();
+        let wall = MannPlaneWall::new(-0.2).unwrap();
+        let wall_filter =
+            MannWallBoxFilter::prepare(source.model(), wall, edges, 256, || false).unwrap();
+        let reference_wall_filter =
+            MannWallBoxFilter::prepare(reference.model(), wall, edges, 256, || false).unwrap();
+        let start = [0.2, -0.4, 0.7];
+        let fixed_point = core::array::from_fn(|i| start[i] - velocity[i] * source.origin_time_s());
+        for step in 1..=5 {
+            source
+                .advance_one_with_translating_average(&mut moving, 64, || false)
+                .unwrap();
+            reference
+                .advance_one_with_average(&mut fixed, 64, || false)
+                .unwrap();
+            ordinary.advance_to(step, 32, || false).unwrap();
+            assert_eq!(source.checkpoint(), ordinary.checkpoint());
+            assert_eq!(moving.observer_velocity_mps(), velocity);
+            assert_eq!(moving.workspace_bytes(), 104 * 8);
+            assert_eq!(moving.interval(), fixed.interval());
+            // This is one translating, finite-footprint sensor over several
+            // intervals. The equivalent Galilean-frame sensor never moves.
+            let endpoint =
+                core::array::from_fn(|i| start[i] + velocity[i] * source.elapsed_time_s());
+            let mut pairs = vec![
+                (
+                    moving.sample(endpoint).unwrap(),
+                    fixed.sample(fixed_point).unwrap(),
+                ),
+                (
+                    moving.sample_filtered(endpoint, &filter).unwrap(),
+                    fixed
+                        .sample_filtered(fixed_point, &reference_filter)
+                        .unwrap(),
+                ),
+            ];
+            if velocity[2] == 0.0 {
+                pairs.extend([
+                    (
+                        moving.sample_wall_blocked(endpoint, wall).unwrap(),
+                        fixed.sample_wall_blocked(fixed_point, wall).unwrap(),
+                    ),
+                    (
+                        moving
+                            .sample_wall_blocked_filtered(endpoint, &wall_filter)
+                            .unwrap(),
+                        fixed
+                            .sample_wall_blocked_filtered(fixed_point, &reference_wall_filter)
+                            .unwrap(),
+                    ),
+                ]);
+                assert_eq!(
+                    moving
+                        .sample_wall_blocked([0.2, -0.4, -0.2], wall)
+                        .unwrap()
+                        .u[2],
+                    0.0
+                );
+            } else {
+                assert_eq!(
+                    moving.sample_wall_blocked(endpoint, wall).unwrap_err().code,
+                    "mann-translating-average-wall-normal"
+                );
+                assert_eq!(
+                    moving
+                        .sample_wall_blocked_filtered(endpoint, &wall_filter)
+                        .unwrap_err()
+                        .code,
+                    "mann-translating-average-wall-normal"
+                );
+            }
+            for (observed, expected) in pairs {
+                for (a, b) in observed
+                    .u
+                    .iter()
+                    .chain(observed.grad.iter().flatten())
+                    .zip(expected.u.iter().chain(expected.grad.iter().flatten()))
+                {
+                    assert!((a - b).abs() < 3e-11 * (1.0 + b.abs()), "{a} vs {b}");
+                }
+                assert!(
+                    (observed.grad[0][0] + observed.grad[1][1] + observed.grad[2][2]).abs() < 2e-13
+                );
+            }
+        }
+        let mut resumed = FixedStepMannField::resume(source.checkpoint(), 88 * 8).unwrap();
+        let mut restored =
+            TranslatingMannStepAverage::prepare(&resumed, velocity, 104 * 8, || false).unwrap();
+        let before = moving.clone();
+        let endpoint_before = source.checkpoint();
+        let mut calls = 0;
+        assert!(
+            source
+                .advance_one_with_translating_average(&mut moving, 64, || {
+                    calls += 1;
+                    calls == 3
+                })
+                .is_err()
+        );
+        assert_eq!(moving, before);
+        assert_eq!(source.checkpoint(), endpoint_before);
+        source
+            .advance_one_with_translating_average(&mut moving, 64, || false)
+            .unwrap();
+        resumed
+            .advance_one_with_translating_average(&mut restored, 64, || false)
+            .unwrap();
+        assert_eq!(moving, restored);
+        assert_eq!(source.checkpoint(), resumed.checkpoint());
+    }
+}
+
+#[test]
+fn moving_probe_averages_one_encountered_wavelength_but_a_comoving_probe_retains_it() {
+    // Nearly frozen OU amplitudes: analytical spatial traversal of one full
+    // wavelength has zero mean, while following the eddies retains the value.
+    // The tiny nonzero OU evolution is kept, never replaced by interpolation.
+    let model = MannSpectralModel::build(
+        17,
+        MANN_TARGET_V1,
+        MannQuadrature {
+            n_modes: 1,
+            min_kl: 0.1,
+            max_kl: 12.0,
+        },
+        [0.0; 3],
+    )
+    .unwrap();
+    let k = model.modes[0].k;
+    let dt = 0.1;
+    let encounter_velocity = k.map(|v| core::f64::consts::TAU * v / (dot(k, k) * dt));
+    let snapshot = HomogeneousMannField::at_anchor(model.clone(), 37, vec![1e12]).unwrap();
+    let mut source = FixedStepMannField::from_snapshot(snapshot, 119, dt, 88).unwrap();
+    let mut fixed_source = source.clone();
+    let mut moving =
+        TranslatingMannStepAverage::prepare(&source, encounter_velocity, 104, || false).unwrap();
+    let mut fixed = MannStepAverage::prepare(&source, 104, || false).unwrap();
+    source
+        .advance_one_with_translating_average(&mut moving, 8, || false)
+        .unwrap();
+    fixed_source
+        .advance_one_with_average(&mut fixed, 8, || false)
+        .unwrap();
+    let endpoint = encounter_velocity.map(|v| v * dt);
+    let norm = |u: [f64; 3]| dot(u, u).sqrt();
+    assert!(norm(fixed.sample(endpoint).unwrap().u) > 0.1);
+    assert!(norm(moving.sample(endpoint).unwrap().u) < 3e-6);
+
+    let mut checkpoint = fixed_source.checkpoint();
+    checkpoint.model =
+        MannSpectralModel::build(17, MANN_TARGET_V1, model.quadrature(), encounter_velocity)
+            .unwrap();
+    let mut comoving = FixedStepMannField::resume(checkpoint, 88).unwrap();
+    let point = [0.2, -0.3, 0.4];
+    let initial = comoving.sample(point).unwrap();
+    let mut observation =
+        TranslatingMannStepAverage::prepare(&comoving, encounter_velocity, 104, || false).unwrap();
+    comoving
+        .advance_one_with_translating_average(&mut observation, 8, || false)
+        .unwrap();
+    let endpoint = core::array::from_fn(|i| point[i] + encounter_velocity[i] * dt);
+    let observed = observation.sample(endpoint).unwrap();
+    for (a, b) in observed.u.iter().zip(initial.u) {
+        assert!((a - b).abs() < 3e-6);
+    }
+}
+
+#[test]
+fn translating_zero_speed_is_bitwise_stationary_and_nonfinite_paths_refuse() {
+    let source = field(41);
+    let fixed = MannStepAverage::prepare(&source, 104 * 8, || false).unwrap();
+    let moving = TranslatingMannStepAverage::prepare(&source, [0.0; 3], 104 * 8, || false).unwrap();
+    assert_eq!(moving.average, fixed);
+    for velocity in [[f64::NAN, 0.0, 0.0], [0.0, f64::INFINITY, 0.0]] {
+        assert_eq!(
+            TranslatingMannStepAverage::prepare(&source, velocity, 104 * 8, || false)
+                .unwrap_err()
+                .code,
+            "mann-translating-average-velocity"
+        );
+    }
+}

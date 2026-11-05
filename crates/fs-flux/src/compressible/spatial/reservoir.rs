@@ -80,6 +80,17 @@ impl Reservoirs {
             states: [None; 6],
             outlets: [None; 6],
         };
+        for side in BoundarySide::ALL {
+            let pair = topology.axis(side.axis());
+            pair.admit::<Error>()?;
+            if let AxisBoundaries::Ends { lower, upper } = pair
+                && let BoundaryCondition::PressureOutlet { pressure_pa } =
+                    (if side.sign() < 0.0 { lower } else { upper })
+            {
+                result.outlets[2 * side.axis() + usize::from(side.sign() > 0.0)] =
+                    Some(PressureOutletBoundary { side, pressure_pa });
+            }
+        }
         for &input in inputs {
             poll(cancelled)?;
             let axis = input.side.axis();

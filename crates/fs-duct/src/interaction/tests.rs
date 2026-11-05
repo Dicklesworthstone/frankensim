@@ -123,3 +123,73 @@ fn the_coupled_admittance_is_reciprocal() {
     // Coupling is real: the off-diagonal terms are nonzero for stations 30 mm apart.
     assert!(coupling.admittance[1].abs() > 1.0e-3 * coupling.admittance[0].abs());
 }
+
+#[test]
+fn coupled_radiation_survives_half_and_full_wave_bore_runs() {
+    // G2: at integer half wavelengths each lossless run is an exact signed
+    // through connection. Its isolated admittance does not exist, but finite
+    // passive aperture loads make the complete instrument perfectly regular.
+    // A 0.4 m wavelength places this fixture near 858 Hz in room-temperature air.
+    let gas = air();
+    let wavelength = 0.4;
+    let omega = TAU * gas.sound_speed / wavelength;
+    let reference = gas.density * gas.sound_speed / (core::f64::consts::PI * 0.007_f64.powi(2));
+    let z1 = C64::new(0.7, -0.2).scale(reference);
+    let z2 = C64::new(0.4, -0.1).scale(reference);
+    let through = TwoPort::through(reference).unwrap();
+    let signed = |phase: f64| TwoPort::new(
+        [C64::ZERO, C64::from_re(phase), C64::from_re(phase), C64::ZERO], reference).unwrap();
+    for inlet_phase in [-1.0, 1.0] {
+        for bell_phase in [-1.0, 1.0] {
+            let first_length = wavelength * if inlet_phase < 0.0 { 0.5 } else { 1.0 };
+            let last_length = wavelength * if bell_phase < 0.0 { 0.5 } else { 1.0 };
+            let chain = PreparedChain {
+                blocks: vec![signed(inlet_phase), through, signed(bell_phase)],
+                reference_impedance: reference,
+                min_shear_number: f64::INFINITY,
+            };
+            assert!(chain.blocks[0].admittance(1.0e12).is_err(),
+                "this fixture must exercise the isolated-component pole");
+            let hole = PreparedOpenHole {
+                block_index: 1,
+                axial_position_m: first_length,
+                effective_radius_m: 0.0025,
+                chimney_length_m: 0.0,
+                sigma: 1.0,
+                half_series_impedance: C64::ZERO,
+                open_chimney_impedance: z1,
+                closed_return_coordinates: [C64::ONE, C64::ZERO],
+                chimney_u_mouth_over_u_in: C64::ONE,
+                shunt_port_reference_pa_s_m3: reference,
+                orifice_quadratic_coeff_pa_s2_m6: 0.0,
+            };
+            let ports = [CoupledPort::open_end(first_length, z1)];
+            let bell = CoupledPort::open_end(first_length + last_length, z2);
+            let zm = mutual_radiation_impedance(&gas, omega, last_length, interaction(2.0)).unwrap();
+            // Mouth pressures have relative sign bell_phase. For v=[1,t],
+            // Zin=1/(v^T Zrad^-1 v); the inlet sign squares to one in Zin but
+            // remains audible in the two radiating mouth-flow phasors.
+            let denominator = z1 + z2 - zm.scale(2.0 * bell_phase);
+            let expected_z = (z1 * z2 - zm * zm) / denominator;
+            let expected_hole = (z2 - zm.scale(bell_phase)).scale(inlet_phase) / denominator;
+            let expected_bell = (z1.scale(bell_phase) - zm).scale(inlet_phase) / denominator;
+            let observed = solve(&chain, &[hole], &ports, Some(bell), &gas,
+                omega, interaction(2.0), 1.0e12).unwrap();
+            assert!(close(observed.input_impedance, expected_z, 1e-11));
+            assert!(close(observed.bell_pressure, expected_z.scale(inlet_phase * bell_phase), 1e-11));
+            assert!(close(observed.hole_mouth_flows[0], expected_hole, 1e-11));
+            assert!(close(observed.hole_chimney_inflows[0], expected_hole, 1e-11));
+            assert!(close(observed.bell_flow, expected_bell, 1e-11));
+            assert!(close(observed.hole_chimney_inflows[0]
+                + observed.bell_flow.scale(bell_phase), C64::from_re(inlet_phase), 1e-11));
+            assert!(observed.condition.is_finite() && observed.condition < 1e12);
+            assert!(observed.input_impedance.re > 0.0);
+            let closed = solve(&chain, &[hole], &ports, None, &gas,
+                omega, interaction(2.0), 1.0e12).unwrap();
+            assert!(close(closed.input_impedance, z1, 1e-11));
+            assert!(close(closed.bell_pressure, z1.scale(inlet_phase * bell_phase), 1e-11));
+            assert!(close(closed.hole_mouth_flows[0], C64::from_re(inlet_phase), 1e-11));
+            assert_eq!(closed.bell_flow, C64::ZERO);
+        }
+    }
+}

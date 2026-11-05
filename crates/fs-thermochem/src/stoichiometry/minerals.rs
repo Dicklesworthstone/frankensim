@@ -7,6 +7,17 @@
 //! Combining seven such oxidations with two ferric-pyrite attacks recovers
 //! the two-pyrite ferrous endpoint; intermediate iron is accounted for rather
 //! than treated as a free oxidant. No reaction rate or cycle turnover is inferred.
+//! Pyrrhotite oxygen endpoints use the conserved coefficient in USGS OFR
+//! 02-195, chapter L, equation 3:
+//! <https://pubs.usgs.gov/of/2002/of02-195/OF02-195L.pdf>.
+//! The two selected compositions are NBS Table 41:Fe's crystalline alpha
+//! Fe1.000S and sulfur-rich Fe7S8, not an interpolated Fe1-xS phase. Oxygen
+//! remains an explicit dissolved inventory. Ferric attack to elemental sulfur
+//! follows chapter B, equation 3:
+//! <https://pubs.usgs.gov/of/2002/of02-195/OF02-195B.pdf>.
+//! Its S(s) product selects the NBS orthorhombic elemental reference per mole
+//! of S atoms. These separate endpoints do not select a pathway, predict a
+//! passivating layer or provide kinetics, iron hydrolysis or oxygen transfer.
 //! Carbonate neutralizations
 //! combine mineral dissolution with CO3(2-) + 2 H+ -> CO2(aq) + H2O from
 //! the USGS PHREEQC database:
@@ -94,6 +105,20 @@
 //! Gas and dissolved oxygen are distinct declared endpoints. These equations
 //! supply no catalyst kinetics, metal-complex destruction, total/WAD cyanide
 //! conversion, nitrogen removal, oxygen-transfer rate or plant treatment claim.
+//! Sulfite/bisulfite cyanide oxidation retains the SO2/air endpoint of SGS
+//! Minerals Services T3 SGS 018 (May 2005), equations 13-14:
+//! <https://www.sgs.com/pt/-/media/sgscorp/documents/corporate/brochures/sgs-min-wa017-cyanide-destruction-en-11.cdn.pt.pdf>.
+//! The equations here select free CN-, free sulfate and finite dissolved O2,
+//! rather than treating an analytical WAD-cyanide measurement as one species.
+//! Metabisulfite preparation retains water and both sodium counterions;
+//! bisulfite dissociation explicitly separates the protonated reagent from
+//! sulfite. Competing sulfite oxidation consumes the same oxygen stock without
+//! destroying cyanide. These net balances supply no catalyst kinetics, air
+//! transfer, metal-complex conversion, pH control or treatment completion.
+//! Source references are NBS Table 14:S and Table 99:Na, with 1989 errata:
+//! <https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv>.
+//! Crystalline Na2S2O5 has no tabulated formation Gibbs energy or entropy;
+//! its known formation enthalpy must not be promoted into equilibrium data.
 //! Magnesite calcination and magnetite oxidation retain the crystalline/gas
 //! endpoints of JANAF C-079, Mg-008, C-095, Fe-032, Fe-030 and O-029:
 //! <https://janaf.nist.gov/>. Their standard reaction heats do not determine
@@ -238,6 +263,27 @@ pub enum MineralReaction {
     /// CN-(aq) + H2O2(aq) -> OCN-(aq, cyanate) + H2O(l).
     /// Free cyanide only; bound metal-cyanide ligands are different inventories.
     CyanidePeroxideOxidation,
+    /// Na2S2O5(s) + H2O(l) -> 2 Na+(aq) + 2 HSO3-(aq).
+    /// Explicit hydrated dissolution extent, not a solubility or completion claim.
+    SodiumMetabisulfiteDissolution,
+    /// Na2SO3(s) -> 2 Na+(aq) + SO3(2-)(aq).
+    /// The crystalline anhydrous reagent is distinct from its dissolved ions.
+    SodiumSulfiteDissolution,
+    /// HSO3-(aq) -> H+(aq) + SO3(2-)(aq).
+    /// Sulfite protonation remains separate from sulfur oxidation.
+    HydrogenSulfiteDissociation,
+    /// CN-(aq) + HSO3-(aq) + O2(aq) -> OCN-(aq) + SO4(2-)(aq) + H+(aq).
+    /// Free-cyanide SO2/air endpoint; finite dissolved oxygen is an explicit input.
+    CyanideBisulfiteOxidation,
+    /// CN-(aq) + SO3(2-)(aq) + O2(aq) -> OCN-(aq) + SO4(2-)(aq).
+    /// Unprotonated sulfite endpoint, with no implied acid-generation equivalent.
+    CyanideSulfiteOxidation,
+    /// 2 SO3(2-)(aq) + O2(aq) -> 2 SO4(2-)(aq).
+    /// Competing reagent/oxygen demand with no cyanide destruction.
+    SulfiteOxygenOxidation,
+    /// 2 HSO3-(aq) + O2(aq) -> 2 SO4(2-)(aq) + 2 H+(aq).
+    /// Protonated side-oxidation endpoint, consuming the original finite oxygen.
+    BisulfiteOxygenOxidation,
     /// OCN-(aq) + 2 H2O(l) -> NH4+(aq) + CO3(2-)(aq).
     /// Declared hydrolysis endpoint; acid/base speciation remains separate.
     CyanateHydrolysisAmmoniumCarbonate,
@@ -278,6 +324,19 @@ pub enum MineralReaction {
     BicarbonateDissociation,
     /// 2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe2+ + 4 SO4(2-) + 4 H+.
     PyriteOxidationFerrous,
+    /// FeS(alpha-pyrrhotite) + 2 O2(aq) -> Fe2+(aq) + SO4(2-)(aq).
+    /// Source-specific iron-rich endpoint; no direct proton production.
+    IronRichPyrrhotiteDissolvedOxygenOxidation,
+    /// 2 Fe7S8(pyrrhotite) + 31 O2(aq) + 2 H2O(l)
+    /// -> 14 Fe2+(aq) + 16 SO4(2-)(aq) + 4 H+(aq).
+    /// Extent is per two Fe7S8 formula units, not two normalized Fe0.875S units.
+    SulfurRichPyrrhotiteDissolvedOxygenOxidation,
+    /// FeS(alpha-pyrrhotite) + 2 Fe3+(aq) -> 3 Fe2+(aq) + S(s).
+    /// Ferric reagent and mineral iron remain distinct inventory contributions.
+    FerricIronRichPyrrhotiteLeach,
+    /// Fe7S8(pyrrhotite) + 14 Fe3+(aq) -> 21 Fe2+(aq) + 8 S(s).
+    /// Declared orthorhombic-sulfur endpoint; no sulfate or proton is inferred.
+    FerricSulfurRichPyrrhotiteLeach,
     /// 4 Fe2+(aq) + O2(g) + 4 H+(aq) -> 4 Fe3+(aq) + 2 H2O(l).
     /// Oxidation consumes one proton per ferrous ion; rate remains an input.
     FerrousOxidationFerric,
@@ -627,6 +686,76 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 0, 2, 1], 0, 1),
                 ],
             ),
+            Self::SodiumMetabisulfiteDissolution => (
+                "sodium-metabisulfite-dissolution",
+                &["Na", "S", "O", "H"],
+                &[
+                    ("Na2S2O5(s)", &[2, 2, 5, 0], 0, -1),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, -1),
+                    ("Na[+](aq)", &[1, 0, 0, 0], 1, 2),
+                    ("HSO3[-](aq)", &[0, 1, 3, 1], -1, 2),
+                ],
+            ),
+            Self::SodiumSulfiteDissolution => (
+                "sodium-sulfite-dissolution",
+                &["Na", "S", "O"],
+                &[
+                    ("Na2SO3(s)", &[2, 1, 3], 0, -1),
+                    ("Na[+](aq)", &[1, 0, 0], 1, 2),
+                    ("SO3[2-](aq)", &[0, 1, 3], -2, 1),
+                ],
+            ),
+            Self::HydrogenSulfiteDissociation => (
+                "hydrogen-sulfite-dissociation",
+                &["H", "S", "O"],
+                &[
+                    ("HSO3[-](aq)", &[1, 1, 3], -1, -1),
+                    ("H+(aq)", &[1, 0, 0], 1, 1),
+                    ("SO3[2-](aq)", &[0, 1, 3], -2, 1),
+                ],
+            ),
+            Self::CyanideBisulfiteOxidation => (
+                "cyanide-bisulfite-oxidation",
+                &["C", "N", "H", "S", "O"],
+                &[
+                    ("CN[-](aq)", &[1, 1, 0, 0, 0], -1, -1),
+                    ("HSO3[-](aq)", &[0, 0, 1, 1, 3], -1, -1),
+                    ("O2(aq)", &[0, 0, 0, 0, 2], 0, -1),
+                    ("OCN[-](aq)", &[1, 1, 0, 0, 1], -1, 1),
+                    ("SO4[2-](aq)", &[0, 0, 0, 1, 4], -2, 1),
+                    ("H+(aq)", &[0, 0, 1, 0, 0], 1, 1),
+                ],
+            ),
+            Self::CyanideSulfiteOxidation => (
+                "cyanide-sulfite-oxidation",
+                &["C", "N", "S", "O"],
+                &[
+                    ("CN[-](aq)", &[1, 1, 0, 0], -1, -1),
+                    ("SO3[2-](aq)", &[0, 0, 1, 3], -2, -1),
+                    ("O2(aq)", &[0, 0, 0, 2], 0, -1),
+                    ("OCN[-](aq)", &[1, 1, 0, 1], -1, 1),
+                    ("SO4[2-](aq)", &[0, 0, 1, 4], -2, 1),
+                ],
+            ),
+            Self::SulfiteOxygenOxidation => (
+                "sulfite-oxygen-oxidation",
+                &["S", "O"],
+                &[
+                    ("SO3[2-](aq)", &[1, 3], -2, -2),
+                    ("O2(aq)", &[0, 2], 0, -1),
+                    ("SO4[2-](aq)", &[1, 4], -2, 2),
+                ],
+            ),
+            Self::BisulfiteOxygenOxidation => (
+                "bisulfite-oxygen-oxidation",
+                &["H", "S", "O"],
+                &[
+                    ("HSO3[-](aq)", &[1, 1, 3], -1, -2),
+                    ("O2(aq)", &[0, 0, 2], 0, -1),
+                    ("SO4[2-](aq)", &[0, 1, 4], -2, 2),
+                    ("H+(aq)", &[1, 0, 0], 1, 2),
+                ],
+            ),
             Self::CyanateHydrolysisAmmoniumCarbonate => (
                 "cyanate-hydrolysis-ammonium-carbonate",
                 &["C", "N", "H", "O"],
@@ -756,6 +885,48 @@ impl MineralReaction {
                     ("Fe[2+](aq)", &[1, 0, 0, 0], 2, 2),
                     ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 4),
                     ("H+(aq)", &[0, 0, 0, 1], 1, 4),
+                ],
+            ),
+            Self::IronRichPyrrhotiteDissolvedOxygenOxidation => (
+                "pyrrhotite-fes-oxidation-dissolved-oxygen",
+                &["Fe", "S", "O"],
+                &[
+                    ("FeS(s-alpha-pyrrhotite)", &[1, 1, 0], 0, -1),
+                    ("O2(aq)", &[0, 0, 2], 0, -2),
+                    ("Fe[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("SO4[2-](aq)", &[0, 1, 4], -2, 1),
+                ],
+            ),
+            Self::SulfurRichPyrrhotiteDissolvedOxygenOxidation => (
+                "pyrrhotite-fe7s8-oxidation-dissolved-oxygen",
+                &["Fe", "S", "O", "H"],
+                &[
+                    ("Fe7S8(s-pyrrhotite)", &[7, 8, 0, 0], 0, -2),
+                    ("O2(aq)", &[0, 0, 2, 0], 0, -31),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, -2),
+                    ("Fe[2+](aq)", &[1, 0, 0, 0], 2, 14),
+                    ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 16),
+                    ("H+(aq)", &[0, 0, 0, 1], 1, 4),
+                ],
+            ),
+            Self::FerricIronRichPyrrhotiteLeach => (
+                "ferric-pyrrhotite-fes-leach",
+                &["Fe", "S"],
+                &[
+                    ("FeS(s-alpha-pyrrhotite)", &[1, 1], 0, -1),
+                    ("Fe[3+](aq)", &[1, 0], 3, -2),
+                    ("Fe[2+](aq)", &[1, 0], 2, 3),
+                    ("S(s)", &[0, 1], 0, 1),
+                ],
+            ),
+            Self::FerricSulfurRichPyrrhotiteLeach => (
+                "ferric-pyrrhotite-fe7s8-leach",
+                &["Fe", "S"],
+                &[
+                    ("Fe7S8(s-pyrrhotite)", &[7, 8], 0, -1),
+                    ("Fe[3+](aq)", &[1, 0], 3, -14),
+                    ("Fe[2+](aq)", &[1, 0], 2, 21),
+                    ("S(s)", &[0, 1], 0, 8),
                 ],
             ),
             Self::FerrousOxidationFerric => (

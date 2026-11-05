@@ -172,15 +172,18 @@ pub struct MovingWallInput {
 /// Explicit continuum-domain gates.  There is no slip correction in this slice.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GasFilmApplicability {
-    /// Caller-supplied molecular mean free path [m] for the declared state.
+    /// Caller-supplied molecular mean free path [m] at the declared temperature
+    /// and `GasFilmInput::initial_absolute_pressure_pa`.
+    /// The isothermal gas uses `lambda(p) = lambda_ref * p_ref / p`.
     pub mean_free_path_m: f64,
-    /// Maximum admitted cell Knudsen number `lambda / h`.
+    /// Maximum admitted cell or reservoir/vent Knudsen number `lambda(p) / h`.
     pub maximum_knudsen_number: f64,
     /// Maximum admitted adjacent-cell slope `abs(dh/dx)`.
     pub maximum_gap_slope: f64,
-    /// Maximum admitted line Mach number based on caller-declared sound speed.
+    /// Caller-declared sound speed [m s^-1] for the isothermal gas state.
     pub speed_of_sound_m_per_s: f64,
-    /// Maximum admitted wall Mach number.
+    /// Maximum admitted tangential gas Mach number, including wall velocities
+    /// and the interior peak of each Couette--Poiseuille velocity profile.
     pub maximum_mach_number: f64,
 }
 
@@ -259,7 +262,8 @@ pub struct GasFilmInput {
     pub uncertainty: GasFilmUncertainty,
     /// Moving-wall Couette and squeeze data.
     pub wall_motion: MovingWallInput,
-    /// Initial absolute pressure for a fresh state [Pa].
+    /// Initial absolute pressure for a fresh state [Pa], also the fixed
+    /// reference pressure of the declared molecular mean free path.
     pub initial_absolute_pressure_pa: f64,
     /// Absolute pressure used only as the named gauge-load reference [Pa].
     ///
@@ -365,8 +369,11 @@ pub struct GasFilmReceipt {
     /// Equals tangential wall work plus pressure-gradient force work up to
     /// roundoff; normal gap work is separate. No temperature evolution is solved.
     pub viscous_heat_w_per_m: f64,
-    /// Maximum admitted Knudsen number.
+    /// Maximum pressure-scaled Knudsen number of accepted cells and reservoirs/vent.
     pub maximum_knudsen_number: f64,
+    /// Maximum tangential gas Mach number across the accepted face profiles,
+    /// including their wall values and any interior velocity extremum.
+    pub maximum_gas_mach_number: f64,
     /// Maximum adjacent gap slope.
     pub maximum_gap_slope: f64,
     /// Caller-declared input uncertainty retained without propagation or promotion.
@@ -480,7 +487,21 @@ impl GasFilmInput {
             .map_or(self.wall_motion.gap_rate_m_per_s, |profile| profile[cell])
     }
 
-    fn validate(&self) -> Result<(usize, f64, f64, f64, f64), GasFilmError> {
+    fn admit_knudsen(&self, pressure_pa: f64, gap_m: f64) -> Result<f64, GasFilmError> {
+        let knudsen = derived(
+            (self.applicability.mean_free_path_m / gap_m)
+                * (self.initial_absolute_pressure_pa / pressure_pa),
+            "pressure_scaled_knudsen_number",
+        )?;
+        if knudsen > self.applicability.maximum_knudsen_number {
+            return Err(GasFilmError::Unavailable {
+                reason: "rarefied-knudsen-outside-continuum-envelope",
+            });
+        }
+        Ok(knudsen)
+    }
+
+    fn validate(&self) -> Result<(usize, f64, f64, f64), GasFilmError> {
         for (field, value) in [
             ("case_id", self.identity.case_id.as_str()),
             ("model_id", self.identity.model_id.as_str()),
@@ -670,7 +691,6 @@ impl GasFilmInput {
                 field: "gas.declared_density_kg_m3",
             });
         }
-        let mut max_knudsen = 0.0_f64;
         let mut max_slope = 0.0_f64;
         for (index, gap) in self.grid.gap_m.iter().take(active).copied().enumerate() {
             positive(gap, "grid.gap_m")?;
@@ -684,8 +704,6 @@ impl GasFilmInput {
                     reason: "roughness-not-small-relative-to-gap",
                 });
             }
-            let knudsen = derived(self.applicability.mean_free_path_m / gap, "knudsen_number")?;
-            max_knudsen = max_knudsen.max(knudsen);
             if index > 0 {
                 let slope = derived(
                     (gap - self.grid.gap_m[index - 1]).abs() / spacing,
@@ -693,11 +711,6 @@ impl GasFilmInput {
                 )?;
                 max_slope = max_slope.max(slope);
             }
-        }
-        if max_knudsen > self.applicability.maximum_knudsen_number {
-            return Err(GasFilmError::Unavailable {
-                reason: "rarefied-knudsen-outside-continuum-envelope",
-            });
         }
         if max_slope > self.applicability.maximum_gap_slope {
             return Err(GasFilmError::Unavailable {
@@ -731,7 +744,7 @@ impl GasFilmInput {
                 positive(absolute_pressure_pa, "boundary.vent_absolute_pressure_pa")?;
             }
         }
-        Ok((active, spacing, rt, max_knudsen, max_slope))
+        Ok((active, spacing, rt, max_slope))
     }
 }
 
@@ -889,6 +902,11 @@ fn invariant_configuration_fingerprint(input: &GasFilmInput) -> String {
         &mut output,
         "mean_free_path",
         input.applicability.mean_free_path_m,
+    );
+    number(
+        &mut output,
+        "mean_free_path_reference_pressure",
+        input.initial_absolute_pressure_pa,
     );
     number(
         &mut output,
@@ -1198,10 +1216,14 @@ fn pressure_driven_mechanics(
     input: &GasFilmInput,
     spacing: f64,
     rt: f64,
-) -> Result<(Vec<f64>, f64, f64), GasFilmError> {
+) -> Result<(Vec<f64>, f64, f64, f64), GasFilmError> {
     let mean_velocity = 0.5
         * (input.wall_motion.lower_tangential_velocity_m_per_s
             + input.wall_motion.upper_tangential_velocity_m_per_s);
+    let lower_velocity = input.wall_motion.lower_tangential_velocity_m_per_s;
+    let upper_velocity = input.wall_motion.upper_tangential_velocity_m_per_s;
+    let relative_velocity = derived(upper_velocity - lower_velocity, "relative_wall_velocity")?;
+    let mut maximum_speed = lower_velocity.abs().max(upper_velocity.abs());
     let viscosity = input.gas.dynamic_viscosity_pa_s;
     let active = pressure.len();
     let mut face_shear = Vec::with_capacity(active + 1);
@@ -1251,6 +1273,32 @@ fn pressure_driven_mechanics(
         let gradient = derived(gradient, "face_pressure_gradient_pa_per_m")?;
         let face_gap = derived(face_gap, "mechanical_face_gap_m")?;
         let face_pressure = derived(face_pressure, "mechanical_face_pressure_pa")?;
+        // u(s) = U_lower + (U_upper-U_lower)*s + A*s*(s-1), s = y/h.
+        // The walls and the one stationary point give the exact profile peak.
+        // A mean-flow or mid-gap check can miss an off-centre gas-speed maximum.
+        let pressure_velocity = derived(
+            face_gap.powi(2) * gradient / (2.0 * viscosity),
+            "poiseuille_velocity_coefficient",
+        )?;
+        if relative_velocity.abs() < pressure_velocity.abs() {
+            let stationary_point = 0.5 * (1.0 - relative_velocity / pressure_velocity);
+            let velocity = derived(
+                lower_velocity
+                    + stationary_point
+                        * (relative_velocity + pressure_velocity * (stationary_point - 1.0)),
+                "interior_gas_velocity",
+            )?;
+            maximum_speed = maximum_speed.max(velocity.abs());
+        }
+        let mach = derived(
+            maximum_speed / input.applicability.speed_of_sound_m_per_s,
+            "gas_mach_number",
+        )?;
+        if mach > input.applicability.maximum_mach_number {
+            return Err(GasFilmError::Unavailable {
+                reason: "gas-mach-outside-declared-envelope",
+            });
+        }
         let shear = derived(0.5 * face_gap * gradient, "pressure_wall_shear_pa")?;
         let conductance = derived(
             face_gap.powi(3) / (12.0 * viscosity),
@@ -1267,7 +1315,12 @@ fn pressure_driven_mechanics(
         )?;
         face_shear.push(shear);
     }
-    Ok((face_shear, heat, pressure_work))
+    Ok((
+        face_shear,
+        heat,
+        pressure_work,
+        maximum_speed / input.applicability.speed_of_sound_m_per_s,
+    ))
 }
 
 /// Advance one bounded deterministic isothermal gas-film step.
@@ -1278,9 +1331,28 @@ pub fn solve_isothermal_gas_film_1d(
     input: &GasFilmInput,
     checkpoint: Option<&GasFilmCheckpoint>,
 ) -> Result<GasFilmStep, GasFilmError> {
-    let (active, spacing, rt, max_knudsen, max_slope) = input.validate()?;
+    let (active, spacing, rt, max_slope) = input.validate()?;
     let (old_pressure, old_gap, old_step_index) = initial_state(input, active, checkpoint)?;
     let gap = &input.grid.gap_m[..active];
+    // Both the starting state and the imposed reservoirs must belong to the
+    // continuum model. A low-pressure boundary cannot be hidden by averaging
+    // it with a denser interior cell, even for a very small timestep.
+    for (pressure, gap) in old_pressure.iter().zip(&old_gap) {
+        input.admit_knudsen(*pressure, *gap)?;
+    }
+    let mut max_knudsen = match input.boundary {
+        GasFilmBoundaryTopology::Sealed => 0.0,
+        GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa,
+            right_absolute_pressure_pa,
+        } => input
+            .admit_knudsen(left_absolute_pressure_pa, gap[0])?
+            .max(input.admit_knudsen(right_absolute_pressure_pa, gap[active - 1])?),
+        GasFilmBoundaryTopology::Vented {
+            cell_index,
+            absolute_pressure_pa,
+        } => input.admit_knudsen(absolute_pressure_pa, gap[cell_index])?,
+    };
     let mut pressure = old_pressure.clone();
     if let GasFilmBoundaryTopology::Vented {
         cell_index,
@@ -1398,6 +1470,9 @@ pub fn solve_isothermal_gas_film_1d(
             max_mass_residual_kg_m2_s: max_residual,
         });
     }
+    for (pressure, gap) in pressure.iter().zip(gap) {
+        max_knudsen = max_knudsen.max(input.admit_knudsen(*pressure, *gap)?);
+    }
     let mass_new = pressure
         .iter()
         .zip(gap)
@@ -1442,7 +1517,7 @@ pub fn solve_isothermal_gas_film_1d(
     let mut gas_on_lower_tangential = Vec::with_capacity(input.grid.gap_m.len());
     let mut lower_on_gas_tangential = Vec::with_capacity(input.grid.gap_m.len());
     let mut upper_shear = Vec::with_capacity(input.grid.gap_m.len());
-    let (pressure_shear, mut viscous_power, pressure_gradient_power) =
+    let (pressure_shear, mut viscous_power, pressure_gradient_power, max_gas_mach) =
         pressure_driven_mechanics(&pressure, gap, &flux, input, spacing, rt)?;
     let mut tangential_wall_power = 0.0;
     let mut normal_gap_power = 0.0;
@@ -1544,6 +1619,7 @@ pub fn solve_isothermal_gas_film_1d(
             pressure_gradient_power_to_gas_w_per_m: pressure_gradient_power,
             viscous_heat_w_per_m: viscous_power,
             maximum_knudsen_number: max_knudsen,
+            maximum_gas_mach_number: max_gas_mach,
             maximum_gap_slope: max_slope,
         },
         checkpoint: GasFilmCheckpoint {

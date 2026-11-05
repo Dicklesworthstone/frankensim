@@ -35,9 +35,10 @@ pub struct PhsVariationalForcedStability {
 }
 
 /// Resolve forced resonance-branch stability using the complete declared
-/// quadratic storage tangent, including every explicit material-memory state.
-/// Nonlinear storage needs the authored complete Hessian action accepted by
-/// [`analyze_forced_orbit_stability_variational_analytic`].
+/// original storage tangent, including every explicit material-memory state.
+/// Exact quadratic metadata or [`fs_phs::Storage::continuous_tangent`] is
+/// discovered automatically. Other nonlinear storage can use the complete
+/// Hessian action accepted by [`analyze_forced_orbit_stability_variational_analytic`].
 ///
 /// The shared variational shooting owner differentiates its actual RK4 stages;
 /// no trajectory perturbation or finite-difference amplitude is used. Each grid

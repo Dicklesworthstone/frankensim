@@ -40,7 +40,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent))
-from descriptors import GraderRefusalError, fit_stiff_string_law, track_partials  # noqa: E402
+from descriptors import GraderRefusalError, fit_stiff_string_law, modal_lines, track_partials  # noqa: E402
 from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
 
 DECOMPOSE_VERSION = "decompose-4"
@@ -446,20 +446,9 @@ def cepstral_envelope(P_db, freqs, f0, grid):
 
 
 def modal_partials(y, f0, P, f, n_modes=N_PARTIALS):
-    """Strongest spectral peaks of the first 0.6 s, for bars and plates whose modes are not integer multiples."""
-    seg = y[: int(0.6 * SR)]
-    nfft = 1 << 17
-    S = np.abs(np.fft.rfft(seg * np.hanning(len(seg)), nfft)) ** 2
-    fr = np.fft.rfftfreq(nfft, 1 / SR)
-    pk = np.flatnonzero((S[1:-1] > S[:-2]) & (S[1:-1] >= S[2:])) + 1
-    pk = pk[(fr[pk] > 0.5 * f0) & (fr[pk] < F_HI) & (S[pk] > S.max() * 1e-6)]
-    picked = []
-    for i in pk[np.argsort(S[pk])[::-1]]:
-        if all(abs(fr[i] - q) > 0.03 * q for q in picked):
-            picked.append(float(fr[i]))
-        if len(picked) >= n_modes:
-            break
-    return sorted(picked)
+    """Strongest spectral peaks of the first 0.6 s, for bars and plates whose modes are not integer multiples: the
+    grader's descriptors.modal_lines, the same lines the note's HNR masks (instrgrade-7)."""
+    return modal_lines(y, f0, sr=SR, n_modes=n_modes, f_hi=F_HI)
 
 
 # ------------------------------------------------------------------------------------------- one note

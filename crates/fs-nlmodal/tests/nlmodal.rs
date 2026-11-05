@@ -397,7 +397,7 @@ fn g1_hessian_action_matches_original_string_and_plate_efforts() {
     let state = [0.001, 0.2, -0.0007, -0.4, 0.0005, 0.3];
     let direction = [0.0003, -0.6, 0.0004, 0.2, -0.0008, 0.7];
     let other = [-0.0002, 0.8, 0.0001, -0.2, 0.0005, -0.3];
-    for storage in [&string, &plate] {
+    for storage in [string, plate] {
         let mut actual = [f64::NAN; 6];
         storage
             .hessian_action(&state, &direction, &mut actual)
@@ -427,6 +427,14 @@ fn g1_hessian_action_matches_original_string_and_plate_efforts() {
         let forward: f64 = actual.iter().zip(other).map(|(a, v)| a * v).sum();
         let reverse: f64 = other_action.iter().zip(direction).map(|(a, v)| a * v).sum();
         assert!((forward - reverse).abs() < 2.0e-12 * forward.abs().max(1.0));
+        let boxed: Box<dyn Storage> = Box::new(storage);
+        let mut through_storage = [f64::NAN; 6];
+        assert!(boxed.continuous_tangent().unwrap().apply(
+            &state,
+            &direction,
+            &mut through_storage,
+        ));
+        assert_eq!(through_storage, actual);
     }
 }
 

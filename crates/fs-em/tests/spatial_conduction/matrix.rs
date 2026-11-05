@@ -14,6 +14,14 @@ fn response_controls() -> SpatialConductanceControls {
     }
 }
 
+fn mixed_controls() -> SpatialMixedConductanceControls {
+    SpatialMixedConductanceControls {
+        maximum_current_terminals: 2,
+        maximum_response_values: 100,
+        maximum_dense_work: 100,
+    }
+}
+
 fn reaction(problem: &SpatialConduction, field: &SpatialConductionField, faces: &[usize]) -> f64 {
     faces
         .iter()
@@ -86,7 +94,69 @@ fn native_multiterminal_response_retains_cross_terms_contact_work_and_floating_e
         for (&actual, expected) in matrix.conductance_s().iter().zip(expected_matrix) {
             near(actual, expected);
         }
-        for sign in [-1.0, 1.0] {
+        let mixed = matrix
+            .prepare_current_control(&[1], mixed_controls(), &mut || false)
+            .unwrap();
+        assert_eq!(mixed.voltage_terminals(), &[0, 2]);
+        assert_eq!(mixed.current_terminals(), &[1]);
+        for sign in [-1.0_f64, 1.0] {
+            // Voltage sources drive the outer electrodes while the middle
+            // electrode has either zero net current or a specified injection.
+            // Its surface currents are solved, not assumed locally insulated.
+            for injection in [0.0, 0.5] {
+                let v_middle = (2.0 + 1.2 * injection) * sign;
+                let i_left = -v_middle / 2.0;
+                let i_right = (5.0 * sign - v_middle) / 3.0;
+                let expected_power = v_middle.powi(2) / 2.0 + (5.0 * sign - v_middle).powi(2) / 3.0;
+                for bias in [0.0, 1e10] {
+                    let field = mixed
+                        .field_at_controls(
+                            &[bias, bias + 5.0 * sign],
+                            &[injection * sign],
+                            1e-10,
+                            1e-9,
+                            &mut || false,
+                        )
+                        .unwrap();
+                    near(field.voltage_v[12], v_middle);
+                    near(field.voltage_v[24], 5.0 * sign);
+                    for (terminal, expected) in
+                        terminals.iter().zip([i_left, injection * sign, i_right])
+                    {
+                        near(reaction(&problem, &field, terminal), expected);
+                    }
+                    near(field.current_density_a_m2[0][0], i_left);
+                    near(field.current_density_a_m2[12][0], -i_right);
+                    near(
+                        field.contacts.iter().map(|c| c.power_w).sum(),
+                        i_left.powi(2),
+                    );
+                    near(field.cell_power_w[..12].iter().sum(), i_left.powi(2));
+                    near(field.cell_power_w[12..].iter().sum(), 3.0 * i_right.powi(2));
+                    near(field.power_w, expected_power);
+                    near(field.supplied_power_w, expected_power);
+                    near(
+                        field.power_w,
+                        v_middle * injection * sign + 5.0 * sign * i_right,
+                    );
+                }
+            }
+            // Several unknown electrode potentials in caller-selected order,
+            // and a current-controlled original reference, use the same field.
+            for (current_terminals, voltages, currents) in [
+                (&[2, 1][..], &[7.0][..], &[sign, 0.0][..]),
+                (&[0][..], &[7.0, 7.0 + 3.0 * sign][..], &[-sign][..]),
+            ] {
+                let mixed = matrix
+                    .prepare_current_control(current_terminals, mixed_controls(), &mut || false)
+                    .unwrap();
+                let field = mixed
+                    .field_at_controls(voltages, currents, 1e-10, 1e-9, &mut || false)
+                    .unwrap();
+                near(field.voltage_v[12], 2.0 * sign);
+                near(field.voltage_v[24], 5.0 * sign);
+                near(field.power_w, 5.0);
+            }
             // Both nonreference terminals are driven simultaneously. B's
             // actual 2 V drop includes the negative cross term between bases.
             let field = matrix
@@ -193,6 +263,69 @@ fn native_multiterminal_response_retains_cross_terms_contact_work_and_floating_e
         near(
             matrix
                 .field_at_currents(&[-1.0, 0.0, 1.0], 1e-10, 1e-9, &mut || false)
+                .unwrap()
+                .power_w,
+            5.0,
+        );
+        for terminals in [&[][..], &[0, 1, 2][..], &[1, 1][..], &[3][..]] {
+            assert!(
+                matrix
+                    .prepare_current_control(terminals, mixed_controls(), &mut || false)
+                    .is_err()
+            );
+        }
+        for bounded in [
+            SpatialMixedConductanceControls {
+                maximum_current_terminals: 0,
+                ..mixed_controls()
+            },
+            SpatialMixedConductanceControls {
+                maximum_response_values: 1,
+                ..mixed_controls()
+            },
+            SpatialMixedConductanceControls {
+                maximum_dense_work: 1,
+                ..mixed_controls()
+            },
+        ] {
+            assert!(
+                matrix
+                    .prepare_current_control(&[1], bounded, &mut || false)
+                    .is_err()
+            );
+        }
+        assert!(
+            mixed
+                .field_at_controls(&[0.0], &[0.0], 1e-10, 1e-9, &mut || false)
+                .is_err()
+        );
+        assert!(
+            mixed
+                .field_at_controls(&[0.0, 5.0], &[f64::NAN], 1e-10, 1e-9, &mut || false)
+                .is_err()
+        );
+        assert!(matches!(
+            matrix.prepare_current_control(&[1], mixed_controls(), &mut || true),
+            Err(SpatialConductionError::Cancelled)
+        ));
+        let mut mixed_polls = 0;
+        mixed
+            .field_at_controls(&[0.0, 5.0], &[0.0], 1e-10, 1e-9, &mut || {
+                mixed_polls += 1;
+                false
+            })
+            .unwrap();
+        let mut retry_polls = 0;
+        assert!(matches!(
+            mixed.field_at_controls(&[0.0, 5.0], &[0.0], 1e-10, 1e-9, &mut || {
+                retry_polls += 1;
+                retry_polls == mixed_polls
+            }),
+            Err(SpatialConductionError::Cancelled)
+        ));
+        near(
+            mixed
+                .field_at_controls(&[0.0, 5.0], &[0.0], 1e-10, 1e-9, &mut || false)
                 .unwrap()
                 .power_w,
             5.0,

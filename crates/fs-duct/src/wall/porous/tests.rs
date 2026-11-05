@@ -219,6 +219,36 @@ fn g1_layered_lining_reproduces_the_original_single_layer_chain() {
 }
 
 #[test]
+fn g1_thin_porous_lining_keeps_viscous_wall_conductance() {
+    // Manufactured Cp=Cv liquid: there is no thermal work to mask a lost
+    // viscous term under the rigid-backed layer's much larger compliance.
+    let fluid = ThermoviscousFluidState::from_heat_capacity_ratio(
+        FluidAcousticState::try_new(1000.0, 1000.0).unwrap(),
+        FluidTransportState::try_new(1000.0, 4200.0, 0.6, 1.0e-3).unwrap(),
+        1.0,
+    )
+    .unwrap();
+    let law = material();
+    let omega = core::f64::consts::TAU * 500.0;
+    for thickness in [1.0e-6, 1.0e-9, 1.0e-12] {
+        let lining = PorousLining::try_new(&law, &fluid, omega, thickness).unwrap();
+        let response = lining.response();
+        let density = response.dynamic_density_kg_m3();
+        let bulk = response.dynamic_bulk_modulus_pa();
+        assert_eq!(bulk.im, 0.0);
+        let resistance = (-omega * density.im) * (thickness / 3.0);
+        let compliance_admittance = omega * thickness / bulk.re;
+        // Integrating the linear pore velocity squared supplies this positive
+        // conductance. It must survive the exp(+i wt) -> exp(-i wt) adapter.
+        let expected = resistance * compliance_admittance * compliance_admittance;
+        let admittance = lining.specific_admittance(0.02, omega).unwrap();
+        assert!(admittance.re > 0.0 && admittance.im < 0.0);
+        assert!((admittance.re / expected - 1.0).abs() < 1.0e-8);
+        assert_eq!(lining.thickness_m(), thickness);
+    }
+}
+
+#[test]
 fn g1_cavity_backed_layers_drive_the_original_pressure_flow_equations() {
     let law = material();
     let air = air();

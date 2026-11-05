@@ -1588,6 +1588,78 @@
           "kind": "original-analysis-source"
         }
       ]
+    },
+    {
+      "id": "uiowa-splash-stick-normal-pp",
+      "instrument": "Splash cymbal",
+      "path": "IowaPercussion/splash.stick.normal.pp.aif",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/cymbals/suspended%20cymbals/stick/splash.stick.normal.pp.aif",
+      "sha256": "936907695b6f420357dd548fbce80f2f8101ba483301c0986c4d398609572e66",
+      "bytes": 2138950,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MIScymbals.html",
+      "chain": "uiowa-cymbals-2013",
+      "articulation": "normal stick strike",
+      "dynamic": "pp",
+      "range": null,
+      "notes": "Original Iowa suspended splash cymbal recording. Manufacturer, diameter, thickness profile, alloy and strike force are uncharacterized; source dynamics are performance labels.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 8.083311,
+        "codec": "pcm_s24be",
+        "bits_per_sample": 24,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "uiowa-splash-stick-normal-mf",
+      "instrument": "Splash cymbal",
+      "path": "IowaPercussion/splash.stick.normal.mf.aif",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/cymbals/suspended%20cymbals/stick/splash.stick.normal.mf.aif",
+      "sha256": "ace502de3ef9187081cd245ee66eb6d397345542c778641207a71cb21ede2b13",
+      "bytes": 2337448,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MIScymbals.html",
+      "chain": "uiowa-cymbals-2013",
+      "articulation": "normal stick strike",
+      "dynamic": "mf",
+      "range": null,
+      "notes": "Original Iowa suspended splash cymbal recording. Manufacturer, diameter, thickness profile, alloy and strike force are uncharacterized; source dynamics are performance labels.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 8.833492,
+        "codec": "pcm_s24be",
+        "bits_per_sample": 24,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
+    },
+    {
+      "id": "uiowa-splash-stick-normal-ff",
+      "instrument": "Splash cymbal",
+      "path": "IowaPercussion/splash.stick.normal.ff.aif",
+      "url": "https://theremin.music.uiowa.edu/sound%20files/MIS/Percussion/cymbals/suspended%20cymbals/stick/splash.stick.normal.ff.aif",
+      "sha256": "6870bc9771cdbcf8469afae5ea934aa97fb77fadf79564001bd927f6f5c7938f",
+      "bytes": 2253082,
+      "licence": "uiowa-mis",
+      "source_page": "https://theremin.music.uiowa.edu/MIScymbals.html",
+      "chain": "uiowa-cymbals-2013",
+      "articulation": "normal stick strike",
+      "dynamic": "ff",
+      "range": null,
+      "notes": "Original Iowa suspended splash cymbal recording. Manufacturer, diameter, thickness profile, alloy and strike force are uncharacterized; source dynamics are performance labels.",
+      "gradable": false,
+      "audio": {
+        "sample_rate_hz": 44100,
+        "channels": 2,
+        "duration_s": 8.514649,
+        "codec": "pcm_s24be",
+        "bits_per_sample": 24,
+        "decode_check": "ffmpeg full decode succeeded"
+      }
     }
   ],
   "acquisition_check": {

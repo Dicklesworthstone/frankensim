@@ -4,8 +4,11 @@
 //! The stored energy subtracts a separate, constant reference per species;
 //! this linear change of conserved variables preserves physical total energy.
 //! HLLC/MUSCL is an Estimated engineering lane. It does not establish a fully
-//! discrete entropy inequality or exact pressure equilibrium across a moving
-//! material interface with different caloric laws.
+//! discrete entropy inequality. The default conservative update does not
+//! preserve exact pressure equilibrium across a moving material interface
+//! with different caloric laws. For verified equilibrium contacts,
+//! [`MixtureEuler1d::step_with_contact_equilibrium`] provides an explicit,
+//! caller-bounded numerical energy correction through the original calorics.
 //!
 //! Shared boundary types admit periodic, reflecting, transmissive and
 //! pressure-outlet ends here. Pressure outlets preserve the outgoing local
@@ -40,6 +43,9 @@ pub mod reactive;
 
 /// Compatible species reconstruction shared by axial and spatial solvers.
 pub mod reconstruction;
+
+/// Opt-in equilibrium-contact transport with explicit numerical energy defects.
+pub mod pressure_equilibrium;
 
 /// Stationary wall drag and conservative heat exchange with finite wall storage.
 pub mod wall_exchange;
@@ -120,6 +126,13 @@ pub enum Error {
     TemperatureIterations,
     /// A stage exceeded the caller's actual face-speed CFL.
     CflExceeded { observed: f64, maximum: f64 },
+    /// The RK-weighted absolute numerical energy correction exceeded its budget.
+    ContactEnergyBudget {
+        /// Accumulated absolute correction in this attempted step [J].
+        observed_j: f64,
+        /// Caller-authorized absolute correction per accepted step [J].
+        maximum_j: f64,
+    },
     /// All atomic time-step retries failed.
     StepRetries { attempts: usize, last: Box<Error> },
     /// Bounded workspace reservation failed.

@@ -157,10 +157,18 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0].mul_add(b[0], a[1].mul_add(b[1], a[2] * b[2]))
 }
 fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    // A single FMA against an already rounded second product does not give
+    // zero for parallel vectors. That artificial transverse offset is later
+    // divided by radius/separation and can rotate a central impact noticeably.
+    // Recover the second product's rounding error before taking the difference.
+    let difference = |a: f64, b: f64, c: f64, d: f64| {
+        let product = c * d;
+        a.mul_add(b, -product) - c.mul_add(d, -product)
+    };
     [
-        a[1].mul_add(b[2], -a[2] * b[1]),
-        a[2].mul_add(b[0], -a[0] * b[2]),
-        a[0].mul_add(b[1], -a[1] * b[0]),
+        difference(a[1], b[2], a[2], b[1]),
+        difference(a[2], b[0], a[0], b[2]),
+        difference(a[0], b[1], a[1], b[0]),
     ]
 }
 fn norm(v: [f64; 3]) -> Result<f64, SweptSphereError> {
@@ -250,6 +258,27 @@ mod tests {
             near(hit.normal_world[0], 0.6);
             near(hit.normal_world[2], -0.8);
             near(hit.relative_normal_speed / scale, -1.6);
+        }
+    }
+
+    #[test]
+    fn rotated_central_impact_retains_normal_and_angular_momentum() {
+        // Opposite input vectors must not acquire an amplified transverse offset.
+        for scale in [1e-100, 1.0, 1e100] {
+            let r = [3.0 * scale, 4.0 * scale, 5.0 * scale];
+            let v = r.map(|x| -x);
+            let distance = norm(r).unwrap();
+            let hit = query(r, v, 1e-12 * scale, 1.0).unwrap();
+            let expected = r.map(|x| x / distance);
+            for (actual, expected) in hit.normal_world.into_iter().zip(expected) {
+                assert!((actual - expected).abs() <= 4.0 * f64::EPSILON);
+            }
+            near(hit.relative_normal_speed / distance, -1.0);
+            near(hit.time_s, 1.0 - 1e-12 * scale / distance);
+            // A central impulse cannot change the pair's orbital angular
+            // momentum, whatever its masses or coefficient of restitution.
+            let torque = cross(expected, hit.normal_world);
+            assert!(norm(torque).unwrap() <= 4.0 * f64::EPSILON);
         }
     }
 

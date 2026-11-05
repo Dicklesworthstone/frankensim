@@ -510,8 +510,10 @@ impl ReactingEuler3d {
                 .sum::<f64>();
             rate = rate.max(local);
         }
-        // Leave acoustic headroom before paying for the first reactive half.
-        // Heat release can still increase the true face CFL; that is retried.
+        rate = rate.max(self.accepted.pressure_outlet_rate(&mut cancelled)?);
+        // Bound prescribed outlet waves before paying for the first reactive
+        // half. Heat release can still increase the true face CFL; that retries
+        // the complete split with the original source and boundary owners.
         let mut dt = maximum_duration
             .value()
             .min(0.8 * controls.transport.cfl / rate);

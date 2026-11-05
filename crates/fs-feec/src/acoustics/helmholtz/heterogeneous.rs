@@ -109,7 +109,10 @@ impl std::error::Error for HeterogeneousError {}
 
 impl From<AcousticFeError> for HeterogeneousError {
     fn from(value: AcousticFeError) -> Self {
-        Self::Acoustic(value)
+        match value {
+            AcousticFeError::Cancelled => Self::Cancelled,
+            _ => Self::Acoustic(value),
+        }
     }
 }
 
@@ -161,9 +164,11 @@ fn medium_coefficients(medium: Medium) -> Result<(f64, f64), AcousticFeError> {
     Ok((inverse_density, compressibility))
 }
 
-/// Physical eigenpairs of the heterogeneous rigid-wall cavity.
+/// Physical original-coordinate eigenpairs of a heterogeneous cavity.
 ///
 /// These are deliberately distinct from the homogeneous owner's `k^2` modes.
+/// Pressure-release modes remain explicitly wrapped in
+/// [`HeterogeneousPressureReleaseModes`].
 #[derive(Debug, Clone)]
 pub struct HeterogeneousModes {
     /// Eigenvalues `omega^2` [rad^2/s^2], ascending.
@@ -172,12 +177,29 @@ pub struct HeterogeneousModes {
     pub frequency_hz: Vec<f64>,
     /// Shapes normalized by the physical compressibility mass, `phi^T M_beta phi = 1`.
     pub shapes: Vec<Vec<f64>>,
-    /// Original modal-owner residuals in the physical mass norm.
+    /// Original modal-owner residuals in the physical mass norm. For
+    /// pressure-release modes this norm uses only the free pressure equations.
     pub residual: Vec<f64>,
     /// Inertia-certified eigenvalue count strictly below the low endpoint.
     pub below_low: usize,
     /// Inertia-certified eigenvalue count strictly below the high endpoint.
     pub below_high: usize,
+}
+
+/// Mixed rigid / ideal pressure-release modes of the original physical pencil.
+///
+/// Density remains inside the stiffness divergence and compressibility remains
+/// in the mass. No homogeneous replacement medium or penalty is introduced.
+/// Ideal `p = 0` is not a finite opening-radiation impedance.
+#[derive(Debug, Clone)]
+pub struct HeterogeneousPressureReleaseModes {
+    /// Original-coordinate shapes with exact zero pressure-release trace.
+    /// Inertia counts and residuals describe the restricted physical pencil.
+    pub eigenpairs: HeterogeneousModes,
+    /// Canonically sorted, unique original boundary triangles.
+    pub pressure_release_faces: Vec<[u32; 3]>,
+    /// Original pressure degrees of freedom retained after exact elimination.
+    pub free_dofs: usize,
 }
 
 /// Coefficient-weighted pressure operator on an existing, unchanged FE space.
@@ -392,6 +414,59 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             shapes: report.modes.into_iter().map(|m| m.phi).collect(),
             below_low: report.below_low,
             below_high: report.below_high,
+        })
+    }
+
+    /// Modes with exact zero pressure on selected original boundary faces;
+    /// every other face retains the rigid natural condition.
+    ///
+    /// Restricts the original `K_rho` and `M_beta` before calling the same
+    /// inertia-certified sparse solver. Shapes keep every original coordinate
+    /// and constrained entries are exactly zero. Empty faces call the existing
+    /// rigid-wall path unchanged. Cancellation brackets the modal solve, whose
+    /// original single-window owner has no internal cancellation callback.
+    pub fn modes_with_pressure_release(
+        &self,
+        window_hz: (f64, f64),
+        pressure_release_faces: &[[u32; 3]],
+        options: &SliceOptions,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousPressureReleaseModes, HeterogeneousError> {
+        let constraints = self
+            .geometry
+            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let eigenpairs = if constraints.faces.is_empty() {
+            self.modes(window_hz, options, cancelled)?
+        } else {
+            let to_lambda = |frequency: f64| {
+                let omega = core::f64::consts::TAU * frequency;
+                omega * omega.abs()
+            };
+            let report = constraints.modes(
+                &self.stiffness,
+                &self.mass,
+                (to_lambda(window_hz.0), to_lambda(window_hz.1)),
+                options,
+                cancelled,
+            )?;
+            HeterogeneousModes {
+                omega_squared_rad2_s2: report.modes.iter().map(|mode| mode.lambda).collect(),
+                frequency_hz: report
+                    .modes
+                    .iter()
+                    .map(|mode| det::sqrt(mode.lambda.max(0.0)) / core::f64::consts::TAU)
+                    .collect(),
+                residual: report.modes.iter().map(|mode| mode.residual).collect(),
+                shapes: report.modes.into_iter().map(|mode| mode.phi).collect(),
+                below_low: report.below_low,
+                below_high: report.below_high,
+            }
+        };
+        poll(cancelled)?;
+        Ok(HeterogeneousPressureReleaseModes {
+            eigenpairs,
+            pressure_release_faces: constraints.faces.into_iter().collect(),
+            free_dofs: constraints.free_dofs.len(),
         })
     }
 

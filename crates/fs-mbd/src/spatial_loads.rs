@@ -30,6 +30,7 @@ use super::{
     AdvanceOutcome, DynamicsError, MassProperties, Pose, RigidBodyIntegrator, RigidBodyState,
     StepReceipt, UnitQuaternion, Vec3, Wrench, finite_derived,
 };
+use fs_math::dd::Dd;
 
 /// Maximum point-force count admitted by one bounded preparation.
 pub const MAX_WORLD_POINT_FORCES: usize = 16_384;
@@ -84,7 +85,72 @@ pub struct PreparedSpatialLoads {
     force_world: Vec3,
     torque_body: Vec3,
     torque_world: Vec3,
-    point_force_moments_world: [Vec3; 3],
+    point_force_moments_world: [CompensatedVec3; 3],
+}
+
+// Keep the product tails as well as the reduction tails until a physical
+// resultant is formed. Rounding r_j F first can erase an entire finite couple:
+// (2^27 + 1)(2^27 - 1) - 2^54 is -1, although both rounded products agree.
+// Three of these vectors suffice at every attitude, regardless of point count.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CompensatedVec3([Dd; 3]);
+
+impl CompensatedVec3 {
+    const ZERO: Self = Self([Dd::ZERO; 3]);
+
+    fn from_vec(value: Vec3) -> Self {
+        Self(components(value).map(Dd::from_f64))
+    }
+
+    fn checked(self, field: &'static str) -> Result<Self, DynamicsError> {
+        for component in self.0 {
+            finite_derived(component.hi, field)?;
+            finite_derived(component.lo, field)?;
+        }
+        Ok(self)
+    }
+
+    fn rounded(self, field: &'static str) -> Result<Vec3, DynamicsError> {
+        let [x, y, z] = self.checked(field)?.0.map(Dd::to_f64);
+        Ok(Vec3::new(x, y, z))
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self(core::array::from_fn(|j| self.0[j] + other.0[j]))
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self(core::array::from_fn(|j| self.0[j] - other.0[j]))
+    }
+
+    fn scale(self, value: f64) -> Self {
+        Self(self.0.map(|component| component * Dd::from_f64(value)))
+    }
+
+    fn dot(self, other: Self) -> Dd {
+        self.0[0] * other.0[0] + self.0[1] * other.0[1] + self.0[2] * other.0[2]
+    }
+
+    fn cross(self, other: Self) -> Self {
+        Self(core::array::from_fn(|j| {
+            let k = (j + 1) % 3;
+            let l = (j + 2) % 3;
+            self.0[k] * other.0[l] - self.0[l] * other.0[k]
+        }))
+    }
+
+    fn expressed_in(self, axes: [Vec3; 3]) -> Self {
+        Self(axes.map(|axis| self.dot(Self::from_vec(axis))))
+    }
+
+    fn norm_bound(self, field: &'static str) -> Result<f64, DynamicsError> {
+        let [hx, hy, hz] = self.0.map(|component| component.hi);
+        let [lx, ly, lz] = self.0.map(|component| component.lo);
+        finite_derived(
+            Vec3::new(hx, hy, hz).stable_norm(field)? + Vec3::new(lx, ly, lz).stable_norm(field)?,
+            field,
+        )
+    }
 }
 
 impl PreparedSpatialLoads {
@@ -93,14 +159,16 @@ impl PreparedSpatialLoads {
         force_world: Vec3::ZERO,
         torque_body: Vec3::ZERO,
         torque_world: Vec3::ZERO,
-        point_force_moments_world: [Vec3::ZERO; 3],
+        point_force_moments_world: [CompensatedVec3::ZERO; 3],
     };
 
     /// Prepare held COM force, body-held couple, world-held couple, and point
     /// forces. `held` uses the original [`Wrench`] conventions. Gravity belongs
     /// on the integrator and must not also be included here.
     ///
-    /// Reductions are compensated in supplied order and use no heap storage.
+    /// Products and reductions are compensated in supplied order and use no
+    /// heap storage. First-moment tails are retained through torque and work
+    /// evaluation so opposing large point loads can retain a small couple.
     /// Cancellation is checked initially, every 64 points, and before return.
     /// All inputs and products must be finite and representable.
     pub fn new(
@@ -117,49 +185,31 @@ impl PreparedSpatialLoads {
         }
         held.validate()?;
         finite_vec(torque_world, "spatial_load.torque_world")?;
-        let mut sums = [0.0; 12];
-        let mut corrections = [0.0; 12];
-        sums[..3].copy_from_slice(&components(held.force_world));
+        let mut force_world = CompensatedVec3::from_vec(held.force_world);
+        let mut point_force_moments_world = [CompensatedVec3::ZERO; 3];
         for (index, point) in points.iter().enumerate() {
             if index % 64 == 0 && cancelled() {
                 return Err(SpatialLoadError::Cancelled);
             }
             finite_vec(point.arm_body, "spatial_load.arm_body")?;
             finite_vec(point.force_world, "spatial_load.force_world")?;
-            let force = components(point.force_world);
-            let arm = components(point.arm_body);
-            let mut values = [0.0; 12];
-            values[..3].copy_from_slice(&force);
-            for j in 0..3 {
-                for k in 0..3 {
-                    values[3 + 3 * j + k] = arm[j] * force[k];
-                }
+            let force = CompensatedVec3::from_vec(point.force_world);
+            force_world = force_world.add(force).checked("spatial_load.reduction")?;
+            for (j, arm) in components(point.arm_body).into_iter().enumerate() {
+                let moment = force.scale(arm).checked("spatial_load.first_moment")?;
+                point_force_moments_world[j] = point_force_moments_world[j]
+                    .add(moment)
+                    .checked("spatial_load.reduction")?;
             }
-            for k in 0..12 {
-                let value = finite_derived(values[k], "spatial_load.first_moment")?;
-                let old = sums[k];
-                let next = finite_derived(old + value, "spatial_load.reduction")?;
-                corrections[k] += if old.abs() >= value.abs() {
-                    (old - next) + value
-                } else {
-                    (value - next) + old
-                };
-                sums[k] = next;
-            }
-        }
-        for k in 0..12 {
-            sums[k] = finite_derived(sums[k] + corrections[k], "spatial_load.reduction")?;
         }
         if cancelled() {
             return Err(SpatialLoadError::Cancelled);
         }
         Ok(Self {
-            force_world: Vec3::new(sums[0], sums[1], sums[2]),
+            force_world: force_world.rounded("spatial_load.reduction")?,
             torque_body: held.torque_body,
             torque_world,
-            point_force_moments_world: core::array::from_fn(|j| {
-                Vec3::new(sums[3 + 3 * j], sums[4 + 3 * j], sums[5 + 3 * j])
-            }),
+            point_force_moments_world,
         })
     }
 
@@ -180,9 +230,13 @@ impl PreparedSpatialLoads {
     /// Refuses a finite load set whose bound cannot be represented in `f64`.
     pub fn torque_norm_bound(&self) -> Result<f64, DynamicsError> {
         let mut bound = self.torque_body.stable_norm("spatial_load.torque_bound")?;
-        for vector in core::iter::once(self.torque_world).chain(self.point_force_moments_world) {
+        bound = finite_derived(
+            bound + self.torque_world.stable_norm("spatial_load.torque_bound")?,
+            "spatial_load.torque_bound",
+        )?;
+        for vector in self.point_force_moments_world {
             bound = finite_derived(
-                bound + vector.stable_norm("spatial_load.torque_bound")?,
+                bound + vector.norm_bound("spatial_load.torque_bound")?,
                 "spatial_load.torque_bound",
             )?;
         }
@@ -195,16 +249,15 @@ impl PreparedSpatialLoads {
     /// body-frame moment over a finite step changes the physical load; use
     /// [`RigidBodyIntegrator::step_spatial`] to evolve the original loads.
     pub fn wrench_at(&self, orientation: UnitQuaternion) -> Result<Wrench, DynamicsError> {
-        let couple = self.free_couple_body(orientation)?;
-        let mut point_torque = Vec3::ZERO;
-        for (axis, moment) in basis_world(orientation)
-            .into_iter()
-            .zip(self.point_force_moments_world)
-        {
-            point_torque = point_torque.add(axis.cross(moment));
+        let axes = basis_world(orientation);
+        let mut torque_world = CompensatedVec3::from_vec(self.torque_world);
+        for (axis, moment) in axes.into_iter().zip(self.point_force_moments_world) {
+            torque_world = torque_world.add(CompensatedVec3::from_vec(axis).cross(moment));
         }
-        let torque_body = couple.add(orientation.rotate_world_to_body(point_torque));
-        finite_vec(torque_body, "spatial_load.torque_body")?;
+        let torque_body = torque_world
+            .expressed_in(axes)
+            .add(CompensatedVec3::from_vec(self.torque_body))
+            .rounded("spatial_load.torque_body")?;
         Ok(Wrench {
             force_world: self.force_world,
             torque_body,
@@ -216,23 +269,28 @@ impl PreparedSpatialLoads {
     pub fn force_work(&self, before: Pose, after: Pose) -> Result<f64, DynamicsError> {
         before.validate()?;
         after.validate()?;
-        let mut work = self
-            .force_world
-            .dot(after.position_world.sub(before.position_world));
+        let mut work = CompensatedVec3::from_vec(self.force_world).dot(
+            CompensatedVec3::from_vec(after.position_world)
+                .sub(CompensatedVec3::from_vec(before.position_world)),
+        );
         let axes_before = basis_world(before.orientation);
         let axes_after = basis_world(after.orientation);
         for j in 0..3 {
-            work += self.point_force_moments_world[j].dot(axes_after[j].sub(axes_before[j]));
+            work = work
+                + self.point_force_moments_world[j].dot(
+                    CompensatedVec3::from_vec(axes_after[j])
+                        .sub(CompensatedVec3::from_vec(axes_before[j])),
+                );
         }
-        finite_derived(work, "spatial_load.force_work")
+        finite_derived(work.lo, "spatial_load.force_work")?;
+        finite_derived(work.to_f64(), "spatial_load.force_work")
     }
 
     fn free_couple_body(&self, orientation: UnitQuaternion) -> Result<Vec3, DynamicsError> {
-        let result = self
-            .torque_body
-            .add(orientation.rotate_world_to_body(self.torque_world));
-        finite_vec(result, "spatial_load.free_couple")?;
-        Ok(result)
+        CompensatedVec3::from_vec(self.torque_world)
+            .expressed_in(basis_world(orientation))
+            .add(CompensatedVec3::from_vec(self.torque_body))
+            .rounded("spatial_load.free_couple")
     }
 }
 

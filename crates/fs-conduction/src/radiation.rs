@@ -82,7 +82,7 @@ pub mod view_factors;
 pub use ambient::{
     AmbientRadiationConfig, AmbientRadiationPatch, AmbientRadiationPatchReport,
     AmbientRadiationReport, AmbientRadiationSolution, solve_with_ambient_radiation,
-    AmbientRadiationGradient, pullback_ambient_radiation,
+    AmbientRadiationGradient, AmbientRadiationLinearization, pullback_ambient_radiation,
 };
 pub(crate) use ambient::{AmbientRadiationTrial, solve_ambient_radiation_with};
 

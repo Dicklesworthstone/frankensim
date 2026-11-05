@@ -18,7 +18,8 @@
 //! `ImplicitConductionGraph` admits branched, cyclic and disconnected networks
 //! through the same nonlinear/time owner with a bounded sparse Krylov solve.
 //! The opt-in `advance_sdirk2_to` path shares this residual and Newton owner,
-//! with second-order L-stable quadrature for fixed, source-free networks.
+//! with second-order L-stable quadrature for fixed networks and piecewise
+//! constant source schedules.
 
 use super::*;
 use crate::enthalpy::backward_euler::{
@@ -32,7 +33,7 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 #[path = "implicit/adaptive.rs"]
 pub mod adaptive;
 
-/// Second-order native stage quadrature for fixed, source-free networks.
+/// Second-order native stages for fixed networks and scheduled source powers.
 #[path = "implicit/sdirk.rs"]
 mod sdirk;
 
@@ -259,6 +260,7 @@ struct Endpoint {
     link_states: BTreeMap<u64, ImplicitLinkState>,
     reservoir_states: BTreeMap<CellId, ImplicitBoundaryState>,
     ambient_states: BTreeMap<CellId, ImplicitBoundaryState>,
+    reconstruction_tangent: Vec<(usize, usize, f64)>,
 }
 
 impl<'a> ImplicitConductionChain<'a> {
@@ -624,6 +626,7 @@ impl<'a> ImplicitConductionChain<'a> {
             link_states,
             reservoir_states,
             ambient_states,
+            reconstruction_tangent: Vec::new(),
         })
     }
 
@@ -664,14 +667,15 @@ impl<'a> ImplicitConductionChain<'a> {
         // constitutive callback. Calls are sequential, with no retained borrow.
         let checkpoint = std::cell::RefCell::new(checkpoint);
         let resolve = |thermal: &DepositionSimulation<'m>| {
-            let endpoint = self.endpoint(thermal, &mut || (checkpoint.borrow_mut())())?;
+            let mut endpoint = self.endpoint(thermal, &mut || (checkpoint.borrow_mut())())?;
             let boundaries = endpoint.boundary_values.clone();
             let mut sources_w = sources_w.clone();
             let mut transfers = transfers.to_vec();
             if let Some(advection) = &self.advection {
-                let transport = advection
-                    .flow
-                    .endpoint_transport(thermal, &mut || (checkpoint.borrow_mut())())?;
+                let (transport, tangent) = advection.endpoint(
+                    thermal, &self.index, &mut || (checkpoint.borrow_mut())(),
+                )?;
+                endpoint.reconstruction_tangent = tangent;
                 for (id, watts) in transport.heat.bulk.sources_w {
                     let value = sources_w.entry(id).or_default();
                     *value = finite(*value + watts)?;
@@ -688,7 +692,7 @@ impl<'a> ImplicitConductionChain<'a> {
                     boundaries,
                 },
                 // Observed transfers stay at the accepted start; an explicitly
-                // bound upwind graph is evaluated at this actual endpoint.
+                // bound flow graph is evaluated at this actual endpoint.
                 // Both use the original paired debit/credit owner exactly once.
                 transfers,
             })
@@ -732,6 +736,7 @@ impl<'a> ImplicitConductionChain<'a> {
                             .checked_mul(2)
                             .and_then(|n| n.checked_add(self.advection.as_ref()
                                 .map_or(0, |flow| flow.tangent.len())))
+                            .and_then(|n| n.checked_add(endpoint.reconstruction_tangent.len()))
                             .ok_or(TridiagonalError::Capacity)?,
                     )
                     .map_err(|_| TridiagonalError::Capacity)?;
@@ -833,7 +838,9 @@ impl<'a> ImplicitConductionChain<'a> {
             add_entry(workspace, i, i, -dt * derivative / cell.mass_kg)?;
         }
         if let Some(advection) = &self.advection {
-            for &(row, col, derivative) in &advection.tangent {
+            for &(row, col, derivative) in advection.tangent.iter()
+                .chain(&endpoint.reconstruction_tangent)
+            {
                 checkpoint()?;
                 add_entry(workspace, row, col, -dt * derivative)?;
             }

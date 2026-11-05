@@ -236,6 +236,29 @@ fn cp_equals_cv_removes_only_thermal_relaxation_exactly() {
 }
 
 #[test]
+fn thin_cached_fluid_surface_keeps_positive_viscous_work() {
+    let fluid = liquid(1.0e-3, 0.6, 1.0);
+    for lafarge in [false, true] {
+        let law = numerical_skeleton(lafarge);
+        for omega in [1.0e-6, 1000.0, 1.0e5] {
+            let response = law.effective_fluid(&fluid, omega).unwrap();
+            let density = response.dynamic_density_kg_m3();
+            let bulk = response.dynamic_bulk_modulus_pa();
+            assert_eq!(bulk.im, 0.0);
+            for thickness in [1.0e-6, 1.0e-9, 1.0e-12] {
+                let surface = response.surface_impedance_rigid(thickness).unwrap();
+                let expected_resistance = (-omega * density.im) * (thickness / 3.0);
+                // The integrated linear velocity profile supplies the 1/3;
+                // it is not a reflected-power residual or a clipped value.
+                assert!(surface.re > 0.0);
+                assert!((surface.re / expected_resistance - 1.0).abs() < 1.0e-7);
+                assert!((-surface.im * omega * thickness / bulk.re - 1.0).abs() < 1.0e-7);
+            }
+        }
+    }
+}
+
+#[test]
 fn fluid_substitution_refreshes_drag_and_thermal_response_without_mutating_pores() {
     let law = numerical_skeleton(true);
     let original = law.reference_card().clone();

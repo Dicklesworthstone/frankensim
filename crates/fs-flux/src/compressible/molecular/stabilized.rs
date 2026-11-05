@@ -326,7 +326,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         update(
             &self.gas, &self.grid, &self.work.current, &self.work.current,
             &self.work.x_flux, &self.work.y_flux, &mut self.work.stage,
-            dt * scheme.first_weight(), false, None, cancelled,
+            dt * scheme.first_weight(), false, None, None, cancelled,
         )?;
         capture_boundaries(
             &self.grid, &self.work.x_flux, &self.work.y_flux,

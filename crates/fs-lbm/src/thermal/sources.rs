@@ -326,6 +326,7 @@ impl Slab<2, 5> for ThermalLbm {
             grid: self.grid.clone(), gpop: self.gpop.clone(), tau_g: self.tau_g,
             t_bottom: self.t_bottom, t_top: self.t_top, gbeta: self.gbeta,
             t_ref: self.t_ref, scratch: Vec::new(),
+            buoyancy_direction: self.buoyancy_direction,
             wall_boundaries: self.wall_boundaries, wall_exchange: self.wall_exchange,
             advection_history: self.advection_history.clone(),
         }, super::W5)
@@ -382,9 +383,11 @@ impl Slab<3, 7> for ThermalLbm3 {
         let weights = s.gpop[0];
         s.grid.f.clone_from(&g.f); s.grid.tau.clone_from(&g.tau); s.grid.fext.clone_from(&g.fext);
         s.grid.trt_magic = g.trt_magic();
+        s.grid.copy_plate_state_from(g);
         s.gpop.clone_from(&self.gpop);
         s.advection_history.clone_from(&self.advection_history);
         s.t_bottom = self.t_bottom; s.t_top = self.t_top; s.t_ref = self.t_ref;
+        s.buoyancy_direction = self.buoyancy_direction;
         s.wall_boundaries = self.wall_boundaries; s.wall_exchange = self.wall_exchange;
         (s, weights)
     }

@@ -1,6 +1,8 @@
 //! Source Maxwell storage/loss, original native poles, full strain coupling and
 //! physical descriptor loading. Independent closed-form member equations.
 
+mod transient;
+
 use super::{NO_RAYLEIGH, RADIUS, RHO, YOUNG, guided, with_cx};
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;

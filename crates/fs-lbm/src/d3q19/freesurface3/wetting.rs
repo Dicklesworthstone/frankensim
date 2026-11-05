@@ -18,6 +18,12 @@ pub(crate) struct WallFill3 {
 }
 
 impl FreeSurface3 {
+    /// The single planar angle owner, whether homogeneous or source-resolved.
+    pub(super) fn planar_contact_wall(&self) -> Option<PlanarWall3> {
+        self.planar_contact_field.as_ref().map(|field| field.wall)
+            .or_else(|| self.planar_contact.map(|contact| contact.wall))
+    }
+
     pub(crate) fn admits_dynamic_planar_wetting(&self) -> bool {
         self.contact == ContactModel3::Neutral && self.planar_contact.is_none()
     }
@@ -255,7 +261,9 @@ mod tests {
                         "{wall:?} {sign}"
                     );
                     surface
-                        .set_planar_contact_field(wall, BTreeMap::from([(p, angle)]), &gate)
+                        .set_planar_contact_field(
+                            wall, geometry.keys().map(|&p| (p, angle)).collect(), &gate,
+                        )
                         .unwrap();
                     let mut ghost = p.map(|v| v as i64);
                     ghost[axis] += if wall.upper() { 1 } else { -1 };
@@ -263,6 +271,12 @@ mod tests {
                     assert!(
                         (value - actual.fill - slope * angle.cos() / angle.sin()).abs() < 2e-12
                     );
+                    let (slot, lane) = surface.grid.resolve_source(
+                        p[0] as i64, p[1] as i64, p[2] as i64,
+                    ).unwrap();
+                    let key = surface.grid.active_keys()[slot];
+                    assert!(surface.curvature(key, lane).abs() < 2e-12);
+                    assert!((surface.reference_density(key, lane) - 1.0).abs() < 2e-14);
                 }
             }
         }

@@ -58,13 +58,19 @@ fn a_fixed_stop_gains_the_bridge_cross_term_and_its_own_omitted_compliance() {
         assert_eq!(bank.system().obstacle_residual_compliance(), Some(compliance.as_slice()));
         assert!(compliance[0] > 0.0 && cross[0] != 0.0);
         assert!(bank.system().obstacle_pairs().is_empty());
-        // Closure minus the cross term times the bridge link: its body part is the receiver side.
+        // Closure minus the cross term times the bridge link. The stop keeps its own receiver
+        // (motionless for a fixed stop); the bridge's body part is a third participant, the
+        // signed correction +cross*B inside the complete map left - right + correction.
         let normal = bank.system().obstacle(0).unwrap();
         let bridge = &member.connections[0].body;
-        assert_eq!(normal.right.component, bank.cards().len()+bridge.component);
-        assert_eq!(normal.right.shapes, bridge.shapes.iter().map(|b| -cross[0]*b).collect::<Vec<_>>());
         let fixed = plain.performance.bank().system().obstacle(0).unwrap();
         assert!(fixed.right.shapes.iter().all(|x| *x == 0.0));
+        assert_eq!(normal.right, fixed.right);
+        let offset: usize = bank.system().components()[..bank.cards().len()+bridge.component].iter()
+            .map(|c| c.modes().len()).sum();
+        let column = bank.system().obstacle_normal_column(0).unwrap();
+        assert_eq!(column[offset..offset+bridge.shapes.len()].to_vec(),
+            bridge.shapes.iter().map(|b| cross[0]*b).collect::<Vec<_>>());
         assert_eq!(normal.left.shapes.len(), fixed.left.shapes.len());
         assert!(normal.left.shapes.iter().zip(&fixed.left.shapes).any(|(a, b)| a != b));
         let (x, y) = (pressure(&mut plain, 128), pressure(&mut soft, 128));
@@ -79,11 +85,15 @@ fn what_the_residual_does_not_own_refuses_by_name() {
         // The released static preload's equilibrium owner has no residual.
         let error = stopped(cx, gate, flexible(&pluck())).err().unwrap().to_string();
         assert!(error.contains("residual compliance"), "{error}");
-        // A stop on the bridge's own receiver is not wired.
+        // A stop on the bridge's own receiver keeps that receiver as its opposite participant;
+        // the bridge correction is added beside it, not substituted for it.
         let receiver = flexible(&struck()).compile_with_profiles(cx, gate, None,
             Some(Profile::parse(STOP.replace("fixed", "bridge:0").as_bytes()).unwrap()),
-            |name| Ok(pack(name, 7800.0, 200_000.0, None)));
-        assert!(receiver.err().unwrap().to_string().contains("receiver stop"));
+            |name| Ok(pack(name, 7800.0, 200_000.0, None))).unwrap();
+        let bank = receiver.performance.bank();
+        let bridge = &bank.source().bank().strings()[0].connections[0].body;
+        assert_eq!(bank.system().obstacle(0).unwrap().right.component, bank.cards().len()+bridge.component);
+        assert!(bank.system().obstacle_residual_compliance().is_some());
     });
     for record in ["residual-flexibility", "residual-flexibility exact-static-green extra", "residual-flexibility modal"] {
         let text = pluck().replace("cavity neck", &format!("{record}\ncavity neck"));

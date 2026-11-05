@@ -2,6 +2,9 @@
 use fs_material::cohesive::mixed_mode::MixedModeParameters;
 use fs_material::cohesive::{BilinearCohesive, CohesivePoint, CohesiveViscosity};
 
+#[path = "cohesive_damaged_compression/tangent.rs"]
+mod tangent;
+
 fn laws() -> [BilinearCohesive; 2] {
     [
         BilinearCohesive::new(1e9, 2e5, 100.0, 2e9, 0.02).unwrap(),

@@ -1,5 +1,8 @@
 //! G1/G3 moving microphones through original, independently retarded images.
 
+#[path = "moving_reflection/uniform_flow.rs"]
+mod uniform_flow;
+
 use fs_aeroac::AeroacError;
 use fs_aeroac::curle3d::moving::trajectory::{
     IdealReflectionObserver, MovingReceiverBudget, MovingReceiverConfig, MovingReflectionObserver,

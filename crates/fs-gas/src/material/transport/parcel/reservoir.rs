@@ -348,11 +348,7 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
         )
         .map_err(GasTransportError::from)?;
         for &id in traces.keys() {
-            poll(&mut cancelled)?;
-            let gas = &candidate.parcels()[&id];
-            let partial = self.partial_densities(gas)?;
-            self.face
-                .qualify_primitive(primitive(gas, &partial), controls.face, &mut cancelled)?;
+            self.qualify_parcel(&candidate.parcels()[&id], controls.face, &mut cancelled)?;
         }
         let exchanges: Vec<_> = ordered
             .values()

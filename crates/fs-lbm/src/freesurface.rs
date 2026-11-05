@@ -5,9 +5,9 @@
 //! missing populations from gas neighbors are reconstructed with the
 //! atmospheric-pressure anti-population closure by default (optionally loaded
 //! by prescribed gas pressure and a Laplace term from fill-field curvature), and cell conversions
-//! (fluid ↔ interface ↔ gas) redistribute their excess/deficit mass
-//! conservatively — with a carry accumulator so NOTHING is ever
-//! silently dropped. The battery gates the ledger at 1e-10 relative
+//! (fluid ↔ interface ↔ gas) redistribute signed mass with its donor's
+//! physical momentum through adjacent capacity. Unlocated mass or unresolved
+//! conversion refuses the complete step. The battery gates the ledger at 1e-10 relative
 //! EVERY step. Legacy contact-line fixtures remain MODEL-BRACKETED;
 //! explicitly assigned planar angles reach the actual curvature stencil.
 //! The material owner can evolve a source-pinned hysteresis/Cox angle field;
@@ -328,6 +328,8 @@ pub struct FreeSurface {
     pub contact: ContactModel,
     /// Unresolved conversion mass with no adjacent interface recipient.
     /// It remains in the ledger; no location is available to redistribute it.
+    /// Every stepping entry requires zero carry because it has no represented
+    /// momentum. An unresolved conversion refuses instead of creating carry.
     pub carry: f64,
     /// Cell-conversion statistics (cumulative).
     pub conversions: ConversionStats,
@@ -644,7 +646,11 @@ impl FreeSurface {
     }
 
     /// One free-surface step: collide, mass exchange + reconstruction
-    /// + stream, conversion cascade with conservative redistribution.
+    /// + stream, then carry signed conversion mass and its physical momentum
+    /// through adjacent capacity. The selected angular policy also applies.
+    /// Uses the same staged owner as [`Self::step_with_momentum`]; no part of a
+    /// refused step is published. Use that entry for typed errors and a
+    /// conversion balance.
     ///
     /// # Panics
     /// If the surface tension or actual pre-step/streamed liquid density leaves
@@ -652,11 +658,13 @@ impl FreeSurface {
     /// physical state.
     /// Also refuses a changed planar wall topology or a conflicting legacy
     /// contact model after assigning an equilibrium angle.
-    /// An inadmissible density-dependent gas-pressure endpoint also panics
-    /// before publishing populations or tracked liquid mass.
+    /// Also panics on an inadmissible gas-pressure endpoint, unresolved local
+    /// mass/momentum, insufficient conversion capacity or a wet state outside
+    /// the finite positive-population, low-Mach domain. Every refusal preserves
+    /// the accepted populations, tracked liquid mass and conversion counters.
     pub fn step(&mut self) {
-        self.stream_step(None).expect("uncancelled free-surface step");
-        self.apply_conversions();
+        self.step_with_momentum(&fs_exec::CancelGate::new_clock_free())
+            .expect("conservative free-surface step");
     }
 
     fn stream_step(
@@ -672,9 +680,9 @@ impl FreeSurface {
             })
     }
 
-    // Pressure and momentum wrappers share collision, mass exchange and the
-    // force-consistent gas reconstruction. Each wrapper then owns its original
-    // conversion policy and publishes only its complete accepted candidate.
+    // All stepping entries share collision, mass exchange and force-consistent
+    // gas reconstruction before the same conservative conversion owner admits
+    // and publishes their complete candidate.
     fn stream_step_with_pressure(
         &mut self,
         gate: Option<&fs_exec::CancelGate>,
@@ -954,6 +962,9 @@ impl FreeSurface {
         Ok(excess)
     }
 
+    // Historical mass-only reference for the existing conversion fixtures.
+    // All public steps use the conservative momentum owner instead.
+    #[cfg(test)]
     fn apply_conversions(&mut self) {
         let excess = self
             .conversion_cascade(false, |_, _| {})

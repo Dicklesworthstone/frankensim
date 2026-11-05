@@ -10,6 +10,7 @@ use fs_material::relaxation::{RelaxingMedium, input::read_relaxation};
 use fs_rep_mesh::TetComplex;
 
 mod fluid;
+mod heat_source;
 mod time;
 mod spatial_wall;
 

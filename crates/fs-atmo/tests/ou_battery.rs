@@ -49,6 +49,25 @@ fn exact_discrete_law_matches_closed_form() {
 }
 
 #[test]
+fn long_correlation_times_retain_the_exact_nonzero_innovation_variance() {
+    for tau in [1e8, 1e12, 1e16, f64::MAX] {
+        let mode = OuMode::from_correlation_time(2.0, tau).unwrap();
+        let decay = (1.0 / TICK_HZ) / tau;
+        let expected_variance = 4.0 * -(-2.0 * decay).exp_m1();
+        let actual_variance = mode.sigma_innov * mode.sigma_innov;
+        assert!(actual_variance > 0.0, "innovation froze at tau={tau}");
+        assert!(
+            (actual_variance / expected_variance - 1.0).abs() < 5e-13,
+            "tau={tau}: {actual_variance} vs {expected_variance}"
+        );
+    }
+    // Guard the floating-point defect independently of the implementation:
+    // direct subtraction really loses the entire innovation in this regime.
+    let rho = (-1.0f64 / (TICK_HZ * 1e16)).exp();
+    assert_eq!(1.0 - rho * rho, 0.0);
+}
+
+#[test]
 fn stationarity_no_spinup() {
     // The anchor draw is EXACTLY stationary, so the sample variance over
     // early and late windows of one long path must agree (no transient).

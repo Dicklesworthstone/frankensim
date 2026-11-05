@@ -237,12 +237,12 @@ fn kc_exact_flow_keeps_every_bending_memory_coordinate_and_its_energy() {
     let mut string = string(300.0, 2);
     string.rayleigh = None;
     string.bending_stiffness_n_m2 = 0.7;
-    string.relaxation_bending = Some(fs_scenario::PronyBending {
+    string.relaxation_bending = Some(fs_scenario::acoustic::PronyBending {
         branches: vec![
-            fs_scenario::BendingRelaxationBranch {
+            fs_scenario::acoustic::BendingRelaxationBranch {
                 relaxing_stiffness_n_m2: 0.5, relaxation_time_s: 0.0005,
             },
-            fs_scenario::BendingRelaxationBranch {
+            fs_scenario::acoustic::BendingRelaxationBranch {
                 relaxing_stiffness_n_m2: 0.3, relaxation_time_s: 0.005,
             },
         ],

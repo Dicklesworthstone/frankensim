@@ -384,14 +384,11 @@ pub(in crate::harmonic) fn tangent_output(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<C64>, DrivenResonanceError> {
     let mut output = vec![C64::ZERO; model.m];
-    for i in 0..model.n {
+    for (p, value) in output.iter_mut().enumerate() {
         poll(cancelled)?;
-        for p in 0..model.m {
-            output[p] = output[p] + effort[i].scale(model.g[i * model.m + p]);
-            if let Some(dg) = port_direction {
-                output[p] = output[p] + original_effort[i].scale(dg[i * model.m + p]);
-            }
-        }
+        *value = crate::harmonic::port_output_tangent(
+            &model.g, model.m, p, effort, port_direction, original_effort,
+        )?;
     }
     Ok(output)
 }

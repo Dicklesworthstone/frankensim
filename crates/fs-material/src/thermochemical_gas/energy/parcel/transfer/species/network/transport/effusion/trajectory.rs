@@ -546,3 +546,6 @@ pub(super) fn advance_candidate_with_row_limit<C: FnMut() -> bool>(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+#[path = "trajectory/layered_tests.rs"]
+mod layered_tests;

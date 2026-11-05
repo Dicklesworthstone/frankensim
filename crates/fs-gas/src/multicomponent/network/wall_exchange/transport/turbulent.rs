@@ -3,6 +3,96 @@
 use super::{Length, WallExchangeError, admit, positive};
 use fs_math::det;
 
+/// Coupled smooth-pipe friction and Gnielinski turbulent heat transfer.
+///
+/// Bulk Reynolds and Prandtl numbers are recomputed from the original gas
+/// composition, calorics, viscosity and conductivity at every source interval.
+/// This explicitly selected correlation requires fully developed flow in a
+/// smooth circular pipe, modest wall-to-bulk property variation and low Mach
+/// number. It does not infer development from Reynolds number, model roughness,
+/// or interpolate through transition. The original branch must be at least ten
+/// diameters long; that geometric check alone does not establish development.
+///
+/// The supported range is deliberately restricted to Re in [1e4, 1e6] and Pr
+/// in [0.5, 200]. Callers may narrow both ranges. The same Darcy factor drives
+/// momentum and heat; no constant Nusselt input is needed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CircularGnielinskiWall {
+    /// Positive diameter of the original constant-area circular branch [m].
+    pub diameter: Length,
+    /// Inclusive declared Reynolds interval, contained in [1e4, 1e6].
+    pub reynolds_number: [f64; 2],
+    /// Inclusive declared Prandtl interval, contained in [0.5, 200].
+    pub prandtl_number: [f64; 2],
+    /// Positive upper wall-relative Mach bound, no greater than 0.3.
+    pub maximum_mach_number: f64,
+}
+
+impl CircularGnielinskiWall {
+    pub(super) fn validate(self) -> Result<(), WallExchangeError> {
+        let [re_min, re_max] = self.reynolds_number;
+        let [pr_min, pr_max] = self.prandtl_number;
+        if !positive(self.diameter.value())
+            || !re_min.is_finite()
+            || !re_max.is_finite()
+            || re_min < 1e4
+            || re_min > re_max
+            || re_max > 1e6
+            || !pr_min.is_finite()
+            || !pr_max.is_finite()
+            || pr_min < 0.5
+            || pr_min > pr_max
+            || pr_max > 200.0
+            || !positive(self.maximum_mach_number)
+            || self.maximum_mach_number > 0.3
+        {
+            return Err(WallExchangeError::Invalid(
+                "Gnielinski circular wall geometry or applicability",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Return `(Darcy friction factor, Nusselt number)` from the same state.
+    ///
+    /// `f = (0.79 ln(Re) - 1.64)^-2`,
+    /// `Nu = (f/8)(Re-1000)Pr / [1 + 12.7 sqrt(f/8)(Pr^(2/3)-1)]`.
+    /// Reference: Gnielinski (1976), International Chemical Engineering 16(2),
+    /// 359--368, turbulent pipe-flow heat-transfer correlation.
+    /// This allocation-free evaluation shares the smooth-pipe relation used by
+    /// `fs-convection` without introducing its FEM dependencies into gas flow.
+    pub fn coefficients(
+        self,
+        reynolds: f64,
+        prandtl: f64,
+    ) -> Result<(f64, f64), WallExchangeError> {
+        self.validate()?;
+        admit(
+            "Reynolds number",
+            reynolds,
+            self.reynolds_number[0],
+            self.reynolds_number[1],
+        )?;
+        admit(
+            "Prandtl number",
+            prandtl,
+            self.prandtl_number[0],
+            self.prandtl_number[1],
+        )?;
+        let inverse = 0.79_f64.mul_add(det::ln(reynolds), -1.64);
+        let friction = 1.0 / (inverse * inverse);
+        let eighth = friction / 8.0;
+        let nusselt = eighth * (reynolds - 1000.0) * prandtl
+            / (1.0 + 12.7 * det::sqrt(eighth) * (det::pow(prandtl, 2.0 / 3.0) - 1.0));
+        if !positive(friction) || !positive(nusselt) {
+            return Err(WallExchangeError::Invalid(
+                "unrepresentable Gnielinski coefficients",
+            ));
+        }
+        Ok((friction, nusselt))
+    }
+}
+
 /// Colebrook-White Darcy friction with explicit equivalent sand-grain roughness.
 ///
 /// The original mixture supplies viscosity, density and wall-relative speed at
@@ -116,6 +206,78 @@ impl CircularTurbulentWall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn heat_model() -> CircularGnielinskiWall {
+        CircularGnielinskiWall {
+            diameter: Length::new(0.02),
+            reynolds_number: [1e4, 1e6],
+            prandtl_number: [0.5, 200.0],
+            maximum_mach_number: 0.3,
+        }
+    }
+
+    #[test]
+    fn gnielinski_g1_friction_heat_relation_and_prandtl_dependence() {
+        for re in [1e4_f64, 1e5, 1e6] {
+            let expected_f = (0.79 * re.ln() - 1.64).powi(-2);
+            let mut previous_nu = 0.0;
+            for pr in [0.5_f64, 1.0, 7.0, 200.0] {
+                let (f, nu) = heat_model().coefficients(re, pr).unwrap();
+                // Independent platform functions and the original equation;
+                // at Pr=1 the denominator is exactly one (Reynolds analogy).
+                let expected_nu = (expected_f / 8.0) * (re - 1000.0) * pr
+                    / (1.0 + 12.7 * (expected_f / 8.0).sqrt() * (pr.powf(2.0 / 3.0) - 1.0));
+                assert!((f / expected_f - 1.0).abs() < 2e-13);
+                assert!((nu / expected_nu - 1.0).abs() < 2e-13);
+                assert!(nu > previous_nu);
+                previous_nu = nu;
+                if pr == 1.0 {
+                    assert_eq!(nu, (f / 8.0) * (re - 1000.0));
+                }
+            }
+        }
+        let (_, slow) = heat_model().coefficients(1e4, 0.7).unwrap();
+        let (_, fast) = heat_model().coefficients(1e5, 0.7).unwrap();
+        assert!(fast > slow);
+    }
+
+    #[test]
+    fn gnielinski_g0_requires_authored_supported_thermal_and_flow_regimes() {
+        for re in [9999.0, 1e6 + 1.0, f64::NAN, f64::INFINITY] {
+            assert!(heat_model().coefficients(re, 1.0).is_err());
+        }
+        for pr in [0.0, 0.49, 200.01, f64::NAN, f64::INFINITY] {
+            assert!(heat_model().coefficients(1e5, pr).is_err());
+        }
+        let narrowed = CircularGnielinskiWall {
+            reynolds_number: [2e4, 2e5],
+            prandtl_number: [0.7, 7.0],
+            ..heat_model()
+        };
+        assert!(narrowed.coefficients(1e4, 1.0).is_err());
+        assert!(narrowed.coefficients(1e5, 0.5).is_err());
+        assert!(narrowed.coefficients(2e4, 0.7).is_ok());
+        for invalid in [
+            CircularGnielinskiWall {
+                diameter: Length::new(0.0),
+                ..heat_model()
+            },
+            CircularGnielinskiWall {
+                reynolds_number: [4000.0, 1e6],
+                ..heat_model()
+            },
+            CircularGnielinskiWall {
+                prandtl_number: [0.5, 201.0],
+                ..heat_model()
+            },
+            CircularGnielinskiWall {
+                maximum_mach_number: 0.4,
+                ..heat_model()
+            },
+        ] {
+            assert!(invalid.coefficients(1e5, 1.0).is_err());
+        }
+    }
 
     fn model(relative_roughness: f64) -> CircularTurbulentWall {
         CircularTurbulentWall {

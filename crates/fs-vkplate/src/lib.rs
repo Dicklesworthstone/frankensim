@@ -79,6 +79,9 @@ pub fn standard_gas() -> GasState {
 mod material_gas_tests;
 
 #[cfg(test)]
+mod microphone_delay_tests;
+
+#[cfg(test)]
 mod material_tests;
 
 #[cfg(test)]
@@ -2022,6 +2025,8 @@ pub struct Cavity {
 /// the weights are stored per shape: `shape[m]` is mode `m`'s shape, and `heads` holds per head body its
 /// weights shape-major (`g` of shape `s` at node `i` is `weights[s * n + i]`) and per mode its sign there.
 /// The step projects and loads once per shape, the same sums as per mode.
+/// A vent contributes its outward volume displacement times the aperture-mean pressure shape to `Y`.
+/// The SAME shape maps modal pressure back onto the vent's inertance, preserving pressure/flow work.
 #[derive(Clone)]
 pub struct AirModes {
     pub kappa: Vec<f64>,
@@ -2030,6 +2035,9 @@ pub struct AirModes {
     pub xp: Vec<f64>,
     pub shape: Vec<usize>,
     pub heads: Vec<(usize, Vec<f64>, Vec<f64>)>,
+    /// `(cavity index, aperture-mean shape per mode)` for each attached lumped vent.
+    /// Shapes are dimensionless and signed; a nodal aperture may have zero coupling.
+    pub ports: Vec<(usize, Vec<f64>)>,
     /// Scratch for the projected volumes, then the pressure amplitudes, of one step.
     pub y: Vec<f64>,
     /// Scratch per shape: a head's projection on it, then the pressure it carries there.
@@ -2047,6 +2055,10 @@ pub struct AirModes {
 const LAYER_FIT_POINTS: usize = 400;
 /// The fit's poles per decade, from a thirtieth of the band's lowest (warped) frequency to thirty times its highest.
 const LAYER_POLES_PER_DECADE: f64 = 3.0;
+/// Relative least-squares weight of the reactive quadrature. The full-band
+/// loss still has to pass its independent 1% gate. This is a numerical fit
+/// weight, not a material parameter or a correction to a mode's frequency.
+const LAYER_REACTANCE_WEIGHT: f64 = 0.1;
 /// The largest relative error the fit may leave in either layer's loss over its band.
 pub const LAYER_FIT_TOLERANCE: f64 = 0.01;
 
@@ -2067,12 +2079,16 @@ pub const LAYER_FIT_TOLERANCE: f64 = 0.01;
 ///   The fit is made in the leapfrog's own discrete domain (the trapezoid's warped frequency and the scheme's
 ///   `sin(omega k) / (omega k)` decay factor), so the stepped loss follows the law. The poles are numerical
 ///   (`LAYER_POLES_PER_DECADE`), not physics, and the band is 20 Hz to the smaller of 20 kHz and a fifth of the
-///   rate. The worst relative error left in either layer's loss over the band is in `fit_error`, and above
-///   `LAYER_FIT_TOLERANCE` the layers are refused.
+///   rate. Loss is fitted over that whole band; the reactive quadrature is fitted over the admitted modes'
+///   frequency range. Both use the same nonnegative pole weights, retaining the passive realization.
+///   The worst relative error left in either layer's loss over the band is in `fit_error`, and above
+///   `LAYER_FIT_TOLERANCE` the layers are refused. `reactance_fit_error` reports the separate residual over
+///   `resonance_band`; it is not a bound on the response outside that band or on a coupled pole.
 /// - Each mode scales the fit so that, at its own frequency, the viscous part decays at its viscous share and the
 ///   thermal part at its thermal share, so the mode rings down at its `sigma`. The layers' reactance also lowers
-///   its frequency. The law's first-order shift is `sigma / (2 pi)` Hz, but only the loss is fitted, so the
-///   fitted reactance gives less: about 0.9 of it at 591 Hz and 0.7 at 5.8 kHz (96 and 144 kHz).
+///   its frequency. The law's first-order shift is `sigma / (2 pi)` Hz. Fitting both quadratures resolves
+///   the missing frequency shift of the former loss-only fit without adding a pitch correction or changing
+///   the time step. Finite clock and pole-fit errors remain explicit and must converge under refinement.
 /// - Away from its own frequency a mode's loss follows the half-order law on both sides:
 ///   - Below it, where `X` follows the heads, the viscous layer scrubs the air the heads carry.
 ///   - Above it, where `X` barely moves, the thermal layer takes the air spring's share.
@@ -2106,16 +2122,23 @@ pub struct AirLayers {
     /// The fit's band [Hz], and its worst relative error there in the viscous and the thermal loss.
     pub band: (f64, f64),
     pub fit_error: (f64, f64),
+    /// Admitted mode-frequency range [Hz] used for the reactive quadrature,
+    /// and its worst relative fit errors (viscous, thermal) on a finer grid.
+    /// These precede each mode's exact loss normalization and are not pole-error bounds.
+    pub resonance_band: (f64, f64),
+    pub reactance_fit_error: (f64, f64),
     /// The largest static softening of an air spring, `sum_j G_j / kappa`, over the modes.
     pub softening: f64,
 }
 
 /// One pole's response on the leapfrog's clock: the trapezoid-stepped `p / (p + xi)` at `omega`, which is the
-/// continuous one at the warped frequency `(2 / k) tan(omega k / 2)`. Returns (Re, Im).
-fn layer_pole(k: f64, omega: f64, xi: f64) -> (f64, f64) {
+/// continuous one at the warped frequency `(2 / k) tan(omega k / 2)`.
+/// Returns (Re, Im, 1 - Re), computing the last term without subtraction:
+/// the thermal spring correction is `-G xi / (p + xi)`, not `G p / (p + xi)`.
+fn layer_pole(k: f64, omega: f64, xi: f64) -> (f64, f64, f64) {
     let w = 2.0 / k * (0.5 * omega * k).tan();
     let d = w * w + xi * xi;
-    (w * w / d, w * xi / d)
+    (w * w / d, w * xi / d, xi * xi / d)
 }
 
 /// The half-order law's shapes on the leapfrog's clock, both up to a constant: the viscous loss term
@@ -2142,44 +2165,88 @@ impl AirLayers {
         }
         let band = (20.0, (0.2 / k).min(20000.0));
         let (wa, wb) = (2.0 * PI * band.0, 2.0 * PI * band.1);
+        // The existing discrete loss compensation is not itself an exact
+        // fractional transfer under the trapezoid's frequency warp. Fit its
+        // reactive part where these actual resonances live, retaining the
+        // original full-band loss obligation. No instrument-specific cutoff.
+        let mut frequencies = Vec::with_capacity(nm);
+        for m in 0..nm {
+            let (sv, st) = (sigma_viscous[m], sigma_thermal[m]);
+            if !(sv.is_finite() && sv >= 0.0 && st.is_finite() && st >= 0.0) {
+                return Err(format!("air layers: mode {m}'s shares {sv} and {st} 1/s must be finite and not negative"));
+            }
+            let mass = kappa[m] / wt2[m];
+            let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
+            if !(mass.is_finite() && mass > 0.0 && om >= wa && om <= wb) {
+                return Err(format!("air layers: mode {m} at {:.1} Hz lies outside the fit's {}-{} Hz", om / (2.0 * PI), band.0, band.1));
+            }
+            frequencies.push(om);
+        }
+        let ra = frequencies.iter().copied().reduce(f64::min).unwrap_or(wa);
+        let rb = frequencies.iter().copied().reduce(f64::max).unwrap_or(wb);
+        let resonance_band = (ra / (2.0 * PI), rb / (2.0 * PI));
         let warp = |w: f64| 2.0 / k * (0.5 * w * k).tan();
         let (xi_lo, xi_hi) = (warp(wa) / 30.0, warp(wb) * 30.0);
         let poles = (LAYER_POLES_PER_DECADE * (xi_hi / xi_lo).log10()).ceil() as usize + 1;
         let xi: Vec<f64> = (0..poles).map(|j| xi_lo * (xi_hi / xi_lo).powf(j as f64 / (poles - 1) as f64)).collect();
         let at = |i: usize, n: usize| wa * (wb / wa).powf(i as f64 / (n - 1) as f64);
-        // one least squares per layer on the relative error, columns at unit norm (nnls's threshold is absolute)
+        let resonance_at = |i: usize, n: usize| ra * (rb / ra).powf(i as f64 / (n - 1) as f64);
+        // One nonnegative fit per layer. The two quadratures of sqrt(i omega)
+        // have equal magnitude; so do the softening and loss of -1/sqrt(i omega).
+        // Their discrete eigenvalue derivative supplies the same clock factor
+        // to frequency shift and decay. Columns have unit norm because nnls's
+        // threshold is absolute. The reactive rows add no states or hot-loop work.
         let fit = |viscous: bool| -> Vec<f64> {
-            let mut a = vec![0.0; LAYER_FIT_POINTS * poles];
+            let rows = 2 * LAYER_FIT_POINTS;
+            let mut a = vec![0.0; rows * poles];
+            let mut target = vec![1.0; rows];
+            target[LAYER_FIT_POINTS..].fill(LAYER_REACTANCE_WEIGHT);
             for i in 0..LAYER_FIT_POINTS {
                 let w = at(i, LAYER_FIT_POINTS);
                 let (tv, tt) = layer_targets(k, w);
+                let wr = resonance_at(i, LAYER_FIT_POINTS);
+                let (rv, rt) = layer_targets(k, wr);
                 for (j, &x) in xi.iter().enumerate() {
-                    let (re, im) = layer_pole(k, w, x);
+                    let (re, im, _) = layer_pole(k, w, x);
+                    let (_, ri, rc) = layer_pole(k, wr, x);
                     a[i * poles + j] = if viscous { re / tv } else { im / tt };
+                    a[(LAYER_FIT_POINTS + i) * poles + j] = LAYER_REACTANCE_WEIGHT
+                        * if viscous { ri / rv } else { rc / rt };
                 }
             }
-            let norms: Vec<f64> = (0..poles).map(|j| (0..LAYER_FIT_POINTS).map(|i| a[i * poles + j].powi(2)).sum::<f64>().sqrt()).collect();
-            for i in 0..LAYER_FIT_POINTS {
+            let norms: Vec<f64> = (0..poles).map(|j| (0..rows).map(|i| a[i * poles + j].powi(2)).sum::<f64>().sqrt()).collect();
+            for i in 0..rows {
                 for j in 0..poles {
                     a[i * poles + j] /= norms[j];
                 }
             }
-            let x = fs_material::visco::nnls(&a, &vec![1.0; LAYER_FIT_POINTS], LAYER_FIT_POINTS, poles);
+            let x = fs_material::visco::nnls(&a, &target, rows, poles);
             x.iter().zip(&norms).map(|(x, n)| x / n).collect()
         };
         let (wv, wt) = (fit(true), fit(false));
         let fine = 10 * LAYER_FIT_POINTS;
         let mut fit_error = (0.0f64, 0.0f64);
+        let mut reactance_fit_error = (0.0f64, 0.0f64);
         for i in 0..fine {
             let w = at(i, fine);
             let (tv, tt) = layer_targets(k, w);
             let (mut sv, mut st) = (0.0, 0.0);
+            let wr = resonance_at(i, fine);
+            let (rv, rt) = layer_targets(k, wr);
+            let (mut rsv, mut rst) = (0.0, 0.0);
             for (j, &x) in xi.iter().enumerate() {
-                let (re, im) = layer_pole(k, w, x);
+                let (re, im, _) = layer_pole(k, w, x);
+                let (_, ri, rc) = layer_pole(k, wr, x);
                 sv += wv[j] * re;
                 st += wt[j] * im;
+                rsv += wv[j] * ri;
+                rst += wt[j] * rc;
             }
             fit_error = (fit_error.0.max((sv / tv - 1.0).abs()), fit_error.1.max((st / tt - 1.0).abs()));
+            reactance_fit_error = (
+                reactance_fit_error.0.max((rsv / rv - 1.0).abs()),
+                reactance_fit_error.1.max((rst / rt - 1.0).abs()),
+            );
         }
         if !(fit_error.0 <= LAYER_FIT_TOLERANCE && fit_error.1 <= LAYER_FIT_TOLERANCE) {
             return Err(format!(
@@ -2193,17 +2260,11 @@ impl AirLayers {
         let mut softening: f64 = 0.0;
         for m in 0..nm {
             let (sv, st) = (sigma_viscous[m], sigma_thermal[m]);
-            if !(sv.is_finite() && sv >= 0.0 && st.is_finite() && st >= 0.0) {
-                return Err(format!("air layers: mode {m}'s shares {sv} and {st} 1/s must be finite and not negative"));
-            }
             let mass = kappa[m] / wt2[m];
-            let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
-            if !(mass.is_finite() && mass > 0.0 && om >= wa && om <= wb) {
-                return Err(format!("air layers: mode {m} at {:.1} Hz lies outside the fit's {}-{} Hz", om / (2.0 * PI), band.0, band.1));
-            }
+            let om = frequencies[m];
             let (mut re, mut im) = (0.0, 0.0);
             for (j, &x) in xi.iter().enumerate() {
-                let (r, i) = layer_pole(k, om, x);
+                let (r, i, _) = layer_pole(k, om, x);
                 re += wv[j] * r;
                 im += wt[j] * i;
             }
@@ -2237,6 +2298,8 @@ impl AirLayers {
             r: vec![0.0; nm * poles],
             band,
             fit_error,
+            resonance_band,
+            reactance_fit_error,
             softening,
         })
     }
@@ -2247,7 +2310,11 @@ impl AirLayers {
 #[derive(Clone)]
 pub struct Port {
     pub area: f64,
+    /// Throat length plus the end corrections still represented by this plug [m].
     pub length: f64,
+    /// Included interior end correction [m]. Explicit cavity modes replace it
+    /// with resolved air inertia; the exterior correction remains in `length`.
+    pub interior_end_correction: f64,
     /// Radiation (and flow) resistance on the volume velocity [Pa s / m^3].
     pub resistance: f64,
     /// Opening position and outward normal sign along z (for microphones).
@@ -2262,8 +2329,9 @@ impl Port {
     pub fn new(radius: f64, head_thickness: f64, pos: [f64; 3], facing: f64) -> Port {
         let area = PI * radius * radius;
         // two flanged end corrections of 0.85 r each
-        let length = head_thickness + 1.7 * radius;
-        Port { area, length, resistance: 0.0, pos, facing, x: 0.0, u: 0.0, du: 0.0 }
+        let interior_end_correction = 0.85 * radius;
+        let length = head_thickness + 2.0 * interior_end_correction;
+        Port { area, length, interior_end_correction, resistance: 0.0, pos, facing, x: 0.0, u: 0.0, du: 0.0 }
     }
 }
 
@@ -2598,7 +2666,33 @@ impl Drive {
     }
 }
 
-/// Rayleigh (baffled) pressure microphone.
+/// Coefficients for a geometric fractional-sample propagation delay. Centered cubic
+/// Lagrange interpolation preserves the first four time moments, reducing the
+/// fraction-dependent gain/phase error that otherwise distorts interference.
+/// Its leading lobe starts one sample before the integer part of the delay.
+/// Subsample paths use linear interpolation so every tap remains causal;
+/// integer delays take the exact two-slot fast path. This polynomial FIR is
+/// not an antialias filter.
+fn microphone_delay_taps(delay: f64) -> (usize, [f64; 4]) {
+    let whole = delay.floor() as usize;
+    let fraction = delay - whole as f64;
+    if whole == 0 || fraction == 0.0 {
+        return (whole, [1.0 - fraction, fraction, 0.0, 0.0]);
+    }
+    let f = fraction;
+    (
+        whole - 1,
+        [
+            -f * (1.0 - f) * (2.0 - f) / 6.0,
+            (1.0 + f) * (1.0 - f) * (2.0 - f) / 2.0,
+            (1.0 + f) * f * (2.0 - f) / 2.0,
+            -(1.0 + f) * f * (1.0 - f) / 6.0,
+        ],
+    )
+}
+
+/// Rayleigh pressure microphone, optionally with the unbaffled thin-source approximation.
+/// Each prepared path uses cubic fractional-delay interpolation (linear below one sample of flight).
 #[derive(Clone)]
 pub struct Mic {
     pub pos: [f64; 3],
@@ -2606,8 +2700,10 @@ pub struct Mic {
     ptaps: Vec<(usize, usize, f64, f64)>,      // cavity port, delay, weight lo, weight hi
     ring: Vec<f64>,
     /// Unbaffled thin source of radius a: the far field tends to the baffled (Rayleigh) one for
-    /// ka >> 1 and to a dipole (4/3pi) ka times it for ka << 1 (rigid disc). A first-order
-    /// high-pass with tau = 4a/(3 pi c) joins the two limits. None = baffled.
+    /// ka >> 1 and to the axial dipole amplitude (4/3pi) ka times it for ka << 1 (rigid disc).
+    /// A first-order high-pass with tau = 4a/(3 pi c) joins the two limits. Both faces radiate,
+    /// with opposite pressure polarity. This approximation does not resolve edge diffraction
+    /// or the low-frequency dipole's angular directivity. None = baffled, facing side only.
     pub unbaffled: Option<f64>,
     /// A rigid floor: head and cavity-port radiation both include the delayed,
     /// positive-pressure image path. Sources facing away from the microphone
@@ -3527,7 +3623,12 @@ impl Instrument {
                 })
                 .collect();
             let gkl = |k: usize, l: usize| -> f64 {
-                grams.iter().map(|(gram, sign)| sign[k] * sign[l] * gram[air.shape[k] * ns + air.shape[l]]).sum()
+                let heads: f64 = grams.iter().map(|(gram, sign)| sign[k] * sign[l] * gram[air.shape[k] * ns + air.shape[l]]).sum();
+                let ports: f64 = air.ports.iter().map(|(cavity, shape)| {
+                    let port = self.cavities[*cavity].port.as_ref().expect("air-mode vent must exist");
+                    shape[k] * shape[l] * port.area / (self.gas.density * port.length)
+                }).sum();
+                heads + ports
             };
             let trace: f64 = (0..nm).map(|k| air.kappa[k] * gkl(k, k)).sum();
             let trace_bound = trace + air.wt2.iter().fold(0.0f64, |x, &y| x.max(y));
@@ -3574,17 +3675,25 @@ impl Instrument {
                     for i in 0..b.n {
                         let p = [b.origin[0] + b.xy[i][0], b.origin[1] + b.xy[i][1], b.origin[2] + b.facing * b.rest_z[i]];
                         let d = [tp[0] - p[0], tp[1] - p[1], tp[2] - p[2]];
-                        if d[2] * b.facing <= 0.0 {
-                            continue; // the other side of this surface faces away from this path
+                        let side = d[2] * b.facing;
+                        if side == 0.0 || (side < 0.0 && m.unbaffled.is_none()) {
+                            continue;
                         }
                         let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                         let delay = r / self.gas.sound_speed * self.rate;
-                        let di = delay.floor() as usize;
-                        let fr = delay - di as f64;
-                        // w is the OUTWARD displacement of the facing side, so no sign flip
-                        let wgt = self.gas.density * h2 / (2.0 * PI * r) / (k * k);
-                        m.taps.push((bi, i, di, wgt * (1.0 - fr), wgt * fr));
+                        let (di, weights) = microphone_delay_taps(delay);
+                        // w is outward on the facing side. An unbaffled sheet's back face
+                        // has the opposite outward velocity: it radiates rarefaction when
+                        // the front compresses. Use the path's side, including floor images;
+                        // a rigid reflection itself still has positive pressure gain.
+                        let polarity = if side < 0.0 { -1.0 } else { 1.0 };
+                        let wgt = polarity * self.gas.density * h2 / (2.0 * PI * r) / (k * k);
+                        m.taps.push((bi, i, di, wgt * weights[0], wgt * weights[1]));
                         dmax = dmax.max(di + 2);
+                        if weights[2] != 0.0 || weights[3] != 0.0 {
+                            m.taps.push((bi, i, di + 2, wgt * weights[2], wgt * weights[3]));
+                            dmax = dmax.max(di + 4);
+                        }
                     }
                 }
             }
@@ -3598,11 +3707,14 @@ impl Instrument {
                         }
                         let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                         let delay = r / self.gas.sound_speed * self.rate;
-                        let di = delay.floor() as usize;
-                        let fr = delay - di as f64;
+                        let (di, weights) = microphone_delay_taps(delay);
                         let wgt = self.gas.density / (2.0 * PI * r);
-                        m.ptaps.push((ci, di, wgt * (1.0 - fr), wgt * fr));
+                        m.ptaps.push((ci, di, wgt * weights[0], wgt * weights[1]));
                         dmax = dmax.max(di + 2);
+                        if weights[2] != 0.0 || weights[3] != 0.0 {
+                            m.ptaps.push((ci, di + 2, wgt * weights[2], wgt * weights[3]));
+                            dmax = dmax.max(di + 4);
+                        }
                     }
                 }
             }
@@ -3660,11 +3772,9 @@ impl Instrument {
                 }
             }
             if let Some(q) = c.port.as_mut() {
-                // the air plug: rho L / A du/dt = p - R u (symplectic Euler, far below its limit)
-                let du = k * (p - q.resistance * q.u) * q.area / (self.gas.density * q.length);
-                q.u += du;
-                q.du = du / k;
-                q.x += k * q.u;
+                // Accumulate every pressure on the same old volume state before
+                // advancing the port. `du` becomes acceleration again below.
+                q.du = p;
             }
         }
         // the enclosed air's modes beyond the lumped term (`AirModes`): forces from this step's head
@@ -3684,6 +3794,12 @@ impl Instrument {
                 }
                 for m in 0..nm {
                     air.y[m] += sign[m] * air.q[air.shape[m]];
+                }
+            }
+            for (cavity, shape) in &air.ports {
+                let port = self.cavities[*cavity].port.as_ref().expect("air-mode vent must exist");
+                for m in 0..nm {
+                    air.y[m] += shape[m] * port.x;
                 }
             }
             match &mut air.layers {
@@ -3738,6 +3854,20 @@ impl Instrument {
                         *f += p * g;
                     }
                 }
+            }
+            for (cavity, shape) in &air.ports {
+                let port = self.cavities[*cavity].port.as_mut().expect("air-mode vent must exist");
+                port.du += shape.iter().zip(&air.y).map(|(g, p)| g * p).sum::<f64>();
+            }
+        }
+        for c in &mut self.cavities {
+            if let Some(q) = &mut c.port {
+                // u lives at the half steps, x at the same integer times as
+                // heads and air modes. All reciprocal forces use that time.
+                let du = k * (q.du - q.resistance * q.u) * q.area / (self.gas.density * q.length);
+                q.u += du;
+                q.du = du / k;
+                q.x += k * q.u;
             }
         }
         for r in &self.rads {
@@ -3952,6 +4082,8 @@ pub struct BodyImage {
 
 /// A microphone's prepared taps: (body, node, whole-sample delay, weight on that sample, weight on
 /// the next) on surface acceleration, and (cavity, delay, weights) on port flow acceleration.
+/// A cubic path occupies two consecutive pairs; consumers must sum every pair,
+/// including its signed interpolation coefficients.
 #[derive(Clone, Debug)]
 pub struct MicImage {
     pub taps: Vec<(usize, usize, usize, f64, f64)>,
@@ -4047,23 +4179,32 @@ impl Body {
 }
 
 // --------------------------------------------------------------------- decimation
-const DECIMATION_RADIUS_FRAMES: usize = 16;
+const DECIMATION_RADIUS_FRAMES: usize = 32;
 
 fn decimation_kernel(factor: usize) -> Vec<f64> {
     let taps = 2 * DECIMATION_RADIUS_FRAMES * factor + 1;
-    let fc = 0.46 / factor as f64; // cycles per input sample: 0.92 x output Nyquist
-    let mid = (taps / 2) as f64;
-    (0..taps)
-        .map(|i| {
-            let t = i as f64 - mid;
-            let s = if t == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * t).sin() / (PI * t) };
-            let wdw = 0.42 - 0.5 * (2.0 * PI * i as f64 / (taps - 1) as f64).cos() + 0.08 * (4.0 * PI * i as f64 / (taps - 1) as f64).cos();
-            s * wdw
-        })
-        .collect()
+    let half = taps / 2;
+    let fc = 0.5 / factor as f64;
+    let mut kernel = vec![0.0; taps];
+    // Exact symmetry permits one multiply per tap pair. The doubled support
+    // retains 0..0.45 of the output rate without the previous 4 dB rolloff at
+    // the upper edge, and suppresses foldover from 0.55 and above.
+    for offset in 0..=half {
+        let phase = PI * offset as f64 / half as f64;
+        let window = 0.42 + 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
+        let sinc = if offset == 0 { 2.0 * fc }
+            else if offset % factor == 0 { 0.0 }
+            else { (2.0 * PI * fc * offset as f64).sin() / (PI * offset as f64) };
+        let value = sinc * window;
+        kernel[half - offset] = value;
+        kernel[half + offset] = value;
+    }
+    let normalization = 2.0 * kernel[..half].iter().sum::<f64>() + kernel[half];
+    for value in &mut kernel { *value /= normalization; }
+    kernel
 }
 
-/// The offline filter in causal streaming form: 16 output frames of delay.
+/// The offline filter in causal streaming form: 32 output frames of delay.
 /// Phase and history survive arbitrary render blocks and cloned instruments.
 #[derive(Clone)]
 pub(crate) struct StreamingDecimator {
@@ -4082,14 +4223,25 @@ impl StreamingDecimator {
     }
     fn value(&self) -> f64 {
         let (a,b) = self.history.split_at(self.next);
+        let mut samples = b.iter().chain(a);
+        let half = self.kernel.len() / 2;
         let mut value = 0.0;
-        for (h,x) in self.kernel.iter().zip(b.iter().chain(a)) { value += h*x; }
+        for h in &self.kernel[..half] {
+            let left = *samples.next().expect("one history sample per kernel tap");
+            let right = *samples.next_back().expect("symmetric history pair");
+            value += h * (left + right);
+        }
+        value += self.kernel[half] * samples.next().expect("odd kernel's central sample");
         value
     }
     fn clear(&mut self) { self.history.fill(0.0); self.next = 0; }
 }
 
 /// Windowed-sinc low-pass then keep every `factor`-th sample.
+/// The retained band is 0..0.45 of the output rate (21.6 kHz at 48 kHz).
+/// The transition extends through Nyquist to 0.55 of that rate; frequencies
+/// beyond it are rejected before they can fold into the retained band.
+/// This observation filter cannot repair aliasing at the mechanical clock.
 pub fn decimate(x: &[f64], factor: usize) -> Vec<f64> {
     decimate_from(x, factor, 0)
 }
@@ -4110,12 +4262,13 @@ pub fn decimate_from(x: &[f64], factor: usize, start: usize) -> Vec<f64> {
         .map(|o| {
             let c = start + o * factor;
             let mut acc = 0.0;
-            for (j, hj) in h.iter().enumerate() {
-                let idx = c as i64 + j as i64 - half as i64;
-                if idx >= 0 && (idx as usize) < x.len() {
-                    acc += hj * x[idx as usize];
-                }
+            for (j, hj) in h[..half].iter().enumerate() {
+                let offset = half - j;
+                let left = c.checked_sub(offset).map_or(0.0, |i| x[i]);
+                let right = c.checked_add(offset).and_then(|i| x.get(i)).copied().unwrap_or(0.0);
+                acc += hj * (left + right);
             }
+            acc += h[half] * x[c];
             acc
         })
         .collect()
@@ -4126,13 +4279,60 @@ mod settling_decimation_tests {
     use super::*;
 
     #[test]
+    fn upper_partials_survive_while_out_of_band_partials_do_not_fold_back() {
+        for factor in [2, 3, 4, 6, 8, 12, 16, 24, 32] {
+            let kernel = decimation_kernel(factor);
+            let midpoint = (kernel.len() / 2) as f64;
+            // Evaluate the full FIR's Fourier response independently of the
+            // paired streaming/offline evaluation. Frequencies are cycles per
+            // output frame: .45 is 21.6 kHz at the kit's 48 kHz output rate.
+            let gain = |frequency: f64| -> f64 {
+                kernel.iter().enumerate().map(|(i, h)| {
+                    h * (2.0 * PI * frequency * (i as f64 - midpoint) / factor as f64).cos()
+                }).sum()
+            };
+            for i in 0..=450 {
+                let frequency = i as f64 / 1000.0;
+                assert!((gain(frequency) - 1.0).abs() < 2.5e-4,
+                    "factor {factor}: attenuated retained partial at {frequency}");
+            }
+            // Cover the entire internal Nyquist band, including higher
+            // folding images when the plate runs at 12x..32x the audio clock.
+            let stop_width = factor as f64 / 2.0 - 0.55;
+            let steps = (stop_width * 200.0).ceil() as usize;
+            for i in 0..=steps {
+                let frequency = 0.55 + stop_width * i as f64 / steps as f64;
+                assert!(gain(frequency).abs() < 2.0e-4,
+                    "factor {factor}: aliased partial at {frequency}");
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_upper_partial_has_the_right_amplitude_and_phase() {
+        for factor in [2, 3, 8, 32] {
+            let input: Vec<_> = (0..256 * factor).map(|i| {
+                let t = i as f64 / factor as f64;
+                (2.0 * PI * 0.45 * t).cos() + (2.0 * PI * 0.55 * t).cos()
+            }).collect();
+            let output = decimate_from(&input, factor, 64 * factor);
+            // The .55 partial would alias directly onto the wanted .45
+            // partial. Away from zero-padding edges, retain only the latter.
+            for (i, sample) in output.iter().enumerate().take(128) {
+                let expected = (2.0 * PI * 0.45 * (64 + i) as f64).cos();
+                assert!((sample - expected).abs() < 3.0e-4,
+                    "factor {factor}, frame {i}: {sample} vs {expected}");
+            }
+        }
+    }
+
+    #[test]
     fn settled_constant_does_not_acquire_a_startup_transient() {
         for factor in [2, 3, 4, 6, 8] {
             let input = vec![1.0; 100 * factor];
             let output = decimate_from(&input, factor, 32 * factor);
-            let dc = decimation_kernel(factor).iter().sum::<f64>();
-            assert_eq!(output[0].to_bits(), dc.to_bits());
-            assert!((decimate(&input[32 * factor..], factor)[0] - dc).abs() > 0.2);
+            assert!((output[0] - 1.0).abs() < 2e-14);
+            assert!((decimate(&input[32 * factor..], factor)[0] - 1.0).abs() > 0.2);
         }
     }
 

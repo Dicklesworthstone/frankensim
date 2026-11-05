@@ -80,6 +80,79 @@ impl RelaxationCoupling {
         }
     }
 }
+// Differentiate the SAME full-state Maxwell energy used by the original
+// gradient, including prestress curvature and every explicit memory row.
+// Linear arms need no scratch; mapped arms reuse two vectors across all arms.
+impl super::ContinuousStorageTangent for super::RelaxationStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        let Some(dimension) = self.base_dim.checked_add(self.couplings.len()) else {
+            return false;
+        };
+        if state.len() != dimension
+            || direction.len() != dimension
+            || out.len() != dimension
+            || state.iter().chain(direction).any(|v| !v.is_finite())
+        {
+            return false;
+        }
+        let Some(base) = self.base.continuous_tangent() else {
+            return false;
+        };
+        out.fill(f64::NAN);
+        if !base.apply(
+            &state[..self.base_dim],
+            &direction[..self.base_dim],
+            &mut out[..self.base_dim],
+        ) || out[..self.base_dim].iter().any(|v| !v.is_finite())
+        {
+            return false;
+        }
+        let mut mapped_scratch: Option<(Vec<f64>, Vec<f64>)> = None;
+        for (arm, coupling) in self.couplings.iter().enumerate() {
+            let memory = self.base_dim + arm;
+            let mut change = -direction[memory];
+            match coupling {
+                RelaxationCoupling::Linear(row) => {
+                    for (&weight, &v) in row.iter().zip(&direction[..self.base_dim]) {
+                        change += weight * v;
+                    }
+                    for (value, &weight) in out[..self.base_dim].iter_mut().zip(row) {
+                        *value += weight * change;
+                    }
+                }
+                RelaxationCoupling::Mapped { strain, scale } => {
+                    let (gradient, curvature) = mapped_scratch.get_or_insert_with(|| {
+                        (vec![f64::NAN; self.base_dim], vec![f64::NAN; self.base_dim])
+                    });
+                    gradient.fill(f64::NAN);
+                    curvature.fill(f64::NAN);
+                    let x = &state[..self.base_dim];
+                    let v = &direction[..self.base_dim];
+                    strain.gradient(x, gradient);
+                    strain.hessian_vector(x, v, curvature);
+                    let effort = scale * strain.strain(x) - state[memory];
+                    if !effort.is_finite() {
+                        return false;
+                    }
+                    for i in 0..self.base_dim {
+                        gradient[i] *= scale;
+                        curvature[i] *= scale;
+                        if !gradient[i].is_finite() || !curvature[i].is_finite() {
+                            return false;
+                        }
+                        change += gradient[i] * v[i];
+                    }
+                    for i in 0..self.base_dim {
+                        out[i] += gradient[i] * change + effort * curvature[i];
+                    }
+                }
+            }
+            out[memory] = -change;
+        }
+        out.iter().all(|v| v.is_finite())
+    }
+}
+
 impl PortHamiltonian {
     /// Append nonlinear Maxwell strain maps through the original H/R owner.
     ///
@@ -92,6 +165,11 @@ impl PortHamiltonian {
     /// dissipated energy is `dt*e_z^2/tau`, using the full discrete effort.
     /// Mapped evaluation currently uses bounded temporary derivative vectors;
     /// this reference nonlinear path does not claim allocation-free execution.
+    /// If the original storage declares a continuous tangent, the complete
+    /// relaxed storage retains it. Its exact action includes the geometric
+    /// curvature under stored stress and every mechanical/memory cross term.
+    /// Two derivative vectors are reused across mapped arms per action;
+    /// purely linear relaxation arms require no derivative scratch.
     ///
     /// Geometry, material bands, clocks and history bounds must be admitted by
     /// the caller. Nonlinear discrete-gradient evolution does not imply that

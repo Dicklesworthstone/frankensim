@@ -112,6 +112,58 @@ fn zero_duration_is_a_noop_with_the_correct_port_output() {
 }
 
 #[test]
+fn signed_port_output_preserves_a_weak_mode_in_direct_and_prepared_paths() {
+    let q = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let system = PortHamiltonian::new(3, 1, vec![0.0; 9], vec![0.0; 9],
+        vec![1.0; 3], Box::new(QuadraticStorage::new(q, 3).unwrap())).unwrap();
+    let large = 2.0_f64.powi(54);
+    let mut work = StepWorkspace::new(&system).unwrap();
+    for initial in [[large, 1.0, -large], [-large, 1.0, large], [1.0, large, -large]] {
+        assert_eq!(system.output(&initial), [1.0]);
+        let mut output = [0.0];
+        system.output_from_effort_into(&initial, &mut output).unwrap();
+        assert_eq!(output, [1.0]);
+        for dt in [0.0, 0.01] {
+            let mut next = [0.0; 3];
+            work.step_into(&system, &initial, &[0.0], dt, &mut next, &mut output).unwrap();
+            assert_eq!(next, initial);
+            assert_eq!(output, [1.0]);
+            assert_eq!(step(&system, &initial, &[0.0], dt).unwrap().y, [1.0]);
+        }
+    }
+}
+
+#[test]
+fn physical_port_output_retains_product_remainders_and_refuses_invalid_efforts() {
+    let delta = 2.0_f64.powi(-27);
+    let system = PortHamiltonian::new(2, 1, vec![0.0; 4], vec![0.0; 4],
+        vec![1.0 + delta, -1.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap())).unwrap();
+    let mut output = [42.0];
+    system.output_from_effort_into(&[1.0 - delta, 1.0], &mut output).unwrap();
+    assert_eq!(output, [-2.0_f64.powi(-54)]);
+    for effort in [&[1.0][..], &[1.0, f64::NAN][..], &[f64::MAX, 0.0][..]] {
+        assert!(system.output_from_effort_into(effort, &mut output).is_err());
+    }
+    assert!(system.output_from_effort_into(&[1.0, 1.0], &mut []).is_err());
+}
+
+#[test]
+fn unrepresentable_port_output_refuses_in_both_step_paths_without_publishing() {
+    let system = PortHamiltonian::new(1, 1, vec![0.0], vec![0.0],
+        vec![f64::from_bits(1)],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap())).unwrap();
+    let mut work = StepWorkspace::new(&system).unwrap();
+    let (mut next, mut output) = ([123.0], [456.0]);
+    for dt in [0.0, 0.01] {
+        assert!(step(&system, &[0.25], &[0.0], dt).is_err());
+        assert!(work.step_into(&system, &[0.25], &[0.0], dt, &mut next, &mut output).is_err());
+        assert_eq!(next, [123.0]);
+        assert_eq!(output, [456.0]);
+    }
+}
+
+#[test]
 fn supply_audit_still_detects_a_nonpassive_raw_system() {
     let sys = PortHamiltonian::from_raw_parts(1, 0, vec![0.2], vec![0.0], vec![],
         Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()));

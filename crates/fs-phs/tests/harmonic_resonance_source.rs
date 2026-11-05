@@ -76,6 +76,83 @@ fn external_mechanical_source_resolves_high_q_and_retains_physical_query_account
 }
 
 #[test]
+fn off_grid_lossless_poles_refuse_even_without_a_bandwidth_request() {
+    let natural = 1234.56789123_f64;
+    for scale in [1e-120, 1.0, 1e120] {
+        let force = C64::new(scale, -0.3 * scale);
+        let result = search_resonance(
+            (1000.0, 1500.0),
+            ResonanceControls {
+                absolute_frequency_tolerance_rad_s: 1e-7,
+                measure_half_power_bandwidth: false,
+                ..controls()
+            },
+            || false,
+            |omega, _, _| {
+                let dynamic = (natural - omega) * (natural + omega);
+                let displacement = force / C64::from_re(dynamic);
+                Ok::<_, Infallible>((displacement, displacement.scale(2.0 * omega / dynamic), 0.0))
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(ResonanceSearchError::FrequencyResolution | ResonanceSearchError::Invalid(_))
+            ),
+            "an undamped pole became a finite peak at scale {scale}: {result:?}"
+        );
+    }
+}
+
+#[test]
+fn a_finite_peak_narrower_than_frequency_tolerance_is_refined_in_its_original_units() {
+    let (natural, damping) = (1234.56789123_f64, 1e-6_f64);
+    let mut reference_frequency = None;
+    for scale in [1e-120, 1.0, 1e120] {
+        let force = C64::new(scale, -0.3 * scale);
+        let queries = Cell::new(0);
+        let result = search_resonance(
+            (1000.0, 1500.0),
+            ResonanceControls {
+                // The linewidth is 100 times narrower than this requested
+                // frequency width. Stopping on frequency alone misses its gain.
+                absolute_frequency_tolerance_rad_s: 1e-4,
+                measure_half_power_bandwidth: false,
+                ..controls()
+            },
+            || false,
+            |omega, need_derivative, _| {
+                assert!(need_derivative);
+                queries.set(queries.get() + 1);
+                let dynamic = C64::new((natural - omega) * (natural + omega), -damping * omega);
+                let displacement = force / dynamic;
+                let dq = -(C64::new(-2.0 * omega, -damping) / dynamic) * displacement;
+                Ok::<_, Infallible>((
+                    C64::new(0.0, -omega) * displacement,
+                    C64::new(0.0, -omega) * dq + C64::new(0.0, -1.0) * displacement,
+                    0.0,
+                ))
+            },
+        )
+        .unwrap();
+        // The complete mechanical mobility peaks at natural with gain 1/c;
+        // this oscillator has Q = natural/c, about 1.2 billion.
+        let exact = force.scale(1.0 / damping);
+        assert!((result.peak.angular_frequency_rad_s - natural).abs() < 1e-8);
+        assert!((result.observation.abs() / exact.abs() - 1.0).abs() < 1e-3);
+        assert!((result.observation - exact).abs() < 0.02 * exact.abs());
+        assert!(result.half_power.is_none());
+        assert_eq!(result.evaluations, queries.get());
+        assert!(result.evaluations < 64);
+        if let Some(reference) = reference_frequency {
+            assert_eq!(result.peak.angular_frequency_rad_s, reference);
+        } else {
+            reference_frequency = Some(result.peak.angular_frequency_rad_s);
+        }
+    }
+}
+
+#[test]
 fn source_feedthrough_interference_moves_the_observed_peak_and_both_half_heights() {
     // y=1+i*h/(gamma-i*(omega-center)). The direct term changes the
     // amplitude maximum away from the pole center and makes asymmetric edges.

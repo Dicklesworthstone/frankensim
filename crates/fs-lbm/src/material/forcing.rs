@@ -5,6 +5,8 @@ pub use heating::transport;
 pub mod electrothermal;
 mod thermal_walls;
 pub use thermal_walls::{MaterialThermalWall, MaterialWallExchange};
+mod moving_walls;
+pub use moving_walls::MaterialPlateExchange;
 
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use crate::ThermalLbm;

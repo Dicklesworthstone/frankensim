@@ -489,3 +489,5 @@ fn bounds_identity_cancellation_and_explicit_dark_channels_are_atomic() {
 }
 
 mod microphones;
+
+mod correlations;

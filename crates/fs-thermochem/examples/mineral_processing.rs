@@ -27,6 +27,8 @@
 //! mass to explicit sodium counterions and hydroxide/cyanide equivalents.
 //! Separate NBS lime modes retain compatible CaO, crystalline Ca(OH)2 and Ca2+
 //! sources for slaking, acid neutralization and the reverse hydrolysis endpoint.
+//! Pyrrhotite modes keep NBS alpha FeS and Fe7S8 distinct, with either finite
+//! dissolved-oxygen oxidation to sulfate or ferric attack to orthorhombic S.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
@@ -74,7 +76,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 50] = [
+const REACTIONS: [&str; 54] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "lime-hydration-nbs1989",
@@ -110,6 +112,10 @@ const REACTIONS: [&str; 50] = [
     "bicarbonate-dissociation",
     "pyrite-roasting",
     "pyrite-oxidation-ferrous",
+    "pyrrhotite-fes-oxidation-dissolved-oxygen",
+    "pyrrhotite-fe7s8-oxidation-dissolved-oxygen",
+    "ferric-pyrrhotite-fes-leach",
+    "ferric-pyrrhotite-fe7s8-leach",
     "ferrous-oxidation-ferric",
     "ferric-pyrite-oxidation",
     "ferric-hydrolysis-goethite",
@@ -717,6 +723,99 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
             ],
             equation: "ZnFe2O4(franklinite) + 2 H+(aq) -> Zn[2+](aq) + 2 FeO(OH)(goethite), net leach/precipitation endpoint with no reaction path inferred",
         },
+        "pyrrhotite-fes-oxidation-dissolved-oxygen" => ReactionCase {
+            reaction: MineralReaction::IronRichPyrrhotiteDissolvedOxygenOxidation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "pyrrhotite-fes-alpha-solid-nbs1989",
+                "oxygen-aqueous-nbs1989-thermochemistry",
+                "iron-ii-ion-aqueous-nbs1989",
+                "sulfate-ion-aqueous-nbs1989",
+            ],
+            species: &[
+                "FeS(s-alpha-pyrrhotite)",
+                "O2(aq)",
+                "Fe[2+](aq)",
+                "SO4[2-](aq)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "FeS(alpha-pyrrhotite) + 2 O2(aq) -> Fe[2+](aq) + SO4[2-](aq), no direct proton production",
+        },
+        "pyrrhotite-fe7s8-oxidation-dissolved-oxygen" => ReactionCase {
+            reaction: MineralReaction::SulfurRichPyrrhotiteDissolvedOxygenOxidation,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "pyrrhotite-fe7s8-solid-nbs1989",
+                "oxygen-aqueous-nbs1989-thermochemistry",
+                "water-liquid-nbs1989-thermochemistry",
+                "iron-ii-ion-aqueous-nbs1989",
+                "sulfate-ion-aqueous-nbs1989",
+                "hydrogen-ion-aqueous-nbs1989",
+            ],
+            species: &[
+                "Fe7S8(s-pyrrhotite)",
+                "O2(aq)",
+                "H2O(l)",
+                "Fe[2+](aq)",
+                "SO4[2-](aq)",
+                "H+(aq)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-liquid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+            ],
+            equation: "2 Fe7S8(pyrrhotite) + 31 O2(aq) + 2 H2O(l) -> 14 Fe[2+](aq) + 16 SO4[2-](aq) + 4 H+(aq), extent per two Fe7S8 units",
+        },
+        "ferric-pyrrhotite-fes-leach" => ReactionCase {
+            reaction: MineralReaction::FerricIronRichPyrrhotiteLeach,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "pyrrhotite-fes-alpha-solid-nbs1989",
+                "iron-iii-ion-aqueous-nbs1989",
+                "iron-ii-ion-aqueous-nbs1989",
+                "sulfur-orthorhombic-solid-nbs1989",
+            ],
+            species: &[
+                "FeS(s-alpha-pyrrhotite)",
+                "Fe[3+](aq)",
+                "Fe[2+](aq)",
+                "S(s)",
+            ],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "FeS(alpha-pyrrhotite) + 2 Fe[3+](aq) -> 3 Fe[2+](aq) + S(orthorhombic)",
+        },
+        "ferric-pyrrhotite-fe7s8-leach" => ReactionCase {
+            reaction: MineralReaction::FerricSulfurRichPyrrhotiteLeach,
+            reference: NBS_REFERENCE,
+            packs: &[
+                "pyrrhotite-fe7s8-solid-nbs1989",
+                "iron-iii-ion-aqueous-nbs1989",
+                "iron-ii-ion-aqueous-nbs1989",
+                "sulfur-orthorhombic-solid-nbs1989",
+            ],
+            species: &["Fe7S8(s-pyrrhotite)", "Fe[3+](aq)", "Fe[2+](aq)", "S(s)"],
+            phase_axes: &[
+                "source-phase-solid",
+                "source-phase-aqueous",
+                "source-phase-aqueous",
+                "source-phase-solid",
+            ],
+            equation: "Fe7S8(pyrrhotite) + 14 Fe[3+](aq) -> 21 Fe[2+](aq) + 8 S(orthorhombic)",
+        },
         "pyrite-roasting" => ReactionCase {
             reaction: MineralReaction::PyriteRoastingToHematite,
             reference: REFERENCE,
@@ -1247,11 +1346,27 @@ fn reference_point(
         "sodium-cyanide-cubic-solid-nbs1989-thermochemistry" => {
             Some("source-phase-sodium-cyanide-cubic")
         }
-        "sulfur-orthorhombic-solid-usgs-b2131" => Some("source-phase-sulfur-orthorhombic"),
+        "pyrrhotite-fes-alpha-solid-nbs1989" => Some("source-phase-pyrrhotite-fes-alpha"),
+        "pyrrhotite-fe7s8-solid-nbs1989" => Some("source-phase-pyrrhotite-fe7s8"),
+        "sulfur-orthorhombic-solid-usgs-b2131" | "sulfur-orthorhombic-solid-nbs1989" => {
+            Some("source-phase-sulfur-orthorhombic")
+        }
         _ => None,
     };
     if let Some(axis) = mineral_axis {
         point = point.with_quantity(axis, QuantitySpec::dimensional(Dims::NONE), 1.0)?;
+    }
+    let iron_per_sulfur = match pack_id {
+        "pyrrhotite-fes-alpha-solid-nbs1989" => Some(1.0),
+        "pyrrhotite-fe7s8-solid-nbs1989" => Some(0.875),
+        _ => None,
+    };
+    if let Some(ratio) = iron_per_sulfur {
+        point = point.with_quantity(
+            "source-iron-atoms-per-sulfur-atom",
+            QuantitySpec::dimensional(Dims::NONE),
+            ratio,
+        )?;
     }
     Ok(point)
 }

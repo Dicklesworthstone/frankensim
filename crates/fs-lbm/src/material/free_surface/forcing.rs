@@ -1,7 +1,52 @@
-//! Prescribed vessel acceleration through the source-owned sparse VOF trajectory.
+//! Prescribed acceleration fields and vessel motion on the sourced VOF trajectory.
 
 use super::*;
 use crate::d3q19::RigidFrame3;
+use crate::d3q19::freesurface3::BodyAccelerationField3;
+
+/// Prescribed affine body acceleration in the fixed physical grid axes.
+///
+/// `a(x) = acceleration_m_s2 + gradient_per_s2 * (x - origin_m)`.
+/// The grid origin is zero and native cell centres are `(i + 1/2) * dx`.
+/// This is a position-dependent load, not a complete rotating frame, Coriolis
+/// model, source-density buoyancy law or thermodynamic expansion model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaterialAffineAcceleration3 {
+    /// Fixed reference position in physical grid coordinates [m].
+    pub origin_m: [f64; 3],
+    /// Acceleration at that position [m/s²].
+    pub acceleration_m_s2: [f64; 3],
+    /// Row-major spatial derivative [1/s²], component then coordinate.
+    pub gradient_per_s2: [[f64; 3]; 3],
+}
+
+impl MaterialAffineAcceleration3 {
+    fn lattice_field(
+        self,
+        scale: &MaterialFreeSurfaceScaling<'_>,
+    ) -> Result<BodyAccelerationField3, MaterialLbmError> {
+        let mut origin = [0.0; 3];
+        let mut acceleration = [0.0; 3];
+        let mut gradient = [[0.0; 3]; 3];
+        for axis in 0..3 {
+            origin[axis] = converted(self.origin_m[axis], self.origin_m[axis] / scale.cell_size_m)?;
+            acceleration[axis] = converted(
+                self.acceleration_m_s2[axis],
+                scale.gravity_lattice(self.acceleration_m_s2[axis])?,
+            )?;
+            for coordinate in 0..3 {
+                let value = self.gradient_per_s2[axis][coordinate];
+                gradient[axis][coordinate] =
+                    converted(value, (value * scale.timestep_s) * scale.timestep_s)?;
+            }
+        }
+        Ok(BodyAccelerationField3::Affine {
+            origin,
+            acceleration,
+            gradient,
+        })
+    }
+}
 
 /// Prescribed motion of a rigid vessel, with all vectors in its moving axes.
 /// The material grid has physical origin zero and cell centres `(i+0.5)*dx`.
@@ -24,7 +69,7 @@ impl MaterialRigidFrame3 {
         self,
         scale: &MaterialFreeSurfaceScaling<'_>,
         body_acceleration_m_s2: [f64; 3],
-    ) -> Result<(RigidFrame3, [f64; 3]), MaterialLbmError> {
+    ) -> Result<(RigidFrame3, [f64; 3]), MaterialLbmError>{
         let mut native = RigidFrame3::default();
         let mut acceleration = [0.0; 3];
         for axis in 0..3 {
@@ -52,7 +97,71 @@ impl MaterialRigidFrame3 {
 }
 
 impl MaterialFreeSurface3<'_> {
-    /// Advance one physical timestep from the accepted gravity/acceleration
+    /// Bind a fixed-grid affine acceleration without advancing time or applying
+    /// an impulse. Density, mass, physical velocity and force-corrected stress
+    /// retain the same source/Guo conventions as [`Self::rebind_gravity`].
+    /// The affine coefficients are converted once; native cells and future
+    /// newly wet cells evaluate the same field at their actual positions.
+    pub fn rebind_affine_acceleration(
+        &mut self,
+        field: MaterialAffineAcceleration3,
+        gate: &CancelGate,
+    ) -> Result<(), MaterialLbmError> {
+        let field = field.lattice_field(&self.scaling)?;
+        self.lattice.rebind_body_acceleration_field(field, gate)?;
+        self.scaling.density_dependent_gravity = true;
+        Ok(())
+    }
+
+    /// Advance to the next prescribed affine field using both actual-density
+    /// force endpoints. `a0` scales by dt²/dx and the spatial gradient by dt².
+    /// The field stays in the original physical grid coordinates, including
+    /// through piston relocation; no per-cell material query or new field
+    /// buffer is needed. The complete native candidate publishes atomically.
+    pub fn advance_affine_acceleration(
+        &mut self,
+        next: MaterialAffineAcceleration3,
+        gate: &CancelGate,
+    ) -> Result<(), MaterialLbmError> {
+        let next = next.lattice_field(&self.scaling)?;
+        self.lattice.advance_body_acceleration_field(next, gate)?;
+        Ok(())
+    }
+
+    /// Compose the affine endpoint with absolute gas-link pressure [Pa] about
+    /// the original fixed pressure reference. The actual next liquid density
+    /// multiplies the field at each interface, including new interfaces. The
+    /// same pressure, source-frame and cancellation admission owns publication.
+    pub fn advance_affine_acceleration_with_gas_link_pressure(
+        &mut self,
+        next: MaterialAffineAcceleration3,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure_pa: impl Fn(MaterialGasPressureLink3) -> f64,
+    ) -> Result<(), MaterialLbmError> {
+        let next = next.lattice_field(&self.scaling)?;
+        let reference = self
+            .scaling
+            .reference_pressure_pa
+            .ok_or(MaterialLbmError::Invalid(
+                "absolute gas loading requires an explicit fixed pressure reference",
+            ))?;
+        self.lattice
+            .advance_body_acceleration_field_with_gas_link_pressure(
+                next,
+                gate,
+                maximum_density_excursion,
+                super::pressure::lattice_link_pressure_field(
+                    reference,
+                    self.scaling.cell_size_m,
+                    self.scaling.pressure_unit_pa,
+                    pressure_pa,
+                ),
+            )?;
+        Ok(())
+    }
+
+/// Advance one physical timestep from the accepted gravity/acceleration
     /// to `next_gravity_m_s2`, retaining both actual-density force endpoints.
     ///
     /// Select [`MaterialFreeSurfaceScaling::with_density_dependent_gravity`]

@@ -498,9 +498,10 @@ impl HarmonicFactor<'_> {
                 resistance = resistance + model.nonlinear_loss_row(i, &state);
             }
             loss += (effort[i].conj() * resistance).re * 0.5;
-            for p in 0..m {
-                output[p] = output[p] + effort[i].scale(model.g[i * m + p]);
-            }
+        }
+        for (p, value) in output.iter_mut().enumerate() {
+            poll(&mut cancelled)?;
+            *value = port_output(&model.g, m, p, &effort)?;
         }
         let mut port_power_components = Vec::with_capacity(m);
         let mut port_power = Vec::with_capacity(m);
@@ -629,4 +630,45 @@ impl HarmonicFactor<'_> {
         }
         Ok((state, relative))
     }
+}
+
+fn port_output(g: &[f64], ports: usize, port: usize, effort: &[C64]) -> Result<C64, HarmonicError> {
+    let re = crate::port_output_component(g, ports, port, |i| effort[i].re);
+    let im = crate::port_output_component(g, ports, port, |i| effort[i].im);
+    Ok(C64::new(
+        re.ok_or_else(|| invalid("physical port output is not representable"))?,
+        im.ok_or_else(|| invalid("physical port output is not representable"))?,
+    ))
+}
+
+// Keep BOTH terms of d(G^T e) in the same accumulator. Rounding G^T de and
+// dG^T e separately can erase a weak tangent when those large terms cancel.
+fn port_output_tangent(
+    g: &[f64], ports: usize, port: usize, effort_derivative: &[C64],
+    port_derivative: Option<&[f64]>, effort: &[C64],
+) -> Result<C64, HarmonicError> {
+    use crate::interconnection::accumulation::Sum;
+    let contract = || -> Option<C64> {
+        let mut re = Sum::default();
+        let mut im = Sum::default();
+        for (i, row) in g.chunks_exact(ports).enumerate() {
+            let derivative = effort_derivative[i];
+            if !finite(derivative) { return None; }
+            if row[port] != 0.0 {
+                re.product(row[port], derivative.re)?;
+                im.product(row[port], derivative.im)?;
+            }
+            if let Some(dg) = port_derivative {
+                let original = effort[i];
+                if !finite(original) { return None; }
+                let coefficient = dg[i * ports + port];
+                if coefficient != 0.0 {
+                    re.product(coefficient, original.re)?;
+                    im.product(coefficient, original.im)?;
+                }
+            }
+        }
+        Some(C64::new(re.value()?, im.value()?))
+    };
+    contract().ok_or_else(|| invalid("physical port output tangent is not representable"))
 }

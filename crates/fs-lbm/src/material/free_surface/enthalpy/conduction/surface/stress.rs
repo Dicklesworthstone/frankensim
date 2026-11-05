@@ -73,6 +73,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         dx: f64,
         gate: &CancelGate,
     ) -> Result<(), Error> {
+        if self.wetting.is_some() && self.height_graph_thermocapillary_surface().is_some() {
+            return Err(Error::Invalid(
+                "graph wetting has no separately solved wall/interface temperature closure",
+            ));
+        }
         if self.local_thermocapillary_surface().is_some() {
             return self.admit_local_surface_geometry(surfaces, gate);
         }
@@ -175,6 +180,11 @@ impl Conduction<'_, '_> {
         gate: &CancelGate,
     ) -> Result<BTreeMap<(u64, usize), f64>, Error> {
         let (normal_axis, graph) = match surface {
+            ThermocapillarySurface::Uniform => {
+                return Err(Error::Invalid(
+                    "solved interface temperature requires a resolved surface geometry",
+                ));
+            }
             ThermocapillarySurface::Planar(plane) => (plane.normal_axis, None),
             ThermocapillarySurface::HeightGraph(graph) => (graph.normal_axis, Some(graph)),
             ThermocapillarySurface::Local(model) => {

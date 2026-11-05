@@ -1,0 +1,54 @@
+frankensim.matdb-source.v1
+observation	identity	Anhydrous crystalline sodium sulfite Na2SO3	NBS Table 99:Na, Sodium (Prepared 1980), Na2SO3 state cr	The source molar mass is 126.0418 g/mol. The neutral formula contains two Na, one S and three O atoms. Hydrated solids, the adjacent ionized-solution ai row, commercial assay and sodium metabisulfite are distinct states.
+observation	standard	Literal NBS 298.15 K standard-state row	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The source gives formation enthalpy -1100.8 kJ/mol, independent formation Gibbs energy -1012.5 kJ/mol, standard molar entropy 145.94 J/(mol K) and isobaric molar heat capacity 120.25 J/(mol K). Values are the 298.15 K columns, not the 0 K formation enthalpy. One Cp point supplies no temperature integration law. Statistical uncertainty and cross-species covariance are unstated.
+observation	scope	Pure-source reference state only	NBS sections 5.5-5.8; https://doi.org/10.18434/M32124	All claims require 298.15 K and 1 bar. Matched individual-ion sources support a separate dissolved extent and source-reference reaction heat. These data do not establish complete dissolution, finite-concentration activities, saturation, reagent dose, oxygen transfer, copper catalysis, cyanide-treatment rate or plant removal efficiency.
+scalar	molar-mass	identity,scope	mass	126.0418	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-1100.8	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-1012.5	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	145.94	J/mol/K	tabulated
+scalar	heat-capacity	identity,standard,scope	cp	120.25	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	heat-capacity	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	heat-capacity	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	heat-capacity	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	heat-capacity	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	heat-capacity	phase	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	heat-capacity	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	heat-capacity	specimen	0	0	1

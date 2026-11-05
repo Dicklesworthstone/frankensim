@@ -98,8 +98,9 @@ reference areal mass and thickness, extra selected properties, receipts and
 model provenance survive the shared `MembraneLaw::Hyperelastic` carrier.
 Mechanical/frequency-conditioned reference properties, competing selected
 membrane capabilities, missing model/context and native domain failures refuse.
-The supplied thickness belongs to the model's original stress-free reference;
-bending and evolving thermal/reference changes are not inferred.
+The supplied thickness and areal mass belong to the original mesh reference.
+Without an explicit natural-reference selection that reference is stress-free;
+bending and evolving temperature/history are not inferred.
 
 For engineering Green strain `[E11,E22,2E12]`, an objective Cholesky
 representative supplies the original native plane-stress owner, including all
@@ -113,9 +114,10 @@ and unresolved principal-stretch boundaries refuse two-sided vibration
 admission. Native local stable-branch limits remain; no wrinkling or global
 stability certificate is added.
 
-`with_incompressible_hyperelastic_membrane` explicitly selects `J=1` through
-the original `hyper::incompressible_plane_stress` owner. The reference thickness
-is unchanged; its current normal stretch is the reciprocal in-plane area ratio.
+`with_incompressible_hyperelastic_membrane` explicitly selects elastic `Je=1`
+through the original `hyper::incompressible_plane_stress` owner. Reference
+thickness is unchanged. With the original natural reference, current normal
+stretch is the reciprocal in-plane area ratio.
 Both transverse shears relax against the native energy remainder and the full
 constrained tangent flows through the same Green-strain chain rule. No bulk
 penalty is evaluated or replaced. The original model card, source bundle,
@@ -126,6 +128,27 @@ finite-compliance selection, including in membrane equality. The existing
 `MembranePatch` equilibrium, pressure and vibration consumers use either choice
 through the same `MembraneLaw` without another spatial solver.
 
+`with_hyperelastic_reference_stretches` explicitly supplies positive natural
+length ratios in warp/weft/normal order. The fixed diagonal G maps the mesh
+reference to the native model's stress-free frame: Fe=F G^-1 and
+W_ref=det(G) W_native(Fe). Exact Piola and tangent pullbacks precede the same
+Green-strain chain rule; no second local Newton solve is introduced. The
+original thickness and areal mass remain fixed. Native stretch and fibre
+activation bounds apply to Fe. Exact incompressibility therefore constrains
+elastic volume while total det(F)=det(G), permitting a changed natural volume.
+The default reference and explicit identity G retain original response bits.
+
+`with_hyperelastic_mean_thermal_expansion` binds three finite mean-expansion
+endpoint sources and explicit reference/endpoint temperature-axis roles. Each
+length ratio is 1+the source's engineering strain. The exact card, typed fixed
+context and both temperatures must agree across sources; original mass,
+thickness and initial model belong to the reconstructed reference context.
+The same selected model is admitted at the endpoint context. All three source
+objects and axis roles survive in the material carrier. Small-strain alpha
+integrals are not reinterpreted as finite reference maps. Reference selection
+is explicit and occurs once; no temperature evolution, reciprocal heat or
+work balance for changing G is supplied by this fixed-endpoint preparation.
+
 `sheet_hyperelastic` checks independent compressible Neo-Hookean reduction,
 all native model tangents, tilted-fibre transverse relaxation and source/reference
 refusals. Its exact-incompressibility controls add an independent analytic
@@ -134,6 +157,42 @@ bitwise independence of unused bulk parameters, tilted-fibre traction closure,
 and retained source/mass/domain controls. `hyperelastic_membrane` checks 3-D
 force/tangent objectivity, independent mass, and finite-deformation
 dead-load/pressure equilibrium against an independent pyramid oracle.
+
+Natural-reference regressions add independent finite/exact Neo-Hookean
+energy/resultant/tangent formulas, all-model derivatives, elastic-domain and
+HGO-activation admission, typed thermal sources and unchanged mass. Bounded
+original-source numerical checks execute the pullback and constitutive chain;
+full typed-source and native consumer tests still require the complete workspace.
+
+## Fixed-mass PCM storage in a sensible solid matrix
+
+`phase::composite::PcmComposite` borrows one sensible all-solid matrix branch
+and one complete solid/liquid PCM chart. Its declared PCM mass fraction remains
+fixed. The constituents share temperature, retain their original source receipts
+and density interpolation laws, and have additive enthalpy and specific volume:
+`1/rho = (1-w)/rho_matrix + w/rho_pcm`. Actual composite liquid mass fraction is
+`w*f_pcm`; complete PCM melting leaves the matrix solid. PCM volume fraction is
+reported separately. A supplied total mass remains fixed as the returned free
+volume changes; the law does not update reference geometry or thermal inventory.
+
+Preparation merges every original caloric breakpoint, preserving the admitted
+piecewise-affine constituent `T(h)` exactly in real arithmetic, including latent
+plateaus. The explicit composite lower enthalpy datum is independent of both
+constituent datums. Cached slope and logarithmic, allocation-free state queries
+feed the existing `ThermalLaw`, thermal timeline and backward-Euler residual;
+entropy remains the mass-weighted original constituent integrals. Density is
+evaluated on the original constituents, never fitted to the compiled mixture
+knots. The combined original-knot preparation ceiling is 8192.
+
+The caller supplies compatible source pressure/work conditions and a nonreacting,
+local-equilibrium, additive-volume model with no heat of mixing. Unsupported
+temperatures, nonpositive fractions and unresolved caloric coordinates refuse.
+A matrix with an ambiguous solid plateau is excluded; two melting constituents
+would require a separate phase-allocation closure. No confinement, conductivity
+mixture rule, evolving geometry or extra pressure-work solver is supplied.
+Manufactured controls cover latent energy, mass/volume fractions, original
+density laws, merged sensible breakpoints, entropy, independent datum shifts,
+and explicit/implicit native heating across the latent plateau.
 
 ## Source calorics, kinetics and shrinkage for crystallization
 
@@ -1481,6 +1540,21 @@ uses the five historical Joanna composites from the real material pack.
 Source-backed test values do not make its energy/throughput outputs measured
 plant performance. Unit regressions and `xtask`'s `mining_bond_sources` exercise
 source preservation, independent energy/throughput answers and refusals.
+
+`comminution::drop_weight::resolve_jk_drop_weight` resolves the independent
+A-fraction and inverse-specific-energy b parameters of the JKDWT impact law
+from one scalar MatDB observation with identical source support. Original
+claims, evidence, uncertainty, observation, query, pack identity and verified
+receipts survive in the returned card. A must be in (0,1] and b positive;
+percent-valued A must be normalized before resolution. Missing or mixed
+parameters and unsupported source conditions refuse. `response` evaluates
+`t10 = A*(1-exp(-b*Ecs))` in coherent SI and preserves the complementary
+retained fraction; `energy_for_t10` inverts reachable targets below A. Both
+honor the explicitly supplied finite nonnegative energy interval, which does
+not establish experimental support. No PSD, abrasion ta, selection rate,
+liberation or SAG power is inferred. The `bueno-jkdwt-2021` material pack supplies
+five published fitted specimens; `drop_weight_reference` and the ordinary
+`mining_drop_weight_sources` compiler integration exercise those source rows.
 
 `comminution` supplies a typed, uncorrected Bond grinding-energy closure,
 dry-solids throughput from net pinion power, and ideal single-ball critical
@@ -3384,15 +3458,21 @@ rationalized quadratic, retaining weak thermal loss and refusing unresolved
 acoustic/thermal roots. No extra bulk viscosity, wall attenuation or thermal
 mode is added. Zero reservoir strength recovers the full original classical
 dispersion, including outside the leading Stokes--Kirchhoff approximation.
-For complex calorics, admission requires the discriminant's real part to stay
-positive throughout the zero-transport homotopy, whose quadratic minimum is
-checked analytically. Stronger mixed modes require explicit continuation and
-refuse: positive attenuation alone cannot exclude an acoustic/thermal root
-switch. A positive-reservoir, Eucken-ratio regression demonstrates that failure.
-Work is allocation-free and bounded by the admitted reservoir count. Direct
-continuity/momentum/energy residuals, a falsifier for the former multiplier,
-the zero-reservoir limit, dimensional similarity and branch refusals are
-covered by the shared dispersion unit tests and `tests/relaxation_absorption.rs`.
+For complex calorics, the acoustic root continues from zero transport at the
+requested frequency. An analytic positive-real discriminant minimum retains the
+inexpensive separated-mode fast path. Otherwise a quadratic Bezier enclosure
+bounds each complete continuation interval away from zero and tracks the
+square-root sheet across its artificial principal cut. Constant storage and at
+most 256 attempted intervals bound this work; coalescing, numerically unresolved
+or exhausted paths refuse. A stable equivalent quadratic formula avoids a
+cancelling denominator after a sheet change while the original rationalized
+formula retains weak thermal loss. This is pointwise transport continuation,
+not a proof of global frequency analyticity. Independent fine-step inverse-root
+continuation checks the positive-reservoir Eucken crossing that previously
+refused, with original polynomial and continuity/momentum/energy residuals,
+exact cut endpoints, coefficient scaling, coalescence refusals and dimensional
+similarity. The shared dispersion tests and `tests/relaxation_absorption.rs`
+also retain the old-multiplier falsifier and full zero-reservoir limit.
 Continuum, linear-response, constant-transport and original rate-data support
 remain required; no experimental or finite-wavefront claim is inferred.
 
@@ -5823,6 +5903,16 @@ already resolved multiphysics interface bundle into the existing
 separation is supplied separately and must include complete failure. No bulk
 material name, absent property, or geometric proximity creates an adhesive bond.
 
+Once complete failure has been accepted, opening and shear may continue beyond
+that obsolete adhesive range. Only the independent normal penetration remains
+bounded; every component must still be finite. The failed path evaluates the
+original compression penalty without inactive adhesive energy norms, preserving
+fracture loss exactly and adding no new bond work. The same rule applies to
+endpoint, timed, mean-traction/tangent and temperature-transfer paths. A step
+starting with surviving bonds still enforces the full separation/rate domain.
+Fixed frames, original trace correspondence and the structural owner's own
+displacement limits remain in force; no new sliding-contact geometry is inferred.
+
 The full bundle, exact source selections, ordered surfaces and texture frames
 remain accessible. The canonical fixed-external-condition policy applies to
 both value dependence and applicability: evolving gap, damage, stress, rate or
@@ -6099,6 +6189,22 @@ independent fully ruptured mixed-mode solution checks the complete toughness
 gradient, including its generally nonsymmetric contribution. These are numerical
 constitutive tests, not adhesive calibration or
 wall-clock performance claims.
+
+`trial_over_time_with_damage_weighted_compression_tangent` also returns the
+unchanged timed trial, vector mean and original damaged-area compression
+`integral d(s) Kc max(-gn(s),0) ds`, with separate optional derivatives of the
+mean traction and compression measure with respect to the endpoint jump.
+The pressure gradient reuses the analytic pressure primitive and moving
+initiation/failure/contact crossings, including first BK mode selection; it
+does not freeze endpoint damage or introduce another fracture history.
+Accepted history and physical time are fixed. Bond viscosity enters the
+traction derivative, never the compression-pressure measure. Ordinary scalar
+callers execute no derivative work; this path is bounded and allocation-free.
+Held kinks or unrepresentable crossing derivatives return `None` independently
+without changing admitted forces, work or state. Focused G0/G1/G3 regressions
+check independent derivatives through rotating mixed modes, reclosure, complete
+rupture and a small newly damaged area, plus exact intact/failed limits and
+source-preserving refusal.
 
 `resolve_mixed_mode_bilinear_cohesive` requires eight explicit ordered-interface
 claims: normal/shear stiffness [Pa/m], normal/shear strength [Pa], mode-I/mode-II
@@ -6438,7 +6544,8 @@ Focused native G1/G3 tests compare the modulus and all first/second derivatives 
 `BilinearCohesive::with_viscosity` selects explicit Kelvin--Voigt traction
 `(1-d) eta_i gdot_i` with independent normal/shear interface viscosities in Pa s/m.
 `trial_over_time` requires positive physical time and a declared jump-rate limit;
-untimed trials refuse this law. The original intrinsic common-mode or frozen-onset
+untimed trials refuse while bonds survive. After accepted complete failure no
+dashpot remains, so untimed continuation is also admitted. The original common-mode or frozen-onset
 BK fracture owner still owns damage and storage. Normal viscosity acts in both
 opening and compression while bonds survive, and all viscous traction vanishes
 after complete failure; the separate compression penalty remains.
@@ -7374,6 +7481,20 @@ The accumulated native caloric residual is retained and checked separately.
 All conservation budgets apply once to the entire interval, without multiplication
 by the number of steps. Open paths make no closed-system entropy claim.
 
+With all external-boundary slices empty, this same trajectory advances closed
+`GasTransportPaths`, including the native `layered_dusty_gas` interfaces and
+separate molecular paths. Every accepted half step retains its original
+laminate source/flux report. Layered interfaces count toward the shared
+connection limit when vacuum or held-reservoir paths are composed, and inactive
+layered reports count toward the retained-history bound. No second controller,
+flux model or energy update is introduced. Independent equal-molar-mass binary
+relaxation through parallel laminate/molecular exposures checks temporal
+refinement, accepted-only throughput and fixed whole-window conservation.
+Native laminate fixtures also check serial Knudsen inventory/enthalpy,
+multicomponent source/reference-energy parity, shared withdrawals, later
+transport of arrivals and transactional source/work/accuracy/cancellation
+refusals. These regressions are authored; native execution remains unverified.
+
 G0/G1/G3/G4 fixtures cover monatomic and diatomic analytic vacuum blowdown over
 three tolerance rungs, shared gross-withdrawal retries, deterministic caloric-
 reference invariance, new-species supply through two finite chambers with vacuum
@@ -8275,6 +8396,21 @@ the canonical cooling endpoint. The same kernel serves specific isobaric,
 volumetric, tabulated and assembled capacities. G1 regressions check signed
 nonlinear calorimetry, source-boundary refusal and source-query counts on
 64- and 4096-knot curves; this is a work bound, not a general throughput claim.
+
+The fixed-datum timeline laws (`IsobaricHeatCapacityLaw`,
+`FixedVolumeThermalLaw` and `HeatStorageThermalLaw`) additionally prepare a
+compensated caloric search index in O(knots) time and storage. Repeated h-to-T
+queries locate the source segment logarithmically and invert its original
+affine-capacity integral analytically, including decreasing capacity. They do
+not approximate the energy curve by straight lines or resample its source.
+Relative heat and entropy still integrate the crossed intervals directly.
+Numerically indistinguishable search knots or roundoff at a source boundary
+retain the direct inverse and its original refusal semantics. Law identities
+advance to v2 for this numerical operation change; source identities and
+uncertainty are unchanged. G1 tests cover both signs, interior datums, exact
+support endpoints, near-datum increments and at most 16 capacity reads for
+ordinary queries on 64-, 4096- and 262144-knot tables. This is an algorithmic
+work test, not a hardware throughput or experimental-accuracy claim.
 
 `HeatStorageThermalLaw` binds this total storage to the existing thermal
 timeline's specific-energy coordinate with an explicit total mass and datum.
@@ -9345,6 +9481,22 @@ energy equations. This does not supply molecular spectra, boundary layers,
 nonlinear response or experimental validity outside the original coefficients'
 supported band. The parabolic transport equations do not establish a finite
 wavefront; an observer's `r/c` reference delay is a numerical convention.
+
+`ClassicalBulkAbsorption::thermoviscous_wave` returns the typed
+`BulkThermoviscousWave` from that same acoustic root, with distinct total
+compressive traction/velocity and thermodynamic pressure/velocity impedances
+[Pa s/m]. With `eta = 4 mu/3 + zeta`, `t = p - eta du/dx`, hence
+`Z_t = rho omega/k` and `Z_p = Z_t + i eta k` in `exp(i k x - i omega t)`.
+The root owner retains the caloric contribution before subtracting viscous
+stress; pressure remains resolved even when those latter terms would cancel,
+including coincident viscous/thermal diffusion scales. DC returns the continuous
+limit `k=0`, `Z_t=Z_p=rho c`. Nonfinite/unrepresentable impedances refuse.
+Mechanical power uses `Re(t conj(u))/2`; complete thermal acoustic-energy flux
+also includes `Re(T' conj(q'))/(2 T0)`. This acoustic eigenmode does not supply
+the independent thermal mode or thermal end conditions. Native regressions
+close the original momentum/heat equations and full energy flux, the exact
+Cp=Cv viscous solution, separate shear/bulk heating, and weak/strong-loss limits.
+The existing wavenumber evaluation order and branch/refusal policy are retained.
 
 `fluid_acoustics::FluidAcoustics` admits one immutable acoustic snapshot with
 positive finite density, adiabatic sound speed, bulk modulus `K_s = rho c²`,
@@ -10706,6 +10858,13 @@ frozen-composition homogeneous source domain and bounded entropy/sonic roots.
 Regression sources cover positive and negative formation-reference shifts,
 near-shut pressure drives, and independent variable-Cp PR throat references.
 
+Real-gas energy/enthalpy trial samples use the original PR scalar density
+evaluator and NASA property-only calorics. The repeated reconstruction path
+therefore needs no component-vector allocation or fugacity calculation; it
+retains the same residual U, complete Cv, pressure and temperature derivative.
+The accepted material state still resolves the full EOS and original transport
+sources, preserving source-domain, fugacity and complete caloric/acoustic checks.
+
 ## Reversible volume work on source-bound real gas
 
 `IsochoricRealGasParcel::at_volume_isentropic` constructs an immutable reversible
@@ -11323,6 +11482,31 @@ are explicit; the original three-argument angle/power table remains available.
 The fourth argument `interior` instead resolves the same beam inside that warm
 layer, including its two boundary faces and evanescent/standing fields.
 
+### Finite acoustic sensor footprints
+
+`RectangularAcousticWindow` adds an exact uniform rectangular observation
+footprint parallel to the original planar interfaces. Exterior windows use
+the corresponding entrance/exit point-field origin; interior windows use depth
+from the selected layer's front face. Analytic sinc overlaps integrate the
+original coherent tangential phases, yielding spatially averaged complex
+pressure and velocity, separately integrated time/spatial mean squares, and
+active/reactive intensity. Squaring an averaged pressure does not substitute
+for the integrated acoustic energy.
+Double-double wavevector differences, sinc decrements and quadratic weights
+retain positive narrow-window energy and heat at a dark interference fringe.
+
+`PreparedLayerAcousticSpectrum::window_with_heat` integrates the original
+coherent viscous and thermal constitutive heating, including all velocity
+directions; heat is not reconstructed from spatially averaged fields.
+Zero-thickness layers admit interface fields but refuse heat density. The
+observation uses O(N) scratch storage and explicitly budgeted N(N+1)/2 component
+pairs, polls cancellation during component preparation and pair integration,
+and performs no source queries or new boundary solve. It remains a passive
+sensor footprint on the original infinite planar solution; it adds no aperture
+clipping, edge diffraction, temporal exposure or thermal evolution. Nonfinite
+or negative quadratic results refuse rather than being presented as physical
+power.
+
 ### Local coherent acoustic heating
 
 `PreparedLayerAcousticSpectrum::field_with_heat` observes the same original
@@ -11445,6 +11629,31 @@ system and integrate local viscous/thermal work through the gap, check normal
 longitudinal limits before/between/after plates, retain heat below reflection
 roundoff, shield downstream layers behind opaque plates, and exercise budgets,
 identities, zero watts and atomic cancellation.
+
+`ElasticPlateStack::prepare_angular_spectrum` also accepts the shared
+`IncidentPlaneWave` and `AngularSpectrumBudget` interface for coherent
+reflection/transmission. `PreparedElasticAcousticSpectrum::prepare_layer_field`
+selects an original fluid/porous section before, between or after plates, with
+indices counting every section. Original P/S propagation retains each plate's
+signed transmission, bounded face states and logarithmic scale, preserving
+phase for downstream interference. Fluid-only and elastic stacks share the
+exterior field, local fluid propagation, coherent sum and positive heat owners.
+
+Selected-layer queries return pressure, all three fluid velocities,
+active/reactive intensity and separate local viscous/thermal heat after coherent
+summation. Opposite-phase sources can cancel both losses; pressure nodes can
+retain transverse viscous heat. Lossless fluid sections have zero heat and
+opaque plates shield downstream pores. Plate indices refuse fluid-interior
+queries. Zero-thickness fluid identities admit interface fields but no heat
+density. Preparation uses the existing component/section caps and retains
+O(components) storage per selected section. Queries allocate nothing, perform
+O(components) work, re-query no source and poll cancellation. Original linear,
+stationary, planar, rigid-frame and lossless-solid limits remain; no solid
+interior field, intrinsic solid damping or temperature evolution is inferred.
+Independent twelve-boundary-equation complex fields across both mode cutoffs,
+spatially integrated versus analytic heat, normal-fluid equivalence and mixed
+three-dimensional interference exercise this extension, together with nodes,
+opaque shielding, identities and atomic cancellation.
 
 The mechanism split does not assign mean heat separately to the pore fluid and
 solid frame or evolve their temperatures. Original linear, rigid-frame,
@@ -13943,6 +14152,34 @@ correlations for non-Newtonian fluids. G0/G3 controls check mixed-temperature
 and incoherent-source refusals, retained owners, one-time queries, and the
 coherent change of Prandtl/Rayleigh groups under viscosity replacement.
 
+`fluid_transport::rheology::pipe::LaminarCarreauPipe` resolves fully developed,
+no-slip circular-pipe flow of that original law at one frozen temperature.
+Both rest and the explicit physical wall-rate ceiling must lie inside source
+support, including the original reduced-rate shift. A bounded bracketed Newton
+solve inverts the positive stress law `tau=mu(g)*g`. Total volume flow uses a
+positive shear-rate-coordinate integral of the canonical stress tangent, so it
+needs one wall inversion rather than an inverse at every integration node.
+Constant-viscosity declarations recover Poiseuille flow directly. Nested
+positive Simpson quadrature splits at the original transition rate and requires
+two consecutive refinements to agree within the declared tolerance; exhausted
+inverse or quadrature budgets refuse. Observed quadrature changes are numerical
+estimates, not certified error bounds or material uncertainty.
+
+The prepared radial profile retains the original pipe/law and controls. It
+resolves axial velocity, outward-face radial shear stress, physical velocity
+gradient, local viscosity and nonnegative `tau*g` heating. Factored wall distance
+preserves small positive velocities near the no-slip wall. Accepted pressure is
+derived from the actual wall constitutive response; the requested pressure and
+signed inversion residual remain explicit. Consequently the integrated flow and
+`accepted_pressure*flow` dissipation describe the same accepted state. Heat is
+reported for a thermal owner, not deposited or used to change the frozen law.
+No density, Reynolds-number criterion, turbulence qualification, entrance loss,
+wall slip, elastic memory or pressure-dependent source response is inferred from
+the caller's laminar rate ceiling. Focused regressions cover independent radial
+velocity/heat integration, both Newtonian plateaus and constant-law limits,
+pressure reversal/rest, singular scalar zero-rate slopes, shifted source limits,
+near-wall velocities, finite work budgets and extreme intermediate products.
+
 Existing LBM callbacks consume the bound state through their native nonlinear
 collision and viscous-heating path; the broader legacy lattice Carreau domain,
 units and prepared relaxation-time policy remain intact. Constitutive regressions
@@ -13970,3 +14207,79 @@ allocation-free correction changes accounting precision, not the constitutive
 model or physical heat/work convention. Focused numerical regressions cover a
 false-zero binary64 balance, exact closed/insulated accounts, nonfinite inputs,
 and early refusal with the parcel unchanged.
+
+### Causal rigid-frame porous diffusion
+
+`porous::diffusive::PorousDiffusive` retains the original `PorousFluidLaw` and one coherent thermoviscous fluid snapshot. High-frequency storage is `alpha_inf*rho/phi` and `K_s/phi`, with the original static Darcy drag and positive viscous/thermal relaxation arms. Analytic positive measures are discretized by bounded midpoint quadrature; thermal relaxation includes its isolated real pole. Cp=Cv removes only thermal memory. Fluid substitution keeps intrinsic permeability and actual adiabatic modulus. Admission checks both complex response and each nonzero real loss against the original JCA/JCAL law on 129 logarithmic frequencies inside the card's support. Reported maxima are sampled discrepancies, not continuous-band bounds. This frozen rigid-frame realization supplies coefficients rather than an integrator; it does not qualify elastic-frame waves, mean flow, phase change, or source accuracy outside its declared band.
+
+## Free and clamped elastic surface reflection
+
+`elastic::acoustic::interface::surface::IsotropicElasticSurface` retains one
+original explicitly isotropic elastic state. `TractionFree` imposes zero
+traction; `Clamped` imposes zero velocity at an ideal stationary support. The
+solid occupies z < 0, with the bonded-interface owner's modal velocity, outward
+traction and peak phasor conventions. There is no artificial second material,
+finite-impedance approximation to a clamp, or guessed loss.
+
+Preparation reuses the original tensor-based traces and critical-slowness
+arithmetic. One row-scaled 2x2 native complex LU supplies coupled P/SV
+reflection; SH has its independent free/clamped sign. The fixed-size prepared
+operator applies coherent amplitudes without allocation or another solve.
+Converted evanescent P fields retain phase and traction while carrying zero
+individual normal power. Finite drives enforce the original half-space strain
+bound and independently check reflected power and surface work. Incoming
+nonpropagating modes, anisotropic sources, singular systems and unrepresentable
+inputs refuse; preparation is cancellable.
+
+G0/G1/G3/G4 regressions compare free/clamped analytical coefficients, normal
+reflection phase and clamp reaction, coherent power unitarity, supercritical
+conversion, common material scaling, original domain limits and cancellation.
+This is an infinite bulk-wave surface model, not a flexural plate-edge law,
+Rayleigh-wave source, compliant support, rough surface, attenuation model or
+experimental qualification of the source material.
+
+## Nonideal passive plant residence
+
+`recovery::residence::nonideal::NonidealTankCascade` advances one named
+conserved constituent through up to 64 unequal active/stagnant tank pairs.
+Declared total flow splits into an instantaneous bypass and the train flow;
+active residence uses the latter. Explicit counterflow exchanges mass with
+stagnant regions, including during an external-flow stop. Zero exchange keeps
+a dead region exactly isolated. Geometry, initial inventories, original
+provenance and each interval's flows remain explicit.
+
+Positive exponential propagation independently integrates the train outlet and
+both exchange directions. Active, stagnant and overall balances must close;
+there is no balancing plug or normalization. Work is bounded by 4096 transition
+exposures per interval and 256 series terms per substep. Invalid, nonfinite,
+unrepresentable or cancelled calculations leave the original state unchanged.
+This is a passive forward transport model, not a recovery law, fitted residence
+distribution, tracer deconvolution or two-phase slip model. Binary64 results are
+not interval enclosures. Analytical regressions cover ideal-tank reduction,
+bypass, unequal tanks, exchange-only shutdown, retained dead inventory, resumed
+flow, partitioned intervals and transactional refusal/cancellation. The
+`nonideal_residence` example and
+`data/matdb/seed-v1/MINING_NONIDEAL_RESIDENCE.md` demonstrate a complete authored
+pulse/stop/restart/flush inventory account without implying plant calibration.
+
+## Experimental Austin grinding population balances
+
+`comminution::austin::resolve_austin_grinding` resolves seven scalar Austin
+parameters and an exact class-size curve from one original observation with
+identical support. Typed envelope queries admit every source class and the
+complete requested contact interval. The existing `SelectionBreakageModel`
+retains original claims, observation, uncertainty and verified receipts through
+prepared passes. Published B_ij indexing generates conservative daughter columns
+without clipping or normalization; the terminal class collects unresolved fines
+with zero selection. Unsupported operating conditions and mixed sources refuse.
+
+The `quartz-assiros-petrakis-2017-austin` pack supplies three Table 2 laboratory
+calibrations and 24 claims. Its exact six-node sieve grid and 0–240 s declared
+calculation window preserve the source's operating conditions and its reported
+mismatch between original fitted and measured product size distributions.
+The incomplete Table 3 amplitude is not reconstructed. This fixed-grid batch
+model does not infer plant scale-up, liberation, power or media wear. The
+`austin_grinding_reference` example and `MINING_AUSTIN_GRINDING.md` demonstrate
+source-to-population-balance use; analytical and compiler-backed regressions
+check source selection rates, first/second populations, daughter mass closure,
+element transport, retained source identity and domain refusal.

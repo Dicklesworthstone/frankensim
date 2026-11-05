@@ -9,8 +9,9 @@
 //!
 //! Implicit midpoint eliminates to one sparse positive-definite operator
 //! `M_beta + (h/2) C_Y + (h^2/4) K_rho`. The existing sparse LDLT owner factors
-//! it once, including its native numeric-memory admission. Every original
-//! pressure degree of freedom remains live; no modal reduction, dense mass
+//! it once, including its native numeric-memory admission. Optional ideal
+//! pressure-release traces are eliminated exactly; every other original
+//! pressure degree of freedom remains live. No modal reduction, dense mass
 //! inverse or material resampling enters subsequent pulse steps.
 //!
 //! Sources are inward velocity traces evaluated at the time-step midpoint.
@@ -27,6 +28,7 @@
 //! those existing owners have no internal cancellation callback. Returned
 //! states are candidates: a refusal never mutates the caller's accepted state.
 
+use super::super::pressure_release::PressureReleaseConstraints;
 use super::{
     AcousticFeError, BoundaryAdmittance, HeterogeneousError, HeterogeneousHelmholtzFe, invalid,
     poll,
@@ -59,7 +61,8 @@ pub type RealVelocityTrace = ([u32; 3], [f64; 3]);
 /// Admission for sparse preparation and physical step validation.
 #[derive(Clone, Copy, Debug)]
 pub struct HeterogeneousTimeLimits {
-    /// Maximum original pressure degrees of freedom.
+    /// Maximum unconstrained original pressure degrees of freedom. Original
+    /// sparse operators and lifted O(ndof) state/work vectors are additional.
     pub max_dofs: usize,
     /// Native LDLT factor/front/scratch payload cap. Caller CSR, symbolic
     /// analysis, O(ndof) vectors and allocator/runtime overhead are additional.
@@ -99,6 +102,8 @@ impl HeterogeneousTimeEnergy {
 
 /// Real fields bound to their ORIGINAL geometry and material operator.
 /// Different time-step sizes may reuse a state on that same frozen operator.
+/// Each prepared evolution owner supplies its own boundary laws and admits
+/// these coefficients against them; a state identifies the spatial model only.
 #[derive(Clone)]
 pub struct HeterogeneousTimeState<'m, 'f, 'c> {
     pub(super) model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
@@ -169,6 +174,7 @@ pub struct PreparedHeterogeneousTime<'m, 'f, 'c> {
     conductance: Csr,
     factor: LdltFactor,
     scales: Vec<f64>,
+    pressure_release: PressureReleaseConstraints,
     limits: HeterogeneousTimeLimits,
 }
 
@@ -179,6 +185,36 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         &'m self,
         duration_s: f64,
         boundaries: &[ResistiveBoundary],
+        limits: HeterogeneousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedHeterogeneousTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_time_with_pressure_release(duration_s, boundaries, &[], limits, cancelled)
+    }
+
+    /// Prepare sparse midpoint waves with ideal `p = 0` on selected original
+    /// boundary triangles and the original physical coefficients elsewhere.
+    /// All hierarchical trace DOFs are eliminated before factorization, not
+    /// penalized or replaced by large admittances. States and work remain in
+    /// the full original spatial basis; constrained reactions do no work.
+    ///
+    /// This owner explicitly selects `psi = p = 0` on the release trace.
+    /// `p = psi_dot = 0` alone permits a time-independent nonzero boundary
+    /// potential; such stationary flow components are outside this path. A
+    /// constant potential gauge must therefore be chosen consistently before
+    /// importing a state. Nonzero trace coefficients are refused, never erased
+    /// or silently projected, including states imported from another prepared
+    /// time-step on the same material/geometry operator.
+    ///
+    /// Admittance and imposed-velocity faces must not overlap release faces;
+    /// adjacent faces may share constrained DOFs. Original volume sources,
+    /// passive losses and midpoint physical work are retained. Empty release
+    /// faces preserve the original full-space arithmetic. This ideal boundary
+    /// supplies no exterior radiation or opening end-correction model.
+    pub fn prepare_time_with_pressure_release<'m>(
+        &'m self,
+        duration_s: f64,
+        boundaries: &[ResistiveBoundary],
+        pressure_release_faces: &[[u32; 3]],
         limits: HeterogeneousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedHeterogeneousTime<'m, 'f, 'c>, HeterogeneousError> {
@@ -201,7 +237,19 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             )
             .into());
         }
-        let n = self.ndof();
+        // An empty release set has a known original dimension: retain its
+        // early cap refusal without allocating an unnecessary identity map.
+        if pressure_release_faces.is_empty() && self.ndof() > limits.max_dofs {
+            return Err(HeterogeneousError::Limit {
+                what: "transient pressure degrees of freedom",
+                requested: self.ndof(),
+                maximum: limits.max_dofs,
+            });
+        }
+        let pressure_release = self
+            .geometry
+            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let n = pressure_release.free_dofs.len();
         if n > limits.max_dofs {
             return Err(HeterogeneousError::Limit {
                 what: "transient pressure degrees of freedom",
@@ -212,6 +260,17 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         let mut admitted = Vec::with_capacity(boundaries.len());
         for boundary in boundaries {
             poll(cancelled)?;
+            for &face in &boundary.faces {
+                poll(cancelled)?;
+                let mut key = face;
+                key.sort_unstable();
+                if pressure_release.faces.contains(&key) {
+                    return Err(invalid(
+                        "pressure-release and resistive boundary faces must not overlap",
+                    )
+                    .into());
+                }
+            }
             admitted.push(BoundaryAdmittance {
                 faces: boundary.faces.clone(),
                 admittance_m_pa_s: C64::from_re(boundary.admittance_m_pa_s),
@@ -219,20 +278,24 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         }
         let (conductance, _) = self.admittance_matrices(&admitted, cancelled)?;
         let mut effective = Coo::new(n, n);
-        for row in 0..n {
+        for (row, &original_row) in pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
             for (matrix, multiplier) in [
                 (&self.mass, 1.0),
                 (&conductance, half_h),
                 (&self.stiffness, quarter_h2),
             ] {
-                let (cols, values) = matrix.row(row);
+                let (cols, values) = matrix.row(original_row);
                 for (&col, &value) in cols.iter().zip(values) {
+                    let free_col = pressure_release.original_to_free[col];
+                    if free_col == usize::MAX {
+                        continue;
+                    }
                     let entry = multiplier * value;
                     if !entry.is_finite() {
                         return Err(invalid("transient pressure operator overflow").into());
                     }
-                    effective.push(row, col, entry);
+                    effective.push(row, free_col, entry);
                 }
             }
         }
@@ -298,6 +361,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             conductance,
             factor,
             scales,
+            pressure_release,
             limits,
         })
     }
@@ -320,12 +384,26 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
     }
 
     /// Import finite coefficients in this exact original space. No interpolation,
-    /// source rebinding or energy normalization occurs.
+    /// source rebinding or energy normalization occurs. Pressure-release
+    /// preparation requires exact zero potential AND pressure on its trace.
     pub fn state(
         &self,
         pressure_potential_pa_s: &[f64],
         pressure_pa: &[f64],
     ) -> Result<HeterogeneousTimeState<'m, 'f, 'c>, HeterogeneousError> {
+        self.admit_coefficients(pressure_potential_pa_s, pressure_pa)?;
+        Ok(HeterogeneousTimeState {
+            model: self.model,
+            potential: pressure_potential_pa_s.to_vec(),
+            pressure: pressure_pa.to_vec(),
+        })
+    }
+
+    fn admit_coefficients(
+        &self,
+        pressure_potential_pa_s: &[f64],
+        pressure_pa: &[f64],
+    ) -> Result<(), HeterogeneousError> {
         let n = self.model.ndof();
         if pressure_potential_pa_s.len() != n
             || pressure_pa.len() != n
@@ -339,11 +417,26 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
             )
             .into());
         }
-        Ok(HeterogeneousTimeState {
-            model: self.model,
-            potential: pressure_potential_pa_s.to_vec(),
-            pressure: pressure_pa.to_vec(),
-        })
+        self.admit_pressure_release_trace(pressure_potential_pa_s, pressure_pa)
+    }
+
+    fn admit_pressure_release_trace(
+        &self,
+        pressure_potential_pa_s: &[f64],
+        pressure_pa: &[f64],
+    ) -> Result<(), HeterogeneousError> {
+        if self.pressure_release.faces.is_empty() {
+            return Ok(());
+        }
+        for (dof, &fixed) in self.pressure_release.constrained.iter().enumerate() {
+            if fixed && (pressure_potential_pa_s[dof] != 0.0 || pressure_pa[dof] != 0.0) {
+                return Err(invalid(
+                    "pressure-release state requires zero potential and pressure on every trace DOF",
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     fn validate_state(
@@ -355,7 +448,13 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
                 invalid("transient state belongs to another spatial/material operator").into(),
             );
         }
-        Ok(())
+        // Private states were admitted by an original-space constructor or
+        // stepper. Preserve the existing warm rigid/mechanical path; a change
+        // of prepared boundary law only requires checking its trace.
+        if self.pressure_release.faces.is_empty() {
+            return Ok(());
+        }
+        self.admit_pressure_release_trace(&state.potential, &state.pressure)
     }
 
     /// Physical energy of the supplied state on the original operator.
@@ -394,6 +493,7 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
     ) -> Result<HeterogeneousTimeStep<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate_state(initial)?;
+        self.admit_velocity_faces(inward_velocity, cancelled)?;
         // The SAME original real trace projection supplies both dynamics and work.
         let load = self.model.geometry.boundary_linear_load(inward_velocity)?;
         self.step_projected(initial, &load, cancelled)
@@ -412,6 +512,7 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
     ) -> Result<HeterogeneousTimeStep<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate_state(initial)?;
+        self.admit_velocity_faces(inward_velocity, cancelled)?;
         super::source::admit_count(sources.len())?;
         for &(source, amplitude) in sources {
             source.validate(self.model)?;
@@ -442,6 +543,28 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         }
         poll(cancelled)?;
         Ok(result)
+    }
+
+    fn admit_velocity_faces(
+        &self,
+        traces: &[RealVelocityTrace],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), HeterogeneousError> {
+        if self.pressure_release.faces.is_empty() {
+            return Ok(());
+        }
+        for &(face, _) in traces {
+            poll(cancelled)?;
+            let mut key = face;
+            key.sort_unstable();
+            if self.pressure_release.faces.contains(&key) {
+                return Err(invalid(
+                    "pressure-release and imposed-velocity faces must not overlap",
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     // Original sparse midpoint solve with an already projected volume load.
@@ -522,8 +645,9 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
             poll(cancelled)?;
             let correction = self.factor.solve(&rhs);
             poll(cancelled)?;
-            for (i, &delta) in correction.iter().enumerate() {
-                next.pressure[i] = delta.mul_add(self.scales[i], next.pressure[i]);
+            for (i, &original) in self.pressure_release.free_dofs.iter().enumerate() {
+                next.pressure[original] =
+                    correction[i].mul_add(self.scales[i], next.pressure[original]);
             }
         }
         unreachable!("last physical residual or work check returns")
@@ -542,9 +666,12 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<f64>, f64), HeterogeneousError> {
         let h = Dd::from_f64(self.duration_s);
-        let mut residual = vec![0.0; self.model.ndof()];
+        let mut residual = vec![0.0; self.pressure_release.free_dofs.len()];
         let mut worst: f64 = 0.0;
-        for row in 0..self.model.ndof() {
+        // Eliminated rows are boundary reactions. Their pressure and potential
+        // remain zero by admission and reconstruction; only the free physical
+        // equations enter the solve residual and correction vector.
+        for (free_row, &row) in self.pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
             let mut value = -h * Dd::from_f64(load[row]);
             let mut scale = self.duration_s * load[row].abs();
@@ -588,7 +715,7 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
             worst = worst
                 .max(relative(value.abs(), scale))
                 .max(relative(kinematics.abs(), kinematic_scale));
-            residual[row] = value;
+            residual[free_row] = value;
         }
         Ok((residual, worst))
     }
@@ -719,3 +846,6 @@ fn energy_change(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod pressure_release_tests;

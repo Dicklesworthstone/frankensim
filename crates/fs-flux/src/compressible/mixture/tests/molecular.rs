@@ -450,15 +450,23 @@ fn g0_planar_molecular_budget_capacity_and_boundary_ownership_are_explicit() {
         .unwrap();
         assert_eq!(flow.workspace_bytes() + op.workspace_bytes(), combined);
     }
-    flow.boundaries.x = OPEN;
-    let source = PlanarTransport::new(
-        flow.gas().clone(),
-        law(flow.gas(), 0.01, 0.02, 0.0, 0.03),
-        || false,
-    )
-    .unwrap();
-    assert!(matches!(
-        MolecularTransport2d::new(&flow, source, MAX_MIXTURE_WORKSPACE_BYTES, || false),
-        Err(DissipationError::Invalid(_))
-    ));
+    for boundary in [
+        OPEN,
+        AxisBoundaries::Ends {
+            lower: BoundaryCondition::PressureOutlet { pressure_pa: 0.8 },
+            upper: BoundaryCondition::Reflecting,
+        },
+    ] {
+        flow.boundaries.x = boundary;
+        let source = PlanarTransport::new(
+            flow.gas().clone(),
+            law(flow.gas(), 0.01, 0.02, 0.0, 0.03),
+            || false,
+        )
+        .unwrap();
+        assert!(matches!(
+            MolecularTransport2d::new(&flow, source, MAX_MIXTURE_WORKSPACE_BYTES, || false),
+            Err(DissipationError::Invalid(_))
+        ));
+    }
 }

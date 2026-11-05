@@ -111,6 +111,18 @@ to parallel biquad sections and discrete state-space.
   a muffler, a pulse tube, and a BEM radiation load are fillings of
   that port. Music is not a special case.
 
+### Analytic multiport impedance derivatives
+
+`mimo::MimoModel::eval_derivative(s)` evaluates the original analytic `dZ/ds`,
+including real/conjugate pole groups, every mutual matrix entry, and the
+improper term E. Repeated robust complex division avoids forming a squared
+pole distance; true poles retain their singular behavior. The acoustic
+frequency derivative is `-i*dZ/ds` at `s=-i*omega`, while this crate's positive
+axis uses `+i*dZ/ds`. No new fit, state realization, history or passivity
+certificate is created. Focused tests compare an independent state resolvent
+derivative, conjugacy, direct terms and extreme pole-distance scales. The
+assembled-shell MIMO harmonic adapter consumes this original source derivative.
+
 ### Exact resonance states on FIR ports
 
 `DelayedFilter::with_exact_poles` retains conjugate Laplace pairs

@@ -252,3 +252,32 @@ fn invalid_physical_observations_cancellation_and_true_source_poles_refuse() {
         )))
     ));
 }
+
+#[test]
+fn native_lossless_poles_between_grid_frequencies_do_not_become_finite_survey_peaks() {
+    let natural = 10.123456789_f64;
+    let system = fs_phs::mass_spring_damper(1.0, natural * natural, 0.0).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let result = model.driven_resonances(
+        &[C64::new(0.8, -0.3)],
+        HarmonicObservation::Output(&[1.0]),
+        &[8.0, 9.0, 11.0, 12.0],
+        ResonanceSurveyControls {
+            absolute_frequency_tolerance_rad_s: 1e-7,
+            ..controls()
+        },
+        || false,
+    );
+    assert!(
+        matches!(
+            result,
+            Err(ResonanceSurveyError::Search(
+                ResonanceSearchError::FrequencyResolution
+                    | ResonanceSearchError::Source(DrivenResonanceError::Harmonic(
+                        HarmonicError::Singular { .. }
+                    ))
+            ))
+        ),
+        "an unsampled native pole became a finite survey peak: {result:?}"
+    );
+}

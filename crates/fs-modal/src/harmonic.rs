@@ -40,8 +40,10 @@ pub use frequency::{
 };
 mod interference;
 pub use interference::{
-    HarmonicForceTone, HarmonicInterferenceControls, HarmonicInterferenceMoments,
-    MAX_INTERFERENCE_TONES, PreparedHarmonicInterference,
+    HarmonicEnsembleControls, HarmonicFactorStatistics, HarmonicForceFactor, HarmonicForceTone,
+    HarmonicInterferenceControls, HarmonicInterferenceMoments, MAX_ENSEMBLE_FORCE_TONES,
+    MAX_INTERFERENCE_FACTORS, MAX_INTERFERENCE_TONES, PreparedHarmonicInterference,
+    PreparedHarmonicInterferenceEnsemble,
 };
 /// Local driven-response extrema and half-magnitude-squared linewidths.
 pub mod resonance;

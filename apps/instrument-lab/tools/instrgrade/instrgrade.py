@@ -30,6 +30,7 @@ from descriptors import (  # noqa: E402
     MissingBandSplitFrequency,
     MissingNoiseFloorEstimate,
     Partial,
+    _parabolic_peak,
     am_fm_modulation_spectrum,
     band_split_statistics,
     beats,
@@ -42,6 +43,7 @@ from descriptors import (  # noqa: E402
     hnr_band,
     intonation_fingerprint,
     jitter_and_shimmer,
+    modal_lines,
     null_baselines,
     partial_envelopes,
     partial_onset_order,
@@ -51,7 +53,7 @@ from descriptors import (  # noqa: E402
     windows,
 )
 
-GRADER_VERSION = "instrgrade-5"
+GRADER_VERSION = "instrgrade-7"
 SR = 48000
 NOTE = {"C": 0, "Db": 1, "D": 2, "Eb": 3, "E": 4, "F": 5, "Gb": 6, "G": 7, "Ab": 8, "A": 9, "Bb": 10, "B": 11}
 NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
@@ -431,6 +433,16 @@ def f0_spectral(f, s, lo, hi, nh=8):
     return float(best)
 
 
+def strongest_line(f, s, lo, hi):
+    """The strongest peak in [lo, hi], refined by a parabola on the log power. This is a bar's pitch: most integer
+    multiples of a bar's first line are empty, so the comb in f0_spectral scores window leakage there and moves tens of
+    cents when the window's end moves, with the line itself standing still (instrgrade-6)."""
+    idx = np.nonzero((f >= lo) & (f <= hi))[0]
+    peaks = idx[(s[idx] >= s[idx - 1]) & (s[idx] >= s[idx + 1])]  # not the skirt of something outside the band
+    best = peaks[np.argmax(s[peaks])] if len(peaks) else idx[np.argmax(s[idx])]
+    return _parabolic_peak(f, np.log10(s + 1e-30), int(best))
+
+
 def partial_ratios(f, s, fmin=100.0, fmax=12000.0, n=5):
     """Frequencies of the n strongest spectral peaks (>= 3% apart), ascending, and ratios to the lowest."""
     sel = (f > fmin) & (f < fmax)
@@ -472,7 +484,8 @@ def describe(
         f0 = float(f0_override)
     elif f0_hint and not chord:  # trust the spectrum within +-7 semitones of the target note
         fs_, ss_ = spectrum(x, t0, t1)
-        f0 = f0_spectral(fs_, ss_, f0_hint * 2 ** (-7 / 12), f0_hint * 2 ** (7 / 12))
+        read = strongest_line if inharmonic else f0_spectral
+        f0 = read(fs_, ss_, f0_hint * 2 ** (-7 / 12), f0_hint * 2 ** (7 / 12))
     if f0 is None or not np.isfinite(f0):
         f0 = f0_hint
     if f0 is None or not np.isfinite(f0) or f0 <= 0:
@@ -519,7 +532,9 @@ def describe(
     seg_sustain = x[int(t0 * SR):int(t1 * SR)]
     if len(seg_sustain) < 64:
         seg_sustain = x
-    if partials:
+    if inharmonic and not chord:  # a bar's own lines, the ones its partial read returns (instrgrade-7)
+        hnr = hnr_band(seg_sustain, partials, (80.0, 10000.0), sr=SR, inharmonic_lines=(f0r, modal_lines(x, f0r, sr=SR)))
+    elif partials:
         hnr = hnr_band(seg_sustain, partials, (80.0, 10000.0), sr=SR, harmonic_law=None if (chord or inharmonic) else (f0r, b_fit))
     else:
         m_fallback = (f > 80) & (f < 10000)

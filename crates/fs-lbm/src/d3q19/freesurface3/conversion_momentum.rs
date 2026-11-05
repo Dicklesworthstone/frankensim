@@ -4,7 +4,7 @@ use super::*;
 
 mod angular;
 
-/// Balance of the most recent explicitly conservative conversion, in lattice
+/// Balance of the most recent conservative conversion, in lattice
 /// units. Collision, streaming, pressure traction and wall work are excluded.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ConversionMomentumReport3 {
@@ -379,7 +379,6 @@ mod tests {
                 &cx,
             )
             .unwrap()
-            .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocal)
         })
     }
 
@@ -477,11 +476,11 @@ mod tests {
     fn check_balance(surface: &FreeSurface3, before: (f64, [f64; 3], f64)) {
         let after = inventory(surface, |_| true);
         let scale = before.0.abs().max(after.0.abs()).max(1.0);
-        let report = surface.conversion_momentum_report().unwrap();
         assert!((after.0 - before.0).abs() < 2e-13 * scale);
         for d in 0..3 {
             assert!((after.1[d] - before.1[d]).abs() < 2e-14 * scale);
         }
+        let report = surface.conversion_momentum_report().unwrap();
         assert!((after.2 - before.2 - report.kinetic_energy_change).abs() < 2e-15 * scale);
         assert!(report.absolute_mass_defect < 2e-13 * scale);
         assert!(
@@ -727,6 +726,54 @@ mod tests {
     }
 
     #[test]
+    fn g1_binary_constructor_defaults_to_physical_conversion_momentum() {
+        for source_mass in [1.25, -0.06] {
+            let force = [0.0002, -0.0001, 0.00005];
+            let mut surface = FreeSurface3::new(
+                8,
+                8,
+                8,
+                0.8,
+                force,
+                0.0,
+                ContactModel3::Neutral,
+                |x, y, z| (x == 3 || x == 4) && y == 3 && z == 3,
+            )
+            .unwrap();
+            for state in [
+                cell([3, 3, 3], 1.01, [0.025, -0.012, 0.018]),
+                cell([4, 3, 3], 0.99, [-0.018, 0.021, -0.006]),
+            ] {
+                let [x, y, z] = state.coordinates.map(|p| p as i64);
+                let (slot, lane) = surface.grid.resolve_source(x, y, z).unwrap();
+                let mut populations = equilibrium3(state.density, state.velocity);
+                crate::thermal::forcing::reframe3(
+                    &mut populations,
+                    state.velocity,
+                    [0.0; 3],
+                    force,
+                );
+                surface.grid.set_populations(slot, lane, populations);
+            }
+            set_mass(&mut surface, [3, 3, 3], source_mass);
+            set_mass(&mut surface, [4, 3, 3], 0.55);
+            let before = inventory(&surface, |_| true);
+            surface.apply_conversions(None).unwrap();
+            check_balance(&surface, before);
+            let report = surface.conversion_momentum_report().unwrap();
+            assert!(report.routes > 0 && report.redistributed_mass > 0.0);
+            assert_eq!(
+                surface.sample_at(3, 3, 3).map(|sample| sample.cell),
+                if source_mass > 0.0 {
+                    Some(Cell3::Fluid)
+                } else {
+                    None
+                }
+            );
+        }
+    }
+
+    #[test]
     fn g1_actual_native_timestep_advances_a_filled_front_and_zero_pressure_replays_it() {
         let mut cells = Vec::new();
         for z in 0..8 {
@@ -740,12 +787,16 @@ mod tests {
         }
         let mut normal = surface(&cells, [0.0; 3]);
         let mut pressure = normal.clone();
+        let mut link_pressure = normal.clone();
         let mut transported = normal.clone();
         let mass = normal.ledger_mass();
         let gate = CancelGate::new_clock_free();
-        normal.step_with_gate(&gate).unwrap();
+        normal.step().unwrap();
         pressure
             .step_with_gas_pressure(&gate, 0.2, |_| Ok(0.0))
+            .unwrap();
+        link_pressure
+            .step_with_gas_link_pressure(&gate, 0.2, |_| Ok(0.0))
             .unwrap();
         let mut trace = MassTransport3::new(transported.mass_snapshot(), 8192);
         transported
@@ -754,6 +805,7 @@ mod tests {
         trace.after = transported.mass_snapshot();
         check_routes(&trace, &transported);
         assert_unchanged(&normal, &pressure);
+        assert_unchanged(&normal, &link_pressure);
         assert_unchanged(&normal, &transported);
         assert_eq!(normal.sample_at(3, 4, 4).unwrap().cell, Cell3::Fluid);
         assert!(normal.sample_at(4, 4, 4).unwrap().fill_fraction > 0.0);
@@ -919,14 +971,14 @@ mod tests {
     #[test]
     fn g4_public_normal_and_pressure_steps_rollback_late_conversion_and_cancellation() {
         for mode in [
-            ConversionRedistribution3::ConservativeLocal,
-            ConversionRedistribution3::ConservativeLocalAngular,
+            None,
+            Some(ConversionRedistribution3::ConservativeLocalAngular),
         ] {
             public_conversion_refusal(mode);
         }
     }
 
-    fn public_conversion_refusal(mode: ConversionRedistribution3) {
+    fn public_conversion_refusal(mode: Option<ConversionRedistribution3>) {
         let mut cells = Vec::new();
         for z in 0..8 {
             for y in 0..8 {
@@ -937,7 +989,10 @@ mod tests {
                 }
             }
         }
-        let mut surface = surface(&cells, [0.0; 3]).with_conversion_redistribution(mode);
+        let mut surface = surface(&cells, [0.0; 3]);
+        if let Some(mode) = mode {
+            surface = surface.with_conversion_redistribution(mode);
+        }
         // This post-stream overshoot is surrounded entirely by full cells.
         // It needs a wider remap; borrowing from the distant free face is not
         // an adjacent-interface conversion. The error occurs after streaming.
@@ -949,6 +1004,12 @@ mod tests {
         assert!(
             surface
                 .step_with_gas_pressure(&gate, 0.2, |_| Ok(0.0))
+                .is_err()
+        );
+        assert_unchanged(&before, &surface);
+        assert!(
+            surface
+                .step_with_gas_link_pressure(&gate, 0.2, |_| Ok(0.0))
                 .is_err()
         );
         assert_unchanged(&before, &surface);

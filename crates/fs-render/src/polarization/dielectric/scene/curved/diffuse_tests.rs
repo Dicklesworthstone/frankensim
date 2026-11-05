@@ -268,6 +268,62 @@ fn g1_spectral_diffuse_depolarizes_forward_power_in_both_native_scene_owners() {
     });
 }
 
+#[test]
+fn g1_coated_spectral_diffuse_reaches_both_native_scenes_and_camera_radiance() {
+    with_cx(|cx, _| {
+        let geometry = geometry();
+        let materials = [glass(1.3, 0.2)];
+        let media = [SceneMedium::Homogeneous(&materials[0])];
+        let coating = crate::coated_diffuse::SmoothDiffuseCoating::try_new(1.3, 1.5).unwrap();
+        let reflectances = [SpectralReflectance::table(&[(380.0, 0.2), (550.0, 0.6), (780.0, 0.9)]).unwrap()];
+        let coated_bindings = |receiver| {
+            let mut result = bindings(receiver);
+            result[0].interaction = Interaction::CoatedDiffuse { medium: 0, reflectance: 0, coating };
+            result
+        };
+        let detector = Interaction::Detector { reference_axis: Vec3::new(1.0, 0.0, 0.0) };
+        let curved = CurvedPolarizedScene::try_new_with_materials(cx, &geometry, &media, &[], &[],
+            &reflectances, coated_bindings(detector), 100_000).unwrap();
+        let straight = PolarizedScene::try_new_with_materials(&geometry, &materials, &[], &[],
+            &reflectances, coated_bindings(detector)).unwrap();
+        let emitting = CurvedPolarizedScene::try_new_with_materials(cx, &geometry, &media, &[], &[],
+            &reflectances, coated_bindings(Interaction::Opaque), 100_000).unwrap();
+        let sources = source();
+        let camera = CurvedCameraScene::try_new(cx, &emitting, &sources, None).unwrap();
+        let normal_reflection = ((1.5_f64-1.3)/(1.5+1.3)).powi(2);
+        let frame = PolarizationFrame::try_new(ray().dir, Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        for wavelength in [400.0, 550.0, 700.0] {
+            let rho = reflectances[0].at(wavelength).unwrap();
+            let denominator = (1.0-rho) + rho*coating.escape_probability();
+            for event in [0.0, 0.9] {
+                let draw = [0.0, 0.25, event];
+                let conditional = if event == 0.0 { 1.0 } else {
+                    (1.0-normal_reflection)*rho*(1.3_f64/1.5).powi(2)/denominator
+                };
+                let expected = conditional * (-0.5_f64).exp();
+                let input = PolarizedBeam::try_new(ray().origin, frame, wavelength,
+                    materials[0], Stokes::unpolarized(1.0)).unwrap();
+                let first = curved.trace_with_samples(cx, input, 0, settings(), |_| draw).unwrap();
+                let second = straight.trace_with_samples(cx, input, 0,
+                    TraceSettings { max_surface_events: 8, max_distance_m: 4.0,
+                        surface_epsilon_m: 1e-9, query_offset_m: 1e-7 }, |_| draw).unwrap();
+                for (termination, traveled, beam) in [
+                    (first.termination(), first.traveled_m(), first.beam()),
+                    (second.termination(), second.traveled_m(), second.beam()),
+                ] {
+                    assert_eq!(termination, PathTermination::Detected);
+                    close(traveled, 2.5, 2e-7);
+                    close(beam.power().i, expected, 5e-7);
+                    assert_eq!(beam.medium(), input.medium());
+                }
+                let image = camera.sample_ray_with_samples(cx, ray(), wavelength, 0, settings(), |_| draw).unwrap();
+                close(image.radiance_w_m2_sr_nm(), 8.0*expected, 5e-6);
+                assert_eq!(image.path().last_contact().unwrap().object_id, 9);
+            }
+        }
+    });
+}
+
 struct DispersiveAffineIndex;
 
 impl GradientIndexField for DispersiveAffineIndex {

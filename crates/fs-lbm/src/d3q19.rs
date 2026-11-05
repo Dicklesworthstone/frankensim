@@ -248,6 +248,22 @@ pub enum CollisionModel3 {
         /// Relaxation rate for the nine degree-three/four moments.
         higher_order_rate: f64,
     },
+    /// Central moments with independent deviatoric and volumetric viscosity.
+    ///
+    /// `nu = (1/shear_rate - 1/2)/3` and, in three dimensions,
+    /// `zeta/rho = (2/9) * (1/bulk_rate - 1/2)` in lattice units.
+    /// Material and SGS shear updates retain the authored bulk rate. The
+    /// original physical-population Guo transform forces every mode at its
+    /// own rate. Equal shear/bulk rates reproduce [`Self::CentralMoment`]
+    /// bit-for-bit, including its selected higher-order relaxation.
+    CentralMomentBulk {
+        /// Rate for the five independent deviatoric second moments, in (0,2).
+        shear_rate: f64,
+        /// Rate for the second-moment trace, finite and strictly in (0,2).
+        bulk_rate: f64,
+        /// Rate for the nine degree-three/four moments, in (0,2).
+        higher_order_rate: f64,
+    },
     /// Reduced cumulant projection onto the 19 independent D3Q19 moments.
     ///
     /// Second- and third-order cumulants equal their central moments. The
@@ -298,6 +314,15 @@ impl CollisionModel3 {
                 validate_moment_rate(2, second_order_rate)?;
                 validate_moment_rate(3, higher_order_rate)
             }
+            Self::CentralMomentBulk {
+                shear_rate,
+                bulk_rate,
+                higher_order_rate,
+            } => {
+                validate_moment_rate(2, shear_rate)?;
+                validate_moment_rate(2, bulk_rate)?;
+                validate_moment_rate(3, higher_order_rate)
+            }
             Self::ReducedCumulant {
                 second_order_rate,
                 third_order_rate,
@@ -325,6 +350,18 @@ impl CollisionModel3 {
             | Self::ReducedCumulant {
                 second_order_rate, ..
             } => (1.0 / second_order_rate - 0.5) / 3.0,
+            Self::CentralMomentBulk { shear_rate, .. } => (1.0 / shear_rate - 0.5) / 3.0,
+        }
+    }
+
+    /// Kinematic bulk viscosity `zeta/rho` in the three-dimensional stress
+    /// convention. The other models tie it to `2 nu / 3`.
+    /// Validate the model first when it did not come from a checked owner.
+    #[must_use]
+    pub const fn kinematic_bulk_viscosity(self) -> f64 {
+        match self {
+            Self::CentralMomentBulk { bulk_rate, .. } => (2.0 / 9.0) * (1.0 / bulk_rate - 0.5),
+            _ => (2.0 / 3.0) * self.kinematic_viscosity(),
         }
     }
 
@@ -335,6 +372,7 @@ impl CollisionModel3 {
             Self::Bgk { .. }
             | Self::Trt { .. }
             | Self::CentralMoment { .. }
+            | Self::CentralMomentBulk { .. }
             | Self::ReducedCumulant { .. } => true,
         }
     }
@@ -346,6 +384,39 @@ fn validate_moment_rate(moment_order: u8, rate: f64) -> Result<(), CollisionErro
     } else {
         Err(CollisionError3::InvalidMomentRelaxationRate { moment_order, rate })
     }
+}
+
+/// Collision-consistent components of `sqrt(2 D:D)` from physical Guo stress.
+/// Return the numerator to divide by the unknown shear tau and the independently
+/// fixed dilation contribution; the constitutive solver combines their norm.
+pub(crate) fn rheology_stress_components3(
+    populations: &[f64; Q3],
+    rho: f64,
+    velocity: [f64; 3],
+    force: [f64; 3],
+    model: CollisionModel3,
+) -> [f64; 2] {
+    let CollisionModel3::CentralMomentBulk { bulk_rate, .. } = model else {
+        return [force_corrected_shear_rate3(populations, rho, velocity, force, 1.0), 0.0];
+    };
+    let mut stress = force_corrected_stress3(populations, rho, velocity, force);
+    let trace = stress[0] + stress[1] + stress[2];
+    for normal in &mut stress[..3] {
+        *normal -= trace / 3.0;
+    }
+    let scale = stress.iter().fold(0.0_f64, |m, value| m.max(value.abs()));
+    let deviatoric = if scale == 0.0 {
+        0.0
+    } else {
+        let s = stress.map(|value| value / scale);
+        let norm2 = s[0] * s[0] + s[1] * s[1] + s[2] * s[2]
+            + 2.0 * (s[3] * s[3] + s[4] * s[4] + s[5] * s[5]);
+        (scale / rho) * (3.0 / core::f64::consts::SQRT_2) * norm2.sqrt()
+    };
+    // tr(Pi) = -2 rho cs² tau_bulk div(u), and
+    // 2 D:D = 2 D_dev:D_dev + (2/3) div(u)².
+    let dilation = (trace / rho).abs() * (3.0 / 6.0_f64.sqrt()) * bulk_rate;
+    [deviatoric, dilation]
 }
 
 /// Fail-closed D3Q19 cell-collision diagnostics.
@@ -598,7 +669,9 @@ fn collide_cell3_with_projection(
         CollisionModel3::Trt { tau, magic } => {
             collide_trt3(populations, equilibrium, velocity, force, tau, magic)
         }
-        CollisionModel3::CentralMoment { .. } | CollisionModel3::ReducedCumulant { .. } => {
+        CollisionModel3::CentralMoment { .. }
+        | CollisionModel3::CentralMomentBulk { .. }
+        | CollisionModel3::ReducedCumulant { .. } => {
             collide_moment_with_force3(populations, equilibrium, velocity, force, model)
         }
     }
@@ -709,6 +782,19 @@ fn collide_moments3(
             equilibrium,
             velocity,
             second_order_rate,
+            second_order_rate,
+            higher_order_rate,
+        ),
+        CollisionModel3::CentralMomentBulk {
+            shear_rate,
+            bulk_rate,
+            higher_order_rate,
+        } => collide_central_moments3(
+            physical,
+            equilibrium,
+            velocity,
+            shear_rate,
+            bulk_rate,
             higher_order_rate,
         ),
         CollisionModel3::ReducedCumulant {
@@ -777,6 +863,7 @@ fn collide_central_moments3(
     equilibrium: [f64; Q3],
     velocity: [f64; 3],
     second_order_rate: f64,
+    bulk_rate: f64,
     higher_order_rate: f64,
 ) -> Result<[f64; Q3], CollisionError3> {
     let matrix = central_moment_matrix3(velocity);
@@ -793,6 +880,17 @@ fn collide_central_moments3(
             equilibrium_moments[moment] - moments[moment],
             moments[moment],
         );
+    }
+    if bulk_rate != second_order_rate {
+        // Correct only the isotropic part of the physical second moment.
+        // The equal-rate branch retains every historical population bit.
+        let trace_defect = (equilibrium_moments[4] - moments[4])
+            + (equilibrium_moments[5] - moments[5])
+            + (equilibrium_moments[6] - moments[6]);
+        let correction = (bulk_rate - second_order_rate) * (trace_defect / 3.0);
+        for normal in &mut relaxed[4..7] {
+            *normal += correction;
+        }
     }
     let post = populations_from_central_moments3(relaxed, velocity);
     for (direction, value) in post.into_iter().enumerate() {
@@ -1012,6 +1110,9 @@ fn solve_moment_system3(
     }
     Ok(solution)
 }
+
+#[cfg(test)]
+mod bulk_viscosity_tests;
 
 #[cfg(test)]
 mod forcing_tests {

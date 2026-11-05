@@ -77,7 +77,12 @@ pub(super) fn run_radiating(f: &Fixture, source: &Path, contact: &Path, ledger: 
 }
 
 pub(super) fn solve_radiating(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
-    let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
+    solve_radiating_output(f, ordinal, None, pack)
+}
+
+pub(super) fn solve_radiating_output(f: &Fixture, ordinal: usize, output: Option<&str>,
+    pack: (Vec<u8>, String, String)) -> (J, J) {
+    let (source, contact, ledger) = prepare_with_pack(f, ordinal, output, pack);
     let output = run_radiating(f, &source, &contact, &ledger);
     assert_eq!(output.exit_code, fs_cli::exit::SUCCESS, "{}\n{}", output.stdout, output.stderr);
     let output = J::parse(&output.stdout).unwrap();

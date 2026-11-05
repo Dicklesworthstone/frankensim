@@ -38,6 +38,9 @@ use std::{
     time::Instant,
 };
 
+#[path = "helmholtz_bc_reflection_iterative.rs"]
+pub(crate) mod reflection;
+
 /// Right preconditioning leaves GMRES's residual in the original equation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preconditioner {
@@ -1114,6 +1117,23 @@ impl<'a> IterativeRadiation<'a> {
             .iter()
             .map(|&v| v * C64::new(0.0, self.k * self.medium.sound_speed * self.medium.density))
             .collect();
+        self.boundary_rhs_from_flux(&q, gate)
+    }
+
+    // Original B*q image; q is the outward normal pressure derivative.
+    // Reflection coordinates supply q=ik*w directly, without converting
+    // through physical velocity and cancelling characteristic-impedance scales.
+    fn boundary_rhs_from_flux(
+        &self,
+        q: &[C64],
+        gate: &CancelGate,
+    ) -> Result<Vec<C64>, IterativeError> {
+        poll(gate)?;
+        if q.len() != self.surface.areas().len() || q.iter().any(|&z| !finite(z)) {
+            return Err(IterativeError::Invalid {
+                what: "one finite normal pressure derivative per panel required",
+            });
+        }
         let (diagonal_b, near, single, adjoint) = match &self.layers {
             Layers::BurtonMiller {
                 diagonal_b,
@@ -1182,7 +1202,25 @@ impl<'a> IterativeRadiation<'a> {
         gate: &CancelGate,
     ) -> Result<IterativeState, IterativeError> {
         let started = Instant::now();
-        let mut rhs = stack(&self.boundary_rhs(velocity, gate)?);
+        let rhs = self.boundary_rhs(velocity, gate)?;
+        self.start_from_rhs(&rhs, velocity, started, gate)
+    }
+
+    // Shared physical scaling for the original and bounded Robin coordinates.
+    // The caller supplies the actual unpreconditioned equation's right side.
+    fn start_from_rhs(
+        &self,
+        rhs: &[C64],
+        velocity: &[C64],
+        started: Instant,
+        gate: &CancelGate,
+    ) -> Result<IterativeState, IterativeError> {
+        if rhs.len() != self.surface.areas().len() || rhs.iter().any(|&z| !finite(z)) {
+            return Err(IterativeError::Invalid {
+                what: "one finite boundary-integral right-hand side per panel required",
+            });
+        }
+        let mut rhs = stack(rhs);
         let mut maximum = 0.0_f64;
         for chunk in rhs.chunks(256) {
             poll(gate)?;
@@ -1329,6 +1367,19 @@ impl<'a> IterativeRadiation<'a> {
         gate: &CancelGate,
         cancel: &mut impl FnMut(usize) -> bool,
     ) -> Result<SolveReport, IterativeError> {
+        self.advance_with_operator(state, cycles, gate, cancel, &|x, gate| self.apply(x, gate))
+    }
+
+    // Right preconditioning, restart checkpoints, actual residual recomputation,
+    // cancellation and failure accounting have one owner for both coordinates.
+    fn advance_with_operator(
+        &self,
+        state: &mut IterativeState,
+        cycles: usize,
+        gate: &CancelGate,
+        cancel: &mut impl FnMut(usize) -> bool,
+        complex_apply: &dyn Fn(&[C64], &CancelGate) -> Result<Vec<C64>, IterativeError>,
+    ) -> Result<SolveReport, IterativeError> {
         if state.stamp != self.stamp {
             return Err(IterativeError::Invalid {
                 what: "checkpoint belongs to a different prepared operator",
@@ -1337,6 +1388,7 @@ impl<'a> IterativeRadiation<'a> {
         let started = Instant::now();
         let op = RealOp {
             owner: self,
+            complex_apply,
             gate,
             first_error: RefCell::new(None),
             matvecs: Cell::new(0),
@@ -1389,24 +1441,7 @@ impl<'a> IterativeRadiation<'a> {
         &self,
         state: &IterativeState,
     ) -> Result<(RadiationSolution, SolveReport, ResourceReceipt), IterativeError> {
-        if state.stamp != self.stamp {
-            return Err(IterativeError::Invalid {
-                what: "checkpoint belongs to a different prepared operator",
-            });
-        }
-        let mut pressure = self.inverse(&unstack(&state.gmres.x));
-        for value in &mut pressure {
-            *value = value.scale(state.rhs_scale);
-        }
-        let report = state.report(self.options.tol);
-        let receipt = self.receipt(state);
-        if !report.converged_euclidean() || pressure.iter().any(|v| !finite(*v)) {
-            return Err(IterativeError::NotConverged {
-                pressure,
-                report,
-                receipt,
-            });
-        }
+        let (pressure, report, receipt) = self.finish_coordinates(state)?;
         let velocity = if let Some(admittance) = self.admittance {
             let absorbed = admittance.image(&pressure)?;
             state
@@ -1438,6 +1473,31 @@ impl<'a> IterativeRadiation<'a> {
             report,
             receipt,
         ))
+    }
+
+    fn finish_coordinates(
+        &self,
+        state: &IterativeState,
+    ) -> Result<(Vec<C64>, SolveReport, ResourceReceipt), IterativeError> {
+        if state.stamp != self.stamp {
+            return Err(IterativeError::Invalid {
+                what: "checkpoint belongs to a different prepared operator",
+            });
+        }
+        let mut pressure = self.inverse(&unstack(&state.gmres.x));
+        for value in &mut pressure {
+            *value = value.scale(state.rhs_scale);
+        }
+        let report = state.report(self.options.tol);
+        let receipt = self.receipt(state);
+        if !report.converged_euclidean() || pressure.iter().any(|v| !finite(*v)) {
+            return Err(IterativeError::NotConverged {
+                pressure,
+                report,
+                receipt,
+            });
+        }
+        Ok((pressure, report, receipt))
     }
 
     fn near_table(&self) -> Option<&NearTable> {
@@ -2123,6 +2183,7 @@ impl BmCloudLayers {
 
 struct RealOp<'a, 's> {
     owner: &'a IterativeRadiation<'s>,
+    complex_apply: &'a dyn Fn(&[C64], &CancelGate) -> Result<Vec<C64>, IterativeError>,
     gate: &'a CancelGate,
     first_error: RefCell<Option<IterativeError>>,
     matvecs: Cell<usize>,
@@ -2145,8 +2206,7 @@ impl LinearOp for RealOp<'_, '_> {
         }
         .and_then(|()| {
             self.matvecs.set(self.matvecs.get() + 1);
-            self.owner
-                .apply(&self.owner.inverse(&unstack(x)), self.gate)
+            (self.complex_apply)(&self.owner.inverse(&unstack(x)), self.gate)
         });
         match result {
             Ok(v) => y.copy_from_slice(&stack(&v)),

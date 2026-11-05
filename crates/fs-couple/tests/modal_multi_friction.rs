@@ -408,6 +408,41 @@ fn invalid_inputs_cancelled_and_nonconvergent_trials_do_not_publish() {
 }
 
 #[test]
+fn g1_active_set_rescue_releases_a_lifted_contact_without_changing_loaded_motion() {
+    // The two opposed loaded ports need more than one joint sweep. A third
+    // point lies on the same body but has no normal load: adding it must not
+    // constrain motion or stop the rescue from resolving the loaded pair.
+    let bank = |sweeps| {
+        let mut cfg = joint_config();
+        cfg.max_sweeps = sweeps;
+        system(true).with_additional_ports(vec![
+            (ModalFrictionPort { left: attachment(0), right: None, law: law() }, config()),
+            (ModalFrictionPort { left: attachment(1), right: None, law: law() }, config()),
+        ], cfg, &CancelGate::new()).unwrap()
+    };
+    let drives = [drive(0.001, 1.0), drive(0.4, 0.0), drive(-0.001, 1.0)];
+    let mut rescued = bank(1);
+    let frame = rescued.step(&[0.0; 2], &drives).unwrap().clone();
+    let mut swept = bank(128);
+    let reference = swept.step(&[0.0; 2], &drives).unwrap().clone();
+    assert_eq!((frame.active_set_rescues, reference.active_set_rescues), (1, 0));
+    assert_eq!(frame.ports[1].regime, ModalFrictionRegime::Released);
+    assert_eq!(frame.ports[1].traction_n, 0.0);
+    assert_eq!(frame.ports[1].drive_work_j, 0.0);
+    assert_eq!(frame.ports[1].dissipation_j, 0.0);
+    assert!(frame.ports[1].slip_distance_m.abs() > 1e-6);
+    for i in [0, 2] {
+        assert_eq!(frame.ports[i].regime, reference.ports[i].regime);
+        assert!((frame.ports[i].traction_n - reference.ports[i].traction_n).abs() < 1e-9);
+    }
+    for (got, expected) in all_states(&rescued).iter().zip(all_states(&swept)) {
+        assert!((got.displacement_m_sqrt_kg - expected.displacement_m_sqrt_kg).abs() < 1e-12);
+        assert!((got.velocity_m_sqrt_kg_per_s - expected.velocity_m_sqrt_kg_per_s).abs() < 1e-10);
+    }
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+}
+
+#[test]
 fn acceleration_observer_sees_both_forces_and_refuses_before_publication() {
     fn observed(limit: f64) -> FrictionModalSystem {
         let mut images = vec![image(800.0,0.0,0.0),image(1100.0,0.0,0.0)];

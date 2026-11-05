@@ -10,7 +10,7 @@ use super::{SolveRefusal, bad, poll};
 
 mod reverse;
 pub(super) use reverse::{
-    NaturalCoupling, airflow_storage_bytes, contact_storage_bytes, finish,
+    NaturalCoupling, airflow_storage_bytes, contact_storage_bytes, feedback_regions, finish,
     material_control_storage_bytes, natural_storage_bytes, prescribed_control_storage_bytes,
     radiation_storage_bytes,
 };

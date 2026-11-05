@@ -279,9 +279,13 @@ pub(super) fn direct_contribution(
     point: Point3,
     receiver: Receiver<'_>,
     wavelengths: &[f64; PACKET],
+    coated_active_lane: Option<usize>,
     rng: &PathRng,
     #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
 ) -> Result<[f64; PACKET], TracerError> {
+    if coated_active_lane.is_some_and(|lane| lane >= PACKET) {
+        return Err(TracerError::InvalidInput);
+    }
     let mut result = [0.0; PACKET];
     if settings.strategy == DirectStrategy::BsdfOnly
         || !medium.emission_grid().has_emission_proposal()
@@ -359,6 +363,11 @@ pub(super) fn direct_contribution(
     };
     let source = medium.source_radiance(cx, point, physical_direction, distance, wavelengths)?;
     for (lane, &wavelength) in wavelengths.iter().enumerate() {
+        // Keep the original packet in every source/transport/proposal query;
+        // only inactive coated material responses are omitted after splitting.
+        if coated_active_lane.is_some_and(|active| active != lane) {
+            continue;
+        }
         let (response, competing_pdf) = receiver.evaluation(direction, wavelength, common_pdf)?;
         if !competing_pdf.is_finite() || competing_pdf < 0.0 {
             return Err(TracerError::InvalidInput);

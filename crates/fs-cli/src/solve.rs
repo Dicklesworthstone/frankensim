@@ -308,7 +308,15 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// including live contact, natural convection and transported-air feedback.
 /// Version 118 differentiates steady live-contact closed/open enclosures
 /// through the complete material, contact, convection and radiosity dual.
-pub const SOLVE_DRIVER_VERSION: u32 = 118;
+/// Version 120 differentiates steady live contacts with ambient radiation,
+/// including radiation-only traces and natural/transported-air feedback.
+/// Version 121 adds complete prescribed-temperature controls and regional
+/// volume-mean goals to those live-contact adjoints, including radiation.
+/// Version 122 composes capacity/contact trajectories with ambient radiation
+/// adjoints and admits radiation-only traces without convection controls.
+/// Version 123 exposes whole-law contact and regional conductivity controls
+/// throughout live-contact capacity histories through the same complete dual.
+pub const SOLVE_DRIVER_VERSION: u32 = 123;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

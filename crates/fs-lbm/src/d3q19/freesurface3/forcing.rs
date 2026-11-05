@@ -3,6 +3,83 @@
 use super::*;
 use crate::d3q19::{RigidFrame3, W3, guo_projection3};
 
+/// Prescribed acceleration in the fixed Cartesian lattice coordinates.
+///
+/// Every wet cell uses its own density in `F = rho * a(x)`. The descriptor
+/// covers the whole domain, including cells activated by advancing liquid,
+/// without a dense field or a wet-only map. It is independent of velocity:
+/// Coriolis and a complete rotating-frame model remain owned by `RigidFrame3`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BodyAccelerationField3 {
+    /// Spatially uniform acceleration [dx/dt²]; preserves the scalar arithmetic.
+    Uniform([f64; 3]),
+    /// `acceleration + gradient * (x - origin)` at cell centre `x = i + 1/2`.
+    /// The origin stays fixed when a piston physically relocates liquid.
+    Affine {
+        /// Reference position in lattice coordinates [dx].
+        origin: [f64; 3],
+        /// Acceleration at the reference position [dx/dt²].
+        acceleration: [f64; 3],
+        /// Row-major `gradient[component][coordinate]` [1/dt²].
+        gradient: [[f64; 3]; 3],
+    },
+}
+
+impl BodyAccelerationField3 {
+    fn admit(&self) -> Result<(), FreeSurfaceError3> {
+        let finite = match self {
+            Self::Uniform(acceleration) => acceleration.iter().all(|v| v.is_finite()),
+            Self::Affine {
+                origin,
+                acceleration,
+                gradient,
+            } => origin
+                .iter()
+                .chain(acceleration)
+                .chain(gradient.iter().flatten())
+                .all(|v| v.is_finite()),
+        };
+        if !finite {
+            return Err(FreeSurfaceError3::Transport(
+                "body-acceleration field coefficients must be finite",
+            ));
+        }
+        Ok(())
+    }
+
+    // Parameters are admitted once at binding. Sampling adds no source query,
+    // allocation or temporal averaging; the original cell order is retained.
+    fn at_cell(&self, key: u64, lane: usize) -> Result<[f64; 3], FreeSurfaceError3> {
+        let (origin, acceleration, gradient) = match self {
+            Self::Uniform(acceleration) => return Ok(*acceleration),
+            Self::Affine {
+                origin,
+                acceleration,
+                gradient,
+            } => (origin, acceleration, gradient),
+        };
+        let (x, y, z) = FreeSurface3::global_of(key, lane);
+        let displacement: [f64; 3] =
+            core::array::from_fn(|axis| [x, y, z][axis] as f64 + 0.5 - origin[axis]);
+        let mut value = *acceleration;
+        for axis in 0..3 {
+            for coordinate in 0..3 {
+                // A zero gradient retains the uniform path's bits, including
+                // signed zeros, without multiplying unused displacements.
+                if gradient[axis][coordinate] != 0.0 {
+                    value[axis] += gradient[axis][coordinate] * displacement[coordinate];
+                }
+            }
+        }
+        if value.iter().any(|v| !v.is_finite()) {
+            return Err(FreeSurfaceError3::Transport(
+                "body acceleration is unrepresentable at a wet cell position",
+            ));
+        }
+        Ok(value)
+    }
+}
+
 impl RigidFrame3 {
     /// Prepare the original sparse VOF owner for one prescribed rigid-frame step.
     ///
@@ -73,7 +150,7 @@ impl RigidFrame3 {
             )
             .into());
         }
-        if surface.body_acceleration().is_some() {
+        if surface.body_acceleration_field().is_some() {
             return Err(FreeSurfaceError3::Transport(
                 "rigid-frame forcing cannot replace an independent body-acceleration owner",
             )
@@ -297,7 +374,7 @@ pub(super) fn retarget_velocity(
     previous: [f64; 3],
     next: [f64; 3],
     force: [f64; 3],
-) -> Result<[f64; Q3], FreeSurfaceError3> {
+) -> Result<[f64; Q3], FreeSurfaceError3>{
     if previous == next {
         return Ok(populations);
     }
@@ -321,12 +398,35 @@ pub(super) fn retarget_velocity(
 }
 
 impl FreeSurface3 {
-    /// Explicit lattice body acceleration [dx/dt²], when selected. None is the
-    /// historical uniform/reference-density or independently held local force.
+    /// Uniform lattice body acceleration [dx/dt²], when selected. An affine
+    /// owner returns None; use [`Self::body_acceleration_field`] to distinguish
+    /// that owner from historical/reference-density or independently held force.
     /// Some([0; 3]) remains an acceleration-owned zero load, not unknown forcing.
     #[must_use]
     pub const fn body_acceleration(&self) -> Option<[f64; 3]> {
+        match self.body_acceleration {
+            Some(BodyAccelerationField3::Uniform(acceleration)) => Some(acceleration),
+            _ => None,
+        }
+    }
+
+    /// Complete accepted density-dependent acceleration owner, if selected.
+    /// Ordinary timesteps hold this field; endpoint advances publish its next
+    /// value only together with accepted populations, mass and force history.
+    #[must_use]
+    pub const fn body_acceleration_field(&self) -> Option<BodyAccelerationField3> {
         self.body_acceleration
+    }
+
+    pub(super) fn acceleration_at_lane(
+        &self,
+        key: u64,
+        lane: usize,
+    ) -> Result<Option<[f64; 3]>, FreeSurfaceError3> {
+        self.body_acceleration
+            .as_ref()
+            .map(|field| field.at_cell(key, lane))
+            .transpose()
     }
 
     /// Advance one lattice timestep to a prescribed body-acceleration endpoint.
@@ -351,7 +451,28 @@ impl FreeSurface3 {
         next_acceleration: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceError3> {
-        self.advance_body_acceleration_with_pressure(next_acceleration, gate, None)
+        self.advance_body_acceleration_field(
+            BodyAccelerationField3::Uniform(next_acceleration),
+            gate,
+        )
+    }
+
+    /// Advance to a uniform or affine acceleration endpoint on the same native
+    /// stream. Collision uses the previous local `rho*a(x)`; gas reconstruction,
+    /// accepted velocity and newly wet cells use the next field at their actual
+    /// cell centres and their own next densities. The descriptor remains fixed
+    /// in world/grid coordinates, not attached to individual parcels.
+    ///
+    /// This shares the scalar entry's ownership, atomicity and numerical scope.
+    /// It adds no interpolation, dense storage, per-cell material callback or
+    /// extra population buffer. An affine law is not a velocity-dependent
+    /// inertial force or a thermodynamic density/thermal-expansion model.
+    pub fn advance_body_acceleration_field(
+        &mut self,
+        next: BodyAccelerationField3,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.advance_body_acceleration_with_pressure(next, gate, None)
     }
 
     /// The same endpoint-acceleration step with prescribed gas-link pressure.
@@ -370,17 +491,36 @@ impl FreeSurface3 {
         maximum_density_excursion: f64,
         pressure: impl Fn(GasPressureLink3) -> Result<f64, FreeSurfaceError3>,
     ) -> Result<(), FreeSurfaceError3> {
+        self.advance_body_acceleration_field_with_gas_link_pressure(
+            BodyAccelerationField3::Uniform(next_acceleration),
+            gate,
+            maximum_density_excursion,
+            pressure,
+        )
+    }
+
+    /// Compose a spatial acceleration endpoint with the original gas-link load.
+    /// Pressure assembly samples each interface's next acceleration once, then
+    /// closes its gas links in that local actual-density force frame. A pressure or
+    /// spatial-field refusal leaves the complete accepted trajectory intact.
+    pub fn advance_body_acceleration_field_with_gas_link_pressure(
+        &mut self,
+        next: BodyAccelerationField3,
+        gate: &CancelGate,
+        maximum_density_excursion: f64,
+        pressure: impl Fn(GasPressureLink3) -> Result<f64, FreeSurfaceError3>,
+    ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         let boundary = pressure::GasPressure3::new(
             maximum_density_excursion,
             pressure::GasPressureField3::Link(&pressure),
         )?;
-        self.advance_body_acceleration_with_pressure(next_acceleration, gate, Some(&boundary))
+        self.advance_body_acceleration_with_pressure(next, gate, Some(&boundary))
     }
 
     fn advance_body_acceleration_with_pressure(
         &mut self,
-        next_acceleration: [f64; 3],
+        next: BodyAccelerationField3,
         gate: &CancelGate,
         pressure: Option<&pressure::GasPressure3<'_>>,
     ) -> Result<(), FreeSurfaceError3> {
@@ -391,16 +531,12 @@ impl FreeSurface3 {
                 "acceleration evolution requires an explicit initial body-acceleration owner",
             ));
         }
-        if next_acceleration.iter().any(|value| !value.is_finite()) {
-            return Err(FreeSurfaceError3::Transport(
-                "next body acceleration must be finite",
-            ));
-        }
+        next.admit()?;
         let mut candidate = self.clone();
         // Do not rebind local_force: it is the accepted collision source F_n.
         // The existing stream already uses this descriptor only to close the
         // endpoint pressure, refresh F_next, and initialize newly wet cells.
-        candidate.body_acceleration = Some(next_acceleration);
+        candidate.body_acceleration = Some(next);
         candidate.step_inner(gate, None, None, pressure)?;
         check_cancel(gate)?;
         *self = candidate;
@@ -429,18 +565,39 @@ impl FreeSurface3 {
         self.rebind_body_acceleration_checked(acceleration, || check_cancel(gate))
     }
 
+    /// Select or replace a uniform/affine field without advancing physical time.
+    /// Reuses the original Guo reframe: density and mass remain exact, while
+    /// physical velocity and stress are retained to population roundoff.
+    /// Subsequent steps evaluate `rho*a(x)` at each actual cell position,
+    /// including newly wet cells and cells relocated by a piston remap.
+    /// Independent local-force and historical replay owners remain refused.
+    pub fn rebind_body_acceleration_field(
+        &mut self,
+        field: BodyAccelerationField3,
+        gate: &CancelGate,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.rebind_body_acceleration_field_checked(field, || check_cancel(gate))
+    }
+
     /// Same candidate admission under an existing Cx/owner cancellation scope.
     pub(crate) fn rebind_body_acceleration_checked(
         &mut self,
         acceleration: [f64; 3],
+        checkpoint: impl FnMut() -> Result<(), FreeSurfaceError3>,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.rebind_body_acceleration_field_checked(
+            BodyAccelerationField3::Uniform(acceleration),
+            checkpoint,
+        )
+    }
+
+    fn rebind_body_acceleration_field_checked(
+        &mut self,
+        field: BodyAccelerationField3,
         mut checkpoint: impl FnMut() -> Result<(), FreeSurfaceError3>,
     ) -> Result<(), FreeSurfaceError3> {
         checkpoint()?;
-        if acceleration.iter().any(|value| !value.is_finite()) {
-            return Err(FreeSurfaceError3::Transport(
-                "body acceleration must be finite",
-            ));
-        }
+        field.admit()?;
         if self.redistribution == ConversionRedistribution3::LegacyGlobal {
             return Err(FreeSurfaceError3::Transport(
                 "body acceleration cannot use historical LegacyGlobal force semantics",
@@ -470,12 +627,12 @@ impl FreeSurface3 {
                 }
                 forces.insert(
                     (key, lane),
-                    body_force(populations.iter().sum(), acceleration)?,
+                    body_force(populations.iter().sum(), field.at_cell(key, lane)?)?,
                 );
             }
         }
         self.rebind_force_field_inner(forces, true, checkpoint)?;
-        self.body_acceleration = Some(acceleration);
+        self.body_acceleration = Some(field);
         Ok(())
     }
 

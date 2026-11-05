@@ -17,6 +17,10 @@ use fs_matdb::Provenance;
 use fs_math::det;
 use fs_qty::{Density, Mass, Time, Volume, VolumetricFlowRate};
 
+/// Unequal active/stagnant compartments with explicit bypass and exchange.
+#[path = "residence/nonideal.rs"]
+pub mod nonideal;
+
 /// Maximum explicitly represented tanks in this bounded synchronous evaluator.
 pub const MAX_TANKS: usize = 64;
 /// Maximum `Q * duration / (active_volume / tank_count)` per call.

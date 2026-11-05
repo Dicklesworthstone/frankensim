@@ -16,9 +16,11 @@
 //! Lossless calls need only rho and c. Thermoviscous calls use the existing
 //! no-slip, isothermal-boundary Zwikker–Kosten model, with full Bessel or
 //! explicitly admitted wide-tube response. A separate compliant wall or
-//! terminal load may also dissipate energy. Mean flow, molecular/bulk-viscous
-//! absorption, evolving cavitation, nonlinear water hammer and shell dynamics
-//! are outside this model. A supplied
+//! terminal load may also dissipate energy. Separate homogeneous bulk viscous
+//! propagation is available through [`bulk::BulkTractionCylinder`], whose
+//! mechanical ports explicitly carry total traction rather than pressure.
+//! Mean flow, molecular absorption, evolving cavitation, nonlinear water hammer
+//! and shell dynamics are outside these models. A supplied
 //! [`fs_material::fluid_acoustics::FrozenHomogeneousMixture`] can drive the
 //! lossless path in its frozen-mass, homogeneous long-wavelength limit; bubble
 //! resonance, phase transfer and mixture transport losses are not inferred.
@@ -35,8 +37,10 @@
 
 /// Distinct original fluid materials in the same axial pressure/flow chain.
 pub mod regional;
+/// Homogeneous bulk viscous acoustic propagation with explicit traction ports.
+pub mod bulk;
 
-use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain, TwoPort};
+use crate::compose::{self, ChainResult, ComposeOptions, InputReflection, PreparedChain, TwoPort};
 use crate::network::NetworkLoad;
 use crate::{ConeSlices, Duct, DuctError, LossModel, Segment, SegmentWave, WallModel};
 use fs_material::MaterialError;
@@ -140,6 +144,9 @@ pub fn segment_wave<M: FluidAcoustics + ?Sized>(
 /// inconsistent pressure/velocity impedance. This does not add wall diffusion
 /// or a damping fit. The constitutive caller owns the frequency, amplitude and
 /// homogenization limits of its complex bulk response.
+/// This pressure relation assumes inviscid longitudinal momentum. With bulk
+/// viscous stress, `rho * omega / k` is total traction/velocity instead; use
+/// [`bulk::BulkTractionCylinder`] to preserve the distinct pressure observable.
 pub fn segment_wave_with_wavenumber<M: FluidAcoustics + ?Sized>(
     material: &M,
     radius: f64,
@@ -646,6 +653,80 @@ pub fn input_impedance_load_with_loss<M: ThermoviscousFluid + ?Sized>(
     )?)
 }
 
+/// Direct input reflection for a passive terminal load in the original fluid.
+/// `None` is rigid and `Some(C64::ZERO)` is pressure release. The returned wave
+/// uses the positive real inlet reference retained by [`duct_chain`]; use
+/// [`InputReflection::referenced_to`] for another real reference.
+///
+/// Reflection is evaluated in scattering coordinates throughout. Lossless
+/// pressure antinodes therefore remain finite even when
+/// [`input_impedance_load`] correctly refuses its singular pressure/flow
+/// ratio. Material evaluation, local wall response, geometry limits and
+/// cancellation are shared with the native chain.
+#[allow(clippy::too_many_arguments)]
+pub fn input_reflection_load<M: FluidAcoustics + ?Sized>(
+    duct: &Duct,
+    material: &M,
+    omega: f64,
+    load: Option<C64>,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<InputReflection, FluidDuctError> {
+    admit_load(load)?;
+    let chain = duct_chain(
+        duct,
+        material,
+        omega,
+        wall,
+        cone_slices,
+        options,
+        &mut cancelled,
+    )?;
+    Ok(compose::compose_chain_reflection_controlled(
+        &chain.blocks,
+        load,
+        options,
+        &mut cancelled,
+    )?)
+}
+
+/// Direct material-fluid reflection with the original viscous and thermal
+/// boundary diffusion, mechanical wall response and passive terminal load.
+/// The positive real wave reference does not replace the fluid's complex
+/// characteristic impedance. Loss and phase remain in the original blocks.
+#[allow(clippy::too_many_arguments)]
+pub fn input_reflection_load_with_loss<M: ThermoviscousFluid + ?Sized>(
+    duct: &Duct,
+    material: &M,
+    omega: f64,
+    loss: LossModel,
+    load: Option<C64>,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<InputReflection, FluidDuctError> {
+    admit_load(load)?;
+    let chain = duct_chain_with_loss(
+        duct,
+        material,
+        omega,
+        loss,
+        wall,
+        cone_slices,
+        options,
+        &mut cancelled,
+    )?;
+    Ok(compose::compose_chain_reflection_controlled(
+        &chain.blocks,
+        load,
+        options,
+        &mut cancelled,
+    )?)
+}
+
 fn admit_load(load: Option<C64>) -> Result<(), DuctError> {
     if load.is_some_and(|z| !z.re.is_finite() || !z.im.is_finite() || z.re < 0.0) {
         return Err(bad(
@@ -692,6 +773,40 @@ pub fn input_impedance_boundary<M: ThermoviscousFluid + ?Sized>(
     // This immutable admitted snapshot implements the shared trait directly:
     // the caller's original material is evaluated exactly once for both owners.
     input_impedance_load_with_loss(
+        duct,
+        &state,
+        omega,
+        loss,
+        impedance,
+        wall,
+        cone_slices,
+        options,
+        cancelled,
+    )
+}
+
+/// Direct reflection with a material-owned terminal boundary and one coherent
+/// fluid snapshot for propagation, boundary diffusion and the terminal law.
+/// Radiation, porous, tabulated, rigid and pressure-release loads retain the
+/// exact owners and scope of [`input_impedance_boundary`]. No impedance of the
+/// complete duct is formed, so its pressure antinodes are admitted.
+#[allow(clippy::too_many_arguments)]
+pub fn input_reflection_boundary<M: ThermoviscousFluid + ?Sized>(
+    duct: &Duct,
+    material: &M,
+    omega: f64,
+    loss: LossModel,
+    load: &NetworkLoad,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<InputReflection, FluidDuctError> {
+    admit_geometry(duct, options, &mut cancelled)?;
+    let state = material.thermoviscous_state()?;
+    let impedance = boundary_from_state(&state.acoustic(), Some(&state), omega, load)?;
+    poll(&mut cancelled, 0)?;
+    input_reflection_load_with_loss(
         duct,
         &state,
         omega,

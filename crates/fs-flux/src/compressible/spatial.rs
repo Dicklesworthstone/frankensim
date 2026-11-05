@@ -171,7 +171,7 @@ impl BoundarySide {
 }
 
 /// Independent boundary pair for each Cartesian direction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Boundaries3d {
     /// Conditions normal to x.
     pub x: AxisBoundaries,

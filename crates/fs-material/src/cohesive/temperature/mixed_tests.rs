@@ -268,3 +268,41 @@ fn failed_mixed_bond_keeps_compression_and_drops_all_bond_viscosity() {
         0.0,
     );
 }
+
+#[test]
+fn failed_common_and_mixed_temperature_cycles_keep_detached_motion_and_original_loss() {
+    let common_cold = BilinearCohesive::new(4.0, 4.0, 10.0, 20.0, 50.0).unwrap();
+    let common_hot = BilinearCohesive::new(1.0, 0.5, 0.5, 40.0, 10.0).unwrap();
+    let mixed_cold = mixed(cold_parameters());
+    let mixed_hot = BilinearCohesive::new_mixed_mode(hot_parameters(), 40.0, 10.0).unwrap();
+    for (cold, hot) in [(&common_cold, &common_hot), (&mixed_cold, &mixed_hot)] {
+        let failed = cold.bonded_point().trial([10.0, 0.0, 0.0], 1e-10).unwrap().point;
+        assert!(failed.failed());
+        let detached = failed.trial([1e200, -2e200, 1e200], 1e-10).unwrap().point;
+        assert_eq!(detached.stored_energy_j_m2(), 0.0);
+        let transferred = detached.transfer_temperature(hot, 1e-10).unwrap();
+        assert_eq!(transferred.point.jump_m(), detached.jump_m());
+        assert_eq!(transferred.point.damage(), 1.0);
+        assert_eq!(transferred.point.dissipated_j_m2(), failed.dissipated_j_m2());
+        assert_eq!(transferred.parameter_work_j_m2, 0.0);
+        assert_eq!(transferred.damage_dissipated_j_m2, 0.0);
+        assert_eq!(transferred.stored_change_j_m2, 0.0);
+        if let Some(before) = detached.mixed_mode_history() {
+            let after = transferred.point.mixed_mode_history().unwrap();
+            assert_eq!(after.onset_direction, before.onset_direction);
+            assert_eq!(after.energy_shear_fraction, before.energy_shear_fraction);
+        }
+        let closed = transferred.point.trial([-0.4, 2e200, -1e200], 1e-10).unwrap();
+        assert_eq!(closed.traction_pa, [-16.0, 0.0, 0.0]);
+        near(closed.energy.work, 3.2);
+        assert_eq!(closed.energy.dissipated, 0.0);
+        let cooled = closed.point.transfer_temperature(cold, 1e-10).unwrap();
+        near(cooled.parameter_work_j_m2, -1.6);
+        near(cooled.stored_change_j_m2, -1.6);
+        assert_eq!(cooled.damage_dissipated_j_m2, 0.0);
+        assert_eq!(cooled.point.dissipated_j_m2(), failed.dissipated_j_m2());
+        let deep = failed.trial([-20.0, 0.0, 0.0], 1e-10).unwrap().point;
+        assert_eq!(deep.transfer_temperature(hot, 1e-10), Err(CohesiveError::SeparationLimit));
+        assert_eq!(failed.jump_m(), [10.0, 0.0, 0.0]);
+    }
+}

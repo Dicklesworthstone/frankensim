@@ -16,7 +16,6 @@ fn isolated(coordinates: [usize; 3], force: [f64; 3], sigma: f64) -> FreeSurface
         |x, y, z| [x, y, z] == coordinates,
     )
     .unwrap()
-    .with_conversion_redistribution(ConversionRedistribution3::ConservativeLocal)
 }
 
 #[test]

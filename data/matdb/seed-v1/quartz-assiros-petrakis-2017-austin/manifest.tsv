@@ -1,0 +1,28 @@
+frankensim.matdb-manifest.v3
+pack_id	quartz-assiros-petrakis-2017-austin
+redistribution	permitted	Attributed numerical facts from a CC-BY-4.0 article and original model-scope annotations; no source prose, figures or table layout reproduced
+citation	Petrakis, E.; Stamboliadis, E.; Komnitsas, K. (2017), Identification of Optimal Mill Operating Parameters during Grinding of Quartz with the Use of Population Balance Modeling, KONA Powder and Particle Journal 34, 213-223; Table 1, Table 2, equations 11-15, sections 3 and 4.3; https://doi.org/10.14356/kona.2017007; https://www.jstage.jst.go.jp/article/kona/34/0/34_2017007/_html; accessed 2026-11-05
+license	CC-BY-4.0
+source	quartz-austin-fits	properties.tsv	material-tsv-v1
+property	amplitude	austin-selection-amplitude	dimensional
+property	alpha	austin-selection-size-exponent	dimensional
+property	mu	austin-selection-rolloff-size	dimensional
+property	lambda	austin-selection-rolloff-exponent	dimensional
+property	phi	austin-daughter-fines-weight	dimensional
+property	gamma	austin-daughter-fines-exponent	dimensional
+property	beta	austin-daughter-coarse-exponent	dimensional
+property	class_size	austin-size-class-upper-size	dimensional
+axis	class_index	austin-size-class-index	dimensional
+axis	contact_time	grinding-contact-time	dimensional
+axis	ball_filling	ball-charge-volume-fraction	dimensional
+axis	powder_filling	powder-charge-volume-fraction	dimensional
+axis	mill_diameter	mill-inside-diameter	dimensional
+axis	mill_length	mill-inside-length	dimensional
+axis	ball_diameter	grinding-ball-diameter	dimensional
+axis	speed	rotation-frequency	dimensional
+axis	charge_mass	dry-charge-mass	dimensional
+axis	dry	dry-grinding	dimensional
+axis	temperature_known	source-test-temperature-known	dimensional
+axis	pressure_known	source-test-pressure-known	dimensional
+axis	model	fitted-reference-model	dimensional
+axis	operating_ore	operating-ore-qualified	dimensional

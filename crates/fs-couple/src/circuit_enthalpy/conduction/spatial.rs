@@ -3,8 +3,8 @@
 //! Each proposed endpoint refreshes the complete original source bundles at
 //! the actual T/liquid mass fraction, rebuilds only the conductivity Hodge, and
 //! deposits native bulk and explicitly partitioned interface Joule work once.
-//! Equipotential total-current drive is resolved anew on that actual operator,
-//! including the trial bulk and contact resistance, before its heat is deposited.
+//! Equipotential current and mixed voltage/current drives are resolved anew on
+//! that actual operator, including trial bulk/contact resistance, before heating.
 //! Native thermal storage,
 //! source/conductance resolution, Newton work limits, events and acceptance
 //! remain with the existing circuit/enthalpy and material-network owners.
@@ -30,7 +30,7 @@ use fs_em::{
     spatial::conduction::{
         SpatialConductanceControls, SpatialConduction, SpatialConductionBoundary,
         SpatialConductionContact, SpatialConductionContactResponse, SpatialConductionError,
-        SpatialConductionField,
+        SpatialConductionField, SpatialMixedConductanceControls,
     },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
@@ -39,7 +39,10 @@ use fs_material::{
     thermal::source::ThermalMaterialError,
 };
 use fs_thermal::enthalpy::{CellId, DepositionSimulation};
-use std::{cell::RefCell, collections::BTreeMap};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpatialConductionRegion {
@@ -77,6 +80,19 @@ pub enum SpatialConductionDrive<'a> {
         currents_a: &'a [f64],
         response: SpatialConductanceControls,
     },
+    /// A nonempty proper subset prescribes signed total current INTO the body;
+    /// zero current makes an equipotential electrode floating. Other terminals
+    /// prescribe voltage in original terminal order. Currents follow the caller's
+    /// `current_terminals` order. Every thermal trial refreshes the full native
+    /// response and its mixed block; no accepted-state resistance is reused.
+    MixedTerminals {
+        terminals: &'a [&'a [usize]],
+        current_terminals: &'a [usize],
+        voltages_v: &'a [f64],
+        currents_a: &'a [f64],
+        response: SpatialConductanceControls,
+        mixed: SpatialMixedConductanceControls,
+    },
 }
 
 impl<'a> SpatialConductionDrive<'a> {
@@ -102,9 +118,18 @@ impl<'a> SpatialConductionDrive<'a> {
         self,
         problem: &SpatialConduction<C>,
         field: &SpatialConductionField,
+        cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<f64, Error> {
+        fn add(sum: &mut f64, correction: &mut f64, value: f64) -> Result<(), Error> {
+            let adjusted = finite(value - *correction)?;
+            let next = finite(*sum + adjusted)?;
+            *correction = finite((next - *sum) - adjusted)?;
+            *sum = next;
+            Ok(())
+        }
+        check(cancel)?;
         // Native admission and the completed solve establish nonempty,
-        // equipotential exterior face sets for either current-driven mode.
+        // equipotential exterior face sets for each terminal-controlled mode.
         let potential = |faces: &[usize]| {
             faces
                 .first()
@@ -134,14 +159,65 @@ impl<'a> SpatialConductionDrive<'a> {
                 let reference = potential(terminals[0])?;
                 let (mut sum, mut correction) = (0.0, 0.0);
                 for (&faces, &current) in terminals.iter().zip(currents_a) {
+                    check(cancel)?;
                     // Independently authored I*V, with the same voltage gauge
                     // as the grounded terminal owner. A floating electrode's
                     // zero net current contributes no source work.
                     let work = finite(current * finite(potential(faces)? - reference)?)?;
-                    let adjusted = finite(work - correction)?;
-                    let next = finite(sum + adjusted)?;
-                    correction = finite((next - sum) - adjusted)?;
-                    sum = next;
+                    add(&mut sum, &mut correction, work)?;
+                }
+                sum
+            }
+            Self::MixedTerminals {
+                terminals,
+                current_terminals,
+                voltages_v,
+                currents_a,
+                ..
+            } => {
+                let voltage_terminals: Vec<_> = (0..terminals.len())
+                    .filter(|t| !current_terminals.contains(t))
+                    .collect();
+                if voltage_terminals.is_empty()
+                    || voltage_terminals.len() != voltages_v.len()
+                    || current_terminals.len() != currents_a.len()
+                {
+                    return Err(invalid("mixed electrodes lost their source correspondence"));
+                }
+                // Remove the common bias using one voltage-controlled electrode.
+                // Voltage-source work uses AUTHORED voltage differences and actual
+                // reactions; current-source work uses AUTHORED currents and actual
+                // potential differences. Neither supply is inferred from heat.
+                let reference = potential(terminals[voltage_terminals[0]])?;
+                let (mut sum, mut correction) = (0.0, 0.0);
+                for (&terminal, &voltage) in voltage_terminals.iter().zip(voltages_v) {
+                    let mut vertices = BTreeSet::new();
+                    for &face in terminals[terminal] {
+                        check(cancel)?;
+                        vertices.extend(problem.mesh().faces[face]);
+                    }
+                    let (mut current, mut current_correction) = (0.0, 0.0);
+                    for vertex in vertices {
+                        check(cancel)?;
+                        let reaction =
+                            field.nodal_boundary_current_a[vertex as usize].ok_or_else(|| {
+                                invalid("voltage electrode lost its current reaction")
+                            })?;
+                        add(&mut current, &mut current_correction, reaction)?;
+                    }
+                    add(
+                        &mut sum,
+                        &mut correction,
+                        finite(finite(voltage - voltages_v[0])? * current)?,
+                    )?;
+                }
+                for (&terminal, &current) in current_terminals.iter().zip(currents_a) {
+                    check(cancel)?;
+                    add(
+                        &mut sum,
+                        &mut correction,
+                        finite(current * finite(potential(terminals[terminal])? - reference)?)?,
+                    )?;
                 }
                 sum
             }
@@ -245,8 +321,9 @@ impl SpatialConductionThermalNetwork<'_> {
     /// Close the actual 3D current field, source sigma/rho(T,f), finite-cell
     /// enthalpy and all original material heat links at one common endpoint.
     /// Pass an existing boundary by reference or [`SpatialConductionDrive`] for
-    /// equipotential total-current electrodes. Current is held fixed over the
-    /// interval while the actual endpoint source laws determine terminal voltage.
+    /// equipotential current or mixed voltage/current electrodes. Authored drives
+    /// are held fixed over the interval; endpoint sources determine all remaining
+    /// terminal potentials and reactions, including floating electrodes.
     /// Scalar and fixed-orientation principal transport share the same solve.
     /// A confined phase chart needs equal, constant density and an explicit
     /// liquid-MASS-fraction coordinate; its original source owns sigma(f), not
@@ -494,13 +571,14 @@ impl SpatialConductionThermalNetwork<'_> {
             |next, _resistors, contact_owner, remaining| {
                 check(cancel).map_err(map_conduction_error)?;
                 let field_solves = match drive {
-                    SpatialConductionDrive::TerminalCurrents { terminals, .. } => terminals
+                    SpatialConductionDrive::TerminalCurrents { terminals, .. }
+                    | SpatialConductionDrive::MixedTerminals { terminals, .. } => terminals
                         .len()
                         .checked_sub(1)
                         .filter(|&n| n > 0)
                         .ok_or_else(|| {
                             map_conduction_error(invalid(
-                                "multi-terminal current needs at least two electrodes",
+                                "multi-terminal drive needs at least two electrodes",
                             ))
                         })?,
                     _ => 1,
@@ -546,13 +624,41 @@ impl SpatialConductionThermalNetwork<'_> {
                             &mut || (*cancel.borrow_mut())(),
                         )
                     }
+                    SpatialConductionDrive::MixedTerminals {
+                        terminals,
+                        current_terminals,
+                        voltages_v,
+                        currents_a,
+                        response,
+                        mixed,
+                    } => {
+                        let matrix = next
+                            .conductance_matrix(terminals, response, field_controls, &mut || {
+                                (*cancel.borrow_mut())()
+                            })
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        let mixed = matrix
+                            .prepare_current_control(current_terminals, mixed, &mut || {
+                                (*cancel.borrow_mut())()
+                            })
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        mixed.field_at_controls(
+                            voltages_v,
+                            currents_a,
+                            field_controls.current_tolerance_a,
+                            field_controls.power_tolerance_w,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                    }
                 }
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
                 let heat_j = finite(dt * field.power_w)?;
                 let supplied_work_j = finite(
                     dt * drive
-                        .supplied_power_w(&next, &field)
+                        .supplied_power_w(&next, &field, cancel)
                         .map_err(map_conduction_error)?,
                 )?;
                 if (field.power_w > 0.0 && heat_j == 0.0)

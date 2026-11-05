@@ -21,8 +21,9 @@ use super::*;
 /// Existing line/pair/FFT work admissions remain authoritative. A real pair
 /// uses eighteen scalar temporal contractions; a proper pair uses at most
 /// twelve. Each query contracts both N point samples and Q native spatial
-/// quadratures, with Q <= 2*N, within the original O(N*F^2) pair-work bound.
-/// No additional FFT or retained frequency bank is needed. Fixed modal
+/// quadratures, with Q <= 2*N, for the original sparse O(N*F²) contraction.
+/// A nonzero real carrier adds its admitted F*N*(width+height) spatial pass
+/// and retained DD coefficient planes. No additional FFT is needed. Fixed modal
 /// contraction scratch is included. Earlier outputs, borrowed owners and
 /// allocator overhead are excluded.
 #[derive(Clone, Copy, Debug)]
@@ -374,12 +375,14 @@ fn accumulate_bank<P: Copy>(
         bank,
         side,
         distance,
+        proper,
         |a, b| kernel(a, b).map(|product| MomentumKernel::new(a, b, product)),
         cancelled,
     )?;
     let cell = integrate_cell_momentum(
         bank.anchor.grid(),
         &observation.fields,
+        observation.carrier.as_ref(),
         &observation.kernels,
         proper,
         product_parts,
@@ -423,6 +426,7 @@ pub(super) fn momentum_error(error: MomentError) -> AngularSpectrumError {
 pub(super) fn integrate_cell_momentum<P: Copy>(
     grid: AngularSpectrumGrid,
     fields: &[Vec<[C64; 6]>],
+    carrier: Option<&cell::CarrierFields>,
     kernels: &[MomentumKernel<P>],
     proper: bool,
     product: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
@@ -432,6 +436,22 @@ pub(super) fn integrate_cell_momentum<P: Copy>(
     for mode in 0..grid.width * grid.height {
         if mode % 32 == 0 {
             poll(cancelled)?;
+        }
+        if let Some(carrier) = carrier {
+            let value = integrate_momentum(
+                fields.len(),
+                kernels,
+                |i| carrier.at(i, mode),
+                proper,
+                cell::rotate_minus_i,
+                |kernel, a, b| cell::product(kernel, a, b, &product).map_err(MomentError::Product),
+                cancelled,
+            )
+            .map_err(momentum_error)?;
+            for c in 0..6 {
+                sum[c] = sum[c] + value[c];
+            }
+            continue;
         }
         let opposite = opposite_mode(grid, mode);
         if opposite.is_some_and(|other| other < mode) {

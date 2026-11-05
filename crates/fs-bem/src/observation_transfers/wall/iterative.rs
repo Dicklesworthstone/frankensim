@@ -2,7 +2,10 @@
 //! FMM error, GMRES residual, receiver quadrature and FIR convergence remain
 //! distinct. A failed source solve cannot produce a partial frequency or bake.
 use super::*;
-use crate::helmholtz::bc::{IncidentField, IncidentTraces, PreparedIterativeBoundary};
+use crate::helmholtz::bc::{
+    BoundarySolution, IncidentField, IncidentTraces, PreparedIterativeBoundary,
+    PreparedIterativeReflectionBoundary, ScatteringSolution,
+};
 use crate::helmholtz::{IterativeError, IterativeOptions, Preconditioner, ResourceReceipt};
 use fs_exec::CancelGate;
 use fs_solver::krylov::SolveReport;
@@ -94,6 +97,35 @@ pub struct IterativeObservationSample {
 pub struct IterativeBoundaryObservation<'a> {
     observation: LocalBoundaryObservation<'a>,
     solver: IterativeOptions,
+}
+
+enum PreparedLocalIterativeBoundary<'a> {
+    Admittance(PreparedIterativeBoundary<'a>),
+    Reflection(PreparedIterativeReflectionBoundary<'a>),
+}
+
+impl PreparedLocalIterativeBoundary<'_> {
+    fn solve(
+        &self,
+        velocity: &[C64],
+        gate: &CancelGate,
+    ) -> Result<(BoundarySolution, SolveReport, ResourceReceipt), IterativeError> {
+        match self {
+            Self::Admittance(owner) => owner.solve(velocity, gate),
+            Self::Reflection(owner) => owner.solve(velocity, gate),
+        }
+    }
+
+    fn scatter(
+        &self,
+        incident: &IncidentTraces,
+        gate: &CancelGate,
+    ) -> Result<(ScatteringSolution, SolveReport, ResourceReceipt), IterativeError> {
+        match self {
+            Self::Admittance(owner) => owner.scatter(incident, gate),
+            Self::Reflection(owner) => owner.scatter(incident, gate),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -292,8 +324,8 @@ impl<'a> IterativeBoundaryObservation<'a> {
     }
 
     /// Admit an unwindowed physical loading interval before a frequency sweep.
-    /// Every material must support the complete interval; an unsampled lossless
-    /// wall resonance also refuses. Observation windows do not extend support.
+    /// Every material must support the complete interval. Mechanical impedance
+    /// zeros retain their pressure-release limit; windows do not extend support.
     pub fn admit_loading_band_hz(&self, band: [f64; 2]) -> Result<(), IterativeObservationError> {
         if core::f64::consts::TAU * band[1] > self.observation.highest_omega {
             return Err(TransferError::Invalid(
@@ -301,7 +333,7 @@ impl<'a> IterativeBoundaryObservation<'a> {
             )
             .into());
         }
-        self.observation.boundary.admit_physical_band_hz(band)?;
+        self.observation.boundary.admit_physical_reflection_band_hz(band)?;
         Ok(())
     }
 
@@ -356,7 +388,7 @@ impl<'a> IterativeBoundaryObservation<'a> {
     }
 
     pub fn operator_hash(&self) -> ContentHash {
-        let mut hash = DomainHasher::new("fs-bem:iterative-local-boundary-observation:v1");
+        let mut hash = DomainHasher::new("fs-bem:iterative-local-boundary-observation:v2");
         hash.update(self.observation.operator_hash().as_bytes());
         hash_options(&mut hash, &self.solver);
         hash.finalize()
@@ -469,25 +501,31 @@ impl<'a> IterativeBoundaryObservation<'a> {
             )
             .into());
         }
-        let beta = self
-            .observation
-            .boundary
-            .normalized_admittance(omega, || gate.is_requested())?;
-        let law = Admittance::Local {
-            beta: &beta,
-            declared_active: false,
+        // Retain the original finite-admittance arithmetic in its well-scaled
+        // chart. A pole changes coordinates, never the material or damping.
+        let beta = match self.observation.boundary.normalized_admittance(
+            omega, || gate.is_requested(),
+        ) {
+            Ok(beta) if beta.iter().all(|b| b.abs() < 1.0 / det::sqrt(f64::EPSILON)) => Some(beta),
+            Err(TransferError::Cancelled) => return Err(TransferError::Cancelled.into()),
+            _ => None,
         };
         let (surface, medium, _, _) = self.field_geometry();
         let k = omega / medium.sound_speed;
-        let prepared = PreparedIterativeBoundary::new(
-            surface,
-            k,
-            medium,
-            law,
-            helmholtz::Formulation::BurtonMiller,
-            &self.solver,
-            gate,
-        )?;
+        let prepared = if let Some(beta) = &beta {
+            PreparedLocalIterativeBoundary::Admittance(PreparedIterativeBoundary::new(
+                surface, k, medium, Admittance::Local { beta, declared_active: false },
+                helmholtz::Formulation::BurtonMiller, &self.solver, gate,
+            )?)
+        } else {
+            let reflection = self.observation.boundary.pressure_reflection(
+                omega, || gate.is_requested(),
+            )?;
+            PreparedLocalIterativeBoundary::Reflection(PreparedIterativeReflectionBoundary::new(
+                surface, k, medium, &reflection, false,
+                helmholtz::Formulation::BurtonMiller, &self.solver, gate,
+            )?)
+        };
         let mut output = prepare()?;
         for (index, source) in self.sources().iter().enumerate() {
             poll(gate)?;

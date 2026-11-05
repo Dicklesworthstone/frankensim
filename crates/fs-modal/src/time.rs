@@ -674,7 +674,7 @@ impl ModalAcousticTimeModel {
                 found: states.len(),
             });
         }
-        let mut total_energy_j = 0.0;
+        let mut total_energy_j = Sum::default();
         for (mode, state) in self.modes.iter().zip(states) {
             if !(state.displacement_m_sqrt_kg.is_finite()
                 && state.velocity_m_sqrt_kg_per_s.is_finite())
@@ -693,8 +693,9 @@ impl ModalAcousticTimeModel {
                 state.velocity_m_sqrt_kg_per_s.abs(),
                 self.budget.maximum_abs_velocity_m_sqrt_kg_per_s,
             )?;
-            total_energy_j += modal_energy(*mode, *state);
+            total_energy_j.add(modal_energy(*mode, *state));
         }
+        let total_energy_j = total_energy_j.value();
         if !total_energy_j.is_finite() {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "restored modal energy must be finite",
@@ -871,7 +872,7 @@ impl ModalAcousticTimeModel {
             });
         }
         let mut candidate = Vec::with_capacity(self.states.len());
-        let mut total_energy_j = 0.0;
+        let mut total_energy_j = Sum::default();
         for (mode, force) in self.modes.iter().zip(generalized_force_n_per_sqrt_kg) {
             if !force.is_finite() {
                 return Err(ModalAcousticTimeError::InvalidInput {
@@ -893,9 +894,10 @@ impl ModalAcousticTimeModel {
                 state.displacement_m_sqrt_kg.abs(),
                 self.budget.maximum_abs_displacement_m_sqrt_kg,
             )?;
-            total_energy_j += modal_energy(*mode, state);
+            total_energy_j.add(modal_energy(*mode, state));
             candidate.push(state);
         }
+        let total_energy_j = total_energy_j.value();
         if !total_energy_j.is_finite() {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "static-equilibrium modal energy must be finite",
@@ -931,7 +933,7 @@ impl ModalAcousticTimeModel {
                 found: pressure_per_modal_velocity.len(),
             });
         }
-        let mut pressure_pa = 0.0;
+        let mut pressure_pa = Sum::default();
         for ((mode, state), transfer) in self
             .modes
             .iter()
@@ -948,9 +950,12 @@ impl ModalAcousticTimeModel {
                     what: "free coordinates have no narrow-band pressure transfer",
                 });
             }
-            pressure_pa += transfer.re * state.velocity_m_sqrt_kg_per_s
-                + transfer.im * mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg;
+            pressure_pa.add(transfer.re * state.velocity_m_sqrt_kg_per_s);
+            pressure_pa.add(
+                transfer.im * mode.angular_frequency_rad_s * state.displacement_m_sqrt_kg,
+            );
         }
+        let pressure_pa = pressure_pa.value();
         if !pressure_pa.is_finite() {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "observer pressure evaluation produced a non-finite result",
@@ -999,7 +1004,7 @@ impl ModalAcousticTimeModel {
                 found: held_generalized_force_n_per_sqrt_kg.len(),
             });
         }
-        let mut pressure_pa = 0.0;
+        let mut pressure_pa = Sum::default();
         for (((mode, state), transfer), force) in self
             .modes
             .iter()
@@ -1023,9 +1028,10 @@ impl ModalAcousticTimeModel {
                 continue;
             }
             let dynamic_displacement = state.displacement_m_sqrt_kg - force / (omega * omega);
-            pressure_pa += transfer.re * state.velocity_m_sqrt_kg_per_s
-                + transfer.im * omega * dynamic_displacement;
+            pressure_pa.add(transfer.re * state.velocity_m_sqrt_kg_per_s);
+            pressure_pa.add(transfer.im * omega * dynamic_displacement);
         }
+        let pressure_pa = pressure_pa.value();
         if !pressure_pa.is_finite() {
             return Err(ModalAcousticTimeError::InvalidInput {
                 what: "equilibrium-relative observer pressure became non-finite",
@@ -1334,15 +1340,54 @@ struct ModalStepData<Work = f64> {
     loss_allowance: f64,
 }
 
-// Ordinary forcing retains its existing f64 operation tree. Impulses retain
-// endpoint-mean and product tails until the complete signed work is reduced.
-// Both paths are statically specialized and use the same admission loop.
-trait ModalWork: Copy + Default + core::ops::Add<Output = Self> {
+// Fixed-order Neumaier accumulation retains quiet coherent terms beside
+// cancelling modes and prevents separate large-bank energy sums from
+// overwhelming the independent work/heat audit. No physical tolerance changes.
+#[derive(Clone, Copy, Default)]
+struct Sum {
+    sum: f64,
+    correction: f64,
+}
+
+impl Sum {
+    fn add(&mut self, value: f64) {
+        let next = self.sum + value;
+        self.correction += if self.sum.abs() >= value.abs() {
+            (self.sum - next) + value
+        } else {
+            (value - next) + self.sum
+        };
+        self.sum = next;
+    }
+
+    fn value(self) -> f64 {
+        self.sum + self.correction
+    }
+}
+
+// Ordinary forcing compensates its signed f64 work sum. Impulses retain their
+// existing double-double endpoint means, products and reduction without an
+// intermediate f64 rounding. Both use the same transactional admission loop.
+trait ModalWork: Copy {
+    type Accumulator: Default;
+
+    fn accumulate(self, total: &mut Self::Accumulator);
+    fn finish(total: Self::Accumulator) -> Self;
     fn value(self) -> f64;
     fn finite(self) -> bool;
 }
 
 impl ModalWork for f64 {
+    type Accumulator = Sum;
+
+    fn accumulate(self, total: &mut Self::Accumulator) {
+        total.add(self);
+    }
+
+    fn finish(total: Self::Accumulator) -> Self {
+        total.value()
+    }
+
     fn value(self) -> f64 {
         self
     }
@@ -1353,6 +1398,16 @@ impl ModalWork for f64 {
 }
 
 impl ModalWork for fs_math::dd::Dd {
+    type Accumulator = Self;
+
+    fn accumulate(self, total: &mut Self::Accumulator) {
+        *total = *total + self;
+    }
+
+    fn finish(total: Self::Accumulator) -> Self {
+        total
+    }
+
     fn value(self) -> f64 {
         self.to_f64()
     }
@@ -1384,13 +1439,13 @@ fn stage_modal_frame<Work: ModalWork>(
             what: "modal workspace must match the admitted mode count",
         });
     }
-    let mut pressure_pa = 0.0;
-    let mut input_work = Work::default();
-    let mut work_roundoff_tolerance_j = 0.0;
-    let mut energy_before_j = 0.0;
-    let mut energy_after_j = 0.0;
-    let mut viscous_dissipation_j = 0.0;
-    let mut dissipation_roundoff_tolerance_j = 0.0;
+    let mut pressure_pa = Sum::default();
+    let mut input_work = Work::Accumulator::default();
+    let mut work_roundoff_tolerance_j = Sum::default();
+    let mut energy_before_j = Sum::default();
+    let mut energy_after_j = Sum::default();
+    let mut viscous_dissipation_j = Sum::default();
+    let mut dissipation_roundoff_tolerance_j = Sum::default();
     for (index, (&mode, &state)) in modes.iter().zip(states).enumerate() {
         let ModalStepData {
             next,
@@ -1411,11 +1466,11 @@ fn stage_modal_frame<Work: ModalWork>(
         )?;
         let before = modal_energy(mode, state);
         let after = modal_energy(mode, next);
-        energy_before_j += before;
-        energy_after_j += after;
-        input_work = input_work + work;
+        energy_before_j.add(before);
+        energy_after_j.add(after);
+        work.accumulate(&mut input_work);
         let work = work.value();
-        work_roundoff_tolerance_j += work_allowance;
+        work_roundoff_tolerance_j.add(work_allowance);
         let balance_loss = work - (after - before);
         let balance_allowance =
             256.0 * f64::EPSILON * work.abs().max(before).max(after).max(f64::MIN_POSITIVE)
@@ -1440,19 +1495,27 @@ fn stage_modal_frame<Work: ModalWork>(
                 what: mode_balance_error,
             });
         }
-        viscous_dissipation_j += loss;
-        dissipation_roundoff_tolerance_j += loss_allowance;
+        viscous_dissipation_j.add(loss);
+        dissipation_roundoff_tolerance_j.add(loss_allowance);
         workspace.frame.modal_viscous_losses[index] = ModalViscousLoss {
             energy_j: loss,
             roundoff_tolerance_j: loss_allowance,
         };
-        pressure_pa += mode.pressure_per_modal_velocity.re * next.velocity_m_sqrt_kg_per_s
-            + mode.pressure_per_modal_velocity.im
+        pressure_pa.add(mode.pressure_per_modal_velocity.re * next.velocity_m_sqrt_kg_per_s);
+        pressure_pa.add(
+            mode.pressure_per_modal_velocity.im
                 * mode.angular_frequency_rad_s
-                * next.displacement_m_sqrt_kg;
+                * next.displacement_m_sqrt_kg,
+        );
         workspace.frame.modal_energy_j[index] = after;
         workspace.candidate[index] = next;
     }
+    let pressure_pa = pressure_pa.value();
+    let energy_before_j = energy_before_j.value();
+    let energy_after_j = energy_after_j.value();
+    let viscous_dissipation_j = viscous_dissipation_j.value();
+    let mut dissipation_roundoff_tolerance_j = dissipation_roundoff_tolerance_j.value();
+    let work_roundoff_tolerance_j = work_roundoff_tolerance_j.value();
     check_limit(
         "total modal energy",
         energy_after_j,
@@ -1463,6 +1526,7 @@ fn stage_modal_frame<Work: ModalWork>(
         pressure_pa.abs(),
         budget.maximum_abs_pressure_pa,
     )?;
+    let input_work = Work::finish(input_work);
     let input_work_j = input_work.value();
     if !input_work.finite()
         || ![

@@ -6,9 +6,9 @@ use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluidState;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::porous::layers::{
-    ElasticPlateLayers, ElasticPlateStack, ElasticPlateStackLayer as Section,
-    ElasticTransmittingLayers, Layer, LayerAbsorptionBudget, LayerAbsorptionError, MAX_LAYERS,
-    TransmittingLayers,
+    AcousticSpectrumError, AngularSpectrumBudget, ElasticPlateLayers, ElasticPlateStack,
+    ElasticPlateStackLayer as Section, ElasticTransmittingLayers, IncidentPlaneWave, Layer,
+    LayerAbsorptionBudget, LayerAbsorptionError, MAX_LAYERS, TransmittingLayers,
 };
 use fs_material::porous::{PorousCard, PorousFluidLaw};
 use fs_math::c64::C64;
@@ -694,7 +694,34 @@ fn interleaved_heat_matches_independent_plate_boundary_fields_and_spatial_integr
             omega,
             cosine,
         );
+        let spectrum = stack
+            .prepare_angular_spectrum(
+                &[IncidentPlaneWave {
+                    direction: [((1.0 - cosine) * (1.0 + cosine)).sqrt(), 0.0, cosine],
+                    pressure_pa: C64::ONE,
+                }],
+                AngularSpectrumBudget { max_components: 1 },
+                &mut || false,
+            )
+            .unwrap();
+        let local = spectrum.prepare_layer_field(1, &mut || false).unwrap();
+        let entrance = spectrum.incident_field([0.0; 3], &mut || false).unwrap();
+        near(entrance.pressure_pa, C64::ONE + oracle[0], 3e-9);
+        near(
+            entrance.particle_velocity_m_s[2],
+            (C64::ONE - oracle[0]).scale(cosine / z0),
+            3e-9 / z0,
+        );
+        near(
+            spectrum
+                .transmitted_field([0.0; 3], &mut || false)
+                .unwrap()
+                .pressure_pa,
+            oracle[11],
+            3e-9,
+        );
         let mut integrals = [0.0; 2];
+        let mut sampled_heat = [0.0; 2];
         let cells = 2048;
         for i in 0..=cells {
             let x = thickness * i as f64 / cells as f64;
@@ -712,6 +739,22 @@ fn interleaved_heat_matches_independent_plate_boundary_fields_and_spatial_integr
             };
             integrals[0] += weight * (normal_velocity.norm_sq() + tangential_velocity.norm_sq());
             integrals[1] += weight * pressure.norm_sq();
+            let sample = local.field_with_heat([0.0, 0.0, x], &mut || false).unwrap();
+            if i % (cells / 2) == 0 {
+                near(sample.field.pressure_pa, pressure, 3e-9);
+                near(
+                    sample.field.particle_velocity_m_s[0],
+                    tangential_velocity,
+                    3e-9 / z0,
+                );
+                near(
+                    sample.field.particle_velocity_m_s[2],
+                    normal_velocity,
+                    3e-9 / z0,
+                );
+            }
+            sampled_heat[0] += weight * sample.viscous_heating_w_m3;
+            sampled_heat[1] += weight * sample.thermal_heating_w_m3;
         }
         let scale = omega * z0 / cosine * thickness / (3.0 * cells as f64);
         let expected = [
@@ -728,6 +771,17 @@ fn interleaved_heat_matches_independent_plate_boundary_fields_and_spatial_integr
         assert_eq!(report.layers()[0].absorbed_fraction(), 0.0);
         assert_eq!(report.layers()[2].absorbed_fraction(), 0.0);
         let porous = report.layers()[1];
+        let flux_scale = 2.0 * z0 / cosine * thickness / (3.0 * cells as f64);
+        near_real(
+            sampled_heat[0] * flux_scale,
+            porous.viscous_absorbed_fraction,
+            3e-9 * porous.viscous_absorbed_fraction,
+        );
+        near_real(
+            sampled_heat[1] * flux_scale,
+            porous.thermal_absorbed_fraction,
+            3e-9 * porous.thermal_absorbed_fraction,
+        );
         near_real(
             porous.viscous_absorbed_fraction,
             expected[0],
@@ -833,6 +887,51 @@ fn porous_heat_before_between_and_after_plates_retains_the_normal_longitudinal_l
     assert_eq!(zero.absorbed_fraction, report.absorbed_fraction);
     assert_eq!(zero.absorbed_power_w, 0.0);
     assert!(zero.layers().iter().all(|row| row.absorbed_power_w == 0.0));
+    let waves = [
+        IncidentPlaneWave {
+            direction: [0.0, 0.0, 1.0],
+            pressure_pa: C64::new(0.6, -0.2),
+        },
+        IncidentPlaneWave {
+            direction: [0.0, 0.0, 1.0],
+            pressure_pa: C64::new(0.1, 0.3),
+        },
+    ];
+    let budget = AngularSpectrumBudget { max_components: 2 };
+    let actual = stack
+        .prepare_angular_spectrum(&waves, budget, &mut || false)
+        .unwrap();
+    let expected = reference
+        .prepare_angular_spectrum(&waves, budget, &mut || false)
+        .unwrap();
+    for (index, thickness) in [(0, 0.01), (2, 0.025), (4, 0.007)] {
+        let actual = actual.prepare_layer_field(index, &mut || false).unwrap();
+        let expected = expected.prepare_layer_field(index, &mut || false).unwrap();
+        for z in [0.0, 0.5 * thickness, thickness] {
+            let a = actual
+                .field_with_heat([0.0, 0.0, z], &mut || false)
+                .unwrap();
+            let b = expected
+                .field_with_heat([0.0, 0.0, z], &mut || false)
+                .unwrap();
+            near(a.field.pressure_pa, b.field.pressure_pa, 2e-12);
+            near(
+                a.field.particle_velocity_m_s[2],
+                b.field.particle_velocity_m_s[2],
+                2e-14,
+            );
+            near_real(
+                a.viscous_heating_w_m3,
+                b.viscous_heating_w_m3,
+                2e-10 * b.viscous_heating_w_m3,
+            );
+            near_real(
+                a.thermal_heating_w_m3,
+                b.thermal_heating_w_m3,
+                2e-10 * b.thermal_heating_w_m3,
+            );
+        }
+    }
 }
 
 #[test]
@@ -898,6 +997,28 @@ fn interleaved_heat_keeps_weak_loss_and_opaque_plate_shielding() {
     assert_eq!(report.layers()[1].absorbed_power_w, 0.0);
     assert_eq!(report.layers()[2].absorbed_power_w, 0.0);
     assert_eq!(report.transmitted_power_w, 0.0);
+    let spectrum = stack
+        .prepare_angular_spectrum(
+            &[IncidentPlaneWave {
+                direction: [0.51_f64.sqrt(), 0.0, 0.7],
+                pressure_pa: C64::ONE,
+            }],
+            AngularSpectrumBudget { max_components: 1 },
+            &mut || false,
+        )
+        .unwrap();
+    let front = spectrum.prepare_layer_field(0, &mut || false).unwrap();
+    let back = spectrum.prepare_layer_field(2, &mut || false).unwrap();
+    let front = front
+        .field_with_heat([0.0, 0.0, 0.005], &mut || false)
+        .unwrap();
+    let back = back
+        .field_with_heat([0.0, 0.0, 0.005], &mut || false)
+        .unwrap();
+    assert!(front.viscous_heating_w_m3 > 0.0 && front.thermal_heating_w_m3 > 0.0);
+    assert_eq!(back.viscous_heating_w_m3, 0.0);
+    assert_eq!(back.thermal_heating_w_m3, 0.0);
+    assert_eq!(back.field.pressure_pa, C64::ZERO);
 }
 
 #[test]
@@ -957,4 +1078,268 @@ fn interleaved_absorption_counts_lossless_sections_and_cancels_both_passes() {
     assert!(empty.layers().is_empty());
     assert_eq!(empty.absorbed_power_w, 0.0);
     assert_eq!(empty.transmitted_power_w, 1.0);
+}
+
+#[test]
+fn coherent_plate_cavity_heat_matches_complex_boundary_superposition_and_nodes() {
+    let outside = ThermoviscousFluidState::from_heat_capacity_ratio(
+        FluidAcousticState::try_new(1000.0, 1500.0).unwrap(),
+        FluidTransportState::try_new(1000.0, 4180.0, 0.6, 1e-3).unwrap(),
+        1.01,
+    )
+    .unwrap();
+    let first = solid(2700.0, 6000.0, 3000.0);
+    let second = solid(3600.0, 5100.0, 2700.0);
+    let foam = PorousFluidLaw::try_new(PorousCard::basotect_foam02(), 1.81e-5).unwrap();
+    let omega = 8000.0;
+    let thickness = 0.025;
+    let sections = [
+        Section::Plate {
+            state: &first,
+            thickness_m: 0.007,
+        },
+        Section::Fluid(Layer::Porous {
+            law: &foam,
+            thickness_m: thickness,
+        }),
+        Section::Plate {
+            state: &second,
+            thickness_m: 0.013,
+        },
+    ];
+    let stack = ElasticPlateStack::new(&outside, &outside, omega, &sections).unwrap();
+    let material = foam.effective_fluid(&outside, omega).unwrap();
+    let rho = material.dynamic_density_kg_m3();
+    let compliance = material.dynamic_bulk_modulus_pa().recip();
+    let k = material.characteristic().1;
+    let waves = [
+        (0.99_f64, 0.0_f64, C64::new(0.8, 0.3)),
+        (0.9, 0.7, C64::new(-0.4, 0.6)),
+        (0.4, 2.0, C64::new(0.5, -0.8)),
+    ]
+    .map(|(cosine, azimuth, pressure_pa)| {
+        let sine = ((1.0 - cosine) * (1.0 + cosine)).sqrt();
+        IncidentPlaneWave {
+            direction: [sine * azimuth.cos(), sine * azimuth.sin(), cosine],
+            pressure_pa,
+        }
+    });
+    let oracle = waves.map(|wave| {
+        let tangent = [wave.direction[0], wave.direction[1]].map(|d| omega / 1500.0 * d);
+        let kn = (k * k - C64::from_re(tangent[0].powi(2) + tangent[1].powi(2))).sqrt();
+        let yn = kn / rho.scale(omega);
+        let solution = double_plate_gap_solution(
+            [1000.0, 1500.0],
+            [
+                [2700.0, 6000.0, 3000.0, 0.007],
+                [3600.0, 5100.0, 2700.0, 0.013],
+            ],
+            (kn, yn.scale(1.5e6), thickness),
+            [1000.0, 1500.0],
+            omega,
+            wave.direction[2],
+        );
+        (wave.pressure_pa, tangent, kn, yn, solution[5], solution[6])
+    });
+    let spectrum = stack
+        .prepare_angular_spectrum(
+            &waves,
+            AngularSpectrumBudget { max_components: 3 },
+            &mut || false,
+        )
+        .unwrap();
+    let field = spectrum.prepare_layer_field(1, &mut || false).unwrap();
+    assert!(core::ptr::eq(spectrum.stack(), &stack));
+    assert!(core::ptr::eq(field.spectrum(), &spectrum));
+    assert_eq!(field.layer_index(), 1);
+    assert_eq!(spectrum.component_count(), 3);
+    let mut interference_changes_heat = false;
+    for position in [
+        [0.0, 0.0, 0.0],
+        [0.013, -0.024, 0.007],
+        [-0.03, 0.01, thickness],
+    ] {
+        let mut pressure = C64::ZERO;
+        let mut velocity = [C64::ZERO; 3];
+        let mut incoherent_heat = 0.0;
+        for (amplitude, kt, kn, yn, forward, backward) in oracle {
+            let lateral = phase(C64::from_re(kt[0] * position[0] + kt[1] * position[1]), 1.0);
+            let a = amplitude * lateral * forward * phase(kn, position[2]);
+            let b = amplitude * lateral * backward * phase(kn, thickness - position[2]);
+            let p = a + b;
+            let v = [
+                p * (C64::from_re(kt[0] / omega) / rho),
+                p * (C64::from_re(kt[1] / omega) / rho),
+                (a - b) * yn,
+            ];
+            pressure = pressure + p;
+            for axis in 0..3 {
+                velocity[axis] = velocity[axis] + v[axis];
+            }
+            incoherent_heat += -0.5
+                * omega
+                * (rho.im * v.iter().map(|v| v.norm_sq()).sum::<f64>()
+                    + compliance.im * p.norm_sq());
+        }
+        let viscous = -0.5 * omega * rho.im * velocity.iter().map(|v| v.norm_sq()).sum::<f64>();
+        let thermal = -0.5 * omega * compliance.im * pressure.norm_sq();
+        let sample = field.field_with_heat(position, &mut || false).unwrap();
+        near(sample.field.pressure_pa, pressure, 5e-9);
+        for axis in 0..3 {
+            near(
+                sample.field.particle_velocity_m_s[axis],
+                velocity[axis],
+                5e-9 / 1.5e6,
+            );
+        }
+        near_real(sample.viscous_heating_w_m3, viscous, 3e-8 * viscous);
+        near_real(sample.thermal_heating_w_m3, thermal, 3e-8 * thermal);
+        interference_changes_heat |=
+            (viscous + thermal - incoherent_heat).abs() > 0.05 * incoherent_heat;
+    }
+    assert!(
+        interference_changes_heat,
+        "coherent fields must not become a power average"
+    );
+
+    // Opposite-phase, equal-angle sources cancel p and v_n at x=0 while their
+    // transverse velocities reinforce. Identical directions cancel everything.
+    let a = IncidentPlaneWave {
+        direction: [0.6, 0.0, 0.8],
+        pressure_pa: C64::ONE,
+    };
+    for opposite_direction in [false, true] {
+        let b = IncidentPlaneWave {
+            direction: [if opposite_direction { -0.6 } else { 0.6 }, 0.0, 0.8],
+            pressure_pa: -C64::ONE,
+        };
+        let spectrum = stack
+            .prepare_angular_spectrum(
+                &[a, b],
+                AngularSpectrumBudget { max_components: 2 },
+                &mut || false,
+            )
+            .unwrap();
+        let local = spectrum.prepare_layer_field(1, &mut || false).unwrap();
+        let sample = local
+            .field_with_heat([0.0, 0.0, 0.01], &mut || false)
+            .unwrap();
+        assert_eq!(sample.field.pressure_pa, C64::ZERO);
+        assert_eq!(sample.field.particle_velocity_m_s[2], C64::ZERO);
+        assert_eq!(sample.thermal_heating_w_m3, 0.0);
+        if opposite_direction {
+            assert!(sample.viscous_heating_w_m3 > 0.0);
+        } else {
+            assert_eq!(sample.viscous_heating_w_m3, 0.0);
+        }
+    }
+}
+
+#[test]
+fn elastic_spectrum_observes_lossless_fluid_identities_and_refuses_atomically() {
+    let outside = fluid(1.2, 343.0);
+    let plate = solid(2700.0, 6000.0, 3000.0);
+    let sections = [
+        Section::Plate {
+            state: &plate,
+            thickness_m: 0.002,
+        },
+        Section::Fluid(Layer::FluidGap { thickness_m: 0.015 }),
+        Section::Fluid(Layer::FluidGap { thickness_m: 0.0 }),
+        Section::Plate {
+            state: &plate,
+            thickness_m: 0.001,
+        },
+    ];
+    let stack = ElasticPlateStack::new(&outside, &outside, 8000.0, &sections).unwrap();
+    let waves = [IncidentPlaneWave {
+        direction: [0.6, 0.0, 0.8],
+        pressure_pa: C64::ONE,
+    }];
+    let budget = AngularSpectrumBudget { max_components: 1 };
+    assert!(
+        stack
+            .prepare_angular_spectrum(
+                &waves,
+                AngularSpectrumBudget { max_components: 0 },
+                &mut || false
+            )
+            .is_err()
+    );
+    let mut preparation_polls = 0;
+    let spectrum = stack
+        .prepare_angular_spectrum(&waves, budget, &mut || {
+            preparation_polls += 1;
+            false
+        })
+        .unwrap();
+    for stop in 1..=preparation_polls {
+        let mut polls = 0;
+        assert!(matches!(
+            stack.prepare_angular_spectrum(&waves, budget, &mut || {
+                polls += 1;
+                polls == stop
+            }),
+            Err(AcousticSpectrumError::Cancelled)
+        ));
+    }
+    assert!(spectrum.prepare_layer_field(0, &mut || false).is_err());
+    assert!(
+        spectrum
+            .prepare_layer_field(sections.len(), &mut || false)
+            .is_err()
+    );
+    let mut preparation_polls = 0;
+    let local = spectrum
+        .prepare_layer_field(1, &mut || {
+            preparation_polls += 1;
+            false
+        })
+        .unwrap();
+    for stop in 1..=preparation_polls {
+        let mut polls = 0;
+        assert!(matches!(
+            spectrum.prepare_layer_field(1, &mut || {
+                polls += 1;
+                polls == stop
+            }),
+            Err(AcousticSpectrumError::Cancelled)
+        ));
+    }
+    let mut observation_polls = 0;
+    let sample = local
+        .field_with_heat([0.0, 0.0, 0.007], &mut || {
+            observation_polls += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(sample.viscous_heating_w_m3, 0.0);
+    assert_eq!(sample.thermal_heating_w_m3, 0.0);
+    for stop in 1..=observation_polls {
+        let mut polls = 0;
+        assert!(matches!(
+            local.field_with_heat([0.0, 0.0, 0.007], &mut || {
+                polls += 1;
+                polls == stop
+            }),
+            Err(AcousticSpectrumError::Cancelled)
+        ));
+    }
+    assert_eq!(
+        local
+            .field_with_heat([0.0, 0.0, 0.007], &mut || false)
+            .unwrap(),
+        sample
+    );
+    let identity = spectrum.prepare_layer_field(2, &mut || false).unwrap();
+    near(
+        identity.field([0.0; 3], &mut || false).unwrap().pressure_pa,
+        local
+            .field([0.0, 0.0, 0.015], &mut || false)
+            .unwrap()
+            .pressure_pa,
+        1e-12,
+    );
+    assert!(identity.field_with_heat([0.0; 3], &mut || false).is_err());
+    assert!(identity.field([0.0, 0.0, 1e-6], &mut || false).is_err());
 }

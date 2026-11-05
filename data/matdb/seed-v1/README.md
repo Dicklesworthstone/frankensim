@@ -6,6 +6,27 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [ball-mill kinetics guide](MINING_AUSTIN_GRINDING.md) adds three
+experimental Assiros quartz calibrations with 24 claims for selection
+frequencies, daughter distributions and the exact source size grid. They drive
+the existing batch population balance under the original mill and charge
+conditions, preserving unresolved fines and the source-reported PSD mismatch.
+
+The [pyrrhotite guide](MINING_PYRRHOTITE.md) adds three matched NBS material
+profiles and four conserved endpoints for FeS/Fe7S8 oxidation and ferric attack.
+Finite oxidant inventories, direct proton production, standard reaction heat
+and Gibbs sums retain the original mineral phase and formula-unit basis.
+
+The [nonideal residence guide](MINING_NONIDEAL_RESIDENCE.md) adds unequal
+active/stagnant tank volumes, explicit bypass and exchange during flow stops.
+Its callable forward model independently accounts for outlet and retained
+material through feed pulses, shutdowns, restarts and flushing.
+
+The [sulfite-treatment guide](MINING_SULFITE_TREATMENT.md) adds four matched
+NBS source profiles and seven conserved endpoints for reagent preparation,
+free-cyanide SO2/air treatment, competing oxygen demand and sulfite protonation.
+The source-pack example retains finite inventories and standard reaction heat.
+
 The [scorodite reference guide](MINING_SCORODITE_REFERENCE.md) supplies a
 separate, consistent NMK2014/CODATA Gibbs dataset. The finite salt-partition
 owner couples both Fe and As inventories to all four arsenate states and
@@ -17,6 +38,11 @@ sizes and closing screen. The material resolver retains each original test in
 the existing grinding card, making source-backed milling energy, throughput,
 inversion and blends available without substituting a generic ore constant.
 
+The [drop-weight guide](MINING_DROP_WEIGHT.md) supplies five published ore
+calibrations and ten claims for the JK impact-energy response. Its source-bound
+card evaluates t10 and inverts reachable fines targets with explicit energy
+limits, preserving the original specimen and evidence.
+
 The [arsenic reference guide](MINING_ARSENIC_REFERENCE.md) adds six compatible
 NBS aqueous profiles and 24 claims. Exact protonation reactions connect all
 four As(V) forms to the shared-pH solver; As(III) source components also support
@@ -25,9 +51,10 @@ The existing chemistry examples run the new sources without another solver.
 
 The [grinding-media guide](MINING_GRINDING_MEDIA.md) adds discrete
 manufacturer ball specifications and a separately identified apparent charge
-packing reference. The [MIBC guide](MINING_FLOTATION_REAGENTS.md) adds a sourced
-flotation-frother profile with explicit density, purity and phase-composition
-bases. Both use the ordinary compiler and catalog.
+packing reference. The [flotation-reagent guide](MINING_FLOTATION_REAGENTS.md)
+adds MIBC frother, solid and liquid PAX, SIBX and copper sulfate pentahydrate
+profiles with explicit density, composition, concentration and hydrate bases.
+Both use the ordinary compiler and catalog.
 
 The [mineral-processing guide](MINERAL_PROCESSING.md) covers 33 source profiles
 and 104 claims for ore/gangue constituents and processing reagents, with an

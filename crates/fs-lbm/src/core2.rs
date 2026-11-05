@@ -22,8 +22,7 @@ const MAX_REGULARIZED_BOUNDARY_SPEED_SQ: f64 = 0.03;
 const UNIT_NORMAL_TOLERANCE: f64 = 128.0 * f64::EPSILON;
 
 /// Collision operator for the D2Q9 core (naming follows the d3q19
-/// [`crate::d3q19::CollisionModel3`] precedent; tau stays per-cell,
-/// so the variants carry no parameters).
+/// [`crate::d3q19::CollisionModel3`] precedent; shear tau stays per-cell).
 ///
 /// Default is [`CollisionModel2::Bgk`], whose arithmetic path is
 /// byte-for-byte the historical one — every existing pin and golden
@@ -99,6 +98,40 @@ pub enum CollisionModel2 {
     /// feature, but it is NOT a faithful acoustic-propagation
     /// operator.
     CentralMoment,
+    /// Central-moment collision with independently specified bulk viscosity.
+    /// Shear modes retain the per-cell [`Grid::tau`], while the trace of the
+    /// second central moment relaxes at `1 / bulk_tau`. In two dimensions,
+    /// `zeta / rho = CS2 * (bulk_tau - 1/2)` (the general `2 / D`
+    /// factor equals one in 2-D); the kinematic shear viscosity
+    /// remains `nu = CS2 * (tau - 1/2)`. Thus acoustic attenuation can reflect
+    /// a material's bulk viscosity independently of its shear viscosity.
+    /// For planar flow in a three-dimensional material, the matching 2-D
+    /// coefficient is `zeta_2 / rho = zeta_3 / rho + nu / 3`.
+    /// Third- and fourth-order moments are equilibrated as in
+    /// [`CollisionModel2::CentralMoment`]. Setting `bulk_tau = 1` reproduces
+    /// that historical operator bit-for-bit.
+    CentralMomentBulk {
+        /// Bulk relaxation time, finite and strictly greater than `1/2`.
+        bulk_tau: f64,
+    },
+}
+
+impl CollisionModel2 {
+    /// Resolve and validate the bulk relaxation once per collision/rheology
+    /// sweep, keeping material parameters out of the per-cell hot path.
+    pub(crate) fn central_moment_bulk_tau(self) -> Option<f64> {
+        match self {
+            Self::CentralMoment => Some(1.0),
+            Self::CentralMomentBulk { bulk_tau } => {
+                assert!(
+                    bulk_tau.is_finite() && bulk_tau > 0.5,
+                    "central-moment bulk relaxation time must be finite and greater than 0.5"
+                );
+                Some(bulk_tau)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Cell classification.
@@ -698,9 +731,11 @@ impl CurvedMovingWallLink2 {
 /// Atomic receipt for a D2Q9 fluid/wall cell-topology transition.
 ///
 /// Newly uncovered fluid cells are initialized by an equal-weight average of
-/// unique, surviving one-ring fluid donors from the pre-transition state.
+/// unique, surviving one-ring fluid donors in the physical Guo frame.
 /// Covered-cell removal and fresh-cell insertion are reported separately so a
-/// caller can ledger the exact active-fluid mass and momentum delta.
+/// caller can ledger the exact active-fluid mass and raw momentum delta.
+/// The raw momentum fields do not include the changed active half-force
+/// inventory; this receipt is not a hydrodynamic body impulse.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[must_use]
 pub struct WallTopologyTransition2 {
@@ -868,10 +903,14 @@ impl Grid {
     /// Atomically replace the D2Q9 wall mask and initialize fresh fluid cells.
     ///
     /// This narrow moving-topology rung accepts only a fluid/wall domain.
-    /// Fresh cells average unique surviving one-ring fluid populations,
-    /// relaxation times, and external forces from the pre-transition state;
-    /// freshly covered cells have their populations cleared. Every donor and
-    /// receipt is validated before any grid field is published.
+    /// Fresh cells average unique surviving one-ring physical populations
+    /// `h = f + S(u,F)/2`, relaxation times, and external forces from the
+    /// pre-transition state. The result is stored in its own Guo force frame.
+    /// Thus differing donor forces do not contaminate the interpolated stress
+    /// with force/velocity covariance. Unforced donor arithmetic is unchanged.
+    /// Freshly covered cells have their populations cleared. Every donor and
+    /// receipt is validated before any grid field is published. This remains
+    /// an initialization, not a conservative mass remap or body-motion solve.
     pub fn transition_wall_topology(&mut self, next_walls: &[bool]) -> WallTopologyTransition2 {
         let cell_count = self.nx * self.ny;
         assert_eq!(
@@ -904,6 +943,10 @@ impl Grid {
         assert!(
             next_walls.iter().any(|&is_wall| !is_wall),
             "wall topology transition must leave at least one fluid cell"
+        );
+        assert!(
+            self.g.into_iter().all(f64::is_finite),
+            "wall topology transition requires finite acceleration"
         );
 
         let mut next_flags = self.flags.clone();
@@ -977,8 +1020,30 @@ impl Grid {
                                 self.fext[donor].into_iter().all(f64::is_finite),
                                 "fresh-cell donor external force must be finite"
                             );
+                            let donor_force = core::array::from_fn(|axis| {
+                                self.g[axis].mul_add(donor_mass, self.fext[donor][axis])
+                            });
+                            let donor_velocity = core::array::from_fn(|axis| {
+                                (donor_momentum[axis] + 0.5 * donor_force[axis]) / donor_mass
+                            });
+                            assert!(
+                                donor_force
+                                    .into_iter()
+                                    .chain(donor_velocity)
+                                    .all(f64::is_finite),
+                                "fresh-cell donor force and physical velocity must be finite"
+                            );
+                            let mut physical = self.f[donor];
+                            if donor_force != [0.0; 2] {
+                                crate::thermal::forcing::reframe2(
+                                    &mut physical,
+                                    donor_velocity,
+                                    donor_force,
+                                    [0.0; 2],
+                                );
+                            }
                             for q in 0..Q {
-                                populations[q] += self.f[donor][q];
+                                populations[q] += physical[q];
                             }
                             relaxation_time += self.tau[donor];
                             external_force[0] += self.fext[donor][0];
@@ -992,16 +1057,40 @@ impl Grid {
                         external_force[0] *= inverse_donor_count;
                         external_force[1] *= inverse_donor_count;
 
+                        let (mass, physical_momentum) = raw_population_moments(&populations);
+                        assert!(
+                            populations.into_iter().all(f64::is_finite)
+                                && mass.is_finite()
+                                && mass > 0.0
+                                && physical_momentum.into_iter().all(f64::is_finite)
+                                && relaxation_time.is_finite()
+                                && relaxation_time > 0.5
+                                && external_force.into_iter().all(f64::is_finite),
+                            "fresh-cell averaged state must remain physically admissible"
+                        );
+                        let force = core::array::from_fn(|axis| {
+                            self.g[axis].mul_add(mass, external_force[axis])
+                        });
+                        let velocity = physical_momentum.map(|value| value / mass);
+                        assert!(
+                            force.into_iter().chain(velocity).all(f64::is_finite),
+                            "fresh-cell force and physical velocity must be finite"
+                        );
+                        if force != [0.0; 2] {
+                            crate::thermal::forcing::reframe2(
+                                &mut populations,
+                                velocity,
+                                [0.0; 2],
+                                force,
+                            );
+                        }
                         let (mass, momentum) = raw_population_moments(&populations);
                         assert!(
                             populations.into_iter().all(f64::is_finite)
                                 && mass.is_finite()
                                 && mass > 0.0
-                                && momentum.into_iter().all(f64::is_finite)
-                                && relaxation_time.is_finite()
-                                && relaxation_time > 0.5
-                                && external_force.into_iter().all(f64::is_finite),
-                            "fresh-cell averaged state must remain physically admissible"
+                                && momentum.into_iter().all(f64::is_finite),
+                            "fresh-cell Guo representation must remain physically admissible"
                         );
                         receipt.fresh_fluid_cells += 1;
                         receipt.fresh_donor_samples += donors.len();
@@ -1063,6 +1152,7 @@ impl Grid {
     // proposals. Chunk boundaries change no cell arithmetic or reduction order.
     fn collide_cells_into(&self, start: usize, post: &mut [[f64; Q]]) {
         let model = self.collision;
+        let central_bulk_omega = model.central_moment_bulk_tau().map(|tau| 1.0 / tau);
         if let CollisionModel2::Trt { magic } = model {
             assert!(
                 magic.is_finite() && magic > 0.0,
@@ -1088,7 +1178,7 @@ impl Grid {
                 self.g[0].mul_add(rho, self.fext[i][0]),
                 self.g[1].mul_add(rho, self.fext[i][1]),
             );
-            if matches!(model, CollisionModel2::CentralMoment) {
+            if let Some(bulk_omega) = central_bulk_omega {
                 // Collide the physical populations f + S/2, then publish
                 // f_post = C(f + S/2) + S/2. At frozen u this is the MRT
                 // forcing rule (I - Lambda/2)S in EACH central mode,
@@ -1115,11 +1205,18 @@ impl Grid {
                     }
                 }
                 // Relax: conserved k00/k10/k01 untouched; shear pair
-                // at 1/tau toward 0 (k11) and 0 (k20 - k02); bulk,
-                // third, fourth equilibrated to Maxwellian values.
+                // at 1/tau toward 0 (k11) and 0 (k20 - k02); bulk at
+                // its material rate; third and fourth equilibrated.
                 let omega = 1.0 / tau;
                 let shear_diff = (1.0 - omega) * (k[2][0] - k[0][2]);
-                let bulk = 2.0 * rho * CS2; // equilibrium k20 + k02
+                let bulk_eq = 2.0 * rho * CS2;
+                let bulk = if bulk_omega == 1.0 {
+                    // Preserve the historical central-moment arithmetic.
+                    bulk_eq
+                } else {
+                    let bulk_old = k[2][0] + k[0][2];
+                    bulk_old + bulk_omega * (bulk_eq - bulk_old)
+                };
                 k[1][1] *= 1.0 - omega;
                 k[2][0] = 0.5 * (bulk + shear_diff);
                 k[0][2] = 0.5 * (bulk - shear_diff);

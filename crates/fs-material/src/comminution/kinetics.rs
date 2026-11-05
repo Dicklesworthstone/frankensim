@@ -94,6 +94,7 @@ pub struct SelectionBreakageModel {
     daughters: SizeRedistributionCard,
     source: ConstitutiveModelCard,
     rates: Vec<Frequency>,
+    pub(super) austin_source: Option<Box<super::austin::AustinCalibrationSource>>,
 }
 
 /// A prepared nonnegative pass with its original sources and numerical result.
@@ -198,7 +199,14 @@ impl SelectionBreakageModel {
             daughters,
             source,
             rates,
+            austin_source: None,
         })
+    }
+
+    /// Original material parameters and exact class grid, when resolved from an
+    /// Austin calibration. Prepared passes retain this source through cloning.
+    pub fn austin_calibration_source(&self) -> Option<&super::austin::AustinCalibrationSource> {
+        self.austin_source.as_deref()
     }
 
     /// Original source model; selection rates never come from mineral names or Wi.
@@ -238,6 +246,14 @@ impl SelectionBreakageModel {
             ));
         }
         poll(&mut cancelled)?;
+        if self.austin_source.is_some()
+            && conditions
+                .axes()
+                .keys()
+                .any(|axis| !self.source.validity.bounds().contains_key(axis))
+        {
+            return Err(GrindingKineticsError::OutsideValidity);
+        }
         if let Some(value) = conditions.axes().get(CONTACT_TIME_AXIS) {
             if *value != t
                 || conditions.axis_quantities().get(CONTACT_TIME_AXIS)

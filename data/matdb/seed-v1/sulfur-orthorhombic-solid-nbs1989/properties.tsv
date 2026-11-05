@@ -1,0 +1,59 @@
+frankensim.matdb-source.v1
+observation	identity	NBS rhombic crystalline elemental sulfur	Table 14:S, S rhombic state cr	The molar basis is one mole of sulfur atoms, not one mole of S8 molecules. The selected elemental standard is orthorhombic sulfur; it is distinct from monoclinic sulfur, vapor, sulfide ions and a prediction of the sulfur surface film produced by leaching.
+observation	standard	NBS elemental sulfur reference thermodynamics	NIST corrected CSV, 298.15 K columns	Molar mass 32.0640 g/mol; formation enthalpy and formation Gibbs energy are both zero by the elemental-reference convention; entropy 31.80 J/(mol K); isobaric heat capacity 22.64 J/(mol K). Reference zeros remain explicit source claims, not missing data or measured zero-uncertainty values.
+observation	scope	Pure orthorhombic sulfur at one thermodynamic state	NBS standard-state conventions and 1989-errata evaluation	The point claims require 298.15 K, 100000 Pa, the selected polymorph and historical NBS reference. No temperature curve, phase transition, passivation kinetics, mineral surface coverage or actual sulfur product phase is inferred. Uncertainty is unstated; no cross-species covariance or confidence law is provided.
+scalar	molar-mass	identity,standard,scope	mass	32.0640	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	0	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	0	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	31.80	J/mol/K	tabulated
+scalar	isobaric-heat-capacity	identity,standard,scope	cp	22.64	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	isobaric-heat-capacity	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	isobaric-heat-capacity	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	isobaric-heat-capacity	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	isobaric-heat-capacity	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	isobaric-heat-capacity	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	isobaric-heat-capacity	phase	1	1	1
+validity	molar-mass	polymorph	1	1	1
+validity	formation-enthalpy	polymorph	1	1	1
+validity	formation-gibbs-energy	polymorph	1	1	1
+validity	standard-entropy	polymorph	1	1	1
+validity	isobaric-heat-capacity	polymorph	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	isobaric-heat-capacity	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	isobaric-heat-capacity	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	isobaric-heat-capacity	specimen	0	0	1

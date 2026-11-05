@@ -107,7 +107,12 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   (fs-ivl's directed-rounding primitive), `ulp_distance`.
 - `c64::C64` — complex f64 (bead urvw): operator traits with strict
   arithmetic, overflow-safe magnitude (max-scaled, no libm hypot —
-  tested at 1e±300), Smith division/reciprocal (scaling-robust),
+  tested at 1e±300), Smith division/reciprocal at ordinary magnitudes
+  with allocation-free, exponent-separated EFT/DD products at finite range
+  extremes. Division retains representable subnormal and weak quadrature
+  components, including when Smith's intermediate ratio underflows; the
+  ordinary-scale operation tree is unchanged. Focused regressions span
+  2^-1074 through 2^1023, full-scale cancellation, and mixed-scale phasors.
   principal sqrt via stable half-angle formulas (both half-planes
   tested). The shared complex home going forward; fs-fft's private
   mini-type migration is recorded cleanup.

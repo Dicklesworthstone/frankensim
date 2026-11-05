@@ -623,6 +623,14 @@ fn spatial<L: TransportLaw>(
                     &mut *cancelled,
                 )?
             }
+            cartesian::FaceKind::Boundary {
+                condition: BoundaryCondition::PressureOutlet { .. },
+                ..
+            } => {
+                return Err(DissipationError::Invalid(
+                    "pressure alone does not define a species/thermal molecular reservoir",
+                ));
+            }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
         if axis == 1 {

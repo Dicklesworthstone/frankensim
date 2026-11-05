@@ -222,16 +222,32 @@ impl PengRobinsonMixtureV1 {
     }
 
     fn mixing(&self, t: f64) -> Result<MixedParameters, PengRobinsonErrorV1> {
+        let n = self.components.len();
+        let mut bi = vec![0.0; n];
+        let mut aij = vec![0.0; n * n];
+        let caloric = self.mixing_caloric(t, |i, value| bi[i] = value,
+            |ij, value| aij[ij] = value)?;
+        Ok(MixedParameters { caloric, aij, bi })
+    }
+
+    // Both evaluations retain the original component and pair operation tree.
+    // Only the full fugacity owner records component covolumes and pair values;
+    // the scalar monomorphization has no recorder work or heap allocation.
+    fn mixing_caloric(
+        &self, t: f64,
+        mut record_covolume: impl FnMut(usize, f64),
+        mut record_attraction: impl FnMut(usize, f64),
+    ) -> Result<MixedCaloricParameters, PengRobinsonErrorV1> {
         if !t.is_finite() || t <= 0.0 {
             return Err(PengRobinsonErrorV1::InvalidTemperature { bits: t.to_bits() });
         }
 
         let n = self.components.len();
         let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
-        let mut ai = vec![0.0; n];
-        let mut dai_dt = vec![0.0; n];
-        let mut d2ai_dt2 = vec![0.0; n];
-        let mut bi = vec![0.0; n];
+        let mut ai = [0.0; MAX_PENG_ROBINSON_COMPONENTS_V1];
+        let mut dai_dt = [0.0; MAX_PENG_ROBINSON_COMPONENTS_V1];
+        let mut d2ai_dt2 = [0.0; MAX_PENG_ROBINSON_COMPONENTS_V1];
+        let mut bi = [0.0; MAX_PENG_ROBINSON_COMPONENTS_V1];
         for i in 0..n {
             let component = self.components[i];
             let tc = component.critical_temperature.value();
@@ -256,9 +272,9 @@ impl PengRobinsonMixtureV1 {
                     what: "pure-component attraction/covolume",
                 });
             }
+            record_covolume(i, bi[i]);
         }
 
-        let mut aij = vec![0.0; n * n];
         let mut a_mix = 0.0;
         let mut da_mix_dt = 0.0;
         let mut d2a_mix_dt2 = 0.0;
@@ -286,7 +302,7 @@ impl PengRobinsonMixtureV1 {
                         what: "binary attraction temperature derivatives",
                     });
                 }
-                aij[i * n + j] = value;
+                record_attraction(i * n + j, value);
                 let weight = self.mole_fractions[i] * self.mole_fractions[j];
                 a_mix += weight * value;
                 da_mix_dt += weight * dvalue;
@@ -301,7 +317,7 @@ impl PengRobinsonMixtureV1 {
             });
         }
 
-        Ok(MixedParameters { a_mix, da_mix_dt, d2a_mix_dt2, b_mix, aij, bi })
+        Ok(MixedCaloricParameters { a_mix, da_mix_dt, d2a_mix_dt2, b_mix })
     }
 
     /// Evaluate PT roots and phase-local fugacity/density observables.
@@ -320,7 +336,7 @@ impl PengRobinsonMixtureV1 {
         }
         let mixed = self.mixing(t)?;
         let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
-        let (dimensionless_a, dimensionless_b) = mixed.dimensionless(t, p)?;
+        let (dimensionless_a, dimensionless_b) = mixed.caloric.dimensionless(t, p)?;
 
         let rt = r * t;
 
@@ -379,42 +395,68 @@ impl PengRobinsonMixtureV1 {
             return Err(PengRobinsonErrorV1::InvalidDensity { bits: rho.to_bits() });
         }
         let mixed = self.mixing(t)?;
-        let v = self.molar_mass.value() / rho;
-        let b = mixed.b_mix;
-        if !v.is_finite() || v <= b {
-            return Err(PengRobinsonErrorV1::OutsideCovolume);
-        }
-        let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
-        let denominator = v * v + 2.0 * b * v - b * b;
-        let p = rt / (v - b) - mixed.a_mix / denominator;
-        if !denominator.is_finite() || denominator <= 0.0 || !p.is_finite() || p <= 0.0 {
-            return Err(PengRobinsonErrorV1::Unrepresentable {
-                what: "positive homogeneous density-temperature pressure",
-            });
-        }
-        let z = p * v / rt;
-        let (a, b) = mixed.dimensionless(t, p)?;
-        let root = mixed.phase_root(&self.mole_fractions, t, z, v, rho, a, b)?;
-        let (dp_dt, dp_dv) = root.pressure_derivatives();
-        if !dp_dt.is_finite() || !dp_dv.is_finite() || dp_dv >= 0.0 {
-            return Err(PengRobinsonErrorV1::MechanicallyUnstable);
-        }
+        let point = mixed.caloric.density_coordinates(t, rho, self.molar_mass.value())?;
+        let root = mixed.phase_root(&self.mole_fractions, t, point.z, point.volume,
+            rho, point.dimensionless_a, point.dimensionless_b)?;
+        root.caloric_state().require_mechanical_stability()?;
         Ok(PengRobinsonDensityEvaluationV1 {
-            temperature, pressure: Pressure::new(p), molar_mass: self.molar_mass, root,
+            temperature, pressure: Pressure::new(point.pressure), molar_mass: self.molar_mass, root,
+        })
+    }
+
+    /// Allocation-free homogeneous calorics at the supplied conserved density.
+    ///
+    /// Uses the same original mixing law, pressure, residual geometry and
+    /// mechanical stability checks as `evaluate_density_temperature`, without
+    /// calculating component fugacities or selecting a phase. Four stack arrays
+    /// are bounded by the admitted 64-component limit. Complete Cv still needs
+    /// the ideal-reference caloric source; local stability is not equilibrium.
+    pub fn evaluate_density_caloric(
+        &self, temperature: Temperature, density: Density,
+    ) -> Result<PengRobinsonDensityCaloricEvaluationV1, PengRobinsonErrorV1> {
+        let t = temperature.value();
+        let rho = density.value();
+        if !rho.is_finite() || rho <= 0.0 {
+            return Err(PengRobinsonErrorV1::InvalidDensity { bits: rho.to_bits() });
+        }
+        let mixed = self.mixing_caloric(t, |_, _| {}, |_, _| {})?;
+        let point = mixed.density_coordinates(t, rho, self.molar_mass.value())?;
+        let residual_geometry = ResidualGeometry::new(point.z, point.dimensionless_a,
+            point.dimensionless_b, point.volume, mixed.b_mix)?;
+        let caloric = CaloricState { parameters: mixed, temperature_k: t,
+            molar_volume_m3_per_mol: point.volume, residual_geometry };
+        caloric.require_mechanical_stability()?;
+        Ok(PengRobinsonDensityCaloricEvaluationV1 {
+            temperature, pressure: Pressure::new(point.pressure),
+            molar_mass: self.molar_mass, density, compressibility_factor: point.z, caloric,
         })
     }
 }
 
 /// Shared temperature-dependent mixing law for both PT and density inputs.
 struct MixedParameters {
+    caloric: MixedCaloricParameters,
+    aij: Vec<f64>,
+    bi: Vec<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MixedCaloricParameters {
     a_mix: f64,
     da_mix_dt: f64,
     d2a_mix_dt2: f64,
     b_mix: f64,
-    aij: Vec<f64>,
-    bi: Vec<f64>,
 }
-impl MixedParameters {
+
+struct DensityCoordinates {
+    pressure: f64,
+    z: f64,
+    volume: f64,
+    dimensionless_a: f64,
+    dimensionless_b: f64,
+}
+
+impl MixedCaloricParameters {
     fn dimensionless(&self, t: f64, p: f64) -> Result<(f64, f64), PengRobinsonErrorV1> {
         let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
         let a = self.a_mix * p / (rt * rt);
@@ -427,18 +469,41 @@ impl MixedParameters {
         Ok((a, b))
     }
 
+    fn density_coordinates(&self, t: f64, rho: f64, molar_mass: f64)
+        -> Result<DensityCoordinates, PengRobinsonErrorV1> {
+        let volume = molar_mass / rho;
+        let b = self.b_mix;
+        if !volume.is_finite() || volume <= b {
+            return Err(PengRobinsonErrorV1::OutsideCovolume);
+        }
+        let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
+        let denominator = volume * volume + 2.0 * b * volume - b * b;
+        let pressure = rt / (volume - b) - self.a_mix / denominator;
+        if !denominator.is_finite() || denominator <= 0.0 || !pressure.is_finite() || pressure <= 0.0 {
+            return Err(PengRobinsonErrorV1::Unrepresentable {
+                what: "positive homogeneous density-temperature pressure",
+            });
+        }
+        let z = pressure * volume / rt;
+        let (dimensionless_a, dimensionless_b) = self.dimensionless(t, pressure)?;
+        Ok(DensityCoordinates { pressure, z, volume, dimensionless_a, dimensionless_b })
+    }
+}
+
+impl MixedParameters {
     fn phase_root(&self, fractions: &[f64], t: f64, z: f64, volume: f64,
         density: f64, dimensionless_a: f64, dimensionless_b: f64)
         -> Result<PengRobinsonPhaseRootV1, PengRobinsonErrorV1> {
-        if !volume.is_finite() || volume <= self.b_mix
+        let mixed = self.caloric;
+        if !volume.is_finite() || volume <= mixed.b_mix
             || !density.is_finite() || density <= 0.0 {
             return Err(PengRobinsonErrorV1::Unrepresentable { what: "phase-root observables" });
         }
         let residual_geometry = ResidualGeometry::new(
-            z, dimensionless_a, dimensionless_b, volume, self.b_mix,
+            z, dimensionless_a, dimensionless_b, volume, mixed.b_mix,
         )?;
         let log_phi = fugacity_logs(residual_geometry, t,
-            self.a_mix, self.b_mix, fractions, &self.aij, &self.bi)?;
+            mixed.a_mix, mixed.b_mix, fractions, &self.aij, &self.bi)?;
         let residual_gibbs_over_rt = fractions.iter().zip(&log_phi)
             .map(|(x, value)| x * value).sum::<f64>();
         if !residual_gibbs_over_rt.is_finite() {
@@ -450,10 +515,10 @@ impl MixedParameters {
             mass_density_kg_per_m3: density,
             residual_gibbs_over_rt,
             log_fugacity_coefficients: log_phi,
-            attraction_parameter: self.a_mix,
-            attraction_temperature_derivative: self.da_mix_dt,
-            attraction_second_temperature_derivative: self.d2a_mix_dt2,
-            covolume_m3_per_mol: self.b_mix,
+            attraction_parameter: mixed.a_mix,
+            attraction_temperature_derivative: mixed.da_mix_dt,
+            attraction_second_temperature_derivative: mixed.d2a_mix_dt2,
+            covolume_m3_per_mol: mixed.b_mix,
             temperature_k: t,
             residual_geometry,
         })
@@ -477,6 +542,61 @@ impl PengRobinsonDensityEvaluationV1 {
     pub const fn molar_mass(&self) -> MolarMass { self.molar_mass }
     #[must_use]
     pub const fn root(&self) -> &PengRobinsonPhaseRootV1 { &self.root }
+}
+
+/// Fixed-size density evaluation for thermal/energy trials. It has the same
+/// residual caloric reference as the full root, but carries no fugacity or
+/// phase-equilibrium result. Successful evaluation and copying allocate nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PengRobinsonDensityCaloricEvaluationV1 {
+    temperature: Temperature,
+    pressure: Pressure,
+    molar_mass: MolarMass,
+    density: Density,
+    compressibility_factor: f64,
+    caloric: CaloricState,
+}
+
+impl PengRobinsonDensityCaloricEvaluationV1 {
+    #[must_use]
+    pub const fn temperature(&self) -> Temperature { self.temperature }
+    #[must_use]
+    pub const fn pressure(&self) -> Pressure { self.pressure }
+    #[must_use]
+    pub const fn molar_mass(&self) -> MolarMass { self.molar_mass }
+    #[must_use]
+    pub const fn density(&self) -> Density { self.density }
+    #[must_use]
+    pub const fn compressibility_factor(&self) -> f64 { self.compressibility_factor }
+    #[must_use]
+    pub const fn molar_volume_m3_per_mol(&self) -> f64 { self.caloric.molar_volume_m3_per_mol }
+    /// U^R [J/mol] relative to ideal gas at the same T and composition.
+    #[must_use]
+    pub fn residual_internal_energy_j_mol(&self) -> f64 { self.caloric.residual_internal_energy_j_mol() }
+    /// H^R [J/mol] with the same pressure-work convention as the full root.
+    #[must_use]
+    pub fn residual_enthalpy_j_mol(&self) -> f64 { self.caloric.residual_enthalpy_j_mol() }
+    /// S^R [J/(mol K)] relative to ideal gas at the same T and density.
+    #[must_use]
+    pub fn residual_entropy_at_density_j_mol_k(&self) -> f64 {
+        self.caloric.residual_entropy_at_density_j_mol_k()
+    }
+    /// S^R [J/(mol K)] relative to ideal gas at the same T and pressure.
+    #[must_use]
+    pub fn residual_entropy_j_mol_k(&self) -> f64 { self.caloric.residual_entropy_j_mol_k() }
+    /// C_v^R [J/(mol K)]; the ideal-reference heat capacity is separate.
+    #[must_use]
+    pub fn residual_cv_j_mol_k(&self) -> f64 { self.caloric.residual_cv_j_mol_k() }
+    /// (dp/dT)_v [Pa/K] and (dp/dv)_T [Pa mol/m^3].
+    #[must_use]
+    pub fn pressure_derivatives(&self) -> (f64, f64) { self.caloric.pressure_derivatives() }
+    /// Complete caloric/acoustic response with ideal Cv at the SAME T and
+    /// composition. Uses this binding's original molar mass.
+    #[must_use]
+    pub fn caloric_mechanics(&self, ideal_molar_cv_j_mol_k: f64)
+        -> Option<PengRobinsonCaloricMechanicsV1> {
+        self.caloric.caloric_mechanics(ideal_molar_cv_j_mol_k, self.molar_mass.value())
+    }
 }
 
 fn cubic_real_roots(
@@ -706,6 +826,20 @@ pub struct PengRobinsonPhaseRootV1 {
 }
 
 impl PengRobinsonPhaseRootV1 {
+    fn caloric_state(&self) -> CaloricState {
+        CaloricState {
+            parameters: MixedCaloricParameters {
+                a_mix: self.attraction_parameter,
+                da_mix_dt: self.attraction_temperature_derivative,
+                d2a_mix_dt2: self.attraction_second_temperature_derivative,
+                b_mix: self.covolume_m3_per_mol,
+            },
+            temperature_k: self.temperature_k,
+            molar_volume_m3_per_mol: self.molar_volume_m3_per_mol,
+            residual_geometry: self.residual_geometry,
+        }
+    }
+
     #[must_use]
     pub const fn compressibility_factor(&self) -> f64 {
         self.compressibility_factor
@@ -731,18 +865,13 @@ impl PengRobinsonPhaseRootV1 {
     /// reference at the same T and composition.
     #[must_use]
     pub fn residual_internal_energy_j_mol(&self) -> f64 {
-        (self.temperature_k * self.attraction_temperature_derivative
-            - self.attraction_parameter)
-            * self.residual_geometry.attraction_integral
+        self.caloric_state().residual_internal_energy_j_mol()
     }
 
     /// Residual enthalpy H^R [J/mol].
     #[must_use]
     pub fn residual_enthalpy_j_mol(&self) -> f64 {
-        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
-            * self.temperature_k
-            * self.residual_geometry.z_minus_one
-            + self.residual_internal_energy_j_mol()
+        self.caloric_state().residual_enthalpy_j_mol()
     }
 
     /// Entropy departure S^R [J/(mol K)] from an ideal gas at the SAME T,
@@ -752,8 +881,7 @@ impl PengRobinsonPhaseRootV1 {
     /// it differs from the conventional same-pressure departure by `R ln Z`.
     #[must_use]
     pub fn residual_entropy_at_density_j_mol_k(&self) -> f64 {
-        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_free_volume
-            + self.attraction_temperature_derivative * self.residual_geometry.attraction_integral
+        self.caloric_state().residual_entropy_at_density_j_mol_k()
     }
 
     /// Entropy departure S^R [J/(mol K)] from the ideal gas at the SAME T,
@@ -762,30 +890,19 @@ impl PengRobinsonPhaseRootV1 {
     /// thermochemical species owner; no phase-equilibrium entropy is inferred.
     #[must_use]
     pub fn residual_entropy_j_mol_k(&self) -> f64 {
-        self.residual_entropy_at_density_j_mol_k()
-            + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
-                * self.residual_geometry.log_z
+        self.caloric_state().residual_entropy_j_mol_k()
     }
 
     /// Residual constant-volume heat capacity C_v^R [J/(mol K)].
     #[must_use]
     pub fn residual_cv_j_mol_k(&self) -> f64 {
-        self.temperature_k * self.attraction_second_temperature_derivative
-            * self.residual_geometry.attraction_integral
+        self.caloric_state().residual_cv_j_mol_k()
     }
 
     /// (dp/dT)_v [Pa/K] and (dp/dv)_T [Pa mol/m^3] from the original PR law.
     #[must_use]
     pub fn pressure_derivatives(&self) -> (f64, f64) {
-        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
-        let t = self.temperature_k;
-        let v = self.molar_volume_m3_per_mol;
-        let b = self.covolume_m3_per_mol;
-        let d = v * v + 2.0 * b * v - b * b;
-        let dp_dt_v = r / (v - b) - self.attraction_temperature_derivative / d;
-        let dp_dv_t = -r * t / ((v - b) * (v - b))
-            + self.attraction_parameter * (2.0 * v + 2.0 * b) / (d * d);
-        (dp_dt_v, dp_dv_t)
+        self.caloric_state().pressure_derivatives()
     }
 
     /// Complete Cp and isentropic sound speed after adding an ideal-reference
@@ -793,6 +910,73 @@ impl PengRobinsonPhaseRootV1 {
     /// unstable root or nonpositive complete caloric response.
     #[must_use]
     pub fn caloric_mechanics(
+        &self,
+        ideal_molar_cv_j_mol_k: f64,
+        molar_mass_kg_mol: f64,
+    ) -> Option<PengRobinsonCaloricMechanicsV1> {
+        self.caloric_state().caloric_mechanics(ideal_molar_cv_j_mol_k, molar_mass_kg_mol)
+    }
+}
+
+/// One owner of the residual and derivative arithmetic for full roots and
+/// scalar trial states. Constructing this fixed-size value only copies scalars.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CaloricState {
+    parameters: MixedCaloricParameters,
+    temperature_k: f64,
+    molar_volume_m3_per_mol: f64,
+    residual_geometry: ResidualGeometry,
+}
+
+impl CaloricState {
+    fn residual_internal_energy_j_mol(&self) -> f64 {
+        (self.temperature_k * self.parameters.da_mix_dt - self.parameters.a_mix)
+            * self.residual_geometry.attraction_integral
+    }
+
+    fn residual_enthalpy_j_mol(&self) -> f64 {
+        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+            * self.temperature_k
+            * self.residual_geometry.z_minus_one
+            + self.residual_internal_energy_j_mol()
+    }
+
+    fn residual_entropy_at_density_j_mol_k(&self) -> f64 {
+        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_free_volume
+            + self.parameters.da_mix_dt * self.residual_geometry.attraction_integral
+    }
+
+    fn residual_entropy_j_mol_k(&self) -> f64 {
+        self.residual_entropy_at_density_j_mol_k()
+            + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * self.residual_geometry.log_z
+    }
+
+    fn residual_cv_j_mol_k(&self) -> f64 {
+        self.temperature_k * self.parameters.d2a_mix_dt2
+            * self.residual_geometry.attraction_integral
+    }
+
+    fn pressure_derivatives(&self) -> (f64, f64) {
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let t = self.temperature_k;
+        let v = self.molar_volume_m3_per_mol;
+        let b = self.parameters.b_mix;
+        let d = v * v + 2.0 * b * v - b * b;
+        let dp_dt_v = r / (v - b) - self.parameters.da_mix_dt / d;
+        let dp_dv_t = -r * t / ((v - b) * (v - b))
+            + self.parameters.a_mix * (2.0 * v + 2.0 * b) / (d * d);
+        (dp_dt_v, dp_dv_t)
+    }
+
+    fn require_mechanical_stability(&self) -> Result<(), PengRobinsonErrorV1> {
+        let (dp_dt, dp_dv) = self.pressure_derivatives();
+        if !dp_dt.is_finite() || !dp_dv.is_finite() || dp_dv >= 0.0 {
+            return Err(PengRobinsonErrorV1::MechanicallyUnstable);
+        }
+        Ok(())
+    }
+
+    fn caloric_mechanics(
         &self,
         ideal_molar_cv_j_mol_k: f64,
         molar_mass_kg_mol: f64,
@@ -922,6 +1106,101 @@ mod tests {
         };
         PengRobinsonMixtureV1::new(vec![methane(), ethane],
             vec![methane_fraction, 1.0 - methane_fraction], vec![]).unwrap()
+    }
+
+    fn assert_scalar_calorics(model: &PengRobinsonMixtureV1, t: f64, rho: f64) {
+        let full = model.evaluate_density_temperature(Temperature::new(t), Density::new(rho)).unwrap();
+        let scalar = model.evaluate_density_caloric(Temperature::new(t), Density::new(rho)).unwrap();
+        let root = full.root();
+        assert_eq!(scalar.temperature(), full.temperature());
+        assert_eq!(scalar.molar_mass(), full.molar_mass());
+        assert_eq!(scalar.density().value().to_bits(), rho.to_bits());
+        for (name, actual, expected) in [
+            ("pressure", scalar.pressure().value(), full.pressure().value()),
+            ("Z", scalar.compressibility_factor(), root.compressibility_factor()),
+            ("volume", scalar.molar_volume_m3_per_mol(), root.molar_volume_m3_per_mol()),
+            ("u", scalar.residual_internal_energy_j_mol(), root.residual_internal_energy_j_mol()),
+            ("h", scalar.residual_enthalpy_j_mol(), root.residual_enthalpy_j_mol()),
+            ("cv", scalar.residual_cv_j_mol_k(), root.residual_cv_j_mol_k()),
+            ("s(rho)", scalar.residual_entropy_at_density_j_mol_k(), root.residual_entropy_at_density_j_mol_k()),
+            ("s(p)", scalar.residual_entropy_j_mol_k(), root.residual_entropy_j_mol_k()),
+            ("dp/dT", scalar.pressure_derivatives().0, root.pressure_derivatives().0),
+            ("dp/dv", scalar.pressure_derivatives().1, root.pressure_derivatives().1),
+        ] {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "{name}, T={t}, rho={rho}");
+        }
+        for ideal_cv in [20.0, 100.0, -1.0e10, f64::NAN] {
+            assert_eq!(scalar.caloric_mechanics(ideal_cv),
+                root.caloric_mechanics(ideal_cv, model.molar_mass().value()));
+        }
+    }
+
+    #[test]
+    fn g1_scalar_density_calorics_preserve_dense_dilute_and_metastable_states() {
+        let binary = methane_ethane(0.37);
+        let interacting = PengRobinsonMixtureV1::new(binary.components().to_vec(),
+            binary.mole_fractions().to_vec(), vec![0.0, 0.03, 0.03, 0.0]).unwrap();
+        for model in [pure(methane()), interacting] {
+            for (t, p) in [(150.0, 1.0e6), (250.0, 2.0e6), (300.0, 5.0e6), (500.0, 1.0e5)] {
+                let pt = model.evaluate_pt(Temperature::new(t), Pressure::new(p)).unwrap();
+                for root in pt.phase_roots() {
+                    // Retain both stable-volume branches, including a
+                    // metastable homogeneous state; never select another rho.
+                    if root.pressure_derivatives().1 < 0.0 {
+                        assert_scalar_calorics(&model, t, root.mass_density_kg_per_m3());
+                    }
+                }
+            }
+            assert_scalar_calorics(&model, 400.0, 1.0e-16);
+            let b = model.mixing(300.0).unwrap().caloric.b_mix;
+            assert_scalar_calorics(&model, 300.0, model.molar_mass().value() / (1.05 * b));
+        }
+    }
+
+    #[test]
+    fn g1_scalar_density_calorics_keep_alpha_sign_changes_and_component_bound() {
+        let pure_model = pure(methane());
+        let binary = methane_ethane(0.37);
+        for component in binary.components() {
+            let omega = component.acentric_factor;
+            let kappa = 0.374_64 + 1.542_26 * omega - 0.269_92 * omega * omega;
+            let zero_t = component.critical_temperature.value() * (1.0 + 1.0 / kappa).powi(2);
+            // Quadratic mixing contains sqrt(a_i*a_j), including the absolute
+            // alpha-base signs. A global polynomial fit would change this law.
+            for t in [zero_t * (1.0 - 1.0e-6), zero_t * (1.0 + 1.0e-6)] {
+                for model in [&pure_model, &binary] {
+                    assert_scalar_calorics(model, t, 2.0);
+                }
+            }
+            for model in [&pure_model, &binary] {
+                let full = model.evaluate_density_temperature(Temperature::new(zero_t), Density::new(2.0));
+                match full {
+                    Ok(_) => assert_scalar_calorics(model, zero_t, 2.0),
+                    Err(error) => assert_eq!(model.evaluate_density_caloric(
+                        Temperature::new(zero_t), Density::new(2.0)).unwrap_err(), error),
+                }
+            }
+        }
+        let n = MAX_PENG_ROBINSON_COMPONENTS_V1;
+        let maximum = PengRobinsonMixtureV1::new(vec![methane(); n],
+            vec![1.0 / n as f64; n], vec![]).unwrap();
+        assert_scalar_calorics(&maximum, 300.0, 50.0);
+    }
+
+    #[test]
+    fn g0_scalar_density_calorics_preserve_physical_refusals() {
+        let model = pure(methane());
+        let pt = model.evaluate_pt(Temperature::new(150.0), Pressure::new(1.0e6)).unwrap();
+        let unstable_density = pt.phase_roots()[1].mass_density_kg_per_m3();
+        for (t, rho) in [
+            (300.0, 0.0), (300.0, -1.0), (300.0, f64::NAN), (300.0, f64::INFINITY),
+            (0.0, 50.0), (-1.0, 50.0), (f64::NAN, 50.0), (f64::INFINITY, 50.0),
+            (300.0, 1000.0), (150.0, 200.0), (150.0, unstable_density),
+        ] {
+            let full = model.evaluate_density_temperature(Temperature::new(t), Density::new(rho));
+            let scalar = model.evaluate_density_caloric(Temperature::new(t), Density::new(rho));
+            assert_eq!(scalar.unwrap_err(), full.unwrap_err(), "T={t}, rho={rho}");
+        }
     }
 
     #[test]
@@ -1315,7 +1594,7 @@ mod tests {
         for i in 0..2 {
             let partial_a = (0..2).map(|j| model.mole_fractions[j] * mixed.aij[2 * i + j])
                 .sum::<f64>();
-            let virial = (mixed.bi[i] + (mixed.a_mix - 2.0 * partial_a) / rt) / v;
+            let virial = (mixed.bi[i] + (mixed.caloric.a_mix - 2.0 * partial_a) / rt) / v;
             assert!((root.log_fugacity_coefficients()[i] / virial - 1.0).abs() < 1.0e-12);
         }
     }

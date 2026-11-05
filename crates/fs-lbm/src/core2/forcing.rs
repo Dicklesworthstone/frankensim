@@ -111,6 +111,13 @@ impl Grid {
                 ));
             }
         }
+        if let CollisionModel2::CentralMomentBulk { bulk_tau } = self.collision {
+            if !bulk_tau.is_finite() || bulk_tau <= 0.5 {
+                return Err(ForceStepError2::Invalid(
+                    "central-moment bulk relaxation time must be finite and greater than 0.5",
+                ));
+            }
+        }
         for (cell, next_external) in external.iter().enumerate() {
             if cell % FORCE_STEP_CHUNK == 0 {
                 checkpoint()?;

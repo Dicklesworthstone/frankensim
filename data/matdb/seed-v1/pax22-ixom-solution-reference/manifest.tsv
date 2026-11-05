@@ -1,0 +1,11 @@
+frankensim.matdb-manifest.v3
+pack_id	pax22-ixom-solution-reference
+redistribution	permitted	Selected attributed numerical facts and original interpretation only; no source prose, images or table layout is redistributed
+citation	IXOM, Potassium Amyl Xanthate Liquid - 22% W/W, product PAX22-BULK_AU, linked SDS product code 000000053541; https://www.ixom.com/p/PAX22-BULK_AU; accessed 2026-11-05
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	collector-solution-reference	properties.tsv	material-tsv-v1
+property	pax_fraction	pax-solution-component-mass-fraction-nominal	dimensional
+axis	product	source-ixom-pax22-solution-product	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	lot_qualified	source-lot-qualified	dimensional
+axis	nominal	source-product-label-nominal	dimensional

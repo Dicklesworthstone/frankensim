@@ -400,7 +400,9 @@ fn transient_sgs_drives_heat_and_zero_coefficient_recovers_the_existing_march() 
     let initial: Vec<_> = (0..domain.cell_count())
         .map(|c| 300.0 + 10.0 * domain.coords(c)[1] as f64)
         .collect();
-    let setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.faces[2] = ThermalFace::Temperature(290.0);
+    setup.faces[3] = ThermalFace::Temperature(350.0);
     let coupled = march_conjugate_with_sgs(
         &domain,
         &fluid,
@@ -431,6 +433,7 @@ fn transient_sgs_drives_heat_and_zero_coefficient_recovers_the_existing_march() 
         "SGS must enter momentum"
     );
     let mut explicit = setup.clone();
+    explicit.eddy_wall_treatment = crate::conjugate::EddyWallTreatment::Molecular;
     assert_eq!(coupled.flow.flow.turbulent_prandtl, 0.6);
     // Reconstruct independently so a shared fallback to 0.9 cannot pass.
     explicit.eddy_conductivity_w_m_k = coupled
@@ -471,6 +474,14 @@ fn transient_sgs_drives_heat_and_zero_coefficient_recovers_the_existing_march() 
         &gate,
     )
     .unwrap();
+    explicit.eddy_wall_treatment = crate::conjugate::EddyWallTreatment::EffectiveConductivity;
+    let augmented_walls = march_energy(
+        &domain, &fluid, &[], &coupled.flow.flow.field, &explicit, &initial,
+        |_| 1.0, &thermal, None, &gate,
+    ).unwrap();
+    let wall_error = coupled.temperature.iter().zip(&augmented_walls.temperature)
+        .fold(0.0_f64, |max, (a, b)| max.max((a - b).abs()));
+    assert!(wall_error > 1e-5, "SGS must not augment the molecular wall heat law");
     let error = coupled
         .temperature
         .iter()

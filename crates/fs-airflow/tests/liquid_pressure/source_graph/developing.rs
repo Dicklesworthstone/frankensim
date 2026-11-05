@@ -3,10 +3,11 @@
 
 use super::*;
 use fs_airflow::graph::thermal::transport::transient::material::convection::developing::{
-    DevelopingWall, GraphDevelopingConvectionError, GraphDevelopingSection,
+    DevelopingDuct, DevelopingWall, GraphDevelopingConvectionError, GraphDevelopingSection,
 };
 use fs_conduction::transient::deposition::{
-    Reservoir, backward_euler::{BoundaryConductances, BoundaryStepCoefficients},
+    Reservoir,
+    backward_euler::{BoundaryConductances, BoundaryStepCoefficients},
 };
 use fs_material::fluid_transport::FluidTransport;
 
@@ -14,17 +15,25 @@ fn diameter() -> f64 { (4.0 * PIPE_AREA / core::f64::consts::PI).sqrt() }
 fn area() -> f64 { core::f64::consts::PI * diameter() * 0.5 }
 
 fn section_fixture(caloric: &ResolvedHeatCapacityCurve, wall_k: f64) -> DepositionSimulation<'_> {
+    section_fixture_with_area(caloric, wall_k, area())
+}
+
+fn section_fixture_with_area(
+    caloric: &ResolvedHeatCapacityCurve,
+    wall_k: f64,
+    wall_area: f64,
+) -> DepositionSimulation<'_> {
     let original = thermal(caloric, [300.0; 6], Some(wall_k), false);
     let mut schedule: Vec<_> = original.cells().values().cloned().map(|mut cell| {
         if cell.id == CellId(3) {
             cell.boundary.reservoir = Some(Reservoir {
-                area_m2: area(), conductance_w_k: 0.0, temperature_k: wall_k,
+                area_m2: wall_area, conductance_w_k: 0.0, temperature_k: wall_k,
             });
         }
         TimedEvent { time_s: 0.0, event: Event::Birth(cell) }
     }).collect();
     schedule.push(TimedEvent { time_s: 0.0, event: Event::Contact(ThermalLink {
-        area_m2: area(), ..original.links()[&9].clone()
+        area_m2: wall_area, ..original.links()[&9].clone()
     }) });
     DepositionSimulation::new(
         schedule, &[(MaterialId(1), caloric.curve() as &dyn ThermalLaw)],
@@ -38,13 +47,15 @@ fn sections() -> [GraphDevelopingSection; 2] {
     [
         GraphDevelopingSection {
             fluid_cell: CellId(2), wall: DevelopingWall::Link(9),
-            diameter: Length::new(diameter()), forward_start: Length::new(0.0),
+            duct: DevelopingDuct::Circular { diameter: Length::new(diameter()) },
+            forward_start: Length::new(0.0),
             reverse_start: Length::new(0.5),
             property_temperature: ConvectionPropertyTemperature::FilmMean,
         },
         GraphDevelopingSection {
             fluid_cell: CellId(3), wall: DevelopingWall::Reservoir,
-            diameter: Length::new(diameter()), forward_start: Length::new(0.5),
+            duct: DevelopingDuct::Circular { diameter: Length::new(diameter()) },
+            forward_start: Length::new(0.5),
             reverse_start: Length::new(0.0),
             property_temperature: ConvectionPropertyTemperature::FilmMean,
         },
@@ -57,6 +68,186 @@ fn hydraulic_controls() -> GraphSolveConfig {
         absolute_flow_tolerance: VolumetricFlowRate::new(1e-14),
         relative_flow_tolerance: 1e-12,
     }
+}
+
+#[test]
+fn g1_g3_rectangular_native_sections_preserve_table_heat_and_reverse_the_entrance() {
+    use fs_airflow::graph::thermal::transport::transient::material::convection::developing::DevelopingSectionEvaluation;
+    use fs_convection::EvaluationSourceRegion;
+    context(|cx| {
+        // Synthetic fluid: actual mu*Cp/k=0.72. The source is not changed or
+        // rounded by the evaluator to satisfy the table's narrow Pr support.
+        let card = card(false, 0.09);
+        let (law, caloric) = source_pair(&card);
+        let width = (2.0 * PIPE_AREA).sqrt();
+        let height = width / 2.0;
+        let perimeter = 2.0 * (width + height);
+        let dh = 4.0 * PIPE_AREA / perimeter;
+        let initial = section_fixture_with_area(&caloric, 400.0, perimeter * 0.5);
+        let graph = graph();
+        let inventory = bind_inventory(cx, &graph, &initial);
+        let laws = laws(2300.0);
+        let owner = LiquidGraphSources::try_new(
+            cx,
+            &law,
+            &caloric,
+            &initial,
+            SourceGraphBinding {
+                graph: &graph,
+                inventory: &inventory,
+                laws: &laws,
+                acceleration_m_s2: [0.0; 3],
+            },
+            caps(),
+        )
+        .unwrap();
+        let mut bindings = sections();
+        for binding in &mut bindings {
+            binding.duct = DevelopingDuct::Rectangular {
+                width: Length::new(width),
+                height: Length::new(height),
+            };
+        }
+        // Whole length 1 m: Gz=40 and Nu_mean=5.61. First half: Gz=80,
+        // Nu_mean=6.88. The downstream half's section mean is 2*5.61-6.88.
+        // These are independent retained source-table entries, not evaluations
+        // of the production correlation inside the test oracle.
+        let q = 40.0 * 0.5 * PIPE_AREA / (1000.0 * 2000.0 * dh * dh);
+        for sign in [-1.0, 1.0] {
+            let resolved = owner
+                .resolve(cx, &initial, &[sign * q, sign * q, -sign * q])
+                .unwrap();
+            let hydraulics = resolved
+                .graph
+                .solve(
+                    &[
+                        FixedPressure {
+                            node: 0,
+                            pressure: Pressure::new(sign * A * 0.00018 * q),
+                        },
+                        FixedPressure {
+                            node: 1,
+                            pressure: Pressure::new(0.0),
+                        },
+                    ],
+                    hydraulic_controls(),
+                    cx,
+                )
+                .unwrap();
+            near(hydraulics.branches[0].flow.value(), sign * q);
+            let heat = owner
+                .evaluate_quasi_steady_developing_sections(
+                    cx,
+                    &initial,
+                    &resolved.sources,
+                    &hydraulics,
+                    0.25,
+                    &bindings,
+                    2,
+                )
+                .unwrap();
+            let samples = heat.convection.samples();
+            let expected = if sign > 0.0 {
+                [6.88, 4.34]
+            } else {
+                [4.34, 6.88]
+            };
+            for (sample, nu) in samples.iter().zip(expected) {
+                assert!(matches!(
+                    sample.section,
+                    DevelopingSectionEvaluation::Rectangular(_)
+                ));
+                assert_eq!(
+                    sample.section.downstream().source_region(),
+                    EvaluationSourceRegion::TableSliceInterpolation
+                );
+                assert_eq!(
+                    sample.section.downstream().card().id,
+                    CorrelationId::RectangularDuctLaminarCwtDevelopingPr072
+                );
+                near(sample.section.nusselt(), nu);
+                near(sample.area_m2, perimeter * 0.5);
+                near(sample.conductance_w_k, perimeter * 0.5 * nu * 0.5 / dh);
+                near(sample.heat_into_fluid_w, 100.0 * sample.conductance_w_k);
+                near(sample.property_temperature_k, 350.0);
+            }
+            let total = perimeter * 5.61 * 0.5 / dh;
+            near(samples.iter().map(|s| s.conductance_w_k).sum(), total);
+            // Treating both halves as new entrances overpredicts wall transfer.
+            assert!(perimeter * 6.88 * 0.5 / dh > 1.2 * total);
+            let mut links = BTreeMap::new();
+            let mut boundaries = BoundaryConductances::default();
+            heat.convection
+                .apply_to(&mut links, &mut boundaries, || false)
+                .unwrap();
+            near(links[&9], samples[0].conductance_w_k);
+            near(
+                boundaries.reservoir_w_k[&CellId(3)],
+                samples[1].conductance_w_k,
+            );
+
+            // Same area with a different shape must not borrow the half-aspect
+            // source table; a different perimeter must not silently change the
+            // native wall patch. Swapping width/height is physically identical.
+            let mut rotated = bindings;
+            for b in &mut rotated {
+                b.duct = DevelopingDuct::Rectangular {
+                    width: Length::new(height),
+                    height: Length::new(width),
+                };
+            }
+            let rotated = owner
+                .evaluate_quasi_steady_developing_sections(
+                    cx,
+                    &initial,
+                    &resolved.sources,
+                    &hydraulics,
+                    0.25,
+                    &rotated,
+                    2,
+                )
+                .unwrap();
+            near(
+                rotated.convection.samples()[0].conductance_w_k,
+                samples[0].conductance_w_k,
+            );
+            let mut wrong = bindings;
+            wrong[0].duct = DevelopingDuct::Rectangular {
+                width: Length::new(PIPE_AREA.sqrt()),
+                height: Length::new(PIPE_AREA.sqrt()),
+            };
+            assert!(
+                owner
+                    .evaluate_quasi_steady_developing_sections(
+                        cx,
+                        &initial,
+                        &resolved.sources,
+                        &hydraulics,
+                        0.25,
+                        &wrong,
+                        2,
+                    )
+                    .is_err()
+            );
+            wrong[0].duct = DevelopingDuct::Rectangular {
+                width: Length::new(width * 1.01),
+                height: Length::new(height),
+            };
+            assert!(
+                owner
+                    .evaluate_quasi_steady_developing_sections(
+                        cx,
+                        &initial,
+                        &resolved.sources,
+                        &hydraulics,
+                        0.25,
+                        &wrong,
+                        2,
+                    )
+                    .is_err()
+            );
+        }
+    });
 }
 
 #[test]
@@ -123,7 +314,9 @@ fn g1_g3_developing_wall_sections_preserve_total_transfer_and_reverse_the_entran
                 assert!(heat.convection.apply_to(&mut empty_links, &mut empty, || true).is_err());
                 assert!(empty_links.is_empty() && empty.reservoir_w_k.is_empty());
                 let mut wrong_geometry = bindings;
-                wrong_geometry[0].diameter = Length::new(1.01 * diameter());
+                wrong_geometry[0].duct = DevelopingDuct::Circular {
+                    diameter: Length::new(1.01 * diameter()),
+                };
                 assert!(owner.evaluate_quasi_steady_developing_sections(
                     cx, &initial, &resolved.sources, &hydraulics, 0.25, &wrong_geometry, 2,
                 ).is_err());
@@ -150,10 +343,24 @@ fn g1_developing_links_and_reservoirs_share_native_momentum_advection_and_energy
         ResolvedInertialGraph, advance_inertial_graph_distributed,
     };
     use fs_solver::NewtonKrylovConfig;
-    context(|cx| {
-        let card = card(true, 1.0);
+    for rectangular in [false, true] {
+        context(|cx| {
+        let card = card(!rectangular, if rectangular { 0.09 } else { 1.0 });
         let (law, caloric) = source_pair(&card);
-        let initial = section_fixture(&caloric, 400.0);
+        let mut bindings = sections();
+        let wall_area = if rectangular {
+            let width = (2.0 * PIPE_AREA).sqrt();
+            let height = width / 2.0;
+            for binding in &mut bindings {
+                binding.duct = DevelopingDuct::Rectangular {
+                    width: Length::new(width), height: Length::new(height),
+                };
+            }
+            width + height // Full perimeter times the native half-metre length.
+        } else {
+            area()
+        };
+        let initial = section_fixture_with_area(&caloric, 400.0, wall_area);
         let graph = graph();
         let inventory = bind_inventory(cx, &graph, &initial);
         let laws = laws(2300.0);
@@ -195,12 +402,14 @@ fn g1_developing_links_and_reservoirs_share_native_momentum_advection_and_energy
                 let resolved = owner.resolve(cx, candidate, flows).map_err(|e| e.to_string())?;
                 Ok::<_, String>(ResolvedInertialGraph {
                     graph: resolved.graph, pressure_boundaries: boundaries.clone(),
-                    driving_pressure_pa: vec![1.0, 0.0, 1.0], payload: resolved.sources,
+                    driving_pressure_pa: if rectangular { vec![0.09, 0.0, 0.09] }
+                        else { vec![1.0, 0.0, 1.0] },
+                    payload: resolved.sources,
                 })
             },
             |cx, candidate, sources, hydraulics| {
                 let heat = owner.evaluate_developing_sections(
-                    cx, candidate, sources, hydraulics, &sections(), 2,
+                    cx, candidate, sources, hydraulics, &bindings, 2,
                 ).map_err(|e| e.to_string())?;
                 let mut links = BTreeMap::new();
                 let mut boundaries = BoundaryConductances::default();
@@ -240,4 +449,5 @@ fn g1_developing_links_and_reservoirs_share_native_momentum_advection_and_energy
         near(initial.time_s(), 0.0);
         near(momentum.accepted_time_s(), 0.0);
     });
+    }
 }

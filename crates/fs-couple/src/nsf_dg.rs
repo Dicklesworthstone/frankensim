@@ -30,6 +30,8 @@ use fs_material::gas::GasState;
 pub mod performance;
 /// Resolved excitation of a complete thermoviscous field and its finite ducts.
 pub mod thermoviscous;
+/// Causal passive RLC and relaxation loads on original resolved flow ports.
+pub mod impedance;
 mod upstream;
 pub use upstream::NsfDgUpstreamFrame;
 mod reservoir;

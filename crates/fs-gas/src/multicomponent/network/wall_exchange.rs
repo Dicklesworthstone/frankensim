@@ -36,8 +36,10 @@ pub use shared::{
 };
 
 mod transport;
-pub use transport::{CircularLaminarWall, CircularTurbulentWall, CircularWallModel};
 use transport::CircularWallTransport;
+pub use transport::{
+    CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall, CircularWallModel,
+};
 
 #[cfg(feature = "material")]
 mod conduction;

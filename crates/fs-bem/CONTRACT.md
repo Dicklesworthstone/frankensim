@@ -756,16 +756,16 @@ budget for the full frequency sweep and a provenance hash. The bake declaration
 hash includes geometry, all traces, route, medium, frequencies and budget.
 
 For `k * source_diameter <= 0.5`, power-consistent Rayleigh resistance uses
-compensated Cartesian source moments and a positive angular Gram rule. This is
+double-double Cartesian source moments and a positive angular Gram rule. This is
 the same point-area sinc operator, evaluated without subtracting almost equal
 monopole powers for a weak dipole, quadrupole or higher cancelling field.
 Degree-16 outgoing amplitudes have an absolute exponential remainder below
 `2.2e-20 * sum(abs(area * shape))`; the 17-point polar / 34-point azimuth rule
 integrates their degree-32 products exactly in exact arithmetic. Cartesian
-moments are projected once into compensated direction/degree coefficients;
+moments are projected once into double-double direction/degree coefficients;
 each further frequency contracts 17 coefficients instead of 153 monomials per
-direction and field. This geometry cache uses `153 * 17 * fields` doubles
-(2.54 MiB at the 128-field cap), replacing the Cartesian moment cache. Angular
+direction and field. This geometry cache uses `153 * 17 * fields` double-doubles
+(5.08 MiB at the 128-field cap), replacing the Cartesian moment cache. Angular
 nodes are also reused. Both geometry projections and recurring frequency work
 are included in the existing modal ceiling. The equivalent-disc reactance
 remains bit-identical.
@@ -783,6 +783,15 @@ at each cell and integrate the resulting field with positive angular weights.
 The opposite azimuths are paired as `|even|² + |odd|²`; simply halving the angular
 domain would be wrong for complex velocities. Double-double contractions retain
 weak residuals, without negative-power clipping or an artificial loss floor.
+Area/shape products, Cartesian moments and directional coefficients retain
+their low components until that coherent contraction. Rounding those upstream
+quantities independently would introduce a spurious radiation floor for
+nearly identical, opposite-phase modal motions. The legacy impedance/reactance
+path still consumes each area's original rounded high component. Two analytic
+G2 tests cancel all cells except one weak monopole, including non-dyadic areas,
+relative modal differences down to `2^-44`, and both sides of the compact-rule
+boundary. The prepared area/shape storage uses two doubles per cell/mode;
+source and work caps are unchanged, and the cache remains reusable per sweep.
 
 The noncompact rule selects polar order n and 2n azimuth points from
 `epsilon = (kD)^n/n! <= 1e-18`, capped at n=128, and refuses if unresolved or over
@@ -1649,9 +1658,9 @@ Layer order, all original material parameters and every fluid's bulk modulus
 bind boundary identity. An empty stack is rigid, but prescribed source panels
 still require the explicit `Rigid` variant. This is a local-reaction approximation:
 it does not resolve lateral propagation or curvature within a finite treatment.
-The dense observer retains pressure-node limits through the original finite
-reflection response; finite-admittance iterative/molecular routes still
-propagate their named refusal. The FIR convergence gates still apply to layered
+Dense and iterative observers retain pressure-node limits through the original
+finite reflection response; finite-admittance molecular routes still propagate
+their named refusal. The FIR convergence gates still apply to layered
 responses and do not certify unsampled material resonances.
 
 `LocalWall::LayeredTransmitting` carries the same ordered sources into both
@@ -1695,9 +1704,10 @@ Wall absorption uses coherent pressure/flow coordinates on the passive branch,
 avoiding a subtraction of incident/scattered velocities that would invent tiny
 losses on rigid patches. No reflection or admittance coefficient is clipped.
 
-The new dense route inherits the original panel/work limits and dense-LU
-cancellation granularity. It does not extend the iterative, nonlocal or
-molecular-gas solver's boundary support; those routes still refuse a band that
+The dense route inherits the original panel/work limits and dense-LU
+cancellation granularity. Its iterative counterpart retains the original FMM
+and GMRES owner as described below. Nonlocal and molecular-gas boundary support
+is unchanged; finite-admittance molecular routes still refuse a band that
 contains a lossless mechanical admittance pole. Focused G0/G1/G3 tests cover
 finite-Robin equivalence, rigid arithmetic, the pressure-release sphere,
 mechanical resonance continuity and constitutive admission. These native
@@ -1863,8 +1873,15 @@ finite-source fields directly, without another solve or a source-pair matrix.
 Original signed pressure, actual normal velocity and prescribed source velocity
 are superposed before the quadratic work. The result separates source input,
 signed outward boundary work and accepted work of the original local wall laws,
-including all coherent cross terms. Accepted work uses the original frequency-bound
-`Re(beta)*|p|^2/(2*rho*c)`; actual velocity comes from the retained solve, making
+including all coherent cross terms. Accepted work retains the original frequency-bound
+`Re(beta)*|p|^2/(2*rho*c)` where admittance is well scaled. At mechanical
+resonances and layered pressure nodes it instead uses the native bounded pair
+`p=a*x`, `rho*c*v_in=b*x`, with `a=(1+r)/2`, `b=(1-r)/2`. Both retained traces
+recover `x=(conj(a)*p+conj(b)*rho*c*(v_drive-v_actual))/(|a|^2+|b|^2)`;
+the original material supplies its independent work conductance. No division
+by a vanishing pressure or invented damping is required. Native mechanical
+resistance and layer surface work retain weak acceptance even when reflected
+power rounds to unity. Actual velocity comes from the retained solve, making
 the returned balance a measured identity rather than an imposed closure.
 An apparent-work scale normalizes the balance even when signed active powers
 cancel. Binary-scaled fields and compensated sums preserve tiny/large drives and
@@ -1880,9 +1897,12 @@ discrete work diagnostics do not bound BEM/FMM or continuum error.
 The explicit `coherent_boundary_power_partition` additionally evaluates native
 positive layer-loss integrals once per distinct transmitting wall law, with a
 caller budget for the summed declared layers. The same coherently combined
-total panel pressures supply accepted work, irreversible loss and outgoing
-receiving-fluid flux. Separate compensated sums retain source cross terms and
-small losses; neither channel is inferred from a residual or normalized to force
+total panel fields supply accepted work, irreversible loss and outgoing
+receiving-fluid flux. Near a pressure node, native positive layer-loss integrals
+use the incident amplitude `A=x/2`; their incident-power fractions therefore
+multiply `|x|^2/(8*rho*c)`. Ordinary total-pressure conductances remain unchanged.
+Separate compensated sums retain source cross terms and small losses;
+neither channel is inferred from a residual or normalized to force
 closure. Legacy report field `absorbed_power_w` remains total accepted work,
 also named by `accepted_power_w()`, and includes outgoing transmission.
 `IterativeBoundaryPowerPartition` exposes that total, its independent two-way
@@ -1966,9 +1986,9 @@ maximum angular frequency for downstream physical load admission.
 `aperture_support_areas_m2` sums original panel areas on each nonzero finite
 unit-flow trace without replacing its velocity profile or renormalizing flow.
 `admit_loading_band_hz` checks the complete positive unwindowed interval against
-native material support and the original resolution declaration, including an
-unsampled lossless zero-impedance resonance. It shares the existing material
-resonance check; the observation window still has no authority to extend a
+native material support and the original resolution declaration. A lossless
+zero-impedance wall retains its finite pressure-release limit in the iterative
+reflection owner. The observation window still has no authority to extend a
 physical loading domain.
 
 ## Reciprocal complete source loads and matched receiver transfers
@@ -2972,8 +2992,13 @@ source fields before products and retains deterministic, real-coordinate and
 proper-complex cross-frequency interference through the existing shared
 harmonic-window kernels. The original pressure, actual outward velocity and
 prescribed source traces supply input/outward work. Original local material
-admittances supply inward wall velocity directly, preserving weak wall work
-beside large input and outward powers. The raw closure residual remains visible.
+admittances supply inward wall velocity directly where well scaled, preserving
+weak wall work beside large input and outward powers. At a pressure node,
+the original bounded reflection pair recovers its amplitude from both retained
+traces, then evaluates inward wall velocity from that constitutive law. A
+resonant line with zero pressure can still have nonzero velocity and exchange
+finite-window beat work with another frequency; that line is retained. The raw
+closure residual remains visible.
 
 The reported watts are normalized-window pressure work. Reactive walls may
 return stored energy during a finite interval; their signed work is not
@@ -3153,3 +3178,64 @@ the original caloric/time-average identity, source interference, coherence
 rotation, volume partition, work/storage admission and cancellation/reuse.
 The new integrated Rust regressions remain unrun because the execution
 environment is unavailable.
+
+
+### Matrix-free mixed reflection and pressure-release boundaries
+
+`helmholtz::bc::PreparedIterativeReflectionBoundary` applies the same bounded
+wall coordinates as the dense owner through the original prepared FMM layers.
+Its operator is A*diag(a)+i*k*B*diag(b), with a=(1+r)/2 and b=(1-r)/2.
+The existing B*q owner accepts q=i*k*w directly, avoiding conversion through
+physical velocity inside the mixed-coordinate matvec. All-rigid boundaries
+reuse the original prepared owner and arithmetic; zero coordinate arms skip
+their FMM work. No dense global matrix or artificial resistance is introduced.
+
+Near-field right-preconditioner blocks are constructed from this transformed
+operator, including the pure i*k*B pressure-release endpoint. The existing
+Centroid, TriangleNear and Triangle operators retain their original near/self
+closures and panel order. FMM leaf groups, block-size limits, near-entry caps,
+GMRES restart/iteration limits, cancellation and resource receipts are shared
+with the original iterative owner. Recomputed Krylov residuals measure the
+original boundary equation after the particular trace is restored; FMM and
+spatial errors remain separate. Nonconvergence reports physical pressure,
+never the internal mixed coordinate.
+
+`IterativeLocalBoundaryObservation` changes from finite admittance to bounded
+reflection at the same scaling threshold as the dense observer. Original
+material bands, source/receiver ordering, window semantics and shared source
+banks are preserved. Loading-band admission accepts a supported lossless wall
+resonance; finite-admittance molecular consumers retain their own restriction.
+Coherent wall-work reconstruction gives zero absorption at rigid and
+pressure-release endpoints. Focused regressions cover dense equivalence,
+independent original-equation residuals, all three panel rules, transformed
+preconditioning, mechanical-resonance continuity and actual refusal/cancellation.
+
+## Signed-lag finite-window pressure-channel correlations
+
+`PreparedHarmonicPressureCorrelations` observes selected ordered channels of an
+existing `PreparedHarmonicPressureArray`. Each authored request retains a finite
+signed lag in seconds:
+`R_ab(tau) = E[<y_a(t) y_b(t + tau)>_window]`.
+Positive lag advances the second signal, giving `exp(-i omega tau)` under the
+original `exp(-i omega t)` convention. Directional p/u pickup, physical source
+phases, channel weights and steering delays are already in the borrowed array.
+
+Preparation retains lagged channel phasors once. Repeated Uniform/Triangular
+window queries share each analytic product kernel across all requested pairs,
+including both off-diagonal frequency contractions, real-factor sum-frequency
+terms and proper-factor difference-frequency terms. They perform no propagation solve,
+lag trigonometry, time sampling or dense source-covariance construction. Work
+is bounded by requested pairs times the sum of squared line counts; caller
+bounds also account for lag preparation, retained payload, query accumulators
+and one output. Cancellation or refusal leaves the original array and accepted observer reusable.
+
+Results distinguish the full uncentered correlation, the window average of
+instantaneous ensemble covariance, and the covariance of the two averaged
+readouts. The latter two are contracted from fluctuation factors directly,
+without subtracting a large deterministic second moment. Cross correlations
+retain either sign. Deterministic temporal variation is not mislabeled as
+source noise. No stationarity, Gaussian statistics or electronic noise is
+inferred. For nonstationary fields, reversing a pair and negating its lag also
+requires shifting the observation window by that lag. The harmonic continuation,
+original receiver/source identities, clock and unresolved physical uncertainty
+remain explicit; this is not a finite pulse or sampling-bandwidth model.

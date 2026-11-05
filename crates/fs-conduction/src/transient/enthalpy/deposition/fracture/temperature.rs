@@ -102,7 +102,19 @@ impl<'t> FractureCooling<'t, '_> {
             .ok_or(Error::Invalid("unknown cohesive interface"))?;
         let a = self.thermal.temperature_k(contact.reference.a)?;
         let b = self.thermal.temperature_k(contact.reference.b)?;
-        let temperature = weight_a * a + (1.0 - weight_a) * b;
+        // Difference-first interpolation keeps uniform temperatures and exact
+        // receiving-side limits bit-identical, including source-domain edges.
+        // Anchor at the more heavily weighted endpoint to avoid subtracting
+        // nearly equal large terms when the two positive temperatures differ.
+        let temperature = if a == b || weight_a == 1.0 {
+            a
+        } else if weight_a == 0.0 {
+            b
+        } else if weight_a <= 0.5 {
+            b + weight_a * (a - b)
+        } else {
+            a + (1.0 - weight_a) * (b - a)
+        };
         if !positive(temperature) {
             return Err(Error::Invalid("unrepresentable interface temperature"));
         }

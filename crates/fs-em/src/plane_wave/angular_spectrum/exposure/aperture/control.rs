@@ -159,13 +159,14 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumApertureEnergyControl<'e, 'b, 's, 'm
         for bank in core::iter::once(fixed).chain(controls.iter()) {
             poll(cancelled)?;
             if bank.anchor.grid() != anchor.grid()
+                || bank.anchor.carrier_rad_m != anchor.carrier_rad_m
                 || !bank
                     .anchor
                     .source()
                     .same_sources_and_geometry(anchor.source())
             {
                 return Err(bad(
-                    "optical controls require the same original materials, layers and grid",
+                    "optical controls require the same original materials, layers, grid and carrier",
                 ));
             }
             count = add(count, bank.frequency_count())?;
@@ -244,11 +245,11 @@ impl<'e, 'b, 's, 'm> PreparedAngularSpectrumApertureEnergyControl<'e, 'b, 's, 'm
                     .binary_search_by(|v| v.total_cmp(&omega))
                     .map_err(|_| bad("original optical control frequency is unavailable"))?;
                 let mut fields = bank.frequency_modal_parts(group, side, distance, cancelled)?;
-                center_fields(
+                center_fields_dd(
                     &mut fields,
                     omega,
-                    |i| anchor.modes[i].kx,
-                    |i| anchor.modes[i].ky,
+                    |i| transverse_wavenumber_dd(anchor, 0, i % grid.width),
+                    |i| transverse_wavenumber_dd(anchor, 1, i / grid.width),
                     aperture,
                     window,
                     cancelled,

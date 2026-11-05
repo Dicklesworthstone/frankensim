@@ -385,7 +385,7 @@ impl Live {
     pub fn instrument(&self) -> &Instrument { &self.ins }
 
     /// Output-filter latency, separate from acoustic travel and device/FIFO latency.
-    pub fn filter_latency_frames(&self) -> usize { if self.oversample == 1 { 0 } else { 16 } }
+    pub fn filter_latency_frames(&self) -> usize { if self.oversample == 1 { 0 } else { DECIMATION_RADIUS_FRAMES } }
 
     /// Fill `out` with the next samples at 48 kHz: microphone pressure [Pa] times `gain`.
     /// While asleep nothing is stepped and the block is exact silence.
@@ -416,7 +416,8 @@ impl Live {
                     if self.oversample == 1 { sample = buf[0]; }
                     else {
                         self.decimator.push(buf[0]);
-                        // Offline decimation samples n*factor; the causal image delays it 16 frames.
+                        // Offline decimation samples n*factor; the causal image retains the
+                        // explicit DECIMATION_RADIUS_FRAMES output delay.
                         if sub == 0 { sample = self.decimator.value(); }
                     }
                 }

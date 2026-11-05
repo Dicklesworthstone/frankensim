@@ -40,6 +40,10 @@ fn cell(coordinates: [usize; 3], density: f64, velocity: [f64; 3]) -> FreeSurfac
 
 fn unchanged(before: &FreeSurface3, after: &FreeSurface3) {
     assert_eq!(before.body_acceleration, after.body_acceleration);
+    same_physical_state(before, after);
+}
+
+fn same_physical_state(before: &FreeSurface3, after: &FreeSurface3) {
     assert_eq!(before.local_force, after.local_force);
     assert_eq!(before.grid.active_keys(), after.grid.active_keys());
     for (&key, tile) in &before.tiles {
@@ -475,4 +479,305 @@ fn g1_body_history_survives_strain_inflow_and_cross_tile_piston_remap() {
     {
         assert!((actual - expected).abs() < 2e-14);
     }
+}
+
+fn affine_field() -> BodyAccelerationField3 {
+    BodyAccelerationField3::Affine {
+        origin: [0.0; 3],
+        acceleration: [0.001, -0.002, 0.003],
+        gradient: [[0.0005, 0.0, 0.0], [0.0, -0.0002, 0.0], [0.0, 0.0, 0.0001]],
+    }
+}
+
+#[test]
+fn g1_affine_acceleration_integrates_local_momentum_with_evolving_density() {
+    let gate = CancelGate::new_clock_free();
+    let old = affine_field();
+    let next = BodyAccelerationField3::Affine {
+        origin: [1.0, 2.0, 3.0],
+        acceleration: [-0.002, 0.001, -0.001],
+        gradient: [[0.0, 0.0003, 0.0], [-0.0004, 0.0, 0.0], [0.0, 0.0, 0.0002]],
+    };
+    for density in [0.6, 1.4] {
+        let initial: Vec<_> = (0..8)
+            .flat_map(|z| {
+                (0..8).flat_map(move |y| {
+                    (0..8).map(move |x| FreeSurfaceInitialCell3 {
+                        coordinates: [x, y, z],
+                        fill_fraction: 1.0,
+                        density,
+                        velocity: [0.0; 3],
+                    })
+                })
+            })
+            .collect();
+        let mut flow = surface(&initial, [0.0; 3]);
+        flow.rebind_body_acceleration_field(old, &gate).unwrap();
+        let before = flow.clone();
+        flow.advance_body_acceleration_field(next, &gate).unwrap();
+        for xyz in [[3, 3, 3], [4, 4, 4]] {
+            let [x, y, z] = xyz.map(|coordinate| coordinate as f64 + 0.5);
+            let a0 = [0.001 + 0.0005 * x, -0.002 - 0.0002 * y, 0.003 + 0.0001 * z];
+            let a1 = [
+                -0.002 + 0.0003 * (y - 2.0),
+                0.001 - 0.0004 * (x - 1.0),
+                -0.001 + 0.0002 * (z - 3.0),
+            ];
+            let incoming = before.sample_at(xyz[0], xyz[1], xyz[2]).unwrap();
+            let accepted = flow.sample_at(xyz[0], xyz[1], xyz[2]).unwrap();
+            let (momentum, _) = moments(&flow, xyz);
+            // At physical rest, streaming the linear Guo source has zeroth
+            // moment -rho*div(a0)/2 and first moment rho*a0(x)/2. The latter
+            // then receives the actual endpoint half source, rho_next*a1/2.
+            let expected_density = incoming.density * (1.0 - 0.5 * (0.0005 - 0.0002 + 0.0001));
+            assert!((accepted.density - expected_density).abs() < 3e-13 * density);
+            assert!((accepted.density - incoming.density).abs() > 1e-5 * density);
+            assert_eq!(
+                flow.force_density_at(xyz[0], xyz[1], xyz[2]).unwrap(),
+                a1.map(|a| accepted.density * a)
+            );
+            for axis in 0..3 {
+                let impulse = 0.5 * (incoming.density * a0[axis] + accepted.density * a1[axis]);
+                assert!((momentum[axis] - impulse).abs() < 3e-13 * density);
+            }
+        }
+        assert_eq!(flow.body_acceleration_field(), Some(next));
+        assert_eq!(flow.body_acceleration(), None);
+    }
+}
+
+#[test]
+fn g3_zero_gradient_field_retains_uniform_population_arithmetic() {
+    let gate = CancelGate::new_clock_free();
+    let acceleration = [0.001, -0.002, 0.0005];
+    let field = |acceleration| BodyAccelerationField3::Affine {
+        origin: [11.0, -3.0, 2.0],
+        acceleration,
+        gradient: [[0.0; 3]; 3],
+    };
+    let mut uniform = surface(&[cell([3, 3, 3], 0.9, [0.01, -0.02, 0.005])], [0.0; 3]);
+    let mut affine = uniform.clone();
+    uniform
+        .rebind_body_acceleration(acceleration, &gate)
+        .unwrap();
+    affine
+        .rebind_body_acceleration_field(field(acceleration), &gate)
+        .unwrap();
+    same_physical_state(&uniform, &affine);
+    uniform.step_with_gate(&gate).unwrap();
+    affine.step_with_gate(&gate).unwrap();
+    same_physical_state(&uniform, &affine);
+    for next in [[-0.002, 0.001, 0.003], [0.0; 3]] {
+        uniform
+            .advance_body_acceleration_with_gas_link_pressure(next, &gate, 0.1, |_| Ok(0.01))
+            .unwrap();
+        affine
+            .advance_body_acceleration_field_with_gas_link_pressure(field(next), &gate, 0.1, |_| {
+                Ok(0.01)
+            })
+            .unwrap();
+        same_physical_state(&uniform, &affine);
+    }
+}
+
+#[test]
+fn g1_affine_gas_pressure_uses_each_positions_next_density_force() {
+    let gate = CancelGate::new_clock_free();
+    let coordinates = [[2, 2, 2], [5, 5, 5]];
+    let initial = [
+        cell(coordinates[0], 0.75, [0.02, -0.01, 0.015]),
+        cell(coordinates[1], 1.1, [-0.01, 0.015, 0.02]),
+    ];
+    let mut flow = surface(&initial, [0.0; 3]);
+    flow.rebind_body_acceleration_field(affine_field(), &gate)
+        .unwrap();
+    let incoming: Vec<_> = coordinates
+        .into_iter()
+        .map(|xyz| {
+            let (slot, lane) = flow
+                .grid
+                .resolve_source(xyz[0] as i64, xyz[1] as i64, xyz[2] as i64)
+                .unwrap();
+            let force = flow.force_density_at(xyz[0], xyz[1], xyz[2]).unwrap();
+            let post = crate::d3q19::collision_kernel3()(
+                flow.grid.populations(slot, lane),
+                flow.collision_model(),
+                force,
+            )
+            .unwrap();
+            (xyz, flow.sample_at(xyz[0], xyz[1], xyz[2]).unwrap(), post)
+        })
+        .collect();
+    let next = BodyAccelerationField3::Affine {
+        origin: [1.0; 3],
+        acceleration: [-0.002, 0.001, 0.003],
+        gradient: [[0.0002, 0.0, 0.0], [0.0, -0.0003, 0.0], [0.0, 0.0, 0.0004]],
+    };
+    let boundary_density = |q: usize| 1.05 + 0.01 * f64::from(E3[q].0 - E3[q].1);
+    flow.advance_body_acceleration_field_with_gas_link_pressure(next, &gate, 0.2, |link| {
+        Ok((boundary_density(link.incoming_direction) - 1.0) * CS2_3)
+    })
+    .unwrap();
+    for (xyz, before, post) in incoming {
+        let after = flow.sample_at(xyz[0], xyz[1], xyz[2]).unwrap();
+        let r = xyz.map(|coordinate| coordinate as f64 - 0.5);
+        let acceleration = [
+            -0.002 + 0.0002 * r[0],
+            0.001 - 0.0003 * r[1],
+            0.003 + 0.0004 * r[2],
+        ];
+        let force = flow.force_density_at(xyz[0], xyz[1], xyz[2]).unwrap();
+        assert_eq!(force, acceleration.map(|a| after.density * a));
+        let (slot, lane) = flow
+            .grid
+            .resolve_source(xyz[0] as i64, xyz[1] as i64, xyz[2] as i64)
+            .unwrap();
+        let f = flow.grid.populations(slot, lane);
+        let uu: f64 = before.velocity.iter().map(|u| u * u).sum();
+        let uf: f64 = before
+            .velocity
+            .iter()
+            .zip(force)
+            .map(|(u, force)| u * force)
+            .sum();
+        for q in 1..Q3 {
+            let e = [E3[q].0, E3[q].1, E3[q].2].map(f64::from);
+            let eu: f64 = e.iter().zip(before.velocity).map(|(e, u)| e * u).sum();
+            let ef: f64 = e.iter().zip(force).map(|(e, f)| e * f).sum();
+            let physical_pair = f[q] + post[OPP3[q]] + W3[q] * (-3.0 * uf + 9.0 * eu * ef);
+            let imposed_pair = 2.0 * W3[q] * boundary_density(q) * (1.0 - 1.5 * uu + 4.5 * eu * eu);
+            assert!((physical_pair - imposed_pair).abs() < 3e-14);
+        }
+    }
+}
+
+#[test]
+fn g1_affine_field_initializes_new_interfaces_at_their_own_position() {
+    let gate = CancelGate::new_clock_free();
+    let velocity = [0.02, -0.01, 0.03];
+    let mut cells = Vec::new();
+    for z in 2..5 {
+        for y in 2..5 {
+            for x in 2..5 {
+                cells.push(FreeSurfaceInitialCell3 {
+                    coordinates: [x, y, z],
+                    fill_fraction: 1.0,
+                    density: 0.7 + 0.1 * ((x + 2 * y + z) % 7) as f64,
+                    velocity,
+                });
+            }
+        }
+    }
+    let mut flow = surface(&cells, [0.0; 3]);
+    flow.rebind_body_acceleration_field(affine_field(), &gate)
+        .unwrap();
+    let (slot, lane) = flow.grid.resolve_source(4, 3, 3).unwrap();
+    let key = flow.grid.active_keys()[slot];
+    let density = flow.grid.populations(slot, lane).iter().sum::<f64>();
+    flow.tiles.get_mut(&key).unwrap().mass[lane] = 1.1 * density;
+    let mass = flow.ledger_mass();
+    flow.apply_conversions(None).unwrap();
+    let sample = flow.sample_at(5, 3, 3).unwrap();
+    let acceleration = [
+        0.001 + 0.0005 * 5.5,
+        -0.002 - 0.0002 * 3.5,
+        0.003 + 0.0001 * 3.5,
+    ];
+    assert!(flow.conversions.gas_to_interface > 0);
+    assert_eq!(sample.cell, Cell3::Interface);
+    assert_eq!(
+        flow.force_density_at(5, 3, 3).unwrap(),
+        acceleration.map(|a| sample.density * a)
+    );
+    let (_, stress) = moments(&flow, [5, 3, 3]);
+    for a in 0..3 {
+        assert!((sample.velocity[a] - velocity[a]).abs() < 3e-14);
+        for b in 0..3 {
+            let expected =
+                sample.density * (velocity[a] * velocity[b] + if a == b { CS2_3 } else { 0.0 });
+            assert!((stress[a][b] - expected).abs() < 3e-14 * sample.density);
+        }
+    }
+    assert!((flow.ledger_mass() - mass).abs() < 3e-13 * mass);
+}
+
+#[test]
+fn g1_affine_field_stays_in_world_coordinates_across_piston_remap() {
+    let gate = CancelGate::new_clock_free();
+    let velocity = [0.02, -0.01, 0.015];
+    let mut flow = surface(&[cell([3, 3, 3], 0.9, velocity)], [0.0; 3]);
+    let field = affine_field();
+    flow.rebind_body_acceleration_field(field, &gate).unwrap();
+    let before = flow.sample_at(3, 3, 3).unwrap();
+    let (p0, s0) = moments(&flow, [3, 3, 3]);
+    let mass = flow.ledger_mass();
+    let report = flow
+        .remap_planar_piston_one_cell(PlanarWall3::XMin, true, 1e-12, &gate)
+        .unwrap();
+    let after = flow.sample_at(4, 3, 3).unwrap();
+    let (p1, s1) = moments(&flow, [4, 3, 3]);
+    let acceleration = [
+        0.001 + 0.0005 * 4.5,
+        -0.002 - 0.0002 * 3.5,
+        0.003 + 0.0001 * 3.5,
+    ];
+    assert_eq!(flow.body_acceleration_field(), Some(field));
+    assert_eq!(
+        flow.force_density_at(4, 3, 3).unwrap(),
+        acceleration.map(|a| after.density * a)
+    );
+    assert_eq!(before.density, after.density);
+    assert_eq!(flow.ledger_mass(), mass);
+    assert_eq!(report.fluid_impulse, [0.0; 3]);
+    assert_eq!(report.fluid_work, 0.0);
+    assert!(flow.sample_at(3, 3, 3).is_none());
+    for a in 0..3 {
+        assert!((after.velocity[a] - before.velocity[a]).abs() < 3e-14);
+        assert!((p1[a] - p0[a]).abs() < 3e-14);
+        for b in 0..3 {
+            assert!((s1[a][b] - s0[a][b]).abs() < 3e-14);
+        }
+    }
+}
+
+#[test]
+fn g0_affine_force_ownership_and_late_refusal_preserve_the_accepted_field() {
+    let gate = CancelGate::new_clock_free();
+    let mut flow = surface(&[cell([3, 3, 3], 0.9, [0.01, -0.02, 0.005])], [0.0; 3]);
+    flow.rebind_body_acceleration_field(affine_field(), &gate)
+        .unwrap();
+    assert!(flow.body_acceleration().is_none());
+    assert!(flow.body_acceleration_field().is_some());
+    let before = flow.clone();
+    assert!(
+        RigidFrame3::default()
+            .prepare_free_surface_step(&mut flow, [0.0; 3], &gate)
+            .is_err()
+    );
+    let independent = flow.local_force.clone().unwrap();
+    assert!(flow.rebind_force_field(independent, &gate).is_err());
+    unchanged(&before, &flow);
+    let invalid = BodyAccelerationField3::Affine {
+        origin: [0.0; 3],
+        acceleration: [0.0; 3],
+        gradient: [[f64::NAN; 3]; 3],
+    };
+    assert!(
+        flow.advance_body_acceleration_field(invalid, &gate)
+            .is_err()
+    );
+    unchanged(&before, &flow);
+    let next = BodyAccelerationField3::Affine {
+        origin: [1.0; 3],
+        acceleration: [0.0; 3],
+        gradient: [[0.0001; 3]; 3],
+    };
+    assert!(matches!(
+        flow.advance_body_acceleration_field_with_gas_link_pressure(next, &gate, 0.1, |_| {
+            gate.request();
+            Ok(0.01)
+        },),
+        Err(FreeSurfaceError3::Cancelled)
+    ));
+    unchanged(&before, &flow);
 }

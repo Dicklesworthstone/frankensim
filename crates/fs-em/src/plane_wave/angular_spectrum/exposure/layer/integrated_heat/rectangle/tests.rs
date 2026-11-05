@@ -76,7 +76,10 @@ fn field(bank: usize, frequency: usize, mode: usize, depth: f64) -> [C64; 3] {
     })
 }
 
-fn prepared(aperture: AngularSpectrumAperture) -> (PreparedHarmonicProductSpectrum, usize, usize) {
+fn prepared(
+    aperture: AngularSpectrumAperture,
+    carrier: [f64; 2],
+) -> (PreparedHarmonicProductSpectrum, usize, usize) {
     let omega = [2.0, 2.3];
     let kx = [0.0, -0.4];
     let ky = [0.0, -0.3];
@@ -84,7 +87,8 @@ fn prepared(aperture: AngularSpectrumAperture) -> (PreparedHarmonicProductSpectr
     let quadrature = volume(aperture);
     let admitted = admit_volume(g, 0.6, quadrature, &mut || false).unwrap();
     let rectangle =
-        PreparedRectangle::prepare(g, aperture, |i| kx[i], |i| ky[i], &mut || false).unwrap();
+        PreparedRectangle::prepare(g, aperture, carrier, |i| kx[i], |i| ky[i], &mut || false)
+            .unwrap();
     let poles = omega.map(|w| [PoleTransfer::new(pole(), w).unwrap()]);
     let mut terms = Vec::new();
     let mut calls = 0;
@@ -113,7 +117,7 @@ fn prepared(aperture: AngularSpectrumAperture) -> (PreparedHarmonicProductSpectr
 // Independent spatial Simpson quadrature of the actual positive-time E and
 // Debye current. The proper factor is averaged over {1,-1,i,-i}; its one
 // coefficient remains shared across every frequency and spatial mode.
-fn reference(aperture: AngularSpectrumAperture, time: f64) -> f64 {
+fn reference(aperture: AngularSpectrumAperture, carrier: [f64; 2], time: f64) -> f64 {
     let steps = 16;
     let omega = [2.0, 2.3];
     let kx = [0.0, -0.4];
@@ -144,8 +148,10 @@ fn reference(aperture: AngularSpectrumAperture, time: f64) -> f64 {
                         let mut current = [0.0; 3];
                         for f in 0..2 {
                             for m in 0..4 {
-                                let (s, c) =
-                                    (omega[f] * time - kx[m % 2] * x - ky[m / 2] * y).sin_cos();
+                                let (s, c) = (omega[f] * time
+                                    - (carrier[0] + kx[m % 2]) * x
+                                    - (carrier[1] + ky[m / 2]) * y)
+                                    .sin_cos();
                                 for axis in 0..3 {
                                     let a = field(bank, f, m, depth.depth_m)[axis] * *z;
                                     electric[axis] += (a * C64::new(c, s)).re;
@@ -170,11 +176,15 @@ fn reference(aperture: AngularSpectrumAperture, time: f64) -> f64 {
 #[test]
 fn rectangle_reservoir_heat_matches_independent_real_field_current_quadrature() {
     let area = AngularSpectrumAperture::try_new([0.21, -0.37], [0.7, 0.9]).unwrap();
-    let (heat, calls, tones) = prepared(area);
+    let (heat, calls, tones) = prepared(area, [0.0; 2]);
     assert_eq!(calls, 3 * 2 * DEPTH.len());
     assert_eq!(tones, 15);
     for t in [-0.2, 0.17, 1.3] {
-        close(heat.evaluate(t).unwrap(), reference(area, t), 2e-8);
+        close(
+            heat.evaluate(t).unwrap(),
+            reference(area, [0.0; 2], t),
+            2e-8,
+        );
     }
     for profile in [
         HarmonicWindowProfile::Uniform,
@@ -197,7 +207,7 @@ fn rectangle_reservoir_heat_matches_independent_real_field_current_quadrature() 
             } else {
                 1.0
             };
-            expected += w * reference(area, window.start_s() + u * window.duration_s());
+            expected += w * reference(area, [0.0; 2], window.start_s() + u * window.duration_s());
         }
         close(
             heat.mean(window).unwrap(),
@@ -208,13 +218,71 @@ fn rectangle_reservoir_heat_matches_independent_real_field_current_quadrature() 
 }
 
 #[test]
+fn carrier_rectangle_heat_retains_reservoir_beats_and_both_spatial_phase_sums() {
+    let area = AngularSpectrumAperture::try_new([0.21, -0.37], [0.7, 0.9]).unwrap();
+    let carrier = [0.37, -0.23];
+    let (heat, calls, tones) = prepared(area, carrier);
+    assert_eq!(calls, 3 * 2 * DEPTH.len());
+    assert_eq!(tones, 15);
+    for t in [-0.2, 0.17, 1.3] {
+        close(heat.evaluate(t).unwrap(), reference(area, carrier, t), 1e-7);
+    }
+}
+
+#[test]
+fn carrier_rectangle_heat_keeps_distinct_envelope_bins_below_one_carrier_ulp() {
+    let g = AngularSpectrumGrid {
+        width: 2,
+        height: 1,
+        spacing_m: [2.0_f64.powi(60), 2.0_f64.powi(-60)],
+    };
+    let area =
+        AngularSpectrumAperture::try_new([0.0; 2], [2.0 * g.spacing_m[0], g.spacing_m[1]]).unwrap();
+    let offset = -core::f64::consts::PI / g.spacing_m[0];
+    assert_eq!(0.4 + offset, 0.4);
+    let rectangle = PreparedRectangle::prepare(
+        g,
+        area,
+        [0.4, 0.0],
+        |i| if i == 0 { 0.0 } else { offset },
+        |_| 0.0,
+        &mut || false,
+    )
+    .unwrap();
+    let q = volume(area);
+    let admitted = admit_volume(g, 0.6, q, &mut || false).unwrap();
+    for proper in [false, true] {
+        let mut terms = Vec::new();
+        rectangle
+            .contract_bank(
+                &[2.0],
+                proper,
+                q,
+                admitted,
+                |_, _, c| reservoir_pair(1.0, &[], &[], 0, 1, proper, c),
+                |_, _, _| Ok(vec![dd([C64::ZERO, C64::ONE, C64::ZERO]); 2]),
+                &mut terms,
+                &mut || false,
+            )
+            .unwrap();
+        let heat = spectrum(terms);
+        // The two unit envelope modes are orthogonal over area 2. Their real
+        // sum-frequency integral is bounded by O(1/(carrier*width)) < 1e-16.
+        // Heating is therefore depth*area*(1²+1²)/2 = 1.2 W, not 2.4 W.
+        for time in [0.0, 0.17, 1.3] {
+            close(heat.evaluate(time).unwrap(), 1.2, 2e-14);
+        }
+    }
+}
+
+#[test]
 fn continuous_rectangle_partitions_add_without_relocating_fields() {
     let whole = AngularSpectrumAperture::try_new([-0.4, 0.2], [1.3, 0.7]).unwrap();
     let left = AngularSpectrumAperture::try_new([-0.4, 0.2], [0.3, 0.7]).unwrap();
     let right = AngularSpectrumAperture::try_new([-0.1, 0.2], [1.0, 0.7]).unwrap();
-    let (a, _, _) = prepared(whole);
-    let (b, _, _) = prepared(left);
-    let (c, _, _) = prepared(right);
+    let (a, _, _) = prepared(whole, [0.0; 2]);
+    let (b, _, _) = prepared(left, [0.0; 2]);
+    let (c, _, _) = prepared(right, [0.0; 2]);
     for t in [-0.7, 0.2, 1.1] {
         close(
             a.evaluate(t).unwrap(),
@@ -238,11 +306,15 @@ fn whole_rectangle_matches_continuous_periodic_cell_without_nyquist_aliasing() {
         transverse: AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell,
         ..rect_volume
     };
-    let rectangle =
-        PreparedRectangle::prepare(g, area, |i| [0.0, 1.0, -2.0, -1.0][i], |_| 0.0, &mut || {
-            false
-        })
-        .unwrap();
+    let rectangle = PreparedRectangle::prepare(
+        g,
+        area,
+        [0.0; 2],
+        |i| [0.0, 1.0, -2.0, -1.0][i],
+        |_| 0.0,
+        &mut || false,
+    )
+    .unwrap();
     let field = |m| {
         if m == 2 {
             [C64::ZERO, C64::new(0.0, 1.0), C64::ZERO]
@@ -296,11 +368,15 @@ fn translated_narrow_dark_patch_retains_positive_variation_and_grouped_residual(
         let area = AngularSpectrumAperture::try_new([1.0, 1.0], [width, width]).unwrap();
         let q = volume(area);
         let volume = admit_volume(g, 0.6, q, &mut || false).unwrap();
-        let rectangle =
-            PreparedRectangle::prepare(g, area, |i| [0.0, 2.0][i], |i| [0.0, -2.0][i], &mut || {
-                false
-            })
-            .unwrap();
+        let rectangle = PreparedRectangle::prepare(
+            g,
+            area,
+            [0.0; 2],
+            |i| [0.0, 2.0][i],
+            |i| [0.0, -2.0][i],
+            &mut || false,
+        )
+        .unwrap();
         for proper in [false, true] {
             let mut terms = Vec::new();
             rectangle
@@ -344,7 +420,8 @@ fn rectangle_preserves_scaled_heat_and_refuses_cancelled_or_mismatched_fields() 
     let area = AngularSpectrumAperture::try_new([0.0; 2], [1e-100, 1.0]).unwrap();
     let q = volume(area);
     let admitted = admit_volume(g, 0.6, q, &mut || false).unwrap();
-    let rectangle = PreparedRectangle::prepare(g, area, |_| 0.0, |_| 0.0, &mut || false).unwrap();
+    let rectangle =
+        PreparedRectangle::prepare(g, area, [0.0; 2], |_| 0.0, |_| 0.0, &mut || false).unwrap();
     let mut terms = Vec::new();
     rectangle
         .contract_bank(
@@ -360,7 +437,7 @@ fn rectangle_preserves_scaled_heat_and_refuses_cancelled_or_mismatched_fields() 
         .unwrap();
     close(spectrum(terms).evaluate(0.0).unwrap() / 3e99, 1.0, 3e-14);
     assert!(matches!(
-        PreparedRectangle::prepare(g, area, |_| 0.0, |_| 0.0, &mut || true),
+        PreparedRectangle::prepare(g, area, [0.0; 2], |_| 0.0, |_| 0.0, &mut || true),
         Err(AngularSpectrumError::Cancelled)
     ));
     assert!(PreparedRectangle::workspace_bytes(grid(usize::MAX, 2)).is_err());

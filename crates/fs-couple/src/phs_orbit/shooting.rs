@@ -10,10 +10,12 @@ use fs_orbit::{
 };
 use fs_phs::PortHamiltonian;
 
-/// Shoot the complete forced pHS ODE using its DECLARED exact quadratic storage
-/// tangent, including explicit material-memory coordinates. A quadratic part of
-/// a nonlinear Hamiltonian is insufficient and returns TangentUnavailable.
-/// For nonlinear storage use [`solve_forced_shooting_variational_analytic`].
+/// Shoot the complete forced pHS ODE using its declared original storage
+/// tangent, including explicit material-memory coordinates. Complete exact
+/// quadratic metadata or [`fs_phs::Storage::continuous_tangent`] is discovered
+/// automatically. A quadratic part of a nonlinear Hamiltonian is insufficient
+/// and returns TangentUnavailable. Other laws can supply an action through
+/// [`solve_forced_shooting_variational_analytic`].
 ///
 /// The physical period is exactly 2*pi/input.omega_rad_s(), with the authored
 /// source phases unchanged. `seed` and state scales retain original displacement,
@@ -56,7 +58,7 @@ pub fn solve_forced_shooting_variational(
 /// to finite differences. At most n actions per native Jacobian evaluation are
 /// requested; native stage/map caps bound those requests. The action's internal
 /// work and memory are caller-owned. Source availability, scaling, bandwidth and
-/// numerical limits have the same meaning as the automatic quadratic entry.
+/// numerical limits have the same meaning as the automatic storage-owned entry.
 pub fn solve_forced_shooting_variational_analytic(
     system: &PortHamiltonian,
     input: &PeriodicPortInput,

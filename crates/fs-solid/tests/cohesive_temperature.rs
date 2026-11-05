@@ -238,6 +238,37 @@ fn heating_native_loaded_patches_releases_damage_and_continues_without_rebonding
 }
 
 #[test]
+fn detached_source_bound_solid_can_change_temperature_beyond_the_adhesive_range() {
+    let card = card("manufactured detached thermal continuation");
+    let cold = source(&card);
+    let hot = cold.at_temperature(&card, "T", 400.0).unwrap();
+    let elastic = Diagonal { n: 1, value: 20.0 };
+    let original = CohesiveSystem::new(&elastic, vec![patch(&cold, 7, 2.0, 0)], budget()).unwrap();
+    let heated = original.with_temperature_sources_controlled(&[&hot], "T", &mut || false).unwrap();
+    let failed = original.bonded_state()
+        .solve_controlled(&[44.0], &[[0.0; 3]], config(), &mut || false).unwrap().state;
+    assert!(failed.points()[0].failed());
+    let mut detached_config = config();
+    detached_config.maximum_displacement_m = 5.0;
+    let far = failed.solve_controlled(&[80.0], &[[0.0; 3]], detached_config, &mut || false).unwrap();
+    close(far.state.displacements_m()[0], 4.0, 1e-12);
+    assert!(far.state.points()[0].jump_m()[0] > cold.law().maximum_separation_m());
+    assert_eq!(far.cohesive_energy_j.dissipated, 0.0);
+    let transfer = far.state.transfer_temperature_controlled(&heated, "T", thermal_config(), &mut || false).unwrap();
+    assert_eq!(transfer.state.displacements_m(), far.state.displacements_m());
+    assert_eq!(transfer.state.points()[0].damage(), 1.0);
+    assert_eq!(transfer.state.points()[0].dissipated_j_m2(), failed.points()[0].dissipated_j_m2());
+    assert_eq!(transfer.energy.parameter_work_j, 0.0);
+    assert_eq!(transfer.energy.damage_dissipated_j, 0.0);
+    assert_eq!(transfer.energy.stored_change_j, 0.0);
+    assert_eq!(transfer.state.system().patches()[0].source().unwrap().resolved(), hot.resolved());
+    let continued = transfer.state.solve_controlled(&[90.0], &[[0.0; 3]], detached_config, &mut || false).unwrap();
+    close(continued.state.displacements_m()[0], 4.5, 1e-12);
+    assert_eq!(continued.cohesive_energy_j.dissipated, 0.0);
+    assert_eq!(continued.state.points()[0].traction_pa(), [0.0; 3]);
+}
+
+#[test]
 fn thermal_transfer_keeps_actual_mass_velocity_clock_and_step_budget() {
     let card = card("manufactured inertial temperature fixture");
     let cold = source(&card);

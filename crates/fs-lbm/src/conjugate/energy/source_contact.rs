@@ -1,4 +1,4 @@
-//! Pinned contact sources on the actual two native half-cell surfaces.
+//! Pinned contact sources on actual native bulk or compact-package surfaces.
 
 use std::sync::Arc;
 
@@ -18,6 +18,8 @@ use super::super::conductance::{ConductivityCurve, interface_response};
 /// One immutable interface source assigned to an ordered Cartesian cell face.
 /// The caller assigns the card's A/B surface roles to `cells` in that order.
 /// Native material indices do not infer a surface finish or source identity.
+/// A compact alias identifies its case/board surface, whose temperature is
+/// recovered after the package resistor rather than equated to the junction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceFaceContact {
     cells: [usize; 2],
@@ -160,11 +162,22 @@ pub(super) fn solve(
             cells: law.cells, resistance_m2_k_w: resistance(&law.reference)?,
         });
     }
+    // Retain only per-contact geometry. The temporary cell-owner map is
+    // released before any thermal solve, and no aliases acquire bulk storage.
+    let compact_faces = {
+        let owner = super::compact_owners(domain, &setup.compact_components, gate)?;
+        let mut faces = Vec::with_capacity(setup.source_face_contacts.len());
+        for (index, law) in setup.source_face_contacts.iter().enumerate() {
+            if index.is_multiple_of(256) { super::super::poll(gate)?; }
+            faces.push(super::face_contact::compact_face(domain, setup, &owner, law.cells)?);
+        }
+        faces
+    };
     let mut maximum_residual = f64::INFINITY;
     for iteration in 1..=controls.max_iterations {
         super::super::poll(gate)?;
-        // Native face admission owns adjacency, duplicate contacts, compact
-        // exclusion and zero through-flow, including all newly appended faces.
+        // Native face admission owns adjacency, duplicate contacts, physical
+        // compact-surface coverage and zero through-flow for appended faces.
         let mut next = fixed_solve(&fixed)?;
         let mut states = Vec::with_capacity(setup.source_face_contacts.len());
         maximum_residual = 0.0;
@@ -181,17 +194,33 @@ pub(super) fn solve(
                             material.axis_conductivity()[axis], &material.conductivity_table);
                     }
                 }
-                ConductivityCurve::constant(next.conductivity[cell][axis])
+                ConductivityCurve::constant(next.wall_conductivity()[cell][axis])
             };
             let applied = fixed.face_contacts[start + index].resistance_m2_k_w;
-            let response = interface_response(curve(a), next.temperature[a], 0.5 * domain.widths(a)[axis],
-                curve(b), next.temperature[b], 0.5 * domain.widths(b)[axis], applied)
-                .ok_or_else(|| invalid("source-contact half-cell response is unrepresentable"))?;
-            let surfaces = response.surface_temperature_k;
+            let (surfaces, flux, heat) = if let Some(package) = compact_faces[index] {
+                let junction = next.temperature[package.alias];
+                let g = super::compact_link_conductance(domain, solids, next.wall_conductivity(),
+                    native_tables.then_some(next.temperature.as_slice()), package.outside,
+                    package.alias, package.axis, package.package_resistance_m2_k_w + applied)
+                    .ok_or_else(|| invalid("source-contact compact link is unrepresentable"))?;
+                let heat = g * (junction - next.temperature[package.outside]);
+                let flux = heat / domain.face_area(package.outside, package.axis);
+                let surface = (-flux).mul_add(package.package_resistance_m2_k_w, junction);
+                let outside_surface = (-flux).mul_add(applied, surface);
+                if package.package_first {
+                    ([surface, outside_surface], flux, heat)
+                } else {
+                    ([outside_surface, surface], -flux, -heat)
+                }
+            } else {
+                let response = interface_response(curve(a), next.temperature[a], 0.5 * domain.widths(a)[axis],
+                    curve(b), next.temperature[b], 0.5 * domain.widths(b)[axis], applied)
+                    .ok_or_else(|| invalid("source-contact half-cell response is unrepresentable"))?;
+                let flux = response.conductance_w_m2_k * (next.temperature[a] - next.temperature[b]);
+                (response.surface_temperature_k, flux, domain.face_area(a, axis) * flux)
+            };
             let source = law.at(surfaces)?;
             let actual = resistance(&source)?;
-            let flux = response.conductance_w_m2_k * (next.temperature[a] - next.temperature[b]);
-            let heat = domain.face_area(a, axis) * flux;
             let residual = (surfaces[0] - surfaces[1]) - actual * flux;
             let relative = (actual - applied).abs() / actual.max(applied);
             let roundoff = 64.0 * f64::EPSILON * surfaces[0].abs()

@@ -54,6 +54,9 @@ pub mod articulated;
 pub mod adhesive;
 /// Native deformable cohesive reclosure, physical interface loss and finite heat.
 pub mod cohesive;
+/// Native SDF solid contact, source-temperature feedback and finite-cell heat.
+#[cfg(feature = "experimental-solid-contact-heat")]
+pub mod solid;
 /// Native rigid adhesive joints and their original finite thermal receivers.
 pub mod rigid_cohesive;
 /// Source-backed Hertz sliding/spin recoil and finite-cell temperature feedback.

@@ -9,8 +9,8 @@ use super::{
     MaterialBoundaryError3, MaterialCurvedWallStep3, MaterialError, MaterialLbmError,
     MaterialScaling, poll,
 };
-use crate::d3q19::{CollisionModel3, force_corrected_shear_rate3};
-use crate::material::transport::rheology::{LocalRheologyError, solve_local};
+use crate::d3q19::{CollisionModel3, rheology_stress_components3};
+use crate::material::transport::rheology::{LocalRheologyError, solve_local_with_fixed_strain};
 use fs_exec::CancelGate;
 
 pub use crate::material::transport::rheology::RheologySolve;
@@ -49,8 +49,10 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     ///
     /// Incoming populations and the ACTUAL held force supply A = gamma*tau.
     /// The shared bounded local solve closes tau = 1/2 + 3 nu(gamma) dt/dx^2
-    /// together with gamma = A/(tau*dt). The constructor's shear relaxation is
-    /// only an initial iterate. Every trial retains the reference density and
+    /// together with gamma = A/(tau*dt). With independent bulk relaxation,
+    /// A contains only deviatoric stress and the fixed dilation contribution
+    /// enters gamma in quadrature. The constructor's shear relaxation is only
+    /// an initial iterate. Every trial retains the reference density and
     /// uses the original source's supported rate domain; no viscosity floor,
     /// cap, constitutive fit or law-name dispatch is substituted.
     ///
@@ -62,7 +64,7 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
     ///
     /// This is incoming-time generalized-Newtonian constitutive splitting.
     /// The native step preserves BGK/TRT/central-moment/reduced-cumulant controls,
-    /// including D3Q19's bulk/shear tie, forcing and open-reservoir accounts.
+    /// including any independent bulk rate, forcing and open-reservoir accounts.
     /// Geometry, wall velocity, origin and momentum/work retain lattice units.
     /// The physical scaling, low-Mach and scenario-speed obligations are those
     /// of `step_curved_walls_with_material`; next-time source admission belongs
@@ -95,6 +97,9 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
             CollisionModel3::CentralMoment {
                 second_order_rate, ..
             }
+            | CollisionModel3::CentralMomentBulk {
+                shear_rate: second_order_rate, ..
+            }
             | CollisionModel3::ReducedCumulant {
                 second_order_rate, ..
             } => 1.0 / second_order_rate,
@@ -108,8 +113,9 @@ impl<R: FluidTransport + ?Sized> MaterialScaling<'_, R> {
             gate,
             |cell| {
                 let index = (cell[2] * ny + cell[1]) * nx + cell[0];
-                let root = solve_local(
-                    numerators[index],
+                let root = solve_local_with_fixed_strain(
+                    numerators[index][0],
+                    numerators[index][1],
                     self.timestep_s,
                     initial_tau,
                     solve,
@@ -162,7 +168,7 @@ fn stress_field(
     grid: &BoundaryGrid3,
     max_cells: usize,
     gate: &CancelGate,
-) -> Result<(Vec<f64>, [usize; 3]), MaterialBoundaryError3> {
+) -> Result<(Vec<[f64; 2]>, [usize; 3]), MaterialBoundaryError3> {
     let dims @ [nx, ny, nz] = grid.dimensions();
     let cells = nx
         .checked_mul(ny)
@@ -175,7 +181,8 @@ fn stress_field(
     values.try_reserve_exact(cells).map_err(|_| {
         MaterialBoundaryError3::Invalid("material shear-stress allocation refused")
     })?;
-    values.resize(cells, 0.0);
+    values.resize(cells, [0.0; 2]);
+    let collision = grid.collision_model();
     for (index, numerator) in values.iter_mut().enumerate() {
         if index % 64 == 0 {
             poll(gate)?;
@@ -197,8 +204,10 @@ fn stress_field(
         if !u.into_iter().chain(force).all(f64::is_finite) {
             return Err(invalid("rheology needs finite native velocity and held force"));
         }
-        *numerator = force_corrected_shear_rate3(&grid.populations(x, y, z), rho, u, force, 1.0);
-        if !numerator.is_finite() || *numerator < 0.0 {
+        *numerator = rheology_stress_components3(
+            &grid.populations(x, y, z), rho, u, force, collision,
+        );
+        if numerator.iter().any(|value| !value.is_finite() || *value < 0.0) {
             return Err(invalid("unrepresentable native non-equilibrium shear stress"));
         }
     }

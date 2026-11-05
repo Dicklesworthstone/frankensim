@@ -103,9 +103,10 @@ impl FeedbackVariationalProblem<'_> {
 }
 
 /// Resolve a self-excited cycle of the COMPLETE original pHS and feedback law.
-/// Exact quadratic storage supplies its full Hessian automatically; a quadratic
-/// part of nonlinear H is insufficient and returns TangentUnavailable. The
-/// explicitly declared feedback Jacobian is required even for a constant law.
+/// Exact quadratic metadata or [`fs_phs::Storage::continuous_tangent`] supplies
+/// the original full Hessian automatically; a quadratic part of nonlinear H is
+/// insufficient and returns TangentUnavailable. The explicitly declared feedback
+/// Jacobian is required even for a constant law.
 ///
 /// Every RHS remains `(J-R)*grad H + G*u(x,G^T*grad H)`; the only added callback
 /// supplies its full continuous Jacobian `(J-R)*H'' + G*du_total/dx`. The shared

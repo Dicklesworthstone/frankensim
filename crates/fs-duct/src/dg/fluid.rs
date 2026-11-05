@@ -13,7 +13,7 @@ mod regional;
 mod update;
 pub use regional::{DgFluidRegion, DgRegionalFluid};
 
-mod sealed {
+pub(super) mod sealed {
     pub trait Medium {}
 }
 
@@ -36,6 +36,11 @@ pub trait DgMedium: sealed::Medium + Clone {
     #[doc(hidden)]
     fn has_spatial_acoustics(&self) -> bool {
         false
+    }
+    /// Original intrinsic porous memory, when this is a rigid-frame equivalent fluid.
+    #[doc(hidden)]
+    fn porous_diffusive_model(&self) -> Option<&fs_material::porous::diffusive::PorousDiffusive> {
+        None
     }
 }
 
@@ -238,3 +243,4 @@ impl<M: ThermoviscousFluid + Clone> DgDuct<DgFluidMaterial<M>> {
         Ok(self.with_uniform_viscothermal_model(model)?)
     }
 }
+

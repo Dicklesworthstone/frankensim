@@ -1,5 +1,6 @@
 //! Physical neck geometry and the shared gas drive the actual reciprocal load.
 use super::*;
+use core::f64::consts::PI;
 use fs_material::gas_species::input::{GasRecord, ThermochemicalPhase, ThermochemicalSources};
 
 #[path = "../../../src/render/schedule/reed/field_input/tests/support.rs"]
@@ -193,6 +194,74 @@ fn source_backed_thermochemistry_changes_neck_loss_without_rewriting_performance
         let q = pressure(&mut second, 128);
         assert!(p.iter().zip(q).any(|(p, q)| (p - q).abs() > 1e-12));
     });
+}
+
+#[test]
+fn orifice_edge_is_opt_in_and_replaces_only_the_exterior_necks_resistance() {
+    const SKIN: &str = "body-radiation skin 0.5 400 65 80 14000000000 36 2 1e-9\n";
+    let card = |neck: &str| source().replace(PHYSICAL, &format!("{SKIN}{neck}"));
+    let cavity = |neck: &str| {
+        input::Spec::parse(card(neck).as_bytes())
+            .unwrap()
+            .cavity
+            .unwrap()
+            .cavity
+    };
+    // One hole on each side of the crossing of eq. 1.9 and eq. 1.10, written out here
+    // independently of the owner: Re Z = (rho omega / a) eps Theta / sqrt 2.
+    let holes = [
+        (0.043509214, 0.002467782, 95.36, 0.5 * ((PI / (0.002467782 / (2.0 * 0.043509214))).ln() / PI + 1.0)),
+        (0.004, 0.03, 200.0, 4.0 / PI * (0.03 / (2.0 * 0.004) + 0.91)),
+    ];
+    for (a, l, hz, theta) in holes {
+        let neck = format!("cavity exterior-neck 0.013035685 {a} {l} flanged flanged 1");
+        let plain = cavity(&neck);
+        let edge = cavity(&format!("{neck} orifice-edge {hz}"));
+        let gas = plain.gas();
+        let omega = 2.0 * PI * hz;
+        let eps = (gas.dynamic_viscosity / (gas.density * omega)).sqrt() / a;
+        let expected = gas.density * omega / a * eps * theta / 2f64.sqrt();
+        close(
+            edge.neck_resistance_n_s_m(),
+            expected * edge.neck_area_m2().powi(2),
+        );
+        assert!(edge.neck_resistance_n_s_m() > plain.neck_resistance_n_s_m());
+        // Nothing else moves: the loss selection, the mass and the spring.
+        assert_eq!(edge.loss(), CavityNeckLoss::ExteriorMouth);
+        assert_eq!(edge.neck_mass_kg(), plain.neck_mass_kg());
+        assert_eq!(
+            edge.compression_stiffness_n_m(),
+            plain.compression_stiffness_n_m()
+        );
+    }
+    // The guitar's hole in air: 53.3 Pa s/m^3 by hand, eq. 1.10, at 95.36 Hz.
+    let guitar = cavity(
+        "cavity exterior-neck 0.013035685 0.043509214 0.002467782 flanged flanged 1 orifice-edge 95.36",
+    );
+    let acoustic = guitar.neck_resistance_n_s_m() / guitar.neck_area_m2().powi(2);
+    assert!((52.5..=54.0).contains(&acoustic), "{acoustic}");
+    for invalid in [
+        // Only with a real frequency, and nothing after it.
+        "cavity exterior-neck 0.003 0.01 0.02 flanged flanged 1 orifice-edge",
+        "cavity exterior-neck 0.003 0.01 0.02 flanged flanged 1 orifice-edge 0",
+        "cavity exterior-neck 0.003 0.01 0.02 flanged flanged 1 orifice-edge NaN",
+        "cavity exterior-neck 0.003 0.01 0.02 flanged flanged 1 orifice-edge 100 1",
+        "cavity exterior-neck 0.003 0.01 0.02 flanged flanged 1 edge 100",
+    ] {
+        assert!(input::Spec::parse(card(invalid).as_bytes()).is_err(), "{invalid}");
+    }
+    // The physical neck has no such option: the two words are extra on its row.
+    let physical = "cavity physical-neck 0.003 0.01 0.02 flanged unflanged 1 orifice-edge 100";
+    assert!(input::Spec::parse(source().replace(PHYSICAL, physical).as_bytes()).is_err());
+    // A plate no thicker than the Stokes layer is outside the paper's limit, with
+    // the same hole accepted without the option.
+    let thin = "cavity exterior-neck 0.003 0.04 1e-6 flanged flanged 1";
+    assert!(input::Spec::parse(card(thin).as_bytes()).is_ok());
+    let error = input::Spec::parse(card(&format!("{thin} orifice-edge 100")).as_bytes())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("thin Stokes"), "{error}");
 }
 
 #[test]

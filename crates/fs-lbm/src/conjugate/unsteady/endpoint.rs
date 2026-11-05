@@ -230,6 +230,7 @@ impl MaterialEndpointCoupling {
                 // The just-projected velocity owns this trial's eddy field.
                 // Replace it from native nu_t, never compound it into source k
                 // or reuse a preceding coupling pass's thermal transport.
+                thermal.eddy_wall_treatment = crate::conjugate::EddyWallTreatment::Molecular;
                 thermal
                     .eddy_conductivity_w_m_k
                     .resize(domain.cell_count(), 0.0);

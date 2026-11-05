@@ -900,8 +900,8 @@ impl BoundaryGrid3 {
     ///
     /// Populations, boundary topology, forcing and reusable work buffers are
     /// preserved. The original collision family owns the rate conversion:
-    /// its higher-order rates stay unchanged, including D3Q19's existing tie
-    /// between shear and bulk second-order relaxation. This only changes the
+    /// its higher-order rates and any independent bulk rate stay unchanged;
+    /// legacy moment models retain their shear/bulk tie. This only changes the
     /// next collision; it does not change density units or supply heat.
     ///
     /// # Errors
@@ -2121,6 +2121,9 @@ impl BoundaryGrid3 {
             CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
             CollisionModel3::CentralMoment {
                 second_order_rate, ..
+            }
+            | CollisionModel3::CentralMomentBulk {
+                shear_rate: second_order_rate, ..
             }
             | CollisionModel3::ReducedCumulant {
                 second_order_rate, ..

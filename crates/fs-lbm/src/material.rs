@@ -19,7 +19,7 @@ mod forcing;
 mod buoyancy;
 pub use buoyancy::MaterialBuoyancyBoundary;
 pub mod free_surface;
-pub use forcing::{MaterialThermalWall, MaterialWallExchange, electrothermal, transport};
+pub use forcing::{MaterialPlateExchange, MaterialThermalWall, MaterialWallExchange, electrothermal, transport};
 mod runtime_rebind;
 mod three_dimensional;
 pub use three_dimensional::{MaterialSlab3, MaterialThermalSlab3};
@@ -31,7 +31,7 @@ use crate::{CS2, Grid, MACH_LIMIT, ScalingPlan, ThermalLbm};
 pub enum MaterialLbmError {
     /// The original material transport owner refused its snapshot.
     Transport(MaterialError),
-    /// An external thermal-flow force field was refused before stepping.
+    /// External force admission or the native thermal-flow step was refused.
     Forcing(crate::thermal::ThermalForcingError),
     /// The dense owner refused a physical-state-preserving force change.
     DenseForcing(crate::core2::ForceRebindError2),

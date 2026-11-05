@@ -22,9 +22,10 @@
 //!   biharmonic eigenfunctions on the SS rectangle); coupling
 //!   integrals by exact trigonometric products, with integer-mode
 //!   selection rules and no spatial quadrature aliasing.
-//! - [`von_karman_sampled_plate`] — the same Airy channels from a
-//!   *sampled* displacement grid (FE, clamped, orthotropic). Membrane
-//!   stress stays the analytic sine Airy basis (in-plane movable).
+//! - [`von_karman_sampled_plate`] — isotropic membrane elasticity on a
+//!   *sampled* displacement grid (FE, clamped). The tensor counterpart
+//!   [`von_karman_sampled_plate_with_membrane`] retains directional normal,
+//!   shear and rotated-axis elasticity in the same Airy basis.
 //! - [`kirchhoff_carrier_string`] — the 1D sibling: one stress "mode"
 //!   whose coupling matrix is exactly `diag(k^2 pi^2/L^2)` — tension
 //!   modulation and pitch glide nearly free. Fixed-fixed sines.
@@ -41,7 +42,10 @@
 //! sine); out-of-plane shape is whatever grid the caller samples.
 
 use fs_math::det;
-use fs_phs::{PhsError, PortHamiltonian, Storage};
+use fs_phs::{ContinuousStorageTangent, PhsError, PortHamiltonian, Storage};
+
+mod membrane;
+pub use membrane::{VkSampledPlateParams, von_karman_sampled_plate_with_membrane};
 
 pub mod longitudinal;
 pub mod sav;
@@ -191,9 +195,9 @@ impl SosModalStorage {
     /// Two matrix-vector passes per channel keep memory constant and work
     /// `O(channel_count * mode_count^2)`. Traversal order is fixed. Original
     /// model admission is rechecked because its frequency/channel fields are
-    /// public. A periodic or variational solver can use
-    /// `|x, v, out| storage.hessian_action(x, v, out).is_ok()` as its analytic
-    /// action, without a dependency on that solver's crate.
+    /// public. [`Storage::continuous_tangent`] exposes this same action after
+    /// boxing, composition and assembly, so periodic/variational solvers can
+    /// discover it without a second model or a solver dependency here.
     ///
     /// This is a continuous constitutive tangent, not the endpoint Jacobian of
     /// a discrete-gradient time step. It establishes neither harmonic
@@ -281,7 +285,17 @@ impl SosModalStorage {
     }
 }
 
+impl ContinuousStorageTangent for SosModalStorage {
+    fn apply(&self, state: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
+        self.hessian_action(state, direction, out).is_ok()
+    }
+}
+
 impl Storage for SosModalStorage {
+    fn continuous_tangent(&self) -> Option<&dyn ContinuousStorageTangent> {
+        Some(self)
+    }
+
     fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], midpoint: &[f64]) -> Option<f64> {
         // The quadratic modal energies have zero midpoint remainder. For
         // V(q) = c/4 (q^T E q)^2, write q = m +/- d/2. Factoring the
@@ -610,7 +624,8 @@ pub struct VkModel {
     pub storage: SosModalStorage,
     /// Displacement mode list (index-aligned with the storage).
     pub disp_modes: Vec<SineMode>,
-    /// Stress mode list (index-aligned with `storage.channels`).
+    /// Retained Airy stress basis. Tensor membrane elasticity can mix these
+    /// modes when factoring the positive complementary energy into channels.
     pub stress_modes: Vec<SineMode>,
     /// Worst relative disagreement between the two spatial approximations
     /// for sampled modes. Zero for [`von_karman_ss_plate`], whose integrals
@@ -803,6 +818,13 @@ fn validate_vk_inputs(
             what: "finite plate parameters",
         });
     }
+    validate_vk_modes(disp_modes, stress_modes)
+}
+
+fn validate_vk_modes(
+    disp_modes: &[SineMode],
+    stress_modes: &[SineMode],
+) -> Result<(), NlModalError> {
     if disp_modes.is_empty() || stress_modes.is_empty() {
         return Err(NlModalError::Parameter {
             what: "empty mode list",
@@ -945,9 +967,10 @@ pub struct SampledPlateMode {
 /// reused across all mode pairs and stress channels.
 /// Airy stress uses the same sine products as the SS constructor
 /// (in-plane movable), so clamped/orthotropic bending is FE while
-/// the membrane channel stays the analytic Airy basis. `E` in the
-/// channel coefficient is `params.young` (use `(E1+E2)/2` for
-/// orthotropic callers).
+/// the membrane channel stays the analytic Airy basis. This constructor
+/// uses isotropic membrane elasticity. Use
+/// [`von_karman_sampled_plate_with_membrane`] for directional stiffness,
+/// independent shear stiffness, or a rotated material axis.
 ///
 /// # Errors
 /// [`NlModalError`] on bad grids, non-physical parameters, Airy indices
@@ -955,13 +978,47 @@ pub struct SampledPlateMode {
 /// FD-stencil disagreement above `0.9` of the channel scale
 /// (FE Hessians are first-order; the sine reprint test is the
 /// accuracy pin).
-#[allow(clippy::items_after_statements)] // the channel alias lives next to its consumers
 pub fn von_karman_sampled_plate(
     params: &VkPlateParams,
     disp: &[SampledPlateMode],
     stress_modes: &[SineMode],
 ) -> Result<VkModel, NlModalError> {
     validate_vk_inputs(params, &dummy_disp_ids(disp.len()), stress_modes)?;
+    let mut model = sampled_plate_couplings(
+        params.lx,
+        params.ly,
+        params.rho * params.h,
+        disp,
+        stress_modes,
+    )?;
+    for (channel, mode) in model.storage.channels.iter_mut().zip(stress_modes) {
+        let k2 = (mode.m as f64 * core::f64::consts::PI / params.lx).powi(2)
+            + (mode.n as f64 * core::f64::consts::PI / params.ly).powi(2);
+        channel.coefficient = params.young * params.h / (2.0 * (k2 * k2).max(1.0e-30));
+    }
+    model.storage.validate()?;
+    Ok(model)
+}
+
+// Assemble geometry once; constitutive callers supply the complementary
+// membrane metric. Unit coefficients here are replaced before publication.
+#[allow(clippy::items_after_statements)]
+fn sampled_plate_couplings(
+    lx: f64,
+    ly: f64,
+    areal_density: f64,
+    disp: &[SampledPlateMode],
+    stress_modes: &[SineMode],
+) -> Result<VkModel, NlModalError> {
+    if [lx, ly, areal_density]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0)
+    {
+        return Err(NlModalError::Parameter {
+            what: "finite positive sampled plate dimensions and areal density",
+        });
+    }
+    validate_vk_modes(&dummy_disp_ids(disp.len()), stress_modes)?;
     if disp.is_empty() {
         return Err(NlModalError::Parameter {
             what: "empty sampled displacement list",
@@ -999,21 +1056,13 @@ pub fn von_karman_sampled_plate(
             what: "sampled Airy mode must be below the grid Nyquist limit",
         });
     }
-    let VkPlateParams {
-        lx,
-        ly,
-        h,
-        young,
-        rho,
-        ..
-    } = *params;
     let dx = lx / (nx - 1) as f64;
     let dy = ly / (ny - 1) as f64;
     let area_el = dx * dy;
     let mut hessians = Vec::with_capacity(disp.len());
     let mut omegas = Vec::with_capacity(disp.len());
     for mode in disp {
-        let energy: f64 = mode.w.iter().map(|v| v * v).sum::<f64>() * area_el * rho * h;
+        let energy: f64 = mode.w.iter().map(|v| v * v).sum::<f64>() * area_el * areal_density;
         if !(energy > 0.0 && energy.is_finite()) {
             return Err(NlModalError::Parameter {
                 what: "sampled mode must have finite positive L2 mass",
@@ -1024,22 +1073,18 @@ pub fn von_karman_sampled_plate(
         hessians.push(sampled_hessians(&field, nx, ny, dx, dy));
         omegas.push(mode.omega);
     }
-    type RawChannel = (f64, Vec<(usize, usize, f64, f64)>, f64);
+    type RawChannel = (Vec<(usize, usize, f64, f64)>, f64);
     let nq = hessians.len();
     let pi = core::f64::consts::PI;
     let psi_norm = det::sqrt(4.0 / (lx * ly));
     let kmin2 = (pi / lx) * (pi / lx) + (pi / ly) * (pi / ly);
     // Mass-normalized φ ~ 1/√(ρ h A); a nonzero raw integral is ~ k⁴/(ρ h).
-    let char_scale = kmin2 * kmin2 / (rho * h).max(1.0e-30);
+    let char_scale = kmin2 * kmin2 / areal_density.max(1.0e-30);
     let mut channels = Vec::with_capacity(stress_modes.len());
     let mut worst_rel = 0.0f64;
     let mut global_scale = f64::MIN_POSITIVE;
     let mut raw: Vec<RawChannel> = Vec::new();
     for &sm in stress_modes {
-        let xi4 = {
-            let k2 = (sm.m as f64 * pi / lx).powi(2) + (sm.n as f64 * pi / ly).powi(2);
-            k2 * k2
-        };
         let psi = sample_sine(sm, lx, ly, nx, ny);
         let mut pairs = Vec::new();
         let mut scale = f64::MIN_POSITIVE;
@@ -1051,9 +1096,9 @@ pub fn von_karman_sampled_plate(
             }
         }
         global_scale = global_scale.max(scale);
-        raw.push((xi4, pairs, scale));
+        raw.push((pairs, scale));
     }
-    for (xi4, pairs, scale) in raw {
+    for (pairs, scale) in raw {
         let judge = scale.max(1.0e-12 * global_scale).max(1.0e-8 * char_scale);
         let mut e = vec![0.0; nq * nq];
         for (p, q, a2, a4) in pairs {
@@ -1067,7 +1112,7 @@ pub fn von_karman_sampled_plate(
             e[q * nq + p] = v;
         }
         channels.push(StressChannel {
-            coefficient: young * h / (2.0 * xi4.max(1.0e-30)),
+            coefficient: 1.0,
             coupling: e,
         });
     }

@@ -12,9 +12,10 @@
 use super::*;
 
 /// Additional admission for a stress query. Original exposure preparation
-/// bounds N*F² frequency-pair units, line reconstruction and FFT work. Stress
+/// bounds spatial/frequency work, line reconstruction and FFT work. Stress
 /// performs twelve local and at most twenty-four modal scalar products per
-/// admitted pair unit; the modal pass adds no FFT or retained frequency plane.
+/// admitted temporal pair unit. Nonzero real carriers also use the bank's
+/// F*N*(width+height) separable spatial pass; proper banks retain sparse work.
 /// This cap includes the original workspace, six compensated sums per point,
 /// the complete stress output and fixed modal quadrature scratch/accumulators.
 /// Borrowed owners, earlier outputs and allocator overhead are excluded.
@@ -45,9 +46,9 @@ impl AngularSpectrumExposureStressPoint {
     }
 }
 
-/// Local stress samples and the exact continuous-periodic-cell integral of
-/// the represented band-limited fields. Modal orthogonality avoids aliasing
-/// their quadratic products on the original sampling grid. This does not
+/// Local stress samples and the exact continuous envelope-cell integral of
+/// the represented fields. Analytic spatial products avoid aliasing their
+/// quadratic observables on the original sampling grid. This does not
 /// resolve a finite aperture edge or certify physical spatial convergence.
 #[derive(Debug)]
 pub struct AngularSpectrumExposureStressField {
@@ -104,11 +105,14 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     /// each field uses its own permittivity and permeability. A left query
     /// remains valid with a lossy/dispersive exit; right queries then refuse.
     ///
-    /// O(L*N + F*N*log N + F²*N). Each admitted N*F² pair unit entails
+    /// At zero carrier, O(L*N + F*N*log N + F²*N). Each admitted N*F² pair unit entails
     /// twelve local and at most twenty-four modal temporal contractions.
     /// Continuous-cell products are integrated before one in-place synthesis
     /// of each original frequency field; no extra FFT, constitutive or film
-    /// solve is performed.
+    /// solve is performed. A nonzero carrier uses the shared exact separable
+    /// Gram contraction for real-bank cell integrals, with F*N*(width+height)
+    /// spatial-axis work included in the original bank's admission. Proper banks retain the
+    /// original diagonal spatial contraction because their common carrier cancels.
     pub fn stress_field(
         &self,
         side: AngularSpectrumSide,
@@ -166,6 +170,9 @@ impl AngularSpectrumExposure<'_, '_, '_> {
     /// material-filled region requires its own consistent material/field
     /// momentum accounting. No such term
     /// is silently set to zero, and no material-force convention is inferred.
+    /// A nonzero transverse carrier refuses this periodic-boundary shortcut:
+    /// finite-window real-field stresses need not agree on the lateral faces.
+    /// Its individual plane and finite-aperture stress observations remain valid.
     pub fn boundary_stress_resultant_n(
         &self,
         distances_from_faces_m: [f64; 2],
@@ -173,6 +180,12 @@ impl AngularSpectrumExposure<'_, '_, '_> {
         limits: AngularSpectrumExposureStressLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<[f64; 3], AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        if self.anchor.carrier_rad_m != [0.0; 2] {
+            return Err(bad(
+                "carrier stress resultants require lateral-surface observations",
+            ));
+        }
         boundary_resultant(
             |side, distance| {
                 self.illumination_stress_field(side, distance, window, limits, &mut cancelled)
@@ -234,6 +247,8 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
 
     /// The total-field surface-stress resultant, with the same finite-window
     /// momentum-storage distinction as the deterministic owner's method.
+    /// Nonzero transverse carriers require explicit lateral-surface accounting
+    /// and refuse this periodic-boundary shortcut.
     pub fn boundary_stress_resultant_n(
         &self,
         distances_from_faces_m: [f64; 2],
@@ -241,6 +256,12 @@ impl AngularSpectrumExposureEnsemble<'_, '_, '_, '_> {
         limits: AngularSpectrumExposureStressLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<[f64; 3], AngularSpectrumError> {
+        poll(&mut cancelled)?;
+        if self.anchor.carrier_rad_m != [0.0; 2] {
+            return Err(bad(
+                "carrier stress resultants require lateral-surface observations",
+            ));
+        }
         boundary_resultant(
             |side, distance| {
                 self.illumination_stress_field(side, distance, window, limits, &mut cancelled)
@@ -313,6 +334,7 @@ where
                 distance,
                 epsilon,
                 mu,
+                true,
                 |a, b| window.proper_product_kernel(a, b),
                 proper_product,
                 ProperHarmonicProduct::mean_real_product_parts_dd,
@@ -327,6 +349,7 @@ where
                 distance,
                 epsilon,
                 mu,
+                false,
                 |a, b| window.product_kernel(a, b),
                 product,
                 HarmonicProduct::mean_real_product_parts_dd,
@@ -382,6 +405,7 @@ fn accumulate_stress_bank<P: Copy>(
     distance: f64,
     epsilon: f64,
     mu: f64,
+    proper: bool,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
     product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
@@ -394,10 +418,11 @@ fn accumulate_stress_bank<P: Copy>(
         return Ok(());
     }
     let mut observation =
-        ExposureObservationBank::prepare(bank, side, distance, kernel, cancelled)?;
+        ExposureObservationBank::prepare(bank, side, distance, proper, kernel, cancelled)?;
     let cell = integrate_cell_dyad(
         bank.anchor.grid(),
         &observation.fields,
+        observation.carrier.as_ref(),
         &observation.kernels,
         epsilon,
         mu,
@@ -434,6 +459,7 @@ fn accumulate_stress_bank<P: Copy>(
 pub(super) fn integrate_cell_dyad<P: Copy>(
     grid: AngularSpectrumGrid,
     fields: &[Vec<[C64; 6]>],
+    carrier: Option<&cell::CarrierFields>,
     kernels: &[P],
     epsilon: f64,
     mu: f64,
@@ -446,6 +472,24 @@ pub(super) fn integrate_cell_dyad<P: Copy>(
     for mode in 0..grid.width * grid.height {
         if mode % 32 == 0 {
             poll(cancelled)?;
+        }
+        if let Some(carrier) = carrier {
+            let dyad = integrate_dyad(
+                fields.len(),
+                kernels,
+                |i| carrier.at(i, mode),
+                epsilon,
+                mu,
+                |kernel, a, b| {
+                    cell::product(kernel, a, b, &product_parts).map_err(MomentError::Product)
+                },
+                cancelled,
+            )
+            .map_err(dyad_error)?;
+            for (sum, value) in integrated.iter_mut().zip(dyad) {
+                *sum = *sum + area * value;
+            }
+            continue;
         }
         let opposite = opposite_mode(grid, mode);
         if opposite.is_some_and(|other| other < mode) {

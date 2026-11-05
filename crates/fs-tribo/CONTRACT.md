@@ -270,6 +270,45 @@ clock and separately integrated displacement/unsigned path. The 21-group native
 ellipse target retains analytic limits, frame covariance, stiff short steps and
 cancellation. Quadrature errors remain estimates, not certified enclosures.
 
+## Shared occupied-branch dry friction
+
+`stribeck_friction` owns the original scalar Gaussian Stribeck, hyperbolic,
+shifted-power and affine load-line continuation formerly embedded in `fs-couple`.
+The coupler re-exports that same owner; its modal consumers retain their existing
+stable-root and adhesive-offset behavior. `HystereticFriction` makes the shared
+owner a checkpoint-bearing `TangentialLaw` for scalar/isotropic held body response.
+A sliding branch remains occupied while its stable root exists, including when a
+static reaction also becomes admissible. Loss of the root, resolved reversal and
+normal release follow the original rule; a force budget cannot choose another
+physical branch. The separate memoryless `FrictionLaw` interface is unchanged.
+
+The checkpoint retains the original law or optional ordered dry-interface card,
+occupied branch, tangent axis, solved slip and last explicit thermal boundary.
+Cards admit actual solved speed and retain their original temperature/pressure
+limits and caller authority. Exported heat is traction contracted with actual
+slip; no reversible or thermal storage is invented. Preparation, refused trials
+and numerical iterations never advance accepted history. A complete candidate
+alone may be committed by its surrounding mechanical transaction.
+
+Gaussian critical points use safeguarded Newton proposals inside the original
+monotone predicate brackets. Every narrowed endpoint is checked, and termination
+still requires adjacent floating-point values. Preparation probes and selected
+root bisections share the explicit step iteration budget, enforced before each
+update. Exact matching load and mobility reuse a prepared line. Optional bounded
+`prepare_state` returns a zero-motion candidate and preparation count for difficult
+near-fold or changing-load cases; ordinary first sliding steps need no separate
+preparation call.
+
+The one-dimensional hysteresis rule retains its scope: the first loaded motion
+selects an axis, and continued sliding or collinear reversal uses that axis.
+`ObjectiveTangentialLaw` transports the retained axis and slip with the existing
+contact-frame convention. Untransported oblique continuation refuses; arrest and
+normal release permit a new direction. This adds no two-axis hysteresis model,
+rate/state aging, source acquisition or experimental validation. The original
+empirical/benchmark-law boundaries remain. Native regressions exercise coexisting
+roots, release/reversal/restart, original-card domains, work/heat, bounded cached
+preparation and the existing isotropic matrix-compliance consumer.
+
 ## Purpose and layer
 
 `fs-tribo` is an L3 dry-contact constitutive leaf. It provides typed dry
@@ -635,6 +674,46 @@ three-rung radial and angular refinement. They also check analytic pure-motion
 limits, coupled capacity reduction, arbitrary tangent rotation/reflection,
 positive velocity scaling down to tiny speeds, small-spin asymptotics, branch
 continuity, deterministic replay, rest/frictionless selections and refusals.
+
+### Local-speed friction across a Hertz sliding and spinning patch
+
+`sliding_patch::rate_dependent::HertzFrictionPatch` resolves the original shared
+`FrictionLaw` at each local speed `|u + omega cross r|`. The full Hertz pressure
+weights force, spin moment and heat together. In particular, zero centre speed
+does not erase the friction and heat of a spinning patch, and neither a centre
+coefficient nor an RMS speed replaces the original local law.
+
+Coulomb and pure translation retain their exact responses. Unclipped affine
+speed laws use the exact Hertz pressure moment `integral r^2 p dA = 2 P a^2/5`,
+giving additional force `-slope P u`, spin moment
+`-2 slope P a^2 omega/5`, and their corresponding local-slip heat. This includes
+velocity strengthening, weakening before the zero clamp, and a purely viscous
+curve with zero Coulomb coefficient. A fully clamped patch returns exactly zero.
+Clipped affine pure spin integrates its analytically known active central radius
+directly. A small positive frictional core therefore cannot vanish between
+full-disk nodes or be lost by subtracting large Coulomb responses.
+
+Other cases use explicit radial/angular composite four-point Gauss resolution.
+The integrand subtracts the exact zero-speed Coulomb response, removing the
+direction singularity at an isolated stationary point without regularizing
+velocity. The radial transform `r=a sin(theta)` resolves the pressure edge;
+reflection symmetry, cached radial geometry and compensated sums keep work
+bounded and allocation-free. Each panel count is in `1..=256`, bounding original
+curve evaluations by 1,048,576; pure spin requires only radial integration.
+Panel counts are discretization controls, not a certified error tolerance.
+Consumers must refine both axes for mixed motion, or the radial axis for pure
+spin. Unrepresentable output or negative integrated heat refuses rather than
+clamping. A missed active region with no positive sampled traction also refuses
+rather than reporting a cancellation remainder as physical heat. The work
+residual retains independently accumulated local heat.
+
+Regressions retain the exact Coulomb/affine limits, compare all non-affine shared
+curve families with independent full-disk traction/heat integration, exercise
+three resolution rungs, and check objectivity, reversal, replay, rest, lift-off,
+clamping and bounded-control refusal. This instantaneous prescribed-kinematics
+owner adds no static-onset solve, retained shear, normal evolution, branch
+selection or thermal partition. Interface source admission and applicability
+remain the material adapter's responsibility; no measured authority is inferred.
 
 ### Coupled Hertz static and sliding wrench
 
@@ -1904,8 +1983,44 @@ Seven focused regressions cover the exact Newtonian image, independent
 no-slip profile integration through the core transition, mixed-law network
 continuity, full directional derivatives and reciprocity, SI consistency
 scaling, refusal/cancellation atomicity, and shared force/tangent admission
-at a one-ULP projected-work difference. The exact film sources and all 61
-native film test definitions, together with the real deterministic math
-modules and their seven tests, pass bounded Rust type and borrow checking.
-Runtime tests and a full crate build have not run in the full-storage
-environment; no runtime pass is claimed.
+at a one-ULP projected-work difference. The original film module and all 116
+of its current native tests compile and pass through a narrow Rust test
+facade using the real `fs-math` and `fs-rand` dependencies. This includes all
+13 passive and pressure-fed power-law tests. A full crate/workspace build and
+cross-ISA execution are not claimed by this focused run.
+
+### Pressure-fed non-Newtonian Reynolds films
+
+`resistive_film::power_law::PressureDrivenPowerLawFilm` binds one explicit
+gauge pressure to each original exterior passage and `None` to each internal
+passage. The existing exact regularized-power-law channel flux and bounded
+Newton/Cholesky pressure solve remain the numerical owners. Pressure relative
+to the retained reservoir datum determines hydraulic drops; physical pressure
+determines normal force and the original pressure-domain checks. No supply
+pressure is silently treated as ambient, including on shut channels.
+
+The separate active type reports mechanical input, signed reservoir input
+`-sum(p_boundary * Q_out)`, nonnegative channel heat `sum(Q * delta_p)`, and
+their work residual. A supply can drive the mechanical ports or receive work
+from them. These instantaneous powers do not supply a time integrator, fluid
+inventory or a thermal destination. Every cell must meet the original flow
+budgets; supplied films scale the relative tolerance by the largest actual
+passage flow or swept-volume rate. Work tolerance includes the magnitudes of
+the mechanical and reservoir inputs, retaining accuracy when those ports
+exchange power with opposite signs.
+
+The accepted differential conductances and the same factorization give the
+analytic force tangent with respect to geometry, normal velocity and every
+original reservoir pressure. Evaluation and tangents allocate no heap scratch.
+Zero supplies preserve the original passive path; `n=1` uses the original
+pressure-fed Newtonian solve. Supply or constitutive-law rebinding retains the
+geometry and numerical controls without introducing a thermal clock. All
+refusals, including caller cancellation before publication, preserve outputs.
+Sliding entrainment, pressure-dependent rheology, cavitation and fluid inertia
+remain outside this combination.
+
+Six focused G1/G3/G4 groups recover independent through-gap momentum integrals
+for thinning and thickening supplied flow, reversed throughflow, mixed-law
+cell continuity, both signs of external power, the native Newtonian limit,
+geometry/rate/supply finite-difference tangents and velocity reciprocity,
+zero-supply parity, law refresh, and atomic domain/budget/cancellation refusal.

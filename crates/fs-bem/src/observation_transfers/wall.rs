@@ -672,7 +672,7 @@ fn admit_binding_for_route(
         ));
     }
     if iterative {
-        boundary.admit_admittance_band(highest_omega, lower)?;
+        boundary.admit_band(highest_omega, lower)?;
         helmholtz::admit_iterative_resolution(surface, highest_omega / medium.sound_speed)?;
     } else {
         boundary.admit_band(highest_omega, lower)?;

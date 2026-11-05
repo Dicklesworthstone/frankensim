@@ -154,12 +154,12 @@ impl Reservoirs {
             .fold(0.0, f64::max)
     }
 
-    /// An Euler zero-gradient continuation alone defines no molecular bath.
+    /// An Euler continuation or imposed pressure alone defines no molecular bath.
     pub(super) fn admit_molecular(&self, topology: Boundaries2d) -> Result<(), DissipationError> {
         for side in SIDES {
             if let AxisBoundaries::Ends { lower, upper } = topology.axis(side.axis()) {
                 let condition = if side.sign() < 0.0 { lower } else { upper };
-                if condition == BoundaryCondition::Transmissive
+                if condition != BoundaryCondition::Reflecting
                     && self.slots[side_index(side.axis(), side.sign())].is_none()
                 {
                     return Err(DissipationError::Invalid(

@@ -122,7 +122,68 @@ fn retained(before: &MixedViscoTetMotion<'_>, after: &MixedViscoTetMotion<'_>) {
         after.reference_density_kg_m3(),
         before.reference_density_kg_m3()
     );
+    assert_eq!(
+        after.reference_corner_density_kg_m3(),
+        before.reference_corner_density_kg_m3()
+    );
     assert_eq!(after.reference_mass_kg(), before.reference_mass_kg());
+}
+
+#[test]
+fn graded_edge_impulse_preserves_inventory_and_relaxed_material_memory() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(10.0 * MU, true);
+        let density = [[3.0, 15.0, 3.0, 3.0]];
+        let old_v = vec![[0.1, -0.02, 0.03]; nodes.len()];
+        let motion = MixedViscoTetMotion::try_new_with_reference_density(
+            relaxed(&nodes, &elements, &material, cx),
+            &density,
+            &old_v,
+            MASS_BYTES,
+            cx,
+        )
+        .unwrap();
+        let edge = TET10_EDGES
+            .iter()
+            .position(|e| e.contains(&2) && e.contains(&3))
+            .unwrap();
+        let local = 4 + edge;
+        let free_dof = 3 * elements[0][local];
+        let held: Vec<_> = (0..3 * nodes.len()).filter(|&d| d != free_dof).collect();
+        let delta_v = 0.02;
+        // Independent exact integral of 16*lambda_2^2*lambda_3^2*rho.
+        let diagonal =
+            (density[0][2] + density[0][3]) / 210.0 + (density[0][0] + density[0][1]) / 630.0;
+        let event = motion
+            .impulse_candidate(
+                &held,
+                &[(free_dof, diagonal * delta_v)],
+                [0.4, -0.3, 0.2],
+                impulse_controls(),
+                cx,
+            )
+            .unwrap();
+        retained(&motion, &event.motion);
+        assert_eq!(
+            event.motion.reference_corner_density_kg_m3(),
+            Some(density.as_slice())
+        );
+        for (i, actual) in event.motion.velocity_mps().iter().enumerate() {
+            for c in 0..3 {
+                near(
+                    actual[c],
+                    old_v[i][c] + if 3 * i + c == free_dof { delta_v } else { 0.0 },
+                    2e-12,
+                );
+            }
+        }
+        near(event.impulse.work_residual_j, 0.0, 2e-13);
+        for c in 0..3 {
+            near(event.impulse.linear_residual_kg_m_s[c], 0.0, 2e-13);
+            near(event.impulse.angular_residual_kg_m2_s[c], 0.0, 2e-13);
+        }
+    });
 }
 
 #[test]

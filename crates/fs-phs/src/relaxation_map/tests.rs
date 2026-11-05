@@ -61,3 +61,119 @@ fn g0_linear_storage_keeps_original_quadratic_image() {
         strain:Rc::new(QuadraticStrain),stiffness:0.0,relaxation_time_s:0.2,
     }]).is_err());
 }
+
+#[test]
+fn g1_native_tangent_keeps_prestress_curvature_and_the_memory_row() {
+    let sys = fixed().with_mapped_relaxation_branches(vec![MappedRelaxationBranch {
+        strain: Rc::new(QuadraticStrain), stiffness: 4.0, relaxation_time_s: 0.2,
+    }]).unwrap();
+    let state = [0.3, 0.0, 0.17];
+    let direction = [0.4, -0.7, -0.2];
+    let mut actual = [f64::NAN; 3];
+    assert!(sys.storage().continuous_tangent().unwrap().apply(&state, &direction, &mut actual));
+    // H_arm = (2*(q+q^2/2)-z)^2/2. Differentiating its actual force
+    // includes stored stress times strain curvature, besides the outer product.
+    let strain_gradient = 2.0 * (1.0 + state[0]);
+    let effort = 2.0 * (state[0] + 0.5 * state[0] * state[0]) - state[2];
+    let change = strain_gradient * direction[0] - direction[2];
+    let expected = [strain_gradient * change + 2.0 * effort * direction[0], 0.0, -change];
+    for (a, b) in actual.iter().zip(expected) {
+        assert!((a - b).abs() < 2.0e-14);
+    }
+    assert!((actual[0] - strain_gradient * change).abs() > 0.4);
+    // A pure history perturbation produces the reciprocal mechanical reaction.
+    assert!(sys.storage().continuous_tangent().unwrap().apply(
+        &state, &[0.0, 0.0, 1.0], &mut actual,
+    ));
+    assert_eq!(actual, [-strain_gradient, 0.0, 1.0]);
+}
+
+#[derive(Debug)]
+struct CoupledStrain;
+impl RelaxationStrainMap for CoupledStrain {
+    fn state_dimension(&self) -> usize { 3 }
+    fn strain(&self, x: &[f64]) -> f64 {
+        x[0] + 0.5*x[0]*x[0] + 0.3*x[0]*x[1] + 0.25*x[1]*x[1]
+    }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) {
+        out.copy_from_slice(&[1.0+x[0]+0.3*x[1], 0.3*x[0]+0.5*x[1], 0.0]);
+    }
+    fn hessian_vector(&self, _: &[f64], v: &[f64], out: &mut [f64]) {
+        out.copy_from_slice(&[v[0]+0.3*v[1], 0.3*v[0]+0.5*v[1], 0.0]);
+    }
+}
+
+#[test]
+fn g3_native_tangent_composes_nested_linear_and_nonlinear_material_memory() {
+    let sys = fixed().with_relaxation_branches(vec![RelaxationBranch {
+        projection: vec![1.0, 0.5], stiffness: 9.0, relaxation_time_s: 0.7,
+    }]).unwrap().with_mapped_relaxation_branches(vec![MappedRelaxationBranch {
+        strain: Rc::new(CoupledStrain), stiffness: 4.0, relaxation_time_s: 0.2,
+    }]).unwrap();
+    let state = [0.3, -0.2, 0.12, -0.4];
+    let direction = [0.4, -0.7, -0.2, 0.3];
+    let other = [-0.2, 0.1, 0.6, -0.4];
+    let tangent = sys.storage().continuous_tangent().unwrap();
+    let mut actual = [f64::NAN; 4];
+    assert!(tangent.apply(&state, &direction, &mut actual));
+    // The original effort is cubic: this independent four-point derivative
+    // is exact in exact arithmetic, including both internal-history rows.
+    let epsilon = 0.01;
+    let gradients: Vec<_> = [-2.0, -1.0, 1.0, 2.0].iter().map(|step| {
+        let x: Vec<_> = state.iter().zip(direction).map(|(x, v)| x + step*epsilon*v).collect();
+        sys.effort(&x)
+    }).collect();
+    for k in 0..4 {
+        let reference = (gradients[0][k] - 8.0*gradients[1][k]
+            + 8.0*gradients[2][k] - gradients[3][k]) / (12.0*epsilon);
+        assert!((actual[k] - reference).abs() < 2.0e-11 * reference.abs().max(1.0));
+    }
+    let mut transposed = [0.0; 4];
+    assert!(tangent.apply(&state, &other, &mut transposed));
+    let left: f64 = actual.iter().zip(other).map(|(a, v)| a*v).sum();
+    let right: f64 = transposed.iter().zip(direction).map(|(a, v)| a*v).sum();
+    assert!((left - right).abs() < 2.0e-13 * left.abs().max(1.0));
+}
+
+#[derive(Debug)]
+struct IncompleteStrain { incomplete_gradient: bool }
+impl RelaxationStrainMap for IncompleteStrain {
+    fn state_dimension(&self) -> usize { 2 }
+    fn strain(&self, x: &[f64]) -> f64 { x[0] }
+    fn gradient(&self, _: &[f64], out: &mut [f64]) {
+        if self.incomplete_gradient { out[0] = 1.0; }
+        else { out.copy_from_slice(&[1.0, 0.0]); }
+    }
+    fn hessian_vector(&self, _: &[f64], _: &[f64], out: &mut [f64]) {
+        if self.incomplete_gradient { out.fill(0.0); }
+        else { out[0] = 0.0; }
+    }
+}
+
+#[test]
+fn g0_native_relaxation_tangent_refuses_missing_derivatives_and_invalid_inputs() {
+    for incomplete_gradient in [false, true] {
+        let sys = fixed().with_mapped_relaxation_branches(vec![MappedRelaxationBranch {
+            strain: Rc::new(IncompleteStrain { incomplete_gradient }),
+            stiffness: 4.0, relaxation_time_s: 0.2,
+        }]).unwrap();
+        assert!(!sys.storage().continuous_tangent().unwrap().apply(
+            &[0.3, 0.1, -0.2], &[0.4, 0.5, 0.6], &mut [0.0; 3],
+        ));
+    }
+    let sys = fixed().with_relaxation_branches(vec![RelaxationBranch {
+        projection: vec![1.0, 0.0], stiffness: 4.0, relaxation_time_s: 0.2,
+    }]).unwrap();
+    let tangent = sys.storage().continuous_tangent().unwrap();
+    let mut out = [17.0; 3];
+    for (state, direction) in [
+        (vec![0.0; 2], vec![0.0; 3]),
+        (vec![0.0; 3], vec![0.0; 2]),
+        (vec![f64::NAN, 0.0, 0.0], vec![0.0; 3]),
+        (vec![0.0; 3], vec![0.0, f64::INFINITY, 0.0]),
+    ] {
+        assert!(!tangent.apply(&state, &direction, &mut out));
+        assert_eq!(out, [17.0; 3]);
+    }
+    assert!(!tangent.apply(&[0.0; 3], &[0.0; 3], &mut [0.0; 2]));
+}

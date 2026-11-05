@@ -144,6 +144,46 @@ fn physical_scale_does_not_set_an_implicit_harmonic_cutoff() {
 }
 
 #[test]
+fn cancellation_of_strong_modes_does_not_erase_nonlinear_output_harmonics() {
+    struct CoupledOutput;
+    impl Storage for CoupledOutput {
+        fn hamiltonian(&self, x: &[f64]) -> f64 {
+            0.5 * (x[0].powi(2) + x[2].powi(2)) + 0.25 * x[1].powi(4)
+        }
+        fn gradient(&self, x: &[f64], out: &mut [f64]) {
+            out.copy_from_slice(&[x[0], x[1].powi(3), x[2]]);
+        }
+    }
+    let source = PortHamiltonian::new(3, 1, vec![0.0; 9], vec![0.0; 9],
+        vec![1.0; 3], Box::new(CoupledOutput)).unwrap();
+    let angle = 0.37;
+    let half = phase(angle).scale(0.5);
+    let large = 2.0_f64.powi(54);
+    // A manufactured physical waveform isolates the observation law. The two
+    // linear efforts cancel exactly; the remaining cubic effort is cos^3(theta).
+    let candidate = HbOrbit {
+        omega: TAU * 83.0,
+        coeffs: vec![
+            vec![C64::ZERO, half.scale(large)],
+            vec![C64::ZERO, half],
+            vec![C64::ZERO, half.scale(-large)],
+        ],
+        residual_trace: Vec::new(), residual: f64::NAN,
+        aft_samples: 0, sampling_defect: f64::NAN,
+    };
+    let mut limits = controls(3);
+    limits.rms_tolerances = vec![1e-10];
+    let result = observe_port_spectrum(&source, &candidate, &limits, || false).unwrap();
+    close(result.dc[0], 0.0);
+    for (index, amplitude) in [0.75, 0.0, 0.25].into_iter().enumerate() {
+        let expected = phase(-((index + 1) as f64) * angle).scale(amplitude);
+        close(result.peak_phasors[0][index].re, expected.re);
+        close(result.peak_phasors[0][index].im, expected.im);
+    }
+    assert_eq!(result.source_evaluations, 224);
+}
+
+#[test]
 fn dc_only_output_retains_the_physical_static_load_without_doubling() {
     let candidate = waveform(0.4, 0.0, 0.0);
     let mut candidate = candidate;

@@ -65,6 +65,13 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         GoldCyanideCementationWithZinc,
         SilverCyanideCementationWithZinc,
         CyanidePeroxideOxidation,
+        SodiumMetabisulfiteDissolution,
+        SodiumSulfiteDissolution,
+        HydrogenSulfiteDissociation,
+        CyanideBisulfiteOxidation,
+        CyanideSulfiteOxidation,
+        SulfiteOxygenOxidation,
+        BisulfiteOxygenOxidation,
         CyanateHydrolysisAmmoniumCarbonate,
         AmmoniumDissociation,
         HydrogenPeroxideDecomposition,
@@ -80,6 +87,10 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         CarbonicComponentDissociation,
         BicarbonateDissociation,
         PyriteOxidationFerrous,
+        IronRichPyrrhotiteDissolvedOxygenOxidation,
+        SulfurRichPyrrhotiteDissolvedOxygenOxidation,
+        FerricIronRichPyrrhotiteLeach,
+        FerricSulfurRichPyrrhotiteLeach,
         FerrousOxidationFerric,
         FerricPyriteOxidation,
         ScoroditePrecipitation,
@@ -307,6 +318,99 @@ fn pyrite_endpoint_changes_oxygen_demand_and_acid_generation() {
             .value(),
         0.5,
     );
+}
+
+#[test]
+fn pyrrhotite_composition_changes_dissolved_oxygen_and_direct_acid_demand() {
+    let fes = MineralReaction::IronRichPyrrhotiteDissolvedOxygenOxidation
+        .build()
+        .unwrap();
+    let fe7s8 = MineralReaction::SulfurRichPyrrhotiteDissolvedOxygenOxidation
+        .build()
+        .unwrap();
+    // Equal sulfur amount: eight FeS units versus one Fe7S8 formula unit.
+    close(amount(&fes, 8.0, "O2(aq)"), 16.0);
+    close(amount(&fe7s8, 0.5, "O2(aq)"), 15.5);
+    close(amount(&fes, 8.0, "Fe[2+](aq)"), 8.0);
+    close(amount(&fe7s8, 0.5, "Fe[2+](aq)"), 7.0);
+    close(amount(&fes, 8.0, "SO4[2-](aq)"), 8.0);
+    close(amount(&fe7s8, 0.5, "SO4[2-](aq)"), 8.0);
+    close(amount(&fe7s8, 0.5, "H+(aq)"), 2.0);
+    assert!(fes.terms().iter().all(|t| t.species != id("H+(aq)")));
+    for reaction in [&fes, &fe7s8] {
+        assert!(reaction.terms().iter().all(|t| t.species != id("O2(g)")));
+    }
+    // Only one Fe7S8 formula unit can react with 15.5 mol dissolved oxygen;
+    // abundant mineral and liquid water cannot fund additional oxygen demand.
+    let initial = [
+        (id("Fe7S8(s-pyrrhotite)"), Amount::new(3.0)),
+        (id("O2(aq)"), Amount::new(15.5)),
+        (id("H2O(l)"), Amount::new(10.0)),
+        (id("Fe[2+](aq)"), Amount::new(0.0)),
+        (id("SO4[2-](aq)"), Amount::new(0.0)),
+        (id("H+(aq)"), Amount::new(0.0)),
+    ];
+    close(fe7s8.limiting_extent(&initial[..3]).unwrap().value(), 0.5);
+    assert!(
+        fe7s8
+            .advance_inventory(&initial, Amount::new(0.51))
+            .is_err()
+    );
+}
+
+#[test]
+fn pyrrhotite_ferric_endpoints_keep_oxidant_and_mineral_iron_separate() {
+    for (recipe, mineral, ferric, ferrous, sulfur) in [
+        (
+            MineralReaction::FerricIronRichPyrrhotiteLeach,
+            "FeS(s-alpha-pyrrhotite)",
+            2.0,
+            3.0,
+            1.0,
+        ),
+        (
+            MineralReaction::FerricSulfurRichPyrrhotiteLeach,
+            "Fe7S8(s-pyrrhotite)",
+            14.0,
+            21.0,
+            8.0,
+        ),
+    ] {
+        let reaction = recipe.build().unwrap();
+        close(amount(&reaction, 1.0, mineral), 1.0);
+        close(amount(&reaction, 1.0, "Fe[3+](aq)"), ferric);
+        close(amount(&reaction, 1.0, "Fe[2+](aq)"), ferrous);
+        close(amount(&reaction, 1.0, "S(s)"), sulfur);
+        let initial = [
+            (id(mineral), Amount::new(2.0)),
+            (id("Fe[3+](aq)"), Amount::new(ferric)),
+            (id("Fe[2+](aq)"), Amount::new(0.0)),
+            (id("S(s)"), Amount::new(0.0)),
+        ];
+        close(
+            reaction.limiting_extent(&initial[..2]).unwrap().value(),
+            1.0,
+        );
+        let final_inventory = reaction
+            .advance_inventory(&initial, Amount::new(1.0))
+            .unwrap();
+        for (species, expected) in [
+            (mineral, 1.0),
+            ("Fe[3+](aq)", 0.0),
+            ("Fe[2+](aq)", ferrous),
+            ("S(s)", sulfur),
+        ] {
+            close(
+                final_inventory
+                    .iter()
+                    .find(|(s, _)| *s == id(species))
+                    .unwrap()
+                    .1
+                    .value(),
+                expected,
+            );
+        }
+    }
 }
 
 #[test]

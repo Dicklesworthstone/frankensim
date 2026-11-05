@@ -29,6 +29,10 @@ pub enum AngularSpectrumFactorStatistics {
 }
 
 /// Whole-ensemble work limits, including the optional deterministic mean.
+/// Pair work charges N*F² per proper bank and includes the admitted
+/// nonzero-carrier spatial-axis pass only for the mean and real factors.
+/// Query workspace still conservatively includes the generic prepared bank;
+/// preparing that reusable owner separately admits its deterministic cache.
 /// Workspace conservatively includes the largest original exposure query,
 /// the ensemble's compensated accumulation and the final output. Other
 /// borrowed banks/beam owners, earlier outputs and allocator overhead are
@@ -133,20 +137,31 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
         for (bank, proper) in banks(mean, factors, statistics) {
             poll(&mut cancelled)?;
             if bank.anchor.grid() != anchor.grid()
+                || bank.anchor.carrier_rad_m != anchor.carrier_rad_m
                 || !bank
                     .anchor
                     .source()
                     .same_sources_and_geometry(anchor.source())
             {
                 return Err(bad(
-                    "exposure ensemble requires the same original materials, layers and grid",
+                    "exposure ensemble requires the same original materials, layers, grid and carrier",
                 ));
             }
             line_count = line_count
                 .checked_add(bank.line_count())
                 .ok_or_else(|| bad("exposure ensemble line work overflow"))?;
+            let bank_pairs = if proper {
+                anchor
+                    .modes
+                    .len()
+                    .checked_mul(bank.frequency_count())
+                    .and_then(|v| v.checked_mul(bank.frequency_count()))
+                    .ok_or_else(|| bad("exposure ensemble pair work overflow"))?
+            } else {
+                bank.point_frequency_pairs()
+            };
             point_frequency_pairs = point_frequency_pairs
-                .checked_add(bank.point_frequency_pairs())
+                .checked_add(bank_pairs)
                 .ok_or_else(|| bad("exposure ensemble pair work overflow"))?;
             field_fft_work = field_fft_work
                 .checked_add(bank.field_fft_work())
@@ -305,6 +320,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
                         bank,
                         side,
                         distance_from_face_m,
+                        true,
                         |a, b| window.proper_product_kernel(a, b),
                         proper_product,
                         ProperHarmonicProduct::mean_real_product_parts_dd,
@@ -317,6 +333,7 @@ impl<'e, 'b, 's, 'm> AngularSpectrumExposureEnsemble<'e, 'b, 's, 'm> {
                         bank,
                         side,
                         distance_from_face_m,
+                        false,
                         |a, b| window.product_kernel(a, b),
                         product,
                         HarmonicProduct::mean_real_product_parts_dd,
@@ -381,6 +398,7 @@ fn accumulate_bank<P: Copy>(
     bank: &AngularSpectrumExposure<'_, '_, '_>,
     side: ExposureSide,
     distance: f64,
+    proper: bool,
     kernel: impl Fn(f64, f64) -> Result<P, fs_fft::harmonic_window::WindowError>,
     product: impl Fn(P, C64, C64) -> Result<Dd, MomentError>,
     product_parts: impl Fn(P, [Dd; 2], [Dd; 2]) -> Result<Dd, fs_fft::harmonic_window::WindowError>,
@@ -412,13 +430,17 @@ fn accumulate_bank<P: Copy>(
     for group in 0..f {
         fields.push(bank.frequency_modal_field(group, side, distance, cancelled)?);
     }
-    let normal_power = integrate_cell_power(
-        bank.anchor.grid(),
-        &fields,
-        &kernels,
-        product_parts,
-        cancelled,
-    )?;
+    let normal_power = {
+        let carrier = bank.carrier_fields(&fields, proper, cancelled)?;
+        integrate_cell_power(
+            bank.anchor.grid(),
+            &fields,
+            carrier.as_ref(),
+            &kernels,
+            product_parts,
+            cancelled,
+        )?
+    };
     for (group, field) in fields.iter_mut().enumerate() {
         bank.synthesize_frequency_field(group, field, cancelled)?;
     }

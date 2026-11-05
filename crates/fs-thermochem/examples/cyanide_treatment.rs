@@ -1,6 +1,6 @@
-//! Finite peroxide treatment and source-backed ammonia/carbonate/cyanide pH.
+//! Finite peroxide/sulfite treatment and source-backed ammonia/carbonate/cyanide pH.
 //!
-//! Run with --help for the two explicit models. `treat` closes finite reagent,
+//! Run with --help for the explicit models. `treat` closes finite reagent,
 //! atom, charge and standard-enthalpy accounts for prescribed extents. `speciate`
 //! solves analytical pools at one common ideal pH and a fixed solvent basis;
 //! it does not reinterpret that approximation as a finite-solvent H/O ledger.
@@ -28,9 +28,13 @@ use fs_thermochem::{
     },
 };
 
+#[path = "cyanide_treatment/sulfite.rs"]
+mod sulfite;
+
 const REFERENCE: &str = "source-elemental-reference-nbs1989";
 const USAGE: &str = "usage:
   cyanide_treatment treat PACK_DIR CN_MOL H2O2_MOL WATER_MOL OX_EXTENT_MOL DECOMP_EXTENT_MOL HYDROLYSIS_EXTENT_MOL
+  cyanide_treatment sulfite PACK_DIR CN_MOL NA2S2O5_MOL WATER_MOL DISSOLVED_O2_MOL DISSOLVE_EXTENT_MOL OX_EXTENT_MOL SIDE_EXTENT_MOL
   cyanide_treatment speciate PACK_DIR AMMONIA_TOTAL_MOL INORGANIC_CARBON_TOTAL_MOL UNCOMPLEXED_CYANIDE_TOTAL_MOL NREF_MOL SODIUM_MOL CHLORIDE_MOL
 
 treat: all products initially zero; oxidation and decomposition share one stock:
@@ -41,6 +45,16 @@ A subsequent explicit stage consumes only the available cyanate and water:
 Extents are moles of each complete equation. No rate or treatment efficiency
 is inferred; nitrogen remains in cyanide, cyanate or ammonium.
 
+sulfite: crystalline metabisulfite first dissolves with explicit water:
+  Na2S2O5(s) + H2O(l) -> 2 Na+ + 2 HSO3-
+Only after that stage, productive and side oxidation share the finite inventory:
+  CN- + HSO3- + O2(aq) -> OCN- + SO4(2-) + H+
+  2 HSO3- + O2(aq) -> 2 SO4(2-) + 2 H+
+Oxygen is dissolved inventory, not gas feed. Preparation consumes finite water;
+extents supply no catalyst kinetics, automatic pH, air transfer or WAD-CN removal.
+The crystalline metabisulfite source has enthalpy but no Gibbs/entropy data.
+See data/matdb/seed-v1/MINING_SULFITE_TREATMENT.md for the required source packs.
+
 speciate: ammonia means NH4+ + NH3; inorganic carbon means the source's formal
 H2CO3 component + HCO3- + CO3(2-); uncomplexed cyanide means HCN + CN-.
 All families share one solved pH. Sodium and chloride are explicit spectators.
@@ -48,7 +62,7 @@ NREF_MOL is the amount at unit activity, solvent kg times 1 mol/kg for these
 NBS sources, not solution volume. Water activity is fixed at one. Cyanate,
 peroxide, bound cyanide, gas loss and nonideal activities are outside this model.
 
-Both modes require the phase-specific NBS packs documented in
+All modes require the phase-specific NBS packs documented in
 data/matdb/seed-v1/MINING_CYANIDE_TREATMENT.md at 298.15 K and 100000 Pa.";
 
 struct Source {
@@ -96,6 +110,23 @@ fn point(phase: &str, ion: bool, carbonic: bool) -> Result<QueryPoint, Box<dyn E
 
 fn load(directory: &Path, species: &SpeciesId) -> Result<Source, Box<dyn Error>> {
     let (slug, phase, ion) = match species.as_str() {
+        "Na2S2O5(s)" => (
+            "sodium-metabisulfite-solid-nbs1989-thermochemistry",
+            "source-phase-solid",
+            false,
+        ),
+        "HSO3[-](aq)" => (
+            "hydrogen-sulfite-ion-aqueous-nbs1989",
+            "source-phase-aqueous",
+            true,
+        ),
+        "SO4[2-](aq)" => ("sulfate-ion-aqueous-nbs1989", "source-phase-aqueous", true),
+        "Na[+](aq)" => ("sodium-ion-aqueous-nbs1989", "source-phase-aqueous", true),
+        "O2(aq)" => (
+            "oxygen-aqueous-nbs1989-thermochemistry",
+            "source-phase-aqueous",
+            false,
+        ),
         "H2O2(aq)" => (
             "hydrogen-peroxide-aqueous-nbs1989",
             "source-phase-aqueous",
@@ -494,7 +525,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("{USAGE}");
         return Ok(());
     }
-    if args.len() != 8 {
+    let expected = match args.first().map(String::as_str) {
+        Some("sulfite") => 9,
+        Some("treat" | "speciate") => 8,
+        _ => return Err(USAGE.into()),
+    };
+    if args.len() != expected {
         return Err(USAGE.into());
     }
     let values = args[2..]
@@ -509,6 +545,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     match args[0].as_str() {
         "treat" => treat(Path::new(&args[1]), &values),
+        "sulfite" => sulfite::run(Path::new(&args[1]), &values),
         "speciate" => speciate(Path::new(&args[1]), &values),
         _ => Err(USAGE.into()),
     }

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use fs_exec::CancelGate;
-use super::{ChtError, Compact, FlowField, ThermalSetup, Voxel, VoxelDomain};
+use super::{ChtError, FlowField, ThermalSetup, Voxel, VoxelDomain};
 
 /// One zero-thickness thermal joint on a Cartesian cell face.
 ///
@@ -12,6 +12,8 @@ use super::{ChtError, Compact, FlowField, ThermalSetup, Voxel, VoxelDomain};
 /// retain ordered surfaces and resolve R at both local temperatures. Same-material
 /// joints, solid/fluid walls and stagnant fluid pairs are allowed. No contact-area,
 /// pressure, phase or interfacial storage law is inferred.
+/// A compact component's case/board contact is additional to its declared
+/// junction resistor; the collapsed package contributes no fictitious bulk leg.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FaceContactResistance {
     /// Two distinct face-adjacent cells, not material indices.
@@ -25,7 +27,7 @@ pub(super) fn prepare(
     domain: &VoxelDomain,
     flow: &FlowField,
     setup: &ThermalSetup,
-    compact: &Compact,
+    compact_owner: &[usize],
     gate: &CancelGate,
 ) -> Result<BTreeMap<(usize, usize), f64>, ChtError> {
     super::super::poll(gate)?;
@@ -61,13 +63,61 @@ pub(super) fn prepare(
         {
             return Err(refuse(format!("contact {index}: face also has a material-pair contact law")));
         }
-        if compact.owner(a).is_some() || compact.owner(b).is_some() {
-            return Err(refuse(format!("contact {index}: compact links replace ordinary face transport")));
-        }
+        compact_face(domain, setup, compact_owner, contact.cells)?;
         if flow.outward(domain, a, face) != 0.0 {
             return Err(refuse(format!("contact {index}: stationary thermal contacts cannot carry through-flow")));
         }
     }
     super::super::poll(gate)?;
     Ok(field)
+}
+
+/// The actual package branch behind one case/board surface. Only a surface
+/// contact is admitted: collapsed internal faces and adiabatic package sides
+/// remain closed, and two compact components cannot share a physical link.
+#[derive(Clone, Copy)]
+pub(super) struct CompactFace {
+    pub alias: usize,
+    pub outside: usize,
+    pub axis: usize,
+    pub package_first: bool,
+    pub package_resistance_m2_k_w: f64,
+}
+
+pub(super) fn compact_face(
+    domain: &VoxelDomain, setup: &ThermalSetup, owner: &[usize], cells: [usize; 2],
+) -> Result<Option<CompactFace>, ChtError> {
+    let invalid = |reason: &str| ChtError::InvalidInput {
+        field: "thermal.face_contacts", reason: reason.into(),
+    };
+    let [a, b] = cells;
+    if a >= domain.cell_count() || b >= domain.cell_count() || a == b {
+        return Err(invalid("contact needs two distinct domain cells"));
+    }
+    let face = (0..6).find(|&f| domain.neighbor(a, f) == Some(b))
+        .ok_or_else(|| invalid("contact cells are not face-adjacent"))?;
+    let component = |c: usize| owner.get(c).copied().filter(|&i| i != usize::MAX);
+    let (index, alias, outside, outward, package_first) = match (component(a), component(b)) {
+        (None, None) => return Ok(None),
+        (Some(i), None) => (i, a, b, face, true),
+        (None, Some(i)) => (i, b, a, face ^ 1, false),
+        (Some(_), Some(_)) => return Err(invalid(
+            "compact contacts require one case/board surface and one ordinary outside cell",
+        )),
+    };
+    let part = &setup.compact_components[index];
+    let board = part.board_face as usize;
+    if outward / 2 != board / 2 {
+        return Err(invalid("compact sides are adiabatic; contacts require a case or board face"));
+    }
+    let resistance = if outward == board {
+        part.junction_to_board_k_w
+    } else {
+        part.junction_to_case_k_w
+    } * part.face_area(domain);
+    if !resistance.is_finite() || resistance <= 0.0 {
+        return Err(invalid("compact branch area resistance is unrepresentable"));
+    }
+    Ok(Some(CompactFace { alias, outside, axis: outward / 2,
+        package_first, package_resistance_m2_k_w: resistance }))
 }

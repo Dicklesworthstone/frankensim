@@ -304,6 +304,14 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                     + (p.velocity[1].abs() + p.sound_speed) / self.accepted.grid.spacing[1],
             );
         }
+        rate = rate.max(super::super::pressure_outlet_rate(
+            &self.accepted.gas,
+            &self.accepted.grid,
+            self.accepted.boundaries,
+            &self.accepted.states,
+            self.accepted.hydrostatic.as_ref(),
+            &mut cancelled,
+        )?);
         let mut dt = maximum_duration.value().min(controls.advection.cfl / rate);
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;

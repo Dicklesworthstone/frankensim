@@ -237,29 +237,42 @@ impl MembranePatch {
     pub fn evaluate(&self, displacement_m: &[[f64; 3]], mut cancelled: impl FnMut() -> bool)
         -> Result<MembraneEvaluation, MembraneError> {
         poll(&mut cancelled)?;
+        let mut internal_gradient_n = vec![[0.0;3]; self.mesh.nodes.len()];
+        let strain_energy_j = self.evaluate_into(displacement_m, &mut internal_gradient_n, &mut cancelled)?;
+        Ok(MembraneEvaluation { strain_energy_j, internal_gradient_n })
+    }
+    // Shared assembly into a caller-owned trial buffer. Only this private
+    // workspace may be partially written on refusal; public states are staged.
+    fn evaluate_into(&self, displacement_m: &[[f64;3]], internal_gradient_n: &mut [[f64;3]],
+        cancelled: &mut impl FnMut()->bool) -> Result<f64,MembraneError> {
+        poll(cancelled)?;
         if !finite_vectors(displacement_m, self.mesh.nodes.len()) {
             return Err(MembraneError::Invalid("one finite displacement vector per reference node required"));
         }
-        let mut out = MembraneEvaluation { strain_energy_j: 0.0, internal_gradient_n: vec![[0.0;3]; self.mesh.nodes.len()] };
+        if internal_gradient_n.len() != self.mesh.nodes.len() {
+            return Err(MembraneError::Invalid("one trial force vector per reference node required"));
+        }
+        internal_gradient_n.fill([0.0;3]);
+        let mut strain_energy_j = 0.0;
         for (index, e) in self.elements.iter().enumerate() {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let f = self.deformation(e, displacement_m);
             let r = self.response(index, f)?;
-            out.strain_energy_j += e.area*r.energy_j_m2;
+            strain_energy_j += e.area*r.energy_j_m2;
             let [s11,s22,s12] = r.resultants_n_m;
             for (a, &node) in e.nodes.iter().enumerate() {
                 let [gx,gy] = e.gradients[a];
                 for i in 0..3 {
-                    out.internal_gradient_n[node][i] += e.area*(
+                    internal_gradient_n[node][i] += e.area*(
                         (s11*gx+s12*gy)*f[0][i] + (s12*gx+s22*gy)*f[1][i]);
                 }
             }
         }
-        if !out.strain_energy_j.is_finite() || !finite_vectors(&out.internal_gradient_n, self.mesh.nodes.len()) {
+        if !strain_energy_j.is_finite() || !finite_vectors(internal_gradient_n, self.mesh.nodes.len()) {
             return Err(MembraneError::Invalid("unrepresentable assembled energy or force"));
         }
-        poll(&mut cancelled)?;
-        Ok(out)
+        poll(cancelled)?;
+        Ok(strain_energy_j)
     }
     /// Exact matrix-free tangent action, including initial-stress/geometric
     /// stiffness. No finite differencing and no dense global Hessian allocation.
@@ -309,6 +322,9 @@ mod equilibrium;
 pub use equilibrium::{MembraneSolveSettings, MembraneSolution};
 
 mod pressure;
+
+/// Nonlinear motion with source-owned elasticity and reference inertia.
+pub mod dynamics;
 
 /// Prestressed vibration and work-conjugate force/volume ports.
 pub mod vibration;

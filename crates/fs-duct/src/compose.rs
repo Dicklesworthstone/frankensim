@@ -450,13 +450,27 @@ pub fn compose_chain_reflection(
     load: Option<C64>,
     options: ComposeOptions,
 ) -> Result<InputReflection, DuctError> {
-    let (total, condition) = compose_scattering(blocks, options, &mut || false)?;
+    compose_chain_reflection_controlled(blocks, load, options, || false)
+}
+
+/// Cancellable direct reflection, using the same terminated scattering
+/// recursion and admission as [`compose_chain_reflection`]. Cancellation is
+/// observed during both forward composition and the load-to-input sweep.
+/// No impedance or imposed-input-flow normalization is formed: an input
+/// pressure antinode remains a finite reflected wave.
+pub fn compose_chain_reflection_controlled(
+    blocks: &[TwoPort],
+    load: Option<C64>,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<InputReflection, DuctError> {
+    let (total, condition) = compose_scattering(blocks, options, &mut cancelled)?;
     let reference = total.reference_impedance;
     let LoadReflection::Finite(r_load) = load_reflection(load, reference)? else {
         return Err(DuctError::Singular);
     };
     let (reflection, _, condition) =
-        terminated_reflection(blocks, options, &mut || false, total, condition, r_load)?;
+        terminated_reflection(blocks, options, &mut cancelled, total, condition, r_load)?;
     if !finite(reflection) {
         return Err(DuctError::Singular);
     }

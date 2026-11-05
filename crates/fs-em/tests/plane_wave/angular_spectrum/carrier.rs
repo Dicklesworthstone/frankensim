@@ -384,8 +384,11 @@ fn carrier_admission_and_exposure_boundaries_are_explicit() {
         )
         .is_err()
     );
+    // Only the constant envelope's DC bin is occupied; shifted dark bins
+    // outside the cone do not forbid this physical near-grazing plane wave.
+    assert!(prepare([0.99, 0.0], limits()).is_ok());
     assert!(matches!(
-        prepare([0.99, 0.0], limits()),
+        prepare([1.01, 0.0], limits()),
         Err(AngularSpectrumError::IncidentLightCone { .. })
     ));
     assert!(prepare([f64::NAN, 0.0], limits()).is_err());
@@ -396,7 +399,20 @@ fn carrier_admission_and_exposure_boundaries_are_explicit() {
         maximum_workspace_bytes: 4 << 20,
         maximum_fft_work: 1 << 20,
     };
-    assert!(AngularSpectrumExposure::try_new(&beam, &[], exposure_limits, || false).is_err());
+    assert!(AngularSpectrumExposure::try_new(&beam, &[], exposure_limits, || false).is_ok());
+    let matched = [prepare([0.4, 0.0], limits()).unwrap()];
+    assert!(
+        AngularSpectrumExposure::try_new(
+            &matched[0],
+            &matched,
+            AngularSpectrumExposureLimits {
+                maximum_point_frequency_pairs: 1024,
+                ..exposure_limits
+            },
+            || false,
+        )
+        .is_ok()
+    );
     let zero = prepare([0.0; 2], limits()).unwrap();
     let factors = [beam, prepare([0.2, 0.0], limits()).unwrap()];
     assert!(

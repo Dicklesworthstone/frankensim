@@ -3370,14 +3370,18 @@ is made.
 Liquid and gas graph source owners expose `evaluate_developing_sections` and
 `evaluate_quasi_steady_developing_sections`. The shared
 `material::convection::developing` implementation uses the original Hausen mean
-through `fs-convection`'s section-integrated evaluator. Explicit forward/reverse
+for `DevelopingDuct::Circular`, or the Shah-London simultaneously developing
+rectangular CWT table for `DevelopingDuct::Rectangular`, through `fs-convection`'s
+section-integrated evaluators. Explicit forward/reverse
 entrance distances follow actual signed flow; spatial subdivision does not
 implicitly restart the heated entrance at every pipe cell.
 
 Each binding names an original pipe cell and an existing zero-conductance
-finite wall link or prescribed wall reservoir. The authored diameter must
-match the native circular flow area, and the wall patch must cover that cell's
-full circular wetted perimeter and length. One binding owns that whole wall.
+finite wall link or prescribed wall reservoir. The authored diameter or
+width/height must match the native flow area, and the wall patch must cover
+that cell's full wetted perimeter and length. Rectangular geometry uses
+`Dh=4A/P` in both Re and `h=Nu k/Dh`, and the physical minor/major side ratio
+in the table admission. One binding owns that whole wall.
 Original local bulk/film sources, caloric identity, density, Reynolds/Mach and
 mechanical-work limits remain authoritative. Old/new/average flow and signed
 zero crossings retain original correlation support and entrance orientation;
@@ -3391,9 +3395,14 @@ Returned wall-to-fluid powers are diagnostic and must not be supplied again
 as cell sources. Explicit section counts bound source work; native cell order
 fixes result ordering. No new momentum or thermal integrator is introduced.
 
-This uses the original constant-wall-temperature, hydrodynamically developed
-uniform circular-duct relation. The caller retains that geometry and upstream
-thermal-entrance model; mixing junctions, bends, changing diameter or wall
+The circular relation retains its constant-wall-temperature, hydrodynamically
+developed inlet. The rectangular relation instead retains simultaneously
+developing flow, equal constant temperature on all four walls, exactly
+aspect ratio 0.5 and the actual source Pr=0.72. Unsupported properties are
+refused, not rounded or replaced with a circular coefficient. Original table
+and declared low-Graetz engineering-bridge evidence stays on the retained
+`DevelopingSectionEvaluation`. The caller retains the selected geometry and
+upstream entrance model; mixing junctions, bends, changing cross-section or wall
 conditions are not newly modeled. Updating local properties or finite wall
 and bulk temperatures is a held-property approximation. Exact partition
 additivity is claimed only at the same source and wall state, and the original
@@ -3645,3 +3654,43 @@ approximation, and positive sections have no validated local discrepancy band.
 Two source/material integration regressions cover conservation and original
 source-domain refusal; they require the unavailable constellation closure and
 are not reported as executed here.
+
+## Source-resolved developed sections in series
+
+`graph::inertial::laminar::series::LaminarSeries` connects the original admitted
+`LaminarPipe` sections with exactly one common incompressible flow. It retains
+each source, radius, viscosity and every wall-memory arm. The duplicate mean
+flows are eliminated analytically, with total inertance equal to the sum of the
+original section inertances; no intermediate compliance, steady-flow root or
+step-average continuity approximation is introduced. One energy-normalized mean
+coordinate and all original profile coordinates carry the exact sum of the
+section kinetic energies. Construction checks the complete 128-state bound and
+exact common reference density before allocating dense matrices.
+
+The original native exact propagator advances the entire held-pressure coupled
+trajectory. Its port average drives displaced volume and work. Independent
+`PreparedSourceLoss` caches integrate each section's original positive viscous
+source squares on that same trajectory, preserving local heat deposition even
+while the profiles develop or reverse. These integrals close against the native
+total dissipation before state and caller-owned section-heat slots publish
+together. They are never assigned by a steady resistance fraction, an endpoint
+power estimate or a kinetic-energy deficit. Preparation owns all exponentials
+and scratch; successful warm advances and mean-flow relations allocate nothing.
+
+`with_sources` renews each original pipe's source, frequency-band and viscosity
+admission while preserving the coupled mean flow, every local profile history,
+kinetic energy and clock. Every density must remain exactly unchanged. The
+cooperative mean/profile-flow comparison bounds Reynolds support for every
+section throughout a held interval; each original section's ceiling applies.
+A failed source, owner, regime, arithmetic, heat closure or cancellation leaves
+accepted state and local heat output unchanged.
+
+This is an ideal series connection of developed Stokes components. Different
+radii do not infer area-change, entrance or convective momentum losses, and
+local heat output does not itself evolve a thermal inventory. Thermal expansion,
+radial viscosity variation, density changes, mixing and turbulent transitions
+require their own owners. Tests check uniform-pipe subdivision through startup
+and reversal, each section's heat and kinetic inventory, heterogeneous viscous
+history against the original full common-flow descriptor, unchanged energy
+through a nonsteady material update, steady local heat, complex impedance and
+atomic physical-limit refusals. Runtime verification is reported separately.

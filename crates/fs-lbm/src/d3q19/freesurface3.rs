@@ -5,7 +5,7 @@
 //! `crate::freesurface` onto the D3Q19 sparse active-tile grid — the same
 //! cell taxonomy (fluid / interface / gas), the same pairwise-antisymmetric
 //! mass exchange, the same gas-side population reconstruction, the same
-//! conversion cascade with a conservation carry, and the same
+//! conversion cascade carrying signed mass and physical momentum, and the same
 //! surface-tension reference-density port. Resolved interfaces use volume-
 //! fraction height functions; incomplete stencils retain smoothed-fill
 //! curvature with the contact-model wall ghost. An opt-in planar equilibrium
@@ -62,8 +62,9 @@ pub(crate) mod pressure;
 pub use pressure::GasPressureLink3;
 mod curvature;
 mod forcing;
-mod impulse;
+pub use forcing::BodyAccelerationField3;
 mod conversion_momentum;
+mod impulse;
 pub use conversion_momentum::ConversionMomentumReport3;
 mod geometry;
 mod motion;
@@ -87,19 +88,23 @@ use transport::{MassLocation3, MassTransport3};
 /// Version 5 removes absolute density/mass floors from volume fractions and
 /// conservation readback, preserving geometry at every admitted density scale.
 /// Streamed density must stay positive even when surface tension is zero.
+/// Version 6 makes capacity-bounded physical momentum conversion the default
+/// for every constructor, including ordinary and pressure-driven stepping.
 /// Explicit `LegacyGlobal` replay retains its historical conversion and gas
 /// reconstruction arithmetic.
-pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 5;
+pub const FREE_SURFACE3_BIT_SEMANTICS_VERSION: u32 = 6;
 
 /// Conversion semantics for new simulations versus historical trajectory replay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ConversionRedistribution3 {
-    /// Transfer excess and debt only to surviving neighboring interface cells.
-    #[default]
+    /// Historical mass-only transfers to surviving neighboring interfaces.
+    /// This explicit replay policy does not preserve conversion momentum.
     Local,
     /// Bound each local route by actual mass/capacity and carry its physical
     /// momentum. Refuse unlocated carry or unsupported geometry; report signed
-    /// numerical kinetic change without turning it into heat. Opt-in.
+    /// numerical kinetic change without turning it into heat. The default for
+    /// ordinary and pressure-driven native stepping.
+    #[default]
     ConservativeLocal,
     /// Reproduce version-1 global pooling, including its nonlocal mass and heat
     /// mixing between disconnected drops. Intended only for historical replay.
@@ -378,9 +383,9 @@ pub struct FreeSurface3 {
     /// Accepted force frame of each wet population. Independent held fields
     /// omit a uniform reference frame; acceleration keeps a complete history.
     local_force: Option<BTreeMap<(u64, usize), [f64; 3]>>,
-    /// Explicit body acceleration. Its complete accepted F=rho*a history is
-    /// retained in local_force; None preserves historical held-force semantics.
-    body_acceleration: Option<[f64; 3]>,
+    /// Uniform or affine acceleration in fixed grid coordinates. Its complete
+    /// accepted F=rho*a(x) history remains in local_force; None preserves held forces.
+    body_acceleration: Option<BodyAccelerationField3>,
 }
 
 impl core::fmt::Debug for FreeSurface3 {
@@ -592,7 +597,7 @@ impl FreeSurface3 {
             solid,
             sigma,
             local_sigma: None,
-            redistribution: ConversionRedistribution3::Local,
+            redistribution: ConversionRedistribution3::default(),
             contact,
             planar_contact: None,
             planar_contact_field: None,
@@ -766,7 +771,8 @@ impl FreeSurface3 {
         self.carry
     }
 
-    /// Select conversion semantics explicitly. Constructors use [`ConversionRedistribution3::Local`].
+    /// Select conversion semantics explicitly. Constructors use
+    /// [`ConversionRedistribution3::ConservativeLocal`].
     /// The legacy choice exists to replay previously frozen version-1 results;
     /// it does not provide spatially local drop or thermal transport.
     /// ConservativeLocal additionally transports physical conversion momentum,
@@ -837,6 +843,7 @@ impl FreeSurface3 {
         let tau = match self.collision_model() {
             super::CollisionModel3::Bgk { tau } | super::CollisionModel3::Trt { tau, .. } => tau,
             super::CollisionModel3::CentralMoment { second_order_rate, .. }
+            | super::CollisionModel3::CentralMomentBulk { shear_rate: second_order_rate, .. }
             | super::CollisionModel3::ReducedCumulant { second_order_rate, .. } => {
                 1.0 / second_order_rate
             }
@@ -1173,9 +1180,11 @@ impl FreeSurface3 {
     /// publication. Cancellation preserves populations, tracked mass and all
     /// conversion counters. Once publication begins its conversion cascade
     /// finishes; a later cancellation request is observed by the next step.
-    /// Both conservative momentum modes and the explicit body-acceleration
-    /// mode evaluate the entire step on a private candidate; any later refusal
-    /// also preserves populations, force history and the accepted receipt.
+    /// The default conservative momentum mode, its angular variant and explicit
+    /// body acceleration evaluate the entire step on a private candidate; any
+    /// later refusal also preserves populations, force history and the accepted
+    /// receipt. Explicit historical mass-only policies retain their older
+    /// post-publication conversion semantics.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
         if self.redistribution.preserves_momentum() || self.body_acceleration.is_some() {
             check_cancel(gate)?;
@@ -1352,6 +1361,7 @@ impl FreeSurface3 {
                 let perturbation = core::array::from_fn(|d| local_force[d] - base_force[d]);
                 let physical_velocity =
                     core::array::from_fn(|d| u_pre[d] + 0.5 * local_force[d] / rho_pre);
+                let endpoint_acceleration = self.acceleration_at_lane(key, lane)?;
                 let (pressure_force, correct_pressure_source) =
                     if self.redistribution == ConversionRedistribution3::LegacyGlobal {
                         if self.local_force.is_some() {
@@ -1413,7 +1423,7 @@ impl FreeSurface3 {
                                         },
                                     )?;
                                     let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
-                                    if let Some(acceleration) = self.body_acceleration {
+                                    if let Some(acceleration) = endpoint_acceleration {
                                         body_pressure_source.get_or_insert([0.0; Q3])[q] =
                                             0.5 * (forcing::source(q, physical_velocity, acceleration)
                                                 + forcing::source(OPP3[q], physical_velocity, acceleration));
@@ -1456,7 +1466,7 @@ impl FreeSurface3 {
         check_cancel(gate)?;
         for (key, lane, f) in new_populations {
             let slot = self.grid.slot_of(key).expect("active");
-            if let Some(acceleration) = self.body_acceleration {
+            if let Some(acceleration) = self.acceleration_at_lane(key, lane)? {
                 if f.iter().any(|value| !value.is_finite() || *value <= 0.0) {
                     return Err(FreeSurfaceError3::Transport(
                         "body acceleration needs positive finite endpoint populations",
@@ -1494,9 +1504,9 @@ impl FreeSurface3 {
         self.apply_conversions_with_tolerance(transport, EPS)
     }
 
-    // The ordinary trajectory retains its original hysteresis. Resolved
-    // surface geometry can explicitly finish an otherwise unsupported
-    // conversion with zero tolerance on its private material candidate.
+    // Explicit mass-only replay retains its original hysteresis. Conservative
+    // momentum conversion finishes signed bounds at zero tolerance, as does
+    // resolved surface geometry on its private material candidate.
     fn apply_conversions_with_tolerance(
         &mut self,
         mut transport: Option<&mut MassTransport3>,
@@ -1506,8 +1516,8 @@ impl FreeSurface3 {
         let mut momentum = if self.redistribution.preserves_momentum() {
             Some(conversion_momentum::ConversionMomentum3::new(self)?)
         } else { None };
-        // Capacity routing needs physical recipient inventories. The opt-in
-        // mode finishes ALL signed over/undershoots in this same conversion.
+        // Capacity routing needs physical recipient inventories. Momentum
+        // conversion finishes ALL signed over/undershoots in this same cascade.
         let tolerance = if momentum.is_some() { 0.0 } else { tolerance };
         let mut excess = Vec::new();
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
@@ -1605,7 +1615,7 @@ impl FreeSurface3 {
                     rho_avg = 1.0;
                 }
                 let mut initial = equilibrium3(rho_avg, u_avg);
-                let force = if let Some(acceleration) = self.body_acceleration {
+                let force = if let Some(acceleration) = self.acceleration_at_lane(nb_key, nb_lane)? {
                     // A birth is initialization, not an elapsed force update.
                     // Its own canonical density sets its half-source frame.
                     forcing::preserve_density(&mut initial, rho_avg)?;
@@ -2455,7 +2465,8 @@ mod capillary_boundary_tests {
 
     #[test]
     fn g0_orphan_conversion_debt_stays_in_carry_without_remote_injection() {
-        let mut sim = separated_drops();
+        let mut sim =
+            separated_drops().with_conversion_redistribution(ConversionRedistribution3::Local);
         let (slot, lane) = sim.grid.resolve_source(11, 4, 4).unwrap();
         let key = sim.grid.active_keys()[slot];
         sim.tiles.get_mut(&key).unwrap().cells[lane] = Cell3::Interface;

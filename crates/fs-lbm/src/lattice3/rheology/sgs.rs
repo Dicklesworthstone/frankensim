@@ -19,6 +19,9 @@ use crate::sgs3::{
     SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3,
 };
 
+mod moving_walls;
+pub use moving_walls::ChannelRheologySgs3;
+
 /// One explicit closure and its existing reusable scratch, borrowed for this
 /// step only. Dynamic variants retain their original periodic/channel topology,
 /// numerical capacity admission and exploration-only policy.

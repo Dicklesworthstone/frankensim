@@ -17,7 +17,7 @@ use super::{
     FluidDuctError, admit_blocks, admit_geometry, admit_load, bad, chain_from_waves_at_reference,
     poll, thermoviscous_wave_from_state, wave_from_state,
 };
-use crate::compose::{self, ChainResult, ComposeOptions, PreparedChain};
+use crate::compose::{self, ChainResult, ComposeOptions, InputReflection, PreparedChain};
 use crate::{ConeSlices, Duct, DuctError, LossModel, SegmentWave, WallModel};
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -215,6 +215,74 @@ pub fn input_impedance_load_with_loss<M: ThermoviscousFluid>(
         &mut cancelled,
     )?;
     Ok(compose::compose_chain_controlled(
+        &chain.blocks,
+        load,
+        options,
+        &mut cancelled,
+    )?)
+}
+
+/// Input reflection from the original regional materials and passive load.
+/// The common positive real reference is the first region's inlet reference;
+/// every interface retains its own physical pressure/volume-flow impedance.
+/// Input impedance poles are finite reflected waves and require no special
+/// load probing, pressure/flow conversion or material averaging.
+#[allow(clippy::too_many_arguments)]
+pub fn input_reflection_load<M: FluidAcoustics>(
+    duct: &Duct,
+    materials: &[M],
+    omega: f64,
+    load: Option<C64>,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<InputReflection, FluidDuctError> {
+    admit_load(load)?;
+    let chain = duct_chain(
+        duct,
+        materials,
+        omega,
+        wall,
+        cone_slices,
+        options,
+        &mut cancelled,
+    )?;
+    Ok(compose::compose_chain_reflection_controlled(
+        &chain.blocks,
+        load,
+        options,
+        &mut cancelled,
+    )?)
+}
+
+/// Direct regional reflection with each material's original thermal/viscous
+/// response. Mechanical walls and the terminal load keep their existing loss
+/// ownership. Cancellation remains live through the final reflection sweep.
+#[allow(clippy::too_many_arguments)]
+pub fn input_reflection_load_with_loss<M: ThermoviscousFluid>(
+    duct: &Duct,
+    materials: &[M],
+    omega: f64,
+    loss: LossModel,
+    load: Option<C64>,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<InputReflection, FluidDuctError> {
+    admit_load(load)?;
+    let chain = duct_chain_with_loss(
+        duct,
+        materials,
+        omega,
+        loss,
+        wall,
+        cone_slices,
+        options,
+        &mut cancelled,
+    )?;
+    Ok(compose::compose_chain_reflection_controlled(
         &chain.blocks,
         load,
         options,

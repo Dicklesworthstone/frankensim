@@ -151,9 +151,6 @@ pub(super) fn extract(
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
-    if data.temperature_contact.is_some() && boundary_requested {
-        return Err(bad("prescribed-temperature controls need the complete source-backed contact lift; use temperature-max-adjoint or temperature-max-contact-adjoint"));
-    }
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| bad("missing conduction setup"))?;
     if data.radiating_boundary.is_some() != (setup.radiation.is_some() || setup.enclosure_radiation.is_some())
@@ -256,7 +253,9 @@ pub(super) fn extract(
         live_contact_rows = Some(result.contact_rows);
         natural_ambient = result.natural_ambient;
         inlet_rows = result.air_rows;
-        let mode = if has_natural && !data.air_paths.is_empty() { "nonlinear-contact-natural-full-air-feedback" }
+        radiation_rows = result.radiation_rows;
+        let mode = if setup.radiation.is_some() { "nonlinear-contact-ambient-radiation-full-feedback" }
+            else if has_natural && !data.air_paths.is_empty() { "nonlinear-contact-natural-full-air-feedback" }
             else if !data.air_paths.is_empty() { "nonlinear-contact-full-air-feedback" }
             else if has_natural { "nonlinear-contact-natural-convection-feedback" }
             else { "nonlinear-contact-full-material-feedback" };

@@ -2,8 +2,10 @@
 //!
 //! Only the two periodic tangent directions are test-filtered. Each z layer
 //! fits its own coefficient, with the actual stationary halfway velocity and
-//! prescribed-temperature or insulating wall conditions in normal derivatives. The original
-//! source owner measures wall heat and publishes the complete candidate.
+//! prescribed-temperature or insulating wall conditions where supplied. For
+//! nonzero flux/film walls, physical and Favre scalar gradients are reconstructed
+//! from three current fluid layers. The original source owner still imposes
+//! the actual wall law, measures its heat and publishes the complete candidate.
 //! This remains resolved-wall, low-Mach Boussinesq sensible-temperature
 //! transport; modeled mechanical dissipation is diagnostic, not a heat source.
 
@@ -134,6 +136,8 @@ impl ThermalLbm3 {
 
     /// Allocate once for the existing periodic-x/y, rigid-z slab. At least
     /// three cells in each tangent direction and two fluid layers are required.
+    /// Insulation and reconstructed flux/film gradients require three fluid
+    /// layers when preparing the scalar fit; fixed-temperature walls need two.
     pub fn thermal_channel_sgs_workspace(
         &self,
         maximum_bytes: usize,
@@ -163,8 +167,11 @@ impl ThermalLbm3 {
     /// the plates. Molecular rates come from the caller or original slab;
     /// coefficients are frozen for one source/flow/temperature step.
     /// Active prescribed temperatures and zero-flux walls supply the scalar
-    /// derivatives. Nonzero flux/Robin walls refuse: their spatially varying
-    /// traces require a boundary filter this owner does not currently provide.
+    /// derivatives. Nonzero flux/film walls use second-order reconstruction
+    /// from three current fluid values at both physical and Favre scales.
+    /// Their actual flux remains with the original wall transport: no ambient
+    /// temperature is substituted for the surface and no diffusivity is needed
+    /// before fitting that diffusivity. Mixed walls retain their own policies.
     ///
     /// Zero viscosity and zero diffusivity each preserve their original rate
     /// bits independently. Preparation allocates nothing and polls cancellation
@@ -190,11 +197,7 @@ impl ThermalLbm3 {
                 ThermalWall::Convective { transfer, .. } if transfer == 0.0 => {
                     ScalarWall::ZeroGradient
                 }
-                ThermalWall::HeatFlux(_) | ThermalWall::Convective { .. } => {
-                    return Err(ThermalSgsError::Invalid(
-                        "channel SGS needs prescribed-temperature or zero-flux walls; nonzero flux/film traces need a local boundary filter",
-                    ));
-                }
+                ThermalWall::HeatFlux(_) | ThermalWall::Convective { .. } => ScalarWall::Interior,
             };
         }
         let (cells, plane) = self.layout()?;

@@ -102,8 +102,11 @@ impl ForcedGasSurface {
             || !self.characteristic_length.value().is_finite()
             || self.characteristic_length.value() <= 0.0
             || !self.speed_m_s.is_finite() || self.speed_m_s < 0.0
+            || (self.area_m2 > 0.0 && self.speed_m_s == 0.0)
         {
-            return Err(invalid("finite gas convection requires nonnegative area/speed and positive length"));
+            return Err(invalid(
+                "finite gas forced convection requires nonnegative area, positive speed for active heat transfer and positive length",
+            ));
         }
         Ok(())
     }

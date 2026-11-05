@@ -27,6 +27,11 @@ const LOWER: f64 = 1.2;
 const UPPER: f64 = 11.3;
 const INTERFACE: f64 = 6.0;
 const CELLS: usize = 4 * 12 * 4;
+const INDEPENDENT_BULK: CollisionModel3 = CollisionModel3::CentralMomentBulk {
+    shear_rate: 1.2,
+    bulk_rate: 0.7,
+    higher_order_rate: 1.6,
+};
 
 fn snapshot(mu: f64) -> FluidTransportState {
     FluidTransportState::try_new(1000.0, 1000.0, 1000.0, mu).unwrap()
@@ -40,6 +45,15 @@ fn retuned(model: CollisionModel3, tau: f64) -> CollisionModel3 {
             higher_order_rate, ..
         } => CollisionModel3::CentralMoment {
             second_order_rate: 1.0 / tau,
+            higher_order_rate,
+        },
+        CollisionModel3::CentralMomentBulk {
+            bulk_rate,
+            higher_order_rate,
+            ..
+        } => CollisionModel3::CentralMomentBulk {
+            shear_rate: 1.0 / tau,
+            bulk_rate,
             higher_order_rate,
         },
         CollisionModel3::ReducedCumulant {
@@ -96,7 +110,7 @@ fn unchanged_viscosity_keeps_native_bits_and_every_collision_familys_other_rates
     // diffusivity whose thermal tau would round to 1/2; momentum still works.
     let current = FluidTransportState::try_new(1000.0, 1234.0, 1e-100, 1.0).unwrap();
     let gate = CancelGate::new_clock_free();
-    for family in MODELS {
+    for family in MODELS.into_iter().chain([INDEPENDENT_BULK]) {
         let model = retuned(family, scaling.flow().tau);
         let force = [2e-6, -1e-6, 3e-6];
         let (mut native, wall) = fractional(model, force);
@@ -145,7 +159,7 @@ fn local_material_rates_use_original_cells_force_and_non_shear_controls() {
     let mu = |p: [usize; 3]| 0.5 + 0.05 * (p[0] + 3 * p[1] + 7 * p[2]) as f64;
     let gate = CancelGate::new_clock_free();
     let force = [1e-6, -2e-6, 3e-6];
-    for model in MODELS {
+    for model in MODELS.into_iter().chain([INDEPENDENT_BULK]) {
         let mut grid = BoundaryGrid3::with_collision_model(8, 4, 4, model, force, periodic());
         seed(&mut grid);
         for z in 0..4 {

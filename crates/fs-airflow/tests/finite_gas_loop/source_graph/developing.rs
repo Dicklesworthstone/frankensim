@@ -3,11 +3,9 @@
 
 use super::*;
 use fs_airflow::graph::thermal::transport::transient::material::convection::developing::{
-    DevelopingWall, GraphDevelopingConvectionError, GraphDevelopingSection,
+    DevelopingDuct, DevelopingWall, GraphDevelopingConvectionError, GraphDevelopingSection,
 };
-use fs_conduction::transient::deposition::{
-    Reservoir, backward_euler::BoundaryConductances,
-};
+use fs_conduction::transient::deposition::{Reservoir, backward_euler::BoundaryConductances};
 use std::collections::BTreeMap;
 
 fn with_developing_reservoir(law: &GasEnthalpyLaw, diameter: f64) -> DepositionSimulation<'_> {
@@ -60,7 +58,7 @@ fn g1_g4_developing_gas_retains_film_calorics_and_native_endpoint_mach() {
         );
         let sections = [GraphDevelopingSection {
             fluid_cell: CellId(2), wall: DevelopingWall::Reservoir,
-            diameter: Length::new(diameter),
+            duct: DevelopingDuct::Circular { diameter: Length::new(diameter) },
             forward_start: Length::new(1.0), reverse_start: Length::new(0.0),
             property_temperature: ConvectionPropertyTemperature::FilmMean,
         }];

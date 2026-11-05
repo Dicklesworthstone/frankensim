@@ -364,17 +364,11 @@ pub(super) fn observe_state(
             + 0.5 * half_pair(response.state[i], effort_derivative[i])?;
     }
     let mut output_derivative = vec![C64::ZERO; m];
-    for p in 0..m {
+    for (p, value) in output_derivative.iter_mut().enumerate() {
         poll(&mut cancelled)?;
-        let mut correction = C64::ZERO;
-        for i in 0..n {
-            accumulate(
-                &mut output_derivative[p],
-                &mut correction,
-                effort_derivative[i].scale(model.g[i * m + p])
-                    + response.effort[i].scale(at(direction.ports, i * m + p)),
-            );
-        }
+        *value = super::port_output_tangent(
+            &model.g, m, p, &effort_derivative, direction.ports, &response.effort,
+        )?;
     }
     let mut loss_derivative = 0.0;
     for i in 0..n {

@@ -8,6 +8,7 @@
 //! The existing timeline owns all state, time integration, sources and balances.
 //! No pressure work, phase change, moisture exchange or moving volume is added.
 
+use super::super::capacity::CapacityInverse;
 use super::{PreparedVolumetricThermalTransport, ThermalTransportError};
 use crate::thermal::conduction::{
     ConductivityCurve, LayerConductionConfig, LayerConductionResponse, TwoLayerConduction,
@@ -31,6 +32,7 @@ pub struct FixedVolumeThermalLaw<'p> {
     reference_density: f64,
     datum_temperature: f64,
     specific_storage_span: [f64; 2],
+    inverse: Option<CapacityInverse>,
     maximum_slope: f64,
     sensible_entropy: bool,
     identity: ContentHash,
@@ -78,7 +80,8 @@ impl<'p> FixedVolumeThermalLaw<'p> {
                 "temperature slope is not representable in this reference mass basis",
             ));
         }
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.fixed-volume-thermal-law.v1");
+        let inverse = path.capacity_inverse(datum_temperature_k);
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.fixed-volume-thermal-law.v2");
         hash.update(path.identity().as_bytes());
         hash.update(&reference_density_kg_m3.to_bits().to_le_bytes());
         hash.update(&datum_temperature_k.to_bits().to_le_bytes());
@@ -87,6 +90,7 @@ impl<'p> FixedVolumeThermalLaw<'p> {
             reference_density: reference_density_kg_m3,
             datum_temperature: datum_temperature_k,
             specific_storage_span,
+            inverse,
             maximum_slope,
             sensible_entropy: false,
             identity: hash.finalize(),
@@ -213,8 +217,15 @@ impl ThermalLaw for FixedVolumeThermalLaw<'_> {
         if !storage.is_finite() || (specific_h_j_kg != 0.0 && storage == 0.0) {
             return Err(DepositionError::MaterialDomain);
         }
-        self.path
-            .temperature_after_storage_change(self.datum_temperature, storage)
+        self.inverse
+            .as_ref()
+            .map_or_else(
+                || {
+                    self.path
+                        .temperature_after_storage_change(self.datum_temperature, storage)
+                },
+                |inverse| self.path.temperature_from_index(inverse, storage),
+            )
             .map_err(|_| DepositionError::MaterialDomain)
     }
 

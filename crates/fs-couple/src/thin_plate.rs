@@ -22,6 +22,7 @@ use fs_material::state_point::{
 use fs_material::visco::{RayleighDamping, ThermoelasticZener};
 use fs_math::c64::C64;
 use fs_math::det;
+use fs_modal::time::LinearForceTransition;
 use fs_plate::{
     AssemblyOptions, EdgeSupport, PlateChart, PlateError, PlateMesh, PlateModel, PlateRegion,
     PlateSection, assemble, modes,
@@ -87,11 +88,55 @@ pub struct CompactBody {
 #[derive(Debug, Clone)]
 struct PistonLoad {
     filter: DigitalFilter,
+    // p[n] = history + feedthrough * surface_mean_velocity[n].
+    feedthrough: f64,
     state: DigitalFilterState,
     // Reused trial memory. Only `state` is accepted physical history.
     proposed_state: DigitalFilterState,
     gas: GasState,
     sample_rate_hz: u32,
+    motion: CompactMotion,
+}
+
+/// Fixed-clock scalar preparation. Public mechanical coefficients may change;
+/// only matching frequencies and damping ratios may reuse these coefficients.
+#[derive(Debug, Clone, Copy)]
+struct CompactMotion {
+    omega: f64,
+    zeta: f64,
+    transition: LinearForceTransition,
+}
+
+impl CompactMotion {
+    fn new(omega: f64, zeta: f64, dt: f64) -> Result<Self, AcousticRealizeError> {
+        Ok(Self {
+            omega,
+            zeta,
+            transition: LinearForceTransition::try_new(omega, zeta, dt)
+                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?,
+        })
+    }
+
+    fn matches(&self, omega: f64, zeta: f64) -> bool {
+        self.omega.to_bits() == omega.to_bits() && self.zeta.to_bits() == zeta.to_bits()
+    }
+}
+
+impl PistonLoad {
+    fn new(
+        filter: DigitalFilter, gas: GasState, sample_rate_hz: u32, omega: f64, zeta: f64,
+    ) -> Result<Self, AcousticRealizeError> {
+        let feedthrough = filter.sections.iter().fold(filter.direct, |sum, section| sum + section.b[0]);
+        if !feedthrough.is_finite() || feedthrough < 0.0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "piston radiation requires finite nonnegative instantaneous resistance",
+            });
+        }
+        let motion = CompactMotion::new(omega, zeta, f64::from(sample_rate_hz).recip())?;
+        let state = filter.zero_state();
+        let proposed_state = state.clone();
+        Ok(Self { filter, feedthrough, state, proposed_state, gas, sample_rate_hz, motion })
+    }
 }
 
 /// One exact-ZOH step of a [`CompactBody`]: its start state and held force.
@@ -163,8 +208,11 @@ impl CompactBody {
 
     /// Advance under a held generalized force and return endpoint acceleration.
     /// Uses the shared exact-ZOH oscillator transition. When present, the
-    /// radiation filter supplies a reaction held over this step; the coupled
-    /// filter/structure evolution is still a sampled approximation.
+    /// radiation filter supplies a reaction held over this step, solved against
+    /// the SAME step's mean surface velocity. This preserves port work and
+    /// removes a lagged resistance's explicit-damping instability. The coupled
+    /// filter/structure evolution is still a sampled approximation, not an
+    /// exact continuous radiation solve or a new passivity proof for the fit.
     ///
     /// # Errors
     /// Refuses invalid force, duration, mass, frequency or damping and
@@ -215,11 +263,43 @@ impl CompactBody {
                     what: "piston radiation load and mechanical step require the same sample clock",
                 });
             }
-            // p = Z_face * mean surface velocity, Q = area_modal * q_dot.
-            // Generalized reaction is -area_modal * p, preserving work and
-            // eigenvector scaling even for negative or nearly cancelling modes.
+            if !self.area_m2.is_finite() || !self.piston_area_m2.is_finite() || self.piston_area_m2 <= 0.0 {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "piston reaction requires finite modal area and positive physical face area",
+                });
+            }
+            if !load.motion.matches(self.omega, self.zeta) {
+                load.motion = CompactMotion::new(self.omega, self.zeta, dt)?;
+            }
+            // The discrete impedance is affine in the CURRENT interval's
+            // input: p = history + d * (A/A_face) * mean(v). The exact held-
+            // force oscillator gives mean(v) = free + beta * (F - A*p)/m.
+            // Solve this scalar loop before either owner accepts history.
+            // Its reaction work is -A*p*delta(y) = -dt*A_face*p*mean(v_face),
+            // so a pure resistance removes dt*A_face*d*mean(v_face)^2.
             load.proposed_state.clone_from(&load.state);
-            match load.filter.step(&mut load.proposed_state, self.v * self.area_m2 / self.piston_area_m2) {
+            let history = load.filter.step(&mut load.proposed_state, 0.0)
+                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+            let root_mass = self.mass_kg.sqrt();
+            let force_without_direct = force_n - self.area_m2 * history;
+            let (free, mobility) = load.motion.transition.held_force_mean_velocity_relation(
+                ModalAcousticState {
+                    displacement_m_sqrt_kg: self.y * root_mass,
+                    velocity_m_sqrt_kg_per_s: self.v * root_mass,
+                },
+                force_without_direct / root_mass,
+            ).map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+            let volume_shape = self.area_m2 / root_mass;
+            let surface_shape = volume_shape / self.piston_area_m2;
+            let denominator = 1.0 + mobility * load.feedthrough * volume_shape * surface_shape;
+            let input = surface_shape * (free / denominator);
+            if mobility < 0.0 || !denominator.is_finite() || denominator < 1.0 || !input.is_finite() {
+                return Err(AcousticRealizeError::Nonlinear(
+                    "piston mean-velocity coupling is not representable".to_string(),
+                ));
+            }
+            load.proposed_state.clone_from(&load.state);
+            match load.filter.step(&mut load.proposed_state, input) {
                 Ok(p_face) => -p_face * self.area_m2,
                 Err(e) => return Err(AcousticRealizeError::Nonlinear(e.to_string())),
             }
@@ -282,19 +362,24 @@ impl CompactBody {
 
     fn transition(&self, step: HeldStep, dt: f64) -> Result<(f64, f64, f64), AcousticRealizeError> {
         let root_mass = self.mass_kg.sqrt();
-        let next = advance_exact_zoh(
-            ModalAcousticMode {
-                angular_frequency_rad_s: self.omega,
-                damping_ratio: self.zeta,
-                pressure_per_modal_velocity: C64::new(0.0, 0.0),
-            },
-            ModalAcousticState {
-                displacement_m_sqrt_kg: step.y * root_mass,
-                velocity_m_sqrt_kg_per_s: step.v * root_mass,
-            },
-            step.force_n / root_mass,
-            dt,
-        );
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: self.omega,
+            damping_ratio: self.zeta,
+            pressure_per_modal_velocity: C64::new(0.0, 0.0),
+        };
+        let state = ModalAcousticState {
+            displacement_m_sqrt_kg: step.y * root_mass,
+            velocity_m_sqrt_kg_per_s: step.v * root_mass,
+        };
+        let force = step.force_n / root_mass;
+        let next = if let Some(load) = self.rad.as_ref().filter(|load|
+            dt.to_bits() == f64::from(load.sample_rate_hz).recip().to_bits()
+                && load.motion.matches(self.omega, self.zeta)) {
+            load.motion.transition.advance(state, force, force)
+                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?
+        } else {
+            advance_exact_zoh(mode, state, force, dt)
+        };
         let y = next.displacement_m_sqrt_kg / root_mass;
         let v = next.velocity_m_sqrt_kg_per_s / root_mass;
         let acc = step.force_n / self.mass_kg
@@ -371,9 +456,7 @@ impl CompactBody {
         }
         let radius = (self.piston_area_m2 / core::f64::consts::PI).sqrt();
         let filter = piston_radiation_filter(radius, gas, sample_rate_hz)?;
-        let state = filter.zero_state();
-        let proposed_state = state.clone();
-        self.rad = Some(PistonLoad { filter, state, proposed_state, gas: *gas, sample_rate_hz });
+        self.rad = Some(PistonLoad::new(filter, *gas, sample_rate_hz, self.omega, self.zeta)?);
         Ok(())
     }
 
@@ -664,15 +747,19 @@ impl VkBody {
                 what: "no usable FE displacement samples",
             });
         }
-        let vk = fs_nlmodal::von_karman_sampled_plate(
-            &fs_nlmodal::VkPlateParams {
+        // Bending and nonlinear stretching use the same oriented homogeneous
+        // section: A = 12 D / h². Averaging E1/E2 loses shear, Poisson coupling
+        // and the normal/shear terms generated by a rotated material axis.
+        let membrane = fs_material::sheet::SheetMatrix::from_coefficients(
+            section.d.map(|value| 12.0 * value / plate.thickness_m.powi(2)),
+        )
+        .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+        let vk = fs_nlmodal::von_karman_sampled_plate_with_membrane(
+            &fs_nlmodal::VkSampledPlateParams {
                 lx: plate.length_m,
                 ly: plate.width_m,
-                h: plate.thickness_m,
-                young: f64::midpoint(plate.e1_pa, plate.e2_pa),
-                nu: plate.nu12,
-                rho: plate.density_kg_m3,
-                pretension_n_m: plate.pretension_n_m,
+                areal_density: plate.density_kg_m3 * plate.thickness_m,
+                membrane,
             },
             &disp,
             &[
@@ -2323,16 +2410,16 @@ mod tests {
     ///   the fit, not on the render. Its R and X errors at the loaded
     ///   frequency are printed, and so is their maximum over the fit band,
     ///   which is uninformative at the band's low edge where R -> 0.
-    /// - Lag term: residual minus fit, the held reaction's O(dt) lag. On the
-    ///   96/192/384/768 kHz ladder it must shrink at observed order >= 0.8 per
-    ///   doubling, for decay and frequency, in every gas.
+    /// - Sampled interconnection term (historically labelled `lag`): residual
+    ///   minus fit. The same-step mean-velocity closure removes explicit
+    ///   resistance lag, but retains sampled coupling and measurement error.
+    ///   On the 96/192/384/768 kHz ladder it must shrink at observed order
+    ///   >= 0.8 per doubling, for decay and frequency, in every gas.
     /// - Gate at 768 kHz: |residual| <= |fit| + |lag(384) - lag(768)| /
     ///   (2^0.8 - 1), the remaining lag by Richardson at the declared minimum
-    ///   order 0.8 (ruling 6253). The first form, |lag(384) - lag(768)|, is
-    ///   that bound at order exactly 1, a knife edge for a first-order lag: it
-    ///   failed by roundoff on air's frequency (3e-7 absolute) and He-O2's
-    ///   decay (0.0014 %). Direction strict at every rate: 2 atm and CO2 damp
-    ///   more than air, He-O2 less.
+    ///   order 0.8 (ruling 6253). This conservative gate remains unchanged
+    ///   when the closure changes. Direction strict at every rate: 2 atm and
+    ///   CO2 damp more than air, He-O2 less.
     /// - Planted negative: at 1e-9 of air's density the load vanishes and the
     ///   body rings at its structural zeta omega0.
     #[test]

@@ -96,6 +96,39 @@ pub fn resonance_neck_resistance(geometry: &HelmholtzCavity, gas: &GasState)
         geometry.neck_length_m, omega)?)
 }
 
+/// Acoustic resistance [Pa s/m^3] of a sharp-edged cylindrical orifice in a rigid
+/// plate at `omega`, with thin Stokes layers: Brandao and Schnitzer, J. Fluid Mech.
+/// 2020 (arXiv:2001.04904), eq. 1.8, `Re Z = (rho omega / a) eps Theta / sqrt 2`,
+/// `eps = sqrt(mu / (rho omega)) / a`, aspect ratio `h = L / (2 a)`. `Theta` is the
+/// larger of the paper's two asymptotes, eq. 1.9 `(4 / pi) (h + 0.91)` and eq. 1.10
+/// `(ln(pi / h) / pi + 1) / 2`, which cross near `h = 0.037`. It counts the hole's
+/// own walls as well as the plate around the edge, so it stands in place of the
+/// neck's Bessel wall resistance, not beside it.
+///
+/// # Errors
+/// Non-positive inputs, or a hole outside the paper's limit (`eps < 1`, `h > eps`).
+pub fn orifice_viscous_resistance(gas: &GasState, radius_m: f64, length_m: f64, omega: f64)
+    -> Result<f64, AcousticRealizeError>
+{
+    if [radius_m, length_m, omega].iter().any(|x| !x.is_finite() || *x <= 0.0) {
+        return Err(invalid("orifice resistance needs finite positive radius, length and frequency"));
+    }
+    let eps = det::sqrt(gas.dynamic_viscosity / (gas.density * omega)) / radius_m;
+    let h = length_m / (2.0 * radius_m);
+    if !(eps.is_finite() && eps < 1.0 && h > eps) {
+        return Err(invalid("orifice resistance is outside the thin Stokes layer limit"));
+    }
+    let pi = core::f64::consts::PI;
+    let long = 4.0 / pi * (h + 0.91);
+    let short = 0.5 * (det::ln(pi / h) / pi + 1.0);
+    let resistance = gas.density * omega / radius_m * eps * long.max(short)
+        / core::f64::consts::SQRT_2;
+    if !(resistance.is_finite() && resistance > 0.0) {
+        return Err(invalid("orifice resistance must be finite and positive"));
+    }
+    Ok(resistance)
+}
+
 /// Original physical inputs and their energy-equivalent modal coefficients.
 #[derive(Clone, Debug)]
 pub struct HelmholtzModalCavity {
@@ -195,6 +228,28 @@ impl HelmholtzModalCavity {
             return Err(invalid("modal cavity normalization is not representable"));
         }
         Ok(Self { geometry, gas, loss, area, mass, stiffness, resistance })
+    }
+
+    /// Replace an [`CavityNeckLoss::ExteriorMouth`] neck's Bessel wall resistance by
+    /// [`orifice_viscous_resistance`] frozen at `freeze_hz`. The neck's mass and
+    /// compressibility stay as they are: eq. 1.8's equal reactance is left out, about
+    /// 0.6 % of a guitar neck's mass, because that mass enters a computed exterior
+    /// load's aperture shape.
+    ///
+    /// # Errors
+    /// Any other loss selection, or the resistance's own refusals.
+    pub fn with_orifice_resistance(mut self, freeze_hz: f64) -> Result<Self, AcousticRealizeError> {
+        if self.loss != CavityNeckLoss::ExteriorMouth {
+            return Err(invalid("the orifice resistance belongs to an exterior-mouth neck"));
+        }
+        let r = orifice_viscous_resistance(&self.gas, self.geometry.neck_radius_m,
+            self.geometry.neck_length_m, 2.0 * core::f64::consts::PI * freeze_hz)?;
+        let resistance = self.area * self.area * r;
+        if !(resistance.is_finite() && resistance > 0.0) {
+            return Err(invalid("orifice resistance is not representable on the neck"));
+        }
+        self.resistance = resistance;
+        Ok(self)
     }
 
     /// Original fixed cavity geometry.

@@ -32,7 +32,7 @@ pub use impulse::{
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
 mod forcing;
-pub use forcing::MaterialRigidFrame3;
+pub use forcing::{MaterialAffineAcceleration3, MaterialRigidFrame3};
 mod two_dimensional;
 pub use two_dimensional::{
     MaterialFreeSurface2, MaterialFreeSurfaceDomain2, MaterialFreeSurfaceMomentumError2,

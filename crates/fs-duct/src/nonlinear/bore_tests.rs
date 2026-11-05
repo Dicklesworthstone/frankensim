@@ -95,8 +95,8 @@ fn wall_gas(state: &GasState) -> WallGas {
 }
 
 // A single, exactly soluble thermal arm: gain=rate=1 and exp(-2*dt)=1/5.
-// From zero history its pressure response is 3/5 of the initial perturbation.
-fn caloric_walls(cells: usize, reference_pressure: f64, drag: f64, thermal: bool) -> Walls {
+// From zero history its temperature response is 3/5 of the initial perturbation.
+fn caloric_walls(cells: usize, wall_temperature: f64, drag: f64, thermal: bool) -> Walls {
     let dt = 0.5 * det::ln(5.0);
     let thermal_arms: &[(f64, f64)] = if thermal { &[(1.0, 1.0)] } else { &[] };
     Walls {
@@ -111,7 +111,7 @@ fn caloric_walls(cells: usize, reference_pressure: f64, drag: f64, thermal: bool
         spare_viscous: vec![0.0; 2 * cells],
         spare_thermal: vec![0.0; 2 * cells],
         state_stride: 2,
-        reference_pressure,
+        wall_temperature,
         receipt: WallReceipt {
             distinct_radii: 1,
             maximum_arms: usize::from(thermal),
@@ -147,7 +147,7 @@ fn g1_caloric_wall_heat_matches_the_exact_cv_integral_in_both_directions() {
         for initial_t in [180.0, 600.0] {
             let q = gas.conserved(rho, 0.0, rho * r * initial_t).unwrap();
             let mut solver = caloric_field(&gas, vec![q; 2]);
-            let mut walls = caloric_walls(2, rho * r * 300.0, 0.0, true);
+            let mut walls = caloric_walls(2, 300.0, 0.0, true);
             walls.apply(&mut solver, &gas).unwrap();
             let expected_t = 300.0 + 0.6 * (initial_t - 300.0);
             let expected_heat = rho
@@ -180,7 +180,7 @@ fn g1_caloric_wall_viscous_heat_precedes_thermal_exchange_without_frozen_gamma()
     let heated_t = initial_t + delta_t;
     for thermal in [false, true] {
         let mut solver = caloric_field(&gas, vec![q; 2]);
-        let mut walls = caloric_walls(2, rho * r * 300.0, 1.0, thermal);
+        let mut walls = caloric_walls(2, 300.0, 1.0, thermal);
         walls.apply(&mut solver, &gas).unwrap();
         let expected_t = if thermal {
             300.0 + 0.6 * (heated_t - 300.0)
@@ -202,6 +202,177 @@ fn g1_caloric_wall_viscous_heat_precedes_thermal_exchange_without_frozen_gamma()
                 "viscous heat is an internal transfer"
             );
         }
+    }
+}
+
+#[test]
+fn g1_caloric_wall_isothermal_density_variations_do_not_create_heat() {
+    let state = air();
+    let wall_temperature = 300.0;
+    for slope in [0.0, 0.003] {
+        let gas = caloric_source(&state, slope);
+        let cells: Vec<_> = [0.2, 1.7, 7.0]
+            .into_iter()
+            .map(|rho| {
+                gas.conserved(rho, 0.0, rho * gas.gas_constant() * wall_temperature)
+                    .unwrap()
+            })
+            .collect();
+        let mut solver = caloric_field(&gas, cells.clone());
+        let mut walls = caloric_walls(cells.len(), wall_temperature, 0.0, true);
+        for _ in 0..4 {
+            walls.apply(&mut solver, &gas).unwrap();
+        }
+        for (&before, &after) in cells.iter().zip(solver.states()) {
+            assert_eq!(after.density, before.density);
+            assert_eq!(after.momentum, before.momentum);
+            assert!((after.energy / before.energy - 1.0).abs() < 1e-12);
+            let temperature = gas.primitive(after, || false).unwrap().temperature;
+            assert!((temperature - wall_temperature).abs() < 1e-8);
+        }
+    }
+}
+
+#[test]
+fn g1_caloric_wall_history_retains_temperature_meaning_across_density_changes() {
+    let state = air();
+    for slope in [0.0, 0.003] {
+        let gas = caloric_source(&state, slope);
+        for next_density in [0.425, 1.7, 6.8] {
+            let mut walls = caloric_walls(2, 300.0, 0.0, true);
+            let initial = gas
+                .conserved(1.7, 0.0, 1.7 * gas.gas_constant() * 600.0)
+                .unwrap();
+            let mut solver = caloric_field(&gas, vec![initial; 2]);
+            walls.apply(&mut solver, &gas).unwrap();
+            let first_t = gas
+                .primitive(solver.states()[0], || false)
+                .unwrap()
+                .temperature;
+            assert!((first_t - 480.0).abs() < 1e-8);
+            // An accepted transport step changes density while retaining the
+            // cell's temperature. The stationary wall's history is unchanged.
+            let transported = gas
+                .conserved(
+                    next_density,
+                    0.0,
+                    next_density * gas.gas_constant() * first_t,
+                )
+                .unwrap();
+            let mut solver = caloric_field(&gas, vec![transported; 2]);
+            walls.apply(&mut solver, &gas).unwrap();
+            // exp(G dt)=[[.6,.4],[.4,.6]]: first history is 120 K,
+            // so the second mean is .6*180 + .4*120 = 156 K above the wall.
+            let expected_t = 456.0;
+            let expected = gas
+                .conserved(
+                    next_density,
+                    0.0,
+                    next_density * gas.gas_constant() * expected_t,
+                )
+                .unwrap();
+            let next = solver.states()[0];
+            assert_eq!(next.density, next_density);
+            assert_eq!(next.momentum, 0.0);
+            assert!((gas.primitive(next, || false).unwrap().temperature - expected_t).abs() < 1e-8);
+            assert!((next.energy / expected.energy - 1.0).abs() < 1e-10);
+        }
+    }
+}
+
+#[test]
+fn g1_temperature_wall_preserves_the_exact_zk_compliance() {
+    let state = air();
+    let radius = 1.0e-3;
+    let dt = 1.0e-7;
+    for density_factor in [0.25, 1.0, 4.0] {
+        for gamma in [state.gamma, 5.0 / 3.0] {
+            let transport = WallGas {
+                density_kg_m3: state.density * density_factor,
+                gamma,
+                ..wall_gas(&state)
+            };
+            let walls = Walls::new(
+                &[radius],
+                WallMemory {
+                    poles: 24,
+                    band_hz: [20.0, 8000.0],
+                    maximum_relative_error: 1e-2,
+                },
+                transport,
+                293.15,
+                dt,
+            )
+            .unwrap();
+            let thermal = &walls.propagators[walls.thermal_of[0]];
+            for frequency in [20.0, 100.0, 1000.0, 4000.0, 8000.0] {
+                let omega = core::f64::consts::TAU * frequency;
+                let s = C64::new(0.0, omega);
+                // The mean response of the ACTUAL bound generator to a
+                // heating source is e0^T(sI-G)^-1 e0 = 1/(s+H(s)).
+                let response = thermal.head.iter().zip(&thermal.decay).fold(
+                    C64::ZERO,
+                    |total, (&head, &decay)| {
+                        let rate = -det::ln(decay) / dt;
+                        total + C64::from_re(head * head) / (s + C64::from_re(rate))
+                    },
+                );
+                // T' is driven by (gamma-1) T0 rho'/rho0; the ideal-gas
+                // relation then gives p'/(R T0 rho') below.
+                let actual = C64::from_re(1.0) + (s * response).scale(gamma - 1.0);
+                let shear = det::sqrt(
+                    omega * transport.density_kg_m3 * radius * radius * transport.prandtl
+                        / transport.dynamic_viscosity_pa_s,
+                );
+                let f = fs_phs::zwikker_kosten_f(shear).unwrap();
+                let expected = C64::from_re(gamma) / (C64::from_re(1.0) + f.scale(gamma - 1.0));
+                let error = (actual - expected).abs() / expected.abs();
+                assert!(
+                    error < 1e-3,
+                    "rho factor {density_factor}, gamma {gamma}, f {frequency}: {error}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_physical_wall_reaches_isothermal_equilibrium_at_each_density() {
+    let state = air();
+    let gas = air_source(&state);
+    let reference = 293.15;
+    let densities = [0.25 * state.density, state.density, 4.0 * state.density];
+    let mut walls = Walls::new(
+        &[1.0e-3; 3],
+        WallMemory {
+            poles: 24,
+            band_hz: [20.0, 8000.0],
+            maximum_relative_error: 1e-2,
+        },
+        wall_gas(&state),
+        reference,
+        0.01,
+    )
+    .unwrap();
+    let cells = densities
+        .iter()
+        .map(|&rho| {
+            gas.conserved(rho, 0.0, rho * gas.gas_constant() * 500.0)
+                .unwrap()
+        })
+        .collect();
+    let mut solver = caloric_field(&gas, cells);
+    for _ in 0..200 {
+        walls.apply(&mut solver, &gas).unwrap();
+    }
+    for (&rho, &next) in densities.iter().zip(solver.states()) {
+        assert_eq!(next.density, rho);
+        assert!((gas.primitive(next, || false).unwrap().temperature - reference).abs() < 1e-7);
+        let isothermal_pressure = rho * gas.gas_constant() * reference;
+        assert!(
+            (gas.primitive(next, || false).unwrap().pressure / isothermal_pressure - 1.0).abs()
+                < 1e-9
+        );
     }
 }
 
@@ -786,7 +957,13 @@ fn bits(bore: &NonlinearBore) -> Vec<[u64; 3]> {
     bore.solver()
         .states()
         .iter()
-        .map(|q| [q.density.to_bits(), q.momentum.to_bits(), q.energy.to_bits()])
+        .map(|q| {
+            [
+                q.density.to_bits(),
+                q.momentum.to_bits(),
+                q.energy.to_bits(),
+            ]
+        })
         .collect()
 }
 
@@ -842,12 +1019,14 @@ fn a_step_that_never_fails_admission_is_the_unretried_step_bit_for_bit() {
     for _ in 0..800 {
         with_retry
             .step(|stage| {
-                let (flux, _) = velocity_port(&source, stage, flow(stage.time) / inlet_area, &mut guess_a)?;
+                let (flux, _) =
+                    velocity_port(&source, stage, flow(stage.time) / inlet_area, &mut guess_a)?;
                 Ok(Some(flux))
             })
             .unwrap();
         unretried_step(&mut without, Reconstruction::Muscl, |stage| {
-            let (flux, _) = velocity_port(&source, stage, flow(stage.time) / inlet_area, &mut guess_b)?;
+            let (flux, _) =
+                velocity_port(&source, stage, flow(stage.time) / inlet_area, &mut guess_b)?;
             Ok(Some(flux))
         })
         .unwrap();
@@ -889,7 +1068,10 @@ fn a_step_that_fails_at_second_order_is_redone_at_first_order_and_counted() {
     assert_eq!(retried.first_order_fallbacks(), 1);
     assert!(step.report.first_order_retry);
     let (first, worst) = difference(&bits(&retried), &bits(&refused));
-    assert!(first.is_none(), "retried vs refused-then-first-order: first difference (cell, component, retried, refused) {first:?}, worst relative {worst:e}");
+    assert!(
+        first.is_none(),
+        "retried vs refused-then-first-order: first difference (cell, component, retried, refused) {first:?}, worst relative {worst:e}"
+    );
     assert_eq!(
         retried.solver().time().value().to_bits(),
         refused.solver().time().value().to_bits()
@@ -897,7 +1079,9 @@ fn a_step_that_fails_at_second_order_is_redone_at_first_order_and_counted() {
     // Against a first-order step that had no refused attempt before it: the shared EOS temperature solve starts from the
     // primitives the refused attempt left behind and stops inside its own energy tolerance, so only that spread is expected.
     let (first, worst) = difference(&bits(&retried), &bits(&fresh));
-    eprintln!("MOOD-RETRY-SPREAD vs a first-order step with no refused attempt: first difference (cell, component, retried, fresh) {first:?}, worst relative {worst:e}");
+    eprintln!(
+        "MOOD-RETRY-SPREAD vs a first-order step with no refused attempt: first difference (cell, component, retried, fresh) {first:?}, worst relative {worst:e}"
+    );
     assert_eq!(
         retried.solver().time().value().to_bits(),
         fresh.solver().time().value().to_bits()
@@ -911,7 +1095,10 @@ fn a_step_that_fails_at_both_orders_is_refused_naming_the_retry_and_changes_noth
     let (field, clock) = (bits(&bore), bore.solver().time().value().to_bits());
     let error = bore.step(|_| Ok(None)).unwrap_err();
     let text = error.to_string();
-    assert!(matches!(error, NonlinearDuctError::GasAfterFirstOrderRetry(_)), "{text}");
+    assert!(
+        matches!(error, NonlinearDuctError::GasAfterFirstOrderRetry(_)),
+        "{text}"
+    );
     assert!(text.starts_with("FS-DUCT-NONLINEAR-GAS: "), "{text}");
     assert!(text.contains("outside source domain"), "{text}");
     assert!(text.ends_with(" after first-order retry"), "{text}");
@@ -928,7 +1115,10 @@ fn a_refusal_that_is_not_a_source_domain_failure_is_not_retried() {
     let error = bore.step(|_| Ok(None)).unwrap_err();
     let text = error.to_string();
     assert!(matches!(error, NonlinearDuctError::Gas(_)), "{text}");
-    assert!(text.contains("radiating end runs on its declared fixed step"), "{text}");
+    assert!(
+        text.contains("radiating end runs on its declared fixed step"),
+        "{text}"
+    );
     assert!(!text.contains("after first-order retry"), "{text}");
     assert_eq!(bore.first_order_fallbacks(), 0);
     assert_eq!(bits(&bore), field);

@@ -457,6 +457,35 @@ impl MaterialCircuit {
     /// Conserved capacitor charge history [C], in capacitor branch order.
     pub fn charges_c(&self) -> &[f64] { &self.charges_c }
 
+    // Independent original-to-final storage for a coupled adaptive window.
+    // Reuse the native constitutive increment (including nonlinear C and
+    // reciprocal blocks), not subtraction of large endpoint Hamiltonians or
+    // summation of the integrator's residuals. Only resistor values may refresh.
+    pub(crate) fn fixed_storage_change_j(&self, next: &Self, inputs: &[f64])
+        -> Result<f64, MaterialCircuitError>
+    {
+        if self.graph.node_count != next.graph.node_count
+            || self.graph.transformers != next.graph.transformers
+            || self.graph.branches.len() != next.graph.branches.len()
+            || self.graph.branches.iter().zip(&next.graph.branches).any(|(a, b)| {
+                a.0 != b.0 || a.1 != b.1 || match (&a.2, &b.2) {
+                    (Branch::Resistor { .. }, Branch::Resistor { .. }) => false,
+                    (left, right) => left != right,
+                }
+            })
+            || self.mutual != next.mutual || self.magnetic_couplings != next.magnetic_couplings
+            || self.capacitor_curves != next.capacitor_curves || self.capacitance_blocks != next.capacitance_blocks
+            || self.dielectric_capacitors != next.dielectric_capacitors || self.storage != next.storage
+        {
+            return Err(MaterialCircuitError::Invalid("coupled window changed fixed circuit storage or topology"));
+        }
+        let (graph, _, dae) = bind_with_storage_laws(&self.graph, self.resistors.clone(),
+            &self.contacts, &self.mutual, &self.capacitor_curves, &self.capacitance_blocks)?;
+        let before = extended(&dae, &self.fluxes_wb, &self.charges_c, inputs)?;
+        let after = extended(&dae, &next.fluxes_wb, &next.charges_c, inputs)?;
+        capacitance::storage_change(&graph, &self.capacitor_curves, &dae, &before, &after)
+    }
+
     /// Re-evaluate a candidate with caller-resolved midpoint resistors and held
     /// external source ports. Source-free graphs use `inputs = &[]`: all heat
     /// then comes from finite electrical storage. Each trial starts from the

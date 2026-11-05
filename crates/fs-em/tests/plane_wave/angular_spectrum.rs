@@ -11,6 +11,7 @@ use fs_math::det;
 
 mod carrier;
 mod carrier_correlation;
+mod oversampled;
 
 fn limits() -> AngularSpectrumLimits {
     AngularSpectrumLimits {
@@ -489,6 +490,9 @@ fn budgets_light_cone_and_cancellation_refuse_without_mutating_the_beam() {
             PlanarAngularSpectrum::prepare(&stack, grid, &input, constrained, || false).is_err()
         );
     }
+    let unsupported: Vec<_> = (0..16)
+        .map(|i| [C64::from_re(if i % 2 == 0 { 1.0 } else { -1.0 }), C64::ZERO])
+        .collect();
     assert!(matches!(
         PlanarAngularSpectrum::prepare(
             &stack,
@@ -496,7 +500,7 @@ fn budgets_light_cone_and_cancellation_refuse_without_mutating_the_beam() {
                 spacing_m: [1.0, 1.0],
                 ..grid
             },
-            &input,
+            &unsupported,
             limits(),
             || false
         ),

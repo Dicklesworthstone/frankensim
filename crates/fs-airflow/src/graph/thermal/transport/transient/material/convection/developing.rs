@@ -3,35 +3,153 @@
 //! Explicit entrance distances follow signed flow. Native fluid cells retain
 //! mass, calorics, momentum geometry and time; native wall links or prescribed
 //! reservoirs own one heat transfer. Local property updates are a held-property
-//! approximation to the original constant-property Hausen mean relation.
+//! approximation to the original constant-property mean duct relation.
 
 use super::*;
 use crate::graph::thermal::medium::convection::deposition::ConvectionSourceError;
 use fs_conduction::transient::deposition::backward_euler::BoundaryConductances;
-use fs_convection::developing::{CircularDuctSection, evaluate_circular_duct_section};
-use fs_convection::ThermalConductivity;
+use fs_convection::developing::{
+    CircularDuctSection, RectangularDuctSection, evaluate_circular_duct_section,
+    evaluate_rectangular_duct_section,
+};
+use fs_convection::{CorrelationError, NusseltEvaluation, ThermalConductivity};
 use fs_material::fluid_transport::ThermalFluidTransportState;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Existing owner of a whole section's circular wetted-wall patch.
+/// Existing owner of a whole section's wetted-wall patch.
 #[derive(Clone, Copy, Debug)]
 pub enum DevelopingWall {
     Link(u64),
     Reservoir,
 }
 
-/// One native pipe cell within an authored uniform circular heated duct.
+/// Physical cross-section of the original uniform heated passage.
+#[derive(Clone, Copy, Debug)]
+pub enum DevelopingDuct {
+    /// Hydrodynamically developed circular inlet, using the Hausen relation.
+    Circular {
+        /// Physical inner diameter.
+        diameter: Length,
+    },
+    /// Simultaneously developing rectangular inlet, using the original
+    /// Shah-London CWT table slice. Its aspect ratio must be 0.5 and the
+    /// actual source Prandtl number must be 0.72; neither is adjusted to fit.
+    /// All four walls share the declared isothermal wall condition.
+    Rectangular {
+        /// One full internal side length.
+        width: Length,
+        /// The perpendicular full internal side length.
+        height: Length,
+    },
+}
+
+impl DevelopingDuct {
+    fn metrics(self) -> Result<DuctMetrics, GraphDevelopingConvectionError> {
+        let (diameter, area, perimeter, aspect) = match self {
+            Self::Circular { diameter } => {
+                let d = diameter.value();
+                (
+                    d,
+                    (core::f64::consts::PI / 4.0) * d * d,
+                    core::f64::consts::PI * d,
+                    None,
+                )
+            }
+            Self::Rectangular { width, height } => {
+                let (w, h) = (width.value(), height.value());
+                if !positive(w) || !positive(h) {
+                    return Err(invalid(
+                        "positive finite rectangular passage dimensions required",
+                    ));
+                }
+                let area = w * h;
+                let perimeter = 2.0 * w + 2.0 * h;
+                (
+                    4.0 * (area / perimeter),
+                    area,
+                    perimeter,
+                    Some(w.min(h) / w.max(h)),
+                )
+            }
+        };
+        if !positive(diameter) || !positive(area) || !positive(perimeter) {
+            return Err(invalid("developing duct cross-section is unrepresentable"));
+        }
+        Ok(DuctMetrics {
+            diameter: Length::new(diameter),
+            area,
+            perimeter,
+            aspect,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DuctMetrics {
+    diameter: Length,
+    area: f64,
+    perimeter: f64,
+    aspect: Option<f64>,
+}
+
+/// Original cumulative evaluations and derived transfer for the selected duct.
+/// Rectangular sections retain the table/engineering-bridge distinction and
+/// their unbounded local model discrepancy; circular sections retain Hausen's
+/// original mean-card support without inventing a local validation band.
+#[derive(Debug)]
+pub enum DevelopingSectionEvaluation {
+    /// Circular Hausen mean and its conservative finite section.
+    Circular(CircularDuctSection),
+    /// Original rectangular table means and their conservative finite section.
+    Rectangular(RectangularDuctSection),
+}
+
+impl DevelopingSectionEvaluation {
+    /// Section-average Nusselt number based on hydraulic diameter.
+    pub fn nusselt(&self) -> f64 {
+        match self {
+            Self::Circular(s) => s.nusselt(),
+            Self::Rectangular(s) => s.nusselt(),
+        }
+    }
+    /// Original cumulative mean at the section start, absent at the entrance.
+    pub fn upstream(&self) -> Option<&NusseltEvaluation> {
+        match self {
+            Self::Circular(s) => s.upstream(),
+            Self::Rectangular(s) => s.upstream(),
+        }
+    }
+    /// Original cumulative mean at the section end, retaining its source domain.
+    pub fn downstream(&self) -> &NusseltEvaluation {
+        match self {
+            Self::Circular(s) => s.downstream(),
+            Self::Rectangular(s) => s.downstream(),
+        }
+    }
+    fn coefficient(&self, conductivity: f64, diameter: Length) -> Result<f64, CorrelationError> {
+        let conductivity = ThermalConductivity::new(conductivity);
+        match self {
+            Self::Circular(s) => Ok(s.heat_transfer_coefficient(conductivity, diameter)?.value()),
+            Self::Rectangular(s) => Ok(s
+                .heat_transfer_coefficient(conductivity, diameter)?
+                .value
+                .value()),
+        }
+    }
+}
+
+/// One native pipe cell within an authored uniform heated duct.
 ///
 /// Entrance distances include upstream heated length, not just this cell.
 /// `forward_start` measures from the entrance for positive branch flow;
 /// `reverse_start` measures from the opposite entrance for negative flow.
-/// A mixing junction, change of diameter, bend-induced secondary flow or changed
+/// A mixing junction, change of cross-section, bend-induced secondary flow or changed
 /// wall condition needs its own physical admission; this card cannot infer one.
 #[derive(Clone, Copy, Debug)]
 pub struct GraphDevelopingSection {
     pub fluid_cell: CellId,
     pub wall: DevelopingWall,
-    pub diameter: Length,
+    pub duct: DevelopingDuct,
     pub forward_start: Length,
     pub reverse_start: Length,
     pub property_temperature: ConvectionPropertyTemperature,
@@ -69,7 +187,7 @@ pub struct DevelopingConvectionSample<M> {
     pub heat_into_fluid_w: f64,
     pub material: M,
     pub thermal: ThermalFluidTransportState,
-    pub section: CircularDuctSection,
+    pub section: DevelopingSectionEvaluation,
 }
 
 #[derive(Debug)]
@@ -119,6 +237,7 @@ fn invalid(reason: &'static str) -> GraphDevelopingConvectionError {
 
 struct Geometry<'a> {
     binding: &'a GraphDevelopingSection,
+    duct: DuctMetrics,
     branch: usize,
     flow_area: f64,
     length: f64,
@@ -156,19 +275,18 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
         let Some(Some((branch, section))) = core.locations.get(&binding.fluid_cell) else {
             return Err(invalid("developing convection requires an original bound pipe cell"));
         };
-        let diameter = binding.diameter.value();
+        let duct = binding.duct.metrics()?;
         let forward = binding.forward_start.value();
         let reverse = binding.reverse_start.value();
         let length = core.section_lengths[*branch][*section];
         let flow_area = core.section_areas[*branch][*section];
-        let circular_area = (core::f64::consts::PI / 4.0) * diameter * diameter;
-        let wall_area = core::f64::consts::PI * diameter * length;
-        if !positive(diameter) || !nonnegative(forward) || !nonnegative(reverse)
-            || !near_positive(flow_area, circular_area) || !positive(wall_area)
+        let wall_area = duct.perimeter * length;
+        if !nonnegative(forward) || !nonnegative(reverse)
+            || !near_positive(flow_area, duct.area) || !positive(wall_area)
             || !positive(forward + length) || !positive(reverse + length)
             || forward + length <= forward || reverse + length <= reverse
         {
-            return Err(invalid("finite entrance distances and original uniform circular section geometry required"));
+            return Err(invalid("finite entrance distances and original uniform duct section geometry required"));
         }
         let cell = thermal.cells().get(&binding.fluid_cell)
             .ok_or_else(|| invalid("missing original developing fluid cell"))?;
@@ -198,10 +316,10 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
             }
         };
         if !near_positive(area, wall_area) {
-            return Err(invalid("developing wall must cover the original section's full circular perimeter and length"));
+            return Err(invalid("developing wall must cover the original section's full wetted perimeter and length"));
         }
         geometry.push(Geometry {
-            binding, branch: *branch, flow_area, length, wall_temperature,
+            binding, duct, branch: *branch, flow_area, length, wall_temperature,
             fluid_temperature: thermal.temperature_k(binding.fluid_cell)
                 .map_err(|error| native(error.into()))?,
             wall_area: area,
@@ -236,13 +354,21 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
         let evaluate_flow = |rate: f64| {
             let start = if rate < 0.0 { binding.reverse_start.value() }
                 else { binding.forward_start.value() };
-            let reynolds = transport.reynolds(rate.abs() / g.flow_area, binding.diameter.value())
+            let reynolds = transport.reynolds(rate.abs() / g.flow_area, g.duct.diameter.value())
                 .map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
-            evaluate_circular_duct_section(
-                reynolds, transport.prandtl(),
-                start / binding.diameter.value(),
-                (start + g.length) / binding.diameter.value(),
-            ).map_err(|error| native(ConvectionSourceError::Material(error.into())))
+            let start_ratio = start / g.duct.diameter.value();
+            let end_ratio = (start + g.length) / g.duct.diameter.value();
+            if start > 0.0 && start_ratio == 0.0 {
+                return Err(invalid("positive developing distance cannot underflow to a new entrance"));
+            }
+            match g.duct.aspect {
+                None => evaluate_circular_duct_section(
+                    reynolds, transport.prandtl(), start_ratio, end_ratio,
+                ).map(DevelopingSectionEvaluation::Circular),
+                Some(aspect) => evaluate_rectangular_duct_section(
+                    reynolds, transport.prandtl(), aspect, start_ratio, end_ratio,
+                ).map(DevelopingSectionEvaluation::Rectangular),
+            }.map_err(|error| native(ConvectionSourceError::Material(error.into())))
         };
         let average = flow.average(g.branch);
         let section = evaluate_flow(average)?;
@@ -255,10 +381,10 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
         if (initial < 0.0 && final_flow > 0.0) || (initial > 0.0 && final_flow < 0.0) {
             evaluate_flow(0.0)?;
         }
-        let coefficient = section.heat_transfer_coefficient(
-            ThermalConductivity::new(transport.thermal_conductivity_w_m_k()), binding.diameter,
+        let coefficient = section.coefficient(
+            transport.thermal_conductivity_w_m_k(), g.duct.diameter,
         ).map_err(|error| native(ConvectionSourceError::Material(error.into())))?;
-        let conductance_w_k = g.wall_area * coefficient.value();
+        let conductance_w_k = g.wall_area * coefficient;
         let difference = g.wall_temperature - g.fluid_temperature;
         let heat_into_fluid_w = conductance_w_k * difference;
         if !positive(conductance_w_k) || !difference.is_finite() || !heat_into_fluid_w.is_finite()

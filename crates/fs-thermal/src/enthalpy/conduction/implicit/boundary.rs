@@ -4,6 +4,11 @@ use super::{ImplicitConductionChain, ImplicitConductionError};
 use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, ThermalLaw};
 use std::collections::BTreeMap;
 
+/// Gray radiation and convection through the original finite half-cell.
+#[path = "boundary/radiation.rs"]
+mod radiation;
+pub use radiation::{GrayAmbientBoundary, GrayAmbientControls, GrayAmbientResponse};
+
 /// Original centre-to-face geometry and the external film/contact resistance.
 /// Area is the actual reservoir coverage or exposed ambient area. Resistance
 /// is area-specific; a material owner converts it to total K/W exactly once.

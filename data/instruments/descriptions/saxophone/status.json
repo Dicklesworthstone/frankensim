@@ -2,19 +2,25 @@
   "schema": "frankensim.instrument-status.v1",
   "family": "saxophone",
   "title": "Alto saxophone",
-  "reference_instrument": "Alto saxophone",
-  "summary": "No render yet. Open sources give only fragments of an alto saxophone air column (a neck cone, two tone-hole positions and a bell cone, from different or unnamed specimens), so the conical bore, the tone-hole lattice and the fingering chart cannot be built from cited numbers without inventing them.",
+  "reference_instrument": "University of Iowa MIS alto saxophone (maker and model unstated on the page)",
+  "summary": "Stand-in saxophone, not a measured one. No tone holes: each note is the printed mouthpiece, neck and bell cones joined by one straight cone cut to that note's length, where a real saxophone plays these notes with holes. The reed's opening, width and area are borrowed. C4 is blown at mf, E3 and F3 at ff, because they are silent at mf on this reed. One mouthpiece position, pushed in 13.28 mm and solved once on C4's passive peak, leaves the three at +18.1, -16.9 and -14.5 c from equal temperament. All three are cleaner than the recordings, and C4 has a hole at its seventh harmonic. Ab4 and E5 stay empty: with a register hole borrowed from a soprano they play an octave low.",
   "physics_present": [
-    "generic fs-duct conical and cylindrical segments, tone-hole side branches and a flanged bell load, the lumped single-reed owner and the physical baffled outlet receiver already run for the clarinet; none has been given this instrument's geometry",
-    "Fuks and Sundberg 1996 blowing pressures for two professional alto saxophone players are retained as player data"
+    "The printed neck (ISMA 2007), bell and mouthpiece (Lefebvre 2010) joined by one straight body cone whose slope is set once from the lowest note, Db3, and cut to each note's length",
+    "An alto reed fitted to a Lefebvre mouthpiece (his printed mass per area, resonance and damping); its opening 1.7 mm, width 10 mm and area 7.5e-5 m2 are borrowed",
+    "One mouthpiece position for every note, pushed in 13.28 mm, solved once on C4's passive first peak against equal temperament",
+    "Fuks and Sundberg 1996 blowing pressures for two alto players",
+    "Reed noise, the duct-constriction law (Oldham and Ukpoho 1990), extrapolated, with no level set against a recording",
+    "A flanged bell radiating into room air with ISO 9613 absorption, 0.5 m on axis, at 48 kHz because the engine refuses this bell at 96 kHz"
   ],
   "physics_missing": [
-    "measured bore diameter profile along the whole air column",
-    "tone-hole positions, diameters and chimney heights, pads and key rise, and a fingering chart",
-    "mouthpiece chamber volume and geometry",
-    "a same-specimen impedance for comparison"
+    "Tone holes, pads, chimneys, key rise and a fingering chart: no measured alto air column is printed, so no hole lattice is built",
+    "A measured alto reed opening, width and area: the opening is an unplayed-tip upper bound, the width a tenor reed's and the area Lefebvre's illustrative value",
+    "The right pitch: one position cannot close a 35 c spread, since C4 was already 11.6 c above E3 and F3 before the push",
+    "The recordings' spectra and noise: harmonics-to-noise reads 5 to 7 dB above the recordings on all three notes, and C4's centroid is 804 Hz against 405 Hz",
+    "The second register: with a register hole borrowed from a soprano, placed by Scavone's rule, Ab4 and E5 sound an octave low, so they stay empty",
+    "A same-specimen impedance for comparison"
   ],
-  "blocked": "No published measured alto saxophone air column was found; it needs an owner measurement of a specimen, or the geometry table behind the Buffet Crampon alto study of Petersen and co-authors 2020 from its authors.",
+  "blocked": null,
   "beads": [
     "pexfp.241"
   ]

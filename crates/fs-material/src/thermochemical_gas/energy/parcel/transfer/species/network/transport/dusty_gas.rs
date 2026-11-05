@@ -19,7 +19,10 @@ use fs_matdb::QueryPoint;
 use super::super::SpeciesNetworkTransfer;
 use super::super::super::diffusion::{
     BinaryDiffusionMaterial,
-    dusty_gas::{DustyGasFaceSolve, DustyGasFlux, DustyGasMedium},
+    dusty_gas::{
+        DustyGasFaceSolve, DustyGasFlux, DustyGasMedium, LayeredDustyGasFlux,
+        LayeredDustyGasMedium,
+    },
 };
 use super::super::super::super::snapshot::{
     MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS,
@@ -50,6 +53,26 @@ pub struct DustyGasNetworkLinkStep {
     pub id: u64,
     pub parcels: [u64; 2],
     pub flux: DustyGasFlux,
+}
+
+/// An ordered heterogeneous porous connection using integrated Dusty-Gas resistance.
+#[derive(Clone, Copy, Debug)]
+pub struct LayeredDustyGasNetworkLink<'a> {
+    pub id: u64,
+    pub parcels: [u64; 2],
+    pub medium: &'a LayeredDustyGasMedium,
+    pub area_m2: f64,
+    pub pairs: &'a [BinaryDiffusionMaterial<'a>],
+    pub gas_context: &'a QueryPoint,
+    pub solve: DustyGasFaceSolve,
+}
+
+/// Original layered face result before the shared finite-inventory update.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayeredDustyGasNetworkLinkStep {
+    pub id: u64,
+    pub parcels: [u64; 2],
+    pub flux: LayeredDustyGasFlux,
 }
 
 /// A refusal leaves every original gas parcel unchanged.
@@ -141,6 +164,78 @@ pub(super) fn sample_transfers(
             });
         }
         reports.push(DustyGasNetworkLinkStep { id, parcels: link.parcels, flux });
+    }
+    check(&mut cancelled)?;
+    Ok((transfers, reports))
+}
+
+
+/// Sample every layered face from the unchanged snapshot. The common finite
+/// species/enthalpy owner later spends these transfers together with every
+/// other declared mechanism, so incoming mass never funds an outgoing path in
+/// the same explicit interval.
+pub(super) fn sample_layered_transfers(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    links: &[LayeredDustyGasNetworkLink<'_>],
+    duration_s: f64,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<(Vec<SpeciesNetworkTransfer>, Vec<LayeredDustyGasNetworkLinkStep>), Error> {
+    check(&mut cancelled)?;
+    if !duration_s.is_finite() || duration_s <= 0.0
+        || parcels.is_empty() || parcels.len() > MAX_SNAPSHOT_PARCELS
+        || links.len() > MAX_SNAPSHOT_TRANSFERS
+    {
+        return Err(Error::Invalid(
+            "bounded nonempty layered dusty-gas graph and positive duration required",
+        ));
+    }
+    let mut ordered = BTreeMap::new();
+    for link in links {
+        check(&mut cancelled)?;
+        if link.parcels[0] == link.parcels[1]
+            || link.parcels.iter().any(|id| !parcels.contains_key(id))
+            || !link.area_m2.is_finite() || link.area_m2 < 0.0
+            || ordered.insert(link.id, link).is_some()
+        {
+            return Err(Error::Invalid(
+                "unique layered dusty-gas IDs, distinct existing endpoints and nonnegative area required",
+            ));
+        }
+    }
+    let mut transfers = Vec::new();
+    let mut reports = Vec::with_capacity(links.len());
+    for (id, link) in ordered {
+        check(&mut cancelled)?;
+        let [left, right] = link.parcels;
+        let flux = parcels[&left].layered_dusty_gas_flux_to(
+            &parcels[&right], link.medium, link.area_m2, link.pairs,
+            link.gas_context, link.solve, &mut cancelled,
+        ).map_err(|error| if error == GasEnergyError::Cancelled {
+            Error::Cancelled
+        } else {
+            Error::Face { id, error }
+        })?;
+        for species in &flux.species {
+            check(&mut cancelled)?;
+            let rate = species.mass_rate_left_to_right_kg_s;
+            let mass = rate * duration_s;
+            if !mass.is_finite() || (rate != 0.0 && mass == 0.0) {
+                return Err(Error::Invalid(
+                    "integrated layered dusty-gas species mass is unrepresentable",
+                ));
+            }
+            if mass == 0.0 { continue; }
+            if transfers.len() == MAX_SNAPSHOT_TRANSFERS {
+                return Err(Error::Invalid(
+                    "layered dusty-gas graph exceeds the selective-transfer bound",
+                ));
+            }
+            let (donor, receiver) = if mass > 0.0 { (left, right) } else { (right, left) };
+            transfers.push(SpeciesNetworkTransfer {
+                donor, receiver, species: species.species.clone(), mass_kg: mass.abs(),
+            });
+        }
+        reports.push(LayeredDustyGasNetworkLinkStep { id, parcels: link.parcels, flux });
     }
     check(&mut cancelled)?;
     Ok((transfers, reports))

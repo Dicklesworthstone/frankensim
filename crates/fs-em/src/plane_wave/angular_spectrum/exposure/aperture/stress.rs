@@ -225,6 +225,7 @@ struct Stress {
     dyad: [Dd; 6],
     poynting: [Dd; 3],
 }
+
 impl Stress {
     fn new(epsilon: f64, mu: f64) -> Self {
         Self {

@@ -233,8 +233,8 @@ impl<M: DgMedium> DgDuct<M> {
                 invalid("attach DG viscothermal memory before compliant wall mechanics").into(),
             );
         }
-        if self.viscothermal.is_some() {
-            return Err(invalid("DG viscothermal memory is already attached").into());
+        if self.viscothermal.is_some() || self.gas.porous_diffusive_model().is_some() {
+            return Err(invalid("DG circular-wall or intrinsic porous diffusion is already attached").into());
         }
         let local = self.mesh.order + 1;
         if !(1..=MAX_ZK_DIFFUSIVE_POLES).contains(&resolution.poles_per_field)
@@ -454,6 +454,8 @@ impl<M: DgMedium> DgDuct<M> {
     ///
     /// # Errors
     /// Foreign/nonfinite state or power overflow.
+    /// This legacy total also includes intrinsic viscous/thermal porous loss;
+    /// `porous_dissipated_power_w` observes those original sources separately.
     pub fn wall_dissipated_power_w(&self, state: &DgState) -> Result<f64, DuctError> {
         if state.operator_identity != self.operator_identity
             || state.tilde.len() != self.total_dofs()
@@ -552,6 +554,8 @@ impl<M: DgMedium> DgDuct<M> {
             None => {}
         }
         power += self.molecular_thermal_loss_pair::<CROSS>(state, tangent);
+        let (porous_viscous, porous_thermal) = self.porous_loss_pair::<CROSS>(state, tangent);
+        power += porous_viscous + porous_thermal;
         power
     }
 }
@@ -570,3 +574,4 @@ impl DgState {
 
 #[cfg(test)]
 mod tests;
+

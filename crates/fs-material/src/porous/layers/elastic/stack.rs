@@ -34,6 +34,9 @@ use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFlu
 use crate::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod spectrum;
+pub use spectrum::{PreparedElasticAcousticSpectrum, PreparedElasticLayerAcousticSpectrum};
+
 /// Ordered physical sections from the incident fluid to the receiving fluid.
 /// Zero thickness is an identity but does not waive original source admission.
 #[derive(Clone, Copy, Debug)]
@@ -72,12 +75,13 @@ enum PreparedSection<'a> {
 }
 
 // A section's original bounded pressure/velocity pair and the two separately
-// accumulated log factors relating its faces. A plate's signed transmission
-// only changes their common phase, which cancels in every local work integral.
+// accumulated log factors relating its faces. Retain plate transmission sign
+// for coherent fields; it cancels only in single-component work integrals.
 #[derive(Clone, Copy, Default)]
 struct SectionTransfer {
     fields: LayerTransfer,
     log_factors: [f64; 2],
+    negative_transmission: bool,
 }
 
 /// At most [`MAX_LAYERS`] fluid-coupled sections at one original frequency.
@@ -87,7 +91,7 @@ struct SectionTransfer {
 /// The original static elastic response regime and strain ceiling are retained;
 /// these infinitesimal coefficients do not admit a finite driving amplitude.
 /// Absorption is solely in the original porous layers. Solid damping, bonded
-/// laminates, lateral boundaries and reconstructed interior fields are absent.
+/// laminates, lateral boundaries and solid interior fields are absent.
 pub struct ElasticPlateStack<'a> {
     prepared: RigidBackedLayers<'a>,
     sections: Vec<PreparedSection<'a>>,
@@ -382,6 +386,7 @@ impl<'a> ElasticPlateStack<'a> {
             let mut step = SectionTransfer {
                 fields: LayerTransfer::identity(pressure, velocity),
                 log_factors: [0.0; 2],
+                negative_transmission: false,
             };
             match section {
                 PreparedSection::Fluid { source, index } => {
@@ -427,7 +432,8 @@ impl<'a> ElasticPlateStack<'a> {
                     step.fields.front_velocity = velocity;
                     // Keep every signed transmission factor in log magnitude;
                     // an exact zero remains zero without an admittance pole.
-                    if next.transmission < 0.0 {
+                    step.negative_transmission = next.transmission < 0.0;
+                    if step.negative_transmission {
                         sign = -sign;
                     }
                     step.log_factors = [

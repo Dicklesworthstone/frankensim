@@ -8,13 +8,14 @@
 //! an inferred source bandwidth, or a random-phase approximation.
 
 use super::*;
-use crate::plane_wave::layers::{FIELD_PREPARATION_WORKSPACE_BYTES, PreparedLayerField};
+use crate::plane_wave::layers::FIELD_PREPARATION_WORKSPACE_BYTES;
 use fs_math::dd::Dd;
 
 mod correlation;
 pub use correlation::{
-    AngularSpectrumCorrelationLimits, AngularSpectrumInterferenceStatistics,
-    AngularSpectrumMutualCoherence, AngularSpectrumObservation,
+    AngularSpectrumCorrelationLimits, AngularSpectrumInterferenceArm,
+    AngularSpectrumInterferenceStatistics, AngularSpectrumMutualCoherence,
+    AngularSpectrumObservation, PreparedAngularSpectrumInterferometer,
 };
 
 /// Whole-factor-bank limits for one query. The conservative workspace includes
@@ -408,7 +409,7 @@ impl<'b, 's, 'm> AngularSpectrumCoherence<'b, 's, 'm> {
         poll(&mut cancelled)?;
         let n = self.anchor.modes.len();
         let workspace_bytes = n
-            .checked_mul(core::mem::size_of::<[PreparedLayerField<'_, '_>; 2]>())
+            .checked_mul(core::mem::size_of::<super::layers::PreparedMode<'_, '_>>())
             .and_then(|v| v.checked_add(self.workspace_bytes))
             .and_then(|v| v.checked_add(FIELD_PREPARATION_WORKSPACE_BYTES))
             .ok_or_else(|| bad("coherence layer workspace overflow"))?;

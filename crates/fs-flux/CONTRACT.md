@@ -535,6 +535,26 @@ active gap. There is no
 anonymous `h_min`, pressure clamp, liquid cavitation substitution, or
 Elrod--Adams semantics.
 
+The declared molecular mean free path belongs to the declared temperature and
+initial absolute pressure. At fixed temperature the solver uses
+`lambda(p) = lambda_ref * p_ref / p`, checking the actual starting/checkpoint
+state, the accepted cells, and each imposed reservoir/vent at its local gap.
+Reservoir pressure is checked directly, without averaging it with a denser
+interior cell. The reported maximum Knudsen number covers the accepted cells
+and boundary states. The reference pressure is fixed across restarts. In a
+uniform sealed isothermal squeeze/expansion, `p*h` and therefore `lambda/h`
+remain constant; a smaller gap alone does not imply greater rarefaction.
+
+The Mach envelope includes pressure-driven gas speed, not only wall motion.
+Each accepted face gradient and gap reconstruct the same no-slip
+Couette--Poiseuille velocity profile used for traction and dissipation. Its
+two wall values and interior stationary point, if present, give the exact
+maximum absolute tangential speed; an off-centre peak cannot be hidden by a
+mean-flow or mid-gap check. The receipt reports `maximum_gas_mach_number`.
+Exceeding either pressure-dependent applicability envelope refuses the step
+before a checkpoint or receipt is published; no slip or compressible-inertia
+correction is silently substituted.
+
 The implementation is bit-deterministic on one ISA by fixed cell/face order and
 bounded Jacobi/Picard sweeps. It has no RNG, no `Cx` cancellation hook, no
 entropy model, and no thermochemical or material-data admission; the
@@ -549,6 +569,8 @@ pressure flow doing work on translating walls, opposing-gradient heat,
 vent closure, spatial/time refinement of analytic limits, reversal and
 pressure-density scaling, static contact exclusion,
 rarefaction/negative/slip/roughness refusal,
+pressure-scaled cell/reservoir/vent rarefaction, sealed compression/expansion
+Knudsen invariance, and pressure-driven/off-centre-profile Mach limits,
 iteration-budget refusal, and deterministic checkpoint replay.  These are
 software/numerical checks of declared equations only.
 
@@ -4441,34 +4463,40 @@ orders, retain original inventory/owner identity, and reject thick interfaces
 or invalid wall/phase controls. These continuum/material tests require the
 normal runtime build.
 
-## Source-owned pressure outlets in three-dimensional compressible flow
+## Source-owned pressure outlets in Cartesian compressible flow
 
-`Euler3d::new_with_open_boundaries` combines complete-state reservoirs with
-`PressureOutletBoundary` on distinct, explicitly transmissive Cartesian sides.
-A pressure outlet supplies only positive absolute backpressure. The original
-`FrozenGas` characteristic owner resolves the outgoing compression/expansion,
-including sonic fan sampling and supersonic departure; density, temperature and
-both tangential velocities follow the outgoing interior gas. A reversed contact
+`BoundaryCondition::PressureOutlet { pressure_pa }` supplies positive finite
+absolute backpressure to frozen and evolving-species Euler fields in two and
+three dimensions. The original `FrozenGas` or `MixtureGas` characteristic owner
+resolves outgoing compression, expansion, sonic fan sampling and supersonic
+departure. Interior composition, entropy and tangential velocities follow the
+departing gas. Pressure alone cannot supply incoming thermodynamics: reversal
 refuses without publishing state, time, loads or a successful report.
 
-The first-order and MUSCL paths use that same source closure. Outlet mass,
-all momentum components, pressure traction and total enthalpy enter the existing
-shared face flux and RK boundary impulse. Fixed six-side metadata introduces no
-face-sized storage or per-step allocation. Initial outgoing boundary wave bounds
-are included before choosing the complete Euler or molecular split interval;
-the existing stage CFL gates remain active. Bindings survive body forcing and
-molecular composition through the original accepted/trial owner.
+First-order and MUSCL paths use the same source closure. Every species, all
+momentum components, pressure traction and full referenced energy share the
+existing face flux and RK boundary impulse. No face-sized storage or per-step
+allocation is added. Initial outgoing-wave bounds participate in Euler and
+complete split intervals, with the existing stage CFL gates retained. The
+planar hydrostatic path uses its physical reference face for this bound; a
+resting high-pressure face is not mistaken for reversed flow from its lower
+cell-average pressure.
 
-A pressure outlet supplies no incoming thermodynamic state and is therefore
-unsuitable for reversal; a full reservoir is required for that case. Fixed
-backpressure is not a nonreflecting boundary. Molecular open-face heat/stress
-conditions remain unchanged, and no finite exterior storage is represented.
+The original `Euler3d::new_with_open_boundaries` and `PressureOutletBoundary`
+API remain supported. The enum uses that same immutable outlet owner. Explicit
+reservoir or outlet bindings still require unique transmissive sides and cannot
+override a pressure condition. Frozen molecular open-face heat/stress policy is
+unchanged; evolving-species molecular owners refuse pressure-only sides because
+no species/thermal bath is specified. Backpressure defines neither a
+nonreflecting boundary nor finite exterior storage.
 
-G0/G1 regressions cover uniform flow and pressure-driven discharge on all six
-sides, both reconstruction modes, reservoir/body-force composition, shared
-boundary work, zero-transport molecular parity and positive-transport sonic
-interval agreement. G4 covers topology/duplicate/pressure admission, backflow
-and cancellation without partial publication.
+G0/G1 regressions cover all four/six side orientations, both reconstruction
+modes, steady advection, discharge and choking, absent species, shear and
+physical-energy conservation, hydrostatic balance, legacy spatial API parity,
+body forcing and complete split intervals. G4 covers invalid pressure,
+conflicting reservoir bindings, reversal and cancellation without partial
+publication. These are manufactured source/physics regressions, not an
+experimental accuracy certificate.
 
 ## Source-owned damped Newton rheology
 
@@ -4528,3 +4556,43 @@ or nonreflecting boundaries. This increment does not define molecular species
 diffusion or heat/stress exchange with the exterior; the existing molecular
 owner continues to refuse transmissive sides. It adds no pressure-equilibrium
 guarantee for unequal-caloric moving contacts or fully discrete entropy theorem.
+
+
+## Opt-in mixture contact-pressure equilibrium on Cartesian grids
+
+The standalone `MixtureEuler2d` and `MixtureEuler3d` owners provide
+`step_with_contact_equilibrium` with the original `fs-gas::multicomponent`
+`pressure_equilibrium::{ContactEquilibriumControl, ContactWorkspace}`.
+Both first-order and MUSCL transport retain the native species/momentum fluxes,
+source thermodynamics, CFL admission and RK2 discretization. The same prepared
+contact workspace is reused across steps; each owner admits its combined
+numerical workspace against the existing hard storage bound.
+
+Each cell's original pressure and full Cartesian velocity are checked against
+both actual traces at every incident face. Physical boundary cells, HLL
+fallback stencils and variations exceeding the caller's tolerance retain
+the conservative update. The second stage can only remove eligibility.
+All velocity components participate, so a normal-velocity match does not
+erase a shear interface. Velocity tolerance is scaled by sound speed.
+
+Eligible cells reconstruct energy through the original mixture calorics
+after both forward-Euler updates and the final SSP average. All represented
+momenta and transported species remain unchanged; zero species stay zero.
+The correction includes every kinetic component and uses the physical cell
+volume and RK weights 1/2, 1/2 and 1. The native arithmetic is preserved for
+default stepping and cells without correction.
+
+The generic `ContactEquilibriumStepReport` retains the native transport
+report and adds the signed numerical energy defect, absolute-defect sum,
+unique corrected-cell count and corrected energy residual. The original
+energy residual still exposes the defect. The caller bounds the sum of
+absolute corrections per accepted step, so opposite signs cannot cancel
+the budget. A budget retry halves time without downgrading MUSCL.
+Cancellation or refusal publishes no field, clock or load change.
+
+This is an Estimated, explicitly nonconservative energy option for admitted
+equilibrium contacts. It is not an entropy or general shock-accuracy theorem.
+The default transport's moving unequal-caloric contact limitation remains.
+Hydrostatic/body-force, molecular, reacting, moving-wall, rotor and network
+compositions continue through their existing methods and do not enable
+this contact correction implicitly.

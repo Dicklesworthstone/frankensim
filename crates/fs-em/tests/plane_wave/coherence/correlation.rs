@@ -1,8 +1,222 @@
 //! Independent two-point interference oracles and original-owner parity.
 use super::*;
 use fs_em::plane_wave::angular_spectrum::{
-    AngularSpectrumCorrelationLimits, AngularSpectrumMutualCoherence, AngularSpectrumObservation,
+    AngularSpectrumCorrelationLimits, AngularSpectrumInterferenceArm,
+    AngularSpectrumMutualCoherence, AngularSpectrumObservation,
 };
+
+fn interferometer_limits(
+    bank: &AngularSpectrumCoherence<'_, '_, '_>,
+    arms: usize,
+) -> AngularSpectrumCorrelationLimits {
+    AngularSpectrumCorrelationLimits {
+        maximum_mode_evaluations: bank.interferometer_mode_evaluations(arms).unwrap(),
+        maximum_workspace_bytes: bank.interferometer_workspace_bytes(arms).unwrap(),
+    }
+}
+
+#[test]
+fn g1_prepared_three_arm_interference_keeps_all_cross_terms_and_independent_factors() {
+    let medium = material(1.0, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 1.0, &[])
+            .unwrap();
+    let mut uniform = [[C64::ZERO; 2]; 8];
+    uniform[0][1] = C64::from_re(2.0);
+    let mut oblique = [[C64::ZERO; 2]; 8];
+    oblique[1][1] = C64::ONE;
+    let factors = [
+        PlanarAngularSpectrum::prepare_modes(&stack, grid(), &uniform, limits(), || false).unwrap(),
+        PlanarAngularSpectrum::prepare_modes(&stack, grid(), &oblique, limits(), || false).unwrap(),
+    ];
+    let bank =
+        AngularSpectrumCoherence::try_new(&factors[0], &factors, coherence_limits(), || false)
+            .unwrap();
+    let length = grid().width as f64 * grid().spacing_m[0];
+    let arms = std::array::from_fn::<_, 3, _>(|index| AngularSpectrumInterferenceArm {
+        observation: observation(Side::Transmitted, 0.0, index as f64 * length / 3.0, 0.0),
+        analyzer: ey(),
+    });
+    let combiner = bank
+        .prepare_interferometer(&arms, interferometer_limits(&bank, arms.len()), || false)
+        .unwrap();
+    assert_eq!(combiner.arm_count(), 3);
+    assert_eq!(combiner.factor_count(), 2);
+    for step in 0..49 {
+        let phi = (step as f64 - 24.0) * core::f64::consts::PI / 12.0;
+        let gains = [C64::ONE, phase(phi), phase(2.0 * phi)];
+        // Three uniformly spaced arms give |1 + e^(i t) + e^(2i t)|²
+        // = (1 + 2 cos(t))². The independently illuminated plane-wave
+        // factors add their intensities, not their electric amplitudes.
+        let expected = 2.0 * (1.0 + 2.0 * det::cos(phi)).powi(2)
+            + 0.5 * (1.0 + 2.0 * det::cos(phi - core::f64::consts::TAU / 3.0)).powi(2);
+        let actual = combiner
+            .electric_mean_square_v2_m2(&gains, || false)
+            .unwrap();
+        near(actual, expected, 2e-12);
+        assert_eq!(
+            actual.to_bits(),
+            combiner
+                .electric_mean_square_v2_m2(&gains, || false)
+                .unwrap()
+                .to_bits()
+        );
+    }
+    // A one-arm detector and a two-arm combiner are the same physical
+    // observables as the existing analyzer/correlation owners.
+    for count in [1, 2] {
+        let prepared = bank
+            .prepare_interferometer(&arms[..count], interferometer_limits(&bank, count), || {
+                false
+            })
+            .unwrap();
+        let expected = if count == 1 {
+            2.5
+        } else {
+            bank.recombined_electric_mean_square_v2_m2(
+                arms[0].observation,
+                arms[1].observation,
+                [ey(); 2],
+                0.0,
+                query_limits(&bank),
+                || false,
+            )
+            .unwrap()
+        };
+        near(
+            prepared
+                .electric_mean_square_v2_m2(&[C64::ONE; 2][..count], || false)
+                .unwrap(),
+            expected,
+            1e-13,
+        );
+    }
+}
+
+#[test]
+fn g1_prepared_multi_arm_null_retains_weak_physical_field() {
+    let medium = material(1.0, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 1.0, &[])
+            .unwrap();
+    let epsilon = 2.0_f64.powi(-30);
+    let mut strong = [[C64::ZERO; 2]; 8];
+    let mut weak = strong;
+    strong[0][1] = C64::ONE;
+    weak[1][1] = C64::from_re(epsilon);
+    let factors = [
+        PlanarAngularSpectrum::prepare_modes(&stack, grid(), &strong, limits(), || false).unwrap(),
+        PlanarAngularSpectrum::prepare_modes(&stack, grid(), &weak, limits(), || false).unwrap(),
+    ];
+    let bank =
+        AngularSpectrumCoherence::try_new(&factors[0], &factors, coherence_limits(), || false)
+            .unwrap();
+    let length = grid().width as f64 * grid().spacing_m[0];
+    let arms = [0.0, length / 2.0, 0.0].map(|x| AngularSpectrumInterferenceArm {
+        observation: observation(Side::Transmitted, 0.0, x, 0.0),
+        analyzer: ey(),
+    });
+    let prepared = bank
+        .prepare_interferometer(&arms, interferometer_limits(&bank, 3), || false)
+        .unwrap();
+    let gains = [C64::ONE, C64::ONE, C64::from_re(-2.0)];
+    let actual = prepared
+        .electric_mean_square_v2_m2(&gains, || false)
+        .unwrap();
+    near(actual / (2.0 * epsilon * epsilon), 1.0, 1e-13);
+    // Rotating every gain cannot change an electric mean square.
+    let rotated = gains.map(|gain| gain * C64::new(0.0, 1.0));
+    assert_eq!(
+        actual.to_bits(),
+        prepared
+            .electric_mean_square_v2_m2(&rotated, || false)
+            .unwrap()
+            .to_bits()
+    );
+}
+
+#[test]
+fn g0_g4_prepared_interferometer_admits_exact_budgets_and_retains_dark_refusals() {
+    let medium = material(1.0, 1.0);
+    let stack =
+        PlanarDielectricLayers::try_new(&medium, DielectricResponse::Lossless(&medium), 1.0, &[])
+            .unwrap();
+    let factors = [prepare(&stack, &vec![[C64::ZERO, C64::ONE]; grid().width])];
+    let bank =
+        AngularSpectrumCoherence::try_new(&factors[0], &factors, coherence_limits(), || false)
+            .unwrap();
+    let arms = [AngularSpectrumInterferenceArm {
+        observation: observation(Side::Transmitted, 0.0, 0.0, 0.0),
+        analyzer: ey(),
+    }; 3];
+    let exact = interferometer_limits(&bank, 3);
+    assert_eq!(exact.maximum_mode_evaluations, 3 * grid().width);
+    let prepared = bank.prepare_interferometer(&arms, exact, || false).unwrap();
+    let mut short_work = exact;
+    short_work.maximum_mode_evaluations -= 1;
+    assert!(
+        bank.prepare_interferometer(&arms, short_work, || false)
+            .is_err()
+    );
+    let mut short_storage = exact;
+    short_storage.maximum_workspace_bytes -= 1;
+    assert!(
+        bank.prepare_interferometer(&arms, short_storage, || false)
+            .is_err()
+    );
+    assert!(bank.interferometer_mode_evaluations(0).is_err());
+    assert!(bank.interferometer_mode_evaluations(4097).is_err());
+    assert!(matches!(
+        bank.prepare_interferometer(&arms, exact, || true),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    assert!(matches!(
+        prepared.electric_mean_square_v2_m2(&[C64::ONE; 3], || true),
+        Err(AngularSpectrumError::Cancelled)
+    ));
+    near(
+        prepared
+            .electric_mean_square_v2_m2(&[C64::ONE; 3], || false)
+            .unwrap(),
+        4.5,
+        1e-14,
+    );
+    let dark =
+        AngularSpectrumCoherence::try_new(&factors[0], &[], coherence_limits(), || false).unwrap();
+    let dark_limits = interferometer_limits(&dark, 3);
+    let prepared = dark
+        .prepare_interferometer(&arms, dark_limits, || false)
+        .unwrap();
+    assert_eq!(prepared.factor_count(), 0);
+    assert_eq!(
+        prepared
+            .electric_mean_square_v2_m2(&[C64::ONE; 3], || false)
+            .unwrap(),
+        0.0
+    );
+    assert!(
+        prepared
+            .electric_mean_square_v2_m2(&[C64::ONE; 2], || false)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .electric_mean_square_v2_m2(&[C64::new(f64::NAN, 0.0); 3], || false)
+            .is_err()
+    );
+    let mut invalid = arms;
+    invalid[1].observation.position_m[0] = f64::INFINITY;
+    assert!(
+        dark.prepare_interferometer(&invalid, dark_limits, || false)
+            .is_err()
+    );
+    invalid = arms;
+    invalid[2].analyzer[2] = C64::new(0.0, f64::NAN);
+    assert!(
+        dark.prepare_interferometer(&invalid, dark_limits, || false)
+            .is_err()
+    );
+}
 
 fn observation(side: Side, distance: f64, x: f64, y: f64) -> AngularSpectrumObservation {
     AngularSpectrumObservation {

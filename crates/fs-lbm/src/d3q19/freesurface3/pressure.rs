@@ -140,11 +140,11 @@ impl FreeSurface3 {
     ///
     /// The field is supplied on EVERY step; it is never retained as a stale
     /// interface map after liquid advances or new sparse tiles activate.
-    /// Gas-pressure refusal or observed cancellation precedes population/mass
-    /// publication; existing post-publication conversion error semantics remain.
-    /// With either conservative momentum mode, the complete pressure/flow/
-    /// conversion candidate publishes together, and any refusal preserves the
-    /// prior native state.
+    /// The default conservative momentum mode publishes pressure, flow and
+    /// conversion together; any refusal preserves the prior native state.
+    /// This also holds for the selected angular mode. Explicit historical
+    /// mass-only policies retain their older post-publication conversion error
+    /// semantics; gas-pressure refusal and cancellation still precede publication.
     pub fn step_with_gas_pressure(
         &mut self,
         gate: &CancelGate,

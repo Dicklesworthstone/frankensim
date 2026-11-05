@@ -1310,6 +1310,28 @@ pub fn cylinder_air_modes(radius: f64, depth: f64, sound_speed: f64, f_max: f64)
     out
 }
 
+// Mean of a cylindrical pressure mode over a circular, uniform-flow aperture
+// in the far head. Graf's addition theorem leaves only J_0 on the local
+// azimuthal average; integrating r J_0 gives 2 J_1(k_r b)/(k_r b).
+// References: DLMF 10.23.7 and 10.22.1. This is an aperture average, not
+// the point pressure at its centre, and retains the far head's axial sign.
+fn cylinder_port_shape(mode: &CylinderAirMode, radius: f64, port: &Port) -> f64 {
+    use crate::radiation::bessel_j;
+    let radial_wave_number = mode.alpha / radius;
+    let r = port.pos[0].hypot(port.pos[1]);
+    let theta = port.pos[1].atan2(port.pos[0]);
+    let angular = if mode.m == 0 { 1.0 }
+        else if mode.sine { (mode.m as f64 * theta).sin() }
+        else { (mode.m as f64 * theta).cos() };
+    let z = radial_wave_number * (port.area / PI).sqrt();
+    let average = if z.abs() < 1e-4 {
+        // 2 J_1(z)/z, including the exact axial-mode and vanishing-hole limit.
+        1.0 - z * z / 8.0 + z.powi(4) / 192.0
+    } else { 2.0 * bessel_j(1, z) / z };
+    let axial = if mode.p % 2 == 0 { 1.0 } else { -1.0 };
+    axial * bessel_j(mode.m, radial_wave_number * r) * angular * average
+}
+
 /// The viscothermal boundary-layer loss of one rigid-cylinder air mode (`cylinder_air_modes`), as the free
 /// mode's amplitude decay rate sigma [1/s] (Q = omega / (2 sigma)).
 ///
@@ -1429,6 +1451,31 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
     if modes.is_empty() {
         return Err(format!("cavity modes: none below {f_max} Hz"));
     }
+    let mut ports = vec![];
+    for (index, cavity) in p.instrument.cavities.iter().enumerate() {
+        if cavity.heads.len() != 2 || !cavity.heads.contains(&batter) || !cavity.heads.contains(&resonant) {
+            continue;
+        }
+        if let Some(port) = &cavity.port {
+            if !port.area.is_finite() || port.area <= 0.0
+                || !port.length.is_finite() || port.length <= 0.0
+                || !port.interior_end_correction.is_finite() || port.interior_end_correction < 0.0
+                || port.length - port.interior_end_correction <= 0.0
+                || !port.pos.iter().all(|x| x.is_finite())
+                || (port.pos[2] + l).abs() > 64.0 * f64::EPSILON * l
+                || port.pos[0].hypot(port.pos[1]) + (port.area / PI).sqrt() > a {
+                return Err("cavity modes: a circular vent must fit inside the resonant head and have finite positive area and inertance length".into());
+            }
+            if p.instrument.step_index != 0 || p.instrument.air_modes.iter().any(|air| air.ports.iter().any(|(cavity, _)| *cavity == index)) {
+                return Err("cavity modes: attach a vent's pressure basis once, before the first integration step".into());
+            }
+            let shape: Vec<f64> = modes.iter().map(|mode| cylinder_port_shape(mode, a, port)).collect();
+            if shape.iter().any(|g| !g.is_finite()) {
+                return Err("cavity modes: vent pressure projection is not representable".into());
+            }
+            ports.push((index, shape));
+        }
+    }
     let k = 1.0 / p.instrument.rate;
     // modes that differ only in their axial order p share one shape on a head: J_m(alpha r / a) {cos, sin}(m th)
     let mut keys: Vec<(usize, usize, bool, f64)> = vec![];
@@ -1486,13 +1533,24 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
         let share = |i: usize| layers.sigma_viscous[i] / (layers.sigma_viscous[i] + layers.sigma_thermal[i]);
         let (v_lo, v_hi) = (0..nm).fold((1.0f64, 0.0f64), |(x, y), i| (x.min(share(i)), y.max(share(i))));
         format!(
-            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz. Each mode carries Pierce's two layers with their half-order law (sec. 10-4): the viscous layer on the air's kinetic energy, the thermal layer on its potential energy, each loss growing as sqrt(f) away from the mode's own frequency (viscous share {:.0}-{:.0} %). The half-order operators are {} poles fitted over {:.0}-{:.0} Hz on this clock, within {:.1e} (viscous) and {:.1e} (thermal) of the law; the thermal layer softens the air springs at rest by at most {:.2} %. The layers' reactance lowers each mode by less than the law's sigma / (2 pi) Hz (about 0.7-0.9 of it), since only the loss is fitted. No loss inside the air, none from the heads' own motion in the layers, and no coupling between modes through the layers. This replaces form B (79988cd3e), a dashpot on the stretch that was a lower bound below the air modes and overcharged the loss above them, and 9d3b26242's form, which overcharged it below them",
+            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz. Each mode carries Pierce's two layers with their half-order law (sec. 10-4): the viscous layer on the air's kinetic energy, the thermal layer on its potential energy, each loss growing as sqrt(f) away from the mode's own frequency (viscous share {:.0}-{:.0} %). The half-order operators are {} poles fitted over {:.0}-{:.0} Hz on this clock, within {:.1e} (viscous) and {:.1e} (thermal) of the law; the thermal layer softens the air springs at rest by at most {:.2} %. The same passive poles fit the reactive quadrature over the modes' {:.0}-{:.0} Hz range, with relative fit errors {:.1e} (viscous) and {:.1e} (thermal) before exact per-mode loss normalization. The continuum first-order frequency shift is -sigma / (2 pi) Hz; these numerical fit residuals are not coupled-pole error bounds. No loss inside the air, none from the heads' own motion in the layers, and no coupling between modes through the layers. This replaces form B (79988cd3e), a dashpot on the stretch that was a lower bound below the air modes and overcharged the loss above them, and 9d3b26242's form, which overcharged it below them",
             gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma, q(lo), name(lo), q(hi), name(hi), band.len(),
-            100.0 * v_lo, 100.0 * v_hi, layers.xi.len(), layers.band.0, layers.band.1, layers.fit_error.0, layers.fit_error.1, 100.0 * layers.softening
+            100.0 * v_lo, 100.0 * v_hi, layers.xi.len(), layers.band.0, layers.band.1, layers.fit_error.0, layers.fit_error.1, 100.0 * layers.softening,
+            layers.resonance_band.0, layers.resonance_band.1, layers.reactance_fit_error.0, layers.reactance_fit_error.1
         )
     } else {
         "shell rigid, air lossless (no boundary-layer loss: a lower bound)".to_string()
     };
+    // At low frequency mode m contributes kappa_m g_m^2 / wt2_m to
+    // the vent inertance. Keeping the lumped inner correction as well would
+    // count the same near-aperture air twice as the pressure basis converges.
+    // Retain throat + exterior correction, with no fitted residual inertia.
+    // All fallible preparation is complete before changing an existing port.
+    for (cavity, _) in &ports {
+        let port = p.instrument.cavities[*cavity].port.as_mut().expect("admitted vent");
+        port.length -= port.interior_end_correction;
+        port.interior_end_correction = 0.0;
+    }
     p.instrument.air_modes.push(AirModes {
         kappa,
         wt2,
@@ -1500,6 +1558,7 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
         xp: vec![0.0; nm],
         shape,
         heads,
+        ports,
         y: vec![0.0; nm],
         q: vec![0.0; ns],
         sigma,
@@ -1508,7 +1567,7 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
     let first: Vec<String> = modes.iter().filter(|md| !md.sine).take(10)
         .map(|md| format!("({},{},{}) {:.0} Hz", md.m, md.n, md.p, md.omega / (2.0 * PI))).collect();
     Ok(format!(
-        "cavity modes (opt-in, ALL-IN): the enclosed air as {nm} acoustic modes on {ns} head shapes of a rigid closed cylinder (radius {a} m, depth {l} m; gas rho {rho:.4} kg/m^3, c {c:.2} m/s) from {:.0} to {:.0} Hz (declared truncation {f_max} Hz), coupling both heads beside the lumped (0,0,0) term; first: {}; {loss}",
+        "cavity modes (opt-in, ALL-IN): the enclosed air as {nm} acoustic modes on {ns} head shapes of a rigid closed-cylinder basis (radius {a} m, depth {l} m; gas rho {rho:.4} kg/m^3, c {c:.2} m/s) from {:.0} to {:.0} Hz (declared truncation {f_max} Hz), coupling both heads and any lumped vent through its aperture-mean pressure beside the lumped (0,0,0) term; the modes replace a vent's interior end correction, and unresolved near-aperture inertia requires cutoff convergence; first: {}; {loss}",
         modes[0].omega / (2.0 * PI), modes[nm - 1].omega / (2.0 * PI), first.join(", ")
     ))
 }
@@ -1744,6 +1803,148 @@ mod air_mode_tests {
     use crate::radiation::bessel_j;
 
     #[test]
+    fn vent_pressure_shapes_match_independent_aperture_quadrature() {
+        // G1: integrate in coordinates centred on an off-axis opening. The
+        // analytic path instead evaluates the cylinder mode at its centre.
+        let (a, l, b) = (0.17, 0.15, 0.025);
+        let port = Port::new(b, 0.0003, [0.035, -0.08, -l], -1.0);
+        let modes = cylinder_air_modes(a, l, 343.0, 3500.0);
+        let mut finite_aperture_effect = 0.0_f64;
+        for mode in modes.iter().take(35) {
+            let (nr, nt) = (80, 96);
+            let mut mean = 0.0;
+            for ir in 0..nr {
+                let r = b * (ir as f64 + 0.5) / nr as f64;
+                for it in 0..nt {
+                    let angle = 2.0 * PI * (it as f64 + 0.5) / nt as f64;
+                    let x = port.pos[0] + r * angle.cos();
+                    let y = port.pos[1] + r * angle.sin();
+                    let theta = y.atan2(x);
+                    let angular = if mode.m == 0 { 1.0 }
+                        else if mode.sine { (mode.m as f64 * theta).sin() }
+                        else { (mode.m as f64 * theta).cos() };
+                    let axial = if mode.p % 2 == 0 { 1.0 } else { -1.0 };
+                    mean += r * bessel_j(mode.m, mode.alpha * x.hypot(y) / a) * angular * axial;
+                }
+            }
+            mean *= 2.0 / (b * nr as f64 * nt as f64);
+            let exact = cylinder_port_shape(mode, a, &port);
+            assert!((mean - exact).abs() < 2e-5, "{mode:?}: quadrature {mean}, analytic {exact}");
+            let tiny = Port::new(1e-9, 0.0003, port.pos, -1.0);
+            finite_aperture_effect = finite_aperture_effect.max((exact - cylinder_port_shape(mode, a, &tiny)).abs());
+            if mode.alpha == 0.0 {
+                assert_eq!(exact, if mode.p % 2 == 0 { 1.0 } else { -1.0 });
+            }
+        }
+        assert!(finite_aperture_effect > 0.01, "the fixture must distinguish a finite opening from a point");
+    }
+
+    #[test]
+    fn cavity_modes_drive_the_vent_and_close_reciprocal_pressure_work() {
+        // G0: one moving head, a vent, uniform compression, and two nonuniform
+        // pressure modes. Initially only the air is displaced, so a port driven
+        // by uniform pressure alone would have exactly zero first acceleration.
+        let rate = 96_000.0;
+        let dt = 1.0 / rate;
+        for resistance in [0.0, 1500.0] {
+            let mut ins = Instrument::new(rate);
+            let head = ins.add(Body::point("head", 0.02));
+            ins.bodies[head].h = 0.03;
+            let mut port = Port::new(0.025, 0.0003, [0.0, 0.0, -0.15], -1.0);
+            port.resistance = resistance;
+            let inertance = ins.gas.density * port.length / port.area;
+            ins.cavities.push(Cavity { heads: vec![head], volume: 0.02, port: Some(port) });
+            let g = [0.0012, -0.0007];
+            let gp = [0.7, -0.5];
+            let kappa = [1e8, 3e8];
+            let x0 = [2e-8, -1e-8];
+            ins.air_modes.push(AirModes {
+                kappa: kappa.to_vec(), wt2: vec![(2.0 * PI * 600.0).powi(2), (2.0 * PI * 1900.0).powi(2)],
+                x: x0.to_vec(), xp: x0.to_vec(), shape: vec![0, 1],
+                heads: vec![(head, g.to_vec(), vec![1.0; 2])], ports: vec![(0, gp.to_vec())],
+                y: vec![0.0; 2], q: vec![0.0; 2], sigma: vec![], layers: None,
+            });
+            assert!(ins.stability().0 < 0.5);
+            let energy = |ins: &Instrument| {
+                let (b, air) = (&ins.bodies[head], &ins.air_modes[0]);
+                let port = ins.cavities[0].port.as_ref().unwrap();
+                let previous = port.x - dt * port.u;
+                let volume = b.h * b.h * b.w[0] + port.x;
+                let old_volume = b.h * b.h * b.wp[0] + previous;
+                let mut e = 0.5 * b.mass[0] * ((b.w[0] - b.wp[0]) / dt).powi(2)
+                    + 0.5 * inertance * port.u.powi(2)
+                    + 0.5 * ins.gas.density * ins.gas.sound_speed.powi(2) / 0.02 * volume * old_volume
+                    - 0.25 * dt * resistance * port.u.powi(2);
+                for m in 0..2 {
+                    let stretch = g[m] * b.w[0] + gp[m] * port.x - air.x[m];
+                    let old_stretch = g[m] * b.wp[0] + gp[m] * previous - air.xp[m];
+                    e += 0.5 * kappa[m] / air.wt2[m] * ((air.x[m] - air.xp[m]) / dt).powi(2)
+                        + 0.5 * kappa[m] * stretch * old_stretch;
+                }
+                e
+            };
+            let e0 = energy(&ins);
+            let (mut dissipated, mut previous_u, mut drift) = (0.0, 0.0, 0.0_f64);
+            for step in 0..8000 {
+                ins.step(&mut []);
+                let port = ins.cavities[0].port.as_ref().unwrap();
+                if step == 0 {
+                    let acceleration = (0..2).map(|m| gp[m] * kappa[m] * x0[m]).sum::<f64>() / inertance;
+                    assert!((port.du / acceleration - 1.0).abs() < 1e-14);
+                }
+                dissipated += dt * resistance * (0.5 * (previous_u + port.u)).powi(2);
+                previous_u = port.u;
+                drift = drift.max((energy(&ins) + dissipated - e0).abs() / e0);
+            }
+            assert!(drift < 2e-9, "R={resistance}: relative pressure-work drift {drift}");
+            if resistance > 0.0 { assert!(dissipated > 0.01 * e0); }
+        }
+    }
+
+    #[test]
+    fn cavity_mode_clock_includes_vent_inertance() {
+        // G0: for one pressure mode the rank-one Gram bound is exact.
+        let mut ins = Instrument::new(96_000.0);
+        let port = Port::new(0.025, 0.0003, [0.0, 0.0, -0.15], -1.0);
+        let inverse_mass = port.area / (ins.gas.density * port.length);
+        ins.cavities.push(Cavity { heads: vec![], volume: 0.02, port: Some(port) });
+        let before = ins.gas_admission_rate2(ins.rate);
+        ins.air_modes.push(AirModes {
+            kappa: vec![1e8], wt2: vec![1e7], x: vec![0.0], xp: vec![0.0], shape: vec![0], heads: vec![],
+            ports: vec![(0, vec![-0.7])], y: vec![0.0], q: vec![0.0], sigma: vec![], layers: None,
+        });
+        let term = ins.gas_admission_rate2(ins.rate) - before;
+        let expected = 1e7 + 1e8 * 0.7_f64.powi(2) * inverse_mass;
+        assert!((term / expected - 1.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn drum_builder_projects_the_actual_vent_and_refuses_an_outside_aperture() {
+        let mut spec = snare();
+        spec.wires = None;
+        spec.port = Some(0.025);
+        spec.grid = 0.02;
+        let mut piece = drum(&spec, &[]).unwrap();
+        let original = piece.instrument.cavities[0].port.as_ref().unwrap().length;
+        attach_cavity_modes(&mut piece, &spec, 2500.0).unwrap();
+        let air = &piece.instrument.air_modes[0];
+        assert_eq!(air.ports.len(), 1);
+        let (index, projection) = &air.ports[0];
+        let port = piece.instrument.cavities[*index].port.as_ref().unwrap();
+        assert_eq!(port.interior_end_correction, 0.0);
+        assert!((port.length - (original - 0.85 * 0.025)).abs() < 1e-15);
+        let modes = cylinder_air_modes(spec.radius, spec.depth, piece.instrument.gas.sound_speed, 2500.0);
+        assert_eq!(projection.len(), modes.len());
+        assert!(modes.iter().zip(projection).any(|(mode, g)| mode.m != 0 && g.abs() > 0.1));
+        for (mode, &g) in modes.iter().zip(projection) {
+            assert_eq!(g, cylinder_port_shape(mode, spec.radius, port));
+        }
+        piece.instrument.cavities[0].port.as_mut().unwrap().pos[0] = spec.radius;
+        assert!(attach_cavity_modes(&mut piece, &spec, 2500.0).is_err());
+        assert_eq!(piece.instrument.air_modes.len(), 1, "rejected attachment must be atomic");
+    }
+
+    #[test]
     fn jprime_zeros_match_the_tables() {
         // Abramowitz and Stegun table 9.5: j'_{0,1} = 3.8317060, j'_{1,1} = 1.8411838, j'_{1,2} = 5.3314428,
         // j'_{2,1} = 3.0542369, j'_{3,1} = 4.2011889
@@ -1803,6 +2004,7 @@ mod air_mode_tests {
             xp: vec![0.0; 2],
             shape: vec![0, 1],
             heads: vec![(head, g.clone(), vec![1.0, 1.0])],
+            ports: vec![],
             y: vec![0.0; 2],
             q: vec![0.0; 2],
             sigma: vec![],
@@ -1885,6 +2087,7 @@ mod air_mode_tests {
                 xp: vec![0.0; 3],
                 shape: shape.to_vec(),
                 heads: (0..2).map(|j| (heads[j], gs[j].to_vec(), signs[j].to_vec())).collect(),
+                ports: vec![],
                 y: vec![0.0; 3],
                 q: vec![0.0; 2],
                 sigma: vec![],
@@ -2145,7 +2348,8 @@ mod cavity_wall_loss_tests {
     /// - The discrete energy E = (kappa / wt2) ((X - X-) / k)^2 / 2 + kappa X X- / 2 falls as exp(-2 sigma t).
     ///   Checked at 144 kHz over 1 / sigma, while the oscillation's energy falls by e^2; bound 1e-3.
     ///   Over longer windows the layers' slow memory (their low poles) is a larger share of what is left.
-    /// - Also printed: the ringing frequency against the mode's, read from interpolated zero crossings.
+    /// - G1: the ringing frequency, read from interpolated zero crossings, includes the boundary layer's
+    ///   first-order reactive shift. A loss-only fit missed roughly 30% of this shift.
     /// - The same mode without sigma or layers keeps E to 1e-9.
     #[test]
     fn a_held_head_air_mode_rings_down_at_its_sigma() {
@@ -2166,7 +2370,7 @@ mod cavity_wall_loss_tests {
             let layers = lossy.then(|| AirLayers::new(k, &[kappa], &[wt2], &[sv], &[st]).unwrap());
             ins.air_modes.push(AirModes {
                 kappa: vec![kappa], wt2: vec![wt2], x: vec![1.0], xp: vec![1.0], shape: vec![0], heads: vec![],
-                y: vec![0.0], q: vec![0.0], sigma: if lossy { vec![sigma] } else { vec![] }, layers,
+                ports: vec![], y: vec![0.0], q: vec![0.0], sigma: if lossy { vec![sigma] } else { vec![] }, layers,
             });
             let energy = |a: &AirModes| 0.5 * kappa / wt2 * ((a.x[0] - a.xp[0]) / k).powi(2) + 0.5 * kappa * a.x[0] * a.xp[0];
             let mut out: [f64; 0] = [];
@@ -2192,6 +2396,8 @@ mod cavity_wall_loss_tests {
             md.m, md.n, md.p, md.omega / (2.0 * PI), 3.0 * std::f64::consts::LN_10 / sigma, md.omega / (2.0 * sigma), f_lossy - f_lossless, sigma / (2.0 * PI)
         );
         assert!((measured / sigma - 1.0).abs() < 1e-3, "{measured} vs {sigma}");
+        let relative_shift = (f_lossless - f_lossy) / (sigma / (2.0 * PI));
+        assert!((relative_shift - 1.0).abs() < 0.025, "boundary-layer frequency shift is {relative_shift} times the physical first-order shift");
         assert!((lossless - 1.0).abs() < 1e-9, "{lossless}");
     }
 
@@ -2356,7 +2562,7 @@ mod cavity_wall_loss_tests {
         ins.links.push(Link { a: (head, 0), b: None, k: kh, c: 0.0 });
         ins.air_modes.push(AirModes {
             kappa: kappa.to_vec(), wt2: wt2.clone(), x: vec![0.0; 2], xp: vec![0.0; 2], shape: vec![0, 1],
-            heads: vec![(head, g.to_vec(), vec![1.0, 1.0])], y: vec![0.0; 2], q: vec![0.0; 2],
+            heads: vec![(head, g.to_vec(), vec![1.0, 1.0])], ports: vec![], y: vec![0.0; 2], q: vec![0.0; 2],
             sigma: vec![sv[0] + st[0], sv[1] + st[1]], layers: Some(layers.clone()),
         });
         let mut out: [f64; 0] = [];
@@ -2463,7 +2669,7 @@ mod cavity_wall_loss_tests {
         ins.links.push(Link { a: (head, 0), b: None, k: kh, c: 0.0 });
         ins.air_modes.push(AirModes {
             kappa: vec![kappa], wt2: vec![wt2], x: vec![x0], xp: vec![x0], shape: vec![0],
-            heads: vec![(head, vec![g], vec![1.0])], y: vec![0.0], q: vec![0.0], sigma: vec![sigma],
+            heads: vec![(head, vec![g], vec![1.0])], ports: vec![], y: vec![0.0], q: vec![0.0], sigma: vec![sigma],
             layers: Some(AirLayers::new(k, &[kappa], &[wt2], &[sv], &[st]).unwrap()),
         });
         let mut out: [f64; 0] = [];
@@ -2592,9 +2798,12 @@ mod cavity_wall_loss_tests {
     ///   rate, and the error is read on a grid ten times finer than the fit's.
     /// - At each mode's own frequency, its stepped coefficients give back its viscous and thermal shares to 1e-12,
     ///   by the scheme's first-order decay. So at resonance the loss is the mode's sigma.
+    /// - G1/G3: both reactive quadratures give the first-order frequency shift within 3% on the 60-7990 Hz
+    ///   modes, with decreasing error on the three clock rungs. The former loss-only fit misses by tens of percent.
     /// - Refused: a mode below the band, a negative share, mismatched lengths.
     #[test]
     fn the_half_order_fit_is_within_one_percent_over_the_band_and_exact_at_each_mode() {
+        let mut previous_shift_error = f64::INFINITY;
         for rate in [96000.0, 144000.0, 192000.0] {
             let k = 1.0 / rate;
             let freqs = [60.0, 591.0, 2400.0, 7990.0];
@@ -2608,16 +2817,24 @@ mod cavity_wall_loss_tests {
             );
             assert!(l.fit_error.0 <= LAYER_FIT_TOLERANCE && l.fit_error.1 <= LAYER_FIT_TOLERANCE, "{:?}", l.fit_error);
             assert!(l.band.0 == 20.0 && (l.band.1 / (0.2 * rate).min(20000.0) - 1.0).abs() < 1e-12, "band {:?}", l.band);
+            assert!(l.visc.iter().chain(&l.arm).all(|x| *x >= 0.0 && x.is_finite()));
+            assert!(l.kappa_rest.iter().all(|x| *x > 0.0));
+            assert!((l.resonance_band.0 / freqs[0] - 1.0).abs() < 1e-10);
+            assert!((l.resonance_band.1 / freqs[3] - 1.0).abs() < 1e-10);
             let nj = l.xi.len();
+            let mut worst_shift_error = 0.0f64;
             for m in 0..4 {
                 let mass = kappa[m] / wt2[m];
                 let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
                 let w = 2.0 / k * (0.5 * om * k).tan();
                 let (mut re, mut im) = (0.0, 0.0);
+                let (mut viscous_reactance, mut thermal_softening) = (0.0, 0.0);
                 for j in 0..nj {
                     let (den, d) = (1.0 + 0.5 * k * l.xi[j], w * w + l.xi[j] * l.xi[j]);
                     re += l.visc[m * nj + j] * den * w * w / d;
                     im += l.arm[m * nj + j] * den * w * l.xi[j] / d;
+                    viscous_reactance += l.visc[m * nj + j] * den * w * l.xi[j] / d;
+                    thermal_softening += l.arm[m * nj + j] * den * l.xi[j] * l.xi[j] / d;
                 }
                 let (back_v, back_t) = (re / (2.0 * mass), im * k / (2.0 * mass * (om * k).sin()));
                 assert!(
@@ -2625,7 +2842,15 @@ mod cavity_wall_loss_tests {
                     "{rate} Hz, mode at {} Hz: shares back {back_v} {back_t} against {} {}",
                     freqs[m], sv[m], st[m]
                 );
+                // The same discrete eigenvalue derivative divides each quadrature:
+                // shift_v / sigma_v = Im Z / Re Z and shift_t / sigma_t = -Re dK / Im dK.
+                worst_shift_error = worst_shift_error.max((viscous_reactance / re - 1.0).abs())
+                    .max((thermal_softening / im - 1.0).abs());
             }
+            eprintln!("{rate} Hz: reactive fit {:?} over {:?} Hz; worst normalized shift error {worst_shift_error:.4e}", l.reactance_fit_error, l.resonance_band);
+            assert!(worst_shift_error < 0.03, "{rate} Hz: {worst_shift_error}");
+            assert!(worst_shift_error < previous_shift_error, "clock refinement did not reduce reactive error: {worst_shift_error} vs {previous_shift_error}");
+            previous_shift_error = worst_shift_error;
         }
         let k = 1.0 / 96000.0;
         let wt2 = |f: f64| (2.0 - 2.0 * (2.0 * PI * f * k).cos()) / (k * k);

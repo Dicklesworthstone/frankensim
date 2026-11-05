@@ -24,6 +24,10 @@
 //! changing gas states require caller-controlled time refinement. The forced
 //! extension includes held gravity and external mechanical work. Rotation and
 //! a shifting centre of mass are excluded.
+//!
+//! Continuous inertial intake uses [`RocketState::advance_with_inertial_capture`]:
+//! its ambient velocity stays fixed while the body accelerates, and the native
+//! endpoint includes physical incoming momentum, orbital influx and capture heat.
 
 use super::{RocketError, RocketForcing, RocketState, RocketStep, mass_integrals, poll};
 use crate::Vec3;
@@ -39,6 +43,10 @@ mod exchange;
 pub use exchange::{
     ParticleExchangeForcing, ParticleExchangeStep, ParticleStreamIntegral, ParticleStreamMoments,
 };
+
+#[path = "exhaust/capture.rs"]
+mod capture;
+pub use capture::{ParticleCaptureForcing, ParticleCaptureStep};
 
 /// Physical comoving exhaust moments, held during the powered interval.
 #[derive(Clone, Copy, Debug, PartialEq)]

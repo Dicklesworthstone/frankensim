@@ -465,6 +465,15 @@ fn zero_capacity_matches_original_and_refusals_preserve_complete_motion() {
     let zero_step = bound
         .advance_controlled(&[0.0], &[[-COMPRESSION, 0.0, 0.0]], 0.01, &mut || false)
         .unwrap();
+    assert!(zero_step.analytic_jacobian_evaluations > 0);
+    assert_eq!(
+        zero_step.analytic_jacobian_evaluations,
+        baseline.analytic_jacobian_evaluations
+    );
+    assert_eq!(
+        zero_step.residual_evaluations,
+        baseline.residual_evaluations
+    );
     assert_eq!(
         baseline.motion.state().displacements_m(),
         zero_step.motion.state().displacements_m()
@@ -558,10 +567,13 @@ fn zero_capacity_matches_original_and_refusals_preserve_complete_motion() {
                     &mut || false,
                 )
                 .unwrap();
-            assert!(
-                matches!(stopping.advance_controlled(&[0.0], &[[-COMPRESSION, 0.0, 0.0]], 0.01, &mut || false),
-                Err(DynamicsError::Model(Error::UnresolvedFrictionReversal { patch: 7 })))
-            );
+            assert!(matches!(
+                stopping
+                    .advance_controlled(&[0.0], &[[-COMPRESSION, 0.0, 0.0]], 0.01, &mut || false),
+                Err(DynamicsError::Model(Error::UnresolvedFrictionReversal {
+                    patch: 7
+                }))
+            ));
             assert_eq!(stopping.velocity_m_s(), &[initial_velocity]);
         }
     }

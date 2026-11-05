@@ -241,6 +241,26 @@ The immutable accessors let coupled process owners verify specific transfer
 models, including the neutral monovalent-counterion/gold-cyanide pair, while
 retaining the original reaction conservation certificate.
 
+## Sulfite reagents and the free-cyanide SO2/air endpoint
+
+Seven `MineralReaction` equations retain crystalline sodium sulfite/metabisulfite
+preparation, HSO3-/SO3(2-) dissociation, productive free-CN oxidation and separate
+bisulfite/sulfite side oxidation. Four matched NBS packs supply 15 literal claims
+at 298.15 K and 1 bar. Negative conventional ionic entropy stays conventional;
+missing metabisulfite Gibbs energy/entropy cannot be replaced by its enthalpy.
+The existing acid/base owner admits the explicitly limited HSO3-/SO3(2-) family.
+
+`cyanide_treatment sulfite` resolves actual source packs and completes finite
+preparation and oxidation stages before printing accepted output. Productive
+and side reactions consume the same original dissolved oxygen and reagent
+stocks. Sodium, sulfate, water and proton equivalents stay in the inventory;
+nitrogen stays in cyanide/cyanate. Source mass, enthalpy and source identities
+are reported. Exact conservation, source facts/refusals, independently summed
+heats, staged demand and shared-pH checks are G0/G1/G3 evidence in
+`xtask/tests/mining_sulfite_sources.rs`. No gas-transfer, copper-catalyst kinetics,
+WAD-CN conversion, automatic pH, commercial dose or treatment-completion claim
+is made. See `data/matdb/seed-v1/MINING_SULFITE_TREATMENT.md`.
+
 ## Finite peroxide treatment and the ammonia acid/base family
 
 `MineralReaction` adds free-CN oxidation by aqueous peroxide, cyanate hydrolysis
@@ -2610,6 +2630,19 @@ unrepresentable arithmetic and mechanical instability `(dp/dv)_T >= 0` refuse.
 The returned homogeneous root is not an inventory of all PT roots. Mechanical
 stability does not establish equilibrium against phase separation.
 
+`evaluate_density_caloric` supplies the same homogeneous pressure, residual
+U/H/entropy/Cv and pressure derivatives in a fixed-size result. Its shared
+mixing reduction uses four stack arrays bounded by the admitted 64 components;
+no successful scalar evaluation allocates or calculates component fugacities.
+The original pair arithmetic, including `sqrt(a_i*a_j)` on either side of an
+alpha-base sign change, is retained. Full evaluations record the same pair
+values for their fugacity owner. Both paths share the residual and derivative
+arithmetic and the pressure/covolume/mechanical-stability checks. Scalar trials
+produce no Gibbs or phase-equilibrium result; a consumer needing fugacity or
+phase admission must still request the full state. Focused tests require bitwise
+agreement in dilute, dense, metastable, alpha-sign and 64-component cases, and
+matching physical refusals. The original fixed operation-tree version remains 4.
+
 G1/G3 tests compare PT and density-coordinate states, the independent pressure
 equation, residual-energy temperature derivatives and the dilute limit. The
 source adapter supplies ideal-reference Cv before complete caloric and acoustic
@@ -2857,3 +2890,23 @@ Three focused actual-source controls cover fourth-order differences of the origi
 `If97State::density_jet` additionally supplies the complete pressure/temperature density Hessian, including the mixed partial. The value and first responses reuse the same admitted state, and its temperature derivatives agree exactly with `isobaric_density_jet`. The extra original Gibbs partials share fixed-size power tables and compensated sums; the isobaric path omits pressure work. Vapor pressure curvature differentiates the residual of `pi*gamma_pi` directly, retaining the finite virial limit without cancellation of ideal-gas terms. The original scalar EOS operation tree, domain and source uncertainty remain unchanged.
 
 Focused controls compare the pressure and both mixed-derivative directions with fourth-order differences of the original state across ten liquid/vapor conditions, preserve the separate saturation tangents, and recover the independently evaluated dilute virial curvature down to 1e-140 Pa. These are single-phase local derivatives; the API supplies no phase-mixture tangent or regional crossing.
+
+## Source-bound pyrrhotite oxidant and acid balances
+
+Three matched NBS/1989 packs add 15 point claims for crystalline alpha FeS,
+Fe7S8 and orthorhombic sulfur at 298.15 K and 1 bar. Four conserved
+`MineralReaction` endpoints separate finite dissolved-oxygen oxidation to
+sulfate from ferric attack to elemental sulfur. Formula-unit and mineral-phase
+identity remain explicit: Fe7S8 is not silently rescaled to Fe0.875S, and the
+sulfur reference is per mole of S atoms. The four `mineral_processing` modes
+compute source-driven mass, standard reaction heat and direct Gibbs sums.
+Compiler-backed regressions also exercise both pyrrhotite phases competing for
+one finite oxygen stock and refuse an overdraw before publishing inventories.
+
+The source rows do not support continuous Fe1-xS interpolation or kinetics.
+Endpoint selection and reacted extents are caller inputs; no oxygen gas supply,
+passivation, ferric regeneration or downstream iron hydrolysis is inferred.
+The FeS sulfate endpoint's zero direct proton term is not a declaration of zero
+long-term acid generation. Source provenance, standard states, historical
+molar masses and unstated uncertainty are retained in
+`data/matdb/seed-v1/MINING_PYRRHOTITE.md` and its referenced packs.

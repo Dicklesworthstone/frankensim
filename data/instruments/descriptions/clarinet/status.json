@@ -3,7 +3,7 @@
   "family": "clarinet",
   "title": "Clarinet",
   "reference_instrument": "Bb clarinet",
-  "summary": "Limits first: a fixed-pressure model, not a player. One lumped reed mode on one slit lay; a printed 2-D contact law with a corner at its onset; a reed-noise law that is an extrapolation, so the notes are noisier than the recordings. No airway, lips or vibrato. The bore is the published 1981 Buffet Crampon Prestige of Taillard and Sanchez 2016 with its 24 tone holes, the open holes and bell sharing room air (Lefebvre, Scavone and Kergomard 2013), and the bore air follows Noreland's measured temperature profile. One barrel pull of 2.79 mm puts the 19 notes from D3 to G5 at -0.1 c from equal temperament on average, spread 10.0 c. Fingerings are Moers and Kergomard 2011 Table 2; Gb3 is inferred, Gb5 comes from two printed charts, and F6, from the same charts, speaks a low tone near 324 Hz, so its page stays recording-only.",
+  "summary": "Limits first: a fixed-pressure model, not a player. Blown at 1.8 kPa (18.4 cm H2O), under the 20 to 55 cm H2O measured on playing clarinettists (Fuks and Sundberg 1999); at those pressures this engine's reed passes through the lay, a contact-law fault, so nothing is posted at them yet. One lumped reed mode on one slit lay; a printed 2-D contact law with a corner at its onset; a reed-noise law that is an extrapolation, so the notes are noisier than the recordings. No airway, lips or vibrato. The bore is the published 1981 Buffet Crampon Prestige of Taillard and Sanchez 2016 with its 24 tone holes, the open holes and bell sharing room air (Lefebvre, Scavone and Kergomard 2013), and the bore air follows Noreland's measured temperature profile. One barrel pull of 2.79 mm puts the 19 notes from D3 to G5 at -0.1 c from equal temperament on average, spread 10.0 c. Fingerings are Moers and Kergomard 2011 Table 2; Gb3 is inferred, Gb5 comes from two printed charts, and F6, from the same charts, speaks a low tone near 324 Hz, so its page stays recording-only.",
   "physics_present": [
     "Air column from the published Buffet Crampon Prestige (1981) bore stations of Taillard and Sanchez 2016, Tableau 2, with all 24 tone holes as side branches at their published positions, minimal diameters and chimney heights, and the mouthpiece as an equivalent cylinder",
     "Fingerings: the open set of each of the 21 normal fingerings from Moers and Kergomard 2011 Table 2, mapped to the Buffet's holes by hole index; Gb3 inferred from the table's rule (F3 with hole 4 also open), a fingering both the Woodwind Fingering Guide's Boehm chart and the UNSW 'Acoustics of the clarinet' diagram now show; Gb5 (written G#5) from those two printed charts",
@@ -25,8 +25,12 @@
     "The printed tone-hole length corrections (Lefebvre, Scavone and Kergomard 2012) are an option in the engine and are off on these cards",
     "The recordings (University of Iowa Musical Instrument Samples) are another clarinet and player: there is no same-specimen comparison",
     "Only the 21 normal fingerings of Moers and Kergomard 2011 Table 2 are printed there. Gb3 is inferred, not printed; Gb5 and F6 take their hole states from two other printed charts (UNSW; Woodwind Fingering Guide) by a mapping of drawn holes to the Buffet's that is a judgment, checked on 17 of the 17 decodable printed fingerings, and UNSW draws 'a Bb clarinet', not this Buffet. The card has no altissimo leak physics",
-    "F6 does not speak: with its printed fingering the card sounds a low tone near 324 Hz with a weak line at F6's own frequency 30 dB under it; the cause has not been isolated"
+    "F6 does not speak: with its printed fingering the card sounds a low tone near 324 Hz with a weak line at F6's own frequency 30 dB under it; the cause has not been isolated",
+    "Every clarinet card ends in a flanged (infinite-baffle) radiation load, because the receiver used needs one; a real bell is unbaffled. At D3 the low-ka unflanged law raises the bore's impedance peaks by about 3 dB (2.8 dB, mean of the peaks between 0.6 and 1.9 kHz, re the playing peak); that law refuses above ka 1, about 1.9 kHz"
   ],
   "blocked": "F6 (written G6): the card speaks a low tone near 324 Hz instead of F6, so its page stays recording-only until the cause is found",
-  "beads": ["pexfp.228", "pexfp.178"]
+  "beads": [
+    "pexfp.228",
+    "pexfp.178"
+  ]
 }

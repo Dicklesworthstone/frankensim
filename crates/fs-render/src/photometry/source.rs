@@ -32,6 +32,8 @@ pub mod finite_detector;
 mod ray_partition;
 /// Prepared sampling of calibrated angular source profiles.
 pub mod sampling;
+/// Selected transmitted-image measurements through native planar glass slabs.
+pub mod slab;
 pub mod validation;
 
 /// Spectral bins shared with the existing spectral renderer.

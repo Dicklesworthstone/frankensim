@@ -664,5 +664,12 @@ fn value(v: Dd) -> Result<f64, TransferError> {
     }
 }
 
+mod correlation;
+pub use correlation::{
+    HarmonicPressureCorrelation, HarmonicPressureCorrelationLimits,
+    HarmonicPressureCorrelationPair, MAX_PRESSURE_CORRELATION_PAIRS,
+    PreparedHarmonicPressureCorrelations, WindowedHarmonicPressureCorrelations,
+};
+
 #[cfg(test)]
 mod tests;

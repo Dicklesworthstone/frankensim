@@ -19,7 +19,7 @@
 
 use super::permeability::IntrinsicPermeability;
 use super::{PorousAmbient, PorousCard};
-use super::{characteristic_from_response, rigid_surface_from_characteristic};
+use super::{characteristic_from_response, rigid_surface_from_response};
 use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use crate::{MaterialError, gas::GasState};
 use fs_math::c64::C64;
@@ -87,10 +87,12 @@ impl PorousFluidResponse {
     }
     /// Rigid-backed surface impedance [Pa s/m] using the same sampled fluid.
     pub fn surface_impedance_rigid(&self, thickness_m: f64) -> Result<C64, MaterialError> {
-        passive_surface(rigid_surface_from_characteristic(
-            self.impedance,
-            self.wavenumber,
+        passive_surface(rigid_surface_from_response(
+            self.density,
+            self.bulk,
+            self.omega,
             thickness_m,
+            (self.impedance, self.wavenumber),
         )?)
     }
 }

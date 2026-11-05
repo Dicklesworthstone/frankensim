@@ -1005,17 +1005,24 @@ impl RigidBodyState {
         let kinetic_energy_before = momentum.work.kinetic_energy_before_j;
         let kinetic_energy_after = momentum.work.kinetic_energy_after_j;
         let kinetic_energy_change_j = momentum.work.kinetic_energy_change_j;
-        let impulse_work_j = finite_derived(
-            midpoint_impulse_pairing(
-                point_kinematics_before.point_velocity_world,
-                point_kinematics_after.point_velocity_world,
-                impulse_world,
-            )
-            .to_f64(),
-            "impulse.work_j",
-        )?;
+        let point_work = midpoint_impulse_pairing(
+            point_kinematics_before.point_velocity_world,
+            point_kinematics_after.point_velocity_world,
+            impulse_world,
+        );
+        let resultant_work = midpoint_impulse_pairing(
+            point_kinematics_before.center_of_mass_velocity_world,
+            point_kinematics_after.center_of_mass_velocity_world,
+            impulse_world,
+        ) + midpoint_impulse_pairing(
+            point_kinematics_before.angular_velocity_body,
+            point_kinematics_after.angular_velocity_body,
+            angular_impulse_body,
+        );
+        let impulse_work_j = finite_derived(point_work.to_f64(), "impulse.work_j")?;
         let work_energy_residual_j = finite_derived(
-            kinetic_energy_change_j - impulse_work_j,
+            ((resultant_work - point_work) + Dd::from_f64(momentum.work.work_energy_residual_j))
+                .to_f64(),
             "impulse.work_energy_residual_j",
         )?;
         Ok(ImpulseReceipt {
@@ -1063,26 +1070,51 @@ impl RigidBodyState {
             self.linear_momentum_world.add(linear_impulse_world),
             self.angular_momentum_body.add(angular_impulse_body),
         )?;
-        let delta_linear = state_after
-            .linear_momentum_world
-            .sub(self.linear_momentum_world);
-        let delta_angular = state_after
-            .angular_momentum_body
-            .sub(self.angular_momentum_body);
+        // Keep the complete represented endpoint difference. A large new
+        // impulse can absorb old momentum even when the rounded delta equals
+        // the command, just as a small impulse can be absorbed by old momentum.
+        let delta_linear = momentum_difference(
+            self.linear_momentum_world,
+            state_after.linear_momentum_world,
+        );
+        let delta_angular = momentum_difference(
+            self.angular_momentum_body,
+            state_after.angular_momentum_body,
+        );
         let velocity_before = self.center_of_mass_velocity_world(properties)?;
         let velocity_after = state_after.center_of_mass_velocity_world(properties)?;
         let omega_before = properties.angular_velocity_body_checked(self.angular_momentum_body)?;
         let omega_after =
             properties.angular_velocity_body_checked(state_after.angular_momentum_body)?;
-        let change = midpoint_impulse_pairing(velocity_before, velocity_after, delta_linear)
-            + midpoint_impulse_pairing(omega_before, omega_after, delta_angular);
+        let mut change = MomentumWork::default();
+        change.add(velocity_before, velocity_after, delta_linear);
+        change.add(omega_before, omega_after, delta_angular);
+        let change = change.total();
         let work = midpoint_impulse_pairing(velocity_before, velocity_after, linear_impulse_world)
             + midpoint_impulse_pairing(omega_before, omega_after, angular_impulse_body);
         let kinetic_energy_change_j =
             finite_derived(change.to_f64(), "momentum_impulse.kinetic_change")?;
         let impulse_work_j = finite_derived(work.to_f64(), "momentum_impulse.work")?;
-        let linear_residual = delta_linear.sub(linear_impulse_world);
-        let angular_residual = delta_angular.sub(angular_impulse_body);
+        let applied_linear = [
+            linear_impulse_world.x,
+            linear_impulse_world.y,
+            linear_impulse_world.z,
+        ];
+        let applied_angular = [
+            angular_impulse_body.x,
+            angular_impulse_body.y,
+            angular_impulse_body.z,
+        ];
+        let linear_error =
+            core::array::from_fn(|d| delta_linear[d] - Dd::from_f64(applied_linear[d]));
+        let angular_error =
+            core::array::from_fn(|d| delta_angular[d] - Dd::from_f64(applied_angular[d]));
+        // Pair the independently recovered error itself with velocity. Taking
+        // the difference of two large work totals can hide this physical loss.
+        let work_error = midpoint_momentum_pairing(velocity_before, velocity_after, linear_error)
+            + midpoint_momentum_pairing(omega_before, omega_after, angular_error);
+        let linear_residual = rounded_vector(linear_error);
+        let angular_residual = rounded_vector(angular_error);
         if !linear_residual.is_finite() || !angular_residual.is_finite() {
             return Err(DynamicsError::NonFinite("momentum_impulse.residual"));
         }
@@ -1091,8 +1123,8 @@ impl RigidBodyState {
             state_after,
             linear_impulse_world,
             angular_impulse_body,
-            linear_increment_world: delta_linear,
-            angular_increment_body: delta_angular,
+            linear_increment_world: rounded_vector(delta_linear),
+            angular_increment_body: rounded_vector(delta_angular),
             linear_residual_world: linear_residual,
             angular_residual_body: angular_residual,
             work: ImpulseWorkDiagnostics {
@@ -1101,7 +1133,7 @@ impl RigidBodyState {
                 kinetic_energy_change_j,
                 impulse_work_j,
                 work_energy_residual_j: finite_derived(
-                    (change - work).to_f64(),
+                    work_error.to_f64(),
                     "momentum_impulse.work_residual",
                 )?,
             },
@@ -1200,7 +1232,8 @@ pub struct ImpulseWorkDiagnostics {
     pub kinetic_energy_change_j: f64,
     /// Impulse dot midpoint material-point velocity, in joules.
     pub impulse_work_j: f64,
-    /// `kinetic_energy_change_j - impulse_work_j`, in joules.
+    /// Compensated kinetic change minus impulse work, in joules. This can be
+    /// nonzero when the separately rounded energy and work totals coincide.
     pub work_energy_residual_j: f64,
 }
 
@@ -1208,13 +1241,57 @@ pub struct ImpulseWorkDiagnostics {
 // work has been accumulated. Rounding a mean velocity first can discard the
 // quadratic impulse energy even when both endpoint momenta are representable.
 fn midpoint_impulse_pairing(before: Vec3, after: Vec3, impulse: Vec3) -> Dd {
-    [before.x, before.y, before.z]
-        .into_iter()
-        .zip([after.x, after.y, after.z])
-        .zip([impulse.x, impulse.y, impulse.z])
-        .fold(Dd::ZERO, |sum, ((old, new), applied)| {
-            sum + (Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new)) * Dd::from_f64(applied)
-        })
+    midpoint_momentum_pairing(
+        before,
+        after,
+        [impulse.x, impulse.y, impulse.z].map(Dd::from_f64),
+    )
+}
+
+fn momentum_difference(before: Vec3, after: Vec3) -> [Dd; 3] {
+    let old = [before.x, before.y, before.z];
+    let new = [after.x, after.y, after.z];
+    core::array::from_fn(|d| Dd::from_f64(new[d]) - Dd::from_f64(old[d]))
+}
+
+fn rounded_vector(values: [Dd; 3]) -> Vec3 {
+    Vec3::new(values[0].to_f64(), values[1].to_f64(), values[2].to_f64())
+}
+
+// Reduce precision layers across all components and bodies before combining.
+// A trailing product can remain after every leading energy transfer cancels.
+#[derive(Default)]
+struct MomentumWork {
+    leading: Dd,
+    cross: Dd,
+    trailing: Dd,
+}
+
+impl MomentumWork {
+    fn add(&mut self, before: Vec3, after: Vec3, momentum: [Dd; 3]) {
+        for ((old, new), delta) in [before.x, before.y, before.z]
+            .into_iter()
+            .zip([after.x, after.y, after.z])
+            .zip(momentum)
+        {
+            let mean = Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new);
+            self.leading = self.leading + Dd::from_f64(mean.hi) * Dd::from_f64(delta.hi);
+            self.cross = self.cross
+                + Dd::from_f64(mean.hi) * Dd::from_f64(delta.lo)
+                + Dd::from_f64(mean.lo) * Dd::from_f64(delta.hi);
+            self.trailing = self.trailing + Dd::from_f64(mean.lo) * Dd::from_f64(delta.lo);
+        }
+    }
+
+    fn total(self) -> Dd {
+        self.leading + self.cross + self.trailing
+    }
+}
+
+fn midpoint_momentum_pairing(before: Vec3, after: Vec3, momentum: [Dd; 3]) -> Dd {
+    let mut work = MomentumWork::default();
+    work.add(before, after, momentum);
+    work.total()
 }
 
 /// Complete atomic receipt for one momentum impulse at a body point.
@@ -1249,9 +1326,11 @@ pub struct MomentumImpulseReceipt {
     pub linear_impulse_world: Vec3,
     /// Requested COM angular impulse [kg m2/s], body coordinates.
     pub angular_impulse_body: Vec3,
+    /// Rounded represented endpoint difference; the residual retains its tail.
     pub linear_increment_world: Vec3,
+    /// Rounded represented endpoint difference; the residual retains its tail.
     pub angular_increment_body: Vec3,
-    /// Actual increment minus requested impulse, retaining lost small kicks.
+    /// Compensated endpoint difference minus requested impulse in the same frame.
     pub linear_residual_world: Vec3,
     pub angular_residual_body: Vec3,
     pub work: ImpulseWorkDiagnostics,
@@ -1295,7 +1374,8 @@ pub struct ActionReactionImpulseReceipt {
     pub kinetic_energy_change_j: f64,
     /// Sum of the two midpoint impulse-work values, in joules.
     pub impulse_work_j: f64,
-    /// `kinetic_energy_change_j - impulse_work_j`, in joules.
+    /// Compensated kinetic change minus impulse work, in joules. This can be
+    /// nonzero when the separately rounded energy and work totals coincide.
     pub work_energy_residual_j: f64,
 }
 
@@ -1329,27 +1409,41 @@ pub fn apply_equal_and_opposite_impulse_at_body_points(
     let mut linear_change = [Dd::ZERO; 3];
     let mut angular_change = [Dd::ZERO; 3];
     let mut angular_impulse = [Dd::ZERO; 3];
-    let mut kinetic_change = Dd::ZERO;
-    let mut supplied_work = Dd::ZERO;
+    let mut kinetic_change = MomentumWork::default();
+    let mut supplied_work = MomentumWork::default();
+    let mut work_error = Dd::ZERO;
     for event in [&first, &second] {
         let old = event.state_before;
         let new = event.state_after;
-        let dp = new.linear_momentum_world.sub(old.linear_momentum_world);
-        let dl_body = new.angular_momentum_body.sub(old.angular_momentum_body);
-        for (sum, value) in linear_change.iter_mut().zip([dp.x, dp.y, dp.z]) {
-            *sum = *sum + Dd::from_f64(value);
+        let dp = momentum_difference(old.linear_momentum_world, new.linear_momentum_world);
+        let dl_body = momentum_difference(old.angular_momentum_body, new.angular_momentum_body);
+        for (sum, value) in linear_change.iter_mut().zip(dp) {
+            *sum = *sum + value;
         }
-        // Spin and orbital changes remain separate until the final reduction.
-        for moment in [
-            old.pose.orientation.rotate_body_to_world(dl_body),
-            old.pose.position_world.cross(dp),
+        // Rotate both parts of the represented spin increment; a rounded
+        // difference must not erase old spin swallowed by a larger impulse.
+        for spin in [
+            Vec3::new(dl_body[0].hi, dl_body[1].hi, dl_body[2].hi),
+            Vec3::new(dl_body[0].lo, dl_body[1].lo, dl_body[2].lo),
         ] {
+            let moment = old.pose.orientation.rotate_body_to_world(spin);
             for (sum, value) in angular_change
                 .iter_mut()
                 .zip([moment.x, moment.y, moment.z])
             {
                 *sum = *sum + Dd::from_f64(value);
             }
+        }
+        let r = [
+            old.pose.position_world.x,
+            old.pose.position_world.y,
+            old.pose.position_world.z,
+        ]
+        .map(Dd::from_f64);
+        for d in 0..3 {
+            let b = (d + 1) % 3;
+            let c = (d + 2) % 3;
+            angular_change[d] = angular_change[d] + r[b] * dp[c] - r[c] * dp[b];
         }
         // Retain the original local arm even when adding it to a distant
         // world origin would round the material-point coordinate away.
@@ -1368,23 +1462,29 @@ pub fn apply_equal_and_opposite_impulse_at_body_points(
         }
         let before = event.point_kinematics_before;
         let after = event.point_kinematics_after;
-        kinetic_change = kinetic_change
-            + midpoint_impulse_pairing(
-                before.center_of_mass_velocity_world,
-                after.center_of_mass_velocity_world,
-                dp,
-            )
-            + midpoint_impulse_pairing(
-                before.angular_velocity_body,
-                after.angular_velocity_body,
-                dl_body,
-            );
-        supplied_work = supplied_work
-            + midpoint_impulse_pairing(
-                before.point_velocity_world,
-                after.point_velocity_world,
-                event.impulse_world,
-            );
+        kinetic_change.add(
+            before.center_of_mass_velocity_world,
+            after.center_of_mass_velocity_world,
+            dp,
+        );
+        kinetic_change.add(
+            before.angular_velocity_body,
+            after.angular_velocity_body,
+            dl_body,
+        );
+        supplied_work.add(
+            before.point_velocity_world,
+            after.point_velocity_world,
+            [
+                event.impulse_world.x,
+                event.impulse_world.y,
+                event.impulse_world.z,
+            ]
+            .map(Dd::from_f64),
+        );
+        // Each native point receipt pairs its own compensated momentum error
+        // with velocity before any large work totals are rounded.
+        work_error = work_error + Dd::from_f64(event.work.work_energy_residual_j);
     }
     let as_vector =
         |values: [Dd; 3]| Vec3::new(values[0].to_f64(), values[1].to_f64(), values[2].to_f64());
@@ -1406,12 +1506,15 @@ pub fn apply_equal_and_opposite_impulse_at_body_points(
         return Err(DynamicsError::NonFinite("action_reaction.angular_momentum"));
     }
     let kinetic_energy_change_j = finite_derived(
-        kinetic_change.to_f64(),
+        kinetic_change.total().to_f64(),
         "action_reaction.kinetic_energy_change_j",
     )?;
-    let impulse_work_j = finite_derived(supplied_work.to_f64(), "action_reaction.impulse_work_j")?;
+    let impulse_work_j = finite_derived(
+        supplied_work.total().to_f64(),
+        "action_reaction.impulse_work_j",
+    )?;
     let work_energy_residual_j = finite_derived(
-        (kinetic_change - supplied_work).to_f64(),
+        work_error.to_f64(),
         "action_reaction.work_energy_residual_j",
     )?;
     Ok(ActionReactionImpulseReceipt {

@@ -152,10 +152,22 @@ impl MixtureGas {
         // A stationary pressure contact can have arbitrary composition,
         // density and tangential shear, but transports only normal pressure.
         // Match the frozen-gas owner without treating nearby pressures as equal.
-        // Moving unequal-caloric contacts retain their existing no-claim limit.
         if pl.velocity == 0.0 && pr.velocity == 0.0 && pl.pressure == pr.pressure {
             out.fill(0.0);
             out[n] = pl.pressure;
+            return checked(out, speed, false);
+        }
+        // At an exact moving pressure contact the physical upwind flux also
+        // transports species and shear exactly. Avoid redundant star-state
+        // roundoff and spurious HLL diffusion at the source-domain endpoints.
+        // This face property does not remove the cell-mixing pressure defect
+        // of conservative transport with unequal caloric laws.
+        if pl.velocity == pr.velocity && pl.pressure == pr.pressure {
+            out.copy_from_slice(if pl.velocity > 0.0 {
+                &fl[..m]
+            } else {
+                &fr[..m]
+            });
             return checked(out, speed, false);
         }
         if sl >= 0.0 {

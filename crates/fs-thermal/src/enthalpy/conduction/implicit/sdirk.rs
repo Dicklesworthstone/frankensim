@@ -12,7 +12,57 @@ use super::*;
 
 const GAMMA: f64 = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
 
+#[path = "sdirk/adaptive.rs"]
+mod time_control;
+
 impl ImplicitConductionChain<'_> {
+    // Check the complete requested window BEFORE an adaptive controller can
+    // process events. Source-only jumps preserve the prepared geometry/material
+    // bindings; a later bath or topology change must not admit a solved prefix.
+    fn admit_sdirk2_window(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        target_s: f64,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), ImplicitConductionError> {
+        if self.advection.is_some() {
+            return Err(ImplicitConductionError::Invalid(
+                "SDIRK2 requires fixed cells without implicit advection",
+            ));
+        }
+        for (index, event) in thermal.schedule[thermal.cursor..]
+            .iter()
+            .take_while(|event| event.time_s <= target_s)
+            .enumerate()
+        {
+            // The caller has already polled at entry. Keep early unsupported
+            // events a preflight refusal while bounding long admitted schedules.
+            if index != 0 && index % 256 == 0 {
+                checkpoint()?;
+            }
+            let Event::Boundary(id, boundary) = &event.event else {
+                return Err(ImplicitConductionError::Invalid(
+                    "SDIRK2 admits only scheduled source changes on fixed cells",
+                ));
+            };
+            let cell = thermal
+                .cells
+                .get(id)
+                .ok_or(ImplicitConductionError::Invalid(
+                    "SDIRK2 source event requires an active cell",
+                ))?;
+            crate::enthalpy::validate_boundary(*boundary)?;
+            let mut expected = cell.boundary;
+            expected.source_w = boundary.source_w;
+            if *boundary != expected {
+                return Err(ImplicitConductionError::Invalid(
+                    "SDIRK2 source events must preserve ambient, film and reservoir boundaries",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn solve_sdirk2_step<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -29,6 +79,9 @@ impl ImplicitConductionChain<'_> {
         if !positive(implicit_dt_s) || stage_time_s <= thermal.time_s || stage_time_s >= target_s {
             return Err(DepositionError::Arithmetic.into());
         }
+        // An empty override map preserves each cell's authored, constant power.
+        // Native StageHeat carries it with the same quadrature as conduction,
+        // including its external energy and unclassified at-cell entropy.
         let sources = BTreeMap::new();
         let first = self.solve_stage(
             thermal,
@@ -75,12 +128,15 @@ impl ImplicitConductionChain<'_> {
     ///
     /// All geometric, nonlinear material, contact and integrated boundary laws
     /// of this prepared solver remain active. Ambient and reservoir temperatures
-    /// must remain constant throughout the call. Attached implicit advection,
-    /// nonzero authored heat sources, observers, moving mass and pending events
-    /// at or before the target are outside this entry point; sources/events
-    /// refuse rather than silently receiving a first-order splitting. Process
-    /// births/boundary events with the original timeline before preparing a
-    /// fixed interval.
+    /// must remain constant throughout the call. Authored cell source/sink powers
+    /// may change through source-only boundary events: every interval ends at
+    /// the next event and uses its original left-limit power in both stages.
+    /// Events at the target are applied without aging under their new power.
+    /// Both stages integrate powers in the original energy residual;
+    /// source entropy retains its original unclassified at-cell convention.
+    /// Attached implicit advection, observers, moving mass and all other scheduled
+    /// events through the target refuse before stage work. Source events retain
+    /// authored order and the same whole-call nonlinear and accepted-step budgets.
     ///
     /// Both stages use the SAME original enthalpy storage. Internal first-stage
     /// heat cancels from the external account; bath heat, bath entropy and
@@ -113,39 +169,52 @@ impl ImplicitConductionChain<'_> {
             workspace.cells(),
         )?;
         self.admit(thermal, &mut checkpoint)?;
-        if self.advection.is_some()
-            || thermal
-                .cells
-                .values()
-                .any(|cell| cell.boundary.source_w != 0.0)
-            || thermal
-                .schedule
-                .get(thermal.cursor)
-                .is_some_and(|event| event.time_s <= target_s)
-        {
-            return Err(ImplicitConductionError::Invalid(
-                "SDIRK2 requires source-free fixed cells and constant baths without advection or pending events",
-            ));
-        }
+        self.admit_sdirk2_window(thermal, target_s, &mut checkpoint)?;
         let mut next = thermal.clone();
+        let mut observer = None;
         let mut report = empty_report();
         let mut supplied = Sum::default();
-        while next.time_s < target_s {
+        loop {
             checkpoint()?;
+            // Reuse the native event owner only when events are due. The common
+            // constant-source path does not clone/process a timeline per step.
+            if next
+                .schedule
+                .get(next.cursor)
+                .is_some_and(|event| event.time_s <= next.time_s)
+            {
+                let current_observer = observer.get_or_insert_with(|| self.conduction.clone());
+                let (with_events, observed, events) = next.advance_observed(
+                    current_observer,
+                    next.time_s,
+                    StepConfig {
+                        max_dt_s: controls.maximum_dt_s,
+                        energy_tolerance_j: controls.total_tolerance_j,
+                    },
+                    &mut checkpoint,
+                )?;
+                next = with_events;
+                observer = Some(observed);
+                report.energy.events += events.events;
+                self.admit(&next, &mut checkpoint)?;
+            }
+            if next.time_s == target_s {
+                break;
+            }
             if report.energy.substeps >= controls.maximum_steps.min(next.budget.max_substeps) {
                 return Err(DepositionError::Budget("implicit thermal intervals").into());
             }
             let start = next.time_s;
-            let remaining = finite(target_s - start)?;
+            let stop = next
+                .schedule
+                .get(next.cursor)
+                .map_or(target_s, |event| event.time_s.min(target_s));
+            let remaining = finite(stop - start)?;
             let mut dt = controls.maximum_dt_s.min(remaining);
             let mut halvings = 0;
             loop {
                 checkpoint()?;
-                let end = if dt == remaining {
-                    target_s
-                } else {
-                    start + dt
-                };
+                let end = if dt == remaining { stop } else { start + dt };
                 if !end.is_finite() || end <= start {
                     return Err(DepositionError::Arithmetic.into());
                 }

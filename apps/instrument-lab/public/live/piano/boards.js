@@ -30,7 +30,7 @@ export const RELATIVE_COST = { 32: 1, 48: 1.12, 64: 1.32, 96: 1.9, 128: 2.4 };
 // 128 frames timed. Returns audio seconds per wall second.
 export const PROBE_KEYS = [38, 45, 50, 54, 56, 57, 59, 61, 63, 64, 66, 73];
 export function probeRealtime(engine) {
-  for (const k of PROBE_KEYS) engine.noteOn(k, 3.5);
+  for (const k of probeNotes(engine).cluster) engine.noteOn(k, 3.5);
   engine.render(512);
   const t0 = performance.now();
   for (let i = 0; i < 48; i++) engine.render(128);
@@ -48,22 +48,46 @@ export function probeRealtime(engine) {
 const COMP_BASS = [36, 41, 43, 38, 45, 40];
 const COMP_CHORDS = [[55, 59, 62, 66], [57, 60, 64, 67], [54, 58, 61, 65], [56, 60, 63, 69], [59, 62, 66, 71]];
 const COMP_UPPER = [[74, 78], [76, 79], [73, 77]];
+
+// Imported scales need not contain the built-in probe's pitches. Spread the
+// workload across their actual courses instead of timing refused strikes and
+// silence. This is a startup cost probe, not an acoustic-fidelity measurement.
+function probeNotes(engine) {
+  const standard = { cluster: PROBE_KEYS, bass: COMP_BASS, chords: COMP_CHORDS, upper: COMP_UPPER };
+  if (typeof engine.keyGeometry !== 'function') return standard; // legacy built-in-scale WASM
+  const geometry = engine.keyGeometry(); // MIDI, length, strike fraction, unison, f1
+  if (!geometry.length || geometry.length % 5) throw new Error('piano probe requires nonempty key geometry');
+  const keys = Array.from({ length: geometry.length / 5 }, (_, i) => geometry[5 * i]).sort((a, b) => a - b);
+  if (keys.some(k => !Number.isInteger(k) || k < 21 || k > 108)) throw new Error('piano probe received invalid key geometry');
+  const targets = [...new Set([...PROBE_KEYS, ...COMP_BASS, ...COMP_CHORDS.flat(), ...COMP_UPPER.flat()])].sort((a, b) => a - b);
+  const present = new Set(keys);
+  if (targets.every(k => present.has(k))) return standard;
+  const mapped = new Map(targets.map((k, i) => [k, keys[Math.round(i * (keys.length - 1) / (targets.length - 1))]]));
+  const group = notes => [...new Set(notes.map(k => mapped.get(k)))];
+  const count = Math.min(PROBE_KEYS.length, keys.length);
+  return {
+    cluster: Array.from({ length: count }, (_, i) => keys[Math.round(i * (keys.length - 1) / Math.max(1, count - 1))]),
+    bass: COMP_BASS.map(k => mapped.get(k)), chords: COMP_CHORDS.map(group), upper: COMP_UPPER.map(group),
+  };
+}
+
 export function probeSustained(engine, { beat = 10240, settle = 4096, timed = 12288 } = {}) {
+  const notes = probeNotes(engine);
   const half = Math.round(beat / 256) * 128, release = Math.round((beat * 0.75) / 128) * 128;
   let k = 0, chord = null, bass = null, upper = null, t0 = 0;
   for (let f = 0; f < settle + timed; f += 128) {
-    if (f === 0) for (const x of PROBE_KEYS) engine.noteOn(x, 3);
-    if (f === 2048) for (const x of PROBE_KEYS) engine.noteOff(x);
+    if (f === 0) for (const x of notes.cluster) engine.noteOn(x, 3);
+    if (f === 2048) for (const x of notes.cluster) engine.noteOff(x);
     const p = f % beat;
     if (p === 0) {
       if (bass !== null) engine.noteOff(bass);
-      bass = COMP_BASS[k % COMP_BASS.length];
+      bass = notes.bass[k % notes.bass.length];
       engine.noteOn(bass, 3);
-      chord = COMP_CHORDS[k % COMP_CHORDS.length];
+      chord = notes.chords[k % notes.chords.length];
       for (const x of chord) engine.noteOn(x, 2.6);
       k += 1;
     } else if (p === half) {
-      upper = COMP_UPPER[k % COMP_UPPER.length];
+      upper = notes.upper[k % notes.upper.length];
       for (const x of upper) engine.noteOn(x, 2.4);
     } else if (p === release) {
       for (const x of chord) engine.noteOff(x);
@@ -140,6 +164,10 @@ export async function chooseQuality({ make, measure = probeSustained, target, fu
         // the caller builds the engine again
       }
       return measure(engine);
+    } catch (error) {
+      kept?.free();
+      kept = null;
+      throw error;
     } finally {
       engine.free();
     }
@@ -285,8 +313,10 @@ export async function chooseBoard({ make, measure = probeRealtime, target, sizes
   // so fetching 96 early would only compete with the board it needs
   const base = make(null, 0);
   const base0 = copyOf(base);
-  const realtime32 = measure(base);
-  base.free();
+  let realtime32;
+  try { realtime32 = measure(base); }
+  catch (error) { base0?.free(); throw error; }
+  finally { base.free(); }
   log(`board 32: ${realtime32.toFixed(2)}x`);
   let tries = 0;
   for (const n of sizes) {

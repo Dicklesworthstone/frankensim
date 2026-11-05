@@ -7,7 +7,7 @@ use crate::multicomponent::{Cell, MAX_SPECIES, Mesh1d, MixtureGas, allocated, po
 use fs_qty::{Length, Pressure, Temperature};
 
 mod turbulent;
-pub use turbulent::CircularTurbulentWall;
+pub use turbulent::{CircularGnielinskiWall, CircularTurbulentWall};
 
 /// Explicit circular, developed-laminar approximation for one complete branch.
 ///
@@ -65,6 +65,8 @@ pub enum CircularWallModel {
     Laminar(CircularLaminarWall),
     /// Colebrook-White drag and an authored Nusselt number.
     Turbulent(CircularTurbulentWall),
+    /// Smooth-pipe drag and heat transfer from actual Reynolds and Prandtl numbers.
+    Gnielinski(CircularGnielinskiWall),
 }
 
 impl CircularWallModel {
@@ -75,20 +77,35 @@ impl CircularWallModel {
                 model.validate()?;
                 admit_circular_mesh(model.diameter, mesh)
             }
+            Self::Gnielinski(model) => {
+                model.validate()?;
+                admit_circular_mesh(model.diameter, mesh)?;
+                let positions = mesh.positions();
+                let length = positions[positions.len() - 1] - positions[0];
+                admit(
+                    "pipe length / diameter",
+                    length / model.diameter.value(),
+                    10.0,
+                    1e6,
+                )
+            }
         }
     }
 
-    fn parameters(self) -> (Length, f64, [f64; 2], f64) {
+    fn parameters(self) -> (Length, [f64; 2], f64) {
         match self {
             Self::Laminar(model) => (
                 model.diameter,
-                model.nusselt_number,
                 model.reynolds_number,
                 model.maximum_mach_number,
             ),
             Self::Turbulent(model) => (
                 model.diameter,
-                model.nusselt_number,
+                model.reynolds_number,
+                model.maximum_mach_number,
+            ),
+            Self::Gnielinski(model) => (
+                model.diameter,
                 model.reynolds_number,
                 model.maximum_mach_number,
             ),
@@ -164,8 +181,8 @@ impl NetworkWallOperator<'_> {
     /// Resolve laminar or turbulent wall friction from each branch's actual gas.
     ///
     /// The original transport law supplies current viscosity and conductivity;
-    /// the selected model supplies geometry, roughness, the Nusselt number and
-    /// an explicit applicability domain. The same wall transaction retains heat,
+    /// the selected model supplies geometry, roughness or the smooth-pipe heat
+    /// relation, and an explicit applicability domain. The same wall transaction retains heat,
     /// moving-wall work, finite-support recoil and whole-network rollback.
     /// Coefficients are frozen per source interval and checked at both endpoints.
     pub fn with_circular_transport<L: TransportLaw + Send + Sync + 'static>(
@@ -257,7 +274,7 @@ impl CircularWallTransport {
                 "wall law viscosity or conductivity",
             ));
         }
-        let (diameter, nusselt_number, reynolds_number, maximum_mach_number) = model.parameters();
+        let (diameter, reynolds_number, maximum_mach_number) = model.parameters();
         let motion = contact.drag.moving_velocity();
         let slip = primitive.velocity - motion.unwrap_or(0.0);
         let reynolds = primitive.density * slip.abs() * diameter.value() / viscosity;
@@ -265,6 +282,25 @@ impl CircularWallTransport {
         let [minimum, maximum] = reynolds_number;
         admit("Reynolds number", reynolds, minimum, maximum)?;
         admit("Mach number", mach, 0.0, maximum_mach_number)?;
+        let (friction_factor, nusselt_number) = match model {
+            CircularWallModel::Laminar(laminar) => (None, laminar.nusselt_number),
+            CircularWallModel::Turbulent(turbulent) => (
+                Some(turbulent.darcy_factor(reynolds)?),
+                turbulent.nusselt_number,
+            ),
+            CircularWallModel::Gnielinski(thermal) => {
+                // Cp, not Cv, defines Pr. Use the original NASA mixture at the
+                // current composition and temperature, preserving formation-
+                // reference independence and avoiding a constant-gamma proxy.
+                let (_, cv_density) =
+                    gas.caloric(state.partial_densities, primitive.temperature)?;
+                let cp =
+                    (cv_density + primitive.pressure / primitive.temperature) / primitive.density;
+                let prandtl = viscosity * cp / conductivity;
+                let (factor, nu) = thermal.coefficients(reynolds, prandtl)?;
+                (Some(factor), nu)
+            }
+        };
         contact.drag = match model {
             CircularWallModel::Laminar(_) => {
                 let drag = WallDrag::circular_laminar(
@@ -282,8 +318,9 @@ impl CircularWallTransport {
                     _ => drag,
                 }
             }
-            CircularWallModel::Turbulent(turbulent) => {
-                let friction_factor = turbulent.darcy_factor(reynolds)?;
+            CircularWallModel::Turbulent(_) | CircularWallModel::Gnielinski(_) => {
+                let friction_factor =
+                    friction_factor.expect("turbulent branch evaluated its factor");
                 match motion {
                     Some(wall_velocity_m_s) => WallDrag::MovingDarcy {
                         friction_factor,

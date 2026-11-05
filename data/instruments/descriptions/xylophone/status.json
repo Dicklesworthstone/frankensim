@@ -3,7 +3,7 @@
   "family": "xylophone",
   "title": "Xylophone",
   "reference_instrument": "Iowa MIS xylophone (model NA; bar material not stated). Ab4 and Eb5 are compared with its hard-rubber files, Db5 with its rosewood file",
-  "summary": "Three solid padouk bars, Ab4, Db5 and Eb5, with no resonator, no neighbouring bars and no room, so each note is cleaner and has less early first partial than a real one. Their undercuts are solved, not printed, and Iowa's bars aren't known to be padouk. Each is Bar No. 5 of Chaigne and Doutaut 1997, with the undercut solved in the engine so the first partial sits at equal temperament and f2 = 3 f1. Eb5's is a narrow groove that we don't know a maker would cut, and it isn't converged in mesh. Ab4 and Eb5 take the paper's hard rubber mallet and Db5 its boxwood, at printed speeds, struck at the mesh point nearest the printed spot. We read the wood's loss from the paper's Fig. 4, 4.22 times its Table I, and we can't say why they differ. B5 and G6 are recordings only.",
+  "summary": "Three solid padouk bars, Ab4, Db5 and Eb5, with no resonator and no neighbouring bars, so each note is cleaner and has less early first partial than a real one. Their undercuts are solved, not printed, and Iowa's bars aren't known to be padouk. Each is Bar No. 5 of Chaigne and Doutaut 1997, with the undercut solved in the engine so the first partial sits at equal temperament and f2 = 3 f1. Eb5's is a narrow groove that we don't know a maker would cut, and it isn't converged in mesh. Ab4 and Eb5 take the paper's hard rubber mallet and Db5 its boxwood, at printed speeds, struck at the mesh point nearest the printed spot. We read the wood's loss from the paper's Fig. 4, 4.22 times its Table I, and we can't say why they differ. B5 and G6 are recordings only.",
   "physics_present": [
     "A three-dimensional bar with the outline of Bar No. 5 of Chaigne and Doutaut 1997 (JASA 101, Table I): padouk, 29.3 x 3.7 x 1.9 cm, with their modulus and density. The other elastic ratios are Honduras mahogany's, a stand-in (USDA Wood Handbook)",
     "A circular-arc undercut solved in the engine for each note, so the first partial sits at equal temperament and f2 = 3 f1. The 1:3 target is xylophone tuning practice in print, not taken from the recording",
@@ -13,13 +13,13 @@
   ],
   "physics_missing": [
     "A resonator: no box is in any render. In our model a box takes Ab4's first partial from -56.7 dB/s to about -142 at half the patch and -460 to -516 at the card's own rule, where Part II of the same paper says a tube has no appreciable effect on a wooden bar. So it's left out, which costs the 22 to 28 dB of early first partial a resonator gives, measured on Ab4 with an earlier mallet. We think the reason is that in this model the bar is a wall of the cavity and feels its full pressure; that hasn't been tested on its own",
-    "Neighbouring bars and a room. Harmonics-to-noise reads 63.9, 71.4 and 74.7 dB on Ab4, Db5 and Eb5, against 47.4, 51.2 and 51.2 dB in the recordings",
+    "Neighbouring bars. Iowa recorded its bars in an anechoic chamber, so the recordings have no room either. Harmonics-to-noise reads 63.9, 71.4 and 74.7 dB on Ab4, Db5 and Eb5, against 54.5, 52.6 and 57.9 dB in the recordings",
     "A printed undercut: the printed bar is tuned about 1:4 at 397 Hz, and no cut for these notes is printed. Eb5's solved groove is 32 mm wide and 6.1 mm deep, against 145 mm and 5.6 mm on Db5, and we don't know that a maker would cut it",
     "Mesh convergence on Eb5: at 112 x 6 x 4 its first partial falls 5.9 c, so the posted cut isn't converged",
     "Why Fig. 4 and Table I differ: Fig. 4's eta is 4.22 times Table I's 9.16e-8, and they may not be the same bar. We looked at the figure because the upper partials decayed too slowly against the recording, so it was found after the gap was seen. On Ab4 its cost is the first partial going from 2.0 under the recording to 6.7 over",
     "The recorded instrument's wood and bars, and on Db5 its mallet: the recording names rosewood mallets, and the render uses boxwood",
     "Lines not explained: Ab4's 2424.8 Hz line is 21 dB too strong and 6 % low against the recording's 2580 Hz. Db5's recording has a line at 3545 Hz with nothing to match it here",
-    "Db5's pitch and Eb5's cepstral envelope stay outside the ruler. Eb5's attack is 3.2 ms against 18.5 ms",
+    "Eb5's pitch and cepstral envelope stay outside the ruler. Db5's pitch passes by .04 c, against a ruler whose widest take is a roll read on one tooth of its comb. Eb5's attack is 3.2 ms against 18.5 ms",
     "Any note beyond these three"
   ],
   "blocked": null,

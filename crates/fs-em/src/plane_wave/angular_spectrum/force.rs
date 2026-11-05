@@ -31,6 +31,9 @@ impl PlanarAngularSpectrum<'_, '_> {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
+            if mode.is_dormant() {
+                continue;
+            }
             let force = super::super::momentum::one_sided(
                 [mode.kx / omega, mode.ky / omega, mode.incident_kz / omega],
                 self.source

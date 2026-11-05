@@ -22,6 +22,127 @@ pub(super) struct CapacityCurve<'a, K> {
     knots: &'a [K],
 }
 
+/// Prepared search coordinates for repeated inversions from one fixed datum.
+///
+/// The coordinates locate an original capacity segment; they do not replace
+/// C(T) by a piecewise-linear energy law. Each query still solves the original
+/// quadratic integral on that segment. Relative heat and entropy integrations
+/// remain on `CapacityCurve`, so small changes never subtract cached primitives.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct CapacityInverse {
+    datum: f64,
+    energy: Vec<f64>,
+}
+
+impl CapacityInverse {
+    /// O(knots) preparation, with independent compensated sums on both sides
+    /// of the datum. An unrepresentable index is only an optimization refusal:
+    /// the owning law can retain the original direct inversion in that case.
+    pub(super) fn new<K: CapacityKnot>(
+        curve: &CapacityCurve<'_, K>,
+        datum: f64,
+    ) -> Result<Self, ThermalTransportError> {
+        curve.check_temperature(datum)?;
+        let split = curve.segment(datum);
+        let mut energy = vec![0.0; curve.knots.len()];
+        for heating in [false, true] {
+            let mut current = datum;
+            let mut sum = 0.0;
+            let mut correction = 0.0;
+            let count = if heating {
+                curve.knots.len() - split - 1
+            } else {
+                split + 1
+            };
+            for step in 0..count {
+                let index = if heating {
+                    split + step + 1
+                } else {
+                    split - step
+                };
+                let segment = if heating { index - 1 } else { index };
+                let end = curve.knots[index].temperature();
+                if end != current {
+                    let a = curve.on_segment(segment, current);
+                    let b = curve.knots[index].capacity();
+                    let amount = (0.5 * a + 0.5 * b) * (end - current).abs();
+                    if !positive(amount) {
+                        return Err(invalid("caloric search increment is not representable"));
+                    }
+                    let corrected = amount - correction;
+                    let next = sum + corrected;
+                    if !positive(next) {
+                        return Err(invalid("caloric search coordinate is not representable"));
+                    }
+                    correction = (next - sum) - corrected;
+                    sum = next;
+                }
+                energy[index] = if heating { sum } else { -sum };
+                current = end;
+            }
+        }
+        if energy.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(invalid("caloric search knots are not numerically distinct"));
+        }
+        Ok(Self { datum, energy })
+    }
+
+    /// Binary search plus one original analytic segment inverse, with no
+    /// allocation or walk from the datum. Near a rounded knot or support bound,
+    /// retain the direct owner's admission instead of clipping heat or T.
+    pub(super) fn temperature<K: CapacityKnot>(
+        &self,
+        curve: &CapacityCurve<'_, K>,
+        energy: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        if energy == 0.0 {
+            return Ok(self.datum);
+        }
+        let direct = || curve.temperature_after_energy_change(self.datum, energy);
+        if !energy.is_finite()
+            || energy <= self.energy[0]
+            || energy >= self.energy[self.energy.len() - 1]
+        {
+            return direct();
+        }
+        let lower = self.energy.partition_point(|value| *value <= energy) - 1;
+        let upper = lower + 1;
+        if self.energy[lower] <= 0.0 && self.energy[upper] >= 0.0 {
+            // The datum's own segment is already constant-work. Subtracting
+            // a distant knot here can turn an unrepresentable tiny heat into
+            // a one-ulp temperature change, even of the wrong sign.
+            return direct();
+        }
+        if energy == self.energy[lower] {
+            return Ok(curve.knots[lower].temperature());
+        }
+        // Work from the nearer endpoint to retain a small local increment.
+        let anchor = if energy - self.energy[lower] <= self.energy[upper] - energy {
+            lower
+        } else {
+            upper
+        };
+        let other = if anchor == lower { upper } else { lower };
+        let start = curve.knots[anchor].temperature();
+        let end = curve.knots[other].temperature();
+        let change = energy - self.energy[anchor];
+        let available = (0.5 * curve.knots[anchor].capacity()
+            + 0.5 * curve.knots[other].capacity())
+            * (end - start);
+        // Prefix sums can round by a final ulp at source knots. Such an edge
+        // must not make a supported query cross a different source interval.
+        if change.abs() <= available.abs()
+            && let Ok(temperature) = curve.temperature_after_energy_change(start, change)
+            && temperature >= start.min(end)
+            && temperature <= start.max(end)
+            && temperature != self.datum
+        {
+            return Ok(temperature);
+        }
+        direct()
+    }
+}
+
 impl<'a, K: CapacityKnot> CapacityCurve<'a, K> {
     pub(super) const fn new(knots: &'a [K]) -> Self {
         Self { knots }
@@ -363,6 +484,116 @@ mod tests {
                         .is_err()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn g1_fixed_datum_inverse_uses_local_work_far_across_long_source_tables() {
+        for count in [64, 4096, 262_144] {
+            let queries = Cell::new(0);
+            let knots: Vec<_> = (0..count)
+                .map(|i| CountedKnot {
+                    values: [250.0 + f64::from(i), 1000.0 + 0.5 * f64::from(i)],
+                    queries: &queries,
+                })
+                .collect();
+            let curve = CapacityCurve::new(&knots);
+            let datum = 250.125 + f64::from(count / 2);
+            let inverse = CapacityInverse::new(&curve, datum).unwrap();
+            for target in [
+                250.25,
+                datum - 0.25,
+                datum + 0.25,
+                248.75 + f64::from(count),
+            ] {
+                let delta = target - datum;
+                // Independent exact integral of C(T)=1000+0.5*(T-250).
+                let heat = (1000.0 + 0.25 * (datum + target - 500.0)) * delta;
+                queries.set(0);
+                let actual = inverse.temperature(&curve, heat).unwrap();
+                assert!(
+                    (actual - target).abs() <= 8.0 * f64::EPSILON * target,
+                    "{count} knots, {actual} != {target}"
+                );
+                assert!(
+                    queries.get() <= 16,
+                    "fixed-datum inversion read {} capacities on {count} knots",
+                    queries.get()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_indexed_inverse_preserves_nonlinear_heating_cooling_and_source_support() {
+        // Each interval deliberately has a different slope, including cooling
+        // through a decreasing capacity. A linear interpolation of h knots
+        // would not recover these temperatures.
+        for scale in [1e-12, 1.0, 1e12] {
+            let knots = [
+                [200.0, 1000.0 * scale],
+                [275.0, 7000.0 * scale],
+                [310.0, 2000.0 * scale],
+                [400.0, 4000.0 * scale],
+                [600.0, 3000.0 * scale],
+            ];
+            let curve = CapacityCurve::new(&knots);
+            for datum in [200.0, 261.75, 310.0, 511.25, 600.0] {
+                let inverse = CapacityInverse::new(&curve, datum).unwrap();
+                assert_eq!(inverse.temperature(&curve, 0.0).unwrap(), datum);
+                for target in [
+                    200.0, 231.25, 275.0, 301.5, 310.0, 367.0, 400.0, 521.0, 600.0,
+                ] {
+                    let heat = curve.energy_change(datum, target).unwrap();
+                    let actual = inverse.temperature(&curve, heat).unwrap();
+                    assert!(
+                        (actual - target).abs() <= 8.0 * f64::EPSILON * target,
+                        "scale={scale}, datum={datum}, {actual} != {target}"
+                    );
+                    if target == 200.0 || target == 600.0 {
+                        assert_eq!(actual, target);
+                    }
+                }
+                for boundary in [200.0, 600.0] {
+                    let heat = curve.energy_change(datum, boundary).unwrap();
+                    let beyond = if boundary == 200.0 {
+                        heat.next_down()
+                    } else {
+                        heat.next_up()
+                    };
+                    assert!(inverse.temperature(&curve, beyond).is_err());
+                }
+                assert!(inverse.temperature(&curve, f64::NAN).is_err());
+                assert!(inverse.temperature(&curve, f64::INFINITY).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn g1_index_does_not_erase_small_heat_near_its_interior_datum() {
+        let knots = [[200.0, 1000.0], [300.0, 2000.0], [400.0, 4000.0]];
+        let curve = CapacityCurve::new(&knots);
+        let datum: f64 = 325.0;
+        let inverse = CapacityInverse::new(&curve, datum).unwrap();
+        for target in [datum.next_down(), datum.next_up()] {
+            let heat = curve.energy_change(datum, target).unwrap();
+            assert_ne!(heat, 0.0);
+            assert_eq!(inverse.temperature(&curve, heat).unwrap(), target);
+        }
+        assert!(inverse.temperature(&curve, f64::from_bits(1)).is_err());
+
+        // A non-dyadic datum exposes cancellation against a distant cached
+        // prefix: it must not manufacture warming or cooling from tiny heat.
+        let knots = [[200.0, 500.0], [400.0, 4000.0]];
+        let curve = CapacityCurve::new(&knots);
+        let datum: f64 = 325.3;
+        let inverse = CapacityInverse::new(&curve, datum).unwrap();
+        for heat in [f64::from_bits(1), -f64::from_bits(1)] {
+            assert!(inverse.temperature(&curve, heat).is_err());
+        }
+        for target in [datum.next_down(), datum.next_up()] {
+            let heat = curve.energy_change(datum, target).unwrap();
+            assert_eq!(inverse.temperature(&curve, heat).unwrap(), target);
         }
     }
 }

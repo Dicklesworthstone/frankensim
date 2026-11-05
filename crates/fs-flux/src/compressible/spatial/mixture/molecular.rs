@@ -163,18 +163,12 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             ));
         }
         for boundary in [flow.boundaries.x, flow.boundaries.y, flow.boundaries.z] {
-            if matches!(
-                boundary,
-                AxisBoundaries::Ends {
-                    lower: BoundaryCondition::Transmissive,
-                    ..
-                } | AxisBoundaries::Ends {
-                    upper: BoundaryCondition::Transmissive,
-                    ..
-                }
-            ) {
+            if let AxisBoundaries::Ends { lower, upper } = boundary
+                && (lower != BoundaryCondition::Reflecting
+                    || upper != BoundaryCondition::Reflecting)
+            {
                 return Err(DissipationError::Invalid(
-                    "transmissive Euler ends do not define a species/thermal molecular reservoir",
+                    "open Euler ends do not define a species/thermal molecular reservoir",
                 ));
             }
         }

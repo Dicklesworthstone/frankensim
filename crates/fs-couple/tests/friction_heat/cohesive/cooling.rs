@@ -1,0 +1,562 @@
+//! Native inertial rupture, changed thermal topology and explicit loss heating.
+//! Coefficients are manufactured analytical references, not specimen estimates.
+use super::*;
+use fs_conduction::transient::enthalpy::deposition::fracture::{
+    CohesiveHeatPartition, ContactPolicy, FractureCooling, Interface,
+};
+use fs_couple::friction_heat::cohesive::cooling::*;
+use fs_material::cohesive::CohesivePoint;
+
+#[path = "cooling/temperature.rs"]
+mod temperature;
+
+fn cooling_controls() -> CohesiveCoolingControls {
+    CohesiveCoolingControls {
+        thermal: StepConfig {
+            max_dt_s: 0.03,
+            energy_tolerance_j: 1e-10,
+        },
+        heat_energy_tolerance_j: 1e-10,
+        combined_energy_tolerance_j: 5e-10,
+    }
+}
+
+fn partition(fracture: f64, viscous: f64) -> [CohesiveHeatPartition; 1] {
+    [CohesiveHeatPartition {
+        interface: CONTACT,
+        fracture_fraction_to_heat: fracture,
+        fracture_fraction_to_first: 0.2,
+        viscous_fraction_to_heat: viscous,
+        viscous_fraction_to_first: 0.6,
+    }]
+}
+
+fn cooling<'a>(
+    thermal: DepositionSimulation<'static>,
+    point: CohesivePoint<'a>,
+) -> FractureCooling<'static, 'a> {
+    let reference = thermal.links()[&CONTACT];
+    FractureCooling::new(
+        thermal,
+        vec![Interface {
+            reference,
+            point,
+            closed: true,
+            policy: ContactPolicy {
+                open_gap_m: 0.003,
+                reclose_gap_m: 0.0,
+                reclosed_conductance_w_k: 0.25,
+                maximum_slip_m: 0.02,
+            },
+        }],
+        1,
+        || Ok(()),
+    )
+    .unwrap()
+}
+
+fn normal_system<'a>(
+    elastic: &'a dyn LinearOp,
+    source: &'a ResolvedBilinearCohesive,
+) -> CohesiveSystem<'a> {
+    CohesiveSystem::new(
+        elastic,
+        vec![
+            CohesivePatch::from_interface(
+                CONTACT,
+                1.0,
+                source,
+                [
+                    &source.surfaces()[0].material,
+                    &source.surfaces()[1].material,
+                ],
+                vec![JumpTerm {
+                    dof: 0,
+                    local: [1.0, 0.0, 0.0],
+                }],
+            )
+            .unwrap(),
+        ],
+        Budget {
+            max_dofs: 1,
+            max_patches: 1,
+            max_jump_terms: 1,
+            max_krylov_basis_entries: 128,
+        },
+    )
+    .unwrap()
+}
+
+#[test]
+fn inertial_rupture_heats_original_cells_and_continues_through_opening_and_reclosure() {
+    let source = material(true);
+    let elastic = Scalar(0.0);
+    let mass = Scalar(1.0);
+    let joint = normal_system(&elastic, &source);
+    let start = 0.3;
+    let target = 0.31;
+    let dt = target - start;
+    let incoming = 0.5;
+    let mut config = dynamics();
+    config.maximum_step_s = 0.03;
+    let motion = joint
+        .bonded_state()
+        .into_dynamics(&mass, vec![incoming], start, config)
+        .unwrap();
+    let thermal = network(1, [1.0; 2], [1.0; 2], [1.0, 2.0], [0.0; 2], [20.0, 0.0])
+        .advance_to(start, cooling_controls().thermal, || Ok(()))
+        .unwrap()
+        .0;
+    let old = cooling(thermal, motion.state().points()[0]);
+    let h0: Vec<_> = old
+        .thermal()
+        .cells()
+        .values()
+        .map(|c| c.specific_h_j_kg)
+        .collect();
+    let gate = CancelGate::new_clock_free();
+    let split = partition(0.25, 0.75);
+    let next = propose_deformable_cohesive_cooling(
+        &motion,
+        &old,
+        &[0.0],
+        &[[0.0; 3]],
+        target,
+        &split,
+        cooling_controls(),
+        &gate,
+    )
+    .unwrap();
+
+    // Exact full-rupture work is Gc. For the linear softening law, the integral
+    // of surviving integrity from zero to complete failure is a*b/(b-a)*ln(b/a).
+    // Midpoint inertia then gives c*g² - drive*g + A*Gc = 0; use the separated root.
+    let (a, b, gc, eta) = (0.001_f64, 0.004_f64, 0.002, 2.0);
+    let integrity_integral = a * b / (b - a) * (b / a).ln();
+    let c = 2.0 * mass.0 / (dt * dt);
+    let drive = 2.0 * mass.0 * incoming / dt - eta * integrity_integral / dt;
+    let gap = (drive + (drive * drive - 4.0 * c * gc).sqrt()) / (2.0 * c);
+    let velocity = 2.0 * gap / dt - incoming;
+    let viscous = eta * gap / dt * integrity_integral;
+    assert!(gap > b);
+    close(
+        next.mechanical.motion.state().displacements_m()[0],
+        gap,
+        1e-12,
+    );
+    close(next.mechanical.motion.velocity_m_s()[0], velocity, 1e-10);
+    close(next.mechanical.cohesive_energy_j.dissipated, gc, 1e-12);
+    close(next.mechanical.viscous_dissipated_j, viscous, 1e-12);
+    close(next.heat.nonthermal_fracture_energy_j, 0.75 * gc, 1e-12);
+    close(next.heat.nonthermal_viscous_energy_j, 0.25 * viscous, 1e-12);
+    let heat = [
+        0.2 * 0.25 * gc + 0.6 * 0.75 * viscous,
+        0.8 * 0.25 * gc + 0.4 * 0.75 * viscous,
+    ];
+    // One explicit substep still conducts through the OLD bonded link. Heat
+    // generated by this mechanical segment arrives at its endpoint afterwards.
+    assert_eq!(next.transport.substeps, 1);
+    let transferred = old.thermal().links()[&CONTACT].conductance_w_k * (h0[0] - h0[1]) * dt;
+    for (i, (&id, cell)) in next.cooling.thermal().cells().iter().enumerate() {
+        let signed = if i == 0 { -transferred } else { transferred };
+        close(
+            cell.specific_h_j_kg,
+            h0[i] + (signed + heat[i]) / cell.mass_kg,
+            1e-11,
+        );
+        close(next.heat.heat_by_cell_j[&id], heat[i], 1e-12);
+    }
+    assert_eq!(next.heat.contact.opened, 1);
+    assert!(!next.cooling.interfaces()[&CONTACT].closed);
+    assert!(!next.cooling.thermal().links().contains_key(&CONTACT));
+    assert!(next.mechanical.motion.state().points()[0].failed());
+    assert_eq!(
+        next.cooling.interfaces()[&CONTACT].point,
+        next.mechanical.motion.state().points()[0]
+    );
+    assert_eq!(next.cooling.last_synchronized_time_s(), target);
+    assert_eq!(next.cooling.thermal().time_s(), target);
+    assert_eq!(next.mechanical.motion.time_s(), target);
+    close(next.combined_energy_residual_j, 0.0, 5e-10);
+    close(next.summed_energy_residual_j, 0.0, 5e-10);
+
+    let detached = propose_deformable_cohesive_cooling(
+        &next.mechanical.motion,
+        &next.cooling,
+        &[0.0],
+        &[[0.0; 3]],
+        0.32,
+        &split,
+        cooling_controls(),
+        &gate,
+    )
+    .unwrap();
+    close(
+        detached.mechanical.motion.state().displacements_m()[0],
+        gap + (0.32 - target) * velocity,
+        1e-12,
+    );
+    close(
+        detached.mechanical.motion.velocity_m_s()[0],
+        velocity,
+        1e-10,
+    );
+    assert_eq!(detached.heat.contact.fracture_dissipation_j, 0.0);
+    assert_eq!(detached.heat.contact.viscous_dissipation_j, 0.0);
+    for (&id, cell) in detached.cooling.thermal().cells() {
+        assert_eq!(
+            cell.specific_h_j_kg,
+            next.cooling.thermal().cells()[&id].specific_h_j_kg
+        );
+    }
+
+    // The original mass is driven back to a small compressive gap. There is no new fracture,
+    // tensile rebond or heat; only the independent reclosed conductance returns.
+    let return_time = 0.34;
+    let return_dt = return_time - detached.mechanical.motion.time_s();
+    let old_gap = detached.mechanical.motion.state().displacements_m()[0];
+    let closed_gap = -0.0001;
+    let change = closed_gap - old_gap;
+    let compression_energy = 0.5 * 2000.0 * closed_gap * closed_gap;
+    let return_force = 2.0 * mass.0 * (change - return_dt * velocity) / (return_dt * return_dt)
+        + compression_energy / change;
+    let reclosed = propose_deformable_cohesive_cooling(
+        &detached.mechanical.motion,
+        &detached.cooling,
+        &[return_force],
+        &[[0.0; 3]],
+        return_time,
+        &split,
+        cooling_controls(),
+        &gate,
+    )
+    .unwrap();
+    close(
+        reclosed.mechanical.motion.state().displacements_m()[0],
+        closed_gap,
+        1e-12,
+    );
+    assert_eq!(reclosed.heat.contact.reclosed, 1);
+    assert!(reclosed.mechanical.motion.state().points()[0].failed());
+    assert_eq!(reclosed.heat.contact.fracture_dissipation_j, 0.0);
+    assert_eq!(reclosed.heat.contact.viscous_dissipation_j, 0.0);
+    close(
+        reclosed.cooling.thermal().links()[&CONTACT].conductance_w_k,
+        0.25,
+        0.0,
+    );
+    for (&id, cell) in reclosed.cooling.thermal().cells() {
+        assert_eq!(
+            cell.specific_h_j_kg,
+            detached.cooling.thermal().cells()[&id].specific_h_j_kg
+        );
+    }
+    let (after, _) = reclosed
+        .cooling
+        .advance_to(0.35, cooling_controls().thermal, || Ok(()))
+        .unwrap();
+    let h1 = reclosed.cooling.thermal().cells()[&CellId(1)].specific_h_j_kg;
+    let h2 = reclosed.cooling.thermal().cells()[&CellId(2)].specific_h_j_kg;
+    let flux = 0.25 * (h1 - h2) * (0.35 - return_time);
+    close(
+        after.thermal().cells()[&CellId(1)].specific_h_j_kg,
+        h1 - flux,
+        1e-11,
+    );
+    close(
+        after.thermal().cells()[&CellId(2)].specific_h_j_kg,
+        h2 + flux / 2.0,
+        1e-11,
+    );
+    assert_eq!(motion.time_s(), start);
+    assert_eq!(old.thermal().time_s(), start);
+    assert!(!motion.state().points()[0].failed());
+}
+
+struct Latent;
+impl ThermalLaw for Latent {
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        if !h.is_finite() || !(0.0..=1.0).contains(&h) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(300.0
+            + if h <= 0.001 {
+                h
+            } else if h <= 0.01 {
+                0.001
+            } else {
+                h - 0.009
+            })
+    }
+    fn maximum_temperature_slope(&self) -> f64 {
+        1.0
+    }
+}
+static LATENT: Latent = Latent;
+
+#[test]
+fn fracture_heat_uses_original_latent_storage_and_explicit_zero_conversion() {
+    let source = material(false);
+    let elastic = Scalar(0.0);
+    let mass = Scalar(1.0);
+    let joint = system(&elastic, &source, &[CONTACT], false);
+    let motion = joint
+        .bonded_state()
+        .into_dynamics(&mass, vec![0.0], 0.0, dynamics())
+        .unwrap();
+    let old = cooling(
+        network_with_law(1, [1.0; 2], [1.0; 2], [1.0; 2], [0.0; 2], [0.0; 2], &LATENT),
+        motion.state().points()[0],
+    );
+    let mut split = partition(1.0, 0.0);
+    split[0].fracture_fraction_to_first = 1.0;
+    let heated = propose_deformable_cohesive_cooling(
+        &motion,
+        &old,
+        &[0.0],
+        &[[0.005, 0.0, 0.0]],
+        0.01,
+        &split,
+        cooling_controls(),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    close(
+        heated.cooling.thermal().cells()[&CellId(1)].specific_h_j_kg,
+        0.002,
+        1e-13,
+    );
+    close(
+        heated.cooling.thermal().temperature_k(CellId(1)).unwrap(),
+        300.001,
+        1e-12,
+    );
+    assert_eq!(
+        heated.cooling.thermal().cells()[&CellId(2)].specific_h_j_kg,
+        0.0
+    );
+    assert_eq!(heated.heat.nonthermal_fracture_energy_j, 0.0);
+    close(heated.mechanical.prescribed_jump_work_j, 0.002, 1e-13);
+    let unheated = propose_deformable_cohesive_cooling(
+        &motion,
+        &old,
+        &[0.0],
+        &[[0.005, 0.0, 0.0]],
+        0.01,
+        &partition(0.0, 0.0),
+        cooling_controls(),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    assert_eq!(
+        unheated.mechanical.motion.state().points(),
+        heated.mechanical.motion.state().points()
+    );
+    close(unheated.heat.nonthermal_fracture_energy_j, 0.002, 1e-13);
+    for cell in unheated.cooling.thermal().cells().values() {
+        assert_eq!(cell.specific_h_j_kg, 0.0);
+    }
+    close(heated.combined_energy_residual_j, 0.0, 1e-12);
+    close(unheated.combined_energy_residual_j, 0.0, 1e-12);
+}
+
+#[test]
+fn foreign_history_area_or_clock_and_unowned_friction_refuse_without_advancing() {
+    let source = material(true);
+    let foreign = material(true);
+    let elastic = Scalar(1000.0);
+    let mass = Scalar(10.0);
+    let joint = system(&elastic, &source, &[CONTACT], true);
+    let state = compressed(&joint, 0.002);
+    let motion = state
+        .into_dynamics(&mass, vec![0.02], 0.0, dynamics())
+        .unwrap()
+        .with_damaged_area_friction_controlled(&[Some(1e-4)], &mut || false)
+        .unwrap();
+    let thermal = network(1, [1.0; 2], [1.0; 2], [1.0; 2], [0.0; 2], [0.0; 2]);
+    let old = cooling(thermal.clone(), motion.state().points()[0]);
+    let call = |bound: &FractureCooling<'_, '_>| {
+        propose_deformable_cohesive_cooling(
+            &motion,
+            bound,
+            &[0.0],
+            &[[-0.001, 0.0, 0.0]],
+            0.01,
+            &partition(1.0, 1.0),
+            cooling_controls(),
+            &CancelGate::new_clock_free(),
+        )
+        .map(|_| ())
+    };
+    // Equal law coefficients are insufficient: the original immutable law and
+    // complete point (including irreversible work/history) must be retained.
+    let foreign_joint = system(&elastic, &foreign, &[CONTACT], true);
+    let foreign_state = compressed(&foreign_joint, 0.002);
+    assert_eq!(foreign_state.points()[0], motion.state().points()[0]);
+    let wrong_law = cooling(thermal.clone(), foreign_state.points()[0]);
+    assert!(matches!(
+        call(&wrong_law),
+        Err(CohesiveCoolingError::Invalid(_))
+    ));
+    let wrong_history = cooling(thermal.clone(), source.law().bonded_point());
+    assert!(matches!(
+        call(&wrong_history),
+        Err(CohesiveCoolingError::Invalid(_))
+    ));
+    let mut wrong_interface = old.interfaces()[&CONTACT];
+    wrong_interface.reference.area_m2 = 0.5;
+    let changed = thermal
+        .replace_contacts(
+            &[ContactUpdate {
+                id: CONTACT,
+                expected: Some(thermal.links()[&CONTACT]),
+                replacement: Some(wrong_interface.reference),
+            }],
+            || Ok(()),
+        )
+        .unwrap();
+    let wrong_area = FractureCooling::new(changed, vec![wrong_interface], 1, || Ok(())).unwrap();
+    assert!(matches!(
+        call(&wrong_area),
+        Err(CohesiveCoolingError::Invalid(_))
+    ));
+    let (stale, _) = old
+        .advance_to(0.001, cooling_controls().thermal, || Ok(()))
+        .unwrap();
+    assert!(matches!(
+        call(&stale),
+        Err(CohesiveCoolingError::Invalid(_))
+    ));
+    assert!(
+        matches!(call(&old), Err(CohesiveCoolingError::Invalid(message))
+        if message.contains("residual-friction"))
+    );
+    assert_eq!(motion.time_s(), 0.0);
+    assert_eq!(old.thermal().time_s(), 0.0);
+    assert_eq!(old.interfaces()[&CONTACT].point, motion.state().points()[0]);
+}
+
+struct CancelOnHeat<'a> {
+    gate: &'a CancelGate,
+}
+impl ThermalLaw for CancelOnHeat<'_> {
+    fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+        if h > 0.0 {
+            self.gate.request();
+        }
+        Ok(300.0 + h)
+    }
+    fn maximum_temperature_slope(&self) -> f64 {
+        1.0
+    }
+}
+
+#[test]
+fn late_heat_domain_or_cancellation_discards_both_candidates_and_exact_retry_succeeds() {
+    struct Bounded;
+    impl ThermalLaw for Bounded {
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            if h > 0.0001 {
+                Err(DepositionError::MaterialDomain)
+            } else {
+                Ok(300.0 + h)
+            }
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            1.0
+        }
+    }
+    static BOUNDED: Bounded = Bounded;
+    let source = material(false);
+    let elastic = Scalar(0.0);
+    let mass = Scalar(1.0);
+    let joint = system(&elastic, &source, &[CONTACT], false);
+    let motion = joint
+        .bonded_state()
+        .into_dynamics(&mass, vec![0.0], 0.0, dynamics())
+        .unwrap();
+    let old = cooling(
+        network_with_law(
+            1, [1.0; 2], [1.0; 2], [1.0; 2], [0.0; 2], [0.0; 2], &BOUNDED,
+        ),
+        motion.state().points()[0],
+    );
+    let gate = CancelGate::new_clock_free();
+    let call = |split: &[CohesiveHeatPartition]| {
+        propose_deformable_cohesive_cooling(
+            &motion,
+            &old,
+            &[0.0],
+            &[[0.005, 0.0, 0.0]],
+            0.01,
+            split,
+            cooling_controls(),
+            &gate,
+        )
+    };
+    assert!(call(&partition(1.0, 0.0)).is_err());
+    let retry = call(&partition(0.0, 0.0)).unwrap();
+    close(retry.heat.nonthermal_fracture_energy_j, 0.002, 1e-13);
+    assert!(retry.mechanical.motion.state().points()[0].failed());
+    assert_eq!(motion.time_s(), 0.0);
+    assert_eq!(old.thermal().time_s(), 0.0);
+    assert_eq!(old.interfaces()[&CONTACT].point, motion.state().points()[0]);
+    assert!(old.thermal().links().contains_key(&CONTACT));
+    // Trigger cancellation only when endpoint physical heat reaches a law. The
+    // original thermal owner retains the gate, not a mock coupled integrator.
+    let cancel_gate = Box::leak(Box::new(CancelGate::new_clock_free()));
+    let law = Box::leak(Box::new(CancelOnHeat { gate: cancel_gate }));
+    let cancellable = cooling(
+        network_with_law(1, [1.0; 2], [1.0; 2], [1.0; 2], [0.0; 2], [0.0; 2], law),
+        motion.state().points()[0],
+    );
+    let result = propose_deformable_cohesive_cooling(
+        &motion,
+        &cancellable,
+        &[0.0],
+        &[[0.005, 0.0, 0.0]],
+        0.01,
+        &partition(1.0, 0.0),
+        cooling_controls(),
+        cancel_gate,
+    );
+    assert!(result.is_err());
+    assert!(cancel_gate.is_requested());
+    assert_eq!(cancellable.thermal().time_s(), 0.0);
+    assert_eq!(
+        cancellable.interfaces()[&CONTACT].point,
+        motion.state().points()[0]
+    );
+    assert_eq!(
+        cancellable.thermal().cells()[&CellId(1)].specific_h_j_kg,
+        0.0
+    );
+    // Retrying the identical physical proposal with a fresh control gate starts
+    // from the original unspent fracture energy and deposits it exactly once.
+    let accepted = propose_deformable_cohesive_cooling(
+        &motion,
+        &cancellable,
+        &[0.0],
+        &[[0.005, 0.0, 0.0]],
+        0.01,
+        &partition(1.0, 0.0),
+        cooling_controls(),
+        &CancelGate::new_clock_free(),
+    )
+    .unwrap();
+    assert_eq!(
+        accepted.mechanical.motion.state().points(),
+        retry.mechanical.motion.state().points()
+    );
+    close(
+        accepted.cooling.thermal().cells()[&CellId(1)].specific_h_j_kg,
+        0.0004,
+        1e-13,
+    );
+    close(
+        accepted.cooling.thermal().cells()[&CellId(2)].specific_h_j_kg,
+        0.0016,
+        1e-13,
+    );
+    close(accepted.combined_energy_residual_j, 0.0, 1e-12);
+}

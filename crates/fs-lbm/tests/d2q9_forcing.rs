@@ -128,6 +128,7 @@ fn switching_and_reversing_forces_delivers_only_the_elapsed_impulse() {
         CollisionModel2::RecursiveRegularized,
         CollisionModel2::Trt { magic: 3.0 / 16.0 },
         CollisionModel2::CentralMoment,
+        CollisionModel2::CentralMomentBulk { bulk_tau: 0.72 },
     ] {
         for rho in [0.55, 1.9] {
             let mut grid = Grid::uniform(3, 2, 0.83);
@@ -213,6 +214,7 @@ fn endpoint_force_ramps_and_reversals_integrate_the_physical_impulse() {
         CollisionModel2::RecursiveRegularized,
         CollisionModel2::Trt { magic: 3.0 / 16.0 },
         CollisionModel2::CentralMoment,
+        CollisionModel2::CentralMomentBulk { bulk_tau: 0.72 },
     ] {
         for (rho, tau) in [(0.55, 0.61), (1.9, 1.37)] {
             let mut grid = Grid::uniform(3, 2, tau);
@@ -328,6 +330,7 @@ fn unchanged_endpoint_forces_preserve_every_native_collision_bit() {
         CollisionModel2::RecursiveRegularized,
         CollisionModel2::Trt { magic: 3.0 / 16.0 },
         CollisionModel2::CentralMoment,
+        CollisionModel2::CentralMomentBulk { bulk_tau: 0.72 },
     ] {
         let mut grid = Grid::uniform(19, 15, 0.8);
         grid.collision = collision;
@@ -359,7 +362,7 @@ fn refused_endpoint_steps_publish_neither_populations_nor_forces() {
     let initial = Grid::uniform(3, 2, 0.8);
     let mut post = Vec::new();
     let mut next = Vec::new();
-    for case in 0..10 {
+    for case in 0..12 {
         let mut grid = initial.clone();
         let mut gravity = [0.001, -0.002];
         let mut external = vec![[0.0002, 0.0001]; grid.f.len()];
@@ -383,6 +386,8 @@ fn refused_endpoint_steps_publish_neither_populations_nor_forces() {
             // The inputs and initial physical velocity are finite; collision
             // overflows. This must refuse after proposal work, before publish.
             8 => grid.fext[5][0] = 1e200,
+            9 => grid.collision = CollisionModel2::CentralMomentBulk { bulk_tau: 0.5 },
+            10 => grid.collision = CollisionModel2::CentralMomentBulk { bulk_tau: f64::NAN },
             _ => gate.request(),
         }
         let before = grid.clone();

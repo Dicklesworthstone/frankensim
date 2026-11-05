@@ -20,6 +20,8 @@ pub mod array;
 pub mod moving;
 /// Analytic whole-sphere power of coherent compact-source arrays.
 pub mod power;
+/// Geometrical transmission of stationary monopoles across a two-fluid plane.
+pub mod refraction;
 mod statistics;
 pub use array::{
     CoherentCompactField, CompactSourcePhasor, IdealAcousticPlane, IdealPlaneBoundary,

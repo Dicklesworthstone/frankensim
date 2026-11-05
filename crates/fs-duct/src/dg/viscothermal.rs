@@ -101,7 +101,6 @@ impl DgDuct {
         })?;
         self.with_uniform_viscothermal_model(model)
     }
-
 }
 
 impl<M: DgMedium> DgDuct<M> {
@@ -111,25 +110,67 @@ impl<M: DgMedium> DgDuct<M> {
         mut self,
         model: fs_phs::ZkDiffusive,
     ) -> Result<Self, DuctError> {
-        if self.viscothermal.is_some() || self.compliant_wall.is_some() || self.molecular.is_some() {
+        if self.viscothermal.is_some()
+            || self.compliant_wall.is_some()
+            || self.molecular.is_some()
+            || self.gas.porous_diffusive_model().is_some()
+        {
             return Err(DuctError::BadParameter {
                 what: "uniform viscothermal stamping requires the bare acoustic owner",
             });
         }
+        self.stamp_uniform_diffusion(
+            model.series_drag_per_s(),
+            model
+                .series_terms()
+                .iter()
+                .map(|t| (t.gain_per_s, t.rate_per_s)),
+            model
+                .shunt_terms()
+                .iter()
+                .map(|t| (t.gain_per_s, t.rate_per_s)),
+        )?;
+        self.viscothermal = Some(ViscothermalMemory::Uniform(model));
+        Ok(self)
+    }
+
+    // One energy-normalized owner for circular wall and intrinsic porous
+    // positive arms. Their original producers retain material/source admission.
+    // The primary acoustic masses already own the infinite-frequency storage.
+    pub(super) fn stamp_uniform_diffusion(
+        &mut self,
+        series_drag_per_s: f64,
+        series: impl ExactSizeIterator<Item = (f64, f64)>,
+        shunt: impl ExactSizeIterator<Item = (f64, f64)>,
+    ) -> Result<(), DuctError> {
         let m = self.field_dofs;
         let original = self.total_dofs();
-        let branches = model.series_terms().len() + model.shunt_terms().len();
+        if original != 2 * m
+            || self.memory_dofs != 0
+            || !series_drag_per_s.is_finite()
+            || series_drag_per_s < 0.0
+        {
+            return Err(DuctError::BadParameter {
+                what: "uniform diffusion stamping needs bare acoustic storage and finite nonnegative drag",
+            });
+        }
+        let branches = series
+            .len()
+            .checked_add(shunt.len())
+            .ok_or(DuctError::BadParameter {
+                what: "DG uniform diffusion branch count overflow",
+            })?;
         let memory_dofs = m.checked_mul(branches).ok_or(DuctError::BadParameter {
-            what: "DG viscothermal memory size overflow",
+            what: "DG uniform diffusion memory size overflow",
         })?;
         let total = original
             .checked_add(memory_dofs)
             .ok_or(DuctError::BadParameter {
-                what: "DG viscothermal total size overflow",
+                what: "DG uniform diffusion total size overflow",
             })?;
         if total > MAX_DG_PROPAGATOR_DOFS {
             return Err(DuctError::BadParameter {
-                what: "DG acoustic plus viscothermal memory exceeds the dense DOF cap",
+                what: "DG acoustic plus diffusion memory exceeds the dense DOF cap",
             });
         }
         let mut operator = vec![0.0; total * total];
@@ -138,28 +179,31 @@ impl<M: DgMedium> DgDuct<M> {
                 .copy_from_slice(&self.l_tilde[i * original..(i + 1) * original]);
         }
         for i in 0..m {
-            operator[(m + i) * total + m + i] -= model.series_drag_per_s();
+            operator[(m + i) * total + m + i] -= series_drag_per_s;
         }
-        for (branch, (field_offset, term)) in model
-            .series_terms()
-            .iter()
-            .map(|t| (m, t))
-            .chain(model.shunt_terms().iter().map(|t| (0, t)))
+        for (branch, (field_offset, gain, rate)) in series
+            .map(|(gain, rate)| (m, gain, rate))
+            .chain(shunt.map(|(gain, rate)| (0, gain, rate)))
             .enumerate()
         {
-            let coupling = det::sqrt(term.gain_per_s) * det::sqrt(term.rate_per_s);
+            if !gain.is_finite() || gain <= 0.0 || !rate.is_finite() || rate <= 0.0 {
+                return Err(DuctError::BadParameter {
+                    what: "DG uniform diffusion needs positive finite original poles and weights",
+                });
+            }
+            let coupling = det::sqrt(gain) * det::sqrt(rate);
             for i in 0..m {
                 let main = field_offset + i;
                 let memory = original + branch * m + i;
-                operator[main * total + main] -= term.gain_per_s;
+                operator[main * total + main] -= gain;
                 operator[main * total + memory] = coupling;
                 operator[memory * total + main] = coupling;
-                operator[memory * total + memory] = -term.rate_per_s;
+                operator[memory * total + memory] = -rate;
             }
         }
         if operator.iter().any(|value| !value.is_finite()) {
             return Err(DuctError::BadParameter {
-                what: "DG viscothermal augmented operator is not finite",
+                what: "DG uniform diffusion augmented operator is not finite",
             });
         }
         for (_, port) in &mut self.ports {
@@ -168,7 +212,6 @@ impl<M: DgMedium> DgDuct<M> {
         self.l_tilde = operator;
         self.g_block = None;
         self.memory_dofs = memory_dofs;
-        self.viscothermal = Some(ViscothermalMemory::Uniform(model));
         self.operator_identity = hash_operator(
             self.mesh,
             self.inlet,
@@ -177,23 +220,27 @@ impl<M: DgMedium> DgDuct<M> {
             &self.l_tilde,
             &self.ports,
         );
-        Ok(self)
+        Ok(())
     }
 
-    /// Admitted angular-frequency band shared by either wall attachment.
-    /// None denotes a lossless duct; it does not omit the spatial wall route.
+    /// Admitted angular-frequency band of circular wall diffusion or intrinsic
+    /// porous equivalent-fluid memory. None means no declared diffusion band;
+    /// other physical losses can still be present.
     #[must_use]
     pub fn viscothermal_band_rad_s(&self) -> Option<[f64; 2]> {
         match &self.viscothermal {
             Some(ViscothermalMemory::Uniform(model)) => Some(model.band_rad_s()),
             Some(ViscothermalMemory::Spatial(wall)) => Some(wall.admission.resolution.band_rad_s),
-            None => None,
+            None => self
+                .gas
+                .porous_diffusive_model()
+                .map(|model| model.band_rad_s()),
         }
     }
 
-    /// Uniform exact-mass pole model and its admitted band/error. A spatial
-    /// attachment instead reports spatial_viscothermal_admission; use
-    /// has_viscothermal_memory to distinguish either route from lossless.
+    /// Uniform circular-wall pole model and its admitted band/error. A spatial
+    /// wall reports spatial_viscothermal_admission. None does not imply a
+    /// lossless duct: intrinsic porous memory has its own porous_diffusive_model.
     #[must_use]
     pub fn viscothermal_model(&self) -> Option<&fs_phs::ZkDiffusive> {
         match &self.viscothermal {
