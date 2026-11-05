@@ -510,6 +510,12 @@ overdamped and explicit free coordinates use one continuous formula without
 division by stiffness or pole separation. Scaled forcing and increments retain
 soft-mode attacks and small motions; separate retentions preserve decay tails.
 Inputs and unrepresentable scaled responses refuse without state mutation.
+`held_force_mean_velocity_relation` also exposes the exact same-interval mean
+velocity and its affine response to an additional constant force. It uses the
+prepared entire gains and the initial force imbalance rather than subtracting
+endpoint displacements. Power-conjugate sampled loads can therefore close
+their direct reaction against resolved motion, including small motion on a
+large static equilibrium, without another transition or per-sample allocation.
 `advance_with_energy` returns the same motion plus independently integrated
 force work and positive viscous heat. Exact first/second force moments compute
 the ramp's work without subtracting absolute positions or dividing by a tiny

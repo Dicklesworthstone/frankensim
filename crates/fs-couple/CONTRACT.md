@@ -8104,8 +8104,18 @@ clarinet is one filling of those objects.
   held force, converting through mass-normalized coordinates. Acceleration,
   volume velocity and pressure describe the completed endpoint. G1/G3 tests
   compare analytical damped/undamped motion and held-force subdivision,
-  including a step beyond the former Euler stability limit. Radiation-filter
-  reaction remains sampled and held, not an exact continuous coupled solution.
+  including a step beyond the former Euler stability limit. A retained piston
+  filter is driven by the exact same-step mean surface velocity; its direct
+  reaction is solved algebraically before either history is accepted. The
+  resulting reaction work is `-dt * face_area * pressure * mean_surface_velocity`,
+  so a resistive load cannot inject energy through a lagged velocity. The
+  scalar transition and filter feedthrough are prepared once, with mechanical
+  cache refresh when the public frequency or damping ratio changes; mass and
+  signed modal area are applied at their current values. The mean relation
+  retains small increments without subtracting absolute endpoint positions.
+  Negative or nonfinite instantaneous filter resistance refuses. This is a
+  power-consistent sampled interconnection, not an exact continuous coupled
+  solution or a global positive-real certificate for the fitted filter.
   Compact motion and sampled radiation-filter memory are proposed together.
   `drive_and_radiate` admits positive finite observer density/distance and finite
   pressure before publishing either history. The independent `PlateBank` path
@@ -8114,11 +8124,14 @@ clarinet is one filling of those objects.
   Refused motion, filtering or observation can therefore be retried from the
   same accepted physical histories. Filter coefficients stay in place, while a
   second mutable filter-state buffer and O(mode-count) scalar proposals are
-  reused after initial allocation. This preserves exact scalar transition and
-  pressure summation order; it does not promote sampled independent radiation
+  reused after initial allocation. This preserves exact scalar motion under
+  the solved held force and pressure summation order; it does not promote sampled independent radiation
   loads to the joint continuous-radiation model. Focused tests in
   `thin_plate/bank/tests.rs` cover late-mode refusal, pressure overflow and
   bitwise-equivalent retry, including nonzero retained filter histories.
+  Manufactured resistive and first-order passive loads additionally close
+  structural work, retained radiation storage and physical heat; a strongly
+  resistive negative control demonstrates the former lagged instability.
   The finished pressure history is passed through ISO 9613-1
   absorption (`air_path`) with the assembly's explicit humidity;
   Stokes–Kirchhoff is only the fallback outside the ISO window.

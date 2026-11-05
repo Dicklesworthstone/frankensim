@@ -414,6 +414,109 @@ fn compact_history(
     )
 }
 
+/// G1/G3: a resistance has no stored energy, so all of its same-window work
+/// must be nonpositive even when explicit damping would reverse velocity.
+#[test]
+fn compact_resistive_reaction_uses_the_same_step_mean_velocity() {
+    use fs_vfit::discretize::DigitalFilter;
+    let (rate, resistance) = (10_u32, 100.0);
+    let dt = f64::from(rate).recip();
+    for area in [1.0, -2.0, 0.125] {
+        let mut body = compact(1.0, 1.0, area, 1.0);
+        body.zeta = 0.0;
+        body.v = 1.0;
+        let filter = DigitalFilter { sections: Vec::new(), direct: resistance,
+            t_s: dt, prewarp: 0.0 };
+        body.rad = Some(super::super::PistonLoad::new(filter, air(), rate, body.omega, body.zeta).unwrap());
+        let coefficient = resistance * area * area / body.piston_area_m2;
+        let energy = |b: &CompactBody| 0.5 * b.mass_kg * (b.v * b.v + (b.omega * b.y).powi(2));
+        let initial = energy(&body);
+        // The former law holds -c*v_old. For the unit-area fixture this
+        // changes initial energy 0.5 J into about 40.4 J in ONE passive step.
+        let mut old = body.clone();
+        old.rad = None;
+        old.drive(-coefficient * old.v, dt).unwrap();
+        if area == 1.0 { assert!(energy(&old) > 70.0 * initial); }
+        for step in 0..64 {
+            let before = energy(&body);
+            let old_y = body.y;
+            let drive = if step < 8 { 0.3 * (step as f64 * 0.4).cos() } else { 0.0 };
+            let (_, held) = body.drive_held(drive, dt).unwrap();
+            let displacement = body.y - old_y;
+            let mean_velocity = displacement / dt;
+            let reaction = held.force_n - drive;
+            assert!((reaction + coefficient * mean_velocity).abs() < 5e-12,
+                "area={area}, reaction={reaction}, mean={mean_velocity}");
+            let heat = dt * coefficient * mean_velocity * mean_velocity;
+            let work = drive * displacement;
+            assert!((energy(&body) - before + heat - work).abs() < 2e-13,
+                "area={area}, passive same-window work failed at step {step}");
+            if drive == 0.0 { assert!(energy(&body) <= before + 2e-14); }
+        }
+    }
+}
+
+/// G1: a positive-real first-order load stores and dissipates energy. Its
+/// bilinear filter is independently interpreted as a midpoint pressure state,
+/// so this checks actual retained history and work, not merely bounded motion.
+#[test]
+fn compact_dynamic_radiation_closes_storage_heat_and_mechanical_work() {
+    use fs_vfit::discretize::bilinear;
+    use fs_vfit::model::{PoleTerm, RationalModel};
+    let (rate, relaxation, residue) = (20_u32, 8.0, 600.0);
+    let dt = f64::from(rate).recip();
+    let mut body = compact(0.7, 3.0, -0.4, 1.0);
+    body.zeta = 0.0;
+    body.y = 0.02;
+    body.v = 0.7;
+    // Z(s)=residue/(s+relaxation): p'=residue*v_face-relaxation*p.
+    // E_air=A_face*p²/(2*residue), D_air=A_face*relaxation*p²/residue.
+    let filter = bilinear(&RationalModel {
+        terms: vec![PoleTerm::Real { pole: -relaxation, residue }], d: 0.0, e: 0.0,
+    }, dt, 0.0).unwrap();
+    body.rad = Some(super::super::PistonLoad::new(filter, air(), rate, body.omega, body.zeta).unwrap());
+    let mechanical = |b: &CompactBody| 0.5 * b.mass_kg * (b.v.powi(2) + (b.omega * b.y).powi(2));
+    let face = body.piston_area_m2;
+    let mut pressure = 0.0;
+    for step in 0..160 {
+        let before = mechanical(&body) + 0.5 * face / residue * pressure * pressure;
+        let old_y = body.y;
+        let force = if step < 40 { 0.2 * (step as f64 * 0.3).sin() } else { 0.0 };
+        let (_, held) = body.drive_held(force, dt).unwrap();
+        let displacement = body.y - old_y;
+        let surface_mean = body.area_m2 / face * displacement / dt;
+        let mean_pressure = (pressure + 0.5 * dt * residue * surface_mean)
+            / (1.0 + 0.5 * dt * relaxation);
+        assert!(((force - held.force_n) / body.area_m2 - mean_pressure).abs() < 2e-12);
+        pressure = 2.0 * mean_pressure - pressure;
+        let heat = dt * face * relaxation / residue * mean_pressure * mean_pressure;
+        let after = mechanical(&body) + 0.5 * face / residue * pressure * pressure;
+        assert!((after - before + heat - force * displacement).abs() < 4e-14,
+            "retained pressure/heat ledger failed at step {step}");
+        if force == 0.0 { assert!(after <= before + 3e-14); }
+    }
+}
+
+#[test]
+fn compact_radiation_cache_tracks_mechanical_changes_without_resetting_history() {
+    let mut body = loaded_compact();
+    body.mass_kg *= 3.0;
+    body.omega *= 0.4;
+    body.zeta = 1.7;
+    body.area_m2 *= -0.7;
+    let mut reference = body.clone();
+    let load = reference.rad.as_mut().unwrap();
+    load.motion = super::super::CompactMotion::new(body.omega, body.zeta, 1.0 / 48_000.0).unwrap();
+    for force in [1.0, -0.2, 0.0] {
+        assert_eq!(body.drive(force, 1.0 / 48_000.0).unwrap().to_bits(),
+            reference.drive(force, 1.0 / 48_000.0).unwrap().to_bits());
+        assert_eq!(compact_history(&body), compact_history(&reference));
+    }
+    let before = compact_history(&body);
+    assert!(body.drive(0.0, 1.0 / 96_000.0).is_err());
+    assert_eq!(compact_history(&body), before);
+}
+
 #[test]
 fn compact_motion_refusal_preserves_radiation_history_and_retry() {
     let mut body = loaded_compact();
