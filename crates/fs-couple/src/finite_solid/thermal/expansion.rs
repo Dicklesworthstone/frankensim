@@ -11,6 +11,7 @@
 use super::{FiniteSolidError, is_fixed_external_coordinate};
 use fs_blake3::ContentHash;
 use fs_matdb::{MaterialCard, QueryPoint};
+use fs_material::hyper::reference::ReferenceDeformation;
 use fs_material::thermal::transport::expansion::{
     FreeExpansionBasis, FreeExpansionGeometrySample, PreparedFreeExpansion,
 };
@@ -48,9 +49,7 @@ pub struct ExpansionThermalReference {
     frame: ExpansionThermalFrame,
     reference_context: QueryPoint,
     current_context: QueryPoint,
-    thermal_gradient: [f64; 9],
-    inverse: [[f64; 3]; 3],
-    cofactor: [[f64; 3]; 3],
+    reference: ReferenceDeformation,
 }
 
 impl ExpansionThermalReference {
@@ -161,47 +160,20 @@ impl ExpansionThermalReference {
         };
         let reference_context = context(reference.axes()[axis])?;
         let current_context = context(temperature_k)?;
-        let s = geometry.principal_stretches();
-        let reciprocal = s.map(|value| 1.0 / value);
-        let areas = [s[1] * s[2], s[0] * s[2], s[0] * s[1]];
-        if reciprocal
-            .into_iter()
-            .chain(areas)
-            .any(|value| !value.is_finite() || value <= 0.0)
-        {
-            return Err(FiniteSolidError::Invalid(
-                "finite expansion inverse or area ratio is unrepresentable",
-            ));
-        }
-        let rotate = |principal: [f64; 3]| -> [[f64; 3]; 3] {
-            std::array::from_fn(|i| {
-                std::array::from_fn(|j| (0..3).map(|a| (q[i][a] * principal[a]) * q[j][a]).sum())
-            })
-        };
-        let gradient = rotate(s);
-        let inverse = rotate(reciprocal);
-        let cofactor = rotate(areas);
-        if gradient
-            .iter()
-            .chain(&inverse)
-            .chain(&cofactor)
-            .flatten()
-            .any(|x| !x.is_finite())
-        {
-            return Err(FiniteSolidError::Invalid(
-                "oriented thermal reference is unrepresentable",
-            ));
-        }
-        let thermal_gradient = std::array::from_fn(|i| gradient[i / 3][i % 3]);
+        let reference =
+            ReferenceDeformation::from_principal_stretches(geometry.principal_stretches(), q)
+                .map_err(|_| {
+                    FiniteSolidError::Invalid(
+                        "finite expansion reference, inverse or area ratio is unrepresentable",
+                    )
+                })?;
         Ok(Self {
             source,
             geometry,
             frame,
             reference_context,
             current_context,
-            thermal_gradient,
-            inverse,
-            cofactor,
+            reference,
         })
     }
 
@@ -227,53 +199,27 @@ impl ExpansionThermalReference {
     }
     /// Row-major stress-free Fth in the mesh frame; not the actual constrained F.
     pub const fn thermal_gradient(&self) -> &[f64; 9] {
-        &self.thermal_gradient
+        self.reference.deformation_gradient()
+    }
+
+    /// Shared held reference for native finite-strain constitutive laws,
+    /// including viscoelastic histories. Retain this source owner alongside
+    /// the law; changing temperature/reference during an accepted history
+    /// needs an explicit thermal-work and history transformation.
+    pub const fn reference_deformation(&self) -> &ReferenceDeformation {
+        &self.reference
     }
 
     pub(super) fn elastic_deformation(&self, f: &[f64; 9]) -> [f64; 9] {
-        if self.frame == ExpansionThermalFrame::Isotropic {
-            return f.map(|value| value / self.geometry.principal_stretches()[0]);
-        }
-        std::array::from_fn(|index| {
-            let (i, j) = (index / 3, index % 3);
-            (0..3).map(|a| f[3 * i + a] * self.inverse[a][j]).sum()
-        })
+        self.reference.elastic_deformation(f)
     }
 
     pub(super) fn pullback_piola(&self, elastic: [f64; 9]) -> [f64; 9] {
-        if self.frame == ExpansionThermalFrame::Isotropic {
-            let s = self.geometry.principal_stretches()[0];
-            return elastic.map(|value| (s * s) * value);
-        }
-        std::array::from_fn(|index| {
-            let (i, j) = (index / 3, index % 3);
-            (0..3)
-                .map(|a| elastic[3 * i + a] * self.cofactor[j][a])
-                .sum()
-        })
+        self.reference.pullback_piola(&elastic)
     }
 
     pub(super) fn pullback_tangent(&self, elastic: [[f64; 9]; 9]) -> [[f64; 9]; 9] {
-        if self.frame == ExpansionThermalFrame::Isotropic {
-            let s = self.geometry.principal_stretches()[0];
-            return elastic.map(|row| row.map(|value| s * value));
-        }
-        let right: [[f64; 9]; 9] = std::array::from_fn(|row| {
-            std::array::from_fn(|column| {
-                let (k, l) = (column / 3, column % 3);
-                (0..3)
-                    .map(|b| elastic[row][3 * k + b] * self.inverse[l][b])
-                    .sum()
-            })
-        });
-        std::array::from_fn(|row| {
-            std::array::from_fn(|column| {
-                let (i, j) = (row / 3, row % 3);
-                (0..3)
-                    .map(|a| self.cofactor[j][a] * right[3 * i + a][column])
-                    .sum()
-            })
-        })
+        self.reference.pullback_tangent(&elastic)
     }
 }
 

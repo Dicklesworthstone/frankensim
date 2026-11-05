@@ -23,6 +23,8 @@ pub mod incompressible_plane_stress;
 pub mod mixed;
 /// Traction-free finite-strain thickness and transverse-shear relaxation.
 pub mod plane_stress;
+/// Prescribed stress-free reference deformation and original-volume pullbacks.
+pub mod reference;
 mod spectral;
 
 /// Maximum number of independently supplied Ogden terms.

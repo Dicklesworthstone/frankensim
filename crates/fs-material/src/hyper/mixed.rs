@@ -379,7 +379,7 @@ pub trait MixedFiniteStrainPotential {
         treatment: VolumetricTreatment,
     ) -> Result<MixedPointState, MaterialError> {
         let remainder = self.remainder_stress_and_potential(f)?;
-        let bulk = pressure_data(self.equilibrium_law(), f, pressure_pa, treatment)?;
+        let bulk = self.mixed_pressure_potential(f, pressure_pa, treatment)?;
         combine_state(f, pressure_pa, remainder, bulk)
     }
     /// All consistent mixed blocks at fixed accepted history and interval.
@@ -390,7 +390,7 @@ pub trait MixedFiniteStrainPotential {
         treatment: VolumetricTreatment,
     ) -> Result<MixedPointResponse, MaterialError> {
         let remainder = self.remainder_response(f)?;
-        let bulk = pressure_data(self.equilibrium_law(), f, pressure_pa, treatment)?;
+        let bulk = self.mixed_pressure_potential(f, pressure_pa, treatment)?;
         let state = combine_state(
             f,
             pressure_pa,
