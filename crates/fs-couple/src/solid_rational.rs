@@ -17,6 +17,9 @@ use fs_vfit::mimo::{
     load::{MimoLoadError, PreparedMimoLoad},
 };
 
+/// Original full-solid motion coupled to the admitted source's exact work-mean load.
+pub mod transient;
+
 /// Separate allowances for the original real realization and the complete
 /// physical solid/boundary image. Each owner's numerical payload is additive.
 #[derive(Clone, Copy, Debug)]
