@@ -7973,3 +7973,22 @@ smooth gradient jumps or cross native mesh faces by itself.
 G1/G3 tests cover independent native P1 scalar-source derivatives, pressure-lens
 ray/bundle focusing, correlated p/T constant-density cancellation and original
 source/domain/cancellation refusals. Native execution is reported separately.
+
+## Native mesh traversal of molecular gas refraction
+
+Under `material-state,volumes`, `thermo_optic::transient::mesh::gas` extends the
+original `P1ConductionMesh` with isobaric and joint pressure/temperature gas ray
+and angular-bundle propagation. Each stage retains the original scalar gas EOS,
+molecular optical model and full density/index Hessian. The existing mesh owns
+face admission, the complete departure collar and crossing-time corrections;
+continuous shared nodal state introduces no artificial Fresnel jump. Pressure-only
+gradient jumps participate in the native one-sided bundle endpoint checks.
+The joint path reuses the existing two-element pressure cache and one barycentric
+query for both fields. It accepts only the original mesh and temperature buffer,
+and requires the original joint p/T snapshot identity. Contacts with duplicated
+nodes and exterior faces terminate at the native boundary; source, numerical,
+face-budget and cancellation refusals remain explicit. These frozen gas fields
+add no pressure solve, flow coupling, phase-equilibrium claim or scattered radiance.
+Four G1/G3 regressions compare an unsplit analytic thermal field, pressure-jump
+bundle variations, correlated p/T constant-index transport and source/contact/work
+refusals. Native execution is reported separately from source and format checks.

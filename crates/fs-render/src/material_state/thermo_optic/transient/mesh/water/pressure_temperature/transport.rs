@@ -127,14 +127,14 @@ impl<'a> P1ConductionMesh<'a> {
 // This cache is private per propagation and never chooses a geometric side.
 // Original native barycentric admission supplies the one selected element.
 // Only its pressure polynomial is looked up or prepared, with no allocation.
-struct MeshPressureTemperature<'cursor, 'mesh> {
+pub(in crate::material_state::thermo_optic::transient::mesh) struct MeshPressureTemperature<'cursor, 'mesh> {
     cursor: &'cursor MeshTemperature<'mesh>,
     snapshot: P1PressureTemperatureSnapshot<'mesh>,
     current: Cell<(usize, PressurePolynomial)>,
     previous: Cell<Option<(usize, PressurePolynomial)>>,
 }
 impl<'cursor, 'mesh> MeshPressureTemperature<'cursor, 'mesh> {
-    fn new(
+    pub(in crate::material_state::thermo_optic::transient::mesh) fn new(
         cursor: &'cursor MeshTemperature<'mesh>,
         element: P1PressureTemperatureElement<'mesh>,
     ) -> Self {
@@ -169,7 +169,7 @@ impl<'cursor, 'mesh> MeshPressureTemperature<'cursor, 'mesh> {
         joint_jet(&temperature, pressure, lambda)
             .map_err(PressureTemperatureSnapshotError::into_gradient_error)
     }
-    fn pressure_gradient_jump(
+    pub(in crate::material_state::thermo_optic::transient::mesh) fn pressure_gradient_jump(
         &self,
         previous: P1ConductionElement<'mesh>,
         next: P1ConductionElement<'mesh>,
