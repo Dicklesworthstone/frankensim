@@ -670,10 +670,10 @@
   {
    "date": "2026-11-05",
    "kind": "finding",
-   "title": "How many times a bowed string slips per period depends on the start, and the printed sort doesn't predict it on our cards",
+   "title": "How many times a bowed string slips per period depends on the start and on the clock, and the printed sort doesn't predict it on our cards",
    "decided": "There's no bow-ramp change across the family. A page's card gets its slip count read before any ramp is tried on it, and the live cello D3 is being traced first.",
-   "why": "Cello Eb4 makes two full slips per period on its page card. With a faster bow start it makes one, and it grades 7 of 14 against 10. A 256-mode test card on D3 goes from two slips to one with a 1.215 s ramp and stays there after the bow speeds up, but its attack is 716 ms against the recording's 381. Guettler's a/sqrt(BD) has held from 0.47 up on the cards traced, and fails below 0.4: Eb4 at 0.13 makes two slips and viola Db4 at 0.09 makes one.",
-   "effect": "On Eb4 and on that D3 test card, the bridge force changes with the slip count and the transfer from force to sound stays the same (on D3 within 0.7 dB, except H8 at 1.5). We first read the ramp as filling a hole at D3's H4. That was true only of the test card, which differs from the page in friction, modes and string; the page's H4 has no such hole. Viola Db4 keeps its strong 400.9 Hz line at one slip, so a pair of slips doesn't explain that line, and we can't yet say what does.",
+   "why": "Cello Eb4 makes two full slips per period on its page card. With a faster bow start it makes one at 48 kHz, grading 7 of 14 against 10, and three at 95888 Hz, so that one slip can't be credited to the start alone. A 256-mode test card on D3 goes from two slips to one with a 1.215 s ramp and stays there after the bow speeds up, but its attack is 716 ms against the recording's 381. Guettler's a/sqrt(BD) has held from 0.47 up on the notes traced at one clock, and fails below 0.4: Eb4 at 0.13 makes two slips and viola Db4 at 0.09 makes one.",
+   "effect": "On Eb4 at 48 kHz and on that D3 test card, the bridge force changes with the slip count and the transfer from force to sound stays the same (on D3 within 0.7 dB, except H8 at 1.5). We first read the ramp as filling a hole at D3's H4. That was true only of the test card, which differs from the page in friction, modes and string; the page's H4 has no such hole. Viola Db4 keeps its strong 400.9 Hz line at one slip, so a pair of slips doesn't explain that line, and we can't yet say what does.",
    "refs": [
     "frankensim-irp-v5-instrument-realism-pexfp.306"
    ]
