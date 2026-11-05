@@ -22,6 +22,8 @@ use fs_contact::normal_patch::{NormalLawSource, NormalLawSourceError};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
 
+/// Simultaneous signed source contacts on the same original native network.
+pub mod multiple;
 mod solve;
 /// Explicit contact-source temperature changes at unchanged original native state.
 pub mod temperature;
@@ -131,50 +133,7 @@ impl SourceNormalModalSystem {
         gate: &CancelGate,
     ) -> Result<Self, SourceNormalModalError> {
         poll(Some(gate))?;
-        network.require_time_domain()?;
-        if network.samples_rendered() != 0 || contact.work_column().len() != network.mode_count() {
-            return Err(invalid(
-                "source contact needs a sample-zero network and complete native row",
-            )
-            .into());
-        }
-        if !(1..=128).contains(&config.maximum_iterations)
-            || [
-                config.maximum_force_n,
-                config.force_absolute_tolerance_n,
-                config.coordinate_absolute_tolerance_m,
-                config.contact_energy_absolute_tolerance_j,
-            ]
-            .iter()
-            .any(|v| !v.is_finite() || *v <= 0.0)
-            || [
-                config.force_relative_tolerance,
-                config.coordinate_relative_tolerance,
-                config.contact_energy_relative_tolerance,
-            ]
-            .iter()
-            .any(|v| !v.is_finite() || *v < 0.0 || *v >= 1.0)
-            || !config.minimum_approach_m.is_finite()
-            || !config.maximum_approach_m.is_finite()
-            || config.minimum_approach_m >= config.maximum_approach_m
-        {
-            return Err(invalid(
-                "finite source-normal domain and positive explicit accuracy/work bounds required",
-            )
-            .into());
-        }
-        match contact.source() {
-            NormalLawSource::HertzPoint(source) if source.dissipation_s_per_m() != 0.0 => {
-                return Err(invalid(
-                    "dissipative point contact requires its original timed loss path",
-                )
-                .into());
-            }
-            _ => {}
-        }
-        // Admit the entire explicit scalar bracket through the original owner.
-        observation(contact.source(), config.minimum_approach_m)?;
-        observation(contact.source(), config.maximum_approach_m)?;
+        admit_contact(&network, &contact, config)?;
         let response = network.linear_response(contact.work_column(), gate)?;
         let compliance = dot(contact.work_column(), &response)?;
         if compliance <= 0.0 {
@@ -491,6 +450,54 @@ impl SourceNormalModalSystem {
         }
         Ok(())
     }
+}
+
+fn admit_contact(
+    network: &CoupledModalSystem,
+    contact: &BoundNormalContact,
+    config: SourceNormalModalConfig,
+) -> Result<(), SourceNormalModalError> {
+    network.require_time_domain()?;
+    if network.samples_rendered() != 0 || contact.work_column().len() != network.mode_count() {
+        return Err(
+            invalid("source contact needs a sample-zero network and complete native row").into(),
+        );
+    }
+    if !(1..=128).contains(&config.maximum_iterations)
+        || [
+            config.maximum_force_n,
+            config.force_absolute_tolerance_n,
+            config.coordinate_absolute_tolerance_m,
+            config.contact_energy_absolute_tolerance_j,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v <= 0.0)
+        || [
+            config.force_relative_tolerance,
+            config.coordinate_relative_tolerance,
+            config.contact_energy_relative_tolerance,
+        ]
+        .iter()
+        .any(|v| !v.is_finite() || *v < 0.0 || *v >= 1.0)
+        || !config.minimum_approach_m.is_finite()
+        || !config.maximum_approach_m.is_finite()
+        || config.minimum_approach_m >= config.maximum_approach_m
+    {
+        return Err(invalid(
+            "finite source-normal domain and positive explicit accuracy/work bounds required",
+        )
+        .into());
+    }
+    if let NormalLawSource::HertzPoint(source) = contact.source()
+        && source.dissipation_s_per_m() != 0.0
+    {
+        return Err(
+            invalid("dissipative point contact requires its original timed loss path").into(),
+        );
+    }
+    observation(contact.source(), config.minimum_approach_m)?;
+    observation(contact.source(), config.maximum_approach_m)?;
+    Ok(())
 }
 
 fn observation(

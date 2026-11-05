@@ -580,3 +580,6 @@ fn native_signed_work_preserves_hertz_table_onset_release_and_dmt_attraction() {
 
 #[path = "adhesive_source_normal_modal/temperature.rs"]
 mod temperature;
+
+#[path = "adhesive_source_normal_modal/multiple.rs"]
+mod multiple;
