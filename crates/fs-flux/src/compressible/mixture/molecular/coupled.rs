@@ -1,6 +1,7 @@
 use super::super::{
     BodyForce2d, Error, ForceChange2d, ForceControl2d, ForcingWorkspace2d, StepReport, forcing,
 };
+use super::stabilized::{IntervalFailure, StepWork};
 use super::*;
 use crate::compressible::StepControl;
 
@@ -20,6 +21,36 @@ impl Default for MolecularStepControl {
             advection: StepControl::default(),
             molecular: DissipationControl::default(),
             maximum_coupling_retries: 16,
+        }
+    }
+}
+
+/// One shared interval with RKL2 molecular work bounded across both halves.
+/// The molecular maximum step caps physical accuracy, not only linear stability.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedMolecularStepControl {
+    /// Original conservative advection, reconstruction and CFL controls.
+    pub advection: StepControl,
+    /// Original molecular macrostep controls and a whole-call operator budget.
+    pub molecular: StabilizedDissipationControl,
+    /// Maximum whole-interval restarts after a shortened or refused phase.
+    pub maximum_coupling_retries: usize,
+}
+impl Default for StabilizedMolecularStepControl {
+    fn default() -> Self {
+        Self {
+            advection: StepControl::default(),
+            molecular: StabilizedDissipationControl::default(),
+            maximum_coupling_retries: 16,
+        }
+    }
+}
+impl StabilizedMolecularStepControl {
+    pub(in crate::compressible) const fn split(self) -> MolecularStepControl {
+        MolecularStepControl {
+            advection: self.advection,
+            molecular: self.molecular.transport,
+            maximum_coupling_retries: self.maximum_coupling_retries,
         }
     }
 }
@@ -49,6 +80,19 @@ pub struct MolecularStepReport {
     pub conservation_residual: Totals,
     /// Physical chemical-plus-kinetic energy residual from conservative differences.
     pub absolute_energy_residual_j: f64,
+}
+
+/// Complete physical split with the actual cost of its original RKL2 operators.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedMolecularStepReport {
+    /// Original physical balances and reports for the accepted complete split.
+    pub transport: MolecularStepReport,
+    /// Includes both halves and every discarded complete-interval probe.
+    pub operator_evaluations: usize,
+    /// Largest stage count in the final accepted pair of molecular halves.
+    pub maximum_stages_used: usize,
+    /// Largest scaled parabolic number in the final accepted molecular halves.
+    pub maximum_scaled_parabolic_number: f64,
 }
 
 /// Atomic nonreacting multicomponent molecular/advection evolution.
@@ -95,6 +139,19 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
             })
             .ok_or(DissipationError::Invalid(
                 "coupled mixture workspace size overflow",
+            ))
+    }
+
+    /// Complete coupled storage plus any unallocated RKL2 face/boundary scratch.
+    /// Add supplied forcing workspace to this allowance before calling `new`.
+    pub fn required_stabilized_workspace_bytes(
+        flow: &MixtureEuler2d,
+        molecular: &MolecularTransport2d<L>,
+    ) -> Result<usize, DissipationError> {
+        Self::required_workspace_bytes(flow, molecular)?
+            .checked_add(molecular.additional_stabilized_workspace_bytes()?)
+            .ok_or(DissipationError::Invalid(
+                "coupled stabilized mixture workspace size overflow",
             ))
     }
 
@@ -200,7 +257,7 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         controls: MolecularStepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport, DissipationError> {
-        self.step_impl(maximum_duration, controls, None, cancelled)
+        self.step_impl(maximum_duration, controls, None, None, cancelled)
     }
 
     /// Compose held acceleration or force density with the same original
@@ -220,8 +277,102 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
             maximum_duration,
             controls,
             Some((force, force_controls, workspace)),
+            None,
             cancelled,
         )
+    }
+
+    /// Compose the original Maxwell--Stefan, enthalpy, heat and stress operators
+    /// with RKL2 on both sides of the same conservative Euler transaction.
+    /// One evaluation counter covers both halves and all discarded trials;
+    /// exhaustion cannot be reset by shortening the coupled interval.
+    ///
+    /// Every stage retains its original physical/source admission and signed
+    /// boundary quadrature. The macrostep cap remains an accuracy choice: the
+    /// larger linear stability interval is not a nonlinear positivity or entropy
+    /// guarantee. Field, clock, loads and reports publish only after full success.
+    pub fn step_stabilized(
+        &mut self,
+        maximum_duration: Time,
+        controls: StabilizedMolecularStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport, DissipationError> {
+        let mut work = StepWork::new(controls.molecular);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls.split(),
+            None,
+            Some(&mut work),
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    /// Retain conservative body impulse/work and final Mach admission between
+    /// the stabilized molecular halves. Even zero-force scratch counts toward
+    /// the complete owner's workspace allowance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_stabilized_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: StabilizedMolecularStepControl,
+        force: BodyForce2d<'_>,
+        force_controls: ForceControl2d,
+        workspace: &mut ForcingWorkspace2d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport, DissipationError> {
+        let mut work = StepWork::new(controls.molecular);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls.split(),
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    fn molecular_half(
+        &mut self,
+        duration: Time,
+        controls: DissipationControl,
+        stabilization: Option<&mut StepWork>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularReport, DissipationError> {
+        match stabilization {
+            None => self.molecular.advance_unpublished(
+                &mut self.trial,
+                duration,
+                controls,
+                self.maximum_workspace_bytes,
+                cancelled,
+            ),
+            Some(work) => {
+                let report = self.molecular.advance_stabilized_unpublished(
+                    &mut self.trial,
+                    duration,
+                    work.controls,
+                    self.maximum_workspace_bytes,
+                    &mut work.evaluations,
+                    cancelled,
+                )?;
+                work.record(
+                    report.maximum_stages_used,
+                    report.maximum_scaled_parabolic_number,
+                );
+                Ok(report.transport)
+            }
+        }
     }
 
     fn step_impl(
@@ -229,6 +380,7 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         maximum_duration: Time,
         controls: MolecularStepControl,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        mut stabilization: Option<&mut StepWork>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport, DissipationError> {
         poll(&mut cancelled)?;
@@ -263,6 +415,23 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                 "coupled mixture duration or controls",
             ));
         }
+        if let Some(work) = stabilization.as_ref() {
+            work.controls.validate()?;
+            // The original operator checks its own field plus scratch. Reserve
+            // the accepted owner, complete loads and supplied forcing separately
+            // so lazy RKL2 storage cannot spend their portion of the same budget.
+            let outside = bytes
+                .checked_sub(self.trial.workspace_bytes())
+                .and_then(|value| value.checked_sub(self.molecular.workspace_bytes()))
+                .ok_or(DissipationError::Invalid(
+                    "coupled stabilized mixture workspace size overflow",
+                ))?;
+            let allowance = self.maximum_workspace_bytes.checked_sub(outside).ok_or(
+                DissipationError::Invalid("coupled stabilized mixture total workspace budget"),
+            )?;
+            self.molecular
+                .reserve_stabilized_workspace(&self.trial, allowance, &mut cancelled)?;
+        }
         let n = self.accepted.gas.species_count();
         let width = n + 3;
         let before = checked_totals(
@@ -288,6 +457,9 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
         let mut last_dt = dt;
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
+            if let Some(work) = stabilization.as_deref_mut() {
+                work.reset_extrema();
+            }
             if !positive(0.5 * dt)
                 || !(self.accepted.time + dt).is_finite()
                 || self.accepted.time + dt <= self.accepted.time
@@ -299,11 +471,10 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
             copy_physical(&self.accepted, &mut self.trial, &mut cancelled)?;
             let mut shortened = None;
             let attempt = (|| -> Result<MolecularStepReport, DissipationError> {
-                let first = self.molecular.advance_unpublished(
-                    &mut self.trial,
+                let first = self.molecular_half(
                     Time::new(0.5 * dt),
                     controls.molecular,
-                    self.maximum_workspace_bytes,
+                    stabilization.as_deref_mut(),
                     &mut cancelled,
                 )?;
                 copy_values(
@@ -335,11 +506,10 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                     &mut self.boundary_trial,
                     &mut cancelled,
                 )?;
-                let second = self.molecular.advance_unpublished(
-                    &mut self.trial,
+                let second = self.molecular_half(
                     Time::new(0.5 * dt),
                     controls.molecular,
-                    self.maximum_workspace_bytes,
+                    stabilization.as_deref_mut(),
                     &mut cancelled,
                 )?;
                 add_impulses(
@@ -403,6 +573,9 @@ impl<L: TransportLaw> MolecularEuler2d<L> {
                     return Ok(report);
                 }
                 Err(DissipationError::Cancelled) => return Err(DissipationError::Cancelled),
+                Err(error) if stabilization.is_some() && error.is_terminal() => {
+                    return Err(error.step_failure(0.0, dt));
+                }
                 Err(error) => {
                     last = error;
                     last_dt = dt;

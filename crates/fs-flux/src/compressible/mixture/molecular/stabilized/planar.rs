@@ -149,13 +149,10 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
         })
     }
 
-    fn reserve_stabilized_workspace(
-        &mut self,
-        flow: &MixtureEuler2d,
-        maximum_workspace_bytes: usize,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(), DissipationError> {
-        let mut required = self.workspace_bytes().checked_add(flow.workspace_bytes());
+    pub(in crate::compressible::mixture::molecular) fn additional_stabilized_workspace_bytes(
+        &self,
+    ) -> Result<usize, DissipationError> {
+        let mut extra = Some(0usize);
         for (saved, count) in [
             (&self.work.stabilized_x_flux, self.work.x_flux.len()),
             (&self.work.stabilized_y_flux, self.work.y_flux.len()),
@@ -165,13 +162,29 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             ),
         ] {
             if saved.len() != count {
-                required = required
-                    .and_then(|bytes| count.checked_mul(size_of::<f64>())?.checked_add(bytes));
+                extra =
+                    extra.and_then(|bytes| count.checked_mul(size_of::<f64>())?.checked_add(bytes));
             }
         }
-        let required = required.ok_or(DissipationError::Invalid(
+        extra.ok_or(DissipationError::Invalid(
             "stabilized planar molecular workspace size overflow",
-        ))?;
+        ))
+    }
+
+    pub(in crate::compressible::mixture::molecular) fn reserve_stabilized_workspace(
+        &mut self,
+        flow: &MixtureEuler2d,
+        maximum_workspace_bytes: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
+        let extra = self.additional_stabilized_workspace_bytes()?;
+        let required = self
+            .workspace_bytes()
+            .checked_add(flow.workspace_bytes())
+            .and_then(|bytes| bytes.checked_add(extra))
+            .ok_or(DissipationError::Invalid(
+                "stabilized planar molecular workspace size overflow",
+            ))?;
         if required > maximum_workspace_bytes || required > MAX_MIXTURE_WORKSPACE_BYTES {
             return Err(DissipationError::Invalid(
                 "stabilized planar molecular total workspace budget",

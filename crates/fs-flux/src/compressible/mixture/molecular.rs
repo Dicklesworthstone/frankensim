@@ -22,7 +22,10 @@ use interval::{Action, Stage, parabolic};
 pub use stabilized::{StabilizedDissipationControl, StabilizedMolecularReport};
 
 mod coupled;
-pub use coupled::{MolecularEuler2d, MolecularStepControl, MolecularStepReport};
+pub use coupled::{
+    MolecularEuler2d, MolecularStepControl, MolecularStepReport, StabilizedMolecularStepControl,
+    StabilizedMolecularStepReport,
+};
 
 // The shared face/capture loops require only cancellation and invalid-input
 // cases. Remaining trait methods retain the original molecular refusal types.

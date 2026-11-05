@@ -37,6 +37,35 @@ pub(in crate::compressible) struct StabilizedInterval {
     pub maximum_scaled_parabolic_number: f64,
 }
 
+/// One work account for a complete split, including discarded whole intervals.
+/// Only accepted-interval extrema reset when the composing owner retries.
+pub(in crate::compressible) struct StepWork {
+    pub controls: StabilizedDissipationControl,
+    pub evaluations: usize,
+    pub maximum_stages_used: usize,
+    pub maximum_scaled_parabolic_number: f64,
+}
+impl StepWork {
+    pub fn new(controls: StabilizedDissipationControl) -> Self {
+        Self {
+            controls,
+            evaluations: 0,
+            maximum_stages_used: 0,
+            maximum_scaled_parabolic_number: 0.0,
+        }
+    }
+
+    pub fn reset_extrema(&mut self) {
+        self.maximum_stages_used = 0;
+        self.maximum_scaled_parabolic_number = 0.0;
+    }
+
+    pub fn record(&mut self, stages: usize, number: f64) {
+        self.maximum_stages_used = self.maximum_stages_used.max(stages);
+        self.maximum_scaled_parabolic_number = self.maximum_scaled_parabolic_number.max(number);
+    }
+}
+
 /// Reserve before touching any source/constitutive workspace. A failed call
 /// consumes its actual attempted evaluation; composing owners retain the same
 /// counter across both molecular halves and discarded complete-interval probes.

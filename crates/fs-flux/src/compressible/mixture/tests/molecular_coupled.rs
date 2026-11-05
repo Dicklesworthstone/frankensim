@@ -7,6 +7,8 @@ use crate::compressible::mixture::molecular::{
 };
 use fs_gas::multicomponent::dissipation::ConstantTransport;
 
+mod stabilized;
+
 type Coupled = MolecularEuler2d<ConstantTransport>;
 const CAP: ForceControl2d = ForceControl2d { maximum_mach: 5.0 };
 
