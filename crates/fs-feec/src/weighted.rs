@@ -28,6 +28,29 @@ pub enum CellWeight {
     Tensor([[f64; 3]; 3]),
 }
 
+impl CellWeight {
+    /// Factor an admitted 3D weight without multiplying its scale into the
+    /// quadrature prematurely. Constant affine input keeps scalar arithmetic.
+    pub(crate) fn normalized_3d(self) -> (f64, [[f64; 3]; 3], Option<[f64; 4]>) {
+        const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        match self {
+            Self::Scalar(value) => (value, IDENTITY, None),
+            Self::AffineScalar(values) => {
+                if values.iter().all(|value| *value == values[0]) {
+                    (values[0], IDENTITY, None)
+                } else {
+                    let scale = values.into_iter().fold(0.0_f64, f64::max);
+                    (scale, IDENTITY, Some(values.map(|v| v / scale)))
+                }
+            }
+            Self::Tensor(tensor) => {
+                let scale = tensor.iter().flatten().fold(0.0_f64, |s, v| s.max(v.abs()));
+                (scale, tensor.map(|row| row.map(|v| v / scale)), None)
+            }
+        }
+    }
+}
+
 /// Explicit bounds on input cells, output rows, and staged contributions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WeightedAssemblyLimits {

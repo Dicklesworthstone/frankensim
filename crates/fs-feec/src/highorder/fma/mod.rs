@@ -12,6 +12,7 @@
 #![allow(unsafe_code)] // registered capsule — see SAFETY.md beside this file
 
 use super::hex::{TensorMass, TensorSpace};
+use super::vecfam::VectorMaterialMass;
 use crate::weighted::WeightedError;
 
 /// Run the const-P element loop with FMA codegen when the CPU has it,
@@ -76,4 +77,40 @@ unsafe fn apply_tensor_mass_x86(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), WeightedError> {
     mass.apply_body(input, output, workspace, cancelled)
+}
+
+/// Apply polynomial-contracted vector material mass using native fused
+/// instructions on supported CPUs and the identical portable body elsewhere.
+#[inline]
+pub(crate) fn apply_vector_mass_dispatch(
+    mass: &VectorMaterialMass<'_, '_>,
+    input: &[f64],
+    output: &mut [f64],
+    scratch: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), WeightedError> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: both target features are checked immediately above.
+            // The inlined body and polynomial contractions are safe Rust.
+            return unsafe { apply_vector_mass_x86(mass, input, output, scratch, cancelled) };
+        }
+    }
+    mass.apply_body(input, output, scratch, cancelled)
+}
+
+/// # Safety
+/// Requires avx2+fma, checked by the only caller immediately before dispatch.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_vector_mass_x86(
+    mass: &VectorMaterialMass<'_, '_>,
+    input: &[f64],
+    output: &mut [f64],
+    scratch: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), WeightedError> {
+    mass.apply_body(input, output, scratch, cancelled)
 }

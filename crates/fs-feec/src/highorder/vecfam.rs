@@ -26,6 +26,9 @@ use fs_la::factor::{cholesky, lu};
 use fs_rep_mesh::TetComplex;
 use fs_sparse::{Coo, Csr};
 
+mod material;
+pub use material::VectorMaterialMass;
+
 /// Highest supported order (dense per-element solves stay small).
 pub const MAX_R: usize = 4;
 

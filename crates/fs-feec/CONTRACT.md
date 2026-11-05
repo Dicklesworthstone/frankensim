@@ -232,6 +232,29 @@ definiteness of an arbitrary global constrained/unconstrained problem.
   global interpolation matrices (derivatives exact in monomial
   coefficients).
 
+- `VecSpace::prepare_material_mass` prepares `VectorMaterialMass` on the
+  original Nedelec/RT moment coordinates at r=1..4. Positive scalar, positive
+  cell-local P1 scalar and Cartesian SPD tensor weights use the existing
+  coefficient admission and r+3 Duffy quadrature, exact for their polynomial
+  products. Reference density on original reference geometry retains inertia;
+  the original unit mass, sorted-global traces and incidence maps are unchanged.
+  CSR assembly is symmetric and triplet-bounded. Warm `apply_into` contracts
+  trial DOFs into three scalar polynomials, accumulates weighted polynomial
+  moments and projects them back: O(n*s + Q*s) for n local DOFs, s monomials
+  and Q points, without a dense element matrix, allocation or source query.
+  Shared quadrature, flat DOF maps, volumes and the consistent diagonal are
+  storage-bounded; caller scratch has ndof entries and output publishes only
+  on success. The existing checked FMA capsule supplies supported x86 codegen.
+  Units follow the ORIGINAL moments: RT face/cell moments have field units;
+  Nedelec edge/face moments have field-times-length units, while its interior
+  moments have field units. `coordinate_dims`, `entry_dims(row,col)`,
+  `output_dims(row,field_dims)` and `energy_dims(field_dims)` retain these
+  differences. Geometry/chart/layout admission is not an independent proof of
+  a caller-modified Vandermonde basis. `tests/material_vecfam.rs` covers exact
+  density inventory/centroid/energy, actual force-to-acceleration mass solves,
+  consistent CSR/action parity, all block scaling under geometry dilation,
+  relabeling, anisotropic energy, bounded work and atomic refusals.
+
 - `cohomology` module (plan §8.1, bead tfz.7): harmonic cochains and
   the discrete Hodge decomposition — the correct treatment of
   multiply-connected domains. `hodge_decompose` splits any k-cochain

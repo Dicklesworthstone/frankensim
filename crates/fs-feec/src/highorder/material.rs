@@ -374,22 +374,7 @@ fn zeros(n: usize) -> Result<Vec<f64>, WeightedError> {
 }
 
 fn normalized(weight: CellWeight) -> (f64, [[f64; 3]; 3], Option<[f64; 4]>) {
-    const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
-    match weight {
-        CellWeight::Scalar(value) => (value, IDENTITY, None),
-        CellWeight::AffineScalar(values) => {
-            if values.iter().all(|value| *value == values[0]) {
-                (values[0], IDENTITY, None)
-            } else {
-                let scale = values.into_iter().fold(0.0_f64, f64::max);
-                (scale, IDENTITY, Some(values.map(|v| v / scale)))
-            }
-        }
-        CellWeight::Tensor(tensor) => {
-            let scale = tensor.iter().flatten().fold(0.0_f64, |s, v| s.max(v.abs()));
-            (scale, tensor.map(|row| row.map(|v| v / scale)), None)
-        }
-    }
+    weight.normalized_3d()
 }
 
 fn pair(tensor: [[f64; 3]; 3], left: [f64; 3], right: [f64; 3]) -> f64 {
