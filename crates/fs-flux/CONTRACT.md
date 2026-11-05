@@ -1106,6 +1106,56 @@ The homogeneous entries remain fixed-mesh, constant-density linear unsteady
 Stokes, without nonlinear open-boundary/backflow conditions, thermal evolution,
 variable-step/BDF3+ integration, continuum error bounds or new cancellation/throughput claims.
 
+### Bounded conservative density subcycling
+
+`ns::transport::density::subcycle` advances one caller-declared macro interval
+through the original positive donor-cell Euler owner, with an explicit maximum
+substep count and outgoing-volume Courant cap strictly between zero and one.
+The prepared BDM volume advector, original mesh, depth, fixed cell volumes and
+exterior donor states remain frozen throughout that interval. Equal dyadic
+subintervals are admitted before updates; a duration that cannot split exactly
+or work beyond the stated cap is refused. This decouples density CFL admission
+from a caller's macro cadence; it does not upgrade frozen-advector temporal
+accuracy or add compressibility, geometric motion, sources or interface repair.
+
+Every density substep reuses the original mass and ALL N specific-inventory
+updates, preserving each actual directional carried transfer. The complete
+interval report audits represented initial/final inventories and cumulative
+physical boundary amounts, retains macro Courant separately from maximum
+substep Courant and count, and scales signed carried residuals with integrated
+absolute boundary exchange even when the carried quantity changes sign.
+Specific quantities are never inferred by multiplying averaged primitives.
+
+A scale-normalized compensated mean of PRE-substep donor densities avoids
+raw density-sum overflow and premature underflow from dividing each tiny
+density by the substep count. Since each frozen directional volume rate and
+the original compatible mass-flux reconstruction are linear in donor density,
+`prepare_mass_flux` reconstructs one time-averaged H(div) mass flux whose
+integrated directional rates agree with the accumulated substep mass amounts
+and whose cell divergence gives the macro density increment, up to represented
+state, summation and reconstruction roundoff. The original quadratic face
+moments and nonnegative donor signs are retained. These averages are flux
+integration weights, not accepted material/thermodynamic states. Changing
+advection, inflow or geometry requires a new plan/interval.
+
+The reusable workspace is bound to its original plan. Its byte cap admits the
+original Euler scratch, two stages, compensated means and cumulative face
+amounts together. Warm advances allocate no heap storage. Refusal/cancellation
+never publishes partial output and invalidates accepted average/transfer views;
+the workspace can be retried. Reconstructing a later mass-flux operator has its
+own explicit storage allowance. The original single-step API and arithmetic
+are unchanged.
+
+G1/G3 regressions in `tests/density_transport/subcycle.rs` compare closed
+counterflow and open throughflow against independent rational matrix
+recurrences for density AND extensive carried inventory. They check cumulative
+directional/boundary accounts, one reconstructed flux's macro divergence,
+constant-specific preservation, exact one-substep parity, large/subnormal
+positive density means, bounded work/storage and final-poll cancellation/retry.
+Native compilation and execution remain required validation gates; these
+regressions alone make no convergence or performance certification claim.
+
+
 ### Conservative density and native BDM momentum
 
 `FluxSystem::assemble_density_momentum_bdf1` and its

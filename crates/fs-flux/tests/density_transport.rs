@@ -14,6 +14,9 @@ mod mass_flux;
 #[path = "density_transport/momentum.rs"]
 mod momentum;
 
+#[path = "density_transport/subcycle.rs"]
+mod subcycle;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,

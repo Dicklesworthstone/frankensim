@@ -17,6 +17,9 @@
 use super::{EdgeVolumeTransport, FluxTransportError, dimensional_rate, edge_volume_rate};
 use crate::{FluxSystem, TriMesh};
 
+/// Bounded density substeps with one compatible time-averaged mass flux.
+pub mod subcycle;
+
 /// Cell-average density and N quantities per unit mass. Components may have
 /// different units: velocity gives momentum, specific enthalpy gives enthalpy,
 /// and mass fractions give component masses. Their reference convention and
@@ -100,6 +103,8 @@ pub enum DensityTransportError {
     VolumeDivergence { cell: usize, relative_residual: f64 },
     /// The requested interval violates the admitted outgoing-volume CFL limit.
     Courant { actual: f64, maximum: f64 },
+    /// The requested interval needs more dyadic density substeps than allowed.
+    SubstepLimit { maximum: usize },
     /// Required logical vector storage exceeds its allowance.
     Storage { required: usize, maximum: usize },
     /// A fallible allocation could not reserve its requested storage.
@@ -199,7 +204,10 @@ impl<'m> FluxSystem<'m> {
         admit_storage(
             &[
                 (nc, size_of::<f64>() + 2 * size_of::<Sum>()),
-                (ne, size_of::<EdgeVolumeTransport>() + 2 * size_of::<[f64; 2]>()),
+                (
+                    ne,
+                    size_of::<EdgeVolumeTransport>() + 2 * size_of::<[f64; 2]>(),
+                ),
             ],
             max_storage_bytes,
         )?;
