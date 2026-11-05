@@ -5,7 +5,10 @@ use fs_phs::linear_exact::{
     DenseExponentialBudget, LinearSplitBudget, PreparedExactTones, PreparedExactZoh,
     PreparedNonlinearTones, PreparedNonlinearZoh, QuadraticPart, split_quadratic,
 };
-use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, Storage, duffing_oscillator};
+use fs_phs::{
+    PortHamiltonian, QuadraticStorage, RelaxationBranch, ResistanceWitness, Storage,
+    duffing_oscillator,
+};
 
 fn budget(n: usize) -> LinearSplitBudget {
     LinearSplitBudget {
@@ -696,4 +699,219 @@ fn nonlinear_tone_capacity_covers_work_and_refusals_are_transactional() {
     owner.set_max_iterations(50).unwrap();
     owner.step_into(&[0.8, 0.3], &[0.7], &[0.2], &mut next, &mut output).unwrap();
     assert!(next.iter().all(|v| v.is_finite()) && output[0].is_finite());
+}
+
+fn affine_force_integral(omega: f64, c0: f64, s0: f64, c1: f64, s1: f64, h: f64) -> f64 {
+    if omega == 0.0 { return 0.5 * h * (c0 + c1); }
+    let (sin, cos) = (omega * h).sin_cos();
+    c0 * sin / omega + s0 * (1.0 - cos) / omega
+        + (c1 - c0) * (sin / omega + (cos - 1.0) / (h * omega * omega))
+        + (s1 - s0) * (-cos / omega + sin / (h * omega * omega))
+}
+
+#[test]
+fn affine_nonlinear_tones_integrate_original_quartic_source_and_channel_heat() {
+    let (dt, resistance) = (0.08, 0.4);
+    let original = PortHamiltonian::new(
+        1, 1, vec![0.0], vec![resistance], vec![1.0], Box::new(PureQuartic),
+    ).unwrap();
+    // The last observation overlaps the first two and exceeds total R. Its
+    // account must stay independent; these are not assumed to partition R.
+    let losses = [0.1_f64, 0.3, 0.8];
+    let channels: Vec<_> = losses.iter().map(|&r| {
+        ResistanceWitness::try_from_source_rows(1, vec![r], vec![r.sqrt()]).unwrap()
+    }).collect();
+    let frequencies = [0.0, 3.0, 3.0, 3.0, 7.1];
+    let mut owner = PreparedNonlinearTones::new_owned_affine_with_resistance_channels(
+        original, &frequencies, dt, budget(1), tone_budget(), &channels,
+    ).unwrap();
+    let large = 2.0_f64.powi(54);
+    let (c0, s0) = ([0.2, large, 0.7, -large, -0.3], [9.0, 0.1, 0.2, 0.3, 0.4]);
+    let (c1, s1) = ([-0.1, large, 0.9, -large, 0.2], [-14.0, 0.2, -0.1, 0.1, -0.25]);
+    let initial = [0.7];
+    let (mut next, mut mean, mut heat) = ([0.0], [0.0], [0.0; 3]);
+    let record = owner.step_affine_observed_into(
+        &initial, &c0, &s0, &c1, &s1, &mut next, &mut mean, &mut heat,
+    ).unwrap();
+    let f = 0.25 * (initial[0] + next[0]) * (initial[0] * initial[0] + next[0] * next[0]);
+    let integral = affine_force_integral(0.0, 0.2, 0.0, -0.1, 0.0, dt)
+        + affine_force_integral(3.0, 0.7, 0.6, 0.9, 0.2, dt)
+        + affine_force_integral(7.1, -0.3, 0.4, 0.2, -0.25, dt);
+    // Q=0 leaves a constant accepted discrete effort. Integrals of the
+    // prescribed affine sinusoids give an independent complete energy oracle.
+    close(next[0], initial[0] - dt * resistance * f + integral, 1.0);
+    close(mean[0], f, 1.0);
+    close(record.supplied, f * integral, 1.0);
+    close(record.dissipated, resistance * dt * f * f, 1.0);
+    close(record.delta_h, 0.25 * (next[0].powi(4) - initial[0].powi(4)), 1.0);
+    for (&actual, &r) in heat.iter().zip(&losses) { close(actual, r * dt * f * f, 1.0); }
+    assert!(owner.is_affine() && record.newton_iters > 0);
+    assert_eq!(owner.resistance_channel_count(), 3);
+    assert!(heat[2] > record.dissipated);
+}
+
+#[test]
+fn nonlinear_affine_and_channel_limits_preserve_complete_quadratic_memory() {
+    let n = 5;
+    let mut row = vec![0.0; n];
+    row[1] = 0.3;
+    row[3] = -0.2;
+    let mut matrix = vec![0.0; n * n];
+    for i in 0..n { for j in 0..n { matrix[i * n + j] = row[i] * row[j]; } }
+    let channels = [ResistanceWitness::try_from_source_rows(n, matrix, row).unwrap()];
+    let frequencies = [0.0, 2.7, 3.01];
+    let mut exact = PreparedExactTones::new_owned_affine_with_resistance_channels(
+        body([0.0; 2], 0.0), &frequencies, 0.003, budget(n), tone_budget(), &channels,
+    ).unwrap();
+    let mut nonlinear = PreparedNonlinearTones::new_owned_affine_with_resistance_channels(
+        body([0.0; 2], 0.0), &frequencies, 0.003, budget(n), tone_budget(), &channels,
+    ).unwrap();
+    let initial = [0.07, -0.03, -0.04, 0.02, 0.025];
+    let (c0, s0) = ([0.1, 0.3, -0.2, 0.2, -0.1, 0.4], [0.0, 0.2, 0.3, 0.0, 0.1, -0.2]);
+    let (c1, s1) = ([0.2, -0.4, 0.1, -0.3, 0.2, 0.1], [0.0, -0.1, 0.1, 0.0, 0.3, 0.2]);
+    let (mut x, mut y, mut heat) = ([0.0; 5], [0.0; 2], [0.0]);
+    let expected = exact.step_affine_observed_into(
+        &initial, &c0, &s0, &c1, &s1, &mut x, &mut y, &mut heat,
+    ).unwrap();
+    let (mut next, mut mean, mut loss) = ([0.0; 5], [0.0; 2], [0.0]);
+    let actual = nonlinear.step_affine_observed_into(
+        &initial, &c0, &s0, &c1, &s1, &mut next, &mut mean, &mut loss,
+    ).unwrap();
+    for (a, b) in next.iter().chain(&mean).chain(&loss).zip(x.iter().chain(&y).chain(&heat)) {
+        close(*a, *b, 1.0);
+    }
+    close(actual.supplied, expected.supplied, 1.0);
+    close(actual.dissipated, expected.dissipated, 1.0);
+    close(actual.delta_h, expected.delta_h, 1.0);
+    assert_eq!(actual.newton_iters, 0);
+
+    let make = || duffing_oscillator(1.0, 4.0, 7.0, 0.2).unwrap();
+    let channels = [ResistanceWitness::try_from_source_rows(
+        2, vec![0.0, 0.0, 0.0, 0.09], vec![0.0, 0.3],
+    ).unwrap()];
+    let mut fixed = PreparedNonlinearTones::new_owned_with_resistance_channels(
+        make(), &[2.7], 0.03, budget(2), tone_budget(), &channels,
+    ).unwrap();
+    let mut affine = PreparedNonlinearTones::new_owned_affine_with_resistance_channels(
+        make(), &[2.7], 0.03, budget(2), tone_budget(), &channels,
+    ).unwrap();
+    let (mut a, mut ya, mut ha) = ([0.0; 2], [0.0], [0.0]);
+    let (mut b, mut yb, mut hb) = ([0.0; 2], [0.0], [0.0]);
+    let ra = fixed.step_observed_into(&[0.2, -0.1], &[0.6], &[-0.2], &mut a, &mut ya, &mut ha).unwrap();
+    let rb = affine.step_affine_observed_into(
+        &[0.2, -0.1], &[0.6], &[-0.2], &[0.6], &[-0.2], &mut b, &mut yb, &mut hb,
+    ).unwrap();
+    for (x, y) in a.iter().chain(&ya).chain(&ha).zip(b.iter().chain(&yb).chain(&hb)) { close(*x, *y, 1.0); }
+    close(ra.supplied, rb.supplied, 1.0);
+    close(ra.dissipated, rb.dissipated, 1.0);
+    close(ha[0], 0.45 * ra.dissipated, 1.0);
+}
+
+#[test]
+fn nonlinear_affine_sources_refine_state_work_and_channels_with_cached_phase() {
+    let (initial, duration) = ([0.7, -0.2], 0.4);
+    let reference = rk4([initial[0], initial[1], 0.0, 0.0, 0.0], duration, 8192, |x| {
+        let t = x[4];
+        let a = t / duration;
+        let u = (0.6 + 0.9 * a) * (2.3 * t).cos() + (-0.2 + 0.3 * a) * (2.3 * t).sin()
+            + (0.1 - 0.4 * a) * (4.1 * t).cos() + (0.3 - 0.2 * a) * (4.1 * t).sin();
+        [x[1], -4.0 * x[0] - 7.0 * x[0].powi(3) - 0.2 * x[1] + u,
+            0.2 * x[1] * x[1], u * x[1], 1.0]
+    });
+    let channel = ResistanceWitness::try_from_source_rows(
+        2, vec![0.0, 0.0, 0.0, 0.09], vec![0.0, 0.3],
+    ).unwrap();
+    let mut errors = Vec::new();
+    for steps in [8, 16, 32] {
+        let mut owner = PreparedNonlinearTones::new_owned_affine_with_resistance_channels(
+            duffing_oscillator(1.0, 4.0, 7.0, 0.2).unwrap(), &[2.3, 4.1],
+            duration / f64::from(steps), budget(2), tone_budget(), core::slice::from_ref(&channel),
+        ).unwrap();
+        let (mut cosine, mut sine) = ([0.6, 0.1], [-0.2, 0.3]);
+        let (mut dc, mut ds) = ([0.9, -0.4], [0.3, -0.2]);
+        let (mut x, mut next, mut mean, mut loss) = (initial, [0.0; 2], [0.0], [0.0]);
+        let (mut heat, mut work, mut observed) = (0.0, 0.0, 0.0);
+        for _ in 0..steps {
+            let c1 = core::array::from_fn::<_, 2, _>(|i| cosine[i] + dc[i] / f64::from(steps));
+            let s1 = core::array::from_fn::<_, 2, _>(|i| sine[i] + ds[i] / f64::from(steps));
+            let record = owner.step_affine_observed_into(
+                &x, &cosine, &sine, &c1, &s1, &mut next, &mut mean, &mut loss,
+            ).unwrap();
+            x = next;
+            heat += record.dissipated;
+            work += record.supplied;
+            observed += loss[0];
+            for tone in 0..2 {
+                (cosine[tone], sine[tone]) = owner.advance_force_phase(tone, c1[tone], s1[tone]).unwrap();
+                (dc[tone], ds[tone]) = owner.advance_force_phase(tone, dc[tone], ds[tone]).unwrap();
+            }
+        }
+        close(owner.system().hamiltonian(&x) - owner.system().hamiltonian(&initial) + heat, work, 1.0);
+        close(observed, 0.45 * heat, 1.0);
+        errors.push([x[0] - reference[0], x[1] - reference[1],
+            heat - reference[2], work - reference[3], observed - 0.45 * reference[2]].map(f64::abs));
+    }
+    for component in 0..5 {
+        assert!(errors[1][component] < 0.35 * errors[0][component], "{errors:?}");
+        assert!(errors[2][component] < 0.35 * errors[1][component], "{errors:?}");
+    }
+}
+
+#[test]
+fn nonlinear_affine_channel_admission_and_publication_are_transactional() {
+    assert!(PreparedNonlinearTones::fits_affine_reference_capacity(125, 1, 1));
+    assert!(PreparedNonlinearTones::fits_affine_reference_capacity(1, 51, 1));
+    for (n, m, k) in [(126, 1, 1), (1, 52, 1), (0, 1, 1), (1, 0, 1), (1, 1, 0),
+        (usize::MAX, 1, 1), (1, usize::MAX, 1), (1, 1, usize::MAX)]
+    {
+        assert!(!PreparedNonlinearTones::fits_affine_reference_capacity(n, m, k));
+    }
+    let make = || duffing_oscillator(1.0, 4.0, 7.0, 0.2).unwrap();
+    let channel = ResistanceWitness::try_from_source_rows(
+        2, vec![0.0, 0.0, 0.0, 0.09], vec![0.0, 0.3],
+    ).unwrap();
+    // The old fixed-source dimension and a budget admitting no channel cannot
+    // stand in for the actual four-quadrature/channel payload and cold work.
+    for denied in [
+        DenseExponentialBudget { max_dimension: 8, ..tone_budget() },
+        DenseExponentialBudget { max_dense_bytes: 60_000, ..tone_budget() },
+        DenseExponentialBudget { max_multiply_terms: 2_300_000, ..tone_budget() },
+    ] {
+        assert!(PreparedNonlinearTones::new_owned_affine_with_resistance_channels(
+            make(), &[2.7], 0.03, budget(2), denied, core::slice::from_ref(&channel),
+        ).is_err());
+    }
+    let wrong = ResistanceWitness::try_from_source_rows(1, vec![1.0], vec![1.0]).unwrap();
+    assert!(PreparedNonlinearTones::new_owned_with_resistance_channels(
+        make(), &[2.7], 0.03, budget(2), tone_budget(), &[wrong],
+    ).is_err());
+    assert!(PreparedNonlinearTones::new_owned_affine(
+        make(), &[2.7], f64::from_bits(1), budget(2), tone_budget(),
+    ).is_err());
+    let mut owner = PreparedNonlinearTones::new_owned_affine_with_resistance_channels(
+        make(), &[2.7], 0.03, budget(2), tone_budget(), &[channel],
+    ).unwrap();
+    let (mut next, mut mean, mut heat) = ([41.0; 2], [42.0], [43.0]);
+    assert!(owner.step_into(&[0.7, -0.2], &[0.4], &[0.1], &mut next, &mut mean).is_err());
+    assert!(owner.step_affine_observed_into(
+        &[0.7, -0.2], &[0.4], &[0.1], &[f64::NAN], &[0.2], &mut next, &mut mean, &mut heat,
+    ).is_err());
+    assert!(owner.step_affine_observed_into(
+        &[0.7, -0.2], &[0.4], &[0.1], &[0.7], &[0.2], &mut next, &mut mean, &mut [],
+    ).is_err());
+    let mut polls = 0;
+    assert!(matches!(owner.step_affine_observed_into_controlled(
+        &[0.7, -0.2], &[0.4], &[0.1], &[0.7], &[0.2], &mut next, &mut mean, &mut heat,
+        || { polls += 1; polls >= 6 },
+    ), Err(fs_phs::PreparedStepError::Cancelled)));
+    owner.set_max_iterations(0).unwrap();
+    assert!(owner.step_affine_observed_into(
+        &[0.7, -0.2], &[0.4], &[0.1], &[0.7], &[0.2], &mut next, &mut mean, &mut heat,
+    ).is_err());
+    assert_eq!((next, mean, heat), ([41.0; 2], [42.0], [43.0]));
+    owner.set_max_iterations(50).unwrap();
+    owner.step_affine_observed_into(
+        &[0.7, -0.2], &[0.4], &[0.1], &[0.7], &[0.2], &mut next, &mut mean, &mut heat,
+    ).unwrap();
+    assert!(heat[0] > 0.0);
 }

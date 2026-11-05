@@ -180,6 +180,7 @@ impl PreparedQuadraticFlow {
         split: &LinearSplit,
         dt: f64,
         frequencies: &[f64],
+        affine: bool,
         rotating_ports: usize,
         linear_forms: &[Vec<f64>],
         budget: DenseExponentialBudget,
@@ -187,7 +188,7 @@ impl PreparedQuadraticFlow {
     ) -> Result<Self, PreparedStepError> {
         Self::prepare(
             sys, split, dt, &[], linear_forms, budget, cancelled, None,
-            Some((frequencies, false, rotating_ports)), None,
+            Some((frequencies, affine, rotating_ports)), None,
         )
     }
 

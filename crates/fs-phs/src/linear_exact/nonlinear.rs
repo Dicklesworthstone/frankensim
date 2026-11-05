@@ -20,8 +20,9 @@ use super::{
     split_quadratic_with_block_dimension,
 };
 use crate::{
-    PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, QuadraticStorage, StepRecord,
-    Storage, discrete_gradient_into_unchecked, quadratic_midpoint_remainder, storage_energy_change,
+    PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, QuadraticStorage,
+    ResistanceWitness, StepRecord, Storage, discrete_gradient_into_unchecked,
+    quadratic_midpoint_remainder, storage_energy_change,
 };
 use fs_la::LuWorkspace;
 use fs_math::det;
@@ -98,6 +99,13 @@ enum Power {
     Tones(TonePower),
 }
 
+#[derive(Clone, Copy)]
+struct TonePreparation<'a> {
+    frequencies: &'a [f64],
+    affine: bool,
+    channels: &'a [ResistanceWitness],
+}
+
 struct Model {
     system: PortHamiltonian,
     q: Vec<f64>,
@@ -133,7 +141,7 @@ struct Scratch {
     effort: Vec<f64>,
     derivative: Vec<f64>,
     heat_coordinates: Vec<f64>,
-    heat: [f64; 1],
+    heat: Vec<f64>,
     lu: LuWorkspace,
     evaluation: Evaluation,
 }
@@ -205,7 +213,7 @@ impl PreparedNonlinearZoh {
         system: PortHamiltonian,
         dt: f64,
         budget: LinearSplitBudget,
-        frequencies: Option<&[f64]>,
+        tones: Option<TonePreparation<'_>>,
         dense_budget: DenseExponentialBudget,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
@@ -216,8 +224,9 @@ impl PreparedNonlinearZoh {
             ).into());
         }
         let (n, m) = (system.n, system.m);
-        let sources = if let Some(frequencies) = frequencies {
-            m.checked_mul(frequencies.len()).and_then(|v| v.checked_mul(2))
+        let sources = if let Some(tones) = tones {
+            m.checked_mul(tones.frequencies.len())
+                .and_then(|v| v.checked_mul(if tones.affine { 4 } else { 2 }))
                 .ok_or_else(|| refuse("nonlinear tone source dimension"))?
         } else { m };
         let held = m
@@ -228,7 +237,7 @@ impl PreparedNonlinearZoh {
             .and_then(|d| d.checked_add(sources))
             .and_then(|d| d.checked_add(1))
             .ok_or_else(|| refuse("nonlinear complete dimension"))?;
-        let heat_dimension = if frequencies.is_some() {
+        let heat_dimension = if tones.is_some() {
             n.checked_add(n.max(m)).and_then(|d| d.checked_add(sources))
                 .ok_or_else(|| refuse("nonlinear tone power dimension"))?
         } else { 2 * n };
@@ -279,9 +288,9 @@ impl PreparedNonlinearZoh {
             })
             .collect::<Option<_>>()
             .ok_or_else(|| refuse("nonlinear original output map is unrepresentable"))?;
-        let flow = if let Some(frequencies) = frequencies {
+        let flow = if let Some(tones) = tones {
             PreparedQuadraticFlow::new_mixed_tones_controlled(
-                &shadow, &shadow_split, dt, frequencies, m, &outputs,
+                &shadow, &shadow_split, dt, tones.frequencies, tones.affine, m, &outputs,
                 dense_budget, &mut *cancelled,
             )?
         } else {
@@ -291,7 +300,7 @@ impl PreparedNonlinearZoh {
         };
         let mut mean_state = Vec::with_capacity(m * n);
         let mut mean_input = Vec::with_capacity(m * held);
-        if frequencies.is_none() {
+        if tones.is_none() {
             for p in 0..m {
                 let (x, u) = flow.linear_integral_map(p)?;
                 mean_state.extend(x.into_iter().map(|v| v / dt));
@@ -301,10 +310,10 @@ impl PreparedNonlinearZoh {
         if !finite(&mean_state) || !finite(&mean_input) {
             return Err(refuse("nonlinear mean-output relation is nonfinite").into());
         }
-        let power = if let Some(frequencies) = frequencies {
+        let power = if let Some(tones) = tones {
             Power::Tones(TonePower::new(
-                &system, &split, frequencies, &flow.source_scales()[..sources],
-                dt, false, &[], cancelled,
+                &system, &split, tones.frequencies, &flow.source_scales()[..sources],
+                dt, tones.affine, tones.channels, cancelled,
             )?)
         } else {
             Power::Held(PositiveHeat::new(&system, &split, dt, &system.r)?)
@@ -343,7 +352,7 @@ impl PreparedNonlinearZoh {
                 effort: vec![0.0; n],
                 derivative: vec![0.0; n],
                 heat_coordinates: vec![0.0; heat_dimension],
-                heat: [0.0],
+                heat: vec![0.0; 1 + tones.map_or(0, |t| t.channels.len())],
                 lu: LuWorkspace::new(n).map_err(|_| refuse("nonlinear LU capacity"))?,
                 evaluation: Evaluation {
                     midpoint: vec![0.0; n],
@@ -504,12 +513,15 @@ impl PreparedNonlinearZoh {
 /// Only the quadratic limit reproduces the exact continuous physical trajectory;
 /// generated harmonics and nonlinear temporal error still require refinement.
 ///
-/// Preparation retains `2*m*K+n` source coordinates for K distinct frequencies:
-/// two quadratures per physical port/tone and one held nonlinear effort per
-/// state. Warm calls allocate nothing, perform no exponentials/trigonometry,
-/// and use the existing bounded nonlinear Newton and transactional publication.
+/// Preparation retains `2*m*K+n` source coordinates for K distinct frequencies;
+/// affine-envelope plans use `4*m*K+n`. The nonlinear effort still occupies one
+/// held coordinate per state. Optional original resistance channels are
+/// integrated on the same trajectory and need not form a partition of R.
+/// Warm calls allocate nothing, perform no exponentials/trigonometry, and use
+/// the existing bounded nonlinear Newton and transactional publication.
 pub struct PreparedNonlinearTones {
     inner: PreparedNonlinearZoh,
+    affine: bool,
     frequencies: Vec<f64>,
     mapping: Vec<usize>,
     phase: Vec<(f64, f64)>,
@@ -522,7 +534,14 @@ impl PreparedNonlinearTones {
     /// `distinct_tones` counts distinct frequencies, including explicit DC.
     /// Physical admission and caller byte/work budgets remain separate checks.
     pub fn fits_reference_capacity(n: usize, m: usize, distinct_tones: usize) -> bool {
-        tone_dimensions(n, m, distinct_tones).is_some_and(|(_, flow, power)| {
+        tone_dimensions(n, m, distinct_tones, false).is_some_and(|(_, flow, power)| {
+            flow.max(power) <= MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
+        })
+    }
+
+    /// The same complete capacity check with four envelope/carrier coordinates.
+    pub fn fits_affine_reference_capacity(n: usize, m: usize, distinct_tones: usize) -> bool {
+        tone_dimensions(n, m, distinct_tones, true).is_some_and(|(_, flow, power)| {
             flow.max(power) <= MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
         })
     }
@@ -546,14 +565,84 @@ impl PreparedNonlinearTones {
         duration: f64,
         split_budget: LinearSplitBudget,
         dense_budget: DenseExponentialBudget,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<Self, PreparedStepError> {
-        poll(&mut cancelled)?;
-        let count = admit_tones(&system, frequencies, duration, split_budget, dense_budget)?;
+        Self::new_owned_with_resistance_channels_controlled(
+            system, frequencies, duration, split_budget, dense_budget, &[], cancelled,
+        )
+    }
+
+    /// Independently integrate each declared original resistance square.
+    /// Channels may overlap; the complete original R still owns total heat.
+    pub fn new_owned_with_resistance_channels(
+        system: PortHamiltonian, frequencies: &[f64], duration: f64,
+        split_budget: LinearSplitBudget, dense_budget: DenseExponentialBudget,
+        channels: &[ResistanceWitness],
+    ) -> Result<Self, PhsError> {
+        Self::new_owned_with_resistance_channels_controlled(
+            system, frequencies, duration, split_budget, dense_budget, channels, || false,
+        ).map_err(uncancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_owned_with_resistance_channels_controlled(
+        system: PortHamiltonian, frequencies: &[f64], duration: f64,
+        split_budget: LinearSplitBudget, dense_budget: DenseExponentialBudget,
+        channels: &[ResistanceWitness], mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            system, frequencies, duration, split_budget, dense_budget, channels,
+            false, &mut cancelled,
+        )
+    }
+
+    /// Continuous affine cosine/sine envelopes, in the interval-start carrier
+    /// basis. The end coefficients advance through the ordinary phase helper.
+    pub fn new_owned_affine(
+        system: PortHamiltonian, frequencies: &[f64], duration: f64,
+        split_budget: LinearSplitBudget, dense_budget: DenseExponentialBudget,
+    ) -> Result<Self, PhsError> {
+        Self::new_owned_affine_with_resistance_channels(
+            system, frequencies, duration, split_budget, dense_budget, &[],
+        )
+    }
+
+    pub fn new_owned_affine_with_resistance_channels(
+        system: PortHamiltonian, frequencies: &[f64], duration: f64,
+        split_budget: LinearSplitBudget, dense_budget: DenseExponentialBudget,
+        channels: &[ResistanceWitness],
+    ) -> Result<Self, PhsError> {
+        Self::new_owned_affine_with_resistance_channels_controlled(
+            system, frequencies, duration, split_budget, dense_budget, channels, || false,
+        ).map_err(uncancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_owned_affine_with_resistance_channels_controlled(
+        system: PortHamiltonian, frequencies: &[f64], duration: f64,
+        split_budget: LinearSplitBudget, dense_budget: DenseExponentialBudget,
+        channels: &[ResistanceWitness], mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            system, frequencies, duration, split_budget, dense_budget, channels,
+            true, &mut cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        system: PortHamiltonian, frequencies: &[f64], duration: f64,
+        split_budget: LinearSplitBudget, dense_budget: DenseExponentialBudget,
+        channels: &[ResistanceWitness], affine: bool, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        poll(cancelled)?;
+        let count = admit_tones(
+            &system, frequencies, duration, split_budget, dense_budget, affine, channels,
+        )?;
         let mut unique = Vec::with_capacity(count);
         let mut mapping = Vec::with_capacity(frequencies.len());
         for &omega in frequencies {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             let index = unique.iter().position(|&old| old == omega).unwrap_or_else(|| {
                 unique.push(omega);
                 unique.len() - 1
@@ -561,13 +650,15 @@ impl PreparedNonlinearTones {
             mapping.push(index);
         }
         let inner = PreparedNonlinearZoh::prepare_owned(
-            system, duration, split_budget, Some(&unique), dense_budget, &mut cancelled,
+            system, duration, split_budget,
+            Some(TonePreparation { frequencies: &unique, affine, channels }),
+            dense_budget, cancelled,
         )?;
         let phase = unique.iter().map(|omega| det::sin_cos(omega * duration)).collect();
         let sources = inner.model.sources;
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         Ok(Self {
-            inner, frequencies: frequencies.to_vec(), mapping, phase,
+            inner, affine, frequencies: frequencies.to_vec(), mapping, phase,
             input: vec![0.0; sources], sums: vec![Sum::default(); sources],
         })
     }
@@ -578,6 +669,10 @@ impl PreparedNonlinearTones {
     pub fn port_dim(&self) -> usize { self.system().m }
     pub fn tone_count(&self) -> usize { self.frequencies.len() }
     pub fn angular_frequencies_rad_s(&self) -> &[f64] { &self.frequencies }
+    /// Whether this owner requires affine endpoint coefficients.
+    pub fn is_affine(&self) -> bool { self.affine }
+    /// Number of additional original resistance observations, excluding total R.
+    pub fn resistance_channel_count(&self) -> usize { self.inner.scratch.heat.len() - 1 }
 
     /// The same bounded endpoint-solve budget as the held-input owner.
     pub fn set_max_iterations(&mut self, limit: usize) -> Result<(), PhsError> {
@@ -631,35 +726,149 @@ impl PreparedNonlinearTones {
         next: &mut [f64], mean_output: &mut [f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreparedStepRecord, PreparedStepError> {
-        poll(&mut cancelled)?;
+        self.step_impl(initial, cosine, sine, None, next, mean_output, None, &mut cancelled)
+    }
+
+    /// State, mean output and every original channel heat publish together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_observed_into(
+        &mut self, initial: &[f64], cosine: &[f64], sine: &[f64],
+        next: &mut [f64], mean_output: &mut [f64], channel_heat: &mut [f64],
+    ) -> Result<PreparedStepRecord, PhsError> {
+        self.step_observed_into_controlled(
+            initial, cosine, sine, next, mean_output, channel_heat, || false,
+        ).map_err(uncancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_observed_into_controlled(
+        &mut self, initial: &[f64], cosine: &[f64], sine: &[f64],
+        next: &mut [f64], mean_output: &mut [f64], channel_heat: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        self.step_impl(
+            initial, cosine, sine, None, next, mean_output, Some(channel_heat), &mut cancelled,
+        )
+    }
+
+    /// Apply `c(t)=c0+(t/h)*(c1-c0)` and `s(t)=s0+(t/h)*(s1-s0)` to the
+    /// continuous carrier. All endpoints use the SAME interval-start phase.
+    /// Rotate END coefficients only after accepting the step. This requires
+    /// affine preparation and adds no warm allocations or sampled forcing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_affine_into(
+        &mut self, initial: &[f64], cosine_start: &[f64], sine_start: &[f64],
+        cosine_end: &[f64], sine_end: &[f64], next: &mut [f64], mean_output: &mut [f64],
+    ) -> Result<PreparedStepRecord, PhsError> {
+        self.step_affine_into_controlled(
+            initial, cosine_start, sine_start, cosine_end, sine_end,
+            next, mean_output, || false,
+        ).map_err(uncancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_affine_into_controlled(
+        &mut self, initial: &[f64], cosine_start: &[f64], sine_start: &[f64],
+        cosine_end: &[f64], sine_end: &[f64], next: &mut [f64], mean_output: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        self.step_impl(
+            initial, cosine_start, sine_start, Some((cosine_end, sine_end)),
+            next, mean_output, None, &mut cancelled,
+        )
+    }
+
+    /// Integrate the original resistance channels on the accepted nonlinear
+    /// affine-source trajectory. No channel is inferred from an energy remainder.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_affine_observed_into(
+        &mut self, initial: &[f64], cosine_start: &[f64], sine_start: &[f64],
+        cosine_end: &[f64], sine_end: &[f64], next: &mut [f64], mean_output: &mut [f64],
+        channel_heat: &mut [f64],
+    ) -> Result<PreparedStepRecord, PhsError> {
+        self.step_affine_observed_into_controlled(
+            initial, cosine_start, sine_start, cosine_end, sine_end,
+            next, mean_output, channel_heat, || false,
+        ).map_err(uncancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_affine_observed_into_controlled(
+        &mut self, initial: &[f64], cosine_start: &[f64], sine_start: &[f64],
+        cosine_end: &[f64], sine_end: &[f64], next: &mut [f64], mean_output: &mut [f64],
+        channel_heat: &mut [f64], mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        self.step_impl(
+            initial, cosine_start, sine_start, Some((cosine_end, sine_end)),
+            next, mean_output, Some(channel_heat), &mut cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_impl(
+        &mut self, initial: &[f64], cosine: &[f64], sine: &[f64],
+        end: Option<(&[f64], &[f64])>, next: &mut [f64], mean_output: &mut [f64],
+        channel_heat: Option<&mut [f64]>, cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedStepRecord, PreparedStepError> {
+        poll(cancelled)?;
         admit_outputs(&self.inner.model, next, mean_output)?;
+        if channel_heat.as_ref().is_some_and(|out| out.len() != self.resistance_channel_count()) {
+            return Err(refuse("nonlinear tone channel output extent").into());
+        }
         let k = self.tone_count();
         let m = self.port_dim();
-        if cosine.len() != m * k || sine.len() != m * k
+        if self.affine != end.is_some() || cosine.len() != m * k || sine.len() != m * k
             || !finite(cosine) || !finite(sine)
+            || end.is_some_and(|(c, s)| c.len() != m * k || s.len() != m * k
+                || !finite(c) || !finite(s))
         {
-            return Err(refuse("nonlinear tones require complete finite port-major coefficients").into());
+            return Err(refuse("nonlinear tones require the prepared finite source layout").into());
         }
         self.sums.fill(Sum::default());
+        let stride = if self.affine { 4 } else { 2 };
         for p in 0..m {
-            poll(&mut cancelled)?;
+            poll(cancelled)?;
             for (source, &target) in self.mapping.iter().enumerate() {
-                let index = 2 * (p * self.phase.len() + target);
-                self.sums[index].product(1.0, cosine[p * k + source])
-                    .and_then(|()| self.sums[index + 1].product(1.0, sine[p * k + source]))
+                let at = p * k + source;
+                let index = stride * (p * self.phase.len() + target);
+                self.sums[index].product(1.0, cosine[at])
+                    .and_then(|()| self.sums[index + 1].product(1.0, sine[at]))
                     .ok_or_else(|| refuse("combined nonlinear tone is unrepresentable"))?;
+                if let Some((cosine_end, sine_end)) = end {
+                    self.sums[index + 2].product(1.0, cosine_end[at])
+                        .and_then(|()| self.sums[index + 3].product(1.0, sine_end[at]))
+                        .ok_or_else(|| refuse("combined nonlinear tone endpoint is unrepresentable"))?;
+                }
+            }
+        }
+        if self.affine {
+            // Coalesce complete endpoints before subtracting. Per-source
+            // differences would erase weak ramps among cancelling strong tones.
+            for source in self.sums.chunks_exact_mut(4) {
+                let (cosine_start, sine_start) = (source[0], source[1]);
+                source[2].add_scaled(cosine_start, -1.0)
+                    .and_then(|()| source[3].add_scaled(sine_start, -1.0))
+                    .ok_or_else(|| refuse("nonlinear tone envelope delta is unrepresentable"))?;
             }
         }
         for (input, sum) in self.input.iter_mut().zip(&self.sums) {
             *input = sum.value().ok_or_else(|| refuse("combined nonlinear tone is nonfinite"))?;
         }
-        self.inner.step_into_controlled(initial, &self.input, next, mean_output, cancelled)
+        let record = solve(
+            &self.inner.model, &mut self.inner.scratch, self.inner.max_iterations,
+            initial, &self.input, &mut None, cancelled,
+        )?;
+        poll(cancelled)?;
+        next.copy_from_slice(&self.inner.scratch.x);
+        mean_output.copy_from_slice(&self.inner.scratch.output);
+        if let Some(out) = channel_heat { out.copy_from_slice(&self.inner.scratch.heat[1..]); }
+        Ok(record)
     }
 }
 
-fn tone_dimensions(n: usize, m: usize, tones: usize) -> Option<(usize, usize, usize)> {
+fn tone_dimensions(n: usize, m: usize, tones: usize, affine: bool) -> Option<(usize, usize, usize)> {
     if n == 0 || m == 0 || tones == 0 { return None; }
-    let sources = m.checked_mul(tones)?.checked_mul(2)?;
+    let sources = m.checked_mul(tones)?.checked_mul(if affine { 4 } else { 2 })?;
     let flow = n.checked_mul(2)?.checked_add(sources)?.checked_add(1)?;
     let power = n.checked_add(n.max(m))?.checked_add(sources)?;
     Some((sources, flow, power))
@@ -668,9 +877,10 @@ fn tone_dimensions(n: usize, m: usize, tones: usize) -> Option<(usize, usize, us
 fn admit_tones(
     system: &PortHamiltonian, frequencies: &[f64], dt: f64,
     split: LinearSplitBudget, budget: DenseExponentialBudget,
+    affine: bool, channels: &[ResistanceWitness],
 ) -> Result<usize, PhsError> {
     let (n, m) = (system.n, system.m);
-    if !dt.is_finite() || dt <= 0.0 || frequencies.is_empty()
+    if !dt.is_finite() || dt <= 0.0 || (affine && !(1.0 / dt).is_finite()) || frequencies.is_empty()
         || frequencies.iter().any(|w| !w.is_finite() || *w < 0.0 || !(w * dt).is_finite())
     {
         return Err(refuse("nonlinear tones require finite frequencies and a positive clock"));
@@ -678,19 +888,25 @@ fn admit_tones(
     // Count actual oscillators without allocating before dimension admission.
     let distinct = frequencies.iter().enumerate()
         .filter(|(i, w)| !frequencies[..*i].contains(w)).count();
-    let (sources, flow, power) = tone_dimensions(n, m, distinct)
+    let (sources, flow, power) = tone_dimensions(n, m, distinct, affine)
         .ok_or_else(|| refuse("nonlinear tone complete dimensions overflow or are empty"))?;
     if n > split.max_modes || flow.max(power) > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM
         || flow.max(power) > budget.max_dimension
     {
         return Err(refuse("nonlinear tone state/source/work/heat dimensions exceed budget"));
     }
-    let (f, d) = (flow as u128, power as u128);
-    let bytes = 8 * (f * f * (2 * m as u128 + 25) + 80 * d * d + 8 * (n * n) as u128)
-        + 128 * (n as u128 + m as u128 + sources as u128 + frequencies.len() as u128);
-    let work = 224 * f * f * f * m as u128 + 4096 * d * d * d;
+    let (f, d, c) = (flow as u128, power as u128, channels.len() as u128);
+    let bytes = 8 * (f * f * (2 * m as u128 + 25) + (80 + c) * d * d
+        + (8 + c) * (n * n) as u128 + c)
+        + 128 * (n as u128 + m as u128 + sources as u128 + frequencies.len() as u128 + c);
+    let work = 224 * f * f * f * m as u128 + 2048 * d * d * d * (c + 2);
     if bytes > budget.max_dense_bytes as u128 || work > budget.max_multiply_terms as u128 {
         return Err(refuse("nonlinear tone complete caches exceed explicit byte/work budget"));
+    }
+    if channels.iter().any(|w| w.matrix.len() != n * n || w.root.len() != n * n
+        || !finite(&w.matrix) || !finite(&w.root))
+    {
+        return Err(refuse("nonlinear tone channel witness must match the original state"));
     }
     Ok(distinct)
 }
@@ -1002,6 +1218,7 @@ fn solve(
         .max(dissipated.abs());
     if !finite(&s.output)
         || !finite(&[delta_h, supplied, dissipated, scale])
+        || s.heat.iter().any(|value| !value.is_finite() || *value < 0.0)
         || !model.system.hamiltonian(&s.x).is_finite()
         || dissipated < 0.0
         || (delta_h + dissipated - supplied).abs() > 1e-12 * scale
