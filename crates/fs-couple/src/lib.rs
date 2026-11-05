@@ -38,7 +38,7 @@ pub mod fission {
         DecayHeatGroup, EnergyChannels, FissionBudget, FissionError, FissionModel,
         FissionState, FissionStep,
     };
-    pub use fs_nuclear::{irradiation, kinetics};
+    pub use fs_nuclear::{burnup, irradiation, kinetics};
     pub use fs_nuclear::thermal::*;
 }
 

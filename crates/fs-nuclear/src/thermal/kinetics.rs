@@ -4,7 +4,7 @@
 //! native thermal cell temperature supplies its admitted feedback fits. The
 //! point-kinetics population-time integral scales a reference multigroup flux;
 //! that mean absolute flux advances the same finite parent-isotope inventories
-//! used by the prescribed-irradiation owner. Only deposited joules enter heat.
+//! used by the chosen irradiation owner. Only deposited joules enter heat.
 //!
 //! For fixed cross sections and spectral shape, integrated fluence determines
 //! parent removal and competing reaction counts. The mean-flux replacement
@@ -12,12 +12,14 @@
 //! heat. Temperature feedback is also frozen at the beginning of the native
 //! thermal interval. Coupled histories therefore require timestep refinement;
 //! analytic neutronics does not make this partitioned thermal solve exact.
-//! No spatial neutron transport, neutron exchange between cells, burnup-driven
-//! reactivity, or automatic fuel/isotope calibration is inferred.
+//! Full product networks also evolve decay at the mean flux, so their changing
+//! production/reaction timing requires refinement. Explicit composition worth
+//! can contribute feedback; spatial transport, neutron exchange between cells,
+//! and automatic fuel/isotope calibration are not inferred.
 
 use std::sync::Arc;
 
-use super::source::{NuclearHeatSource, sealed};
+use super::source::{FluxDrivenHeatSource, NuclearHeatSource, sealed};
 use super::{
     FissionThermalError, IrradiationCellSource, IrradiationCellStep, IrradiationHeatingBudget,
     NuclearHeating, Sum, finite,
@@ -124,9 +126,9 @@ impl KineticsControlSchedule {
 
 /// Explicit work/accuracy limits for all owners in one coupled source.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct KineticHeatingBudget {
+pub struct KineticHeatingBudget<B = IrradiationHeatingBudget> {
     /// Isotope/group limits and the common thermal nuclear-energy allowance.
-    pub irradiation: IrradiationHeatingBudget,
+    pub irradiation: B,
     /// Population and integrated-population numerical estimates, separately
     /// budgeted from joule account closure and coupled-model approximation.
     pub kinetics: KineticsBudget,
@@ -136,11 +138,11 @@ pub struct KineticHeatingBudget {
 
 /// One declared fixed-shape neutron region bound to one thermal receiver.
 #[derive(Clone, Debug)]
-pub struct KineticCellSource {
+pub struct KineticCellSource<S = IrradiationCellSource> {
     /// Original isotope inventories and reference flux history. Here the
     /// authored flux is the absolute flux at neutron amplitude n=1; actual
     /// flux equals that reference times the explicitly normalized amplitude.
-    pub irradiation: IrradiationCellSource,
+    pub irradiation: S,
     /// Current neutron and delayed-neutron precursor history for that region.
     pub kinetics: PointKineticsState,
     /// Independently authored control reactivity and external neutron source.
@@ -151,12 +153,12 @@ pub struct KineticCellSource {
 
 /// One accepted coupled interval, retaining both original physical reports.
 #[derive(Clone, Debug, PartialEq)]
-pub struct KineticCellStep {
+pub struct KineticCellStep<R = IrradiationCellStep> {
     /// Point-neutron solution and integrated neutron-population time.
     pub kinetics: KineticsStep,
     /// Actual finite-inventory fission, capture and energy accounts.
-    pub irradiation: IrradiationCellStep,
-    /// Reference/control reactivity plus the beginning-temperature feedback.
+    pub irradiation: R,
+    /// Reference/control reactivity plus beginning-temperature and composition feedback.
     pub applied_reactivity: f64,
     /// Integrated neutron-population time divided by the same interval length.
     pub mean_neutron_population: f64,
@@ -165,14 +167,14 @@ pub struct KineticCellStep {
 }
 
 /// The shared transactional thermal owner with lumped neutron feedback.
-pub type KineticHeating = NuclearHeating<KineticCellSource>;
+pub type KineticHeating<S = IrradiationCellSource> = NuclearHeating<KineticCellSource<S>>;
 
-impl KineticCellSource {
+impl<S: FluxDrivenHeatSource> KineticCellSource<S> {
     fn reactivity_at(
         &self,
         control: KineticsControl,
         temperature_k: f64,
-        budget: KineticHeatingBudget,
+        budget: KineticHeatingBudget<S::Budget>,
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
     ) -> Result<f64, FissionThermalError> {
         if self.feedback.len() > budget.max_feedback_terms {
@@ -180,6 +182,10 @@ impl KineticCellSource {
         }
         let mut reactivity = Sum::default();
         reactivity.add(control.reactivity)?;
+        reactivity.add(
+            self.irradiation
+                .composition_reactivity(budget.irradiation, checkpoint)?,
+        )?;
         for fit in &self.feedback {
             checkpoint()?;
             reactivity.add(fit.reactivity_shift(temperature_k)?)?;
@@ -191,11 +197,11 @@ impl KineticCellSource {
         &self,
         time_s: f64,
         amplitude: f64,
-        budget: KineticHeatingBudget,
+        budget: KineticHeatingBudget<S::Budget>,
         checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
     ) -> Result<GroupFlux, FissionThermalError> {
-        let reference = self.irradiation.fluxes.flux_at(time_s)?;
-        if reference.groups().len() > budget.irradiation.source.max_neutron_groups {
+        let reference = self.irradiation.reference_flux(time_s)?;
+        if reference.groups().len() > S::max_neutron_groups(budget.irradiation) {
             return Err(FissionError::Budget("neutron groups").into());
         }
         let mut values = Vec::with_capacity(reference.values_m2_s().len());
@@ -211,19 +217,22 @@ impl KineticCellSource {
     }
 }
 
-impl sealed::Sealed for KineticCellSource {}
-impl NuclearHeatSource for KineticCellSource {
-    type Budget = KineticHeatingBudget;
-    type Step = KineticCellStep;
+impl<S: FluxDrivenHeatSource> sealed::Sealed for KineticCellSource<S> {}
+impl<S: FluxDrivenHeatSource> NuclearHeatSource for KineticCellSource<S> {
+    type Budget = KineticHeatingBudget<S::Budget>;
+    type Step = KineticCellStep<S::Step>;
 
     fn cell_id(&self) -> CellId {
-        self.irradiation.cell_id
+        self.irradiation.cell_id()
     }
     fn material_id(&self) -> MaterialId {
-        self.irradiation.material_id
+        self.irradiation.material_id()
     }
     fn energy_tolerance_j(budget: Self::Budget) -> f64 {
-        IrradiationCellSource::energy_tolerance_j(budget.irradiation)
+        S::energy_tolerance_j(budget.irradiation)
+    }
+    fn nuclei_tolerance(budget: Self::Budget) -> Option<f64> {
+        S::nuclei_tolerance(budget.irradiation)
     }
     fn next_transition(&self, time_s: f64) -> Option<f64> {
         [
@@ -345,16 +354,25 @@ impl NuclearHeatSource for KineticCellSource {
         ))
     }
     fn released(step: &Self::Step) -> EnergyChannels {
-        step.irradiation.released
+        S::released(&step.irradiation)
     }
     fn energy_roundoff_j(step: &Self::Step) -> f64 {
-        step.irradiation.energy_roundoff_j
+        S::energy_roundoff_j(&step.irradiation)
+    }
+    fn population_roundoff_nuclei(step: &Self::Step) -> f64 {
+        S::population_roundoff_nuclei(&step.irradiation)
+    }
+    fn decays(step: &Self::Step) -> f64 {
+        S::decays(&step.irradiation)
+    }
+    fn produced_nuclei(step: &Self::Step) -> f64 {
+        S::produced_nuclei(&step.irradiation)
     }
     fn fissions(step: &Self::Step) -> f64 {
-        step.irradiation.fissions
+        S::fissions(&step.irradiation)
     }
     fn captures(step: &Self::Step) -> f64 {
-        step.irradiation.captures
+        S::captures(&step.irradiation)
     }
     fn cumulative_released(&self) -> Result<EnergyChannels, FissionThermalError> {
         self.irradiation.cumulative_released()

@@ -1,6 +1,7 @@
 //! The shared transactional heat-owner seam for admitted nuclear source laws.
 
 use super::{FissionCellSource, FissionThermalError};
+use crate::irradiation::GroupFlux;
 use crate::{EnergyChannels, FissionBudget, FissionError, FissionStep};
 use fs_thermal::enthalpy::{CellId, MaterialId};
 
@@ -73,6 +74,35 @@ pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
     fn captures(step: &Self::Step) -> f64;
     /// The source's lifetime release, including all explicit initial reservoirs.
     fn cumulative_released(&self) -> Result<EnergyChannels, FissionThermalError>;
+}
+
+/// An admitted irradiation law whose reference spectrum can be scaled by the
+/// same lumped neutron kinetics owner. This is sealed through `NuclearHeatSource`.
+/// Both independent parents and full product networks retain their own reaction
+/// propagation; the shared bridge owns neutron normalization and thermal time.
+pub trait FluxDrivenHeatSource: NuclearHeatSource {
+    /// Authored absolute group flux at neutron population amplitude one.
+    fn reference_flux(&self, time_s: f64) -> Result<&GroupFlux, FissionThermalError>;
+    /// Maximum groups admitted by this source's numerical budget.
+    fn max_neutron_groups(budget: Self::Budget) -> usize;
+    /// Advance against the supplied absolute mean spectrum over this interval.
+    fn trial_flux(
+        &self,
+        flux: &GroupFlux,
+        duration_s: f64,
+        temperature_k: f64,
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, Self::Step), FissionThermalError>;
+    /// Caller-supplied composition worth at the beginning of the interval.
+    /// The parent-only model has no inferred composition-to-reactivity law.
+    fn composition_reactivity(
+        &self,
+        _budget: Self::Budget,
+        _checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<f64, FissionThermalError> {
+        Ok(0.0)
+    }
 }
 
 impl sealed::Sealed for FissionCellSource {}

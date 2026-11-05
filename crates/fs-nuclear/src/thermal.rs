@@ -18,17 +18,21 @@ use fs_thermal::enthalpy::{
     Event, MaterialId, StepConfig, ThermalStorageBasis,
 };
 
+use crate::burnup::BurnupError;
 use crate::decay::DecayError;
 use crate::kinetics::KineticsError;
 use crate::{EnergyChannels, FissionError, FissionState};
 
 mod source;
-pub use source::NuclearHeatSource;
+pub use source::{FluxDrivenHeatSource, NuclearHeatSource};
 mod irradiation;
 pub use irradiation::{
     IrradiationCellSource, IrradiationCellStep, IrradiationHeating, IrradiationHeatingBudget,
     NeutronFluxChange, NeutronFluxSchedule,
 };
+mod burnup;
+pub use burnup::{BurnupCellSource, BurnupHeating, BurnupHeatingBudget};
+
 mod production;
 pub use production::{DecayProductionCellSource, DecayProductionHeating};
 
@@ -164,6 +168,8 @@ pub enum FissionThermalError {
     Fission(FissionError),
     /// Original neutron-kinetics model or numerical-accuracy refusal.
     Kinetics(KineticsError),
+    /// Original product inventory, reaction-data or propagation refusal.
+    Burnup(BurnupError),
     /// Original radioactive inventory, production or propagation refusal.
     Decay(DecayError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
@@ -226,6 +232,16 @@ impl From<DecayError> for FissionThermalError {
         Self::Decay(error)
     }
 }
+impl From<BurnupError> for FissionThermalError {
+    fn from(error: BurnupError) -> Self {
+        match error {
+            // Preserve the original callback error for the native observer's
+            // cancellation/error recovery rather than wrapping it twice.
+            BurnupError::Fission(error) => Self::Fission(error),
+            other => Self::Burnup(other),
+        }
+    }
+}
 impl std::fmt::Display for FissionThermalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "fission/thermal coupling refused: {self:?}")
@@ -237,6 +253,7 @@ impl std::error::Error for FissionThermalError {
             Self::Thermal(error) => Some(error),
             Self::Fission(error) => Some(error),
             Self::Kinetics(error) => Some(error),
+            Self::Burnup(error) => Some(error),
             Self::Decay(error) => Some(error),
             _ => None,
         }
@@ -688,6 +705,8 @@ impl Account {
         // count observations are exported as one scalar per advance.
         population_roundoff.add(self.decays.export_roundoff()?)?;
         population_roundoff.add(self.produced.export_roundoff()?)?;
+        population_roundoff.add(self.fissions.export_roundoff()?)?;
+        population_roundoff.add(self.captures.export_roundoff()?)?;
         let population_roundoff_nuclei = population_roundoff.nonnegative_upper_bound()?;
         Ok(FissionHeatingAudit {
             released: EnergyChannels {

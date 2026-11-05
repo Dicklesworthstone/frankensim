@@ -551,6 +551,81 @@ impl TemperatureFeedback {
     }
 }
 
+/// Explicit linear worth of one tracked nuclide in the declared neutron region.
+///
+/// The shift is `coefficient_per_nucleus * (N - reference_nuclei)`. The caller
+/// must calibrate this fit for the same region, geometry and population
+/// normalization as its neutron model. A microscopic absorption cross section
+/// is not a reactivity coefficient; no spatial importance or criticality is
+/// inferred here. The finite inventory domain is checked at each evaluation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompositionFeedback {
+    data_id: String,
+    nuclide: crate::irradiation::NuclideId,
+    reference_nuclei: f64,
+    minimum_nuclei: f64,
+    maximum_nuclei: f64,
+    coefficient_per_nucleus: f64,
+}
+
+impl CompositionFeedback {
+    /// Admit the identity, inventory normalization, worth and applicability.
+    pub fn new(
+        data_id: String,
+        nuclide: crate::irradiation::NuclideId,
+        reference_nuclei: f64,
+        minimum_nuclei: f64,
+        maximum_nuclei: f64,
+        coefficient_per_nucleus: f64,
+    ) -> Result<Self, KineticsError> {
+        if data_id.trim().is_empty()
+            || !nonnegative(reference_nuclei)
+            || !nonnegative(minimum_nuclei)
+            || !nonnegative(maximum_nuclei)
+            || reference_nuclei < minimum_nuclei
+            || reference_nuclei > maximum_nuclei
+            || !coefficient_per_nucleus.is_finite()
+        {
+            return Err(KineticsError::InvalidInput(
+                "invalid composition-feedback fit or domain",
+            ));
+        }
+        let fit = Self {
+            data_id,
+            nuclide,
+            reference_nuclei,
+            minimum_nuclei,
+            maximum_nuclei,
+            coefficient_per_nucleus,
+        };
+        fit.reactivity_shift(minimum_nuclei)?;
+        fit.reactivity_shift(maximum_nuclei)?;
+        Ok(fit)
+    }
+
+    /// Caller-supplied identity and version of this calibrated worth fit.
+    #[must_use]
+    pub fn data_id(&self) -> &str {
+        &self.data_id
+    }
+
+    /// Physical identity used to find the inventory, independent of node order.
+    #[must_use]
+    pub fn nuclide(&self) -> crate::irradiation::NuclideId {
+        self.nuclide
+    }
+
+    /// Evaluate at an absolute number of nuclei, not a number density.
+    pub fn reactivity_shift(&self, nuclei: f64) -> Result<f64, KineticsError> {
+        if !nuclei.is_finite() || nuclei < self.minimum_nuclei || nuclei > self.maximum_nuclei {
+            return Err(KineticsError::InvalidInput(
+                "inventory is outside composition-feedback domain",
+            ));
+        }
+        finite(self.coefficient_per_nucleus * (nuclei - self.reference_nuclei))
+    }
+}
+
 /// Refusal without publication of a neutron history.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KineticsError {

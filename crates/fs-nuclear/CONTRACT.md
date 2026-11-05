@@ -527,8 +527,9 @@ interval. Therefore this is an explicitly partitioned coupled model. Refine
 `StepConfig::max_dt_s`; the source does not claim an exact or unconditionally
 accurate coupled trajectory. Numerical population estimates, nuclear/thermal
 account closure, data uncertainty and this partitioning error remain distinct.
-There is no intercell neutron transport, neutron exchange, burnup-dependent
-reactivity update, automatic criticality calculation or inferred nuclear dataset.
+The parent-only specialization does not infer burnup-dependent reactivity.
+There is no intercell neutron transport, neutron exchange, automatic criticality
+calculation or inferred nuclear dataset.
 
 Five new coupled regressions passed: independent exponential population-time
 calorimetry; feedback refinement against an independently derived neutron/fluence
@@ -696,3 +697,59 @@ not OpenMC's CRAM or a spatial neutron transport solver. Accounting admission,
 series truncation, coupled timestep error and nuclear-data uncertainty are
 separate claims. No evaluated isotope dataset, criticality prediction or
 reactor-design qualification is supplied.
+
+## Product heating and composition feedback on the shared thermal timeline
+
+`thermal::BurnupHeating` specializes the existing `NuclearHeating` transaction
+for a complete product-resolved inventory per cell. The original temperature
+and final accepted interval feed the reaction owner; only integrated deposited
+energy enters the original thermal heat path. Capture, fission and product-decay
+counts remain distinct. Flux changes clip the shared timeline, zero flux stops
+neutron reactions while radioactive products keep evolving, and restart retains
+all populations and cumulative accounts. Material identity, bulk mass, geometry
+and the original caloric law remain bound to the existing thermal cell.
+
+`FluxDrivenHeatSource` extends the sealed source seam so the original neutron
+kinetics bridge can operate on either the parent-only irradiation model or a
+full product network. `KineticCellSource<S>`, `KineticHeating<S>` and their
+report/budget types preserve the original parent-only default types. The same
+kinetics population-time integral scales the reference multigroup flux. No
+duplicate neutron solver, source clock, heat integrator or thermal transaction
+is introduced. The common source audit and advance-wide nuclei allowance also
+retain and bound product-network population defects and radioactive counts.
+
+`kinetics::CompositionFeedback` is an explicitly identified linear nuclide
+worth fit, with absolute reference/minimum/maximum populations and a coefficient
+per nucleus. Nuclide identity binds a fit to the inventory independently of node
+order. Its coefficient must be calibrated for the same region and neutron
+normalization; a microscopic capture cross section is not itself a reactivity
+worth. Initial and prospective product inventories must stay in every fit's
+domain. An unknown nuclide, domain exit, exhausted resource/account allowance,
+or checkpoint failure refuses before inventories and heat are published.
+
+Scheduled controls, temperature feedback and admitted composition worth sum
+to the beginning-of-interval reactivity. This closes the reduced loop from
+fuel reactions to products, product worth, neutron amplitude, subsequent
+reactions and material heat. Temperature/composition feedback and the mean
+within-step spectrum remain partitioned approximations; decay competes with
+time-dependent neutron reactions, so matching total fluence alone is not an
+exact product history. Timestep refinement is required. No automatic criticality,
+spatial flux redistribution, burnup-dependent delayed-neutron coefficients,
+evaluated worth calibration or empirical reactor validation is claimed.
+
+Focused regressions exercise analytic competing reaction calorimetry with
+same-interval product decay/capture, fission multiplicity, additive boundary
+heat, shutdown/restart, unchanged bulk mass, and composition feedback against
+an independent neutron/fluence invariant. Halving the coupled timestep gives
+the expected first-order convergence in that manufactured fixture. Domain and
+cancellation checks preserve the original source and thermal states.
+
+The final merged native build passed **141 tests**: 35 numerical-owner tests
+(13 reaction and 22 existing decay/source) and 106 complete nuclear tests with
+`thermal` enabled, including the concurrent radioactive-production work. The
+new work adds 11 burnup inventory and five coupled product/feedback regressions.
+The production nuclear library and the exact `fs-couple` fission-facade imports
+also compiled. The build used actual math, quantity, decay and native thermal
+owners; unrelated thermal module declarations were excluded from that focused
+dependency build. Full workspace Cargo, the complete `fs-couple` crate, examples,
+performance benchmarks and cross-ISA validation were not run for this change.

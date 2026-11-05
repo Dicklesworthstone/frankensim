@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::source::{NuclearHeatSource, sealed};
+use super::source::{FluxDrivenHeatSource, NuclearHeatSource, sealed};
 use super::{FissionThermalError, NuclearHeating, Sum, finite};
 use crate::irradiation::{GroupFlux, IrradiationBudget, IrradiationState, IrradiationStep};
 use crate::{EnergyChannels, FissionError};
@@ -72,7 +72,7 @@ impl NeutronFluxSchedule {
         &self.changes
     }
 
-    fn next_after(&self, time_s: f64) -> Option<f64> {
+    pub(super) fn next_after(&self, time_s: f64) -> Option<f64> {
         let index = self
             .changes
             .partition_point(|change| change.time_s <= time_s);
@@ -298,5 +298,24 @@ impl IrradiationCellSource {
             },
             report,
         ))
+    }
+}
+
+impl FluxDrivenHeatSource for IrradiationCellSource {
+    fn reference_flux(&self, time_s: f64) -> Result<&GroupFlux, FissionThermalError> {
+        self.fluxes.flux_at(time_s)
+    }
+    fn max_neutron_groups(budget: Self::Budget) -> usize {
+        budget.source.max_neutron_groups
+    }
+    fn trial_flux(
+        &self,
+        flux: &GroupFlux,
+        duration_s: f64,
+        temperature_k: f64,
+        budget: Self::Budget,
+        checkpoint: &mut dyn FnMut() -> Result<(), FissionError>,
+    ) -> Result<(Self, Self::Step), FissionThermalError> {
+        IrradiationCellSource::trial_flux(self, flux, duration_s, temperature_k, budget, checkpoint)
     }
 }
