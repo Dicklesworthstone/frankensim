@@ -1,5 +1,33 @@
 # CONTRACT: fs-conduction
 
+## Source-surface contact with evolving material radiation
+
+`TemperatureContacts::advance_enthalpy_with_material_ambient_radiation` and
+`advance_enthalpy_with_material_enclosure_radiation` compose the bounded
+temperature-contact fixed point with the original material pointwise owners.
+Triangulated temperature/pressure contact laws participate without a contact
+derivative. Each native enthalpy response evaluates emissivity at the actual
+nodal temperature and phase; enclosure reflection follows that same state.
+The immutable old enthalpy, original caloric objects, material identities and
+selected source claims remain bound throughout every discarded response.
+
+Acceptance independently re-queries actual contact flux and material radiation
+under the original residual and energy targets. Existing Newton/Krylov limits,
+cancellation, and refusal behavior remain active. Ambient and open-reservoir
+heat remain external; closed reflected exchange and interbody contact cancel
+internally. Radiation does not become convective heat or acquire solid storage.
+The accepted endpoint retains its source/phase radiation reports and remains
+usable by the existing complete material-radiation/contact adjoint binder.
+This path iterates contact temperature and still refuses phase-dependent
+contact resistance, whose evolution requires the enthalpy-coordinate owner.
+
+Focused regressions manufacture nonuniform latent states from independent
+degree-six triangle moments and analytic two-patch radiosity, then compare the
+coupled ambient, closed and open solutions with those states and their energy
+accounts. They also retain source receipts, exact chart ownership, failed-step
+history, repeatability and cancelled-work checks. These native regressions
+require execution on a build host with the complete physics dependencies.
+
 ## Sensible bonded-film storage in primary enthalpy
 
 `EnthalpyBackwardEuler::with_surface_heat_capacity` and its heterogeneous counterpart bind the existing `SurfaceHeatCapacity` laws to the original host enthalpy. The shared P1 rule gives `C_i = integral(C_s N_i dA)` in J/K, including nonuniform thickness/capacity and its original material source. The native row storage is `E_i(h_i) = m_i h_i + C_i T_i(h_i)` up to a fixed datum, with increment `m_i Delta_h_i + C_i Delta_T_i`. Reference mass, host caloric charts and phase fractions keep their original owners. A sharp host latent plateau has zero sensible film increment at fixed temperature; no latent energy or apparent heat-capacity regularization is added.

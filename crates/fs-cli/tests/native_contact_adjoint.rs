@@ -49,8 +49,23 @@ fn pack(name: &str, property: &str, dims: fs_qty::Dims,
         specimen: name.into(), method: "explicit numerical contact-control fixture".into(),
         artifact: source, caveats: "numerical verification only".into(), provenance: provenance(),
     }).unwrap();
+    let mut validity = fs_evidence::ValidityDomain::unconstrained().with("T",200.0,450.0);
+    // Synthetic surfaces must author both source-coordinate domains. Retain
+    // the original thermal declaration; source cells still determine coverage
+    // inside these bounds, so a missing cell never becomes supported data.
+    if let PropertyValue::Surface2D { axes, samples, .. } = &value {
+        for (coordinate, axis) in axes.iter().enumerate() {
+            if !validity.bounds().contains_key(axis) {
+                let low = samples.iter().map(|(point, _)| point[coordinate])
+                    .fold(f64::INFINITY, f64::min);
+                let high = samples.iter().map(|(point, _)| point[coordinate])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                validity = validity.with(axis.clone(), low, high);
+            }
+        }
+    }
     claims.insert_claim(PropertyClaim { key: PropertyKey::new(property, dims), value,
-        validity: fs_evidence::ValidityDomain::unconstrained().with("T",200.0,450.0),
+        validity,
         uncertainty: UncertaintyModel::Unstated, interpolation,
         observations: vec![observation], provenance: provenance(),
     }).unwrap();

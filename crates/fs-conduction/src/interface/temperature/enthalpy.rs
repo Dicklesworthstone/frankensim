@@ -52,6 +52,8 @@ enum FixedPointRadiation<'a, 'm> {
     MeanAmbient(&'a [AmbientRadiationPatch], AmbientRadiationConfig),
     PointwiseAmbient(&'a crate::PointwiseAmbientRadiation<'m>),
     PointwiseEnclosure(&'a crate::PointwiseEnclosureRadiation<'m>),
+    MaterialAmbient(&'a crate::MaterialPointwiseAmbientRadiation<'m>),
+    MaterialEnclosure(&'a crate::MaterialPointwiseEnclosureRadiation<'m>),
 }
 
 /// Bounded coupled Newton work and independent physical enthalpy acceptance.
@@ -366,6 +368,62 @@ impl TemperatureContacts<'_, '_> {
             coupling, Some(FixedPointRadiation::PointwiseEnclosure(radiation)))
     }
 
+    /// Compose a temperature-dependent contact fixed point with original
+    /// material emissivity at every nodal enthalpy candidate. Source-surface
+    /// contact laws need no derivative; local emission, temperature and phase
+    /// emissivity remain coupled inside each native enthalpy Newton response.
+    /// The final audit re-queries both the actual contact law and the material
+    /// radiation owner before accepting the original residual/energy targets.
+    ///
+    /// Every response retains the same old h, original caloric objects and
+    /// selected emissivity claims. Radiation stays external heat, while contact
+    /// remains internal. Source/phase reports are retained on the conduction
+    /// endpoint; no frozen emissivity or separate radiative iteration is used.
+    /// All discarded contact responses count toward the existing work limits.
+    /// This temperature-iterate path does not admit phase-dependent resistance.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_with_material_ambient_radiation(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        step_config: EnthalpyStepConfig,
+        coupling: ContactIterationConfig,
+        radiation: &crate::MaterialPointwiseAmbientRadiation<'_>,
+    ) -> Result<ContactEnthalpyStep, EnthalpyError> {
+        self.advance_enthalpy_inner(cx, engine, problem, old_h, dt_s, step_config,
+            coupling, Some(FixedPointRadiation::MaterialAmbient(radiation)))
+    }
+
+    /// Compose a temperature-dependent contact fixed point with source-backed
+    /// local emission and reflected irradiation in the original gray enclosure.
+    /// Both emissivity and the reflection matrix follow the actual nodal h in
+    /// each native response and its independent physical audit. Closed exchange
+    /// remains internal; an open black environment contributes external heat
+    /// exactly once and has no solid storage or transported-air state.
+    ///
+    /// The original geometry, source receipts, caloric objects, immutable old h
+    /// and full contact work limits remain authoritative. No contact derivative
+    /// is required, so triangulated temperature/pressure sources participate.
+    /// Phase-dependent resistance still requires its enthalpy-coordinate owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_enthalpy_with_material_enclosure_radiation(
+        &self,
+        cx: &Cx<'_>,
+        engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
+        problem: ConductionProblem<'_>,
+        old_h: &[f64],
+        dt_s: f64,
+        step_config: EnthalpyStepConfig,
+        coupling: ContactIterationConfig,
+        radiation: &crate::MaterialPointwiseEnclosureRadiation<'_>,
+    ) -> Result<ContactEnthalpyStep, EnthalpyError> {
+        self.advance_enthalpy_inner(cx, engine, problem, old_h, dt_s, step_config,
+            coupling, Some(FixedPointRadiation::MaterialEnclosure(radiation)))
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn advance_enthalpy_inner(
         &self,
@@ -459,6 +517,18 @@ impl TemperatureContacts<'_, '_> {
                     )?;
                     (solved, None, None, None)
                 },
+                Some(FixedPointRadiation::MaterialAmbient(owner)) => {
+                    let solved = engine.advance_with_material_ambient_radiation(
+                        cx, problem, Some(applied.frozen_interfaces()), old_h, dt_s, step_config, owner,
+                    )?;
+                    (solved, None, None, None)
+                },
+                Some(FixedPointRadiation::MaterialEnclosure(owner)) => {
+                    let solved = engine.advance_with_material_enclosure_radiation(
+                        cx, problem, Some(applied.frozen_interfaces()), old_h, dt_s, step_config, owner,
+                    )?;
+                    (solved, None, None, None)
+                },
             };
             let (trial_newton, trial_krylov) = match work {
                 Some(work) => work,
@@ -488,6 +558,18 @@ impl TemperatureContacts<'_, '_> {
                 },
                 Some(FixedPointRadiation::PointwiseEnclosure(owner)) => {
                     engine.evaluate_endpoint_with_pointwise_enclosure_radiation(
+                        cx, problem, Some(actual.frozen_interfaces()), old_h,
+                        &solved.specific_enthalpy_j_kg, dt_s, step_config, owner,
+                    )?
+                },
+                Some(FixedPointRadiation::MaterialAmbient(owner)) => {
+                    engine.evaluate_endpoint_with_material_ambient_radiation(
+                        cx, problem, Some(actual.frozen_interfaces()), old_h,
+                        &solved.specific_enthalpy_j_kg, dt_s, step_config, owner,
+                    )?
+                },
+                Some(FixedPointRadiation::MaterialEnclosure(owner)) => {
+                    engine.evaluate_endpoint_with_material_enclosure_radiation(
                         cx, problem, Some(actual.frozen_interfaces()), old_h,
                         &solved.specific_enthalpy_j_kg, dt_s, step_config, owner,
                     )?

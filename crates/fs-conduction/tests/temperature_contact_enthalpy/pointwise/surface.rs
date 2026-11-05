@@ -1,4 +1,6 @@
 //! Source-surface fixed points retain original pointwise radiation and history.
+#[path = "surface/material.rs"]
+mod material;
 use super::*;
 use fs_conduction::interface::temperature::enthalpy::ContactEnthalpyStep;
 use fs_conduction::radiation::{
