@@ -6,7 +6,8 @@
 //! keep their original caloric laws, so a finite mold or substrate exchanges
 //! heat through the same links without a fictitious crystal fraction.
 //! Scheduled births enter with their original mass/enthalpy and explicitly
-//! zero kinetic exposure. Older cells retain their complete phase history.
+//! zero kinetic exposure unless an original accepted incoming state is supplied.
+//! Older cells retain their complete phase history.
 //! Birth, contact, separation and boundary events use the original timeline
 //! owner in authored order, including events exactly at the requested endpoint.
 //! Existing heat links and physical
@@ -42,10 +43,14 @@ use crate::crystallization::{
     CrystallizationLaw, CrystallizationSolve, CrystallizationState, EquivalentAgeRemelting,
 };
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 #[path = "crystallization/impulses.rs"]
 mod impulses;
 pub use impulses::CrystallizationImpulseControls;
+
+#[path = "crystallization/ingress.rs"]
+mod ingress;
 
 /// Implicit heat transport with original finite-rate phase history.
 #[path = "crystallization/implicit.rs"]
@@ -116,8 +121,10 @@ impl From<CrystallizationError> for CrystallizationTimelineError {
 pub struct CrystallizationAudit {
     pub thermal: EnergyAudit,
     /// Signed net crystalline mass formed during this advance, kg. Selected
-    /// remelting can make it negative. It is part of the original total mass,
-    /// not an extra mass source or a separate latent-heat debit.
+    /// remelting can make it negative. Imported crystals enter with their
+    /// original birth mass and are excluded from this conversion increment.
+    /// Crystal mass is part of the original total mass, not an extra mass
+    /// source or a separate latent-heat debit.
     pub crystallized_mass_kg: f64,
     /// Maximum sum of local represented-heat and caloric defects, J.
     pub maximum_cell_energy_residual_j: f64,
@@ -177,6 +184,9 @@ pub struct CrystallizationSimulation<'a> {
     thermal: DepositionSimulation<'a>,
     materials: BTreeMap<MaterialId, CrystallizationMaterial<'a>>,
     states: BTreeMap<CellId, CrystallizationState>,
+    // Immutable authored feed histories, admitted against the original active
+    // cells or unique future births. They never age before the birth event.
+    incoming_states: Arc<BTreeMap<CellId, CrystallizationState>>,
     remelting: BTreeMap<MaterialId, EquivalentAgeRemelting>,
     adaptivity: BTreeMap<MaterialId, CrystallizationAdaptivity>,
 }
@@ -187,57 +197,21 @@ impl<'a> CrystallizationSimulation<'a> {
     /// caloric law and storage basis, with no phase-history state allocated.
     /// Already active bound cells and subsequent scheduled births start at zero
     /// exposure. This is an explicit all-amorphous incoming-state convention;
-    /// precrystallized inflow needs a separate supplied history and is not
+    /// precrystallized inflow uses [`Self::new_with_incoming_states`] and is not
     /// inferred from temperature. An empty timeline can be attached before its
     /// first birth. `advance_to` activates events without pre-birth aging.
     pub fn new(
         thermal: DepositionSimulation<'a>,
         materials: &[CrystallizationMaterial<'a>],
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, CrystallizationTimelineError> {
-        checkpoint()?;
-        if materials.len() > thermal.budget.max_cells {
-            return Err(DepositionError::Budget("crystallization materials").into());
-        }
-        let mut map = BTreeMap::new();
-        for &material in materials {
-            checkpoint()?;
-            if material.amorphous.storage_basis() != ThermalStorageBasis::Enthalpy
-                || !positive(material.maximum_temperature_slope)
-                || material.maximum_temperature_slope
-                    < material.amorphous.maximum_temperature_slope()
-                || !thermal.uses_material_law(material.material_id, material.amorphous)
-                || map.insert(material.material_id, material).is_some()
-            {
-                return Err(DepositionError::InvalidInput(
-                    "crystallization needs unique original enthalpy laws and a valid mixture slope bound",
-                ).into());
-            }
-            let original_identity = material.amorphous.caloric_identity();
-            if original_identity.is_none()
-                || original_identity != material.law.parent_caloric_identity()
-            {
-                return Err(DepositionError::InvalidInput(
-                    "crystallization requires the same identified parent calorics as the original thermal law",
-                ).into());
-            }
-        }
-        let mut states = BTreeMap::new();
-        for (&id, cell) in &thermal.cells {
-            checkpoint()?;
-            let Some(model) = map.get(&cell.material_id) else {
-                continue;
-            };
-            states.insert(id, amorphous_state(&thermal, id, model, &mut checkpoint)?);
-        }
-        checkpoint()?;
-        Ok(Self {
+        Self::new_with_incoming_states(
             thermal,
-            materials: map,
-            states,
-            remelting: BTreeMap::new(),
-            adaptivity: BTreeMap::new(),
-        })
+            materials,
+            &[],
+            CrystallizationSolve::default(),
+            checkpoint,
+        )
     }
 
     /// Select instantaneous equilibrium remelting for one already bound
@@ -451,12 +425,23 @@ impl<'a> CrystallizationSimulation<'a> {
                     Event::Birth(cell) => Some(cell.id),
                     _ => None,
                 };
+                let incoming = birth.and_then(|id| next.incoming_states.get(&id).copied());
                 let mut event_audit = empty_audit();
-                next.thermal.apply(event, &mut event_audit)?;
+                next.thermal.apply_with_birth_calorics(
+                    event,
+                    &mut event_audit,
+                    |cell, law| match incoming {
+                        Some(state) => Ok(state.temperature_k()),
+                        None => law.temperature_k(cell.specific_h_j_kg),
+                    },
+                )?;
                 if let Some(id) = birth {
                     let cell = &next.thermal.cells[&id];
                     if let Some(model) = next.materials.get(&cell.material_id) {
-                        let state = amorphous_state(&next.thermal, id, model, &mut checkpoint)?;
+                        let state = match incoming {
+                            Some(state) => state,
+                            None => amorphous_state(&next.thermal, id, model, &mut checkpoint)?,
+                        };
                         next.states.insert(id, state);
                     }
                 }

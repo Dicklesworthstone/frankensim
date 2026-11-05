@@ -195,6 +195,7 @@ impl<'s, 'a> CrystallizationBackwardEulerStep<'s, 'a> {
             thermal: thermal.clone(),
             materials: self.initial.materials.clone(),
             states: BTreeMap::new(),
+            incoming_states: self.initial.incoming_states.clone(),
             remelting: self.initial.remelting.clone(),
             adaptivity: self.initial.adaptivity.clone(),
         };

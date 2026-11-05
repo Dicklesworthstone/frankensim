@@ -3,6 +3,8 @@
 mod adaptive;
 #[path = "tests/impulses.rs"]
 mod impulses;
+#[path = "tests/ingress.rs"]
+mod ingress;
 #[path = "tests/remelting.rs"]
 mod remelting;
 

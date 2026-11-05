@@ -529,6 +529,21 @@ impl<'a> DepositionSimulation<'a> {
     }
 
     fn apply(&mut self, event: Event, audit: &mut EnergyAudit) -> Result<(), DepositionError> {
+        self.apply_with_birth_calorics(event, audit, |cell, law| {
+            law.temperature_k(cell.specific_h_j_kg)
+        })
+    }
+
+    // Stateful caloric owners retain every original birth admission rule and
+    // supply only the temperature of their validated incoming physical state.
+    // Interpreting a crystal mixture's h with its all-amorphous parent chart
+    // would give the wrong temperature or reject an otherwise valid cold feed.
+    fn apply_with_birth_calorics(
+        &mut self,
+        event: Event,
+        audit: &mut EnergyAudit,
+        temperature: impl FnOnce(&DepositedCell, &dyn ThermalLaw) -> Result<f64, DepositionError>,
+    ) -> Result<(), DepositionError> {
         match event {
             Event::Birth(cell) => {
                 if self.cells.len() >= self.budget.max_cells {
@@ -554,12 +569,14 @@ impl<'a> DepositionSimulation<'a> {
                 }
                 validate_boundary(cell.boundary)?;
                 self.materials[&cell.material_id].validate_cell(&cell)?;
+                if !positive(temperature(&cell, self.materials[&cell.material_id])?) {
+                    return Err(DepositionError::MaterialDomain);
+                }
                 audit.incoming_mass_kg = finite(audit.incoming_mass_kg + cell.mass_kg)?;
                 audit.incoming_energy_j =
                     finite(audit.incoming_energy_j + finite(cell.mass_kg * cell.specific_h_j_kg)?)?;
                 let id = cell.id;
                 self.cells.insert(id, cell);
-                self.temperature_k(id)?;
                 self.exposed_area_m2(id)?;
             }
             Event::Contact(link) => {
