@@ -2505,3 +2505,38 @@ The existing scalar implementation and its regressions remain in place.
 The scope remains prescribed sources in stationary, lossless, infinite planar,
 nontrapping fluid layers; guided poles, absorption, source loading and finite
 edges are not supplied. Native Rust execution is not claimed by this extension.
+
+## Coherent compact-source arrays inside the original fluid layer
+
+`interior::internal::array::PreparedLayerInternalFullWaveCompactSourceObserver`
+prepares original volume-flow and three-dimensional force sources, with every
+source and the receiver strictly inside the same finite layer. `new` retains
+the coherent direct-plus-returning field; `new_reflected` retains only the
+boundary returns and admits the finite reflected self-field. Total-field
+preparation rejects a coincident source before its spectral work. Both
+constructors validate the original DD receiver domain even for an empty array.
+
+The adapter caches one Cartesian 4-by-4 transfer per physical source from the
+native internal monopole and force owners. It reuses the common fixed-order DD
+array evaluation, harmonic clock, explicit low-rank coherence factors and
+independent-source statistics. Q/F amplitudes and every direct/reflected path
+remain coherent within each original source. Pressure, all velocity components,
+and signed active/reactive intensity use the actual field; no extra propagation
+delay or plane-wave intensity approximation is introduced. Warm application
+allocates nothing and repeats no quadrature.
+
+The original per-mechanism controls and one aggregate evaluation cap cover all
+sources, Q/F preparations and active returning families. Original unit-Q and
+unit-force diagnostics remain separate. Exact absent-second-face/equal-speed
+reductions consume no spectral evaluations; equal sound speeds alone do not
+remove unequal-density interfaces. Cancellation or exhaustion publishes no
+partial array. Per-source estimates give no relative array-error guarantee at
+interference nulls, and independent statistics require caller-supplied source
+independence. Coherence factors describe line powers, not automatically PSD/Hz.
+
+`tests/full_wave_layer_internal_array.rs` covers direct/return Q/F composition,
+coherent and factorized statistics, source cancellation, original clocks,
+exact reductions, strict domains, finite reflected self-fields and aggregate
+preparation/coherence budgets. The same stationary, lossless, infinite planar,
+nontrapping-layer and prescribed-source scope applies; source loading, guided
+poles, absorption, moving fluids and finite edges remain outside this API.

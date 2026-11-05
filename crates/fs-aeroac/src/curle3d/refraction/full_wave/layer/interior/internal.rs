@@ -31,6 +31,7 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use fs_math::{c64::C64, dd::Dd, det};
 
+pub mod array;
 mod force;
 pub use force::{
     FULL_WAVE_LAYER_INTERNAL_REFLECTED_FORCE_SCOPE, FULL_WAVE_LAYER_INTERNAL_TOTAL_FORCE_SCOPE,
