@@ -7,7 +7,7 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::elastic::IsotropicElastic;
-use fs_material::fiber::ManderConcrete;
+use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
 use fs_material::plastic::J2Plasticity;
 use fs_material::plastic::chaboche::axial::UniaxialChaboche;
 use fs_material::plastic::chaboche::source::{
@@ -207,6 +207,51 @@ fn hardening_sources_are_explicit_and_monotonic_tangent_does_not_invent_a_split(
         )
         .is_err()
     );
+}
+
+#[test]
+fn menegotto_pinto_symmetric_section_has_no_artificial_axial_force_under_bending() {
+    let law = MenegottoPintoSteel::new(E, 400e6, 0.02).unwrap();
+    let mut positive = Section::new(
+        [-ARM, ARM]
+            .map(|y| Fiber {
+                y,
+                area: AREA,
+                law: FiberLaw::Steel(law.clone()),
+            })
+            .to_vec(),
+    );
+    let mut negative = positive.clone();
+    let yield_curvature = law.fy / (law.e0 * ARM);
+    let knee = law.fy * (law.b + (1.0 - law.b) * 2.0_f64.powf(-1.0 / law.r0));
+    let virgin = positive.try_respond(0.0, yield_curvature).unwrap();
+    close(virgin.n, 0.0, 1e-7);
+    close(virgin.m, 2.0 * AREA * ARM * knee, 2e-13);
+
+    for curvature in [0.0, 0.005, 0.02, 0.04, 0.04, 0.015, -0.025, 0.0, 0.05] {
+        let a = positive.try_respond(0.0, curvature).unwrap();
+        let b = negative.try_respond(0.0, -curvature).unwrap();
+        close(a.n, 0.0, 1e-7);
+        close(b.n, 0.0, 1e-7);
+        close(a.m, -b.m, 2e-13);
+        close(a.tangent[0][1], 0.0, 1e-6);
+        close(a.tangent[1][0], 0.0, 1e-6);
+        for i in 0..2 {
+            for j in 0..2 {
+                close(a.tangent[i][j], b.tangent[i][j], 2e-13);
+            }
+        }
+        positive.commit(0.0, curvature);
+        negative.commit(0.0, -curvature);
+    }
+    // Both sides retain real cyclic history through the native section owner.
+    for state in &positive.states {
+        let FiberState::Steel(state) = state else {
+            panic!("steel history required")
+        };
+        assert!(state.r < law.r0);
+        assert!(state.xi_max > 0.0);
+    }
 }
 
 #[test]

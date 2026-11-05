@@ -64,7 +64,7 @@ pub struct MpState {
     pub sig_0: f64,
     /// Current branch curvature R.
     pub r: f64,
-    /// Loading direction of the current branch (+1/−1).
+    /// Loading direction (+1/−1); zero until the first nonzero strain.
     pub dir: f64,
     /// Last committed strain.
     pub eps_prev: f64,
@@ -114,13 +114,25 @@ impl MenegottoPintoSteel {
 
     fn reversed(&self, strain: f64, s: &MpState) -> Option<MpState> {
         let step = strain - s.eps_prev;
-        if step.abs() < f64::MIN_POSITIVE || step.signum().to_bits() == s.dir.to_bits() {
+        if step == 0.0 || step.signum().to_bits() == s.dir.to_bits() {
             return None;
+        }
+        let dir = step.signum();
+        if s.dir == 0.0 {
+            // Selecting the virgin loading direction is not a reversal: no
+            // plastic excursion has occurred, so both signs retain R0 and
+            // zero excursion history. Even a tiny nonzero first step selects
+            // its branch; only an exact zero hold leaves it uninitialized.
+            return Some(MpState {
+                eps_0: dir * self.yield_strain(),
+                sig_0: dir * self.fy,
+                dir,
+                ..s.clone()
+            });
         }
         // New branch from the reversal point toward the opposite yield
         // asymptote: σ = b·E₀·ε + d·f_y(1−b). Intersect with the elastic
         // line through (ε_r, σ_r) of slope E₀.
-        let dir = step.signum();
         let (eps_r, sig_r) = (s.eps_prev, s.sig_prev);
         let eps_0 =
             (dir * self.fy * (1.0 - self.b) - sig_r + self.e0 * eps_r) / (self.e0 * (1.0 - self.b));
@@ -152,15 +164,15 @@ impl Uniaxial for MenegottoPintoSteel {
     type State = MpState;
 
     fn initial_state(&self) -> MpState {
-        // Virgin monotonic branch toward +yield (mirrored on first
-        // negative excursion by the reversal logic with eps_prev = 0).
+        // The positive branch coordinates supply the initial tangent at
+        // zero; the first nonzero update selects either virgin direction.
         MpState {
             eps_r: 0.0,
             sig_r: 0.0,
             eps_0: self.yield_strain(),
             sig_0: self.fy,
             r: self.r0,
-            dir: 1.0,
+            dir: 0.0,
             eps_prev: 0.0,
             sig_prev: 0.0,
             xi_max: 0.0,

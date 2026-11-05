@@ -406,6 +406,98 @@ fn mt_003_j2_return_mapping_and_dissipation() {
 }
 
 #[test]
+fn menegotto_pinto_virgin_loading_preserves_both_signs_and_tiny_first_steps() {
+    let law = MenegottoPintoSteel::new(200e9, 400e6, 0.02).unwrap();
+    let virgin = law.initial_state();
+    for zero in [0.0, -0.0] {
+        let held = law.update_state(zero, &virgin);
+        assert_eq!(held, virgin, "a zero hold must not select a branch");
+        assert_eq!(held.dir, 0.0);
+        assert_eq!(law.tangent(zero, &held), law.e0);
+    }
+    // The virgin yield knee uses R0 in either direction. A compressive first
+    // step used to spuriously degrade R to 3.913..., a 50 MPa error here.
+    let ey = law.fy / law.e0;
+    let knee = law.fy * (law.b + (1.0 - law.b) * 2.0_f64.powf(-1.0 / law.r0));
+    for sign in [-1.0, 1.0] {
+        assert!((law.stress(sign * ey, &virgin) - sign * knee).abs() < 1e-5);
+        // Includes a representable subnormal: no arbitrary strain tolerance
+        // should convert a virgin direction selection into a later reversal.
+        for first in [f64::MIN_POSITIVE / 4.0, 1e-14, 0.5 * ey] {
+            let mut state = law.update_state(sign * first, &virgin);
+            assert_eq!(state.dir, sign);
+            for magnitude in [first, 0.5 * ey, ey, 2.0 * ey, 10.0 * ey] {
+                let strain = sign * magnitude;
+                let reference = law.stress(magnitude, &virgin);
+                let tangent = law.tangent(magnitude, &virgin);
+                assert!((law.stress(strain, &state) - sign * reference).abs() < 1e-5);
+                assert!((law.tangent(strain, &state) - tangent).abs() < 1e-3);
+                state = law.update_state(strain, &state);
+                assert_eq!(state.r, law.r0);
+                assert_eq!(state.xi_max, 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn menegotto_pinto_mirrored_cycles_retain_true_reversal_memory() {
+    let law = MenegottoPintoSteel::new(200e9, 400e6, 0.02).unwrap();
+    let mut positive = law.initial_state();
+    let mut negative = law.initial_state();
+    // Holds and zero crossings after yielding must retain the selected branch
+    // and its accumulated curvature degradation, rather than reinitialize it.
+    let path = [
+        0.0, 0.001, 0.006, 0.006, 0.002, 0.0, -0.004, -0.004, 0.0, 0.008,
+    ];
+    let mut saw_reversal = false;
+    for strain in path {
+        let old_strain = positive.eps_prev;
+        let stress = law.stress(strain, &positive);
+        let tangent = law.tangent(strain, &positive);
+        assert!((stress + law.stress(-strain, &negative)).abs() < 1e-5);
+        assert!((tangent - law.tangent(-strain, &negative)).abs() < 1e-3);
+        if strain != old_strain {
+            let h = 1e-9;
+            let fd =
+                (law.stress(strain + h, &positive) - law.stress(strain - h, &positive)) / (2.0 * h);
+            assert!((tangent - fd).abs() < 1e-6 * law.e0);
+        }
+        positive = law.update_state(strain, &positive);
+        negative = law.update_state(-strain, &negative);
+        if positive.dir == 0.0 {
+            // Both unselected virgin states use the positive coordinates only
+            // to define the zero-strain tangent; neither has chosen a sign.
+            assert_eq!(positive, negative);
+        } else {
+            for (a, b) in [
+                (positive.eps_r, negative.eps_r),
+                (positive.sig_r, negative.sig_r),
+                (positive.eps_0, negative.eps_0),
+                (positive.sig_0, negative.sig_0),
+                (positive.eps_prev, negative.eps_prev),
+                (positive.sig_prev, negative.sig_prev),
+                (positive.dir, negative.dir),
+            ] {
+                assert!((a + b).abs() <= 1e-13 * a.abs().max(1.0));
+            }
+        }
+        assert_eq!(positive.r, negative.r);
+        assert_eq!(positive.xi_max, negative.xi_max);
+        if strain < old_strain {
+            saw_reversal = true;
+        }
+        if saw_reversal {
+            assert!(
+                positive.r < law.r0,
+                "real reversals must retain Bauschinger memory"
+            );
+            assert!(positive.xi_max > 0.0);
+        }
+    }
+}
+
+#[test]
 fn mt_004_hysteresis_fixtures() {
     // Menegotto–Pinto published-curve features.
     let mp = MenegottoPintoSteel::new(200e9, 400e6, 0.02).expect("mp");
