@@ -104,6 +104,8 @@ pub mod sheet;
 /// Source-bound constituent mass, volume and water accounting for mineral slurries.
 pub mod slurry;
 pub mod state_point;
+/// Source-bound maximum-principal tensile stress at fixed physical conditions.
+pub mod strength;
 /// Landau two-fluid thermodynamics, counterflow and passive mutual friction.
 pub mod superfluid;
 /// Bounded solid-vapor pressure and latent-heat laws for shared phase transfer.

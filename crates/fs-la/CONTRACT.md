@@ -7,6 +7,16 @@
 Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. Layer: L1.
 
 ## Public types and semantics
+- `eigen::symmetric_eigenvalues3` computes ascending eigenvalues of one finite
+  symmetric 3x3 matrix using fixed storage, at most 16 cyclic Jacobi sweeps,
+  and fs-math strict square roots. It scales before rotation to avoid squaring
+  dimensional entries, preserves diagonal inputs exactly, and refuses
+  nonfinite/asymmetric input, unrepresentable eigenvalues or nonconvergence.
+  Off-diagonal convergence is 4*f64::EPSILON relative to maximum input entry.
+  G0/G3 tests cover pure shear, repeated roots and extreme scaling. Values are
+  floating-point estimates, not interval enclosures or relative-accuracy
+  guarantees for nearly zero eigenvalues; this bounded leaf has no allocation
+  or cancellation boundary and leaves the existing batched bit contract intact.
 - `gemm::{gemm_f64, gemm_f32, gemm_mixed}` — C = α·A·B + β·C on row-major
   contiguous slices (BLAS-shape signatures). β = 0 OVERWRITES C (NaN and
   garbage in C are ignored — the uninitialized-output convention).

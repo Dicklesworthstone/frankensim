@@ -26,6 +26,9 @@
 
 use crate::factor::qr;
 
+mod symmetric3;
+pub use symmetric3::{SymmetricEigenvalues3Error, symmetric_eigenvalues3};
+
 /// Conservative cap for temporary `f64` elements admitted by the dense
 /// eigensolver kernels. This is an OVERFLOW/OOM guard, not a promise that an
 /// admitted problem will fit the caller's memory budget: higher layers still

@@ -1,5 +1,29 @@
 # fs-material — CONTRACT
 
+## Source-bound isotropic tensile limit
+
+`strength::IsotropicTensileLimit` binds one explicitly named pressure-valued
+strength claim at its original material/environment state. The caller selects
+the isotropic maximum-principal-stress criterion; it is never inferred from a
+material name or substituted for a ductile yield law. Assessment consumes
+tensile-positive tensor-shear Cauchy stress `[xx,yy,zz,xy,yz,zx]` and reports
+`max(0, sigma_max)/strength`, using the shared scaled, allocation-free 3x3
+Jacobi kernel. Thus hydrostatic tension is retained and compression does not
+consume tensile capacity. Missing, nonpositive, mistyped or dynamically
+conditioned strength refuses; fixed external conditions and source-pinned
+state refresh use the original resolver. Nonfinite stress and unrepresentable
+results refuse without partially updating any state.
+
+This is a bounded local criterion observation, with floating-point eigenvalue
+estimates. It is not an allowable-stress conversion, uncertainty bound,
+anisotropic failure surface or fracture evolution. Engineering ultimate
+strength is not automatically a true-stress limit after finite strain/necking.
+Toughness, damage, crack energy, plastic redistribution, fatigue and
+post-failure load transfer require their own laws. G0/G3 regressions in
+`tests/tensile_strength.rs` cover tensile/compressive states, hydrostatic
+tension, tensor shear, rotations/repeated roots, extreme scaling, source
+admission and source-preserving temperature changes.
+
 ## Paris-region fatigue crack growth
 
 `fatigue::crack_growth` adds an immutable, explicitly scoped Paris calibration
