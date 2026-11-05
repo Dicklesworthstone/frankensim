@@ -14,7 +14,8 @@
     "Reed noise: the duct-constriction law of Oldham and Ukpoho 1990, read at the reed slit with the total pressure drop and the Bernoulli speed",
     "One barrel pull of 2.79 mm, solved once so the 19 notes from D3 to G5 average equal temperament",
     "Blown at one fixed mouth pressure (1800 Pa), rising over 20 ms and released over 60 ms, with a tongue-contact row holding the reed on the lay while the pressure builds",
-    "Observer: the physical baffled outlet receiver, open holes and bell summed, room air around the bell and holes, ISO 9613 air absorption"
+    "Observer: the physical baffled outlet receiver, open holes and bell summed, room air around the bell and holes, ISO 9613 air absorption",
+    "On G4 and D3, the printed tone-hole lengths (Lefebvre and Scavone 2012): thick-wall inner, matching and radiation lengths and the series inertance of every hole, open or closed"
   ],
   "physics_missing": [
     "No player: no airway or vocal tract, no lips, no vibrato, no wall vibration; the lumped reed has one mode, with no reed continuum and no lip mass or damping",
@@ -22,7 +23,7 @@
     "The reed-noise law was measured on dampers and orifice plates in a 300 mm duct at 10 to 25 m/s and does not fix the jet speed or pressure drop to use for a slit this small; that choice alone moves the source by up to 40 dB. The notes are noisier than the recordings (harmonics-to-noise 21.9 to 36.0 dB against 30.6 to 47.0 dB) and the level is not a prediction",
     "The barrel pull sets the mean, not the spread: the 10.0 c spread about equal temperament is mostly this specimen's own playing pattern (Taillard and Sanchez 2016, Fig. 7, read from the figure, spreads 7 c over D3 to G5). The aim was equal temperament, not the recordings, and the pull is one step for every note",
     "Pad height, undercuts, key geometry and the tone-hole edge radius are unmeasured for this Buffet, as are the mouthpiece interior (chamber, baffle, throat, lay) and the reed and mouthpiece the recordings used",
-    "The printed tone-hole length corrections (Lefebvre, Scavone and Kergomard 2012) are an option in the engine and are off on these cards",
+    "The printed tone-hole length corrections (Lefebvre and Scavone 2012) on most notes: they are on G4 and D3, where the count ties (9 of 14 and 10 of 15) and D3 moves 13 c sharp through its 24 closed holes; on Eb5 they lower the count from 10 to 9 of 14, so Eb5 and the other pages are rendered without them",
     "The recordings (University of Iowa Musical Instrument Samples) are another clarinet and player: there is no same-specimen comparison",
     "Only the 21 normal fingerings of Moers and Kergomard 2011 Table 2 are printed there. Gb3 is inferred, not printed; Gb5 and F6 take their hole states from two other printed charts (UNSW; Woodwind Fingering Guide) by a mapping of drawn holes to the Buffet's that is a judgment, checked on 17 of the 17 decodable printed fingerings, and UNSW draws 'a Bb clarinet', not this Buffet. The card has no altissimo leak physics",
     "F6 does not speak: with its printed fingering the card sounds a low tone near 324 Hz with a weak line at F6's own frequency 30 dB under it; the cause has not been isolated",
