@@ -22,12 +22,12 @@ use super::chamber::{
 use super::momentum::{MaxwellReflection, MolecularSurfaceFrame};
 use super::{
     ClosedGasParcel, GasSurfaceError, SpeciesId, ThermochemicalGasModel, VaporReservoir,
-    compatibility, invalid, molecular_mass_flux, nonnegative, phase_at, poll, positive,
+    compatibility, invalid, nonnegative, phase_at, poll, positive,
 };
 use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::admit_catalog;
 use fs_qty::Temperature;
 use fs_thermal::sublimation::molecular::{
-    drift::incident_maxwellian, momentum::flux_weighted_normal_speed,
+    drift::incident_maxwellian, molecular_mass_flux, momentum::flux_weighted_normal_speed,
 };
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 use std::collections::BTreeMap;

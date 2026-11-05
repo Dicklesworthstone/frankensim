@@ -616,7 +616,7 @@ impl<'m> FluxSystem<'m> {
         Ok(())
     }
 
-    fn admit_navier_stokes_boundaries(
+    pub(super) fn admit_navier_stokes_boundaries(
         &self,
         params: FluxParams,
         boundaries: &[NavierStokesBoundary<'_>],

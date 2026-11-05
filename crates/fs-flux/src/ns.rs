@@ -481,6 +481,7 @@ impl<'m> FluxSystem<'m> {
             darcy.map(porous::CellResistance::Darcy),
             reactions,
             None,
+            None,
         )
     }
 
@@ -501,6 +502,7 @@ impl<'m> FluxSystem<'m> {
         resistance: Option<porous::CellResistance<'_>>,
         mut reactions: Option<&mut ReactionAssembly>,
         inertia_weights: Option<&[[f64; 6]]>,
+        conservative: Option<&boundary::conservative::ConservativeMomentum>,
     ) -> (Csr, Vec<f64>) {
         let mesh = self.mesh;
         let nu = params.nu;
@@ -820,6 +822,16 @@ impl<'m> FluxSystem<'m> {
                 g,
                 &con,
                 boundary,
+                reactions.as_deref_mut(),
+            );
+        }
+        if let Some(transport) = conservative {
+            transport.add_operator(
+                self,
+                &mut coo,
+                &mut rhs,
+                &con,
+                boundary.expect("conservative momentum owns admitted boundaries"),
                 reactions.as_deref_mut(),
             );
         }

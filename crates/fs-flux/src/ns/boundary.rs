@@ -24,6 +24,9 @@ pub use transport::BoundaryTransport;
 #[path = "boundary/rheology.rs"]
 mod rheology;
 pub use rheology::{StokesRheologyControls, StokesRheologySolution};
+/// Conservative changing-density transport and native BDM momentum.
+#[path = "boundary/conservative.rs"]
+pub mod conservative;
 #[path = "boundary/navier_stokes.rs"]
 mod navier_stokes;
 #[path = "boundary/transient.rs"]
@@ -220,8 +223,9 @@ pub struct StokesAssembly<'a, 'm> {
     reference: StokesPressureReference,
     has_traction: Vec<bool>,
     reactions: reaction::ReactionOperator,
-    // Positive quadrature weights times rho/rho_reference. Both time levels
-    // and the kinetic-energy observer retain this same immutable metric.
+    // Positive quadrature weights times the current rho/rho_reference.
+    // Fixed-density histories reuse this metric; conservative momentum retains
+    // its distinct old mass load before the original constraints are applied.
     inertia_weights: Option<Vec<[f64; 6]>>,
 }
 
@@ -589,6 +593,36 @@ impl<'m> FluxSystem<'m> {
         history_rotation: Option<[f64; 2]>,
         inertia_weights: Option<Vec<[f64; 6]>>,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        self.assemble_stokes_admitted_conservative(
+            params,
+            viscosity,
+            force,
+            admitted,
+            resistance,
+            inv_dt,
+            previous_velocity,
+            advecting_velocity,
+            history_rotation,
+            inertia_weights,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_stokes_admitted_conservative<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        admitted: &AdmittedBoundary,
+        resistance: Option<super::porous::CellResistance<'_>>,
+        inv_dt: f64,
+        previous_velocity: Option<&[f64]>,
+        advecting_velocity: Option<&[f64]>,
+        history_rotation: Option<[f64; 2]>,
+        inertia_weights: Option<Vec<[f64; 6]>>,
+        conservative: Option<&conservative::ConservativeMomentum>,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
         let bad_viscosity = Cell::new(None);
         let checked_viscosity = |cell, point| {
             if bad_viscosity.get().is_some() {
@@ -615,6 +649,9 @@ impl<'m> FluxSystem<'m> {
             }
         };
         let mut reactions = reaction::ReactionAssembly::new(self, admitted, advecting_velocity);
+        if let Some(transport) = conservative {
+            reactions.set_conservative_transport(transport);
+        }
         let (matrix, rhs) = self.assemble_operator_with_inertia(
             params,
             Some(&checked_viscosity),
@@ -628,6 +665,7 @@ impl<'m> FluxSystem<'m> {
             resistance,
             Some(&mut reactions),
             inertia_weights.as_deref(),
+            conservative,
         );
         if let Some((cell, point, value)) = bad_viscosity.get() {
             return Err(StokesBoundaryError::InvalidViscosity { cell, point, value });

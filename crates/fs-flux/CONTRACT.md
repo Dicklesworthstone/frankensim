@@ -1106,6 +1106,69 @@ The homogeneous entries remain fixed-mesh, constant-density linear unsteady
 Stokes, without nonlinear open-boundary/backflow conditions, thermal evolution,
 variable-step/BDF3+ integration, continuum error bounds or new cancellation/throughput claims.
 
+### Conservative density and native BDM momentum
+
+`FluxSystem::assemble_density_momentum_bdf1` and its
+`density_momentum_bdf1_step` convenience entry couple the positive P0 density
+owner to the original affine BDM1 velocity and P0 pressure system. A prescribed,
+explicitly lagged divergence-free advector transports density and any N passive
+mass-specific quantities. Momentum then solves
+`M(rho_new) u_new/dt + C(j) u_new + A(mu) u_new + G p = M(rho_old) u_old/dt + f`
+with the original continuity equations, mixed stress/velocity/slip boundaries,
+pressure datums, linear residual gates and retained support reactions.
+
+The H(div) mass-flux reconstruction above uses the SAME original directional
+donor densities and volume faces. Its constant cell divergence agrees with the
+P0 density increment up to reported represented-state roundoff; its quadratic
+face moments also match the square of every affine velocity. Full consistent
+old and new density metrics remain distinct. Old momentum loads are integrated
+directly, avoiding subtraction of a new-density history correction at large
+contrast. There is no cell-average velocity projection or lost subcell mode.
+
+Inputs are physical dynamic viscosity [Pa s], body-force density [N/m^3],
+reference density [kg/m^3], depth [m], and the existing
+`MaterialNavierStokesBoundary` owners. Force and viscosity callbacks receive the
+transported candidate cell and must describe frozen endpoint laws. One fixed
+positive reference normalizes all momentum, stress, traction, slip, pressure
+and inertia terms. The accepted result retains physical cells, mechanical
+`pressure_pa`, consistent kinetic energy [J], linear momentum [kg m/s], and the
+original donor-cell inventory report. Its `flow` view retains native normalized
+pressure/stress units. Boundary transport keeps the actual volume rate separate
+from density-weighted momentum and kinetic rates; a volume flux never gains an
+extra density multiplier.
+
+For homogeneous closed velocity data and the shared discrete mass balance,
+`K_new-K_old + 0.5*||u_new-u_old||_(rho_old)^2 + dt*D_upwind
+ + dt*a(u_new,u_new) = dt*(f,u_new)` up to quadrature/solve/roundoff defects.
+`D_upwind` uses both directional mass streams and is nonnegative. The original
+viscous/SIP form a, boundary kinetic transport, boundary upwinding and explicitly
+chosen backflow resistance keep their separate meanings. The result reports
+time and interior-upwind losses; they are numerical dissipation, not physical
+heating. The N carried slots remain passive (e.g. enthalpy/species): momentum
+forces act on the native BDM velocity, not on a velocity-like passive slot.
+
+This is a first-order fixed-mesh IMEX discretization: mass flux is explicitly
+lagged while momentum, viscosity and pressure are implicit. Density positivity
+retains the outgoing-volume CFL restriction. It does not implement a fully
+implicit coupled density/velocity iteration, nonlinear constitutive feedback,
+EOS/compressibility, phase-volume sources, moving interfaces with sharp
+reconstruction, heat diffusion or pressure-work closure. The exposed native
+matrix permits its existing fixed-operator transpose solve; it is not a full
+transport-step Jacobian. Per-owner transport storage is bounded; the original
+native linear assembly/solver keeps its own storage and synchronous cancellation
+limitations. Cancellation is checked around that solve and during preparation
+and observations. Caller histories never mutate and no partial coupled state
+is returned on refusal.
+
+`tests/density_momentum.rs` covers unequal-density free-stream transport through
+physical reservoirs, large density contrast and reference-normalization
+invariance, actual boundary momentum/kinetic exchange, closed counterflow
+kinetic and wall-momentum balances, first-order coupled temporal convergence
+against an independent closed-form solution over three timestep refinements,
+physical density-weighted acceleration and traction pressure, recovery of the
+original uniform-density Oseen matrix/load, and cancellation, CFL, invalid-source
+and unrepresentable-history refusals.
+
 ### Fixed stratified density in native Stokes inertia
 
 `assemble_stokes_mixed_bdf1_variable_density` adds the spatially weighted

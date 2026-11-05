@@ -336,7 +336,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     }
 }
 
-fn with_kinematic_boundaries<T>(
+pub(crate) fn with_kinematic_boundaries<T>(
     density: f64,
     boundaries: &[MaterialNavierStokesBoundary<'_>],
     solve: impl FnOnce(&[NavierStokesBoundary<'_>]) -> T,

@@ -7,7 +7,8 @@
 
 use super::{BoundaryWrench, StokesBoundaryError};
 
-/// Outward convective transport per unit depth, divided by source density.
+/// Outward convective transport per unit depth, divided by one fixed reference
+/// density. Volume transport is physical and is never density-scaled.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BoundaryTransport {
     /// Physical origin [m] for the angular momentum flux.
@@ -17,13 +18,15 @@ pub struct BoundaryTransport {
     pub velocity_offset_m_s: [f64; 2],
     /// Signed outward volume flow [m²/s].
     pub outward_volume_flux_m2_s: f64,
-    /// Outward linear/angular momentum transport divided by density.
+    /// Outward linear/angular momentum transport divided by reference density.
     pub outward_momentum: BoundaryWrench,
     /// Signed outward carried kinetic power divided by density [m⁴/s³]:
-    /// integral 0.5 * (w.n) * |u_upwind + velocity_offset|².
+    /// integral 0.5 * (rho_upwind/rho_reference) * (w.n)
+    /// * |u_upwind + velocity_offset|². The ratio is one on constant-density paths.
     pub outward_kinetic_energy_flux: f64,
     /// Nonnegative boundary upwind loss divided by density [m⁴/s³]:
-    /// integral 0.5 * max(-w.n, 0) * |u - u_upwind|².
+    /// integral 0.5 * (rho_upwind/rho_reference) * max(-w.n, 0)
+    /// * |u - u_upwind|².
     /// This is numerical boundary dissipation, unchanged by a common boost;
     /// it excludes interior upwinding, viscosity and backflow resistance.
     pub upwind_kinetic_dissipation: f64,
@@ -90,6 +93,7 @@ struct TransportSample {
     point: [f64; 2],
     velocity: [f64; 2],
     volume_flux: f64,
+    mass_flux_per_reference: f64,
 }
 
 pub(super) struct TransportAccumulator {
@@ -105,6 +109,7 @@ impl TransportAccumulator {
                     point: [0.0; 2],
                     velocity: [0.0; 2],
                     volume_flux: 0.0,
+                    mass_flux_per_reference: 0.0,
                 }; crate::ns::CONVECTION_EDGE_QUADRATURE_CAPACITY],
                 count: 0,
                 upwind_loss: 0.0,
@@ -120,7 +125,19 @@ impl TransportAccumulator {
         upwind: [f64; 2],
         interior: [f64; 2],
     ) -> Result<(), StokesBoundaryError> {
+        self.sample_mass_weighted(point, volume_flux, volume_flux, upwind, interior)
+    }
+
+    pub(super) fn sample_mass_weighted(
+        &mut self,
+        point: [f64; 2],
+        volume_flux: f64,
+        mass_flux_per_reference: f64,
+        upwind: [f64; 2],
+        interior: [f64; 2],
+    ) -> Result<(), StokesBoundaryError> {
         if !volume_flux.is_finite()
+            || !mass_flux_per_reference.is_finite()
             || !point
                 .iter()
                 .chain(&upwind)
@@ -129,7 +146,7 @@ impl TransportAccumulator {
         {
             return Err(invalid("nonfinite boundary transport sample"));
         }
-        if volume_flux == 0.0 {
+        if volume_flux == 0.0 && mass_flux_per_reference == 0.0 {
             return Ok(());
         }
         let count = self.quadrature.count;
@@ -142,12 +159,17 @@ impl TransportAccumulator {
             point,
             velocity: upwind,
             volume_flux,
+            mass_flux_per_reference,
         };
         self.quadrature.count += 1;
-        if volume_flux < 0.0 {
-            self.loss
-                .add([half_weighted_square(-volume_flux, interior[0] - upwind[0])
-                    + half_weighted_square(-volume_flux, interior[1] - upwind[1])]);
+        if mass_flux_per_reference < 0.0 {
+            self.loss.add([half_weighted_square(
+                -mass_flux_per_reference,
+                interior[0] - upwind[0],
+            ) + half_weighted_square(
+                -mass_flux_per_reference,
+                interior[1] - upwind[1],
+            )]);
         }
         Ok(())
     }
@@ -197,10 +219,10 @@ impl TransportQuadrature {
             if !u.iter().all(|v| v.is_finite()) {
                 return Err(invalid("unrepresentable boundary transport velocity"));
             }
-            let q = sample.volume_flux;
+            let q = sample.mass_flux_per_reference;
             let force = u.map(|v| q * v);
             sums.add([
-                q,
+                sample.volume_flux,
                 force[0],
                 force[1],
                 cross(

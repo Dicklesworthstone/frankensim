@@ -44,6 +44,7 @@ pub use mixed::{
     MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
     MaterialStokesRheologySolution, MaterialStokesSolution,
 };
+pub(crate) use navier_stokes::with_kinematic_boundaries;
 pub use navier_stokes::{
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
 };

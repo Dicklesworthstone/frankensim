@@ -1,5 +1,6 @@
 //! Discrete boundary reactions from the original mixed momentum equations.
 
+use super::conservative::{ConservativeMomentum, RelativeMassFluxFace};
 use super::transport::{BoundaryTransport, Sums, TransportAccumulator, TransportQuadrature};
 use super::{
     AdmittedBoundary, OpenBoundaryPolicy, Samples, StokesBoundaryError, StokesPressureReference,
@@ -394,6 +395,7 @@ struct Face {
     viscosity: [f64; 2],
     penalty: [f64; 2],
     advection: Option<([f64; 2], [f64; 6])>,
+    conservative: Option<RelativeMassFluxFace>,
 }
 
 /// Only rows removed by strong normal velocity are retained, in a rectangular
@@ -436,6 +438,7 @@ impl ReactionAssembly {
                             core::array::from_fn(|i| v[system.dof(cell, i)]),
                         )
                     }),
+                    conservative: None,
                 })
             })
             .collect();
@@ -444,6 +447,11 @@ impl ReactionAssembly {
             rhs: vec![0.0; global_rows.len()],
             global_rows,
             faces,
+        }
+    }
+    pub(super) fn set_conservative_transport(&mut self, transport: &ConservativeMomentum) {
+        for face in &mut self.faces {
+            face.conservative = Some(transport.faces[face.edge]);
         }
     }
     pub(in crate::ns) fn push(&mut self, row: usize, column: usize, value: f64) {
@@ -615,6 +623,36 @@ impl ReactionOperator {
                 }
                 load.stress.add(load.backflow);
             }
+            if let Some(samples) = face.conservative {
+                for sample in samples.points() {
+                    let u = velocity(system, cell, sample.point_m, &field.x);
+                    let mass_rate = sample.mass_rate_per_reference;
+                    let upwind = if mass_rate < 0.0 && face.tangential_resistance.is_none() {
+                        match (face.reservoir, face.samples) {
+                            (Some(prescribed), _) | (None, Samples::Velocity(prescribed)) => {
+                                convection_boundary_trace(prescribed, sample.boundary_fraction)
+                            }
+                            _ => u,
+                        }
+                    } else {
+                        u
+                    };
+                    transport.sample_mass_weighted(
+                        sample.point_m,
+                        sample.volume_rate_m2_s,
+                        mass_rate,
+                        upwind,
+                        u,
+                    )?;
+                    load.outward_momentum
+                        .sample(sample.point_m, upwind.map(|v| mass_rate * v));
+                    if face.policy == Some(OpenBoundaryPolicy::DissipativeBackflow) {
+                        load.backflow
+                            .sample(sample.point_m, u.map(|v| -mass_rate.min(0.0) * v));
+                    }
+                }
+                load.stress.add(load.backflow);
+            }
             let transport = transport.finish()?;
             if !load.finite() {
                 return Err(invalid("nonfinite discrete boundary reaction"));
@@ -641,7 +679,12 @@ impl ReactionOperator {
     }
 }
 
-fn velocity(system: &FluxSystem<'_>, cell: usize, point: [f64; 2], x: &[f64]) -> [f64; 2] {
+pub(super) fn velocity(
+    system: &FluxSystem<'_>,
+    cell: usize,
+    point: [f64; 2],
+    x: &[f64],
+) -> [f64; 2] {
     let mut u = [0.0; 2];
     for i in 0..6 {
         let basis = eval_basis(&system.bases[cell], i, point);
