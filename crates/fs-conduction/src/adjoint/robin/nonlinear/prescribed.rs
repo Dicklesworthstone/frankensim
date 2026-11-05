@@ -63,6 +63,22 @@ impl RobinResponse {
         regions: &[&str], h_slopes: &[f64], reference_slopes: &[f64],
         reference_feedback: &[f64], flux_feedback: Option<&MeanFluxFeedback>, max_entries: usize,
     ) -> Result<Vec<f64>, ConductionError> {
+        Self::prescribed_temperature_pullback_with_contact_feedback(
+            cx, problem, interfaces, None, temperature, nodal_weights, nodal_load_adjoint,
+            regions, h_slopes, reference_slopes, reference_feedback, flux_feedback, max_entries,
+        )
+    }
+
+    /// The checked live-contact owner adds only its original full-node
+    /// dK_contact/dT * T correction. Frozen contact is already in assembly.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prescribed_temperature_pullback_with_contact_feedback(
+        cx: &Cx<'_>, problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+        contact_feedback: Option<&fs_sparse::Csr>, temperature: &[f64],
+        nodal_weights: &[f64], nodal_load_adjoint: &[f64], regions: &[&str],
+        h_slopes: &[f64], reference_slopes: &[f64], reference_feedback: &[f64],
+        flux_feedback: Option<&MeanFluxFeedback>, max_entries: usize,
+    ) -> Result<Vec<f64>, ConductionError> {
         poll(cx, 0)?;
         let n = problem.mesh.vertex_count();
         let m = regions.len();
@@ -81,6 +97,9 @@ impl RobinResponse {
         vector(cx, h_slopes, m)?;
         vector(cx, reference_slopes, m)?;
         vector(cx, reference_feedback, m*m)?;
+        if contact_feedback.is_some_and(|matrix| matrix.nrows() != n || matrix.ncols() != n) {
+            return Err(invalid("prescribed-temperature contact correction has a different nodal layout"));
+        }
         if let Some(materials) = problem.element_materials { materials.validate_for(problem.mesh)?; }
         let mut fixed = vec![false; n];
         for &(v, value) in problem.boundary.dirichlet() {
@@ -97,20 +116,24 @@ impl RobinResponse {
         let matrix = assemble_jacobian_with_optional_interfaces(cx, problem.mesh,
             problem.boundary, problem.material, temperature, interfaces, problem.element_materials)?;
         let mut entries = 0_usize;
-        for v in 0..n {
-            if v % 512 == 0 { poll(cx, v)?; }
-            entries = entries.checked_add(matrix.row(v).0.len())
-                .ok_or_else(|| invalid("prescribed-temperature operator count overflow"))?;
-            if entries > max_entries { return Err(invalid("prescribed-temperature CSR exceeds its entry allowance")); }
+        for operator in std::iter::once(&matrix).chain(contact_feedback) {
+            for v in 0..n {
+                if v % 512 == 0 { poll(cx, v)?; }
+                entries = entries.checked_add(operator.row(v).0.len())
+                    .ok_or_else(|| invalid("prescribed-temperature operator count overflow"))?;
+                if entries > max_entries { return Err(invalid("prescribed-temperature CSR exceeds its entry allowance")); }
+            }
         }
         let mut result = Vec::new();
         result.try_reserve_exact(n).map_err(|_| invalid("prescribed-temperature output allocation refused"))?;
         result.extend(nodal_weights.iter().copied());
-        for (v, &lambda) in nodal_load_adjoint.iter().enumerate() {
-            if v % 512 == 0 { poll(cx, v)?; }
-            let (columns, values) = matrix.row(v);
-            for (&w, &coefficient) in columns.iter().zip(values) {
-                if fixed[w] { result[w] = checked(result[w] - checked(lambda*checked(coefficient)?)?)?; }
+        for operator in std::iter::once(&matrix).chain(contact_feedback) {
+            for (v, &lambda) in nodal_load_adjoint.iter().enumerate() {
+                if v % 512 == 0 { poll(cx, v)?; }
+                let (columns, values) = operator.row(v);
+                for (&w, &coefficient) in columns.iter().zip(values) {
+                    if fixed[w] { result[w] = checked(result[w] - checked(lambda*checked(coefficient)?)?)?; }
+                }
             }
         }
         let mut mean_bars = vec![0.0; m];

@@ -9,7 +9,8 @@ use super::{TemperatureContacts, invalid, poll};
 
 /// A revalidated steady endpoint and the complete nonsymmetric response.
 /// No additional primal solve or derivative of solver iterations is performed.
-pub struct ContactSteadyLinearization {
+pub struct ContactSteadyLinearization<'a> {
+    problem: ConductionProblem<'a>,
     response: RobinResponse,
     contact: ContactTemperatureLinearization,
     residual_norm_w: f64,
@@ -17,7 +18,7 @@ pub struct ContactSteadyLinearization {
     dirichlet_reactions_w: Vec<(usize, f64)>,
 }
 
-impl std::ops::Deref for ContactSteadyLinearization {
+impl std::ops::Deref for ContactSteadyLinearization<'_> {
     type Target = RobinResponse;
     fn deref(&self) -> &Self::Target { &self.response }
 }
@@ -31,7 +32,7 @@ pub struct ContactSteadyGradient {
     pub resistance_multipliers: Vec<ContactResistanceGradient>,
 }
 
-impl ContactSteadyLinearization {
+impl ContactSteadyLinearization<'_> {
     /// Actual pinned contact states and both actions of their temperature tangent.
     #[must_use]
     pub const fn contact(&self) -> &ContactTemperatureLinearization { &self.contact }
@@ -44,6 +45,45 @@ impl ContactSteadyLinearization {
     /// Original Dirichlet reservoir heat entering at each fixed vertex, W.
     #[must_use]
     pub fn dirichlet_reactions_w(&self) -> &[(usize, f64)] { &self.dirichlet_reactions_w }
+
+    /// Contract the SAME complete dual with the original prescribed temperatures.
+    ///
+    /// Returns `w_D - J_FD^T lambda_F` at fixed vertices and zero elsewhere.
+    /// `nodal_weights` includes direct fixed-node objective terms; the supplied
+    /// load adjoint must instead be zero there. Use the full nodal dual from
+    /// this endpoint, including exactly the Robin/mean-flux feedback supplied
+    /// here. The arrays follow this response's original selected-region order.
+    ///
+    /// The original problem is borrowed for the response's lifetime, so this
+    /// contraction cannot substitute a different mesh, boundary, source or
+    /// conductivity. Its material Jacobian includes the frozen contact once;
+    /// the retained source-law correction adds both dR/dT_A and dR/dT_B on
+    /// ALL nodes before fixed-column contraction. Robin and mean-flux factors
+    /// retain their fixed-node observation weights as well.
+    ///
+    /// No new primal or dual solve, dense matrix or field mutation occurs.
+    /// `max_entries` bounds the shared assembly/traversal work and the combined
+    /// bulk/frozen-contact CSR plus source-law correction entries. It is not
+    /// a peak allocator bound. The caller owns the supplied dual and any
+    /// objective dependence other than nodal temperature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prescribed_temperature_pullback_with_flux_feedback(
+        &self, cx: &Cx<'_>, nodal_weights: &[f64], nodal_load_adjoint: &[f64],
+        htc_wall_derivatives: &[f64], reference_wall_derivatives: &[f64],
+        reference_feedback: &[f64], flux_feedback: Option<&MeanFluxFeedback>,
+        max_entries: usize,
+    ) -> Result<Vec<f64>, ConductionError> {
+        poll(cx, 0)?;
+        if self.ports().len() > 64 {
+            return Err(invalid("<steady-contact-adjoint>", "prescribed-temperature lift admits at most 64 feedback regions"));
+        }
+        let regions: Vec<_> = self.ports().iter().map(|port| port.name.as_str()).collect();
+        RobinResponse::prescribed_temperature_pullback_with_contact_feedback(cx,
+            self.problem, Some(self.contact.physical_contacts().frozen_interfaces()),
+            Some(self.contact.feedback()), self.temperature(), nodal_weights,
+            nodal_load_adjoint, &regions, htc_wall_derivatives,
+            reference_wall_derivatives, reference_feedback, flux_feedback, max_entries)
+    }
 
     /// Differentiate nodal/Robin observations through the full coupled residual.
     /// Contact controls use this SAME total adjoint, including both source
@@ -137,14 +177,15 @@ impl TemperatureContacts<'_, '_> {
     /// contact temperature partials. Its tangent and true transpose use the
     /// existing bounded FGMRES response owner, even for a constant bulk tensor.
     /// Material/source corners do not acquire an invented unique derivative.
-    /// Source uncertainty, shape changes, pressure evolution and prescribed-
-    /// temperature controls are outside this local constitutive derivative.
+    /// Source uncertainty, shape changes and pressure evolution are outside
+    /// this local constitutive derivative. Prescribed-temperature controls use
+    /// the explicit full-node lift on the returned response.
     #[allow(clippy::too_many_arguments)]
-    pub fn linearize_steady_endpoint(
-        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, temperature: &[f64],
+    pub fn linearize_steady_endpoint<'a>(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'a>, temperature: &[f64],
         linear: LinearConfig, residual_tolerance_w: f64, energy_tolerance_w: f64,
         regions: &[&str], max_face_pairs: usize,
-    ) -> Result<ContactSteadyLinearization, ConductionError> {
+    ) -> Result<ContactSteadyLinearization<'a>, ConductionError> {
         poll(cx, 0)?;
         self.check_mesh(problem.mesh)?;
         if !(residual_tolerance_w.is_finite() && residual_tolerance_w > 0.0)
@@ -156,7 +197,7 @@ impl TemperatureContacts<'_, '_> {
         let (response, residual_norm_w, energy, dirichlet_reactions_w) =
             RobinResponse::for_steady_contact(cx, problem, &contact, linear,
                 residual_tolerance_w, energy_tolerance_w, regions)?;
-        Ok(ContactSteadyLinearization { response, contact, residual_norm_w,
+        Ok(ContactSteadyLinearization { problem, response, contact, residual_norm_w,
             energy, dirichlet_reactions_w })
     }
 }

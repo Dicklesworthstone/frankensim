@@ -52,15 +52,15 @@ impl Retained {
         Ok(Self { prepared, resolution, tolerance_w })
     }
 
-    pub(super) fn linearize(
+    pub(super) fn linearize<'a>(
         &self,
         cx: &Cx<'_>,
-        problem: ConductionProblem<'_>,
+        problem: ConductionProblem<'a>,
         temperature: &[f64],
         linear: fs_conduction::LinearConfig,
         regions: &[&str],
         max_pairs: usize,
-    ) -> Result<fs_conduction::interface::temperature::steady::ContactSteadyLinearization, SolveRefusal> {
+    ) -> Result<fs_conduction::interface::temperature::steady::ContactSteadyLinearization<'a>, SolveRefusal> {
         let contacts = self.prepared.bind(
             cx, problem.mesh, problem.boundary, &self.resolution, max_pairs,
         )?;
