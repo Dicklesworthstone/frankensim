@@ -103,7 +103,9 @@ pub struct SuspendedPistonStep<R = StepReport> {
     pub spring_energy_j: [f64; 2],
     /// Exact quadratic-potential increment, evaluated before cancellation [J].
     pub spring_energy_change_j: f64,
-    /// Nonnegative midpoint viscous loss `c*w²*dt` [J], not gas heating.
+    /// Nonnegative midpoint viscous loss `c*w²*dt` [J]. A thermal composition
+    /// may explicitly return part of it as heat and separately report that
+    /// destination; the mechanical owner alone does not heat either gas.
     pub damping_energy_j: f64,
     /// Spring-plus-damper impulse ON the piston [N s]; the anchor receives
     /// its opposite. The stationary anchor does no mechanical work.
@@ -113,8 +115,10 @@ pub struct SuspendedPistonStep<R = StepReport> {
     /// Native mechanical balance including spring storage and viscous loss [J].
     pub mechanical_energy_residual_j: f64,
     /// Gas energy + piston kinetic + spring storage + damping loss + exterior
-    /// pressure work - independently authored drive work [J]. An opt-in contact
-    /// owner also subtracts its separately reported numerical energy defect.
+    /// pressure work - independently authored drive work [J]. A thermal owner
+    /// includes its finite wall storage and counts only unreturned damping
+    /// loss as external. An opt-in contact owner also subtracts its separately
+    /// reported numerical energy defect.
     pub total_energy_residual_j: f64,
 }
 

@@ -10,20 +10,33 @@ use crate::multicomponent::wall_exchange::{
 };
 use std::cell::Cell as Counter;
 
+mod suspension;
+
 /// Actual heat exchanged with one original, finite piston inventory.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SharedPistonHeatReport {
     /// Before and after the mechanical step, each over half its duration.
-    /// Both reports refer to the SAME wall, with the second starting at the
-    /// first endpoint. No thermal energy or mechanical work is duplicated.
+    /// Both reports refer to the SAME wall. An explicitly returned damper
+    /// heat deposit may separate them; it is reported below, not hidden in
+    /// either gas-contact solve. No inventory or mechanical work is duplicated.
     pub stages: [WallCellReport; 2],
     /// Heat into [left, right] gas across both half steps [J].
     pub heat_to_gas_j: [f64; 2],
     /// Original wall's represented final minus initial stored energy [J].
     pub wall_energy_change_j: f64,
-    /// Sum of both gas heats plus the one wall-storage change [J].
+    /// Authored fraction of accepted suspension loss transferred to this wall
+    /// before the second heat stage [J]. Zero for the free-piston entry.
+    pub damping_heat_to_wall_j: f64,
+    /// Represented wall deposit minus `damping_heat_to_wall_j` [J].
+    /// The original nonlinear calorics own this finite-precision residual.
+    pub damping_heat_residual_j: f64,
+    /// Remaining accepted damper loss that leaves the represented thermal
+    /// system [J]. This excludes the part returned to the wall above.
+    pub damping_loss_external_j: f64,
+    /// Both gas heats plus wall storage minus returned damper heat [J].
     pub energy_residual_j: f64,
-    /// Original caloric/state calls across both accepted heat stages.
+    /// Original caloric/state calls across both accepted heat stages and any
+    /// intervening damper-heat deposit.
     pub source_evaluations: usize,
     /// Implicit gas-contact solves, including the wall root's trial endpoints.
     pub contact_solves: usize,
@@ -105,7 +118,8 @@ impl From<WallExchangeError> for SharedPistonThermalError {
 /// retry resets them from accepted fields; velocity proposals reuse the
 /// original shared-piston scratch. The initial heat solve is independent of
 /// midpoint velocity and runs once per duration, not once per root proposal.
-/// The caloric work budget covers both heat halves of ONE complete attempt;
+/// The caloric work budget covers both heat halves and any damper-heat deposit
+/// of ONE complete attempt;
 /// each restart resets it, under `StepControl::maximum_halvings`. Accepted
 /// source-work counts describe the accepted attempt, not discarded retries.
 pub struct SharedPistonThermal<'law> {
@@ -280,6 +294,9 @@ impl<'law> SharedPistonThermal<'law> {
         &self,
         stages: [WallCellReport; 2],
         heat: [[f64; 2]; 2],
+        damping_heat_to_wall_j: f64,
+        damping_heat_residual_j: f64,
+        damping_loss_external_j: f64,
         controls: WallControl,
     ) -> Result<SharedPistonHeatReport, SharedPistonThermalError> {
         let initial = self.group.accepted.storage.thermal;
@@ -313,8 +330,15 @@ impl<'law> SharedPistonThermal<'law> {
             heat_capacity_j_per_k * (after - before)
         };
         let heat_to_gas_j = [sum([heat[0][0], heat[1][0]]), sum([heat[0][1], heat[1][1]])];
-        let residual = sum([heat_to_gas_j[0], heat_to_gas_j[1], wall_change]);
-        let scale = sum(heat.into_iter().flatten().map(f64::abs)).max(wall_change.abs());
+        let residual = sum([
+            heat_to_gas_j[0],
+            heat_to_gas_j[1],
+            wall_change,
+            -damping_heat_to_wall_j,
+        ]);
+        let scale = sum(heat.into_iter().flatten().map(f64::abs))
+            .max(wall_change.abs())
+            .max(damping_heat_to_wall_j);
         if !residual.is_finite() || residual.abs() > controls.tolerance(scale) {
             return Err(WallExchangeError::Balance {
                 energy_residual_j: residual,
@@ -329,6 +353,9 @@ impl<'law> SharedPistonThermal<'law> {
             stages,
             heat_to_gas_j,
             wall_energy_change_j: wall_change,
+            damping_heat_to_wall_j,
+            damping_heat_residual_j,
+            damping_loss_external_j,
             energy_residual_j: residual,
             source_evaluations: self.work.used.get(),
             contact_solves: self.work.contacts.get(),
@@ -345,10 +372,12 @@ impl<'law> SharedPistonThermal<'law> {
         gas_controls: StepControl,
         heat_controls: WallControl,
         external_force_n: f64,
+        suspension: Option<PistonSuspension>,
+        damping_heat_fraction_to_wall: f64,
         piston_controls: PistonControl,
         mut equilibrium: Option<([ContactEquilibriumControl; 2], [&mut ContactWorkspace; 2])>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<PistonStep<SharedPistonThermalStepReport>, SharedPistonThermalError> {
+    ) -> Result<SuspendedPistonStep<SharedPistonThermalStepReport>, SharedPistonThermalError> {
         poll(&mut cancelled)?;
         admit_geometry(left, right)?;
         validate(
@@ -362,6 +391,17 @@ impl<'law> SharedPistonThermal<'law> {
             piston_controls,
         )?;
         heat_controls.validate()?;
+        if !damping_heat_fraction_to_wall.is_finite()
+            || !(0.0..=1.0).contains(&damping_heat_fraction_to_wall)
+        {
+            return Err(PistonError::Invalid(
+                "shared-piston damping heat fraction must be between zero and one",
+            )
+            .into());
+        }
+        if let Some(law) = suspension {
+            law.bind(left.mesh.positions()[left.cell_count()])?;
+        }
         if let Some((controls, workspaces)) = equilibrium.as_ref() {
             workspaces[0].admit(left.cell_count(), controls[0])?;
             workspaces[1].admit(right.cell_count(), controls[1])?;
@@ -421,30 +461,61 @@ impl<'law> SharedPistonThermal<'law> {
                     self.heat_stage(Time::new(0.5 * dt), heat_controls, &mut cancelled)?;
                 let mut trial_piston = original_piston;
                 let [trial_left, trial_right] = &mut self.trial;
-                let mut step = trial_left
-                    .advance_shared_piston(
-                        trial_right,
-                        &mut trial_piston,
-                        Time::new(dt),
-                        gas_controls,
-                        external_force_n,
-                        None,
-                        piston_controls,
-                        equilibrium
-                            .as_mut()
-                            .map(|(controls, [a, b])| (*controls, [&mut **a, &mut **b])),
-                        &mut cancelled,
-                    )?
-                    .piston;
-                let accepted_dt = step.gas.left.elapsed.value();
+                let mut step = trial_left.advance_shared_piston(
+                    trial_right,
+                    &mut trial_piston,
+                    Time::new(dt),
+                    gas_controls,
+                    external_force_n,
+                    suspension,
+                    piston_controls,
+                    equilibrium
+                        .as_mut()
+                        .map(|(controls, [a, b])| (*controls, [&mut **a, &mut **b])),
+                    &mut cancelled,
+                )?;
+                let accepted_dt = step.piston.gas.left.elapsed.value();
                 if accepted_dt != dt {
                     next_dt = accepted_dt;
                     return Ok(None);
                 }
+                // Only this accepted mechanical interval pays damper heat.
+                // Every complete retry restores the original wall inventory;
+                // root proposals and discarded longer intervals pay nothing.
+                let damping_heat_to_wall_j = damping_heat_fraction_to_wall * step.damping_energy_j;
+                let damping_loss_external_j = step.damping_energy_j - damping_heat_to_wall_j;
+                let damping_heat_residual_j = if damping_heat_to_wall_j == 0.0 {
+                    0.0
+                } else {
+                    poll(&mut cancelled)?;
+                    let deposited = self.group.after_state(
+                        self.group.candidate,
+                        damping_heat_to_wall_j,
+                        &self.work,
+                    )?;
+                    let residual = deposited.change - damping_heat_to_wall_j;
+                    if !residual.is_finite()
+                        || residual.abs() > heat_controls.tolerance(damping_heat_to_wall_j)
+                    {
+                        return Err(WallExchangeError::Balance {
+                            energy_residual_j: residual,
+                            thermal_residual_j: residual,
+                        }
+                        .into());
+                    }
+                    self.group.candidate = deposited.thermal;
+                    residual
+                };
                 let (second, second_heat) =
                     self.heat_stage(Time::new(0.5 * dt), heat_controls, &mut cancelled)?;
-                let heat =
-                    self.complete_heat([first, second], [first_heat, second_heat], heat_controls)?;
+                let heat = self.complete_heat(
+                    [first, second],
+                    [first_heat, second_heat],
+                    damping_heat_to_wall_j,
+                    damping_heat_residual_j,
+                    damping_loss_external_j,
+                    heat_controls,
+                )?;
                 let after = SharedPistonGasReport {
                     left: totals(
                         &self.trial[0].states,
@@ -465,23 +536,39 @@ impl<'law> SharedPistonThermal<'law> {
                         workspaces[1].receipt().signed_energy_j,
                     ])
                 });
+                let piston = &mut step.piston;
+                piston.total_energy_residual_j = sum([
+                    after.left.energy - before.left.energy,
+                    after.right.energy - before.right.energy,
+                    heat.wall_energy_change_j,
+                    piston.kinetic_energy_change_j,
+                    -piston.external_force_work_j,
+                    -damping_heat_to_wall_j,
+                    -defect,
+                ]);
                 step.total_energy_residual_j = sum([
                     after.left.energy - before.left.energy,
                     after.right.energy - before.right.energy,
                     heat.wall_energy_change_j,
-                    step.kinetic_energy_change_j,
-                    -step.external_force_work_j,
+                    piston.kinetic_energy_change_j,
+                    step.spring_energy_change_j,
+                    damping_loss_external_j,
+                    -step.applied_force_work_j,
                     -defect,
                 ]);
-                if !step.total_energy_residual_j.is_finite() || !step.admitted(piston_controls) {
+                if !step.total_energy_residual_j.is_finite()
+                    || step.total_energy_residual_j.abs() > piston_controls.energy_tolerance_j
+                    || !piston.admitted(piston_controls)
+                {
                     return Err(PistonError::Balance {
-                        momentum_residual_n_s: step
+                        momentum_residual_n_s: piston
                             .momentum_residual_n_s
                             .abs()
-                            .max(step.combined_momentum_residual_n_s.abs()),
-                        energy_residual_j: step
+                            .max(piston.combined_momentum_residual_n_s.abs()),
+                        energy_residual_j: piston
                             .mechanical_energy_residual_j
                             .abs()
+                            .max(piston.total_energy_residual_j.abs())
                             .max(step.total_energy_residual_j.abs()),
                     }
                     .into());
@@ -502,8 +589,8 @@ impl<'law> SharedPistonThermal<'law> {
                     core::mem::swap(left, &mut self.trial[0]);
                     core::mem::swap(right, &mut self.trial[1]);
                     self.group.accepted.storage.thermal = self.group.candidate;
-                    self.last_report = Some(step.gas.heat);
-                    piston.accept(&step);
+                    self.last_report = Some(step.piston.gas.heat);
+                    piston.accept(&step.piston);
                     return Ok(step);
                 }
                 Ok(None) => {
@@ -564,18 +651,22 @@ impl MixtureEuler1d {
         piston_controls: PistonControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<SharedPistonThermalStepReport>, SharedPistonThermalError> {
-        thermal.advance(
-            self,
-            right,
-            piston,
-            maximum_duration,
-            gas_controls,
-            heat_controls,
-            external_force_n,
-            piston_controls,
-            None,
-            cancelled,
-        )
+        thermal
+            .advance(
+                self,
+                right,
+                piston,
+                maximum_duration,
+                gas_controls,
+                heat_controls,
+                external_force_n,
+                None,
+                0.0,
+                piston_controls,
+                None,
+                cancelled,
+            )
+            .map(|step| step.piston)
     }
 
     /// Retain independently bounded material contacts during shared-wall heating.
@@ -605,18 +696,22 @@ impl MixtureEuler1d {
         SharedPistonThermalError,
     > {
         let [a, b] = workspaces;
-        let step = thermal.advance(
-            self,
-            right,
-            piston,
-            maximum_duration,
-            gas_controls,
-            heat_controls,
-            external_force_n,
-            piston_controls,
-            Some((equilibrium, [&mut *a, &mut *b])),
-            cancelled,
-        )?;
+        let step = thermal
+            .advance(
+                self,
+                right,
+                piston,
+                maximum_duration,
+                gas_controls,
+                heat_controls,
+                external_force_n,
+                None,
+                0.0,
+                piston_controls,
+                Some((equilibrium, [&mut *a, &mut *b])),
+                cancelled,
+            )?
+            .piston;
         Ok(step.map_gas(|gas| SharedPistonThermalStepReport {
             transport: contact_reports(gas.transport, [a.receipt(), b.receipt()]),
             before: gas.before,

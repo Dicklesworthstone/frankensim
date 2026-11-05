@@ -4912,3 +4912,55 @@ second order nor a simultaneous conjugate thermomechanical solve. Molecular
 transport, chemistry, suspension heat, leakage, thermal expansion, through-wall
 temperature gradients, entropy stability and general FSI stability require
 their separate owners and are not enabled by these entry points.
+
+## Suspended shared pistons return physical damper heat to one wall
+
+`MixtureEuler1d::step_with_shared_suspended_piston_and_heat` closes the
+spring/damper, finite-wall and two resolved pressure fields in one accepted
+step. The original `PistonSuspension` enters every existing shared midpoint-
+velocity proposal. The caller additionally supplies a finite fraction `f` in
+`[0,1]` of the physical viscous loss to return to the one piston thermal
+inventory. A damping coefficient alone never selects a thermal destination.
+
+The stages are `H(dt/2), A_with_suspension(dt), deposit, H(dt/2)`. Only an
+accepted pressure/mechanical interval pays its actual nonnegative
+`D = c*w_mid^2*dt`. The original `Group::after_state` deposits `f*D` through
+the wall's nonlinear calorics before the second H; no constant capacity tangent,
+second wall mass, additional inertia or empirical gas-heating term is introduced.
+Both gas contacts then read that wall temperature and the actual moved volumes.
+Returned loss changes subsequent gas pressures and piston motion. The fraction
+`D-f*D` leaves the represented thermal system as explicitly reported loss.
+
+The complete suspended account is
+`Delta E_left + Delta E_right + Delta U_wall + Delta K + Delta U_spring
+ + (D-f*D) - W_drive - Delta E_contact_left - Delta E_contact_right`.
+It uses actual endpoint gas and wall storage; returned heat is already inside
+the wall/gas account and is not debited again as external loss. The nested
+native piston report retains its spring/damper force-work convention and
+subtracts `f*D` once from its enclosing gas/wall energy balance. The original
+pressure impulses and conjugate gas work contain no conductive or damper heat.
+`SharedPistonHeatReport` separately exposes returned heat, its represented
+deposition residual and external damping remainder. Its heat-only residual is
+`Q_left + Q_right + Delta U_wall - f*D`, not an apparent energy leak.
+
+`step_with_shared_suspended_piston_heat_and_contact_equilibrium` retains the
+two independently bounded original contact corrections. Targets come from
+the fields after H1; physical heat gradients are never projected away.
+Both gas fields, meshes, clocks, piston, wall inventory and last heat report
+publish together. Acoustic shortening, failed heat/source admission and
+cancellation restore the accepted state before any retry; discarded root
+proposals and longer intervals cannot heat the wall. The original heat work
+budget includes the caloric deposit. Zero returned heat skips that source
+evaluation, and all original pressure/heat workspaces are reused.
+
+Focused G0/G1/G2/G4 regressions cover independent midpoint mechanics and
+three-capacity heat equations, actual pressure/motion response to returned
+heat, insulated and zero-suspension native limits, nonlinear wall energy and
+reference shifts, contact-defect accounting and a duplicate-heat falsifier,
+late cancellation after prior motion, acoustic replay, source-work refusal,
+and convergence of pressure, motion and wall temperature under time refinement.
+The suspension and its anchor remain fixed during a step. Damper heat from
+the accepted A does not retrospectively alter that A's force. This split,
+spatially uniform-wall model adds no temperature-dependent damping law,
+resolved through-wall transport, chemistry, entropy inequality, second-order
+thermomechanical accuracy or general FSI stability claim.

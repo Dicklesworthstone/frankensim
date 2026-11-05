@@ -10,6 +10,8 @@ use fs_thermal::enthalpy::{
     ThermalLaw, ThermalStorageBasis,
 };
 
+mod suspension;
+
 fn heat_controls() -> WallControl {
     WallControl {
         absolute_energy_tolerance_j: 1e-13,
