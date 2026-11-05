@@ -22,11 +22,13 @@ pub use fs_gas::multicomponent::dissipation::{
 use fs_gas::multicomponent::{MixtureGas, SpatialPrimitive};
 use fs_qty::Time;
 
+mod adaptive;
 mod coupled;
 mod driving;
 mod inertia;
 mod reservoir;
 mod stabilized;
+pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
 pub use coupled::{
     MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, StabilizedMolecularStepControl,
     StabilizedMolecularStepReport3d,
@@ -115,6 +117,7 @@ pub struct MolecularTransport3d<L: TransportLaw> {
     last_step: Option<MolecularReport>,
     work: Workspace,
     stabilized: Option<stabilized::Workspace>,
+    adaptive: Option<adaptive::Workspace>,
     #[cfg(feature = "experimental-sgs")]
     sgs: Option<SubgridTransport>,
 }
@@ -191,6 +194,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             boundary_impulses: allocated(boundary, 0.0)?,
             last_step: None,
             stabilized: None,
+            adaptive: None,
             #[cfg(feature = "experimental-sgs")]
             sgs: None,
             work: Workspace {
@@ -302,7 +306,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             + self
                 .stabilized
                 .as_ref()
-                .map_or(0, stabilized::Workspace::workspace_bytes);
+                .map_or(0, stabilized::Workspace::workspace_bytes)
+            + self
+                .adaptive
+                .as_ref()
+                .map_or(0, adaptive::Workspace::workspace_bytes);
         #[cfg(feature = "experimental-sgs")]
         let bytes = bytes
             + self

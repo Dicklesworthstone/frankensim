@@ -28,7 +28,7 @@ pub struct StabilizedMolecularReport {
 
 /// Only the anchor faces and a second boundary recurrence need extra storage.
 pub(super) struct Workspace {
-    anchor_flux: [Vec<f64>; 3],
+    pub(super) anchor_flux: [Vec<f64>; 3],
     boundary_stage: Vec<f64>,
 }
 impl Workspace {
@@ -254,7 +254,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn rkl_trial(
+    pub(super) fn rkl_trial(
         &mut self,
         reservoirs: &Reservoirs,
         dt: f64,

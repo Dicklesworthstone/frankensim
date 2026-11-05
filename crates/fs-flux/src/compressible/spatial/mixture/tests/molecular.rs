@@ -1,5 +1,6 @@
 use super::*;
 
+mod adaptive;
 mod coupled;
 mod reservoir;
 mod stabilized;
