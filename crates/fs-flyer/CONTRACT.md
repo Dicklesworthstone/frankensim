@@ -623,6 +623,60 @@ mechanical-stop models: `maximum_step_s` must resolve nonlinear smooth motion
 and forcing. They are not interval-certified CCD of the exact trajectory,
 stop compliance/damage, friction or historical control-mechanics validation.
 
+## Coherent Mann turbulence at native six-DOF force stages
+
+`atmosphere::mann_flight::MannFlightWind` connects the original full-tensor
+`FixedStepMannField` to the actual `DynamicPropulsion::step` and
+`HarmonicPropulsion::step` owners. Its explicitly selected wind timestep is half
+the mechanical timestep. Sequential OU transitions supply the real start,
+midpoint and endpoint amplitudes and advective phases. Every wing, hub, blade
+and parasite-drag point at one stage samples the same source; query order and
+query count cannot change its stochastic history. Pointwise blade resolution
+requires the existing `BladeIncident::WindField` or `WindAndWingField` choice.
+The adapter preserves that choice and all native aerodynamic/wake equations.
+
+World coordinates are flight-line-forward/right/down. The atmospheric point
+is `[-world_x, world_y, ground_down - world_z]`; both velocity and gradient
+transform with the corresponding signed coordinate map. The existing neutral
+log-law mean is added along downwind. Homogeneous flow requires an explicit
+positive minimum height. `GroundPlane` uses the existing harmonic slip-plane
+correction at height zero, retaining solenoidality and zero normal wind; it
+does not add viscous-wall or ground-generated turbulence. Moving and rotating
+material points sample their actual stage positions, including vertical motion.
+
+The native integrator's exact start/midpoint/endpoint time labels select the
+corresponding integer source half step. Other time queries refuse; no amplitude
+interpolation, query-local randomness, or unannounced substep refinement occurs.
+The source retains its canonical integer-clock phase arithmetic, including when
+floating-point time additions associate differently. The full timestep is a
+model input: OU paths are not temporally band-limited, and no stochastic
+second-order accuracy or refinement-equivalent realization is claimed.
+
+Start/midpoint/endpoint numerical storage is prepared once; successful wind
+updates and samples allocate no numerical buffers. The explicit work budget
+counts eight normal innovations per spectral mode for the two half steps.
+The capacity budget conservatively counts all three temporal owners, including
+shared immutable temporal arrays three times; immutable spectral geometry and
+fixed metadata are excluded. Native force solvers retain their existing costs.
+
+The accepted source changes only after the full native mechanical/wake solve,
+endpoint-CG domain admission, and final cancellation check succeed. A rejected
+stage query, force/wake solve, work budget, clock or cancellation publishes
+neither mechanical output nor changed accepted wind. Inputs are borrowed;
+caller callback side effects remain caller-owned. The returned native state
+and `MannFlightWindCheckpoint` belong together for restart. The complete source,
+mean, boundary interpretation and ground coordinate are restored; scratch
+stages are rebuilt. Existing `SimLoop` paths and V2-V9 checkpoint formats retain
+their prior behavior.
+
+This is instantaneous, temporally evolving force coupling. It does not replace
+nonlinear loads with a force evaluated at a time-averaged velocity, supply
+unsteady airfoil gust memory, resolve omitted spectral bands, or validate a
+historical turbulent flight. Source/frame/rollback regressions live in
+`atmosphere/mann_flight/tests.rs`; `tests/mann_flight.rs` exercises genuine
+evolving turbulence through native wing/blade/shaft/body loads, exact replay,
+midpoint density refusal and late cancellation.
+
 ## Hydrostatic pressure and material atmosphere loads
 
 `atmosphere::MaterialAirProfile` composes the L2 atmospheric wind with the

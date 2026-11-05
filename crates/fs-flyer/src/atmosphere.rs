@@ -16,6 +16,9 @@ use fs_material::gas::GasState;
 use fs_material::gas::atmosphere::StandardAtmosphere1976;
 use fs_math::det;
 
+/// Evolving full-tensor Mann wind at the native flight integrator's stages.
+pub mod mann_flight;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Profile {
     Uniform(GasState),
