@@ -383,3 +383,35 @@ These observations do not validate atmospheric intermittency, nonlinear energy
 transfer or unresolved stresses, and OU forcing remains temporally unbounded in
 frequency. The pre-existing interval-average API retains its independently keyed
 integral bridge; this API does not establish a joint realization with those means.
+
+## Exact represented spatial momentum and subfilter stress
+
+`mann_field::filter::moments::MannBoxMoments` prepares an instantaneous quadratic
+observation of the existing homogeneous Mann realization. Both temporal owners
+expose `sample_filtered_moments`, returning the original box-averaged velocity
+and gradient plus the complete central stress `average(u_i u_j) - mean(u_i)
+mean(u_j)`. The result also exposes convective momentum flux per unit density and
+the subfilter kinetic energy. These quantities retain represented fluctuations
+that disappear when a coupling squares the filtered velocity alone.
+
+For the same centered footprint gain `G(k) = product(sinc(k dot half_edge))`,
+the cosine/cosine central coefficient for modes `m,n` is
+`(G(k_m-k_n)+G(k_m+k_n))/2 - G(k_m)G(k_n)` and the sine/sine coefficient is
+`(G(k_m-k_n)-G(k_m+k_n))/2`. Every cross-mode term is retained. This is the
+spatial stress of one accepted realization, without an isotropic approximation
+or an ensemble replacement. Boxes, skew parallelepipeds and collapsed faces and
+lines use the same observation; an exact point returns exactly zero stress.
+
+Preparation admits `n(n+1)/2` unordered pairs and their storage explicitly: two
+f64 coefficients per pair plus the original eight-byte gain per mode. Sampling
+allocates no heap storage, reuses the accepted OU amplitudes and polls
+cancellation throughout the quadratic work. It requires at most 12 KiB of stack
+scratch. Prepared geometry remains bound to the complete original spectral
+model. Neither sampling nor cancellation advances or mutates either time owner.
+
+The stress is positive semidefinite in exact arithmetic; small floating-point
+eigenvalues are not clipped, and cancellation can limit relative accuracy for
+vanishingly small footprints. This observation does not add energy outside the
+represented finite spectral band, provide a nonlinear time average, or include
+wall-blocking corrections, density fluctuations, pressure or a separate mean
+flow. The existing linear filters retain their original O(n) cost.

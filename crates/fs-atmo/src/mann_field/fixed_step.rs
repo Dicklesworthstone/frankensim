@@ -334,6 +334,24 @@ impl FixedStepMannField {
     ) -> Result<FlowSample, Refusal> {
         self.sample_with_gains(point_m, filter.gains(self.model())?)
     }
+
+    /// Exact instantaneous quadratic spatial observation of this accepted
+    /// state. This averages spatial momentum; it does not average over time.
+    pub fn sample_filtered_moments(
+        &self,
+        point_m: [f64; 3],
+        observation: &filter::moments::MannBoxMoments,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<filter::moments::MannFilteredMoments, Refusal> {
+        filter::moments::sample(
+            self.model(),
+            self.time_s(),
+            core::array::from_fn(|i| self.amplitudes[i].as_slice()),
+            point_m,
+            observation,
+            cancelled,
+        )
+    }
     fn sample_with_gains(
         &self,
         point_m: [f64; 3],

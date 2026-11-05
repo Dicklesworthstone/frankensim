@@ -512,6 +512,25 @@ impl HomogeneousMannField {
         self.sample_with_gains(point_m, filter.gains(&self.model)?)
     }
 
+    /// Exact instantaneous box-averaged momentum and subfilter stress of the
+    /// represented field. Includes cross-mode products discarded by squaring
+    /// the filtered velocity. No noise is drawn and the OU state is unchanged.
+    pub fn sample_filtered_moments(
+        &self,
+        point_m: [f64; 3],
+        observation: &filter::moments::MannBoxMoments,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<filter::moments::MannFilteredMoments, Refusal> {
+        filter::moments::sample(
+            &self.model,
+            self.tick() as f64 / TICK_HZ,
+            core::array::from_fn(|i| self.paths[i].amplitudes()),
+            point_m,
+            observation,
+            cancelled,
+        )
+    }
+
     fn sample_with_gains(
         &self,
         point_m: [f64; 3],

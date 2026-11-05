@@ -10,6 +10,9 @@
 
 use super::{MannParams, MannQuadrature, MannSpectralModel, Refusal, det, dot, refuse};
 
+/// Exact second moments and subfilter stresses of the finite Fourier field.
+pub mod moments;
+
 /// Prepared scalar gains, bound to the complete immutable source model.
 /// Preparation is O(modes), sampling allocates nothing and draws no randomness.
 /// Numerical gain storage is at most 8*MAX_MODES bytes (plus fixed metadata).
