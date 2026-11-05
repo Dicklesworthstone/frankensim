@@ -17,6 +17,7 @@ crate-type = ["rlib"]
 layer = "L4"
 
 [dependencies]
+fs-contact = { path = "../fs-contact" }
 fs-material = { path = "../fs-material" }
 fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }

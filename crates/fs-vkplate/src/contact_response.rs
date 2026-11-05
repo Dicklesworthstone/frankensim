@@ -12,13 +12,13 @@ mod components;
 #[derive(Clone, Default)]
 pub(crate) struct Workspace {
     core: IslandWorkspace,
-    indices: Vec<usize>,
-    predicted: Vec<f64>,
-    previous: Vec<f64>,
-    previous_force: Vec<f64>,
-    diagonal_bound: Vec<f64>,
-    crush: Vec<Option<Crush>>,
-    touched: Vec<usize>,
+    pub(super) indices: Vec<usize>,
+    pub(super) predicted: Vec<f64>,
+    pub(super) previous: Vec<f64>,
+    pub(super) previous_force: Vec<f64>,
+    pub(super) diagonal_bound: Vec<f64>,
+    pub(super) crush: Vec<Option<Crush>>,
+    pub(super) touched: Vec<usize>,
     seen: Vec<bool>,
     components: components::Components,
     diagonal: Vec<f64>,
@@ -67,7 +67,7 @@ fn apply_compliance(
     }
 }
 
-fn law(c: &Contact, previous: f64, crush: Option<&Crush>, d: f64, k: f64) -> (f64, f64) {
+pub(super) fn law(c: &Contact, previous: f64, crush: Option<&Crush>, d: f64, k: f64) -> (f64, f64) {
     let Law::Power {
         k: stiffness,
         alpha,
@@ -182,23 +182,27 @@ fn independent_forces(
     }
 }
 
-/// Publish all normal forces, crush memories and body displacements together.
-/// A refusal changes only private numerical scratch. Friction is a subsequent,
-/// separate stage and is not included in this normal-contact consistency claim.
-pub(crate) fn solve_contacts_checked(
-    bodies: &mut [Body],
-    contacts: &mut [Contact],
+pub(super) struct Prepared {
+    independent: bool,
+    nonlocal: bool,
+    partitioned: bool,
+}
+
+/// Read and validate the frozen normal-contact frame without advancing any
+/// physical state. The normal-only and joint friction adapters share this
+/// exact footprint convention, previous pose and crushing-history selection.
+pub(super) fn prepare(
+    bodies: &[Body],
+    contacts: &[Contact],
     queue: &mut ContactQueue,
     work: &mut Workspace,
     k: f64,
-    controls: Controls,
-) -> Result<SolveReport, SolveError> {
+) -> Result<Prepared, SolveError> {
     if !k.is_finite() || k <= 0.0 {
         return Err(SolveError::InvalidInput(
             "time step must be positive and finite",
         ));
     }
-    controls.validate()?;
     work.indices.clear();
     work.predicted.clear();
     work.previous.clear();
@@ -314,6 +318,31 @@ pub(crate) fn solve_contacts_checked(
     work.scalar_force.resize(count, 0.0);
     work.scalar_pose.resize(count, 0.0);
     work.actual_pose.resize(count, 0.0);
+    Ok(Prepared {
+        independent,
+        nonlocal,
+        partitioned,
+    })
+}
+
+/// Publish all normal forces, crush memories and body displacements together.
+/// A refusal changes only private numerical scratch. A caller needing friction
+/// must use the joint adapter so its final normal laws remain consistent.
+pub(crate) fn solve_contacts_checked(
+    bodies: &mut [Body],
+    contacts: &mut [Contact],
+    queue: &mut ContactQueue,
+    work: &mut Workspace,
+    k: f64,
+    controls: Controls,
+) -> Result<SolveReport, SolveError> {
+    controls.validate()?;
+    let Prepared {
+        independent,
+        nonlocal,
+        partitioned,
+    } = prepare(bodies, contacts, queue, work, k)?;
+    let count = work.indices.len();
     let Workspace {
         core,
         indices,

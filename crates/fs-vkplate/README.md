@@ -51,10 +51,24 @@ Node count alone does not establish audio-band fidelity.
   violate those properties. Uniform-mass surfaces retain their original operator;
   clock admission includes the mass-normalized damping bound on tapered surfaces.
 - **Contacts** (stick, felt beater, snare wires, hi-hat rims): one-sided power laws with
-  Hunt-Crossley loss, `f = K d^alpha (1 + mu d_dot)`, each solved implicitly as a monotone scalar
-  equation, so a hickory tip on bronze is stable at audio rates. A zero-radius tip uses bilinear
-  grid weights for both displacement and force; an incomplete boundary cell falls back to its
-  nearest node. A finite striker face retains its equal-weight footprint.
+  Hunt-Crossley loss use the discrete potential secant over the centered body interval.
+  Interacting contacts solve simultaneously through the same SAV, air-inertia and radiation
+  inverse as body prediction; proven independent contacts retain scalar fast paths. A zero-radius
+  tip uses bilinear grid weights for displacement and force; an incomplete boundary cell falls
+  back to its nearest node. A finite striker face retains its equal-weight footprint.
+- **Rim friction**: compliant normal forces and ideal Coulomb tractions share one final pose.
+  The joint solve includes normal/tangent feedback and interaction between friction patches,
+  using `fs-contact`'s generalized Coulomb derivative and `fs-solver`'s Newton–FGMRES driver.
+  Slip is `T^T(w_next - w_previous)`, matching the centered work interval. The final check covers
+  the original normal law, Coulomb capacity, slip/traction alignment and signed work before any
+  contact force, crush memory or displacement correction is published. `try_step` exposes a
+  bounded refusal; a failed instrument must be restored from a pre-step clone or rebuilt because
+  earlier prediction can advance other histories. `friction_solver_controls` govern both laws on
+  joint samples, and `friction_solve_report()` exposes that sample's signed mechanical work and
+  dissipated energy. `tangential_contact_forces()` returns signed reactions. This law has no
+  tangential elastic memory or thermal state, and acceptance does not establish global uniqueness
+  or continuum convergence. Export refuses nonzero friction until the external/GPU stepper
+  implements the same joint solve.
 - **Air**: a lumped adiabatic cavity couples a drum's two heads; each head's volume motion
   carries the radiation mass of a baffled piston (`8 rho a^3 / 3`, implicit); a monopole
   radiation resistance acts on the drum's NET volume flow, so two heads moving the same way in

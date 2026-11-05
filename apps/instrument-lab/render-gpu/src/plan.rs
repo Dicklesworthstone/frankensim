@@ -75,6 +75,40 @@ pub const TPB: usize = 256;
 /// Microphone taps per segment (two per lane of a warp).
 const SEG: usize = 64;
 
+/// Check before `Instrument::image`: a frictional contact may activate later,
+/// and the GPU kernel does not implement the joint compliant/Coulomb solve.
+pub fn validate_friction_export(frictions: &[fs_vkplate::Friction]) -> Result<(), String> {
+    if frictions.iter().any(|fr| fr.mu != 0.0) {
+        return Err("this GPU stepper has no simultaneous compliant normal-contact and Coulomb-friction solver; render the instrument natively (--backend cpu)".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod friction_export_tests {
+    use super::*;
+
+    #[test]
+    fn nonzero_friction_refuses_live_export_and_all_image_entries() {
+        let mut ins = Instrument::new(48_000.0);
+        let mut image = ins.image();
+        let plan = Plan::new(&image, &ins, 1, 256, true).unwrap();
+        assert!(plan.state(&image).is_ok());
+        ins.frictions.push(fs_vkplate::Friction {
+            contact: 0, sx: vec![], sy: vec![], mu: 0.0, force: 0.0, stuck: false,
+        });
+        assert!(validate_friction_export(&ins.frictions).is_ok());
+        ins.frictions[0].mu = 0.3;
+        let expected = validate_friction_export(&ins.frictions).unwrap_err();
+        assert!(expected.contains("simultaneous compliant"));
+        assert!(expected.contains("--backend cpu"));
+        assert_eq!(Plan::new(&image, &ins, 1, 256, true).err(), Some(expected.clone()));
+        image.frictions = std::mem::take(&mut ins.frictions);
+        assert_eq!(Plan::new(&image, &ins, 1, 256, true).err(), Some(expected.clone()));
+        assert_eq!(plan.state(&image).err(), Some(expected));
+    }
+}
+
 #[derive(Default)]
 pub struct Plan {
     pub nt: usize,
@@ -373,6 +407,8 @@ impl Plan {
     /// `exact_friction`: retain the CPU's order on all shared nodes (dependency levels)
     /// instead of a coloured sweep; for checks against the CPU.
     pub fn new(img: &InstrumentImage, ins: &Instrument, threads: usize, item: usize, exact_friction: bool) -> Result<Plan, String> {
+        validate_friction_export(&ins.frictions)?;
+        validate_friction_export(&img.frictions)?;
         let item = item.clamp(32, TPB);
         if img.step_index != 0 {
             return Err("export the instrument before its first step (the microphone rings are not exported)".into());
@@ -849,6 +885,7 @@ impl Plan {
 
     /// The state and strikes of one simulation of this plan's instrument.
     pub fn state(&self, img: &InstrumentImage) -> Result<SimState, String> {
+        validate_friction_export(&img.frictions)?;
         if img.has_mutual_radiation {
             return Err("a batch member has mutual radiation loading the GPU stepper cannot replay".into());
         }

@@ -64,6 +64,9 @@ impl Controls {
 /// No approximate force is published when the solve is refused.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SolveError {
+    /// Failure of the joint compliant normal/Coulomb stage. No contact state
+    /// or nodal correction from that stage has been published.
+    Friction(crate::friction_island::SolveError),
     InvalidInput(&'static str),
     InvalidLaw {
         contact: usize,
@@ -83,6 +86,7 @@ pub enum SolveError {
 impl std::fmt::Display for SolveError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Friction(error) => error.fmt(f),
             Self::InvalidInput(reason) => write!(f, "normal contact: {reason}"),
             Self::InvalidLaw { contact } => write!(
                 f,

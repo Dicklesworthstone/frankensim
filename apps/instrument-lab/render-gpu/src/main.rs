@@ -138,6 +138,9 @@ fn use_gpu(o: &Opts) -> bool {
 #[cfg(all(feature = "cuda", not(target_os = "macos")))]
 fn gpu_raw(pieces: &mut [Piece], total: usize, o: &Opts) -> Vec<Vec<Vec<f64>>> {
     let t = Instant::now();
+    for p in pieces.iter() {
+        plan::validate_friction_export(&p.instrument.frictions).unwrap_or_else(|e| die(&e));
+    }
     let imgs: Vec<_> = pieces.iter_mut().map(|p| p.instrument.image()).collect();
     // nodes per work item (one block each): about one item per multiprocessor of a large GPU (128), at
     // most a full block

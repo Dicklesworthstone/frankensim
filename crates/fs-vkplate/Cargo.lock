@@ -532,6 +532,26 @@ name = "fs-casebook"
 version = "0.0.1"
 
 [[package]]
+name = "fs-contact"
+version = "0.0.1"
+dependencies = [
+ "fs-blake3",
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-la",
+ "fs-matdb",
+ "fs-material",
+ "fs-math",
+ "fs-motion",
+ "fs-qty",
+ "fs-query",
+ "fs-solver",
+ "fs-tribo",
+]
+
+[[package]]
 name = "fs-evidence"
 version = "0.0.1"
 dependencies = [
@@ -555,12 +575,14 @@ dependencies = [
 name = "fs-feec"
 version = "0.0.1"
 dependencies = [
+ "fs-exec",
  "fs-ivl",
  "fs-la",
  "fs-math",
  "fs-modal",
  "fs-phs",
  "fs-qty",
+ "fs-query",
  "fs-rep-mesh",
  "fs-soa",
  "fs-sparse",
@@ -576,6 +598,13 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-simd",
+]
+
+[[package]]
+name = "fs-ga"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
 ]
 
 [[package]]
@@ -642,6 +671,18 @@ name = "fs-math"
 version = "0.0.1"
 
 [[package]]
+name = "fs-mesh"
+version = "0.0.1"
+dependencies = [
+ "fs-exec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-math",
+ "fs-obs",
+ "fs-rep-mesh",
+]
+
+[[package]]
 name = "fs-modal"
 version = "0.0.1"
 dependencies = [
@@ -651,6 +692,19 @@ dependencies = [
  "fs-la",
  "fs-math",
  "fs-sparse",
+]
+
+[[package]]
+name = "fs-motion"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-exec",
+ "fs-ga",
+ "fs-geom",
+ "fs-ivl",
+ "fs-math",
+ "fs-query",
 ]
 
 [[package]]
@@ -673,10 +727,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-query"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-mesh",
+ "fs-obs",
+ "fs-rep-frep",
+ "fs-rep-mesh",
+ "fs-rep-sdf",
+]
+
+[[package]]
 name = "fs-rand"
 version = "0.0.1"
 dependencies = [
  "fs-math",
+]
+
+[[package]]
+name = "fs-rep-frep"
+version = "0.0.1"
+dependencies = [
+ "fs-evidence",
+ "fs-exec",
+ "fs-geom",
+ "fs-ivl",
+ "fs-math",
+ "fs-obs",
 ]
 
 [[package]]
@@ -789,10 +870,19 @@ name = "fs-tilelang-macros"
 version = "0.0.1"
 
 [[package]]
+name = "fs-tribo"
+version = "0.0.1"
+dependencies = [
+ "fs-math",
+ "fs-rand",
+]
+
+[[package]]
 name = "fs-vkplate"
 version = "0.0.1"
 dependencies = [
  "fs-blake3",
+ "fs-contact",
  "fs-evidence",
  "fs-la",
  "fs-matdb",

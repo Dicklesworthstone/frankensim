@@ -79,12 +79,18 @@ pub mod shaft;
 mod contact_island;
 mod contact_response;
 pub use contact_island::{Controls as ContactSolveControls, SolveError as ContactSolveError, SolveReport as ContactSolveReport};
+mod friction_island;
+mod friction_response;
+pub use friction_island::{Controls as FrictionSolveControls, SolveError as FrictionSolveError, SolveReport as FrictionSolveReport};
 
 #[cfg(test)]
 mod contact_island_tests;
 
 #[cfg(test)]
 mod friction_contact_tests;
+
+#[cfg(test)]
+mod friction_joint_tests;
 
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
@@ -3273,12 +3279,13 @@ fn solve_contacts(bodies: &mut [Body], contacts: &mut [Contact], q: &mut Contact
 /// (Kirchhoff: u = -z grad w), so the two faces of a contact slip against each other by
 /// s = (t_a / 2) grad w_a + (t_b / 2) grad w_b, the face below a plate moving opposite to the face
 /// above it. `sx` and `sy` hold the two slip components as weighted sums of node displacements. The
-/// friction force acts against the final slip with at most `mu` times the normal force. It is
-/// solved after normal contact using centered slip across the same two-step
-/// interval as the body and normal-contact work. Backward slip can oppose the
-/// centered velocity and inject energy into an oscillator. Normal/tangential
-/// cross-coupling still requires a joint solve; this sequential stage alone
-/// does not certify passivity of the complete coupled discretization.
+/// friction force acts against the final centered slip with at most `mu` times
+/// the final normal force. The instrument solves both laws simultaneously,
+/// including cross-response between normal and tangential footprints and other
+/// contacts. Centered slip spans the same two-step interval as body and normal
+/// work; backward slip can inject energy into a resonating body at a turning
+/// point. This is ideal dry friction, without tangential elastic storage,
+/// temperature evolution or a uniqueness claim for the coupled Coulomb problem.
 #[derive(Clone)]
 pub struct Friction {
     pub contact: usize,
@@ -3337,6 +3344,9 @@ fn friction_force(dx: f64, dy: f64, cxx: f64, cyy: f64, cxy: f64, cap: f64) -> (
     (fx, fy, stuck)
 }
 
+// Isolated fixed-normal reference for the contact regressions. Instrument
+// stepping uses the joint adapter, since traction can change normal penetration.
+#[cfg(test)]
 fn solve_frictions(bodies: &mut [Body], contacts: &[Contact], frictions: &mut [Friction], k: f64) {
     for fr in frictions.iter_mut() {
         let c = &contacts[fr.contact];
@@ -3433,7 +3443,8 @@ pub struct Instrument {
     mutual_radiation: Vec<mutual_radiation::BoundResistance>,
     pub links: Vec<Link>,
     pub contacts: Vec<Contact>,
-    /// Dry friction on the faces some contacts press together, solved after the contacts.
+    /// Dry friction on contact faces, solved jointly with all active normal
+    /// contacts through the same body response and centered displacement.
     pub frictions: Vec<Friction>,
     pub strikes: Vec<Strike>,
     pub drives: Vec<Drive>,
@@ -3448,10 +3459,15 @@ pub struct Instrument {
     prepared: bool,
     cq: ContactQueue,
     contact_work: contact_response::Workspace,
-    /// Accuracy and work limits for simultaneous normal contact. All active
-    /// contacts participate, including initially separated ones.
+    friction_work: friction_response::Workspace,
+    /// Accuracy and work limits for samples without active nonzero friction.
+    /// All active normal contacts participate, including separated ones.
     pub contact_solver_controls: ContactSolveControls,
+    /// Accuracy and work limits for the joint normal/Coulomb solve when any
+    /// active contact carries nonzero friction. These govern both force laws.
+    pub friction_solver_controls: FrictionSolveControls,
     contact_report: ContactSolveReport,
+    friction_report: FrictionSolveReport,
     // Air and material prediction can advance before contact refuses. A failed
     // instrument must not silently continue from that partial interval.
     contact_failure: Option<ContactSolveError>,
@@ -3478,7 +3494,7 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, mutual_radiation: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), contact_work: contact_response::Workspace::default(), contact_solver_controls: ContactSolveControls::default(), contact_report: ContactSolveReport::default(), contact_failure: None, load_on: None })
+        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, mutual_radiation: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), contact_work: contact_response::Workspace::default(), friction_work: friction_response::Workspace::default(), contact_solver_controls: ContactSolveControls::default(), friction_solver_controls: FrictionSolveControls::default(), contact_report: ContactSolveReport::default(), friction_report: FrictionSolveReport::default(), contact_failure: None, load_on: None })
     }
     /// Attach one complete narrowband mutual resistance in its producer's
     /// generalized basis. Each footprint is the dimensionless projection
@@ -4037,17 +4053,29 @@ impl Instrument {
     }
 
     /// One time step; returns each microphone's pressure sample [Pa].
-    /// Panics if normal contact cannot meet its declared tolerances; callers
+    /// Panics if contact cannot meet its declared tolerances; callers
     /// that need to handle this refusal should use `try_step`.
     pub fn step(&mut self, out: &mut [f64]) {
-        self.try_step(out).expect("instrument normal-contact step failed");
+        self.try_step(out).expect("instrument contact step failed");
     }
 
-    /// The last accepted normal-contact solve, before the separate friction
-    /// stage. Residuals are normalized by `contact_solver_controls`.
+    /// The last accepted normal-contact solve at the common final pose.
+    /// Residuals use `friction_solver_controls` on joint friction samples and
+    /// `contact_solver_controls` otherwise. Joint Krylov work is reported by
+    /// `friction_solve_report`; its CG iteration count here is zero.
     pub fn contact_solve_report(&self) -> ContactSolveReport { self.contact_report }
 
-    /// Advance one interval, refusing an unconverged normal-contact solution.
+    /// The last accepted joint solve, including signed mechanical friction
+    /// work and nonnegative dissipation for that interval [J]. Zero on samples
+    /// without active nonzero friction; no heat state is evolved by this law.
+    pub fn friction_solve_report(&self) -> FrictionSolveReport { self.friction_report }
+
+    /// Last accepted signed tangential reactions [N], indexed like `frictions`.
+    /// Each pair multiplies that friction's `sx` and `sy` footprints. Empty
+    /// before the first accepted contact stage; inactive entries are zero.
+    pub fn tangential_contact_forces(&self) -> &[[f64; 2]] { self.friction_work.tangential_forces() }
+
+    /// Advance one interval, refusing an unconverged contact solution.
     /// A contact refusal leaves microphone output and the accepted step index
     /// unchanged and publishes no contact forces or contact displacement update.
     /// Earlier air/material prediction may already have advanced: the instrument
@@ -4266,21 +4294,22 @@ impl Instrument {
                 crush.deepest = 0.0;
             }
         }
-        // All normal contacts see one common final pose through the same SAV
-        // and acoustic response used by body prediction.
-        self.contact_report = match contact_response::solve_contacts_checked(
-            &mut self.bodies, &mut self.contacts, &mut self.cq, &mut self.contact_work,
-            k, self.contact_solver_controls,
+        // Normal and Coulomb laws see one common final pose through the same
+        // SAV and acoustic response used by body prediction. Tangential work
+        // uses the centered interval; it cannot invalidate a finished normal solve.
+        let (normal_report, friction_report) = match friction_response::solve_contacts_with_friction_checked(
+            &mut self.bodies, &mut self.contacts, &mut self.frictions,
+            &mut self.cq, &mut self.contact_work, &mut self.friction_work,
+            k, self.contact_solver_controls, self.friction_solver_controls,
         ) {
-            Ok(report) => report,
+            Ok(reports) => reports,
             Err(error) => {
                 self.contact_failure = Some(error.clone());
                 return Err(error);
             }
         };
-        if !self.frictions.is_empty() {
-            solve_frictions(&mut self.bodies, &self.contacts, &mut self.frictions, k);
-        }
+        self.contact_report = normal_report;
+        self.friction_report = friction_report;
         for b in self.bodies.iter_mut() {
             b.finish(k);
         }
@@ -4355,13 +4384,15 @@ impl Instrument {
     /// render-gpu's plan refuses a microphone that has one. Nor is a `RadDipole`: the kit attaches one only to
     /// heads carrying a radiation load, which that plan refuses. Mutual radiation
     /// also requires refusal: its presence marker survives export, not its operator.
-    /// Interacting normal contacts are also refused: the exported stepper does
-    /// not implement their simultaneous solve. This check includes contacts a
-    /// scheduled strike may activate later.
+    /// Interacting normal contacts and nonzero friction are also refused: the
+    /// exported stepper does not implement their simultaneous solve. These
+    /// checks include contacts a scheduled strike may activate later.
     pub fn image(&mut self) -> InstrumentImage {
         assert!(self.contact_failure.is_none(), "cannot export an instrument after a refused contact step");
         assert!(!contact_response::requires_coupled_contacts(&self.bodies, &self.contacts),
             "the exported stepper does not implement simultaneous interacting normal contacts; use Instrument::try_step");
+        assert!(self.frictions.iter().all(|f| f.mu == 0.0),
+            "the exported stepper does not implement simultaneous compliant normal contact and centered Coulomb friction; use Instrument::try_step");
         assert!(self.cavities.iter().filter_map(|c| c.port.as_ref()).all(|q|
             !q.has_baffled_radiation() && q.flow_loss_coefficient() == 0.0),
             "the exported stepper does not implement nonlinear or memory vent pressure laws; use Instrument::step");

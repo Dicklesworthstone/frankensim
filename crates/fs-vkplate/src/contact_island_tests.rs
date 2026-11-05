@@ -253,7 +253,7 @@ fn simultaneous_hunt_crossley_and_retardation_close_dissipative_work() {
     assert!(worst < 2e-9);
 }
 
-fn loaded_body(k: f64) -> Body {
+pub(super) fn loaded_body(k: f64) -> Body {
     // Manufactured passive, nonorthogonal radiation columns; the operator,
     // cached inverse and contact laws remain the production implementations.
     let mut body = Body::point("loaded contact fixture", 1.0);
@@ -280,7 +280,7 @@ fn loaded_body(k: f64) -> Body {
 }
 
 /// Independent full nodal elimination, not a second Woodbury implementation.
-fn dense_solve(mut a: Vec<f64>, mut b: Vec<f64>) -> Vec<f64> {
+pub(super) fn dense_solve(mut a: Vec<f64>, mut b: Vec<f64>) -> Vec<f64> {
     let n = b.len();
     for j in 0..n {
         let p = (j..n)

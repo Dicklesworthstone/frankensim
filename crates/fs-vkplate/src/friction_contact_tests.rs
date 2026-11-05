@@ -2,7 +2,13 @@
 
 use super::*;
 
-fn point_with_prediction(name: &str, position: f64, previous: f64, force: f64, k: f64) -> Body {
+pub(super) fn point_with_prediction(
+    name: &str,
+    position: f64,
+    previous: f64,
+    force: f64,
+    k: f64,
+) -> Body {
     let mut body = Body::point(name, 1.0);
     body.w[0] = position;
     body.wp[0] = previous;
@@ -11,7 +17,7 @@ fn point_with_prediction(name: &str, position: f64, previous: f64, force: f64, k
     body
 }
 
-fn turning_oscillator(k: f64) -> (Vec<Body>, Vec<Contact>, Vec<Friction>) {
+pub(super) fn turning_oscillator(k: f64) -> (Vec<Body>, Vec<Contact>, Vec<Friction>) {
     let stiffness = 1e6;
     let bodies = vec![
         point_with_prediction("normal", 0.001, 0.001, 0.0, k),
@@ -22,7 +28,11 @@ fn turning_oscillator(k: f64) -> (Vec<Body>, Vec<Contact>, Vec<Friction>) {
         vec![(0, 0, 1.0)],
         vec![],
         0.0,
-        Law::Power { k: stiffness, alpha: 1.0, mu: 0.0 },
+        Law::Power {
+            k: stiffness,
+            alpha: 1.0,
+            mu: 0.0,
+        },
     )];
     let frictions = vec![Friction {
         contact: 0,
@@ -35,16 +45,33 @@ fn turning_oscillator(k: f64) -> (Vec<Body>, Vec<Contact>, Vec<Friction>) {
     (bodies, contacts, frictions)
 }
 
-fn turning_energy(bodies: &[Body], k: f64, after: bool) -> f64 {
-    let kinetic: f64 = bodies.iter().map(|b| {
-        let increment = if after { b.wn[0] - b.w[0] } else { b.w[0] - b.wp[0] };
-        0.5 * b.mass[0] * (increment / k).powi(2)
-    }).sum();
+pub(super) fn turning_energy(bodies: &[Body], k: f64, after: bool) -> f64 {
+    let kinetic: f64 = bodies
+        .iter()
+        .map(|b| {
+            let increment = if after {
+                b.wn[0] - b.w[0]
+            } else {
+                b.w[0] - b.wp[0]
+            };
+            0.5 * b.mass[0] * (increment / k).powi(2)
+        })
+        .sum();
     let normal = &bodies[0];
-    let (a, b) = if after { (normal.wn[0], normal.w[0]) } else { (normal.w[0], normal.wp[0]) };
+    let (a, b) = if after {
+        (normal.wn[0], normal.w[0])
+    } else {
+        (normal.w[0], normal.wp[0])
+    };
     let contact = 0.25 * 1e6 * (a.max(0.0).powi(2) + b.max(0.0).powi(2));
     let tangent = &bodies[1];
-    let spring = 0.5 * 1e6 * if after { tangent.wn[0] * tangent.w[0] } else { tangent.w[0] * tangent.wp[0] };
+    let spring = 0.5
+        * 1e6
+        * if after {
+            tangent.wn[0] * tangent.w[0]
+        } else {
+            tangent.w[0] * tangent.wp[0]
+        };
     kinetic + contact + spring
 }
 
@@ -64,7 +91,8 @@ fn centered_friction_cannot_pump_a_turning_resonant_oscillator() {
         &mut contact_response::Workspace::default(),
         k,
         ContactSolveControls::default(),
-    ).unwrap();
+    )
+    .unwrap();
     assert!((contacts[0].force - 2000.0 / 3.0).abs() < 2e-9);
     let predicted_tangent = bodies[1].wn[0];
     assert!(predicted_tangent - bodies[1].w[0] < 0.0);
@@ -85,5 +113,7 @@ fn centered_friction_cannot_pump_a_turning_resonant_oscillator() {
     assert!(heat > 0.0);
     assert!((heat - 0.01875).abs() < 2e-12);
     assert!((final_energy + heat - initial).abs() < 3e-12);
-    eprintln!("turning oscillator: energy {initial:.12} -> {final_energy:.12} J, centered friction heat {heat:.12} J");
+    eprintln!(
+        "turning oscillator: energy {initial:.12} -> {final_energy:.12} J, centered friction heat {heat:.12} J"
+    );
 }
