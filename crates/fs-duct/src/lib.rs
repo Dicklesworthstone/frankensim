@@ -475,6 +475,31 @@ pub struct SegmentWave {
     pub shear_number: f64,
 }
 
+// Resolve the component normal to a real transverse wavenumber in the
+// original isotropic medium: q² = k² - k_t², exp(-i omega t). Form the
+// dimensional difference BEFORE scaling: dividing k and k_t separately
+// rounds away their small separation near cutoff. Scaling the factored
+// real part avoids squaring dimensional wavenumbers; evaluating 2 Re(k) Im(k)
+// directly also retains the weak phase of a strongly evanescent mode.
+fn normal_wavenumber(k: C64, transverse: f64) -> C64 {
+    if transverse == 0.0 {
+        return k;
+    }
+    let scale = k.re.abs().max(k.im.abs()).max(transverse.abs());
+    let re = k.re / scale;
+    let im = k.im / scale;
+    let difference = (k.re - transverse) / scale;
+    let sum = re + transverse / scale;
+    let squared = C64::new(difference.mul_add(sum, -(im * im)), 2.0 * re * im);
+    let q = squared.sqrt().scale(scale);
+    // Forward-decaying branch, including the real propagating limit.
+    if q.im < 0.0 || (q.im == 0.0 && q.re < 0.0) {
+        -q
+    } else {
+        q
+    }
+}
+
 /// A solved input impedance with its validity diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub struct DuctResponse {

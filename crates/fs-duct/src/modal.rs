@@ -365,14 +365,9 @@ fn modal_wave_from_plane_wave(
     let mut zc = Vec::with_capacity(n);
     k.push(k0);
     zc.push(zc0);
-    let k0sq = k0 * k0;
     for &gamma in gammas {
         let kt = gamma / radius;
-        let mut kn = (k0sq - C64::from_re(kt * kt)).sqrt();
-        // Forward-decaying branch: Im k >= 0 under e^{-i omega t}.
-        if kn.im < 0.0 || (kn.im == 0.0 && kn.re < 0.0) {
-            kn = -kn;
-        }
+        let kn = crate::normal_wavenumber(k0, kt);
         if kn.abs() < 1e-300 {
             if admit_cutoff && kn == C64::ZERO {
                 k.push(kn);
@@ -384,7 +379,7 @@ fn modal_wave_from_plane_wave(
         k.push(kn);
         // Zc_n = Zc_0 * k_0 / k_n: exact lossless modal impedance
         // omega*rho/(k_n S) scaled through the ZK-corrected plane mode.
-        zc.push(zc0 * k0 * kn.recip());
+        zc.push(zc0 * (k0 / kn));
     }
     Ok(ModalWave {
         radius,
@@ -1132,6 +1127,130 @@ mod modal_tests {
             );
         }
         verdict("mm-002-analytic-cutoffs", pass, &detail);
+    }
+
+    // Independent expanded dispersion relation in double-double precision.
+    // Production factors and scales binary64 values; this oracle instead
+    // retains the low product bits when subtracting k² and k_t².
+    fn cutoff_reference(k: C64, transverse: f64) -> C64 {
+        let re = Dd::from_f64(k.re);
+        let im = Dd::from_f64(k.im);
+        let transverse = Dd::from_f64(transverse);
+        let x = re * re - im * im - transverse * transverse;
+        let y = Dd::from_f64(2.0) * re * im;
+        let magnitude = (x * x + y * y).sqrt();
+        let large = ((magnitude + x.abs()) / Dd::from_f64(2.0)).sqrt();
+        if x.hi >= 0.0 {
+            C64::new(large.to_f64(), (y / (Dd::from_f64(2.0) * large)).to_f64())
+        } else {
+            C64::new((y / (Dd::from_f64(2.0) * large)).to_f64(), large.to_f64())
+        }
+    }
+
+    fn cutoff_component_close(actual: C64, expected: C64) {
+        for (got, want) in [(actual.re, expected.re), (actual.im, expected.im)] {
+            assert!(
+                (got - want).abs() <= 16.0 * f64::EPSILON * want.abs(),
+                "actual {actual:?}, independent dispersion {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mm_cutoff_adjacent_frequencies_resolve_axial_wavelength_and_impedance() {
+        let state = air20();
+        let gammas = j1_roots(3).unwrap();
+        for radius in [0.003, 0.03, 0.3] {
+            for &gamma in &gammas {
+                let transverse = gamma / radius;
+                let original = segment_wave(
+                    &state, radius, transverse * state.sound_speed, LossModel::Lossless,
+                ).unwrap();
+                for re in [transverse.next_down(), transverse.next_up()] {
+                    // Retain these exact adjacent binary64 wavenumbers;
+                    // an extra frequency/sound-speed round trip can move one.
+                    let plane = SegmentWave {
+                        wavenumber: C64::from_re(re),
+                        ..original
+                    };
+                    let modes = modal_wave_from_plane_wave(plane, radius, &[gamma], false).unwrap();
+                    let expected = cutoff_reference(plane.wavenumber, transverse);
+                    cutoff_component_close(modes.k[1], expected);
+                    let axial_length = core::f64::consts::TAU / modes.k[1].abs();
+                    let expected_length = core::f64::consts::TAU / expected.abs();
+                    assert!((axial_length / expected_length - 1.0).abs() < 16.0 * f64::EPSILON);
+                    cutoff_component_close(
+                        modes.zc[1],
+                        original.characteristic_impedance * (plane.wavenumber / expected),
+                    );
+                    assert_eq!(modes.k[0], plane.wavenumber);
+                    assert_eq!(modes.zc[0], plane.characteristic_impedance);
+                }
+                let cutoff = SegmentWave {
+                    wavenumber: C64::from_re(transverse),
+                    ..original
+                };
+                assert!(matches!(
+                    modal_wave_from_plane_wave(cutoff, radius, &[gamma], false),
+                    Err(DuctError::Singular)
+                ));
+                let finite = modal_wave_from_plane_wave(cutoff, radius, &[gamma], true).unwrap();
+                assert_eq!(finite.k[1], C64::ZERO);
+                assert_eq!(finite.zc[1], cutoff.characteristic_impedance);
+            }
+        }
+    }
+
+    #[test]
+    fn mm_cutoff_lossy_modes_preserve_phase_decay_and_original_momentum_relation() {
+        let state = air20();
+        let radius = 0.03;
+        let gammas = j1_roots(3).unwrap();
+        let cutoff_omega = state.sound_speed * gammas[0] / radius;
+        for loss in [LossModel::WideTube, LossModel::Bessel] {
+            for ratio in [0.4, 0.999_999, 1.0, 1.000_001, 3.0] {
+                let plane = segment_wave(&state, radius, ratio * cutoff_omega, loss).unwrap();
+                assert!(plane.wavenumber.im > 1e-5 * plane.wavenumber.re);
+                let modes = modal_wave_from_plane_wave(plane, radius, &gammas, false).unwrap();
+                for (n, &gamma) in gammas.iter().enumerate() {
+                    let expected = cutoff_reference(plane.wavenumber, gamma / radius);
+                    cutoff_component_close(modes.k[n + 1], expected);
+                    assert!(modes.k[n + 1].re > 0.0 && modes.k[n + 1].im > 0.0);
+                    let momentum = modes.zc[n + 1] * expected;
+                    let original_momentum = plane.characteristic_impedance * plane.wavenumber;
+                    assert!((momentum - original_momentum).abs()
+                        < 32.0 * f64::EPSILON * original_momentum.abs());
+                }
+                assert_eq!(modes.k[0], plane.wavenumber);
+                assert_eq!(modes.zc[0], plane.characteristic_impedance);
+                assert_eq!(modes.shear_number, plane.shear_number);
+            }
+        }
+    }
+
+    #[test]
+    fn mm_cutoff_dispersion_is_scale_invariant_including_weak_loss() {
+        let transverse = j1_roots(1).unwrap()[0] / 0.03;
+        let cases = [
+            C64::from_re(transverse.next_down()),
+            C64::from_re(transverse.next_up()),
+            C64::new(transverse.next_down(), transverse * 1e-18),
+            C64::new(transverse, transverse * 1e-12),
+            C64::new(transverse.next_up(), transverse * 1e-8),
+            C64::new(transverse, transverse * 0.1),
+            C64::new(transverse * 1e-18, transverse * 0.01),
+        ];
+        for k in cases {
+            let expected = cutoff_reference(k, transverse);
+            for exponent in [-540_i32, -200, 0, 200, 540] {
+                // Test the physical wave calculation's homogeneity, without
+                // requiring a full duct's area or inertia at these scales.
+                let scale = f64::from_bits(((1023 + exponent) as u64) << 52);
+                let q = crate::normal_wavenumber(k.scale(scale), transverse * scale);
+                cutoff_component_close(C64::new(q.re / scale, q.im / scale), expected);
+                assert_eq!(crate::normal_wavenumber(k.scale(scale), 0.0), k.scale(scale));
+            }
+        }
     }
 
     #[test]

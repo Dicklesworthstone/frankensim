@@ -1,5 +1,51 @@
 use super::*;
 use crate::compose::ComposeOptions;
+use fs_math::dd::Dd;
+
+#[test]
+fn g1_oblique_cutoff_retains_adjacent_wavenumbers_in_the_weak_loss_limit() {
+    let gas = gas();
+    // An explicit free-fluid limiting control, not a measured porous material.
+    // Its small but positive pore loss resolves both sides of grazing without
+    // allowing the imaginary part to hide a rounded-away real separation.
+    let card = PorousCard {
+        name: "synthetic-weak-loss-cutoff",
+        porosity: 1.0,
+        flow_resistivity: 1e-16,
+        tortuosity: 1.0,
+        viscous_length_m: 1e14,
+        thermal_length_m: 1e14,
+        thermal_permeability_m2: None,
+        provenance: "synthetic free-fluid limiting control, not measured material",
+        valid_hz: (1.0, 1e5),
+    };
+    let material = PorousFluidLaw::try_new(card, 1.81e-5).unwrap();
+    let (omega, area, length) = (6000.0, 0.004, 0.04);
+    let reference = gas.characteristic_impedance / area;
+    let normal = PorousLayer::try_new(&material, &gas, omega, length, area, reference).unwrap();
+    let k = normal.normal_wavenumber_rad_m();
+    assert!(k.im > 0.0 && k.im < 0.01 * f64::EPSILON * k.re);
+    for transverse in [k.re.next_down(), k.re, k.re.next_up()] {
+        let layer = PorousLayer::try_new_oblique(
+            &material, &gas, omega, length, area, reference, transverse,
+        ).unwrap();
+        let q = layer.normal_wavenumber_rad_m();
+        assert!(q.re > 0.0 && q.im > 0.0);
+        // Expanded high-precision dispersion, independent of the production
+        // factored/scaled calculation, preserves each original product bit.
+        let re = Dd::from_f64(k.re);
+        let im = Dd::from_f64(k.im);
+        let tangent = Dd::from_f64(transverse);
+        let expected = C64::new(
+            (re * re - im * im - tangent * tangent).to_f64(),
+            (Dd::from_f64(2.0) * re * im).to_f64(),
+        );
+        assert!((q * q - expected).abs() < 32.0 * f64::EPSILON * expected.abs());
+        let momentum = layer.normal_specific_impedance_pa_s_m() * q;
+        let original = layer.material_response().dynamic_density_kg_m3().conj().scale(omega);
+        close(momentum, original, 32.0 * f64::EPSILON);
+    }
+}
 
 #[test]
 fn g1_oblique_slab_matches_independent_interface_continuity_and_exact_normal_limit() {

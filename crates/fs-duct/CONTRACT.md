@@ -1001,7 +1001,15 @@ pipe `Z_in = +i Zc cot(kL)`.
     degenerates to the scalar plane-wave path on stepped-cylinder
     chains within 1e-9 relative (measured 1e-10 class); modal
     wavenumbers are the analytic `sqrt(k^2 - (gamma_n/R)^2)` in both
-    regimes; the junction projection matrix matches independent in-test
+    regimes. Their shared normal-wave calculation subtracts dimensional real
+    wavenumbers before scaling and factors the difference of squares, so
+    adjacent representable frequencies retain their long axial wavelengths
+    on either side of cutoff. Double-double expanded-dispersion controls cover
+    those neighbors, finite exact-cutoff references, original wide-tube/Bessel
+    phase and attenuation, weak-loss evanescence and wave-scale invariance.
+    Modal impedance forms `Zc_0 * (k_0 / k_n)` without an intermediate
+    dimensional product; the original plane-mode values remain exact.
+    The junction projection matrix matches independent in-test
     quadrature to 5e-9; a sudden expansion's evanescent modes add a
     purely reactive, convergent impedance shift; and on a trumpet-like
     flare the mode ladder is settled at the top (N=4 vs N=5 <= 1 cent,
@@ -3239,8 +3247,10 @@ and powers, angular weighting and exact coherent-witness parity.
 `q = sqrt(k_bulk^2 - k_t^2)` and normal specific impedance
 `Z_n = omega rho_eff / q`. The original stable scattering, interface maps and
 analytic cell integrals retain normal thickness and full physical face area.
-A common `k_t` is required at every parallel interface. The square-root argument
-is scaled and factored; internally evanescent modes are admitted, while exact
+A common `k_t` is required at every parallel interface. The normal-wave owner
+is shared with duct modes: its dimensional real-wavenumber difference is taken
+before scaling, preserving grazing accuracy even in the weak-loss limit.
+Internally evanescent modes are admitted, while exact
 zero or unrepresentable normal wavenumber refuses. The zero-tangent branch
 retains the original normal-incidence arithmetic exactly.
 
@@ -3261,7 +3271,8 @@ partially coherent stack excitation share this same owner and spatial mode.
 
 `porous/tests/oblique.rs` checks independent interface-continuity reflection
 and transmission, independently reconstructed vector-velocity volume loss,
-normal flux closure, exact normal-limit parity, opaque and internally
+normal flux closure, adjacent grazing modes against an expanded double-double
+dispersion control, exact normal-limit parity, opaque and internally
 evanescent layers, and mode-domain refusal. The derivation follows linear
 isotropic momentum/continuity; the oblique equivalent-fluid setting is also
 summarized by Sgard, Atalla and Robin (2024), section 2.2.1,

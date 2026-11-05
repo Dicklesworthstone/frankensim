@@ -146,17 +146,7 @@ impl<'a> PorousLayer<'a> {
         let mut specific = specific.conj();
         let mut wavenumber = wavenumber.conj();
         if tangential_wavenumber_rad_m != 0.0 {
-            // Scale before squaring: k² and k_t² can overflow even when q is
-            // representable. Factoring the difference also retains cutoff
-            // accuracy without subtracting two independently rounded squares.
-            let scale = wavenumber
-                .re
-                .abs()
-                .max(wavenumber.im.abs())
-                .max(tangential_wavenumber_rad_m);
-            let k = C64::new(wavenumber.re / scale, wavenumber.im / scale);
-            let t = C64::from_re(tangential_wavenumber_rad_m / scale);
-            let q = ((k - t) * (k + t)).sqrt().scale(scale);
+            let q = crate::normal_wavenumber(wavenumber, tangential_wavenumber_rad_m);
             if !finite(q) || q.abs() == 0.0 || q.im < 0.0 || q.re < 0.0 {
                 return Err(bad("porous normal wavenumber is singular or unrepresentable").into());
             }
