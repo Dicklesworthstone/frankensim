@@ -445,6 +445,9 @@ impl MultiFrictionModalSystem {
     /// Original geometry and dry construction law, with no mutable admission bypass.
     /// An explicit material_shear_layer replaces that port's active dry mechanism.
     #[must_use] pub fn port(&self, index: usize) -> Option<&ModalFrictionPort> { self.points.get(index).map(|p| &p.port) }
+    /// Complete retained map of one port, `b_left - b_right + b_correction`: the
+    /// displacement and force map the joint solve uses. `port` keeps the participants.
+    #[must_use] pub fn friction_port_column(&self, index: usize) -> Option<&[f64]> { self.points.get(index).map(|p| p.column.as_slice()) }
     /// Actual modal, bilateral, material, series-drive and obstacle stored energy [J].
     pub fn total_energy_j(&self) -> Result<f64, ModalCouplingError> {
         let network = self.core.total_energy_j()?;

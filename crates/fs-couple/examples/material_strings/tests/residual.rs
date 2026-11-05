@@ -126,9 +126,14 @@ fn bow_residual_uses_material_geometry_and_reaches_the_original_pcm_writer() {
         }]).unwrap();
         assert_eq!(bank.system().friction_residual_compliance(),Some(g.as_slice()));
         assert!(g[0]>0.0 && cross[0]!=0.0);
-        let receiver=bank.system().port(0).unwrap().right.as_ref().unwrap();
+        // The port keeps the plain card's receiving surface (none at a fixed bow); the bridge's
+        // body part is the separate correction +cross*B inside the port's complete map.
+        assert_eq!(bank.system().port(0).unwrap().right,plain.performance.bank().system().port(0).unwrap().right);
         let bridge=&bank.source().bank().strings()[0].connections[0].body;
-        assert_eq!(receiver.shapes,bridge.shapes.iter().map(|b|-cross[0]*b).collect::<Vec<_>>());
+        let offset:usize=bank.system().components()[..bank.cards().len()+bridge.component].iter()
+            .map(|c|c.modes().len()).sum();
+        let column=bank.system().friction_port_column(0).unwrap();
+        assert_eq!(column[offset..offset+bridge.shapes.len()].to_vec(),bridge.shapes.iter().map(|b|cross[0]*b).collect::<Vec<_>>());
         assert_eq!(bank.system().components()[0].modes(),plain.performance.bank().system().components()[0].modes());
         let a=pressure(&mut plain,37);
         let b=pressure(&mut corrected,1);
