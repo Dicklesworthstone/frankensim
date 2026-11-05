@@ -76,6 +76,15 @@ pub enum ViscoError {
         /// The authored gate.
         required: f64,
     },
+    /// A bounded positive spectral truncation could not meet its error gate.
+    TruncationTolerance {
+        /// Analytic upper error bound, normalized by the full relaxation strength.
+        achieved: f64,
+        /// Authored bound in the same normalization.
+        required: f64,
+        /// Retained thermal terms at exhaustion.
+        terms: usize,
+    },
     /// The nonlinear fractional-Zener fit exhausted its iteration budget
     /// without meeting the convergence criteria.
     FitDiverged {
@@ -102,6 +111,10 @@ impl core::fmt::Display for ViscoError {
                 f,
                 "FS-MAT-VISCO-FIT-TOLERANCE: sup relative modulus error {achieved:.3e} \
                  exceeds the authored gate {required:.3e}"
+            ),
+            ViscoError::TruncationTolerance { achieved, required, terms } => write!(
+                f,
+                "FS-MAT-VISCO-TRUNCATION-TOLERANCE: normalized error bound {achieved:.3e} exceeds {required:.3e} with {terms} terms"
             ),
             ViscoError::FitDiverged {
                 residual,

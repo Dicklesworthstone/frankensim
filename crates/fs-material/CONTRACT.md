@@ -3785,6 +3785,29 @@ a homogeneous isotropic slab with insulated faces, without lateral diffusion
 or a transient heat solver. Focused tests compare the closed form with an
 independent thermal-mode sum and recover uniaxial anticlastic bending.
 
+`SlabThermoelasticBending::new_coupled` extends the explicit anisotropic
+plane-stress law to coupled linear thermoelastic memory. It treats the supplied
+elastic tensor as isothermal and converts the supplied constant-stress heat
+capacity to `C_epsilon = C_sigma - T alpha^T Q alpha`, refusing a nonpositive
+or numerically indeterminate result. The same fixed-strain capacity supplies
+both the positive rank-one relaxation tensor and diffusion times. The original
+`new` constructor and diagonal weak-loss consumers retain their constant-stress
+capacity convention. Both models assume a homogeneous frozen state,
+through-thickness Fourier conduction and insulated faces; neither supplies
+lateral heat transport or evolving mean temperature.
+
+`slab_relaxation_response` and `complex_bending_increment` expose the complete
+complex thermal increment, including storage dispersion, DC and signed-frequency
+conjugacy. `lower_to_prony` supplies a bounded positive odd-mode prefix to the
+existing Maxwell state owners. Retained weights are never renormalized.
+`SlabPronySpectrum` records the declared frequency band, analytic omitted-tail
+bound, retained coefficient-rounding bound and total normalized complex-error
+bound. The tail uses the convex midpoint integral bound on the infinite thermal
+series; admission does not rely on a frequency grid. An exhausted term cap
+returns `TruncationTolerance`. This scalar constitutive bound excludes source
+tensor, FE projection, modal truncation and runtime roundoff, and is not an
+arbitrary-force trajectory guarantee. It does not create material provenance.
+
 `fit_fractional_zener_components` fits storage and loss with separate relative
 residuals and AD Jacobian rows. Every measured component must meet its own
 samplewise budget, so weak damping cannot disappear behind elastic stiffness.

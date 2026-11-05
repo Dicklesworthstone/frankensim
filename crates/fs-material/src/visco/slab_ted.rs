@@ -9,10 +9,12 @@
 //! Isotropic plane stress couples temperature to
 //! `E alpha/(1-nu) (epsilon_x+epsilon_y)`, so only mean curvature drives loss.
 //! The anisotropic law retains the full `Q alpha` coupling, including shear.
-//! Both use the first-order, weak
-//! thermoelastic coupling approximation: heat capacity is `rho c_p`, lateral
-//! heat diffusion and surface heat exchange are omitted. Do not add this loss
-//! to a model that already resolves the same thermomechanical heat transfer.
+//! The original constructor and scalar Zener methods use the first-order weak
+//! coupling approximation with constant-stress capacity `rho c_p`. The explicit
+//! coupled constructor instead retains fixed-strain capacity and linear
+//! strain--temperature feedback. Both omit lateral heat diffusion and surface
+//! heat exchange. Do not add these terms when the same thermomechanical heat
+//! transfer is already resolved.
 //!
 //! References: Lifshitz & Roukes, Phys. Rev. B 61, 5600 (2000), eq. (29) and
 //! appendix A, <https://doi.org/10.1103/PhysRevB.61.5600>; Norris & Photiadis,
@@ -21,6 +23,9 @@
 
 use super::{ThermoelasticZener, ViscoError};
 use fs_math::det;
+
+mod spectrum;
+pub use spectrum::{SlabPronySpectrum, SlabPronyTerm};
 
 /// Complete thermal diffusion loss sum per unit relaxation strength:
 /// `sum_n 96/[pi^4(2n+1)^4] omega tau_n/[1+(omega tau_n)^2]`.
@@ -73,15 +78,69 @@ pub fn slab_relaxation_shape(omega: f64, first_relaxation_time: f64) -> f64 {
 }
 
 
+/// Complete normalized complex bending increment for `exp(i omega t)`.
+///
+/// This is `sum_j w_j i omega tau_j / (1 + i omega tau_j)`, with the same
+/// insulated-face diffusion modes as [`slab_relaxation_shape`]. Its real part
+/// is the thermal storage increase from the isothermal to the adiabatic limit;
+/// its imaginary part is the original loss response. It is zero at DC and
+/// obeys conjugacy at negative frequency. Invalid inputs return complex NaNs.
+///
+/// The closed form is `1 - 3/q^2 + 3 tanh(q)/q^3`, where
+/// `q=(1+i) pi sqrt(abs(omega)*tau_0/2)/2`; the code uses real arithmetic,
+/// a cancellation-free Taylor quotient near zero, and scaled exponentials.
+/// References: Lifshitz--Roukes, equations (23), (27a); Norris--Photiadis,
+/// Appendix B, with the harmonic convention conjugated as necessary.
+#[must_use]
+pub fn slab_relaxation_response(omega: f64, first_relaxation_time: f64) -> fs_math::c64::C64 {
+    use fs_math::c64::C64;
+    let loss = slab_relaxation_shape(omega, first_relaxation_time);
+    if !loss.is_finite() {
+        return C64::new(f64::NAN, f64::NAN);
+    }
+    let pi2 = core::f64::consts::PI * core::f64::consts::PI;
+    let wt = omega.abs() * first_relaxation_time;
+    let storage = if wt <= 2.0 / pi2 {
+        let xi2 = (0.5 * pi2) * wt;
+        let xi4 = xi2 * xi2;
+        // 1/(4k)! - 6/(4k+3)!, k>=1, are strictly positive.
+        // The first omitted term at xi<=1 is below binary64 roundoff.
+        let numerator = xi4
+            * (17.0 / 420.0 + xi4 * (41.0 / 1_663_200.0
+                + xi4 * (227.0 / 108_972_864_000.0
+                    + xi4 * (121.0 / 2_534_272_925_184_000.0))));
+        let denominator = 1.0 + xi4 * (1.0 / 24.0
+            + xi4 * (1.0 / 40_320.0
+                + xi4 * (1.0 / 479_001_600.0 + xi4 / 20_922_789_888_000.0)));
+        numerator / denominator
+    } else if wt.is_infinite() {
+        1.0
+    } else {
+        let xi = (core::f64::consts::PI / core::f64::consts::SQRT_2) * det::sqrt(wt);
+        let ratio = if xi >= 40.0 {
+            1.0
+        } else {
+            let decay = det::exp(-xi);
+            let decay2 = decay * decay;
+            (1.0 - decay2 - 2.0 * decay * det::sin(xi))
+                / (1.0 + decay2 + 2.0 * decay * det::cos(xi))
+        };
+        1.0 - ((6.0 / xi) / xi) * (ratio / xi)
+    };
+    C64::new(storage, loss)
+}
+
 /// Homogeneous plane-stress slab with an explicitly supplied thermal expansion
-/// tensor. All coefficients are at one frozen specimen state. This retains
-/// weak thermoelastic coupling, insulated faces and through-thickness Fourier
-/// conduction; lateral transport and a changing temperature field are absent.
+/// tensor. All coefficients are at one frozen specimen state. Constructors
+/// select the weak-coupling or coupled linear heat capacity. Both retain
+/// insulated faces and through-thickness Fourier conduction; lateral transport
+/// and a changing mean temperature field are absent.
 ///
 /// For engineering strains [epsilon_xx, epsilon_yy, 2 epsilon_xy], beta=Q alpha.
 /// The bending relaxation tensor is f f^T, with
-/// f=sqrt(T h^3/(12 C_p)) beta. Thus every original curvature cross term survives
-/// and dissipation vanishes whenever beta dot curvature vanishes.
+/// f=sqrt(T h^3/(12 C_*)) beta, where C_* is constant-stress capacity for
+/// [`Self::new`] and fixed-strain capacity for [`Self::new_coupled`]. Every
+/// curvature cross term survives, and loss vanishes when beta dot curvature does.
 /// See Norris & Photiadis, equations (3)-(4), (31)-(34), cited above.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlabThermoelasticBending {
@@ -90,7 +149,7 @@ pub struct SlabThermoelasticBending {
 }
 
 impl SlabThermoelasticBending {
-    /// Admit the actual isothermal plane-stress Q [Pa], row major, and expansion
+    /// Weak-coupling admission of isothermal plane-stress Q [Pa], row major, and expansion
     /// [alpha_xx, alpha_yy, 2 alpha_xy] [1/K] in the SAME coordinate frame.
     /// Heat capacity is per volume at constant stress [J/(m^3 K)]; conductivity
     /// is the through-thickness component [W/(m K)], not an in-plane average.
@@ -138,6 +197,140 @@ impl SlabThermoelasticBending {
         Ok(Self { relaxation_factor, first_relaxation_time_s })
     }
 
+
+    /// Admit a displacement-controlled LINEAR thermoelastic slab, including
+    /// strain--temperature feedback in its thermal capacity.
+    ///
+    /// Inputs have the same meaning and frame as [`Self::new`], including
+    /// heat capacity at constant stress. The capacity at fixed in-plane strain
+    /// is `C_epsilon = C_sigma - T alpha^T Q alpha`. It supplies both
+    /// `tau_0=h^2 C_epsilon/(pi^2 k_perp)` and
+    /// `Delta D=T h^3 (Q alpha)(Q alpha)^T/(12 C_epsilon)`.
+    /// This is the exact linear plane-stress constitutive conversion from
+    /// Norris--Photiadis, Table 1 and equation (4), followed by the same
+    /// through-thickness Fourier model. Coefficients and geometry stay frozen;
+    /// no lateral transport, finite strain or evolving mean temperature is added.
+    ///
+    /// [`Self::new`] retains its original weak-coupling `C_sigma` convention.
+    ///
+    /// # Errors
+    /// As [`Self::new`], and when the fixed-strain capacity is nonpositive,
+    /// unrepresentable, or cannot be separated from zero by outward arithmetic.
+    pub fn new_coupled(
+        plane_stress_pa: [f64; 9],
+        engineering_expansion_per_k: [f64; 3],
+        temperature_k: f64,
+        volumetric_heat_capacity_j_m3_k: f64,
+        thickness_conductivity_w_m_k: f64,
+        thickness_m: f64,
+    ) -> Result<Self, ViscoError> {
+        // Reuse the original source admission before interpreting its capacity.
+        let weak = Self::new(plane_stress_pa, engineering_expansion_per_k,
+            temperature_k, volumetric_heat_capacity_j_m3_k,
+            thickness_conductivity_w_m_k, thickness_m)?;
+        if engineering_expansion_per_k == [0.0; 3] {
+            return Ok(weak);
+        }
+        use fs_math::dd::Dd;
+        // Preserve the small capacity difference and weak signed Q-alpha
+        // channels with the existing extended-precision arithmetic owner.
+        let mut coupling = Dd::ZERO;
+        let mut beta = [Dd::ZERO; 3];
+        let mut enclosure = (0.0, 0.0);
+        for i in 0..3 {
+            for j in 0..3 {
+                let a = engineering_expansion_per_k[i];
+                let b = engineering_expansion_per_k[j];
+                let q = plane_stress_pa[3*i+j];
+                let stress = Dd::from_f64(q) * Dd::from_f64(b);
+                beta[i] = beta[i] + stress;
+                coupling = coupling + (Dd::from_f64(a) * stress) * Dd::from_f64(temperature_k);
+                let term = scale_enclosure(
+                    scale_enclosure(scale_enclosure((a, a), q), b), temperature_k);
+                enclosure = ((enclosure.0 + term.0).next_down(),
+                    (enclosure.1 + term.1).next_up());
+            }
+        }
+        let capacity = (Dd::from_f64(volumetric_heat_capacity_j_m3_k) - coupling).to_f64();
+        let coupling = coupling.to_f64();
+        let capacity_lower = (volumetric_heat_capacity_j_m3_k - enclosure.1).next_down();
+        if !coupling.is_finite() || coupling < 0.0 || !capacity.is_finite()
+            || !capacity_lower.is_finite() || capacity_lower <= 0.0 || capacity <= 0.0
+        {
+            return Err(ViscoError::Parameters {
+                what: "fixed-strain thermoelastic heat capacity must be established finite and positive",
+            });
+        }
+        let mut result = Self::new(plane_stress_pa, engineering_expansion_per_k, temperature_k,
+            capacity, thickness_conductivity_w_m_k, thickness_m)?;
+        let scale = det::sqrt(temperature_k / capacity)
+            * thickness_m * det::sqrt(thickness_m / 12.0);
+        result.relaxation_factor = beta.map(|value| (Dd::from_f64(scale) * value).to_f64());
+        if result.relaxation_factor.iter().any(|x| !x.is_finite() || !(x*x).is_finite()) {
+            return Err(ViscoError::Parameters {
+                what: "coupled thermoelastic relaxation factor is unrepresentable",
+            });
+        }
+        Ok(result)
+    }
+
+    /// Complex thermal increment to the ISOTHERMAL bending tensor [N m].
+    /// Add this to the original elastic tensor exactly once. The real part
+    /// contains thermal stiffening; the imaginary part is dissipative for
+    /// positive frequency. Every normal/shear cross term is retained.
+    ///
+    /// # Errors
+    /// Nonfinite angular frequency.
+    pub fn complex_bending_increment(
+        &self,
+        omega: f64,
+    ) -> Result<[fs_math::c64::C64; 9], ViscoError> {
+        if !omega.is_finite() {
+            return Err(ViscoError::Parameters {
+                what: "slab angular frequency must be finite",
+            });
+        }
+        let tau = self.first_relaxation_time_s;
+        let response = slab_relaxation_response(omega, tau);
+        let wt = omega.abs() * tau;
+        let pi2 = core::f64::consts::PI * core::f64::consts::PI;
+        Ok(self.relaxation_matrix().map(|value| {
+            let mut entry = response.scale(value);
+            if wt <= 2.0 / pi2 {
+                // A unit response may underflow while a dimensioned tensor
+                // response is representable. In precisely this range all
+                // higher asymptotic corrections are below binary64 roundoff.
+                if response.re == 0.0 || response.re.is_subnormal() {
+                    let leading = value * ((17.0 / 1680.0) * pi2 * pi2);
+                    entry.re = small_product(small_product(leading, omega.abs(), tau),
+                        omega.abs(), tau);
+                }
+                if response.im == 0.0 || response.im.is_subnormal() {
+                    entry.im = small_product(value * (pi2 / 10.0), omega.abs(), tau);
+                    if omega.is_sign_negative() { entry.im = -entry.im; }
+                }
+            } else if wt.is_infinite() || response.im.is_subnormal() {
+                // Here 1/sqrt(omega*tau) is already below roundoff. Divide
+                // before forming the overflowing product omega*tau, and
+                // multiply the constant before a possible final underflow.
+                let multiplier = 12.0 / pi2;
+                let (numerator, denominator) = if wt.is_finite() {
+                    (value, wt)
+                } else {
+                    (value / omega.abs().min(tau), omega.abs().max(tau))
+                };
+                let boosted = numerator * multiplier;
+                entry.im = if boosted.is_finite() {
+                    boosted / denominator
+                } else {
+                    (numerator / denominator) * multiplier
+                };
+                if omega.is_sign_negative() { entry.im = -entry.im; }
+            }
+            entry
+        }))
+    }
+
     /// Original rank-one factor [sqrt(N m)] on engineering curvatures.
     /// Project this factor before squaring to retain weak and null directions.
     #[must_use]
@@ -168,6 +361,31 @@ impl SlabThermoelasticBending {
         }
         let shape = slab_relaxation_shape(omega, self.first_relaxation_time_s);
         Ok(self.relaxation_matrix().map(|value| value * shape))
+    }
+}
+
+
+
+// For a*b <= 2/pi^2, choosing the larger factor first prevents a small
+// intermediate from erasing a representable dimensioned response. If that
+// product overflows, the smaller-first ordering is finite because a*b < 1.
+fn small_product(value: f64, a: f64, b: f64) -> f64 {
+    let (small, large) = (a.min(b), a.max(b));
+    let first = value * large;
+    if first.is_finite() { first * small } else { (value * small) * large }
+}
+
+// The fixed-strain capacity uses one signed quadratic form. This helper only
+// encloses multiplication of that form's running interval by an exact input;
+// its finite arithmetic guard is the positive-capacity admission above.
+fn scale_enclosure((lo, hi): (f64, f64), value: f64) -> (f64, f64) {
+    if value == 0.0 || (lo == 0.0 && hi == 0.0) {
+        return (0.0, 0.0);
+    }
+    if value >= 0.0 {
+        ((lo * value).next_down(), (hi * value).next_up())
+    } else {
+        ((hi * value).next_down(), (lo * value).next_up())
     }
 }
 
