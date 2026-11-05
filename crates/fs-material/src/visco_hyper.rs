@@ -25,15 +25,22 @@
 //! loading at frozen internal state (`work`), then relaxation at the new
 //! `F` (`dissipated`, a sum of non-negative terms computed directly, not as
 //! a difference of energies). `stored` is the sum of the equilibrium and
-//! branch energies; `work - Delta stored - dissipated` therefore measures
-//! the local solve's consistency, not a tautology.
+//! branch energies; `work + reference_work - Delta stored - dissipated`
+//! therefore measures the local solve's consistency. The separate signed
+//! `reference_work` account is zero until an explicit natural-strain change.
 //!
 //! A fixed [`ReferenceDeformation`] prescribes a natural configuration `G`.
 //! The equilibrium and every branch act on `F_e = F G^-1`, with each branch
 //! further split into its elastic and viscous parts. Stress, tangent, work,
 //! storage and relaxation loss are pulled back to the ORIGINAL reference
-//! volume. Histories retain total `F` and are bound to this fixed `G`; changing
-//! natural configurations requires a separate parameter-work model.
+//! volume. Histories retain total `F` and are bound to `G`. An explicit
+//! [`ViscoHyperelastic::change_reference_from`] transaction changes a prescribed
+//! natural configuration at fixed total `F` and fixed viscous metrics, recording
+//! its signed energy exchange separately from mechanical work and viscous loss.
+
+/// Prescribed natural-strain changes with retained viscous history and energy.
+pub mod reference;
+pub use reference::{ViscoReferenceChange, ViscoRemainderReferenceChange};
 
 use crate::hyper::reference::ReferenceDeformation;
 use crate::hyper::{Hyperelastic, MAX_OGDEN_TERMS, OgdenTerm};
@@ -105,12 +112,16 @@ pub struct ViscoState {
     pub deformation_gradient: [f64; 9],
     /// Accumulated loading work at frozen internal state (J/m^3).
     pub work: f64,
+    /// Accumulated signed energy supplied by explicit reference changes at
+    /// fixed total deformation and viscous metrics (J/m^3). This is neither
+    /// mechanical work nor nonnegative relaxation heat.
+    pub reference_work: f64,
     /// Current stored energy, equilibrium plus branches (J/m^3).
     pub stored: f64,
     /// Accumulated relaxation dissipation (J/m^3), non-negative and
     /// non-decreasing.
     pub dissipated: f64,
-    // Metrics and reference-volume ledgers cannot be reused under a different G.
+    // Only an explicit reference-change transaction can rebind these metrics.
     // Construct histories through the owning law's initial_state, then advance.
     reference_gradient: [f64; 9],
 }
@@ -128,6 +139,9 @@ pub struct ViscoRemainderState {
     pub deformation_gradient: [f64; 9],
     /// Accumulated frozen-metric loading work of the remainder, in Pa.
     pub work: f64,
+    /// Accumulated signed remainder-energy exchange from prescribed reference
+    /// changes, in Pa. A mixed spatial owner separately accounts for bulk energy.
+    pub reference_work: f64,
     /// Physical equilibrium-remainder plus branch storage, in Pa.
     pub stored: f64,
     /// Accumulated original branch relaxation loss, in Pa.
@@ -140,6 +154,7 @@ pub struct ViscoRemainderState {
 trait BranchHistory {
     fn viscous_metrics(&self) -> &[[f64; 6]];
     fn reference_gradient(&self) -> &[f64; 9];
+    fn check_ledger(&self) -> Result<(), MaterialError>;
 }
 
 impl BranchHistory for ViscoState {
@@ -149,6 +164,10 @@ impl BranchHistory for ViscoState {
 
     fn reference_gradient(&self) -> &[f64; 9] {
         &self.reference_gradient
+    }
+
+    fn check_ledger(&self) -> Result<(), MaterialError> {
+        ViscoState::check_ledger(self)
     }
 }
 
@@ -160,11 +179,30 @@ impl BranchHistory for ViscoRemainderState {
     fn reference_gradient(&self) -> &[f64; 9] {
         &self.reference_gradient
     }
+
+    fn check_ledger(&self) -> Result<(), MaterialError> {
+        ViscoRemainderState::check_ledger(self)
+    }
+}
+
+impl ViscoState {
+    fn check_ledger(&self) -> Result<(), MaterialError> {
+        if ![self.work, self.reference_work, self.stored, self.dissipated]
+            .iter()
+            .all(|value| value.is_finite())
+            || self.dissipated < 0.0
+        {
+            return Err(state_error(
+                "nonfinite history ledger or negative accumulated loss".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl ViscoRemainderState {
     fn check_ledger(&self) -> Result<(), MaterialError> {
-        if ![self.work, self.stored, self.dissipated]
+        if ![self.work, self.reference_work, self.stored, self.dissipated]
             .iter()
             .all(|v| v.is_finite())
             || self.dissipated < 0.0
@@ -908,15 +946,6 @@ impl ViscoHyperelastic {
         dt_s: f64,
     ) -> Result<FrozenViscoHyperelastic<'a>, MaterialError> {
         self.check_inputs(accepted, &accepted.deformation_gradient, dt_s)?;
-        if ![accepted.work, accepted.stored, accepted.dissipated]
-            .iter()
-            .all(|value| value.is_finite())
-            || accepted.dissipated < 0.0
-        {
-            return Err(state_error(
-                "nonfinite history ledger or negative accumulated loss".into(),
-            ));
-        }
         Ok(FrozenViscoHyperelastic {
             law: self,
             accepted,
@@ -981,9 +1010,10 @@ impl ViscoHyperelastic {
     /// returned energy densities are per original volume and stresses are
     /// conjugate to total `F`. Elastic stretch limits apply to `F_e`.
     ///
-    /// Create a new history after changing this map. Existing histories are
-    /// bound to their original `G` and will be refused; changing `G` during a
-    /// history requires work/heat accounting beyond this fixed-reference law.
+    /// Histories are bound to their current `G`. To carry an accepted history
+    /// through a physical prescribed-reference change, use
+    /// [`Self::change_reference_from`] or [`Self::change_remainder_reference_from`]
+    /// on this target law. Ordinary steps refuse a mismatched reference.
     #[must_use]
     pub fn with_reference_deformation(mut self, reference: ReferenceDeformation) -> Self {
         self.reference_deformation = reference;
@@ -1037,6 +1067,7 @@ impl ViscoHyperelastic {
             inverse_viscous_cauchy_green: vec![[1.0, 1.0, 1.0, 0.0, 0.0, 0.0]; self.branches.len()],
             deformation_gradient: *self.reference_deformation.deformation_gradient(),
             work: 0.0,
+            reference_work: 0.0,
             stored: 0.0,
             dissipated: 0.0,
             reference_gradient: *self.reference_deformation.deformation_gradient(),
@@ -1051,6 +1082,7 @@ impl ViscoHyperelastic {
             inverse_viscous_cauchy_green: vec![[1.0, 1.0, 1.0, 0.0, 0.0, 0.0]; self.branches.len()],
             deformation_gradient: *self.reference_deformation.deformation_gradient(),
             work: 0.0,
+            reference_work: 0.0,
             stored: 0.0,
             dissipated: 0.0,
             reference_gradient: *self.reference_deformation.deformation_gradient(),
@@ -1063,6 +1095,7 @@ impl ViscoHyperelastic {
         f: &[f64; 9],
         dt: f64,
     ) -> Result<(), MaterialError> {
+        s.check_ledger()?;
         if s.reference_gradient() != self.reference_deformation.deformation_gradient() {
             return Err(state_error(
                 "history belongs to a different fixed reference deformation".into(),
@@ -1278,12 +1311,14 @@ impl ViscoHyperelastic {
             inverse_viscous_cauchy_green: prep.branches.iter().map(|b| b.cv_new).collect(),
             deformation_gradient: *f_new,
             work: s.work + loading_work_pa,
+            reference_work: s.reference_work,
             stored: volume * (psi_eq + psi_star),
             dissipated: s.dissipated + dissipation,
             reference_gradient: *self.reference_deformation.deformation_gradient(),
         };
         if ![
             next.work,
+            next.reference_work,
             next.stored,
             next.dissipated,
             loading_work_pa,
@@ -1330,6 +1365,7 @@ impl ViscoHyperelastic {
             inverse_viscous_cauchy_green: prep.branches.iter().map(|b| b.cv_new).collect(),
             deformation_gradient: *f_new,
             work: s.work + loading_work_pa,
+            reference_work: s.reference_work,
             stored: volume * (psi_eq + psi_star),
             dissipated: s.dissipated + dissipated_pa,
             reference_gradient: *self.reference_deformation.deformation_gradient(),
@@ -1532,7 +1568,7 @@ impl ViscoHyperelastic {
             dissipation_nonnegative: true,
             polyconvex: None,
             tangent_symmetric: true,
-            failure_envelope: "validity ends at the equilibrium law's elastic stretch_limit on F G^-1; the fixed reference map cannot change within a history; branch energies carry no separate limit",
+            failure_envelope: "validity ends at the equilibrium law's elastic stretch_limit on F G^-1; prescribed reference changes require the explicit retained-history work transaction; branch energies carry no separate limit",
         }
     }
 }
