@@ -1,4 +1,4 @@
-//! Unsteady, fully developed flow between fixed parallel no-slip walls.
+//! Unsteady, fully developed flow between parallel no-slip walls.
 //!
 //! Finite volumes solve rho dv/dt = dp/L + mu d²v/dy² with cell-centred velocities
 //! across the physical gap, not a prescribed parabolic profile or fitted
@@ -9,13 +9,18 @@
 //! An optional ideal uniform exit kinetic head is solved implicitly with EVERY
 //! cell. This terminal approximation does not resolve axial development,
 //! nonuniform exit energy flux, separation or the jet. The channel assumes an
-//! incompressible Newtonian gas at fixed material state and geometry. Side walls,
-//! compressibility, heat transport, moving walls and turbulence are excluded.
+//! incompressible Newtonian gas at fixed material state and cross-section.
+//! Prescribed axial wall motion supplies Couette shear through the original
+//! no-slip faces, with signed wall work and opposite mechanical reactions.
+//! Side walls, compressibility, heat transport, changing gaps, normal wall
+//! motion, entrance effects and turbulence are excluded.
 //!
 //! Reference limits: NETL MFiX FLD01 plane Poiseuille verification:
 //! <https://mfix.netl.doe.gov/doc/vvuq-manual/main/html/fluid/fld-01.html>.
 //! Unsteady momentum equation and eigenfunction solution:
 //! <https://courses.washington.edu/me507/Lecture_Notes/Lecture10_ExactSolutions_UnsteadyPoiseuille.pdf>.
+//! Couette–Poiseuille reference: NETL MFiX FLD05 verification,
+//! <https://mfix.netl.doe.gov/doc/vvuq-manual/main/html/fluid/fld-05.html>.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_material::gas::GasState;
@@ -48,7 +53,8 @@ pub struct SlitChannelSpec {
     pub length_m: f64,
     /// Spanwise width [m]; lateral wall effects are excluded.
     pub width_m: f64,
-    /// Distance between the stationary no-slip walls [m].
+    /// Fixed distance between the no-slip walls [m]. Axial wall motion may be
+    /// supplied independently; normal wall motion does not change this gap.
     pub height_m: f64,
     /// Finite-volume cells across the gap, in 2..=4096.
     pub transverse_cells: usize,
@@ -71,6 +77,13 @@ pub struct SlitChannelStep {
     pub stored_delta_j: f64,
     /// Supplied pressure times accepted volume [J].
     pub pressure_work_j: f64,
+    /// Signed work supplied by the prescribed axial wall motion [J].
+    /// A moving wall can recover energy from the fluid; this is never heat.
+    pub wall_work_j: f64,
+    /// Axial impulses exerted BY the walls ON the fluid [N s], lower/upper
+    /// for a slit or axis/outer wall for a circle (the axis value is zero).
+    /// A mechanical wall receives the opposite impulse.
+    pub wall_impulse_n_s: [f64; 2],
     /// Irreversible no-slip wall-friction heat [J].
     pub viscous_dissipation_j: f64,
     /// Work passed to the exit terminal [J], nonnegative for either flow sign.
@@ -78,19 +91,21 @@ pub struct SlitChannelStep {
     pub exit_work_j: f64,
     /// Backward-Euler numerical dissipation [J], not physical heat.
     pub numerical_dissipation_j: f64,
-    /// Pressure work minus storage change, wall heat, exit and numerical work [J].
+    /// Pressure plus wall work minus storage change, heat, exit and numerical work [J].
     pub energy_residual_j: f64,
 }
 
 /// Exact affine pressure/flow boundary of a fixed channel's next discrete step.
 /// Positive volume flow and pressure drop point along the supplied channel.
-/// The history term contains the retained velocity field; it is not a pressure
-/// source supplied by the caller. It must remain inside the channel energy audit.
+/// The offset contains retained velocity history and, for a moving-wall load,
+/// the explicitly supplied axial wall drive. Both remain in the channel audit;
+/// external wall work is reported separately from pressure work.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SlitChannelLoad {
     /// Positive coefficient Z in dp = Z Q - history [Pa s/m³].
     pub impedance_pa_s_m3: f64,
-    /// Retained inertial history pressure [Pa], signed with the previous flow.
+    /// Signed history and prescribed-wall pressure offset [Pa]. For stationary
+    /// walls this contains only the retained inertial history.
     pub history_pressure_pa: f64,
 }
 impl SlitChannelLoad {
@@ -199,6 +214,40 @@ impl FixedChannel {
     pub fn step(&mut self, pressure: f64) -> Result<SlitChannelStep, AcousticRealizeError> {
         match self { Self::Slit(v) => v.step(pressure), Self::Circular(v) => v.step(pressure) }
     }
+
+    /// Common axial wall drive in lower/upper order for a slit, or axis/outer
+    /// order for a circle. The circular axis must have zero prescribed speed.
+    /// Geometry stays fixed; this is tangential motion, never a swept-volume law.
+    pub fn step_with_wall_velocities(&mut self, pressure: f64, walls: [f64; 2])
+        -> Result<SlitChannelStep, AcousticRealizeError>
+    {
+        match self {
+            Self::Slit(v) => v.step_with_wall_velocities(pressure, walls),
+            Self::Circular(v) => v.step_with_wall_velocities(pressure, walls),
+        }
+    }
+
+    /// Condense the same prescribed wall drive and original velocity history
+    /// into the next static-pressure port; include wall work when accepting it.
+    pub fn pressure_load_with_wall_velocities(&self, walls: [f64; 2])
+        -> Result<SlitChannelLoad, AcousticRealizeError>
+    {
+        match self {
+            Self::Slit(v) => v.pressure_load_with_wall_velocities(walls),
+            Self::Circular(v) => v.pressure_load_with_wall_velocities(walls),
+        }
+    }
+
+    /// Candidate at prescribed endpoint flow and axial wall velocities. The
+    /// caller must accept its pressure AND wall work before publishing it.
+    pub fn preview_at_flow_with_wall_velocities(&self, flow: f64, walls: [f64; 2])
+        -> Result<Self, AcousticRealizeError>
+    {
+        let pressure = self.pressure_load_with_wall_velocities(walls)?.pressure_drop_pa(flow)?;
+        let mut trial = self.clone();
+        trial.step_with_wall_velocities(pressure, walls)?;
+        Ok(trial)
+    }
 }
 
 fn invalid(what: &'static str) -> AcousticRealizeError {
@@ -281,6 +330,16 @@ impl SlitChannel {
         self.profile.pressure_load()
     }
 
+    /// Next-step affine pressure port with held axial speeds at the lower and
+    /// upper no-slip wall. Wall drive is part of the offset; the accepted step
+    /// reports its mechanical work separately. Geometry and pressure impedance
+    /// stay fixed, and no accepted history changes during this read.
+    pub fn pressure_load_with_wall_velocities(&self, walls_m_s: [f64; 2])
+        -> Result<SlitChannelLoad, AcousticRealizeError>
+    {
+        self.profile.pressure_load_with_walls(walls_m_s)
+    }
+
     /// Added-mass part rho L / (A_t dt) of the next-step impedance [Pa s/m^3]; the rest of
     /// `pressure_load().impedance_pa_s_m3` is wall friction. A coupled valve must count the first as inertance
     /// (it lowers every mechanical rate) and only the second as loss.
@@ -302,20 +361,20 @@ impl SlitChannel {
         Ok(trial)
     }
 
-    /// Exact steady bulk response of THIS spatial discretization [m/s].
+    /// Exact stationary-wall steady bulk response of THIS discretization [m/s].
     /// It is useful for cold admission, but never replaces the live field.
     pub fn steady_bulk_speed_m_s(&self, pressure_pa: f64) -> Result<f64, AcousticRealizeError> {
         self.profile.steady_bulk_speed(pressure_pa)
     }
 
-    /// Centre velocity of the steady solution on THIS mesh [m/s], including the
+    /// Stationary-wall centre velocity of the steady solution on THIS mesh [m/s], including the
     /// declared exit pressure law. Used for cold pressure admission only; it
     /// neither advances the channel nor replaces its live velocity profile.
     pub fn steady_centre_speed_m_s(&self, pressure_pa: f64) -> Result<f64, AcousticRealizeError> {
         self.profile.steady_midpoint_speed(pressure_pa)
     }
 
-    /// Advance one physical pressure interval, allowing signed pressure and flow.
+    /// Advance one pressure interval with stationary walls and signed pressure/flow.
     /// Failure leaves the accepted velocity field and last exchange unchanged.
     ///
     /// The terminal law makes the mean response a scalar monotone quadratic.
@@ -323,6 +382,19 @@ impl SlitChannel {
     /// fitted flow coefficient, nonlinear iteration or one-sample lag appears.
     pub fn step(&mut self, pressure_pa: f64) -> Result<SlitChannelStep, AcousticRealizeError> {
         self.profile.step(pressure_pa)
+    }
+
+    /// Couette–Poiseuille step with prescribed axial lower/upper wall speeds.
+    /// The implicit no-slip traction drives the complete transverse profile.
+    /// Speeds are endpoint values held in this backward-Euler step; independently
+    /// refine time for a varying drive. Physical relative-shear heat, signed
+    /// wall work and mechanical reaction impulses are all reported. No gap or
+    /// wall-normal motion is implied. This uses the existing factored matrix
+    /// and preallocated trial field, with no allocation in the step.
+    pub fn step_with_wall_velocities(&mut self, pressure_pa: f64, walls_m_s: [f64; 2])
+        -> Result<SlitChannelStep, AcousticRealizeError>
+    {
+        self.profile.step_with_walls(pressure_pa, walls_m_s)
     }
 }
 

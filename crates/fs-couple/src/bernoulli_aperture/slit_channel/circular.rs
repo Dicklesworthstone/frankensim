@@ -7,8 +7,9 @@
 //! The SAME momentum/time/work owner also serves parallel-wall slits.
 //!
 //! This is the incompressible, fully developed, laminar Newtonian reduction at
-//! fixed material state. It excludes entrance development, axial taper, moving
-//! walls, separation, turbulence and thermodynamic compression; a whole oboe
+//! fixed material state. An optional axial outer-wall speed drives the same
+//! resolved radial diffusion. It excludes entrance development, axial taper,
+//! radial/rotating wall motion, separation, turbulence and thermodynamic compression; a whole oboe
 //! staple is not qualified by a cylindrical fixture. Space/time refinement is
 //! required separately from validation of that physical reduction.
 //!
@@ -111,6 +112,13 @@ impl CircularChannel {
     pub fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
         self.profile.pressure_load()
     }
+    /// Next-step pressure port with axial outer-wall motion. The first speed
+    /// must be zero because the symmetry axis is not a material wall.
+    pub fn pressure_load_with_wall_velocities(&self, walls_m_s: [f64; 2])
+        -> Result<SlitChannelLoad, AcousticRealizeError>
+    {
+        self.profile.pressure_load_with_walls(walls_m_s)
+    }
     /// Added-mass part rho L / (A dt) of the next-step impedance [Pa s/m^3]; the rest of
     /// `pressure_load().impedance_pa_s_m3` is wall friction.
     #[must_use]
@@ -122,13 +130,21 @@ impl CircularChannel {
         trial.step(pressure)?;
         Ok(trial)
     }
-    /// Steady response of the actual radial mesh, not a replacement for dynamics.
+    /// Stationary-wall steady response of the radial mesh, never a replacement for dynamics.
     pub fn steady_bulk_speed_m_s(&self, pressure: f64) -> Result<f64, AcousticRealizeError> {
         self.profile.steady_bulk_speed(pressure)
     }
-    /// Advance one signed physical pressure interval with atomic acceptance.
+    /// Advance one signed pressure interval with stationary walls and atomic acceptance.
     pub fn step(&mut self, pressure: f64) -> Result<SlitChannelStep, AcousticRealizeError> {
         self.profile.step(pressure)
+    }
+    /// Advance with prescribed axial motion of the outer wall. Speeds are
+    /// `[0.0, outer_wall_speed_m_s]`; a nonzero axis speed refuses. Reports
+    /// wall reaction and signed work separately from relative-shear heat.
+    pub fn step_with_wall_velocities(&mut self, pressure: f64, walls_m_s: [f64; 2])
+        -> Result<SlitChannelStep, AcousticRealizeError>
+    {
+        self.profile.step_with_walls(pressure, walls_m_s)
     }
 }
 

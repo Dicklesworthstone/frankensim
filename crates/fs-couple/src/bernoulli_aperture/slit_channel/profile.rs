@@ -4,6 +4,8 @@
 //! Symmetric G has one nonnegative conductance per face; its quadratic form
 //! is exactly the wall heat used below. The same owner serves planar and
 //! axisymmetric passages, including pressure reversal and retained inertia.
+//! Prescribed axial wall velocities enter through the SAME boundary shear
+//! conductances. Their mechanical work is separate from irreversible heat.
 
 use super::{AcousticRealizeError, ChannelGasUpdate, SlitChannelLoad, SlitChannelStep, SlitExit, invalid};
 use fs_math::det;
@@ -179,10 +181,26 @@ impl MomentumProfile {
         })
     }
 
-    fn free_profile(&self) -> Vec<f64> {
+    fn free_profile(&self, walls: [f64; 2]) -> Vec<f64> {
         let mut free: Vec<_> = self.mass.iter().zip(&self.velocity).map(|(m, v)| m * v).collect();
+        self.add_wall_drive(&mut free, walls);
         solve(&self.inverse_diagonal, &self.lower_ratio, &self.upper_ratio, &mut free);
         free
+    }
+
+    fn admit_walls(&self, walls: [f64; 2]) -> Result<(), AcousticRealizeError> {
+        if walls.iter().any(|v| !v.is_finite())
+            || (self.conductance[0] == 0.0 && walls[0] != 0.0) {
+            return Err(invalid("channel wall velocities must be finite; the circular axis is not a moving wall"));
+        }
+        Ok(())
+    }
+
+    fn add_wall_drive(&self, rhs: &mut [f64], walls: [f64; 2]) {
+        // Avoid even an addition of zero on the original stationary-wall path.
+        if walls[0] != 0.0 { rhs[0] += self.dt * self.conductance[0] * walls[0]; }
+        let n = rhs.len();
+        if walls[1] != 0.0 { rhs[n - 1] += self.dt * self.conductance[n] * walls[1]; }
     }
     fn mean(&self, velocity: &[f64]) -> f64 {
         self.area.iter().zip(velocity).map(|(a, v)| a * v).sum::<f64>() / self.total_area
@@ -197,12 +215,19 @@ impl MomentumProfile {
     }
 
     pub(super) fn pressure_load(&self) -> Result<SlitChannelLoad, AcousticRealizeError> {
+        self.pressure_load_with_walls([0.0; 2])
+    }
+
+    pub(super) fn pressure_load_with_walls(&self, walls: [f64; 2])
+        -> Result<SlitChannelLoad, AcousticRealizeError>
+    {
+        self.admit_walls(walls)?;
         if self.exit != SlitExit::StaticPressure {
             return Err(invalid("affine channel condensation requires the actual static-pressure terminal"));
         }
         let load = SlitChannelLoad {
             impedance_pa_s_m3: 1.0 / (self.total_area * self.mean_pressure_response),
-            history_pressure_pa: self.mean(&self.free_profile()) / self.mean_pressure_response,
+            history_pressure_pa: self.mean(&self.free_profile(walls)) / self.mean_pressure_response,
         };
         if !load.impedance_pa_s_m3.is_finite() || load.impedance_pa_s_m3 <= 0.0
             || !load.history_pressure_pa.is_finite() {
@@ -227,10 +252,20 @@ impl MomentumProfile {
     }
 
     pub(super) fn step(&mut self, pressure: f64) -> Result<SlitChannelStep, AcousticRealizeError> {
+        self.step_with_walls(pressure, [0.0; 2])
+    }
+
+    pub(super) fn step_with_walls(&mut self, pressure: f64, walls: [f64; 2])
+        -> Result<SlitChannelStep, AcousticRealizeError>
+    {
         if !pressure.is_finite() { return Err(invalid("unsteady channel pressure must be finite")); }
+        self.admit_walls(walls)?;
         for ((rhs, mass), velocity) in self.trial.iter_mut().zip(&self.mass).zip(&self.velocity) {
             *rhs = mass * velocity;
         }
+        let n = self.trial.len();
+        if walls[0] != 0.0 { self.trial[0] += self.dt * self.conductance[0] * walls[0]; }
+        if walls[1] != 0.0 { self.trial[n - 1] += self.dt * self.conductance[n] * walls[1]; }
         solve(&self.inverse_diagonal, &self.lower_ratio, &self.upper_ratio, &mut self.trial);
         let target = self.mean(&self.trial) + self.mean_pressure_response * pressure;
         let speed = match self.exit {
@@ -259,24 +294,36 @@ impl MomentumProfile {
             numerical += self.mass[i] * (v - old).powi(2);
             if i != 0 { shear += self.conductance[i] * (v - self.trial[i - 1]).powi(2); }
         }
-        let n = self.trial.len();
-        shear += self.conductance[0] * self.trial[0].powi(2)
-            + self.conductance[n] * self.trial[n - 1].powi(2);
+        let relative = [self.trial[0] - walls[0], self.trial[n - 1] - walls[1]];
+        shear += self.conductance[0] * relative[0].powi(2)
+            + self.conductance[n] * relative[1].powi(2);
+        let wall_impulse = [-self.conductance[0] * relative[0] * self.dt,
+            -self.conductance[n] * relative[1] * self.dt];
+        let wall_work = [wall_impulse[0] * walls[0], wall_impulse[1] * walls[1]];
         let bulk = self.mean(&self.trial);
         let flow = self.total_area * bulk;
         let mut step = SlitChannelStep { bulk_speed_m_s: bulk, flow_m3_s: flow,
             kinetic_energy_j: 0.5 * energy, stored_delta_j: 0.5 * delta,
             pressure_work_j: pressure * flow * self.dt,
+            wall_work_j: wall_work.iter().sum(), wall_impulse_n_s: wall_impulse,
             viscous_dissipation_j: shear * self.dt,
             exit_work_j: exit_pressure * flow * self.dt,
             numerical_dissipation_j: 0.5 * numerical, energy_residual_j: 0.0 };
         step.energy_residual_j = step.pressure_work_j - step.stored_delta_j
             - step.viscous_dissipation_j - step.exit_work_j - step.numerical_dissipation_j;
-        let scale = step.pressure_work_j.abs() + step.stored_delta_j.abs()
-            + step.viscous_dissipation_j + step.exit_work_j + step.numerical_dissipation_j;
+        if walls != [0.0; 2] { step.energy_residual_j += step.wall_work_j; }
+        let mut scale = step.pressure_work_j.abs() + step.stored_delta_j.abs()
+            + step.viscous_dissipation_j + step.exit_work_j + step.numerical_dissipation_j
+            + wall_work[0].abs() + wall_work[1].abs();
+        // A translating wall can leave finite kinetic inventory after all exchanges
+        // vanish. The absolute-velocity solve still rounds at that inventory's scale;
+        // an exchange-only bound would spuriously refuse convergence to plug motion.
+        // Keep the raw residual and physical dissipation, and the stationary bound.
+        if walls != [0.0; 2] { scale += self.energy_j + step.kinetic_energy_j; }
         if ![bulk, flow, step.kinetic_energy_j, step.stored_delta_j, step.pressure_work_j,
             step.viscous_dissipation_j, step.exit_work_j, step.numerical_dissipation_j,
-            step.energy_residual_j, scale].iter().all(|x| x.is_finite())
+            step.energy_residual_j, step.wall_work_j, wall_impulse[0], wall_impulse[1],
+            scale].iter().all(|x| x.is_finite())
             || step.exit_work_j < 0.0
             || step.energy_residual_j.abs() > 4096.0 * f64::EPSILON * scale {
             return Err(invalid("channel step does not close finite dissipation and kinetic storage"));

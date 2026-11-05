@@ -6550,7 +6550,7 @@ required before treating them as passing evidence.
 
 These are explicit numerical axes for a fixed, incompressible, fully developed
 planar channel and the original estimated jet card. Side-wall/entrance/axial
-profile development, compressibility, thermal transport, moving walls and
+profile development, compressibility, thermal transport, normal wall motion and
 turbulence remain outside the channel. The exit uses uniform bulk kinetic
 head despite the resolved internal profile. This does not establish a resolved
 jet, moving-reed channel or experimentally validated instrument claim.
@@ -18184,6 +18184,36 @@ Native compilation, Cargo tests and rustfmt remain unexecuted in this environmen
 
 
 ### Shared unsteady planar and circular fluid passages
+
+The same original momentum owner accepts prescribed **axial** no-slip wall
+velocities through `step_with_wall_velocities`, in lower/upper order for a
+slit and `[0, outer]` order for a circular passage. The axis is not a wall;
+nonzero axis drive refuses. Boundary shear supplies the original implicit
+finite-volume equations, without changing the cross-section, fitting a drag
+coefficient, or replacing the transverse field. The factorization and trial
+storage are reused, so the step adds no allocation. Stationary-wall stepping
+retains its original arithmetic.
+
+`SlitChannelStep` separates signed `wall_work_j`, both impulses **on the
+fluid**, nonnegative relative-shear heat, pressure work, kinetic storage,
+exit work and backward-Euler numerical dissipation. Mechanical walls receive
+opposite impulses. A moving wall can extract work from faster fluid; that
+work is not reclassified as heat. `pressure_load_with_wall_velocities` and
+`FixedChannel::preview_at_flow_with_wall_velocities` condense the same drive
+and history for a static-pressure terminal. Their offset includes the
+specified wall source; any coupled acceptance must retain its separate work.
+No boundary velocity or trial field publishes on refusal. Gas interventions
+continue to preserve cell momentum through the existing material owner.
+
+G1/G3 `channel_wall_motion` checks independent Couette profile/traction/heat,
+adverse-pressure second-order spatial convergence, startup sine-series
+first-order time convergence, momentum reaction, signed work extraction,
+both geometries' pressure condensation and rollback, and circular viscous
+startup towards uniform axial translation. This is fully developed laminar
+Newtonian flow at fixed gap/radius. It does not supply normal wall motion,
+rotating-cylinder flow, swept volume, entrance development, thermal evolution,
+or transition prediction. Reference: NETL MFiX FLD05 steady Couette verification,
+<https://mfix.netl.doe.gov/doc/vvuq-manual/main/html/fluid/fld-05.html>.
 
 `slit_channel::FixedChannel` retains either the original planar slit or an
 explicit circular passage. Both use one finite-volume momentum owner with
