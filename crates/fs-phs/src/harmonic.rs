@@ -482,28 +482,22 @@ impl HarmonicFactor<'_> {
         }
         let (state, relative) = self.solve_rhs(&rhs, &mut cancelled)?;
         let mut effort = state.clone();
-        let mut energy = 0.0;
+        let mut energy = Sum::default();
         for i in 0..model.n_diff {
             poll(&mut cancelled)?;
-            effort[i] = C64::ZERO;
-            for k in 0..model.n_diff {
-                effort[i] = effort[i] + state[k].scale(model.q[i * n + k]);
-            }
-            energy += (state[i].conj() * effort[i]).re * 0.25;
+            let row = storage_row(model, i, &state)?;
+            effort[i] = input_value(row, C64::ZERO)?;
+            add_stored_work(&mut energy, row, state[i])?;
         }
-        let mut loss = 0.0;
+        let energy = energy.value().ok_or_else(|| invalid("stored energy is not representable"))?;
+        let mut loss = Sum::default();
         let mut output = vec![C64::ZERO; m];
         for i in 0..n {
             poll(&mut cancelled)?;
-            let mut resistance = C64::ZERO;
-            for k in 0..n {
-                resistance = resistance + effort[k].scale(model.r[i * n + k]);
-            }
-            if model.resisting_tangent.is_some() {
-                resistance = resistance + model.nonlinear_loss_row(i, &state);
-            }
-            loss += (effort[i].conj() * resistance).re * 0.5;
+            let row = resisting_row(model, i, &state, &effort)?;
+            add_dissipative_work(&mut loss, row, effort[i])?;
         }
+        let loss = loss.value().ok_or_else(|| invalid("dissipative power is not representable"))?;
         for (p, value) in output.iter_mut().enumerate() {
             poll(&mut cancelled)?;
             *value = port_output(&model.g, m, p, &effort)?;
@@ -717,6 +711,71 @@ fn input_value([mut re, mut im]: [Sum; 2], initial: C64) -> Result<C64, Harmonic
         re.value().ok_or_else(|| invalid("physical input row is not representable"))?,
         im.value().ok_or_else(|| invalid("physical input row is not representable"))?,
     ))
+}
+
+// A differential storage row is retained through its energy observation, then
+// rounded once for the effort vector. Algebraic efforts remain state entries.
+fn storage_row(
+    model: &HarmonicModel, row: usize, state: &[C64],
+) -> Result<[Sum; 2], HarmonicError> {
+    input_row_sums(&model.q[row*model.n..row*model.n+model.n_diff], |j| state[j])
+}
+
+fn storage_tangent_row(
+    model: &HarmonicModel, row: usize, state: &[C64], state_derivative: &[C64],
+    storage_derivative: Option<&[f64]>,
+) -> Result<[Sum; 2], HarmonicError> {
+    let range = row*model.n..row*model.n+model.n_diff;
+    input_tangent_sums(&model.q[range.clone()], storage_derivative.map(|dq| &dq[range]),
+        state, Some(state_derivative), |_| true)
+}
+
+fn add_stored_work(total: &mut Sum, row: [Sum; 2], state: C64) -> Result<(), HarmonicError> {
+    total.add_quarter_scaled(row[0], state.re)
+        .and_then(|()| total.add_quarter_scaled(row[1], state.im))
+        .ok_or_else(|| invalid("stored energy is not representable"))
+}
+
+// R acts on the represented effort vector; the signed incremental T acts on
+// the represented original state. Carry both row words through their outer
+// work contraction without extra vectors or recomputing Q inside the R map.
+fn resisting_row(
+    model: &HarmonicModel, row: usize, state: &[C64], effort: &[C64],
+) -> Result<[Sum; 2], HarmonicError> {
+    let range = row*model.n..(row+1)*model.n;
+    input_tangent_sums(&model.r[range.clone()],
+        model.resisting_tangent.as_deref().map(|t| &t[range]),
+        state, Some(effort), |_| true)
+}
+
+fn resisting_tangent_row(
+    model: &HarmonicModel, row: usize, state: &[C64], effort: &[C64],
+    state_derivative: &[C64], effort_derivative: &[C64],
+    direction: HarmonicParameterDirection<'_>,
+) -> Result<[Sum; 2], HarmonicError> {
+    let range = row*model.n..(row+1)*model.n;
+    let mut result = input_tangent_sums(&model.r[range.clone()],
+        direction.dissipation.map(|dr| &dr[range.clone()]),
+        effort, Some(effort_derivative), |_| true)?;
+    for (matrix, state) in [
+        (model.resisting_tangent.as_deref(), state_derivative),
+        (direction.resisting_flow, state),
+    ] {
+        if let Some(matrix) = matrix {
+            let terms = input_row_sums(&matrix[range.clone()], |j| state[j])?;
+            for (sum, term) in result.iter_mut().zip(terms) {
+                sum.add_scaled(term, 1.0)
+                    .ok_or_else(|| invalid("dissipative tangent row is not representable"))?;
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn add_dissipative_work(total: &mut Sum, row: [Sum; 2], effort: C64) -> Result<(), HarmonicError> {
+    total.add_half_scaled(row[0], effort.re)
+        .and_then(|()| total.add_half_scaled(row[1], effort.im))
+        .ok_or_else(|| invalid("dissipative power is not representable"))
 }
 
 fn physical_power(

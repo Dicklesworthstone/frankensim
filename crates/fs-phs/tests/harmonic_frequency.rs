@@ -33,6 +33,40 @@ fn near_real(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn frequency_energy_and_heat_slopes_preserve_weak_work_between_strong_states() {
+    let identity = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let mut g = vec![0.0; 18];
+    for i in 0..3 { g[i*6+2*i] = 1.0; g[i*6+2*i+1] = 1.0; }
+    let system = PortHamiltonian::new(
+        3, 6, vec![0.0; 9], identity.clone(), g,
+        Box::new(QuadraticStorage::new(identity, 3).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let large = 2.0_f64.powi(54);
+    let x = [large, 1.0, large];
+    let dx = [1.0, 1.0, -1.0];
+    let mut input = [C64::ZERO; 6];
+    let mut input_derivative = [C64::ZERO; 6];
+    for i in 0..3 {
+        input[2*i] = C64::new(x[i], -x[i]);
+        // The first derivative port cancels i*x. The second independently
+        // supplies (1-i)*dx, so the target derivative is [1,1,-1].
+        input_derivative[2*i] = C64::new(0.0, -x[i]);
+        input_derivative[2*i+1] = C64::new(dx[i], -dx[i]);
+    }
+    let result = model.factor(1.0, || false).unwrap()
+        .response_with_frequency_derivative(&input, Some(&input_derivative), || false).unwrap();
+    for (actual, expected) in result.state_derivative.iter().zip(dx) {
+        near(*actual, C64::from_re(expected), 3e-14);
+    }
+    // H'=sum(x_i*dx_i)/2 and P_loss'=sum(x_i*dx_i). Both contain L+1-L.
+    near_real(result.mean_stored_energy_derivative, 0.5, 3e-14);
+    near_real(result.dissipated_power_derivative, 1.0, 3e-14);
+    near_real(result.supplied_power_derivative, 1.0, 3e-14);
+    near_real(result.power_residual_derivative, 0.0, 3e-14);
+}
+
+#[test]
 fn coherent_frequency_sources_and_storage_action_share_the_original_row() {
     let system = PortHamiltonian::new(
         1, 3, vec![0.0], vec![1.0], vec![1.0; 3],

@@ -54,6 +54,37 @@ fn damped_resonance_has_analytic_amplitude_phase_and_independent_power() {
 }
 
 #[test]
+fn coupled_storage_retains_a_weak_effort_and_its_tangents_in_an_exact_pencil() {
+    // Q is positive definite (leading minors 4, 3, 8). With J=R=0 and G=I,
+    // the pencil is exactly -i*omega*I, independent of the coupled storage.
+    // At unit frequency x=[L,1,-L] gives (Q*x)[1]=L+1-L=1.
+    let identity = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let q = vec![4.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 4.0];
+    let system = PortHamiltonian::new(
+        3, 3, vec![0.0; 9], vec![0.0; 9], identity,
+        Box::new(QuadraticStorage::new(q, 3).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let factor = model.factor(1.0, || false).unwrap();
+    let large = 2.0_f64.powi(54);
+    let input = [C64::new(0.0, -large), C64::new(0.0, -1.0), C64::new(0.0, large)];
+    let response = factor.response(&input, || false).unwrap();
+    assert_eq!(response.state, [C64::from_re(large), C64::ONE, C64::from_re(-large)]);
+    assert_eq!(response.effort[1], C64::ONE);
+    assert_eq!(response.output[1], C64::ONE);
+    assert_eq!(response.supplied_power_w, 0.0);
+    assert_eq!(response.dissipated_power_w, 0.0);
+    let frequency = factor.response_with_frequency_derivative(&input, None, || false).unwrap();
+    assert_eq!(frequency.effort_derivative[1], -C64::ONE);
+    assert_eq!(frequency.output_derivative[1], -C64::ONE);
+    let amplitude = factor.response_with_parameter_derivative(
+        &input, HarmonicParameterDirection::default(), Some(&input), || false,
+    ).unwrap();
+    assert_eq!(amplitude.effort_derivative[1], C64::ONE);
+    assert_eq!(amplitude.output_derivative[1], C64::ONE);
+}
+
+#[test]
 fn coherent_drives_retain_weak_motion_and_original_physical_work() {
     let system = PortHamiltonian::new(
         1, 3, vec![0.0], vec![1.0], vec![1.0; 3],

@@ -56,6 +56,16 @@ impl Sum {
         self.product(half, smaller)
     }
 
+    /// Peak-phasor stored energy carries a factor of one quarter. Scale the
+    /// larger scalar so a tiny state survives multiplication by a large effort
+    /// and a representable energy does not require an overflowing full product.
+    pub(crate) fn quarter_product(&mut self, a: f64, b: f64) -> Option<()> {
+        let (larger, smaller) = if a.abs() >= b.abs() { (a, b) } else { (b, a) };
+        let quarter = 0.25 * larger;
+        if quarter == 0.0 && larger != 0.0 && smaller != 0.0 { return None; }
+        self.product(quarter, smaller)
+    }
+
     /// Carry BOTH first-stage words through the next physical contraction.
     /// Rounding `source.value()` first could remove an entire coupled mode.
     pub(crate) fn add_scaled(&mut self, source: Self, coefficient: f64) -> Option<()> {
@@ -68,6 +78,12 @@ impl Sum {
     pub(crate) fn add_half_scaled(&mut self, source: Self, coefficient: f64) -> Option<()> {
         self.half_product(source.high, coefficient)?;
         self.half_product(source.low, coefficient)
+    }
+
+    /// Carry the unrounded storage row through its quarter-scaled energy term.
+    pub(crate) fn add_quarter_scaled(&mut self, source: Self, coefficient: f64) -> Option<()> {
+        self.quarter_product(source.high, coefficient)?;
+        self.quarter_product(source.low, coefficient)
     }
 
     /// Round only at the final structure entry, whose opposite transpose is
@@ -152,6 +168,30 @@ mod tests {
         work.add_half_scaled(positive, 2.0).unwrap();
         work.add_half_scaled(negative, 2.0).unwrap();
         assert_eq!(work.value().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn peak_storage_products_keep_finite_energy_and_subnormal_state_components() {
+        for (a, b, expected) in [
+            (f64::MAX, 4.0, f64::MAX),
+            (4.0, f64::MAX, f64::MAX),
+            (f64::from_bits(1), 2.0_f64.powi(1023), 2.0_f64.powi(-53)),
+            (2.0_f64.powi(1023), f64::from_bits(1), 2.0_f64.powi(-53)),
+        ] {
+            let mut sum = Sum::default();
+            sum.quarter_product(a, b).unwrap();
+            assert_eq!(sum.value().unwrap(), expected);
+        }
+        assert!(Sum::default().quarter_product(f64::from_bits(1), 1.0).is_none());
+        assert!(Sum::default().quarter_product(f64::INFINITY, 0.0).is_none());
+        let large = 2.0_f64.powi(54);
+        let mut row = Sum::default();
+        row.product(large, 1.0).unwrap();
+        row.product(1.0, 1.0).unwrap();
+        let mut energy = Sum::default();
+        energy.add_quarter_scaled(row, 1.0).unwrap();
+        energy.quarter_product(-large, 1.0).unwrap();
+        assert_eq!(energy.value().unwrap(), 0.25);
     }
 
     #[test]

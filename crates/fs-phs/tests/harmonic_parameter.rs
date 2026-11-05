@@ -38,6 +38,47 @@ fn near_real(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn parameter_energy_and_heat_slopes_retain_weak_cross_state_work() {
+    let identity = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let system = PortHamiltonian::new(
+        3, 3, vec![0.0; 9], identity.clone(), identity.clone(),
+        Box::new(QuadraticStorage::new(identity, 3).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let large = 2.0_f64.powi(54);
+    let input = [large, 1.0, large].map(|x| C64::new(x, -x));
+    let input_derivative = [1.0, 1.0, -1.0].map(|dx| C64::new(dx, -dx));
+    let result = model.factor(1.0, || false).unwrap().response_with_parameter_derivative(
+        &input, Direction::default(), Some(&input_derivative), || false,
+    ).unwrap();
+    near_real(result.mean_stored_energy_derivative, 0.5, 3e-14);
+    near_real(result.dissipated_power_derivative, 1.0, 3e-14);
+    near_real(result.supplied_power_derivative, 1.0, 3e-14);
+    near_real(result.power_residual_derivative, 0.0, 3e-14);
+}
+
+#[test]
+fn storage_tangent_combines_the_changing_map_before_effort_rounding() {
+    let system = PortHamiltonian::new(
+        2, 2, vec![0.0; 4], vec![0.0; 4], vec![1.0, 0.0, 0.0, 1.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 1.0, 1.0, 2.0], 2).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let large = 2.0_f64.powi(54);
+    // x=[0,L], dx=[L,1], dQ=[[0,-1],[-1,0]]. The first effort tangent
+    // is (L+1)-L=1; separately rounding Q*dx would erase it completely.
+    let result = model.factor(1.0, || false).unwrap().response_with_parameter_derivative(
+        &[C64::ZERO, C64::new(0.0, -large)],
+        Direction { storage: Some(&[0.0, -1.0, -1.0, 0.0]), ..Direction::default() },
+        Some(&[C64::new(0.0, -large), C64::new(0.0, -1.0)]), || false,
+    ).unwrap();
+    assert_eq!(result.state_derivative[0], C64::from_re(large));
+    assert_eq!(result.state_derivative[1], C64::ONE);
+    assert_eq!(result.effort_derivative[0], C64::ONE);
+    assert_eq!(result.output_derivative[0], C64::ONE);
+}
+
+#[test]
 fn coherent_parameter_sources_and_port_map_preserve_weak_motion_and_work() {
     let system = PortHamiltonian::new(
         1, 3, vec![0.0], vec![1.0], vec![1.0; 3],

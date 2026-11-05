@@ -5,7 +5,7 @@
 //! efforts and every hereditary state remain in the shared native solve.
 
 use super::{
-    C64, HarmonicError, HarmonicFactor, HarmonicPortPower, HarmonicResponse, finite, invalid, poll,
+    C64, HarmonicError, HarmonicFactor, HarmonicResponse, Sum, finite, invalid, poll,
     resource_bounds,
 };
 
@@ -133,36 +133,30 @@ impl HarmonicFactor<'_> {
         let (state_derivative, relative_derivative_residual) =
             self.solve_rhs(&rhs, &mut cancelled)?;
         let mut effort_derivative = state_derivative.clone();
-        let mut energy_derivative = 0.0;
+        let mut energy_derivative = Sum::default();
         for i in 0..model.n_diff {
             poll(&mut cancelled)?;
-            effort_derivative[i] = C64::ZERO;
-            for k in 0..model.n_diff {
-                effort_derivative[i] =
-                    effort_derivative[i] + state_derivative[k].scale(model.q[i * n + k]);
-            }
-            energy_derivative += 0.5 * half_pair(state_derivative[i], response.effort[i])?
-                + 0.5 * half_pair(response.state[i], effort_derivative[i])?;
+            let original = super::storage_row(model, i, &response.state)?;
+            let derivative = super::storage_row(model, i, &state_derivative)?;
+            effort_derivative[i] = super::input_value(derivative, C64::ZERO)?;
+            super::add_stored_work(&mut energy_derivative, original, state_derivative[i])?;
+            super::add_stored_work(&mut energy_derivative, derivative, response.state[i])?;
         }
-        let mut loss_derivative = 0.0;
+        let energy_derivative = energy_derivative.value()
+            .ok_or_else(|| invalid("stored-energy tangent is not representable"))?;
+        let mut loss_derivative = Sum::default();
         let mut output_derivative = vec![C64::ZERO; m];
         for i in 0..n {
             poll(&mut cancelled)?;
-            let mut resistance = C64::ZERO;
-            let mut resistance_derivative = C64::ZERO;
-            for k in 0..n {
-                resistance = resistance + response.effort[k].scale(model.r[i * n + k]);
-                resistance_derivative =
-                    resistance_derivative + effort_derivative[k].scale(model.r[i * n + k]);
-            }
-            if model.resisting_tangent.is_some() {
-                resistance = resistance + model.nonlinear_loss_row(i, &response.state);
-                resistance_derivative =
-                    resistance_derivative + model.nonlinear_loss_row(i, &state_derivative);
-            }
-            loss_derivative += half_pair(effort_derivative[i], resistance)?
-                + half_pair(response.effort[i], resistance_derivative)?;
+            let original = super::resisting_row(model, i, &response.state, &response.effort)?;
+            let derivative = super::resisting_tangent_row(model, i, &response.state,
+                &response.effort, &state_derivative, &effort_derivative,
+                super::HarmonicParameterDirection::default())?;
+            super::add_dissipative_work(&mut loss_derivative, original, effort_derivative[i])?;
+            super::add_dissipative_work(&mut loss_derivative, derivative, response.effort[i])?;
         }
+        let loss_derivative = loss_derivative.value()
+            .ok_or_else(|| invalid("dissipative-power tangent is not representable"))?;
         for (p, value) in output_derivative.iter_mut().enumerate() {
             poll(&mut cancelled)?;
             *value = super::port_output(&model.g, m, p, &effort_derivative)?;
@@ -207,8 +201,4 @@ impl HarmonicFactor<'_> {
             relative_derivative_residual,
         })
     }
-}
-
-fn half_pair(left: C64, right: C64) -> Result<f64, HarmonicError> {
-    Ok(HarmonicPortPower::from_peak(left, right)?.active_w)
 }
