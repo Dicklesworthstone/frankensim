@@ -272,6 +272,18 @@ coordinate; only calibration R and squared Delta-K are excluded from operating
 context matching. No missing growth data, toughness, threshold or measured
 authority is inferred from unrelated material properties.
 
+`crack_growth::source::resolve_walker` resolves all six original parameters
+from distinct `walker-*` properties, including the reference load ratio and
+gamma. All six retain one provenance, observation population and identical
+complete typed validity domain; only scalar or temperature-only parameter
+interpolation is admitted. The four common normalized parameter roles and
+the two extra original claims, answers and selections remain inspectable.
+Neither resolver substitutes the other model's property keys, and querying
+a plain Paris fit cannot silently enable Walker. Reference R is an original
+fit parameter, not the operating R chosen in the source query. Native binding
+continues to require the actual original material card/state and fixed typed
+operating context for either explicitly selected model.
+
 `CrackGeometry` retains either constant Y or an immutable, bounded original
 table of Y versus crack length. Both use `K=Y(a)*sigma*sqrt(pi*a)`. The constant
 case retains its analytical O(1) path, including the exponential m=2 limit.
