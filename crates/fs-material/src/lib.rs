@@ -39,6 +39,8 @@ pub mod conductor;
 pub mod creep;
 /// Finite gold cyanidation coupled to original aqueous acid/base speciation.
 pub mod cyanide_leach;
+/// Irreversible, calibrated ductile initiation driven by native plastic history.
+pub mod ductile;
 /// Ordered source-backed Ohmic contact resistance, distinct from bulk resistivity.
 pub mod electrical_interface;
 pub mod liquid;
