@@ -7398,3 +7398,36 @@ and test execution remain outstanding after the execution environment failed.
 The gate stops at damage initiation: it supplies no stress erosion, fracture
 energy, characteristic length, crack insertion, fragments or post-failure
 load transfer, and does not close the broader regularized-fracture bead.
+
+## Material-bound tensile strength on native solid stresses
+
+`strength::TensileMaterialBinding` binds an explicitly selected isotropic
+maximum-principal-tension criterion to the native source-derived elastic state.
+Elasticity and strength must use the same immutable material card, physical
+condition coordinates and quantity conventions; selecting additional strength
+properties does not require an identical complete property-bundle identity.
+Every assessed stress must retain the binding's actual elastic-state identity.
+Uniform, per-element and per-point bindings support spatial heterogeneity and
+temperature-dependent stiffness/strength without substituting a material-name
+constant or a silently refreshed state.
+
+`TetThermalStressReport::assess_tensile_strength` consumes actual constant P1
+stresses, including the same reports returned by inertial trajectories.
+`QuadraticThermalResponse` now retains native stiffness-quadrature stresses,
+their local material identities and integration weights. Its tensile assessment
+checks these samples individually: opposite bending stresses cannot cancel
+through the existing element mean. Standard and B-bar samples use the same
+strain as native force and energy recovery. Mandel shears are converted to
+physical tensor components before the shared `fs-material` criterion.
+
+The largest utilization and its first deterministic sample govern. Sample
+budgets are checked before allocation, and each sample polls cancellation;
+source mismatch, invalid counts or numerical refusal publishes no partial
+assessment and changes no accepted mechanical state. The G1/G3/G4 tests in
+`tests/tensile_strength.rs` cover signed loading, pure shear, zero-mean bending
+hotspots, independently integrated energy, local thermal-strength changes and
+transactional refusals. Results compare finite sampled stresses with a named
+limit; they do not bound unsampled surface/interior stresses, supply anisotropic
+or ductile failure laws, or predict crack growth, fracture energy, plastic
+failure, fragmentation or service life. Finite-strain Piola stress is not
+accepted as Cauchy stress by these small-strain adapters.

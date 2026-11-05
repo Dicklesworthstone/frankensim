@@ -15,19 +15,53 @@ use fs_exec::Cx;
 use fs_solver::checked_cg::{CheckedCgConfig, CheckedCgError, checked_cg};
 use fs_solver::op::CsrOp;
 
+/// Actual small-strain Cauchy stress at one stiffness quadrature point.
+///
+/// Points remain in the native integration-rule order. They are discrete
+/// samples, not nodal extrapolations or a continuum peak-stress bound.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuadraticStressPoint {
+    stress_mandel_pa: [f64; 6],
+    material_state_identity: ContentHash,
+    integration_weight_m3: f64,
+}
+
+impl QuadraticStressPoint {
+    /// Mesh-frame Mandel [xx, yy, zz, xy, yz, zx], with sqrt(2) shear entries.
+    #[must_use]
+    pub const fn stress_mandel_pa(&self) -> &[f64; 6] {
+        &self.stress_mandel_pa
+    }
+
+    /// Actual local elastic source, including temperature-dependent updates.
+    #[must_use]
+    pub const fn material_state_identity(&self) -> ContentHash {
+        self.material_state_identity
+    }
+
+    /// Reference-geometry integration weight, including the Jacobian [m^3].
+    #[must_use]
+    pub const fn integration_weight_m3(&self) -> f64 {
+        self.integration_weight_m3
+    }
+}
+
 /// Integrated response of one isoparametric element in mesh-frame Mandel coordinates.
 ///
-/// Strain and stress are volume-weighted averages over the stiffness rule.
-/// These are neither pointwise stresses nor peak-stress estimates. Energy
+/// Mean strain and stress are volume-weighted averages over the stiffness rule.
+/// These means are neither pointwise stresses nor peak-stress estimates. Energy
 /// integrates the actual compatible or B-bar assumed field before averaging,
 /// so bending energy is retained even when mean strain vanishes. All values
 /// use the undeformed reference geometry and the parent response's formulation.
+/// The original point stresses are retained separately for strength assessments;
+/// averaging opposite bending stresses must not erase a tensile hotspot.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuadraticElementThermalResponse {
     mean_elastic_strain_mandel: [f64; 6],
     mean_stress_mandel_pa: [f64; 6],
     elastic_energy_j: f64,
     quadrature_volume_m3: f64,
+    stress_points: Vec<QuadraticStressPoint>,
 }
 
 impl QuadraticElementThermalResponse {
@@ -55,6 +89,13 @@ impl QuadraticElementThermalResponse {
     #[must_use]
     pub const fn quadrature_volume_m3(&self) -> f64 {
         self.quadrature_volume_m3
+    }
+
+    /// Original stress samples in the stiffness quadrature's native order.
+    /// B-bar samples use the same assumed strain as stiffness and forces.
+    #[must_use]
+    pub fn stress_points(&self) -> &[QuadraticStressPoint] {
+        &self.stress_points
     }
 }
 
@@ -309,7 +350,7 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
     let mut response = Vec::with_capacity(elements.len());
     let mut nodal_internal_force_n = vec![[0.0; 3]; nodes_m.len()];
     let mut elastic_energy_j = 0.0;
-    let mut identity = DomainHasher::new("org.frankensim.fs-solid.quadratic-thermal-response.v1");
+    let mut identity = DomainHasher::new("org.frankensim.fs-solid.quadratic-thermal-response.v2");
     identity.update(load.identity.as_bytes());
     identity.update(mesh_frame.as_bytes());
     identity.update(&maximum_absolute_mandel_strain.to_bits().to_le_bytes());
@@ -329,6 +370,7 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
         let mut mean_stress_mandel_pa = [0.0; 6];
         let mut volume = 0.0;
         let mut energy = 0.0;
+        let mut stress_points = Vec::with_capacity(stiffness_rule.len());
         for (point, &(reference, weight)) in stiffness_rule.iter().enumerate() {
             cx.checkpoint().map_err(|_| TetElasticError::Cancelled)?;
             let compatible_point;
@@ -375,6 +417,15 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
             }
             volume += dv;
             energy += point_energy;
+            identity.update(&material.material_state_identity);
+            for value in stress.iter().chain(core::iter::once(&dv)) {
+                identity.update(&value.to_bits().to_le_bytes());
+            }
+            stress_points.push(QuadraticStressPoint {
+                stress_mandel_pa: stress,
+                material_state_identity: ContentHash(material.material_state_identity),
+                integration_weight_m3: dv,
+            });
             for i in 0..6 {
                 mean_elastic_strain_mandel[i] += dv * elastic[i];
                 mean_stress_mandel_pa[i] += dv * stress[i];
@@ -419,6 +470,7 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
             mean_stress_mandel_pa,
             elastic_energy_j: energy,
             quadrature_volume_m3: volume,
+            stress_points,
         });
     }
     let mut nodal_force_balance_n = nodal_internal_force_n.clone();

@@ -75,6 +75,8 @@ pub mod rod;
 pub mod shell;
 pub mod shell_time;
 pub mod stability;
+/// Material-bound tensile assessments of native element and quadrature stresses.
+pub mod strength;
 /// Typed vector histories bound to body-fitted plane elasticity.
 pub mod vector_boundary2;
 

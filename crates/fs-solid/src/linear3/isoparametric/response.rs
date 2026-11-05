@@ -244,7 +244,8 @@ impl TetLinearElasticProblem<'_> {
                 damping[node][c] = finite(damping[node][c] + finite(eta*mv + zeta*kv)?)?;
             }
             elements.push(TetElementThermalStress { elastic_strain_mandel,
-                stress_mandel_pa, elastic_energy_j: energy });
+                stress_mandel_pa, elastic_energy_j: energy,
+                material_state_identity: ContentHash(material.material_state_identity) });
         }
         let solution_identity = source.finalize();
         let mut identity = DomainHasher::new("org.frankensim.fs-solid.dynamic-stress-field.v1");

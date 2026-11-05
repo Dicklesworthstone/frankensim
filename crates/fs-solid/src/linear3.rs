@@ -59,7 +59,7 @@ mod isoparametric;
 pub use isoparametric::thermal_field::QuadraticThermalStrainField;
 pub use isoparametric::thermal_response::prestress::QuadraticPrestressedAssembly;
 pub use isoparametric::thermal_response::{
-    QuadraticElementThermalResponse, QuadraticThermalResponse,
+    QuadraticElementThermalResponse, QuadraticStressPoint, QuadraticThermalResponse,
 };
 /// Isoparametric quadratic tetrahedra with consistent mass and explicit quadrature.
 pub mod tet10;
@@ -1277,6 +1277,7 @@ pub struct TetElementEigenstrainStress {
     elastic_strain_mandel: [f64; 6],
     stress_mandel_pa: [f64; 6],
     elastic_energy_j: f64,
+    material_state_identity: ContentHash,
 }
 
 /// Thermal-source name for the shared element stress and energy result.
@@ -1297,6 +1298,11 @@ impl TetElementEigenstrainStress {
     #[must_use]
     pub const fn elastic_energy_j(&self) -> f64 {
         self.elastic_energy_j
+    }
+    /// Exact elastic state consumed by the stress recovery at this element.
+    #[must_use]
+    pub const fn material_state_identity(&self) -> ContentHash {
+        self.material_state_identity
     }
 }
 
@@ -2646,6 +2652,7 @@ impl TetLinearElasticProblem<'_> {
                 elastic_strain_mandel,
                 stress_mandel_pa,
                 elastic_energy_j: energy,
+                material_state_identity: ContentHash(material.material_state_identity),
             });
         }
         for (node, force) in nodal_internal_force_n.iter().enumerate() {
