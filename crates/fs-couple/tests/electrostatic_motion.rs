@@ -1,6 +1,10 @@
 //! Resolved fields, native body momentum and independent physical work checks.
 //! All material cards are synthetic numerical fixtures, not measured devices.
 
+#[path = "electrostatic_motion/circuit.rs"]
+#[cfg(feature = "resolved-electrostatic-circuit-motion")]
+mod circuit;
+
 use fs_couple::electrostatic::motion::{
     ElectricalControl, Error, MotionControls, MotionInput, PlanarCapacitorMotion,
     PlanarCapacitorPath,
@@ -476,4 +480,41 @@ fn path_rejects_folding_and_inconsistent_rigid_electrode_motion() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn radial_geometry_cannot_be_interpreted_as_cartesian_rigid_electrode_motion() {
+    let source = reference(2.0, 2.0, false);
+    let old = source.mesh();
+    let mesh = TriComplex2::from_indexed_triangles(
+        "axisymmetric-motion-refusal",
+        old.vertices().iter().map(|p| [p[0] + 1.0, p[1]]).collect(),
+        old.faces().to_vec(),
+        Metric2::axisymmetric(core::f64::consts::TAU).unwrap(),
+    )
+    .unwrap();
+    // The planar field constructor already refuses this public route. Keep
+    // the complete coupling probe so a future broader field constructor must
+    // still pass the path's independent Cartesian rigid-motion admission.
+    let candidate = (|| -> Result<PlanarCapacitorPath, Error> {
+        let reference =
+            PlanarElectrostatics::new(mesh, source.materials().to_vec(), limits(), &mut || false)?;
+        PlanarCapacitorPath::new(
+            reference,
+            [vec![2, 5], vec![0, 3]],
+            vec![
+                [0.0, 0.0],
+                [0.5, 0.0],
+                [1.0, 0.0],
+                [0.0, 0.0],
+                [0.5, 0.0],
+                [1.0, 0.0],
+            ],
+            [-0.4, 0.4],
+            limits(),
+            field_controls(),
+            &mut || false,
+        )
+    })();
+    assert!(candidate.is_err());
 }

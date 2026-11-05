@@ -207,6 +207,69 @@ pub(crate) fn parameter_work(
 }
 
 impl MaterialCircuit {
+    // Only a coupled spatial-field owner may use this internal parameter
+    // substitution. It must pay the geometry work before publishing its joint
+    // candidate. Other source snapshots, laws, graph stamps and conserved
+    // coordinates remain attached; an existing owner of this branch refuses.
+    #[cfg(feature = "resolved-electrostatic-circuit-motion")]
+    pub(crate) fn with_resolved_capacitance(
+        &self,
+        branch: usize,
+        farads: f64,
+        inputs: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, f64), MaterialCircuitError> {
+        poll(cancelled)?;
+        if !super::positive(farads)
+            || !super::positive(1.0 / farads)
+            || self.storage.iter().any(|source| source.branch == branch)
+            || self.capacitor_curves.iter().any(|law| law.branch == branch)
+            || self
+                .capacitance_blocks
+                .iter()
+                .any(|block| block.branches().contains(&branch))
+            || self
+                .dielectric_capacitors
+                .iter()
+                .any(|law| law.branch() == branch)
+        {
+            return Err(invalid(
+                "resolved moving field needs one unbound linear capacitor branch",
+            ));
+        }
+        let mut next = self.clone();
+        let entry = next
+            .graph
+            .branches
+            .get_mut(branch)
+            .ok_or_else(|| invalid("resolved capacitor branch is out of range"))?;
+        if !matches!(entry.2, Branch::Capacitor { .. }) {
+            return Err(invalid("resolved field branch is not a capacitor"));
+        }
+        entry.2 = Branch::Capacitor { farads };
+        let (graph, _, dae) = super::bind_with_storage_laws(
+            &next.graph,
+            next.resistors.clone(),
+            &next.contacts,
+            &next.mutual,
+            &next.capacitor_curves,
+            &next.capacitance_blocks,
+        )?;
+        let x = super::extended(&dae, &next.fluxes_wb, &next.charges_c, inputs)?;
+        // Native consistency preserves charge/flux bit for bit; do not project
+        // them to satisfy an incompatible ideal voltage clamp or parallel C.
+        dae.consistent_initial_state(&x, inputs)?;
+        let energy = dae.system.hamiltonian(&x);
+        if !energy.is_finite() || energy < 0.0 {
+            return Err(invalid(
+                "resolved capacitor circuit energy is unrepresentable",
+            ));
+        }
+        next.graph = graph;
+        poll(cancelled)?;
+        Ok((next, energy))
+    }
+
     /// Construct the ordinary circuit with ALL R, C and L values supplied by
     /// their material owners. Numeric graph values are placeholders only.
     /// No alternate circuit solver or stored-state representation is introduced.

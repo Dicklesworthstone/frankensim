@@ -4,7 +4,7 @@ use fs_em::electrostatic::{ElectrostaticControls, PlanarElectrostatics};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::field_storage::planar::PlanarDielectricLaw;
 use fs_math::dd::Dd;
-use fs_rep_mesh::TriComplex2;
+use fs_rep_mesh::{Metric2, TriComplex2};
 
 use super::{Error, Result, check, finite, positive};
 
@@ -80,6 +80,11 @@ impl PlanarCapacitorPath {
     ) -> Result<Self> {
         check(cancelled)?;
         let mesh = reference.mesh();
+        if !matches!(mesh.metric(), Metric2::Planar { .. }) {
+            return Err(Error::Invalid(
+                "guided Cartesian capacitor motion requires a planar fixed-thickness field",
+            ));
+        }
         if motion.len() != mesh.vertices().len()
             || motion.iter().flatten().any(|x| !x.is_finite())
             || limits_m.iter().any(|x| !x.is_finite())

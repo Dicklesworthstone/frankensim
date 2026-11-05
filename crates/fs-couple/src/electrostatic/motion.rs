@@ -8,12 +8,16 @@
 //!
 //! Charge is either held on an isolated electrode, or voltage is held by an
 //! ideal source whose signed V dQ work is retained. The corresponding field
-//! work is -d[Q²/(2C)] or +d[C V²/2]. A changing finite circuit, breakdown,
-//! charge leakage and radiation require their own coupled owners.
+//! work is -d[Q²/(2C)] or +d[C V²/2]. The optional `circuit` owner supplies
+//! finite-circuit charge evolution on this same field path. Breakdown, charge
+//! transport inside the dielectric and radiation remain separate owners.
 //! Energy conventions: <https://doc.comsol.com/6.4/doc/com.comsol.help.acdc/acdc_ug_theory.05.79.html>.
 
 mod path;
 pub use path::{CapacitanceSample, PlanarCapacitorPath};
+/// Finite material RLC supply coupled to the same resolved moving field.
+#[cfg(feature = "resolved-electrostatic-circuit-motion")]
+pub mod circuit;
 
 use std::sync::Arc;
 
@@ -31,6 +35,8 @@ use fs_mbd_material::ResolvedBody;
 pub enum Error {
     Field(ElectrostaticError),
     Mechanics(ArticulatedError),
+    #[cfg(feature = "resolved-electrostatic-circuit-motion")]
+    Circuit(crate::material_circuit::MaterialCircuitError),
     Invalid(&'static str),
     Cancelled,
     OutsideBracket {
@@ -64,6 +70,15 @@ impl From<ElectrostaticError> for Error {
 impl From<ArticulatedError> for Error {
     fn from(error: ArticulatedError) -> Self {
         Self::Mechanics(error)
+    }
+}
+#[cfg(feature = "resolved-electrostatic-circuit-motion")]
+impl From<crate::material_circuit::MaterialCircuitError> for Error {
+    fn from(error: crate::material_circuit::MaterialCircuitError) -> Self {
+        match error {
+            crate::material_circuit::MaterialCircuitError::Cancelled => Self::Cancelled,
+            error => Self::Circuit(error),
+        }
     }
 }
 type Result<T> = core::result::Result<T, Error>;

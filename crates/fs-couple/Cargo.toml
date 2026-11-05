@@ -90,6 +90,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Frontier resolved electrostatic field/circuit/body feedback on one time step.
+resolved-electrostatic-circuit-motion = []
 # Source-owned Maxwell-Stefan, Soret and Dufour transport in the live gas assembly.
 molecular-transport = ["dep:fs-gas", "fs-gas/material"]
 # Native SDF barrier friction, accepted sliding history and finite-cell heat.
