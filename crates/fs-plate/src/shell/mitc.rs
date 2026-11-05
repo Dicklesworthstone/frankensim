@@ -29,6 +29,8 @@ pub mod strain;
 pub mod thermal;
 /// Full membrane, bending and transverse-shear material dissipation.
 pub mod viscosity;
+/// Original strain factors for insulated-slab membrane storage and bending memory.
+pub mod thermoelastic;
 /// Work-conjugate bilateral physical attachments in the shared shell pencil.
 pub mod connections;
 

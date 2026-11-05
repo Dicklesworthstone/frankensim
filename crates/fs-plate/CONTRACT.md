@@ -1,5 +1,38 @@
 # CONTRACT: fs-plate
 
+## Original MITC thermoelastic factors
+
+`shell::mitc::thermoelastic::project_thermoelastic_factors` projects the
+original homogeneous symmetric slab's reversible membrane stiffness and
+bending relaxation factors separately. It reuses the original physical
+six-coordinate nodal basis, directors, elastic director-bubble condensation
+and positive seven-point element quadrature. Every retained cross-mode term
+is represented by the full factor Gram. The source owner supplies the
+constitutive square factors already in the original facet's engineering
+strain frame; no thermal property, shear loss or drilling loss is inferred.
+
+The uniform through-thickness thermal mode stores membrane energy without
+dissipation under insulated faces and absent lateral diffusion. Odd thermal
+diffusion modes belong to the caller's positive bending-memory spectrum.
+Regional row metadata permits one element pass followed by separate grouping
+for distinct material rates. Exact zero channels remain zero; compensated
+short physical-strain and factor contractions retain weak signed channels.
+No dense nodal thermal matrix, eigensolve, spectrum or time integrator is added.
+
+The complete supplied basis is admitted up to the existing 1,024-mode shell
+ceiling. Checked work and combined factor-entry allowances, including
+quadrature padding, precede allocation. Original geometry/section validation
+and cancellation remain binding. Static elastic bubble condensation is the
+retained trial-space approximation, not a dynamic elimination of thermal
+director states. This local slab projection is not a general layered thermal
+model, a source-applicability proof or a spatial/roundoff certificate.
+
+Five authored regressions cover affine membrane energy, independent bending
+energy, signed cross terms, weak channels and exact nulls, curved director
+condensation and frame covariance, complete-basis admission and refusal.
+Independent numerical equations were checked; native Rust execution remains
+unverified in this environment.
+
 ## Bonded-beam stretch in the shared shell equilibrium
 
 The single-shell and tied-assembly preload owners include the original bonded
