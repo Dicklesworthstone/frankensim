@@ -1,0 +1,19 @@
+frankensim.matdb-source.v1
+observation	identity	IXOM copper sulfate pentahydrate, CAS 7758-99-8, product 000031007601	Supplier pentahydrate identity and composition entry	The active compound is CuSO4.5H2O, carrying five waters per formula unit. Its product mass is not anhydrous CuSO4 mass or elemental copper mass. This product reference does not supply adsorption activation, copper-ion speciation, dissolution heat or flotation recovery.
+observation	composition	IXOM pentahydrate product minimum component fraction	SDS section 3 weight-percent lower bound	The 98 weight percent lower bound refers to copper sulfate pentahydrate in the supplied product. It is not 98 percent elemental copper or an exact lot assay. The remaining impurities are unidentified.
+observation	density	IXOM reported relative density of the pentahydrate product	SDS section 9 dimensionless relative-density entry	Retain 2.284 as a dimensionless reported ratio. The temperature, pressure and reference density are not stated in this entry. Do not turn it into kg/m3, a bulk-bed density or a solution density without additional evidence.
+scalar	pentahydrate-minimum	identity,composition	pentahydrate_min	0.98	1	constant
+uncertainty	pentahydrate-minimum	unstated	-	-	-	-
+validity	pentahydrate-minimum	product	1	1	1
+validity	pentahydrate-minimum	hydration	5	5	1
+validity	pentahydrate-minimum	reference	1	1	1
+validity	pentahydrate-minimum	lot_qualified	0	0	1
+scalar	relative-density	identity,density	relative_density	2.284	1	constant
+uncertainty	relative-density	unstated	-	-	-	-
+validity	relative-density	product	1	1	1
+validity	relative-density	hydration	5	5	1
+validity	relative-density	reference	1	1	1
+validity	relative-density	lot_qualified	0	0	1
+validity	relative-density	temperature_known	0	0	1
+validity	relative-density	pressure_known	0	0	1
+validity	relative-density	reference_density_known	0	0	1

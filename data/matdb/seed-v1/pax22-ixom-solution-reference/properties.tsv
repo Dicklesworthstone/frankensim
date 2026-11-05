@@ -1,0 +1,8 @@
+frankensim.matdb-source.v1
+observation	identity	IXOM liquid PAX22-BULK_AU product	Supplier product label states 22 percent W/W	The product label supplies nominal PAX mass fraction, not a lot certificate, specification tolerance or measured composition. It is a different product from the solid PAX reference. The remaining solution mass is not assigned to a chemically complete species list. No solution density or volume dose is inferred from the label or a broader SDS concentration range.
+scalar	pax-nominal-fraction	identity	pax_fraction	0.22	1	constant
+uncertainty	pax-nominal-fraction	unstated	-	-	-	-
+validity	pax-nominal-fraction	product	1	1	1
+validity	pax-nominal-fraction	reference	1	1	1
+validity	pax-nominal-fraction	lot_qualified	0	0	1
+validity	pax-nominal-fraction	nominal	1	1	1

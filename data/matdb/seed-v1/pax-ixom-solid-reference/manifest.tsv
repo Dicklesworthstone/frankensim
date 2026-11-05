@@ -1,0 +1,11 @@
+frankensim.matdb-manifest.v3
+pack_id	pax-ixom-solid-reference
+redistribution	permitted	Selected attributed numerical facts and original interpretation only; no source prose, images or table layout is redistributed
+citation	IXOM Operations Pty Ltd, POTASSIUM AMYL XANTHATE, product code 000033326701, Safety Data Sheet revision 9, 2023-11-01, section 3 page 2; https://sds.ixom.com/pdf/shess-en-mtr-UGHS-000033326701.pdf; product https://www.ixom.com/p/PAX-900_AU; accessed 2026-11-05
+license	Attributed-Numerical-Facts-Only-No-Source-Document-License
+source	collector-reference	properties.tsv	material-tsv-v1
+property	pax_fraction	pax-product-component-mass-fraction-reported	dimensional
+property	koh_fraction	potassium-hydroxide-product-component-mass-fraction-reported	dimensional
+axis	product	source-ixom-pax-solid-product	dimensional
+axis	reference	engineering-reference-model	dimensional
+axis	lot_qualified	source-lot-qualified	dimensional

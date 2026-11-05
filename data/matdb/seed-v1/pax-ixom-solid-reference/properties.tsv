@@ -1,0 +1,13 @@
+frankensim.matdb-source.v1
+observation	identity	IXOM solid potassium amyl xanthate, CAS 2720-73-2, product 000033326701	Supplier solid collector SDS section 3, revision 9	This is the identified commercial solid PAX product. It is separate from aqueous PAX products and pure-compound thermochemistry. No flotation recovery, adsorption constant, recommended dose or reaction extent follows from the product identity.
+observation	composition	IXOM solid PAX composition disclosure	SDS section 3 weight-percent entries	The disclosed 90 weight percent PAX and 1.5 weight percent potassium hydroxide are retained as reported reference fractions. They are not minimum or maximum specifications, an analysis of a delivered lot, or exact composition guarantees. The other-components balance is unidentified and is not assigned to water or an invented species.
+scalar	pax-fraction	identity,composition	pax_fraction	0.90	1	constant
+uncertainty	pax-fraction	unstated	-	-	-	-
+validity	pax-fraction	product	1	1	1
+validity	pax-fraction	reference	1	1	1
+validity	pax-fraction	lot_qualified	0	0	1
+scalar	koh-fraction	identity,composition	koh_fraction	0.015	1	constant
+uncertainty	koh-fraction	unstated	-	-	-	-
+validity	koh-fraction	product	1	1	1
+validity	koh-fraction	reference	1	1	1
+validity	koh-fraction	lot_qualified	0	0	1
