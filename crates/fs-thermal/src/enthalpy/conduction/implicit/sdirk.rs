@@ -160,10 +160,12 @@ impl ImplicitConductionChain<'_> {
     ///
     /// Both stages use the SAME original enthalpy storage. Internal first-stage
     /// heat and advective pairs cancel from the external account. Bath heat,
-    /// inlet/outlet enthalpy, bath entropy, conductive production and signed
-    /// unclassified transport Q/T use the two positive Runge--Kutta weights.
-    /// Exact caloric entropy storage and the signed temporal defect remain
-    /// separate; no stream entropy or mixing-production law is inferred.
+    /// inlet/outlet enthalpy, bath entropy, conductive production and transport
+    /// entropy use the two positive Runge--Kutta weights. The optional
+    /// `with_implicit_advection_entropy` binding supplies original upwind boundary
+    /// entropy and spatial mixing; otherwise transport Q/T stays unclassified.
+    /// Exact caloric storage and the signed temporal defect remain separate;
+    /// no chemical entropy or constitutive fluid dissipation is inferred.
     ///
     /// Each accepted physical interval counts once in `energy.substeps`; all
     /// stage/retry work consumes the existing residual and linear budgets.

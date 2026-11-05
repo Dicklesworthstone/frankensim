@@ -10,6 +10,8 @@
 use super::liquid::LiquidEnthalpyCarrier;
 use super::{Advected, MassBoundary, MassFlow, finite, invalid};
 use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, MaterialId};
+use crate::enthalpy::backward_euler::TransportStepCoefficients;
+use crate::enthalpy::entropy::AdvectiveEntropyContribution;
 use std::collections::BTreeMap;
 
 /// Entropy balance over the last successful advance, in J/K.
@@ -45,6 +47,101 @@ pub struct AdvectionEntropyAudit {
     /// Advective energy/T minus boundary entropy and upwind mixing. Keeps
     /// mass-balance tolerance, flux arithmetic and reduction error separate.
     pub advective_balance_residual_j_k: f64,
+}
+
+/// Instantaneous entropy terms from the original bulk-upwind endpoint, W/K.
+/// No physical interval, accepted history or extra heat source is implied.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AdvectionEntropyRates {
+    pub boundary_entropy_input_w_k: f64,
+    pub upwind_mixing_w_k: f64,
+    /// Original transport power/T minus boundary entropy and upwind mixing.
+    pub balance_residual_w_k: f64,
+}
+
+pub(in crate::enthalpy) struct EndpointAdvectionEntropy {
+    pub(in crate::enthalpy) rates: AdvectionEntropyRates,
+    pub(in crate::enthalpy) temperatures: BTreeMap<CellId, f64>,
+}
+
+impl AdvectionEntropyRates {
+    pub(in crate::enthalpy) fn integrated(
+        self,
+        duration_s: f64,
+    ) -> Result<AdvectiveEntropyContribution, DepositionError> {
+        if !duration_s.is_finite() || duration_s <= 0.0 {
+            return Err(invalid("advective entropy requires positive quadrature"));
+        }
+        Ok(AdvectiveEntropyContribution {
+            boundary_entropy_input_j_k: finite(duration_s * self.boundary_entropy_input_w_k)?,
+            upwind_mixing_j_k: finite(duration_s * self.upwind_mixing_w_k)?,
+            balance_residual_j_k: finite(duration_s * self.balance_residual_w_k)?,
+        })
+    }
+}
+
+impl Advected<()> {
+    /// Query native bulk-upwind enthalpy and its entropy at the SAME endpoint.
+    ///
+    /// The original transport owner admits fixed mass, continuity, caloric
+    /// storage and source conventions before entropy is evaluated. Inlet/outlet
+    /// entropy and control-volume mixing use the same immutable law as their
+    /// donor/receiver enthalpy, with no arbitrary absolute entropy datum.
+    /// Temperature and caloric entropy must be supported by the original laws.
+    ///
+    /// This stateless query does not advance an observer or impose an explicit
+    /// flow CFL. Liquid carriers, species, selective outlets and attached flow
+    /// histories retain the implicit bulk owner's refusal. Reconstructed face
+    /// enthalpies require their own entropy closure and are not substituted here.
+    pub fn endpoint_transport_with_entropy(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(TransportStepCoefficients<()>, AdvectionEntropyRates), DepositionError> {
+        self.endpoint_transport_entropy_state(thermal, checkpoint)
+            .map(|(transport, entropy)| (transport, entropy.rates))
+    }
+
+    pub(in crate::enthalpy) fn endpoint_transport_entropy_state(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(TransportStepCoefficients<()>, EndpointAdvectionEntropy), DepositionError> {
+        checkpoint()?;
+        self.admit_implicit_bulk()?;
+        let transport = self.endpoint_transport(thermal, &mut checkpoint)?;
+        let mut enthalpies = BTreeMap::new();
+        let mut temperatures = BTreeMap::new();
+        for (i, (&id, cell)) in thermal.cells().iter().enumerate() {
+            if i % 256 == 0 { checkpoint()?; }
+            enthalpies.insert(id, cell.specific_h_j_kg);
+            temperatures.insert(id, thermal.temperature_k(id)?);
+        }
+        let (boundary, mixing) = flux_entropy_rates(
+            thermal, &self.flows, &self.boundaries, &self.reference_cells,
+            None, &enthalpies, &temperatures, None, &mut checkpoint,
+        )?;
+        // Use the exact powers returned by the physical transport owner, not
+        // a reconstructed stored-energy difference or an independently evolved
+        // flow. Continuity/flux roundoff stays in its own balance residue.
+        let mut at_cell = Sum::default();
+        for (&id, &watts) in &transport.heat.bulk.sources_w {
+            checkpoint()?;
+            at_cell.add(finite(watts / temperature(&temperatures, id)?)?)?;
+        }
+        for transfer in &transport.transfers {
+            checkpoint()?;
+            at_cell.add(finite(-transfer.power_w / temperature(&temperatures, transfer.a)?)?)?;
+            at_cell.add(finite(transfer.power_w / temperature(&temperatures, transfer.b)?)?)?;
+        }
+        let rates = AdvectionEntropyRates {
+            boundary_entropy_input_w_k: boundary,
+            upwind_mixing_w_k: mixing,
+            balance_residual_w_k: finite(at_cell.total()? - boundary - mixing)?,
+        };
+        checkpoint()?;
+        Ok((transport, EndpointAdvectionEntropy { rates, temperatures }))
+    }
 }
 
 impl<O> Advected<O> {
@@ -146,6 +243,83 @@ fn add_power(
     Ok(())
 }
 
+// One original entropy-flux law for explicit start states and implicit
+// endpoint stages. Only explicit history needs the per-cell power reconstruction;
+// implicit callers retain the native transport owner's actual returned powers.
+#[allow(clippy::too_many_arguments)]
+fn flux_entropy_rates(
+    thermal: &DepositionSimulation<'_>,
+    flows: &[MassFlow],
+    boundaries: &[MassBoundary],
+    energy_reference_cells: &BTreeMap<CellId, CellId>,
+    liquid_carrier: Option<LiquidEnthalpyCarrier>,
+    enthalpies: &BTreeMap<CellId, f64>,
+    temperatures: &BTreeMap<CellId, f64>,
+    mut powers: Option<&mut BTreeMap<CellId, f64>>,
+    check: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(f64, f64), DepositionError> {
+    // At coexistence the carrier uses original pure-liquid h/s; stationary
+    // solid remains in cell storage. The implicit bulk path passes no carrier.
+    let carried = |id| -> Result<f64, DepositionError> {
+        let h = *enthalpies.get(&id).ok_or(DepositionError::Arithmetic)?;
+        match liquid_carrier {
+            Some(carrier) => carrier.carried_h_at(h),
+            None => Ok(h),
+        }
+    };
+    let mut references = BTreeMap::new();
+    let mut boundary = Sum::default();
+    let mut mixing = Sum::default();
+    for (i, entry) in boundaries.iter().enumerate() {
+        if i % 256 == 0 { check()?; }
+        let (_, id, rate) = entry.identity();
+        let cell = thermal.cells().get(&id).ok_or(DepositionError::Arithmetic)?;
+        let h = carried(id)?;
+        let reference = *references.entry(cell.material_id).or_insert(h);
+        let t = temperature(temperatures, id)?;
+        let (boundary_s, carried_h, sign) = match *entry {
+            MassBoundary::Inlet { material_id, specific_h_j_kg: donor_h, .. } => {
+                if material_id != cell.material_id {
+                    return Err(invalid("advective entropy requires one immutable caloric law"));
+                }
+                let incoming_s = difference(thermal, material_id, reference, donor_h)?;
+                let ds = difference(thermal, material_id, h, donor_h)?;
+                mixing.add(finite(rate * finite((donor_h - h) / t - ds)?)?)?;
+                (incoming_s, donor_h, 1.0)
+            }
+            MassBoundary::Outlet { .. } => {
+                (difference(thermal, cell.material_id, reference, h)?, h, -1.0)
+            }
+        };
+        boundary.add(sign * finite(rate * boundary_s)?)?;
+        if let Some(powers) = powers.as_deref_mut() {
+            let energy_reference = carried(*energy_reference_cells.get(&id).unwrap_or(&id))?;
+            add_power(powers, id, sign * finite(rate * finite(carried_h - energy_reference)?)?)?;
+        }
+    }
+    for (i, flow) in flows.iter().enumerate() {
+        if i % 256 == 0 { check()?; }
+        let Some((up, down, rate)) = flow.directed() else { continue; };
+        let donor = thermal.cells().get(&up).ok_or(DepositionError::Arithmetic)?;
+        let receiver = thermal.cells().get(&down).ok_or(DepositionError::Arithmetic)?;
+        if donor.material_id != receiver.material_id {
+            return Err(invalid("advective entropy requires one immutable caloric law"));
+        }
+        let hu = carried(up)?;
+        let hd = carried(down)?;
+        let td = temperature(temperatures, down)?;
+        let ds = difference(thermal, donor.material_id, hd, hu)?;
+        mixing.add(finite(rate * finite((hu - hd) / td - ds)?)?)?;
+        if let Some(powers) = powers.as_deref_mut() {
+            let energy_reference = carried(*energy_reference_cells.get(&up).unwrap_or(&up))?;
+            let power = finite(rate * finite(hu - energy_reference)?)?;
+            add_power(powers, up, -power)?;
+            add_power(powers, down, power)?;
+        }
+    }
+    Ok((boundary.total()?, mixing.total()?))
+}
+
 impl EntropyState {
     pub(super) fn reset(&mut self) {
         *self = Self::default();
@@ -186,89 +360,11 @@ impl EntropyState {
             return Err(invalid("advective entropy must retain its active cells"));
         }
         let initial = &self.initial_h;
-        // Reconstruct the actual original carrier at the retained source
-        // epoch, never from the post-step mixture fraction. Nonflowing solid
-        // cells still participate in storage and need no liquid admission.
-        let carried = |id| -> Result<f64, DepositionError> {
-            let h = *initial.get(&id).ok_or(DepositionError::Arithmetic)?;
-            match liquid_carrier {
-                Some(carrier) => carrier.carried_h_at(h),
-                None => Ok(h),
-            }
-        };
         let mut powers: BTreeMap<_, _> = initial.keys().map(|&id| (id, 0.0)).collect();
-        // A single relative reference per immutable material law. Separate
-        // disconnected components with this same law can share the reference.
-        let mut references = BTreeMap::new();
-        let mut boundary = Sum::default();
-        let mut mixing = Sum::default();
-        for (i, entry) in boundaries.iter().enumerate() {
-            if i % 256 == 0 {
-                check()?;
-            }
-            let (_, id, rate) = entry.identity();
-            let cell = thermal
-                .cells()
-                .get(&id)
-                .ok_or(DepositionError::Arithmetic)?;
-            let h = carried(id)?;
-            let energy_reference = carried(*energy_reference_cells.get(&id).unwrap_or(&id))?;
-            let reference = *references.entry(cell.material_id).or_insert(h);
-            let t = temperature(temperatures, id)?;
-            match *entry {
-                MassBoundary::Inlet {
-                    material_id,
-                    specific_h_j_kg: donor_h,
-                    ..
-                } => {
-                    if material_id != cell.material_id {
-                        return Err(invalid(
-                            "advective entropy requires one immutable caloric law",
-                        ));
-                    }
-                    let incoming_s = difference(thermal, material_id, reference, donor_h)?;
-                    boundary.add(finite(rate * incoming_s)?)?;
-                    let ds = difference(thermal, material_id, h, donor_h)?;
-                    mixing.add(finite(rate * finite((donor_h - h) / t - ds)?)?)?;
-                    add_power(&mut powers, id, finite(rate * finite(donor_h - energy_reference)?)?)?;
-                }
-                MassBoundary::Outlet { .. } => {
-                    let outgoing_s = difference(thermal, cell.material_id, reference, h)?;
-                    boundary.add(-finite(rate * outgoing_s)?)?;
-                    add_power(&mut powers, id, -finite(rate * finite(h - energy_reference)?)?)?;
-                }
-            }
-        }
-        for (i, flow) in flows.iter().enumerate() {
-            if i % 256 == 0 {
-                check()?;
-            }
-            let Some((up, down, rate)) = flow.directed() else {
-                continue;
-            };
-            let donor = thermal
-                .cells()
-                .get(&up)
-                .ok_or(DepositionError::Arithmetic)?;
-            let receiver = thermal
-                .cells()
-                .get(&down)
-                .ok_or(DepositionError::Arithmetic)?;
-            if donor.material_id != receiver.material_id {
-                return Err(invalid(
-                    "advective entropy requires one immutable caloric law",
-                ));
-            }
-            let hu = carried(up)?;
-            let hd = carried(down)?;
-            let td = temperature(temperatures, down)?;
-            let ds = difference(thermal, donor.material_id, hd, hu)?;
-            mixing.add(finite(rate * finite((hu - hd) / td - ds)?)?)?;
-            let energy_reference = carried(*energy_reference_cells.get(&up).unwrap_or(&up))?;
-            let power = finite(rate * finite(hu - energy_reference)?)?;
-            add_power(&mut powers, up, -power)?;
-            add_power(&mut powers, down, power)?;
-        }
+        let (boundary, mixing) = flux_entropy_rates(
+            thermal, flows, boundaries, energy_reference_cells, liquid_carrier,
+            initial, temperatures, Some(&mut powers), check,
+        )?;
         let mut storage = Sum::default();
         let mut temporal = Sum::default();
         let mut other = Sum::default();
@@ -288,8 +384,8 @@ impl EntropyState {
             other.add(finite((energy - transported) / t0)?)?;
             advective.add(finite(transported / t0)?)?;
         }
-        let boundary = finite(dt * boundary.total()?)?;
-        let mixing = finite(dt * mixing.total()?)?;
+        let boundary = finite(dt * boundary)?;
+        let mixing = finite(dt * mixing)?;
         let values = [
             storage.total()?,
             boundary,

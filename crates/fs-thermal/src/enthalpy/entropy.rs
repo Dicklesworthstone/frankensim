@@ -3,9 +3,47 @@
 //! Birth carries a new material cell into the system. Its incoming entropy is
 //! excluded on BOTH sides of this relative account; subsequent thermal aging
 //! is integrated from its actual birth enthalpy. No absolute entropy datum is
-//! needed. This account does not supply chemical, advective or mechanical entropy.
+//! needed. An explicitly bound upwind owner may classify advective entropy;
+//! chemical and mechanical entropy require their own physical closures.
 
 use super::*;
+
+/// Entropy carried by an admitted fixed-mass upwind flow, in J/K.
+///
+/// The original flow owner supplies these terms on the same quadrature as its
+/// enthalpy flux. They are not inferred from a generic heat-transfer pair.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AdvectiveEntropyContribution {
+    /// Net inlet entropy minus outlet entropy. A common relative entropy datum
+    /// cancels under the original per-cell mass-continuity admission.
+    pub boundary_entropy_input_j_k: f64,
+    /// Sum dm*[(h_donor-h_receiver)/T_receiver - (s_donor-s_receiver)].
+    /// This is upwind/control-volume mixing, not constitutive fluid dissipation.
+    /// It is nonnegative for monotone T(h) in exact arithmetic; signed roundoff
+    /// is retained, and latent energy at one temperature produces no mixing.
+    pub upwind_mixing_j_k: f64,
+    /// Original transported energy/T minus boundary entropy and mixing. Keeps
+    /// admitted continuity roundoff and flux arithmetic separate from production.
+    pub balance_residual_j_k: f64,
+}
+
+impl AdvectiveEntropyContribution {
+    pub(in crate::enthalpy) fn accumulate(&mut self, other: Self) -> Result<(), DepositionError> {
+        self.boundary_entropy_input_j_k =
+            finite(self.boundary_entropy_input_j_k + other.boundary_entropy_input_j_k)?;
+        self.upwind_mixing_j_k = finite(self.upwind_mixing_j_k + other.upwind_mixing_j_k)?;
+        self.balance_residual_j_k = finite(self.balance_residual_j_k + other.balance_residual_j_k)?;
+        Ok(())
+    }
+
+    pub(in crate::enthalpy) fn scaled(self, factor: f64) -> Result<Self, DepositionError> {
+        Ok(Self {
+            boundary_entropy_input_j_k: finite(self.boundary_entropy_input_j_k * factor)?,
+            upwind_mixing_j_k: finite(self.upwind_mixing_j_k * factor)?,
+            balance_residual_j_k: finite(self.balance_residual_j_k * factor)?,
+        })
+    }
+}
 
 /// Entropy over accepted thermal intervals, in J/K. This is an accounting
 /// identity, not a spatial/time accuracy certificate or a global second-law proof.
@@ -19,20 +57,24 @@ pub struct EntropyAudit {
     /// Nonnegative production in finite-temperature conductive links and boundaries,
     /// evaluated on the SAME start/end quadrature as the accepted heat flux.
     pub conduction_generation_j_k: f64,
+    /// Explicit flow-owner classification, when requested. These terms are
+    /// excluded from the unclassified source contribution below.
+    pub advection: Option<AdvectiveEntropyContribution>,
     /// Applied source energy divided by its receiving cell's quadrature temperature.
     /// This is a thermal-storage contribution, NOT an assigned boundary entropy.
     /// The source owner must classify heat, work conversion and its own entropy.
     pub unclassified_source_at_cell_j_k: f64,
     /// Whether ANY active source was nonzero, even if signed contributions cancel.
     pub has_unclassified_sources: bool,
-    /// Storage minus reservoir input, conductive production and source-at-cell
-    /// contribution. Includes time quadrature, algebraic residual and roundoff;
+    /// Storage minus reservoir input, conductive production, classified
+    /// advection and source-at-cell contribution. Includes time quadrature,
+    /// algebraic residual and roundoff;
     /// never relabel this as physical heat or material entropy production.
     pub temporal_defect_j_k: f64,
 }
 
 impl EntropyAudit {
-    fn accumulate(&mut self, other: Self) -> Result<(), DepositionError> {
+    pub(in crate::enthalpy) fn accumulate(&mut self, other: Self) -> Result<(), DepositionError> {
         self.thermal_storage_change_j_k =
             finite(self.thermal_storage_change_j_k + other.thermal_storage_change_j_k)?;
         self.reservoir_entropy_input_j_k =
@@ -42,12 +84,25 @@ impl EntropyAudit {
         self.unclassified_source_at_cell_j_k =
             finite(self.unclassified_source_at_cell_j_k + other.unclassified_source_at_cell_j_k)?;
         self.has_unclassified_sources |= other.has_unclassified_sources;
+        if let Some(advection) = other.advection {
+            self.advection.get_or_insert_with(Default::default).accumulate(advection)?;
+        }
+        self.refresh_temporal_defect()
+    }
+
+    pub(in crate::enthalpy) fn refresh_temporal_defect(&mut self) -> Result<(), DepositionError> {
         self.temporal_defect_j_k = finite(
             self.thermal_storage_change_j_k
                 - self.reservoir_entropy_input_j_k
                 - self.conduction_generation_j_k
                 - self.unclassified_source_at_cell_j_k,
         )?;
+        if let Some(advection) = self.advection {
+            self.temporal_defect_j_k = finite(
+                self.temporal_defect_j_k - advection.boundary_entropy_input_j_k
+                    - advection.upwind_mixing_j_k - advection.balance_residual_j_k,
+            )?;
+        }
         Ok(())
     }
 }
@@ -267,16 +322,12 @@ impl DepositionSimulation<'_> {
             thermal_storage_change_j_k: storage.total()?,
             reservoir_entropy_input_j_k: finite(duration_s * boundary.total()?)?,
             conduction_generation_j_k: finite(duration_s * generation.total()?)?,
+            advection: None,
             unclassified_source_at_cell_j_k: finite(duration_s * source.total()?)?,
             has_unclassified_sources: has_source,
             temporal_defect_j_k: 0.0,
         };
-        audit.temporal_defect_j_k = finite(
-            audit.thermal_storage_change_j_k
-                - audit.reservoir_entropy_input_j_k
-                - audit.conduction_generation_j_k
-                - audit.unclassified_source_at_cell_j_k,
-        )?;
+        audit.refresh_temporal_defect()?;
         checkpoint()?;
         Ok(audit)
     }

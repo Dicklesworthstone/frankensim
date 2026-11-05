@@ -93,6 +93,19 @@ impl<'a> ImplicitConductionGraph<'a> {
         })
     }
 
+    /// Classify the already attached bulk-upwind flow on the native entropy
+    /// account. See [`ImplicitConductionChain::with_implicit_advection_entropy`]
+    /// for the caloric, stage-quadrature and reconstruction restrictions.
+    pub fn with_implicit_advection_entropy(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_implicit_advection_entropy(thermal, checkpoint)?,
+        })
+    }
+
     /// Solve limited axial enthalpy transport with the original conduction
     /// residual, nonlinear iteration and energy accounts.
     ///

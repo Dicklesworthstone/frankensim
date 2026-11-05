@@ -2038,11 +2038,43 @@ crosses that support boundary. Source identity, fixed density, pure-liquid
 inlet and conservative endpoint admission remain owned by the original carrier.
 
 Stationary species, selective streams and flow-entropy histories still refuse
-until their own endpoint closures exist. Thermal entropy marks these transfers
-unclassified. No phase mobility, moving inventory, pressure
-work, momentum feedback or entropy-generation model is inferred. The selected
-method's time error and upwind spatial diffusion still require independent
-refinement.
+until their own endpoint closures exist. Thermal entropy leaves mass-carried
+transfers unclassified unless the caller selects
+`with_implicit_advection_entropy` after binding an ordinary bulk-upwind flow.
+Liquid carriers retain their existing energy-only implicit account.
+No phase mobility, moving inventory, pressure work or momentum feedback is
+inferred. The selected method's time error and upwind spatial diffusion still
+require independent refinement.
+
+The entropy opt-in reuses the explicit flow owner's original caloric entropy
+differences and the actual native endpoint powers. Its
+`EntropyAudit::advection` separates net inlet-minus-outlet entropy, upwind
+control-volume mixing and the transport arithmetic/continuity residue. The
+same immutable material law and reference convention must cover each flowing
+component. A common relative entropy datum cancels under mass continuity;
+chemical mixing and unlike-law streams are not inferred. Upwind mixing is a
+spatial discretization/control-volume contribution, not constitutive fluid
+dissipation, and is nonnegative for monotone T(h) in exact arithmetic. Isothermal
+latent transport carries entropy without inventing mixing production.
+
+Backward Euler samples the actual endpoint; native SDIRK2 retains each stage's
+entropy with precisely the same positive quadrature weights as its enthalpy
+rates. Exact caloric storage, actual-reservoir entropy and conductive production
+remain in the original account. Real heat/work sources are sampled separately
+before flow powers are combined, so cancelling sources retain their unclassified
+status while closed flow loops cease to look like external heat sources.
+The signed temporal defect includes time quadrature, algebraic residual and
+roundoff; none is converted to physical heat or dissipation. Adaptive comparisons
+publish only their accepted fine trajectory. Rejection and late cancellation
+publish no entropy or physical prefix.
+
+`Advected::endpoint_transport_with_entropy` exposes the same stateless bulk
+transport query for callers needing instantaneous rates. No observer history
+or explicit CFL step is advanced. Nonempty face reconstruction requires its
+own entropy closure and refuses the implicit entropy opt-in; the energy-only
+reconstruction path remains available. The entropy query runs only on final
+audited Newton endpoints, leaving intermediate residuals and analytic tangents
+unchanged.
 
 Focused G1/G3/G4 regressions cover exact high-Courant chain/graph balances,
 large enthalpy-reference shifts, unequal-mass latent throughflow, nonlinear
@@ -2051,6 +2083,13 @@ The `fs-lbm` flow-enthalpy integration regression binds actual material-driven
 SIMPLEC face fluxes to the same implicit owner, checking serial latent inventory
 and inlet-minus-outlet joules at Courant 10 in one accepted interval. These are
 synthetic numerical checks, not experimental validation or throughput claims.
+
+Focused entropy regressions cover high-Courant closed loops with independent
+conductive/spatial/temporal terms, open flow with independently solved BE/SDIRK
+stage temperatures, unequal-mass latent transport, fine-trajectory-only adaptive
+integration, cancelling genuine sources, and late cancellation/reconstruction
+refusal. These are analytic numerical conformance checks, not full fluid
+second-law or experimental accuracy certificates.
 
 ## Limited axial convection in the native implicit graph
 

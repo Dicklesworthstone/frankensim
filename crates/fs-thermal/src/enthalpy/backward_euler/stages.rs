@@ -1,6 +1,6 @@
 //! Internal stage quadrature on the original joule residual and caloric chart.
 use super::*;
-use crate::enthalpy::entropy::EntropyAudit;
+use crate::enthalpy::entropy::{AdvectiveEntropyContribution, EntropyAudit};
 
 /// The physical endpoint clock and the implicit quadrature weight are distinct.
 /// A retained earlier stage is native heat, never an external source or a
@@ -23,6 +23,7 @@ pub(in crate::enthalpy) struct StageHeat {
     conduction_generation_j_k: f64,
     source_entropy_j_k: f64,
     has_unclassified_sources: bool,
+    advection: Option<AdvectiveEntropyContribution>,
 }
 
 impl StageQuadrature<'_> {
@@ -50,14 +51,12 @@ impl StageQuadrature<'_> {
             audit.unclassified_source_at_cell_j_k =
                 finite(audit.unclassified_source_at_cell_j_k + earlier.source_entropy_j_k)?;
             audit.has_unclassified_sources |= earlier.has_unclassified_sources;
+            if let Some(advection) = earlier.advection {
+                audit.advection.get_or_insert_with(Default::default).accumulate(advection)?;
+            }
             // Storage is still the exact caloric integral from the ORIGINAL
             // physical initial state. The first stage is not an extra step.
-            audit.temporal_defect_j_k = finite(
-                audit.thermal_storage_change_j_k
-                    - audit.reservoir_entropy_input_j_k
-                    - audit.conduction_generation_j_k
-                    - audit.unclassified_source_at_cell_j_k,
-            )?;
+            audit.refresh_temporal_defect()?;
         }
         Ok(())
     }
@@ -78,6 +77,7 @@ impl StageHeat {
             conduction_generation_j_k: entropy.conduction_generation_j_k,
             source_entropy_j_k: entropy.unclassified_source_at_cell_j_k,
             has_unclassified_sources: entropy.has_unclassified_sources,
+            advection: entropy.advection,
         }
     }
 
@@ -104,6 +104,7 @@ impl StageHeat {
         self.reservoir_entropy_j_k = finite(self.reservoir_entropy_j_k * factor)?;
         self.conduction_generation_j_k = finite(self.conduction_generation_j_k * factor)?;
         self.source_entropy_j_k = finite(self.source_entropy_j_k * factor)?;
+        self.advection = self.advection.map(|value| value.scaled(factor)).transpose()?;
         checkpoint()?;
         Ok(self)
     }
@@ -129,6 +130,38 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
 }
 
 impl<'m, T> BackwardEulerTrial<'m, T> {
+    /// Classify only the current endpoint's admitted upwind flow. Earlier
+    /// native stages already carry their original classified contributions.
+    /// Actual stored energy, rates, residuals and acceptance stay unchanged.
+    pub(in crate::enthalpy) fn classify_endpoint_advection(
+        &mut self,
+        advection: AdvectiveEntropyContribution,
+        source_entropy_j_k: f64,
+        has_unclassified_sources: bool,
+        quadrature: Option<StageQuadrature<'_>>,
+    ) -> Result<(), DepositionError> {
+        let audit = self.entropy.as_mut().ok_or(DepositionError::InvalidInput(
+            "advective classification requires the native entropy account",
+        ))?;
+        let earlier = quadrature.and_then(|stage| stage.earlier);
+        // Rebuild the NONadvective source contribution from its separately
+        // sampled owner, not by subtracting two large combined entropy totals.
+        audit.unclassified_source_at_cell_j_k = finite(
+            source_entropy_j_k + earlier.map_or(0.0, |heat| heat.source_entropy_j_k),
+        )?;
+        audit.has_unclassified_sources = has_unclassified_sources
+            || earlier.is_some_and(|heat| heat.has_unclassified_sources);
+        audit.advection.get_or_insert_with(Default::default).accumulate(advection)?;
+        audit.refresh_temporal_defect()?;
+        if let Some(heat) = &mut self.stage_heat {
+            // Retained first-stage heat has no earlier quadrature contribution.
+            heat.source_entropy_j_k = source_entropy_j_k;
+            heat.has_unclassified_sources = has_unclassified_sources;
+            heat.advection = Some(advection);
+        }
+        Ok(())
+    }
+
     pub(in crate::enthalpy) fn accept_with_stage_heat(
         self,
         cell_tolerance_j: f64,

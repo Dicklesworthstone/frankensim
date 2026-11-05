@@ -1112,3 +1112,63 @@ fn implicit_limited_loop_refines_a_transported_wave_with_less_spatial_diffusion(
         "{limited_errors:?}"
     );
 }
+
+#[path = "advection_entropy.rs"]
+mod entropy;
+
+
+#[test]
+fn implicit_entropy_keeps_cancelled_local_and_observed_sources_unclassified() {
+    use crate::enthalpy::conduction::implicit::source::{
+        ImplicitHeatSourceLaw, ImplicitHeatSourceState,
+    };
+
+    struct LocalSource<'a>(&'a Law);
+    impl ImplicitHeatSourceLaw for LocalSource<'_> {
+        fn caloric_law(&self) -> &dyn ThermalLaw { self.0 }
+        fn state_at_specific_enthalpy(
+            &self,
+            h: f64,
+            check: &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<ImplicitHeatSourceState, DepositionError> {
+            check()?;
+            self.0.temperature_k(h)?;
+            Ok(ImplicitHeatSourceState {
+                power_w: 20.0,
+                power_enthalpy_derivative_w_kg_j: 0.0,
+            })
+        }
+    }
+    #[derive(Clone)]
+    struct ObservedSink;
+    impl DepositionObserver for ObservedSink {
+        type Error = DepositionError;
+        fn sources(
+            &mut self,
+            _: &DepositionSimulation<'_>,
+            _: &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+            Ok(BTreeMap::from([(CellId(0), -20.0)]))
+        }
+    }
+
+    let law = Law { nonlinear_k: false, plateau: false };
+    let (thermal, conduction) = setup(&law, &[400.0], None, vec![]);
+    let source = LocalSource(&law);
+    let flow = open_flow(1, 2.0, 300.0);
+    let chain = ImplicitConductionChain::new(
+        &thermal, &conduction, &[(MaterialId(0), &law)], || Ok(()),
+    ).unwrap().with_heat_sources(&thermal, &[(CellId(0), &source)], || Ok(())).unwrap()
+        .with_implicit_advection(&thermal, &flow, || Ok(())).unwrap()
+        .with_implicit_advection_entropy(&thermal, || Ok(())).unwrap();
+    let (next, _, report) = chain.advance_observed_to(
+        &thermal, &ObservedSink, 0.5, controls(0.5),
+        &mut ImplicitConductionWorkspace::new(1).unwrap(), || Ok(()),
+    ).unwrap();
+    near(next.temperature_k(CellId(0)).unwrap(), 350.0, 1e-10);
+    near(report.energy.external_heat_j, -50.0, 1e-9);
+    near(report.entropy.unclassified_source_at_cell_j_k, 0.0, 0.0);
+    assert!(report.entropy.has_unclassified_sources);
+    assert!(report.entropy.advection.is_some());
+    near(report.entropy.thermal_storage_change_j_k, (350.0_f64 / 400.0).ln(), 1e-12);
+}

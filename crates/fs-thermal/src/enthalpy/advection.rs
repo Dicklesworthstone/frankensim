@@ -337,6 +337,19 @@ impl<O> Advected<O> {
 }
 
 impl Advected<()> {
+    fn admit_implicit_bulk(&self) -> Result<(), DepositionError> {
+        if self.liquid_carrier.is_some()
+            || self.stationary_species.is_some()
+            || !self.selective_outlets.is_empty()
+            || self.entropy.is_some()
+        {
+            return Err(invalid(
+                "implicit bulk enthalpy excludes liquid carriers, species, selective streams and flow entropy histories",
+            ));
+        }
+        Ok(())
+    }
+
     /// Analytic derivative of the original endpoint heat rates with respect
     /// to each cell's CARRIED specific enthalpy, in kg/s. Ordinary bulk flow
     /// carries the stored h itself. A liquid carrier must additionally apply

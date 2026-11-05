@@ -72,7 +72,7 @@ use boundary::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundarySt
 /// Endpoint upwind enthalpy in the same conservative nonlinear solve.
 #[path = "implicit/advection.rs"]
 mod advection;
-use advection::ImplicitAdvection;
+use advection::{ClassifiedAdvectionEntropy, ImplicitAdvection};
 
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
@@ -275,6 +275,7 @@ struct Endpoint {
     ambient_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     heat_source_states: BTreeMap<CellId, ImplicitHeatSourceState>,
     transport_tangent: Vec<(usize, usize, f64)>,
+    advection_entropy: Option<ClassifiedAdvectionEntropy>,
 }
 
 impl<'a> ImplicitConductionChain<'a> {
@@ -696,6 +697,7 @@ impl<'a> ImplicitConductionChain<'a> {
             ambient_exchange_states,
             heat_source_states,
             transport_tangent: Vec::new(),
+            advection_entropy: None,
         })
     }
 
@@ -748,10 +750,22 @@ impl<'a> ImplicitConductionChain<'a> {
             }
             let mut transfers = transfers.to_vec();
             if let Some(advection) = &self.advection {
-                let (transport, tangent) = advection.endpoint(
-                    thermal, &self.index, &mut || (checkpoint.borrow_mut())(),
+                let (transport, tangent, flow_entropy) = advection.endpoint(
+                    thermal, &self.index, entropy, &mut || (checkpoint.borrow_mut())(),
                 )?;
                 endpoint.transport_tangent = tangent;
+                if let Some(flow_entropy) = flow_entropy {
+                    let mut classified = ClassifiedAdvectionEntropy::sample(
+                        thermal, &sources_w, &transfers, flow_entropy,
+                        quadrature.map_or(step.duration_s(), |stage| stage.implicit_dt_s),
+                        &mut || (checkpoint.borrow_mut())(),
+                    )?;
+                    // Preserve actual local source ownership even when these
+                    // endpoint watts cancel an independent observed source.
+                    classified.has_unclassified_sources |= endpoint.heat_source_states
+                        .values().any(|state| state.power_w != 0.0);
+                    endpoint.advection_entropy = Some(classified);
+                }
                 for (id, watts) in transport.heat.bulk.sources_w {
                     let value = sources_w.entry(id).or_default();
                     *value = finite(*value + watts)?;
@@ -776,12 +790,19 @@ impl<'a> ImplicitConductionChain<'a> {
                 exchanges,
             })
         };
-        if let Some(stage) = quadrature {
+        let mut trial = if let Some(stage) = quadrature {
             step.evaluate_stage(energy, resolve, stage, entropy, || (checkpoint.borrow_mut())())
         } else {
             step.evaluate_exchange_option(energy, resolve, entropy, None,
                 || (checkpoint.borrow_mut())())
+        }?;
+        if let Some(classified) = trial.payload().advection_entropy {
+            trial.classify_endpoint_advection(
+                classified.advection, classified.source_entropy_j_k,
+                classified.has_unclassified_sources, quadrature,
+            )?;
         }
+        Ok(trial)
     }
 
     fn jacobian(
@@ -1247,22 +1268,7 @@ fn empty_report() -> ImplicitConductionReport {
     }
 }
 fn accumulate_entropy(total: &mut EntropyAudit, next: EntropyAudit) -> Result<(), DepositionError> {
-    total.thermal_storage_change_j_k =
-        finite(total.thermal_storage_change_j_k + next.thermal_storage_change_j_k)?;
-    total.reservoir_entropy_input_j_k =
-        finite(total.reservoir_entropy_input_j_k + next.reservoir_entropy_input_j_k)?;
-    total.conduction_generation_j_k =
-        finite(total.conduction_generation_j_k + next.conduction_generation_j_k)?;
-    total.unclassified_source_at_cell_j_k =
-        finite(total.unclassified_source_at_cell_j_k + next.unclassified_source_at_cell_j_k)?;
-    total.has_unclassified_sources |= next.has_unclassified_sources;
-    total.temporal_defect_j_k = finite(
-        total.thermal_storage_change_j_k
-            - total.reservoir_entropy_input_j_k
-            - total.conduction_generation_j_k
-            - total.unclassified_source_at_cell_j_k,
-    )?;
-    Ok(())
+    total.accumulate(next)
 }
 #[derive(Default)]
 struct Sum {
