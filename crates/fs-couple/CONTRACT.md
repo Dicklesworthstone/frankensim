@@ -32950,3 +32950,51 @@ radiation retain their existing owners. See
 [the dielectric thermal contract](docs/resolved-dielectric-thermal.md) for the
 API, first-order coupled thermal accuracy and bounded physical assumptions.
 Seven focused regressions are in `tests/dielectric_field_thermal.rs`.
+
+## Source-bound causal radiation for complete interior fields
+
+`cavity_modal::interior::exterior::causal::BoundCausalRadiation` binds original
+planar P1 opening shapes, the complete pressure FE space, one coherent
+homogeneous source gas, native full BEM aperture matrices, and the native proper
+MIMO exact-ZOH load. The same opening binding serves harmonic construction.
+Malformed, duplicate, empty or nonfinite original traces refuse before geometry
+indexing. The bound field is assembled from the source gas itself; an arbitrary
+heterogeneous coefficient field is never assumed to equal its reference medium.
+
+Original BEM matrices remain in N s/m and are conjugated once for the FE/fitting
+convention. Every self and mutual reaction and signed zero-net mode retains its
+original force/velocity work coordinates. Native causality is checked before
+fitting, under explicit finite-band tail assumptions. Exactly three increasing
+proper shared-pole orders retain their original reports and must decrease
+measured matrix-relative error up to roundoff. Independently evaluated,
+interleaved BEM frequencies remain outside the fit and must also meet the
+declared final tolerance. Actual sampled endpoints must equal the load's source
+band and cover Nyquist. The positive first frequency leaves DC fit accuracy
+unqualified; the native sampled passivity check still includes DC.
+
+Sample storage, finite-band causality work and native relocation QR scratch/work
+are bounded before baking. Native BEM mesh/route limits, pole fitting,
+continuous/sampled passivity admission and complete-field time preparation
+remain authoritative. The immutable owner constructs the existing time closure
+from its own field, mode order and zero-history load. Sources created through
+`field()` retain that exact FE identity. Cancellation precedes history cloning
+during preparation; repeated simulations have independent native load histories.
+
+This construction extracts zero prescribed delay. It retains phase propagation
+in finite-band BEM data without inferring sharp arrivals from aperture centres
+or bounding boxes. It applies no gain scaling or passivity repair and promotes
+no native certificate class. GridOnly remains GridOnly. It does not establish
+spatial convergence, a uniform unsampled error bound, sharp first-arrival
+accuracy, exterior stored energy or closed-loop decay qualification. Planar P1
+opening traces remain its explicit source family; the lower-level time owner
+continues to accept separately qualified quadratic and delayed sources.
+
+Six focused native regressions specify original signed BEM coordinates,
+source/trace and resource refusals, a three-order reciprocal relaxation model
+with independent validation, analytic phasor/causality signs, and the complete
+public box bake -> original volume source -> full-field time-step route with
+separate BEM and FE-work checks. Pinned parsing/format and source/API reviews
+passed. Native compilation and numerical execution remain unverified under the
+existing upstream dependency-memory and workspace-space blocker. In particular,
+successful numerical admission of the full BEM fitting fixture is pending; no
+fit, causality or passivity gate was relaxed to manufacture it.

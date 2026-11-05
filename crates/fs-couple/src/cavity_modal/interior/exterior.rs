@@ -19,7 +19,11 @@
 //! radiators. Each opening is planar and must use identical physical triangles
 //! on both sides. The exterior uses their P0 velocity projection; pressure FE,
 //! signed trace and BEM mesh/route convergence remain separate requirements.
-//! No causal time-domain radiation realization is supplied by this module.
+//! The [`causal`] child constructs source-bound full-field exact-ZOH loads
+//! from these same original opening traces and native BEM matrices.
+
+/// Source-bound BEM bake, native rational realization and full-field time closure.
+pub mod causal;
 
 use super::{BoundaryLayerGeometry, GasState, HelmholtzFe, boundary_layer_transport};
 use fs_bem::helmholtz::aperture::{
@@ -152,6 +156,163 @@ pub struct RadiationResponse {
     pub power_balance_residual_w: f64,
 }
 
+/// Shared original geometry/shape admission for harmonic and causal owners.
+#[allow(clippy::too_many_arguments)]
+fn bind_openings(
+    fe: &HelmholtzFe<'_>,
+    ports: &[BoundaryMode],
+    radiating_modes: &[usize],
+    surface: &SpherePanels,
+    gas: &GasState,
+    budget: RadiationBudget,
+    gate: &CancelGate,
+) -> Result<(Vec<usize>, Vec<Aperture>), RadiationError> {
+    poll(gate)?;
+    boundary_layer_transport(gas)?;
+    let medium = fe.medium();
+    if medium.density_kg_m3.to_bits() != gas.density.to_bits()
+        || medium.sound_speed_m_s.to_bits() != gas.sound_speed.to_bits()
+    {
+        return Err(bad(
+            "original interior and exterior must use the same coherent source gas",
+        ));
+    }
+    let panels = surface.areas().len();
+    let count = radiating_modes.len();
+    let terms = panels as u128 * count as u128 * count as u128;
+    if ports.is_empty()
+        || ports.len() > MAX_PORT_MODES
+        || count == 0
+        || count > ports.len()
+        || panels == 0
+        || panels > budget.maximum_panels
+        || panels
+            .checked_mul(count)
+            .is_none_or(|n| n > budget.maximum_trace_entries)
+        || terms > u128::from(budget.maximum_projection_terms)
+    {
+        return Err(bad(
+            "complete opening trace bank exceeds its declared limits",
+        ));
+    }
+    let mut selected = vec![false; ports.len()];
+    for &mode in radiating_modes {
+        if mode >= ports.len() || selected[mode] {
+            return Err(bad("unique original radiating mode indices required"));
+        }
+        selected[mode] = true;
+    }
+    let driven_modes: Vec<_> = (0..ports.len()).filter(|&i| !selected[i]).collect();
+    let radiation_faces: BTreeSet<_> = radiating_modes
+        .iter()
+        .flat_map(|&i| ports[i].traces.iter().map(|(face, _)| face_key(*face)))
+        .collect();
+    if driven_modes.iter().any(|&i| {
+        ports[i]
+            .traces
+            .iter()
+            .any(|(face, _)| radiation_faces.contains(&face_key(*face)))
+    }) {
+        return Err(bad(
+            "driven interior feed and radiation modes share an opening face",
+        ));
+    }
+
+    if fe.ndof() > budget.maximum_pressure_dofs {
+        return Err(bad(
+            "original pressure field exceeds its declared DOF limit",
+        ));
+    }
+    // Validate every original trace before indexing or creating a panel bank.
+    // Harmonic and causal construction use the same physical opening binding.
+    for port in ports {
+        if port.traces.is_empty() {
+            return Err(bad("each original opening mode needs boundary traces"));
+        }
+        let mut faces = BTreeSet::new();
+        for &(face, values) in &port.traces {
+            poll(gate)?;
+            if !faces.insert(face_key(face)) || values.iter().any(|x| !x.is_finite()) {
+                return Err(bad("opening traces need unique faces and finite values"));
+            }
+            fe.boundary_geometry(face)?;
+        }
+    }
+    GeometryPolicy::new(surface).map_err(RadiationError::Geometry)?;
+    poll(gate)?;
+    let triangles = surface
+        .triangles()
+        .ok_or_else(|| bad("exterior requires original retained triangles"))?;
+    let mut panel_by_triangle = BTreeMap::new();
+    for (i, &triangle) in triangles.iter().enumerate() {
+        poll(gate)?;
+        if panel_by_triangle
+            .insert(triangle_key(triangle), i)
+            .is_some()
+        {
+            return Err(bad("duplicate physical exterior triangle"));
+        }
+    }
+    let mut apertures = Vec::with_capacity(count);
+    for &mode in radiating_modes {
+        poll(gate)?;
+        let first = ports[mode].traces[0].0;
+        let (_, normal, _) = fe.boundary_geometry(first)?;
+        let reference_point = fe.positions()[first[0] as usize];
+        let mut shape = vec![0.0; panels];
+        for &(face, values) in &ports[mode].traces {
+            poll(gate)?;
+            let points = face.map(|v| fe.positions()[v as usize]);
+            let panel = *panel_by_triangle
+                .get(&triangle_key(points))
+                .ok_or_else(|| bad("opening FE triangle is absent from original exterior"))?;
+            let (_, face_normal, _) = fe.boundary_geometry(face)?;
+            if face_normal
+                .iter()
+                .zip(normal)
+                .any(|(a, b)| (a - b).abs() > 1e-12)
+                || surface.normals()[panel]
+                    .iter()
+                    .zip(normal)
+                    .any(|(a, b)| (a - b).abs() > 1e-12)
+            {
+                return Err(bad(
+                    "opening must share its planar outward normal with the exterior",
+                ));
+            }
+            for point in points {
+                let offset: f64 = (0..3)
+                    .map(|c| normal[c] * (point[c] - reference_point[c]))
+                    .sum();
+                let scale = point
+                    .iter()
+                    .chain(&reference_point)
+                    .map(|x| x.abs())
+                    .fold(f64::MIN_POSITIVE, f64::max);
+                if !offset.is_finite() || offset.abs() > 64.0 * f64::EPSILON * scale {
+                    return Err(bad("each radiating mode must lie on one physical plane"));
+                }
+            }
+            // Exact area mean of the original real P1 trace, retaining its
+            // sign. Never divide by the mode's possibly zero net volume.
+            shape[panel] = values[0] / 3.0 + values[1] / 3.0 + values[2] / 3.0;
+        }
+        if shape.iter().any(|v| !v.is_finite()) || shape.iter().all(|&v| v == 0.0) {
+            return Err(bad(
+                "exterior P0 mesh does not resolve a supplied signed opening mode",
+            ));
+        }
+        apertures.push(Aperture {
+            shape,
+            reference_point,
+            normal,
+        });
+    }
+
+    poll(gate)?;
+    Ok((driven_modes, apertures))
+}
+
 impl<'surface> RadiatingInterior<'surface> {
     /// Bind original pressure coordinates, source gas and identical opening
     /// triangles. All modes supported on a radiating face must be radiating;
@@ -169,56 +330,9 @@ impl<'surface> RadiatingInterior<'surface> {
         budget: RadiationBudget,
         gate: &CancelGate,
     ) -> Result<Self, RadiationError> {
-        poll(gate)?;
+        let (driven_modes, apertures) =
+            bind_openings(fe, ports, radiating_modes, surface, gas, budget, gate)?;
         let transport = boundary_layer_transport(gas)?;
-        let medium = fe.medium();
-        if medium.density_kg_m3.to_bits() != gas.density.to_bits()
-            || medium.sound_speed_m_s.to_bits() != gas.sound_speed.to_bits()
-        {
-            return Err(bad(
-                "original interior and exterior must use the same coherent source gas",
-            ));
-        }
-        let panels = surface.areas().len();
-        let count = radiating_modes.len();
-        let terms = panels as u128 * count as u128 * count as u128;
-        if ports.is_empty()
-            || ports.len() > MAX_PORT_MODES
-            || count == 0
-            || count > ports.len()
-            || panels == 0
-            || panels > budget.maximum_panels
-            || panels
-                .checked_mul(count)
-                .is_none_or(|n| n > budget.maximum_trace_entries)
-            || terms > u128::from(budget.maximum_projection_terms)
-        {
-            return Err(bad(
-                "complete opening trace bank exceeds its declared limits",
-            ));
-        }
-        let mut selected = vec![false; ports.len()];
-        for &mode in radiating_modes {
-            if mode >= ports.len() || selected[mode] {
-                return Err(bad("unique original radiating mode indices required"));
-            }
-            selected[mode] = true;
-        }
-        let driven_modes: Vec<_> = (0..ports.len()).filter(|&i| !selected[i]).collect();
-        let radiation_faces: BTreeSet<_> = radiating_modes
-            .iter()
-            .flat_map(|&i| ports[i].traces.iter().map(|(face, _)| face_key(*face)))
-            .collect();
-        if driven_modes.iter().any(|&i| {
-            ports[i]
-                .traces
-                .iter()
-                .any(|(face, _)| radiation_faces.contains(&face_key(*face)))
-        }) {
-            return Err(bad(
-                "driven interior feed and radiation modes share an opening face",
-            ));
-        }
         let cancelled = || gate.is_requested();
         let interior = match walls {
             Some((faces, geometry)) => InteriorMultiport::new_full_with_boundary_layers(
@@ -234,76 +348,6 @@ impl<'surface> RadiatingInterior<'surface> {
                 InteriorMultiport::new_full(fe, ports, budget.maximum_pressure_dofs, &cancelled)?
             }
         };
-        GeometryPolicy::new(surface).map_err(RadiationError::Geometry)?;
-        poll(gate)?;
-        let triangles = surface
-            .triangles()
-            .ok_or_else(|| bad("exterior requires original retained triangles"))?;
-        let mut panel_by_triangle = BTreeMap::new();
-        for (i, &triangle) in triangles.iter().enumerate() {
-            poll(gate)?;
-            if panel_by_triangle
-                .insert(triangle_key(triangle), i)
-                .is_some()
-            {
-                return Err(bad("duplicate physical exterior triangle"));
-            }
-        }
-        let mut apertures = Vec::with_capacity(count);
-        for &mode in radiating_modes {
-            poll(gate)?;
-            let first = ports[mode].traces[0].0;
-            let (_, normal, _) = fe.boundary_geometry(first)?;
-            let reference_point = fe.positions()[first[0] as usize];
-            let mut shape = vec![0.0; panels];
-            for &(face, values) in &ports[mode].traces {
-                poll(gate)?;
-                let points = face.map(|v| fe.positions()[v as usize]);
-                let panel = *panel_by_triangle
-                    .get(&triangle_key(points))
-                    .ok_or_else(|| bad("opening FE triangle is absent from original exterior"))?;
-                let (_, face_normal, _) = fe.boundary_geometry(face)?;
-                if face_normal
-                    .iter()
-                    .zip(normal)
-                    .any(|(a, b)| (a - b).abs() > 1e-12)
-                    || surface.normals()[panel]
-                        .iter()
-                        .zip(normal)
-                        .any(|(a, b)| (a - b).abs() > 1e-12)
-                {
-                    return Err(bad(
-                        "opening must share its planar outward normal with the exterior",
-                    ));
-                }
-                for point in points {
-                    let offset: f64 = (0..3)
-                        .map(|c| normal[c] * (point[c] - reference_point[c]))
-                        .sum();
-                    let scale = point
-                        .iter()
-                        .chain(&reference_point)
-                        .map(|x| x.abs())
-                        .fold(f64::MIN_POSITIVE, f64::max);
-                    if !offset.is_finite() || offset.abs() > 64.0 * f64::EPSILON * scale {
-                        return Err(bad("each radiating mode must lie on one physical plane"));
-                    }
-                }
-                // Exact area mean of the original real P1 trace, retaining its
-                // sign. Never divide by the mode's possibly zero net volume.
-                shape[panel] = values[0] / 3.0 + values[1] / 3.0 + values[2] / 3.0;
-            }
-            if shape.iter().any(|v| !v.is_finite()) || shape.iter().all(|&v| v == 0.0) {
-                return Err(bad(
-                    "exterior P0 mesh does not resolve a supplied signed opening mode",
-                ));
-            }
-            apertures.push(Aperture {
-                shape,
-                reference_point,
-                normal,
-            });
-        }
         poll(gate)?;
         Ok(Self {
             interior,
