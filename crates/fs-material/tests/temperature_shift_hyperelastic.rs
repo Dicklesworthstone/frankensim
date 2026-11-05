@@ -4,6 +4,7 @@
 use fs_material::MaterialError;
 use fs_material::hyper::cards::FiniteStrainPotential;
 use fs_material::hyper::mixed::{MixedFiniteStrainPotential, VolumetricTreatment};
+use fs_material::hyper::reference::ReferenceDeformation;
 use fs_material::hyper::{Hyperelastic, HyperelasticModel, OgdenTerm};
 use fs_material::visco::temperature::{
     HyperelasticTemperatureError, TemperatureShift, TemperatureShiftModel,
@@ -13,6 +14,79 @@ use std::error::Error;
 
 const F: [f64; 9] = [1.2, 0.1, 0.0, 0.02, 0.94, 0.0, 0.0, 0.0, 0.91];
 const G: [f64; 9] = [1.16, 0.07, 0.02, -0.01, 0.97, 0.03, 0.01, 0.0, 0.93];
+
+#[test]
+fn temperature_shift_preserves_the_fixed_natural_configuration_and_its_history() {
+    let natural =
+        ReferenceDeformation::try_new([1.2, 0.15, 0.0, 0.02, 0.9, 0.08, 0.0, -0.03, 1.1]).unwrap();
+    let original = reference().with_reference_deformation(natural);
+    let accepted = original
+        .step_response(&original.initial_state(), &F, 0.02)
+        .unwrap()
+        .state;
+    let remainder = original
+        .step_remainder_response(&original.initial_remainder_state(), &F, 0.02)
+        .unwrap()
+        .state;
+    let snapshot = (accepted.clone(), remainder.clone());
+    for shift in shifts() {
+        let shifted = shift.shift_hyperelastic(&original, 325.0).unwrap();
+        assert_eq!(shifted.law().reference_deformation(), &natural);
+        assert_eq!(
+            shifted.law().initial_state().deformation_gradient,
+            *natural.deformation_gradient()
+        );
+        assert_eq!(
+            shifted.law().free_energy(&accepted, &F).unwrap(),
+            original.free_energy(&accepted, &F).unwrap()
+        );
+        assert_eq!(
+            shifted.law().remainder_free_energy(&remainder, &F).unwrap(),
+            original.remainder_free_energy(&remainder, &F).unwrap()
+        );
+        // A kinetic change at zero duration introduces no parameter work or heat.
+        assert_eq!(
+            shifted.law().step_response(&accepted, &F, 0.0).unwrap(),
+            original.step_response(&accepted, &F, 0.0).unwrap()
+        );
+        let mut explicit = original.clone();
+        for branch in &mut explicit.branches {
+            branch.tau_s *= shifted.state().factor();
+        }
+        assert_eq!(shifted.law(), &explicit);
+        assert_eq!(
+            shifted.law().step_response(&accepted, &G, 0.03).unwrap(),
+            explicit.step_response(&accepted, &G, 0.03).unwrap()
+        );
+        assert_eq!(
+            shifted
+                .law()
+                .step_remainder_response(&remainder, &G, 0.03)
+                .unwrap(),
+            explicit
+                .step_remainder_response(&remainder, &G, 0.03)
+                .unwrap()
+        );
+        let actual = shifted
+            .law()
+            .freeze_remainder(&remainder, 0.03)
+            .unwrap()
+            .mixed_response(&G, 3500.0, VolumetricTreatment::ExactIncompressible)
+            .unwrap();
+        let expected = explicit
+            .freeze_remainder(&remainder, 0.03)
+            .unwrap()
+            .mixed_response(&G, 3500.0, VolumetricTreatment::ExactIncompressible)
+            .unwrap();
+        assert_eq!(
+            actual.state.pressure_residual,
+            expected.state.pressure_residual
+        );
+        assert_eq!(actual.state.bulk_volume_ratio, natural.volume_ratio());
+        assert_eq!(actual.tangent_pa, expected.tangent_pa);
+    }
+    assert_eq!((accepted, remainder), snapshot);
+}
 
 fn reference() -> ViscoHyperelastic {
     ViscoHyperelastic::new(

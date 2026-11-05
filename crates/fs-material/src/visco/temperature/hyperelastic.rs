@@ -45,7 +45,8 @@ impl TemperatureShift {
     /// Prepare the existing finite-strain law with `tau_j(T) = a_T tau_j(ref)`.
     ///
     /// The equilibrium energy, each Neo-Hookean/Ogden branch energy, branch
-    /// order, deformation domain and original Newton controls are preserved.
+    /// order, fixed natural configuration, deformation domain and original
+    /// Newton controls are preserved.
     /// No eigensolve or return map runs during preparation. The returned law
     /// drives the same `step_response`, `freeze`, `freeze_remainder` and
     /// mixed finite-strain consumers.
@@ -88,7 +89,8 @@ impl TemperatureShift {
                     reference.local_newton_max_iterations(),
                 )
             })
-            .map_err(HyperelasticTemperatureError::Material)?;
+            .map_err(HyperelasticTemperatureError::Material)?
+            .with_reference_deformation(*reference.reference_deformation());
         for branch in &mut law.branches {
             branch.tau_s = scaled(branch.tau_s, state.factor())
                 .map_err(HyperelasticTemperatureError::Shift)?;
