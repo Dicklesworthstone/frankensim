@@ -37,7 +37,9 @@ pub(super) fn pdf(
         return 0.0;
     }
     coating.branch_probabilities(cos_o.clamp(0.0, 1.0))
-        .map_or(0.0, |mass| mass[1] * cos_i / core::f64::consts::PI)
+        .and_then(|mass| coating.diffuse_direction_pdf(cos_i.clamp(0.0, 1.0))
+            .map(|density| mass[1] * density))
+        .unwrap_or(0.0)
 }
 
 pub(super) struct Sample {
@@ -60,7 +62,7 @@ impl Sample {
         if self.delta {
             Ok(self.coefficient)
         } else {
-            Ok(self.coefficient * coating.diffuse_weight(substrate_reflectance)?)
+            Ok(self.coefficient * coating.sampled_diffuse_weight(substrate_reflectance)?)
         }
     }
 }
@@ -110,7 +112,9 @@ pub(super) fn sample(
         u1 / diffuse_mass
     };
     let remapped = conditional.clamp(0.0, 1.0_f64.next_down());
-    let (direction, conditional_pdf) = cosine_sample(normal, remapped, u2);
+    let (direction, conditional_pdf) = cosine_sample(
+        normal, remapped * coating.diffuse_cone_fraction(), u2,
+    );
     if conditional_pdf <= 0.0 {
         return Ok(None);
     }
@@ -121,8 +125,8 @@ pub(super) fn sample(
     Ok(Some(Sample {
         direction,
         delta: false,
-        pdf_fwd: diffuse_mass * normal.dot(direction) / core::f64::consts::PI,
-        pdf_rev: exit.event_probabilities()[1] * cosine / core::f64::consts::PI,
+        pdf_fwd: diffuse_mass * coating.diffuse_direction_pdf(normal.dot(direction).clamp(0.0, 1.0))?,
+        pdf_rev: exit.event_probabilities()[1] * coating.diffuse_direction_pdf(cosine.clamp(0.0, 1.0))?,
         coefficient: (interface.transmittance / diffuse_mass) * exit.transmittance,
     }))
 }
@@ -242,6 +246,33 @@ mod tests {
         assert_ne!(material(0.6, coated).content_identity(), material(0.7, coated).content_identity());
         for draw in [-0.1, 1.0, f64::NAN] {
             assert!(sample(coated, normal, normal, draw, 0.2).is_err());
+        }
+    }
+
+    #[test]
+    fn immersed_low_index_coating_samples_only_its_escape_cone_with_reciprocal_pdfs() {
+        let coating = SmoothDiffuseCoating::try_new(1.5, 1.0).unwrap();
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let outgoing = Vec3::new(0.6, 0.0, 0.8);
+        let masses = coating.branch_probabilities(0.8).unwrap();
+        let material = material(0.7, coating);
+        for unit in [0.0, 0.2, 0.8, 0.999] {
+            let event = sample(coating, normal, outgoing, diffuse_draw(masses, unit), 0.3)
+                .unwrap().unwrap();
+            assert!(!event.delta);
+            let cosine = event.direction.z;
+            assert!(cosine > (1.0_f64 - (1.0_f64 / 1.5).powi(2)).sqrt());
+            let value = coating.diffuse_brdf(0.8, cosine, 0.7).unwrap();
+            assert!((event.weight(coating, 0.7).unwrap() - value*cosine/event.pdf_fwd).abs() < 2e-13);
+            assert_eq!(event.pdf_fwd, bsdf_pdf(&material, normal, outgoing, event.direction, None));
+            assert_eq!(event.pdf_rev, bsdf_pdf(&material, normal, event.direction, outgoing, None));
+        }
+        let trapped = Vec3::new(3.0_f64.sqrt()/2.0, 0.0, 0.5);
+        assert_eq!(bsdf_pdf(&material, normal, outgoing, trapped, None), 0.0);
+        for draw in [0.0, 0.3, 0.999] {
+            let event = sample(coating, normal, trapped, draw, 0.2).unwrap().unwrap();
+            assert!(event.delta);
+            assert_eq!(event.weight(coating, 0.0).unwrap(), 1.0);
         }
     }
 }

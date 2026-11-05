@@ -3,11 +3,78 @@ use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, Glass
 use fs_geom::Point3;
 
 fn beam(direction: Vec3, state: Stokes) -> PolarizedBeam {
-    let glass = DielectricGlass::new(CauchyIor::try_constant(1.0).unwrap(),
+    beam_in_medium(direction, state, 1.0)
+}
+
+fn beam_in_medium(direction: Vec3, state: Stokes, index: f64) -> PolarizedBeam {
+    let glass = DielectricGlass::new(CauchyIor::try_constant(index).unwrap(),
         BeerLambertAbsorption::CLEAR, GlassProvenance::Custom);
     let axis = if direction.y == 0.0 { Vec3::new(0.0, 1.0, 0.0) } else { Vec3::new(1.0, 0.0, 0.0) };
     PolarizedBeam::try_new(Point3::new(0.0, 0.0, 0.0),
         PolarizationFrame::try_new(direction, axis).unwrap(), 550.0, glass, state).unwrap()
+}
+
+#[test]
+fn g1_immersed_coat_scalar_agreement_and_external_tir_support() {
+    let coating = SmoothDiffuseCoating::try_new(1.5, 1.0).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let input = beam_in_medium(Vec3::new(0.6, 0.0, -0.8), Stokes::unpolarized(2.0), 1.5);
+    let masses = coating.branch_probabilities(0.8).unwrap();
+    let diffuse_draw = if masses[0] <= masses[1] { masses[0]+0.5*masses[1] } else { 0.5*masses[1] };
+    for unit in [0.0, 0.2, 0.8, 0.999] {
+        let event = input.sample_coated_diffuse(normal, coating, 0.7, [unit, 0.3, diffuse_draw]).unwrap();
+        assert!(!event.delta);
+        let direction = event.beam.frame().direction();
+        assert!(direction.z > (1.0_f64 - (1.0_f64/1.5).powi(2)).sqrt());
+        let density = masses[1]*coating.diffuse_direction_pdf(direction.z).unwrap();
+        close(event.pdf, density);
+        close(event.beam.power().i*event.pdf/(2.0*direction.z),
+            coating.diffuse_brdf(0.8, direction.z, 0.7).unwrap());
+        let source = PolarizationFrame::try_new(direction.scale(-1.0), event.beam.frame().horizontal()).unwrap();
+        let response = input.evaluate_coated_diffuse_connection(normal, coating, 0.7,
+            source, Stokes::unpolarized(1.0)).unwrap();
+        close(response.factor, coating.diffuse_brdf(0.8, direction.z, 0.7).unwrap());
+        close(response.pdf, event.pdf);
+    }
+    let trapped = beam_in_medium(Vec3::new(3.0_f64.sqrt()/2.0, 0.0, -0.5),
+        Stokes { i: 1.0, q: 0.0, u: 0.6, v: 0.8 }, 1.5);
+    for draw in [0.0, 0.5, 0.999] {
+        let mirror = trapped.sample_coated_diffuse(normal, coating, 0.0, [0.2, 0.3, draw]).unwrap();
+        assert!(mirror.delta);
+        assert_eq!(mirror.pdf, 1.0);
+        close(mirror.beam.power().i, 1.0);
+        close(mirror.beam.power().degree(), 1.0);
+    }
+    let blocked_source = input.evaluate_coated_diffuse_connection(normal, coating, 1.0,
+        trapped.frame(), Stokes::unpolarized(1.0)).unwrap();
+    assert_eq!(blocked_source.factor, 0.0);
+    assert_eq!(blocked_source.pdf, 0.0);
+    let blocked_camera = trapped.evaluate_coated_diffuse_connection(normal, coating, 1.0,
+        input.frame(), Stokes::unpolarized(1.0)).unwrap();
+    assert_eq!(blocked_camera.factor, 0.0);
+    assert_eq!(blocked_camera.pdf, 0.0);
+}
+
+#[test]
+fn g1_immersed_coat_white_furnace_retains_polarized_incident_power() {
+    let coating = SmoothDiffuseCoating::try_new(1.5, 1.0).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    for q in [-1.0, 0.0, 1.0] {
+        let input = beam_in_medium(Vec3::new(0.6, 0.0, -0.8),
+            Stokes { i: 1.0, q, u: 0.0, v: 0.0 }, 1.5);
+        let masses = coating.branch_probabilities(0.8).unwrap();
+        let mirror_draw = if masses[0] <= masses[1] { 0.5*masses[0] } else { masses[1]+0.5*masses[0] };
+        let diffuse_draw = if masses[0] <= masses[1] { masses[0]+0.5*masses[1] } else { 0.5*masses[1] };
+        let mirror = input.sample_coated_diffuse(normal, coating, 1.0, [0.3, 0.2, mirror_draw]).unwrap();
+        let mut diffuse = 0.0;
+        const N: usize = 16384;
+        for i in 0..N {
+            let event = input.sample_coated_diffuse(normal, coating, 1.0,
+                [(i as f64+0.5)/N as f64, 0.2, diffuse_draw]).unwrap();
+            diffuse += event.beam.power().i/N as f64;
+        }
+        assert!((masses[0]*mirror.beam.power().i + masses[1]*diffuse - 1.0).abs() < 4e-6);
+    }
 }
 
 fn close(a: f64, b: f64) {

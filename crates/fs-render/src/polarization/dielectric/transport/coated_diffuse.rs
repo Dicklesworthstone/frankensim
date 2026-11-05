@@ -54,10 +54,12 @@ impl PolarizedBeam {
             return Ok(BeamSample { beam, event: DielectricEvent::Reflection,
                 pdf: probability[0], delta: true });
         }
-        let proposal = self.sample_depolarizing_diffuse(normal, 1.0, [samples[0], samples[1]])?;
+        let proposal = self.sample_depolarizing_diffuse(normal, 1.0,
+            [samples[0] * coating.diffuse_cone_fraction(), samples[1]])?;
         let beam = self.coated_diffuse_response(normal, proposal.beam.frame.direction,
-            coating, reflectance, probability[1])?;
-        let pdf = checked_product(probability[1], proposal.pdf_solid_angle)?;
+            coating, reflectance, probability[1], true)?;
+        let pdf = checked_product(probability[1], coating.diffuse_direction_pdf(
+            normal.dot(proposal.beam.frame.direction).clamp(0.0, 1.0))?)?;
         Ok(BeamSample { beam, event: DielectricEvent::Reflection, pdf, delta: false })
     }
 
@@ -81,10 +83,11 @@ impl PolarizedBeam {
             return Ok(SurfaceConnectionResponse::zero(DielectricEvent::Reflection));
         }
         let response = camera.coated_diffuse_response(normal, direction, coating, reflectance,
-            core::f64::consts::PI)?;
+            core::f64::consts::PI, false)?;
         let factor = reciprocal_contraction(response, source_frame, normalized_source)?;
         let probability = coating.branch_probabilities((-normal.dot(camera.frame.direction)).clamp(0.0, 1.0))?[1];
-        let pdf = checked_product(probability, outgoing_cosine / core::f64::consts::PI)?;
+        let pdf = checked_product(probability,
+            coating.diffuse_direction_pdf(outgoing_cosine.clamp(0.0, 1.0))?)?;
         SurfaceConnectionResponse::checked(factor, pdf, DielectricEvent::Reflection)
     }
 
@@ -99,14 +102,22 @@ impl PolarizedBeam {
 
     fn coated_diffuse_response(
         self, normal: Vec3, direction: Vec3, coating: SmoothDiffuseCoating,
-        reflectance: f64, divisor: f64,
+        reflectance: f64, divisor: f64, sampled: bool,
     ) -> Result<Self, BeamError> {
         let incident_cosine = (-normal.dot(self.frame.direction)).clamp(0.0, 1.0);
         let outgoing_cosine = normal.dot(direction).clamp(0.0, 1.0);
         let incident_axis = interface_axis(self.frame.direction, normal)?;
         let incident = self.with_reference_axis(incident_axis)?;
         let entry = fresnel_dielectric_polarized(incident_cosine, coating.exterior_index(), coating.coating_index())?;
-        let weight = coating.diffuse_weight(reflectance)?;
+        let exit = fresnel_dielectric_polarized(outgoing_cosine, coating.exterior_index(), coating.coating_index())?;
+        // An external TIR direction has exactly zero diffuse response. This
+        // is a physical support boundary, not an underflow of positive power.
+        if entry.scalar.total_internal_reflection || exit.scalar.total_internal_reflection {
+            let frame = PolarizationFrame::try_new(direction, interface_axis(direction, normal)?)?;
+            return Self::try_new(self.origin, frame, self.wavelength_nm, self.medium, Stokes::unpolarized(0.0));
+        }
+        let weight = if sampled { coating.sampled_diffuse_weight(reflectance)? }
+            else { coating.diffuse_weight(reflectance)? };
         // A sampled transmission is conditional on its branch. Normalize the
         // native coefficients before applying them: weight/probability can
         // overflow at grazing, and T*input can underflow before /probability
@@ -120,7 +131,6 @@ impl PolarizedBeam {
         // Power transmission is reciprocal at paired Snell angles. Evaluating
         // from the external direction retains the exact same native s/p law
         // without subtracting a critical-angle cosine inside the escape cone.
-        let exit = fresnel_dielectric_polarized(outgoing_cosine, coating.exterior_index(), coating.coating_index())?;
         let power = exit.transmission.apply_diagonal_jones(Stokes::unpolarized(base));
         if base > 0.0 && outgoing_cosine > 0.0 && power.i == 0.0 { return Err(BeamError::NumericalRange); }
         let axis = interface_axis(direction, normal)?;

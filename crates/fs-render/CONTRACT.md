@@ -7432,7 +7432,7 @@ Five focused controls cover liquid/vapor many-cell propagation with nonparallel 
 ## Smooth dielectric coats over diffuse substrates
 
 `SmoothDiffuseCoating` declares constant dimensionless indices
-`1 <= n_exterior <= n_coating` for a smooth, lossless, geometrically collapsed
+`n_exterior >= 1` and `n_coating >= 1` for a smooth, lossless, geometrically collapsed
 dielectric above the original wavelength-resolved, depolarizing Lambertian
 substrate. Its actual surrounding phase index must agree. Both reflection
 branches remain in that medium; this material never changes the bulk-medium
@@ -7441,7 +7441,10 @@ stack or invents a thermal-emission law.
 The original native Fresnel owner supplies entry and exit transmission.
 Construction caches internal escape
 `E = (n_exterior/n_coating)^2 * 2*integral(mu*T(mu), mu=0..1)`
-using bounded Gauss-Legendre refinement on the external hemisphere. Repeated
+using bounded Gauss-Legendre refinement on the lower-index hemisphere. For
+`n_coating < n_exterior`, the directly integrated internal hemisphere supplies
+`E`; external directions beyond the critical angle have total internal
+reflection and exactly zero diffuse response. Repeated
 internal returns use the cancellation-resistant
 `D = (1-rho) + rho*E`, giving continuous reciprocal reflection
 `rho*(n_exterior/n_coating)^2*T_in*T_out/(pi*D)`, alongside native mirror
@@ -7454,7 +7457,12 @@ Native polarized scene/camera transport retains full entry s/p response,
 substrate depolarization and polarization on escape. Scalar
 `Material::CoatedDiffuse`, spectral path continuation and BDPT share the same
 law, with a discrete mirror branch and unconditional continuous density
-`diffuse_mass*cos(theta)/pi`. Forward/reverse densities, emitting-surface
+`diffuse_mass*cos(theta)/(pi*C)` on the accessible exterior cone, where
+`C = min(1, (n_coating/n_exterior)^2)`. The cosine sampler scales its squared
+radius by `C`; it does not waste samples outside the transmitted cone. Its
+conditional weight cancels the cone's reciprocal etendue analytically, before
+forming large coefficients. For the original high-index coats, `C=1` and the
+original full-hemisphere law remains. Forward/reverse densities, emitting-surface
 addition, material identity, actual-medium admission and existing receiver
 lighting remain explicit. The smaller sampling branch lies next to zero, so
 a mirror mass rounded to one cannot erase weak diffuse support. The polarized
@@ -7471,7 +7479,10 @@ material; ordinary sampled continuation and continuous bundle receivers apply.
 
 Independent numerical controls cover flux integrals, white-furnace conservation,
 internal returns, reciprocity, matched/black limits, full Stokes frames,
-conditional grazing/subnormal power and mixed forward/reverse PDFs. Native
+conditional grazing/subnormal power and mixed forward/reverse PDFs. Lower-index
+coats additionally test independent internal flux integrals, external TIR for
+black and white substrates, escape-cone densities, scalar/polarized agreement
+and polarized white-furnace conservation. Native
 scene, scalar Material and BDPT integration regressions are also present.
 The model supplies no finite thickness, coherent interference, roughness,
 bulk absorption or lateral displacement.
