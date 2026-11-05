@@ -463,9 +463,39 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         previous_velocity: &[f64],
         timestep_s: f64,
     ) -> Result<MaterialStokesSolution, MaterialFluxError> {
+        self.bdf2_stokes_mixed_step(
+            force_density,
+            boundaries,
+            previous_velocity,
+            None,
+            timestep_s,
+        )
+    }
+
+    /// Advance equal-step BDF2 Stokes with physical force, traction and history.
+    ///
+    /// `previous_velocity` is u_n; Some(u_(n-1)) selects the second-order
+    /// formula, with BOTH intervals equal to timestep_s. None performs the
+    /// original BDF1 startup. The same frozen source density weights all three
+    /// time levels and every SI conversion. Equal-step G-energy stability is
+    /// conditional on dissipative spatial/boundary data, as documented by the
+    /// native [`crate::ns::FluxSystem::assemble_stokes_mixed_bdf2`] entry. This does not
+    /// support variable timesteps, transported density or nonlinear advection.
+    ///
+    /// # Errors
+    /// Preserves native admission/convergence and physical-output refusals;
+    /// neither caller-owned history is modified.
+    pub fn bdf2_stokes_mixed_step(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+    ) -> Result<MaterialStokesSolution, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
         let flow = with_physical_boundaries(boundaries, density, |primitive_boundaries| {
-            self.system.bdf1_stokes_mixed_step(
+            self.system.bdf2_stokes_mixed_step(
                 self.params,
                 &|point| {
                     let physical = force_density(point);
@@ -473,6 +503,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 },
                 primitive_boundaries,
                 previous_velocity,
+                older_velocity,
                 timestep_s,
             )
         })

@@ -156,11 +156,45 @@ impl<G> MaterialStokesField<'_, '_, G> {
         previous_velocity: &[f64],
         timestep_s: f64,
     ) -> Result<MaterialStokesFieldSolution<G>, MaterialFluxError> {
+        self.bdf2_stokes_mixed_step(
+            force_density,
+            boundaries,
+            previous_velocity,
+            None,
+            timestep_s,
+        )
+    }
+
+    /// Advance the frozen material field with equal-step second-order BDF2.
+    ///
+    /// `previous_velocity` is u_n. Some(u_(n-1)) supplies the second immutable
+    /// history; BOTH time intervals must equal timestep_s. None performs the
+    /// exact original BDF1 startup. Source owners are not queried again: one
+    /// density-weighted metric acts on all three velocity levels and supplies
+    /// reactions and physical kinetic energy. Dynamic viscosity, pressure,
+    /// force and traction retain the same fixed reference normalization.
+    ///
+    /// Equal-step G-energy stability has the scope of the native
+    /// [`FluxSystem::assemble_stokes_mixed_bdf2`] entry. Single-state kinetic
+    /// energy need not decrease at every unforced step. This does not change
+    /// density, transport interfaces, or add variable-step/nonlinear dynamics.
+    ///
+    /// # Errors
+    /// Preserves native two-history admission, convergence and physical-output
+    /// refusals. Neither history nor the frozen source snapshots are changed.
+    pub fn bdf2_stokes_mixed_step(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+    ) -> Result<MaterialStokesFieldSolution<G>, MaterialFluxError> {
         let reference = self.reference_density_kg_m3;
         with_physical_boundaries(boundaries, reference, |primitive_boundaries| {
             let assembly = self
                 .system
-                .assemble_stokes_mixed_bdf1_variable_density(
+                .assemble_stokes_mixed_bdf2_variable_density(
                     self.params,
                     &|cell, _| self.samples[cell].relative_density,
                     &|cell, _| self.samples[cell].normalized_viscosity,
@@ -170,6 +204,7 @@ impl<G> MaterialStokesField<'_, '_, G> {
                     },
                     primitive_boundaries,
                     previous_velocity,
+                    older_velocity,
                     timestep_s,
                 )
                 .map_err(MaterialFluxError::Boundary)?;

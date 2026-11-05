@@ -8,6 +8,9 @@ use fs_flux::{
 use fs_solid::Mesh2;
 use std::cell::Cell;
 
+#[path = "transient/bdf2.rs"]
+mod bdf2;
+
 fn traction_boundaries<'a>(
     mesh: &TriMesh,
     value: &'a dyn Fn([f64; 2], [f64; 2]) -> [f64; 2],

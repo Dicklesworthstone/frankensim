@@ -1,4 +1,4 @@
-//! Checked linear unsteady Stokes on the original mixed-boundary operator.
+//! Checked BDF1/BDF2 linear Stokes on the original mixed-boundary operator.
 
 use super::{StokesAssembly, StokesBoundary, StokesBoundaryError, StokesSolution};
 use crate::ns::{FluxParams, FluxSystem};
@@ -132,6 +132,178 @@ impl<'m> FluxSystem<'m> {
         )
     }
 
+    /// Assemble equal-step BDF2 for constant-viscosity linear mixed Stokes.
+    ///
+    /// `previous_velocity` is u_n. `older_velocity=Some(u_(n-1))` uses
+    /// `(3 u_new - 4 u_n + u_(n-1))/(2 dt)`; the two time intervals MUST
+    /// equal timestep_s. `None` starts the trajectory with the original BDF1
+    /// step, without fabricated older history. This startup retains global
+    /// second-order accuracy for smooth solutions at fixed positive final time.
+    ///
+    /// Endpoint force, velocity and total traction have the same units and
+    /// pressure datums as [`Self::assemble_stokes_mixed_bdf1`]. The original
+    /// consistent mass acts on both immutable histories. For fixed density,
+    /// homogeneous data and a dissipative spatial operator, equal-step BDF2
+    /// dissipates the two-state energy
+    /// `G_n=(||u_n||_rho²+||2u_n-u_(n-1)||_rho²)/4`, not necessarily the
+    /// single-state kinetic energy on every step. No variable-step, arbitrary
+    /// boundary-work, noncoercive-penalty or nonlinear stability is implied.
+    ///
+    /// # Errors
+    /// Refuses invalid or unrepresentable history/timestep before callbacks,
+    /// and preserves all original boundary, material and convergence checks.
+    pub fn assemble_stokes_mixed_bdf2<'a>(
+        &'a self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        if !params.nu.is_finite() || params.nu <= 0.0 {
+            return Err(StokesBoundaryError::InvalidInput(
+                "invalid Stokes viscosity",
+            ));
+        }
+        self.assemble_stokes_mixed_bdf2_variable_viscosity(
+            params,
+            &|_, _| params.nu,
+            force,
+            boundaries,
+            previous_velocity,
+            older_velocity,
+            timestep_s,
+        )
+    }
+
+    /// Equal-step BDF2 with positive endpoint viscosity mu/rho_reference.
+    /// Uses [`Self::assemble_stokes_mixed_bdf2`] history/startup semantics and
+    /// one constant physical density. `params.nu` is unused.
+    ///
+    /// # Errors
+    /// Preserves checked history, one-sided viscosity and boundary admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_stokes_mixed_bdf2_variable_viscosity<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        self.assemble_stokes_mixed_bdf2_inertia(
+            params,
+            None,
+            viscosity,
+            force,
+            boundaries,
+            previous_velocity,
+            older_velocity,
+            timestep_s,
+        )
+    }
+
+    /// Equal-step BDF2 with a fixed spatial density at all three time levels.
+    ///
+    /// Uses [`Self::assemble_stokes_mixed_bdf2`] history/startup semantics.
+    /// Relative density is rho(x)/rho_reference; viscosity, force density,
+    /// pressure, total traction and slip resistance use that SAME reference.
+    /// Density is sampled once per original mass quadrature point and the
+    /// retained metric supplies both histories, reactions and kinetic energy.
+    /// `params.nu` is unused. Density advection or changing material mass is
+    /// not supported; neither history is reweighted with a different density.
+    ///
+    /// # Errors
+    /// Preserves weighted BDF1 admission and refuses invalid/unrepresentable
+    /// two-level history before density, viscosity or boundary callbacks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn assemble_stokes_mixed_bdf2_variable_density<'a>(
+        &'a self,
+        params: FluxParams,
+        relative_density: &dyn Fn(usize, [f64; 2]) -> f64,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        self.assemble_stokes_mixed_bdf2_inertia(
+            params,
+            Some(relative_density),
+            viscosity,
+            force,
+            boundaries,
+            previous_velocity,
+            older_velocity,
+            timestep_s,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_stokes_mixed_bdf2_inertia<'a>(
+        &'a self,
+        params: FluxParams,
+        relative_density: Option<&dyn Fn(usize, [f64; 2]) -> f64>,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        let Some(older) = older_velocity else {
+            return self.assemble_stokes_mixed_bdf1_inertia(
+                params,
+                relative_density,
+                viscosity,
+                force,
+                boundaries,
+                previous_velocity,
+                timestep_s,
+            );
+        };
+        if self
+            .admit_mixed_bdf1_history(previous_velocity, timestep_s)
+            .is_err()
+            || older.len() != self.n_u
+            || older.iter().any(|value| !value.is_finite())
+        {
+            return Err(StokesBoundaryError::InvalidInput(
+                "BDF2 needs two finite original velocity histories and a representable positive equal timestep",
+            ));
+        }
+        // M*(3/2)/dt and M*((4/3)*u_n-(1/3)*u_(n-1))*(3/2)/dt
+        // reuse the SAME weighted assembly, history and support-reaction rows.
+        // Difference form preserves a constant history exactly; scaling before
+        // subtraction covers opposite-sign finite histories without overflow.
+        let history: Vec<_> = previous_velocity
+            .iter()
+            .zip(older)
+            .map(|(&recent, &old)| {
+                let difference = recent - old;
+                let correction = if difference.is_finite() {
+                    difference / 3.0
+                } else {
+                    recent / 3.0 - old / 3.0
+                };
+                recent + correction
+            })
+            .collect();
+        self.assemble_stokes_mixed_bdf1_inertia(
+            params,
+            relative_density,
+            viscosity,
+            force,
+            boundaries,
+            &history,
+            (2.0 / 3.0) * timestep_s,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn assemble_stokes_mixed_bdf1_inertia<'a>(
         &'a self,
@@ -206,5 +378,31 @@ impl<'m> FluxSystem<'m> {
     ) -> Result<StokesSolution, StokesBoundaryError> {
         self.assemble_stokes_mixed_bdf1(params, force, boundaries, previous_velocity, timestep_s)?
             .solve()
+    }
+
+    /// Advance checked equal-step BDF2, or BDF1 startup when older is None.
+    /// See [`Self::assemble_stokes_mixed_bdf2`] for history and stability scope.
+    ///
+    /// # Errors
+    /// Preserves original admission and both linear residual checks; neither
+    /// caller-owned velocity history is modified on success or refusal.
+    pub fn bdf2_stokes_mixed_step(
+        &self,
+        params: FluxParams,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[StokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+    ) -> Result<StokesSolution, StokesBoundaryError> {
+        self.assemble_stokes_mixed_bdf2(
+            params,
+            force,
+            boundaries,
+            previous_velocity,
+            older_velocity,
+            timestep_s,
+        )?
+        .solve()
     }
 }

@@ -299,3 +299,107 @@ fn spatial_binding_refuses_unrepresentable_common_normalization() {
         Err(MaterialFluxError::Invalid(_))
     ));
 }
+
+#[test]
+fn sourced_bdf2_keeps_two_histories_and_physical_normalization() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let spec = GasSpec::dry_air_ussa1976();
+    let lower = Counted {
+        material: GasState::try_new(&spec, 293.15, 101_325.0).unwrap(),
+        queries: Cell::new(0),
+    };
+    let upper = Counted {
+        material: GasState::try_new(&spec, 353.15, 303_975.0).unwrap(),
+        queries: Cell::new(0),
+    };
+    let densities = [
+        lower.material.transport_state().unwrap().density_kg_m3(),
+        upper.material.transport_state().unwrap().density_kg_m3(),
+    ];
+    // u(t)=t² on both layers. Exact u(1/2)=1/4 and u(0)=0 are the
+    // supplied histories; BDF2 must recover u(1)=1 from endpoint u'=2.
+    let mut previous = vec![0.0; system.n_u];
+    for (edge, geometry) in mesh.edges.iter().enumerate() {
+        previous[2 * edge] = 0.25 * geometry.normal[0];
+    }
+    let older = vec![0.0; system.n_u];
+    let snapshot = previous.clone();
+    let traction = |point: [f64; 2], normal: [f64; 2]| {
+        let pressure = 5.0 - 0.8 * point[0];
+        normal.map(|n| -pressure * n)
+    };
+    let boundaries: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .map(|edge| MaterialStokesBoundary::TotalTraction {
+            edge,
+            value: &traction,
+        })
+        .collect();
+    let force = |point: [f64; 2]| [2.0 * densities[usize::from(point[1] >= 0.5)] - 0.8, 0.0];
+    for reference_density in [2.0, 9.0] {
+        let reference = transport(reference_density, 0.7);
+        let binding =
+            MaterialFluxSystem::new(&system, &reference, MaterialFluxNumerics::default()).unwrap();
+        let sources: Vec<&dyn FluidTransport> = mesh
+            .centroids
+            .iter()
+            .map(|point| {
+                if point[1] < 0.5 {
+                    &lower as &dyn FluidTransport
+                } else {
+                    &upper as &dyn FluidTransport
+                }
+            })
+            .collect();
+        let field = binding.bind_stokes_materials(sources).unwrap();
+        let queries = [lower.queries.get(), upper.queries.get()];
+        let solved = field
+            .bdf2_stokes_mixed_step(&force, &boundaries, &previous, Some(&older), 0.5)
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&solved.discrete().x, &|_| [1.0, 0.0]);
+        assert!(error < 3e-10 && divergence < 3e-10, "{error}, {divergence}");
+        for (cell, point) in mesh.centroids.iter().enumerate() {
+            near(solved.pressure_pa()[cell], 5.0 - 0.8 * point[0], 3e-9);
+            assert!(std::ptr::eq(
+                &field.samples()[cell],
+                &solved.samples()[cell]
+            ));
+        }
+        near(
+            solved.kinetic_energy_j_per_m(),
+            0.25 * (densities[0] + densities[1]),
+            3e-10,
+        );
+        near(
+            solved.viscous_dissipation().total_power_w_per_m(),
+            0.0,
+            1e-15,
+        );
+        assert_eq!([lower.queries.get(), upper.queries.get()], queries);
+
+        // The homogeneous source adapter reaches the same native time formula.
+        let homogeneous = binding
+            .bdf2_stokes_mixed_step(
+                &|_| [2.0 * reference_density - 0.8, 0.0],
+                &boundaries,
+                &previous,
+                Some(&older),
+                0.5,
+            )
+            .unwrap();
+        assert!(
+            system
+                .velocity_error(&homogeneous.discrete().x, &|_| [1.0, 0.0])
+                .0
+                < 3e-10
+        );
+        near(
+            homogeneous.kinetic_energy_j_per_m(),
+            0.5 * reference_density,
+            3e-10,
+        );
+    }
+    assert_eq!(previous, snapshot);
+    assert_eq!(older, vec![0.0; system.n_u]);
+}

@@ -452,8 +452,9 @@ geometry and must never be labelled as volts or discharge reach.
 - 3D (tets, BDM on faces), BDM2+/higher-order pressures, and curved
   boundaries — recorded successors on the same dof-Vandermonde
   surface (bead dcng's high-order FEEC would unblock them).
-- Projection/splitting time integrators and BDF2+ — the IMEX BDF1
-  ships; the segregated variants are documented successors.
+- Projection/splitting time integrators, nonlinear Navier–Stokes BDF2 and
+  BDF3+ remain successors. Equal-step linear mixed-Stokes BDF2 is available
+  below; the IMEX convection entry remains BDF1.
 - Fine-mesh Ghia tables, Re=1000 cavity, cylinder benchmarks, and
   asymptotic-regime convergence confirmation — perf-lane scope,
   ledgered in invariants 2 and 4.
@@ -863,7 +864,7 @@ checks actual shared-gas density in pressure-driven acceleration and physical
 pressure, dynamic-viscosity traction, inertia and energy in an affine shear.
 The homogeneous entries remain fixed-mesh, constant-density linear unsteady
 Stokes, without nonlinear open-boundary/backflow conditions, thermal evolution,
-BDF2+, continuum error bounds or new cancellation/throughput claims.
+variable-step/BDF3+ integration, continuum error bounds or new cancellation/throughput claims.
 
 ### Fixed stratified density in native Stokes inertia
 
@@ -947,6 +948,47 @@ history, analytic weighted energy, actual-mu heating, physical pressure and
 boundary force/moment, and invariance under two reference normalizations.
 Focused admission tests retain original material errors, freeze source
 snapshots across solves/reporting, and refuse unrepresentable normalization.
+
+### Second-order time integration with frozen density
+
+`assemble_stokes_mixed_bdf2`, its variable-viscosity and variable-density
+variants, and `bdf2_stokes_mixed_step` add equal-step BDF2 to the original
+linear mixed-Stokes operator. The homogeneous material binding and retained
+`MaterialStokesField` expose the same physical-unit step. `previous_velocity`
+is u_n; `older_velocity=Some(u_(n-1))` uses
+`(3 u_new-4 u_n+u_(n-1))/(2 dt)`. Both supplied history intervals must equal
+the requested timestep; these slice APIs do not carry timestamps that could
+verify the spacing. `None` executes the original BDF1 startup exactly. For
+smooth solutions, that one startup step preserves second-order convergence at
+fixed positive final time.
+
+The implementation assembles the existing operator with effective interval
+`2 dt/3` and immutable history `u_n+(u_n-u_(n-1))/3`. A constant history is
+preserved exactly in this combination. One retained density quadrature supplies
+the full consistent mass, both historical contributions, support reactions and
+kinetic energy. Source-material fields retain their original frozen density and
+dynamic viscosity at all three time levels; pressure, force, traction and slip
+use the same fixed reference normalization. Invalid histories and unrepresentable
+effective timestep/history refuse before field or boundary callbacks.
+
+For zero forcing, homogeneous boundary data and a dissipative original spatial
+form a, equal-step BDF2 satisfies
+`G_new-G_n + ||u_new-2u_n+u_(n-1)||_rho^2/4 + dt*a(u_new,u_new)=0`,
+where `G_n=(||u_n||_rho^2+||2u_n-u_(n-1)||_rho^2)/4`.
+Thus this two-state energy decreases when a is nonnegative; single-state
+physical kinetic energy need not decrease at every step. The spatial term
+includes the original viscous/SIP form, not just physical bulk heating.
+No variable-step, arbitrary-boundary-work, noncoercive-penalty or nonlinear
+stability claim is made. Density transport, changing mass, moving interfaces
+and Navier–Stokes BDF2 remain outside this entry.
+
+`tests/stokes_boundary/transient/bdf2.rs` specifies exact quadratic-in-time
+graded-density shear, common-reference invariance, both history contributions,
+physical stress force/moment, exact BDF1 startup, second-order time refinement,
+constant-history free stream, and the weighted G-energy identities with and
+without viscous/SIP loss. `tests/material_flow/density.rs` carries original
+two-layer gas sources through BDF2 and checks physical pressure/energy, source
+reuse, both immutable histories and the homogeneous source adapter.
 
 ## Nonlinear pressure-driven flow with explicit backflow behavior
 
