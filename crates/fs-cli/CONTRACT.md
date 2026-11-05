@@ -1,5 +1,35 @@
 # CONTRACT: fs-cli
 
+## Cooling controls through live contact histories — driver 124
+
+Final-time and sampled-peak capacity adjoints, including their explicit
+material-control forms, now compose live temperature-dependent contact with
+natural convection and quasi-steady transported air. Natural reservoir controls
+retain signed wall and film-property coefficient derivatives. Air inlet and
+admitted fan-speed controls retain the complete upstream reference march,
+hydraulic response and local forced-convection dependence. Optional area-mean
+ambient or closed/open enclosure feedback enters the same complete transpose.
+
+Every reverse endpoint re-queries the original contact law on the freshly bound
+physical cooling boundary and checks the original free residual and stored-energy
+target. Airflow additionally checks actual marched-air energy, including cases
+without radiation and with reflected enclosures. Convection alone heats air;
+radiation and off-path natural reservoirs retain independent heat accounts.
+Radiation-only ports carry no invented natural or air feedback. The same
+watt-coordinate dual supplies all admitted controls without advancing physical
+history or adding a timestep factor. Frozen and live contact owners cannot both
+be supplied.
+
+Driver 124 invalidates cached results from earlier producers. Imported-project
+regressions cover natural-only curve/Newton contact and mixed natural/air
+source-surface contact both with and without ambient radiation, independently
+perturbing reservoir temperature, inlet and fan speed through complete histories.
+They retain exact forward receipts and separate physical heat checks. Exact
+natural equilibrium, correlation-domain exits, source corners and unsupported
+pointwise capacity radiation remain refused. Syntax and composition review do
+not establish numerical execution; runtime verification remains required on an
+adequately resourced build host.
+
 ## Material controls through live contact histories — driver 123
 
 `temperature-final-material-adjoint` and
@@ -21,8 +51,8 @@ influence. Admission reserves an additional bounded physical contact evaluation
 for explicit material reports. Ordinary reports retain their existing scope.
 
 These reports compose prescribed or scheduled boundaries with optional
-area-mean ambient and closed/open enclosure radiation. Derived-convection
-contact adjoints and pointwise capacity radiation remain outside this increment.
+area-mean ambient and closed/open enclosure radiation. Driver 124 adds derived-
+convection contact adjoints; pointwise capacity radiation remains unsupported.
 Driver 123 invalidates cached results from earlier producers. Focused regressions
 compare independently perturbed complete histories for constant and nonlinear
 conductivity, curve and source-surface contacts, final and interior-peak goals,
@@ -51,8 +81,8 @@ memory allowance. They retain zero convection controls and do not become
 independently variable nonradiative fluxes. Ordinary convection and enclosure
 flux controls retain their existing physical owners. Driver 122 invalidates
 older cached producer results. Driver 123 adds material-extended live-contact
-reports. Pointwise capacity radiation and derived-convection live-contact
-adjoints remain outside these increments.
+reports and driver 124 adds derived-convection live-contact adjoints. Pointwise
+capacity radiation remains unsupported.
 
 Native and imported-project regressions compare complete perturbed histories
 for curve/Newton and source-surface/fixed-point contacts, vacuum and Robin

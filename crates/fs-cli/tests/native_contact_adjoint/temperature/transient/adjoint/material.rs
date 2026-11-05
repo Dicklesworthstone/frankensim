@@ -254,10 +254,16 @@ fn compare_histories(f: &Fixture, nonlinear: bool, surface: bool, peak: bool) {
         for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
             let mut scales = [1.0; 3];
             scales[coordinate] += sign * epsilon;
-            values.push(qoi(
-                &physical_probe(f, 402 + 2 * coordinate + side, nonlinear, surface, scales),
-                peak,
-            ));
+            let physical = physical_probe(
+                f, 402 + 2 * coordinate + side, nonlinear, surface, scales,
+            );
+            if peak {
+                let selected = physical.get("transient").unwrap().get("sampled_peak").unwrap();
+                assert_eq!(n(selected, "state"), n(adjoint, "state_index"),
+                    "a material perturbation changed the selected peak branch");
+                assert_eq!(n(selected, "time_s"), n(adjoint, "time_s"));
+            }
+            values.push(qoi(&physical, peak));
         }
         agrees(actual, (values[1] - values[0]) / (2.0 * epsilon));
     }
