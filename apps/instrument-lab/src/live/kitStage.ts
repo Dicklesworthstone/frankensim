@@ -7,9 +7,12 @@ import { el } from "../util";
 import { createLiveAudioContext } from "./liveAudio";
 import { createLiveMix, KitLane, type GasSourceOptions, type KitBurst, type KitField, type KitMaterialOptions, type KitReady, type LiveMix } from "./mix";
 import { HIHAT_CLOSED_FORCE_N, HIHAT_TRANSITION_SECONDS } from "./hiHat";
+import { LiveMidiInput, type MidiInputState } from "./midiInput";
+import { LiveKitMidi } from "./kitMidi";
 
 /** Slow-motion factor for the replay of each stroke's first milliseconds. */
 const SLOW = 60;
+const KIT_AHEAD_FRAMES = 1024;
 
 type PieceId = "kick" | "snare" | "tom-12" | "tom-14" | "hihat" | "crash" | "ride";
 
@@ -138,6 +141,23 @@ export function mountLiveKit(root: HTMLElement): void {
   const controls = el("div", { class: "kit-controls" },
     el("label", { class: "kit-dyn" }, el("span", { class: "small muted" }, "Stroke"), dyn, dynLabel),
     hatMode, el("label", { class: "kit-dyn" }, el("span", { class: "small muted" }, "Pedal force"), hatForce, hatForceLabel));
+  const midiSupported = typeof navigator.requestMIDIAccess === "function";
+  const midiButton = el("button", { type: "button", class: "btn sm", disabled: "" }, "Connect MIDI");
+  const midiDevice = el("select", { disabled: "", "aria-label": "Drum MIDI input" },
+    el("option", { value: "" }, "No MIDI input connected"));
+  const midiChannel = el("select", { "aria-label": "Drum MIDI channel" }, el("option", { value: "all" }, "All channels"));
+  for (let channel = 0; channel < 16; channel++) {
+    midiChannel.append(el("option", { value: String(channel) }, `Channel ${channel + 1}${channel === 9 ? " · drums" : ""}`));
+  }
+  midiChannel.value = "9";
+  const midiStatus = el("p", { class: "small muted", role: "status" }, midiSupported
+    ? "Start the kit, then connect a MIDI drum controller."
+    : "This browser does not expose Web MIDI. The on-screen controls remain available.");
+  const midiPanel = el("details", { class: "kit-atmosphere" }, el("summary", {}, "MIDI drum controller"),
+    el("div", { class: "kit-atmosphere-grid" },
+      el("label", {}, el("span", {}, "Input"), midiDevice),
+      el("label", {}, el("span", {}, "Channel"), midiChannel)), midiButton, midiStatus,
+    el("p", { class: "small muted" }, "Pad velocity sets the physical stick speed. CC4 controls the hi-hat pedal: 0 releases it, 127 presses it to 80 N. Once CC4 arrives, closed/open note numbers preserve that pedal position. Without CC4, notes 42 and 46 request closed/open targets; note 44 only presses the pedal. Live input starts the 120 ms motion when the message arrives, without the preparation possible for a known score."));
   const numberInput = (value: number, min: number, max: number): HTMLInputElement =>
     el("input", { type: "number", value: String(value), min: String(min), max: String(max), step: "any", required: "" });
   const temperature = numberInput(20, 0, 50);
@@ -332,7 +352,7 @@ export function mountLiveKit(root: HTMLElement): void {
     el("p", { class: "small" }, "Each piece is the same finite-difference solver as the drum kit above: tensioned Mylar heads with the air between them, von Kármán bronze shells, Hertz stick contacts, a felt beater, snare wires and a pedal-clamped hi-hat whose rims rub with dry friction. Here it runs on a grid several times coarser (picked per piece for this device when you start), so it is cheaper and loses detail above a few kHz. A piece that has gone quiet is not stepped until it is struck again."),
     el("p", { class: "small" }, "Press H or touch the hi-hat to strike it. O releases the pedal; P presses it. The force slider moves the same pull rod between 0 and 80 N over 120 ms, preserving both cymbals' motion. Closing a ringing hat brings its rims into contact; pedal-only actions add no stick strike. The starting force is settled before playback."),
     el("p", { class: "small muted" }, "The colours are the computed transverse velocity of the surface (warm up, cool down), drawn from the solver state about 20 ms ahead of what you hear. Energy is the kinetic energy of the piece; force is the peak stick force of the last stroke. Levels use one fixed gain per piece. Where a measured table exists, gain is rescaled for the chosen grid; the shared hi-hat keeps its declared gain throughout pedal motion and has no open/closed level correction."));
-  root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), atmosphere, materialsPanel, hud, evidence));
+  root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), midiPanel, atmosphere, materialsPanel, hud, evidence));
   root.style.minHeight = "0";
 
   const g = canvas.getContext("2d")!;
@@ -352,6 +372,52 @@ export function mountLiveKit(root: HTMLElement): void {
   const base = document.createElement("canvas");
   let raf = 0;
   let visible = true; // the canvas is on screen (an IntersectionObserver below keeps this)
+
+  const midiKit = new LiveKitMidi({
+    strike: (piece, u, v, factor, frame) => {
+      if (!running) return;
+      const live = lives.get(piece);
+      if (!live?.ready || !live.lane) return;
+      hitAt(piece, u * live.ready.radius, v * live.ready.radius, live.def.speed * factor, frame);
+    },
+    pedal: (forceN, transitionSeconds, frame) => setHatForce(forceN, frame, transitionSeconds),
+    unsupported: (note) => { midiStatus.textContent = `MIDI note ${note} has no matching piece in this seven-piece kit.`; },
+  });
+  let midiState: MidiInputState["status"] = "disconnected";
+  function paintMidi(state: MidiInputState): void {
+    midiState = state.status;
+    const active = state.status === "connected" || state.status === "waiting";
+    midiButton.textContent = state.status === "connecting" ? "Cancel MIDI" : active ? "Disconnect MIDI" : "Connect MIDI";
+    midiButton.disabled = !midiSupported || !running;
+    midiDevice.replaceChildren(...state.inputs.map(input => el("option", { value: input.id }, input.name)));
+    if (state.selectedId && !state.inputs.some(input => input.id === state.selectedId)) {
+      midiDevice.append(el("option", { value: state.selectedId }, "Selected input disconnected"));
+    } else if (state.inputs.length === 0) midiDevice.append(el("option", { value: "" }, "No MIDI input connected"));
+    midiDevice.value = state.selectedId ?? "";
+    midiDevice.disabled = !active || state.inputs.length === 0;
+    midiStatus.textContent = !midiSupported ? "This browser does not expose Web MIDI. The on-screen controls remain available."
+      : !running && state.status === "disconnected" ? "Start the kit, then connect a MIDI drum controller." : state.message;
+  }
+  const midiInput = new LiveMidiInput({
+    onMessage: (message) => {
+      if (!root.isConnected) { midiInput.disconnect(); return; }
+      if (!running || !ctx || ctx.state !== "running") return;
+      // Every action from this message uses one frame, beyond the normal render
+      // horizon by two audio quanta. A pedal and its strike cannot acquire
+      // different implicit "now" frames in separate worker messages.
+      const frame = Math.ceil(ctx.currentTime * ctx.sampleRate) + KIT_AHEAD_FRAMES + 256;
+      midiKit.receive(message, frame);
+    },
+    onReset: () => midiKit.reset(),
+    onState: paintMidi,
+  });
+  midiButton.addEventListener("click", () => {
+    if (!running) return;
+    if (midiState === "connected" || midiState === "waiting" || midiState === "connecting") midiInput.disconnect();
+    else void midiInput.connect();
+  });
+  midiDevice.addEventListener("change", () => midiInput.select(midiDevice.value));
+  midiChannel.addEventListener("change", () => midiKit.setChannel(midiChannel.value === "all" ? null : Number(midiChannel.value)));
 
   const spotOf = (id: PieceId): Spot => layout[id.startsWith("hihat") ? "hat" : id]!;
   const px = (s: Spot): { cx: number; cy: number; rx: number; ry: number } => ({ cx: ox + s.cx * S, cy: oy + s.cy * S, rx: s.rx * S, ry: s.ry * S });
@@ -504,26 +570,26 @@ export function mountLiveKit(root: HTMLElement): void {
   }
 
   // ------------------------------------------------------------- playing
-  function setHatForce(forceN: number): void {
+  function setHatForce(forceN: number, frame?: number, transitionSeconds = HIHAT_TRANSITION_SECONDS): void {
     if (!Number.isFinite(forceN) || forceN < 0 || forceN > HIHAT_CLOSED_FORCE_N) return;
     const changed = forceN !== hatForceN;
     hatForceN = forceN;
     hatForce.value = String(forceN);
-    hatForceLabel.textContent = `${forceN} N`;
+    hatForceLabel.textContent = `${Number(forceN.toFixed(1))} N`;
     for (const button of hatMode.querySelectorAll("button")) {
       button.setAttribute("aria-pressed", String(Number(button.dataset.force) === forceN));
     }
     if (running && changed) {
       const hat = lives.get("hihat");
-      hat?.lane?.pedal(forceN, HIHAT_TRANSITION_SECONDS);
+      hat?.lane?.pedal(forceN, transitionSeconds, frame);
       if (hat) hat.replay = null;
       kickDraw();
     }
   }
-  function hitAt(id: PieceId, x: number, y: number, speed: number): void {
+  function hitAt(id: PieceId, x: number, y: number, speed: number, frame?: number): void {
     const L = lives.get(id)!;
     if (!L.lane) return;
-    L.lane.strike(x, y, speed);
+    L.lane.strike(x, y, speed, frame);
     L.force = 0;
     L.lastStrike = { x, y, at: performance.now() };
     kickDraw();
@@ -577,6 +643,8 @@ export function mountLiveKit(root: HTMLElement): void {
   const stop = (): void => {
     session++;
     running = false;
+    midiInput.disconnect();
+    midiButton.disabled = true;
     for (const L of lives.values()) { L.lane?.dispose(); L.lane = null; L.field = null; L.kinetic = 0; L.replay = null; L.failure = null; }
     mix?.dispose();
     mix = null;
@@ -591,6 +659,7 @@ export function mountLiveKit(root: HTMLElement): void {
   // another player starting stops the kit, also while it is still being built
   const onClaimed = (): void => { if (running || start.disabled) stop(); };
   registerPlayer(onClaimed);
+  window.addEventListener("pagehide", stop);
 
   async function begin(): Promise<void> {
     if (running || start.disabled) return;
@@ -622,7 +691,7 @@ export function mountLiveKit(root: HTMLElement): void {
         const L = lives.get(def.id)!;
         const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, gasSources, materials,
           ...(def.id === "hihat" ? { hihatPedal: { initialForceN: initialHatForceN } } : {}),
-          aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
+          aheadFrames: KIT_AHEAD_FRAMES, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
         L.lane = lane;
         lane.onField = (f) => {
           L.field = f;
@@ -675,6 +744,8 @@ export function mountLiveKit(root: HTMLElement): void {
       }));
       if (my !== session) return;
       running = true;
+      midiButton.disabled = !midiSupported;
+      if (midiSupported) midiStatus.textContent = "Kit ready. Connect a MIDI drum controller to play its pads and pedal.";
       if (hatForceN !== initialHatForceN) lives.get("hihat")?.lane?.pedal(hatForceN, HIHAT_TRANSITION_SECONDS);
       const gas = lives.get("kick")?.ready?.info.gas;
       atmosphereStatus.textContent = `${environment.label}. ${gas

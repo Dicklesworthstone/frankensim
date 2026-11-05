@@ -65,6 +65,38 @@ export. An older engine is refused rather than silently replacing the shared
 pair with independent open/closed presets. The shared pair currently has no
 grid-specific loudness table; its declared gain is left unscaled.
 
+## Live MIDI controllers
+
+Start the live kit, open **MIDI drum controller**, and choose **Connect MIDI**.
+Select an input and channel; channel 10 is the drum default. Supported General
+MIDI pads play the existing physical pieces, with velocity setting stick speed
+and the same strike locations used by the MIDI-file player. Hardware hits are
+not thinned or randomized. Unsupported notes, including the separate wires-off
+snare, are reported instead of silently substituted.
+
+CC4 maps 0–127 to 0–80 N of hi-hat pull-rod force. After a channel supplies CC4,
+notes 42/46 preserve its continuous pedal position, and note 44 adds no second
+foot action. A note-only controller instead uses 42/46 for closed/open targets
+and 44 for pedal closure without a stick. Live input starts the declared
+120 ms ramp when received; it cannot anticipate a gesture as a known score can.
+Each message's pedal and strike commands use one explicit audio frame.
+Disconnecting or resetting MIDI forgets controller authority while preserving
+the drum's existing mechanical state; it does not synthesize a choke.
+
+The piano uses the same input connection owner and offers device/channel
+selection. Its default accepts pitched channels and excludes percussion channel
+10. Repeated note-ons retrigger without accumulating held-key counts. Note-offs,
+channel changes and disconnection release only MIDI-owned holds. Sustain (CC64),
+sostenuto (CC66) and una corda (CC67) combine across MIDI channels and local
+controls. CC121 resets a channel's controllers; CC123 releases its keys; CC120
+releases both. These operate the shared piano's physical controls, without
+erasing another input's vibration.
+
+MIDI permission is requested only by the connection button, with system-exclusive
+access disabled. The selected input identity is retained through unplug/replug,
+and a cancelled or disposed connection cannot attach after permission arrives.
+Web MIDI availability and device permission are determined by the browser.
+
 ## Rebuilding
 
 The workspace needs its sibling repos at the `constellation.lock` pins. If the shared sibling
