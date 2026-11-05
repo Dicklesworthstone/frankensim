@@ -10,8 +10,9 @@
 //! mouth volume flow of the SAME transfer-matrix duct
 //! ([`crate::driving_point::outlet`], driven by the island's incident wave);
 //! and the baffled circular-opening receiver, whose pressure is the retarded
-//! derivative of that flow. No source waveform, formant filter or output gain
-//! exists, and the supraglottal pressure is never the output.
+//! derivative of that flow. No source waveform or formant filter exists, the one
+//! gain is the opt-in `pulse_shimmer` below, and the supraglottal pressure is never
+//! the output.
 //!
 //! Limits, not hidden: infinite-baffle radiation (no head diffraction), a
 //! plane-wave series tract (no side branches or nasal coupling), a lumped
@@ -44,6 +45,7 @@
 //! aspiration_noise <seed> <xi_pa_s3_per_m6> [<re_crit>]   (optional; turbulence noise at the glottis)
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>         (optional; constriction noise of the glottal jet, Verge's fraction)
 //! constriction_noise <seed> <duct_radius_m>               (optional; Oldham and Ukpoho's printed constriction noise)
+//! pulse_shimmer <seed> <sd_rel>                           (optional; a per-cycle gain on the wave the tract receives)
 //! ```
 //!
 //! `constriction_noise` is an opt-in glottal source on the printed duct-constriction law of Oldham and Ukpoho (J. Sound Vib.
@@ -99,6 +101,19 @@
 //! same law and the same four fields, its `y` added to the first row's. It draws from tile 1 of the row's key, so it is
 //! independent of the first row even on the same seed. A card needs `tension_flutter` to take it. Without the key a
 //! performance is bit-identical to one written before the key existed; `sd_rel` 0 is bit-identical as well.
+//!
+//! `pulse_shimmer` is the one gain in this module, and it is opt-in. At each opening of the glottis (a step that ends
+//! open after one that ended shut) it draws `g` from a seeded normal stream of standard deviation `sd_rel`, and until the
+//! next opening the island's incident wave reaches the mouth-flow line multiplied by `1 + g`. It stands for the
+//! cycle-to-cycle amplitude variation printed for real voices (shimmer), whose cause this code does not model. The
+//! island, its own load, the tension and every noise source never see the gain, so the fold's motion and phase are bit
+//! for bit those of the card without the key; only the radiated pressure changes. The gain multiplies the whole incident
+//! wave of a cycle, which includes the tract's own wave returning from the glottis, so a cycle's gain also lands on the
+//! end of the cycle before. For independent normal gains, local shimmer (the mean absolute difference of consecutive
+//! cycle amplitudes over their mean) is `2 sd_rel / sqrt(pi)`; the card, not this code, says which print it took and
+//! whether that print's tracker floor was taken out. A fold that never shuts draws nothing and is left as it was.
+//! Without the key nothing is multiplied and a performance is bit-identical to one written before the key existed;
+//! `sd_rel` 0 is bit-identical as well.
 //!
 //! `fold_mapping bilateral` reads the fold line's masses and stiffnesses as ONE fold of Ishizaka and
 //! Flanagan's mirror pair and halves them for the island's full-gap coordinate
@@ -197,6 +212,8 @@ pub struct VoiceDescription {
     /// Opt-in glottal constriction noise (Oldham and Ukpoho's printed law on the glottal jet, an extrapolation;
     /// [`crate::turbulence_noise::ConstrictionNoise`]); `None` adds nothing.
     pub constriction_noise: Option<ConstrictionNoiseCard>,
+    /// Opt-in per-cycle gain on the wave the tract receives ([`PulseShimmerCard`]); `None` multiplies nothing.
+    pub pulse_shimmer: Option<PulseShimmerCard>,
 }
 
 fn field(rest: &[&str], i: usize, what: &str) -> Result<f64, String> {
@@ -284,6 +301,7 @@ impl VoiceDescription {
         let mut aspiration_noise = None;
         let mut jet_noise = None;
         let mut constriction_noise = None;
+        let mut pulse_shimmer = None;
         let mut fold_mapping = None;
         let mut fold_shape = None;
         let mut fold_damping_upper = None;
@@ -505,6 +523,14 @@ impl VoiceDescription {
                     card.validate().map_err(str::to_string)?;
                     once(&mut constriction_noise, card, key)?;
                 }
+                "pulse_shimmer" => {
+                    arity(&rest, 2, key)?;
+                    let seed = whole(&rest, 0, "pulse_shimmer seed")?;
+                    let sd_rel = field(&rest, 1, "pulse_shimmer sd")?;
+                    let card = PulseShimmerCard { seed, sd_rel };
+                    card.validate()?;
+                    once(&mut pulse_shimmer, card, key)?;
+                }
                 "fold_mapping" => {
                     arity(&rest, 1, key)?;
                     if rest[0] != "bilateral" {
@@ -583,6 +609,7 @@ impl VoiceDescription {
             aspiration_noise,
             jet_noise,
             constriction_noise,
+            pulse_shimmer,
         })
     }
 
@@ -688,6 +715,7 @@ impl VoiceDescription {
             aspiration,
             jet_noise,
             constriction_noise,
+            pulse_shimmer: self.pulse_shimmer.map(PulseShimmer::new),
             gas_density: gas.density,
             gas_viscosity: gas.dynamic_viscosity,
             fold_length_m: self.fold.fold_length_m,
@@ -766,6 +794,8 @@ pub struct VoiceStats {
     pub max_force_passes: u32,
     /// Mean passes of that solve per physical substep.
     pub mean_force_passes: f64,
+    /// Gains `pulse_shimmer` has drawn, one per opening of the glottis; 0 without the key.
+    pub pulse_shimmer_draws: u64,
 }
 
 struct Schedule {
@@ -879,6 +909,58 @@ impl TensionFlutter {
     }
 }
 
+/// Seed-stream kernel of `pulse_shimmer` ("shim").
+pub const PULSE_SHIMMER_KERNEL: u32 = 0x7368_696d;
+
+/// A `pulse_shimmer` row: the seed and the standard deviation of the per-cycle relative gain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PulseShimmerCard {
+    /// Seed of the gain stream.
+    pub seed: u64,
+    /// Standard deviation of `g`, drawn once per glottal cycle; the wave is multiplied by `1 + g`.
+    pub sd_rel: f64,
+}
+
+impl PulseShimmerCard {
+    fn validate(&self) -> Result<(), String> {
+        // 0.05 puts a gain of zero 20 standard deviations away.
+        if !(0.0..=0.05).contains(&self.sd_rel) {
+            return Err("pulse_shimmer sd must be in 0..=0.05".into());
+        }
+        Ok(())
+    }
+}
+
+/// The gain of the current cycle: 1 until the first opening, then `1 + g` with a new `g` at each opening.
+struct PulseShimmer {
+    white: Stream,
+    sd_rel: f64,
+    gain: f64,
+    was_shut: bool,
+    draws: u64,
+}
+
+impl PulseShimmer {
+    fn new(card: PulseShimmerCard) -> Self {
+        Self {
+            white: StreamKey { seed: card.seed, kernel: PULSE_SHIMMER_KERNEL, tile: 0 }.stream(),
+            sd_rel: card.sd_rel,
+            gain: 1.0,
+            was_shut: false,
+            draws: 0,
+        }
+    }
+
+    /// One mechanics step's frame: a step that ends open after one that ended shut starts a cycle.
+    fn observe(&mut self, shut: bool) {
+        if self.was_shut && !shut {
+            self.gain = 1.0 + self.sd_rel * self.white.next_normal();
+            self.draws += 1;
+        }
+        self.was_shut = shut;
+    }
+}
+
 /// A realized performance: the fold, the tract and the microphone, advanced
 /// together on one physical clock.
 pub struct VoicePerformance {
@@ -895,6 +977,8 @@ pub struct VoicePerformance {
     jet_noise: Option<GlottalJetNoise>,
     /// Opt-in glottal constriction noise (Oldham and Ukpoho's printed law, an extrapolation).
     constriction_noise: Option<ConstrictionNoise>,
+    /// Opt-in per-cycle gain on the wave the tract receives.
+    pulse_shimmer: Option<PulseShimmer>,
     gas_density: f64,
     gas_viscosity: f64,
     fold_length_m: f64,
@@ -953,6 +1037,7 @@ impl VoicePerformance {
             } else {
                 all_passes as f64 / self.steps as f64
             },
+            pulse_shimmer_draws: self.pulse_shimmer.as_ref().map_or(0, |row| row.draws),
         }
     }
 
@@ -1030,9 +1115,18 @@ impl VoicePerformance {
             if let Some(source) = self.constriction_noise.as_mut() {
                 source.record(frame.flow_m3_s);
             }
+            let mut wave = self.island.incident_wave_pa();
+            if let Some(shimmer) = self.pulse_shimmer.as_mut() {
+                // After the island's step, so nothing the island sees changes; a gain of 1 multiplies nothing, so a card
+                // with `sd_rel` 0 or a fold that never shuts sends the wave bit for bit.
+                shimmer.observe(frame.shut);
+                if shimmer.gain != 1.0 {
+                    wave *= shimmer.gain;
+                }
+            }
             let flow = self
                 .mouth
-                .push(self.island.incident_wave_pa())
+                .push(wave)
                 .map_err(|e| format!("mouth-flow line refused: {e:?}"))?;
             self.trace[j] = flow;
             self.peak_flow_m3_s = self.peak_flow_m3_s.max(frame.flow_m3_s);
@@ -1964,6 +2058,98 @@ mod tests {
         let jet = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\n"));
         assert_ne!(both, aspiration, "the jet row must add to a card that has aspiration");
         assert_ne!(both, jet, "the aspiration row must add to a card that has the jet row");
+    }
+
+    #[test]
+    fn pulse_shimmer_parses_and_is_refused_by_name() {
+        let ok = VoiceDescription::from_bytes(modulation_text("pulse_shimmer 7 0.0113\n").as_bytes()).expect("parses");
+        assert_eq!(ok.pulse_shimmer, Some(PulseShimmerCard { seed: 7, sd_rel: 0.0113 }));
+        let none = VoiceDescription::from_bytes(modulation_text("").as_bytes()).expect("parses");
+        assert_eq!(none.pulse_shimmer, None);
+        for (extra, needle) in [
+            ("pulse_shimmer 7\n", "takes 2 fields"),
+            ("pulse_shimmer x 0.01\n", "seed"),
+            ("pulse_shimmer 7 x\n", "not a number"),
+            ("pulse_shimmer 7 -0.01\n", "sd"),
+            ("pulse_shimmer 7 0.06\n", "sd"),
+            ("pulse_shimmer 7 0.01\npulse_shimmer 8 0.01\n", "only appear once"),
+        ] {
+            let error = VoiceDescription::from_bytes(modulation_text(extra).as_bytes()).expect_err(extra);
+            assert!(error.contains(needle), "{extra:?} -> {error}");
+        }
+    }
+
+    /// The row on its own: no draw without an opening (a step open after a shut one), one draw per opening, and the
+    /// gains have mean 1 and the stated spread.
+    #[test]
+    fn pulse_shimmer_draws_once_per_opening_with_its_stated_spread() {
+        let card = PulseShimmerCard { seed: 3, sd_rel: 0.02 };
+        let mut row = PulseShimmer::new(card);
+        for shut in [false, false, false] {
+            row.observe(shut);
+        }
+        assert_eq!((row.draws, row.gain.to_bits()), (0, 1.0_f64.to_bits()), "open from the start draws nothing");
+        for _ in 0..5 {
+            row.observe(true);
+        }
+        assert_eq!(row.draws, 0, "a closing draws nothing");
+        let mut gains = Vec::new();
+        for _ in 0..20_000 {
+            row.observe(false);
+            gains.push(row.gain);
+            row.observe(false);
+            assert_eq!(row.gain.to_bits(), gains[gains.len() - 1].to_bits(), "the gain holds through the cycle");
+            row.observe(true);
+        }
+        assert_eq!(row.draws, 20_000);
+        let mean = gains.iter().sum::<f64>() / gains.len() as f64;
+        let sd = det::sqrt(gains.iter().map(|g| (g - mean) * (g - mean)).sum::<f64>() / gains.len() as f64);
+        assert!((mean - 1.0).abs() < 0.05 * card.sd_rel, "mean {mean}");
+        assert!((sd / card.sd_rel - 1.0).abs() < 0.03, "sd {sd:e}");
+        let lag = gains.iter().zip(&gains[1..]).map(|(a, b)| (a - mean) * (b - mean)).sum::<f64>() / (gains.len() - 1) as f64;
+        assert!((lag / (sd * sd)).abs() < 0.03, "consecutive gains correlate {}", lag / (sd * sd));
+    }
+
+    /// Gauntlet G0: no key or `sd_rel` 0 leaves the pressure bit for bit. A real gain reaches the pressure, repeats on its
+    /// seed, draws about once per cycle, keeps the callback partition free, and leaves the island alone: the island's
+    /// incident wave and gap are those of the card without the key at every output sample.
+    #[test]
+    fn pulse_shimmer_is_bit_identical_when_silent_and_otherwise_leaves_the_island_alone() {
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let plain = render(&modulation_text(""));
+        assert_eq!(bits(&plain), bits(&render(&modulation_text("pulse_shimmer 7 0\n"))), "sd 0");
+        let text = modulation_text("pulse_shimmer 7 0.0113\n");
+        let shimmer = render(&text);
+        assert!(shimmer.iter().all(|v| v.is_finite()));
+        assert_ne!(bits(&plain), bits(&shimmer), "a real gain must reach the pressure");
+        assert_eq!(bits(&shimmer), bits(&render(&text)), "the same seed repeats");
+        assert_ne!(bits(&shimmer), bits(&render(&modulation_text("pulse_shimmer 8 0.0113\n"))), "another seed");
+        let description = VoiceDescription::from_bytes(text.as_bytes()).expect("parses");
+        let mut split = description.build().expect("builds");
+        let mut chunked = vec![0.0; description.samples as usize];
+        for chunk in chunked.chunks_mut(37) {
+            split.block(chunk).expect("split");
+        }
+        assert_eq!(bits(&shimmer), bits(&chunked), "block partition changed the pressure");
+        let build = |t: &str| VoiceDescription::from_bytes(t.as_bytes()).expect("parses").build().expect("builds");
+        let (mut a, mut b) = (build(&modulation_text("")), build(&text));
+        let (mut x, mut y) = (0.0_f64, 0.0_f64);
+        for n in 0..description.samples {
+            a.block(core::slice::from_mut(&mut x)).expect("renders");
+            b.block(core::slice::from_mut(&mut y)).expect("renders");
+            assert_eq!(a.island.incident_wave_pa().to_bits(), b.island.incident_wave_pa().to_bits(), "wave at {n}");
+            assert_eq!(a.island.gap_m().to_bits(), b.island.gap_m().to_bits(), "gap at {n}");
+        }
+        assert_eq!(a.closed_steps, b.closed_steps);
+        let rate = 48_000.0_f64;
+        let prior = steady_f0_hz(&plain[(0.4 * rate) as usize..(0.9 * rate) as usize], rate);
+        assert_eq!(a.stats().pulse_shimmer_draws, 0, "no key, no draws");
+        let draws = b.stats().pulse_shimmer_draws as f64;
+        let seconds = description.samples as f64 / rate;
+        assert!(
+            draws > 0.6 * prior * seconds && draws <= 1.05 * prior * seconds,
+            "{draws} draws in {seconds} s at {prior:.1} Hz"
+        );
     }
 
     #[test]
