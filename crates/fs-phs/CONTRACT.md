@@ -1290,7 +1290,12 @@ matches the dissipation ledger within 2%.
   caps; analytic Jacobians only — the laws are smooth). Bias
   admission is a DC Newton refusal, not silent garbage. Distortion is
   CONSTITUTIVE: the harmonic ladder emerges from curvature at the
-  operating point. No-claims: the split image is the BUDGET solver —
+  operating point. The diode clipper solves the junction load line
+  with both the external resistor and the card's common series
+  resistance, returning terminal voltage including the internal
+  resistive drop. Its bounded current-domain Newton solve admits only
+  converged samples within the card's current range, without clipping
+  the exponential law. No-claims: the split image is the BUDGET solver —
   the full-DAE monolith is the authority image and the bake-off
   belongs to the electric-gates bead; parameter provenance is
   authored-typical (Koren 12AX7 fit constants, silicon-class diode),

@@ -109,7 +109,7 @@ pub struct DiodePairCard {
     pub n_ideal: f64,
     /// Thermal voltage [V].
     pub vt_v: f64,
-    /// Series resistance [ohm].
+    /// Common series resistance of the antiparallel pair [ohm].
     pub rs_ohm: f64,
     /// Validity: maximum junction current the law covers [A].
     pub i_max_a: f64,
@@ -136,7 +136,6 @@ impl DiodePairCard {
     #[must_use]
     pub fn current(&self, v: f64) -> (f64, f64) {
         let x = v / (self.n_ideal * self.vt_v);
-        let x = x.clamp(-60.0, 60.0);
         let i = 2.0 * self.is_a * x.sinh();
         let di = 2.0 * self.is_a * x.cosh() / (self.n_ideal * self.vt_v);
         (i, di)
@@ -154,6 +153,11 @@ pub enum DeviceError {
     /// The DC bias admission failed to converge.
     BiasDidNotConverge {
         /// Residual at stall.
+        residual: f64,
+    },
+    /// The runtime island exhausted its iteration budget.
+    IslandDidNotConverge {
+        /// Kirchhoff current residual [A] at the final iterate.
         residual: f64,
     },
     /// The operating point (or a runtime excursion) left the card's
@@ -386,46 +390,89 @@ impl DiodeClipper {
             (card.is_a, "Is"),
             (card.n_ideal, "ideality"),
             (card.vt_v, "Vt"),
-            (card.rs_ohm, "Rs"),
+            (card.i_max_a, "maximum junction current"),
         ] {
             if !(v.is_finite() && v > 0.0) {
                 return Err(DeviceError::Invalid { what });
             }
         }
+        if !(card.rs_ohm.is_finite() && card.rs_ohm >= 0.0) {
+            return Err(DeviceError::Invalid { what: "Rs" });
+        }
+        let thermal_v = card.n_ideal * card.vt_v;
+        if !(thermal_v.is_finite() && thermal_v > 0.0 && (2.0 * card.is_a).is_finite()) {
+            return Err(DeviceError::Invalid {
+                what: "representable junction scales",
+            });
+        }
+        if !(r_ohm + card.rs_ohm).is_finite() {
+            return Err(DeviceError::Invalid {
+                what: "representable total series resistance",
+            });
+        }
         Ok(Self { card, r_ohm })
     }
 
-    /// Output voltage for input `v_in`: Newton with the analytic
-    /// Jacobian on `(v_in − v)/R = i_pair(v − i R s)` (fixed 40-cap,
-    /// state-relative tolerance; returns the solution, iterations,
-    /// and the residual — deterministic and disclosed).
+    /// Terminal output voltage for input `v_in`. The junction voltage
+    /// is `n Vt asinh(i / (2 Is))`; the load line includes BOTH series
+    /// resistances, `v_in = v_junction + (R + Rs) i`, and the output is
+    /// `v_junction + Rs i`. Safeguarded Newton in current avoids
+    /// exponent overflow or a synthetic clipping of the device law.
+    /// Returns voltage, iterations, and Kirchhoff current residual [A]
+    /// with a fixed 40-iteration cap and a relative voltage tolerance.
     ///
     /// # Errors
-    /// [`DeviceError::OutsideValidity`] past the card's current cap.
+    /// [`DeviceError::Invalid`] for nonfinite input,
+    /// [`DeviceError::OutsideValidity`] past the card's current cap,
+    /// or [`DeviceError::IslandDidNotConverge`] on exhausted iteration budget.
     pub fn solve(&self, v_in: f64) -> Result<(f64, usize, f64), DeviceError> {
-        let mut v = v_in.clamp(-1.0, 1.0);
-        let mut residual = f64::INFINITY;
-        let mut iters = 0usize;
-        for k in 0..40 {
-            iters = k + 1;
-            let (i, di) = self.card.current(v);
-            let f = (v_in - v) / self.r_ohm - i;
-            residual = f.abs();
-            if residual < 1.0e-14 * (v_in.abs() / self.r_ohm).max(1.0e-12) {
-                break;
-            }
-            let df = -1.0 / self.r_ohm - di;
-            let step = f / df;
-            v -= step.clamp(-0.3, 0.3);
-        }
-        let (i, _) = self.card.current(v);
-        if i.abs() > self.card.i_max_a {
-            return Err(DeviceError::OutsideValidity {
-                what: "junction current above the card's cap",
-                value: i,
+        if !v_in.is_finite() {
+            return Err(DeviceError::Invalid {
+                what: "finite clipper input voltage",
             });
         }
-        Ok((v, iters, residual))
+        if v_in == 0.0 {
+            return Ok((v_in, 0, 0.0));
+        }
+        let drive = v_in.abs();
+        let thermal_v = self.card.n_ideal * self.card.vt_v;
+        let pair_scale_a = 2.0 * self.card.is_a;
+        let series_ohm = self.r_ohm + self.card.rs_ohm;
+        let junction_v = |i: f64| thermal_v * (i / pair_scale_a).asinh();
+        let max_drive = junction_v(self.card.i_max_a) + series_ohm * self.card.i_max_a;
+        if drive > max_drive {
+            return Err(DeviceError::OutsideValidity {
+                what: "input voltage above the card's junction-current load line",
+                value: v_in,
+            });
+        }
+        let (mut lo, mut hi) = (0.0, self.card.i_max_a.min(drive / series_ohm));
+        // The small-signal tangent starts at or below the positive root.
+        let mut i = drive / (series_ohm + thermal_v / pair_scale_a);
+        i = i.min(hi);
+        let mut residual = f64::INFINITY;
+        for k in 0..40 {
+            let v_junction = junction_v(i);
+            let f = v_junction + series_ohm * i - drive;
+            residual = f.abs() / self.r_ohm;
+            if f.abs() <= 32.0 * f64::EPSILON * drive {
+                let output = (v_junction + self.card.rs_ohm * i).copysign(v_in);
+                return Ok((output, k + 1, residual));
+            }
+            if f > 0.0 {
+                hi = i;
+            } else {
+                lo = i;
+            }
+            let df = series_ohm + thermal_v / pair_scale_a.hypot(i);
+            let next = i - f / df;
+            i = if next > lo && next < hi {
+                next
+            } else {
+                f64::midpoint(lo, hi)
+            };
+        }
+        Err(DeviceError::IslandDidNotConverge { residual })
     }
 }
 
@@ -580,38 +627,105 @@ mod device_tests {
 
     #[test]
     fn dv_003_diode_clipper_matches_a_method_diverse_solve() {
-        // The island's Newton vs a BISECTION solve of the same scalar
-        // equation in-test (method diversity), plus the knee sanity:
-        // far above the knee the output compresses logarithmically.
-        let clipper = DiodeClipper::new(DiodePairCard::silicon_class(), 4.7e3).expect("clipper");
-        let card = DiodePairCard::silicon_class();
-        for &vin in &[0.05f64, 0.3, 1.0, 3.0] {
-            let (v_newton, iters, res) = clipper.solve(vin).expect("newton");
-            // Bisection oracle.
-            let f = |v: f64| (vin - v) / 4.7e3 - card.current(v).0;
-            let (mut lo, mut hi) = (0.0f64, vin.min(1.0));
-            for _ in 0..200 {
-                let mid = f64::midpoint(lo, hi);
-                if f(mid) > 0.0 {
-                    lo = mid;
-                } else {
-                    hi = mid;
+        // Current-domain Newton vs a junction-voltage BISECTION oracle.
+        // Include a substantial internal resistance: returning the junction
+        // voltage or ignoring Rs would miss over a volt at 3 V drive.
+        for rs_ohm in [0.0, 1.0, 4.7e3] {
+            let card = DiodePairCard {
+                rs_ohm,
+                ..DiodePairCard::silicon_class()
+            };
+            let clipper = DiodeClipper::new(card.clone(), 4.7e3).expect("clipper");
+            for drive in [1.0e-12f64, 0.05, 0.3, 1.0, 3.0] {
+                let current = |v: f64| 2.0 * card.is_a * (v / (card.n_ideal * card.vt_v)).sinh();
+                let f = |v: f64| v + (4.7e3 + rs_ohm) * current(v) - drive;
+                let (mut lo, mut hi) = (0.0, drive);
+                for _ in 0..200 {
+                    let mid = f64::midpoint(lo, hi);
+                    if f(mid) > 0.0 {
+                        hi = mid;
+                    } else {
+                        lo = mid;
+                    }
+                }
+                let junction = f64::midpoint(lo, hi);
+                let expected = junction + rs_ohm * current(junction);
+                for sign in [-1.0, 1.0] {
+                    let (output, iters, residual) = clipper.solve(sign * drive).expect("Newton");
+                    assert!(
+                        (output - sign * expected).abs() < 2.0e-13 * drive,
+                        "drive {drive}, Rs {rs_ohm}: Newton {output:.15e}, bisection {expected:.15e}"
+                    );
+                    assert!(iters <= 40 && residual < 1.0e-13 * drive / 4.7e3);
                 }
             }
-            let v_bisect = f64::midpoint(lo, hi);
-            assert!(
-                (v_newton - v_bisect).abs() < 1.0e-9,
-                "vin {vin}: Newton {v_newton:.9} vs bisection {v_bisect:.9}"
-            );
-            println!(
-                "{{\"suite\":\"fs-phs\",\"case\":\"dv-003-clipper\",\"vin\":{vin},\
-                 \"vout\":{v_newton:.5},\"iters\":{iters},\"residual\":{res:.2e}}}"
-            );
+            assert_eq!(clipper.solve(0.0).expect("zero drive"), (0.0, 0, 0.0));
         }
         // Compression: 3 V in produces far less than 3x the 1 V output.
+        let clipper = DiodeClipper::new(DiodePairCard::silicon_class(), 4.7e3).expect("clipper");
         let v1 = clipper.solve(1.0).expect("1V").0;
         let v3 = clipper.solve(3.0).expect("3V").0;
         assert!(v3 < 1.5 * v1, "the knee must compress ({v3:.3} vs {v1:.3})");
+    }
+
+    #[test]
+    fn dv_006_diode_high_drive_obeys_terminal_load_line_and_current_domain() {
+        for is_a in [2.5e-9, 1.0e-30] {
+            let card = DiodePairCard {
+                is_a,
+                rs_ohm: 4.7e3,
+                ..DiodePairCard::silicon_class()
+            };
+            let clipper = DiodeClipper::new(card.clone(), 10.0).expect("clipper");
+            // Construct the exact terminal voltages from prescribed currents.
+            // The low-Is card admits nVt-normalized junction voltages above 60:
+            // a hard exponential clamp would silently change a valid device.
+            for current in [1.0e-12, 1.0e-6, 1.0e-3, 0.049] {
+                let junction = card.n_ideal * card.vt_v * (current / (2.0 * is_a)).asinh();
+                let drive = junction + (10.0 + card.rs_ohm) * current;
+                let expected = junction + card.rs_ohm * current;
+                let (output, _, residual) = clipper.solve(drive).expect("admitted high drive");
+                assert!((output - expected).abs() < 2.0e-13 * expected);
+                assert!(residual < 1.0e-13 * drive / 10.0);
+                assert!((card.current(junction).0 - current).abs() < 2.0e-13 * current);
+                // External resistor loss plus junction + internal resistor
+                // work closes source power at the same prescribed current.
+                let source = drive * current;
+                let sink = 10.0 * current * current + output * current;
+                assert!((source - sink).abs() < 2.0e-13 * source);
+            }
+            let max_junction = card.n_ideal * card.vt_v * (card.i_max_a / (2.0 * is_a)).asinh();
+            let outside = max_junction + (10.0 + card.rs_ohm) * card.i_max_a + 1.0;
+            for drive in [outside, -outside, f64::MAX, -f64::MAX] {
+                assert!(matches!(
+                    clipper.solve(drive),
+                    Err(DeviceError::OutsideValidity { .. })
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn dv_007_diode_invalid_inputs_cannot_produce_successful_samples() {
+        let clipper = DiodeClipper::new(DiodePairCard::silicon_class(), 4.7e3).expect("clipper");
+        for input in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                clipper.solve(input),
+                Err(DeviceError::Invalid { .. })
+            ));
+        }
+        for cap in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                DiodeClipper::new(
+                    DiodePairCard {
+                        i_max_a: cap,
+                        ..DiodePairCard::silicon_class()
+                    },
+                    4.7e3
+                ),
+                Err(DeviceError::Invalid { .. })
+            ));
+        }
     }
 
     #[test]
