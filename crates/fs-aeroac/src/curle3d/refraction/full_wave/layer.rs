@@ -34,6 +34,11 @@ use core::f64::consts::{FRAC_PI_2, TAU};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det};
 
+mod force;
+pub use force::{
+    FULL_WAVE_LAYER_FORCE_SCOPE, FullWaveLayerForceDiagnostics, PreparedLayeredFullWaveForce,
+};
+
 /// Applicability of the original finite-layer source-to-receiver transfer.
 pub const FULL_WAVE_LAYER_MONOPOLE_SCOPE: &str = "Prescribed stationary compact 3D volume \
 source; coherent spherical-wave transmission through one infinite planar homogeneous \

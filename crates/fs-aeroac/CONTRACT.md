@@ -1751,6 +1751,33 @@ reciprocity, rotation, refinement, observation clocks, work and cancellation.
 Private regressions check internal grazing, large evanescent layer depth and a
 resonance that passes the phase-span test but fails denominator resolution.
 
+### Physical force sources through the finite layer
+
+`PreparedLayeredFullWaveForce` applies the same coherent finite-layer Green
+function to a prescribed original compact force ON the incident fluid, in
+newtons. The source derivative is `i/(omega rho_incident) grad_source(p/Q)`;
+analytic receiving derivatives retain all five cylindrical velocity-tensor
+entries, including transverse motion at a pressure null. The seven pressure
+and velocity channels share the parent's critical branches, physical spectral
+weight, resonance resolution and adaptive nodes. No finite-difference dipole,
+single ray, truncated return series or `p/Z` velocity substitutes for the tensor.
+
+The original `FullWaveForceLimits` separately control the pressure-vector norm
+and velocity-tensor Frobenius norm per newton. Derivative-aware analytic
+evanescent tails retain the layer thickness and original density factors;
+reported quadrature errors remain estimates rather than interval certificates.
+The prepared 4-by-3 Cartesian matrix applies arbitrary complex force vectors
+without allocation, quadrature or transcendental evaluation and exposes native
+harmonic lines with the existing clock. Zero thickness and identical fluids
+delegate the original single-interface force owner. The parent's exterior-only,
+lossless, nontrapping and prescribed-source scope remains unchanged.
+
+`tests/full_wave_layer_force.rs` checks all seven tensor channels against
+independently refined direct-q spectra, a coherent spherical-image force series,
+source derivatives and receiving-fluid momentum. It also checks exact collapsed
+limits, axial transverse motion, harmonic observation, zero/nonfinite forces,
+work exhaustion, cancellation and original geometry/domain refusals.
+
 ## Resolved volume-stress quadrupoles
 
 `curle3d::quadrupole::PreparedQuadrupoleObserver` propagates prescribed symmetric
