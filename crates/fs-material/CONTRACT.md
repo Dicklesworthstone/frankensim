@@ -1,5 +1,21 @@
 # fs-material — CONTRACT
 
+## Completed brittle-plane release admission
+
+`BrittleCrackBand::release_failed_plane` admits an explicitly selected physical
+face only when the original native history has completely failed, the face
+normal aligns with that fixed material plane, and the actual full-stress
+traction meets its declared Pa gate. Active normal compression refuses even
+with a loose traction tolerance. Surviving bonds cannot be released by a
+numerical tolerance.
+
+The returned observation preserves full stress, in-plane elastic storage and
+all cumulative fracture dissipation, including thermal history. This bounded,
+allocation-free query changes no state and creates no new cohesive energy or
+impulse. Structural owners must retain those accounts once through topology
+transfer. A generalized crack-band opening is not a geometric face gap; this
+entry does not admit partial-damage surface insertion or contact response.
+
 ## Native brittle mean-stress assembly adapter
 
 `BrittleCrackBand::mean_small_strain_law` borrows the original crack-band owner

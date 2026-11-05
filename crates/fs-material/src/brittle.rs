@@ -59,6 +59,9 @@ pub mod initiation;
 /// Exact path-mean stress and its native derivative for work-conjugate dynamics.
 pub mod path;
 
+/// Traction-free admission of completely failed material planes for topology release.
+pub mod release;
+
 /// Explicit pure-mode strengths and fracture work. No values are inferred from
 /// a material name, hardness, flexural modulus of rupture or yield stress.
 #[derive(Clone, Copy, Debug, PartialEq)]
