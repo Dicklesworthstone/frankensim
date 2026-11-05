@@ -437,6 +437,7 @@ fn main() -> Result<()> {
             gap_tolerance_m: 2e-4,
             angle_tolerance_rad: std::f64::consts::PI,
         },
+        point_masses: Vec::new(),
     };
     // Unit vertical forces on the top plate at the saddle zone. The plan prints no bridge position; the bridge lies in the
     // gap between the two axis strips (x from 0.313 to 0.356 m, centre 0.3345 m: INFERRED), at the outer string positions and

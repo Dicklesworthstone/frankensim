@@ -3,8 +3,8 @@
 use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::SharedMaterialShellAssemblyBody;
 use fs_couple::shear_shell::assembly::{
-    MaterialShellAssembly, MaterialShellComponent, ShellAssemblyForcePort,
-    ShellAssemblyReductionOptions,
+    MaterialShellAssembly, MaterialShellAssemblyImage, MaterialShellComponent,
+    ShellAssemblyForcePort, ShellAssemblyReductionOptions,
 };
 use fs_couple::shear_shell::pressure::ShellPressureSurfaces;
 use fs_plate::shell::junction::{
@@ -132,6 +132,7 @@ fn body(gate: &CancelGate) -> SharedMaterialShellAssemblyBody {
                 gap_tolerance_m: 1e-10,
                 angle_tolerance_rad: 1e-10,
             },
+            point_masses: Vec::new(),
         },
         reduction: ShellAssemblyReductionOptions {
             eigenvalue_window: (0.0, 1e9),
@@ -694,6 +695,67 @@ fn a_modal_damping_law_sets_every_retained_mode_and_no_law_changes_nothing() {
         assert_ne!(m, plain.damping().matrix_per_s());
         assert_eq!(one.physical_modes(), plain.physical_modes());
         assert_eq!(one.eigenvalue_intervals(), plain.eigenvalue_intervals());
+    });
+}
+
+// A point mass moves every mode by Rayleigh's first-order shift from the shape it sits in, and no mass changes no byte.
+#[test]
+fn a_point_mass_shifts_each_mode_by_its_own_first_order_term_and_none_changes_nothing() {
+    use fs_couple::shear_shell::assembly::ShellPointMass;
+    with_cx(|_, gate| {
+        let original = single_part_body(gate);
+        let reduce = |body: &SharedMaterialShellAssemblyBody| {
+            body.specimen.reduce(&body.reduction, &body.force_ports, gate)
+        };
+        let plain = reduce(&original).unwrap();
+        let with = |nodes: Vec<usize>, mass_kg: f64| {
+            let mut body = original.clone();
+            body.specimen.point_masses.push(ShellPointMass { component: 0, nodes, mass_kg });
+            body
+        };
+        let omega = |image: &MaterialShellAssemblyImage| {
+            image.eigenvalue_intervals().iter().map(|(a, b)| (0.5 * (a + b)).sqrt()).collect::<Vec<f64>>()
+        };
+        let again = reduce(&original).unwrap();
+        assert_eq!(again.physical_modes(), plain.physical_modes());
+        assert_eq!(again.eigenvalue_intervals(), plain.eigenvalue_intervals());
+        // Far-edge nodes of the clamped plate, shared equally. Part mass 700 x 0.2 x 0.3 x 0.003 = 0.126 kg; 1 mg stays first order.
+        let (nodes, mass_kg) = (vec![3, 7, 11], 1e-6);
+        let share = mass_kg / nodes.len() as f64;
+        let w0 = omega(&plain);
+        let w1 = omega(&reduce(&with(nodes.clone(), mass_kg)).unwrap());
+        let mut largest = 0.0_f64;
+        for mode in 0..w0.len() {
+            // delta(w^2) / w^2 = - phi' dM phi for a mass-normalized phi; rotations carry no share.
+            let shape = &plain.physical_modes()[0][mode];
+            let term: f64 = nodes
+                .iter()
+                .map(|node| share * (0..3).map(|axis| shape[6 * node + axis].powi(2)).sum::<f64>())
+                .sum();
+            let predicted = -0.5 * term;
+            let measured = w1[mode] / w0[mode] - 1.0;
+            assert!(
+                (measured - predicted).abs() <= 1e-2 * predicted.abs(),
+                "mode {mode}: measured {measured:e}, predicted {predicted:e}"
+            );
+            largest = largest.max(predicted.abs());
+        }
+        assert!(largest > 1e-7, "the check must see a shift: {largest:e}");
+        // A mass on a clamped node would vanish: every bad record refuses by name.
+        let text = |body: SharedMaterialShellAssemblyBody| reduce(&body).unwrap_err().to_string();
+        let clamped = original.specimen.components[0]
+            .constraints
+            .first()
+            .map(|c| c.node)
+            .unwrap();
+        assert!(text(with(vec![clamped], 1e-6)).contains("free in all three translations"));
+        assert!(text(with(vec![3, 3], 1e-6)).contains("distinct nodes"));
+        assert!(text(with(Vec::new(), 1e-6)).contains("distinct nodes"));
+        assert!(text(with(vec![3], 0.0)).contains("positive finite mass"));
+        assert!(text(with(vec![3], f64::NAN)).contains("positive finite mass"));
+        let mut absent = with(vec![3], 1e-6);
+        absent.specimen.point_masses[0].component = 1;
+        assert!(text(absent).contains("absent shell component"));
     });
 }
 

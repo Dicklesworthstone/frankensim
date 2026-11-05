@@ -3,6 +3,7 @@ use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::SharedMaterialShellAssemblyBody;
 use fs_couple::shear_shell::assembly::{
     MaterialShellAssembly, MaterialShellAssemblyImage, ShellAssemblyForcePort, ShellAssemblyReductionOptions,
+    ShellPointMass,
 };
 use fs_plate::shell::junction::{
     EdgeTie, FaceTie, RotationCoupling, TieBudget, TieKind, TieOffset, TieSide,
@@ -22,6 +23,8 @@ const MAX_COMPONENTS: usize = 64;
 const MAX_TOTAL_NODES: usize = 4 * MAX_NODES;
 const MAX_TOTAL_TRIANGLES: usize = 4 * MAX_TRIANGLES;
 const MAX_TIES: usize = 157;
+// One solid on a few parts: the cello endpin shares its mass over three.
+const MAX_POINT_MASSES: usize = 16;
 
 #[derive(Clone, Debug)]
 struct Component {
@@ -45,6 +48,7 @@ pub(crate) struct Spec {
     window: (f64, f64),
     projection_work: usize,
     coating_memory: Option<coating::MemoryInput>,
+    point_masses: Vec<ShellPointMass>,
 }
 
 impl Spec {
@@ -183,6 +187,7 @@ impl Spec {
                 footprint: Bridge::read_fields(&v[1..], shell.nodes.len(), &shell.triangles)?,
             });
         }
+        let point_masses = read_point_masses(&mut r, &components)?;
         if r.lines.next().is_some() {
             return Err("unconsumed assembly body profile record".into());
         }
@@ -196,6 +201,7 @@ impl Spec {
             window,
             projection_work,
             coating_memory,
+            point_masses,
         })
     }
 
@@ -421,6 +427,7 @@ impl Spec {
                 edge_ties: edges,
                 face_ties: faces,
                 tie_budget: self.ties,
+                point_masses: self.point_masses.clone(),
             },
             reduction: ShellAssemblyReductionOptions {
                 eigenvalue_window: self.window,
@@ -448,6 +455,26 @@ fn component(components: &[Component], name: &str) -> Result<usize> {
         .iter()
         .position(|c| c.name == name)
         .ok_or_else(|| "assembly reference names an unknown component".into())
+}
+/// The optional block after the bridges; a profile without it reads as it always did.
+fn read_point_masses(r: &mut Records<'_>, components: &[Component]) -> Result<Vec<ShellPointMass>> {
+    if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) != Some("point-masses") {
+        return Ok(Vec::new());
+    }
+    let n = count(r.row("point-masses", 1)?[0], 1, MAX_POINT_MASSES)?;
+    let mut masses = Vec::with_capacity(n);
+    for _ in 0..n {
+        let v = r.row("point-mass", 3)?;
+        let part = component(components, v[0])?;
+        let mass_kg = scalar(v[1])?;
+        if mass_kg <= 0.0 {
+            return Err("point-mass requires a positive mass in kg".into());
+        }
+        let bound = components[part].shell.nodes.len();
+        let nodes = indices(r, "mass-node", count(v[2], 1, bound)?, bound)?;
+        masses.push(ShellPointMass { component: part, nodes, mass_kg });
+    }
+    Ok(masses)
 }
 fn offset(value: &str) -> Result<TieOffset> {
     match value {

@@ -874,6 +874,7 @@ fn g3_assembled_forcing_keeps_every_original_component_film_and_its_own_limit() 
             gap_tolerance_m: 1e-10,
             angle_tolerance_rad: 1e-10,
         },
+        point_masses: Vec::new(),
     };
     let image = source
         .reduce(

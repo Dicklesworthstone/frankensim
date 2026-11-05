@@ -339,6 +339,7 @@ fn g3_single_component_assembly_preserves_source_response_and_signed_volume() {
             gap_tolerance_m: 1e-10,
             angle_tolerance_rad: 1e-10,
         },
+        point_masses: Vec::new(),
     };
     let assembled = assembly
         .reduce(

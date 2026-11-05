@@ -277,6 +277,7 @@ fn g0_assembled_descriptor_constraints_budgets_source_bands_and_cancellation_rem
         tie_budget: TieBudget {
             max_segments: 32, max_slave_dofs: 24, gap_tolerance_m: 1e-10, angle_tolerance_rad: 1e-10,
         },
+        point_masses: Vec::new(),
     };
     let image = source.reduce(&ShellAssemblyReductionOptions {
         eigenvalue_window: (0.0, 1e9), n_modes: 2,

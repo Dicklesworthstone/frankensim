@@ -8,10 +8,11 @@
 //! is edited here. `drive` records name the node nearest a point on a part and the global direction of a unit force there.
 //!
 //!   shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--shapes PATH]
-//!                    [--node-shapes PATH] [--fholes RASTER.tsv]
+//!                    [--node-shapes PATH] [--fholes RASTER.tsv] [--point-mass PART:MASS_KG:NODE,NODE,...]
 //!
 //! `PACK_DIR/<pack>.fsmatpk` is read for each pack name in the table. `--shapes` writes the displacement of the top and back
 //! nodes along their directors; `--node-shapes` writes the three displacement components of every node of every part.
+//! `--point-mass` (repeatable) shares a mass equally over nodes of a part, as a v4 profile's `point-mass` record does.
 //! `--fholes` computes the sound holes' conductance from their raster (`frankensim.specimen-raster-runs.v1`) with
 //! `fs_bem::plate_aperture` at the table's neck length, and the neck becomes the circular flanged neck of that conductance.
 //! A table written with its generator's `neck=bem` already carries that neck, through the holes' measured bore; on a
@@ -22,7 +23,7 @@ use fs_bem::plate_aperture::{ApertureRaster, PlateApertureOptions, plate_apertur
 use fs_couple::cavity_modal::{CavityNeckLoss, HelmholtzModalCavity};
 use fs_couple::shear_shell::assembly::{
     MaterialShellAssembly, MaterialShellComponent, ShellAssemblyForcePort,
-    ShellAssemblyReductionOptions,
+    ShellAssemblyReductionOptions, ShellPointMass,
 };
 use fs_couple::shear_shell::pressure::ShellPressureSurfaces;
 use fs_couple::shear_shell::{
@@ -514,7 +515,7 @@ fn jacobi(mut a: Vec<Vec<f64>>) -> (Vec<f64>, Vec<Vec<f64>>) {
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 3 {
-        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--projection-work TERMS] [--shapes PATH] [--node-shapes PATH] [--fholes RASTER.tsv]".into());
+        return Err("usage: shell_body_modes ASSEMBLY.tsv PACK_DIR [--modes N] [--fmin HZ] [--fmax HZ] [--omega RAD_S] [--drilling-alpha A] [--projection-work TERMS] [--shapes PATH] [--node-shapes PATH] [--fholes RASTER.tsv] [--point-mass PART:MASS_KG:NODE,NODE,...]".into());
     }
     let (mut n_modes, mut fmin, mut fmax, mut omega) = (
         10usize,
@@ -527,6 +528,7 @@ fn main() -> Result<()> {
     let mut fholes: Option<String> = None;
     let mut drilling_alpha = DRILLING_ALPHA;
     let mut projection_work = PROJECTION_WORK;
+    let mut point_mass_flags: Vec<String> = Vec::new();
     let mut it = args[3..].iter();
     while let Some(flag) = it.next() {
         let value = it.next().ok_or("flag without a value")?;
@@ -540,6 +542,7 @@ fn main() -> Result<()> {
             "--shapes" => shapes = Some(value.clone()),
             "--node-shapes" => node_shapes = Some(value.clone()),
             "--fholes" => fholes = Some(value.clone()),
+            "--point-mass" => point_mass_flags.push(value.clone()),
             other => return Err(format!("unknown flag {other}").into()),
         }
     }
@@ -618,6 +621,15 @@ fn main() -> Result<()> {
     let total_nodes: usize = table.parts.iter().map(|p| p.nodes.len()).sum();
     let total_tris: usize = table.parts.iter().map(|p| p.tris.len()).sum();
     let slave_nodes: usize = table.ties.iter().map(|t| t.slave_nodes.len()).sum();
+    // `--point-mass PART:MASS_KG:NODE,NODE,...`, the v4 profile's `point-mass` record.
+    let mut point_masses = Vec::with_capacity(point_mass_flags.len());
+    for flag in &point_mass_flags {
+        let [part, mass_kg, nodes] = flag.split(':').collect::<Vec<_>>()[..] else {
+            return Err("--point-mass needs PART:MASS_KG:NODE,NODE,...".into());
+        };
+        let nodes = nodes.split(',').map(str::parse).collect::<Result<Vec<usize>, _>>()?;
+        point_masses.push(ShellPointMass { component: position(part)?, nodes, mass_kg: mass_kg.parse()? });
+    }
     let assembly = MaterialShellAssembly {
         components: parts,
         edge_ties,
@@ -628,6 +640,7 @@ fn main() -> Result<()> {
             gap_tolerance_m: 2e-4,
             angle_tolerance_rad: std::f64::consts::PI,
         },
+        point_masses,
     };
     // Unit forces named by the table's `drive` records: the node of the named part nearest the stated point, along the stated direction.
     if table.drives.is_empty() {
@@ -903,7 +916,7 @@ fn main() -> Result<()> {
     let (order, vectors) = (open_order, open_vectors);
     // Share of the shell kinetic energy that each group of parts carries in every open-sound-hole mode, with lumped nodal masses
     // (a third of each triangle's area x thickness x density): a mode carried by one small part, such as the bridge, shows here.
-    let lumped: Vec<Vec<f64>> = table
+    let mut lumped: Vec<Vec<f64>> = table
         .parts
         .iter()
         .zip(&densities)
@@ -928,6 +941,11 @@ fn main() -> Result<()> {
             m
         })
         .collect();
+    for load in &image.source().point_masses {
+        for &node in &load.nodes {
+            lumped[load.component][node] += load.mass_kg / load.nodes.len() as f64;
+        }
+    }
     let mut groups: Vec<String> = table.parts.iter().map(|p| group_of(&p.name)).collect();
     groups.sort();
     groups.dedup();

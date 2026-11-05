@@ -22,11 +22,13 @@ use fs_plate::shell::{
         EdgeTie, FaceTie, RotationCoupling, ShellComponent, TieBudget, TieKind, TieReceipt,
         tie_shells_with_faces,
     },
+    ShellModel,
     mitc::{
         ConstraintFrame, MitcBudget, NodalDirectors, ShellConstraint, ShellMass, assemble_mitc3p,
     },
     modes_shell,
 };
+use std::borrow::Cow;
 
 /// One independently oriented material midsurface, before ties are eliminated.
 #[derive(Clone, Debug)]
@@ -47,6 +49,22 @@ pub struct MaterialShellComponent {
     pub assembly_budget: MitcBudget,
 }
 
+/// Inertia of a solid the shell does not mesh, carried on named nodes of one part.
+///
+/// The mass joins the translational diagonal of the part's own mass matrix
+/// before the ties, shared equally over `nodes`. It is rigidly attached to each
+/// of them, adds no rotary inertia, no stiffness, no loss and no fluid role, and
+/// it says nothing about what the solid touches: a body carrying one stays free.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShellPointMass {
+    /// Index into [`MaterialShellAssembly::components`].
+    pub component: usize,
+    /// Distinct nodes of that part, each free in all three translations.
+    pub nodes: Vec<usize>,
+    /// Total mass [kg] over all of `nodes`, positive and finite.
+    pub mass_kg: f64,
+}
+
 /// Complete component sources and work-conjugate seams, in canonical part order.
 #[derive(Clone, Debug)]
 pub struct MaterialShellAssembly {
@@ -58,6 +76,8 @@ pub struct MaterialShellAssembly {
     pub face_ties: Vec<FaceTie>,
     /// Explicit mortar work and geometric admission limits.
     pub tie_budget: TieBudget,
+    /// Opt-in inertia of solids the shell does not mesh; empty on a body naming none.
+    pub point_masses: Vec<ShellPointMass>,
 }
 
 /// One physical force/moment footprint distributed over any number of parts.
@@ -423,6 +443,9 @@ impl MaterialShellAssembly {
                     .map_err(owner)?,
             );
         }
+        let mut pencils: Vec<Cow<'_, ShellModel>> =
+            models.iter().map(|model| Cow::Borrowed(model.pencil())).collect();
+        self.add_point_masses(&mut pencils)?;
         let parts: Vec<_> = self
             .components
             .iter()
@@ -430,7 +453,7 @@ impl MaterialShellAssembly {
             .map(|(id, part)| ShellComponent {
                 id,
                 mesh: &part.specimen.mesh,
-                model: models[id].pencil(),
+                model: pencils[id].as_ref(),
                 nodal_thickness_m: &thickness[id],
             })
             .collect();
@@ -621,6 +644,48 @@ impl MaterialShellAssembly {
             coating_relaxation,
             substrate_relaxation,
         })
+    }
+
+    // A rotation of the three translation axes leaves m I as m I, so the support
+    // frame does not matter; a constrained axis would drop the mass, so it refuses.
+    // Before the ties, so a slave node's share reaches its masters by the same
+    // congruence as the rest of its row.
+    fn add_point_masses(
+        &self,
+        pencils: &mut [Cow<'_, ShellModel>],
+    ) -> Result<(), AcousticRealizeError> {
+        for load in &self.point_masses {
+            let pencil = pencils
+                .get_mut(load.component)
+                .ok_or_else(|| invalid("point mass names an absent shell component"))?;
+            let mut nodes = load.nodes.clone();
+            nodes.sort_unstable();
+            nodes.dedup();
+            if nodes.is_empty() || nodes.len() != load.nodes.len() {
+                return Err(invalid("point mass requires distinct nodes"));
+            }
+            if !load.mass_kg.is_finite() || load.mass_kg <= 0.0 {
+                return Err(invalid("point mass requires a positive finite mass"));
+            }
+            let share = load.mass_kg / nodes.len() as f64;
+            let pencil = pencil.to_mut();
+            for dof in nodes.iter().flat_map(|node| (0..3).map(move |axis| 6 * node + axis)) {
+                let row = pencil
+                    .dof_map
+                    .get(dof)
+                    .copied()
+                    .flatten()
+                    .ok_or_else(|| invalid("point mass node must be free in all three translations"))?;
+                let diagonal = pencil
+                    .m
+                    .row(row)
+                    .0
+                    .binary_search(&row)
+                    .map_err(|_| invalid("point mass node has no translational inertia row"))?;
+                pencil.m.row_values_mut(row)[diagonal] += share;
+            }
+        }
+        Ok(())
     }
 
     // The current mortar owner eliminates free slave coordinates. It cannot

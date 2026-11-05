@@ -1381,6 +1381,9 @@ slave-triangle TRIANGLE
 glue PACK MASTER_REGION SLAVE_REGION WIDTH_M
 bridges COUNT
 bridge COMPONENT NODE DIRECTION_X DIRECTION_Y DIRECTION_Z
+point-masses COUNT
+point-mass COMPONENT MASS_KG N_NODES
+mass-node NODE
 ```
 
 Repeat each component and its records in declaration order. The `region`,
@@ -1406,6 +1409,22 @@ one tie and selects the original compliant mortar. Nonmatching seams and
 overlapping patches remain subject to that owner's geometric and work limits.
 Prescribed slave coordinates that a rigid tie would eliminate refuse; compliant
 ties retain both sides' supports.
+
+The `point-masses` block is optional, closes the v4 records, and is absent on a
+body that names no such solid: without it nothing changes. Each `point-mass`
+shares `MASS_KG` equally over its `mass-node` rows, on the translational
+diagonal of that component's mass matrix before the ties. It stands in for the
+inertia of a solid the shell does not mesh. It is rigidly attached to each node
+and adds no rotary inertia, stiffness, loss or fluid role. It does not model
+what the solid touches: a floor contact or a player's hold stays out of the
+body, which remains free. Nodes must be distinct and free in all three
+translations.
+
+On a thin part, do not put a heavy mass on one node. Above the frequency where
+`omega m` passes the part's point impedance (`8 sqrt(D rho h)` for a plate), the
+mass stops following the part and acts as a pin in it. Spread it over the nodes
+where the real solid is fixed, and record that footprint as an assumption if no
+source prints it.
 
 ### Material adhesive data
 

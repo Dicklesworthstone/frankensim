@@ -434,6 +434,7 @@ fn g3_full_cross_mode_memory_and_single_component_assembly_have_the_same_poles()
             gap_tolerance_m: 1e-10,
             angle_tolerance_rad: 1e-10,
         },
+        point_masses: Vec::new(),
     };
     let assembled = assembly
         .reduce(
