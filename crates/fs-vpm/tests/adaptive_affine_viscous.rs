@@ -1056,3 +1056,99 @@ fn g4_source_diffusion_and_publication_cancellation_leave_inputs_unchanged() {
     assert!(diffusion_seen && source_seen && publication_seen);
     assert_eq!(good, run(&gate, &counter).unwrap());
 }
+
+#[test]
+fn g1_dense_and_compact_samples_use_current_diffused_strengths_and_held_flow() {
+    with_cx(&CancelGate::new_clock_free(), Budget::INFINITE, |cx| {
+        let law = PseDiffusion::compact_wendland(NU, WIDTH).unwrap();
+        let mut budget = caps(CLOUD.len());
+        budget.run.max_live_bytes = 1024 * 1024;
+        let dense = adaptive::simulate_viscous_with_affine_flow_cx(
+            cx,
+            &CLOUD,
+            &AREAS,
+            0.08,
+            CORE,
+            law,
+            source(),
+            options(1e-6),
+            budget,
+        )
+        .unwrap();
+        let compact = adaptive::simulate_viscous_compact_with_affine_flow_cx(
+            cx,
+            &CLOUD,
+            &AREAS,
+            0.08,
+            CORE,
+            law,
+            source(),
+            options(1e-6),
+            budget,
+            adaptive::CompactNeighborBudget {
+                max_edges: 6,
+                max_candidate_visits: 1_000_000,
+            },
+        )
+        .unwrap();
+        let point = [0.4, -0.3];
+        assert_eq!(dense.kinematics_at(point), compact.kinematics_at(point));
+        for run in [dense, compact] {
+            assert_eq!(run.background_flow(), source());
+            assert_eq!(run.velocity_core_m(), CORE);
+            assert!(
+                run.run
+                    .particles
+                    .iter()
+                    .zip(CLOUD)
+                    .any(|(a, b)| a.circulation != b.circulation)
+            );
+            let induced = fs_vpm::induced_kinematics(&run.run.particles, point, CORE).unwrap();
+            let sample = run.kinematics_at(point).unwrap();
+            let dx = point[0] - ORIGIN[0];
+            let dy = point[1] - ORIGIN[1];
+            near(
+                sample.velocity[0],
+                induced.velocity[0] + VELOCITY[0] + GRADIENT[0] * dx + GRADIENT[1] * dy,
+                2e-13,
+            );
+            near(
+                sample.velocity[1],
+                induced.velocity[1] + VELOCITY[1] + GRADIENT[2] * dx - GRADIENT[0] * dy,
+                2e-13,
+            );
+            for (i, row) in [[GRADIENT[0], GRADIENT[1]], [GRADIENT[2], -GRADIENT[0]]]
+                .into_iter()
+                .enumerate()
+            {
+                for (j, value) in row.into_iter().enumerate() {
+                    near(sample.gradient[i][j], induced.gradient[i][j] + value, 2e-13);
+                }
+            }
+            near(
+                sample.vorticity,
+                induced.vorticity + GRADIENT[2] - GRADIENT[1],
+                2e-13,
+            );
+        }
+        let zero = AffineFlow2::new([3.0, -4.0], [0.0; 2], [0.0; 3]).unwrap();
+        let run = adaptive::simulate_viscous_with_affine_flow_cx(
+            cx,
+            &CLOUD,
+            &AREAS,
+            0.0,
+            CORE,
+            law,
+            zero,
+            options(1e-6),
+            budget,
+        )
+        .unwrap();
+        assert_eq!(run.background_flow(), zero);
+        assert_eq!(run.source_particle_updates, 0);
+        assert_eq!(
+            run.kinematics_at(point),
+            fs_vpm::induced_kinematics(&run.run.particles, point, CORE),
+        );
+    });
+}

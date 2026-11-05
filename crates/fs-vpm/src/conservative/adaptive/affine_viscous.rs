@@ -35,6 +35,8 @@ pub struct DiffusionMomentChange {
 /// Accepted native viscous trajectory with disjoint source and PSE accounts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientViscousAdaptiveRun {
+    pub(super) background_flow: AffineFlow2,
+    pub(super) velocity_core_m: f64,
     /// The sole published particle inventory and original adaptive work receipt.
     pub run: AdaptiveRun,
     /// Actual vortex-moment increments during accepted affine maps only.
@@ -49,6 +51,29 @@ pub struct AmbientViscousAdaptiveRun {
     /// Actual compact distance tests across all geometry rebuilds; zero for
     /// the dense path or inactive diffusion.
     pub candidate_visits: u64,
+}
+
+impl AmbientViscousAdaptiveRun {
+    /// Original held source, including identity fields and inactive windows.
+    pub const fn background_flow(&self) -> AffineFlow2 {
+        self.background_flow
+    }
+
+    /// Algebraic velocity-core radius, independent of the PSE kernel width [m].
+    pub const fn velocity_core_m(&self) -> f64 {
+        self.velocity_core_m
+    }
+
+    /// Sample the CURRENT accepted particle positions AND PSE-updated strengths
+    /// plus their original background. This allocation-free O(N) query uses the
+    /// velocity kernel, not `Gamma/area` or the PSE smoothing profile.
+    pub fn kinematics_at(&self, point_m: [f64; 2]) -> Option<crate::ParticleKinematics2> {
+        self.background_flow.kinematics_with_particles_at(
+            &self.run.particles,
+            point_m,
+            self.velocity_core_m,
+        )
+    }
 }
 
 /// Adapt a moving viscous cloud in one held incompressible affine background.
@@ -109,7 +134,7 @@ pub fn simulate_viscous_with_affine_flow_cx(
         duration_s,
         core,
         law,
-        (!flow.is_zero()).then_some(flow),
+        Some(flow),
         options,
         budget,
         None,
@@ -150,7 +175,7 @@ pub fn simulate_viscous_compact_with_affine_flow_cx(
         duration_s,
         core,
         law,
-        (!flow.is_zero()).then_some(flow),
+        Some(flow),
         options,
         budget,
         Some(neighbors),

@@ -700,3 +700,76 @@ fn g0_subnormal_durations_and_unresolved_source_motion_are_not_silenced() {
         })
     ));
 }
+
+#[test]
+fn g1_complete_samples_use_current_conservative_and_viscous_particles() {
+    let source = flow([0.0; 2], [0.2, -0.1], [0.0, 0.4, 0.0]);
+    let point = [0.2, 0.3];
+    let runs = with_cx(&CancelGate::new_clock_free(), Budget::INFINITE, |cx| {
+        [
+            ambient::simulate_with_cx(cx, &CLOUD, 0.02, 3, 0.1, source, caps(3, 3)).unwrap(),
+            ambient::simulate_viscous_with_cx(
+                cx,
+                &CLOUD,
+                &[1.0; 3],
+                0.02,
+                3,
+                0.1,
+                source,
+                PseDiffusion::new(0.1, 0.5).unwrap(),
+                caps(3, 3),
+            )
+            .unwrap(),
+        ]
+    });
+    for (index, mut run) in runs.into_iter().enumerate() {
+        assert_eq!(run.background_flow(), source);
+        assert_eq!(run.velocity_core_m(), 0.1);
+        assert_ne!(run.run.particles, CLOUD);
+        if index == 1 {
+            assert!(
+                run.run
+                    .particles
+                    .iter()
+                    .zip(CLOUD)
+                    .any(|(a, b)| a.circulation != b.circulation)
+            );
+        }
+        let induced = fs_vpm::induced_kinematics(&run.run.particles, point, 0.1).unwrap();
+        let sample = run.kinematics_at(point).unwrap();
+        close(sample.velocity[0], induced.velocity[0] + 0.32, 2e-14);
+        close(sample.velocity[1], induced.velocity[1] - 0.1, 2e-14);
+        close(sample.gradient[0][1], induced.gradient[0][1] + 0.4, 2e-14);
+        assert_eq!(sample.gradient[0][0], induced.gradient[0][0]);
+        assert_eq!(sample.gradient[1][0], induced.gradient[1][0]);
+        assert_eq!(sample.gradient[1][1], induced.gradient[1][1]);
+        close(sample.vorticity, induced.vorticity - 0.4, 2e-14);
+
+        // The only particle inventory remains the published run, not a sample cache.
+        run.run.particles[0].circulation *= 0.5;
+        assert_ne!(run.kinematics_at(point).unwrap(), sample);
+        run.run.particles[0].pos[0] = f64::NAN;
+        assert!(run.kinematics_at(point).is_none());
+    }
+}
+
+#[test]
+fn g0_inactive_windows_retain_their_authored_sampled_background() {
+    let source = flow([0.0; 2], [0.2, -0.1], [0.0, 0.4, 0.0]);
+    for (particles, dt, steps) in [
+        (&[] as &[Particle], 0.02, 3),
+        (CLOUD.as_slice(), 0.0, 3),
+        (CLOUD.as_slice(), 0.02, 0),
+    ] {
+        let run = evolve(particles, dt, steps, source);
+        assert_eq!(run.background_flow(), source);
+        assert_eq!(run.source_particle_updates, 0);
+        let point = [0.2, 0.3];
+        let induced = fs_vpm::induced_kinematics(&run.run.particles, point, 0.1).unwrap();
+        let sample = run.kinematics_at(point).unwrap();
+        close(sample.velocity[0], induced.velocity[0] + 0.32, 2e-14);
+        close(sample.velocity[1], induced.velocity[1] - 0.1, 2e-14);
+        close(sample.vorticity, induced.vorticity - 0.4, 2e-14);
+        assert!(run.kinematics_at([f64::NAN, 0.0]).is_none());
+    }
+}

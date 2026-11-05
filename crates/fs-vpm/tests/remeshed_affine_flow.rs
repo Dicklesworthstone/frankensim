@@ -572,3 +572,107 @@ fn g4_cancellation_during_source_and_final_remap_is_atomic_and_retryable() {
     .unwrap();
     assert_eq!(retry, reference);
 }
+
+#[test]
+fn g1_remeshed_complete_field_retains_last_source_and_current_grid() {
+    let input = particles();
+    let grids = grids();
+    let sources = flows();
+    let schedule = RemeshSchedule {
+        every_steps: 2,
+        grids: &grids,
+    };
+    with_cx(&CancelGate::new_clock_free(), Budget::INFINITE, |cx| {
+        let viscous = simulate_with_affine_flows_cx(
+            cx,
+            &input,
+            0.001,
+            3,
+            0.1,
+            PseDiffusion::new(0.02, 0.15).unwrap(),
+            schedule,
+            &sources,
+            caps(),
+        )
+        .unwrap();
+        let inviscid = fs_vpm::conservative::remeshed::simulate_with_affine_flows_order_cx(
+            cx,
+            &input,
+            0.001,
+            3,
+            0.1,
+            fs_vpm::conservative::CompositionOrder::Fourth,
+            schedule,
+            &sources,
+            caps(),
+        )
+        .unwrap();
+        for run in [viscous, inviscid] {
+            assert_eq!(run.background_flow(), Some(sources[1]));
+            assert_eq!(run.velocity_core_m(), 0.1);
+            assert!(run.run.particles.len() > input.len());
+            let point = [0.25, -0.15];
+            let induced = fs_vpm::induced_kinematics(&run.run.particles, point, 0.1).unwrap();
+            let sample = run.kinematics_at(point).unwrap();
+            // Last authored field, not the first interval and not a sum of both.
+            near(sample.velocity[0], induced.velocity[0] + 0.07);
+            near(sample.velocity[1], induced.velocity[1] + 0.097);
+            for (i, row) in [[0.05, -0.35], [0.25, -0.05]].into_iter().enumerate() {
+                for (j, value) in row.into_iter().enumerate() {
+                    near(sample.gradient[i][j], induced.gradient[i][j] + value);
+                }
+            }
+            near(sample.vorticity, induced.vorticity + 0.6);
+            assert_ne!(
+                sample,
+                sources[1]
+                    .kinematics_with_particles_at(&input, point, 0.1)
+                    .unwrap(),
+            );
+        }
+    });
+}
+
+#[test]
+fn g0_remeshed_zero_time_retains_authored_flow_and_zero_steps_has_none() {
+    let input = particles();
+    let grids = grids();
+    let sources = flows();
+    with_cx(&CancelGate::new_clock_free(), Budget::INFINITE, |cx| {
+        for steps in [0, 3] {
+            let active_grids = if steps == 0 { &grids[..1] } else { &grids[..] };
+            let active_sources = if steps == 0 {
+                &sources[..0]
+            } else {
+                &sources[..]
+            };
+            let run = simulate_with_affine_flows_cx(
+                cx,
+                &input,
+                0.0,
+                steps,
+                0.1,
+                PseDiffusion::new(0.02, 0.15).unwrap(),
+                RemeshSchedule {
+                    every_steps: 2,
+                    grids: active_grids,
+                },
+                active_sources,
+                caps(),
+            )
+            .unwrap();
+            assert_eq!(run.background_flow(), active_sources.last().copied());
+            assert_eq!(run.source_particle_updates, 0);
+            let point = [0.25, -0.15];
+            let induced = fs_vpm::induced_kinematics(&run.run.particles, point, 0.1).unwrap();
+            let sample = run.kinematics_at(point).unwrap();
+            if steps == 0 {
+                assert_eq!(sample, induced);
+            } else {
+                near(sample.velocity[0], induced.velocity[0] + 0.07);
+                near(sample.velocity[1], induced.velocity[1] + 0.097);
+                near(sample.vorticity, induced.vorticity + 0.6);
+            }
+        }
+    });
+}

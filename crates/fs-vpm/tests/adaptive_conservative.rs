@@ -819,3 +819,72 @@ fn g4_cancellation_inside_trials_sources_and_final_publication_is_atomic() {
     assert!(pair_seen && source_seen && publication_seen);
     assert_eq!(good, run(&gate, &counter).unwrap());
 }
+
+#[test]
+fn g1_adaptive_complete_field_uses_the_accepted_cloud_and_original_source() {
+    with_cx(&CancelGate::new_clock_free(), Budget::INFINITE, |cx| {
+        for order in [CompositionOrder::Second, CompositionOrder::Fourth] {
+            let run = adaptive::simulate_with_affine_flow_cx(
+                cx,
+                &CLOUD,
+                0.02,
+                CORE,
+                order,
+                source(),
+                options(1e-7),
+                caps(CLOUD.len()),
+            )
+            .unwrap();
+            assert!(run.run.accepted_steps > 0);
+            assert_ne!(run.run.particles, CLOUD);
+            assert_eq!(run.background_flow(), source());
+            assert_eq!(run.velocity_core_m(), CORE);
+            let point = [0.4, -0.3];
+            let induced = fs_vpm::induced_kinematics(&run.run.particles, point, CORE).unwrap();
+            let sample = run.kinematics_at(point).unwrap();
+            let dx = point[0] - ORIGIN[0];
+            let dy = point[1] - ORIGIN[1];
+            near(
+                sample.velocity[0],
+                induced.velocity[0] + VELOCITY[0] + GRADIENT[0] * dx + GRADIENT[1] * dy,
+                2e-13,
+            );
+            near(
+                sample.velocity[1],
+                induced.velocity[1] + VELOCITY[1] + GRADIENT[2] * dx - GRADIENT[0] * dy,
+                2e-13,
+            );
+            for (i, row) in [[GRADIENT[0], GRADIENT[1]], [GRADIENT[2], -GRADIENT[0]]]
+                .into_iter()
+                .enumerate()
+            {
+                for (j, value) in row.into_iter().enumerate() {
+                    near(sample.gradient[i][j], induced.gradient[i][j] + value, 2e-13);
+                }
+            }
+            near(
+                sample.vorticity,
+                induced.vorticity + GRADIENT[2] - GRADIENT[1],
+                2e-13,
+            );
+        }
+        let zero = AffineFlow2::new([3.0, -4.0], [0.0; 2], [0.0; 3]).unwrap();
+        let run = adaptive::simulate_with_affine_flow_cx(
+            cx,
+            &CLOUD,
+            0.0,
+            CORE,
+            CompositionOrder::Second,
+            zero,
+            options(1e-7),
+            caps(CLOUD.len()),
+        )
+        .unwrap();
+        assert_eq!(run.background_flow(), zero);
+        assert_eq!(run.source_particle_updates, 0);
+        assert_eq!(
+            run.kinematics_at([0.4, -0.3]),
+            fs_vpm::induced_kinematics(&run.run.particles, [0.4, -0.3], CORE),
+        );
+    });
+}

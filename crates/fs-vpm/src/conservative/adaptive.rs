@@ -205,6 +205,10 @@ fn viscous_run<const TRACK_DIFFUSION: bool>(
     envelope: AmbientAdaptiveBudget,
     neighbors: Option<CompactNeighborBudget>,
 ) -> Result<AmbientViscousAdaptiveRun, AdaptiveError> {
+    // The published field retains the authored source; identity sources still
+    // take the original inactive-map path and keep its work/resource counts.
+    let background_flow = flow.unwrap_or_default();
+    let flow = flow.filter(|flow| !flow.is_zero());
     let budget = envelope.run;
     let time = options.time;
     validate_options(duration_s, time)?;
@@ -630,6 +634,8 @@ fn viscous_run<const TRACK_DIFFUSION: bool>(
     accountant.checkpoint("fs-vpm.viscous-adaptive-publication", cx)?;
     let stats = backend.stats();
     Ok(AmbientViscousAdaptiveRun {
+        background_flow,
+        velocity_core_m: core,
         run: AdaptiveRun {
             particles: state,
             elapsed_s: duration_s,

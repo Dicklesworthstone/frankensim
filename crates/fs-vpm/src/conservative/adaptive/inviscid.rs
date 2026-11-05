@@ -45,11 +45,36 @@ pub struct AmbientAdaptiveBudget {
 /// Accepted adaptive window and the physical source increments on its path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientAdaptiveRun {
+    background_flow: AffineFlow2,
+    velocity_core_m: f64,
     pub run: AdaptiveRun,
     /// Only accepted fine trajectories contribute to this original DD account.
     pub ambient_moment_change: AmbientMomentChange,
     /// Actual computational source visits, including rejected/coarse trials.
     pub source_particle_updates: u64,
+}
+
+impl AmbientAdaptiveRun {
+    /// Original held source, independent of accepted/rejected candidate maps.
+    pub const fn background_flow(&self) -> AffineFlow2 {
+        self.background_flow
+    }
+
+    /// Algebraic velocity-core radius used by the original evolution [m].
+    pub const fn velocity_core_m(&self) -> f64 {
+        self.velocity_core_m
+    }
+
+    /// Sample only the CURRENT accepted particles plus the retained background.
+    /// Coarse and rejected trial inventories never enter this allocation-free
+    /// O(N) query; callers bound bulk sampling as for the original point kernel.
+    pub fn kinematics_at(&self, point_m: [f64; 2]) -> Option<crate::ParticleKinematics2> {
+        self.background_flow.kinematics_with_particles_at(
+            &self.run.particles,
+            point_m,
+            self.velocity_core_m,
+        )
+    }
 }
 
 /// Complete an inviscid window with controlled local position error.
@@ -137,7 +162,7 @@ pub fn simulate_with_affine_flow_cx(
         duration_s,
         core,
         order,
-        (!flow.is_zero()).then_some(flow),
+        Some(flow),
         options,
         budget,
     )
@@ -155,6 +180,9 @@ fn run(
     budget: AmbientAdaptiveBudget,
 ) -> Result<AmbientAdaptiveRun, AdaptiveError> {
     validate_options(duration_s, core, options)?;
+    // Retain the authored source even when its map is an exact identity.
+    let background_flow = flow.unwrap_or_default();
+    let flow = flow.filter(|flow| !flow.is_zero());
     let n = particles.len();
     admit_cap("particles", n, budget.run.max_particles)?;
     let active = duration_s > 0.0 && n > 0 && (n > 1 || flow.is_some());
@@ -379,6 +407,8 @@ fn run(
     }
     accountant.checkpoint("fs-vpm.adaptive-publication", cx)?;
     Ok(AmbientAdaptiveRun {
+        background_flow,
+        velocity_core_m: core,
         run: AdaptiveRun {
             particles: state,
             elapsed_s: duration_s,

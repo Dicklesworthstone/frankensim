@@ -79,6 +79,8 @@ pub struct RemeshedVpmRun {
 /// A remeshed trajectory with separately measured prescribed-flow effects.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientRemeshedVpmRun {
+    background_flow: Option<AffineFlow2>,
+    velocity_core_m: f64,
     /// Original final cloud, quadrature and complete shared execution account.
     pub run: RemeshedVpmRun,
     /// Actual signed vortex-moment changes during the source substeps alone.
@@ -89,6 +91,33 @@ pub struct AmbientRemeshedVpmRun {
     /// or four with the optional fourth-order inviscid composition.
     /// Included in `run.work_units`, independent of pair/remap visits.
     pub source_particle_updates: u64,
+}
+
+impl AmbientRemeshedVpmRun {
+    /// Last authored interval's source, evaluated on the final remapped cloud.
+    /// At a source-switch endpoint this is the field BEFORE any next interval;
+    /// no future source or interpolation is inferred. A zero-step schedule has
+    /// no interval and returns `None`. Zero-time intervals still retain their
+    /// authored source even though they performed no source updates.
+    pub const fn background_flow(&self) -> Option<AffineFlow2> {
+        self.background_flow
+    }
+
+    /// Algebraic velocity-core radius used throughout the original run [m].
+    pub const fn velocity_core_m(&self) -> f64 {
+        self.velocity_core_m
+    }
+
+    /// Sample the CURRENT final-grid particles and the last interval's source.
+    /// With no authored interval this returns the induced field alone. The
+    /// original quadrature areas are not substituted for the velocity core.
+    /// This allocation-free O(N) query has the same finite-domain and bounded
+    /// bulk-work obligations as [`AffineFlow2::kinematics_with_particles_at`].
+    pub fn kinematics_at(&self, point_m: [f64; 2]) -> Option<crate::ParticleKinematics2> {
+        self.background_flow
+            .unwrap_or_default()
+            .kinematics_with_particles_at(&self.run.particles, point_m, self.velocity_core_m)
+    }
 }
 
 /// Original evolution and remap refusals, with no partial trajectory published.
@@ -510,6 +539,8 @@ fn run(
         budget: accountant.consumption(),
     };
     Ok(AmbientRemeshedVpmRun {
+        background_flow: flows.and_then(|flows| flows.last().copied()),
+        velocity_core_m: core,
         run,
         ambient_moment_change: AmbientMomentChange {
             first_moment_m3_s: [source_moments[0].to_f64(), source_moments[1].to_f64()],

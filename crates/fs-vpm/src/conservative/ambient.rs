@@ -11,6 +11,8 @@ use super::*;
 use crate::diffusion::{self, PseDiffusion};
 use fs_math::{dd::Dd, det};
 
+mod kinematics;
+
 /// A held divergence-free background in metres and seconds.
 ///
 /// `u(x) = velocity + [[a,b],[c,-a]] * (x-origin)`. Three gradient entries
@@ -71,6 +73,8 @@ pub struct AmbientMomentChange {
 /// Complete native trajectory plus the external source's moment account.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AmbientVpmRun {
+    background_flow: AffineFlow2,
+    velocity_core_m: f64,
     /// Original resource receipt and the sole owned particle vector.
     pub run: VpmRun,
     /// Actual source-driven increments, accumulated without subtracting large
@@ -80,6 +84,30 @@ pub struct AmbientVpmRun {
     /// second order, four at fourth order. Included in `run.work_units`, not
     /// pair evaluations.
     pub source_particle_updates: u64,
+}
+
+impl AmbientVpmRun {
+    /// The same held source that advanced this particle inventory, including
+    /// empty clouds and zero-duration windows.
+    pub const fn background_flow(&self) -> AffineFlow2 {
+        self.background_flow
+    }
+
+    /// Algebraic velocity-core radius used by the original evolution [m].
+    pub const fn velocity_core_m(&self) -> f64 {
+        self.velocity_core_m
+    }
+
+    /// Sample the CURRENT published particles plus their retained background.
+    /// This allocation-free O(N) query has the same finite-domain and bounded
+    /// bulk-work obligations as [`AffineFlow2::kinematics_with_particles_at`].
+    pub fn kinematics_at(&self, point_m: [f64; 2]) -> Option<crate::ParticleKinematics2> {
+        self.background_flow.kinematics_with_particles_at(
+            &self.run.particles,
+            point_m,
+            self.velocity_core_m,
+        )
+    }
 }
 
 /// Advance inviscid vortices in one held affine background. Negative time is
@@ -214,6 +242,8 @@ fn run(
             None => super::simulate_with_order_cx(cx, particles, dt, steps, core, order, budget)?,
         };
         return Ok(AmbientVpmRun {
+            background_flow: flow,
+            velocity_core_m: core,
             run,
             ambient_moment_change: AmbientMomentChange::default(),
             source_particle_updates: 0,
@@ -344,6 +374,8 @@ fn run(
     }
     accountant.checkpoint("fs-vpm.ambient-publication", cx)?;
     Ok(AmbientVpmRun {
+        background_flow: flow,
+        velocity_core_m: core,
         run: VpmRun {
             particles: state,
             steps_completed: steps,

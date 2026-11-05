@@ -108,6 +108,54 @@ frame covariance, bitwise velocity parity, length/strength scaling from
 `1e-300` through `1e300`, recoverable tiny-core tails and numerical refusals
 (G0/G1/G3).
 
+### Complete flow samples retained with affine trajectories
+
+`AffineFlow2::kinematics_at(point)` samples its original authored
+`u(x)=U+A(x-o)` in SI units, including the exact constant gradient and
+counterclockwise-positive curl `c-b`. Fluid spin is half that curl.
+`kinematics_with_particles_at(particles, point, core)` evaluates the original
+`induced_kinematics` once in the current particle order, then adds this
+background once. It sums the independently evaluated curls; it does not
+subtract rounded gradients or reinterpret PSE `Gamma/area`. A zero background
+returns the original induced sample unchanged. The background represents an
+additional maintained field, not a second representation of the same vortices.
+
+`AmbientVpmRun`, `AmbientAdaptiveRun`, and `AmbientViscousAdaptiveRun` retain
+the original source and admitted algebraic velocity-core radius. Their
+`background_flow()`, `velocity_core_m()`, and `kinematics_at(point)` expose
+that same field on the CURRENT published particle vector: accepted adaptive
+positions and PSE-updated strengths, never initial or rejected candidates.
+Zero-duration windows, empty clouds and authored zero fields retain their
+source even when the original evolution performs no source visits.
+Dense/compact backends share this same sampling path.
+
+`AmbientRemeshedVpmRun` retains the final authored interval's source and the
+same velocity core while sampling the final remapped particle inventory.
+`background_flow()` returns `Some(last_source)`, including zero-time
+intervals; at a source-switch endpoint this is the field before any next
+interval. A zero-step empty source schedule returns `None`, and its query is
+the induced field of the initial remap alone. No future source, interpolation,
+PSE profile or quadrature-dependent velocity core is inferred.
+
+Each composite query is O(N), O(1) stack storage, with no heap allocation,
+mutation or extra particle inventory. Original evolution, source order,
+accepted states, execution counts and owned payload reservations are unchanged.
+The affine query rejects nonfinite points, unrepresentable needed coordinate
+differences, contributions, curl or final sums; unused chart coordinates cannot
+invalidate uniform flow or a single-column shear. The composite also inherits
+the original particle kernel's singularity/input refusals. As with that
+per-probe kernel, bulk work must be bounded by the caller; no `Cx` receipt is
+claimed. These are velocity-field samples, not an added lift law, pressure
+reconstruction, finite-fluid reaction or continuum-accuracy certificate.
+
+The seven unit regressions in `conservative/ambient/kinematics.rs` check
+analytic shear/rotation/extension, source-chart and frame invariance, independent
+vortex/background superposition, original zero-source bits, tiny-core curl,
+irrelevant chart offsets and field/sum refusals. The existing
+`ambient_flow`, `adaptive_conservative`, `adaptive_affine_viscous` and
+`remeshed_affine_flow` suites additionally check current-state sampling,
+dense/compact agreement, source retention and the final-interval convention.
+
 ## Error model
 
 The checked path validates finite particle coordinates/circulations and finite
