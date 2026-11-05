@@ -38,6 +38,10 @@
 
 use core::fmt;
 
+#[path = "crystallization/rate.rs"]
+mod rate;
+pub use rate::{HoffmanLauritzenConfig, HoffmanLauritzenRate};
+
 #[path = "crystallization/adaptive.rs"]
 mod adaptive;
 pub use adaptive::{AdaptiveCrystallizationStep, CrystallizationAdaptivity};
