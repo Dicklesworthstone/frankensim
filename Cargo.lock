@@ -2559,6 +2559,7 @@ dependencies = [
  "fs-qty",
  "fs-rand",
  "fs-rep-frep",
+ "fs-rep-mesh",
  "fs-rep-nurbs",
  "fs-solid",
  "fs-substrate",

@@ -7954,3 +7954,22 @@ collisions; and material, snapshot, capability, domain, duplicate, work and
 cancellation refusals. Native Rust execution is not available in the current
 implementation environment; parser/format checks and independent source/math
 review are recorded separately from the authored regressions.
+
+## Joint pressure and temperature driving molecular gas refraction
+
+`material_state::gas_scattering::pressure_temperature::PressureTemperatureGasField`
+borrows the original single-component gas model and the existing joint absolute
+pressure/temperature reconstruction. Each stage uses one original field query
+and allocation-free native gas-state evaluation. Exact density gradients and
+Hessians include both pressure and temperature curvature and the mixed p/T
+response; the existing molecular Lorentz–Lorenz owner supplies optical jets and
+native ray/bundle propagation. An original P1 joint element is accepted directly,
+without a new reconstruction, copied source buffers or a renderer-side EOS.
+Original gas validity, water labeling, provider cancellation, source support and
+dilute-optics refusal remain in force. This frozen single-component or declared
+pseudocomponent model does not establish phase equilibrium, real-gas corrections,
+moving-medium optics, new dispersion data or scattered radiance. It does not
+smooth gradient jumps or cross native mesh faces by itself.
+G1/G3 tests cover independent native P1 scalar-source derivatives, pressure-lens
+ray/bundle focusing, correlated p/T constant-density cancellation and original
+source/domain/cancellation refusals. Native execution is reported separately.

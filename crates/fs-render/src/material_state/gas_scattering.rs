@@ -11,6 +11,8 @@ mod refraction;
 pub use refraction::{GasDensityJet, GasDensitySecondOrderField};
 /// Original thermal reconstructions driving single-component ideal-gas optics.
 pub mod isobaric;
+/// Original joint pressure/temperature reconstructions driving ideal-gas optics.
+pub mod pressure_temperature;
 mod composition;
 pub use composition::{
     AxialGasCompositionError, AxialGasCompositionField,

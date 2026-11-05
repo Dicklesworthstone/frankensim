@@ -41,6 +41,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-propcheck = { path = "../fs-propcheck" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-frep = { path = "../fs-rep-frep" }
+fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-thermochem = { path = "../fs-thermochem" }
 
 [features]
