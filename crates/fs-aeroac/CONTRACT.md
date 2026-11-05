@@ -2408,11 +2408,33 @@ destructive interference. G1/G3 DD-clock regressions exercise full tensor fields
 and an analytic 16 kHz two-source pressure null at a 2^30-second epoch. G4 checks
 normalization, nonfinite/overflow/unresolved times and bounded cancellation.
 
+The same transient observer admits `with_orthogonal_planes` and `with_wedge`
+using the original ideal-wall geometry and finite image groups. Every image
+keeps its independent retarded time and complete tensor/vector transform;
+the harmonic folded coefficient is never treated as a single transient delay.
+`source_count`, `source_position_m` and `source_delay_s` retain physical-source
+and direct-path meanings. `path_count`, `path_source_index`, `path_delay_s` and
+`source_delay_bounds_s` expose all image paths for complete history-window
+admission. The callback reads the same original physical source at each path's
+emission time; explicit retarded input contains one history per path. Images
+apply `s H Q H^T` equivalently through virtual receiver `H^-1 x`, pulling
+velocity back by `(H^-1)^T`, including nonsymmetric wedge rotations. Preparation
+and storage are O(paths) under an explicit source-path cap; repeated observation
+is allocation-free O(paths) with bounded cancellation and no transcendental work.
+The complete pressure/velocity sum precedes instantaneous flux, retaining
+interference between direct and reflected arrivals. No image is silently cut
+off, and callback boundaries never advance or reset the physical source history.
+
 G1/G3 regressions compare harmonic field/mean-flux parity, independently
 differentiated retarded Green potentials, all three momentum equations, causal
 pulse arrivals, transverse velocity at pressure nulls and coherent interference.
-This adds no source-model validation, finite-cell quadrature bound, moving
-quadrupole, absorption, scattering, reciprocal loading or measured-SPL claim.
+G1/G4 `transient_quadrupole_reflection` controls independently transform oblique
+source images, distinguish direct/echo onset, enforce all six tensor components
+at mixed rigid/release walls, check wedge harmonic and momentum parity, and
+exercise source identity, complete delay bounds, budgets and cancellation.
+These ideal infinite walls/wedges add no source-model validation, finite-cell
+quadrature bound, moving quadrupole, absorption, finite wall impedance, general
+diffraction, closed-room reverberation, reciprocal loading or measured-SPL claim.
 
 ## Sources and receivers inside the original refracting layer
 

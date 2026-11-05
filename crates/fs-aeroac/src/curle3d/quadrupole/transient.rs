@@ -15,13 +15,17 @@
 //! the observer neither differentiates a noisy record nor fabricates a
 //! stationary tone from a transient. All sources must be sampled at their
 //! OWN retarded times for the SAME receiver time before coherent evaluation.
-//! The original stationary, homogeneous, lossless point-source limits apply;
-//! no finite-cell quadrature error, motion, scattering or feedback is inferred.
+//! Exact ideal-wall images retain their own retarded times and the full
+//! tensor/vector transformation. The original stationary, homogeneous,
+//! lossless point-source limits apply; no finite-cell quadrature error,
+//! motion, general scattering or feedback is inferred.
 
 use super::{QUADRUPOLE_SCOPE, invalid, nonfinite, poll};
 use crate::AeroacError;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{dd::Dd, det};
+
+mod reflection;
 
 /// One source's physical symmetric stress history at one retarded time.
 ///
@@ -69,21 +73,80 @@ struct Transfer {
     // 1/(4 pi c^2 r). Velocity has one additional inverse length and rho.
     pressure_scales: [f64; 3],
     velocity_scales: [f64; 4],
+    // A virtual receiver H^-1 x uses the original source tensor. Its velocity
+    // returns to the physical frame through (H^-1)^T. None is the direct path.
+    inverse_image: Option<[[f64; 3]; 3]>,
+}
+
+impl Transfer {
+    fn new(
+        acoustic: FluidAcousticState,
+        observer_m: [f64; 3],
+        source_m: [f64; 3],
+    ) -> Result<Self, AeroacError> {
+        if source_m.iter().any(|x| !x.is_finite()) {
+            return Err(nonfinite("transient quadrupole source position"));
+        }
+        let displacement = core::array::from_fn::<_, 3, _>(|i| observer_m[i] - source_m[i]);
+        let range = det::hypot(
+            det::hypot(displacement[0], displacement[1]),
+            displacement[2],
+        );
+        let c = acoustic.sound_speed_m_s();
+        let rho = acoustic.density_kg_m3();
+        let green_scale = (0.25 / core::f64::consts::PI) / range;
+        let pressure_scales = [
+            (green_scale / range) / range,
+            (green_scale / range) / c,
+            (green_scale / c) / c,
+        ];
+        let velocity_scales = [
+            (pressure_scales[0] / range) / rho,
+            (pressure_scales[1] / range) / rho,
+            (pressure_scales[2] / range) / rho,
+            (pressure_scales[2] / c) / rho,
+        ];
+        let delay_s = range / c;
+        if [range, delay_s]
+            .iter()
+            .chain(&pressure_scales)
+            .chain(&velocity_scales)
+            .any(|x| !x.is_finite() || *x <= 0.0)
+        {
+            return Err(invalid(
+                "transient quadrupole separation or field coefficients are not representable",
+            ));
+        }
+        Ok(Self {
+            source_m,
+            delay_s,
+            direction: displacement.map(|x| x / range),
+            pressure_scales,
+            velocity_scales,
+            inverse_image: None,
+        })
+    }
 }
 
 /// Prepared coherent observation of stationary transient volume-stress cells.
 ///
 /// Only each cell is compact; the whole source array may span wavelengths.
 /// Preparation allocates once under an explicit source-count budget. Each
-/// evaluation is allocation-free O(N), with cached geometry/material scales,
-/// no transcendentals and fixed-order double-double field sums. Empty source
-/// arrays are silence. Neither the preparation budget nor a successful
-/// evaluation validates source compactness, source bandwidth or flow physics.
+/// evaluation is allocation-free O(P), where P is the admitted physical-source
+/// path count, with cached geometry/material scales, no transcendentals and
+/// fixed-order double-double field sums. Exact ideal-wall images require
+/// distinct retarded histories, so they are never collapsed to one effective
+/// delay. Empty source arrays are silence. Neither the preparation budget nor
+/// a successful evaluation validates source compactness, bandwidth or physics.
 #[derive(Clone, Debug)]
 pub struct PreparedTransientQuadrupoleObserver {
     acoustic: FluidAcousticState,
     observer_m: [f64; 3],
+    // Direct paths come first; each image then repeats physical source order.
     transfers: Vec<Transfer>,
+    physical_source_count: usize,
+    reflection_planes: Vec<super::IdealAcousticPlane>,
+    reflection_wedge_order: Option<usize>,
 }
 
 impl PreparedTransientQuadrupoleObserver {
@@ -127,52 +190,16 @@ impl PreparedTransientQuadrupoleObserver {
             .map_err(|_| invalid("transient quadrupole allocation exceeds available memory"))?;
         for source in source_positions_m {
             poll(&mut cancelled)?;
-            if source.iter().any(|x| !x.is_finite()) {
-                return Err(nonfinite("transient quadrupole source position"));
-            }
-            let displacement = core::array::from_fn::<_, 3, _>(|i| observer_m[i] - source[i]);
-            let range = det::hypot(
-                det::hypot(displacement[0], displacement[1]),
-                displacement[2],
-            );
-            let c = acoustic.sound_speed_m_s();
-            let rho = acoustic.density_kg_m3();
-            let green_scale = (0.25 / core::f64::consts::PI) / range;
-            let pressure_scales = [
-                (green_scale / range) / range,
-                (green_scale / range) / c,
-                (green_scale / c) / c,
-            ];
-            let velocity_scales = [
-                (pressure_scales[0] / range) / rho,
-                (pressure_scales[1] / range) / rho,
-                (pressure_scales[2] / range) / rho,
-                (pressure_scales[2] / c) / rho,
-            ];
-            let delay_s = range / c;
-            if [range, delay_s]
-                .iter()
-                .chain(&pressure_scales)
-                .chain(&velocity_scales)
-                .any(|x| !x.is_finite() || *x <= 0.0)
-            {
-                return Err(invalid(
-                    "transient quadrupole separation or field coefficients are not representable",
-                ));
-            }
-            transfers.push(Transfer {
-                source_m: *source,
-                delay_s,
-                direction: displacement.map(|x| x / range),
-                pressure_scales,
-                velocity_scales,
-            });
+            transfers.push(Transfer::new(acoustic, observer_m, *source)?);
         }
         poll(&mut cancelled)?;
         Ok(Self {
             acoustic,
             observer_m,
             transfers,
+            physical_source_count: source_positions_m.len(),
+            reflection_planes: Vec::new(),
+            reflection_wedge_order: None,
         })
     }
 
@@ -186,26 +213,83 @@ impl PreparedTransientQuadrupoleObserver {
         self.observer_m
     }
 
-    /// Number of independently retarded source samples required per call.
+    /// Number of original physical sources, unchanged by ideal-wall images.
     pub fn source_count(&self) -> usize {
+        self.physical_source_count
+    }
+
+    /// Number of independently retarded paths, including every direct path.
+    pub fn path_count(&self) -> usize {
         self.transfers.len()
     }
 
     /// Original source position [m], retaining the caller's source order.
     pub fn source_position_m(&self, index: usize) -> Option<[f64; 3]> {
-        self.transfers.get(index).map(|t| t.source_m)
+        (index < self.source_count()).then(|| self.transfers[index].source_m)
     }
 
-    /// Travel time r/c [s]. For a receiver time t, sample source i at
-    /// `t - source_delay_s(i)`. Do not apply this delay a second time.
+    /// Direct-path travel time r/c [s] for the original physical source.
+    /// Reflections retain additional distinct delays through `path_delay_s`.
     pub fn source_delay_s(&self, index: usize) -> Option<f64> {
+        (index < self.source_count()).then(|| self.transfers[index].delay_s)
+    }
+
+    /// Original source index for a path in image-major/source-major order.
+    /// The first `source_count()` paths are the direct group.
+    pub fn path_source_index(&self, index: usize) -> Option<usize> {
+        self.transfers
+            .get(index)
+            .map(|_| index % self.source_count())
+    }
+
+    /// Travel time [s] of one exact direct or reflected path.
+    pub fn path_delay_s(&self, index: usize) -> Option<f64> {
         self.transfers.get(index).map(|t| t.delay_s)
+    }
+
+    /// Minimum and maximum delay [s] over ALL paths of one physical source.
+    /// Use these bounds to admit complete source-history windows before
+    /// observation; no echo is discarded or replaced by an effective delay.
+    pub fn source_delay_bounds_s(&self, index: usize) -> Option<[f64; 2]> {
+        let direct = self.source_delay_s(index)?;
+        Some(
+            self.transfers
+                .iter()
+                .skip(index)
+                .step_by(self.source_count())
+                .fold([direct; 2], |[lo, hi], path| {
+                    [lo.min(path.delay_s), hi.max(path.delay_s)]
+                }),
+        )
+    }
+
+    /// Physical ideal boundaries, in their original preparation order.
+    pub fn reflection_planes(&self) -> &[super::IdealAcousticPlane] {
+        &self.reflection_planes
+    }
+
+    /// Exact wedge opening pi/m, or None for free space/perpendicular walls.
+    pub const fn reflection_wedge_order(&self) -> Option<usize> {
+        self.reflection_wedge_order
+    }
+
+    /// Original source and propagation-model boundaries of every field.
+    pub const fn scope(&self) -> &'static str {
+        if self.reflection_planes.is_empty() {
+            QUADRUPOLE_SCOPE
+        } else if self.reflection_wedge_order.is_some() {
+            reflection::WEDGE_SCOPE
+        } else {
+            reflection::ORTHOGONAL_SCOPE
+        }
     }
 
     /// Sum source fields at one receiver time before computing energy flux.
     ///
-    /// Every input is already at its own path's retarded time. The caller
-    /// owns timestamps, source interpolation, antialiasing and bandwidth.
+    /// Every input is already at its own path's retarded time. Supply
+    /// `path_count()` samples in the order exposed by `path_source_index` and
+    /// `path_delay_s`; reflected paths must not reuse a direct-path sample.
+    /// The caller owns interpolation, antialiasing and source bandwidth.
     pub fn evaluate_at_retarded(
         &self,
         sources: &[TransientQuadrupoleSource],
@@ -213,25 +297,27 @@ impl PreparedTransientQuadrupoleObserver {
         self.evaluate_at_retarded_cancellable(sources, || false)
     }
 
-    /// Allocation-free coherent evaluation; poll at most every 256 sources.
+    /// Allocation-free coherent evaluation; poll at most every 256 paths.
     /// Refusal returns no partial field and does not mutate any source state.
     pub fn evaluate_at_retarded_cancellable(
         &self,
         sources: &[TransientQuadrupoleSource],
         cancelled: impl FnMut() -> bool,
     ) -> Result<RetardedQuadrupoleField, AeroacError> {
-        if sources.len() != self.source_count() {
+        if sources.len() != self.path_count() {
             return Err(invalid(
-                "one retarded history is required per transient quadrupole source",
+                "one retarded history is required per transient quadrupole path",
             ));
         }
-        self.evaluate_sources(|index, _| Ok(sources[index]), cancelled)
+        self.evaluate_sources(|path, _, _| Ok(sources[path]), cancelled)
     }
 
     /// Observe histories at one receiver time, applying each path delay once.
     ///
-    /// The callback receives (source index, emission time in seconds), in
-    /// original source order. It supplies a physical value and its matching
+    /// The callback receives (physical source index, emission time in seconds)
+    /// in image-major/source-major order. Reflections observe the SAME source
+    /// at each path's distinct retarded time; they do not advance or duplicate
+    /// its state. The callback supplies a physical value and its matching
     /// derivatives/integral from that source's own history. The observer
     /// performs no interpolation, extrapolation, differentiation or source
     /// advancement. Callbacks should only observe history; their own side
@@ -264,7 +350,7 @@ impl PreparedTransientQuadrupoleObserver {
             return Err(nonfinite("transient quadrupole receiver time"));
         }
         self.evaluate_sources(
-            |index, delay_s| {
+            |_, index, delay_s| {
                 let emission_time_s =
                     (Dd::from_f64(receiver_time_s) - Dd::from_f64(delay_s)).to_f64();
                 if !emission_time_s.is_finite() || emission_time_s >= receiver_time_s {
@@ -317,7 +403,7 @@ impl PreparedTransientQuadrupoleObserver {
             return Err(nonfinite("transient quadrupole receiver clock"));
         }
         self.evaluate_sources(
-            |index, delay_s| {
+            |_, index, delay_s| {
                 let emission_time_s = receiver_time_s - Dd::from_f64(delay_s);
                 if !emission_time_s.hi.is_finite()
                     || !emission_time_s.lo.is_finite()
@@ -335,7 +421,7 @@ impl PreparedTransientQuadrupoleObserver {
 
     fn evaluate_sources(
         &self,
-        mut source_at: impl FnMut(usize, f64) -> Result<TransientQuadrupoleSource, AeroacError>,
+        mut source_at: impl FnMut(usize, usize, f64) -> Result<TransientQuadrupoleSource, AeroacError>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RetardedQuadrupoleField, AeroacError> {
         poll(&mut cancelled)?;
@@ -344,7 +430,7 @@ impl PreparedTransientQuadrupoleObserver {
             if index.is_multiple_of(256) {
                 poll(&mut cancelled)?;
             }
-            let source = source_at(index, transfer.delay_s)?;
+            let source = source_at(index, index % self.source_count(), transfer.delay_s)?;
             if source
                 .stress_integral_n_m_s
                 .iter()
@@ -366,17 +452,34 @@ impl PreparedTransientQuadrupoleObserver {
                 + rate.pressure_near() * p[1]
                 + acceleration.radial * p[2];
             let v = transfer.velocity_scales.map(Dd::from_f64);
+            let mut velocity = if transfer.inverse_image.is_none() {
+                [sums[1], sums[2], sums[3]]
+            } else {
+                [Dd::ZERO; 3]
+            };
             for axis in 0..3 {
                 let n = direction[axis];
                 // -grad of the retarded time integral of pressure. Direction
                 // derivatives are essential: Qn is not generally parallel to n.
-                sums[axis + 1] = sums[axis + 1]
+                velocity[axis] = velocity[axis]
                     + integral.velocity_near(n, axis) * v[0]
                     + moment.velocity_near(n, axis) * v[1]
                     + ((rate.radial * Dd::from_f64(6.0) - rate.trace) * n
                         - rate.vector[axis] * Dd::from_f64(2.0))
                         * v[2]
                     + acceleration.radial * n * v[3];
+            }
+            if let Some(inverse) = transfer.inverse_image {
+                for axis in 0..3 {
+                    for virtual_axis in 0..3 {
+                        sums[axis + 1] = sums[axis + 1]
+                            + Dd::from_f64(inverse[virtual_axis][axis]) * velocity[virtual_axis];
+                    }
+                }
+            } else {
+                for axis in 0..3 {
+                    sums[axis + 1] = velocity[axis];
+                }
             }
         }
         poll(&mut cancelled)?;
@@ -397,7 +500,7 @@ impl PreparedTransientQuadrupoleObserver {
             pressure_pa,
             particle_velocity_m_s,
             instantaneous_intensity_w_m2,
-            scope: QUADRUPOLE_SCOPE,
+            scope: self.scope(),
         })
     }
 }
