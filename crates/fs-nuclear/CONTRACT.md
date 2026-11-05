@@ -385,3 +385,61 @@ stiff tails and resolved slow heat after extreme exposure. The build retained
 the actual production `fs-la::decay` and `fs-thermochem::decay` modules and rebuilt
 the real `fs-math`, `fs-qty` and `fs-blake3` crates. It is focused original-owner
 evidence, not a full workspace Cargo, thermal-feature or DSR gate.
+
+## Point-neutron kinetics and explicit temperature feedback
+
+`kinetics` keeps effective delayed-neutron precursor coordinates separate from
+both isotope populations and delayed-energy reservoirs. `PointKineticsModel`
+requires an identified effective generation time, delayed fractions and precursor
+decay constants. `PointKineticsState` requires the actual initial neutron amplitude
+and every precursor coordinate in one caller-defined normalization. Calling the
+explicit equilibrium constructor is an authored history assumption; state
+construction never guesses equilibrium from temperature or power.
+
+For constant reactivity `rho` and external source `S`, the model solves
+
+```text
+n'   = (rho - beta) n / Lambda + sum(lambda_i C_i) + S
+C_i' = beta_i n / Lambda - lambda_i C_i.
+```
+
+A positive shifted Taylor matrix exponential with scaling and squaring advances
+the state. Augmented coordinates integrate the constant external source and
+`integral(n dt)` in the same solve; no endpoint-rate rectangle supplies the
+returned population-time integral. The dimension is the delayed-group count
+plus three. Storage is O(groups squared), and arithmetic is
+O(groups cubed times (Taylor terms + squarings)). Prompt stiffness increases
+scaling logarithmically rather than requiring explicit prompt-lifetime time
+steps. This is an algorithmic work description, not a performance benchmark.
+
+Explicit budgets bound group count, Taylor terms, squarings, estimated population
+error, estimated population-time error and the population balance residual.
+Nonnegative matrix arithmetic does not clip negative physical populations after
+the fact. Finite supercritical growth is integrated; unrepresentable growth or
+insufficient work/accuracy budget refuses the whole candidate. Checkpoints run
+through matrix work and before publication. Clone retains complete precursor
+history and permits deterministic same-partition replay on the same platform.
+The reported truncation/roundoff estimates are not interval certificates or
+nuclear-data uncertainty bounds.
+
+`TemperatureFeedback` admits identified linear and logarithmic reactivity fits,
+reference temperatures and explicit Kelvin domains. Its evaluator returns a
+reactivity shift only in-domain. It does not determine a coefficient from an
+isotope name, solve criticality, choose a flux normalization, or close a thermal
+feedback iteration by itself. Neutron amplitude and its integral are not fission
+counts without a separately admitted rate or flux mapping. Frozen coefficients
+and the fixed spatial/spectral shape are declared reduced-model assumptions.
+
+Eleven kinetics regressions passed with the merged production source: independent
+prompt/source exponentials and one-group eigenmodes, critical equilibrium, stiff
+prompt relaxation, source buildup and shutdown, positive tiny-time integrals,
+partitioned integral agreement, replay, cancellation/work/accuracy/overflow
+rollback, and explicit temperature-feedback behavior. Together with the
+prescribed source, radioactive inventories and irradiation kernels, the merged
+focused source run passed 52 tests. The dependency build retained the complete
+original decay modules and real math/quantity/hash crates described above; it
+is not the full Cargo workspace or thermal-feature gate.
+
+Equation references: [Argonne reactor power](https://sas-doc.nse.anl.gov/5.8/Part02/Ch04/power.html)
+and [delayed-neutron precursors](https://sas-doc.nse.anl.gov/5.8/Part02/Ch04/delayed-neutrons.html).
+No evaluated neutron coefficients or reactor-design qualification are supplied.
