@@ -162,6 +162,78 @@ fn momenta(motion: &MembraneMotion<'_>) -> ([f64; 3], [f64; 3]) {
     (linear, angular)
 }
 
+fn ballistic_patch() -> MembranePatch {
+    // Dyadic geometry and nodal masses isolate the applied-work identity
+    // from constitutive roundoff: side 1/8 m, areal density 3 kg/m^2.
+    let mut reference = mesh();
+    for node in &mut reference.nodes {
+        node[0] *= 1.25;
+        node[1] *= 1.25;
+    }
+    MembranePatch::try_new(
+        reference,
+        vec![sheet(8000.0, 8000.0, 4000.0, 3.0); 4],
+        vec![0.0; 4],
+        domain(),
+        budget(),
+        || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn uniform_force_work_is_independent_of_translation_below_the_position_ulp() {
+    let patch = ballistic_patch();
+    let dt = 2.0_f64.powi(-30);
+    let acceleration = 4.0;
+    let load = patch.body_load_n([0.0, 0.0, acceleration]).unwrap();
+    let mass = 3.0 / 32.0;
+    assert_eq!(patch.reference_mass_kg(), mass);
+    let expected_work = 0.5 * mass * acceleration * acceleration * dt * dt;
+    for origin in [0.0, 1.0, 1e6] {
+        let initial = vec![[0.0, 0.0, origin]; 5];
+        let mut motion =
+            MembraneMotion::new(&patch, &[], &initial, &[[0.0; 3]; 5], 0.0, || false).unwrap();
+        let step = motion.step(dt, &load, || false).unwrap();
+        close(step.dead_load_work_j, expected_work, 0.0, 1e-13);
+        close(step.kinetic_energy_j, expected_work, 0.0, 1e-13);
+        close(step.energy_defect_j, 0.0, 1e-13 * expected_work, 0.0);
+        assert!(step.dead_load_work_j > 0.0);
+        if origin != 0.0 {
+            assert_eq!(motion.displacement_m(), initial.as_slice());
+        }
+        let reverse = motion.step(-dt, &load, || false).unwrap();
+        close(reverse.dead_load_work_j, -expected_work, 0.0, 1e-13);
+        close(reverse.energy_defect_j, 0.0, 1e-13 * expected_work, 0.0);
+        assert_eq!(motion.displacement_m(), initial.as_slice());
+        assert_eq!(motion.velocity_m_s(), &[[0.0; 3]; 5]);
+    }
+}
+
+#[test]
+fn small_work_survives_a_large_orthogonal_kinetic_background() {
+    let patch = ballistic_patch();
+    let dt = 2.0_f64.powi(-30);
+    let acceleration = 4.0;
+    let load = patch.body_load_n([acceleration, 0.0, 0.0]).unwrap();
+    let mut motion = MembraneMotion::new(
+        &patch,
+        &[],
+        &[[0.0; 3]; 5],
+        &[[0.0, 0.0, 1.0]; 5],
+        0.0,
+        || false,
+    )
+    .unwrap();
+    let before = motion.kinetic_energy_j();
+    let step = motion.step(dt, &load, || false).unwrap();
+    let expected_work = 0.5 * (3.0 / 32.0) * acceleration * acceleration * dt * dt;
+    // Absolute endpoint totals cannot resolve the tiny transverse transfer.
+    assert_eq!(step.kinetic_energy_j.to_bits(), before.to_bits());
+    close(step.dead_load_work_j, expected_work, 0.0, 1e-13);
+    close(step.energy_defect_j, 0.0, 1e-13 * expected_work, 0.0);
+}
+
 #[test]
 fn free_motion_preserves_linear_and_angular_momentum_and_reverses() {
     let p = patch(8000.0, 2000.0, 500.0, 0.2, 0.37);
@@ -223,11 +295,13 @@ fn held_load_work_and_support_impulse_close_the_actual_step() {
     loads[1][0] = 5.0; // a loaded stationary support does no work
     let before = momenta(&motion).0;
     let old_energy = motion.strain_energy_j() + motion.kinetic_energy_j();
+    let initial_gradient = p.evaluate(&u, || false).unwrap().internal_gradient_n[0][2];
+    let drift = 0.5 * 1e-5_f64.powi(2) * (-2.0 - initial_gradient) / p.nodal_mass_kg()[0];
     let step = motion.step(1e-5, &loads, || false).unwrap();
     let after = momenta(&motion).0;
     close(
         step.dead_load_work_j,
-        -2.0 * (motion.displacement_m()[0][2] - u[0][2]),
+        -2.0 * drift,
         0.0,
         1e-14,
     );
@@ -259,7 +333,15 @@ fn refused_trials_leave_motion_energy_and_checkpoint_unchanged() {
     let zero = vec![[0.0; 3]; 5];
     let fixed = prescribed(1.02);
     let initial = MembraneMotion::new(&p, &fixed, &u, &zero, 0.0, || false).unwrap();
-    for cancel_at in [1, 10, 20, 30] {
+    let mut probe = initial.clone();
+    let mut polls = 0;
+    probe
+        .step(1e-5, &zero, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    for cancel_at in [1, 10, 20, 30, polls - 1, polls] {
         let mut motion = initial.clone();
         let mut calls = 0;
         let result = motion.step(1e-5, &zero, || {

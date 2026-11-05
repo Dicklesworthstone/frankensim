@@ -3,7 +3,7 @@
 ## Nonlinear source-bound membrane motion
 
 `membrane::dynamics::MembraneMotion` advances the original total-Lagrangian
-membrane energy with `fs-time::verlet_momentum_step`. Reference lumped inertia,
+membrane energy with `fs-time::verlet_momentum_step_with_displacement`. Reference lumped inertia,
 grain, source laws and finite-strain geometric stiffening retain their existing
 owners. Only free coordinates are integrated; stationary support values are
 eliminated exactly, and inconsistent initial support motion refuses. Cloning
@@ -15,8 +15,12 @@ nonlinear law once. Geometry, force and integrator work buffers are allocated
 at preparation and reused. Failed state/domain checks or cancellation cannot
 publish displacement, momentum, time, energy or an invalid cached force.
 
-Each step reports stored and kinetic energy, exact held-dead-load work, support
-impulse from the same kicks, and the signed energy/work defect. Stationary
+Each step reports stored and kinetic energy, held-dead-load work over the
+resolved kinematic drift, support impulse from the same kicks, and the signed
+energy/work defect. Work uses the original `h M^-1 p_half` increment, without
+subtracting rounded absolute positions. Kinetic changes use the polarized
+quadratic form so a small resolved transfer survives a large energy background;
+strain-storage/integration error remains in the signed numerical defect. Stationary
 supports do no work. This second-order symplectic explicit lane introduces no
 physical damping and does not claim exact energy conservation, automatic time
 step stability, real-time throughput, spatial convergence or experimental
@@ -29,7 +33,9 @@ against the independent nonlinear Duffing energy-integral period on three time
 rungs, including pure geometric restoring force at zero prestretch. Additional
 checks cover source stiffness/mass scaling, linear and angular momentum,
 time reversal, held-load work/support impulse, checkpoint replay and refusal
-rollback. These are manufactured mechanics checks, not measured drum sounds.
+rollback. Ballistic work is also checked below the position ULP at translated
+origins and against a large orthogonal kinetic background. These are
+manufactured mechanics checks, not measured drum sounds.
 
 ## Original interface friction in quasistatic obstacle contact
 

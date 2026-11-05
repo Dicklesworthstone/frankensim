@@ -13,7 +13,7 @@
 
 use super::{MembraneError, MembranePatch, finite_vectors, poll};
 use fs_solver::op::LinearOp;
-use fs_time::{MomentumVerletError, verlet_momentum_step};
+use fs_time::{MomentumVerletError, verlet_momentum_step_with_displacement};
 use std::cell::{Cell, RefCell};
 
 #[derive(Clone, Debug)]
@@ -39,6 +39,17 @@ fn kinetic(momentum: &[f64], inverse: &InverseMass) -> f64 {
         .sum()
 }
 
+// Polarize the original quadratic form: do not subtract large absolute
+// kinetic energies to recover a small, resolved mechanical transfer.
+fn kinetic_change(before: &[f64], after: &[f64], inverse: &InverseMass) -> f64 {
+    before
+        .iter()
+        .zip(after)
+        .zip(&inverse.0)
+        .map(|((old, new), inv)| (new - old) * (inv * (0.5 * old + 0.5 * new)))
+        .sum()
+}
+
 /// Physical endpoint and signed work balance of one accepted step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MembraneStep {
@@ -48,7 +59,8 @@ pub struct MembraneStep {
     pub strain_energy_j: f64,
     /// Kinetic energy from the original reference lumped mass [J].
     pub kinetic_energy_j: f64,
-    /// Exact work of the load held constant during this step [J].
+    /// Work of the held load over the resolved kinematic drift [J], even when
+    /// adding that displacement to the absolute position rounds it away.
     pub dead_load_work_j: f64,
     /// Change in total mechanical energy minus external work [J]. This is a
     /// signed numerical defect; no physical dissipation is introduced.
@@ -130,7 +142,7 @@ impl<'a> MembraneMotion<'a> {
         }
         let scratch_size = free
             .len()
-            .checked_mul(3)
+            .checked_mul(4)
             .ok_or(MembraneError::Budget("motion workspace overflow"))?;
         let inverse_mass = InverseMass(
             free.iter()
@@ -288,7 +300,7 @@ impl<'a> MembraneMotion<'a> {
             }
             support_sum.set(reactions);
         };
-        let result = verlet_momentum_step(
+        let result = verlet_momentum_step_with_displacement(
             &mut self.trial_q,
             &mut self.trial_momentum,
             dt_s,
@@ -300,7 +312,7 @@ impl<'a> MembraneMotion<'a> {
         if let Some(error) = stopped.into_inner() {
             return Err(error);
         }
-        result.map_err(|error| match error {
+        let displacement = result.map_err(|error| match error {
             MomentumVerletError::Cancelled => MembraneError::Cancelled,
             MomentumVerletError::InvalidInput(what) | MomentumVerletError::NonFinite(what) => {
                 MembraneError::Invalid(what)
@@ -311,10 +323,10 @@ impl<'a> MembraneMotion<'a> {
         let dead_load_work_j: f64 = self
             .free
             .iter()
-            .enumerate()
-            .map(|(i, &dof)| dead_load_n[dof / 3][dof % 3] * (self.trial_q[i] - self.q[i]))
+            .zip(displacement)
+            .map(|(&dof, &increment)| dead_load_n[dof / 3][dof % 3] * increment)
             .sum();
-        let energy_defect_j = (kinetic_energy_j - self.kinetic_energy_j)
+        let energy_defect_j = kinetic_change(&self.momentum, &self.trial_momentum, &self.inverse_mass)
             + (strain_energy_j - self.strain_energy_j)
             - dead_load_work_j;
         let support_impulse_n_s = support_sum.get().map(|f| (0.5 * dt_s) * f);

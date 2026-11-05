@@ -57,7 +57,8 @@ pub use stiff::{
 };
 pub use symplectic::{
     MomentumVerletError, MomentumVerletGradient, MomentumVerletParameterVjp, verlet_adjoint,
-    verlet_momentum_adjoint, verlet_momentum_parameter_adjoint, verlet_momentum_step, verlet_step,
+    verlet_momentum_adjoint, verlet_momentum_parameter_adjoint, verlet_momentum_step,
+    verlet_momentum_step_with_displacement, verlet_step,
 };
 
 /// Crate version, re-exported for provenance stamping.

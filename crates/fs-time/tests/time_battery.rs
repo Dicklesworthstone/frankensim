@@ -150,7 +150,7 @@ mod momentum_verlet {
     use fs_solver::op::LinearOp;
     use fs_time::{
         MomentumVerletError, verlet_adjoint, verlet_momentum_adjoint, verlet_momentum_step,
-        verlet_step,
+        verlet_momentum_step_with_displacement, verlet_step,
     };
     use std::cell::Cell;
 
@@ -179,6 +179,135 @@ mod momentum_verlet {
             for i in 0..2 {
                 out[i] = self.0[0][i] * x[0] + self.0[1][i] * x[1];
             }
+        }
+    }
+
+    #[test]
+    fn resolved_drift_preserves_held_force_work_below_the_position_ulp() {
+        // Coupled inverse mass: the exact ballistic acceleration is (1.5, -1).
+        let inverse_mass = Matrix([[0.5, 0.25], [0.25, 1.0]]);
+        let load = [4.0, -2.0];
+        let force = |_: &[f64], out: &mut [f64]| out.copy_from_slice(&load);
+        let h = 2.0_f64.powi(-30);
+        for origin in [0.0, 1.0, 1e12] {
+            let initial = ([origin, -origin], [0.0, 0.0]);
+            let (mut q, mut p) = initial;
+            let (mut old_q, mut old_p) = initial;
+            verlet_momentum_step(
+                &mut old_q,
+                &mut old_p,
+                h,
+                &inverse_mass,
+                &force,
+                &mut [0.0; 6],
+                &mut || false,
+            )
+            .unwrap();
+            let mut scratch = [0.0; 8];
+            let displacement = verlet_momentum_step_with_displacement(
+                &mut q,
+                &mut p,
+                h,
+                &inverse_mass,
+                &force,
+                &mut scratch,
+                &mut || false,
+            )
+            .unwrap();
+            assert_eq!(q.map(f64::to_bits), old_q.map(f64::to_bits));
+            assert_eq!(p.map(f64::to_bits), old_p.map(f64::to_bits));
+            assert_eq!(displacement, &[0.75 * h * h, -0.5 * h * h]);
+            let work: f64 = load.iter().zip(displacement).map(|(f, dq)| f * dq).sum();
+            assert_eq!(work, 4.0 * h * h);
+            assert_eq!(p, [4.0 * h, -2.0 * h]);
+            if origin != 0.0 {
+                assert_eq!(q, initial.0, "rounded position hides the resolved work");
+            }
+            let reverse = verlet_momentum_step_with_displacement(
+                &mut q,
+                &mut p,
+                -h,
+                &inverse_mass,
+                &force,
+                &mut scratch,
+                &mut || false,
+            )
+            .unwrap();
+            let reverse_work: f64 = load.iter().zip(reverse).map(|(f, dq)| f * dq).sum();
+            assert_eq!(reverse_work, -work);
+            assert_eq!((q, p), initial);
+        }
+    }
+
+    #[test]
+    fn displacement_refusal_and_final_cancellation_do_not_publish_state() {
+        let identity = Diagonal([1.0]);
+        let force = |_: &[f64], out: &mut [f64]| out[0] = 0.0;
+        let initial = ([-f64::MAX], [f64::MAX]);
+        let (mut q, mut p) = initial;
+        // FMA can produce a finite position although the displacement alone
+        // is unrepresentable. Reporting it must refuse the complete step.
+        assert_eq!(
+            verlet_momentum_step_with_displacement(
+                &mut q,
+                &mut p,
+                2.0,
+                &identity,
+                &force,
+                &mut [0.0; 4],
+                &mut || false,
+            ),
+            Err(MomentumVerletError::NonFinite("drift displacement"))
+        );
+        assert_eq!((q, p), initial);
+        assert!(matches!(
+            verlet_momentum_step_with_displacement(
+                &mut q,
+                &mut p,
+                0.5,
+                &identity,
+                &force,
+                &mut [0.0; 3],
+                &mut || false,
+            ),
+            Err(MomentumVerletError::InvalidInput(_))
+        ));
+        assert_eq!((q, p), initial);
+        let initial = ([1.0], [0.25]);
+        let (mut q, mut p) = initial;
+        let mut polls = 0;
+        verlet_momentum_step_with_displacement(
+            &mut q,
+            &mut p,
+            0.5,
+            &identity,
+            &force,
+            &mut [0.0; 4],
+            &mut || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+        for cancel_at in [1, polls - 1, polls] {
+            let (mut q, mut p) = initial;
+            let mut calls = 0;
+            assert_eq!(
+                verlet_momentum_step_with_displacement(
+                    &mut q,
+                    &mut p,
+                    0.5,
+                    &identity,
+                    &force,
+                    &mut [0.0; 4],
+                    &mut || {
+                        calls += 1;
+                        calls == cancel_at
+                    },
+                ),
+                Err(MomentumVerletError::Cancelled)
+            );
+            assert_eq!((q, p), initial);
         }
     }
 
@@ -299,6 +428,7 @@ mod momentum_verlet {
         let initial = ([0.8, -0.4], [-0.2, 0.3]);
         let (mut q, mut p) = initial;
         let (mut old_q, mut old_p) = initial;
+        let (mut work_q, mut work_p) = initial;
         for _ in 0..31 {
             verlet_step(&mut old_q, &mut old_p, 0.03, &force, &mut [0.0; 2]);
             verlet_momentum_step(
@@ -313,6 +443,12 @@ mod momentum_verlet {
             .unwrap();
             assert_eq!(q.map(f64::to_bits), old_q.map(f64::to_bits));
             assert_eq!(p.map(f64::to_bits), old_p.map(f64::to_bits));
+            verlet_momentum_step_with_displacement(
+                &mut work_q, &mut work_p, 0.03, &identity, &force,
+                &mut [0.0; 8], &mut || false,
+            ).unwrap();
+            assert_eq!(work_q.map(f64::to_bits), old_q.map(f64::to_bits));
+            assert_eq!(work_p.map(f64::to_bits), old_p.map(f64::to_bits));
         }
         let seed = (&[0.7, -0.2][..], &[-0.5, 0.9][..]);
         let old = verlet_adjoint(&initial.0, &initial.1, 0.03, 31, &force, &vjp, seed);

@@ -277,6 +277,8 @@ fn momentum_proposal<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
 /// fixed smooth actions; negative `h` performs a reverse step. Configuration-
 /// dependent mass, constraints and impulses are outside this separable lane.
 /// Design-parameter derivatives use [`verlet_momentum_parameter_adjoint`].
+/// [`verlet_momentum_step_with_displacement`] also exposes the resolved drift
+/// for force-work accounting without subtracting rounded absolute positions.
 /// The existing unit-mass [`verlet_step`] is unchanged.
 pub fn verlet_momentum_step<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
     q: &mut [f64],
@@ -300,6 +302,71 @@ pub fn verlet_momentum_step<M: LinearOp + ?Sized, F: Fn(&[f64], &mut [f64])>(
     q.copy_from_slice(next_q);
     p.copy_from_slice(next_p);
     Ok(())
+}
+
+/// The same physical-momentum step, with its resolved displacement available
+/// for work-conjugate coupling and held-load work.
+///
+/// The returned slice is `h * M^-1 p_half`, using the SAME inverse-mass action
+/// as the accepted drift, before adding it to the absolute position. A small
+/// displacement can therefore remain resolved even when `q_next - q` rounds
+/// to zero. A constant generalized load does work `load.dot(displacement)`;
+/// numerical changes of stored energy still carry their integration/rounding
+/// defect and must not be inferred from this work or called physical heat.
+///
+/// At least `4 * q.len()` caller-owned scratch components are required. The
+/// returned slice borrows the final scratch block; there is no allocation or
+/// extra force/mass evaluation. The position/momentum map is identical to
+/// [`verlet_momentum_step`]. A nonrepresentable displacement or cancellation
+/// refuses before publishing either state, although scratch may change.
+pub fn verlet_momentum_step_with_displacement<
+    'work,
+    M: LinearOp + ?Sized,
+    F: Fn(&[f64], &mut [f64]),
+>(
+    q: &mut [f64],
+    p: &mut [f64],
+    h: f64,
+    inverse_mass: &M,
+    force: &F,
+    scratch: &'work mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<&'work [f64], MomentumVerletError> {
+    let workspace_len = momentum_inputs(q, p, h, inverse_mass, cancelled)?;
+    let required = q
+        .len()
+        .checked_mul(4)
+        .ok_or(MomentumVerletError::InvalidInput(
+            "workspace length overflow",
+        ))?;
+    if scratch.len() < required {
+        return Err(MomentumVerletError::InvalidInput(
+            "four state vectors of workspace required",
+        ));
+    }
+    let (workspace, displacement) = scratch[..required].split_at_mut(workspace_len);
+    momentum_proposal(
+        q,
+        p,
+        h,
+        inverse_mass,
+        force,
+        workspace,
+        Some(&mut *displacement),
+        cancelled,
+    )?;
+    for chunk in displacement.chunks_mut(256) {
+        momentum_poll(cancelled)?;
+        for value in chunk {
+            *value *= h;
+        }
+    }
+    momentum_finite(displacement, "drift displacement", cancelled)?;
+    let (next_q, rest) = workspace.split_at_mut(q.len());
+    let (next_p, _) = rest.split_at_mut(p.len());
+    q.copy_from_slice(next_q);
+    p.copy_from_slice(next_p);
+    Ok(displacement)
 }
 
 /// Discrete adjoint of repeated [`verlet_momentum_step`] maps.

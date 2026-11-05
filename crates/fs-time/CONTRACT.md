@@ -47,6 +47,16 @@ where claimed below.
   mass, constraints and impacts are outside this separable lane. Polls bracket
   actions and occur every 256 vector components; actions own their internal
   latency and accepted forward publication uses two final slice copies.
+- `verlet_momentum_step_with_displacement` performs the same map with four
+  caller-owned scratch vectors and returns a borrowed slice containing the
+  resolved drift `h M^-1 p_half`. Held-force work uses this increment even when
+  adding it to an absolute position rounds it away. There is no additional
+  force/mass evaluation or allocation. Displacement arithmetic and cancellation
+  are checked before state publication; a nonrepresentable increment refuses
+  even if the fused position update is finite. Numerical storage defects remain
+  separate from supplied work and physical dissipation. Focused `time_battery`
+  regressions cover coupled-mass ballistic work below the position ULP, reversal,
+  unchanged nonlinear step bits, overflow and final-poll cancellation.
 - `verlet_momentum_parameter_adjoint` extends the same checkpoint/reverse sweep
   to design-dependent constant physical mass and force laws. The
   `MomentumVerletParameterVjp` actions supply force-parameter derivatives and
