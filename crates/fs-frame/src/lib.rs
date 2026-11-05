@@ -30,7 +30,8 @@ pub mod layout;
 
 pub use building::{
     BuildingFragility, BuildingFrame, BuildingResponse, BuildingSpec, RcMember, building_fragility,
-    building_fragility_from_frame,
+    building_fragility_from_frame, building_fragility_from_frame_with_spectrum,
+    building_fragility_with_spectrum,
 };
 pub use cvar::building::{
     BuildingCvarControls, BuildingCvarDesign, BuildingCvarError, BuildingCvarEvaluation,
