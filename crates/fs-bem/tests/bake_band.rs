@@ -1,6 +1,6 @@
 //! G0/G1/G2/G5 declared-band bake qualification. Native execution is required.
 use fs_bem::helmholtz::iterative::IterativeOptions;
-use fs_bem::helmholtz::{MAX_DENSE_PANELS, Medium};
+use fs_bem::helmholtz::{Formulation, MAX_DENSE_PANELS, Medium};
 use fs_bem::panel3d::SpherePanels;
 use fs_bem::radiation_bake::declared::{
     BakeDeclaration, BakeError, BakeMesh, BakeStatus, ModeContent, PanelLadder, PanelSource,
@@ -108,18 +108,40 @@ fn bake_band_complete_ladder() {
     }
 }
 
+/// G3: merely permitting a larger solver route changes no dense acoustic
+/// equation. The geometry, numerical rungs and original source remain equal.
+#[test]
+fn bake_route_options_preserve_dense_geometry_policy() {
+    let source = Sphere { radius: 1.0 };
+    let declaration = declare(&source, &[0.05, 0.1], 0.25);
+    let ladder = PanelLadder::new(&source, vec![0, 1, 2]).unwrap();
+    let dense = bake_declared(&declaration, &ladder, || false).unwrap();
+    let routed = bake_declared_routed(
+        &declaration,
+        &ladder,
+        Some(&IterativeOptions::default()),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(dense.status(), BakeStatus::Complete);
+    assert_eq!(routed.status(), BakeStatus::Complete);
+    assert_eq!(dense.refinement().len(), routed.refinement().len());
+    assert!(routed.refinement().iter().all(|row| row.route == "dense"));
+    for (a, b) in dense.rows().iter().zip(routed.rows()) {
+        assert_eq!(a.formulation, Formulation::PlainCbie);
+        assert_eq!(b.formulation, Formulation::PlainCbie);
+        assert_eq!(a.z_specific, b.z_specific);
+        assert_eq!(a.z_acoustic, b.z_acoustic);
+        assert_eq!(a.radiated_power, b.radiated_power);
+        assert_eq!(a.directivity.coefficients, b.directivity.coefficients);
+    }
+}
+
 /// G2 strict qualification, on the M2.5-W5 route. The dense owner alone
-/// caps at 8192 panels before the three-rung rule completes at 1e-3, which
-/// stays a genuine blocked qualification, never a relaxed tolerance
-/// (bake_dense_cap_blocks_and_routes). Routed, the ladder runs to icosphere-6
-/// (81920 panels), with Burton-Miller on every rung.
-/// - At ka = 0.05 the dense Burton-Miller sphere errors are 7.7e-3, 2.8e-3
-///   and 1.2e-3 at 320, 1280 and 5120 panels (ts1, dd1052e20), so two
-///   successive changes under 1e-3 need the 20480 and 81920 rungs.
-/// - At ka = 0.5 the successive changes were 1.1e-2, 2.5e-3 and 4.1e-4 up to
-///   20480 panels (trj b181).
-/// - 81920 panels at order 6 count about 2.9e10 M2L multiply-adds per pass,
-///   so the run declares max_translation_work.
+/// caps at 8192 panels; later declared rungs use the iterative owner only
+/// if still needed. The geometry policy now selects triangle CBIE for this
+/// band, so it may converge before reaching the 81920-panel final rung.
+/// The same 1e-3 operator and independent analytic gates remain unchanged.
 #[test]
 fn bake_pulsating_sphere_band() {
     let source = Sphere { radius: 1.0 };
@@ -132,6 +154,9 @@ fn bake_pulsating_sphere_band() {
         tol: 1e-9,
         fmm_order: 6,
         max_iters: 900,
+        // Triangle-CBIE near tables share the explicit qualification budget
+        // used by iterative_cbie.rs; the BM-only default is too small here.
+        max_near_entries: 1 << 26,
         near_field_cache_bytes: 1 << 31,
         max_translation_work: 40_000_000_000,
         workers,
@@ -147,12 +172,6 @@ fn bake_pulsating_sphere_band() {
         bake.status(),
         BakeStatus::Complete,
         "strict sphere qualification did not complete on the routed ladder"
-    );
-    assert!(
-        bake.refinement()
-            .iter()
-            .any(|r| r.route == "iterative" && r.panels > MAX_DENSE_PANELS),
-        "the qualification must exercise the iterative route"
     );
     for row in bake.rows() {
         let ka = row.k * source.radius;
@@ -170,29 +189,27 @@ fn bake_pulsating_sphere_band() {
     }
 }
 
-/// G2 (M2.5-W5 route): the same pulsating-sphere oracle on a Burton-Miller
-/// band (mouth ka >= 0.5) whose ladder needs the 20480-panel rung, past the
-/// dense cap. The iterative owner solves that rung. A routed ladder is
-/// Burton-Miller on every rung, including mouth ka < 0.5, which has no
-/// iterative plain-CBIE quadrature.
+/// G2 (M2.5-W5 route): the same pulsating-sphere oracle below the body's
+/// conservative interior Dirichlet bound. All rungs use triangle CBIE.
+/// Starting at 1280 panels requires the third solved rung at 20480 panels,
+/// beyond the dense cap, even if CBIE converges faster than the former
+/// forced Burton-Miller route.
 ///
 /// The declared operator tolerance is 5e-3, and the closed-form check below
-/// stays at 1e-3. At 1e-3 the three-rung rule cannot complete on this ladder.
-/// trj b181 measured successive changes at ka = 0.5 of 1.1e-2, 2.5e-3 and
-/// 4.1e-4 (SH 1.2e-2, 3.1e-3, 7.5e-4) over 320, 1280, 5120 and 20480 panels.
-/// Completing at 1e-3 needs icosphere-6 (81920 panels), which
-/// bake_pulsating_sphere_band runs with a declared max_translation_work.
+/// stays at 1e-3; neither is relaxed to make the route pass.
 #[test]
-fn bake_routes_burton_miller_rows_past_the_dense_cap() {
+fn bake_routes_cbie_rows_past_the_dense_cap() {
     let source = Sphere { radius: 1.0 };
     let declaration = declare(&source, &[0.5, 1.0], 5e-3);
-    let ladder = PanelLadder::new(&source, vec![2, 3, 4, 5]).unwrap();
+    let ladder = PanelLadder::new(&source, vec![3, 4, 5]).unwrap();
     // Scheduling budgets only; every solve is bit-identical at any count.
     let workers = std::thread::available_parallelism().map_or(1, |n| n.get().min(16));
     let iterative = IterativeOptions {
         tol: 1e-9,
         fmm_order: 6,
         max_iters: 900,
+        // Match the triangle-CBIE qualification's near-table envelope.
+        max_near_entries: 1 << 26,
         workers,
         m2l_cache_bytes: 1 << 33,
         ..IterativeOptions::default()

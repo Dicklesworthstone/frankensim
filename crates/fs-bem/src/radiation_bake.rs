@@ -4,9 +4,10 @@
 //! (music bead `frankensim-music-t-brass-zl-mm-zolja`).
 //!
 //! The bake is OFFLINE plumbing, not new physics: each row is one
-//! admitted [`crate::helmholtz::solve_radiation`] call (Burton–Miller
-//! above `ka = 0.5` at the mouth, plain CBIE below it — the recorded
-//! low-`ka` resistance-artifact boundary), area-averaged over the driven
+//! admitted Helmholtz solve, using the closed body's
+//! [`GeometryPolicy`] to exclude interior Dirichlet resonances before
+//! selecting plain CBIE or Burton–Miller. The driven mouth's area does
+//! not set that spectrum. Each solution is area-averaged over the driven
 //! panels exactly like the pulsating-sphere oracle's arbiter. Every row
 //! retains the guardrail diagnostics (panels-per-wavelength, condition
 //! lower bound, radiated power, passivity margin) so a consumer can see
@@ -27,6 +28,7 @@ use crate::helmholtz::{
     solve_radiation,
 };
 use crate::panel3d::SpherePanels;
+use crate::radiation_policy::GeometryPolicy;
 use fs_exec::CancelGate;
 
 /// Declaration-bound refinement over this same radiation-bake owner.
@@ -142,18 +144,17 @@ impl RadiationLoadBake {
 /// Bake `Z_L(omega)` for the driven mouth of an exterior mesh.
 ///
 /// `driven[i]` marks the panels of the radiating mouth (unit outward
-/// normal velocity there, rigid elsewhere). The formulation switches at
-/// `ka = 0.5` on the equivalent mouth radius: plain CBIE below, Burton–Miller
-/// above, which owns the fictitious-frequency band. Below `ka = 0.5` the
-/// dense plain CBIE converges at about h^2 against Burton–Miller's h^1.3
-/// (see [`bake_radiation_load_iterative`]). Since the alpha = +i/k
-/// correction, the negative-resistance artifact that first motivated the
-/// switch does not appear on the dense pulsating sphere: Burton–Miller's
-/// resistance is within 2 % at 320 panels and converges.
+/// normal velocity there, rigid elsewhere). Prepare [`GeometryPolicy`] once
+/// from every closed component of the actual surface. Plain CBIE retains
+/// its low-frequency triangle accuracy below the geometry's conservative
+/// interior Dirichlet bound; Burton–Miller owns the remaining band. The
+/// selected formulation is independent of the driven mask and solver route.
+/// `mouth_ka` remains descriptive output, never a uniqueness criterion.
 ///
 /// # Errors
 /// [`HelmholtzError`] on refusal: empty/non-increasing omegas, mask
-/// length mismatch, no driven panels, or any per-row solver refusal —
+/// length mismatch, no driven panels, missing/invalid closed triangles,
+/// or any per-row solver refusal —
 /// including [`HelmholtzError::TooCoarse`] past the mesh's
 /// panels-per-wavelength bound (the sweep refuses; it never
 /// extrapolates).
@@ -172,7 +173,6 @@ pub fn bake_radiation_load(
         medium,
         l_max,
         source_id,
-        LowKa::PlainCbie,
         |k, formulation, velocity| solve_radiation(surface, k, medium, velocity, formulation),
     )
 }
@@ -183,19 +183,13 @@ pub fn bake_radiation_load(
 /// same post-processing of a converged surface solution; an unconverged
 /// solve refuses.
 ///
-/// Every row is Burton-Miller, at every mouth ka, because the iterative owner
-/// has no plain-CBIE quadrature. For a uniform field, Burton-Miller is passive
-/// and convergent below ka = 0.5 since the alpha = +i/k correction
-/// (40122769f). On the dense pulsating unit sphere at ka = 0.05 it gives
-/// 7.7e-3, 2.8e-3 and 1.2e-3 at 320, 1280 and 5120 panels, against plain
-/// CBIE's 5.9e-3, 1.5e-3 and 3.6e-4: about h^1.3 against h^2 (ts1,
-/// dd1052e20).
-///
-/// A non-uniform field converges much more slowly at low ka, and its
-/// resistance most of all. On the sphere's dipole at ka = 0.05 and 5120
-/// panels, the Burton-Miller resistance is 11.6 times the closed form,
-/// against plain CBIE's 0.35% (modal_loading, 8476279df). A driven mouth is
-/// such a field, so low-ka rows routed here carry that resistance bias.
+/// The SAME [`GeometryPolicy`] selects the formulation on dense and iterative
+/// routes. Iterative plain CBIE preserves the dense owner's triangle rule;
+/// selecting a larger work envelope must not force low-frequency, nonuniform
+/// mouth excitation onto the less accurate centroid Burton–Miller equation.
+/// All original FMM, near-table, wavelength and convergence budgets apply.
+/// Unsupported options refuse; no failed selected solve is retried using the
+/// other formulation.
 ///
 /// # Errors
 /// As [`bake_radiation_load`], plus every [`IterativeError`] refusal.
@@ -216,41 +210,11 @@ pub fn bake_radiation_load_iterative(
         medium,
         l_max,
         source_id,
-        LowKa::BurtonMiller,
         |k, formulation, velocity| {
             solve_radiation_iterative(surface, k, medium, velocity, formulation, options, &gate)
                 .map(|(solution, _, _)| solution)
         },
     )
-}
-
-/// [`bake_radiation_load`] with Burton-Miller at every mouth ka, the dense
-/// rungs of a routed ladder, so one formulation spans the ladder.
-pub(crate) fn bake_radiation_load_burton_miller(
-    surface: &SpherePanels,
-    driven: &[bool],
-    omegas: &[f64],
-    medium: Medium,
-    l_max: usize,
-    source_id: &str,
-) -> Result<RadiationLoadBake, HelmholtzError> {
-    bake_radiation_load_with(
-        surface,
-        driven,
-        omegas,
-        medium,
-        l_max,
-        source_id,
-        LowKa::BurtonMiller,
-        |k, formulation, velocity| solve_radiation(surface, k, medium, velocity, formulation),
-    )
-}
-
-/// The formulation of a row whose mouth ka is below 0.5.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LowKa {
-    PlainCbie,
-    BurtonMiller,
 }
 
 fn bake_radiation_load_with<E: From<HelmholtzError>>(
@@ -260,7 +224,6 @@ fn bake_radiation_load_with<E: From<HelmholtzError>>(
     medium: Medium,
     l_max: usize,
     source_id: &str,
-    low_ka: LowKa,
     mut solve: impl FnMut(f64, Formulation, &[C64]) -> Result<RadiationSolution, E>,
 ) -> Result<RadiationLoadBake, E> {
     let n = surface.areas().len();
@@ -298,6 +261,7 @@ fn bake_radiation_load_with<E: From<HelmholtzError>>(
         }
         .into());
     }
+    let policy = GeometryPolicy::new(surface)?;
     let mouth_radius = (mouth_area / core::f64::consts::PI).sqrt();
     let velocity: Vec<C64> = driven
         .iter()
@@ -308,11 +272,7 @@ fn bake_radiation_load_with<E: From<HelmholtzError>>(
     for &omega in omegas {
         let k = omega / medium.sound_speed;
         let mouth_ka = k * mouth_radius;
-        let formulation = if mouth_ka < 0.5 && low_ka == LowKa::PlainCbie {
-            Formulation::PlainCbie
-        } else {
-            Formulation::BurtonMiller
-        };
+        let formulation = policy.formulation(k)?;
         let solution = solve(k, formulation, &velocity)?;
         fingerprint = solution.surface_fingerprint;
         // Area-averaged p over the driven panels (v = 1 there): the same
@@ -428,7 +388,17 @@ pub fn lathe_profile(
         (profile[profile.len() - 1].0 - profile[0].0) / (profile.len() - 1) as f64;
     let cap = |x: f64, r_cap: f64, outward_plus_x: bool, triangles: &mut Vec<[[f64; 3]; 3]>| {
         let m = ((r_cap / mean_axial_step.max(1e-9)).ceil() as usize).max(1);
-        let radii: Vec<f64> = (0..=m).map(|i| r_cap * i as f64 / m as f64).collect();
+        // Preserve the declared wall rim exactly: (r_cap * m) / m can
+        // differ by one ulp, leaving an open seam in the triangle topology.
+        let radii: Vec<f64> = (0..=m)
+            .map(|i| {
+                if i == m {
+                    r_cap
+                } else {
+                    r_cap * i as f64 / m as f64
+                }
+            })
+            .collect();
         let ring_at = |r: f64| -> Vec<[f64; 3]> {
             (0..circumferential)
                 .map(|j| {
@@ -495,14 +465,15 @@ mod tests {
     fn zb_001_bake_reproduces_the_pulsating_sphere() {
         // All panels driven on an icosphere = the pulsating sphere; the
         // bake's area-averaged rows must land inside the SAME bands the
-        // solver's own oracle tests pin (PlainCbie < 4% below ka 0.5,
-        // Burton-Miller < 8% above).
+        // solver's own oracle tests pin (PlainCbie < 4% below the body's
+        // spectral exclusion limit, Burton-Miller < 8% above). The final
+        // row is the true sphere's first interior Dirichlet frequency.
         let radius = 1.0f64;
         let surface = SpherePanels::icosphere(radius, 2).expect("icosphere");
         let n = surface.areas().len();
         let medium = Medium::air();
         let c = medium.sound_speed;
-        let kas = [0.2f64, 0.5, 1.0, 2.0];
+        let kas = [0.2f64, 0.5, 1.0, 2.0, core::f64::consts::PI];
         let omegas: Vec<f64> = kas.iter().map(|ka| ka * c / radius).collect();
         let driven = vec![true; n];
         let bake = bake_radiation_load(&surface, &driven, &omegas, medium, 4, "test/icosphere2/v1")
@@ -516,7 +487,7 @@ mod tests {
         for (row, &ka) in bake.rows.iter().zip(&kas) {
             let analytic = C64::new(ka * ka, -ka).scale(rho_c / (1.0 + ka * ka));
             let rel = (row.z_specific - analytic).abs() / analytic.abs();
-            if ka < 0.5 {
+            if ka <= 2.0 {
                 assert!(matches!(row.formulation, Formulation::PlainCbie));
                 worst_cbie = worst_cbie.max(rel);
             } else {

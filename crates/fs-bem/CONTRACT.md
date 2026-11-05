@@ -1238,9 +1238,12 @@ NASA marks it as U.S. Government work with public use permitted.
   `solve_radiation` producing an area-averaged `Z_L(omega)` table
   (specific and acoustic normalizations both retained) plus
   per-frequency SH directivity for a driven mouth on a closed exterior
-  mesh. Formulation policy: plain CBIE below mouth `ka = 0.5` (the
-  recorded Burton-Miller low-`ka` resistance boundary), Burton-Miller
-  above. Every row keeps the guardrail receipts
+  mesh. Both dense and iterative routes prepare `GeometryPolicy` from the
+  actual closed components: plain CBIE below its conservative interior
+  Dirichlet spectral limit, Burton-Miller above. Selection is independent
+  of the driven mask and its equivalent mouth radius; `mouth_ka` remains
+  descriptive. Invalid or missing retained closed triangles refuse. Every
+  row keeps the guardrail receipts
   (panels-per-wavelength, condition lower bound, radiated power,
   passivity margin); the sweep REFUSES past the mesh's
   panels-per-wavelength bound rather than extrapolating.
@@ -1280,8 +1283,9 @@ tolerance. This measures the full retained complex SH vector through the
 declared degree; it is not a relative guarantee for every quiet coefficient or
 a bound on omitted SH degrees. It is finite-frequency-grid refinement evidence,
 not a uniform-in-frequency interpolation error enclosure or physical validation.
-Negative resistance beyond the same relative tolerance refuses. No panel
-arithmetic, formulation threshold or legacy bake result changes here.
+Negative resistance beyond the same relative tolerance refuses. The same
+geometry-based formulation policy applies on every rung and solver route;
+the conservative bound may change as the original geometry is refined.
 `bake_declared` stays dense: a rung past `MAX_DENSE_PANELS` is
 `Blocked { route: "M2.5-W5" }`. `bake_declared_routed(.., Some(&options), ..)`
 is that route: such a rung is solved by `bake_radiation_load_iterative`
@@ -1291,6 +1295,11 @@ FMM order and storage budgets), while rungs within the cap stay dense. Each
 An iterative refusal is `BakeError::IterativeRoute { at_hz, what }`, and an
 unconverged solve is never a row. The same ladder, tolerance and three-rung
 rule decide completeness.
+
+Supplying iterative options does not force low-frequency dense or iterative
+rungs onto Burton-Miller. No failed solve is retried with a different equation.
+Focused G1/G3 regressions compare both routes, verify driven-mask independence,
+and exercise a small driven patch above the whole body's CBIE spectral limit.
 
 The exact next source panel count is checked before allocating its surface or
 dense matrix. More than 8192 panels returns `Blocked` with frequency, needed
