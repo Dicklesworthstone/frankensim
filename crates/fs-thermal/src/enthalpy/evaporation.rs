@@ -18,7 +18,7 @@ use super::{
 };
 use crate::evaporation::{
     EvaporationError, EvaporationLaw, GasFilm, LiquidSurfaceState, SolverConfig, SurfaceStep,
-    advance_surface,
+    advance_surface_with_heat,
 };
 
 /// A failed phase or thermal proposal leaves all accepted state unchanged.
@@ -227,11 +227,40 @@ impl DepositionSimulation<'_> {
         film: GasFilm,
         duration_s: f64,
         config: SolverConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<SurfaceStep, ThermalEvaporationError> {
+        self.evaporate_cell_with_heat(
+            id, law, film, duration_s, 0.0, config, checkpoint,
+        )
+    }
+
+    /// Solve explicitly supplied heat and evaporation together on one active
+    /// liquid cell, committing its original mass and caloric enthalpy atomically.
+    ///
+    /// Positive heat enters the liquid; the returned receipt closes storage
+    /// change plus full carried vapor enthalpy against that one input. Heat can
+    /// feed latent transfer without a sensible-only intermediate state.
+    ///
+    /// The caller owns this signed total energy and must debit its source once.
+    /// Authored source, convection and link heat are not evaluated by this
+    /// direct phase operation. The clock, contacts and reference geometry stay
+    /// unchanged, as for `evaporate_cell`; the caller owns interval scheduling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaporate_cell_with_heat<L: EvaporationLaw + ?Sized>(
+        &mut self,
+        id: CellId,
+        law: &L,
+        film: GasFilm,
+        duration_s: f64,
+        supplied_heat_j: f64,
+        config: SolverConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<SurfaceStep, ThermalEvaporationError> {
         checkpoint()?;
         let area = self.exposed_area_m2(id)?;
-        self.evaporate_cell_over_area(id, law, film, area, duration_s, config, &mut checkpoint)
+        self.evaporate_cell_over_area(
+            id, law, film, area, duration_s, supplied_heat_j, config, &mut checkpoint,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -242,6 +271,7 @@ impl DepositionSimulation<'_> {
         film: GasFilm,
         area: f64,
         duration_s: f64,
+        supplied_heat_j: f64,
         config: SolverConfig,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<SurfaceStep, ThermalEvaporationError> {
@@ -252,7 +282,7 @@ impl DepositionSimulation<'_> {
         let caloric = self.materials[&cell.material_id];
         let chart_error = std::cell::RefCell::new(None);
         let mut checkpoint_error = None;
-        let result = advance_surface(
+        let result = advance_surface_with_heat(
             law,
             film,
             LiquidSurfaceState {
@@ -261,6 +291,7 @@ impl DepositionSimulation<'_> {
                 area_m2: area,
             },
             duration_s,
+            supplied_heat_j,
             config,
             |h| {
                 caloric.temperature_k(h).map_err(|error| {
@@ -418,6 +449,7 @@ impl DepositionSimulation<'_> {
                     film,
                     area,
                     stop - start,
+                    0.0,
                     phase_config,
                     &mut checkpoint,
                 )?;

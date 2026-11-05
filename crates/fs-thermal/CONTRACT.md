@@ -1601,6 +1601,37 @@ phase transfer on event-clipped intervals. The interval's initial exposed area
 survives endpoint covering, and no phase exchange occurs before cell birth.
 The whole request shares the original thermal work limit.
 
+`evaporation::advance_surface_with_heat` and the native
+`DepositionSimulation::evaporate_cell_with_heat` solve signed supplied heat
+and phase transfer at one endpoint. The original liquid chart closes
+`m0*(h1-h0)+dm*L(T1)=Q`; the vapor still carries `dm*(h1+L(T1))`, so latent
+heat is counted once. Supplied heat can feed evaporation directly without an
+artificial sensible-only intermediate temperature outside the liquid chart.
+The returned surface receipt retains `supplied_heat_j` and the complete
+energy residual. A zero-duration heat impulse changes caloric storage with
+zero phase transfer, subject to the same liquid and nonboiling admission.
+
+The caller supplies total signed energy and owns its reservoir account.
+Temperature-dependent convection, radiation or contact exchange still needs
+its own coupled owner. The direct cell method preserves the original clock,
+geometry and authored sources; it does not automatically apply their heat.
+The existing `advance_evaporating_to` timeline remains first-order heat/phase
+splitting. Its original calls use zero additional supplied heat.
+
+Heating can turn initial equilibrium or condensation into evaporation. An
+exhausted endpoint now uses the larger initial/endpoint frozen evaporation
+rate for its finite retry estimate. The estimate remains advisory: a retry
+must resupply heat for its new interval and satisfy all original source,
+inventory and energy gates. Nonfinite residuals or combined energy allowances
+refuse. The scalar solve retains bounded work and allocation-free evaluation.
+
+Six scalar regression groups cover direct latent heat supply, signed flux
+reversal with temperature-dependent latent heat, boiling-trial narrowing,
+zero-heat equivalence, caloric impulses, inventory retry, finite controls,
+source/cancellation refusal and independent time refinement. Three native
+cell groups cover simultaneous heating, original mass/energy receipts,
+inventory constraints and final-gate rollback.
+
 `LiquidCellExchange` and `apply_liquid_exchanges` admit externally solved
 finite-atmosphere endpoints on those same cells. Full expected-cell equality,
 unique identities, original caloric/storage and cell constraints, admitted

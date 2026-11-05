@@ -573,3 +573,6 @@ fn external_liquid_batch_validates_all_cells_and_final_cancellation_before_writi
     );
     assert_eq!(thermal.cells(), &before);
 }
+
+#[path = "tests/heating.rs"]
+mod heating;

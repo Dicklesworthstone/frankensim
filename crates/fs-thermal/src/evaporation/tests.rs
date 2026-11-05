@@ -527,3 +527,6 @@ fn g4_boiling_domains_inventory_and_cancellation_refuse_transactionally() {
     near(maximum_duration_s * initial_rate, initial.mass_kg, 1e-15);
     assert_eq!(initial, liquid());
 }
+
+#[path = "tests/heating.rs"]
+mod heating;

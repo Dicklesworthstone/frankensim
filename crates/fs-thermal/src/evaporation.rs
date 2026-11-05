@@ -45,9 +45,10 @@ pub enum EvaporationError {
     },
     /// A smaller interval is required before liquid extinction/topology change.
     InventoryLimit {
-        /// Suggested retry below the initial frozen-rate inventory limit.
-        /// Arbitrary caller caloric closures need not be monotone; this is not
-        /// a guaranteed accepted step. All source and energy checks still apply.
+        /// Suggested retry using the larger initial/endpoint frozen evaporation rate.
+        /// Arbitrary caloric closures and caller-supplied heat need not scale
+        /// with duration; this is not a guaranteed accepted step. All source
+        /// and energy checks still apply to the retry's newly supplied heat.
         maximum_duration_s: f64,
     },
     Unrepresentable(&'static str),
@@ -294,7 +295,7 @@ pub struct SolverConfig {
     pub max_iterations: usize,
 }
 
-/// All heat, mass and recession accounts use the SAME represented transfer.
+/// Phase heat, mass and recession accounts use the SAME represented transfer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceStep {
     pub liquid: LiquidSurfaceState,
@@ -304,6 +305,9 @@ pub struct SurfaceStep {
     /// Signed stream enthalpy in the liquid datum, already INCLUDING latent heat.
     /// The prescribed bath owns subsequent vapor sensible-heat equilibration.
     pub vapor_energy_j: f64,
+    /// Signed externally supplied heat, positive into liquid, counted once.
+    pub supplied_heat_j: f64,
+    /// Liquid storage change plus carried vapor energy minus supplied heat.
     pub energy_residual_j: f64,
     /// Represented transfer minus backward-Euler rate integral [kg].
     pub mass_rate_residual_kg: f64,
@@ -344,12 +348,44 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
     duration_s: f64,
     config: SolverConfig,
     temperature: impl Fn(f64) -> Result<f64, EvaporationError>,
+    checkpoint: impl FnMut() -> Result<(), EvaporationError>,
+) -> Result<SurfaceStep, EvaporationError> {
+    advance_surface_with_heat(
+        law, film, liquid, duration_s, 0.0, config, temperature, checkpoint,
+    )
+}
+
+/// Simultaneous backward-Euler phase transfer and prescribed total heat input.
+///
+/// Positive `supplied_heat_j` heats the liquid; negative values remove heat.
+/// The one balance is `m0*(h1-h0) + dm*L(T1) = supplied_heat_j`, with the
+/// original liquid `T(h)` and endpoint vapor stream enthalpy `h1+L(T1)`.
+/// Heat can therefore feed vaporization without an intermediate sensible-only
+/// temperature outside the liquid chart. No latent source is added twice.
+///
+/// The caller owns the supplied heat and its reservoir account. This is total
+/// energy over the interval, not power or an automatically evaluated convection
+/// law; authored thermal sources must not be applied again for the same heat.
+/// Zero duration permits a caloric heat impulse with no phase transfer.
+///
+/// All phase/source, positive-inventory, work-budget and cancellation conditions
+/// of `advance_surface` still apply. Area and the prescribed film remain fixed.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_surface_with_heat<L: EvaporationLaw + ?Sized>(
+    law: &L,
+    film: GasFilm,
+    liquid: LiquidSurfaceState,
+    duration_s: f64,
+    supplied_heat_j: f64,
+    config: SolverConfig,
+    temperature: impl Fn(f64) -> Result<f64, EvaporationError>,
     mut checkpoint: impl FnMut() -> Result<(), EvaporationError>,
 ) -> Result<SurfaceStep, EvaporationError> {
     let [lo, hi] = config.specific_enthalpy_bracket_j_kg;
     if !positive(liquid.mass_kg)
         || !nonnegative(liquid.area_m2)
         || !nonnegative(duration_s)
+        || !supplied_heat_j.is_finite()
         || !lo.is_finite()
         || !hi.is_finite()
         || lo > hi
@@ -362,7 +398,7 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
         || config.max_iterations > 4096
     {
         return Err(EvaporationError::Invalid(
-            "invalid liquid state, duration, pure-liquid enthalpy bracket or solve budget",
+            "invalid liquid state, duration, supplied heat, pure-liquid enthalpy bracket or solve budget",
         ));
     }
     film.validate()?;
@@ -380,7 +416,9 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
         let mass = checked(liquid.mass_kg - raw_dm)?;
         let dm = liquid.mass_kg - mass;
         let latent = checked(dm * p.latent_heat_j_kg)?;
-        let residual = checked(liquid.mass_kg * (h - liquid.specific_enthalpy_j_kg) + latent)?;
+        let residual = checked(
+            liquid.mass_kg * (h - liquid.specific_enthalpy_j_kg) + latent - supplied_heat_j,
+        )?;
         Ok(Endpoint {
             h,
             t,
@@ -392,14 +430,17 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
             density: p.liquid_density_kg_m3,
         })
     };
-    let balanced = |e: Endpoint| {
-        let sensible = liquid.mass_kg * (e.h - liquid.specific_enthalpy_j_kg);
-        e.residual.abs()
-            <= config.absolute_energy_tolerance_j
-                + config.relative_tolerance * sensible.abs().max(e.latent.abs())
+    let balanced = |e: Endpoint| -> Result<bool, EvaporationError> {
+        let sensible = checked(liquid.mass_kg * (e.h - liquid.specific_enthalpy_j_kg))?;
+        let tolerance = checked(
+            config.absolute_energy_tolerance_j
+                + config.relative_tolerance
+                    * sensible.abs().max(e.latent.abs()).max(supplied_heat_j.abs()),
+        )?;
+        Ok(e.residual.abs() <= tolerance)
     };
     let initial = evaluate(liquid.specific_enthalpy_j_kg)?;
-    let endpoint = if balanced(initial) {
+    let endpoint = if balanced(initial)? {
         initial
     } else {
         let bound = if initial.residual > 0.0 { lo } else { hi };
@@ -411,8 +452,8 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
         let far = match evaluate(bound) {
             Ok(endpoint) => endpoint,
             Err(EvaporationError::Boiling { .. }) if initial.residual < 0.0 => {
-                // Condensation can heat a valid liquid without reaching the
-                // source chart's upper temperature. A boiling trial is not a
+                // Condensation or supplied heat can warm a valid liquid below
+                // the source chart's upper temperature. A boiling trial is not a
                 // physical endpoint or a positive residual. Narrow the domain
                 // until an ACTUAL opposite-sign liquid residual is available.
                 let mut supported_h = initial.h;
@@ -423,10 +464,12 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
                         return Err(EvaporationError::NonConverged);
                     }
                     match evaluate(h) {
-                        Ok(endpoint) if balanced(endpoint) || endpoint.residual > 0.0 => {
-                            break endpoint;
+                        Ok(endpoint) => {
+                            if balanced(endpoint)? || endpoint.residual > 0.0 {
+                                break endpoint;
+                            }
+                            supported_h = endpoint.h;
                         }
-                        Ok(endpoint) => supported_h = endpoint.h,
                         Err(EvaporationError::Boiling { .. }) => boiling_h = h,
                         Err(error) => return Err(error),
                     }
@@ -434,7 +477,7 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
             }
             Err(error) => return Err(error),
         };
-        if balanced(far) {
+        if balanced(far)? {
             far
         } else {
             if far.residual.signum() == initial.residual.signum() {
@@ -453,7 +496,7 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
                     return Err(EvaporationError::NonConverged);
                 }
                 let middle = evaluate(h)?;
-                if balanced(middle) {
+                if balanced(middle)? {
                     break middle;
                 }
                 if middle.residual.signum() == left.residual.signum() {
@@ -466,7 +509,8 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
     };
     if endpoint.mass <= 0.0 {
         return Err(EvaporationError::InventoryLimit {
-            maximum_duration_s: (duration_s * (liquid.mass_kg / initial.raw_dm))
+            maximum_duration_s: (duration_s
+                * (liquid.mass_kg / initial.raw_dm.max(endpoint.raw_dm)))
                 .next_down()
                 .max(0.0),
         });
@@ -485,6 +529,7 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
         transferred_mass_kg: endpoint.dm,
         latent_energy_j: endpoint.latent,
         vapor_energy_j: checked(endpoint.dm * endpoint.h + endpoint.latent)?,
+        supplied_heat_j,
         energy_residual_j: endpoint.residual,
         mass_rate_residual_kg: checked(endpoint.dm - endpoint.raw_dm)?,
         recession_m: if liquid.area_m2 == 0.0 {
