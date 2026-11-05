@@ -110,8 +110,9 @@ Node count alone does not establish audio-band fidelity.
   quadrature roundoff. Passivity alone does not establish waveform accuracy.
   This isolated uniform aperture still assumes linear, low-Mach exterior
   acoustics: shell diffraction, mutual radiation, the structural cutout and
-  nonuniform aperture flow remain unresolved. The existing microphone remains a
-  compact vent observer, so this load is not a full-band receiver upgrade.
+  nonuniform aperture flow remain unresolved. The microphone integrates the same
+  uniform circular aperture in that medium, including its finite spread of
+  propagation delays; it still does not include the surrounding finite shell.
   Attach at rest on the final clock. Direct `Port::enable_baffled_radiation`
   retains an independently supplied linear neck resistance; the kit attachment
   specifically replaces its builder's radiation resistance. External/GPU
@@ -125,6 +126,23 @@ Node count alone does not establish audio-band fidelity.
   Integer delays stay exact; paths below one sample of flight use causal linear interpolation.
   This polynomial FIR approximation has a one-sample leading lobe. It is not an antialias
   filter, an exact wavefront, or a qualification of the instrument's broadband radiation model.
+  Vents use the uniform circular aperture's analytic spatial impulse response
+  ([Stepanishen 1971, equations 15–17](https://doi.org/10.1121/1.1912541)), integrated
+  against that same propagation basis. The pressure is `rho/A * h * dQ/dt`, with
+  `h = c * arc_fraction`: the fraction of a circle below the receiver that lies
+  inside the opening. This retains near-field pressure and off-axis aperture
+  interference. On axis it reduces to the exact difference of flows delayed from
+  the center and edge; in the far field it tends to Bessel piston directivity.
+  Setup splits at time cells and geometric edges, removes endpoint singularities,
+  and compares 4- and 8-point Gauss rules at relative coefficient tolerance `1e-9`
+  with bounded subdivision. That comparison is a convergence estimate, not a
+  certified error enclosure. Time refinement remains required. Paths exceeding
+  4096 coefficients or 1,048,576 samples of flight refuse during preparation.
+  Delay bins combine the aperture contributions once: stepping allocates nothing
+  and costs only the aperture transit span in samples. The existing tap-pair export
+  includes every coefficient, including rigid-floor image paths. This observation
+  does not add a force, radiation loss, jet noise or an acoustic source to the
+  dynamics. It retains the isolated uniform aperture and infinite-baffle assumptions.
   A cymbal is not in a baffle: its microphones hear both faces with opposite pressure polarity,
   including the delayed back-face sound reflected by a floor. They apply the unbaffled-disc
   axial amplitude limit (`(4/3pi) ka` times the baffled field for `ka << 1`), joined to the

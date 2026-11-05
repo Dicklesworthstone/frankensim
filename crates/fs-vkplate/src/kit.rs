@@ -1472,7 +1472,7 @@ pub fn attach_baffled_vent_radiation(piece: &mut Piece) -> Result<String, String
     for (index, port) in ports {
         ins.cavities[index].port = Some(port);
     }
-    Ok(format!("{count} vent(s): causal uniform-piston radiation in an infinite rigid baffle; replaces resonance-pinned resistance and exterior end correction. Positive finite-memory kernel on the {} Hz clock; stored exterior energy and emitted energy are separate. Time refinement still required; no shell diffraction or mutual exterior load. The receiver remains the compact vent observer", ins.rate))
+    Ok(format!("{count} vent(s): causal uniform-piston radiation in an infinite rigid baffle; replaces resonance-pinned resistance and exterior end correction. Positive finite-memory kernel on the {} Hz clock; stored exterior energy and emitted energy are separate. Time refinement still required; no shell diffraction or mutual exterior load. The receiver integrates the same uniform circular aperture in this medium", ins.rate))
 }
 
 /// Opt-in (ALL-IN, MB 14741): the drum's enclosed air as the rigid cylinder's acoustic modes below `f_max`

@@ -204,17 +204,17 @@ fn g3_cavity_port_floor_pressure_matches_direct_plus_image() {
         ins.mics.extend([reflected, Mic::new(pos), Mic::new(image)]);
         ins.prepare();
 
-        // Each noninteger propagation filter is exported as two tap pairs.
-        assert_eq!(ins.mics[0].ptaps.len(), 2 * (direct_paths + 1));
-        assert_eq!(ins.mics[1].ptaps.len(), 2 * direct_paths);
-        assert_eq!(ins.mics[2].ptaps.len(), 2);
+        // Every aperture contributes its finite spread of propagation delays.
+        assert_eq!(ins.mics[0].ptaps.len(), ins.mics[1].ptaps.len() + ins.mics[2].ptaps.len());
+        assert_eq!(ins.mics[1].ptaps.is_empty(), direct_paths == 0);
+        assert!(!ins.mics[2].ptaps.is_empty());
         let image_delay = ins.mics[2].ptaps[0].1;
-        let distance = image.iter().map(|x| x * x).sum::<f64>().sqrt();
         let gain = ins.mics[2].ptaps.iter().map(|t| t.2 + t.3).sum::<f64>();
         let delay_moment = ins.mics[2].ptaps.iter()
-            .map(|t| t.1 as f64 * t.2 + (t.1 + 1) as f64 * t.3).sum::<f64>() / gain;
-        assert!((delay_moment - distance / ins.gas.sound_speed * ins.rate).abs() < 1e-12);
-        assert!((gain * 2.0 * PI * distance / ins.gas.density - 1.0).abs() < 1e-14);
+            .map(|t| t.1 as f64 * t.2 + (t.1 + 1) as f64 * t.3).sum::<f64>();
+        // Exact Rayleigh first moment: (rho/2pi A) integral_A (R rate/c)/R dA.
+        let exact_moment = ins.gas.density * ins.rate / (2.0 * PI * ins.gas.sound_speed);
+        assert!((delay_moment / exact_moment - 1.0).abs() < 2e-10);
         assert!(gain > 0.0, "rigid pressure reflection preserves polarity");
         assert!(ins.mics[0].ring.len() > image_delay + 3);
 

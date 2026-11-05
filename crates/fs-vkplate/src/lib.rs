@@ -40,6 +40,7 @@ pub use annular_membrane::MembraneTerm;
 /// Lumped vent inertia and passive pressure/flow loss.
 pub mod port;
 pub use port::Port;
+mod port_receiver;
 
 pub use fs_material::gas::GasState;
 pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
@@ -2740,6 +2741,8 @@ fn microphone_delay_taps(delay: f64) -> (usize, [f64; 4]) {
 
 /// Rayleigh pressure microphone, optionally with the unbaffled thin-source approximation.
 /// Each prepared path uses cubic fractional-delay interpolation (linear below one sample of flight).
+/// Circular vents integrate their finite-aperture impulse response against that
+/// same basis, retaining near-field pressure and off-axis aperture interference.
 #[derive(Clone)]
 pub struct Mic {
     pub pos: [f64; 3],
@@ -3879,15 +3882,13 @@ impl Instrument {
                         if d[2] * q.facing <= 0.0 {
                             continue;
                         }
-                        let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                        let delay = r / self.gas.sound_speed * self.rate;
-                        let (di, weights) = microphone_delay_taps(delay);
-                        let wgt = self.gas.density / (2.0 * PI * r);
-                        m.ptaps.push((ci, di, wgt * weights[0], wgt * weights[1]));
-                        dmax = dmax.max(di + 2);
-                        if weights[2] != 0.0 || weights[3] != 0.0 {
-                            m.ptaps.push((ci, di + 2, wgt * weights[2], wgt * weights[3]));
-                            dmax = dmax.max(di + 4);
+                        let (first, weights) = port_receiver::circular_taps(
+                            q.area, d, self.gas.density, self.gas.sound_speed, self.rate,
+                        ).expect("admitted circular vent microphone geometry and clock");
+                        for (pair, values) in weights.chunks(2).enumerate() {
+                            let di = first + 2 * pair;
+                            m.ptaps.push((ci, di, values[0], values.get(1).copied().unwrap_or(0.0)));
+                            dmax = dmax.max(di + 2);
                         }
                     }
                 }
