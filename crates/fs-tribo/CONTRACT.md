@@ -675,6 +675,46 @@ limits, coupled capacity reduction, arbitrary tangent rotation/reflection,
 positive velocity scaling down to tiny speeds, small-spin asymptotics, branch
 continuity, deterministic replay, rest/frictionless selections and refusals.
 
+### Local-speed friction across a Hertz sliding and spinning patch
+
+`sliding_patch::rate_dependent::HertzFrictionPatch` resolves the original shared
+`FrictionLaw` at each local speed `|u + omega cross r|`. The full Hertz pressure
+weights force, spin moment and heat together. In particular, zero centre speed
+does not erase the friction and heat of a spinning patch, and neither a centre
+coefficient nor an RMS speed replaces the original local law.
+
+Coulomb and pure translation retain their exact responses. Unclipped affine
+speed laws use the exact Hertz pressure moment `integral r^2 p dA = 2 P a^2/5`,
+giving additional force `-slope P u`, spin moment
+`-2 slope P a^2 omega/5`, and their corresponding local-slip heat. This includes
+velocity strengthening, weakening before the zero clamp, and a purely viscous
+curve with zero Coulomb coefficient. A fully clamped patch returns exactly zero.
+Clipped affine pure spin integrates its analytically known active central radius
+directly. A small positive frictional core therefore cannot vanish between
+full-disk nodes or be lost by subtracting large Coulomb responses.
+
+Other cases use explicit radial/angular composite four-point Gauss resolution.
+The integrand subtracts the exact zero-speed Coulomb response, removing the
+direction singularity at an isolated stationary point without regularizing
+velocity. The radial transform `r=a sin(theta)` resolves the pressure edge;
+reflection symmetry, cached radial geometry and compensated sums keep work
+bounded and allocation-free. Each panel count is in `1..=256`, bounding original
+curve evaluations by 1,048,576; pure spin requires only radial integration.
+Panel counts are discretization controls, not a certified error tolerance.
+Consumers must refine both axes for mixed motion, or the radial axis for pure
+spin. Unrepresentable output or negative integrated heat refuses rather than
+clamping. A missed active region with no positive sampled traction also refuses
+rather than reporting a cancellation remainder as physical heat. The work
+residual retains independently accumulated local heat.
+
+Regressions retain the exact Coulomb/affine limits, compare all non-affine shared
+curve families with independent full-disk traction/heat integration, exercise
+three resolution rungs, and check objectivity, reversal, replay, rest, lift-off,
+clamping and bounded-control refusal. This instantaneous prescribed-kinematics
+owner adds no static-onset solve, retained shear, normal evolution, branch
+selection or thermal partition. Interface source admission and applicability
+remain the material adapter's responsibility; no measured authority is inferred.
+
 ### Coupled Hertz static and sliding wrench
 
 `sliding_patch::contact::HertzWrenchContact` solves a candidate held force and

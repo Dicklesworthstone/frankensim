@@ -29,6 +29,9 @@ use crate::{TriboError, nonnegative_finite, positive_finite};
 /// Coupled static/sliding contact with full translational and torsional recoil.
 pub mod contact;
 
+/// Shared speed-dependent friction resolved over the original Hertz patch.
+pub mod rate_dependent;
+
 fn finite(value: f64, field: &'static str) -> Result<f64, TriboError> {
     crate::finite(value, field)?;
     Ok(value)
@@ -81,9 +84,9 @@ pub struct HertzSlidingPatch {
 /// Resultant acting on the side whose relative velocity was supplied.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HertzSlidingWrench {
-    /// Tangential force opposing the centre slip velocity [N].
+    /// Tangential resultant acting on the supplied relative-velocity side [N].
     pub force_n: [f64; 2],
-    /// Moment about the patch centre, opposing relative normal-axis spin [N m].
+    /// Normal-axis moment about the patch centre on that same side [N m].
     pub spin_moment_nm: f64,
     /// Integral of `mu p |u + omega cross r|` [W]. No partition is assigned.
     pub dissipated_power_w: f64,
