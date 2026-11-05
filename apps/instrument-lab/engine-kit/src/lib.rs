@@ -170,6 +170,12 @@ mod wasm {
         pub fn copy(&self) -> KitPiece {
             KitPiece { live: self.live.clone(), scale: self.scale }
         }
+        /// Settle the initial pedal load on a source-resolved shared hi-hat.
+        /// Only valid before its first strike; refusal preserves the original state.
+        #[wasm_bindgen(js_name = prepareHiHatPedal)]
+        pub fn prepare_hihat_pedal(&mut self, initial_pedal_n: f64) -> Result<(), JsError> {
+            self.live.prepare_hihat_pedal(initial_pedal_n).map_err(|e| JsError::new(&e))
+        }
         /// Strike at (x, y) metres from the centre of the playing surface at `speed` m/s.
         pub fn strike(&mut self, x: f64, y: f64, speed: f64) {
             self.live.strike(x, y, speed);

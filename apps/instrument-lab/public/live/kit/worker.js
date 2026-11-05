@@ -4,7 +4,7 @@
 // 5x (levels.js, engine_levels.json beside the wasm).
 //
 // Main thread -> worker
-//   {type:'init', piece, port, gasRecord?, gasSources?, materials?, gain?, aheadFrames?, chunk?, scales?, minRealtime?, benchMs?, fieldHz?, fieldFrames?, bursts?}
+//   {type:'init', piece, port, gasRecord?, gasSources?, materials?, hihatPedal?, gain?, aheadFrames?, chunk?, scales?, minRealtime?, benchMs?, fieldHz?, fieldFrames?, bursts?}
 //       gasRecord    shared material record: `T_K P_Pa RH`, or
 //                    `mixture T_K P_Pa mole|mass COUNT SPECIES FRACTION ...`
 //                    Held for every grid trial, clone and fallback construction.
@@ -15,6 +15,7 @@
 //                    (KitMaterialOptions in mix.ts); no browser material laws.
 //                    Drum heads need its bendingLoss, or filmLoss 'stated-unknown'
 //                    (entered as 0, with a receipt); otherwise they refuse.
+//       hihatPedal  {initialForceN}: settle the shared hihat before playback, with all sources retained
 //       chunk        most frames per audio message (default 128; lane.js)
 //       fieldHz      fields per second of wall time (0: no fields)
 //       fieldFrames  instead: one field every this many AUDIO frames (even spacing however far
@@ -27,14 +28,16 @@
 //                    more once it rings than at its attack needs longer: the snare's wires touch the head
 //                    from ~85 ms after a stroke, and its steps then cost ~1.6x as much
 //   {type:'strike', x, y, speed, frame?}   x, y metres from the centre; speed m/s
-//   {type:'sequence', startFrame, loopFrames, events:[{offset, x, y, speed}]}
-//   {type:'score', events:[{frame, x, y, speed}]}   a fixed score, played once
+//   {type:'pedal', forceN, transitionSeconds, frame?} — same hi-hat rod, at an audio frame
+//   {type:'sequence', startFrame, loopFrames, events:[{offset, ...action}]}
+//   {type:'score', events:[{frame, ...action}]}   a fixed score, played once
+//       action       {x, y, speed} or {pedalForceN, transitionSeconds}
 //   {type:'stopScore'}                      drop the rest of the score (ringing continues)
 //   {type:'resync', epoch}                  render for the clock as it is now (after a mix flush)
 //   {type:'stop'}                           end the sequence (ringing continues)
 //   {type:'gain', gain}                     a new page gain (scaled by the same levelFix)
 // Worker -> main thread
-//   {type:'ready', info, gasRecord?, xy:Float32Array, h, radius, scale, realtime, levelFix, levels, refused}
+//   {type:'ready', info, gasRecord?, hihatPedal?, xy:Float32Array, h, radius, scale, realtime, levelFix, levels, refused}
 //       levelFix  the factor on the page's gain for this grid (1 on 5x); levels: 'ok', or 'none' when
 //                 engine_levels.json is missing or was measured with another wasm (gain unscaled)
 //       refused   [{scale, message}]: each grid of the search whose build refused, with the engine's own
@@ -120,7 +123,7 @@ function copyOf(p) {
 
 // The material owner admits the record; the browser never substitutes another
 // gas after a refused constructor or when a deployed WASM predates withGas.
-function makePiece(name, scale, gasRecord, materials, gasSources) {
+function buildPiece(name, scale, gasRecord, materials, gasSources) {
   if (gasRecord !== undefined && (typeof gasRecord !== 'string' || !gasRecord.trim())) {
     throw new Error('A nonempty atmosphere record is required.');
   }
@@ -183,6 +186,31 @@ function makePiece(name, scale, gasRecord, materials, gasSources) {
   return KitPiece.withGas(name, scale, gasRecord);
 }
 
+// Prepare pedal load on the source-bound instrument before the benchmark copy.
+// The native owner settles the same rod/contact state for every construction route.
+function makePiece(name, scale, gasRecord, materials, gasSources, hihatPedal) {
+  if (hihatPedal !== undefined && (name !== 'hihat' || !hihatPedal
+      || !Number.isFinite(hihatPedal.initialForceN) || hihatPedal.initialForceN < 0)) {
+    throw new Error('Initial pedal force requires the shared hihat and a finite nonnegative force in newtons.');
+  }
+  const built = buildPiece(name, scale, gasRecord, materials, gasSources);
+  try {
+    if (name === 'hihat' && typeof built.setPedalForce !== 'function') {
+      throw new Error('This kit engine needs rebuilding with shared hi-hat pedal support.');
+    }
+    if (hihatPedal !== undefined) {
+      if (typeof built.prepareHiHatPedal !== 'function') {
+        throw new Error('This kit engine needs rebuilding with initial hi-hat pedal preparation.');
+      }
+      built.prepareHiHatPedal(hihatPedal.initialForceN);
+    }
+    return built;
+  } catch (e) {
+    built.free();
+    throw e;
+  }
+}
+
 // The finest of `scales` (listed finest first) that runs `minRealtime` times faster than real time; if none
 // does, the coarsest. The grids are timed from the coarse end, stepping finer until one falls short. A finer
 // grid has more nodes and never runs faster, so this is the grid a finest-first search picks. But no grid finer
@@ -197,15 +225,15 @@ function makePiece(name, scale, gasRecord, materials, gasSources) {
 // shortfall there is timed once more, on a new build, before it ends the search.
 // A grid whose build refuses is skipped, and its text goes into `refused` for the page to show.
 let timed = 0;
-function choose(name, scales, minRealtime, benchMs, gasRecord, materials, gasSources, refused) {
+function choose(name, scales, minRealtime, benchMs, gasRecord, materials, gasSources, hihatPedal, refused) {
   let pick = null;
   for (let i = scales.length - 1; i >= 0; i--) {
     let kept = null, rt;
     try {
-      const built = makePiece(name, scales[i], gasRecord, materials, gasSources);
+      const built = makePiece(name, scales[i], gasRecord, materials, gasSources, hihatPedal);
       kept = copyOf(built);
       rt = bench(built, benchMs, minRealtime);
-      if (timed++ === 0 && rt < minRealtime) rt = bench(makePiece(name, scales[i], gasRecord, materials, gasSources), benchMs, minRealtime);
+      if (timed++ === 0 && rt < minRealtime) rt = bench(makePiece(name, scales[i], gasRecord, materials, gasSources, hihatPedal), benchMs, minRealtime);
     } catch (e) {
       kept?.free();
       refused.push({ scale: scales[i], message: e && e.message ? String(e.message) : String(e) });
@@ -220,7 +248,7 @@ function choose(name, scales, minRealtime, benchMs, gasRecord, materials, gasSou
     pick = { scale: scales[i], realtime: rt, piece: kept };
   }
   if (pick) return pick;
-  const built = makePiece(name, 5, gasRecord, materials, gasSources);
+  const built = makePiece(name, 5, gasRecord, materials, gasSources, hihatPedal);
   const kept = copyOf(built);
   try {
     return { scale: 5, realtime: bench(built, benchMs, minRealtime), piece: kept };
@@ -244,21 +272,29 @@ self.onmessage = async (event) => {
       if (m.bursts === false) bursts = false;
       const gasRecord = m.gasRecord;
       const materials = m.materials;
+      const hihatPedal = m.hihatPedal;
       const gasSources = gasSourcePacket(gasRecord, m.gasSources);
       const refused = [];
-      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112, gasRecord, materials, gasSources, refused);
-      piece = pick.piece || makePiece(m.piece, pick.scale, gasRecord, materials, gasSources);
+      const pick = choose(m.piece, m.scales || [2.5, 3, 3.5, 4, 5, 6, 7, 8], m.minRealtime || 1.7, Number(m.benchMs) > 0 ? Number(m.benchMs) : 112, gasRecord, materials, gasSources, hihatPedal, refused);
+      piece = pick.piece || makePiece(m.piece, pick.scale, gasRecord, materials, gasSources, hihatPedal);
       // The grid correction table describes the original material presets.
       // A source-bound swap keeps the declared pressure gain; it is never
       // normalized back to a bronze/Mylar stroke's level.
-      fix = materials === undefined && gasSources === undefined ? levelFix(table, m.piece, pick.scale, pageGain) : 1;
+      // The shared pedal trajectory has no measured level table; keep its declared gain.
+      const measuredLevels = m.piece !== 'hihat' && materials === undefined && gasSources === undefined;
+      fix = measuredLevels ? levelFix(table, m.piece, pick.scale, pageGain) : 1;
       gain = pageGain * fix;
       const engine = {
         idle: () => piece.asleep(),
         apply: (e) => {
-          piece.strike(e.x, e.y, e.speed);
-          if (bursts && (fieldEvery !== Infinity || fieldFrames > 0)) burst = { frames: [], since: 0, frame: lane ? lane.frame : 0 };
-          if (fieldFrames > 0) fieldDue = 0; // show the stroke's first moment
+          if ('pedalForceN' in e) {
+            piece.setPedalForce(e.pedalForceN, e.transitionSeconds);
+            burst = null;
+          } else {
+            piece.strike(e.x, e.y, e.speed);
+            if (bursts && (fieldEvery !== Infinity || fieldFrames > 0)) burst = { frames: [], since: 0, frame: lane ? lane.frame : 0 };
+          }
+          if (fieldFrames > 0) fieldDue = 0; // show the mechanical command's first moment
         },
         render: (n) => {
           let out;
@@ -310,11 +346,13 @@ self.onmessage = async (event) => {
       };
       lane = createLane(m.port, engine, { aheadFrames: m.aheadFrames || 1024, chunk: m.chunk });
       const xy = piece.surfaceXY();
-      post({ type: 'ready', info: JSON.parse(piece.info()), gasRecord, xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table && materials === undefined && gasSources === undefined ? 'ok' : 'none', refused }, [xy.buffer]);
+      post({ type: 'ready', info: JSON.parse(piece.info()), gasRecord, hihatPedal, xy, h: piece.surfaceH(), radius: piece.radius(), scale: pick.scale, realtime: pick.realtime, levelFix: fix, levels: table && measuredLevels ? 'ok' : 'none', refused }, [xy.buffer]);
     } else if (!piece || !lane) {
       return;
     } else if (m.type === 'strike') {
       lane.event({ frame: Number.isFinite(m.frame) ? m.frame : undefined, x: m.x, y: m.y, speed: m.speed });
+    } else if (m.type === 'pedal') {
+      lane.event({ frame: Number.isFinite(m.frame) ? m.frame : undefined, pedalForceN: m.forceN, transitionSeconds: m.transitionSeconds });
     } else if (m.type === 'sequence') {
       lane.sequence(m.startFrame, m.loopFrames, m.events);
     } else if (m.type === 'score') {

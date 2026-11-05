@@ -17,6 +17,7 @@ struct HiHatPedal {
     rod: usize,
     drive: usize,
     transition_end: f64,
+    transition_seconds: f64,
 }
 
 /// A clone holds every bit of the piece's state, so it steps exactly as the original would from
@@ -84,11 +85,34 @@ impl Live {
             return Err("hi-hat pedal force must be finite and nonnegative [N]".into());
         }
         let mut live = Self::new("hihat", scale)?;
-        if initial_pedal_n > 0.0 {
-            live.set_hihat_pedal(initial_pedal_n, 0.12)?;
-            live.settle_initial_hihat_load()?;
-        }
+        live.prepare_hihat_pedal(initial_pedal_n)?;
         Ok(live)
+    }
+
+    /// Prepare the shared hi-hat before its first strike, retaining the material
+    /// and atmosphere sources selected by its constructor. The initial load uses
+    /// the same 120 ms force ramp and bounded physical settle as `with_hihat_pedal`.
+    /// A refusal leaves this instrument's entire trajectory unchanged.
+    pub fn prepare_hihat_pedal(&mut self, initial_pedal_n: f64) -> Result<(), String> {
+        if !initial_pedal_n.is_finite() || initial_pedal_n < 0.0 {
+            return Err("hi-hat pedal force must be finite and nonnegative [N]".into());
+        }
+        if self.name != "hihat" || self.pedal.is_none() {
+            return Err("pedal preparation requires the shared hihat instrument".into());
+        }
+        if self.strokes != 0 || !self.ins.strikes.is_empty() {
+            return Err("hi-hat pedal preparation must precede the first strike".into());
+        }
+        let mut prepared = self.clone();
+        prepared.set_hihat_pedal(initial_pedal_n, 0.12)?;
+        // A newly built open pair stays bitwise identical to ordinary open play.
+        // Releasing a previously commanded load still runs its physical settle.
+        if initial_pedal_n > 0.0 || prepared.pedal.as_ref()
+            .is_some_and(|pedal| pedal.transition_end > prepared.ins.time()) {
+            prepared.settle_initial_hihat_load()?;
+        }
+        *self = prepared;
+        Ok(())
     }
 
     fn settle_initial_hihat_load(&mut self) -> Result<(), String> {
@@ -260,7 +284,7 @@ impl Live {
                 .ok_or_else(|| "shared hi-hat is missing its pull rod".to_string())?;
             let drive = p.instrument.drives.len();
             p.instrument.drives.push(Drive { body: rod, node: 0, knots: vec![(0.0, 0.0)] });
-            Some(HiHatPedal { rod, drive, transition_end: p.instrument.time() })
+            Some(HiHatPedal { rod, drive, transition_end: p.instrument.time(), transition_seconds: 0.0 })
         } else { None };
         let mut live = Live {
             ins: p.instrument, name: piece.into(), target, radius, strikers: vec![(stick, contact)], foot,
@@ -279,6 +303,8 @@ impl Live {
     /// Prescribe downward force on the shared hi-hat's pull rod [N], ramped from its
     /// current force over `transition_seconds`. This is an external mechanical input,
     /// not a stick stroke or a PCM envelope. Zero force releases the return spring.
+    /// Repeating the same target and duration retains an unfinished ramp's endpoint;
+    /// a changed duration explicitly replaces it from the current force.
     /// Fixed `hihat-open`/`hihat-closed` presets refuse because they have different rest gaps.
     pub fn set_hihat_pedal(&mut self, force_n: f64, transition_seconds: f64) -> Result<(), String> {
         if !force_n.is_finite() || force_n < 0.0 {
@@ -300,12 +326,17 @@ impl Live {
         if pedal.transition_end <= now && current == -force_n {
             return Ok(());
         }
+        if pedal.transition_seconds == transition_seconds
+            && drive.knots.last().is_some_and(|&(_, target)| target == -force_n) {
+            return Ok(());
+        }
         drive.knots = if transition_seconds == 0.0 {
             vec![(now, -force_n)]
         } else {
             vec![(now, current), (end, -force_n)]
         };
         pedal.transition_end = end;
+        pedal.transition_seconds = transition_seconds;
         self.asleep = false;
         self.quiet_samples = 0;
         Ok(())
@@ -582,6 +613,109 @@ mod tests {
         assert_ne!(a, unclosed, "a closure must affect the same ringing cymbals");
         let rod = live.pedal.as_ref().unwrap().rod;
         assert_ne!(live.ins.bodies[rod].w, control.ins.bodies[rod].w);
+    }
+
+    #[test]
+    fn repeated_hihat_target_keeps_its_finish_time_but_a_new_duration_replaces_it() {
+        let mut live = Live::with_hihat_pedal(7.0, 0.0).unwrap();
+        live.set_hihat_pedal(80.0, 0.12).unwrap();
+        let drive = live.pedal.as_ref().unwrap().drive;
+        let original = live.ins.drives[drive].knots.clone();
+        live.render(&mut [0.0; 512], 1.0);
+        assert!(live.ins.time() > original[0].0);
+        let mut uninterrupted = live.clone();
+        live.set_hihat_pedal(80.0, 0.12).unwrap();
+        assert_eq!(live.ins.drives[drive].knots, original,
+            "repeated closed-note events must not keep postponing closure");
+        assert_eq!(live.pedal.as_ref().unwrap().transition_end, original[1].0);
+        let (mut a, mut b) = ([0.0; 512], [0.0; 512]);
+        live.render(&mut a, 1.0);
+        uninterrupted.render(&mut b, 1.0);
+        assert_eq!(a, b, "a repeated target must preserve the physical trajectory");
+
+        let now = live.ins.time();
+        let current = live.ins.drives[drive].at(now);
+        live.set_hihat_pedal(80.0, 0.04).unwrap();
+        assert_eq!(live.ins.drives[drive].knots, vec![(now, current), (now + 0.04, -80.0)]);
+        assert_eq!(live.pedal.as_ref().unwrap().transition_seconds, 0.04);
+    }
+
+    #[test]
+    fn hihat_preparation_retains_resolved_material_and_atmosphere_authority() {
+        let source = fs_material::gas_species::input::read_gas_record(
+            &mut "mixture 293.15 100000 mole 2 N2 0.6 CO2 0.4".split_ascii_whitespace(),
+            None, None).unwrap();
+        // A polymer pair is only a source-retention control, not a bronze preset.
+        let film = include_bytes!("../packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk");
+        let materials = KitMaterials::from_packs_at_temperature(
+            film, &[], film, "T", 293.15, 9e-6, 0.005, 0.05).unwrap();
+        let mut live = Live::with_resolved_atmosphere("hihat", 7.0, source.clone(), Some(materials)).unwrap();
+        let authority = live.atmosphere_source.as_ref().unwrap().clone();
+        let material_authority = live.ins.materials.as_ref().unwrap().clone();
+        let state = live.ins.bodies.iter().map(|body| (body.w.clone(), body.wp.clone())).collect::<Vec<_>>();
+        let step = live.ins.step_index;
+        live.prepare_hihat_pedal(0.0).unwrap();
+        assert!(Arc::ptr_eq(&authority, live.atmosphere_source.as_ref().unwrap()));
+        assert!(Arc::ptr_eq(&material_authority, live.ins.materials.as_ref().unwrap()));
+        assert_eq!(live.atmosphere_source(), Some(&source));
+        assert_eq!(live.ins.gas(), source.state());
+        assert_eq!(live.ins.step_index, step, "an initially open pair needs no extra clock");
+        assert_eq!(live.ins.bodies.iter().map(|body| (body.w.clone(), body.wp.clone())).collect::<Vec<_>>(), state);
+
+        let mut loaded = Live::with_resolved_atmosphere("hihat", 7.0, source.clone(), None).unwrap();
+        let authority = loaded.atmosphere_source.as_ref().unwrap().clone();
+        loaded.prepare_hihat_pedal(80.0).unwrap();
+        assert!(loaded.asleep());
+        assert!(Arc::ptr_eq(&authority, loaded.atmosphere_source.as_ref().unwrap()));
+        assert_eq!(loaded.ins.gas(), source.state());
+        assert_eq!(loaded.strokes, 0);
+        assert!(loaded.ins.contacts.iter().any(|contact| contact.active && contact.force > 0.0));
+    }
+
+    #[test]
+    fn hihat_preparation_refuses_invalid_fixed_and_already_struck_instruments() {
+        let mut live = Live::new("hihat", 7.0).unwrap();
+        let drive = live.pedal.as_ref().unwrap().drive;
+        let original = live.ins.drives[drive].knots.clone();
+        let step = live.ins.step_index;
+        for force in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(live.prepare_hihat_pedal(force).is_err());
+            assert_eq!(live.ins.drives[drive].knots, original);
+            assert_eq!(live.ins.step_index, step);
+        }
+        for name in ["kick", "hihat-open", "hihat-closed"] {
+            assert!(Live::new(name, 7.0).unwrap().prepare_hihat_pedal(80.0).is_err());
+        }
+        live.strike(0.85 * live.radius, 0.0, 2.5);
+        let mut control = live.clone();
+        assert!(live.prepare_hihat_pedal(80.0).unwrap_err().contains("first strike"));
+        let (mut a, mut b) = ([0.0; 1024], [0.0; 1024]);
+        live.render(&mut a, 1.0);
+        control.render(&mut b, 1.0);
+        assert_eq!(a, b, "refusing late preparation must not erase a pending strike");
+        assert!(a.iter().any(|sample| *sample != 0.0));
+        assert!(live.prepare_hihat_pedal(0.0).is_err(), "rendering a strike does not permit preparation again");
+    }
+
+    #[test]
+    fn failed_hihat_settle_keeps_the_original_state_and_force_program() {
+        let mut live = Live::new("hihat", 7.0).unwrap();
+        live.ins.prepare();
+        // A corrupt delayed output must refuse preparation after stepping its
+        // candidate, without publishing that candidate's advanced mechanics.
+        live.ins.mics[0].ring.fill(f64::NAN);
+        let before = live.clone();
+        assert!(live.prepare_hihat_pedal(80.0).unwrap_err().contains("nonfinite"));
+        assert_eq!(live.ins.step_index, before.ins.step_index);
+        assert_eq!(live.ins.bodies.iter().map(|body| (body.w.clone(), body.wp.clone())).collect::<Vec<_>>(),
+            before.ins.bodies.iter().map(|body| (body.w.clone(), body.wp.clone())).collect::<Vec<_>>());
+        assert_eq!(live.ins.drives.iter().map(|drive| drive.knots.clone()).collect::<Vec<_>>(),
+            before.ins.drives.iter().map(|drive| drive.knots.clone()).collect::<Vec<_>>());
+        assert_eq!(live.ins.mics.iter().map(|mic| mic.ring.iter().map(|v| v.to_bits()).collect::<Vec<_>>()).collect::<Vec<_>>(),
+            before.ins.mics.iter().map(|mic| mic.ring.iter().map(|v| v.to_bits()).collect::<Vec<_>>()).collect::<Vec<_>>());
+        assert_eq!(live.pedal.as_ref().unwrap().transition_end, before.pedal.as_ref().unwrap().transition_end);
+        assert_eq!((live.strokes, live.asleep, live.quiet_samples),
+            (before.strokes, before.asleep, before.quiet_samples));
     }
 
     #[test]

@@ -212,6 +212,8 @@ export interface KitReady {
     headLoss?: string | null };
   /** Exact requested atmosphere, retained through every grid trial and rebuild. */
   gasRecord?: string;
+  /** The shared hi-hat's prepared pedal load; absent on fixed presets. */
+  hihatPedal?: { initialForceN: number };
   xy: Float32Array;
   h: number;
   radius: number;
@@ -261,8 +263,10 @@ export interface LaneWorkerStats {
   governorUp?: number;
 }
 
-/** A stroke of a fixed score: absolute context frame, point on the surface [m], stick speed [m/s]. */
-export interface KitScoreEvent { frame: number; x: number; y: number; speed: number }
+/** A mechanical command: either a stick impact or a pedal force, never an audio envelope. */
+export type KitAction = { x: number; y: number; speed: number } | { pedalForceN: number; transitionSeconds: number };
+/** A fixed-score command at an absolute context frame; simultaneous commands retain their order. */
+export type KitScoreEvent = { frame: number } & KitAction;
 /** A key or pedal event of a fixed score (one operation per event; silent lifts a key without a strike). */
 export interface PianoScoreEvent { frame: number; on?: number; off?: number; silent?: number; speed?: number; sustain?: number; unaCorda?: boolean; sostenuto?: boolean }
 
@@ -285,8 +289,10 @@ export class KitLane {
    * the same immutable source state reaches loading and microphone propagation.
    * `materials`: source-bound elastic surfaces and a spherical striker. Bulk material data changes
    * mass, stiffness and Hertz contact; preset T60/support/rim/wire laws remain separate declarations.
+   * `hihatPedal`: settle the shared `hihat` under this force before benchmarking and playing it.
+   * The same gas/material sources and cymbal motion are retained through later pedal commands.
    */
-  constructor(mix: LiveMix, piece: string, opts: { gain: number; gasRecord?: string; gasSources?: GasSourceOptions; materials?: KitMaterialOptions; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
+  constructor(mix: LiveMix, piece: string, opts: { gain: number; gasRecord?: string; gasSources?: GasSourceOptions; materials?: KitMaterialOptions; hihatPedal?: { initialForceN: number }; aheadFrames?: number; chunk?: number; scales?: number[]; minRealtime?: number; benchMs?: number; fieldHz?: number; fieldFrames?: number; bursts?: boolean }) {
     this.piece = piece;
     this.lane = new LaneWorker<KitReady>(`${LIVE_BASE_URL}/kit/worker.js`, `kit-${piece}`, `the ${piece} engine`, mix, piece, (m) => {
       if (m.type === "field") this.onField?.(m as unknown as KitField);
@@ -300,7 +306,11 @@ export class KitLane {
   strike(x: number, y: number, speed: number, frame?: number): void {
     this.worker.postMessage({ type: "strike", x, y, speed, frame });
   }
-  sequence(startFrame: number, loopFrames: number, events: { offset: number; x: number; y: number; speed: number }[]): void {
+  /** Move the shared hi-hat's pull rod without adding a stick stroke or resetting its ringing. */
+  pedal(forceN: number, transitionSeconds: number, frame?: number): void {
+    this.worker.postMessage({ type: "pedal", forceN, transitionSeconds, frame });
+  }
+  sequence(startFrame: number, loopFrames: number, events: ({ offset: number } & KitAction)[]): void {
     this.worker.postMessage({ type: "sequence", startFrame, loopFrames, events });
   }
   /** Replace the fixed score (played once, sorted once in the Worker). */

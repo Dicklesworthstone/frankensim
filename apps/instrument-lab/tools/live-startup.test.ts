@@ -34,6 +34,48 @@ test("kit lane startup and replacement forward the caller's full atmosphere reco
   }
 });
 
+test("shared hi-hat retains preparation and schedules pedal commands independently of strikes", async () => {
+  const previousWorker = globalThis.Worker;
+  const messages: Record<string, unknown>[] = [], ports: MessagePort[] = [];
+  let boundary: WorkerBoundary;
+  class WorkerBoundary {
+    onmessage: ((event: { data: object }) => void) | null = null;
+    onerror: ((event: ErrorEvent) => void) | null = null;
+    constructor() { boundary = this; }
+    postMessage(message: Record<string, unknown>) {
+      messages.push(message);
+      if (message.port) ports.push(message.port as MessagePort);
+    }
+    terminate() {}
+  }
+  Object.assign(globalThis, { Worker: WorkerBoundary });
+  const mix = { attach(_id: string, port: MessagePort) { ports.push(port); }, dropLane() {} } as unknown as ConstructorParameters<typeof KitLane>[0];
+  const lane = new KitLane(mix, "hihat", { gain: 0.134, gasRecord: "300 90000 0.4", hihatPedal: { initialForceN: 35 } });
+  try {
+    assert.equal(messages[0]!.piece, "hihat");
+    assert.equal(messages[0]!.gasRecord, "300 90000 0.4");
+    assert.deepEqual(messages[0]!.hihatPedal, { initialForceN: 35 });
+    boundary!.onmessage!({ data: { type: "ready", hihatPedal: { initialForceN: 35 } } });
+    assert.deepEqual((await lane.ready).hihatPedal, { initialForceN: 35 });
+    lane.pedal(0, 0.12, 480);
+    lane.strike(0.12, 0, 2.5, 960);
+    lane.score([{ frame: 1440, pedalForceN: 80, transitionSeconds: 0.12 },
+      { frame: 1920, x: 0.1, y: 0.02, speed: 3 }]);
+    lane.sequence(2400, 4800, [{ offset: 0, pedalForceN: 0, transitionSeconds: 0.12 }]);
+    assert.deepEqual(messages.slice(1), [
+      { type: "pedal", forceN: 0, transitionSeconds: 0.12, frame: 480 },
+      { type: "strike", x: 0.12, y: 0, speed: 2.5, frame: 960 },
+      { type: "score", events: [{ frame: 1440, pedalForceN: 80, transitionSeconds: 0.12 },
+        { frame: 1920, x: 0.1, y: 0.02, speed: 3 }] },
+      { type: "sequence", startFrame: 2400, loopFrames: 4800,
+        events: [{ offset: 0, pedalForceN: 0, transitionSeconds: 0.12 }] },
+    ]);
+  } finally {
+    lane.dispose(); ports.forEach(port => port.close());
+    Object.assign(globalThis, { Worker: previousWorker });
+  }
+});
+
 test("failed worklet URLs change on retry; concurrent and successful loads are shared", async () => {
   const urls: string[] = [];
   const context = { audioWorklet: { async addModule(url: string) {
