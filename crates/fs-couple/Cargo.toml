@@ -90,6 +90,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Source-owned Maxwell-Stefan, Soret and Dufour transport in the live gas assembly.
+molecular-transport = ["dep:fs-gas", "fs-gas/material"]
 # Native SDF barrier friction, accepted sliding history and finite-cell heat.
 experimental-solid-contact-heat = ["fs-solid/contact"]
 # Coherent winding heat and magnetic work on the native enthalpy timeline.
