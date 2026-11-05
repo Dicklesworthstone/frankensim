@@ -13,7 +13,9 @@
 //! It is neither a rotated infinitesimal-strain update nor a finite-difference
 //! tangent. Large rotation and plastic stretch are supported within explicit
 //! elastic, plastic and accumulated-history bounds. This law is isothermal,
-//! rate independent and isotropically hardening; it does not assert cyclic
+//! rate independent and isotropically hardening. Explicit Voce saturation
+//! extends the linear hardening through the same metric and tangent owner;
+//! it does not assert cyclic
 //! kinematic hardening, damage, thermal expansion or a mixed-pressure element.
 
 use core::fmt;
@@ -29,6 +31,8 @@ pub mod rate;
 pub mod source;
 /// Affine temperature dependence and multiplicative isotropic thermal stretch.
 pub mod thermal;
+/// Energetic Voce saturation on the same finite metric, flow and tangent owner.
+pub mod voce;
 
 const IDENTITY6: [f64; 6] = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
 const ROUND_OFF: f64 = 2048.0 * f64::EPSILON;
@@ -66,6 +70,7 @@ pub struct FiniteJ2 {
     parameters: FiniteJ2Parameters,
     limits: FiniteJ2Limits,
     maximum_creep_alpha: Option<f64>,
+    voce: Option<voce::FiniteVoceHardening>,
 }
 
 /// Complete native material-point history, with no hidden deformation reset.
@@ -262,6 +267,7 @@ impl FiniteJ2 {
             parameters,
             limits,
             maximum_creep_alpha: None,
+            voce: None,
         })
     }
 
@@ -484,6 +490,9 @@ impl FiniteJ2 {
             return Err(FiniteJ2Error::Numerical(
                 "trial equivalent stress is not finite",
             ));
+        }
+        if self.voce.is_some() {
+            return self.return_map_voce(f, old, trial, q_trial, kinetics);
         }
         let radius_old = self.yield_radius(old.alpha);
         let excess = q_trial - radius_old;
@@ -741,7 +750,19 @@ impl FiniteJ2 {
     }
 
     fn yield_radius(&self, alpha: f64) -> f64 {
-        self.parameters.yield_stress_pa + self.parameters.hardening_modulus_pa * alpha
+        let linear = self.parameters.yield_stress_pa + self.parameters.hardening_modulus_pa * alpha;
+        match self.voce {
+            Some(voce) => linear + voce.strength(alpha),
+            None => linear,
+        }
+    }
+
+    fn hardening_energy(&self, alpha: f64) -> f64 {
+        let linear = 0.5 * self.parameters.hardening_modulus_pa * alpha * alpha;
+        match self.voce {
+            Some(voce) => linear + voce.stored_energy(alpha),
+            None => linear,
+        }
     }
 
     fn check_elastic_domain(&self, log_j: f64, dev: &[f64; 9]) -> Result<(), FiniteJ2Error> {
@@ -757,7 +778,7 @@ impl FiniteJ2 {
         let p = &self.parameters;
         let energy = 0.5 * p.bulk_modulus_pa * log_j * log_j
             + p.shear_modulus_pa * dot(dev, dev)
-            + 0.5 * p.hardening_modulus_pa * alpha * alpha;
+            + self.hardening_energy(alpha);
         if !energy.is_finite() {
             return Err(FiniteJ2Error::Numerical("stored energy is not finite"));
         }

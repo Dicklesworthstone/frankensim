@@ -156,6 +156,8 @@ impl FiniteNortonJ2 {
             let correction =
                 -(h / (h + flow.tangent_modulus_pa)) * ((1.0 - 1.0 / exponent) * scale);
             (flow.overstress_pa, flow.increment, 0.0, correction)
+        } else if self.backbone().voce_hardening().is_some() {
+            return self.radial_return_voce(trial, alpha);
         } else if hardening == 0.0 {
             let creep = self.native.increment_at_stress(yield_old)?;
             let plastic = ((trial - yield_old) - h * creep) / h;
@@ -224,5 +226,86 @@ impl FiniteNortonJ2 {
             primary_potential: plastic_dissipation,
             rate_potential: potential_fraction * creep_dissipation,
         })
+    }
+
+    // Plastic complementarity and Norton kinetics remain simultaneous when
+    // the yield surface saturates. Eliminate q and creep in favor of the
+    // plastic increment; the remaining residual is strictly increasing.
+    fn radial_return_voce(&self, trial: f64, alpha: f64) -> Result<RadialReturn, FiniteJ2Error> {
+        let backbone = self.backbone();
+        let voce = backbone.voce_hardening().expect("active saturated branch");
+        let elastic = 3.0 * backbone.parameters.shear_modulus_pa;
+        let linear_hardening = backbone.parameters.hardening_modulus_pa;
+        let yield_old = backbone.yield_radius(alpha);
+        let excess = trial - yield_old;
+        let mut lower = 0.0;
+        let mut upper = backbone.saturated_increment(excess, alpha, None)?;
+        let mut plastic = upper;
+        for _ in 0..96 {
+            let hardening_increment =
+                linear_hardening * plastic + voce.strength_increment(alpha, plastic);
+            let q = yield_old + hardening_increment;
+            let log_creep = self.native.log_increment_at_stress(q);
+            // A high trial yield radius can imply an unrepresentable creep
+            // increment although the coupled root is admissible. This is a
+            // positive residual, so shrink the bracket without forming it.
+            if log_creep > det::ln(trial / elastic) {
+                upper = plastic;
+                plastic = 0.5 * lower + 0.5 * upper;
+                continue;
+            }
+            let creep = self.native.increment_at_stress(q)?;
+            let residual = elastic.mul_add(plastic + creep, hardening_increment) - excess;
+            let hardening = backbone.hardening_tangent(alpha + plastic);
+            let creep_derivative = self.parameters().exponent * (creep / q);
+            let denominator = elastic + (1.0 + elastic * creep_derivative) * hardening;
+            if !denominator.is_finite() || denominator <= 0.0 || !residual.is_finite() {
+                return Err(FiniteJ2Error::Numerical(
+                    "joint finite Voce derivative is not representable",
+                ));
+            }
+            if residual.abs() <= 128.0 * f64::EPSILON * trial {
+                if plastic <= 0.0 || creep <= 0.0 {
+                    return Err(FiniteJ2Error::Numerical(
+                        "joint finite Voce increments must be positive",
+                    ));
+                }
+                let plastic_dissipation = backbone.parameters.yield_stress_pa * plastic;
+                let creep_dissipation = q * creep;
+                return Ok(RadialReturn {
+                    plastic_increment: plastic,
+                    creep_increment: creep,
+                    scale: q / trial,
+                    tangent_correction: -(elastic / denominator)
+                        * ((yield_old
+                            + voce.curvature_remainder(alpha, plastic)
+                            + hardening * ((self.parameters().exponent - 1.0) * creep))
+                            / trial),
+                    plastic_dissipation,
+                    creep_dissipation,
+                    primary_potential: plastic_dissipation,
+                    rate_potential: (1.0 / (1.0 + 1.0 / self.parameters().exponent))
+                        * creep_dissipation,
+                });
+            }
+            if residual > 0.0 {
+                upper = plastic;
+            } else {
+                lower = plastic;
+            }
+            let newton = plastic - residual / denominator;
+            let middle = 0.5 * lower + 0.5 * upper;
+            if middle == lower || middle == upper {
+                break;
+            }
+            plastic = if newton.is_finite() && newton > lower && newton < upper {
+                newton
+            } else {
+                middle
+            };
+        }
+        Err(FiniteJ2Error::Numerical(
+            "bounded joint finite Voce return did not converge",
+        ))
     }
 }

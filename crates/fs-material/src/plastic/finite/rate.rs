@@ -90,7 +90,7 @@ impl FiniteOverstressJ2 {
             let p = backbone.parameters();
             if !modulus.is_finite()
                 || modulus <= 0.0
-                || !(3.0 * p.shear_modulus_pa + p.hardening_modulus_pa + modulus).is_finite()
+                || !(3.0 * p.shear_modulus_pa + backbone.hardening_tangent(0.0) + modulus).is_finite()
             {
                 return Err(FiniteJ2Error::Parameters(
                     "linear finite overstress modulus and return denominator must be representable",
