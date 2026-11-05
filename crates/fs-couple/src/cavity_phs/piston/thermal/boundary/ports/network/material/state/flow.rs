@@ -156,6 +156,7 @@ struct FlowStage<F> {
 }
 // The same whole-interval audit serves every transport and gas heat law. It
 // cannot manufacture a transport/source refusal or discard a typed source error.
+#[derive(Debug)]
 enum FlowBalanceError {
     Invalid(&'static str),
     Gas { chamber: u64, error: fs_material::MaterialError },

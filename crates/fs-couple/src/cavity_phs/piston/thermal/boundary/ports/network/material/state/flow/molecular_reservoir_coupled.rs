@@ -5,10 +5,13 @@
 //! both physical storage and separate incoming/outgoing exposed streams.
 use super::*;
 use crate::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::diffusion::coupled::{
-    CoupledDiffusionControls, CoupledDiffusionError, CoupledDiffusionEstimate, CoupledPhysicalError,
-    PhysicalEstimate, PhysicalSubstep, TransportLedger,
+    CoupledDiffusionControls, CoupledDiffusionEstimate, CoupledPhysicalError,
+    PhysicalEstimate, PhysicalStepError, PhysicalSubstep, TransportLedger,
 };
 
+/// Complete adaptive reservoir feedback with selected gas-surface heat laws.
+#[path = "molecular_reservoir_coupled_gas_law.rs"]
+pub mod gas_law;
 #[path = "molecular_reservoir_streams.rs"]
 mod streams;
 #[path = "molecular_reservoir_window.rs"]
@@ -60,7 +63,7 @@ type Error = CoupledMolecularReservoirError;
 /// Accepted original molecular, bath and complete feedback receipts.
 /// The balance is independently checked over the original-to-final window;
 /// neither physical tolerance nor retained-ledger bounds grow with subdivision.
-pub struct CoupledMolecularReservoirReport {
+pub struct CoupledMolecularReservoirReport<I = ResolvedMaterialStatePoint> {
     pub start_s: f64,
     pub end_s: f64,
     pub evaluations: usize,
@@ -71,11 +74,7 @@ pub struct CoupledMolecularReservoirReport {
     pub estimated_error: CoupledMolecularReservoirEstimate,
     pub balance: MolecularReservoirWindowBalance,
     /// Two actual fine physical steps per accepted comparison; no coarse receipts.
-    pub steps: Vec<PhysicalSubstep<MolecularReservoirAdvance>>,
-}
-
-fn lift(error: CoupledDiffusionError) -> Error {
-    error.map_estimate(CoupledMolecularReservoirEstimate::from_state)
+    pub steps: Vec<PhysicalSubstep<MolecularReservoirAdvance<I>>>,
 }
 
 impl<'m> MaterialExchangeState<'m> {
@@ -121,22 +120,16 @@ impl<'m> MaterialExchangeState<'m> {
         guess_j: &[f64],
         time: CoupledMolecularReservoirControls,
     ) -> Result<(Self, CoupledMolecularReservoirReport), Error> {
-        cx.checkpoint().map_err(|_| Error::Cancelled)?;
-        time.streams.validate().map_err(|error| match error {
-            MaterialFlowError::Invalid(reason) => Error::Invalid(reason),
-            MaterialFlowError::Cancelled => Error::Cancelled,
-            error => Error::Step {
-                start_s: self.time_s(),
-                end_s: target_s,
-                error,
-            },
-        })?;
-        let (mut next, window) = self.coupled_physical_window_candidate(
+        self.coupled_molecular_reservoir_window_candidate(
             cx,
             target_s,
+            ports,
             drives,
+            reactions,
+            molecular_controls,
+            controls,
             guess_j,
-            time.state,
+            time,
             |state, end, subdrives, guess| {
                 state.molecular_reservoir_step_candidate(
                     prepared,
@@ -154,6 +147,55 @@ impl<'m> MaterialExchangeState<'m> {
                     guess,
                 )
             },
+            <ParcelMolecularStep as TransportLedger>::refinable,
+        )
+    }
+
+    // The complete open-window ledger consumes physical quantities, never the
+    // selected law's receipt. Share admission, stream accuracy and publication
+    // preparation without copying or erasing that receipt or its error type.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn coupled_molecular_reservoir_window_candidate<I, S>(
+        &self,
+        cx: &Cx<'_>,
+        target_s: f64,
+        ports: &[f64],
+        drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>],
+        molecular_controls: ParcelMolecularSolve,
+        controls: NetworkSolve,
+        guess_j: &[f64],
+        time: CoupledMolecularReservoirControls,
+        evolve: impl FnMut(
+            &Self,
+            f64,
+            &[ChamberDrive],
+            &[f64],
+        ) -> Result<(Self, MolecularReservoirAdvance<I>), S>,
+        transport_refinable: impl Fn(&S) -> bool,
+    ) -> Result<
+        (Self, CoupledMolecularReservoirReport<I>),
+        CoupledPhysicalError<CoupledMolecularReservoirEstimate, S>,
+    >
+    where
+        S: PhysicalStepError + From<FlowBalanceError>,
+    {
+        use CoupledPhysicalError as Failure;
+        cx.checkpoint().map_err(|_| Failure::Cancelled)?;
+        time.streams
+            .validate_for_window()
+            .map_err(|error| match error {
+                FlowBalanceError::Invalid(reason) => Failure::Invalid(reason),
+                FlowBalanceError::Gas { chamber, error } => Failure::Gas { chamber, error },
+                FlowBalanceError::Cancelled => Failure::Cancelled,
+            })?;
+        let (mut next, window) = self.coupled_physical_window_candidate(
+            cx,
+            target_s,
+            drives,
+            guess_j,
+            time.state,
+            evolve,
             |state, coarse, first, second, factor| {
                 Ok(CoupledMolecularReservoirEstimate {
                     state,
@@ -168,7 +210,7 @@ impl<'m> MaterialExchangeState<'m> {
                     )?,
                 })
             },
-            <ParcelMolecularStep as TransportLedger>::refinable,
+            transport_refinable,
         )?;
         let balance = window::summarize(
             self,
@@ -180,10 +222,9 @@ impl<'m> MaterialExchangeState<'m> {
             molecular_controls,
             controls,
             &window.steps,
-        )
-        .map_err(lift)?;
-        window::macro_ports(self, &mut next, cx, controls, &balance).map_err(lift)?;
-        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        )?;
+        window::macro_ports(self, &mut next, cx, controls, &balance)?;
+        cx.checkpoint().map_err(|_| Failure::Cancelled)?;
         Ok((
             next,
             CoupledMolecularReservoirReport {

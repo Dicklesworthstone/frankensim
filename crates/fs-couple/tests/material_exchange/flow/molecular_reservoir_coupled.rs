@@ -1,4 +1,7 @@
 //! Complete adaptive bath trajectories, independent decay and atomic histories.
+#[path = "molecular_reservoir_coupled_gas_law.rs"]
+mod gas_law_tests;
+
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::{
     diffusion::coupled::{CoupledDiffusionControls, CoupledDiffusionScales},

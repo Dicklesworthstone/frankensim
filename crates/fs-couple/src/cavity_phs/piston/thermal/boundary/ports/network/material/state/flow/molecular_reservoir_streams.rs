@@ -7,7 +7,7 @@
 //! integrated here as a physical boundary-energy account.
 
 use crate::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::{
-    MaterialFlowError, diffusion::coupled::scaled_error,
+    FlowBalanceError, MaterialFlowError, diffusion::coupled::scaled_error,
 };
 use fs_exec::Cx;
 use fs_gas::material::transport::parcel::reservoir::{
@@ -30,13 +30,17 @@ pub struct MolecularReservoirStreamScales {
 impl MolecularReservoirStreamScales {
     /// Admit accuracy scales before spending any complete physical trial.
     pub fn validate(self) -> Result<(), MaterialFlowError> {
+        self.validate_for_window().map_err(Into::into)
+    }
+
+    pub(super) fn validate_for_window(self) -> Result<(), FlowBalanceError> {
         if [self.species_mass_kg, self.heat_j]
             .into_iter()
             .all(|value| value.is_finite() && value > 0.0)
         {
             Ok(())
         } else {
-            Err(MaterialFlowError::Invalid(
+            Err(FlowBalanceError::Invalid(
                 "positive finite molecular species and heat stream scales required",
             ))
         }
@@ -63,7 +67,9 @@ impl MolecularReservoirStreamEstimate {
     }
 }
 
-type Error = MaterialFlowError;
+// Accuracy arithmetic cannot manufacture a constitutive-source failure. Keep
+// its neutral refusal usable with both default and caller-selected heat laws.
+type Error = FlowBalanceError;
 fn check(cx: &Cx<'_>) -> Result<(), Error> {
     cx.checkpoint().map_err(|_| Error::Cancelled)
 }
@@ -337,7 +343,7 @@ fn error<K: Ord>(
 /// If all three streams vanish, that species needs no energy-chart coefficient.
 /// Species, additional heat and sensible energy retain separate gross signs.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compare(
+pub(super) fn compare(
     coarse: &ReservoirMolecularStep,
     first: &ReservoirMolecularStep,
     second: &ReservoirMolecularStep,
@@ -347,7 +353,7 @@ pub(crate) fn compare(
     cx: &Cx<'_>,
 ) -> Result<MolecularReservoirStreamEstimate, Error> {
     check(cx)?;
-    scales.validate()?;
+    scales.validate_for_window()?;
     if !relative_tolerance.is_finite()
         || !(0.0..1.0).contains(&relative_tolerance)
         || !fine_error_factor.is_finite()

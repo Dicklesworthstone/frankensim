@@ -15,6 +15,7 @@ mod physical;
 #[cfg(feature = "molecular-transport")]
 pub(crate) use error::scaled_error;
 pub use physical::PhysicalSubstep;
+pub(crate) use physical::{PhysicalControlError, PhysicalStepError};
 #[cfg(feature = "molecular-transport")]
 pub(crate) use physical::PhysicalEstimate;
 pub use balance::{CoupledDiffusionBalance, CoupledDiffusionChamberBalance,
@@ -91,11 +92,12 @@ impl CoupledDiffusionEstimate {
     }
 }
 
-/// Complete-assembly refusal with a transport-specific local-accuracy payload.
+/// Complete-assembly refusal retaining the local-accuracy payload and the
+/// original physical/constitutive error, including a selected heat-law source.
 #[derive(Debug)]
-pub enum CoupledPhysicalError<E> {
+pub enum CoupledPhysicalError<E, S = MaterialFlowError> {
     Invalid(&'static str),
-    Step { start_s: f64, end_s: f64, error: MaterialFlowError },
+    Step { start_s: f64, end_s: f64, error: S },
     Accuracy { start_s: f64, step_s: f64, estimate: E },
     WorkLimit { time_s: f64, evaluations: usize, accepted_substeps: usize },
     Balance(&'static str),
@@ -103,12 +105,12 @@ pub enum CoupledPhysicalError<E> {
     Gas { chamber: u64, error: fs_material::MaterialError },
     Cancelled,
 }
-impl<E: core::fmt::Debug> core::fmt::Display for CoupledPhysicalError<E> {
+impl<E: core::fmt::Debug, S: core::fmt::Debug> core::fmt::Display for CoupledPhysicalError<E, S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "coupled molecular diffusion: {self:?}")
     }
 }
-impl<E: core::fmt::Debug> std::error::Error for CoupledPhysicalError<E> {}
+impl<E: core::fmt::Debug, S: core::fmt::Debug> std::error::Error for CoupledPhysicalError<E, S> {}
 /// Original concrete closed-assembly error, preserving its variant namespace.
 #[derive(Debug)]
 pub enum CoupledDiffusionError {
@@ -127,24 +129,6 @@ impl core::fmt::Display for CoupledDiffusionError {
     }
 }
 impl std::error::Error for CoupledDiffusionError {}
-impl CoupledDiffusionError {
-    /// Preserve every physical refusal while adapting only the accuracy payload.
-    pub(crate) fn map_estimate<T>(self, convert: impl FnOnce(CoupledDiffusionEstimate) -> T) -> CoupledPhysicalError<T> {
-        match self {
-            Self::Invalid(reason) => CoupledPhysicalError::Invalid(reason),
-            Self::Step { start_s, end_s, error } => CoupledPhysicalError::Step { start_s, end_s, error },
-            Self::Accuracy { start_s, step_s, estimate } => CoupledPhysicalError::Accuracy {
-                start_s, step_s, estimate: convert(estimate),
-            },
-            Self::WorkLimit { time_s, evaluations, accepted_substeps } =>
-                CoupledPhysicalError::WorkLimit { time_s, evaluations, accepted_substeps },
-            Self::Balance(reason) => CoupledPhysicalError::Balance(reason),
-            Self::Circuit(error) => CoupledPhysicalError::Circuit(error),
-            Self::Gas { chamber, error } => CoupledPhysicalError::Gas { chamber, error },
-            Self::Cancelled => CoupledPhysicalError::Cancelled,
-        }
-    }
-}
 impl From<CoupledPhysicalError<CoupledDiffusionEstimate>> for CoupledDiffusionError {
     fn from(error: CoupledPhysicalError<CoupledDiffusionEstimate>) -> Self {
         match error {
@@ -163,8 +147,9 @@ impl From<CoupledPhysicalError<CoupledDiffusionEstimate>> for CoupledDiffusionEr
 type Error = CoupledDiffusionError;
 
 /// One actual accepted half step, retaining every original source and balance.
-pub type CoupledDiffusionSubstep<F = DiffusionNetworkStep> = PhysicalSubstep<MaterialFlowAdvance<F>>;
-pub struct CoupledDiffusionReport<F = DiffusionNetworkStep> {
+pub type CoupledDiffusionSubstep<F = DiffusionNetworkStep, I = ResolvedMaterialStatePoint> =
+    PhysicalSubstep<MaterialFlowAdvance<F, I>>;
+pub struct CoupledDiffusionReport<F = DiffusionNetworkStep, I = ResolvedMaterialStatePoint> {
     pub start_s: f64,
     pub end_s: f64,
     pub evaluations: usize,
@@ -177,7 +162,7 @@ pub struct CoupledDiffusionReport<F = DiffusionNetworkStep> {
     /// Independent original-to-final accounts against accepted physical ledgers.
     pub balance: CoupledDiffusionBalance,
     /// Two fine steps per accepted comparison. Rejected receipts are discarded.
-    pub steps: Vec<CoupledDiffusionSubstep<F>>,
+    pub steps: Vec<CoupledDiffusionSubstep<F, I>>,
 }
 
 // A private ingress for other original transport candidates. They must expose
@@ -194,15 +179,15 @@ impl TransportLedger for DiffusionNetworkStep {
     }
 }
 
-fn check(cx: &Cx<'_>) -> Result<(), Error> {
-    cx.checkpoint().map_err(|_| Error::Cancelled)
+fn check(cx: &Cx<'_>) -> Result<(), PhysicalControlError> {
+    cx.checkpoint().map_err(|_| PhysicalControlError::Cancelled)
 }
-fn finite(value: f64) -> Result<f64, Error> {
+fn finite(value: f64) -> Result<f64, PhysicalControlError> {
     if value.is_finite() { Ok(value) }
-    else { Err(Error::Invalid("coupled diffusion arithmetic is unrepresentable")) }
+    else { Err(PhysicalControlError::Invalid("coupled diffusion arithmetic is unrepresentable")) }
 }
 impl CoupledDiffusionControls {
-    fn validate(self) -> Result<(), Error> {
+    fn validate(self) -> Result<(), PhysicalControlError> {
         let a = self.absolute;
         if [a.species_mass_kg, a.gas_temperature_k, a.gas_pressure_pa,
             a.gas_volume_m3, a.piston_velocity_m_s, a.cell_energy_j, a.charge_c,
@@ -212,7 +197,7 @@ impl CoupledDiffusionControls {
             || !(0.0..1.0).contains(&self.relative_tolerance)
             || self.minimum_step_s > self.maximum_step_s || self.maximum_evaluations < 3
         {
-            return Err(Error::Invalid("positive dimensioned error scales, bounded steps and at least three evaluations required"));
+            return Err(PhysicalControlError::Invalid("positive dimensioned error scales, bounded steps and at least three evaluations required"));
         }
         Ok(())
     }
@@ -263,9 +248,25 @@ impl<'m> MaterialExchangeState<'m> {
         evolve: impl FnMut(&Self, f64, &[ChamberDrive], &[f64])
             -> Result<(Self, MaterialFlowAdvance<F>), MaterialFlowError>,
     ) -> Result<(Self, CoupledDiffusionReport<F>), Error> {
+        self.coupled_transport_window_with_error_candidate(cx, target_s, ports, drives,
+            reactions, species_controls, controls, guess_j, time, evolve, F::refinable)
+            .map_err(Into::into)
+    }
+
+    /// The same closed-window accounts retain the selected heat law's original
+    /// source receipt and typed refusal; only the complete trial ingress varies.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn coupled_transport_window_with_error_candidate<F: TransportLedger, I, S: PhysicalStepError>(
+        &self, cx: &Cx<'_>, target_s: f64, ports: &[f64], drives: &[ChamberDrive],
+        reactions: &[ChamberReaction<'_>], species_controls: SpeciesNetworkSolve,
+        controls: NetworkSolve, guess_j: &[f64], time: CoupledDiffusionControls,
+        evolve: impl FnMut(&Self, f64, &[ChamberDrive], &[f64])
+            -> Result<(Self, MaterialFlowAdvance<F, I>), S>,
+        transport_refinable: impl Fn(&S) -> bool,
+    ) -> Result<(Self, CoupledDiffusionReport<F, I>), CoupledPhysicalError<CoupledDiffusionEstimate, S>> {
         let (mut next, window) = self.coupled_physical_window_candidate(
             cx, target_s, drives, guess_j, time, evolve,
-            |state_error, _, _, _, _| Ok(state_error), F::refinable,
+            |state_error, _, _, _, _| Ok(state_error), transport_refinable,
         )?;
         let balance = balance::summarize(self, &next, cx, ports, drives, reactions,
             species_controls, controls, &window.steps)?;
@@ -304,20 +305,27 @@ fn refinable(error: &MaterialFlowError) -> bool {
     use transport::DiffusionNetworkError as D;
     matches!(error,
         MaterialFlowError::Diffusion(D::EntropyDecrease { .. }
-            | D::Exchange(SpeciesNetworkError::Withdrawal { .. }))
-        | MaterialFlowError::Exchange(ReactiveExchangeError::Reaction {
+            | D::Exchange(SpeciesNetworkError::Withdrawal { .. })))
+        || matches!(error, MaterialFlowError::Exchange(error) if feedback_refinable(error))
+}
+
+// A caller's source-error type never affects which original physical failures
+// are timestep-sensitive. Constitutive/source refusals remain fatal.
+fn feedback_refinable<E>(error: &ReactiveExchangeError<E>) -> bool {
+    matches!(error,
+        ReactiveExchangeError::Reaction {
             error: GasReactionError::ConsumptionLimit { .. } | GasReactionError::EntropyDecrease { .. }
-                | GasReactionError::ImplicitOutsideBracket { .. } | GasReactionError::ImplicitNotConverged { .. }, .. })
-        | MaterialFlowError::Exchange(ReactiveExchangeError::Exchange(
+                | GasReactionError::ImplicitOutsideBracket { .. } | GasReactionError::ImplicitNotConverged { .. }, .. }
+        | ReactiveExchangeError::Exchange(
             CircuitEnthalpyError::NotConverged(_)
             | CircuitEnthalpyError::Source(NetworkError::Boundary {
                 error: ThermalPistonError::OutsideBracket { .. } | ThermalPistonError::NotConverged { .. }
                     | ThermalPistonError::Piston(PistonError::OutsideBracket { .. }
                         | PistonError::NotConverged { .. }
-                        | PistonError::TimeResolution(fs_phs::linear_exact::ResolvedBandError::Outside { .. })), .. }))))
+                        | PistonError::TimeResolution(fs_phs::linear_exact::ResolvedBandError::Outside { .. })), .. })))
 }
 
-fn fixed(initial: &MaterialExchangeState<'_>, next: &MaterialExchangeState<'_>) -> Result<(), Error> {
+fn fixed(initial: &MaterialExchangeState<'_>, next: &MaterialExchangeState<'_>) -> Result<(), PhysicalControlError> {
     if !initial.chambers.keys().eq(next.chambers.keys())
         || !initial.thermal.cells().keys().eq(next.thermal.cells().keys())
         || initial.thermal.links() != next.thermal.links()
@@ -329,29 +337,29 @@ fn fixed(initial: &MaterialExchangeState<'_>, next: &MaterialExchangeState<'_>) 
                 || a.boundary != b.boundary || a.body_id != b.body_id || a.segment_id != b.segment_id
         })
     {
-        return Err(Error::Invalid("coupled diffusion requires fixed cell/circuit/chamber topology and cell masses"));
+        return Err(PhysicalControlError::Invalid("coupled diffusion requires fixed cell/circuit/chamber topology and cell masses"));
     }
     Ok(())
 }
 
-fn inventory(gas: &ClosedGasParcel) -> Result<BTreeMap<SpeciesId, f64>, Error> {
+fn inventory(gas: &ClosedGasParcel) -> Result<BTreeMap<SpeciesId, f64>, PhysicalControlError> {
     let total_mol = finite(gas.mass_kg() / gas.state().thermodynamics().properties().molar_mass().value())?;
     gas.model().thermodynamics().components().iter()
         .zip(gas.model().thermodynamics().mole_composition().fractions())
         .map(|(species, &fraction)| {
             let mass = finite((total_mol * fraction) * species.molar_mass().value())?;
-            if mass < 0.0 { return Err(Error::Invalid("negative actual species inventory")); }
+            if mass < 0.0 { return Err(PhysicalControlError::Invalid("negative actual species inventory")); }
             Ok((species.species().clone(), mass))
         }).collect()
 }
 
 fn compare(start: &MaterialExchangeState<'_>, coarse: &MaterialExchangeState<'_>,
     fine: &MaterialExchangeState<'_>, policy: CoupledDiffusionControls, fine_error_factor: f64, cx: &Cx<'_>,
-) -> Result<CoupledDiffusionEstimate, Error> {
+) -> Result<CoupledDiffusionEstimate, PhysicalControlError> {
     let mut result = CoupledDiffusionEstimate::default();
-    let observe = |target: &mut f64, a: f64, b: f64, absolute: f64| -> Result<(), Error> {
+    let observe = |target: &mut f64, a: f64, b: f64, absolute: f64| -> Result<(), PhysicalControlError> {
         let ratio = error::scaled_error(a, b, absolute, policy.relative_tolerance)
-            .ok_or(Error::Invalid("coupled local error is unrepresentable"))?;
+            .ok_or(PhysicalControlError::Invalid("coupled local error is unrepresentable"))?;
         // Overflow remains an infinite rejecting estimate, never a zero error.
         *target = target.max(ratio * fine_error_factor);
         Ok(())

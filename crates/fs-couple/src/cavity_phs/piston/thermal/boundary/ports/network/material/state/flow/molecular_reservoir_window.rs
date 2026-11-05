@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::diffusion::coupled::{
-    CoupledDiffusionError, CoupledReactionExtent, PhysicalSubstep,
+    CoupledReactionExtent, PhysicalControlError, PhysicalSubstep,
 };
 use crate::port_adoption::{PortTransfer, StepAccount};
 use fs_gas::material::transport::parcel::adaptive::{
@@ -107,7 +107,7 @@ pub struct MolecularReservoirWindowBalance {
     pub chambers: Vec<MolecularReservoirWindowChamberBalance>,
 }
 
-type Error = CoupledDiffusionError;
+type Error = PhysicalControlError;
 fn check(cx: &Cx<'_>) -> Result<(), Error> {
     cx.checkpoint().map_err(|_| Error::Cancelled)
 }
@@ -255,10 +255,10 @@ impl Accepted {
         }
     }
 
-    fn record(
+    fn record<I>(
         &mut self,
         initial: &MaterialExchangeState<'_>,
-        step: &PhysicalSubstep<MolecularReservoirAdvance>,
+        step: &PhysicalSubstep<MolecularReservoirAdvance<I>>,
         reactions: &[ChamberReaction<'_>],
         cx: &Cx<'_>,
     ) -> Result<(), Error> {
@@ -514,7 +514,7 @@ fn inventory(gas: &ClosedGasParcel) -> Result<BTreeMap<SpeciesId, f64>, Error> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn summarize(
+pub(super) fn summarize<I>(
     initial: &MaterialExchangeState<'_>,
     final_state: &MaterialExchangeState<'_>,
     cx: &Cx<'_>,
@@ -523,7 +523,7 @@ pub(super) fn summarize(
     reactions: &[ChamberReaction<'_>],
     molecular_controls: ParcelMolecularSolve,
     controls: NetworkSolve,
-    steps: &[PhysicalSubstep<MolecularReservoirAdvance>],
+    steps: &[PhysicalSubstep<MolecularReservoirAdvance<I>>],
 ) -> Result<MolecularReservoirWindowBalance, Error> {
     check(cx)?;
     let duration = finite(final_state.time_s() - initial.time_s())?;

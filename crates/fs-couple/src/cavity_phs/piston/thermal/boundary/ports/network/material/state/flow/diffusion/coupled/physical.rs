@@ -3,6 +3,82 @@
 //! The physical state comparison is mandatory. A transport may add directional
 //! stream errors, but cannot replace the original storage-coordinate checks.
 use super::*;
+use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::transport::{
+    GasTransportError, GasTransportStep,
+};
+
+/// Control and accounting failures contain no constitutive callback error.
+/// Keeping this set separate lets every adapter retain its original typed
+/// physical refusal without an erased source or an unreachable conversion arm.
+#[derive(Debug)]
+pub(crate) enum PhysicalControlError {
+    Invalid(&'static str),
+    Balance(&'static str),
+    Circuit(crate::material_circuit::MaterialCircuitError),
+    Gas {
+        chamber: u64,
+        error: fs_material::MaterialError,
+    },
+    Cancelled,
+}
+impl<E, S> From<PhysicalControlError> for CoupledPhysicalError<E, S> {
+    fn from(error: PhysicalControlError) -> Self {
+        match error {
+            PhysicalControlError::Invalid(reason) => Self::Invalid(reason),
+            PhysicalControlError::Balance(reason) => Self::Balance(reason),
+            PhysicalControlError::Circuit(error) => Self::Circuit(error),
+            PhysicalControlError::Gas { chamber, error } => Self::Gas { chamber, error },
+            PhysicalControlError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+impl From<PhysicalControlError> for CoupledDiffusionError {
+    fn from(error: PhysicalControlError) -> Self {
+        match error {
+            PhysicalControlError::Invalid(reason) => Self::Invalid(reason),
+            PhysicalControlError::Balance(reason) => Self::Balance(reason),
+            PhysicalControlError::Circuit(error) => Self::Circuit(error),
+            PhysicalControlError::Gas { chamber, error } => Self::Gas { chamber, error },
+            PhysicalControlError::Cancelled => Self::Cancelled,
+        }
+    }
+}
+
+/// Classify the original failure by type without inspecting or cloning a
+/// caller's source payload. A smaller step cannot cure a constitutive refusal.
+pub(crate) trait PhysicalStepError {
+    fn is_cancelled(&self) -> bool;
+    fn refinable(&self) -> bool;
+}
+impl PhysicalStepError for MaterialFlowError {
+    fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
+    }
+    fn refinable(&self) -> bool {
+        super::refinable(self)
+    }
+}
+impl<E> PhysicalStepError for MaterialGasLawFlowError<E> {
+    fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
+    }
+    fn refinable(&self) -> bool {
+        match self {
+            Self::Exchange(error) => feedback_refinable(error),
+            Self::Transport(error) => native_transport_refinable(error),
+            #[cfg(feature = "molecular-transport")]
+            Self::Molecular(
+                fs_gas::material::transport::parcel::ParcelMolecularError::Transport(error),
+            ) => native_transport_refinable(error),
+            _ => false,
+        }
+    }
+}
+fn native_transport_refinable(error: &GasTransportError) -> bool {
+    // Delegate the native finite-inventory classification unchanged. This clone
+    // contains only the native transport error, never a caller-selected source.
+    <GasTransportStep as TransportLedger>::refinable(&MaterialFlowError::Transport(error.clone()))
+}
 
 /// One actual accepted physical half step and its original source receipts.
 /// Coarse probes and rejected trials never enter the accepted trajectory.
@@ -41,10 +117,6 @@ pub(crate) struct PhysicalWindow<A, E> {
     pub steps: Vec<PhysicalSubstep<A>>,
 }
 
-fn lift<E: PhysicalEstimate>(error: Error) -> CoupledPhysicalError<E> {
-    error.map_estimate(E::from_state)
-}
-
 impl<'m> MaterialExchangeState<'m> {
     /// Run the original first-order physical split with complete-state local
     /// error control and optional source-owned integrated-stream comparisons.
@@ -52,33 +124,26 @@ impl<'m> MaterialExchangeState<'m> {
     /// balances and publishes them. Native residual budgets never scale with
     /// the number of accepted steps.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn coupled_physical_window_candidate<A, E: PhysicalEstimate>(
+    pub(crate) fn coupled_physical_window_candidate<
+        A,
+        E: PhysicalEstimate,
+        S: PhysicalStepError,
+    >(
         &self,
         cx: &Cx<'_>,
         target_s: f64,
         drives: &[ChamberDrive],
         guess_j: &[f64],
         time: CoupledDiffusionControls,
-        mut evolve: impl FnMut(
-            &Self,
-            f64,
-            &[ChamberDrive],
-            &[f64],
-        ) -> Result<(Self, A), MaterialFlowError>,
-        mut additional_error: impl FnMut(
-            CoupledDiffusionEstimate,
-            &A,
-            &A,
-            &A,
-            f64,
-        ) -> Result<E, MaterialFlowError>,
-        transport_refinable: impl Fn(&MaterialFlowError) -> bool,
-    ) -> Result<(Self, PhysicalWindow<A, E>), CoupledPhysicalError<E>> {
+        mut evolve: impl FnMut(&Self, f64, &[ChamberDrive], &[f64]) -> Result<(Self, A), S>,
+        mut additional_error: impl FnMut(CoupledDiffusionEstimate, &A, &A, &A, f64) -> Result<E, S>,
+        transport_refinable: impl Fn(&S) -> bool,
+    ) -> Result<(Self, PhysicalWindow<A, E>), CoupledPhysicalError<E, S>> {
         use CoupledPhysicalError as Failure;
-        check(cx).map_err(lift::<E>)?;
-        time.validate().map_err(lift::<E>)?;
+        check(cx)?;
+        time.validate()?;
         let start_s = self.time_s();
-        let duration = finite(target_s - start_s).map_err(lift::<E>)?;
+        let duration = finite(target_s - start_s)?;
         if duration <= 0.0
             || guess_j.len() != self.thermal.cells().len()
             || guess_j.iter().any(|x| !x.is_finite())
@@ -107,17 +172,17 @@ impl<'m> MaterialExchangeState<'m> {
         let mut estimated_error = E::from_state(CoupledDiffusionEstimate::default());
         let mut step_s = time.maximum_step_s.min(duration);
         while next.time_s() < target_s {
-            check(cx).map_err(lift::<E>)?;
+            check(cx)?;
             let before = next.time_s();
-            let remaining = finite(target_s - before).map_err(lift::<E>)?;
+            let remaining = finite(target_s - before)?;
             let dt = step_s.min(remaining);
             let end = if dt == remaining {
                 target_s
             } else {
-                finite(before + dt).map_err(lift::<E>)?
+                finite(before + dt)?
             };
-            let dt = finite(end - before).map_err(lift::<E>)?;
-            let midpoint = finite(before + 0.5 * (end - before)).map_err(lift::<E>)?;
+            let dt = finite(end - before)?;
+            let midpoint = finite(before + 0.5 * (end - before))?;
             if midpoint <= before || midpoint >= end {
                 return Err(Failure::Invalid(
                     "coupled diffusion half-step clock is unrepresentable",
@@ -131,8 +196,8 @@ impl<'m> MaterialExchangeState<'m> {
             let mut evaluate = |state: &Self,
                                 end: f64,
                                 evaluations: &mut usize|
-             -> Result<(Self, A), CoupledPhysicalError<E>> {
-                check(cx).map_err(lift::<E>)?;
+             -> Result<(Self, A), CoupledPhysicalError<E, S>> {
+                check(cx)?;
                 if *evaluations >= cap {
                     return Err(Failure::WorkLimit {
                         time_s: before,
@@ -157,23 +222,25 @@ impl<'m> MaterialExchangeState<'m> {
                 let guess: Vec<_> = guess_j.iter().map(|value| value * fraction).collect();
                 *evaluations += 1;
                 let (candidate, report) =
-                    evolve(state, end, &subdrives, &guess).map_err(|error| match error {
-                        MaterialFlowError::Cancelled => Failure::Cancelled,
-                        error => Failure::Step {
-                            start_s: state.time_s(),
-                            end_s: end,
-                            error,
-                        },
+                    evolve(state, end, &subdrives, &guess).map_err(|error| {
+                        if error.is_cancelled() {
+                            Failure::Cancelled
+                        } else {
+                            Failure::Step {
+                                start_s: state.time_s(),
+                                end_s: end,
+                                error,
+                            }
+                        }
                     })?;
-                fixed(self, &candidate).map_err(lift::<E>)?;
+                fixed(self, &candidate)?;
                 Ok((candidate, report))
             };
             let comparison = (|| {
                 let (coarse, coarse_report) = evaluate(&next, end, &mut evaluations)?;
                 let (half, first) = evaluate(&next, midpoint, &mut evaluations)?;
                 let (fine, second) = evaluate(&half, end, &mut evaluations)?;
-                let state_error = compare(&next, &coarse, &fine, time, fine_error_factor, cx)
-                    .map_err(lift::<E>)?;
+                let state_error = compare(&next, &coarse, &fine, time, fine_error_factor, cx)?;
                 let estimate = additional_error(
                     state_error,
                     &coarse_report,
@@ -181,13 +248,16 @@ impl<'m> MaterialExchangeState<'m> {
                     &second,
                     fine_error_factor,
                 )
-                .map_err(|error| match error {
-                    MaterialFlowError::Cancelled => Failure::Cancelled,
-                    error => Failure::Step {
-                        start_s: before,
-                        end_s: end,
-                        error,
-                    },
+                .map_err(|error| {
+                    if error.is_cancelled() {
+                        Failure::Cancelled
+                    } else {
+                        Failure::Step {
+                            start_s: before,
+                            end_s: end,
+                            error,
+                        }
+                    }
                 })?;
                 // Additional stream coordinates cannot suppress the mandatory
                 // complete physical-state estimate, even for a future adapter.
@@ -228,7 +298,7 @@ impl<'m> MaterialExchangeState<'m> {
                     start_s,
                     end_s,
                     error,
-                }) if refinable(&error) || transport_refinable(&error) => (
+                }) if error.refinable() || transport_refinable(&error) => (
                     0.5,
                     Failure::Step {
                         start_s,
@@ -248,7 +318,7 @@ impl<'m> MaterialExchangeState<'m> {
             }
             step_s = smaller;
         }
-        check(cx).map_err(lift::<E>)?;
+        check(cx)?;
         Ok((
             next,
             PhysicalWindow {

@@ -1,5 +1,6 @@
 //! Accepted native receipts plus independent original-to-final storage.
 use super::*;
+use super::PhysicalControlError as Error;
 use fs_thermochem::ReactionId;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::diffusion::network::adaptive::DiffusionNetworkIntegratedTransfer;
 use crate::port_adoption::{PortTransfer, StepAccount};
@@ -94,10 +95,10 @@ struct ChamberLedger {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn summarize<F: TransportLedger>(
+pub(super) fn summarize<F: TransportLedger, I>(
     initial: &MaterialExchangeState<'_>, final_state: &MaterialExchangeState<'_>, cx: &Cx<'_>,
     ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
-    species_controls: SpeciesNetworkSolve, controls: NetworkSolve, steps: &[CoupledDiffusionSubstep<F>],
+    species_controls: SpeciesNetworkSolve, controls: NetworkSolve, steps: &[CoupledDiffusionSubstep<F, I>],
 ) -> Result<CoupledDiffusionBalance, Error> {
     check(cx)?;
     let mut ledgers: BTreeMap<(u64, SpeciesId), SpeciesLedger> = BTreeMap::new();
