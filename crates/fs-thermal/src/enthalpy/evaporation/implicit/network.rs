@@ -282,6 +282,8 @@ impl<'s, 'm, 'l, L: EvaporationLaw + ?Sized> EvaporatingNetworkBackwardEulerStep
     /// heat callback sees the exact validated films and proposed liquid masses
     /// used in this residual. Returned maps must match the selected cells
     /// exactly, including an empty map for a heat-only step.
+    /// The thermal view carries endpoint time/h/T and the interval's INITIAL
+    /// masses for energy coordinates; proposed masses are in the liquid map.
     ///
     /// Film sources may depend on time and all endpoint caloric states; their
     /// accepted history must remain immutable during speculative calls. This

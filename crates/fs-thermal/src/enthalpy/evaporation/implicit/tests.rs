@@ -17,6 +17,9 @@ mod activation;
 #[path = "tests/films.rs"]
 mod films;
 
+#[path = "tests/resolved_timeline.rs"]
+mod resolved_timeline;
+
 use super::*;
 use crate::enthalpy::backward_euler::{
     BoundaryExchanges, BoundaryStepCoefficients, PrescribedBathHeat, StepCoefficients,

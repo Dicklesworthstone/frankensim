@@ -294,6 +294,8 @@ impl<'m> DepositionSimulation<'m> {
     /// cell identities. The heat callback receives those SAME endpoint films
     /// and proposed liquid inventories. Neither callback may advance accepted
     /// physical history during speculative evaluation.
+    /// The thermal view retains the interval's initial masses for its joule
+    /// coordinates; only the separate liquid map contains proposed new masses.
     ///
     /// Film temperature is a transport input to the phase rate. Reciprocal
     /// sensible gas heat remains an explicit part of the heat coefficients.

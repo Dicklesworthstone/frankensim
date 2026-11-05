@@ -1795,6 +1795,8 @@ state. `EvaporatingNetworkBackwardEulerStep::evaluate_with_films` then resolves
 the complete film map at each uncached endpoint BEFORE evaluating any phase rate.
 The heat callback receives those exact validated films and all proposed liquid
 inventories, so heat and environmental response participate in one residual.
+The thermal view contains endpoint time and caloric coordinates with the
+interval's initial masses; proposed new masses are supplied in the liquid map.
 Every film map must match selected active cell identities exactly; missing,
 extra, wrong-id or invalid films refuse before the heat callback.
 
@@ -1808,6 +1810,24 @@ reciprocal sensible heat remains explicitly supplied thermal coefficients.
 This entry supplies environmental feedback, without creating an atmosphere
 inventory or a gas caloric model. A finite-gas coupling must separately close
 species/energy changes and upstream-vapor enthalpy for nonisothermal condensation.
+
+`advance_adaptive_evaporating_network_with_films_to` advances those sources on
+the same adaptive event/phase timeline. Both public adaptive entry points share
+one controller, activation path, physical account and whole-request work budget;
+only their per-interval source evaluation differs. Future liquid births need no
+invented film state. Resolved maps contain only active selected cells, including
+an empty map during a heat-only prefix.
+
+Each coarse or fine interval resolves its own initial films and nonlinear
+endpoint films from its own thermal state. In particular, the second fine
+interval uses the first fine interval's changed inventory and enthalpy. Only
+accepted fine transfers enter per-cell totals, and only the final fine payload
+is returned before endpoint events. For a successful request the additional
+initial-film queries are exactly three per complete comparison; actual endpoint
+queries remain bounded by the existing shared residual-evaluation limit.
+Mass-sensitive time accuracy detects changing humidity even when latent power
+keeps liquid temperature fixed. External source history must remain immutable;
+resolving films does not itself evolve or conserve a finite atmosphere.
 
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation

@@ -8,8 +8,8 @@
 use super::super::account::TimelineAccount;
 use super::super::{CoupledEvaporationAudit, LiquidBranch, ThermalEvaporationError};
 use super::{
-    EvaporatingCellBinding, EvaporationImplicitError, EvaporationNetworkImplicitControls,
-    EvaporationNetworkImplicitReport,
+    EvaporatingCellBinding, EvaporatingCellSource, EvaporationImplicitError,
+    EvaporationNetworkImplicitControls, EvaporationNetworkImplicitReport,
 };
 use crate::enthalpy::backward_euler::BoundaryExchangeStepCoefficients;
 use crate::enthalpy::conduction::implicit::adaptive::ConductionTimeOrder;
@@ -17,7 +17,7 @@ use crate::enthalpy::observe::EnergySum;
 use crate::enthalpy::{
     CellId, DepositionError, DepositionSimulation, EnergyAudit, Event, finite, positive,
 };
-use crate::evaporation::{EvaporationLaw, LiquidSurfaceState, SurfaceStep};
+use crate::evaporation::{EvaporationLaw, GasFilm, LiquidSurfaceState, SurfaceStep};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Time-error allowances are distinct from nonlinear energy/mass residual gates.
@@ -190,6 +190,38 @@ impl SurfaceAccumulator {
     }
 }
 
+// Both public entry points share event activation, time accuracy and physical
+// accounting. Only their interval source evaluation differs; an unresolved
+// interface has no invented film state.
+trait AdaptiveInterface: Copy {
+    fn id(self) -> CellId;
+    fn range(self) -> [f64; 2];
+    fn validate(self) -> Result<(), ThermalEvaporationError>;
+}
+impl<L: EvaporationLaw + ?Sized> AdaptiveInterface for EvaporatingCellBinding<'_, L> {
+    fn id(self) -> CellId {
+        self.id
+    }
+    fn range(self) -> [f64; 2] {
+        self.pure_liquid_enthalpy_range_j_kg
+    }
+    fn validate(self) -> Result<(), ThermalEvaporationError> {
+        self.film.validate()?;
+        Ok(())
+    }
+}
+impl<L: EvaporationLaw + ?Sized> AdaptiveInterface for EvaporatingCellSource<'_, L> {
+    fn id(self) -> CellId {
+        self.id
+    }
+    fn range(self) -> [f64; 2] {
+        self.pure_liquid_enthalpy_range_j_kg
+    }
+    fn validate(self) -> Result<(), ThermalEvaporationError> {
+        Ok(())
+    }
+}
+
 impl<'m> DepositionSimulation<'m> {
     /// Advance one heat network and all selected liquid interfaces with local
     /// h/T/mass time-error control. An empty binding set retains heat-only BE.
@@ -223,6 +255,95 @@ impl<'m> DepositionSimulation<'m> {
             &BTreeMap<CellId, LiquidSurfaceState>,
         )
             -> Result<BoundaryExchangeStepCoefficients<T>, ThermalEvaporationError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, Option<T>, AdaptiveEvaporationReport), AdaptiveEvaporationError> {
+        self.advance_adaptive_interfaces(
+            bindings,
+            target_s,
+            controls,
+            |initial, active, target, solve, checkpoint| {
+                initial.solve_implicit_evaporating_network_step(
+                    active,
+                    target,
+                    solve,
+                    &mut resolve,
+                    checkpoint,
+                )
+            },
+            checkpoint,
+        )
+    }
+
+    /// Advance the same conservative adaptive timeline with films resolved
+    /// from each original initial state and each nonlinear thermal endpoint.
+    /// The film map must exactly match the currently active selected sources;
+    /// it is empty before their births when the interval contains only heat.
+    ///
+    /// Film and heat callbacks see each speculative trajectory's actual
+    /// thermal history. In particular, the second fine interval starts from
+    /// the first fine interval's changed mass and enthalpy. Its accepted heat
+    /// payload and surface receipts refer to the same resolved endpoint films.
+    /// Discarded coarse/rejected trials spend the shared numerical budget but
+    /// contribute no physical transfer or source history to the result.
+    ///
+    /// Sources must be repeatable for the supplied state and may not mutate
+    /// accepted external physics during speculative calls. Film resolution
+    /// alone does not close finite-gas mass, momentum or energy accounts.
+    /// Original source failures and cancellation refuse the entire candidate.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_adaptive_evaporating_network_with_films_to<L: EvaporationLaw + ?Sized, T>(
+        &self,
+        sources: &[EvaporatingCellSource<'_, L>],
+        target_s: f64,
+        controls: AdaptiveEvaporationControls,
+        mut resolve_films: impl FnMut(
+            &DepositionSimulation<'m>,
+        )
+            -> Result<BTreeMap<CellId, GasFilm>, ThermalEvaporationError>,
+        mut resolve_heat: impl FnMut(
+            &DepositionSimulation<'m>,
+            &BTreeMap<CellId, LiquidSurfaceState>,
+            &BTreeMap<CellId, GasFilm>,
+        ) -> Result<
+            BoundaryExchangeStepCoefficients<T>,
+            ThermalEvaporationError,
+        >,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, Option<T>, AdaptiveEvaporationReport), AdaptiveEvaporationError> {
+        self.advance_adaptive_interfaces(
+            sources,
+            target_s,
+            controls,
+            |initial, active, target, solve, checkpoint| {
+                initial.solve_implicit_evaporating_network_step_with_films(
+                    active,
+                    target,
+                    solve,
+                    &mut resolve_films,
+                    &mut resolve_heat,
+                    checkpoint,
+                )
+            },
+            checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn advance_adaptive_interfaces<I: AdaptiveInterface, T>(
+        &self,
+        bindings: &[I],
+        target_s: f64,
+        controls: AdaptiveEvaporationControls,
+        mut solve: impl FnMut(
+            &DepositionSimulation<'m>,
+            &[I],
+            f64,
+            EvaporationNetworkImplicitControls,
+            &mut dyn FnMut() -> Result<(), DepositionError>,
+        ) -> Result<
+            (Self, T, EvaporationNetworkImplicitReport),
+            EvaporationImplicitError,
+        >,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, Option<T>, AdaptiveEvaporationReport), AdaptiveEvaporationError> {
         checkpoint()?;
@@ -241,21 +362,18 @@ impl<'m> DepositionSimulation<'m> {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            if selected.insert(binding.id, *binding).is_some() {
+            if selected.insert(binding.id(), *binding).is_some() {
                 return Err(AdaptiveEvaporationError::Invalid(
                     "duplicate liquid interface inventory",
                 ));
             }
-            binding
-                .film
-                .validate()
-                .map_err(ThermalEvaporationError::from)?;
-            LiquidBranch::new(binding.id, binding.pure_liquid_enthalpy_range_j_kg)?.check(self)?;
-            if self.cells.contains_key(&binding.id) {
+            binding.validate()?;
+            LiquidBranch::new(binding.id(), binding.range())?.check(self)?;
+            if self.cells.contains_key(&binding.id()) {
                 active_bindings.push(*binding);
-                active_ids.insert(binding.id);
+                active_ids.insert(binding.id());
             } else {
-                unscheduled.insert(binding.id);
+                unscheduled.insert(binding.id());
             }
         }
         // Resolve future identities once, before any source callback. Actual
@@ -326,8 +444,7 @@ impl<'m> DepositionSimulation<'m> {
                     }
                 }
                 for binding in &active_bindings {
-                    LiquidBranch::new(binding.id, binding.pure_liquid_enthalpy_range_j_kg)?
-                        .check(&next)?;
+                    LiquidBranch::new(binding.id(), binding.range())?.check(&next)?;
                 }
                 checkpoint()?;
             }
@@ -370,7 +487,7 @@ impl<'m> DepositionSimulation<'m> {
                 end,
                 controls.solve,
                 &mut work,
-                &mut resolve,
+                &mut solve,
                 &mut checkpoint,
             )?;
             let (half, _, first) = solve_interval(
@@ -379,7 +496,7 @@ impl<'m> DepositionSimulation<'m> {
                 middle,
                 controls.solve,
                 &mut work,
-                &mut resolve,
+                &mut solve,
                 &mut checkpoint,
             )?;
             let (fine, payload, second) = solve_interval(
@@ -388,7 +505,7 @@ impl<'m> DepositionSimulation<'m> {
                 end,
                 controls.solve,
                 &mut work,
-                &mut resolve,
+                &mut solve,
                 &mut checkpoint,
             )?;
             let correction = order
@@ -511,17 +628,26 @@ impl<'m> DepositionSimulation<'m> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn solve_interval<'m, L: EvaporationLaw + ?Sized, T>(
+fn solve_interval<'m, I: AdaptiveInterface, T>(
     initial: &DepositionSimulation<'m>,
-    bindings: &[EvaporatingCellBinding<'_, L>],
+    bindings: &[I],
     target: f64,
     mut controls: EvaporationNetworkImplicitControls,
     work: &mut Work,
-    resolve: &mut impl FnMut(
+    solve: &mut impl FnMut(
         &DepositionSimulation<'m>,
-        &BTreeMap<CellId, LiquidSurfaceState>,
-    )
-        -> Result<BoundaryExchangeStepCoefficients<T>, ThermalEvaporationError>,
+        &[I],
+        f64,
+        EvaporationNetworkImplicitControls,
+        &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (
+            DepositionSimulation<'m>,
+            T,
+            EvaporationNetworkImplicitReport,
+        ),
+        EvaporationImplicitError,
+    >,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
 ) -> Result<
     (
@@ -539,8 +665,7 @@ fn solve_interval<'m, L: EvaporationLaw + ?Sized, T>(
     if controls.maximum_iterations == 0 || controls.maximum_evaluations == 0 {
         return Err(DepositionError::Budget("adaptive evaporation whole-call solver work").into());
     }
-    let (next, payload, report) = initial
-        .solve_implicit_evaporating_network_step(bindings, target, controls, resolve, checkpoint)?;
+    let (next, payload, report) = solve(initial, bindings, target, controls, checkpoint)?;
     work.iterations = add_count(work.iterations, report.newton_iterations)?;
     work.evaluations = add_count(work.evaluations, report.residual_evaluations)?;
     Ok((next, payload, report))
