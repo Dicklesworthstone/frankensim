@@ -279,6 +279,14 @@ pub fn sdof_peak(record: &[f64], dt: f64, wn: f64, zeta: f64) -> f64 {
 /// responses and combine coherently. This limiting convention is not a
 /// stationary-response claim for undamped white-noise excitation.
 ///
+/// Ordinary combinations use the allocation-free quadratic sum. If signed
+/// contributions nearly cancel, an O(n) scratch buffer combines exactly equal
+/// frequency/damping pairs before squaring, and the same correlation law is
+/// reevaluated with the shared double-double arithmetic. Nearby frequencies
+/// or damping ratios are never merged. This retains small physical responses
+/// that a rounded correlation or a clipped f64 sum would erase; it is not a
+/// covariance enclosure or a forward-accuracy certificate.
+///
 /// # Panics
 /// Array lengths must agree, frequencies must be positive and finite, damping
 /// ratios nonnegative and finite, and modal peaks finite.
@@ -304,19 +312,190 @@ pub fn cqc(peaks: &[f64], freqs: &[f64], damps: &[f64]) -> f64 {
         return 0.0;
     }
     let mut acc = 0.0f64;
+    let mut magnitude = 0.0f64;
     for i in 0..n {
         let pi = peaks[i] / scale;
         // The diagonal is exactly one, including a zero-damped mode; the
         // literal coefficient formula is 0/0 there. Symmetry halves the work.
         acc += pi * pi;
+        magnitude += pi * pi;
         for j in 0..i {
             let rho = cqc_correlation(freqs[i], freqs[j], damps[i], damps[j]);
-            acc += 2.0 * rho * pi * (peaks[j] / scale);
+            let cross = 2.0 * rho * pi * (peaks[j] / scale);
+            acc += cross;
+            magnitude += cross.abs();
         }
     }
-    // Coincident modes of opposite sign can cancel exactly. The correlation
-    // form is nonnegative; only summation roundoff may cross zero.
-    scale * acc.max(0.0).sqrt()
+    // When about half the f64 significand is lost, refine the actual
+    // correlations as well as the sum. Compensating only accumulation cannot
+    // recover 1-rho after rho has rounded to one.
+    if acc <= f64::EPSILON.sqrt() * magnitude {
+        cqc_cancellation(peaks, freqs, damps, scale)
+    } else {
+        scale * acc.sqrt()
+    }
+}
+
+fn cqc_cancellation(peaks: &[f64], freqs: &[f64], damps: &[f64], scale: f64) -> f64 {
+    use fs_math::dd::Dd;
+
+    let input_scale = Dd::from_f64(scale);
+    let mut modes: Vec<_> = peaks
+        .iter()
+        .enumerate()
+        .map(|(i, &peak)| (freqs[i], damps[i], Dd::from_f64(peak) / input_scale))
+        .collect();
+    // The scalar output has no mode-order identity. A complete tie-break gives
+    // identical arithmetic for permutations, including repeated eigenspaces.
+    modes.sort_unstable_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then_with(|| a.1.total_cmp(&b.1))
+            .then_with(|| a.2.hi.total_cmp(&b.2.hi))
+            .then_with(|| a.2.lo.total_cmp(&b.2.lo))
+    });
+    let mut retained = 0;
+    for read in 0..modes.len() {
+        let mode = modes[read];
+        if retained > 0 && modes[retained - 1].0 == mode.0 && modes[retained - 1].1 == mode.1 {
+            modes[retained - 1].2 = modes[retained - 1].2 + mode.2;
+        } else {
+            modes[retained] = mode;
+            retained += 1;
+        }
+    }
+    modes.truncate(retained);
+    // Cancellation can leave a tiny coherent amplitude. Rescale it BEFORE
+    // squaring so an otherwise representable final response is not lost to
+    // underflow of its variance.
+    let group_scale = modes
+        .iter()
+        .map(|mode| mode.2.abs().to_f64())
+        .fold(0.0_f64, f64::max);
+    if group_scale == 0.0 {
+        return 0.0;
+    }
+    let normalization = Dd::from_f64(group_scale);
+    for mode in &mut modes {
+        mode.2 = mode.2 / normalization;
+    }
+    let total = modes.iter().fold(Dd::ZERO, |sum, mode| sum + mode.2);
+    let mut coherent = total * total;
+    let mut coherent_magnitude = coherent.abs().to_f64();
+    let mut direct = Dd::ZERO;
+    let mut direct_magnitude = 0.0;
+    let two = Dd::from_f64(2.0);
+    for i in 0..modes.len() {
+        let (wi, zi, pi) = modes[i];
+        direct = direct + pi * pi;
+        direct_magnitude += (pi * pi).to_f64();
+        for &(wj, zj, pj) in &modes[..i] {
+            let (rho, deficit) = cqc_correlation_refined(wi, wj, zi, zj);
+            let product = two * pi * pj;
+            let cross = rho * product;
+            let contrast = deficit * product;
+            direct = direct + cross;
+            coherent = coherent - contrast;
+            direct_magnitude += cross.abs().to_f64();
+            coherent_magnitude += contrast.abs().to_f64();
+        }
+    }
+    // p^T R p = (sum p)^2 - 2 sum_{i<j}(1-rho_ij)*p_i*p_j.
+    // Choose the form with smaller absolute terms. The complementary form
+    // resolves nearly coherent cancellation; the direct form retains the
+    // uncorrelated limit without cancelling a large squared total.
+    let acc = if coherent_magnitude < direct_magnitude {
+        coherent
+    } else {
+        direct
+    };
+    // The correlation form is PSD in real arithmetic. Only remaining
+    // double-double accumulation roundoff may be clipped here.
+    let root = acc.to_f64().max(0.0).sqrt();
+    let mut factors = [scale, group_scale, root];
+    factors.sort_unstable_by(f64::total_cmp);
+    (factors[0] * factors[2]) * factors[1]
+}
+
+fn cqc_correlation_refined(
+    wi: f64,
+    wj: f64,
+    zi: f64,
+    zj: f64,
+) -> (fs_math::dd::Dd, fs_math::dd::Dd) {
+    use fs_math::dd::Dd;
+
+    if zi == 0.0 || zj == 0.0 {
+        return if zi == zj && wi == wj {
+            (Dd::ONE, Dd::ZERO)
+        } else {
+            (Dd::ZERO, Dd::ONE)
+        };
+    }
+    if wi == wj && zi == zj {
+        return (Dd::ONE, Dd::ZERO);
+    }
+    let (wi, wj, zi, zj) = if wj <= wi {
+        (wi, wj, zi, zj)
+    } else {
+        (wj, wi, zj, zi)
+    };
+    // Form the ratio in extended precision: subtracting a rounded f64 ratio
+    // from one would already lose the small physical frequency separation.
+    let r = Dd::from_f64(wj) / Dd::from_f64(wi);
+    if r.to_f64() == 0.0 {
+        return (Dd::ZERO, Dd::ONE);
+    }
+    let damping_scale = Dd::from_f64(zi.max(zj));
+    let zi = Dd::from_f64(zi) / damping_scale;
+    let zj = Dd::from_f64(zj) / damping_scale;
+    let four = Dd::from_f64(4.0);
+    let eight = Dd::from_f64(8.0);
+    let root_i = zi.sqrt();
+    let root_j = zj.sqrt();
+    let root_r = r.sqrt();
+    let detuning = (Dd::ONE - r) * (Dd::ONE + r);
+    let numerator = eight * root_i * root_j * (zi + r * zj) * r * root_r;
+    let loss = four * zi * zj * r * (Dd::ONE + r * r)
+        + four * (zi * zi + zj * zj) * r * r;
+    // The loss part of denominator - numerator factors as
+    // 4*r*(zi+r*zj)*(sqrt(zj)-sqrt(r*zi))^2.
+    // Rationalize the root difference and retain 1-rho independently;
+    // subtracting even a double-double rho from one has an avoidable floor.
+    let root_difference = (zj - r * zi) / (root_j + root_r * root_i);
+    let loss_deficit = four * r * (zi + r * zj) * root_difference * root_difference;
+    let (rho, deficit) = if damping_scale.lt(detuning) {
+        // Divide the whole fraction by the detuning term when loss is small.
+        // Squaring detuning/damping could otherwise overflow.
+        let inverse = damping_scale / detuning;
+        let square = inverse * inverse;
+        let denominator = Dd::ONE + loss * square;
+        (
+            numerator * square / denominator,
+            (Dd::ONE + loss_deficit * square) / denominator,
+        )
+    } else {
+        let gap = detuning / damping_scale;
+        let square = gap * gap;
+        let denominator = square + loss;
+        (
+            numerator / denominator,
+            (square + loss_deficit) / denominator,
+        )
+    };
+    let bounded = |value: Dd| {
+        assert!(
+            value.hi.is_finite() && value.lo.is_finite(),
+            "CQC refined correlation must be representable"
+        );
+        if value.lt(Dd::ZERO) {
+            Dd::ZERO
+        } else if Dd::ONE.lt(value) {
+            Dd::ONE
+        } else {
+            value
+        }
+    };
+    (bounded(rho), bounded(deficit))
 }
 
 fn cqc_correlation(wi: f64, wj: f64, zi: f64, zj: f64) -> f64 {
@@ -697,6 +876,88 @@ mod tests {
         assert_eq!(lossless.to_bits(), small_loss.to_bits());
         let degenerate = cqc(&[1.0, 1.0], &[17.0, 17.0], &[zi, zj]);
         assert!((degenerate - (2.0 + 4.0 * (zi * zj).sqrt() / (zi + zj)).sqrt()).abs() < 1.0e-15);
+    }
+
+    #[test]
+    fn g1_cqc_preserves_small_coherent_responses_before_squaring() {
+        // A repeated eigenspace is one coherent response. Expanding its
+        // squared sum loses these residues, even with perfectly exact rho=1.
+        for small in [1.0e-8, 1.0e-12, 1.0e-200] {
+            for damping in [0.0, 0.05, 2.0] {
+                for peaks in [
+                    [1.0, small, -1.0],
+                    [-1.0, 1.0, small],
+                    [small, -1.0, 1.0],
+                    [-1.0, small, 1.0],
+                ] {
+                    let got = cqc(&peaks, &[10.0; 3], &[damping; 3]);
+                    assert_eq!(got.to_bits(), small.to_bits());
+                }
+            }
+            let got = cqc(
+                &[1.0, small, -1.0, 0.6, -0.6],
+                &[10.0, 10.0, 10.0, 12.0, 12.0],
+                &[0.05, 0.05, 0.05, 0.02, 0.02],
+            );
+            assert_eq!(got.to_bits(), small.to_bits());
+        }
+        // The small normalized amplitude is representable, but its square
+        // is not. Regrouping must precede the variance calculation.
+        let got = cqc(&[1.0e200, 1.0, -1.0e200], &[10.0; 3], &[0.05; 3]);
+        assert!((got - 1.0).abs() < 4.0 * f64::EPSILON);
+    }
+
+    #[test]
+    fn g1_cqc_close_distinct_frequencies_retain_their_physical_residual() {
+        let damping = 0.05_f64;
+        for separation in [1.0e-5, 1.0e-7, 1.0e-9, 1.0e-11] {
+            for unit in [1.0e-100, 1.0, 1.0e100] {
+                let hi = (10.0 + separation) * unit;
+                let lo = 10.0 * unit;
+                // Independent equal-damping reduction of 2*(1-rho):
+                // factor the frequency difference before any subtraction
+                // from a correlation near one.
+                let r = lo / hi;
+                let delta = (hi - lo) / hi;
+                let u = 1.0 + r;
+                let root_sum = 1.0 + r.sqrt();
+                let den = (delta * u).powi(2) + 4.0 * damping * damping * r * u * u;
+                let expected = delta
+                    * (2.0
+                        * (u * u + 4.0 * damping * damping * r * u / root_sum.powi(2))
+                        / den)
+                        .sqrt();
+                let actual = cqc(&[1.0, -1.0], &[hi, lo], &[damping; 2]);
+                assert!(actual > 0.0);
+                assert!(
+                    (actual / expected - 1.0).abs() < 2.0e-11,
+                    "separation={separation}, unit={unit}: {actual} vs {expected}"
+                );
+                assert_eq!(
+                    actual.to_bits(),
+                    cqc(&[-1.0, 1.0], &[lo, hi], &[damping; 2]).to_bits()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_cqc_equal_frequency_keeps_distinct_damping_laws() {
+        let zi = 0.05_f64;
+        for separation in [1.0e-7, 1.0e-10, 1.0e-13] {
+            let zj = zi + separation;
+            // At equal frequency rho=2*sqrt(zi*zj)/(zi+zj).
+            // Rationalizing its complement yields this stable physical
+            // response; merging merely nearby damping ratios would give zero.
+            let expected = core::f64::consts::SQRT_2 * (zi - zj).abs()
+                / ((zi.sqrt() + zj.sqrt()) * (zi + zj).sqrt());
+            let actual = cqc(&[1.0, -1.0], &[10.0; 2], &[zi, zj]);
+            assert!((actual / expected - 1.0).abs() < 2.0e-11);
+            assert_eq!(
+                actual.to_bits(),
+                cqc(&[-1.0, 1.0], &[10.0; 2], &[zj, zi]).to_bits()
+            );
+        }
     }
 
     #[test]

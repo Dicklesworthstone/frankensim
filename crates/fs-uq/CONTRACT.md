@@ -54,8 +54,8 @@ for QMC Gaussian germs instead of duplicating the polynomial.
 - Slice 2 (bead o5kc): `seismic` — `KanaiTajimi` PSD + spectral-
   representation synthesis with counter-based phases (bit-replayable
   per seed), `sdof_peak` (Newmark average-acceleration response
-  ordinates), `cqc` (Der Kiureghian coefficients; collapses to `srss`
-  for separated modes, exceeds it for close modes),
+  ordinates), `cqc` (Der Kiureghian coefficients; recovers `srss`
+  for uncorrelated modes and retains signed close-mode interference),
   `bilinear_peak_ductility` + `ida_fragility` (the nonlinear IDA
   workhorse). Both oscillator paths use implicit Newmark average acceleration
   from initial rest; the first acceleration sample initializes equilibrium,
@@ -68,7 +68,15 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   exact unit diagonal correlation; distinct undamped frequencies are
   uncorrelated, while identical undamped frequencies combine coherently.
   Pair symmetry halves coefficient work and ordered frequency ratios avoid
-  overflow across wide bands. `anytime` —
+  overflow across wide bands. Well-conditioned combinations retain the
+  allocation-free O(n²) path. Severe signed cancellation uses O(n) scratch to
+  combine exactly equal frequency/damping pairs before squaring; nearby modes
+  remain distinct. The shared double-double owner reevaluates the correlation
+  and its independently factored complement, choosing between the direct
+  quadratic form and the coherent-total-minus-deficits form. Regrouped
+  amplitudes are rescaled before their variance can underflow. This numerical
+  refinement is not a covariance enclosure or forward-error certificate.
+  `anytime` —
   `estimate_probability_anytime`: a sub-Gaussian (σ = 1/2) mixture
   confidence sequence stops the moment its RADIUS meets the decision's
   half-width — valid AT the stopping time by construction (fs-eproc's
@@ -206,6 +214,9 @@ within its analytic constant-load amplitude bound at `omega*dt = 5`; a yielded
 step solves its accepted restoring force; cyclic plastic peaks converge to an
 independent 600,000-step explicit reference. CQC checks zero damping, signed
 degeneracy, unequal damping, frequency-unit changes and extreme peak scales.
+Three additional G1 regressions cover coherent residues down to 1e-200,
+large cancelling physical contributions, permutations, near-coincident
+frequencies under unit changes, and distinct almost-equal damping laws.
 
 ### Ground-motion bandwidth and sample clock
 
