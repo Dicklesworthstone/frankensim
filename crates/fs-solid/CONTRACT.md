@@ -1,5 +1,27 @@
 # fs-solid CONTRACT
 
+## Continued brittle seam growth with retained physical histories
+
+`TetFractureTopology::refine` adds explicitly selected original faces to an
+already split mesh. Every new nodal star maps to exactly one PREVIOUS split
+star, preserving independent crack-face displacement and velocity instead of
+looking them up on the unsplit mesh. Original elements, quadrature layout,
+material bindings and the retained seam prefix stay fixed. The existing native
+splitter and consistent P1 inventory owner verify unchanged mass, linear/angular
+momentum and kinetic energy; no lumping, averaging, deletion or healing occurs.
+Budgets cover the complete result, and refused/cancelled candidates leave the
+accepted topology and fields reusable.
+
+The retained-interface admission checks both complete matching P1 maps against
+the actual reference geometry and verifies unchanged physical points, axes,
+areas, shape order, surface roles and borrowed law/source owners on old seams.
+It uses the native P1 frame arithmetic with linear seam work and no mesh-sized
+temporary allocation. This permits retained point histories to remain with
+their physical locations; it neither rebinds opaque solver checkpoints nor
+initializes newly inserted cohesive laws in a loaded solid. New-surface
+traction/history/energy admission and boundary/load reassignment remain with
+the receiving solver; automatic crack discovery is not claimed.
+
 ## Partial brittle crack fronts and retained reference trace order
 
 Matching P1 cohesive traces admit one or two shared crack-front vertices. Their

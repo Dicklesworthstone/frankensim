@@ -94,6 +94,9 @@ impl<'a> CohesivePatch<'a> {
     /// Original source bundle when this patch was constructed from interface data.
     #[must_use]
     pub fn source(&self) -> Option<&'a ResolvedBilinearCohesive> { self.source }
+    /// Original immutable law owner, retained when geometry is rebound.
+    #[must_use]
+    pub fn law(&self) -> &'a BilinearCohesive { self.law }
     #[must_use]
     pub fn id(&self) -> u64 { self.id }
     #[must_use]

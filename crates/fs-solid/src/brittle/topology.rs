@@ -16,6 +16,12 @@
 //! their original ordered slices; this does not rebind opaque solver-owned
 //! checkpoints to a new system. Existing cohesive dynamics owns all subsequent
 //! fracture loss, motion and compressive reclosure.
+//!
+//! [`TetFractureTopology::refine`] adds cuts while preserving motion already
+//! developed on the previous split mesh. Its retained-interface check verifies
+//! physical quadrature, reference frames and the same material/source owners
+//! before a caller reuses old surface histories. New surfaces still require
+//! their own traction/history/energy admission in the receiving solver.
 
 use crate::cohesive::p1::FacePair;
 use crate::loads3::TetLoadGeometry3;
@@ -23,10 +29,14 @@ use fs_exec::Cx;
 use fs_material::cohesive::BilinearCohesive;
 
 mod mesh;
+mod retained;
 pub use mesh::{
     FractureMotionTransfer, FractureTopologyBudget, FractureTopologyError, InteriorSeam,
-    P1PhysicalInventory, SplitFace, TetFractureTopology,
+    P1PhysicalInventory, SplitFace, TetFractureRefinement, TetFractureTopology,
 };
+
+#[cfg(test)]
+mod retained_tests;
 
 impl<'g> TetFractureTopology<'g> {
     /// Split explicitly selected internal faces of admitted reference geometry.
@@ -60,6 +70,33 @@ impl<'g> TetFractureTopology<'g> {
 
     /// Duplicate intensive nodal motion and reconstruct consistent P1 inertia.
     /// Densities follow the unchanged element order and have units kg/m³.
+    pub fn transfer_motion(
+        &self,
+        displacement_m: &[f64],
+        velocity_m_s: &[f64],
+        density_kg_m3: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<FractureMotionTransfer, FractureTopologyError> {
+        self.transfer_motion_controlled(displacement_m, velocity_m_s, density_kg_m3, &mut || {
+            cx.checkpoint().is_err()
+        })
+    }
+
+    /// Add cuts without merging any previously independent nodal stars.
+    /// The budget bounds the complete resulting mesh, including retained cuts.
+    pub fn refine<'p>(
+        &'p self,
+        additional_seams: &[InteriorSeam],
+        budget: FractureTopologyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<TetFractureRefinement<'p, 'g>, FractureTopologyError> {
+        self.refine_controlled(additional_seams, budget, &mut || cx.checkpoint().is_err())
+    }
+}
+
+impl TetFractureRefinement<'_, '_> {
+    /// Preserve motion on the previous split mesh and independently verify its
+    /// consistent mass, linear/angular momentum and kinetic energy after cuts.
     pub fn transfer_motion(
         &self,
         displacement_m: &[f64],

@@ -2,6 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+mod refinement;
+pub use refinement::TetFractureRefinement;
+
 /// An original interior triangle and its explicitly ordered receiving bodies.
 /// Node order is arbitrary. `side_a_element` selects A; the other owner is B.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -932,9 +935,9 @@ mod tests {
             nodes: [0, 1, 3],
             side_a_element: 0,
         };
-        let partial = TetFractureTopology::prepare(
-            &nodes, &tets, &volumes, &[seam], budget(), &mut || false,
-        ).unwrap();
+        let partial =
+            TetFractureTopology::prepare(&nodes, &tets, &volumes, &[seam], budget(), &mut || false)
+                .unwrap();
         let face = partial.seams()[0];
         assert_eq!(partial.nodes_m().len(), nodes.len() + 1);
         assert_eq!(partial.element_fragments(), &[0, 0, 0]);
@@ -942,15 +945,17 @@ mod tests {
         assert_ne!(face.side_a[2], face.side_b[2]);
         for (a, b, face) in [(0, 2, [0, 1, 2]), (1, 2, [0, 1, 4])] {
             for node in face {
-                assert_eq!(partial.tetrahedra()[a][corner(&tets, a, node) % 4],
-                    partial.tetrahedra()[b][corner(&tets, b, node) % 4]);
+                assert_eq!(
+                    partial.tetrahedra()[a][corner(&tets, a, node) % 4],
+                    partial.tetrahedra()[b][corner(&tets, b, node) % 4]
+                );
             }
         }
         let displacement: Vec<_> = (0..15).map(|i| 0.001 * (i as f64).sin()).collect();
         let velocity: Vec<_> = (0..15).map(|i| 0.2 * (i as f64).cos()).collect();
-        let transfer = partial.transfer_motion_controlled(
-            &displacement, &velocity, &[2.0; 3], &mut || false,
-        ).unwrap();
+        let transfer = partial
+            .transfer_motion_controlled(&displacement, &velocity, &[2.0; 3], &mut || false)
+            .unwrap();
         assert_eq!(transfer.before, transfer.after);
         let all = [
             seam,
@@ -996,14 +1001,29 @@ mod tests {
     fn fully_tied_internal_seam_refuses_without_fabricating_opening_modes() {
         // Eight tetrahedra fill an octahedron around its center. Removing one
         // face adjacency leaves each of its three node stars connected.
-        let nodes = [[0., 0., 0.], [1., 0., 0.], [-1., 0., 0.],
-            [0., 1., 0.], [0., -1., 0.], [0., 0., 1.], [0., 0., -1.]];
+        let nodes = [
+            [0., 0., 0.],
+            [1., 0., 0.],
+            [-1., 0., 0.],
+            [0., 1., 0.],
+            [0., -1., 0.],
+            [0., 0., 1.],
+            [0., 0., -1.],
+        ];
         let mut tets = Vec::new();
-        for x in [1, 2] { for y in [3, 4] { for z in [5, 6] {
-            tets.push([0, x, y, z]);
-        } } }
+        for x in [1, 2] {
+            for y in [3, 4] {
+                for z in [5, 6] {
+                    tets.push([0, x, y, z]);
+                }
+            }
+        }
         let volumes = [1.0 / 6.0; 8];
-        let seam = InteriorSeam { id: 7, nodes: [0, 1, 3], side_a_element: 0 };
+        let seam = InteriorSeam {
+            id: 7,
+            nodes: [0, 1, 3],
+            side_a_element: 0,
+        };
         assert!(matches!(
             TetFractureTopology::prepare(&nodes, &tets, &volumes, &[seam], budget(), &mut || false),
             Err(FractureTopologyError::UnopenedSeam { seam: 7 })

@@ -635,7 +635,7 @@ fn length(v: [f64; 3]) -> Result<f64, Error> {
     let u = v.map(|x| x / scale);
     positive(scale * fs_math::det::sqrt(dot(u, u)))
 }
-fn frame(
+pub(crate) fn frame(
     nodes: &[[f64; 3]],
     a: [usize; 3],
     opposite_a: usize,
