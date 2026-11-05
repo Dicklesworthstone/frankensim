@@ -443,3 +443,48 @@ is not the full Cargo workspace or thermal-feature gate.
 Equation references: [Argonne reactor power](https://sas-doc.nse.anl.gov/5.8/Part02/Ch04/power.html)
 and [delayed-neutron precursors](https://sas-doc.nse.anl.gov/5.8/Part02/Ch04/delayed-neutrons.html).
 No evaluated neutron coefficients or reactor-design qualification are supplied.
+
+## Shared thermal irradiation of isotope mixtures
+
+`thermal::NuclearHeating<S>` now owns the common material binding, absolute clock,
+authored-transition clipping, pending interval, additive heat credit and atomic
+publication. `FissionHeating` remains its prescribed-source specialization;
+`IrradiationHeating` specializes that same owner for neutron irradiation. The
+sealed `NuclearHeatSource` seam does not duplicate a thermal integrator, nuclear
+inventory or energy-account implementation. The optional `fs-couple` facade
+exposes these types plus the original `irradiation` and `kinetics` namespaces.
+
+An `IrradiationCellSource` binds a bounded ordered mixture of distinct parent
+nuclides to one original active thermal cell. Its immutable
+`NeutronFluxSchedule` uses one exact group identity/edge grid and right-continuous
+absolute-time changes. Each isotope sees the same incident spectrum and the
+original cell temperature. Each advances its own fission/capture inventory and
+delayed-energy history; emitted channels and reaction counts are then aggregated.
+Fission and capture products remain in the thermal material's mass coordinate.
+No composition-dependent caloric chart or daughter yield is silently assigned.
+
+Both initial and final thermal temperatures must remain within every bound
+nuclear dataset's declared range. A final-temperature refusal occurs before
+pending inventories are accepted and discards the whole thermal advance. Flux
+transitions clip the actual native timestep. Only integrated deposited fission,
+capture and delayed heat divided by that final duration enters the native source
+path, in addition to authored boundary heat. Outward radiation and escaped energy
+remain exports. The same per-advance numerical allowance includes absolute
+source and heat-credit defects across cells/substeps, including final rounding
+when multiple isotope channels become one cell heat rate. A one-joule isotope
+contribution cannot vanish beside a 1e16-joule contribution outside that budget.
+
+Five additional thermal regressions passed: independent two-group/two-isotope
+reaction calorimetry with additive boundary heat and shutdown clipping; decay-heat
+restart at flux shutdown; joint refusal when the thermal endpoint leaves the
+nuclear-data domain; duplicate-isotope/group-identity/work admission; and mixed-
+magnitude heat-reduction accounting. Together with all source kernels, the six
+original prescribed thermal tests and eight preserved radioactive thermal tests,
+the focused production-owner build passed **71 tests** with `thermal` enabled.
+It used the unchanged native enthalpy, heat-rate, timestep, observer, coverage,
+boundary and species implementations. No heat law, integrator, physical type or
+nuclear algorithm was substituted. Unrelated thermal wrappers were excluded from
+that focused dependency build; full workspace and `fs-couple` Cargo gates remain
+separate. The bounded native `cargo check -p fs-thermal --locked --offline --lib`
+attempt timed out after 180 seconds in real dependency compilation, without
+producing thermal metadata or a source diagnostic.
