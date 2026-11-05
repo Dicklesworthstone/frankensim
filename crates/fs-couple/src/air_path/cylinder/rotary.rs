@@ -14,7 +14,11 @@
 //! Each quadrature cell is therefore an actual inertia/dashpot branch,
 //! Z_j(s)=c_j*s/(s+lambda_j), I_j=c_j/lambda_j. The slow tail is integrated
 //! by the phase of J1+iY1 and collapsed to resistance, with impedance error
-//! at most R_low*lambda_min/omega. Refine cutoffs and grid independently.
+//! at most R_low*lambda_min/omega. The final cell and infinite fast tail are
+//! reduced together to one positive branch matching their inertia and leading
+//! dissipative coefficient, without increasing the number of states. This is
+//! a low-frequency moment approximation, not the exact high-frequency square-
+//! root law; refine cutoffs and grid independently for the physical bandwidth.
 //! <https://dlmf.nist.gov/10.5.E2>; the independent modified-Bessel integral
 //! oracle is <https://dlmf.nist.gov/10.32.E9>.
 //!
@@ -95,9 +99,17 @@ impl<F: FluidTransport> RotaryCylinderFlow<F> {
             let x = det::exp(log_min + (cell as f64 + 0.5) * step);
             let denominator = j1(x).powi(2) + y1(x).powi(2);
             // d(log lambda) = 2*d(log x); this is the order-one rotary spectrum.
-            let resistance = (8.0 / core::f64::consts::PI) * scale * step / denominator;
-            let rate = diffusion * x * x;
-            let inertia = resistance / rate;
+            let (mass_weight, resistance_weight) = if cell + 1 == resolution.intervals {
+                super::fast_tail::weights(det::exp(log_min + cell as f64 * step), true, gate)?
+            } else {
+                (step / denominator / (x * x), step / denominator)
+            };
+            let resistance = (8.0 / core::f64::consts::PI) * scale * resistance_weight;
+            // Fluid inertia is geometric, including the completed fast tail.
+            // Viscosity changes resistance/rate, not the stored kinetic energy.
+            let inertia = (8.0 / core::f64::consts::PI) * transport.density_kg_m3()
+                * radius_m * radius_m * radius_m * radius_m * mass_weight;
+            let rate = resistance / inertia;
             if [x, denominator, resistance, rate, inertia].iter()
                 .any(|value| !value.is_finite() || *value <= 0.0) {
                 return Err(invalid("rotary cylinder memory is not finite and passive"));

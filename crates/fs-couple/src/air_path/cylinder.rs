@@ -24,7 +24,11 @@
 //! Resolution has three independent axes: two spectral cutoffs and log-grid
 //! intervals. The low tail's exact integrated weight is collapsed to resistance;
 //! its error is at most R_low*lambda_min/omega at a positive frequency omega.
-//! The high tail is omitted. Neither cutoff nor a grid count certifies a whole
+//! The final log cell and infinite high tail share one positive mass/dashpot
+//! that matches their added inertia and leading dissipative coefficient. This
+//! completes the fast spectrum without increasing the state count; its finite-
+//! frequency approximation still requires the high-cutoff refinement axis.
+//! Neither cutoff nor a grid count certifies a whole
 //! performance: compare complex impedance and actual coupled histories on a
 //! declared frequency/time band while refining all three axes.
 //!
@@ -47,6 +51,8 @@ pub mod frame;
 /// The same Newtonian exterior with rotational no-slip boundary conditions.
 pub mod rotary;
 
+mod fast_tail;
+
 use super::invalid;
 use crate::acoustic_realize::AcousticRealizeError;
 use fs_aeroac::bessel::{j0, y0};
@@ -61,7 +67,8 @@ pub struct CylinderFlowResolution {
     /// Smallest dimensionless diffusion wavenumber times physical radius.
     /// Finite in (0,0.5]; the excluded slow tail is integrated analytically.
     pub minimum_wavenumber_radius: f64,
-    /// Largest dimensionless diffusion wavenumber times physical radius.
+    /// End of the explicitly resolved diffusion grid. The final cell and the
+    /// infinite faster tail share a passive two-moment completion.
     /// Greater than the minimum and at most 3000 (the Bessel owner's domain).
     pub maximum_wavenumber_radius: f64,
     /// Positive midpoint intervals in log(wavenumber), in 1..=4096.
@@ -187,15 +194,19 @@ impl<F: FluidTransport> CylinderFlow<F> {
             let x = det::exp(log_min + (cell as f64 + 0.5) * step);
             let denominator = j0(x).powi(2) + y0(x).powi(2);
             // d log(lambda) = 2 d log(x).
-            let resistance = (16.0 / core::f64::consts::PI) * viscosity
-                * step / denominator;
+            let (mass_weight, resistance_weight) = if cell + 1 == resolution.intervals {
+                fast_tail::weights(det::exp(log_min + cell as f64 * step), false, gate)?
+            } else {
+                (step / denominator / (x * x), step / denominator)
+            };
+            let resistance = (16.0 / core::f64::consts::PI) * viscosity * resistance_weight;
             // This is a physical fluid inertia at a fixed dimensionless
             // spatial spectral point, not a viscosity-dependent fit. Derive
             // it from geometry and density so changing ONLY viscosity cannot
             // change stored energy through rounding in c/lambda. Derive the
             // pole from that same mass used by the native time-domain owner.
             let mass = (16.0 / core::f64::consts::PI)
-                * (added_mass / core::f64::consts::PI) * step / denominator / (x * x);
+                * (added_mass / core::f64::consts::PI) * mass_weight;
             let rate = resistance / mass;
             if [x, denominator, resistance, rate, mass].iter()
                 .any(|v| !v.is_finite() || *v <= 0.0) {
@@ -231,7 +242,8 @@ impl<F> CylinderFlow<F> {
     }
     /// Slow cutoff [1/s], for the explicit low-tail error estimate.
     #[must_use] pub const fn minimum_rate_per_s(&self) -> f64 { self.minimum_rate_per_s }
-    /// Transverse positive mechanical branches in original quadrature order.
+    /// Positive mechanical branches in spectral order; the terminal branch
+    /// completes the final cell and infinite fast tail without an extra state.
     #[must_use] pub fn branches(&self) -> &[CylinderFlowBranch] { &self.branches }
 
     /// Axial branches of the SAME diffusion continuum and numerical grid.

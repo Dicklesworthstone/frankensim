@@ -241,6 +241,79 @@ pub fn y1(x: f64) -> f64 {
     }
 }
 
+fn hankel_abs_squared(order: f64, x: f64) -> f64 {
+    if x.is_nan() || x <= 0.0 {
+        return f64::NAN;
+    }
+    if x.is_infinite() {
+        return 0.0;
+    }
+    if x <= SPLIT {
+        if order == 0.0 { j0(x).powi(2) + y0(x).powi(2) }
+        else { j1(x).powi(2) + y1(x).powi(2) }
+    } else {
+        // J=A(P cos chi-Q sin chi), Y=A(P sin chi+Q cos chi).
+        // Form the norm before introducing the common phase. This avoids the
+        // large-argument phase error that limits the individual J/Y values.
+        let (p, q) = asymptotic_pq(order, x);
+        (core::f64::consts::FRAC_2_PI / x) * (p*p + q*q)
+    }
+}
+
+/// Squared modulus `J0(x)^2 + Y0(x)^2`, without a large-argument phase.
+///
+/// The defining series supplies the small-argument regime. Above the shared
+/// crossover, the Hankel amplitudes give `2*(P0^2+Q0^2)/(pi*x)` directly
+/// (DLMF 10.17.3–4). No oscillatory phase or argument reduction is needed, so
+/// the individual J/Y phase-accuracy limit at `x=3000` does not apply to this
+/// positive envelope. The large-argument result tends to `2/(pi*x)`, including
+/// finite arguments where multiplying `pi*x` would overflow.
+/// Domain/policy: positive `x`; NaN otherwise; zero at positive infinity.
+#[must_use]
+pub fn hankel0_abs_squared(x: f64) -> f64 { hankel_abs_squared(0.0, x) }
+
+/// Squared modulus `J1(x)^2 + Y1(x)^2`, evaluated from the phase-free Hankel
+/// amplitudes in the large-argument regime; same domain as
+/// [`hankel0_abs_squared`]. At tiny positive `x` the physical `4/(pi*x)^2`
+/// divergence can exceed the representable range and returns infinity.
+#[must_use]
+pub fn hankel1_abs_squared(x: f64) -> f64 { hankel_abs_squared(1.0, x) }
+
+#[cfg(test)]
+mod modulus_tests {
+    use super::*;
+
+    #[test]
+    fn phase_free_moduli_match_the_certified_real_bessel_range() {
+        for x in [1e-10, 0.01, 1.0, 17.99, 18.0, 18.01, 40.0, 3000.0] {
+            for (actual, expected) in [
+                (hankel0_abs_squared(x), j0(x).powi(2) + y0(x).powi(2)),
+                (hankel1_abs_squared(x), j1(x).powi(2) + y1(x).powi(2)),
+            ] {
+                assert!(actual > 0.0);
+                assert!((actual / expected - 1.0).abs() < 6e-13, "x={x}");
+            }
+        }
+    }
+
+    #[test]
+    fn phase_free_moduli_retain_the_large_argument_envelope_and_first_correction() {
+        // The independent modulus expansion starts with
+        // (pi*x/2)(J_n^2+Y_n^2) = 1 + (4*n^2-1)/(8*x^2) + O(x^-4).
+        for x in [1e4, 1e6, 1e12, 1e100, f64::MAX] {
+            let scale = core::f64::consts::FRAC_2_PI / x;
+            for (actual, correction) in [
+                (hankel0_abs_squared(x), -0.125),
+                (hankel1_abs_squared(x), 0.375),
+            ] {
+                assert!(actual.is_finite() && actual > 0.0);
+                let expected = 1.0 + (correction / x) / x;
+                assert!((actual / scale - expected).abs() < 3e-15, "x={x:e}");
+            }
+        }
+    }
+}
+
 /// Outgoing 2D Hankel function `H0^(1)(x) = J0(x) + i Y0(x)`
 /// (`e^{-i omega t}` convention). Outside the domain (`x <= 0` or
 /// NaN) BOTH components are NaN — never a half-valid complex

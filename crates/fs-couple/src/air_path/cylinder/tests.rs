@@ -71,13 +71,83 @@ fn grid_count_and_both_spectral_cutoffs_are_live_independent_axes() {
     assert!(previous < 0.003);
 
     previous = f64::INFINITY;
-    for maximum in [30.0, 300.0, 3000.0] {
+    // After positive fast-tail completion the leading omission is cubic in
+    // frequency. Resolve that error before the finite log grid becomes dominant.
+    for maximum in [8.0, 16.0, 30.0] {
         let f = flow(resolution(1e-5, maximum, 512));
         let e = error(&f, 100.0, ORACLE[4].1);
         assert!(e < previous / 8.0, "fast-tail axis maximum={maximum}: {e:e}");
         previous = e;
     }
-    assert!(previous < 0.3);
+    assert!(previous < 0.04);
+}
+
+#[test]
+fn fast_tail_completion_recovers_complex_force_without_more_memory_states() {
+    // The former omitted tail gives errors of about 8 and 0.267 respectively
+    // at omega=100. These are independent complex K-Bessel force references,
+    // not a comparison to a finer copy of the real-Bessel spectral algorithm.
+    for (maximum, error_limit) in [(100.0, 5e-4), (3000.0, 2.5e-5)] {
+        let f = flow(resolution(1e-5, maximum, 512));
+        assert_eq!(f.branches().len(), 512);
+        for &(omega, expected) in &ORACLE {
+            let e = error(&f, omega, expected);
+            assert!(e < error_limit, "maximum={maximum}, omega={omega}, error={e:e}");
+            let loss = f.impedance_per_length(omega).unwrap().re / f.gas().dynamic_viscosity;
+            assert!((loss - expected.re).abs() < 5e-5,
+                "maximum={maximum}, omega={omega}, resistive error={:e}", loss - expected.re);
+        }
+    }
+}
+
+#[test]
+fn one_completed_tail_state_retains_native_work_and_positive_heat() {
+    let gate = CancelGate::new_clock_free();
+    let source = FluidTransportState::try_new(2.0, 4000.0, 0.5, 0.1).unwrap();
+    let f = CylinderFlow::from_fluid(0.2, source, resolution(0.1, 2.0, 1), &gate).unwrap();
+    let body = f.transverse_body(0.7, 0.6, 4.0, 3, &gate).unwrap();
+    assert_eq!(body.system().state_dim(), 3);
+    let mut state = body.state_from_motion(0.02, 0.3, &[-0.1]).unwrap();
+    let initial_energy = body.system().hamiltonian(&state);
+    let (mut heat, mut work) = (0.0, 0.0);
+    for _ in 0..20 {
+        let (force, dt) = (0.03, 0.02);
+        let step = fs_phs::step(body.system(), &state, &[force], dt).unwrap();
+        let velocity = 0.5 * (state[1] + step.x[1]) / body.moving_mass_kg();
+        let fluid_velocity = 0.5 * (state[2] + step.x[2]) / body.memory_masses_kg()[0];
+        let relative_velocity = velocity - fluid_velocity;
+        heat += dt * body.length_m() * (
+            f.low_tail_resistance_per_length_n_s_m2() * velocity * velocity
+            + f.branches()[0].resistance_per_length_n_s_m2 * relative_velocity * relative_velocity);
+        work += force * (step.x[0] - state[0]);
+        state = step.x;
+    }
+    assert!(heat > 0.0);
+    let energy_change = body.system().hamiltonian(&state) - initial_energy;
+    assert!((energy_change + heat - work).abs() < 2e-12 * initial_energy);
+}
+
+#[test]
+fn one_interval_fast_tail_has_independent_physical_inertia_and_resistance() {
+    // Independent adaptive integration of 1/[k^3(J0^2+Y0^2)] and
+    // 1/[k^5(J0^2+Y0^2)] on [0.001,infinity), with SciPy's real Bessel
+    // implementation and QUADPACK, gives Mweight=27954.841894480702 and
+    // Rweight=Mweight^2/Nweight=0.061008776802984721. This includes both
+    // the slow decades and the infinite fast end of the original spectrum.
+    let gate = CancelGate::new_clock_free();
+    for (density, viscosity, radius) in [(1.2, 1.8e-5, 0.0003), (1000.0, 0.001, 0.001)] {
+        let fluid = FluidTransportState::try_new(density, 1000.0, 0.025, viscosity).unwrap();
+        let f = CylinderFlow::from_fluid(radius, fluid, resolution(0.001, 0.1, 1), &gate).unwrap();
+        assert_eq!(f.branches().len(), 1);
+        let branch = f.branches()[0];
+        let mass = (16.0 / core::f64::consts::PI) * density * radius * radius
+            * 27954.841894480702;
+        let resistance = (16.0 / core::f64::consts::PI) * viscosity * 0.061008776802984721;
+        assert!((branch.mass_per_length_kg_m / mass - 1.0).abs() < 2e-9);
+        assert!((branch.resistance_per_length_n_s_m2 / resistance - 1.0).abs() < 2e-9);
+        assert!(branch.rate_per_s > 0.0);
+        assert_eq!(branch.rate_per_s, branch.resistance_per_length_n_s_m2 / branch.mass_per_length_kg_m);
+    }
 }
 
 #[test]

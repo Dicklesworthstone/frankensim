@@ -8051,7 +8051,29 @@ clarinet is one filling of those objects.
   wavenumber cutoffs and log-grid intervals: `0<X_MIN<=0.5`,
   `X_MIN<X_MAX<=3000`, and `1..=4096` intervals. The exact integrated slow
   tail is collapsed to resistance with dynamic error bounded by
-  `R_low*lambda_min/omega` at positive frequency; the fast tail is truncated.
+  `R_low*lambda_min/omega` at positive frequency. The final log cell and the
+  complete faster continuum share one positive mass/dashpot branch. For that
+  original spectral measure, `M=integral(dR/lambda)` and
+  `N=integral(dR/lambda^2)` give `lambda_eff=M/N`, `R_eff=M^2/N`. This retains
+  the added inertia and leading dissipative response: both exact and reduced
+  impedances start with `s*M-s^2*N`, and their difference starts at order
+  `s^3`. The fast-tail reduction applies to transverse, axial and rotary flow;
+  instantaneous potential-flow mass and the rotary steady resistance remain
+  separate. Fluid inertia is evaluated from density and geometry, so a
+  viscosity-only change changes resistance/rates without changing storage.
+
+  This completion keeps exactly `INTERVALS` memory coordinates, with no extra
+  runtime operations or new material parameters. It adds cold positive-weight
+  moment quadrature: logarithmic panels below the Bessel crossover and inverse
+  wavenumber above it, with cancellation between refinements. The large-
+  argument squared Bessel modulus uses phase-free Hankel amplitudes rather
+  than extrapolating the individual oscillatory J/Y phase certificate. The
+  internal moment-quadrature tolerance is `1e-10`; it does not certify a
+  finite-frequency impedance or coupled trajectory. In particular a finite
+  number of branches cannot reproduce the continuum's unbounded square-root
+  high-frequency law. The upper cutoff must still be refined for the physical
+  bandwidth; the complete fast tail is represented by its first two inverse-
+  rate moments, not resolved at every rate.
   Refine all three axes and the actual coupled response. Every branch adds one
   coordinate and one connection per retained transverse/twist mode, and per
   axial mode when longitudinal waves are selected. The shared mechanical
