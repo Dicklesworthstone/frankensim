@@ -1,10 +1,11 @@
-//! Coherent and statistically specified compact sources across the same fluid plane.
+//! Coherent and statistically specified compact sources at the same fluid plane.
 //!
 //! Preparation folds the original volume and force Green functions into one
 //! 4-by-4 transfer per physical source. Application preserves every Q/F and
 //! cross-source phase before forming quadratic observations. A full-wave field
 //! has no single ray delay; all propagation phase is already in these kernels.
 
+use super::reflection::{PreparedReflectedFullWaveForce, PreparedReflectedFullWaveMonopole};
 use super::{
     FullWaveForceDiagnostics, FullWaveForceLimits, FullWaveMonopoleDiagnostics,
     FullWaveMonopoleLimits, PlanarFluidInterface, PreparedFullWaveForce, PreparedFullWaveMonopole,
@@ -26,6 +27,45 @@ evanescent fields. Source statistics are caller-supplied. Numerical quadrature e
 and analytic spectral-tail bounds are per source, not interval certificates; no flow, \
 absorption, finite boundaries, source feedback or measured-SPL qualification.";
 
+/// Incident-side returning fields without the original direct contribution.
+pub const FULL_WAVE_REFLECTED_ARRAY_SCOPE: &str = "Prescribed stationary compact 3D volume \
+flows [m³/s] and forces on fluid [N]; coherent reflected-only full-wave field on the \
+incident side of one infinite plane between original stationary homogeneous lossless \
+fluids, including reactive and evanescent fields. Source statistics are caller-supplied. \
+Per-source quadrature estimates and analytic spectral-tail bounds are not interval \
+certificates; no direct field, source feedback, absorption, finite edges, moving fluids \
+or measured-SPL qualification.";
+
+/// Direct and reflected amplitudes remain coherent within every original source.
+pub const FULL_WAVE_TOTAL_ARRAY_SCOPE: &str = "Prescribed stationary compact 3D volume \
+flows [m³/s] and forces on fluid [N]; coherent direct-plus-reflected full-wave field on \
+the incident side of one infinite plane between original stationary homogeneous lossless \
+fluids. Source statistics are caller-supplied. Reflected-transfer error estimates give no \
+relative guarantee at direct/reflected or cross-source interference nulls. No singular \
+direct self-field, source feedback, absorption, finite edges, moving fluids, interval \
+certificate or measured-SPL qualification.";
+
+/// Which physical field the cached array and all of its statistical views contain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FullWaveCompactFieldKind {
+    /// Original sources in the incident fluid, observer in the receiving fluid.
+    Transmitted,
+    /// Original sources and observer in the incident fluid; returning field only.
+    Reflected,
+    /// Original sources and observer in the incident fluid; direct plus returning.
+    IncidentTotal,
+}
+
+impl FullWaveCompactFieldKind {
+    const fn scope(self) -> &'static str {
+        match self {
+            Self::Transmitted => FULL_WAVE_COMPACT_ARRAY_SCOPE,
+            Self::Reflected => FULL_WAVE_REFLECTED_ARRAY_SCOPE,
+            Self::IncidentTotal => FULL_WAVE_TOTAL_ARRAY_SCOPE,
+        }
+    }
+}
+
 /// Preparation limits for an entire array and for each physical source mechanism.
 #[derive(Clone, Copy, Debug)]
 pub struct FullWaveCompactSourceLimits {
@@ -42,7 +82,8 @@ pub struct FullWaveCompactSourceLimits {
 /// The separate units must be retained: multiply Q errors by |Q| and force
 /// vector/tensor norm errors by ||F||, then sum over sources for an absolute
 /// field estimate. Relative per-source accuracy does not guarantee relative
-/// accuracy at a coherently cancelling array null.
+/// accuracy at a coherently cancelling array null. Incident-side diagnostics
+/// control only the reflected transfer, including when the prepared field is total.
 #[derive(Clone, Copy, Debug)]
 pub struct FullWaveCompactSourceDiagnostics {
     pub monopole: FullWaveMonopoleDiagnostics,
@@ -66,6 +107,7 @@ struct Transfer {
 #[derive(Clone, Debug)]
 pub struct PreparedFullWaveCompactSourceObserver {
     interface: PlanarFluidInterface,
+    field_kind: FullWaveCompactFieldKind,
     frequency_hz: f64,
     observer_m: [f64; 3],
     transfers: Vec<Transfer>,
@@ -89,6 +131,75 @@ impl PreparedFullWaveCompactSourceObserver {
         limits: FullWaveCompactSourceLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            interface,
+            FullWaveCompactFieldKind::Transmitted,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare only the returning field with every source and observer strictly
+    /// in the original incident fluid. Coincident sources/observer are admitted:
+    /// their reflected fields are finite, without claiming self-consistent loading.
+    /// Limits and diagnostics apply to the reflected Q/F transfer of each source.
+    pub fn new_reflected(
+        interface: PlanarFluidInterface,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        limits: FullWaveCompactSourceLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            interface,
+            FullWaveCompactFieldKind::Reflected,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare the coherent direct-plus-reflected field in the incident fluid.
+    /// Each original Q/F column already contains both propagation paths. Even
+    /// explicitly independent sources retain their own direct/reflected cross
+    /// terms. A coincident source refuses its singular direct field at admission,
+    /// irrespective of later source amplitude. Numerical limits control only
+    /// the reflected transfer; total fields inherit absolute, not relative,
+    /// error estimates near an interference null.
+    pub fn new_total(
+        interface: PlanarFluidInterface,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        limits: FullWaveCompactSourceLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        Self::prepare(
+            interface,
+            FullWaveCompactFieldKind::IncidentTotal,
+            frequency_hz,
+            observer_m,
+            source_positions_m,
+            limits,
+            cancelled,
+        )
+    }
+
+    fn prepare(
+        interface: PlanarFluidInterface,
+        field_kind: FullWaveCompactFieldKind,
+        frequency_hz: f64,
+        observer_m: [f64; 3],
+        source_positions_m: &[[f64; 3]],
+        limits: FullWaveCompactSourceLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
         poll(cancelled)?;
         admit(limits.monopole)?;
         force::admit(limits.force)?;
@@ -99,10 +210,19 @@ impl PreparedFullWaveCompactSourceObserver {
         }
         if !positive(core::f64::consts::TAU * frequency_hz)
             || observer_m.iter().any(|v| !v.is_finite())
-            || !positive(interface.distance(observer_m).to_f64())
         {
             return Err(invalid(
-                "full-wave compact array frequency or receiving position",
+                "full-wave compact array frequency or observer position",
+            ));
+        }
+        let observer_distance = interface.distance(observer_m).to_f64();
+        let correct_side = match field_kind {
+            FullWaveCompactFieldKind::Transmitted => positive(observer_distance),
+            _ => positive(-observer_distance),
+        };
+        if !correct_side {
+            return Err(invalid(
+                "full-wave compact array frequency or observer half-space",
             ));
         }
         let exact = interface.incident_state().sound_speed_m_s()
@@ -114,56 +234,103 @@ impl PreparedFullWaveCompactSourceObserver {
         let mut evaluations = 0;
         for &source_m in source_positions_m {
             poll(cancelled)?;
+            if field_kind == FullWaveCompactFieldKind::IncidentTotal && source_m == observer_m {
+                return Err(invalid(
+                    "total full-wave compact array has a singular direct self-field",
+                ));
+            }
             let mut monopole_limits = limits.monopole;
             monopole_limits.maximum_evaluations = remaining_budget(
                 monopole_limits.maximum_evaluations,
                 limits.maximum_total_evaluations - evaluations,
                 exact,
             )?;
-            let monopole = PreparedFullWaveMonopole::new(
-                interface,
-                frequency_hz,
-                source_m,
-                observer_m,
-                monopole_limits,
-                cancelled,
-            )?;
-            evaluations += monopole.diagnostics().evaluations;
+            let mut field = [[C64::ZERO; 4]; 4];
+            let monopole_diagnostics = if field_kind == FullWaveCompactFieldKind::Transmitted {
+                let monopole = PreparedFullWaveMonopole::new(
+                    interface,
+                    frequency_hz,
+                    source_m,
+                    observer_m,
+                    monopole_limits,
+                    cancelled,
+                )?;
+                for (row, coefficient) in field.iter_mut().zip(monopole.transfer) {
+                    row[0] = coefficient;
+                }
+                *monopole.diagnostics()
+            } else {
+                let monopole = PreparedReflectedFullWaveMonopole::new(
+                    interface,
+                    frequency_hz,
+                    source_m,
+                    observer_m,
+                    monopole_limits,
+                    cancelled,
+                )?;
+                let line = if field_kind == FullWaveCompactFieldKind::Reflected {
+                    monopole.evaluate_reflected_harmonic_line(C64::ONE)?
+                } else {
+                    monopole.evaluate_total_harmonic_line(C64::ONE)?
+                };
+                set_column(&mut field, 0, line);
+                *monopole.diagnostics()
+            };
+            evaluations += monopole_diagnostics.evaluations;
             let mut force_limits = limits.force;
             force_limits.maximum_evaluations = remaining_budget(
                 force_limits.maximum_evaluations,
                 limits.maximum_total_evaluations - evaluations,
                 exact,
             )?;
-            let force = PreparedFullWaveForce::new(
-                interface,
-                frequency_hz,
-                source_m,
-                observer_m,
-                force_limits,
-                cancelled,
-            )?;
-            evaluations += force.diagnostics().evaluations;
-            let field = core::array::from_fn(|row| {
-                [
-                    monopole.transfer[row],
-                    force.transfer[row][0],
-                    force.transfer[row][1],
-                    force.transfer[row][2],
-                ]
-            });
+            let force_diagnostics = if field_kind == FullWaveCompactFieldKind::Transmitted {
+                let force = PreparedFullWaveForce::new(
+                    interface,
+                    frequency_hz,
+                    source_m,
+                    observer_m,
+                    force_limits,
+                    cancelled,
+                )?;
+                for (row, coefficients) in field.iter_mut().zip(force.transfer) {
+                    row[1..].copy_from_slice(&coefficients);
+                }
+                *force.diagnostics()
+            } else {
+                let force = PreparedReflectedFullWaveForce::new(
+                    interface,
+                    frequency_hz,
+                    source_m,
+                    observer_m,
+                    force_limits,
+                    cancelled,
+                )?;
+                for column in 0..3 {
+                    let unit =
+                        core::array::from_fn(|i| if i == column { C64::ONE } else { C64::ZERO });
+                    let line = if field_kind == FullWaveCompactFieldKind::Reflected {
+                        force.evaluate_reflected_harmonic_line(unit)?
+                    } else {
+                        force.evaluate_total_harmonic_line(unit)?
+                    };
+                    set_column(&mut field, column + 1, line);
+                }
+                *force.diagnostics()
+            };
+            evaluations += force_diagnostics.evaluations;
             transfers.push(Transfer {
                 source_m,
                 field,
                 diagnostics: FullWaveCompactSourceDiagnostics {
-                    monopole: *monopole.diagnostics(),
-                    force: *force.diagnostics(),
+                    monopole: monopole_diagnostics,
+                    force: force_diagnostics,
                 },
             });
         }
         poll(cancelled)?;
         Ok(Self {
             interface,
+            field_kind,
             frequency_hz,
             observer_m,
             transfers,
@@ -173,6 +340,12 @@ impl PreparedFullWaveCompactSourceObserver {
 
     pub const fn interface(&self) -> PlanarFluidInterface {
         self.interface
+    }
+    pub const fn field_kind(&self) -> FullWaveCompactFieldKind {
+        self.field_kind
+    }
+    pub const fn scope(&self) -> &'static str {
+        self.field_kind.scope()
     }
     pub const fn frequency_hz(&self) -> f64 {
         self.frequency_hz
@@ -211,7 +384,7 @@ impl PreparedFullWaveCompactSourceObserver {
             particle_velocity_m_s: velocity,
             active_intensity_w_m2: intensity.map(|v| v.re),
             reactive_intensity_w_m2: intensity.map(|v| v.im),
-            scope: FULL_WAVE_COMPACT_ARRAY_SCOPE,
+            scope: self.scope(),
         })
     }
 
@@ -256,7 +429,7 @@ impl PreparedFullWaveCompactSourceObserver {
         for mode in modes {
             sum.add(self.amplitudes(mode)?)?;
         }
-        sum.finish(FULL_WAVE_COMPACT_ARRAY_SCOPE)
+        sum.finish(self.scope())
     }
 
     /// O(N) observation of explicitly independent physical sources. Q and F
@@ -273,7 +446,7 @@ impl PreparedFullWaveCompactSourceObserver {
             transfer.accumulate(*source, &mut field)?;
             sum.add(field.map(ComplexSum::value))?;
         }
-        sum.finish(FULL_WAVE_COMPACT_ARRAY_SCOPE)
+        sum.finish(self.scope())
     }
 
     fn check_count(&self, sources: &[CompactSourcePhasor]) -> Result<(), AeroacError> {
@@ -296,6 +469,13 @@ impl PreparedFullWaveCompactSourceObserver {
             return Err(nonfinite("full-wave compact array amplitude"));
         }
         Ok(field)
+    }
+}
+
+fn set_column(field: &mut [[C64; 4]; 4], column: usize, line: HarmonicFieldLine<3>) {
+    field[0][column] = line.pressure_pa;
+    for axis in 0..3 {
+        field[axis + 1][column] = line.particle_velocity_m_s[axis];
     }
 }
 

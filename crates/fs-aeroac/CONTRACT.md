@@ -1766,6 +1766,31 @@ independent versus factored source statistics, all p/u moments, native harmonic
 lines, per-source diagnostics, shared work exhaustion, empty arrays and input
 or cancellation refusals.
 
+### Reflected and coherent total arrays in the incident fluid
+
+The same prepared array owner adds `new_reflected` and `new_total`; the original
+`new` remains transmitted-only. `FullWaveCompactFieldKind` and `scope()` retain
+which physical field every coherent, independent-source, and low-rank
+statistical result contains. Original sources and the observer are strictly in
+the incident fluid for both new constructors. The reflection owners supply
+each original Q/F column, including complete particle velocity and evanescence.
+
+For total arrays, each source's direct and returned complex amplitudes are
+combined before source statistics. Even explicitly independent physical sources
+retain their own direct/reflected interference; an image is not an independent
+noise source. Original aggregate work and allocation budgets still cover every
+Q/F preparation. Evaluation reuses the same fixed-order DD and StatisticsSum
+paths without allocation, new quadrature, or added propagation delay.
+
+Reflected arrays admit finite source-coincident observations; total arrays
+refuse a singular direct self-field at preparation even if its eventual source
+amplitude would be zero. Numerical diagnostics control the reflected transfer
+and do not promise relative accuracy at total-field interference nulls.
+`tests/full_wave_reflected_array.rs` covers exact density-jump images with mixed
+Q/F sources, all covariance/intensity components, independent and factored
+coherence, unequal-speed composition, shared work exhaustion, singular versus
+finite self-fields, harmonic clocks, cancellation and invalid inputs.
+
 ## Full spherical-wave transmission through a finite fluid layer
 
 `curle3d::refraction::full_wave::layer::PreparedLayeredFullWaveMonopole`
