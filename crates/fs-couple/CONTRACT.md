@@ -1,5 +1,62 @@
 # CONTRACT: fs-couple
 
+## Source-bound thermal memory on the original shear shell
+
+MaterialShellImage::with_thermoelastic_memory selects explicit instantaneous
+expansion, constant-stress specific heat and normal-conductivity roles from
+the SAME held regional material bundles. Positive absolute temperature must
+be explicitly typed. The shared coupled slab law derives fixed-strain heat
+capacity from the original principal plane-stress Q, expansion and density;
+every selected source band is retained. Orthotropic21 exchanges the normal
+expansion entries without reversing in-plane engineering shear. Coatings,
+asymmetric/effective sections, other substrate memory and frequency-anchored
+loss refuse; independent original Kelvin and interface loss is retained once.
+
+ThermoelasticShellImage keeps the original isothermal eigenbasis, physical
+mode signs and mass normalization, force footprints, source receipts and both
+exterior/cavity volume maps. The original MITC thermal-factor owner projects
+all facets once, including the elastic director-bubble map and seven-point
+quadrature. Compensated covector rotation precedes compensated physical
+strain contraction. The existing power-scaled QR owner compresses complete
+rows without an eigenvalue cutoff. No dense thermal nodal matrix or second
+mechanical eigensolve is formed.
+
+Under insulated faces and absent lateral conduction, the uniform thickness
+temperature mode adds reversible adiabatic membrane stiffness, with no heat.
+Odd diffusion modes add positive bending memory, stiffness dispersion and
+physical dissipation. Every retained cross-mode term remains. Exactly
+identical represented regional spectra share one compression; different
+thermal rates retain separate histories. Each regional spectrum retains its
+own finite-band response and truncation-error report.
+
+prepare_coupled uses the original complete prepared held-force owner at zero
+mechanical/thermal perturbation. Original bulk/interface dashpots, conservative
+membrane columns and bending memory share its work, storage, heat and clock.
+Interface elastic stiffness remains in the original pencil and is never
+reapplied. Membrane reference stiffness is only a coordinate factorization
+scale; its reported connection forces are virtual thermal-coordinate forces,
+and the original force ceiling applies to that scale. Pressure transfers
+remain zero until an explicit acoustic owner is attached. fill_force uses
+the unchanged physical port maps without allocation and refuses atomically.
+
+Checked projection, factor storage, memory and original runtime ceilings
+remain binding. A single conservative instantaneous-stiffness bound must fit
+the intersection of ALL regional and interface applicability bands. The
+final augmented exponential extent is checked before avoidable preparation.
+Thermal diffusion rates impose no artificial sample-period/relaxation-time
+restriction. The local homogeneous plane-stress slab approximation excludes
+lateral/boundary heat flow, finite strain, thermal initial fields and evolving
+material temperature; static elastic director condensation remains the spatial
+approximation. Constitutive bounds do not certify modal/spatial truncation,
+projection roundoff, arbitrary forcing or later external couplings.
+
+Source and runtime regressions cover typed held data, signed anisotropic axes,
+original curved-shell strain/Gram integration, complete complex stiffness and
+separate thermal/Kelvin/interface heat, pulse decay, null expansion, regional
+thermal-rate ownership, and transactional resource/band/cancellation refusal.
+Independent constitutive and exact-state numerical oracles were checked;
+native Rust execution remains unverified in this environment.
+
 ## Executable certified damping blocks
 
 The explicit plate-viscosity certificate consumer binds the existing

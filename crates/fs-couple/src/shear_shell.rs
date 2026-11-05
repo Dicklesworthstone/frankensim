@@ -30,6 +30,8 @@ pub mod connections;
 pub mod assembly;
 /// Independently owned exterior and cavity pressure boundaries.
 pub mod pressure;
+/// Source-bound insulated-slab thermal storage and memory on this same basis.
+pub mod thermoelastic;
 mod reduction;
 pub use reduction::{
     MAX_SHELL_MODES, MaterialShellImage, ShellProjectionBudget, ShellReductionOptions,

@@ -281,7 +281,7 @@ fn compensated_sum(values: impl Iterator<Item = f64>) -> f64 {
 // A power-of-two scale has no rounding unless it loses subnormal bits; reject
 // that case explicitly instead of erasing a represented source coefficient.
 #[allow(clippy::float_cmp)]
-fn compress_rows(
+pub(crate) fn compress_rows(
     rows: &mut [f64],
     count: usize,
     n: usize,
