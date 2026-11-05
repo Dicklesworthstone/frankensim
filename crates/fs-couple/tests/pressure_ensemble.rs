@@ -12,6 +12,7 @@ use fs_couple::render::schedule::{ScheduledControl, ScheduledRenderer};
 use fs_couple::render::schedule::force::ensemble::{EnsembleConfig, EnsembleRenderer};
 use fs_exec::CancelGate;
 use fs_math::c64::C64;
+use fs_math::dd::Dd;
 
 fn config() -> PressureEnsembleConfig {
     PressureEnsembleConfig { sample_rate_hz: 48_000, samples: 257, max_block: 257, max_parts: 4 }
@@ -48,7 +49,7 @@ fn mixed(ratios: &[u32]) -> PressureEnsemble {
 fn expected(ratios: &[u32], samples: usize) -> Vec<f64> {
     let common = ratios.iter().map(|&r| Decimator::new(r as usize, 1).unwrap().delay_output_frames() as usize)
         .max().unwrap();
-    let mut sum = vec![0.0; samples];
+    let mut sum = vec![Dd::ZERO; samples];
     for &ratio in ratios {
         let mut physical = source(48_000 * ratio, samples * ratio as usize, None);
         let mut input = vec![0.0; samples * ratio as usize];
@@ -57,10 +58,10 @@ fn expected(ratios: &[u32], samples: usize) -> Vec<f64> {
         let delay = common - filter.delay_output_frames() as usize;
         for (i, chunk) in input.chunks_exact(ratio as usize).enumerate() {
             let p = filter.preview(chunk).unwrap()[0]; filter.commit();
-            if i + delay < samples { sum[i + delay] += p; }
+            if i + delay < samples { sum[i + delay] = sum[i + delay] + Dd::from_f64(p); }
         }
     }
-    sum
+    sum.into_iter().map(Dd::to_f64).collect()
 }
 fn bits(values: &[f64]) -> Vec<u64> { values.iter().map(|v| v.to_bits()).collect() }
 
@@ -264,5 +265,66 @@ fn declared_source_delays_preserve_zero_behavior_and_refuse_fractional_or_unboun
         assert!(PressureEnsemble::new_with_source_delays(
             vec![observed(1), observed(2)], config(), &[0.0, source_delay],
         ).is_err());
+    }
+}
+
+// Exact quarter-cycle pressure samples with an already-applied receiver delay.
+// This source exercises the observer boundary; it is not a mechanics model.
+struct AnalyticPressure {
+    amplitude_pa: f64,
+    receiver_delay: u64,
+    completed: u64,
+}
+impl PressureRenderer for AnalyticPressure {
+    fn samples_rendered(&self) -> u64 { self.completed }
+    fn max_block_len(&self) -> usize { 257 }
+    fn validate_sample_rate(&self, rate: u32) -> Result<(), RenderError> {
+        if rate == 48_000 { Ok(()) }
+        else { Err(RenderError::Sizing { what: "analytic pressure clock" }) }
+    }
+    fn validate_sample_count(&self, samples: u64) -> Result<(), RenderError> {
+        if samples <= 257 - self.completed { Ok(()) }
+        else { Err(RenderError::Sizing { what: "analytic pressure horizon" }) }
+    }
+    fn block(&mut self, output: &mut [f64]) -> Result<(), RenderError> {
+        if output.is_empty() { return Err(RenderError::EmptyBlock); }
+        self.validate_sample_count(output.len() as u64)?;
+        for sample in output {
+            *sample = self.completed.checked_sub(self.receiver_delay).map_or(0.0, |n|
+                self.amplitude_pa * [1.0, 0.0, -1.0, 0.0][(n % 4) as usize]);
+            self.completed += 1;
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn destructive_interference_retains_a_weak_source_after_clock_alignment() {
+    // Ordinary binary64 accumulation loses epsilon in 1 + epsilon - 1.
+    // The acoustic oracle is instead exactly epsilon times the common carrier.
+    let epsilon = 2.0_f64.powi(-60);
+    let amplitudes = [1.0, epsilon, -1.0];
+    for delays in [[0_u64; 3], [0, 11, 5]] {
+        let common = *delays.iter().max().unwrap();
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            for partition in [1, 7, 257] {
+                let parts = order.map(|index| DecimatedRenderer::new(AnalyticPressure {
+                    amplitude_pa: amplitudes[index], receiver_delay: delays[index], completed: 0,
+                }, 48_000, 48_000, 257).unwrap()).into_iter().collect();
+                let mut ensemble = PressureEnsemble::new_with_source_delays(
+                    parts, config(), &order.map(|index| delays[index] as f64),
+                ).unwrap();
+                let mut output = [0.0; 257];
+                for block in output.chunks_mut(partition) { ensemble.block(block).unwrap(); }
+                assert_eq!(ensemble.delay_output_samples(), common as usize);
+                for (n, &actual) in output.iter().enumerate() {
+                    let expected = (n as u64).checked_sub(common).map_or(0.0, |n|
+                        epsilon * [1.0, 0.0, -1.0, 0.0][(n % 4) as usize]);
+                    assert_eq!(actual, expected, "sample {n}, order {order:?}, partition {partition}");
+                }
+                assert_eq!(ensemble.samples_rendered(), 257);
+                assert!(ensemble.parts().iter().all(|part| part.source().samples_rendered() == 257));
+            }
+        }
     }
 }

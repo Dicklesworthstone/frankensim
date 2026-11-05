@@ -7,6 +7,9 @@
 //! receiver. Nothing resamples forces or physical state, invents a
 //! gain, or interconnects the mechanics. Sources must describe the SAME observer
 //! and physical time origin; type/clock admission cannot establish that fact.
+//! Three or more signed pressures accumulate in double-double precision and
+//! round once after every source has contributed, retaining weak fields at
+//! destructive nulls. One/two-source mixes need only the original binary64 sum.
 //!
 //! A new mix starts at output sample zero with zero pressure prehistory. Retain
 //! the whole object to continue: reconstructing delay lines over running parts
@@ -16,6 +19,7 @@
 
 use super::{DecimatedRenderer, DecimationInfo, PressureRenderer};
 use crate::render::{RenderError, schedule::ScheduledRenderer};
+use fs_math::dd::Dd;
 
 /// Bounded per-part alignment storage, in final output samples. Source receiver
 /// latency plus the outer decimator must fit this domain without rounding.
@@ -82,6 +86,7 @@ pub struct PressureEnsemble<S = ScheduledRenderer> {
     info: Vec<AlignedPartInfo>,
     delays: Vec<DelayLine>,
     scratch: Vec<f64>,
+    sums: Vec<Dd>,
     config: PressureEnsembleConfig,
     common_delay: usize,
     completed: u64,
@@ -153,10 +158,14 @@ impl<S: PressureRenderer> PressureEnsemble<S> {
         let mut info = Vec::new();
         let mut delays = Vec::new();
         let mut scratch = Vec::new();
+        let mut sums = Vec::new();
         info.try_reserve_exact(parts.len()).map_err(|_| sizing("cannot reserve pressure part descriptions"))?;
         delays.try_reserve_exact(parts.len()).map_err(|_| sizing("cannot reserve pressure alignment lines"))?;
         scratch.try_reserve_exact(config.max_block).map_err(|_| sizing("cannot reserve pressure mixing scratch"))?;
         scratch.resize(config.max_block, 0.0);
+        let coherent_frames = if parts.len() > 2 { config.max_block } else { 0 };
+        sums.try_reserve_exact(coherent_frames).map_err(|_| sizing("cannot reserve coherent pressure sums"))?;
+        sums.resize(coherent_frames, Dd::ZERO);
         for (index, part) in parts.iter().enumerate() {
             let observation = part.info();
             let source_filter_delay_output_samples = source_delays.map_or(0.0, |delays| delays[index]) as usize;
@@ -167,7 +176,7 @@ impl<S: PressureRenderer> PressureEnsemble<S> {
                 total_filter_delay_output_samples, alignment_delay_samples });
             delays.push(DelayLine::new(alignment_delay_samples)?);
         }
-        Ok(Self { parts, info, delays, scratch, config, common_delay, completed: 0, poisoned: false })
+        Ok(Self { parts, info, delays, scratch, sums, config, common_delay, completed: 0, poisoned: false })
     }
 
     /// Exact source/observation clocks and added delays in summation order.
@@ -201,23 +210,43 @@ impl<S: PressureRenderer> PressureEnsemble<S> {
         let samples = u64::try_from(output.len()).map_err(|_| sizing("pressure block length exceeds u64"))?;
         self.validate_sample_count(samples)?;
         output.fill(0.0);
+        if !self.sums.is_empty() { self.sums[..output.len()].fill(Dd::ZERO); }
         for (part, delay) in self.parts.iter_mut().zip(&mut self.delays) {
             let scratch = &mut self.scratch[..output.len()];
             if let Err(error) = part.block(scratch) {
                 self.poisoned = true;
                 return Err(error);
             }
-            for (sum, &sample) in output.iter_mut().zip(scratch.iter()) {
-                if !sample.is_finite() {
-                    self.poisoned = true;
-                    return Err(sizing("a pressure part produced a non-finite observation"));
+            if self.sums.is_empty() {
+                // Adding two binary64 inputs already rounds their exact sum
+                // once. Preserve the original cost for the common small mix.
+                for (sum, &sample) in output.iter_mut().zip(scratch.iter()) {
+                    if !sample.is_finite() {
+                        self.poisoned = true;
+                        return Err(sizing("a pressure part produced a non-finite observation"));
+                    }
+                    *sum += delay.push(sample);
+                    if !sum.is_finite() {
+                        self.poisoned = true;
+                        return Err(sizing("physical pressure superposition overflowed"));
+                    }
                 }
-                *sum += delay.push(sample);
-                if !sum.is_finite() {
-                    self.poisoned = true;
-                    return Err(sizing("physical pressure superposition overflowed"));
+            } else {
+                for (sum, &sample) in self.sums[..output.len()].iter_mut().zip(scratch.iter()) {
+                    if !sample.is_finite() {
+                        self.poisoned = true;
+                        return Err(sizing("a pressure part produced a non-finite observation"));
+                    }
+                    *sum = *sum + Dd::from_f64(delay.push(sample));
+                    if !sum.hi.is_finite() || !sum.lo.is_finite() {
+                        self.poisoned = true;
+                        return Err(sizing("physical pressure superposition overflowed"));
+                    }
                 }
             }
+        }
+        for (sample, sum) in output.iter_mut().zip(&self.sums) {
+            *sample = sum.to_f64();
         }
         self.completed += samples;
         Ok(())
