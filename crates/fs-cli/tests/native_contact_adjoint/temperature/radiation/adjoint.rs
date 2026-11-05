@@ -203,37 +203,18 @@ fn ambient_live_contact_controls_match_physical_resolves_in_vacuum_and_mixed_coo
 }
 
 #[test]
-fn live_contact_ambient_admission_keeps_transient_and_pointwise_derivatives_refused() {
-    for pointwise in [false, true] {
-        let mut f = super::fixture(true);
-        let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
-        if pointwise {
-            setup.radiation.as_mut().unwrap().spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
-        } else {
-            setup.transient = Some(fs_project::ConductionTransient {
-                initial_temperature: fs_project::TransientInitialTemperature::Uniform(QtyAny::new(300.0, dims::TEMPERATURE)),
-                horizon: QtyAny::new(1.0, dims::TIME), max_step: QtyAny::new(0.5, dims::TIME), max_steps: 8,
-                energy_tolerance: QtyAny::new(1e-6, dims::ENERGY),
-                boundary_schedules: Vec::new(), power_schedules: Vec::new(), enthalpy: None,
-                capacities: setup.regions.iter().map(|row| fs_project::TransientRegionCapacity {
-                    region: row.region.clone(),
-                    volumetric_heat_capacity: QtyAny::new(10.0, dims::VOLUMETRIC_HEAT_CAPACITY),
-                    source: "synthetic capacity for derivative admission".into(),
-                }).collect(),
-            });
-        }
-        let output = if pointwise { OUTPUT } else { "temperature-final-adjoint" };
-        let (source, contact, ledger) = prepare(&f, 241 + usize::from(pointwise), Some(output));
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let result = fs_cli::run(vec!["--json".into(), "solve".into(), source.display().to_string(),
-            ledger.display().to_string(), "--materials".into(), f.dir.join("solid.fsmcdpk").display().to_string(),
-            "--materials".into(), root.join("data/reference-project/gray-surface.fsmcdpk").display().to_string(),
-            "--interfaces".into(), contact.display().to_string()]);
-        assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
-        let diagnostic = format!("{}{}", result.stdout, result.stderr);
-        let tag = if pointwise { "cli-solve-conduction-pointwise-radiation" }
-            else { "cli-solve-conduction-contact-composition" };
-        assert!(diagnostic.contains(tag), "{diagnostic}");
-        assert!(!diagnostic.contains("run_receipt"));
-    }
+fn live_contact_ambient_admission_keeps_steady_pointwise_derivatives_refused() {
+    let mut f = super::fixture(true);
+    f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .radiation.as_mut().unwrap().spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+    let (source, contact, ledger) = prepare(&f, 242, Some(OUTPUT));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let result = fs_cli::run(vec!["--json".into(), "solve".into(), source.display().to_string(),
+        ledger.display().to_string(), "--materials".into(), f.dir.join("solid.fsmcdpk").display().to_string(),
+        "--materials".into(), root.join("data/reference-project/gray-surface.fsmcdpk").display().to_string(),
+        "--interfaces".into(), contact.display().to_string()]);
+    assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
+    let diagnostic = format!("{}{}", result.stdout, result.stderr);
+    assert!(diagnostic.contains("cli-solve-conduction-pointwise-radiation"), "{diagnostic}");
+    assert!(!diagnostic.contains("run_receipt"));
 }

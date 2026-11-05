@@ -312,7 +312,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// including radiation-only traces and natural/transported-air feedback.
 /// Version 121 adds complete prescribed-temperature controls and regional
 /// volume-mean goals to those live-contact adjoints, including radiation.
-pub const SOLVE_DRIVER_VERSION: u32 = 121;
+/// Version 122 composes capacity/contact trajectories with ambient radiation
+/// adjoints and admits radiation-only traces without convection controls.
+pub const SOLVE_DRIVER_VERSION: u32 = 122;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

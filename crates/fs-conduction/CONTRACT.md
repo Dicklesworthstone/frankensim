@@ -1,5 +1,22 @@
 # CONTRACT: fs-conduction
 
+## Capacity adjoints with live contacts and ambient radiation
+
+The complete `ContactCapacityLinearization` composes with the existing ambient
+coefficient/reference feedback and remapping on the unchanged physical endpoint.
+The watt-coordinate dual supplies source, whole contact-law, capacity and old-
+temperature contractions without another timestep factor. Both independent
+contact-temperature partials and nonlinear bulk conductivity remain in the
+same transpose. The original endpoint residual and energy gates remain in force.
+
+`tests/temperature_contact/radiation/capacity_adjoint.rs` compares six independent
+controls against complete perturbed histories: whole resistance-law scale,
+source scale, emissivity, reservoir temperature, total capacity and uniform
+initial temperature. It covers vacuum curve/Newton and Robin source-surface
+fixed-point histories, with a final and an earlier selected state. No primal
+field or accepted old state is replaced. Native runtime execution remains
+required; this discrete derivative supplies no temporal-error certificate.
+
 ## Complete steady contact and ambient-radiation adjoints
 
 `AmbientRadiationLinearization` binds the existing area-mean secant at an

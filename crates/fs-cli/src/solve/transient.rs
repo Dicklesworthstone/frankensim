@@ -894,9 +894,7 @@ pub(super) fn solve(
                 linear.restart,
             )?).ok_or_else(|| bad("combined contact adjoint memory estimate overflows"))?;
         }
-        let ports = problem.boundary.conditions().iter()
-            .filter(|condition| matches!(condition, fs_conduction::ThermalBc::Robin { .. }))
-            .count();
+        let ports = adjoint::feedback_regions(problem.boundary, radiation).len();
         if let Some(lowering) = radiation {
             additional = additional.checked_add(adjoint::radiation_storage_bytes(
                 problem.mesh.vertex_count(), ports, lowering.surface_count(), lowering.is_enclosure(),

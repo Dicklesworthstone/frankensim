@@ -2,6 +2,9 @@
 use super::*;
 use fs_project::{TransientBoundarySchedule, TransientBoundaryStep, TransientBoundaryTarget};
 
+#[path = "adjoint/ambient.rs"]
+mod ambient;
+
 const FINAL: &str = "temperature-final-adjoint";
 const PEAK: &str = "temperature-sampled-peak-adjoint";
 

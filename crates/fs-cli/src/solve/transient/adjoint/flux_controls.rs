@@ -74,6 +74,18 @@ impl Controls {
             if !actual.is_finite() || actual.to_bits() != outward_flux.value.to_bits() {
                 return Err(bad("prescribed heat-flux control differs from its declaration"));
             }
+            // An area-mean ambient capacity patch admits explicit absence of
+            // nonradiative exchange, not an independently variable Neumann
+            // load. Retain that zero-flux identity without inventing a control
+            // whose nonzero perturbations the original forward model refuses.
+            if actual == 0.0
+                && setup.transient.as_ref().is_some_and(|time| time.enthalpy.is_none())
+                && setup.radiation.as_ref().is_some_and(|radiation|
+                    radiation.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
+                        && radiation.surfaces.iter().any(|surface| surface.target == boundary.target))
+            {
+                continue;
+            }
             rows.try_reserve(1)
                 .map_err(|_| bad("prescribed heat-flux metadata allocation refused"))?;
             rows.push(Control { target: boundary.target.clone(), flux_w_m2: actual, derivative: 0.0 });

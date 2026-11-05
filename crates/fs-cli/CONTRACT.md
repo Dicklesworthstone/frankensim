@@ -1,5 +1,36 @@
 # CONTRACT: fs-cli
 
+## Capacity contact trajectories with ambient sensitivities — driver 122
+
+`temperature-final-adjoint` and `temperature-sampled-peak-adjoint` now compose
+live temperature-dependent contacts with area-mean ambient radiation. Reverse
+traversal re-queries the original contact law at every unchanged accepted
+endpoint, audits the actual radiative and stored-energy residual against the
+retained forward target, and binds the complete capacity/material/contact
+tangent on the exact combined physical boundary. The existing coefficient and
+weighted-reference feedback enter the same transpose; forward face-mean
+arithmetic and boundary identity are preserved.
+
+The same watt-coordinate dual supplies source, total-capacity, initial-state,
+prescribed-temperature, emissivity and independent radiative-bath controls.
+Neither the parameter contractions nor the history propagation receive another
+timestep factor. Selected earlier peaks retain zero future influence. No
+accepted temperature or forward receipt is replaced.
+
+Original zero-flux radiation-only traces now participate in feedback and its
+memory allowance. They retain zero convection controls and do not become
+independently variable nonradiative fluxes. Ordinary convection and enclosure
+flux controls retain their existing physical owners. Driver 122 invalidates
+older cached producer results. Pointwise capacity radiation, derived-convection
+live-contact adjoints and material-extended live-contact reports remain outside
+this increment.
+
+Native and imported-project regressions compare complete perturbed histories
+for curve/Newton and source-surface/fixed-point contacts, vacuum and Robin
+cooling, final and selected-prefix goals, and fixed-temperature lifting. Rust
+syntax and source checks do not establish native execution; numerical runtime
+verification remains required on a host with adequate build resources.
+
 ## Prescribed temperatures and volume means with live contact — driver 121
 
 Steady `temperature-max-boundary-adjoint`,
@@ -22,9 +53,9 @@ Focused imported-project regressions compare fresh fixed-temperature and contact
 perturbations for selected and volume-mean goals, a direct prescribed-node goal,
 ambient vacuum cooling and self-reflecting open-cavity exchange. Shared controls
 and primal receipts must agree across report forms. Native CLI execution remains
-required; syntax/source checks do not establish numerical test passes. Transient
-ambient/contact derivatives, steady pointwise radiation, adaptive-goal bounds and
-continuum/gradient-error certificates remain outside this extension.
+required; syntax/source checks do not establish numerical test passes. Driver 122
+adds capacity ambient/contact derivatives. Steady pointwise radiation, adaptive-
+goal bounds and continuum/gradient-error certificates remain outside this extension.
 
 ## Live contact and ambient-radiation sensitivities — driver 120
 
@@ -46,9 +77,9 @@ earlier cached producer results.
 Focused numerical and imported-project regressions compare independent physical
 re-solves, including vacuum and mixed natural/air cooling, curve/Newton and
 source-surface/Picard contacts, and unchanged primal results. Full native
-execution is still required. Transient ambient/live-contact adjoints and steady
-pointwise radiation remain refused. Driver 121 adds the prescribed-temperature
-and volume-mean extension described above.
+execution is still required. Driver 121 adds prescribed-temperature and
+volume-mean controls, and driver 122 adds capacity ambient/live-contact adjoints.
+Steady pointwise radiation remains refused.
 
 ## Live contact and enclosure sensitivities — driver 118
 
