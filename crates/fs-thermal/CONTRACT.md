@@ -1891,4 +1891,36 @@ fluxes, with the smooth-solution qualifications above. These bounded checks do
 not establish a global TVD, arbitrary-source
 maximum-principle, experimental-validation or throughput claim.
 
+### Gray radiative links between finite enthalpy bodies
 
+`implicit::link::GrayRadiativeLink` attaches through the existing chain/graph
+`with_link_laws` seam. Two equal-area opaque diffuse-gray faces with full mutual
+view exchange radiation and an explicitly supplied parallel gas-gap conductance.
+The original ordered caloric objects retain finite storage. Existing contact
+coverage excludes these faces from ambient heating. Their nominal and covered
+areas must agree.
+
+For each side, `r_i = d_i/k_i(h_i) + Rcoat_i` precedes its radiating surface.
+Coating resistances are explicit and ordered; an authored unsplit contact
+resistance refuses. One bounded scalar surface solve enforces
+`q = (Ta-Tsa)/ra = (Tsb-Tb)/rb = hgap*(Tsa-Tsb) +
+epsilon_eff*sigma*(Tsa^4-Tsb^4)`, with
+`epsilon_eff = 1/(1/epsilon_a + 1/epsilon_b - 1)` and its insulating zero-emissivity
+limit. A dimensionless surface-gap fraction and factored fourth-power difference
+retain near-equilibrium heat. The returned secant applies one equal/opposite
+power; the original surface residual is retained without reallocating heat.
+
+Both analytic endpoint derivatives include their original `dT/dh` and `dk/dh`,
+including phase-dependent conductivity on an exact latent plateau. The existing
+BE/SDIRK residuals, stage quadrature, Newton gates, finite-body thermal entropy
+and energy owners remain unchanged. Zero bulk conductivity insulates this link;
+undetermined disconnected massless surface temperatures are reported as `None`.
+Domain, arithmetic, scalar budget and cancellation failures publish no response.
+
+The fixed gray/full-view, cellwise-conductivity and fixed-geometry approximation
+is explicit. This does not replace the existing general-enclosure radiosity
+owner or supply source-dependent emissivity, profile-integrated k(T), near-field
+radiation, participating media or photon entropy. Focused regressions exercise
+independent two-surface balances, reversal, sensible/latent tangents, near-equal
+temperatures, insulating limits and original unequal-mass chain/graph BE/SDIRK
+energy and thermal-entropy quadrature.

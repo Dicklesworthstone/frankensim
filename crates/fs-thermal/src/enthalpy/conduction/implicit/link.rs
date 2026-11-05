@@ -5,6 +5,10 @@ use crate::enthalpy::conduction::ConductiveLink;
 use crate::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, ThermalLaw};
 use std::collections::BTreeMap;
 
+#[path = "link/radiation.rs"]
+mod radiation;
+pub use radiation::{GrayRadiativeControls, GrayRadiativeLink, GrayRadiativeResponse};
+
 /// One passive link flux and its full derivatives at the same trial state.
 /// Positive power is from A to B: `Q = G * (T_A - T_B)`. The derivatives
 /// differentiate this complete Q, not G, with the other enthalpy held fixed.

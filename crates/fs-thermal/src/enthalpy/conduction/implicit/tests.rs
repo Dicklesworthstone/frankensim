@@ -1198,6 +1198,9 @@ mod radiation;
 #[path = "tests/two_bath.rs"]
 mod two_bath;
 
+#[path = "tests/radiative_link.rs"]
+mod radiative_link;
+
 #[path = "tests/advection.rs"]
 mod advection;
 
