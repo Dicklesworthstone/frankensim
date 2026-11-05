@@ -4,6 +4,8 @@
 
 #[path = "spatial_electrostatic/force.rs"]
 mod force;
+#[path = "spatial_electrostatic/dispersion.rs"]
+mod dispersion;
 #[path = "spatial_electrostatic/sources.rs"]
 mod sources;
 #[path = "spatial_electrostatic/virtual_work.rs"]

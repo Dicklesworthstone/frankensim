@@ -19,6 +19,8 @@
 //! Formulation reference: <https://mfem.org/electromagnetics/#electrostatics>.
 
 mod force;
+/// Distributed dielectric memory and Ohmic charge relaxation on tetrahedra.
+pub mod dispersion;
 mod terminals;
 mod virtual_work;
 pub mod network;

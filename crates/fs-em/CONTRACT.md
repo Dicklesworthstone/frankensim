@@ -4483,7 +4483,51 @@ component gauges, deterministic replay and transactional refusal (G1/G3/G4).
 This is synthetic numerical verification, not measured dielectric qualification.
 Midpoint does not promise monotone relaxation at unresolved time steps; resolve
 the pole times and refine time and mesh separately. Changing material/temperature,
-anisotropic memory, Ohmic leakage, magnetic induction, carrier transport,
-breakdown, thermal evolution and mechanical work require their own coupled
-owners. Local heat is available to a thermal consumer but is not silently
+anisotropic memory, magnetic induction, carrier transport, breakdown,
+thermal evolution and mechanical work require their own coupled owners.
+Ohmic leakage is available through the opt-in total-current lane below. Local heat is available to a thermal consumer but is not silently
 deposited into an unspecified reservoir.
+
+
+## Distributed total-current dielectrics in planar, axisymmetric and 3D geometry
+
+`electrostatic::dispersion` retains the planar API and adds
+`AxisymmetricDebyeDielectric`; `spatial::electrostatic::dispersion` adds
+`SpatialDebyeDielectric` on conforming P1 tetrahedra. All three use one
+constitutive/time-evolution kernel and their original native weighted Whitney
+operators. Axisymmetric volumes include the authored angular span. Physical
+voltage traces must cover complete exterior edges/faces; an axis-only,
+point-only, edge-only 3D or unanchored component cannot act as an electrode.
+
+The default constructors explicitly model insulation. The default-off
+`resolved-leaky-dielectric` feature exposes `new_leaky` with one original
+`ResolvedLeakyDielectric` source bundle per cell. It admits independently
+sourced nonnegative isotropic DC conductivity, including exact zero. Free
+nodal charge follows total-current continuity: its stored-charge increment
+plus integrated Ohmic outflow must vanish. This includes Maxwell charge
+relaxation and charge buildup at heterogeneous dielectric interfaces.
+Prescribed traces supply both stored electrode charge and transported charge.
+
+Local midpoint pole updates and conductivity are condensed into a positive
+effective-permittivity operator, without global polarization unknowns or a
+fictitious conductivity floor. A prepared operator is reusable at one fixed
+time step for the same immutable geometry/material owner. Original local
+polarization loss and Joule heat are recovered independently, retained
+separately and summed once. Stable storage increments and separate source-work
+contributions avoid subtracting large biased total energies; only their
+combined source work is gauge independent. Charge, work and energy acceptance
+and cancellation remain transactional. Native candidates expose physical
+cell volumes and source identities for receiving coupled owners.
+
+`tests/dielectric_leakage.rs` adds six analytic/G1/G3/G4 groups covering DC
+through-current, Maxwell relaxation, Maxwell-Wagner interface charge, combined
+Debye/Ohmic eigenmodes, sourced-zero parity and axisymmetric scaling.
+`tests/spatial_electrostatic/dispersion.rs` adds eight groups covering oblique
+3D fields, physical volume/orientation, heterogeneous and isolated relaxation,
+independent component gauges, trace admission, cancellation and Ohmic loss.
+These are synthetic numerical checks, not measured material qualification.
+Fixed geometry and source coefficients are required. Induction, carrier
+transport, anisotropic dispersion/leakage, breakdown and moving geometry are
+outside this owner. Passive second-order midpoint does not guarantee monotone
+relaxation for unresolved time steps; refine against the physical pole and
+charge-relaxation times as well as the spatial mesh.
