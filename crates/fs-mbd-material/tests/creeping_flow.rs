@@ -7,6 +7,8 @@ mod driven;
 mod finite_reynolds;
 #[path = "creeping_flow/rotation.rs"]
 mod rotation;
+#[path = "creeping_flow/rotational_lift.rs"]
+mod rotational_lift;
 #[path = "creeping_flow/unsteady.rs"]
 mod unsteady;
 use common::{close, density_card, point};

@@ -21,6 +21,8 @@
 //! Do not superpose another exterior drag law on this same sphere.
 //! The explicit [`finite_reynolds`] and [`unsteady`] extensions retain their
 //! own applicability domains; these Stokes-only limits describe [`CreepingSphere`].
+//! The explicit rotational-lift methods add the leading Rubinow--Keller force
+//! for a spinning sphere in uniform flow, within the same small-Reynolds limits.
 
 use crate::principal::{PrincipalBody, PrincipalFrame};
 use crate::{MaterialInertiaError, VolumeMoments};
@@ -154,10 +156,13 @@ pub struct CreepingSphere<'a, F: FluidTransport + ?Sized> {
 /// it is not automatically added to any finite material heat store.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CreepingLoad {
-    /// Fluid drag, buoyancy and rotary resistance; excludes body weight.
+    /// Fluid drag, selected lift, buoyancy and rotary resistance; excludes body weight.
     pub wrench: Wrench,
     /// Translational resistance in the world frame [N].
     pub drag_force_world_n: Vec3,
+    /// Transverse Rubinow--Keller force [N]; zero in the Stokes-only methods.
+    /// It does no work against the relative translational velocity.
+    pub lift_force_world_n: Vec3,
     /// Rotary resistance in the principal body frame [N m].
     pub rotary_torque_body_nm: Vec3,
     /// Fully immersed Archimedes force in the world frame [N].
@@ -165,7 +170,7 @@ pub struct CreepingLoad {
     /// Nonnegative viscous loss deposited in the external fluid reservoir [W].
     pub dissipated_power_w: f64,
     /// Work supplied by maintaining the admitted background flow. The uniform
-    /// sphere uses F_drag dot U; an ambient-rotation owner also includes
+    /// sphere uses (F_drag + F_lift) dot U; an ambient-rotation owner also includes
     /// its rotary drag moment dotted with the local fluid angular velocity.
     pub background_power_w: f64,
     /// Diameter-based Reynolds number at the supplied relative velocity.
@@ -334,11 +339,43 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         self.load_frame(body.frame(), state, &mut cancelled)
     }
 
+    /// Add the leading small-Reynolds rotational lift to Stokes drag and buoyancy.
+    ///
+    /// Rubinow & Keller (1961), <https://doi.org/10.1017/S0022112061000640>:
+    /// F_lift = pi*rho*a^3 * omega_world cross (v_body - U). The sphere's
+    /// spin and translational slip are expressed in the SAME world frame.
+    /// Fluid density comes from the original transport snapshot, not body mass.
+    ///
+    /// This is an explicit quasi-steady, unbounded, uniform-flow asymptote,
+    /// not a high-Reynolds spinning-ball law or a shear/Saffman correction.
+    /// Both existing Reynolds ceilings still apply. Viscous dissipation is
+    /// unchanged; lift contributes to maintained-flow work when U is nonzero.
+    pub fn load_with_rotational_lift(
+        &self,
+        body: &PrincipalBody<'_>,
+        state: RigidBodyState,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingLoad, Error> {
+        poll(&mut cancelled)?;
+        self.admit_body(body)?;
+        self.load_frame_with_lift(body.frame(), state, SphereLift::RubinowKeller, cancelled)
+    }
+
     /// Same force owner for an already admitted spherical configuration.
     pub(crate) fn load_frame(
         &self,
         frame: &PrincipalFrame,
         state: RigidBodyState,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingLoad, Error> {
+        self.load_frame_with_lift(frame, state, SphereLift::None, cancelled)
+    }
+
+    fn load_frame_with_lift(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        lift_model: SphereLift,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingLoad, Error> {
         poll(&mut cancelled)?;
@@ -361,10 +398,25 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             });
         }
         let drag = vector(relative.scale(-self.resistance_kg_s))?;
+        let lift = match lift_model {
+            SphereLift::None => Vec3::ZERO,
+            SphereLift::RubinowKeller => vector(
+                state
+                    .pose()
+                    .orientation()
+                    .rotate_body_to_world(omega)
+                    .cross(relative)
+                    .scale(0.75 * self.fluid_mass_kg),
+            )?,
+        };
         let rotary = vector(omega.scale(-self.rotary_resistance_kg_m2_s))?;
         let buoyancy = vector(self.gravity.acceleration_world().scale(-self.fluid_mass_kg))?;
         let dissipated_power_w = finite(-drag.dot(relative) - rotary.dot(omega))?;
-        let background_power_w = finite(drag.dot(self.ambient_velocity_world))?;
+        let fluid_force = match lift_model {
+            SphereLift::None => drag,
+            SphereLift::RubinowKeller => vector(drag.add(lift))?,
+        };
+        let background_power_w = finite(fluid_force.dot(self.ambient_velocity_world))?;
         if dissipated_power_w < 0.0
             || (relative != Vec3::ZERO || omega != Vec3::ZERO) && dissipated_power_w == 0.0
         {
@@ -373,13 +425,14 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             ));
         }
         let wrench = Wrench {
-            force_world: vector(drag.add(buoyancy))?,
+            force_world: vector(fluid_force.add(buoyancy))?,
             torque_body: rotary,
         };
         poll(&mut cancelled)?;
         Ok(CreepingLoad {
             wrench,
             drag_force_world_n: drag,
+            lift_force_world_n: lift,
             rotary_torque_body_nm: rotary,
             buoyancy_force_world_n: buoyancy,
             dissipated_power_w,
@@ -436,6 +489,35 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         self.step_frame_with_wrench(body.frame(), state, applied, controls, &mut cancelled)
     }
 
+    /// Advance with [`Self::load_with_rotational_lift`] at the original native
+    /// midpoint, optionally driven by a held external COM force/body couple.
+    /// Supply [`Wrench::ZERO`] for unforced motion; gravity is already included.
+    ///
+    /// The transverse force is solved simultaneously with drag, rather than
+    /// applied as an explicit kick that would spuriously increase kinetic energy.
+    /// A closed-form three-dimensional skew solve adds no iterations or heap
+    /// allocations. The original rigid-body integrator remains the sole motion
+    /// owner, with the same Reynolds, diffusion, work and cancellation checks.
+    pub fn step_with_rotational_lift(
+        &self,
+        body: &PrincipalBody<'_>,
+        state: RigidBodyState,
+        applied: Wrench,
+        controls: CreepingStepControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingStep, Error> {
+        poll(&mut cancelled)?;
+        self.admit_body(body)?;
+        self.step_frame_with_lift(
+            body.frame(),
+            state,
+            applied,
+            controls,
+            SphereLift::RubinowKeller,
+            cancelled,
+        )
+    }
+
     /// Native midpoint closure shared by frozen and thermally updated bodies.
     /// The caller has already admitted this frame's one uniform sphere.
     pub(crate) fn step_frame(
@@ -454,6 +536,18 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
         state: RigidBodyState,
         applied: Wrench,
         controls: CreepingStepControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<CreepingStep, Error> {
+        self.step_frame_with_lift(frame, state, applied, controls, SphereLift::None, cancelled)
+    }
+
+    fn step_frame_with_lift(
+        &self,
+        frame: &PrincipalFrame,
+        state: RigidBodyState,
+        applied: Wrench,
+        controls: CreepingStepControls,
+        lift_model: SphereLift,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CreepingStep, Error> {
         poll(&mut cancelled)?;
@@ -469,7 +563,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 "positive finite step/work controls and relaxation fraction in (0,1] required",
             ));
         }
-        let load_before = self.load_frame(frame, state, &mut cancelled)?;
+        let load_before = self.load_frame_with_lift(frame, state, lift_model, &mut cancelled)?;
         let p = frame.properties();
         let inertia = p.principal_inertia_body();
         let translation_time = positive(p.mass() / self.resistance_kg_s)?;
@@ -489,13 +583,12 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 .scale(1.0 - self.fluid_mass_kg / p.mass())
                 .add(applied.force_world.scale(1.0 / p.mass())),
         )?;
-        let relative_mid = vector(
+        let mut relative_mid = vector(
             velocity
                 .sub(self.ambient_velocity_world)
                 .add(acceleration.scale(half_dt))
                 .scale(1.0 / (1.0 + half_dt / translation_time)),
         )?;
-        let velocity_mid = vector(relative_mid.add(self.ambient_velocity_world))?;
         let angular_mid = vector(Vec3::new(
             (omega.x + half_dt * applied.torque_body.x / inertia.x)
                 / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.x),
@@ -504,6 +597,28 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
             (omega.z + half_dt * applied.torque_body.z / inertia.z)
                 / (1.0 + half_dt * self.rotary_resistance_kg_m2_s / inertia.z),
         ))?;
+        if lift_model == SphereLift::RubinowKeller && angular_mid != Vec3::ZERO {
+            // (A I - [b]x) r_mid = rhs, A = 1+h*c/m,
+            // b = h*pi*rho*a^3*omega_world/m, h = dt/2.
+            // With beta=b/A and u=rhs/A, the inverse is
+            // r_mid=(u + beta cross u + beta*(beta dot u))/(1+|beta|^2).
+            // pi*rho*a^3/c = (a^2/nu)/6. The admitted Reynolds and
+            // relaxation limits keep beta small; no speed division is needed.
+            // The native attitude increment rotates about angular_mid, so
+            // its world direction is identical at the start and midpoint.
+            let omega_world = state.pose().orientation().rotate_body_to_world(angular_mid);
+            let fraction = half_dt / translation_time;
+            let beta = vector(
+                omega_world.scale(fraction / (1.0 + fraction) * (self.diffusion_time_s / 6.0)),
+            )?;
+            relative_mid = vector(
+                relative_mid
+                    .add(beta.cross(relative_mid))
+                    .add(beta.scale(beta.dot(relative_mid)))
+                    .scale(1.0 / positive(1.0 + beta.dot(beta))?),
+            )?;
+        }
+        let velocity_mid = vector(relative_mid.add(self.ambient_velocity_world))?;
         let midpoint = RigidBodyState::new(
             state.pose(),
             velocity_mid.scale(p.mass()),
@@ -513,13 +628,15 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                 angular_mid.z * inertia.z,
             ),
         )?;
-        let load_midpoint = self.load_frame(frame, midpoint, &mut cancelled)?;
+        let load_midpoint =
+            self.load_frame_with_lift(frame, midpoint, lift_model, &mut cancelled)?;
         let total = Wrench {
             force_world: vector(load_midpoint.wrench.force_world.add(applied.force_world))?,
             torque_body: vector(load_midpoint.wrench.torque_body.add(applied.torque_body))?,
         };
         let dynamics = RigidBodyIntegrator::new(self.gravity).step(state, p, total, dt)?;
-        let load_after = self.load_frame(frame, dynamics.state_after, &mut cancelled)?;
+        let load_after =
+            self.load_frame_with_lift(frame, dynamics.state_after, lift_model, &mut cancelled)?;
         let viscous_heat_j = finite(dt * load_midpoint.dissipated_power_w)?;
         let background_work_j = finite(dt * load_midpoint.background_power_w)?;
         let applied_power_w =
@@ -601,6 +718,12 @@ impl<'a, F: FluidTransport + ?Sized> CreepingSphere<'a, F> {
                     .dot(state.pose().position_world()),
         )
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SphereLift {
+    None,
+    RubinowKeller,
 }
 
 fn small_positive(x: f64, maximum: f64) -> bool {

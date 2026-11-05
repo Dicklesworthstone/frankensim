@@ -382,6 +382,7 @@ impl<'a, F: FluidTransport + ?Sized> CreepingEllipsoid<'a, F> {
                 torque_body: rotary,
             },
             drag_force_world_n: drag,
+            lift_force_world_n: Vec3::ZERO,
             rotary_torque_body_nm: rotary,
             buoyancy_force_world_n: buoyancy,
             dissipated_power_w,

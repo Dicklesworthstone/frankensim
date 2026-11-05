@@ -1210,6 +1210,41 @@ refinement, separate maintained-flow work from heat, and exercise geometry,
 regime and transactional refusals. This is a bounded MR57 capability; it does
 not close the broader exterior/gap-flow bead or claim empirical validation.
 
+### Rotational lift on the same material-defined sphere
+
+`CreepingSphere::load_with_rotational_lift` and `step_with_rotational_lift`
+explicitly select the leading Rubinow--Keller transverse force
+`F_lift = pi*rho_fluid*a^3 * (omega_world cross (v-U))`; the latter accepts
+`Wrench::ZERO` or the same held external COM force/body couple as the original
+driven step. The source's fluid density, declared spherical radius, actual
+native spin and relative translation determine the force. Body density still
+determines inertia, not the lift coefficient. The original `load`, `step`,
+thermal, ellipsoid and unsteady-flow paths retain their existing models.
+
+The shared midpoint implementation solves drag and the transverse skew term
+simultaneously through a closed-form 3-by-3 inverse, without iterative solves
+or allocations. The original rigid-body integrator advances the only motion
+state. `lift_force_world_n` retains the transverse contribution separately;
+it does no relative translational work and adds no viscous heat. Maintaining
+the uniform background flow supplies `(F_drag + F_lift) dot U`, which enters
+the existing work-energy balance exactly once. A held external force/couple
+remains a separate work account. The same initial, midpoint and endpoint
+Reynolds checks, diffusion/relaxation limits, cancellation and transactional
+energy acceptance apply.
+
+This is a quasi-steady small-Reynolds asymptote for an unbounded uniform
+Newtonian fluid, following Rubinow & Keller, JFM 11 (1961), 447--459,
+<https://doi.org/10.1017/S0022112061000640>. It does not extend the empirical
+finite-Reynolds sphere lane to spinning balls, infer a cylinder circulation
+law, or supply shear/Saffman lift, wall corrections, resolved wake reaction
+or unsteady fluid memory. G1/G3/G4 coverage in
+`tests/creeping_flow/rotational_lift.rs` checks signed force and density/radius
+scaling, frame/boost covariance, zero-slip/spin limits, native midpoint and
+work agreement under a general drive, second-order convergence to an
+independent curved trajectory with decaying spin, and regime/cancellation
+refusals. Synthetic source cards establish these numerical properties, not
+measured-material or high-Reynolds physical validation.
+
 ## Source-bound finite-Reynolds sphere drag
 
 `creeping_flow::finite_reynolds::FiniteReynoldsSphere` reuses the original
