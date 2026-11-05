@@ -1,5 +1,34 @@
 # CONTRACT: fs-airflow
 
+## Unsteady laminar branches between common reservoirs
+
+`graph::inertial::laminar::parallel::LaminarParallel` connects original
+`LaminarPipe` owners between the same two held pressure reservoirs. Each branch
+retains its actual material, geometry, viscous-profile history and Reynolds
+ceiling. Total flow is the sum of the original trajectories at every instant;
+the flow split is not frozen to steady Poiseuille conductances. Different
+branches can carry opposing flows during a reversal.
+
+Prepared advancement reuses each original exact propagator and independent
+heat integral. Whole-bundle reports add actual pressure work, mean/profile
+kinetic storage and irreversible heat; `branch_steps` retains each original
+numerical admission and local heat. No joint solver certificate is invented.
+Construction and preparation allocate; warm advancement reuses branch buffers
+and publishes all histories and reports together only after complete admission.
+`with_sources` preserves the original profiles and common clock under each
+branch's admitted viscosity continuation, with density and geometry unchanged.
+
+The summed condensed relation can solve a held pressure for an authored
+**interval-average** total flow. It does not prescribe instantaneous flow or
+model a sealed junction. Frequency response sums original admittances and
+retains every branch's original band. The common density, developed Newtonian
+flow, rigid no-slip walls and sampled-frequency approximation of `LaminarPipe`
+remain; reservoir storage, mixing, manifolds and entrance losses are not inferred.
+G1/G3/G4 tests compare unequal-radius startup/reversal to the independent radial
+Stokes series, symmetric branches to the original pipe, zero-drive dissipation of
+kinetic storage, signed total-flow pressure control, viscosity continuation,
+harmonic parallel addition and atomic failure of a later branch.
+
 ## Geometry-derived laminar duct resistance
 
 `MaterialFlowResistance::circular_laminar` and `rectangular_laminar` compile

@@ -34,7 +34,7 @@ fn near(actual: f64, expected: f64, scale: f64, tolerance: f64) {
 // At t/tau >= 0.01 the omitted flow tail is below 1e-16. The integrated
 // expression uses the exact Rayleigh sum sum(j_0n^-6)=1/192, so its early
 // history does not inherit a truncated steady-flow or acceleration moment.
-fn startup(t_over_tau: f64) -> (f64, f64, f64) {
+pub(super) fn startup(t_over_tau: f64) -> (f64, f64, f64) {
     const ZEROS: [f64; 16] = [
         2.404_825_557_695_772_4,
         5.520_078_110_286_311,

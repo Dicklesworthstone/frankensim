@@ -24,6 +24,8 @@
 //! The frequency-domain error is sampled over an explicit band; arbitrary
 //! startup pulses do not inherit a time-domain error certificate.
 
+/// Common-pressure branches with independent viscous histories and heat.
+pub mod parallel;
 /// Coupled developed sections with separate viscosity histories and heat.
 pub mod series;
 
