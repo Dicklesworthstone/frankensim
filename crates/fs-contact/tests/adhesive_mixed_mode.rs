@@ -2,6 +2,11 @@
 #[path = "source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_mixed_mode/motion.rs"]
+mod motion;
+#[path = "adhesive_mixed_mode/path.rs"]
+mod path;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{
     JkrEnvelope, SourceJkrSphereContact,

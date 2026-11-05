@@ -24,6 +24,12 @@ pub mod loading;
 /// Mixed-mode withdrawal through finite normal and tangential apparatus springs.
 pub mod pull_off;
 
+/// Coupled native normal/shear inertia on the original full-stick potential.
+pub mod motion;
+
+/// Work-consistent coupled discrete forces and whole-path source admission.
+pub mod path;
+
 use super::{JkrError, SourceJkrSphereContact};
 use core::f64::consts::PI;
 use fs_blake3::{ContentHash, DomainHasher};

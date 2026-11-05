@@ -1542,6 +1542,39 @@ certified-wrapper or Cargo/DSR workspace gate.
 
 `SourceAdhesiveContactUpdate::from_mixed_mode` and `SourceAdhesiveShear::bind_mixed_mode` transfer the actual reduced solid area and original repulsive load into the retained source-bound junction-capacity owner. The caller must recompute the mixed-mode solution consistently with actual tangential loading and separately resolve any slip/peel transition; geometry exchange does not introduce a second elastic shear storage owner. Force control is closed form and displacement control uses two monotone solves bounded to 64 iterations each, without evaluation allocation. Seven original-source physical groups check independent Griffith equations, area reduction, both folds, energy gradients, full stiffness/compliance, vector path work, rotation and scaling; the sourced shear integration and original Mindlin regressions remain passing.
 
+`mixed_mode::path` supplies a symmetric coupled discrete gradient of that same
+normal/shear/surface potential. Exact polynomial product differences and the
+radial stationarity secant give factored original work and an analytic endpoint
+tangent without quadrature, finite differences, or division by a vanishing
+coordinate increment. Original finite equilibrium error stays visible in a
+separate work residual; a singular radial secant refuses. This endpoint work
+exchange does not itself admit a physical trajectory. `admit_quadratic_path`
+separately encloses the entire quadratic Bezier motion using convex hulls,
+monotonic radius corners and bounded de Casteljau subdivision. It retains all
+original applicability limits and the sourced static strength on the evolving
+real area; interior probes can reject a path but never establish admission by
+sampling. The shared evaluation budget, cancellation, unresolved bounds, fold,
+static-capacity and source-identity refusals preserve the input source. These
+are conservative floating-point screens, not interval certificates or an
+inferred dynamic post-slip, post-fold, dissipation or healing law.
+
+`mixed_mode::motion::JkrMixedModeMotion` uses that original discrete gradient in
+a joint normal/two-shear midpoint inertial solve with all nine entries of the
+held native mobility. Analytic source tangents and one reusable prepared 3x3 LU
+drive bounded Newton/backtracking; a positive symmetric local inertial tangent
+is required. The original quadratic-path owner admits the complete accepted
+kinematic interpolation and real static capacity under the same source-query
+budget. Exact-source contact work, relative kinetic change and held external
+work close independently of the solver residual. Original source, shear data,
+mobility, numerical policy, position, velocity, time and step count remain sealed
+in immutable continuation states. Failed source, solve, range, work or cancellation
+checks publish no state. This conservative attached full-stick phase adds no slip,
+snap release or thermal loss; timestep refinement remains necessary and neither
+global nonlinear uniqueness nor finite-rotation trajectory accuracy is claimed.
+Four G1/G3/G4 integration groups verify full-force equilibrium, convergence to an
+independent original-force RK4 trajectory, normal/shear recoil, actual area and
+energy, time reversal, tangent-frame covariance, chronology and atomic refusal.
+
 ## Fixed-volume planar capillary adhesion
 
 `capillary_bridge::SourcePlanarCapillaryBridge` retains the original liquid and both ordered wetting source states at one frozen physical query. Its declared geometry is a symmetric, translationally invariant liquid bridge between parallel, identically wetting rigid plates, with fixed liquid volume and acute equilibrium angles. Exact circular Young–Laplace profiles supply surface areas, pressure, attractive force, and the derivative of the same Young–Dupré free energy. The explicit topology rule continues a connected profile to zero neck, then retains all liquid in two equal-volume caps; closing caps reform a bridge when they touch. This geometric rule is not a certified physical stability or dynamic pinch-off threshold.
