@@ -34,6 +34,10 @@ pub mod holdup;
 #[path = "circuit/power.rs"]
 pub mod power;
 
+/// Retained mill inventory and conservative product/recycle accounts through feed changes.
+#[path = "circuit/transient.rs"]
+pub mod transient;
+
 use super::{
     ContinuousMillSolution, ContinuousPopulationBalanceMill, MEAN_RESIDENCE_TIME_AXIS,
     MILL_DRY_FLOW_AXIS, PopulationBalanceError, Sum, product, quotient, require,

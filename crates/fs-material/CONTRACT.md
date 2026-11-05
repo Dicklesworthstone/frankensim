@@ -13803,8 +13803,8 @@ admission; an empty feed cannot provide a required solids-fraction coordinate.
 Cancellation, insufficient work budget or failed conservation publishes no
 partial state. This is a first-order numerical trajectory, with an explicit
 step limit; a small balance residual is not a trajectory-error bound.
-Dynamic classifier recycle, rate-power calibration and plant transfer remain
-outside this local model. The `transient_grinding` example and seven independent
+The closed-circuit transient adapter below supplies instantaneous classifier
+recycle. Rate-power calibration and plant transfer remain outside this local model. The `transient_grinding` example and seven independent
 analytical/refinement/conservation regressions exercise the complete path.
 
 ## Simultaneous shared-reagent batch kinetics
@@ -14793,3 +14793,42 @@ oracle and finite-pair result, audit branched/throughflow storage independently,
 combine selective counterflow and heat, verify aggregate donor limits and pressure
 crossing refusal, preserve large-reference invariance, and check source/cancellation
 and lowered-record boundaries.
+
+## Dynamic closed grinding circuit with retained inventory
+
+DESIGN: `population_balance::circuit::transient` extends the original
+`ContinuousGrindingCircuit` with `advance_inventory`. The mill retains finite
+size-class dry and elemental masses plus a separate water stock; classifier
+and return line have zero inventory and instantaneous return. Constant fresh
+feed, residence, selection/daughter parameters and classifier partitions apply
+during each interval. For each dry or elemental class,
+`dH_i/dt=fresh_i-(S_i+escape_i/tau)H_i+sum_j(b_ij*S_j*H_j)`, with
+`escape_i=purge+returned*overflow_i`. Water has its own external escape.
+
+The original positive coarse-to-fine backward-Euler step is shared with the
+open mill owner. Gross discharge is H/tau. Every initial/numerical endpoint
+passes through the original classifier, and source support is checked using
+actual fresh plus returned mill feed, residence and feed solids fraction.
+A declared returned/fresh dry-flow ceiling is enforced at every point.
+Positive fresh dry flow and an admitted initial wet inventory are required;
+this closed-circuit API does not model empty startup or shutdown.
+
+The immutable response retains original model/input/query/settings, initial
+and final streams, final inventory, integrated fresh feed, actual mill feed,
+gross discharge, underflow, recycle, overflow and purge. Independent mill
+and whole-circuit audits check dry, water and every element. Internal recycle
+never enters external product; no remainder repairs a stream. Cancellation,
+work exhaustion, source failure or failed conservation returns no partial state.
+The first-order numerical trajectory and endpoint source checks supply neither
+a continuous-time enclosure nor a trajectory-error estimate.
+
+FACT (constructed tests): seven circuit regressions plus 33 existing
+population-balance tests pass in the original production-module closure.
+Independent two-class one-second inventories are 1000/19 kg coarse,
+172000/4009 kg fine and 1000/31 kg water. Other checks cover the original steady
+fixed point, zero-return agreement with the open owner, ODE refinement, assay
+changes, finite accumulation, actual source/circulation refusals and atomic
+cancellation/work limits. The `transient_grinding_circuit` example carries a
+copper feed change across three intervals and prints retained/exported Cu and
+both balance residuals. These are constructed model checks; no rate-power,
+liberation, classifier delay or laboratory-to-plant calibration is supplied.

@@ -16,9 +16,10 @@
 //! feed, residence and source conditions remain constant during an interval;
 //! feed changes are separate calls carrying the returned inventory forward.
 //!
-//! This local model has no dynamic classifier/recycle, variable discharge law,
-//! mineral liberation, rate-power calibration, Bond transient power estimate or
-//! plant transfer claim. All physical inputs retain their original meaning.
+//! The sibling circuit::transient adapter reuses the same implicit step for
+//! instantaneous classifier recycle. This open-volume API has no variable
+//! discharge law, mineral liberation, rate-power calibration, Bond transient
+//! power estimate or plant transfer claim.
 
 use super::{
     ClassHoldup, ContinuousPopulationBalanceMill, MAX_SIZE_CLASSES, PopulationBalanceError, Sum,
@@ -115,7 +116,7 @@ impl MillInventory {
             .map(|c| c.elements[element].value()))?))
     }
 
-    fn integrate(stream: &ParticleStream, elapsed: Time) -> Result<Self> {
+    pub(super) fn integrate(stream: &ParticleStream, elapsed: Time) -> Result<Self> {
         let classes = stream
             .classes()
             .iter()
@@ -143,7 +144,7 @@ impl MillInventory {
         )
     }
 
-    fn discharge_at(&self, residence: Time) -> Result<ParticleStream> {
+    pub(super) fn discharge_at(&self, residence: Time) -> Result<ParticleStream> {
         let classes = self
             .classes
             .iter()
@@ -305,6 +306,7 @@ impl ContinuousPopulationBalanceMill {
         let mut discharged_water = Sum::default();
         let nominal_step = quotient(elapsed.value(), substeps as f64)?;
         let integrated_feed = MillInventory::integrate(feed, elapsed)?;
+        let escape = vec![1.0; self.classes.len()];
         for step in 0..substeps {
             poll(&mut cancelled)?;
             let dt = if step + 1 == substeps {
@@ -317,36 +319,24 @@ impl ContinuousPopulationBalanceMill {
                 "requested time partition is not representable within the step limit",
             )?;
             let flushed = quotient(dt, residence.value())?;
-            let mut incoming = vec![vec![Sum::default(); channels]; self.classes.len()];
-            for (i, row) in incoming.iter_mut().enumerate() {
-                for (channel, value) in row.iter_mut().enumerate() {
-                    value.add(masses[i][channel])?;
-                    value.add(product(dt, rates[i][channel])?)?;
-                }
-            }
-            for &i in &order {
-                poll(&mut cancelled)?;
-                let selected = product(dt, self.kinetics[i].selection_rate.value())?;
-                let denominator = sum([1.0, flushed, selected])?;
-                for channel in 0..channels {
-                    let mass = quotient(incoming[i][channel].value()?, denominator)?;
-                    masses[i][channel] = mass;
-                    discharged[i][channel].add(product(mass, flushed)?)?;
-                    let broken = product(mass, selected)?;
-                    for daughter in &self.kinetics[i].daughters {
-                        let output = self
-                            .classes
-                            .binary_search_by(|c| c.id.cmp(&daughter.output))
-                            .expect("original source admits every daughter identity");
-                        incoming[output][channel]
-                            .add(product(broken, daughter.mass_fraction.value())?)?;
-                    }
-                }
-            }
-            water = quotient(
-                sum([water, product(dt, feed.water().value())?])?,
-                sum([1.0, flushed])?,
+            implicit_step(
+                self,
+                &mut masses,
+                &rates,
+                &mut water,
+                feed.water().value(),
+                dt,
+                residence,
+                &escape,
+                1.0,
+                &order,
+                &mut cancelled,
             )?;
+            for &i in &order {
+                for channel in 0..channels {
+                    discharged[i][channel].add(product(masses[i][channel], flushed)?)?;
+                }
+            }
             discharged_water.add(product(water, flushed)?)?;
         }
         let inventory = inventory_from_channels(self, &elements, masses, water)?;
@@ -386,7 +376,57 @@ impl ContinuousPopulationBalanceMill {
     }
 }
 
-fn admit_settings(elapsed: Time, settings: TransientMillSettings) -> Result<usize> {
+// Shared positive triangular backward-Euler owner. Open flow uses unit escape;
+// instantaneous circuit return uses the original classifier's external escape.
+// All dimensions, layouts and source points are admitted by the domain caller.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn implicit_step(
+    model: &ContinuousPopulationBalanceMill,
+    masses: &mut [Vec<f64>],
+    rates: &[Vec<f64>],
+    water: &mut f64,
+    water_feed: f64,
+    dt: f64,
+    residence: Time,
+    escape: &[f64],
+    water_escape: f64,
+    order: &[usize],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<()> {
+    let channels = masses[0].len();
+    let flushed = quotient(dt, residence.value())?;
+    let mut incoming = vec![vec![Sum::default(); channels]; model.classes.len()];
+    for (i, row) in incoming.iter_mut().enumerate() {
+        for (channel, value) in row.iter_mut().enumerate() {
+            value.add(masses[i][channel])?;
+            value.add(product(dt, rates[i][channel])?)?;
+        }
+    }
+    for &i in order {
+        poll(cancelled)?;
+        let selected = product(dt, model.kinetics[i].selection_rate.value())?;
+        let denominator = sum([1.0, product(flushed, escape[i])?, selected])?;
+        for channel in 0..channels {
+            let mass = quotient(incoming[i][channel].value()?, denominator)?;
+            masses[i][channel] = mass;
+            let broken = product(mass, selected)?;
+            for daughter in &model.kinetics[i].daughters {
+                let output = model
+                    .classes
+                    .binary_search_by(|c| c.id.cmp(&daughter.output))
+                    .expect("original source admits every daughter identity");
+                incoming[output][channel].add(product(broken, daughter.mass_fraction.value())?)?;
+            }
+        }
+    }
+    *water = quotient(
+        sum([*water, product(dt, water_feed)?])?,
+        sum([1.0, product(flushed, water_escape)?])?,
+    )?;
+    Ok(())
+}
+
+pub(super) fn admit_settings(elapsed: Time, settings: TransientMillSettings) -> Result<usize> {
     require(
         elapsed.value().is_finite()
             && elapsed.value() > 0.0
@@ -418,7 +458,7 @@ fn admit_settings(elapsed: Time, settings: TransientMillSettings) -> Result<usiz
     Ok(count)
 }
 
-fn inventory_from_channels(
+pub(super) fn inventory_from_channels(
     model: &ContinuousPopulationBalanceMill,
     elements: &[ElementId],
     values: Vec<Vec<f64>>,
@@ -444,7 +484,7 @@ fn inventory_from_channels(
     )
 }
 
-fn close_accounts(
+pub(super) fn close_accounts(
     initial: &MillInventory,
     feed: &MillInventory,
     final_state: &MillInventory,
@@ -507,7 +547,7 @@ fn sum(values: impl IntoIterator<Item = f64>) -> core::result::Result<f64, Popul
     }
     total.value()
 }
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(TransientMillError::Cancelled)
     } else {

@@ -4508,3 +4508,18 @@ It also checks data-only Cp substitutions, source pressure/temperature refusals
 and the distinction between integrated Cp and separately printed source H.
 These are bounded caloric-model checks, not qualification of a piano string,
 a particular silver specimen, or the separate adiabatic elastic observations.
+
+## Dynamic closed grinding and assay lag
+
+The existing continuous grinding/classifier model now advances finite mill
+inventory through feed changes with
+`ContinuousGrindingCircuit::advance_inventory`. It retains dry, water and
+elemental stocks and separate integrated fresh, circulating, discharge,
+overflow and purge accounts. The original positive step, classifier and source
+admission are reused; both mill and external boundaries must conserve material.
+See [dynamic closed circuit and delayed assay response](MINING_CONTINUOUS_GRINDING_CIRCUIT.md#dynamic-closed-circuit-and-delayed-assay-response)
+and the runnable `transient_grinding_circuit` example. Seven dedicated tests
+and all 40 population-balance tests pass in the original-module closure.
+The selected model has instantaneous return, fixed interval coefficients and
+explicit step/work/source limits; it supplies no plant calibration or
+continuous-time error bound.

@@ -172,7 +172,71 @@ refinement and retain the original steady solution as a fixed point. G0/G3/G4
 checks cover separate elemental/water balances, feed changes, replay, source
 restrictions, cancellation and bounded work.
 
-This is one local perfectly mixed inventory. Dynamic classifier recycle,
-size-dependent discharge, liberation, varying kinetic coefficients, equipment
-power draw and plant calibration remain separate physical inputs/models. The
-source-backed Bond test rows do not supply any of those missing calibrations.
+This open-volume API describes one local perfectly mixed inventory. The closed
+circuit extension below supplies instantaneous classifier return. Size-dependent
+discharge, liberation, varying kinetic coefficients, equipment power draw and
+plant calibration remain separate physical inputs/models. The source-backed
+Bond test rows do not supply those missing calibrations.
+
+## Dynamic closed circuit and delayed assay response
+
+`ContinuousGrindingCircuit::advance_inventory` carries the mill's actual
+size-resolved inventory through a constant-feed interval while operating the
+original classifier and return/purge split. Carry its returned `MillInventory`
+into the next call to change fresh throughput or assay without erasing material
+already inside the mill. The classifier and return line are instantaneous and
+have no separate stored inventory.
+
+For dry or elemental class mass, the external escape fraction changes the
+open-mill equation to:
+
+```text
+escape_i = purge_fraction + returned_fraction * overflow_fraction_i
+dH_i/dt = fresh_i - (S_i + escape_i/tau)*H_i
+           + sum_j(b_ij*S_j*H_j)
+gross_discharge_i = H_i/tau
+```
+
+Water follows the same inventory accounting with its own classifier partition.
+Fresh feed, residence, coefficients and partitions stay fixed within a call.
+The implementation reuses the original positive backward-Euler step; a zero
+return fraction gives the open mill's final inventory. Every numerical endpoint
+runs the original classifier on actual discharge and admits the mill source
+against actual fresh-plus-return feed. The settings include maximum step,
+finite work budget, mass tolerances and maximum returned/fresh dry load.
+
+The response retains instantaneous and integrated mill feed, gross discharge,
+classifier underflow, recycle, overflow and purge separately. Two independent
+audits enforce initial stock + input = final stock + output, around both the
+mill and the full circuit. Recycle is internal to the second boundary.
+Dry matter, water and each element have their own accounts. Small residuals
+are reported, never assigned to a balancing flow.
+
+```bash
+cargo run -p fs-material --example transient_grinding_circuit
+```
+
+The synthetic example begins at a steady circuit state and doubles the fresh
+copper grade while retaining the existing charge. It then restores the original
+grade. Its backward-Euler intervals give:
+
+| Interval after the grade change | Fresh Cu, kg | External Cu, kg | Change in retained Cu, kg |
+| --- | ---: | ---: | ---: |
+| First 1 second at doubled grade | 2 | 1.024932252 | +0.975067748 |
+| Next 49 seconds at doubled grade | 98 | 80.237202983 | +17.762797017 |
+| Next 10 seconds after restoring grade | 10 | 17.475287791 | -7.475287791 |
+
+The delayed output comes from conserved inventory. The calculation does not
+impose steady output equal to fresh input. Seven dedicated tests check an
+independent rational two-class solution, original steady fixed point,
+zero-return equivalence, independent ODE refinement, assay changes,
+source/circulation admission, trapped accumulation and atomic work/cancellation
+refusals; all 40 population-balance tests pass in the production-module closure.
+
+This API requires positive fresh dry flow and an initial wet inventory admitted
+by the classifier. Empty startup, shutdown, dynamic sump/pipe delays, changing
+selection coefficients, liberation and equipment power draw need additional
+physical models. Time integration is first order; a conservation residual is
+not a bound on trajectory error. Source admission is checked at the initial
+point and numerical endpoints, not as a continuous-time enclosure. Authored
+kinetic fixtures and Bond work-index rows do not establish plant calibration.
