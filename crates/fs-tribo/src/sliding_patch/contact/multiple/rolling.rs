@@ -460,7 +460,7 @@ impl PreparedHertzRollingContacts {
                 };
                 let mut problem = Problem {
                     law: sites[i].law,
-                    input: &native_input,
+                    response: native_input.scaled_compliance_m_per_n,
                     free: actual_hertz,
                     config: HertzWrenchConfig {
                         maximum_evaluations: 1,

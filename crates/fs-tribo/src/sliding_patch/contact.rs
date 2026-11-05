@@ -13,6 +13,8 @@ use fs_math::det;
 use super::{HertzSlidingPatch, HertzSlidingPatchParameters, shape_factors};
 use crate::TriboError;
 
+/// Instantaneous finite-patch impulses with coupled translation and spin.
+pub mod impulse;
 /// Simultaneous original Hertz patches with full cross-contact response.
 pub mod multiple;
 
@@ -401,10 +403,30 @@ pub(crate) fn advance_circular<L: CircularWrenchLaw>(
     if input.free_spin_angle_rad != 0.0 && free[2] == 0.0 {
         return Err(HertzWrenchError::Invalid("scaled_spin_underflow"));
     }
-    let (matrix, factor) = admit_matrix(input.scaled_compliance_m_per_n, config)?;
+    project_circular(
+        law,
+        free,
+        input.scaled_compliance_m_per_n,
+        config,
+        cancelled,
+    )
+}
+
+/// Numerical convex projection shared by conjugate force/displacement and
+/// impulse/velocity ports. No duration, constitutive state or physical travel
+/// is introduced here. Callers interpret the scalar result in their own units;
+/// in particular the endpoint support pairing is not mechanical impact loss.
+fn project_circular<L: CircularWrenchLaw>(
+    law: &L,
+    free: Vector,
+    response: Matrix,
+    config: HertzWrenchConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<HertzWrenchStep, HertzWrenchError> {
+    let (matrix, factor) = admit_matrix(response, config)?;
     let mut problem = Problem {
         law,
-        input,
+        response,
         free,
         config,
         evaluations: 0,
@@ -432,10 +454,7 @@ pub(crate) fn advance_circular<L: CircularWrenchLaw>(
     }
     let mut active = Active::new(first);
     for iteration in 0..=config.maximum_iterations {
-        let actual = sub(
-            free,
-            multiply(input.scaled_compliance_m_per_n, active.point),
-        );
+        let actual = sub(free, multiply(response, active.point));
         finite_vector(actual, "actual_motion")?;
         let support = problem.support(actual)?;
         let step = problem.candidate(
@@ -482,7 +501,7 @@ pub(crate) fn advance_circular<L: CircularWrenchLaw>(
                 if trial == active.point {
                     break;
                 }
-                let motion = sub(free, multiply(input.scaled_compliance_m_per_n, trial));
+                let motion = sub(free, multiply(response, trial));
                 let native = problem.support(motion)?;
                 let refined = problem.candidate(
                     trial,
@@ -510,7 +529,7 @@ pub(crate) fn advance_circular<L: CircularWrenchLaw>(
 
 struct Problem<'a, F: FnMut() -> bool, L: CircularWrenchLaw = HertzWrenchContact> {
     law: &'a L,
-    input: &'a HertzWrenchInput,
+    response: Matrix,
     free: Vector,
     config: HertzWrenchConfig,
     evaluations: usize,
@@ -641,13 +660,7 @@ impl<F: FnMut() -> bool, L: CircularWrenchLaw> Problem<'_, F, L> {
         iterations: usize,
     ) -> Result<HertzWrenchStep, HertzWrenchError> {
         let radius = self.law.radius();
-        let compatibility = sub(
-            actual,
-            sub(
-                self.free,
-                multiply(self.input.scaled_compliance_m_per_n, wrench),
-            ),
-        );
+        let compatibility = sub(actual, sub(self.free, multiply(self.response, wrench)));
         let residual = sub(wrench, support);
         let spin_angle = actual[2] / radius;
         let moment = radius * wrench[2];

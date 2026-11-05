@@ -763,6 +763,39 @@ KKT, full cross-response/local work against spatial Hertz quadrature with a live
 three-rung convergence check, frame covariance, dimensional similarity, exact
 zero limits, and atomic cancellation/refusal/retry.
 
+### Instantaneous coupled Hertz patch impulses
+
+`sliding_patch::contact::impulse::HertzImpulsePatch` solves simultaneous
+tangential and normal-axis angular impulses for a prescribed compressive normal
+impulse and fixed circular Hertz pressure-impulse distribution. One declared
+impact coefficient supplies the integrated local Coulomb budget. Translation
+and spin share that original support surface; separate force and torsional
+clamps cannot replace it. This instantaneous law does not infer a static/kinetic
+history, a timestep or a finite slip displacement.
+
+The mechanical owner supplies the complete positive-definite mobility mapping
+`[p_x, p_y, L/a]` to `[dv_x, dv_y, a*domega]`, including all translation/spin
+cross terms. The bounded allocation-free Hertz projection is shared with the
+sustained wrench owner. It returns either an admitted arrest impulse or the
+maximum-dissipation sliding impulse. Physical linear/angular impulse limits,
+the original mobility equation and support stationarity of the actual returned
+impulse must all pass; tolerances never enlarge the friction set.
+
+The report retains the actual post-impact velocity, including any floating
+arrest residual. Dissipation is minus the physical impulse paired with the
+midpoint velocity. An independent inverse-mobility kinetic-energy calculation
+checks that loss; the endpoint support gap remains a separate optimality
+quantity and is not substituted for impact energy. Invalid mobility,
+unresolved boundaries, exhausted budgets and cancellation return no candidate.
+The borrowed inputs and immutable law remain unchanged.
+
+This is a conditional tangent/spin impact solve: normal restitution, coupled
+normal/tangent impulse determination, evolving patch radius, elastic memory,
+rolling deformation and heat allocation remain with their physical owners.
+`tests/hertz_wrench_impulse.rs` covers analytic translation and Hertz spin
+limits, full cross-coupled arrest, mixed motion against independent local
+pressure integration, exact zero limits and atomic refusal.
+
 ### Partial-slip return-map rung
 
 `partial_slip` is a solver-independent, two-region Jenkins/Iwan

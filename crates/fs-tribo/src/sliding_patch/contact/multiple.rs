@@ -686,7 +686,7 @@ impl PreparedCircularContacts {
                 };
                 let mut problem = Problem {
                     law: &projection,
-                    input: &input,
+                    response: input.scaled_compliance_m_per_n,
                     free: motion,
                     config: HertzWrenchConfig {
                         maximum_evaluations: remaining.min(self.config.local.maximum_evaluations),
@@ -788,7 +788,7 @@ impl PreparedCircularContacts {
             }
             let mut problem = Problem {
                 law: site.law,
-                input: &input,
+                response: input.scaled_compliance_m_per_n,
                 free: local_free,
                 config: HertzWrenchConfig {
                     maximum_evaluations: remaining.min(self.config.local.maximum_evaluations),
