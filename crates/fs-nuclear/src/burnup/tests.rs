@@ -1,6 +1,7 @@
 //! Synthetic equation tests: none of these coefficients are evaluated isotope data.
 
 use super::*;
+use crate::cross_sections::{CrossSectionData, CrossSectionLimits};
 use fs_qty::Frequency;
 
 fn channels(deposited_j: f64, radiation_j: f64, escaped_j: f64) -> EnergyChannels {
@@ -553,4 +554,275 @@ fn g0_identity_branch_data_and_domains_are_admitted_before_evolution() {
             .is_err()
     );
     assert!(BurnupInventory::new(Arc::clone(inventory.model()), vec![1.0]).is_err());
+}
+
+fn table(
+    data: &BurnupData,
+    parent: usize,
+    reaction: NeutronReaction,
+    temperatures_k: Vec<f64>,
+    cross_sections_m2: Vec<Vec<f64>>,
+) -> Arc<CrossSectionTable> {
+    Arc::new(
+        CrossSectionTable::new(
+            CrossSectionData {
+                data_id: "synthetic-processed-temperature-rows".into(),
+                nuclide: data.nuclides[parent].id,
+                reaction,
+                groups: Arc::clone(&data.groups),
+                temperatures_k,
+                cross_sections_m2,
+            },
+            CrossSectionLimits {
+                max_temperatures: 4,
+                max_neutron_groups: 8,
+                max_values: 32,
+            },
+        )
+        .unwrap(),
+    )
+}
+
+#[test]
+fn g1_tabulated_reactions_change_counts_products_and_heat_at_actual_temperature() {
+    let (template, flux) = fixture(0.0, 0.0, 0.35, vec![100.0, 0.0, 0.0, 0.0]);
+    let mut data = template.model.data.clone();
+    data.reactions[0].rate = BurnupRate::TabulatedFission {
+        cross_sections: table(
+            &data,
+            0,
+            NeutronReaction::Fission,
+            vec![250.0, 1000.0],
+            vec![vec![0.02, 0.02], vec![0.12, 0.04]],
+        ),
+    };
+    data.reactions[1].rate = BurnupRate::TabulatedCapture {
+        cross_sections: table(
+            &data,
+            0,
+            NeutronReaction::Capture,
+            vec![250.0, 1000.0],
+            vec![vec![0.20, 0.0], vec![0.05, 0.025]],
+        ),
+    };
+    let initial = BurnupInventory::new(
+        Arc::new(BurnupModel::new(data, limits()).unwrap()),
+        vec![100.0, 0.0, 0.0, 0.0],
+    )
+    .unwrap();
+    for (temperature, fission_rate, capture_rate) in [
+        (250.0, 0.06, 0.20),
+        (625.0, 0.13, 0.15),
+        (1000.0, 0.20, 0.10),
+    ] {
+        let rates = initial
+            .model
+            .rate_constants(&flux, temperature, limits(), || Ok(()))
+            .unwrap();
+        close(rates[0], fission_rate, 5e-17);
+        close(rates[1], capture_rate, 5e-17);
+        let (evolved, report) = initial
+            .trial(2.0, &flux, temperature, budget(), || Ok(()))
+            .unwrap();
+        let total: f64 = fission_rate + capture_rate;
+        let survival = (-2.0 * total).exp();
+        let removals = 100.0 * -(-2.0 * total).exp_m1();
+        let fissions = removals * fission_rate / total;
+        let captures = removals * capture_rate / total;
+        let fragments = 200.0 * fission_rate / (0.35 - total) * (survival - (-0.7_f64).exp());
+        let decays = 2.0 * fissions - fragments;
+        close(evolved.populations()[0], 100.0 * survival, 1e-9);
+        close(evolved.populations()[1], fragments, 2e-9);
+        close(evolved.populations()[2], decays, 2e-9);
+        close(evolved.populations()[3], captures, 1e-9);
+        close(report.fissions, fissions, 1e-9);
+        close(report.captures, captures, 1e-9);
+        close(report.decays, decays, 2e-9);
+        close(
+            report.released.deposited_j,
+            3.0 * fissions + captures + 0.5 * decays,
+            3e-9,
+        );
+        close(
+            report.generated_energy_j,
+            6.0 * fissions + 3.0 * captures + 2.0 * decays,
+            8e-9,
+        );
+        let prepared = initial
+            .model
+            .prepare(2.0, &flux, temperature, limits(), || Ok(()))
+            .unwrap();
+        let (explicit, explicit_step) = initial
+            .trial_prepared(&prepared, budget(), || Ok(()))
+            .unwrap();
+        assert_eq!(evolved, explicit);
+        assert_eq!(report, explicit_step);
+    }
+}
+
+#[test]
+fn g0_cached_burnup_distinguishes_channel_rates_even_when_total_removal_is_identical() {
+    let (template, flux) = fixture(0.0, 0.0, 0.0, vec![100.0, 0.0, 0.0, 0.0]);
+    let mut data = template.model.data.clone();
+    data.reactions[0].rate = BurnupRate::TabulatedFission {
+        cross_sections: table(
+            &data,
+            0,
+            NeutronReaction::Fission,
+            vec![250.0, 1000.0],
+            vec![vec![0.25, 0.0], vec![0.75, 0.0]],
+        ),
+    };
+    data.reactions[1].rate = BurnupRate::TabulatedCapture {
+        cross_sections: table(
+            &data,
+            0,
+            NeutronReaction::Capture,
+            vec![250.0, 1000.0],
+            vec![vec![0.75, 0.0], vec![0.25, 0.0]],
+        ),
+    };
+    let initial = BurnupInventory::new(
+        Arc::new(BurnupModel::new(data, limits()).unwrap()),
+        vec![100.0, 0.0, 0.0, 0.0],
+    )
+    .unwrap();
+    let (cold, _) = initial
+        .trial(0.5, &flux, 250.0, budget(), || Ok(()))
+        .unwrap();
+    let (hot, report) = cold.trial(0.5, &flux, 1000.0, budget(), || Ok(())).unwrap();
+    assert!(!Arc::ptr_eq(
+        cold.prepared.as_ref().unwrap(),
+        hot.prepared.as_ref().unwrap()
+    ));
+    let removed = cold.populations()[0] * -(-0.5_f64).exp_m1();
+    close(report.fissions, 0.75 * removed, 1e-9);
+    close(report.captures, 0.25 * removed, 1e-9);
+    close(
+        hot.populations()[1] - cold.populations()[1],
+        1.5 * removed,
+        2e-9,
+    );
+    let mut attempt = hot.clone();
+    assert!(
+        attempt
+            .advance(0.5, &flux, 1001.0, budget(), || Ok(()))
+            .is_err()
+    );
+    assert_eq!(attempt, hot);
+    let mut too_small = budget();
+    too_small.limits.max_neutron_groups = 1;
+    assert!(
+        attempt
+            .advance(0.5, &flux, 1000.0, too_small, || Ok(()))
+            .is_err()
+    );
+    assert_eq!(attempt, hot);
+}
+
+#[test]
+fn g0_equal_complete_rate_vectors_reuse_maps_across_table_temperatures_and_fluxes() {
+    let (template, flux) = fixture(0.0, 0.0, 0.0, vec![100.0, 0.0, 0.0, 0.0]);
+    let mut data = template.model.data.clone();
+    data.reactions[0].rate = BurnupRate::TabulatedFission {
+        cross_sections: table(
+            &data,
+            0,
+            NeutronReaction::Fission,
+            vec![250.0, 1000.0],
+            vec![vec![0.25, 0.125], vec![0.50, 0.0]],
+        ),
+    };
+    data.reactions[1].rate = BurnupRate::TabulatedCapture {
+        cross_sections: table(
+            &data,
+            0,
+            NeutronReaction::Capture,
+            vec![250.0, 1000.0],
+            vec![vec![0.125, 0.0625], vec![0.25, 0.0]],
+        ),
+    };
+    let initial = BurnupInventory::new(
+        Arc::new(BurnupModel::new(data, limits()).unwrap()),
+        vec![100.0, 0.0, 0.0, 0.0],
+    )
+    .unwrap();
+    let (cold, _) = initial
+        .trial(0.5, &flux, 250.0, budget(), || Ok(()))
+        .unwrap();
+    let (hot, _) = cold.trial(0.5, &flux, 1000.0, budget(), || Ok(())).unwrap();
+    assert!(Arc::ptr_eq(
+        cold.prepared.as_ref().unwrap(),
+        hot.prepared.as_ref().unwrap()
+    ));
+    let equivalent_flux = GroupFlux::new(Arc::clone(flux.groups()), vec![2.0, 0.0]).unwrap();
+    let (changed_flux, _) = hot
+        .trial(0.5, &equivalent_flux, 250.0, budget(), || Ok(()))
+        .unwrap();
+    assert!(Arc::ptr_eq(
+        hot.prepared.as_ref().unwrap(),
+        changed_flux.prepared.as_ref().unwrap()
+    ));
+}
+
+#[test]
+fn g0_tables_require_matching_nuclide_reaction_grid_and_full_model_domain() {
+    let (template, _) = fixture(0.12, 0.08, 0.35, vec![100.0, 0.0, 0.0, 0.0]);
+    let original = template.model.data.clone();
+    let mut wrong_parent = original.clone();
+    wrong_parent.reactions[0].rate = BurnupRate::TabulatedFission {
+        cross_sections: table(
+            &original,
+            1,
+            NeutronReaction::Fission,
+            vec![250.0, 1000.0],
+            vec![vec![0.1, 0.0], vec![0.2, 0.0]],
+        ),
+    };
+    assert!(BurnupModel::new(wrong_parent, limits()).is_err());
+    let mut wrong_reaction = original.clone();
+    wrong_reaction.reactions[0].rate = BurnupRate::TabulatedFission {
+        cross_sections: table(
+            &original,
+            0,
+            NeutronReaction::Capture,
+            vec![250.0, 1000.0],
+            vec![vec![0.1, 0.0], vec![0.2, 0.0]],
+        ),
+    };
+    assert!(BurnupModel::new(wrong_reaction, limits()).is_err());
+    let mut different_grid = original.clone();
+    different_grid.groups = Arc::new(
+        NeutronGroups::new(
+            "same-edges-different-data".into(),
+            original.groups.edges_j().to_vec(),
+        )
+        .unwrap(),
+    );
+    let mut wrong_grid = original.clone();
+    wrong_grid.reactions[0].rate = BurnupRate::TabulatedFission {
+        cross_sections: table(
+            &different_grid,
+            0,
+            NeutronReaction::Fission,
+            vec![250.0, 1000.0],
+            vec![vec![0.1, 0.0], vec![0.2, 0.0]],
+        ),
+    };
+    assert!(BurnupModel::new(wrong_grid, limits()).is_err());
+    let mut short_domain = original.clone();
+    short_domain.reactions[0].rate = BurnupRate::TabulatedFission {
+        cross_sections: table(
+            &original,
+            0,
+            NeutronReaction::Fission,
+            vec![300.0, 900.0],
+            vec![vec![0.1, 0.0], vec![0.2, 0.0]],
+        ),
+    };
+    assert!(BurnupModel::new(short_domain.clone(), limits()).is_err());
+    short_domain.temperature_min_k = 350.0;
+    short_domain.temperature_max_k = 800.0;
+    let model = BurnupModel::new(short_domain, limits()).unwrap();
+    assert!(model.validate_temperature(300.0).is_err());
 }

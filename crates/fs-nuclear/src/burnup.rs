@@ -13,7 +13,9 @@
 //! Q value for the same products. These populations retain the irradiation and
 //! cooling history without a second effective energy reservoir.
 //!
-//! Cross sections and yields are fixed over each admitted interval. Different
+//! Cross sections are either supplied fixed vectors or explicit processed tables
+//! evaluated at the interval temperature without extrapolation. The resulting
+//! rates and product yields are fixed over that admitted interval. Different
 //! group-dependent product yields can be authored as disjoint partial reaction
 //! channels; their cross sections must sum to the intended total, not duplicate
 //! it. A flux is absolute, not a normalized spectrum. This module does not infer
@@ -28,6 +30,7 @@ use fs_la::decay::{
 };
 use fs_thermochem::decay::DecayLawV1;
 
+use crate::cross_sections::{CrossSectionTable, NeutronReaction};
 use crate::irradiation::{GroupFlux, NeutronGroups, NuclideId};
 use crate::{
     Accumulator, EnergyChannels, FissionError, channel_values, nonnegative, positive, sum,
@@ -61,6 +64,15 @@ pub enum BurnupRate {
     /// Nonfission removal of the parent; elastic scattering is not capture.
     Capture {
         cross_sections_m2: Vec<f64>,
+    },
+    /// An identified processed fission table, evaluated at the actual interval T.
+    /// Partial-channel tables are required when different channels have distinct yields.
+    TabulatedFission {
+        cross_sections: Arc<CrossSectionTable>,
+    },
+    /// A processed nonfission-removal table with the same parent identity and grid.
+    TabulatedCapture {
+        cross_sections: Arc<CrossSectionTable>,
     },
 }
 
@@ -195,6 +207,12 @@ impl BurnupModel {
                         ));
                     }
                 }
+                BurnupRate::TabulatedFission { cross_sections } => {
+                    model.admit_table(cross_sections, reaction.parent, NeutronReaction::Fission)?;
+                }
+                BurnupRate::TabulatedCapture { cross_sections } => {
+                    model.admit_table(cross_sections, reaction.parent, NeutronReaction::Capture)?;
+                }
             }
             let mut products = BTreeSet::new();
             for product in &reaction.products {
@@ -254,7 +272,8 @@ impl BurnupModel {
         self.data.temperature_max_k
     }
 
-    /// All microscopic coefficients are held fixed inside this declared domain.
+    /// Every interval temperature must lie inside the model's declared domain.
+    /// Construction checks that every supplied table covers this entire domain.
     pub fn validate_temperature(&self, temperature_k: f64) -> Result<(), BurnupError> {
         if !positive(temperature_k)
             || temperature_k < self.temperature_min_k()
@@ -288,8 +307,35 @@ impl BurnupModel {
         Ok(())
     }
 
+    fn admit_table(
+        &self,
+        table: &CrossSectionTable,
+        parent: usize,
+        reaction: NeutronReaction,
+    ) -> Result<(), BurnupError> {
+        if table.nuclide() != self.data.nuclides[parent].id || table.reaction() != reaction {
+            return Err(BurnupError::Invalid(
+                "tabulated reaction must match the parent nuclide and reaction kind",
+            ));
+        }
+        if !Arc::ptr_eq(self.groups(), table.groups()) && self.groups() != table.groups() {
+            return Err(BurnupError::Invalid(
+                "tabulated reaction must use the burnup model's exact neutron groups",
+            ));
+        }
+        if table.temperature_min_k() > self.temperature_min_k()
+            || table.temperature_max_k() < self.temperature_max_k()
+        {
+            return Err(BurnupError::Invalid(
+                "tabulated reaction must cover the entire burnup temperature domain",
+            ));
+        }
+        Ok(())
+    }
+
     /// Per-parent rate constant for each original reaction [1/s]. These rounded
-    /// rates define the frozen operator; no temperature interpolation is inferred.
+    /// rates define the frozen operator. Only explicitly supplied processed
+    /// tables interpolate microscopic coefficients at the current temperature.
     pub fn rate_constants(
         &self,
         flux: &GroupFlux,
@@ -326,6 +372,13 @@ impl BurnupModel {
                     }
                     checked(rate.value())?
                 }
+                BurnupRate::TabulatedFission { cross_sections }
+                | BurnupRate::TabulatedCapture { cross_sections } => cross_sections.rate_constant(
+                    flux,
+                    temperature_k,
+                    limits.max_neutron_groups,
+                    &mut checkpoint,
+                )?,
             };
             rates.push(rate);
         }
@@ -344,6 +397,20 @@ impl BurnupModel {
         mut checkpoint: impl FnMut() -> Result<(), FissionError>,
     ) -> Result<PreparedBurnup, BurnupError> {
         let rates = self.rate_constants(flux, temperature_k, limits, &mut checkpoint)?;
+        self.prepare_rates(duration_s, flux, temperature_k, limits, rates, checkpoint)
+    }
+
+    // Both public preparation and automatic cache misses arrive with already
+    // admitted, collapsed rates. Do not repeat table interpolation or group work.
+    fn prepare_rates(
+        self: &Arc<Self>,
+        duration_s: f64,
+        flux: &GroupFlux,
+        temperature_k: f64,
+        limits: BurnupLimits,
+        rates: Vec<f64>,
+        mut checkpoint: impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<PreparedBurnup, BurnupError> {
         let mut removals = vec![Accumulator::new(0.0); self.data.nuclides.len()];
         for (reaction, &rate) in self.data.reactions.iter().zip(&rates) {
             checkpoint()?;
@@ -406,7 +473,10 @@ impl BurnupModel {
     }
 }
 
-/// Reusable interval maps, flux and reaction attribution with exact model binding.
+/// Reusable interval maps and reaction attribution with exact model binding.
+/// Flux and temperature record the original preparation point. An inventory's
+/// cache may reuse these maps at other conditions only when ALL collapsed
+/// reaction rates are identical, preserving the channel-by-channel attribution.
 #[derive(Clone, Debug)]
 pub struct PreparedBurnup {
     model: Arc<BurnupModel>,
@@ -532,21 +602,26 @@ impl BurnupInventory {
     ) -> Result<(Self, BurnupStep), BurnupError> {
         checkpoint()?;
         budget.validate()?;
-        // This model's coefficients are fixed throughout its admitted T domain.
-        // Reuse across temperatures is valid, but every current T is admitted.
-        self.model.validate_temperature(temperature_k)?;
+        // Reevaluate the current operator: matching dt/flux is insufficient once
+        // cross sections depend on temperature. Compare individual channel rates,
+        // not just total removal, because product yields and event energies differ.
+        let rates =
+            self.model
+                .rate_constants(flux, temperature_k, budget.limits, &mut checkpoint)?;
         let prepared = if let Some(prepared) = self.prepared.as_ref().filter(|prepared| {
-            prepared.duration_s().to_bits() == duration_s.to_bits()
-                && prepared.flux() == flux
+            Arc::ptr_eq(&self.model, prepared.model())
+                && prepared.duration_s().to_bits() == duration_s.to_bits()
                 && prepared.limits == budget.limits
+                && prepared.reaction_rate_constants() == rates.as_slice()
         }) {
             Arc::clone(prepared)
         } else {
-            Arc::new(self.model.prepare(
+            Arc::new(self.model.prepare_rates(
                 duration_s,
                 flux,
                 temperature_k,
                 budget.limits,
+                rates,
                 &mut checkpoint,
             )?)
         };
@@ -606,8 +681,8 @@ impl BurnupInventory {
             let error = add(&mut next.reactions[index], count)?.abs();
             add(&mut nuclei_error, error)?;
             let kind = match reaction.rate {
-                BurnupRate::Fission { .. } => 0,
-                BurnupRate::Capture { .. } => 1,
+                BurnupRate::Fission { .. } | BurnupRate::TabulatedFission { .. } => 0,
+                BurnupRate::Capture { .. } | BurnupRate::TabulatedCapture { .. } => 1,
                 BurnupRate::Decay { .. } => 2,
             };
             let error = add(&mut counts[kind], count)?.abs();

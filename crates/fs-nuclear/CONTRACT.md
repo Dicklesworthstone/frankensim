@@ -666,9 +666,10 @@ products from this tracked inventory. Particle mass/charge accounting and
 composition-dependent thermal material laws remain outside this owner.
 
 Microscopic cross sections use square metres and group-integrated absolute flux
-uses neutrons/m²/s. The full named energy grid and edges must match. Data stay
-fixed inside the explicit Kelvin range; no interpolation, Doppler broadening,
-self-shielding or source normalization is inferred. Energy-dependent yields can
+uses neutrons/m²/s. The full named energy grid and edges must match. The original
+fixed-coefficient variants stay fixed inside the explicit Kelvin range; the
+shared tabulated variants interpolate supplied temperature rows as described
+below. No Doppler broadening, self-shielding or source normalization is inferred. Energy-dependent yields can
 be supplied as disjoint partial channels; duplicated total cross sections would
 double-count a physical reaction and are not an evaluated-data admission.
 
@@ -681,13 +682,13 @@ and escaped channels remain disjoint. Cumulative event and energy accounts use
 the existing compensated accumulator. Absolute noncancelling population and
 energy defects consume separate user-supplied allowances.
 
-`PreparedBurnup` binds immutable interval maps to the exact model, flux and work
-limits and can serve multiple inventories. `BurnupInventory::trial` retains one
-shared immutable prepared map for exact repeated duration/flux/limit inputs;
-temperature is still validated on every call, but a change within the declared
-fixed-coefficient domain does not rebuild an identical operator. Preparation
-cost is paid only on a cache miss; application and retained maps are quadratic
-in node count. Changed limits cannot bypass numerical preparation. Candidate
+`PreparedBurnup` binds immutable interval maps to the exact model, interval,
+channel rates and work limits and can serve multiple inventories.
+`BurnupInventory::trial` retains one shared immutable map for exact repeated
+operator inputs; current flux, temperature and work are still admitted before
+reuse. Preparation cost is paid only on a cache miss; application and retained
+maps are quadratic in node count. Changed limits cannot bypass numerical
+preparation. Candidate
 state, cumulative accounts and the cache are published only after acceptance.
 
 The formulation follows the production-minus-loss depletion equation described
@@ -895,3 +896,38 @@ exact knots, positivity and endpoint scales, limits/identity/range/cancellation,
 actual fuel competition, the original delayed-heat convolution and existing
 capture-product evolution. Full workspace Cargo and empirical nuclear-data
 validation remain separate.
+
+## Temperature-dependent depletion on the original coupled timeline
+
+`BurnupRate::TabulatedFission` and `TabulatedCapture` use the same immutable
+`cross_sections::CrossSectionTable` as parent-only irradiation. Construction
+binds the table's isotope, reaction, named neutron grid and complete temperature
+coverage to its parent and model. The original fixed-coefficient variants remain
+available. Rates are collapsed from the current material temperature and supplied
+absolute multigroup flux; the reaction operator is frozen over the accepted step.
+
+The prepared-map cache compares the entire channel-rate vector, exact interval,
+model identity and work limits. A changed fission/capture split invalidates it
+even if total removal is unchanged. Different temperatures or spectra that yield
+identical channel rates share the same immutable map. Each call still admits
+its current temperature, grid and work before reuse; a cache miss collapses the
+rates only once. Preparation's recorded flux and temperature describe where
+that map was first built, not every later state that can share its operator.
+
+No second thermal or neutron solver is introduced. The existing irradiation,
+capture-activation, burnup and kinetic heating adapters pass the material's
+actual beginning-of-step temperature to their original reaction owner. Their
+shared transaction checks the prospective endpoint against the data domain
+before publishing either heat or populations. Temperature-dependent nuclear
+data, material heat, product worth and neutron amplitude therefore participate
+in the existing partitioned feedback loop. This remains a first-order coupled
+approximation, not an implicit temperature/transport solve.
+
+Four focused burnup regressions cover analytic temperature-dependent event and
+product counts, reaction-channel cache invalidation, reuse at equivalent rates,
+and table identity/grid/domain admission. Three shared-timeline regressions
+compare both original reaction owners against an exact nonlinear cooling-feedback
+solution, refine the neutron/temperature/product-worth loop against an independent
+invariant, and verify joint rollback on a final-temperature domain exit. The
+combined native nuclear lane passed 133 tests when this increment was prepared.
+These are manufactured verification problems, not evaluated-data validation.
