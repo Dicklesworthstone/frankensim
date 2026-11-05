@@ -141,7 +141,11 @@ function pump() {
   const error = engine.lastError();
   if (error) post({ type: 'error', code: 'engine', message: error });
   govern(now);
-  if (snapshotIntervalMs > 0 && now - lastSnapshotAt >= snapshotIntervalMs) {
+  // Drawing is deferrable when rendering is close to the audio deadline.
+  // Bound load-related deferral to 250 ms; do not change audio quality,
+  // event delivery, queue targets, or underrun accounting.
+  if (snapshotIntervalMs > 0 && now - lastSnapshotAt >= snapshotIntervalMs
+      && (loadAverage < 0.8 || now - lastSnapshotAt >= 250)) {
     lastSnapshotAt = now;
     const data = engine.snapshot();
     post({ type: 'snapshot', data, renderedFrames: rendered, aheadMs: (estimateQueue(now) * 1000) / sampleRate }, [data.buffer]);

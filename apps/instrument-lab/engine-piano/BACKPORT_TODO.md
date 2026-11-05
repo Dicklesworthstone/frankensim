@@ -1,5 +1,12 @@
 # Piano CPU backports — 2026-10-27
 
+## Defer drawing work during dense audio load — 2026-11-05 (`frankensim-fnhlq`)
+
+- [x] Select a separate runtime-only hypothesis: the Worker constructs string-shape snapshots after refilling audio even when measured render load is near its deadline. Trial delays only drawing snapshots while load>=0.8, bounded to250ms; audio quality, notes,18ms queue, underrun counters and published WASM stay unchanged. No retry of queue enlargement, ring/coalescing or rejected FFT changes.
+- [x] Stage private baseline/candidate runtime artifacts under `/Volumes/trj-data/tmp/piano-snapshot-headroom-20261105/`; only candidate worker.js differs. Reuse the established actual Worker/AudioWorklet dense C-minor cohort:48-coordinate board,4,800-mode cap,governor off,C-A-A-C,six repeats per arm. No canonical/runtime promotion yet.
+- [ ] Finish the four actual-browser runs, retain every result, and check whether deferring drawing actually improves continuity. Do not claim a CPU percentage or dropout repair from this hypothesis alone.
+- [ ] If useful, integrate the narrow change, verify ordinary musical playback and publish only that qualified runtime delta. If not useful, retain the failed trial and leave production unchanged.
+
 ## Restore native FFT integration after upstream replacement — 2026-11-04 (`frankensim-fnhlq`)
 
 - [x] Identify the missing accepted SmallFft/partitioned receiver source in the retained stash; preserve newer material, gas, directional, modal and transactional receiver APIs. Do not apply the stash wholesale or reuse rejected FFT variants.

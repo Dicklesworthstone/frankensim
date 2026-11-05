@@ -110,7 +110,8 @@ fn describe_clock(piano: &LivePiano, output_rate: u32, substeps: usize,
             }
         }
             else if c.rt0425_string_damping { "rt0425" } else { "authored" },
-        if c.rt0425_hammer_dissipation { "rt0425 K_H and R_H" }
+        if c.felt_pack_hammers { "Stulov Abel felt pack" }
+            else if c.rt0425_hammer_dissipation { "rt0425 K_H and R_H" }
             else if c.rt0425_hammer_stiffness { "rt0425 K_H, estimated Prony" } else { "legacy" },
         if piano.string_materials().is_some() { "sampled-cylinder-retained-modes" }
             else { "unresolved-effective-scale" },

@@ -49,6 +49,31 @@ test('a stalled sink cannot accumulate seconds of stale audio; acknowledgement r
   }
 });
 
+test('drawing yields under audio load, stays bounded, and resumes without changing audio', () => {
+  const pump = source.slice(source.indexOf('function pump() {'), source.indexOf('function onSinkMessage(event) {'));
+  const run = new Function(`
+    const CHUNK = 128, sampleRate = 48000, targetFrames = 864;
+    let now = 100, sentTotal = 2048, loadAverage = 0.9;
+    let lastSnapshotAt = 0, snapshotIntervalMs = 1000 / 30;
+    const lastStatsAt = Infinity, rendered = 2048;
+    const level = { at: 1, queuedFrames: 2048, receivedFrames: 2048 };
+    const performance = { now: () => now }, sinkPort = {};
+    const updates = [];
+    const post = message => updates.push(message.type);
+    const engine = { lastError: () => null, snapshot: () => new Float32Array(1) };
+    const govern = () => {};
+    const renderChunk = () => { throw new Error('already full; must not render more audio'); };
+    ${body}
+    ${pump}
+    pump(); const deferred = updates.length;
+    now = 250; pump(); const bounded = updates.length;
+    now = 300; loadAverage = 0.2; pump(); const resumed = updates.length;
+    now = 1000; snapshotIntervalMs = 0; pump();
+    return { deferred, bounded, resumed, final: updates.length, sentTotal, rendered };
+  `);
+  assert.deepEqual(run(), { deferred: 0, bounded: 1, resumed: 2, final: 2, sentTotal: 2048, rendered: 2048 });
+});
+
 const governSource = source.slice(source.indexOf('function govern(now) {'), source.indexOf('function pump() {'));
 type Quality = { courseModeBudget: number; partialBandHz: number; maxDynamicModes: number };
 const governorRun = new Function('asked', 'initial', 'loads', 'admit', `
