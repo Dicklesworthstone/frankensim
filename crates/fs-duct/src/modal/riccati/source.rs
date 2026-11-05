@@ -8,6 +8,8 @@
 use super::*;
 use crate::modal::ModalSourceResponse;
 use crate::network::{PortExcitation, coherent_sum};
+use fs_material::gas_field::AxialGasField;
+use std::sync::Arc;
 
 /// One coherent drive and its complete continuous modal pressure/flow field.
 #[derive(Debug, Clone)]
@@ -30,9 +32,10 @@ pub struct PreparedModalProfile {
     record: Stations,
     axis_weight: Vec<f64>,
     gas: GasState,
+    outlet_gas: GasState,
+    gas_field: Option<Arc<AxialGasField>>,
     omega: f64,
     zref: f64,
-    length: f64,
     min_shear: f64,
     mouth_ka: f64,
 }
@@ -131,21 +134,43 @@ impl PreparedModalProfile {
         let run = propagate_controlled(
             profile, state, omega, loss, load, modes.0, steps, true, cancelled,
         )?;
+        Self::from_propagated(state, state, None, omega, modes, run)
+    }
+
+    pub(super) fn from_propagated(
+        inlet: &GasState,
+        outlet: &GasState,
+        gas_field: Option<Arc<AxialGasField>>,
+        omega: f64,
+        modes: ModeCount,
+        run: Propagated,
+    ) -> Result<Self, DuctError> {
         Ok(Self {
             record: run.stations.ok_or(DuctError::Singular)?,
             axis_weight: axis_weights(modes.0),
-            gas: *state,
+            gas: *inlet,
+            outlet_gas: *outlet,
+            gas_field,
             omega,
             zref: run.zref,
-            length: profile.length(),
             min_shear: run.min_shear,
             mouth_ka: run.mouth_ka,
         })
     }
 
-    /// Original material snapshot, never an independently substituted rho/c pair.
+    /// Original inlet material snapshot, never an independently substituted rho/c pair.
     pub const fn gas_state(&self) -> &GasState {
         &self.gas
+    }
+    /// Original mouth gas used by the terminal boundary. A field-backed
+    /// profile does not substitute its inlet gas at a different temperature.
+    pub const fn outlet_gas_state(&self) -> &GasState {
+        &self.outlet_gas
+    }
+    /// Complete original primitive field and its material sources, when this
+    /// profile was prepared through [`ModalGasFieldProfile`].
+    pub fn gas_field(&self) -> Option<&AxialGasField> {
+        self.gas_field.as_deref()
     }
     /// Frozen positive angular frequency [rad/s].
     pub const fn omega_rad_s(&self) -> f64 {
@@ -194,7 +219,6 @@ impl PreparedModalProfile {
         let field = reconstruct_field(
             &self.record,
             self.zref,
-            self.length,
             &self.axis_weight,
             wave,
             cancelled,

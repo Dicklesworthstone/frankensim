@@ -3928,6 +3928,25 @@ behavior, and complete rollback on refusal or late cancellation.
 
 ## Physical sources and reflected fields in continuous multimodal profiles
 
+`modal::ModalGasFieldProfile` binds this same continuous axisymmetric operator
+to an original prescribed `AxialGasField`. Original local material states and
+geometry are cached at the two fourth-order Magnus quadrature points, with
+exact span boundaries at primitive material stations and spline knots.
+Prepared source and reflection responses retain all radial coordinates, the
+complete source-backed field, and distinct inlet and outlet gas states.
+Uniform fields preserve the original propagation operation order. Analytic,
+full flanged and explicit modal matrix mouth loads use the actual outlet gas;
+inlet normalization uses the inlet gas. No independently interpolated density,
+sound speed or transport coefficient replaces the material owner.
+
+This extension remains frozen, no-mean-flow acoustics with the existing
+finite-mode and locally cylindrical higher-mode loss approximation. It does
+not supply transverse thermal gradients, full three-dimensional thermoviscous
+flow, gas transport or nonlinear acoustic qualification. G1/G3 tests compare
+the one-mode result against the independent gas-field Webster operator,
+verify higher-mode lossless power and fourth-order refinement, and check
+uniform-field bitwise parity, original interface coordinates and cancellation.
+
 `modal::PreparedModalProfile` retains the original continuous Gauss–Magnus
 pressure/flow charts and backward station maps at one material, geometry,
 frequency and mouth load. Scalar/ideal/tabulated/matched, complete flanged,

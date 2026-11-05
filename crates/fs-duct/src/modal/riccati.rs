@@ -83,6 +83,8 @@ use fs_math::det;
 
 mod source;
 pub use source::{ModalSourceField, PreparedModalProfile};
+mod gas_field;
+pub use gas_field::ModalGasFieldProfile;
 
 /// Upper end of the Bessel range certified for continuous propagation.
 pub const BESSEL_CERTIFIED_X: f64 = 64.0;
@@ -294,10 +296,22 @@ fn generator(
     zref: f64,
     x: f64,
 ) -> Result<Local, DuctError> {
-    let n = basis.n;
-    let w = 2 * n;
     let radius = profile.radius(x)?;
     let flare = profile.slope(x)? / radius;
+    generator_at_radius(state, omega, loss, basis, zref, radius, flare)
+}
+
+fn generator_at_radius(
+    state: &GasState,
+    omega: f64,
+    loss: LossModel,
+    basis: &Basis,
+    zref: f64,
+    radius: f64,
+    flare: f64,
+) -> Result<Local, DuctError> {
+    let n = basis.n;
+    let w = 2 * n;
     let wave = segment_wave(state, radius, omega, loss)?;
     let (k0, zc0) = (wave.wavenumber, wave.characteristic_impedance);
     let k0zc0 = k0 * zc0;
@@ -334,6 +348,9 @@ fn generator(
 /// `a=P/Zref+U`, each station has `P/Zref=X a`, `U=Y a`, `X+Y=I`.
 /// `wave_back[j]` takes a at station j+1 back to station j.
 struct Stations {
+    /// Actual axial coordinates, ordered from mouth to inlet. Material-field
+    /// stations and spline knots can make the integration spans nonuniform.
+    positions_m: Vec<f64>,
     pressure: Vec<Vec<C64>>,
     flow: Vec<Vec<C64>>,
     wave_back: Vec<Vec<C64>>,
@@ -413,12 +430,53 @@ fn propagate_controlled<'a>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Propagated, DuctError> {
     poll(cancelled, 0)?;
-    let load = load.into();
     steps.validate()?;
+    let length = profile.length();
+    let h = -length / steps.0 as f64;
+    let root3 = det::sqrt(3.0);
+    let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
+    propagate_resolved(
+        profile, state, state, omega, loss, load.into(), n, steps.0,
+        track_flow, cancelled, &mut |j, basis, zref| {
+            let x0 = length + j as f64 * h;
+            Ok(PropagationStep {
+                h,
+                left_m: if j + 1 == steps.0 { 0.0 } else { length + (j + 1) as f64 * h },
+                local: [
+                    generator(profile, state, omega, loss, basis, zref, x0 + c1 * h)?,
+                    generator(profile, state, omega, loss, basis, zref, x0 + c2 * h)?,
+                ],
+            })
+        },
+    )
+}
+
+/// One original two-node Magnus span. The source binding chooses material
+/// and integration stations; the same wave-chart owner advances both paths.
+struct PropagationStep {
+    h: f64,
+    left_m: f64,
+    local: [Local; 2],
+}
+
+#[allow(clippy::too_many_arguments)]
+fn propagate_resolved(
+    profile: &RadiusProfile,
+    inlet: &GasState,
+    outlet: &GasState,
+    omega: f64,
+    loss: LossModel,
+    load: ProfileLoad<'_>,
+    n: usize,
+    steps: usize,
+    track_flow: bool,
+    cancelled: &mut impl FnMut() -> bool,
+    local_step: &mut impl FnMut(usize, &Basis, f64) -> Result<PropagationStep, DuctError>,
+) -> Result<Propagated, DuctError> {
     if !(omega.is_finite() && omega > 0.0) {
         return Err(bad("omega must be finite and positive"));
     }
-    if !(state.density > 0.0 && state.sound_speed > 0.0) {
+    if !(inlet.density > 0.0 && inlet.sound_speed > 0.0) {
         return Err(bad(
             "modal profile gas must have positive density and sound speed",
         ));
@@ -426,7 +484,7 @@ fn propagate_controlled<'a>(
     let basis = Basis::new(n);
     let w = 2 * n;
     let r_in = profile.inlet_radius();
-    let zref = state.density * state.sound_speed / (core::f64::consts::PI * r_in * r_in);
+    let zref = inlet.density * inlet.sound_speed / (core::f64::consts::PI * r_in * r_in);
     if !(zref.is_finite() && zref > 0.0) {
         return Err(bad("modal profile reference impedance is not finite"));
     }
@@ -444,17 +502,17 @@ fn propagate_controlled<'a>(
             {
                 None
             } else {
-                Some(segment_wave(state, r_mouth, omega, loss)?)
+                Some(segment_wave(outlet, r_mouth, omega, loss)?)
             };
             let (plane, ka) = match load {
-                MouthLoad::Analytic(t) => termination_impedance(t, state, r_mouth, omega)?,
+                MouthLoad::Analytic(t) => termination_impedance(t, outlet, r_mouth, omega)?,
                 MouthLoad::Tabulated(table) => (
                     Some(table.z_at(omega)?),
-                    omega * r_mouth / state.sound_speed,
+                    omega * r_mouth / outlet.sound_speed,
                 ),
                 MouthLoad::Matched => (
                     Some(mouth.as_ref().ok_or(DuctError::Singular)?.characteristic_impedance),
-                    omega * r_mouth / state.sound_speed,
+                    omega * r_mouth / outlet.sound_speed,
                 ),
             };
             for k in 0..n {
@@ -492,7 +550,7 @@ fn propagate_controlled<'a>(
             ka
         }
         ProfileLoad::Flanged(exterior) => {
-            crate::exterior::admit(state, exterior)?;
+            crate::exterior::admit(outlet, exterior)?;
             let matrix = crate::flanged::flanged_modal_impedance(exterior, r_mouth, omega, n)?;
             for (x, z) in x_blk.iter_mut().zip(matrix) {
                 *x = z.scale(1.0 / zref);
@@ -508,7 +566,7 @@ fn propagate_controlled<'a>(
             omega * r_mouth / exterior.sound_speed
         }
         ProfileLoad::Matrix(matrix) => {
-            matrix.admit_prefix(state, omega, r_mouth, n)?;
+            matrix.admit_prefix(outlet, omega, r_mouth, n)?;
             let declared = matrix.modes().0;
             for i in 0..n {
                 for j in 0..n {
@@ -522,20 +580,17 @@ fn propagate_controlled<'a>(
     };
     normalize_wave_chart(&mut x_blk, &mut y_blk, n)?;
     let mut stations = track_flow.then(|| Stations {
+        positions_m: vec![length],
         pressure: vec![x_blk.clone()],
         flow: vec![y_blk.clone()],
-        wave_back: Vec::with_capacity(steps.0),
+        wave_back: Vec::with_capacity(steps),
     });
-    let h = -length / steps.0 as f64;
     let root3 = det::sqrt(3.0);
-    let (c1, c2) = (0.5 - root3 / 6.0, 0.5 + root3 / 6.0);
     let mut min_shear = f64::INFINITY;
     let mut throat = r_mouth.min(r_in);
-    for j in 0..steps.0 {
+    for j in 0..steps {
         poll(cancelled, j)?;
-        let x0 = length + j as f64 * h;
-        let l1 = generator(profile, state, omega, loss, &basis, zref, x0 + c1 * h)?;
-        let l2 = generator(profile, state, omega, loss, &basis, zref, x0 + c2 * h)?;
+        let PropagationStep { h, left_m, local: [l1, l2] } = local_step(j, &basis, zref)?;
         if l1.kappa.max(l2.kappa) * h.abs() > MAX_EVANESCENT_STEP {
             return Err(bad(
                 "evanescent decay per step exceeds MAX_EVANESCENT_STEP; refine Riccati steps",
@@ -575,12 +630,13 @@ fn propagate_controlled<'a>(
         x_blk = x_new;
         y_blk = y_new;
         if let Some(record) = &mut stations {
+            record.positions_m.push(left_m);
             record.pressure.push(x_blk.clone());
             record.flow.push(y_blk.clone());
             record.wave_back.push(wave_back);
         }
     }
-    poll(cancelled, steps.0)?;
+    poll(cancelled, steps)?;
     Ok(Propagated {
         pressure: x_blk,
         flow: y_blk,
@@ -803,7 +859,7 @@ fn profile_field_with_load(
     let inlet = fs_la::eigen_complex::lu_complex(record.flow.last().ok_or(DuctError::Singular)?, n)
         .map_err(|_| DuctError::Singular)?;
     inlet.solve(&mut wave);
-    reconstruct_field(&record, run.zref, profile.length(), &axis_weights(n), wave, &mut || false)
+    reconstruct_field(&record, run.zref, &axis_weights(n), wave, &mut || false)
 }
 
 fn axis_weights(n: usize) -> Vec<f64> {
@@ -823,14 +879,12 @@ fn axis_weights(n: usize) -> Vec<f64> {
 fn reconstruct_field(
     record: &Stations,
     zref: f64,
-    length: f64,
     axis_weight: &[f64],
     mut wave: Vec<C64>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ModalField, DuctError> {
     let n = wave.len();
     let s = record.wave_back.len();
-    let h = -length / s as f64;
     let mut field = ModalField {
         n_modes: n,
         x: Vec::with_capacity(s + 1),
@@ -856,9 +910,7 @@ fn reconstruct_field(
         if !(finite(axis) && p.iter().chain(&u).all(|&v| finite(v))) {
             return Err(DuctError::Singular);
         }
-        field
-            .x
-            .push(if j == s { 0.0 } else { length + j as f64 * h });
+        field.x.push(record.positions_m[j]);
         field.pressure.push(p);
         field.flow.push(u);
         field.axis_pressure.push(axis);
