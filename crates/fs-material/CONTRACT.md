@@ -10958,6 +10958,16 @@ Norton, combined creep/plastic and frozen-temperature families. Kinetic thermal
 inspection without an actual physical interval still refuses. Source adapters
 continue to own the original law, model card and validity domain.
 
+The fixed-temperature `FinitePlaneStressMaterial` interface retains the complete
+native constitutive behavior, not merely its elastic/plastic backbone. Original
+J2/source bindings, Perzyna, Norton and simultaneous Norton/J2 laws share the
+same spatial consumer while keeping their own history validation, accepted-state
+conditions, independent storage inspection and physical interval. Positive
+viscous overstress is admissible when the original law admits it; inspection
+never performs another flow step. The kinetic reduced potential is not physical
+dissipation. Rate-independent laws report no physical clock, and thermal
+evolution still requires the native two-temperature work account.
+
 The reduction uses fixed-size arrays and the original native spectral workspace;
 spatial consumers poll cancellation between material points. Rejection
 or exhausted local work returns no candidate and changes no accepted history.

@@ -47,24 +47,24 @@ const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
 
-/// Exact original laws, in original tetrahedron order; no property averaging.
+/// Exact original laws, in original element order; no property averaging.
 #[derive(Debug)]
-pub enum FinitePlasticLawField<'a, L: FiniteJ2Material = FiniteJ2> {
+pub enum FinitePlasticLawField<'a, L = FiniteJ2> {
     /// One native or source-resolved law shared by the mesh.
     Uniform(&'a L),
-    /// One native or source-resolved law per tetrahedron.
+    /// One native or source-resolved law per element.
     PerElement(&'a [L]),
 }
 
-impl<L: FiniteJ2Material> Copy for FinitePlasticLawField<'_, L> {}
+impl<L> Copy for FinitePlasticLawField<'_, L> {}
 
-impl<L: FiniteJ2Material> Clone for FinitePlasticLawField<'_, L> {
+impl<L> Clone for FinitePlasticLawField<'_, L> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<L: FiniteJ2Material> FinitePlasticLawField<'_, L> {
+impl<L> FinitePlasticLawField<'_, L> {
     fn validate_count(&self, expected: usize) -> Result<(), HyperTetError> {
         if let Self::PerElement(laws) = self
             && laws.len() != expected

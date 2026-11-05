@@ -971,8 +971,10 @@ reaction. Its constitutive coefficients are explicitly authored model inputs.
 ## Retained finite-plastic sheet forming
 
 `hyper2d::plastic::FinitePlasticSheet` advances a P1/Q1 sheet through the
-original three-dimensional finite J2 return map and shared plastic increment
-solver. All three transverse nominal tractions relax at each point; the
+original three-dimensional finite J2, Perzyna overstress, Norton creep or
+combined creep/J2 return map and shared plastic increment solver. The material
+bound is `FinitePlaneStressMaterial`; kinetic owners are never reduced to
+their rate-independent backbones. All three transverse nominal tractions relax at each point; the
 Schur-complement material tangent enters the actual element tangent. The sheet
 retains full accepted deformation, plastic history and original per-element
 native/source-resolved law bindings. Geometry is prepared once, and every
@@ -982,20 +984,36 @@ centroid evaluation; Q1 retains four independent Gauss-point histories.
 Each endpoint starts from the accepted displacement and uses frozen history
 through local/global Newton and backtracking. Free in-plane coordinates solve
 equilibrium; recovered normal thickness is `h0 * F22`. Independent energy
-checks distinguish elastic/hardening storage, physical plastic dissipation,
-support/dead-load work and the signed endpoint quadrature defect. An exhausted
+checks distinguish elastic/hardening storage, native plastic/creep dissipation,
+the actual reduced incremental potential, support/dead-load work and the signed
+endpoint quadrature defect. Potential is checked against assembly independently;
+it is not identified with storage plus physical loss for kinetic laws. The
+inelastic-dissipation accessor sums the native irreversible accounts, while
+signed work defects never become heat. An exhausted
 solve, material-domain exit, folded element, energy refusal or cancellation
 returns no partially updated sheet. `SheetAssemblyBudget` bounds topology and
 free coordinates; cancellation is polled between material points. Assembly is
 sequential and deterministic. The shared increment solver's component count
 defaults to three; sheets select two solely for translation-free force scaling.
 
+Every kinetic element must declare the same positive physical duration, held
+fixed through local/global trials and endpoint audit. Static elements can share
+that interval. `physical_time_s()` is `None` for a wholly static sheet and starts
+at `Some(0.0)` for a kinetic sheet; it advances only with an accepted endpoint.
+Repeated fixed-deformation or fixed-load endpoints therefore resolve physical
+relaxation or creep. Accepted-state inspection retains legitimate viscous
+overstress instead of imposing equilibrium yield or integrating a second time.
+Construction refuses any inelastic initialization flow, and incompatible
+element durations or an unrepresentable next clock value refuse transactionally.
+
 G0/G1/G3/G4 regressions in `tests/finite_plastic_sheet.rs` exercise independent
 Hencky/J2 uniaxial tension/compression formulas, free lateral/interior motion,
 unloading with permanent shape and thickness, hardening versus heat, assembled
 force/tangent/energy derivatives, heterogeneous original laws and thicknesses,
-and transactional refusal/cancellation. Coefficients are synthetic. This is
-an isothermal, rate-independent in-plane continuum; it does not claim shell
+and transactional refusal/cancellation. The rate-sheet regressions in
+`tests/finite_plastic_sheet_rate.rs` add kinetic holds, creep under free-coordinate
+equilibrium, distinct physical/kinetic accounts, and retained clock/history.
+Coefficients are synthetic. This is an isothermal in-plane continuum; it does not claim shell
 bending, wrinkling, necking, contact, anisotropic yielding, fracture, calibrated
 forming limits or a general mesh-convergence result.
 

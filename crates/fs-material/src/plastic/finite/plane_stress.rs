@@ -23,7 +23,7 @@ use super::combined::FiniteNortonJ2;
 use super::creep::FiniteNortonCreep;
 use super::rate::FiniteOverstressJ2;
 use super::thermal::{FiniteJ2ThermalError, FrozenThermalFiniteJ2};
-use super::{FiniteJ2, FiniteJ2Error, FiniteJ2Response, FiniteJ2State};
+use super::{FiniteJ2, FiniteJ2Error, FiniteJ2Material, FiniteJ2Response, FiniteJ2State};
 use crate::hyper::plane_stress::{PlaneStressSettings, PositiveBlock};
 
 const IN_PLANE: [usize; 4] = [0, 1, 3, 4];
@@ -59,13 +59,194 @@ impl FinitePlaneStressResponse {
     }
 }
 
+/// Complete fixed-temperature material behavior for retained plastic sheets.
+///
+/// Unlike an elastic/plastic backbone accessor, this interface retains the
+/// selected flow law, physical interval, accepted-state admissibility and
+/// independent stored-energy inspection. A viscous endpoint can legitimately
+/// remain outside the equilibrium yield surface. Inspecting that endpoint
+/// must neither project it nor advance its history through another interval.
+///
+/// The response potential is the integral used by the native return map; it
+/// generally differs from stored energy plus physical inelastic loss. Spatial
+/// consumers must retain both accounts. Evolving temperature additionally
+/// requires the native two-temperature thermodynamic work account and is not
+/// represented by this fixed-temperature interface.
+pub trait FinitePlaneStressMaterial {
+    fn initial_state(&self) -> FiniteJ2State;
+
+    fn plane_stress_response(
+        &self,
+        in_plane: &[f64; 4],
+        old: &FiniteJ2State,
+        transverse_seed: [f64; 3],
+        settings: PlaneStressSettings,
+    ) -> Result<FinitePlaneStressResponse, FiniteJ2Error>;
+
+    /// Fixed-history inspection, without constitutive evolution.
+    fn stored_energy(&self, f: &[f64; 9], state: &FiniteJ2State) -> Result<f64, FiniteJ2Error>;
+
+    /// Apply the actual selected law's accepted-state condition.
+    fn validate_committed(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error>;
+
+    /// Physical time advanced by one accepted return; static laws have none.
+    fn duration_s(&self) -> Option<f64> {
+        None
+    }
+}
+
+impl<L: FiniteJ2Material + ?Sized> FinitePlaneStressMaterial for L {
+    fn initial_state(&self) -> FiniteJ2State {
+        self.finite_j2().initial_state()
+    }
+
+    fn plane_stress_response(
+        &self,
+        in_plane: &[f64; 4],
+        old: &FiniteJ2State,
+        transverse_seed: [f64; 3],
+        settings: PlaneStressSettings,
+    ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
+        self.finite_j2()
+            .plane_stress_response(in_plane, old, transverse_seed, settings)
+    }
+
+    fn stored_energy(&self, f: &[f64; 9], state: &FiniteJ2State) -> Result<f64, FiniteJ2Error> {
+        self.finite_j2().stored_energy(f, state)
+    }
+
+    fn validate_committed(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error> {
+        self.finite_j2()
+            .validate_committed(f, state, yield_tolerance_pa)
+    }
+}
+
+impl FinitePlaneStressMaterial for FiniteOverstressJ2 {
+    fn initial_state(&self) -> FiniteJ2State {
+        Self::initial_state(self)
+    }
+
+    fn plane_stress_response(
+        &self,
+        in_plane: &[f64; 4],
+        old: &FiniteJ2State,
+        transverse_seed: [f64; 3],
+        settings: PlaneStressSettings,
+    ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
+        Self::plane_stress_response(self, in_plane, old, transverse_seed, settings)
+    }
+
+    fn stored_energy(&self, f: &[f64; 9], state: &FiniteJ2State) -> Result<f64, FiniteJ2Error> {
+        Self::stored_energy(self, f, state)
+    }
+
+    fn validate_committed(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error> {
+        Self::validate_committed(self, f, state, yield_tolerance_pa)
+    }
+
+    fn duration_s(&self) -> Option<f64> {
+        Some(Self::duration_s(self))
+    }
+}
+
+impl FinitePlaneStressMaterial for FiniteNortonCreep {
+    fn initial_state(&self) -> FiniteJ2State {
+        Self::initial_state(self)
+    }
+
+    fn plane_stress_response(
+        &self,
+        in_plane: &[f64; 4],
+        old: &FiniteJ2State,
+        transverse_seed: [f64; 3],
+        settings: PlaneStressSettings,
+    ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
+        Self::plane_stress_response(self, in_plane, old, transverse_seed, settings)
+    }
+
+    fn stored_energy(&self, f: &[f64; 9], state: &FiniteJ2State) -> Result<f64, FiniteJ2Error> {
+        Self::stored_energy(self, f, state)
+    }
+
+    fn validate_committed(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error> {
+        if !yield_tolerance_pa.is_finite() || yield_tolerance_pa < 0.0 {
+            return Err(FiniteJ2Error::Parameters(
+                "yield tolerance must be finite and nonnegative",
+            ));
+        }
+        Self::validate_committed(self, f, state)
+    }
+
+    fn duration_s(&self) -> Option<f64> {
+        Some(Self::duration_s(self))
+    }
+}
+
+impl FinitePlaneStressMaterial for FiniteNortonJ2 {
+    fn initial_state(&self) -> FiniteJ2State {
+        Self::initial_state(self)
+    }
+
+    fn plane_stress_response(
+        &self,
+        in_plane: &[f64; 4],
+        old: &FiniteJ2State,
+        transverse_seed: [f64; 3],
+        settings: PlaneStressSettings,
+    ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
+        Self::plane_stress_response(self, in_plane, old, transverse_seed, settings)
+    }
+
+    fn stored_energy(&self, f: &[f64; 9], state: &FiniteJ2State) -> Result<f64, FiniteJ2Error> {
+        Self::stored_energy(self, f, state)
+    }
+
+    fn validate_committed(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2Error> {
+        Self::validate_committed(self, f, state, yield_tolerance_pa)
+    }
+
+    fn duration_s(&self) -> Option<f64> {
+        Some(Self::duration_s(self))
+    }
+}
+
 fn numerical(what: &'static str) -> FiniteJ2Error {
     FiniteJ2Error::Numerical(what)
 }
 
 fn block(response: &FiniteJ2Response) -> Result<PositiveBlock, FiniteJ2Error> {
-    PositiveBlock::new(TRANSVERSE.map(|i| TRANSVERSE.map(|j| response.tangent_pa[i][j])))
-        .map_err(|_| numerical("plane-stress transverse tangent is not finite, symmetric and positive definite"))
+    PositiveBlock::new(TRANSVERSE.map(|i| TRANSVERSE.map(|j| response.tangent_pa[i][j]))).map_err(
+        |_| {
+            numerical(
+                "plane-stress transverse tangent is not finite, symmetric and positive definite",
+            )
+        },
+    )
 }
 
 fn residual(response: &FiniteJ2Response, scale: f64) -> f64 {
@@ -95,7 +276,9 @@ fn condense(
         }
     }
     if tangent.iter().flatten().any(|v| !v.is_finite()) {
-        return Err(numerical("condensed finite-plastic tangent is not representable"));
+        return Err(numerical(
+            "condensed finite-plastic tangent is not representable",
+        ));
     }
     Ok(FinitePlaneStressResponse {
         deformation_gradient: f,
@@ -128,7 +311,10 @@ fn reduce<E: From<FiniteJ2Error>>(
         ).into());
     }
     let determinant = in_plane[0] * in_plane[3] - in_plane[1] * in_plane[2];
-    if in_plane.iter().chain(&transverse_seed).any(|v| !v.is_finite())
+    if in_plane
+        .iter()
+        .chain(&transverse_seed)
+        .any(|v| !v.is_finite())
         || !determinant.is_finite()
         || determinant <= 0.0
         || transverse_seed[2] <= 0.0
@@ -140,9 +326,15 @@ fn reduce<E: From<FiniteJ2Error>>(
         ).into());
     }
     let mut f = [
-        in_plane[0], in_plane[1], transverse_seed[0],
-        in_plane[2], in_plane[3], transverse_seed[1],
-        0.0, 0.0, transverse_seed[2],
+        in_plane[0],
+        in_plane[1],
+        transverse_seed[0],
+        in_plane[2],
+        in_plane[3],
+        transverse_seed[1],
+        0.0,
+        0.0,
+        transverse_seed[2],
     ];
     let initial = evaluate(&f).and_then(|value| {
         let block = block(&value).map_err(E::from)?;
@@ -180,10 +372,11 @@ fn reduce<E: From<FiniteJ2Error>>(
         }
     };
     let gradient_norm = in_plane.iter().fold(0.0_f64, |n, v| n.hypot(*v));
-    let scale = positive
-        .traction_scale()
-        .map_err(|_| E::from(numerical("plane-stress traction scale is not representable")))?
-        * gradient_norm.max(1.0);
+    let scale = positive.traction_scale().map_err(|_| {
+        E::from(numerical(
+            "plane-stress traction scale is not representable",
+        ))
+    })? * gradient_norm.max(1.0);
     if !scale.is_finite() || scale <= 0.0 {
         return Err(numerical("plane-stress traction normalization is not representable").into());
     }
@@ -197,7 +390,11 @@ fn reduce<E: From<FiniteJ2Error>>(
         }
         let direction = positive
             .solve(TRANSVERSE.map(|i| -value.first_piola_pa[i]))
-            .map_err(|_| E::from(numerical("plane-stress Newton direction is not representable")))?;
+            .map_err(|_| {
+                E::from(numerical(
+                    "plane-stress Newton direction is not representable",
+                ))
+            })?;
         let mut step = 1.0;
         let mut accepted = None;
         for _ in 0..settings.max_backtracks {
@@ -216,7 +413,10 @@ fn reduce<E: From<FiniteJ2Error>>(
             step *= 0.5;
         }
         let Some((gradient, response, stable)) = accepted else {
-            return Err(numerical("finite plane-stress line search exhausted its budget or material domain").into());
+            return Err(numerical(
+                "finite plane-stress line search exhausted its budget or material domain",
+            )
+            .into());
         };
         f = gradient;
         value = response;
@@ -239,7 +439,9 @@ impl FiniteJ2 {
         settings: PlaneStressSettings,
     ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
         self.validate_history(old)?;
-        reduce(in_plane, transverse_seed, 1.0, settings, |f| self.response(f, old))
+        reduce(in_plane, transverse_seed, 1.0, settings, |f| {
+            self.response(f, old)
+        })
     }
 }
 
@@ -254,7 +456,9 @@ impl FiniteOverstressJ2 {
         settings: PlaneStressSettings,
     ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
         self.validate_history(old)?;
-        reduce(in_plane, transverse_seed, 1.0, settings, |f| self.response(f, old))
+        reduce(in_plane, transverse_seed, 1.0, settings, |f| {
+            self.response(f, old)
+        })
     }
 }
 
@@ -268,7 +472,9 @@ impl FiniteNortonCreep {
         settings: PlaneStressSettings,
     ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
         self.validate_history(old)?;
-        reduce(in_plane, transverse_seed, 1.0, settings, |f| self.response(f, old))
+        reduce(in_plane, transverse_seed, 1.0, settings, |f| {
+            self.response(f, old)
+        })
     }
 }
 
@@ -282,7 +488,9 @@ impl FiniteNortonJ2 {
         settings: PlaneStressSettings,
     ) -> Result<FinitePlaneStressResponse, FiniteJ2Error> {
         self.validate_history(old)?;
-        reduce(in_plane, transverse_seed, 1.0, settings, |f| self.response(f, old))
+        reduce(in_plane, transverse_seed, 1.0, settings, |f| {
+            self.response(f, old)
+        })
     }
 }
 
@@ -298,8 +506,12 @@ impl FrozenThermalFiniteJ2 {
         settings: PlaneStressSettings,
     ) -> Result<FinitePlaneStressResponse, FiniteJ2ThermalError> {
         self.validate_history(old)?;
-        reduce(in_plane, transverse_seed, self.thermal_stretch().powi(3), settings, |f| {
-            self.response(f, old)
-        })
+        reduce(
+            in_plane,
+            transverse_seed,
+            self.thermal_stretch().powi(3),
+            settings,
+            |f| self.response(f, old),
+        )
     }
 }
