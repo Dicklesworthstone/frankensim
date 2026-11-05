@@ -49,6 +49,180 @@ fn nonlinear() -> LaminarCarreauPipe {
 }
 
 #[test]
+fn g1_prescribed_flow_recovers_poiseuille_pressure_heat_and_rest_conductance() {
+    let source = law(
+        [3.0, 3.0, 0.6, 0.4, 0.6],
+        [0.0, 1e8],
+        ViscosityShiftMode::Vertical,
+    );
+    let pipe = LaminarCarreauPipe::new(source, 320.0, 0.012, 0.7, 1e6).unwrap();
+    let mu = source
+        .evaluate(320.0, 0.0)
+        .unwrap()
+        .dynamic_viscosity_pa_s();
+    let conductance =
+        core::f64::consts::PI * pipe.radius_m().powi(4) / (8.0 * mu * pipe.length_m());
+    for flow in [-2e-5, 0.0, 2e-5] {
+        let solution = pipe
+            .profile_at_flow(flow, CarreauPipeControls::default(), 1e-11, 32)
+            .unwrap();
+        let profile = solution.profile();
+        close(profile.flow().volumetric_flow_m3_s, flow, 2e-14);
+        close(profile.flow().pressure_drop_pa, flow / conductance, 2e-14);
+        close(
+            profile.flow().dissipated_power_w,
+            flow * flow / conductance,
+            2e-14,
+        );
+        close(
+            profile.pressure_conductance_m3_s_pa().unwrap(),
+            conductance,
+            2e-14,
+        );
+        assert_eq!(solution.requested_volumetric_flow_m3_s(), flow);
+        assert_eq!(
+            solution.flow_residual_m3_s(),
+            profile.flow().volumetric_flow_m3_s - flow
+        );
+        assert_eq!(profile.flow().pressure_residual_pa, 0.0);
+        assert!(solution.flow_iterations() <= 1);
+    }
+}
+
+#[test]
+fn g1_prescribed_nonlinear_flow_matches_independent_stress_coordinate_oracle() {
+    // For a=1, n=1/2 and mu_inf=0, s=t/sqrt(1+t), where
+    // s=tau*lambda/mu_0 and t=lambda*g. Its independent exact inverse is
+    // t=(s*s+s*sqrt(s*s+4))/2. Integrate pi*r^2*g(r), without the
+    // production stress tangent, shear-coordinate quadrature or root finder.
+    let (mu0, lambda, radius, length) = (12.0, 0.6, 0.01, 0.5);
+    let pipe = LaminarCarreauPipe::new(
+        law(
+            [mu0, 0.0, lambda, 0.5, 1.0],
+            [0.0, 1e8],
+            ViscosityShiftMode::Vertical,
+        ),
+        300.0,
+        radius,
+        length,
+        1e6,
+    )
+    .unwrap();
+    for pressure in [1.0_f64, 200.0, 5000.0] {
+        let panels = 4096;
+        let mut sum = 0.0;
+        for i in 0..=panels {
+            let r = radius * i as f64 / panels as f64;
+            let s = pressure * r / (2.0 * length) * lambda / mu0;
+            let rate = 0.5 * (s * s + s * (s * s + 4.0).sqrt()) / lambda;
+            let weight = if i == 0 || i == panels {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            sum += weight * r * r * rate;
+        }
+        let oracle_flow = core::f64::consts::PI * radius * sum / (3.0 * panels as f64);
+        for direction in [-1.0, 1.0] {
+            let flow = direction * oracle_flow;
+            let result = pipe
+                .profile_at_flow(flow, CarreauPipeControls::default(), 1e-10, 48)
+                .unwrap();
+            close(
+                result.profile().flow().pressure_drop_pa,
+                direction * pressure,
+                3e-8,
+            );
+            close(result.profile().flow().volumetric_flow_m3_s, flow, 1e-10);
+            close(
+                result.profile().flow().dissipated_power_w,
+                pressure * oracle_flow,
+                4e-8,
+            );
+            assert_eq!(result.profile().pipe(), &pipe);
+            assert_eq!(
+                result.profile().sample(radius).unwrap().axial_velocity_m_s,
+                0.0_f64.copysign(direction)
+            );
+            assert!(result.flow_iterations() < 16);
+        }
+    }
+}
+
+#[test]
+fn g1_differential_conductance_matches_pressure_derivative_not_secant() {
+    let pipe = nonlinear();
+    for pressure in [0.1_f64, 400.0, 20_000.0] {
+        let controls = CarreauPipeControls {
+            relative_quadrature_tolerance: 1e-11,
+            ..CarreauPipeControls::default()
+        };
+        let h = pressure * 1e-4;
+        let centre = pipe.profile_at_pressure(pressure, controls).unwrap();
+        let plus = pipe.profile_at_pressure(pressure + h, controls).unwrap();
+        let minus = pipe.profile_at_pressure(pressure - h, controls).unwrap();
+        let numerical =
+            (plus.flow().volumetric_flow_m3_s - minus.flow().volumetric_flow_m3_s) / (2.0 * h);
+        let tangent = centre.pressure_conductance_m3_s_pa().unwrap();
+        close(tangent, numerical, 2e-7);
+        let reversed = pipe.profile_at_pressure(-pressure, controls).unwrap();
+        assert_eq!(tangent, reversed.pressure_conductance_m3_s_pa().unwrap());
+        assert!(tangent >= centre.flow().volumetric_flow_m3_s / centre.flow().pressure_drop_pa);
+    }
+}
+
+#[test]
+fn g0_flow_inverse_honours_source_limits_controls_and_refusal_without_mutation() {
+    let source = law(
+        [12.0, 0.2, 0.6, 0.45, 2.0],
+        [0.0, 200.0],
+        ViscosityShiftMode::VerticalAndRate,
+    );
+    let pipe = LaminarCarreauPipe::new(source, 320.0, 0.01, 0.5, 100.0).unwrap();
+    let before = pipe;
+    let wall = source.evaluate(320.0, 100.0).unwrap();
+    let pressure = 2.0 * pipe.length_m() * wall.dynamic_viscosity_pa_s() * 100.0 / pipe.radius_m();
+    let ceiling = pipe
+        .profile_at_pressure(pressure, CarreauPipeControls::default())
+        .unwrap();
+    let maximum = ceiling.flow().volumetric_flow_m3_s;
+    assert!(
+        pipe.profile_at_flow(2.0 * maximum, CarreauPipeControls::default(), 1e-9, 48)
+            .is_err()
+    );
+    assert!(
+        pipe.profile_at_flow(maximum / 2.0, CarreauPipeControls::default(), 1e-12, 1)
+            .is_err()
+    );
+    for bad in [0.0, -1.0, 1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            pipe.profile_at_flow(1e-5, CarreauPipeControls::default(), bad, 48)
+                .is_err()
+        );
+    }
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            pipe.profile_at_flow(bad, CarreauPipeControls::default(), 1e-9, 48)
+                .is_err()
+        );
+    }
+    for iterations in [0, 129] {
+        assert!(
+            pipe.profile_at_flow(1e-5, CarreauPipeControls::default(), 1e-9, iterations)
+                .is_err()
+        );
+    }
+    let solution = pipe
+        .profile_at_flow(maximum / 2.0, CarreauPipeControls::default(), 1e-10, 48)
+        .unwrap();
+    assert_eq!(solution.profile().pipe().law(), &source);
+    assert!(solution.profile().flow().wall_shear_rate_per_s < 100.0);
+    assert_eq!(pipe, before);
+}
+
+#[test]
 fn g0_newtonian_limits_recover_poiseuille_and_the_parabolic_thermal_profile() {
     for parameters in [
         [3.0, 0.2, 0.0, 0.4, 0.6],

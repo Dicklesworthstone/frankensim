@@ -122,6 +122,34 @@ pub struct CarreauPipeProfile {
     flow: CarreauPipeFlow,
     wall: RateState,
     transition_stress_fraction: Option<f64>,
+    normalized_flow_integral: f64,
+}
+
+/// A prescribed signed flow resolved through the original radial constitutive
+/// law. The accepted profile owns pressure and heat; the flow residual is never
+/// hidden by substituting the requested flow into either quantity.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarreauPipeFlowSolution {
+    profile: CarreauPipeProfile,
+    requested_volumetric_flow_m3_s: f64,
+    flow_residual_m3_s: f64,
+    flow_iterations: u32,
+}
+
+impl CarreauPipeFlowSolution {
+    pub const fn profile(&self) -> &CarreauPipeProfile {
+        &self.profile
+    }
+    pub const fn requested_volumetric_flow_m3_s(&self) -> f64 {
+        self.requested_volumetric_flow_m3_s
+    }
+    /// Accepted minus requested flow, in m³/s.
+    pub const fn flow_residual_m3_s(&self) -> f64 {
+        self.flow_residual_m3_s
+    }
+    pub const fn flow_iterations(&self) -> u32 {
+        self.flow_iterations
+    }
 }
 
 /// Local physical axial velocity, radial traction and irreversible heating.
@@ -344,9 +372,130 @@ impl LaminarCarreauPipe {
             )?
         };
         let (wall, iterations) = self.inverse(target, self.ceiling, controls)?;
+        self.profile_from_wall(wall, pressure_drop_pa, iterations, controls)
+    }
+
+    /// Resolve the pressure required by a prescribed signed volume flow.
+    ///
+    /// The bounded Newton solve works directly in wall shear rate, reusing the
+    /// original positive flow quadrature. It does not nest pressure-to-rate
+    /// inversions or use finite-difference derivatives. Its derivative follows
+    /// from the Rabinowitsch relation: if Q = pi R³ g_w I, then
+    /// dQ/dg_w = pi R³ (tau'_w/mu_w) (1 - 3 I).
+    /// For the admitted shear-thinning laws, I <= 1/4, so this expression does
+    /// not subtract nearly equal terms. The zero-flow pressure and heat are
+    /// exactly zero; the zero-flow conductance remains finite.
+    ///
+    /// `relative_flow_tolerance` applies to both the computed flow residual and
+    /// the Newton wall-rate correction. Quadrature accuracy is independently
+    /// controlled by `controls`, and remains an estimate, not a certified error.
+    /// `maximum_flow_iterations` is in 1..=128 and bounds all profile queries.
+    /// Unsupported flow, exhausted work or unrepresentable responses refuse.
+    pub fn profile_at_flow(
+        &self,
+        volumetric_flow_m3_s: f64,
+        controls: CarreauPipeControls,
+        relative_flow_tolerance: f64,
+        maximum_flow_iterations: u32,
+    ) -> Result<CarreauPipeFlowSolution, MaterialError> {
+        controls.admit()?;
+        if !volumetric_flow_m3_s.is_finite()
+            || !relative_flow_tolerance.is_finite()
+            || !(0.0..1.0).contains(&relative_flow_tolerance)
+            || relative_flow_tolerance == 0.0
+            || !(1..=128).contains(&maximum_flow_iterations)
+        {
+            return Err(parameters(
+                "invalid prescribed Carreau pipe flow or inverse controls",
+            ));
+        }
+        let accepted = |profile: CarreauPipeProfile, flow_iterations| {
+            let residual = profile.flow.volumetric_flow_m3_s - volumetric_flow_m3_s;
+            CarreauPipeFlowSolution {
+                profile,
+                requested_volumetric_flow_m3_s: volumetric_flow_m3_s,
+                flow_residual_m3_s: residual,
+                flow_iterations,
+            }
+        };
+        if volumetric_flow_m3_s == 0.0 {
+            return Ok(accepted(self.profile_at_pressure(0.0, controls)?, 0));
+        }
+        let at_rate = |wall: RateState| {
+            let pressure = product_ratio(&[2.0, self.length_m, wall.stress()], &[self.radius_m])?
+                .copysign(volumetric_flow_m3_s);
+            self.profile_from_wall(wall, pressure, 0, controls)
+        };
+        let target = volumetric_flow_m3_s.abs();
+        // The Newtonian relation is a lower wall-rate estimate for shear
+        // thinning. The original declared ceiling supplies the upper bracket.
+        let seed = product_ratio(
+            &[4.0, target],
+            &[
+                core::f64::consts::PI,
+                self.radius_m,
+                self.radius_m,
+                self.radius_m,
+            ],
+        )?;
+        let mut low = 0.0;
+        let mut high = self.ceiling.rate;
+        let mut bracketed = false;
+        let mut rate = seed.min(high);
+        for iterations in 1..=maximum_flow_iterations {
+            let profile = at_rate(self.sample_rate(rate)?)?;
+            let difference = profile.flow.volumetric_flow_m3_s.abs() - target;
+            if rate == self.ceiling.rate && difference < 0.0 {
+                return Err(state_error(
+                    "prescribed flow exceeds the Carreau pipe wall-rate envelope",
+                ));
+            }
+            let derivative = profile.wall_rate_flow_derivative()?;
+            let correction = difference / derivative;
+            if (difference / target).abs() <= relative_flow_tolerance
+                && (correction / rate).abs() <= relative_flow_tolerance
+            {
+                return Ok(accepted(profile, iterations));
+            }
+            if difference < 0.0 {
+                low = rate;
+            } else {
+                high = rate;
+                bracketed = true;
+            }
+            let candidate = rate - correction;
+            let next = if candidate.is_finite() && candidate > low && candidate < high {
+                candidate
+            } else if !bracketed {
+                // Evaluate the source ceiling only if needed to bound the
+                // requested flow. A distant ceiling may have unrepresentable
+                // pressure/heat even when the requested solution is ordinary.
+                high
+            } else {
+                low + 0.5 * (high - low)
+            };
+            if next == rate || next <= low || next > high || (bracketed && next == high) {
+                return Err(state_error(
+                    "Carreau pipe flow inverse lost floating-point resolution",
+                ));
+            }
+            rate = next;
+        }
+        Err(state_error(
+            "Carreau pipe flow inverse exhausted its iteration budget",
+        ))
+    }
+
+    fn profile_from_wall(
+        &self,
+        wall: RateState,
+        pressure_drop_pa: f64,
+        iterations: u32,
+        controls: CarreauPipeControls,
+    ) -> Result<CarreauPipeProfile, MaterialError> {
         let transition = self.transition_rate(wall.rate);
         let (integral, change) = if wall.rate == 0.0 {
-            (0.0, 0.0)
+            (0.25, 0.0)
         } else if self.constant() {
             (0.25, 0.0)
         } else {
@@ -410,6 +559,7 @@ impl LaminarCarreauPipe {
             controls,
             wall,
             transition_stress_fraction,
+            normalized_flow_integral: integral,
             flow: CarreauPipeFlow {
                 requested_pressure_drop_pa: pressure_drop_pa,
                 pressure_drop_pa: pressure,
@@ -434,6 +584,38 @@ impl CarreauPipeProfile {
     }
     pub const fn flow(&self) -> &CarreauPipeFlow {
         &self.flow
+    }
+
+    /// Positive differential hydraulic conductance dQ/d(delta_p) [m³/(s Pa)].
+    /// It is even under flow reversal and has the exact Poiseuille limit at
+    /// rest. This uses the already accepted radial integral without another
+    /// constitutive solve or quadrature; it is not the secant Q/delta_p.
+    pub fn pressure_conductance_m3_s_pa(&self) -> Result<f64, MaterialError> {
+        product_ratio(
+            &[
+                core::f64::consts::PI,
+                self.pipe.radius_m,
+                self.pipe.radius_m,
+                self.pipe.radius_m,
+                self.pipe.radius_m,
+                1.0 - 3.0 * self.normalized_flow_integral,
+            ],
+            &[2.0, self.pipe.length_m, self.wall.viscosity],
+        )
+    }
+
+    fn wall_rate_flow_derivative(&self) -> Result<f64, MaterialError> {
+        product_ratio(
+            &[
+                core::f64::consts::PI,
+                self.pipe.radius_m,
+                self.pipe.radius_m,
+                self.pipe.radius_m,
+                self.wall.tangent,
+                1.0 - 3.0 * self.normalized_flow_integral,
+            ],
+            &[self.wall.viscosity],
+        )
     }
 
     /// Sample the inclusive physical radius [0,R]. Velocity integrates the same

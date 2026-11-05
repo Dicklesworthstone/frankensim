@@ -14855,6 +14855,26 @@ velocity/heat integration, both Newtonian plateaus and constant-law limits,
 pressure reversal/rest, singular scalar zero-rate slopes, shifted source limits,
 near-wall velocities, finite work budgets and extreme intermediate products.
 
+`LaminarCarreauPipe::profile_at_flow` additionally resolves the required
+pressure for a prescribed signed volume flow through that same radial law.
+A bounded Newton solve acts directly on wall shear rate, with the original
+source ceiling, positive quadrature and analytic Rabinowitsch derivative.
+It does not nest constitutive inversions, finite-difference pressure trials,
+or replace the radial viscosity by a single apparent value. The returned
+solution retains requested flow, accepted flow residual and actual iteration
+count; pressure, profile and irreversible power use the accepted state.
+The existing temperature calibration and both shift conventions are unchanged.
+
+Each accepted profile exposes the positive differential pressure conductance,
+computed from its retained radial integral without a new solve or quadrature.
+This derivative is even under reversal, differs from the secant in thinning
+flow and recovers Poiseuille conductance at rest. Flow residual tolerance,
+quadrature estimate and source support remain separate; neither Newton
+convergence nor a declared wall-rate ceiling establishes laminar validity or
+material accuracy. Focused G0/G1 controls cover analytic Newtonian pressure
+and heat, an independently inverted nonlinear stress law, pressure-derivative
+finite differences, signed flow, source ceilings and bounded-work refusal.
+
 Existing LBM callbacks consume the bound state through their native nonlinear
 collision and viscous-heating path; the broader legacy lattice Carreau domain,
 units and prepared relaxation-time policy remain intact. Constitutive regressions
