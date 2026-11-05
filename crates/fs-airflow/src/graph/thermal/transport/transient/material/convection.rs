@@ -14,6 +14,8 @@ mod laws;
 pub mod reservoir;
 /// Section-integrated entrance heat on original finite walls and reservoirs.
 pub mod developing;
+/// Source-integrated solid resistance on native forced-duct wall links.
+pub mod conjugate;
 
 use super::*;
 use crate::graph::thermal::medium::convection::{

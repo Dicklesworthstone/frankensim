@@ -1215,3 +1215,5 @@ mod plate_sections;
 
 #[path = "source_graph/spheres.rs"]
 mod spheres;
+#[path = "source_graph/conjugate.rs"]
+mod conjugate;

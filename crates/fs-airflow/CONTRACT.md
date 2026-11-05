@@ -3637,6 +3637,44 @@ The original sphere area, Reynolds, Prandtl and bulk/surface viscosity-ratio bou
 
 The existing implicit native graph refreshes flow, bulk and wall properties at each actual thermal candidate. Original reciprocal links debit finite walls once; prescribed reservoirs enter external heat once. Whitaker's conductive contribution stays inside its single coefficient. Focused `source_graph::spheres` regressions cover nonunit liquid/gas viscosity ratios, source and interval refusals, gas surface-property versus storage-density separation, and coupled momentum/enthalpy evolution with finite-wall and total energy checks. The isolated stationary isothermal sphere and uniform external-flow assumptions remain; numerical execution and experimental validation are reported separately.
 
+### Source-integrated solid resistance on native forced-duct links
+
+`PreparedGraphConjugateLinks` composes the original liquid/gas graph convection
+admission with `ResolvedConductionLayer` and
+`ReservoirLayerGeometry::evaluate_material_to_bath`. One homogeneous,
+source-free solid path runs from the existing wall cell's temperature trace to
+its actual fluid-facing surface. Planar or radial geometry remains explicit;
+its contacted area and original contact coverage must match exactly. The
+prepared conductivity chart retains the original source line and identical
+wall caloric object; no conductivity copy, additional solid storage, or
+separate fluid temperature is introduced.
+
+This adapter admits bulk-property circular/rectangular fully developed
+laminar CWT/CHF, Dittus-Boelter, and Gnielinski laws only. The existing native
+graph owner still checks the actual initial/final/average flow and
+source/correlation limits. Film-property, sphere, plate, natural, mixed, and
+developing laws refuse here because their surface feedback or section model
+needs its own closure. The caller retains the selected correlation's
+developed-flow and wall-uniformity assumptions.
+
+At each nonlinear endpoint the existing material owner solves the surface
+temperature and integrated k(T) heat. The adapter lowers its accepted signed
+heat to the single original reciprocal link using Q/(Twall-Tfluid), with a
+separate equilibrium limit and explicit representation audit. Only the
+combined conductance map is applicable; bare film samples remain diagnostic
+evidence. Reports retain the actual surface, original fluid source, shared
+solid source line, and layer residual. Changed wall/caloric/contact ownership,
+stale callback evidence, source-domain failure, competing conductance
+ownership, and cancellation refuse without advancing either native history.
+
+The focused `liquid_pressure::source_graph::conjugate` cases cover
+constant/variable-k surface continuity, heating/cooling/equilibrium, native
+reciprocal residuals, refusal cases, and coupled
+momentum/advection/material-wall endpoint feedback. Ten tests passed in a
+bounded build of the original material layer/reservoir kernel, including two
+fixture-specific flux/domain checks. The new graph adapter and its integration
+tests were syntax/API reviewed but not compiled in the full Cargo graph.
+
 ## Reversible total-pressure hydraulic nodes and physical static tractions
 
 `graph::inertial::total_pressure::TotalPressureGraph` is an explicitly selected,
