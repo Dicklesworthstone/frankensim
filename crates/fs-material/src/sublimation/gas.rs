@@ -50,8 +50,8 @@ use crate::thermochemical_gas::{
     },
 };
 use fs_thermal::sublimation::{
-    SolidSurfaceState, SublimationError, SublimationLaw, SublimationProperties, VaporReservoir,
-    molecular::molecular_mass_flux,
+    SolidSurfaceState, SublimationError, SublimationLaw, SublimationProperties, SurfaceKinetics,
+    VaporReservoir, molecular::molecular_mass_flux_with_kinetics,
 };
 use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 
@@ -439,6 +439,34 @@ fn snapshot_surface_at_temperature<L: SublimationLaw + ?Sized>(
     duration_s: f64,
     controls: GasSurfaceSolve,
 ) -> Result<SurfaceSnapshot, GasSurfaceError> {
+    snapshot_surface_at_temperature_with_kinetics(
+        law,
+        binding,
+        solid,
+        gas,
+        catalog,
+        temperature_k,
+        SurfaceKinetics {
+            accommodation_coefficient: binding.accommodation_coefficient,
+            mass_transfer_coefficient_m_s: None,
+        },
+        duration_s,
+        controls,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn snapshot_surface_at_temperature_with_kinetics<L: SublimationLaw + ?Sized>(
+    law: &L,
+    binding: &GasSurfaceBinding,
+    solid: SolidSurfaceState,
+    gas: GasSpeciesSnapshot,
+    catalog: &ThermochemicalGasModel,
+    temperature_k: f64,
+    kinetics: SurfaceKinetics,
+    duration_s: f64,
+    controls: GasSurfaceSolve,
+) -> Result<SurfaceSnapshot, GasSurfaceError> {
     let phase = phase_at(law, temperature_k, gas.molar_mass)?;
     let vapor_enthalpy = catalog.species_specific_enthalpy_j_kg(&binding.species, temperature_k)?;
     let source_alignment_residual_j_kg = compatibility(
@@ -449,10 +477,10 @@ fn snapshot_surface_at_temperature<L: SublimationLaw + ?Sized>(
         temperature_k,
         controls.latent_compatibility_tolerance_j_kg,
     )?;
-    let flux = molecular_mass_flux(
+    let flux = molecular_mass_flux_with_kinetics(
         law,
         temperature_k,
-        binding.accommodation_coefficient,
+        kinetics,
         VaporReservoir::Prescribed {
             partial_pressure_pa: gas.partial_pressure_pa,
             temperature_k: gas.temperature_k,
