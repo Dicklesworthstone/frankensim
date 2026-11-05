@@ -597,3 +597,50 @@ intervals at arbitrary schedule transitions.
 
 The example also compiled and executed successfully through the same exact-source
 native build, including its production/conservation/shutdown assertions.
+
+## Scheduled production on the shared nuclear/thermal transaction
+
+`thermal::DecayProductionHeating` is a specialization of the existing
+`NuclearHeating<S>` owner. `DecayProductionCellSource` binds a radioactive
+inventory and an immutable `DecayProductionSchedule` to the original thermal
+cell/material. The common scheduler clips steps at authored source changes;
+the original final accepted duration drives both the production convolution
+and integrated deposited-heat credit. Source shutdown preserves radioactive
+populations, daughter ingrowth and later heat release.
+
+The source caches its prepared production map by duration and propagation
+limits. Changing the rate vector alone reuses the same immutable map. A clone
+shares model, schedule and prepared data while retaining an independent accepted
+inventory. The original shared material bindings, caloric identity, storage basis,
+geometry, temperature admission, checkpoint propagation and rollback remain in
+one owner. Deposited energy remains distinct from radiation and escaped energy,
+and production does not invent a bulk-material mass or enthalpy influx.
+
+The common source seam now has default-zero produced/decayed counters and an
+optional advance-wide nuclei allowance. Existing fission, irradiation and
+kinetics sources retain their original behavior. Production enables the nuclei
+gate, which sums per-node physical defects and scalar counter-reduction defects
+across every cell and interval. Nonnegative defect totals preserve a positive
+low part at an allowance boundary. The source's original energy budget and the
+native thermal energy budget remain independently mandatory. Typed decay
+refusals are retained by `FissionThermalError::Decay`.
+
+`fs_couple::radioactive` re-exports the production types and shared thermal
+specialization under the existing `nuclear-thermal` feature. No additional
+thermal solver or independent source scheduler is introduced.
+
+All 90 native tests passed with the actual nuclear crate root and `thermal`
+enabled: 60 core, eight closed-decay thermal, six production thermal, and 16
+existing fission/irradiation/kinetics thermal regressions. The production checks
+cover schedule shutdown clipping and continuing heat, newborn daughter heat,
+rate-change map reuse and restart, composition with prescribed fission, joint
+rollback, whole-advance population allowances, and zero-source compatibility.
+The dependency build used current production thermal runtime and exact boundary/
+composition definitions at c9d1b20e, excluding unrelated module declarations.
+This focused source run does not replace the unavailable full workspace gate.
+
+The constant-forcing interpretation uses the standard matrix-exponential
+convolution and related phi functions; see [Al-Mohy and Higham (2011)](https://eprints.maths.manchester.ac.uk/1591/).
+The implementation retains this project's positive DAG uniformization and its
+own explicit numerical admission rather than claiming the paper's general
+matrix-exponential error analysis.

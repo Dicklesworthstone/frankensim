@@ -18,6 +18,7 @@ use fs_thermal::enthalpy::{
     Event, MaterialId, StepConfig, ThermalStorageBasis,
 };
 
+use crate::decay::DecayError;
 use crate::kinetics::KineticsError;
 use crate::{EnergyChannels, FissionError, FissionState};
 
@@ -28,6 +29,8 @@ pub use irradiation::{
     IrradiationCellSource, IrradiationCellStep, IrradiationHeating, IrradiationHeatingBudget,
     NeutronFluxChange, NeutronFluxSchedule,
 };
+mod production;
+pub use production::{DecayProductionCellSource, DecayProductionHeating};
 
 mod kinetics;
 pub use kinetics::{
@@ -142,6 +145,12 @@ pub struct FissionHeatingAudit {
     pub fissions: f64,
     /// Total accepted competing captures over this advance.
     pub captures: f64,
+    /// Integrated radioactive transformations, including newly produced daughters.
+    pub decays: f64,
+    /// Supplied nuclei integrated over all accepted intervals and cells.
+    pub produced_nuclei: f64,
+    /// Noncancelling inventory, production and counter-reduction defects.
+    pub population_roundoff_nuclei: f64,
     /// Number of common accepted thermal/source intervals.
     pub substeps: usize,
 }
@@ -155,6 +164,8 @@ pub enum FissionThermalError {
     Fission(FissionError),
     /// Original neutron-kinetics model or numerical-accuracy refusal.
     Kinetics(KineticsError),
+    /// Original radioactive inventory, production or propagation refusal.
+    Decay(DecayError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
     Invalid(&'static str),
     /// A source names a cell that has not been activated.
@@ -184,6 +195,13 @@ pub enum FissionThermalError {
         /// Caller-supplied advance allowance [J].
         tolerance_j: f64,
     },
+    /// Accumulated population defects exceed the source's advance allowance.
+    NucleiBudget {
+        /// Noncancelling numerical population defects [expected nuclei].
+        defect_nuclei: f64,
+        /// Caller-supplied advance allowance [expected nuclei].
+        tolerance_nuclei: f64,
+    },
     /// Finite inputs produced nonfinite arithmetic or an exhausted counter.
     Arithmetic,
 }
@@ -203,6 +221,11 @@ impl From<KineticsError> for FissionThermalError {
         Self::Kinetics(error)
     }
 }
+impl From<DecayError> for FissionThermalError {
+    fn from(error: DecayError) -> Self {
+        Self::Decay(error)
+    }
+}
 impl std::fmt::Display for FissionThermalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "fission/thermal coupling refused: {self:?}")
@@ -214,6 +237,7 @@ impl std::error::Error for FissionThermalError {
             Self::Thermal(error) => Some(error),
             Self::Fission(error) => Some(error),
             Self::Kinetics(error) => Some(error),
+            Self::Decay(error) => Some(error),
             _ => None,
         }
     }
@@ -368,7 +392,32 @@ impl<S: NuclearHeatSource> NuclearHeating<S> {
         let (thermal, source, audit) =
             thermal.advance_observed(self, target_s, config, &mut checkpoint)?;
         source.validate(&thermal, source.time_s, &mut checkpoint)?;
+        source.admit_audit(&source.audit)?;
         Ok((thermal, source, audit))
+    }
+
+    fn admit_audit(&self, audit: &FissionHeatingAudit) -> Result<(), FissionThermalError> {
+        let defect = finite(audit.coupling_roundoff_j + audit.nuclear_energy_defect_j)?;
+        if defect > S::energy_tolerance_j(self.budget) {
+            return Err(FissionThermalError::EnergyBudget {
+                defect_j: defect,
+                tolerance_j: S::energy_tolerance_j(self.budget),
+            });
+        }
+        if let Some(tolerance_nuclei) = S::nuclei_tolerance(self.budget) {
+            if !nonnegative(tolerance_nuclei) {
+                return Err(FissionThermalError::Invalid(
+                    "population allowance must be finite and nonnegative",
+                ));
+            }
+            if audit.population_roundoff_nuclei > tolerance_nuclei {
+                return Err(FissionThermalError::NucleiBudget {
+                    defect_nuclei: audit.population_roundoff_nuclei,
+                    tolerance_nuclei,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn validate(
@@ -505,13 +554,7 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             .checked_add(1)
             .ok_or(FissionThermalError::Arithmetic)?;
         let audit = account.snapshot()?;
-        let defect = finite(audit.coupling_roundoff_j + audit.nuclear_energy_defect_j)?;
-        if defect > S::energy_tolerance_j(self.budget) {
-            return Err(FissionThermalError::EnergyBudget {
-                defect_j: defect,
-                tolerance_j: S::energy_tolerance_j(self.budget),
-            });
-        }
+        self.admit_audit(&audit)?;
         checkpoint()?;
         self.pending = Some(PendingStep {
             start_s,
@@ -545,6 +588,7 @@ impl<S: NuclearHeatSource> DepositionObserver for NuclearHeating<S> {
             ));
         }
         self.validate(thermal, pending.end_s, checkpoint)?;
+        self.admit_audit(&pending.audit)?;
         checkpoint()?;
         // All fallible work precedes publication, even for direct hook callers.
         let pending = self.pending.take().expect("validated pending interval");
@@ -589,6 +633,17 @@ impl Sum {
     fn export_roundoff(&self) -> Result<f64, FissionThermalError> {
         finite(crate::sum(&[self.sum, self.correction, -self.value()?]).abs())
     }
+    // Used only for nonnegative defect sums. Round upward when a retained low
+    // part would otherwise disappear at an exact caller allowance boundary.
+    fn nonnegative_upper_bound(&self) -> Result<f64, FissionThermalError> {
+        let rounded = self.value()?;
+        let remainder = finite(crate::sum(&[self.sum, self.correction, -rounded]))?;
+        if remainder > 0.0 {
+            finite(rounded.next_up())
+        } else {
+            Ok(rounded)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -599,6 +654,9 @@ struct Account {
     nuclear_defect: Sum,
     fissions: Sum,
     captures: Sum,
+    decays: Sum,
+    produced: Sum,
+    population_roundoff: Sum,
     substeps: usize,
 }
 impl Account {
@@ -618,9 +676,19 @@ impl Account {
         self.nuclear_defect.add(S::energy_roundoff_j(report))?;
         self.fissions.add(S::fissions(report))?;
         self.captures.add(S::captures(report))?;
+        self.decays.add(S::decays(report))?;
+        self.produced.add(S::produced_nuclei(report))?;
+        self.population_roundoff
+            .add(S::population_roundoff_nuclei(report))?;
         Ok(())
     }
     fn snapshot(&self) -> Result<FissionHeatingAudit, FissionThermalError> {
+        let mut population_roundoff = self.population_roundoff;
+        // The retained low parts must not disappear for free when the new
+        // count observations are exported as one scalar per advance.
+        population_roundoff.add(self.decays.export_roundoff()?)?;
+        population_roundoff.add(self.produced.export_roundoff()?)?;
+        let population_roundoff_nuclei = population_roundoff.nonnegative_upper_bound()?;
         Ok(FissionHeatingAudit {
             released: EnergyChannels {
                 deposited_j: self.released[0].value()?,
@@ -632,6 +700,9 @@ impl Account {
             nuclear_energy_defect_j: self.nuclear_defect.value()?,
             fissions: self.fissions.value()?,
             captures: self.captures.value()?,
+            decays: self.decays.value()?,
+            produced_nuclei: self.produced.value()?,
+            population_roundoff_nuclei,
             substeps: self.substeps,
         })
     }

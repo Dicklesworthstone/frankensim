@@ -1,4 +1,4 @@
-//! The shared transactional heat-owner seam for the two admitted source laws.
+//! The shared transactional heat-owner seam for admitted nuclear source laws.
 
 use super::{FissionCellSource, FissionThermalError};
 use crate::{EnergyChannels, FissionBudget, FissionError, FissionStep};
@@ -10,9 +10,10 @@ pub(super) mod sealed {
 
 /// A cell-bound nuclear source using the shared thermal transaction.
 ///
-/// This sealed interface keeps prescribed-event and neutron-irradiation laws
-/// on one binding, scheduling, heat-credit and rollback implementation. Public
-/// source types carry their own physical inventories and admitted budgets.
+/// This sealed interface keeps prescribed-event, neutron-irradiation and
+/// radioactive-production laws on one binding, scheduling, heat-credit and
+/// rollback implementation. Public source types carry their own physical
+/// inventories and admitted budgets.
 pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
     /// Explicit work and numerical-accounting budget for this source law.
     type Budget: Copy + core::fmt::Debug;
@@ -25,6 +26,11 @@ pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
     fn material_id(&self) -> MaterialId;
     /// Advance-wide allowance for noncancelling nuclear and coupling defects.
     fn energy_tolerance_j(budget: Self::Budget) -> f64;
+    /// Optional advance-wide allowance for noncancelling population defects.
+    /// Existing source laws retain their own accounting when this is absent.
+    fn nuclei_tolerance(_budget: Self::Budget) -> Option<f64> {
+        None
+    }
     /// Next authored discontinuity strictly after the accepted clock.
     fn next_transition(&self, time_s: f64) -> Option<f64>;
     /// Admit immutable source data, the initial environment and work limits.
@@ -49,6 +55,18 @@ pub trait NuclearHeatSource: sealed::Sealed + Clone + core::fmt::Debug {
     fn released(step: &Self::Step) -> EnergyChannels;
     /// Noncancelling numerical energy-account defects over that interval.
     fn energy_roundoff_j(step: &Self::Step) -> f64;
+    /// Noncancelling population and production-account defects over the interval.
+    fn population_roundoff_nuclei(_step: &Self::Step) -> f64 {
+        0.0
+    }
+    /// Integrated radioactive transformations, including newly produced daughters.
+    fn decays(_step: &Self::Step) -> f64 {
+        0.0
+    }
+    /// Independently supplied nuclei integrated over the interval.
+    fn produced_nuclei(_step: &Self::Step) -> f64 {
+        0.0
+    }
     /// Accepted fission events over that interval.
     fn fissions(step: &Self::Step) -> f64;
     /// Accepted competing captures over that interval.

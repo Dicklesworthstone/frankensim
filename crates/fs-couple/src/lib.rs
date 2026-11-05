@@ -51,6 +51,11 @@ pub mod radioactive {
         DecayNuclide, DecayStep, PreparedDecay,
     };
     pub use fs_nuclear::decay::thermal::*;
+    pub use fs_nuclear::decay::production::{
+        DecayProductionChange, DecayProductionSchedule, DecayProductionStep,
+        PreparedDecayProduction,
+    };
+    pub use fs_nuclear::thermal::{DecayProductionCellSource, DecayProductionHeating};
 }
 
 pub mod acoustic_realize;
