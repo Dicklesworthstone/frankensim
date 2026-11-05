@@ -536,6 +536,147 @@
     "frankensim-tgc2z",
     "the 145 pairs on this site graded again with e34e7618f (deploy 123)"
    ]
+  },
+  {
+   "date": "2026-11-02",
+   "kind": "owner",
+   "title": "Turn on every physics option, render again, and compare only with the real recording",
+   "decided": "The owner's words: \"OPT-IN TO LITERALLY EVERY SINGLE THING AND THEN RE-RENDER AND SEE IF IT HELPS\", and \"we only want to compare our latest and greatest simulated version to the REAL ACTUAL RECORDING\".",
+   "why": "New physics was landing behind opt-in rows that the page cards didn't use, while effort went to verification tables and relabelling that changed no sound.",
+   "effect": "Each family's cards take what the code offers. Each page shows its latest render beside the recording, with what was enabled and what the solver refused, and unchanged audio isn't relabelled. An option that's turned on can still be refused or grade worse, and the page says so. Tuning to a recording stays forbidden.",
+   "refs": [
+    "8a3a350eb",
+    "54981334a"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "owner",
+   "title": "Every rendering goes on the site, phrases included",
+   "decided": "The owner's words: \"don't forget to update the web site for the instrument tests with all the latest progress and renderings of the latest audio for each instrument!! and ALL of the renderings, including the phrases, melodies, scales, double-stops, etc.\"",
+   "why": "Only the note rows were following the pages. When the order came, the cello, viola and double bass scales, melodies and chords dated from Nov 1 on the open-string route, with a rigid stop and no body. The whistle, pan pipe and voice phrases dated from Oct 31 and the piano's from Oct 30.",
+   "effect": "Phrases are re-rendered on each family's current cards as those renders finish. Every phrase now shows when it was rendered, or says that it's an older render still waiting. On Nov 5 those waiting are the violin melody and chords, the viola chords, the double bass scale, melody and chords, the kit roll and the piano's phrases. The violin scale is partly done, with 12 of 15 notes on current cards.",
+   "refs": [
+    "deploys 267 to 295"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "method",
+   "title": "The grader no longer counts high harmonics as noise",
+   "decided": "Band HNR now masks every harmonic of the note up to 10 kHz. It used to mask only the partials the grader had tracked, at most 30, so every harmonic above the 30th and any weak one it skipped counted as noise. Chords and inharmonic notes keep the tracked lines alone, because they have no single harmonic law.",
+   "why": "A low note with strong high harmonics read far noisier than it was: clarinet D3 read 37.5 dB against 35.3 in the recording, inside the ruler, when it really reads 66.4.",
+   "effect": "On the 89 graded pages the render's reading moved a median of 0.01 dB and up to 40.3 dB, by more than 8 dB on 22 pages. The recording's moved a median of 0.03 dB and up to 10.6 dB. 14 pages went from inside the ruler to outside on this measure, and none went the other way. The rulers were measured with the old mask and are carried over. Other measures don't change.",
+   "refs": [
+    "62986ae68",
+    "instrgrade-5"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "method",
+   "title": "A recording's upper harmonics aren't read from one long window",
+   "decided": "When a page quotes a recording's harmonics above about H5, both clips are read by summing power within 0.8 % of each peak, or in 100 ms frames that follow the pitch. A fixed-pitch projection or a band peak over a long window is no longer used for a recording's column.",
+   "why": "A player's pitch wanders, so each line spreads across bins and its peak falls, while a steady render loses nothing. Read the old way, the mean of H6 to H12 comes out 3 to 8 dB low on almost every recording, and flute D4's H9 came out 13 dB low. Renders looked brighter than the recording by that much.",
+   "effect": "The flute pages were corrected. The grader wasn't affected, because it already sums power within 0.8 % of each peak. Our first answer, that a band peak was fine, was wrong.",
+   "refs": [
+    "flute D4, G4 and A5 pages"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "ruling",
+   "title": "Flow noise comes from a printed law, with no gain to set",
+   "decided": "A brass lip, reed or glottal card can declare constriction_noise: Oldham and Ukpoho's 1990 duct-constriction law, as printed in Guedel, applied as a series pressure source in each third octave. The row takes a seed and a duct radius and has no gain. The radius is the card's first bore record.",
+   "why": "Renders were too clean, and setting a noise level from a recording would be tuning.",
+   "effect": "The law was measured on dampers and orifice plates in a 300 mm duct at 10-25 m/s, so on a lip, a reed or a glottis it's an extrapolation in size and Mach number, and each page with the row says so. A card without the row renders bit-identical to before. No bowed page has any bow noise physics yet.",
+   "refs": [
+    "7021bce64",
+    "4b7a1c6c5",
+    "d2fa7336f",
+    "14f4e6bb3"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "finding",
+   "title": "The trombone lip opens by the printed area law, and the family plays one rule",
+   "decided": "The row lip_area_exponent makes the flow opening grow as (h/H0)^(q-1). q = 1.4 comes from Copley and Strong 1996, Table AI: their peak area matches at q = 1.35 and their mean area at 1.44. Bromage, Campbell and Gilbert 2010 print the same exponent. q = 2 was refused as a value, because its large gain came mostly from an opening 2.4 times the print's. Every trombone page plays one q, and the attack gesture was taken off the family.",
+   "why": "q was chosen from the print, not from the sound. One rule for the family means a good number on one note can't come from a setting chosen for that note.",
+   "effect": "On Bb3 the row took the page from 11 to 13 of 14, and the attack got worse. One rule for the family lowered G2, C3 (13 to 12), Bb2, Eb3 and Bb3 (one count each on the last three), and those pages state it. Still open: the printed lip height is about twice ours at every q (3.3 mm peak against 1.84), so q is partly standing in for a short swing.",
+   "refs": [
+    "ae66a7c66"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "finding",
+   "title": "A measured vocal tract and fast pitch movement take the voice from 105 to 124 of 204",
+   "decided": "The voice pages moved to a measured tract (DVTD subject 1, Birkholz et al. 2020, CC0), a man of 39 who isn't the singer in the recordings. They then took two rows of fast pitch movement, sized from Ternström and Friberg 1989, Fig. 5, read by eye.",
+   "why": "The voice's largest error was +26.9 dB at 4-8 kHz. On the measured tract, band HNR read too clean on all 14 pages.",
+   "effect": "The tract took the count from 105 to 113, the spectrum gap fell on 12 of 14 pages and the mean tilt shortfall went from 22.9 to 7.6 dB. The rows took it from 113 to 124, with HNR inside on 12 of 14. That HNR agreement is in the number only: at C3 and C4 the floor under 2 kHz in our renders is the skirt of a moving line, still falling away from it, while the recording's is flat from 0.25 f0 out. So the rows don't make the floor the recording has, and what does is still open between turbulent noise and cycle-to-cycle jitter.",
+   "refs": [
+    "36d300c20",
+    "c5a677335",
+    "frankensim-irp-v5-instrument-realism-pexfp.324"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "finding",
+   "title": "The flute plays with its head joint out 13.2 mm, and part of its sharpness was our own arithmetic",
+   "decided": "One pull of 13.2 mm on every note, solved against equal temperament and never against a recording, with nothing retuned per note.",
+   "why": "We had read the top notes as sounding 25 to 52 c above the tube's own resonance. That came from our solve, which read the card's 4.4 mm section where the window row uses a 1.2 mm channel, so every resonance came out low. Corrected at 13.2 mm, the notes sit above the resonance by 4.9 c at E5, 12.8 c at A5 and 18.4 c at G6.",
+   "effect": "The offset from the mouth is smaller than we'd said, and part of the climb is the tube's own. The notes are still off: D4 at -19.2 c, A5 at +19.7 c and G6 at +24.7 c from equal temperament, and the flute card says so first.",
+   "refs": [
+    "7f2b06976"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "ruling",
+   "title": "A family with no printed air column gets a stated stand-in, not an empty page",
+   "decided": "We stop looking for one whole printed bore. A card may be built from printed fragments, a stated derivation or a number borrowed from a sibling instrument, as long as the page says which. A bore read off a printed figure is allowed with its read error stated. A guess isn't allowed.",
+   "why": "Four hunts for a whole printed air column came back empty. That left the alto saxophone with five empty pages and the tuba with four, blocked on a source that doesn't exist rather than on the physics.",
+   "effect": "The alto saxophone's C4 card uses Lefebvre 2010 Fig. A.5 for the mouthpiece, ISMA 2007 for the neck, one straight cone solved at Db3, the clarinet's reed row (borrowed) and Fuks and Sundberg's alto pressures. It's rendering now. The tuba's bore is being read off a printed figure. Both families' pages stay empty until a render exists, and the first one will say it's a stand-in. The same route moved the horn: A2 at a flat 6.22 kPa went from 2 to 5 of 11.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.241",
+    "frankensim-irp-v5-instrument-realism-pexfp.262",
+    "frankensim-irp-v5-instrument-realism-pexfp.258"
+   ]
+  },
+  {
+   "date": "2026-11-04",
+   "kind": "finding",
+   "title": "The cello body is 19 dB too tall at 178.85 Hz, and F3's near-sine tone is made after the string",
+   "decided": "We're testing wood loss on F3 and reading the finite receiver on a frequency sweep. There's no neck, fingerboard or tailpiece work on this evidence.",
+   "why": "F3's string force at the bridge is a sawtooth, so the page's near-sine tone can't come from the string. Against Zhang and Woodhouse 2014, Fig. 2, read from the figure's vector path, our bridge response peaks at -6.8 dB at 178.8 Hz where the print has -25.7 at 175.3. About 13 dB of that is Q (82.9 against 18.5) and about 5 is mass (0.179 against 0.32 kg). The log mean over 350-1400 Hz is within 0.7 dB.",
+   "effect": "The cello melody's text says this for F3. Bringing both poles to Q 22 lowers H1 by 3.4 dB at the bridge. No page has changed its render on this yet.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.306"
+   ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "finding",
+   "title": "On the clarinet, blow, lay and reed spring all slide along one curve that misses the recording",
+   "decided": "There will be no more lay, blow or reed-spring tests for the top harmonics. The next reads are the control card at printed blowing pressures, and the card's passive impedance beside UNSW's measured fingerings, as a comparison only.",
+   "why": "On G4 a printed reed lay removed the top harmonics only by shrinking the reed's swing at the card's 1.8 kPa. At the blow that matches the control's swing, 2.4 kPa, the top came back: 22.6 dB over the recording against the control's 23.0. Blow, lay and stiffness move H3 and the top (H8-H12) along one curve (-13/+5, -7/+16, -5/+23 dB re the recording), and the recording sits off that curve by 5-7 dB of H3 and 15-20 dB of top.",
+   "effect": "This replaces our earlier reading that the lay was the lever. Nothing was posted or landed from it. It also showed that the card's 1.8 kPa is under the whole printed range (Fuks and Sundberg 1999: 1.96 to 5.39 kPa), so the baseline may be a quiet note.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.228"
+   ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "finding",
+   "title": "How many times a bowed string slips per period depends on the start, and the printed sort doesn't predict it on our cards",
+   "decided": "There's no bow-ramp change across the family. A page's card gets its slip count read before any ramp is tried on it, and the live cello D3 is being traced first.",
+   "why": "Cello Eb4 makes two full slips per period on its page card. With a faster bow start it makes one, and it grades 7 of 14 against 10. A 256-mode test card on D3 goes from two slips to one with a 1.215 s ramp and stays there after the bow speeds up, but its attack is 716 ms against the recording's 381. Guettler's a/sqrt(BD) has held from 0.47 up on the cards traced, and fails below 0.4: Eb4 at 0.13 makes two slips and viola Db4 at 0.09 makes one.",
+   "effect": "On Eb4 and on that D3 test card, the bridge force changes with the slip count and the transfer from force to sound stays the same (on D3 within 0.7 dB, except H8 at 1.5). We first read the ramp as filling a hole at D3's H4. That was true only of the test card, which differs from the page in friction, modes and string; the page's H4 has no such hole. Viola Db4 keeps its strong 400.9 Hz line at one slip, so a pair of slips doesn't explain that line, and we can't yet say what does.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.306"
+   ]
   }
  ]
 }
