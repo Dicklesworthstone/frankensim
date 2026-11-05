@@ -3,7 +3,8 @@
 //! Sphere geometry is centred on each original COM; its mass distribution may
 //! have arbitrary physical principal inertia inside that sphere. Constant world
 //! forces, body-frame torques and gravity use the existing native kick, followed
-//! by one simultaneous normal/Coulomb solve and the original free drift.
+//! by simultaneous normal/Coulomb solves on independent dynamic contact islands
+//! and the original free drift. A connected island is never split.
 //!
 //! Complete straight COM drift paths are checked analytically, including pairs
 //! omitted from the current contact solve. A rejected crossing shortens the
@@ -12,10 +13,11 @@
 //! Positive activation gaps are an explicitly reported spatial resolution.
 //! Impact/contact loss stays unallocated, and force splitting work is not heat.
 
+use super::islands::{IslandContactError, IslandContactResult};
 use super::spheres::{ContactSphere, SphereContactError, sphere_pair_witness};
 use super::step::{
     RigidContactPath, RigidContactStepControls, RigidContactStepError, RigidContactStepReport,
-    step_rigid_frictional_contacts,
+    step_rigid_contact_islands,
 };
 use super::{
     RigidFrictionalContact, RigidFrictionalImpactError, RigidImpactCounterpart, RigidImpactPoint,
@@ -98,7 +100,7 @@ pub struct SphereSceneStep {
     pub contact_keys: Vec<SphereSceneContactKey>,
     /// Largest actual geometric gap among activated contacts.
     pub maximum_contact_gap_m: f64,
-    pub native: RigidContactStepReport<SphereScenePathReport>,
+    pub native: RigidContactStepReport<SphereScenePathReport, IslandContactResult>,
 }
 impl core::fmt::Debug for SphereSceneStep {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -191,7 +193,7 @@ pub enum SphereSceneError {
     SphereGeometry(SphereContactError),
     Impact(RigidFrictionalImpactError),
     Geometry(SphereScenePathError),
-    Step(RigidContactStepError<SphereScenePathError>),
+    Step(RigidContactStepError<SphereScenePathError, IslandContactResult, IslandContactError>),
     StepBudget,
     RejectionBudget,
     NoProgress,
@@ -292,6 +294,9 @@ struct Exchange {
 /// background cannot erase a small impulse, and locally admitted errors can
 /// still exceed the complete-call budget. Source/support work and impulse
 /// diagnostics use the same compensated chronological reduction.
+/// Contacts sharing any dynamic body use one simultaneous solve. Prescribed
+/// supports do not connect independent bodies: the dense contact cap applies
+/// per island, while the explicit scene cap bounds the complete contact set.
 ///
 /// The native free attitude integrator retains its asymmetric-body accuracy
 /// limits. This does not provide arbitrary-shape CCD, pose repair, exact
@@ -356,7 +361,7 @@ pub fn advance_sphere_scene(
             if h <= 0.0 || elapsed + h == elapsed || time + h == time {
                 return Err(SphereSceneError::NoProgress);
             }
-            let result = step_rigid_frictional_contacts(
+            let result = step_rigid_contact_islands(
                 &mut staged,
                 properties,
                 wrenches,
@@ -704,19 +709,15 @@ fn detected_contacts(
         let normal = witness.normal_world;
         let point = witness.first;
         let opposite = witness.second;
-        let va = bodies[a]
-            .point_kinematics(properties[a], point.arm_body)?
-            .point_velocity_world;
-        let vb = bodies[b]
-            .point_kinematics(properties[b], opposite.arm_body)?
-            .point_velocity_world;
+        let va = bodies[a].point_kinematics(properties[a], point.arm_body)?;
+        let vb = bodies[b].point_kinematics(properties[b], opposite.arm_body)?;
         detected.push(Detected {
             key,
             point,
             other: RigidImpactCounterpart::Body(opposite),
             normal,
             gap,
-            incoming: va.sub(vb).dot(normal),
+            incoming: va.relative_velocity_world(vb)?.dot(normal),
         });
         if detected.len() > c.step.impact.maximum_contacts {
             return Err(SphereSceneError::Invalid(
@@ -753,7 +754,7 @@ fn detected_contacts(
             };
             let velocity = bodies[i]
                 .point_kinematics(properties[i], point.arm_body)?
-                .point_velocity_world;
+                .velocity_relative_to_world(plane.velocity_world)?;
             detected.push(Detected {
                 key,
                 point,
@@ -763,7 +764,7 @@ fn detected_contacts(
                 },
                 normal: plane.normal_world,
                 gap,
-                incoming: velocity.sub(plane.velocity_world).dot(plane.normal_world),
+                incoming: velocity.dot(plane.normal_world),
             });
             if detected.len() > c.step.impact.maximum_contacts {
                 return Err(SphereSceneError::Invalid(

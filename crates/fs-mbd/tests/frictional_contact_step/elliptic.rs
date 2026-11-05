@@ -309,8 +309,10 @@ fn g4_source_candidates_wait_for_complete_native_step_acceptance() {
                     2e-14,
                 );
                 let friction = if outcome == 2 {
+                    // A zero coefficient is a supported friction-free axis.
+                    // Use an invalid negative law to exercise source rollback.
                     EllipticFriction {
-                        coefficients_mu: [0.0, 0.5],
+                        coefficients_mu: [-0.1, 0.5],
                         ..law()
                     }
                 } else {

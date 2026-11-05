@@ -296,6 +296,117 @@ fn whole_scene_accumulates_native_impulse_errors_before_atomic_publication() {
 }
 
 #[test]
+fn thirty_two_spheres_share_a_moving_floor_without_a_global_dense_contact_limit() {
+    const COUNT: usize = 32;
+    let duration = 0.125;
+    let velocity = Vec3::new(1.0, 0.0, -0.3);
+    let support = plane(Vec3::new(0.25, 0.0, 0.0));
+    let mut reference = [body(Vec3::new(0.0, 0.0, RADIUS + CLEARANCE), velocity, 1.0)];
+    let reference_report = advance_sphere_scene(
+        &mut reference,
+        &[property(1.0)],
+        &[sphere(10)],
+        &[support],
+        &[Wrench::ZERO],
+        Gravity::ZERO,
+        0.0,
+        duration,
+        controls(1.0 / 32.0),
+        |_| Some(law(0.8, 0.5)),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    // This is a real tangential stopping impulse with support work, rather
+    // than a zero-friction case that can bypass the coupled Coulomb owner.
+    assert!(reference_report.support_impulse_ns.x < -0.2);
+    assert!(reference_report.support_work_j < -0.05);
+    assert!(reference[0].angular_momentum_body().y > 0.1);
+
+    let properties = vec![property(1.0); COUNT];
+    let spheres: Vec<_> = (0..COUNT).map(|index| sphere(10 + index as u64)).collect();
+    let initial: Vec<_> = (0..COUNT)
+        .map(|index| {
+            body(
+                Vec3::new(2.0 * index as f64, 0.0, RADIUS + CLEARANCE),
+                velocity,
+                1.0,
+            )
+        })
+        .collect();
+    let mut bodies = initial.clone();
+    let mut scene_controls = controls(1.0 / 32.0);
+    scene_controls.step.impact.maximum_bodies = COUNT;
+    scene_controls.step.impact.maximum_contacts = COUNT;
+    // Raise only the scene cap. The original dense constitutive cap remains
+    // unchanged for every connected physical island.
+    assert_eq!(scene_controls.step.impact.contact.maximum_contacts, 21);
+    assert!(COUNT > scene_controls.step.impact.contact.maximum_contacts);
+    let report = advance_sphere_scene(
+        &mut bodies,
+        &properties,
+        &spheres,
+        &[support],
+        &vec![Wrench::ZERO; COUNT],
+        Gravity::ZERO,
+        0.0,
+        duration,
+        scene_controls,
+        |_| Some(law(0.8, 0.5)),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    balances(&report, duration);
+    assert_eq!(report.steps.len(), 4);
+    let contact = &report.steps[0].native.impact.contact;
+    assert_eq!(report.steps[0].contact_keys.len(), COUNT);
+    assert_eq!(contact.impulses.len(), COUNT);
+    assert_eq!(contact.islands.len(), COUNT);
+    for (index, island) in contact.islands.iter().enumerate() {
+        assert_eq!(island.body_indices, [index]);
+        assert_eq!(island.contact_indices, [index]);
+        for axis in 0..3 {
+            close(
+                island.impact.contact.impulses[0][axis],
+                reference_report.steps[0].native.impact.contact.impulses[0][axis],
+                1e-12,
+            );
+        }
+        vector(
+            bodies[index].linear_momentum_world(),
+            reference[0].linear_momentum_world(),
+            1e-12,
+        );
+        vector(spin_world(bodies[index]), spin_world(reference[0]), 1e-12);
+        vector(
+            bodies[index]
+                .pose()
+                .position_world()
+                .sub(initial[index].pose().position_world()),
+            reference[0]
+                .pose()
+                .position_world()
+                .sub(Vec3::new(0.0, 0.0, RADIUS + CLEARANCE)),
+            1e-12,
+        );
+    }
+    close(
+        report.unallocated_contact_loss_j,
+        COUNT as f64 * reference_report.unallocated_contact_loss_j,
+        1e-11,
+    );
+    close(
+        report.support_work_j,
+        COUNT as f64 * reference_report.support_work_j,
+        1e-11,
+    );
+    vector(
+        report.support_impulse_ns,
+        reference_report.support_impulse_ns.scale(COUNT as f64),
+        1e-11,
+    );
+}
+
+#[test]
 fn automatic_floor_settling_and_resting_support_do_not_create_micro_bounces() {
     let properties = [property(1.0)];
     let spheres = [sphere(10)];

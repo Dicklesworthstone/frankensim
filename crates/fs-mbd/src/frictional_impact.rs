@@ -17,6 +17,9 @@ pub mod sphere_scene;
 /// Directional friction ellipses on the same simultaneous native-body owner.
 pub mod elliptic;
 
+/// Independent dynamic contact islands with atomic whole-scene publication.
+pub mod islands;
+
 use crate::{DynamicsError, MassProperties, RigidBodyState, Vec3};
 use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactConfig, FrictionalContactError, FrictionalContactResult,
@@ -61,6 +64,8 @@ pub struct RigidFrictionalContact<F = f64> {
 #[derive(Clone, Copy, Debug)]
 pub struct RigidImpactControls {
     pub maximum_bodies: usize,
+    /// Maximum supplied contact count. Island entry points apply the narrower
+    /// constitutive contact cap to each connected component, not the scene.
     pub maximum_contacts: usize,
     /// Dynamic witnesses must lie on the same normal line within this bound.
     /// Their actual separation remains in the angular-momentum check.
@@ -69,6 +74,7 @@ pub struct RigidImpactControls {
     pub linear_momentum_tolerance_ns: f64,
     pub angular_momentum_tolerance_nms: f64,
     pub energy_tolerance_j: f64,
+    /// Numerical controls and the dense limit for one coupled contact solve.
     pub contact: FrictionalContactConfig,
 }
 

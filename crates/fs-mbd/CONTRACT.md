@@ -2930,6 +2930,37 @@ This point-impact phase holds poses fixed, requires supplied geometry and
 coefficients, and makes no automatic finite-patch preload, torsional-friction,
 collision-discovery or impact-to-heat allocation claim.
 
+### Independent native rigid contact islands
+
+`frictional_impact::islands::apply_rigid_contact_islands` partitions supplied
+contacts by shared dynamic bodies and applies the original simultaneous
+normal/Coulomb solver to each connected component. Its directional counterpart,
+`apply_rigid_elliptic_contact_islands`, uses the same decomposition and the
+existing friction ellipse owner. A prescribed support has no reciprocal state,
+so a common floor or conveyor does not connect independent dynamic bodies.
+Contacts sharing any dynamic body remain one coupled solve, including supplied
+inactive witnesses. An oversized connected component refuses before solving;
+it is never split into sequential pair collisions.
+
+The scene body/contact caps bound graph storage and the number of solves;
+`contact.maximum_contacts` remains the dense owner's per-island limit of at
+most 21 contacts. Graph storage is linear in scene bodies and contacts. Dense
+mobility storage belongs only to individual islands, not a square matrix for
+the whole scene. Stable contact IDs determine island and global output order,
+with original body/contact index mappings and every native determinacy receipt
+retained. Redundant impulse representatives gain no local-load or heat authority.
+
+All native body states remain private until every island and the original
+absolute whole-scene momentum/work gates pass. The numerical allowances do not
+grow with island count. Compensated reductions preserve the summed physical
+increments, source/support work, contact losses and residuals. A late solver,
+balance, index, capacity or cancellation failure publishes no partial update.
+`step_rigid_contact_islands` and
+`step::elliptic::step_rigid_elliptic_contact_islands` reuse the original force
+kick, native drift, mandatory whole-path callback and complete-step balance
+gates. This does not introduce a new contact law or relax any connected
+solver's applicability.
+
 ### Directional simultaneous rigid impacts
 
 `frictional_impact::elliptic::apply_rigid_elliptic_impacts` consumes a principal
@@ -3150,8 +3181,8 @@ frame and Galilean invariance, staging momentum/work and atomic refusals.
 `frictional_impact::sphere_scene::advance_sphere_scene` discovers contacts and
 advances complete COM-centred native spheres against other spheres and
 prescribed infinite planes with constant translation. It composes the shared
-bounded spatial broad phase with the original native force/contact/drift step;
-it does not introduce a second impulse solver. Each body retains its actual
+bounded spatial broad phase with the original native force/contact/drift step
+using independent dynamic contact islands. Each body retains its actual
 mass, orientation, spin and physically enclosed principal inertia. Applied
 world force, body torque and uniform gravity remain explicit inputs.
 
@@ -3196,7 +3227,10 @@ estimate. This numerical lane supports straight drift of spheres and fixed
 normal translating planes; it does not claim interval-certified CCD, arbitrary
 shapes, rotating supports, deformability, adhesion, rolling/torsional resistance
 or thermal allocation. The original simultaneous solver's coupled-contact cap
-still applies. The broader contact and multibody beads remain open.
+applies to each connected island; the separately declared scene contact cap can
+admit more than 21 independent contacts. Accepted native step reports retain
+the complete per-island solver and body receipts. The broader contact and
+multibody beads remain open.
 
 Six focused native G1/G3/G4 groups cover resting support with nonzero material
 restitution, falling contact and settling, two-layer stack load transfer,

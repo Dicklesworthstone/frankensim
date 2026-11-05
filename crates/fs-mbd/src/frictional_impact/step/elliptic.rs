@@ -14,6 +14,9 @@ use crate::frictional_impact::elliptic::{
     RigidEllipticContact, RigidEllipticSourceFailure, RigidImpactGeometry,
     apply_rigid_elliptic_impacts, apply_rigid_elliptic_impacts_with,
 };
+use crate::frictional_impact::islands::{
+    IslandContactError, IslandContactResult, apply_rigid_elliptic_contact_islands,
+};
 use crate::{Gravity, MassProperties, RigidBodyState, Wrench};
 use fs_contact::frictional_multicontact::elliptic::{
     EllipticFriction, EllipticFrictionalContactError, EllipticFrictionalContactResult,
@@ -26,6 +29,15 @@ pub type RigidEllipticContactStepError<E> =
     RigidContactStepError<E, EllipticFrictionalContactResult, EllipticFrictionalContactError>;
 pub type RigidEllipticSourceContactStepError<E, SE> =
     RigidContactStepError<E, EllipticFrictionalContactResult, RigidEllipticSourceFailure<SE>>;
+/// Complete native directional step with separate island determinacy receipts.
+pub type RigidEllipticIslandStepReport<P> =
+    RigidContactStepReport<P, IslandContactResult<EllipticFrictionalContactResult>>;
+/// Directional step refusal before any island or endpoint is published.
+pub type RigidEllipticIslandStepError<E> = RigidContactStepError<
+    E,
+    IslandContactResult<EllipticFrictionalContactResult>,
+    IslandContactError<EllipticFrictionalContactResult, EllipticFrictionalContactError>,
+>;
 
 /// Advance native poses under held loads and a coupled directional friction law.
 ///
@@ -60,6 +72,38 @@ pub fn step_rigid_elliptic_contacts<P, E>(
         dt_s,
         controls,
         apply_rigid_elliptic_impacts,
+        admit_path,
+        gate,
+    )
+}
+
+/// Advance independent directional-friction islands through the original step.
+///
+/// The scene contact limit is independent of the per-island dense solver limit.
+/// Every constitutive witness, native impulse audit, drift and whole-path gate
+/// is retained. A common prescribed support does not connect dynamic bodies;
+/// bodies sharing a contact are always solved together.
+#[allow(clippy::too_many_arguments)]
+pub fn step_rigid_elliptic_contact_islands<P, E>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    wrenches: &[Wrench],
+    gravity: Gravity,
+    contacts: &[RigidEllipticContact],
+    dt_s: f64,
+    controls: RigidContactStepControls,
+    admit_path: impl FnOnce(&RigidContactPath<'_, EllipticFriction>) -> Result<P, E>,
+    gate: &CancelGate,
+) -> Result<RigidEllipticIslandStepReport<P>, RigidEllipticIslandStepError<E>> {
+    step_with(
+        bodies,
+        properties,
+        wrenches,
+        gravity,
+        contacts,
+        dt_s,
+        controls,
+        apply_rigid_elliptic_contact_islands,
         admit_path,
         gate,
     )

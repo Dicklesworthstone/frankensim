@@ -9,6 +9,7 @@
 /// Directional coefficients and source histories through the same native step.
 pub mod elliptic;
 
+use super::islands::{IslandContactError, IslandContactResult, apply_rigid_contact_islands};
 use super::{
     ImpactResponse, RigidFrictionalContact, RigidFrictionalImpactError,
     RigidFrictionalImpactReport, RigidImpactControls, RigidImpactCounterpart,
@@ -198,6 +199,44 @@ pub fn step_rigid_frictional_contacts<P, E>(
         dt_s,
         controls,
         apply_rigid_frictional_impacts,
+        admit_path,
+        gate,
+    )
+}
+
+/// Advance a bounded scene using independent simultaneous contact islands.
+///
+/// The original kick, free drift, whole-path admission and complete-step
+/// balance gates are unchanged. Only the native contact dispatch is partitioned
+/// by shared dynamic bodies; prescribed supports do not connect islands.
+/// `controls.impact.maximum_contacts` bounds the scene, and the constitutive
+/// maximum bounds each connected island. Per-island determinacy receipts
+/// remain available through the returned impact instead of being collapsed
+/// into a claimed unique scene impulse.
+#[allow(clippy::too_many_arguments)]
+pub fn step_rigid_contact_islands<P, E>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    wrenches: &[Wrench],
+    gravity: Gravity,
+    contacts: &[RigidFrictionalContact],
+    dt_s: f64,
+    controls: RigidContactStepControls,
+    admit_path: impl FnOnce(&RigidContactPath<'_>) -> Result<P, E>,
+    gate: &CancelGate,
+) -> Result<
+    RigidContactStepReport<P, IslandContactResult>,
+    RigidContactStepError<E, IslandContactResult, IslandContactError>,
+> {
+    step_with(
+        bodies,
+        properties,
+        wrenches,
+        gravity,
+        contacts,
+        dt_s,
+        controls,
+        apply_rigid_contact_islands,
         admit_path,
         gate,
     )
