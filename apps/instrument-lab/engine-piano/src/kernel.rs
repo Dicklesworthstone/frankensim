@@ -103,6 +103,13 @@ pub struct Config {
     pub static_attachment: bool,
     /// Rayleigh half-space receiver position [m] in the board frame.
     pub microphone_m: [f64; 3],
+    /// Cold observer optimization: use the same physical FIR through a bounded
+    /// FFT partition when travel delay permits it. Rounding can differ. Kept
+    /// opt-in until the current material-aware full piano is qualified.
+    pub partitioned_receiver: bool,
+    /// Copy immutable string coefficients into active traversal order after a
+    /// successful basis rebuild. Opt-in while the restored path is qualified.
+    pub active_coefficients: bool,
     /// Optional source-gas absorption/dispersion on every original surface
     /// path. None retains the lossless reference observer; prepared browser
     /// atmospheres select the shared classical transport law explicitly.
@@ -209,6 +216,8 @@ impl Config {
             duplex: true,
             static_attachment: true,
             microphone_m: [0.675, 1.0, 1.0],
+            partitioned_receiver: false,
+            active_coefficients: false,
             atmospheric_propagation: None,
             full_scale_pa: 10.0,
             retire_ringing_j: 1.0e-10,
@@ -1408,6 +1417,33 @@ struct Modes {
     lw: Vec<f64>,
 }
 
+/// Immutable coefficients in active traversal order. Publish only after every
+/// fallible rebuild step succeeds; failed rebuilds retain the previous cache.
+#[derive(Clone, Default)]
+struct ActiveCoefficients {
+    pre: Vec<PreRec>,
+    fin: Vec<FinRec>,
+    hit: Vec<HitRec>,
+    c1: Vec<f64>,
+    c2: Vec<f64>,
+    c3: Vec<f64>,
+    cross: Vec<f64>,
+}
+
+impl ActiveCoefficients {
+    fn with_capacity(modes: usize) -> Self {
+        Self {
+            pre: Vec::with_capacity(modes),
+            fin: Vec::with_capacity(modes),
+            hit: Vec::with_capacity(modes),
+            c1: Vec::with_capacity(modes),
+            c2: Vec::with_capacity(modes),
+            c3: Vec::with_capacity(modes),
+            cross: Vec::with_capacity(modes),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct CourseDamper {
     fractions: Vec<f64>,
@@ -1419,6 +1455,8 @@ struct ASeg {
     seg: usize,
     off: usize,
     n: usize,
+    coeff: usize,
+    coeff_mode: usize,
     /// `Seg::pair` of this segment.
     #[cfg(target_arch = "wasm32")]
     pair: usize,
@@ -1592,6 +1630,7 @@ pub struct LivePiano {
     courses: Vec<Course>,
     segs: Vec<Seg>,
     m: Modes,
+    active_coefficients: ActiveCoefficients,
     /// One state per physical retained partial, whether active or in the bank.
     q: Vec<f64>,
     v: Vec<f64>,
@@ -1707,6 +1746,15 @@ impl Clone for LivePiano {
             courses: self.courses.clone(),
             segs: self.segs.clone(),
             m: self.m.clone(),
+            active_coefficients: ActiveCoefficients {
+                pre: spare(&self.active_coefficients.pre),
+                fin: spare(&self.active_coefficients.fin),
+                hit: spare(&self.active_coefficients.hit),
+                c1: spare(&self.active_coefficients.c1),
+                c2: spare(&self.active_coefficients.c2),
+                c3: spare(&self.active_coefficients.c3),
+                cross: spare(&self.active_coefficients.cross),
+            },
             q: self.q.clone(),
             v: self.v.clone(),
             fq: self.fq.clone(),
@@ -2220,6 +2268,7 @@ impl LivePiano {
         // The same bandlimited derivative on the summed pressure instead of all r board
         // coordinates (frankensim-mhrzg): ~3,000 fewer multiply-adds per sample at r32.
         mic.differentiate_pressure()?;
+        if cfg.partitioned_receiver { mic.enable_partitioned_fft_fitting(128); }
         let surface_xy = desc.surface.iter().flat_map(|p| [p.position_m[0] as f32, p.position_m[1] as f32]).collect();
         let surface_shapes: Vec<f32> = desc.surface.iter().flat_map(|p| p.mode_shape.iter().map(|x| *x as f32)).collect();
         let n_courses = courses.len();
@@ -2238,6 +2287,8 @@ impl LivePiano {
             fq: vec![0.0; n_total],
             fv: vec![0.0; n_total],
             m,
+            active_coefficients: ActiveCoefficients::with_capacity(
+                if cfg.active_coefficients { cfg.max_dynamic_modes.min(n_total) } else { 0 }),
             keys,
             g_st,
             a_st,
@@ -2306,6 +2357,10 @@ impl LivePiano {
     }
 
     pub fn config(&self) -> &Config { &self.cfg }
+
+    /// The actual receiver path; close-microphone configurations can refuse
+    /// the requested FFT partition and retain direct convolution.
+    pub fn uses_partitioned_receiver(&self) -> bool { self.mic.uses_partitioned_fft() }
     pub fn board_modes(&self) -> usize { self.r }
     pub fn board_frequencies_hz(&self) -> &[f64] { &self.board_freq_hz }
     pub fn board_provenance(&self) -> &str { &self.board_provenance }
@@ -2467,6 +2522,8 @@ impl LivePiano {
         }
         let (pad_pack, pad_gram) = pack_pads(&pad, n);
         ASeg {
+            coeff: 0,
+            coeff_mode: 0,
             #[cfg(target_arch = "wasm32")]
             pair: self.segs[si].pair,
             seg: si, off, n, duplex: self.segs[si].duplex, member: self.segs[si].member, beta2, mek, w_schur, loss_w, sum_c4,
@@ -2939,6 +2996,27 @@ impl LivePiano {
             }
         }
         self.engagement_cached = f64::NAN; // pad coefficients depend on gl
+        if self.cfg.active_coefficients {
+            let cache = &mut self.active_coefficients;
+            cache.pre.clear(); cache.fin.clear(); cache.hit.clear();
+            cache.c1.clear(); cache.c2.clear(); cache.c3.clear();
+            cache.cross.clear();
+            for course in &mut self.active {
+                for segment in &mut course.segs {
+                    let records = recs(segment);
+                    let modes = segment.off..segment.off + segment.n;
+                    segment.coeff = cache.pre.len();
+                    segment.coeff_mode = cache.c1.len();
+                    cache.pre.extend_from_slice(&self.m.pre[records.clone()]);
+                    cache.fin.extend_from_slice(&self.m.fin[records.clone()]);
+                    cache.hit.extend_from_slice(&self.m.hit[records]);
+                    cache.c1.extend_from_slice(&self.m.c1[modes.clone()]);
+                    cache.c2.extend_from_slice(&self.m.c2[modes.clone()]);
+                    cache.cross.extend_from_slice(&self.m.cross[modes.clone()]);
+                    cache.c3.extend_from_slice(&self.m.c3[modes]);
+                }
+            }
+        }
         self.counters.rebuilds += 1;
         Ok(())
     }
@@ -3413,7 +3491,10 @@ impl LivePiano {
             for ac in &self.active {
                 let mut source = 0.0;
                 for s in &ac.segs {
-                    source += dot(&self.m.cross[s.off..s.off + s.n], &self.v[s.off..s.off + s.n]);
+                    let cross = if self.cfg.active_coefficients {
+                        &self.active_coefficients.cross[s.coeff_mode..s.coeff_mode + s.n]
+                    } else { &self.m.cross[s.off..s.off + s.n] };
+                    source += dot(cross, &self.v[s.off..s.off + s.n]);
                 }
                 for (x, g) in self.rhs.iter_mut().zip(&ac.gl) {
                     *x += g * source;
@@ -3449,9 +3530,12 @@ impl LivePiano {
                 let mut reaction = 0.0;
                 for s in &mut ac.segs {
                     let range = s.off..s.off + s.n;
+                    let pre = if self.cfg.active_coefficients {
+                        &self.active_coefficients.pre[s.coeff..s.coeff + recs(s).len()]
+                    } else { &self.m.pre[recs(s)] };
                     let [loss, acc3, reac] = pre_seg(&self.q[range.clone()], &self.v[range.clone()],
                         &mut self.fq[range.clone()], &mut self.fv[range.clone()],
-                        &self.m.pre[recs(s)], bm);
+                        pre, bm);
                     string_loss += 0.5 * loss;
                     reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
                     reaction += reac + b0 * s.w_schur;
@@ -3555,8 +3639,12 @@ impl LivePiano {
             for s in &mut ac.segs {
                 let range = s.off..s.off + s.n;
                 let m = &self.m;
+                let (fin, hit) = if self.cfg.active_coefficients {
+                    let records = s.coeff..s.coeff + recs(s).len();
+                    (&self.active_coefficients.fin[records.clone()], &self.active_coefficients.hit[records])
+                } else { (&m.fin[recs(s)], &m.hit[recs(s)]) };
                 let [mut reac, src] = finish_seg(&mut self.q[range.clone()], &mut self.v[range.clone()],
-                    &self.fq[range.clone()], &self.fv[range.clone()], (&m.fin[recs(s)], &m.hit[recs(s)]), bbar, s.force);
+                    &self.fq[range.clone()], &self.fv[range.clone()], (fin, hit), bbar, s.force);
                 if s.force != 0.0 {
                     reac += s.hammer_lift * s.force;
                 }
@@ -3623,8 +3711,12 @@ impl LivePiano {
                 for s in &ac.segs {
                     let range = s.off..s.off + s.n;
                     let m = &self.m;
-                    let [loss, acc3] = post_seg(&mut self.v[range.clone()], &m.c1[range.clone()],
-                        &m.c2[range.clone()], &m.c3[range.clone()], bm);
+                    let (c1, c2, c3) = if self.cfg.active_coefficients {
+                        let modes = s.coeff_mode..s.coeff_mode + s.n;
+                        let cache = &self.active_coefficients;
+                        (&cache.c1[modes.clone()], &cache.c2[modes.clone()], &cache.c3[modes])
+                    } else { (&m.c1[range.clone()], &m.c2[range.clone()], &m.c3[range.clone()]) };
+                    let [loss, acc3] = post_seg(&mut self.v[range.clone()], c1, c2, c3, bm);
                     string_loss += 0.5 * loss;
                     reaction_loss += s.endpoint_drag * bm - acc3 - bm * s.sum_c4;
                 }

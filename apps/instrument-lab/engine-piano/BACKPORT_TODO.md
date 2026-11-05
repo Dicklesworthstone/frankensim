@@ -1,5 +1,18 @@
 # Piano CPU backports — 2026-10-27
 
+## Restore native FFT integration after upstream replacement — 2026-11-04 (`frankensim-fnhlq`)
+
+- [x] Identify the missing accepted SmallFft/partitioned receiver source in the retained stash; preserve newer material, gas, directional, modal and transactional receiver APIs. Do not apply the stash wholesale or reuse rejected FFT variants.
+- [x] Restore the bounded transform and convolution modules; integrate FFT pressure preview and accepted-frame advancement into the current receiver. Cold material-kernel rebuilding invalidates the FFT plan. Preserve direct histories for modal-pressure diagnostics and clone the complete FFT state.
+- [x] Add focused direct/FFT timing and pressure comparisons across filter forms, invalid-input/clone checks, material-padding invalidation and reactive directional-child coverage.
+- [x] Restore opt-in native-piano receiver selection and active coefficient packing without restoring the old shared-state/reciprocal-bank implementation. Cache publication follows all fallible rebuild steps; clone preserves capacities. Add full-piano paired receiver and exact active-cache comparisons, including bank on/off, pedals, clone, failed rebuild, later successful strike and quality changes. Both optimizations remain off by default pending current-source qualification.
+- [x] First real remote compile reaches a pre-existing fs-material harmonic-carrier inference error. Fix only the closure's original source index type (`usize`), preserving all physics. Original run exits101 with terminal ACK/source/tree/pair release. The initial test filter was also wrong (`baffled_pressure`); the corrected selection is `pcm_wav::baffled`. Neither the compiler failure nor the separate queue-admission refusal is a test pass.
+- [x] Run the required cargo-independent constellation preflight: it refuses the existing asupersync checkout (expected7a0f2f55047c9405118d1717c74e51c27ec95196, actual8940119023c0e01b4d6d3e2c1399f41417c2ad24). Preserve the peer checkout. Focused remote probes use the current dependency tree and do not qualify the pinned repository release gate.
+- [x] The first release compile passes that type check, then exposes a second existing inference error in `fs-mbd/src/verlet.rs`: `(-2.0).mul_add` has an ambiguous receiver type. Specify `-2.0_f64`, preserving the fused remainder and subnormal half-impulse correction. The failed run is retained; no tests have run in it. The final paired test also records worst128-frame time and rejects unexpected engine errors; run its two tests serially to avoid self-contention.
+- [ ] Run native receiver and transform tests through normal strict RCH; resolve concrete build failures without overwriting peers. Evidence: `/Volumes/trj-data/tmp/piano-native-reconcile-20261104/`.
+- [ ] Compare the restored full-piano paths against the current uncached incumbent in the same invocation. The first full-piano build started before active packing was restored; run the final source again after that build completes.
+- [ ] Verify actual browser playback and deploy only the qualified result. Native source restoration alone does not establish a new CPU win, subjective sound quality, or a fix for remaining 4,800-mode dropouts. Sales stay open; no charge or user-setup changes.
+
 ## Reconcile the live queue and quality fixes with current source — 2026-11-04 (`frankensim-qobyi`, `frankensim-fnhlq`)
 
 - [x] Confirm current source lost already-deployed queue/quality repairs during the external stash/pull. Reopen qobyi for source integration; production remains on verified runtime5c5a57901116. Do not apply the old stash wholesale.
