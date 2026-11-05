@@ -16,13 +16,17 @@
 //!
 //! Particles join at the instantaneous point-body position. The orbital influx
 //! therefore uses that moving position, not either endpoint. Spin, finite-size
-//! capture, external loads, outgoing particles and an inferred capture rate are
-//! outside this operator. Other loads require an explicit composition/refinement
-//! with their native owners. Source inventory and caloric admission remain with
-//! the composing material owner.
+//! capture, outgoing particles and an inferred capture rate are outside this
+//! operator. Held external force and gravity use the same variable-mass
+//! trajectory through `advance_with_inertial_capture_forced`. Source inventory
+//! and caloric admission remain with the composing material owner.
 
+use super::ExhaustEnvironment;
 use crate::Vec3;
 use crate::rocket::{RocketError, RocketForcing, RocketState, mass_integrals, poll};
+
+#[path = "capture/forced.rs"]
+mod forced;
 
 /// A physical incoming stream, held in the body's declared inertial frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,6 +54,14 @@ pub struct ParticleCaptureStep {
     /// Incoming orbital angular momentum about the world origin [kg m2/s].
     /// The capture location follows the continuous native trajectory.
     pub incoming_angular_momentum_world_kg_m2_s: Vec3,
+    /// Applied force plus gravity impulse, integrated on retained mass [N s].
+    pub external_momentum_world_kg_m_s: Vec3,
+    /// Applied force plus gravity orbital impulse about the world origin [kg m2/s].
+    pub external_angular_momentum_world_kg_m2_s: Vec3,
+    /// Work of the held nongravitational force along the trajectory [J].
+    pub external_work_j: f64,
+    /// Work of uniform gravity on the continuously changing retained mass [J].
+    pub gravity_work_j: f64,
     /// Incoming complete energy in the world frame [J].
     pub incoming_energy_world_j: f64,
     /// Incoming internal/random energy in its original source datum [J].
@@ -65,11 +77,11 @@ pub struct ParticleCaptureStep {
     pub kinetic_energy_change_j: f64,
     /// Actual native inventory increase minus integrated incoming mass [kg].
     pub mass_residual_kg: f64,
-    /// Actual retained momentum change minus physical incoming momentum [N s].
+    /// Actual momentum change minus incoming and external impulses [N s].
     pub momentum_residual_kg_m_s: Vec3,
-    /// Actual orbital momentum change minus its incoming flux [kg m2/s].
+    /// Actual orbital change minus incoming and external angular impulses [kg m2/s].
     pub angular_momentum_residual_kg_m2_s: Vec3,
-    /// Actual kinetic change plus capture heat minus incoming bulk kinetic energy.
+    /// Actual kinetic change plus heat minus incoming kinetic energy and load work.
     /// Internal/formation energies are excluded from this mechanical check [J].
     pub kinetic_energy_residual_j: f64,
 }
@@ -91,9 +103,37 @@ impl RocketState {
         &self,
         forcing: ParticleCaptureForcing,
         duration_s: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ParticleCaptureStep, RocketError> {
+        self.advance_with_inertial_capture_forced(
+            forcing,
+            ExhaustEnvironment::ZERO,
+            duration_s,
+            cancelled,
+        )
+    }
+
+    /// Capture an inertial stream with held external force and uniform gravity.
+    ///
+    /// Integrates `M'=q`, `(M*v)'=q*u+F+M*g` on one native trajectory.
+    /// Incoming particles, external angular impulse, work and inelastic heat
+    /// follow that same trajectory. Gravity acts on retained mass; incoming
+    /// velocity and source inventory remain the source owner's responsibility.
+    ///
+    /// All work is allocation-free with bounded scalar moment evaluations.
+    /// A zero rate gives constant-mass forced motion; zero duration is an
+    /// admitted identity. Cancellation and rejection publish no state.
+    pub fn advance_with_inertial_capture_forced(
+        &self,
+        forcing: ParticleCaptureForcing,
+        environment: ExhaustEnvironment,
+        duration_s: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ParticleCaptureStep, RocketError> {
         poll(&mut cancelled)?;
+        if !environment.gravity_m_s2.is_finite() || !environment.external_force_n.is_finite() {
+            return Err(RocketError::NonFiniteInput("inertial capture environment"));
+        }
         if !forcing.mass_flow_kg_s.is_finite()
             || !forcing.velocity_world_m_s.is_finite()
             || !forcing.internal_energy_rate_w.is_finite()
@@ -147,7 +187,7 @@ impl RocketState {
         } else {
             Vec3::ZERO
         };
-        let mean_velocity = if x < 0.5 {
+        let mut mean_velocity = if x < 0.5 {
             let mean_increment = slip.scale(x * c);
             next.velocity_m_s = v0.add(slip.scale(x));
             next.position_m = self
@@ -176,7 +216,7 @@ impl RocketState {
             0.0
         };
         let slip_squared = slip.norm_squared();
-        let thermalization = (0.5 * (m0 * x)) * slip_squared;
+        let mut thermalization = (0.5 * (m0 * x)) * slip_squared;
         // Integral of q*(position-position0) cross u. The large-gain form
         // retains the finite M0*log(M1/M0) contribution when C rounds to one.
         let angular_mass = if x < 0.125 {
@@ -184,17 +224,12 @@ impl RocketState {
         } else {
             m0 * (a - 1.0)
         };
-        let centered_angular = if captured > 0.0 {
+        let mut centered_angular = if captured > 0.0 {
             v0.cross(forcing.velocity_world_m_s)
                 .scale(angular_mass * duration_s)
         } else {
             Vec3::ZERO
         };
-        let incoming_angular = self
-            .position_m
-            .cross(incoming_momentum)
-            .add(centered_angular);
-
         // Use the initial-velocity chart for small capture and the incoming
         // chart when capture dominates. In the latter, the original momentum
         // remains directly visible even when M0/M1 is below machine epsilon.
@@ -206,6 +241,32 @@ impl RocketState {
         } else {
             forcing.velocity_world_m_s
         };
+        let loads = if environment == ExhaustEnvironment::ZERO || duration_s == 0.0 {
+            forced::CaptureLoads::ZERO
+        } else {
+            let loads = forced::CaptureInterval {
+                duration_s,
+                captured_mass_kg: captured,
+                initial_mass_kg: m0,
+                final_mass_kg: m1,
+                x,
+                a,
+                c,
+            }
+            .loads(self, forcing, environment, boost)?;
+            next.velocity_m_s = next.velocity_m_s.add(loads.velocity_increment);
+            next.position_m = next
+                .position_m
+                .add(loads.mean_velocity_increment.scale(duration_s));
+            mean_velocity = mean_velocity.add(loads.mean_velocity_increment);
+            centered_angular = centered_angular.add(loads.incoming_centered_angular_increment);
+            thermalization = loads.thermalization_energy_j;
+            loads
+        };
+        let incoming_angular = self
+            .position_m
+            .cross(incoming_momentum)
+            .add(centered_angular);
         let before_relative = v0.sub(boost);
         let after_relative = next.velocity_m_s.sub(boost);
         let incoming_relative = if captured > 0.0 {
@@ -220,8 +281,9 @@ impl RocketState {
             .scale(self.dry_mass_kg)
             .add(after_relative.scale(next.propellant_mass_kg));
         let momentum_change_relative = momentum_after_relative.sub(momentum_before_relative);
-        let centered_momentum_residual =
-            momentum_change_relative.sub(incoming_relative.scale(captured));
+        let centered_momentum_residual = momentum_change_relative
+            .sub(incoming_relative.scale(captured))
+            .sub(loads.external_impulse);
         let momentum_residual = centered_momentum_residual.add(boost.scale(mass_residual));
         let kinetic_before_relative = (0.5 * self.dry_mass_kg) * before_relative.norm_squared()
             + (0.5 * self.propellant_mass_kg) * before_relative.norm_squared();
@@ -242,6 +304,7 @@ impl RocketState {
             .sub(self.position_m)
             .cross(final_momentum)
             .sub(centered_angular)
+            .sub(loads.external_centered_angular)
             .add(self.position_m.cross(momentum_residual));
         let result = ParticleCaptureStep {
             state_after: next,
@@ -249,6 +312,13 @@ impl RocketState {
             captured_mass_kg: captured,
             incoming_momentum_world_kg_m_s: incoming_momentum,
             incoming_angular_momentum_world_kg_m2_s: incoming_angular,
+            external_momentum_world_kg_m_s: loads.external_impulse,
+            external_angular_momentum_world_kg_m2_s: self
+                .position_m
+                .cross(loads.external_impulse)
+                .add(loads.external_centered_angular),
+            external_work_j: loads.external_work_j,
+            gravity_work_j: loads.gravity_work_j,
             incoming_energy_world_j: internal + incoming_kinetic,
             incoming_internal_energy_j: internal,
             thermalization_energy_j: thermalization,
@@ -264,13 +334,16 @@ impl RocketState {
                 + kinetic_change_relative
                 + thermalization
                 - (0.5 * captured) * incoming_relative.norm_squared()
-                + (0.5 * mass_residual) * boost_squared,
+                + (0.5 * mass_residual) * boost_squared
+                - loads.work_relative_j,
         };
         if ![
             result.state_after.position_m,
             result.state_after.velocity_m_s,
             result.incoming_momentum_world_kg_m_s,
             result.incoming_angular_momentum_world_kg_m2_s,
+            result.external_momentum_world_kg_m_s,
+            result.external_angular_momentum_world_kg_m2_s,
             result.mean_velocity_world_m_s,
             result.momentum_residual_kg_m_s,
             result.angular_momentum_residual_kg_m2_s,
@@ -284,6 +357,8 @@ impl RocketState {
                 result.kinetic_energy_change_j,
                 result.mass_residual_kg,
                 result.kinetic_energy_residual_j,
+                result.external_work_j,
+                result.gravity_work_j,
             ]
             .into_iter()
             .all(f64::is_finite)

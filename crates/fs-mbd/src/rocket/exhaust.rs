@@ -28,6 +28,8 @@
 //! Continuous inertial intake uses [`RocketState::advance_with_inertial_capture`]:
 //! its ambient velocity stays fixed while the body accelerates, and the native
 //! endpoint includes physical incoming momentum, orbital influx and capture heat.
+//! [`RocketState::advance_with_inertial_capture_forced`] integrates held force
+//! and uniform gravity simultaneously, including their work and angular impulse.
 
 use super::{RocketError, RocketForcing, RocketState, RocketStep, mass_integrals, poll};
 use crate::Vec3;

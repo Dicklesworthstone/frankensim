@@ -5509,6 +5509,27 @@ intervals and depletion refusal, Galilean/datum transforms, and tiny-fraction
 and endpoint-rounding limits. Source files were parsed with Rustfmt; these new
 native regressions have not been executed in this dependency-limited session.
 
+### Inertial intake with simultaneous external loads
+
+`RocketState::advance_with_inertial_capture_forced` extends the existing
+inertial-intake owner with held force and uniform gravity. It integrates
+`M'=q`, `(M*v)'=q*u+F+M*g`, the capture position, and all mechanical exchanges
+over one accepted interval. Orbital influx follows the moving capture point;
+external angular impulse includes the continuously changing retained mass.
+Separate force/gravity work and nonnegative inelastic heat accompany the native
+endpoint. Heat uses positive relative-velocity moments, never a repaired energy
+residual; incoming internal energy and capture heat remain explicit material
+credits. Source inventory and incoming inertial velocity remain source-owned.
+
+Zero loads preserve the force-free calculation, zero rate gives ballistic
+forced motion, and cancellation/refusal publishes no state. Small-rate series
+retain near-balanced force/gravity response; the dominant-intake chart retains
+the original body's finite momentum and heat. G1/G3/G4 tests independently
+integrate the conservation laws and cover exact endpoint momentum, work/angular
+balances, interval composition, frame changes, limiting cases and rejection.
+Spin, finite-size attachment, outflow and time-varying loads remain outside this
+point-body operator.
+
 
 ## Passive release from supported payload inventory
 
