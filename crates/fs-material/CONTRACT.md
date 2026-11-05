@@ -410,7 +410,10 @@ power differences are factored; general exponents use the original deterministic
 math owner with a corrected logarithm and `expm1`. Nearly equal temperatures
 therefore retain their small heat transfer without subtracting absolute powers.
 The evaluation allocates no memory and exposes source parameters, tangents and
-the validity range to implicit thermal consumers.
+the validity range to implicit thermal consumers. The reference-plus-offset
+entry point preserves temperature differences below one ULP of the absolute
+reference; an error-free sum checks source bounds even when an invalid offset
+would otherwise round onto an accepted boundary.
 
 `entropy_production_w_k` reports `Q*(1/T_to - 1/T_from) >= 0`. This entropy
 account is not a second heat source: a finite thermal composition must debit

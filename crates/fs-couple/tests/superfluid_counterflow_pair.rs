@@ -10,6 +10,7 @@ use fs_couple::superfluid::counterflow_pair::advance_counterflow_heat_pair;
 use fs_duct::superfluid::{
     BoundaryVelocities, ChannelEnd, LinearizationLimits, MutualFriction, TwoFluidChannel,
 };
+use fs_material::superfluid::kapitza::{KapitzaInterface, KapitzaParameters};
 use fs_material::superfluid::{NormalViscousWall, TwoFluidProperties, TwoFluidState};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -137,11 +138,21 @@ fn thermal<'a>(
 fn contacts(g: [f64; 2]) -> [CounterflowThermalContact; 2] {
     [ChannelEnd::Left, ChannelEnd::Right].map(|end| {
         let i = usize::from(end == ChannelEnd::Right);
-        CounterflowThermalContact {
-            end,
-            cell: IDS[i],
-            conductance_w_k: g[i],
-        }
+        CounterflowThermalContact::linear(end, IDS[i], g[i])
+    })
+}
+fn kapitza_contacts(g_at_reference: [f64; 2]) -> [CounterflowThermalContact; 2] {
+    [ChannelEnd::Left, ChannelEnd::Right].map(|end| {
+        let i = usize::from(end == ChannelEnd::Right);
+        let law = KapitzaInterface::try_new(KapitzaParameters {
+            area_m2: 1.0,
+            coefficient_w_m2_k_n: g_at_reference[i] / (4.0 * T0.powi(3)),
+            exponent: 4.0,
+            min_temperature_k: 1.98,
+            max_temperature_k: 2.02,
+        })
+        .unwrap();
+        CounterflowThermalContact::kapitza(end, IDS[i], law)
     })
 }
 fn controls() -> CounterflowHeatControls {
@@ -389,7 +400,7 @@ fn both_original_latent_plateaux_accept_heat_without_fitted_capacity() {
     let report = advance_counterflow_heat_pair(
         &mut wave,
         &mut heat,
-        contacts([0.1, 0.3]),
+        kapitza_contacts([0.1, 0.3]),
         dt,
         MutualFriction::None,
         controls(),
@@ -552,7 +563,7 @@ fn early_iterative_and_final_cancellation_are_atomic_and_retryable() {
     advance_counterflow_heat_pair(
         &mut accepted_wave,
         &mut accepted_heat,
-        contacts([1.0; 2]),
+        kapitza_contacts([1.0; 2]),
         dt,
         MutualFriction::None,
         controls(),
@@ -571,7 +582,7 @@ fn early_iterative_and_final_cancellation_are_atomic_and_retryable() {
             advance_counterflow_heat_pair(
                 &mut wave,
                 &mut heat,
-                contacts([1.0; 2]),
+                kapitza_contacts([1.0; 2]),
                 dt,
                 MutualFriction::None,
                 controls(),
@@ -586,7 +597,7 @@ fn early_iterative_and_final_cancellation_are_atomic_and_retryable() {
         advance_counterflow_heat_pair(
             &mut wave,
             &mut heat,
-            contacts([1.0; 2]),
+            kapitza_contacts([1.0; 2]),
             dt,
             MutualFriction::None,
             controls(),
@@ -597,5 +608,82 @@ fn early_iterative_and_final_cancellation_are_atomic_and_retryable() {
             snapshot(&wave, &heat),
             snapshot(&accepted_wave, &accepted_heat)
         );
+    }
+}
+
+#[test]
+fn nonlinear_and_mixed_interfaces_recover_manufactured_joint_heat_powers() {
+    let caloric = laws(0.0);
+    for nonlinear_right in [false, true] {
+        let mut wave = channel(0.001, 0.0);
+        let dt = 0.4 * wave.maximum_step_s();
+        let (diagonal, cross) = impedance(dt);
+        let expected = [-0.005, 0.003];
+        let coefficient = [0.04, 0.025];
+        let g = coefficient.map(|c| 4.0 * c * T0.powi(3));
+        // Manufacture the INITIAL finite-cell energies from independently
+        // eliminated wave impedances and prescribed endpoint heat powers.
+        // This uses the quartic equation directly, not the material evaluator.
+        let theta: [f64; 2] = std::array::from_fn(|i| {
+            let fluid = T0 + 0.001 - diagonal * expected[i] - cross * expected[1 - i];
+            let solid_mid = if i == 0 || nonlinear_right {
+                (fluid.powi(4) - expected[i] / coefficient[i]).powf(0.25)
+            } else {
+                fluid - expected[i] / g[i]
+            };
+            solid_mid - T0 - dt * expected[i] / (2.0 * MASS[i] * CP[i])
+        });
+        let mut heat = thermal(
+            [&caloric[0], &caloric[1]],
+            std::array::from_fn(|i| theta[i] * CP[i]),
+            [0.0; 2],
+        );
+        let wave_before = wave.wave_energy_j().unwrap();
+        let heat_before = reference_heat_inventory(&wave) + heat.energy_j();
+        let mut ports = kapitza_contacts(g);
+        if !nonlinear_right {
+            ports[1] = contacts(g)[1];
+        }
+        ports.swap(0, 1);
+        let report = advance_counterflow_heat_pair(
+            &mut wave,
+            &mut heat,
+            ports,
+            dt,
+            MutualFriction::None,
+            controls(),
+            || false,
+        )
+        .unwrap();
+        let mut availability = wave.wave_energy_j().unwrap() - wave_before;
+        for i in 0..2 {
+            near(report.heat_outward_w[i], expected[i], 3e-13);
+            near(
+                report.channel_midpoint_temperature_k[i],
+                T0 + 0.001 - diagonal * expected[i] - cross * expected[1 - i],
+                1e-13,
+            );
+            let after_theta = heat.temperature_k(IDS[i]).unwrap() - T0;
+            near(
+                after_theta,
+                theta[i] + dt * expected[i] / (MASS[i] * CP[i]),
+                1e-13,
+            );
+            near(
+                report.contact_power_residual_w[i],
+                0.0,
+                controls().contact_power_tolerance_w,
+            );
+            assert!(report.contact_availability_loss_j[i] >= 0.0);
+            availability += 0.5 * MASS[i] * CP[i] / T0 * (after_theta.powi(2) - theta[i].powi(2))
+                + report.contact_availability_loss_j[i];
+        }
+        near(availability, 0.0, 2e-15);
+        near(
+            reference_heat_inventory(&wave) + heat.energy_j(),
+            heat_before,
+            2e-14,
+        );
+        near(report.channel.boundary_mass_kg, 0.0, 1e-20);
     }
 }

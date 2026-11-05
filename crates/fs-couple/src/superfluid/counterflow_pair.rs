@@ -25,8 +25,8 @@ use fs_duct::superfluid::{BodyForce, ChannelEnd, ChannelStep, MutualFriction, Tw
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation, EnergyAudit};
 
 use super::counterflow::{
-    CounterflowHeatControls, CounterflowHeatError, CounterflowThermalContact, admit_temperature,
-    check, nonnegative, positive, thermal_check,
+    CounterflowContactLaw, CounterflowHeatControls, CounterflowHeatError,
+    CounterflowThermalContact, admit_temperature, check, nonnegative, positive, thermal_check,
 };
 
 /// Explicit spatial dissipation destinations on the same finite thermal timeline.
@@ -43,12 +43,12 @@ pub struct CounterflowPairHeatStep {
     pub heat_to_thermal_j: [f64; 2],
     pub channel_midpoint_temperature_k: [f64; 2],
     pub thermal_midpoint_temperature_k: [f64; 2],
-    /// Q_i-G_i*(T_channel_mid_i-T_cell_mid_i), W.
+    /// Q_i minus the original interface law at both midpoint temperatures, W.
     pub contact_power_residual_w: [f64; 2],
     pub reference_heat_transfer_residual_j: f64,
     pub reference_entropy_transfer_residual_j_k: f64,
     pub wave_port_residual_j: f64,
-    /// Each interface's G_i*(delta T_mid_i)^2*dt/T0. These availability
+    /// Each interface's `law(T_channel_mid_i,T_cell_mid_i)*delta T_mid_i*dt/T0`. These availability
     /// losses are not extra caloric heat and are never deposited twice.
     pub contact_availability_loss_j: [f64; 2],
     /// Caloric probes per endpoint, each bounded by controls.max_iterations.
@@ -59,8 +59,9 @@ pub struct CounterflowPairHeatStep {
 ///
 /// Supply two contacts in either order, one per end, attached to DISTINCT cells
 /// of the same thermal simulation. Both cells must remain active with unchanged
-/// mass and material law over the interval. Zero conductance closes that heat
-/// port; one open contact reduces to the single-contact equations.
+/// mass and material law over the interval. Each end independently selects a
+/// linear or Kapitza interface. Zero linear conductance closes that heat port;
+/// one open contact reduces to the single-contact equations.
 ///
 /// The original wave owner supplies one reciprocal response. The bounded
 /// nonlinear iteration makes only scalar caloric probes, followed by one native
@@ -111,10 +112,12 @@ fn advance_pair_prepared<'a, T>(
     if contacts[0].end == ChannelEnd::Right {
         contacts.swap(0, 1);
     }
+    for contact in contacts {
+        contact.law.validate()?;
+    }
     if contacts[0].end != ChannelEnd::Left
         || contacts[1].end != ChannelEnd::Right
         || contacts[0].cell == contacts[1].cell
-        || !contacts.iter().all(|c| nonnegative(c.conductance_w_k))
         || channel.time_s() != thermal.time_s()
         || !(1..=128).contains(&controls.max_iterations)
         || !positive(controls.max_abs_heat_power_w)
@@ -138,6 +141,18 @@ fn advance_pair_prepared<'a, T>(
     ];
     for temperature in temperature_before {
         admit_temperature(temperature, t0, controls)?;
+    }
+    let channel_theta_before = [
+        channel.cell(0).unwrap().temperature_perturbation_k,
+        channel
+            .cell(channel.cells() - 1)
+            .unwrap()
+            .temperature_perturbation_k,
+    ];
+    for i in 0..2 {
+        contacts[i]
+            .law
+            .heat_w(t0, channel_theta_before[i], temperature_before[i] - t0)?;
     }
     let response =
         channel
@@ -188,16 +203,33 @@ fn advance_pair_prepared<'a, T>(
             temperature_after,
         })
     };
-    let conductance = contacts.map(|c| c.conductance_w_k);
-    let solution = solve_pair(
+    let laws = contacts.map(|c| c.law);
+    let mut solution = solve_pair(
         evaluate,
         response.reference_temperature_perturbation_k,
         response.temperature_heat_impedance_k_w,
-        conductance,
+        laws,
+        t0,
         controls,
     )?;
-    for point in solution.point {
+    let mut interface_power = [0.0; 2];
+    for (i, point) in solution.point.into_iter().enumerate() {
         admit_temperature(point.temperature_after, t0, controls)?;
+        interface_power[i] = laws[i].heat_w(t0, solution.channel_theta[i], point.thermal_theta)?;
+        solution.residual[i] = point.q - interface_power[i];
+        if solution.residual[i].abs() > controls.contact_power_tolerance_w {
+            return Err(CounterflowHeatError::Unresolved {
+                residual_w: solution.residual[i],
+                iterations: solution.probes[i],
+            });
+        }
+        // The channel temperature is unchanged by either friction stage;
+        // recover and admit the original wave endpoint from its midpoint.
+        laws[i].heat_w(
+            t0,
+            2.0 * solution.channel_theta[i] - channel_theta_before[i],
+            point.temperature_after - t0,
+        )?;
     }
     let q = solution.point.map(|point| point.q);
     let heat_j = q.map(|power| power * dt_s);
@@ -222,7 +254,7 @@ fn advance_pair_prepared<'a, T>(
                 + solution.channel_theta[1] / t0 * heat_j[1];
             let availability_loss = std::array::from_fn(|i| {
                 let delta = solution.channel_theta[i] - solution.point[i].thermal_theta;
-                dt_s * conductance[i] * delta * delta / t0
+                dt_s * interface_power[i] * delta / t0
             });
             if ![
                 heat_residual,
@@ -284,7 +316,8 @@ struct PairSolution {
 struct ContactEquations {
     reference: [f64; 2],
     resistance: [[f64; 2]; 2],
-    conductance: [f64; 2],
+    laws: [CounterflowContactLaw; 2],
+    reference_temperature_k: f64,
     minimum_slope: [f64; 2],
 }
 impl ContactEquations {
@@ -303,7 +336,12 @@ impl ContactEquations {
         let theta = self.reference[i]
             - self.resistance[i][i] * point.q
             - self.resistance[i][1 - i] * other_q;
-        let residual = point.q - self.conductance[i] * (theta - point.thermal_theta);
+        let residual = point.q
+            - self.laws[i].probe_heat_w(
+                self.reference_temperature_k,
+                theta,
+                point.thermal_theta,
+            )?;
         if residual.is_finite() && theta.is_finite() {
             Ok(residual)
         } else {
@@ -318,15 +356,23 @@ fn solve_pair(
     evaluate: impl Fn(usize, f64) -> Result<CaloricPoint, CounterflowHeatError>,
     reference: [f64; 2],
     resistance: [[f64; 2]; 2],
-    conductance: [f64; 2],
+    laws: [CounterflowContactLaw; 2],
+    reference_temperature_k: f64,
     controls: CounterflowHeatControls,
 ) -> Result<PairSolution, CounterflowHeatError> {
-    let minimum_slope = std::array::from_fn(|i| 1.0 + conductance[i] * resistance[i][i]);
+    let minimum_slope = std::array::from_fn(|i| laws[i].minimum_probe_slope(resistance[i][i]));
     for i in 0..2 {
-        let cross_slope = conductance[i] * resistance[i][1 - i];
+        let maximum_tangent = laws[i].maximum_tangent_w_k()?;
+        let diagonal_slope = 1.0 + maximum_tangent * resistance[i][i];
+        let cross_slope = maximum_tangent * resistance[i][1 - i];
+        // For any actual channel-side tangent g in [0,g_max], the scalar
+        // response map's derivative is bounded by g*R_ij/(1+g*R_ii).
+        // The finite caloric response only increases its denominator. This
+        // bound also covers numerical probes with a flat interface potential.
         if !positive(minimum_slope[i])
+            || !positive(diagonal_slope)
             || !nonnegative(cross_slope)
-            || minimum_slope[i] <= cross_slope
+            || diagonal_slope <= cross_slope
         {
             return Err(CounterflowHeatError::Invalid(
                 "paired thermal response must be finite and strictly diagonally dominant",
@@ -336,7 +382,8 @@ fn solve_pair(
     let equations = ContactEquations {
         reference,
         resistance,
-        conductance,
+        laws,
+        reference_temperature_k,
         minimum_slope,
     };
     let mut point = [evaluate(0, 0.0)?, evaluate(1, 0.0)?];
@@ -429,8 +476,9 @@ fn solve_coordinate(
     if initial_residual.abs() <= tolerance || *probes == controls.max_iterations {
         return Ok(initial);
     }
-    // F'_i >= 1+G_i*R_ii follows from the original caloric monotonicity.
-    // This bounds the scalar root from any admitted cached coordinate.
+    // The law's global probe slope and the original caloric monotonicity bound
+    // the scalar root from any admitted cached coordinate. For a nonlinear
+    // interface this includes flat numerical continuation at its domain edges.
     let bound = (initial.q - initial_residual / equations.minimum_slope[i]).clamp(
         -controls.max_abs_heat_power_w,
         controls.max_abs_heat_power_w,

@@ -2,7 +2,7 @@
 //!
 //! cargo run -p fs-couple --features superfluid --example superfluid_heat_link
 //!
-//! Helium is the sourced 1.8 K SVP reference. Geometry, interface conductances
+//! Helium is the sourced 1.8 K SVP reference. Geometry, Kapitza coefficients
 //! and finite-cell calorics are authored examples, not an apparatus calibration.
 //! Transverse Stokes modes retain normal-profile memory and kinetic energy.
 //! Explicit local caloric receivers collect distributed dissipation. Their
@@ -13,6 +13,7 @@ use fs_couple::superfluid::counterflow_pair::dissipation::advance_counterflow_he
 use fs_duct::superfluid::{ChannelEnd, LinearizationLimits, MutualFriction, TwoFluidChannel};
 use fs_material::superfluid::NormalViscousSpectrum;
 use fs_material::superfluid::helium::HeliumSvpReference;
+use fs_material::superfluid::kapitza::{KapitzaInterface, KapitzaParameters};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalStorageBasis,
@@ -22,7 +23,7 @@ use fs_thermal::enthalpy::{
 const T0: f64 = 1.8;
 const MASS: f64 = 1e-9;
 const CP: f64 = 1.0;
-const G: f64 = 1e-8;
+const INTERFACE_COEFFICIENT_W_M2_K4: f64 = 135.0;
 const THETA: f64 = 0.001;
 const CELLS: usize = 48;
 const LENGTH: f64 = 1.0;
@@ -56,6 +57,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         NormalViscousSpectrum::circular_capillary(material, RADIUS, RESOLVED_PROFILE_MODES)?;
     let wall = spectrum.wall();
     let area = core::f64::consts::PI * RADIUS * RADIUS;
+    // Authored surface coefficient and actual endpoint area. This example
+    // exercises nonlinear boundary transfer; it is not a surface calibration.
+    let interface = KapitzaInterface::try_new(KapitzaParameters {
+        area_m2: area,
+        coefficient_w_m2_k_n: INTERFACE_COEFFICIENT_W_M2_K4,
+        exponent: 4.0,
+        min_temperature_k: 1.79,
+        max_temperature_k: 1.81,
+    })?;
+    let reference_conductance = interface.tangent_from_w_k(T0)?;
     let mut channel = TwoFluidChannel::try_new_with_normal_profile(
         material,
         LENGTH,
@@ -71,12 +82,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Independent steady two-fluid equations: mu'=p'/rho-s*T'=0,
     // gamma*vn=-rho*s*grad(T'), q=rho*s*T0*vn at zero mass current.
     // The explicit ports sit at the end cells, with N-1 resolved dual volumes.
+    // Only this initialization uses the reference interface tangent; every
+    // transient step solves both original nonlinear surface laws together.
     let gamma = material.normal_viscosity_pa_s() / wall.permeability_m2();
     let entropy_density = material.density_kg_m3() * material.entropy_j_kg_k();
     let conductivity = entropy_density * entropy_density * T0 / gamma;
     let resolved_length = LENGTH * (CELLS - 1) as f64 / CELLS as f64;
-    let initial_power = 2.0 * THETA / (2.0 / G + resolved_length / (conductivity * area));
-    let left_theta = THETA - initial_power / G;
+    let initial_power =
+        2.0 * THETA / (2.0 / reference_conductance + resolved_length / (conductivity * area));
+    let left_theta = THETA - initial_power / reference_conductance;
     let temperature: Vec<_> = (0..CELLS)
         .map(|i| left_theta * (1.0 - 2.0 * i as f64 / (CELLS - 1) as f64))
         .collect();
@@ -155,10 +169,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
     let mut thermal = original.advance_to(0.0, thermal_config, || Ok(()))?.0;
-    let contacts = [ChannelEnd::Left, ChannelEnd::Right].map(|end| CounterflowThermalContact {
-        end,
-        cell: IDS[usize::from(end == ChannelEnd::Right)],
-        conductance_w_k: G,
+    let contacts = [ChannelEnd::Left, ChannelEnd::Right].map(|end| {
+        CounterflowThermalContact::kapitza(
+            end,
+            IDS[usize::from(end == ChannelEnd::Right)],
+            interface,
+        )
     });
     let controls = CounterflowHeatControls {
         thermal: thermal_config,
@@ -179,7 +195,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "normal_relaxation_rate_per_s={:.9e}",
         material.normal_wall_decay_rate_s_inv(wall)?
     );
-    println!("initial_steady_heat_power_W={initial_power:.9e}");
+    println!("authored_kapitza_coefficient_W_m2_K4={INTERFACE_COEFFICIENT_W_M2_K4}");
+    println!("interface_area_m2={area:.9e}, reference_tangent_W_K={reference_conductance:.9e}");
+    println!("linearized_initial_heat_power_W={initial_power:.9e}");
     println!("resolved_transverse_modes={RESOLVED_PROFILE_MODES}, matched_tail_modes=1");
     println!("time_s,heater_K,sink_K,heat_from_heater_W,heat_to_sink_W");
     for step in 0..1000 {

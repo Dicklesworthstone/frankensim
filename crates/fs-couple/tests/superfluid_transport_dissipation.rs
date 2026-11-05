@@ -7,6 +7,7 @@ use fs_couple::superfluid::counterflow_pair::dissipation::{
     CounterflowDissipationStep, advance_counterflow_heat_pair_with_dissipation,
 };
 use fs_duct::superfluid::{ChannelEnd, LinearizationLimits, MutualFriction, TwoFluidChannel};
+use fs_material::superfluid::kapitza::{KapitzaInterface, KapitzaParameters};
 use fs_material::superfluid::{
     NormalViscousSpectrum, NormalViscousWall, TwoFluidProperties, TwoFluidState,
 };
@@ -151,10 +152,8 @@ fn thermal<'a>(laws: &'a [Caloric; 4], sources: [f64; 4]) -> DepositionSimulatio
     .0
 }
 fn contacts() -> [CounterflowThermalContact; 2] {
-    [ChannelEnd::Left, ChannelEnd::Right].map(|end| CounterflowThermalContact {
-        end,
-        cell: IDS[usize::from(end == ChannelEnd::Right)],
-        conductance_w_k: 0.2,
+    [ChannelEnd::Left, ChannelEnd::Right].map(|end| {
+        CounterflowThermalContact::linear(end, IDS[usize::from(end == ChannelEnd::Right)], 0.2)
     })
 }
 fn advance(
@@ -223,15 +222,43 @@ fn snapshot(channel: &TwoFluidChannel, thermal: &DepositionSimulation<'_>) -> Ve
 fn finite_contacts_and_distributed_native_calorics_receive_each_transfer_once() {
     let laws = CP.map(|cp| Caloric { cp, upper: 1.0 });
     let sources = [1e-5, -2e-5, 1e-6, 2e-6];
-    for profile in [false, true] {
+    for (profile, nonlinear) in [(false, false), (false, true), (true, false), (true, true)] {
         let mut wave = channel(profile);
         let mut heat = thermal(&laws, sources);
+        let mut ports = contacts();
+        if nonlinear {
+            let interface = KapitzaInterface::try_new(KapitzaParameters {
+                area_m2: 1.0,
+                coefficient_w_m2_k_n: 0.00625,
+                exponent: 4.0,
+                min_temperature_k: 1.98,
+                max_temperature_k: 2.02,
+            })
+            .unwrap();
+            ports = [ChannelEnd::Left, ChannelEnd::Right].map(|end| {
+                CounterflowThermalContact::kapitza(
+                    end,
+                    IDS[usize::from(end == ChannelEnd::Right)],
+                    interface,
+                )
+            });
+        }
         let mut total_loss = 0.0;
         for _ in 0..20 {
             let h = IDS.map(|id| heat.cells()[&id].specific_h_j_kg);
             let temperatures = IDS.map(|id| heat.temperature_k(id).unwrap());
             let before_energy = heat.energy_j();
-            let report = advance(&mut wave, &mut heat, &IDS[2..], || false).unwrap();
+            let report = advance_counterflow_heat_pair_with_dissipation(
+                &mut wave,
+                &mut heat,
+                ports,
+                &IDS[2..],
+                DT,
+                MutualFriction::Linear { gamma_kg_m3_s: 3.0 },
+                controls(),
+                || false,
+            )
+            .unwrap();
             let pair = report.contacts;
             let spatial: Vec<_> = wave.last_dissipated_heat_j().collect();
             let loss: f64 = spatial.iter().sum();
@@ -248,11 +275,13 @@ fn finite_contacts_and_distributed_native_calorics_receive_each_transfer_once() 
                 if i < 2 {
                     let midpoint = 0.5 * (temperatures[i] + heat.temperature_k(IDS[i]).unwrap());
                     near(pair.thermal_midpoint_temperature_k[i], midpoint, 2e-14);
-                    near(
-                        pair.heat_outward_w[i],
-                        0.2 * (pair.channel_midpoint_temperature_k[i] - midpoint),
-                        2e-13,
-                    );
+                    let fluid = pair.channel_midpoint_temperature_k[i];
+                    let power = if nonlinear {
+                        0.00625 * (fluid.powi(4) - midpoint.powi(4))
+                    } else {
+                        0.2 * (fluid - midpoint)
+                    };
+                    near(pair.heat_outward_w[i], power, 2e-13);
                 }
             }
             let contact_heat: f64 = pair.heat_to_thermal_j.iter().sum();

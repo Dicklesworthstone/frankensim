@@ -7,6 +7,7 @@ use fs_couple::superfluid::counterflow::{
     advance_counterflow_heat,
 };
 use fs_duct::superfluid::{ChannelEnd, LinearizationLimits, MutualFriction, TwoFluidChannel};
+use fs_material::superfluid::kapitza::{KapitzaInterface, KapitzaParameters};
 use fs_material::superfluid::{TwoFluidProperties, TwoFluidState};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
@@ -121,11 +122,17 @@ fn controls() -> CounterflowHeatControls {
     }
 }
 fn contact(end: ChannelEnd, conductance: f64) -> CounterflowThermalContact {
-    CounterflowThermalContact {
-        end,
-        cell: ID,
-        conductance_w_k: conductance,
-    }
+    CounterflowThermalContact::linear(end, ID, conductance)
+}
+fn kapitza(coefficient: f64, bounds: [f64; 2]) -> KapitzaInterface {
+    KapitzaInterface::try_new(KapitzaParameters {
+        area_m2: 1.0,
+        coefficient_w_m2_k_n: coefficient,
+        exponent: 4.0,
+        min_temperature_k: bounds[0],
+        max_temperature_k: bounds[1],
+    })
+    .unwrap()
 }
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!(
@@ -431,7 +438,8 @@ fn early_mid_solve_and_final_cancellation_are_atomic_and_retryable() {
         cubic: 10.0,
         bound: 0.2,
     };
-    let port = contact(ChannelEnd::Left, 1.0);
+    let port =
+        CounterflowThermalContact::kapitza(ChannelEnd::Left, ID, kapitza(0.03, [1.98, 2.02]));
     let mut accepted_wave = channel(0.0, -0.03);
     let mut accepted_heat = thermal(&law, 0.04, 0.0);
     let dt = 0.4 * accepted_wave.maximum_step_s();
@@ -484,5 +492,212 @@ fn early_mid_solve_and_final_cancellation_are_atomic_and_retryable() {
             snapshot(&wave, &heat),
             snapshot(&accepted_wave, &accepted_heat)
         );
+    }
+}
+
+#[test]
+fn quartic_interface_and_finite_calorics_match_independent_implicit_equations() {
+    let caloric = Caloric {
+        cubic: 0.0,
+        bound: 0.2,
+    };
+    let coefficient = 0.125;
+    let interface = kapitza(coefficient, [1.98, 2.02]);
+    for end in [ChannelEnd::Left, ChannelEnd::Right] {
+        for solid_theta in [-0.01, 0.01] {
+            let mut wave = channel(0.0, 0.0);
+            let mut heat = thermal(&caloric, CP * solid_theta, 0.0);
+            let dt = 0.4 * wave.maximum_step_s();
+            // Independent elimination of the two-cell second-sound system.
+            // No production interface evaluation or endpoint response is used.
+            let r = 6.0 * dt * dt;
+            let impedance = dt * (1.0 + r) / (0.64 * (1.0 + 2.0 * r));
+            let residual = |q: f64| {
+                let fluid = T0 - impedance * q;
+                let solid = T0 + solid_theta + dt * q / (2.0 * MASS * CP);
+                q - coefficient * (fluid.powi(4) - solid.powi(4))
+            };
+            let (mut low, mut high) = (-0.1, 0.1);
+            assert!(residual(low) < 0.0 && residual(high) > 0.0);
+            for _ in 0..80 {
+                let middle = 0.5 * (low + high);
+                if residual(middle) < 0.0 {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            let expected = 0.5 * (low + high);
+            let report = advance_counterflow_heat(
+                &mut wave,
+                &mut heat,
+                CounterflowThermalContact::kapitza(end, ID, interface),
+                dt,
+                MutualFriction::None,
+                controls(),
+                || false,
+            )
+            .unwrap();
+            near(report.heat_outward_w, expected, 2e-13);
+            near(
+                heat.temperature_k(ID).unwrap(),
+                T0 + solid_theta + expected * dt / (MASS * CP),
+                1e-13,
+            );
+            near(
+                report.channel_midpoint_temperature_k,
+                T0 - impedance * expected,
+                1e-13,
+            );
+            near(entropy_inventory(&wave), -expected * dt, 1e-14);
+            near(report.heat_intake.external_heat_j, expected * dt, 1e-14);
+            assert!(report.contact_availability_loss_j >= 0.0);
+            let final_theta = heat.temperature_k(ID).unwrap() - T0;
+            let availability = wave.wave_energy_j().unwrap()
+                + 0.5 * MASS * CP / T0 * (final_theta.powi(2) - solid_theta.powi(2));
+            near(
+                availability + report.contact_availability_loss_j,
+                0.0,
+                1e-15,
+            );
+            let tangent_q = -4.0 * coefficient * T0.powi(3) * solid_theta
+                / (1.0 + 4.0 * coefficient * T0.powi(3) * (impedance + dt / (2.0 * MASS * CP)));
+            assert!(
+                (report.heat_outward_w - tangent_q).abs() > 1e-6,
+                "the nonlinear interface must not freeze the reference tangent"
+            );
+        }
+    }
+}
+
+#[test]
+fn temporary_kapitza_domain_probes_do_not_replace_final_physical_admission() {
+    let caloric = Caloric {
+        cubic: 0.0,
+        bound: 10.0,
+    };
+    let mut wave = channel(0.0, 0.0);
+    let mut heat = thermal(&caloric, CP * 0.007, 0.0);
+    let dt = 0.4 * wave.maximum_step_s();
+    let interface = kapitza(3.0, [1.99, 2.01]);
+    let first_probe_q = 3.0 * (T0.powi(4) - (T0 + 0.007).powi(4));
+    assert!(T0 + 0.007 + dt * first_probe_q / (2.0 * MASS * CP) < 1.99);
+    let report = advance_counterflow_heat(
+        &mut wave,
+        &mut heat,
+        CounterflowThermalContact::kapitza(ChannelEnd::Left, ID, interface),
+        dt,
+        MutualFriction::None,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert!((1.99..=2.01).contains(&heat.temperature_k(ID).unwrap()));
+    near(
+        report.contact_power_residual_w,
+        0.0,
+        controls().contact_power_tolerance_w,
+    );
+
+    // Both initial temperatures and the solved midpoint are in this narrower
+    // range, but the finite cell's final temperature is outside it. A midpoint
+    // check alone would incorrectly publish this step.
+    assert!(heat.temperature_k(ID).unwrap() < 1.999);
+    assert!(report.thermal_midpoint_temperature_k > 1.999);
+    let mut refused_wave = channel(0.0, 0.0);
+    let mut refused_heat = thermal(&caloric, CP * 0.007, 0.0);
+    let before = snapshot(&refused_wave, &refused_heat);
+    assert!(matches!(
+        advance_counterflow_heat(
+            &mut refused_wave,
+            &mut refused_heat,
+            CounterflowThermalContact::kapitza(ChannelEnd::Left, ID, kapitza(3.0, [1.999, 2.01])),
+            dt,
+            MutualFriction::None,
+            controls(),
+            || false,
+        ),
+        Err(CounterflowHeatError::Interface(_))
+    ));
+    assert_eq!(snapshot(&refused_wave, &refused_heat), before);
+    advance_counterflow_heat(
+        &mut refused_wave,
+        &mut refused_heat,
+        CounterflowThermalContact::kapitza(ChannelEnd::Left, ID, interface),
+        dt,
+        MutualFriction::None,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(
+        snapshot(&refused_wave, &refused_heat),
+        snapshot(&wave, &heat)
+    );
+}
+
+#[test]
+fn sub_ulp_wave_temperature_still_drives_the_original_heat_port() {
+    let caloric = Caloric {
+        cubic: 0.0,
+        bound: 0.2,
+    };
+    let theta = 1e-17;
+    let conductance = 0.7;
+    assert_eq!(
+        T0 + theta,
+        T0,
+        "fixture is below the absolute-temperature ULP"
+    );
+    let mut c = controls();
+    c.contact_power_tolerance_w = 1e-30;
+    c.cell_energy_tolerance_j = 1e-30;
+    c.transfer_energy_tolerance_j = 1e-30;
+    let mut reference_wave = channel(theta, 0.0);
+    let mut reference_heat = thermal(&caloric, 0.0, 0.0);
+    let dt = 0.4 * reference_wave.maximum_step_s();
+    let expected = advance_counterflow_heat(
+        &mut reference_wave,
+        &mut reference_heat,
+        contact(ChannelEnd::Left, conductance),
+        dt,
+        MutualFriction::None,
+        c,
+        || false,
+    )
+    .unwrap();
+    assert!(expected.heat_outward_w > 0.0);
+    for exponent in [1.0, 4.0] {
+        let interface = KapitzaInterface::try_new(KapitzaParameters {
+            area_m2: 1.0,
+            coefficient_w_m2_k_n: conductance / (exponent * T0.powf(exponent - 1.0)),
+            exponent,
+            min_temperature_k: 1.8,
+            max_temperature_k: 2.2,
+        })
+        .unwrap();
+        let mut wave = channel(theta, 0.0);
+        let mut heat = thermal(&caloric, 0.0, 0.0);
+        let actual = advance_counterflow_heat(
+            &mut wave,
+            &mut heat,
+            CounterflowThermalContact::kapitza(ChannelEnd::Left, ID, interface),
+            dt,
+            MutualFriction::None,
+            c,
+            || false,
+        )
+        .unwrap();
+        // n=1 is exactly the linear law. At n=4 the nonlinear correction here
+        // is below f64 precision, so the original local tangent is the oracle.
+        assert!(actual.heat_outward_w > 0.0);
+        near(actual.heat_outward_w, expected.heat_outward_w, 2e-30);
+        near(actual.heat_to_thermal_j, expected.heat_to_thermal_j, 1e-31);
+        for (actual, expected) in snapshot(&wave, &heat)
+            .into_iter()
+            .zip(snapshot(&reference_wave, &reference_heat))
+        {
+            near(actual, expected, 1e-27);
+        }
     }
 }

@@ -70,6 +70,72 @@ fn one_ulp_temperature_difference_retains_differential_heat_transfer() {
 }
 
 #[test]
+fn reference_offsets_preserve_heat_below_an_absolute_temperature_ulp() {
+    let reference = 1.8_f64;
+    for n in [1.0, 3.0, 3.5, 4.0] {
+        let law = KapitzaInterface::try_new(parameters(n)).unwrap();
+        for offset in [1e-18, 1e-100, 1e-300] {
+            assert_eq!(reference + offset, reference);
+            let expected = 0.25 * n * reference.powf(n - 1.0) * offset;
+            let power = law
+                .heat_flow_about_reference_w(reference, offset, 0.0)
+                .unwrap();
+            assert!(power > 0.0);
+            close(power, expected, 2e-13);
+            assert_eq!(
+                law.heat_flow_about_reference_w(reference, 0.0, offset)
+                    .unwrap(),
+                -power,
+            );
+        }
+        let from = 0.1_f64;
+        let to = -0.2_f64;
+        close(
+            law.heat_flow_about_reference_w(reference, from, to)
+                .unwrap(),
+            law.heat_flow_w(reference + from, reference + to).unwrap(),
+            2e-13,
+        );
+    }
+    let law = KapitzaInterface::try_new(parameters(3.5)).unwrap();
+    assert!(
+        law.heat_flow_about_reference_w(2.0, f64::from_bits(1), 0.0)
+            .unwrap()
+            > 0.0
+    );
+}
+
+#[test]
+fn sub_ulp_offsets_cannot_round_an_invalid_temperature_onto_a_source_boundary() {
+    let law = KapitzaInterface::try_new(parameters(4.0)).unwrap();
+    let tiny = 1e-20;
+    assert_eq!(0.25 - tiny, 0.25);
+    assert_eq!(4.0 + tiny, 4.0);
+    assert!(law.heat_flow_about_reference_w(0.25, -tiny, 0.0).is_err());
+    assert!(law.heat_flow_about_reference_w(4.0, 0.0, tiny).is_err());
+    assert!(law.heat_flow_about_reference_w(0.25, tiny, 0.0).unwrap() > 0.0);
+    assert!(law.heat_flow_about_reference_w(4.0, 0.0, -tiny).unwrap() > 0.0);
+    // A common reference outside the source range is allowed when the actual
+    // two temperatures, retained as compensated sums, are both inside.
+    close(
+        law.heat_flow_about_reference_w(5.0, -3.0, -4.0).unwrap(),
+        3.75,
+        2e-15,
+    );
+    for reference in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(
+            law.heat_flow_about_reference_w(reference, 0.0, 0.0)
+                .is_err()
+        );
+    }
+    assert!(law.heat_flow_about_reference_w(2.0, f64::NAN, 0.0).is_err());
+    assert!(
+        law.heat_flow_about_reference_w(2.0, 0.0, f64::INFINITY)
+            .is_err()
+    );
+}
+
+#[test]
 fn interface_area_and_source_coefficient_scale_actual_power() {
     let p = parameters(3.5);
     let law = KapitzaInterface::try_new(p).unwrap();

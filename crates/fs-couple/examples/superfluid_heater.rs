@@ -92,11 +92,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     let mut thermal = initial.advance_to(0.0, thermal_config, || Ok(()))?.0;
     let initial_energy = thermal.energy_j();
-    let contact = CounterflowThermalContact {
-        end: ChannelEnd::Left,
-        cell: ID,
-        conductance_w_k: 0.002,
-    };
+    let contact = CounterflowThermalContact::linear(ChannelEnd::Left, ID, 0.002);
     let controls = CounterflowHeatControls {
         thermal: thermal_config,
         max_iterations: 64,

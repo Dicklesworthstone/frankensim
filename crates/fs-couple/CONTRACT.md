@@ -32234,3 +32234,45 @@ actual driven receiver slopes, not a spectral-completeness or continuum-error
 claim. G1/G3/G4/G5 regressions exercise an analytic dark Maxwell mode, full
 coupled frequency differences, differentiated physical work, unchanged primal
 responses, phase-dependent forcing, zero-force crossings, budgets and cancellation.
+
+## Nonlinear helium–solid thermal interfaces
+
+The `superfluid` single-contact, paired-contact and distributed-dissipation
+compositions accept `CounterflowContactLaw::Kapitza` alongside explicitly linear
+interfaces. `CounterflowThermalContact::kapitza` consumes the original immutable
+`fs_material::superfluid::kapitza::KapitzaInterface`: actual area, coefficient,
+exponent and absolute-temperature domain remain caller-supplied. Each endpoint
+may select its own law. `CounterflowThermalContact::linear` retains constant
+conductance, including an exactly closed zero-conductance port.
+
+The nonlinear heat powers satisfy the original law at BOTH finite midpoint
+temperatures, together with the full reciprocal channel response and the native
+caloric charts, including latent plateaux. Root probes use a monotone flat
+continuation at interface temperature bounds; this is numerical bracketing only.
+Within the admitted domain, the material law consumes reference temperature
+and the original perturbations separately, preserving heat transport even when
+their difference is smaller than one absolute-temperature floating-point ULP.
+The original unmodified material law must admit both sides at the initial,
+midpoint and final states before either owner publishes. No clipped temperature
+or extrapolated coefficient becomes accepted physics. Scalar root work remains
+bounded and uses O(1) caloric/interface probes; it introduces no repeated wave
+or thermal-network solves. The paired convergence bound uses the largest
+channel-side interface tangent over its declared temperature domain.
+
+Boundary heat and entropy remain the original reference-state `Q` and `Q/T0`.
+Interface wave-availability loss is `H(T_channel,T_cell)*(T_channel-T_cell)*dt/T0`,
+where `H` is the selected constitutive law; it is nonnegative and is not deposited
+as additional heat. Distributed viscous/vortex dissipation still enters only its
+explicit native caloric destinations. Frozen small-signal helium properties,
+first-order network splitting and the separate wave/reference-heat accounts
+remain unchanged; this does not supply a nonlinear bulk helium EOS or phase
+transition dynamics.
+
+Focused G1/G3/G4 tests independently eliminate the two-cell wave equations,
+recover manufactured nonlinear and mixed-interface heat powers, close finite
+heat/availability balances, exercise bounded-domain probes and final-state
+refusals, and verify cancellation/retry with profile memory and both heat
+intakes. `superfluid_heat_link` now runs a sourced 1.8 K helium channel between
+finite caloric cells through authored quartic interfaces, with normal-profile
+memory and explicit distributed heat receivers. Its surface coefficient and
+geometry are illustrative inputs, not an experimental apparatus calibration.

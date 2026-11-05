@@ -138,12 +138,46 @@ impl KapitzaInterface {
     pub fn heat_flow_w(&self, from_k: f64, to_k: f64) -> Result<f64, MaterialError> {
         self.admit_temperature(from_k)?;
         self.admit_temperature(to_k)?;
-        if from_k == to_k {
+        self.heat_from_difference_w(from_k, to_k, from_k - to_k)
+    }
+
+    /// Heat power between temperatures represented as a common reference plus
+    /// separate perturbations [K]. This preserves differences smaller than one
+    /// ULP of the absolute temperature, as carried by small-signal wave owners.
+    /// The reference must be positive finite; it need not itself be in range
+    /// if both resulting temperatures are. An error-free sum also checks the
+    /// source bounds, so an out-of-range offset cannot round onto a valid edge.
+    pub fn heat_flow_about_reference_w(
+        &self,
+        reference_k: f64,
+        from_perturbation_k: f64,
+        to_perturbation_k: f64,
+    ) -> Result<f64, MaterialError> {
+        if !positive(reference_k)
+            || !from_perturbation_k.is_finite()
+            || !to_perturbation_k.is_finite()
+        {
+            return Err(invalid(
+                "Kapitza reference and perturbations must be finite; reference > 0",
+            ));
+        }
+        let from = self.temperature_about_reference(reference_k, from_perturbation_k)?;
+        let to = self.temperature_about_reference(reference_k, to_perturbation_k)?;
+        self.heat_from_difference_w(from, to, from_perturbation_k - to_perturbation_k)
+    }
+
+    fn heat_from_difference_w(
+        &self,
+        from_k: f64,
+        to_k: f64,
+        difference_k: f64,
+    ) -> Result<f64, MaterialError> {
+        if difference_k == 0.0 {
             return Ok(0.0);
         }
         let hot = from_k.max(to_k);
         let cold = from_k.min(to_k);
-        let delta = hot - cold;
+        let delta = difference_k.abs();
         let ratio = cold / hot;
         let n = self.parameters.exponent;
         // Divide the secant by the hot-side tangent: this factor is in [1/n,1].
@@ -155,7 +189,11 @@ impl KapitzaInterface {
             4.0 => 0.25 * (1.0 + ratio) * (1.0 + ratio * ratio),
             _ => {
                 let relative_delta = delta / hot;
-                if relative_delta == 1.0 {
+                if relative_delta == 0.0 {
+                    // A subnormal offset can underflow when divided by T0;
+                    // the secant still tends to the finite differential law.
+                    1.0
+                } else if relative_delta >= 1.0 {
                     1.0 / n
                 } else {
                     // log1p(-relative_delta), corrected for rounding in 1-d.
@@ -174,7 +212,11 @@ impl KapitzaInterface {
         if !magnitude.is_finite() || magnitude < 0.0 {
             return Err(invalid("Kapitza heat transfer is unrepresentable"));
         }
-        Ok(if from_k > to_k { magnitude } else { -magnitude })
+        Ok(if difference_k > 0.0 {
+            magnitude
+        } else {
+            -magnitude
+        })
     }
 
     /// Nonnegative irreversible interface entropy production [W/K],
@@ -199,6 +241,29 @@ impl KapitzaInterface {
             Err(invalid(
                 "Kapitza interface temperature is outside its declared range",
             ))
+        }
+    }
+
+    fn temperature_about_reference(
+        &self,
+        reference_k: f64,
+        perturbation_k: f64,
+    ) -> Result<f64, MaterialError> {
+        let temperature = reference_k + perturbation_k;
+        self.admit_temperature(temperature)?;
+        // TwoSum retains the rounding residual even for a sub-ULP offset at
+        // an exact source boundary. Only the range check needs this low part.
+        let recovered_offset = temperature - reference_k;
+        let residual =
+            (reference_k - (temperature - recovered_offset)) + (perturbation_k - recovered_offset);
+        if (temperature == self.parameters.min_temperature_k && residual < 0.0)
+            || (temperature == self.parameters.max_temperature_k && residual > 0.0)
+        {
+            Err(invalid(
+                "Kapitza interface offset is outside its declared range",
+            ))
+        } else {
+            Ok(temperature)
         }
     }
 }
