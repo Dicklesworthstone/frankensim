@@ -1418,7 +1418,15 @@ Invalid probes/growth, singular zero-core encounters, or unrepresentable outputs
 return `None`. A positive-core axis has finite nonzero vorticity even when its
 segment velocity vanishes. G2 tests compare derivatives to the independently
 differenced whole field and check zero off-source curl for a closed inviscid
-sheet. This exact near-source API does not differentiate multipole far cells.
+sheet. `WakeKinematics::strain_rate` exposes the symmetric velocity-gradient
+part, while `vorticity_stretching` evaluates the inviscid
+`(omega . grad)u` stretching/tilting term and `enstrophy_production_rate`
+returns `omega . S omega`. These are allocation-free algebraic diagnostics
+of the same analytic Jacobian: they add no finite-difference scale, source
+sweep, circulation mutation, core update or claim of a complete 3-D viscous
+vorticity integrator. Rigid rotation produces no enstrophy, while resolved
+strain can stretch or tilt vorticity with the expected inverse-time powers.
+This exact near-source API does not differentiate multipole far cells.
 
 `FarCell::exact_kinematics`, `FarField::exact_kinematics` and
 `hybrid_kinematics` extend the same analytic velocity/Jacobian through retained
