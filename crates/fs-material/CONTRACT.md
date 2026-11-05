@@ -1,5 +1,58 @@
 # fs-material — CONTRACT
 
+## Bulk brittle crack bands through the original cohesive history
+
+`brittle::BrittleCrackBand` composes isotropic small-strain elasticity with the
+original mixed-mode `BilinearCohesive` owner on an explicitly supplied fixed
+plane and band width `h`. A positive plane-stress remainder retains in-plane
+elasticity. Three work-conjugate band coordinates carry normal opening and
+the two shears; their intact stiffnesses are `(lambda+2*mu)/h` and `mu/h`.
+The normal coordinate includes the elastic Poisson correction. Intact stress
+and tangent recover the original three-dimensional elastic law, including
+auxetic backbones. No spectral tensile-strain split or inferred crack direction
+is used. The normal coordinate is not a measured geometric face gap.
+
+The original cohesive law owns quadratic initiation, frozen-onset BK mode
+mix, irreversible damage, unloading, softening tangents and analytic path
+work. Complete failure removes tensile and shear transfer across the chosen
+plane while retaining in-plane elasticity and compressive normal response.
+Its fracture work per volume is the original work per area divided by `h`;
+pure-mode complete failure spends exactly `Gc/h`. Construction refuses bands
+whose elastic initiation energy leaves no positive softening interval. Width
+scaling regularizes this declared band experiment; it is not a general mesh-
+or orientation-independent crack-growth theorem. Positive local softening
+does not rule out structural snap-back; the original solver retains its
+nonconvergence/refusal and displacement-control boundaries.
+
+`small_strain_law` borrows the immutable prepared owner for existing generic
+solid solvers. Each state retains its original law, strain and cohesive history;
+rejected trials never publish history. The checked `trial` returns stress,
+the classical tangent where it exists, a selected branch tangent, storage,
+fracture work and the energy defect. The legacy infallible trait signals
+refusals with nonfinite responses. Mixed-mode initiation can have a
+nonsymmetric tangent and advertises that fact to the native linear solver.
+Prepared mappings and point updates use fixed-size arrays without per-point
+law/table clones or heap allocation.
+
+`brittle::source` retains a complete `ResolvedMaterialStatePoint`, including
+other physics properties, while requiring explicit brittle tensile/shear
+strength, mode-I/mode-II fracture energy and BK exponent alongside E and nu.
+Only fixed supported external conditions are admitted. No modulus-of-rupture,
+hardness, yield stress, surface energy or material-name default supplies an
+absent fracture datum. A newly resolved temperature cannot replace the law
+under an existing history. Source uncertainty and selection receipts survive;
+they do not establish a statistical breaking probability. Without calibration,
+the model card retains an unbounded model-form discrepancy.
+
+This is a fixed-plane, small-strain constitutive estimate, without automatic
+crack nucleation, multiple crack families, evolving crack geometry, fragment
+creation, finite rotations, frictional recontact, thermal-history transfer or
+experimental calibration. Existing separated-interface/contact owners retain
+those responsibilities. G0/G1/G3 regressions specify intact elasticity, pure-
+mode fracture energy, width scaling, unloading/reclosure, rotation, consistent
+tangents and source/owner/domain refusals. The broader MR63 fragment-transfer
+acceptance remains open.
+
 ## Source-bound isotropic tensile limit
 
 `strength::IsotropicTensileLimit` binds one explicitly named pressure-valued

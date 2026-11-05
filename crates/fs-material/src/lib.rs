@@ -23,6 +23,8 @@ pub mod adsorption;
 pub mod aqueous_adsorption;
 /// Source-bound monotonic axial comparisons from reported tensile/compression moduli.
 pub mod axial_reference;
+/// Energy-regularized brittle crack bands using the native cohesive history.
+pub mod brittle;
 /// Bounded compression references from original nominal stress/strain observations.
 pub mod compression_reference;
 pub mod calibrate;
