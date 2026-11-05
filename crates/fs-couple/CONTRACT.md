@@ -32651,3 +32651,28 @@ is atomic prescribed-velocity control, not an inferred mass-flow balance.
 The native integration regressions exercise paired signed histories in distinct
 frames, later-history and native-kind refusals, selected versus unselected
 profile authority, empty selections and cancellation.
+
+### Quadratic opening motion in causal full-field reaction
+
+`CausalInteriorTime::new_with_boundary_sources` appends the original prepared
+`BoundaryVelocitySource` columns after linear velocity ports, preserving the
+exact FE owner's ordering and work coordinates. Both families can supply
+prescribed feeds or exterior reaction modes. Midside-only motion and signed
+zero-net quadratic profiles retain their complete original pressure projection,
+with no re-integration, corner substitution, area normalization or additional
+exterior states. Exterior indices address the combined order. Original
+source/model identity, pressure-release restrictions and complete augmented-state
+limits remain with the exact FE owner. Canonical physical support is checked
+even for zero feed shapes; an exterior source with zero original pressure
+projection refuses. The old constructor delegates with an empty prepared-source
+list. Warm stepping, atomic history acceptance and original load reports remain
+unchanged.
+
+Three focused regressions specify independently integrated midside-only
+inlet/opening work with simultaneous linear and volume sources, complete P2
+linear-profile recovery and live zero-net midside modes with fractional delayed
+mutual reaction, and identity/support/release/combined-count refusals plus
+bit-identical empty-source compatibility. Parsing and formatting passed; native
+tests remain unrun in this environment. This extends interconnection only:
+supplied exterior realizations must describe the same original physical
+quadratic modes and retain their original qualification limits.

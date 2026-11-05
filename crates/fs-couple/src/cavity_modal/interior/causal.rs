@@ -31,7 +31,7 @@ use fs_feec::acoustics::helmholtz::heterogeneous::time::{
     HeterogeneousTimeState, ResistiveBoundary,
 };
 use fs_feec::acoustics::helmholtz::heterogeneous::{
-    HeterogeneousError, HeterogeneousHelmholtzFe, VolumeVelocitySource,
+    BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe, VolumeVelocitySource,
 };
 use fs_la::factor::{FactorError, Lu, lu};
 use fs_math::dd::Dd;
@@ -238,13 +238,63 @@ impl<'m, 'f, 'c> CausalInteriorTime<'m, 'f, 'c> {
         limits: CausalTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, CausalTimeError> {
+        Self::new_with_boundary_sources(
+            model,
+            duration_s,
+            boundaries,
+            ports,
+            &[],
+            exterior_ports,
+            volume_sources,
+            pressure_release_faces,
+            exterior,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Bind the SAME original full field with cached quadratic velocity shapes.
+    /// The combined port order is `ports` followed by `boundary_sources`, exactly
+    /// as in the original exact FE owner. `exterior_ports` indexes this combined
+    /// sequence in source-matrix order; unselected columns are prescribed feeds
+    /// in combined order. Both families use velocity amplitudes [m/s] and their
+    /// original conjugate integrated pressure forces [N].
+    ///
+    /// Midside-only and zero-area-integral shapes retain their complete original
+    /// pressure projection. An exterior mode whose full original projection is
+    /// zero refuses; it cannot exchange work through this spatial discretization.
+    /// Source/model identity, pressure-release restrictions and the complete
+    /// augmented-state budget are admitted by the exact FE owner. Physical face
+    /// support is checked even for a zero prescribed source; an overlapping feed
+    /// cannot bypass exterior ownership by choosing a zero amplitude or net flow.
+    /// Preparation reuses the cached source loads, with no face resampling,
+    /// corner reconstruction, shape normalization or extra exterior state.
+    /// Supplied exterior data must use these exact same physical mode shapes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_boundary_sources(
+        model: &'m HeterogeneousHelmholtzFe<'f, 'c>,
+        duration_s: f64,
+        boundaries: &[ResistiveBoundary],
+        ports: &[ExactVelocityPort],
+        boundary_sources: &[&BoundaryVelocitySource<'_, '_, '_>],
+        exterior_ports: &[usize],
+        volume_sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        exterior: CausalExteriorLoad,
+        limits: CausalTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, CausalTimeError> {
         poll(cancelled)?;
+        let port_count = ports
+            .len()
+            .checked_add(boundary_sources.len())
+            .ok_or_else(|| invalid("combined original velocity-port count overflow"))?;
         let n = exterior_ports.len();
         if !(1..=128).contains(&limits.maximum_exterior_ports)
             || n == 0
             || n > limits.maximum_exterior_ports
             || n != exterior.ports()
-            || ports.len() > 128
+            || port_count > 128
             || !duration_s.is_finite()
             || duration_s <= 0.0
             || duration_s.to_bits() != exterior.duration_s().to_bits()
@@ -256,36 +306,57 @@ impl<'m, 'f, 'c> CausalInteriorTime<'m, 'f, 'c> {
                 "complete bounded source ports, matching physical clocks and a finite closure tolerance are required",
             ));
         }
-        let mut selected = vec![false; ports.len()];
+        let mut selected = vec![false; port_count];
         for &index in exterior_ports {
-            if index >= ports.len() || selected[index] {
+            if index >= port_count || selected[index] {
                 return Err(invalid(
                     "exterior indices must uniquely identify original velocity ports",
                 ));
             }
-            if ports[index]
-                .profile
-                .iter()
-                .all(|(_, values)| values.iter().all(|&v| v == 0.0))
-            {
+            let nonzero = if index < ports.len() {
+                ports[index]
+                    .profile
+                    .iter()
+                    .any(|(_, values)| values.iter().any(|&v| v != 0.0))
+            } else {
+                boundary_sources[index - ports.len()].has_nonzero_projection()
+            };
+            if !nonzero {
                 return Err(invalid(
                     "each exterior mode needs a nonzero original physical velocity shape",
                 ));
             }
             selected[index] = true;
         }
-        let driven_ports: Vec<_> = (0..ports.len()).filter(|&index| !selected[index]).collect();
-        let exterior_faces: BTreeSet<_> = exterior_ports
-            .iter()
-            .flat_map(|&index| ports[index].profile.iter().map(|(face, _)| face_key(*face)))
-            .collect();
+        let driven_ports: Vec<_> = (0..port_count).filter(|&index| !selected[index]).collect();
+        let mut exterior_faces = BTreeSet::new();
+        for &index in exterior_ports {
+            poll(cancelled)?;
+            if index < ports.len() {
+                exterior_faces.extend(ports[index].profile.iter().map(|(face, _)| face_key(*face)));
+            } else {
+                exterior_faces.extend(
+                    boundary_sources[index - ports.len()]
+                        .support_faces()
+                        .iter()
+                        .map(|&face| face_key(face)),
+                );
+            }
+        }
         for &index in &driven_ports {
             poll(cancelled)?;
-            if ports[index]
-                .profile
-                .iter()
-                .any(|(face, _)| exterior_faces.contains(&face_key(*face)))
-            {
+            let overlaps = if index < ports.len() {
+                ports[index]
+                    .profile
+                    .iter()
+                    .any(|(face, _)| exterior_faces.contains(&face_key(*face)))
+            } else {
+                boundary_sources[index - ports.len()]
+                    .support_faces()
+                    .iter()
+                    .any(|&face| exterior_faces.contains(&face_key(face)))
+            };
+            if overlaps {
                 return Err(invalid(
                     "all velocity modes on an exterior face must belong to that exterior",
                 ));
@@ -303,10 +374,11 @@ impl<'m, 'f, 'c> CausalInteriorTime<'m, 'f, 'c> {
                 ));
             }
         }
-        let prepared = model.prepare_exact_time_with_pressure_release(
+        let prepared = model.prepare_exact_time_with_boundary_sources(
             duration_s,
             boundaries,
             ports,
+            boundary_sources,
             volume_sources,
             pressure_release_faces,
             limits.interior,

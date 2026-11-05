@@ -8,6 +8,8 @@ use fs_vfit::mimo::{DelayedMimoModel, MimoModel};
 use fs_vfit::model::PoleTerm;
 use fs_vfit::passivity::CertificateClass;
 
+mod quadratic;
+
 const MEDIUM: Medium = Medium {
     density_kg_m3: 2.0,
     sound_speed_m_s: 4.0,
