@@ -18,6 +18,21 @@ mode cancellation, a known product remainder, direct/prepared parity, and an
 independent complex relaxation response. Workspace outputs remain unpublished
 on refusal; the low-level effort contraction documents its scratch semantics.
 
+The reciprocal held-input map `G u` and signed port-work contraction now use
+that same two-word arithmetic in ordinary, prepared and descriptor discrete
+gradient stepping. Opposing large actuator loads retain their smaller net force;
+positive and negative port work, including declared nonlinear source power, are
+combined before multiplying by the physical duration. No state, port, physical
+coefficient or solver tolerance is changed. The contractions allocate nothing,
+refuse nonfinite or unrepresentable products, and retain prepared publication
+and retry semantics. This is finite-precision arithmetic, not arbitrary-precision
+or overflow-cancellation support. Work remains independent of stored-energy
+change and loss. Prepared exact ZOH shares the signed-work owner and uses the
+original physical output at zero duration; its existing cached exponential and
+integral contractions are otherwise unchanged. Focused `prepared_step` tests
+cover analytic unit-mass driving/braking, product remainders, an algebraic
+resistive port, zero-time observation and transactional forcing refusals.
+
 ## Explicit synchronous converter gate cycles
 
 `circuit::converter::switching::PreparedSwitchCycle` advances the original

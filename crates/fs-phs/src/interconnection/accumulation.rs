@@ -9,6 +9,19 @@ pub(crate) struct Sum {
 }
 
 impl Sum {
+    /// A complete checked contraction, retaining both words until its physical
+    /// consumer has added the other sources and applied its integration weight.
+    pub(crate) fn dot(left: &[f64], right: &[f64]) -> Option<Self> {
+        if left.len() != right.len() {
+            return None;
+        }
+        let mut sum = Self::default();
+        for (&a, &b) in left.iter().zip(right) {
+            sum.product(a, b)?;
+        }
+        Some(sum)
+    }
+
     fn add(&mut self, value: f64) -> Option<()> {
         let next = self.high + value;
         self.low += if self.high.abs() >= value.abs() {
@@ -107,5 +120,34 @@ mod tests {
         zero.product(0.0, 1e300).unwrap();
         zero.product(1e-300, 0.0).unwrap();
         assert_eq!(zero.value().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn simultaneous_source_work_retains_small_drive_and_regeneration() {
+        let large = 2.0_f64.powi(53);
+        for map in [[large, 1.0, -large], [-large, 1.0, large], [1.0, large, -large]] {
+            for sign in [-1.0, 1.0] {
+                let force = Sum::dot(&map, &[sign; 3]).unwrap();
+                assert_eq!(force.value().unwrap(), sign);
+                let output = map.map(|entry| 0.625 * entry);
+                let power = Sum::dot(&[sign; 3], &output).unwrap();
+                let mut work = Sum::default();
+                work.add_scaled(power, 0.25).unwrap();
+                assert_eq!(work.value().unwrap(), sign * 0.15625);
+            }
+        }
+    }
+
+    #[test]
+    fn additional_source_cancels_before_duration_rounding() {
+        let large = 2.0_f64.powi(53);
+        let mut power = Sum::dot(&[1.0, 1.0], &[large, 1.0]).unwrap();
+        power.product(1.0, -large).unwrap();
+        let mut work = Sum::default();
+        work.add_scaled(power, 0.125).unwrap();
+        assert_eq!(work.value().unwrap(), 0.125);
+        assert!(Sum::dot(&[1.0], &[]).is_none());
+        assert!(Sum::dot(&[0.0], &[f64::NAN]).is_none());
+        assert!(Sum::dot(&[f64::MAX], &[2.0]).is_none());
     }
 }

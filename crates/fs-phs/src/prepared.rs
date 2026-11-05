@@ -488,11 +488,8 @@ impl StepWorkspace {
         )?;
         let h0 = sys.hamiltonian(x0);
         if !h0.is_finite() { return Err(dimensions("nonfinite initial Hamiltonian").into()); }
-        self.forcing.fill(0.0);
+        crate::port_inputs_into(n, self.m, &sys.g, u, &mut self.forcing)?;
         for row in 0..n {
-            for (port, &input) in u.iter().enumerate() {
-                self.forcing[row] += sys.g[row * self.m + port] * input;
-            }
             let increment = dt * self.forcing[row];
             if !increment.is_finite() { return Err(dimensions("nonfinite input increment").into()); }
             scale = scale.max(increment.abs());
@@ -652,10 +649,8 @@ impl StepWorkspace {
         }
         dissipated *= dt;
         sys.output_from_effort_into(&self.effort, &mut self.output)?;
-        let mut supplied = dt * u.iter().zip(&self.output).map(|(a, b)| a * b).sum::<f64>();
-        if self.nonlinear_power.supplied_power_w != 0.0 {
-            supplied += dt * self.nonlinear_power.supplied_power_w;
-        }
+        let supplied = crate::port_work(u, &self.output, dt,
+            self.nonlinear_power.supplied_power_w)?;
         // The storage-difference owner may overwrite its gradient scratch with
         // grad H(midpoint). Keep the accepted Gonzalez effort intact for actual
         // constitutive work attribution; FD probe scratch is no longer needed.

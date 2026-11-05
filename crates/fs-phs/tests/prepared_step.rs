@@ -6,6 +6,122 @@ fn oscillator(damping: f64) -> PortHamiltonian {
         Box::new(QuadraticStorage::new(vec![9.0, 0.0, 0.0, 1.0], 2).unwrap())).unwrap()
 }
 
+fn driven_unit_mass(port_map: Vec<f64>) -> PortHamiltonian {
+    PortHamiltonian::new(1, port_map.len(), vec![0.0], vec![0.0], port_map,
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap())).unwrap()
+}
+
+#[test]
+fn opposing_multiport_loads_retain_motion_and_signed_work_in_every_order() {
+    let large = 2.0_f64.powi(53);
+    for map in [
+        [large, 1.0, -large], [-large, 1.0, large], [1.0, large, -large],
+        [large, -large, 1.0], [-large, large, 1.0], [1.0, -large, large],
+    ] {
+        let system = driven_unit_mass(map.to_vec());
+        let mut prepared = StepWorkspace::new(&system).unwrap();
+        for sign in [-1.0, 1.0] {
+            // The original three actuators deliver net force +/-1 to a unit
+            // mass. Starting at speed 1/2, braking extracts kinetic energy.
+            let initial = 0.5;
+            let dt = 0.25;
+            let expected_velocity = initial + dt * sign;
+            let expected_work = sign * dt * (initial + expected_velocity) * 0.5;
+            let record = step(&system, &[initial], &[sign; 3], dt).unwrap();
+            assert_eq!(record.x, [expected_velocity]);
+            assert_eq!(record.supplied, expected_work);
+            assert_eq!(record.delta_h, expected_work);
+            assert_eq!(record.balance_residual(), 0.0);
+
+            let (mut next, mut output) = ([31.0], [47.0; 3]);
+            let actual = prepared.step_into(&system, &[initial], &[sign; 3], dt,
+                &mut next, &mut output).unwrap();
+            assert_eq!(next, [expected_velocity]);
+            assert_eq!(output.as_slice(), record.y.as_slice());
+            assert_eq!(actual.supplied, expected_work);
+            assert_eq!(actual.delta_h, expected_work);
+            assert_eq!(actual.balance_residual(), 0.0);
+        }
+    }
+}
+
+#[test]
+fn product_remainder_is_real_applied_force_and_work() {
+    let delta = 2.0_f64.powi(-27);
+    let system = driven_unit_mass(vec![1.0 + delta, -1.0]);
+    let input = [1.0 - delta, 1.0];
+    // (1+d)(1-d)-1 = -d^2, although the individual product rounds to 1.
+    let expected_velocity = -delta * delta;
+    let expected_work = 0.5 * expected_velocity * expected_velocity;
+    let record = step(&system, &[0.0], &input, 1.0).unwrap();
+    assert_eq!(record.x, [expected_velocity]);
+    assert_eq!(record.supplied, expected_work);
+    assert_eq!(record.delta_h, expected_work);
+    let mut prepared = StepWorkspace::new(&system).unwrap();
+    let (mut next, mut output) = ([31.0], [47.0; 2]);
+    let actual = prepared.step_into(&system, &[0.0], &input, 1.0,
+        &mut next, &mut output).unwrap();
+    assert_eq!(next, [expected_velocity]);
+    assert_eq!(actual.supplied, expected_work);
+    assert_eq!(actual.delta_h, expected_work);
+}
+
+#[test]
+fn descriptor_uses_the_same_physical_force_and_algebraic_port_work() {
+    let large = 2.0_f64.powi(53);
+    let system = fs_phs::DescriptorPortHamiltonian::new(2, 1, 3,
+        vec![0.0; 4], vec![0.0, 0.0, 0.0, 1.0],
+        vec![large, 1.0, -large, large, 1.0, -large],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap())).unwrap();
+    // One stored momentum and one resistive algebraic effort: dp/dt = 1,
+    // lambda = 1, H = p^2/2, and heat = integral lambda^2 dt.
+    let record = fs_phs::step_descriptor(&system, &[0.5, 0.0], &[1.0; 3], 0.25).unwrap();
+    assert_eq!(record.x, [0.75, 1.0]);
+    assert_eq!(record.delta_h, 0.15625);
+    assert_eq!(record.dissipated, 0.25);
+    assert_eq!(record.supplied, 0.40625);
+    assert_eq!(record.balance_residual(), 0.0);
+}
+
+#[test]
+fn unrepresentable_forcing_refuses_before_prepared_publication_and_allows_retry() {
+    for (map, input) in [(f64::MAX, 2.0), (f64::from_bits(1), 0.25)] {
+        let system = driven_unit_mass(vec![map]);
+        let mut prepared = StepWorkspace::new(&system).unwrap();
+        let (mut next, mut output) = ([31.0], [47.0]);
+        assert!(step(&system, &[0.0], &[input], 1.0).is_err());
+        assert!(prepared.step_into(&system, &[0.0], &[input], 1.0,
+            &mut next, &mut output).is_err());
+        assert_eq!(next, [31.0]);
+        assert_eq!(output, [47.0]);
+        assert!(prepared.last_step_discrete_effort().is_none());
+        let retry = prepared.step_into(&system, &[0.0], &[0.0], 1.0,
+            &mut next, &mut output).unwrap();
+        assert_eq!(next, [0.0]);
+        assert_eq!(output, [0.0]);
+        assert_eq!(retry.supplied, 0.0);
+    }
+}
+
+#[test]
+fn exact_zero_time_observation_preserves_the_original_physical_output() {
+    use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
+    let system = PortHamiltonian::new(3, 1, vec![0.0; 9], vec![0.0; 9], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], 3).unwrap())).unwrap();
+    let mut prepared = PreparedExactZoh::new(&system, 0.0,
+        LinearSplitBudget { max_modes: 3, max_omega_dt: 0.04 }).unwrap();
+    let large = 2.0_f64.powi(54);
+    let initial = [large, 1.0, -large];
+    let (mut next, mut output) = ([0.0; 3], [0.0]);
+    let record = prepared.step_into(&initial, &[0.0], &mut next, &mut output).unwrap();
+    assert_eq!(next, initial);
+    assert_eq!(output, [1.0]);
+    assert_eq!(output.as_slice(), system.output(&initial).as_slice());
+    assert_eq!(record.supplied, 0.0);
+    assert_eq!(record.delta_h, 0.0);
+}
+
 #[derive(Debug)]
 struct CoupledQuartic;
 impl Storage for CoupledQuartic {

@@ -186,9 +186,7 @@ fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQua
     let Some(flow) = flow else {
         scratch.effort.fill(0.0);
         sys.storage.gradient(initial, &mut scratch.effort);
-        for p in 0..sys.m {
-            scratch.output[p] = (0..sys.n).map(|i| sys.g[i*sys.m+p]*scratch.effort[i]).sum();
-        }
+        sys.output_from_effort_into(&scratch.effort, &mut scratch.output)?;
         if !finite(&scratch.output) || !sys.hamiltonian(initial).is_finite() {
             return Err(refuse("prepared ZOH initial energy/output is nonfinite"));
         }
@@ -199,7 +197,7 @@ fn evaluate_step(sys: &PortHamiltonian, duration: f64, flow: Option<&PreparedQua
     flow.evaluate_into(initial, input, &mut scratch.augmented, &mut scratch.balanced,
         &mut scratch.endpoint, &mut scratch.integrals)?;
     for (out, value) in scratch.output.iter_mut().zip(&scratch.integrals) { *out = value/duration; }
-    let supplied: f64 = input.iter().zip(&scratch.integrals).map(|(u, integral)| u*integral).sum();
+    let supplied = crate::port_work(input, &scratch.integrals, 1.0, 0.0)?;
     let dissipated = heat.ok_or_else(||refuse("prepared positive heat is missing"))?
         .evaluate_into(sys,initial,input,&mut scratch.effort,&mut scratch.balanced,
             &mut scratch.heat_state)?;

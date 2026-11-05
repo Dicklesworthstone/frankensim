@@ -1363,6 +1363,48 @@ fn port_outputs_into(
     Ok(())
 }
 
+// The reciprocal physical input map uses the same signed arithmetic as its
+// transpose. Large opposing actuators must not erase a smaller applied load.
+fn port_inputs_into(
+    n: usize, m: usize, g: &[f64], input: &[f64], out: &mut [f64],
+) -> Result<(), PhsError> {
+    if input.len() != m || out.len() != n || n.checked_mul(m) != Some(g.len()) {
+        return Err(PhsError::Dimension { what: "physical port input extents" });
+    }
+    if input.iter().any(|v| !v.is_finite()) {
+        return Err(PhsError::Unadmitted { what: "nonfinite physical port input" });
+    }
+    for (row, value) in out.iter_mut().enumerate() {
+        *value = interconnection::accumulation::Sum::dot(&g[row*m..(row+1)*m], input)
+            .and_then(interconnection::accumulation::Sum::value)
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical port forcing" })?;
+    }
+    Ok(())
+}
+
+// Work from the original conjugate port samples or already integrated outputs.
+// Keep all signed source terms together before applying the duration. In
+// particular, regeneration and nonlinear supply are never positive-only sums.
+fn port_work(input: &[f64], output: &[f64], duration: f64, other_power: f64)
+    -> Result<f64, PhsError>
+{
+    if input.len() != output.len() || !duration.is_finite() || duration < 0.0 {
+        return Err(PhsError::Dimension { what: "physical port work extents or duration" });
+    }
+    if !other_power.is_finite() || input.iter().chain(output).any(|v| !v.is_finite()) {
+        return Err(PhsError::Unadmitted { what: "nonfinite physical port work" });
+    }
+    if duration == 0.0 { return Ok(0.0); }
+    let result = (|| {
+        let mut power = interconnection::accumulation::Sum::dot(input, output)?;
+        power.product(1.0, other_power)?;
+        let mut work = interconnection::accumulation::Sum::default();
+        work.add_scaled(power, duration)?;
+        work.value()
+    })();
+    result.ok_or(PhsError::Unadmitted { what: "unrepresentable physical port work" })
+}
+
 /// Isolated 0-junction of two 1-port systems: `p_a = p_b`, `U_a + U_b = U_ext`.
 ///
 /// This is [`common_effort_star`] of two members. When both ports are
@@ -1716,16 +1758,9 @@ pub fn step_descriptor(
         });
     }
     let mut gu = vec![0.0; n];
-    for i in 0..n {
-        for p in 0..sys.m {
-            gu[i] += sys.g[i * sys.m + p] * u[p];
-        }
-    }
-    if gu.iter().any(|v| !v.is_finite()) {
-        return Err(PhsError::DescriptorDomain {
-            what: "held port forcing is nonfinite",
-        });
-    }
+    port_inputs_into(n, sys.m, &sys.g, u, &mut gu).map_err(|_| PhsError::DescriptorDomain {
+        what: "held port forcing is unrepresentable",
+    })?;
     // Multipliers are efforts, not stored coordinates: e = [∇H(x), λ].
     // Gonzalez still owns the differential block; λ enters J as itself
     // so Ga λ / −Gb λ actually drive the ports.
@@ -2065,11 +2100,9 @@ pub fn step_descriptor(
         dissipated += dg[i] * rd;
     }
     dissipated *= dt;
-    let mut supplied = 0.0;
-    for p in 0..sys.m {
-        supplied += u[p] * y[p];
-    }
-    supplied *= dt;
+    let supplied = port_work(u, &y, dt, 0.0).map_err(|_| PhsError::DescriptorDomain {
+        what: "accepted port work is unrepresentable",
+    })?;
     if y.iter().any(|v| !v.is_finite())
         || !h1.is_finite()
         || !delta_h.is_finite()
@@ -2332,11 +2365,7 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     }
     // Forcing term dt*G*u (held over the step).
     let mut gu = vec![0.0; n];
-    for i in 0..n {
-        for p in 0..sys.m {
-            gu[i] += sys.g[i * sys.m + p] * u[p];
-        }
-    }
+    port_inputs_into(n, sys.m, &sys.g, u, &mut gu)?;
     let residual = |x1: &[f64], dg: &[f64]| -> Vec<f64> {
         let mut res = vec![0.0; n];
         for i in 0..n {
@@ -2499,7 +2528,7 @@ fn ledger(
     dissipated *= dt;
     let mut y = vec![0.0; sys.m];
     sys.output_from_effort_into(&dg, &mut y)?;
-    let supplied = dt * u.iter().zip(&y).map(|(&a, &b)| a * b).sum::<f64>();
+    let supplied = port_work(u, &y, dt, 0.0)?;
     let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x1,
         &mut vec![0.0; n], &mut dg);
     Ok(StepRecord {
