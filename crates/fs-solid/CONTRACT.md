@@ -7823,3 +7823,63 @@ cover retained-damage compliance under load, damage onset at held strain,
 source/overload/cancellation refusals and deterministic retries. Rust parsing and
 formatting were checked; compilation and execution of these new tests remain
 outstanding because the execution environment had no free disk space.
+
+
+## Adaptive native continuation through progressive ductile softening
+
+`ductile::evolution::DuctileTetEvolution` continues the ORIGINAL
+`SmallStrainTetProblem::solve_from` through post-initiation softening with
+`fs-material::ductile::evolution::DuctileJ2`. It reuses the native return map,
+element assembly, Newton iteration and nonsymmetric FGMRES path. Each material
+point retains its original immutable model, calibration and directional
+characteristic length. The existing `TetCrackBandGeometry` supplies
+h = V / projected area. Admission checks original connectivity and volume
+exactly, derived area/width within normalization roundoff, and exact agreement
+between the material length and the supplied band record. Agreement of those
+geometric measures does not authorize history transfer to a changed mesh.
+
+One call advances a finite positive physical interval with affine prescribed
+displacements and dead forces, using one actual uniform or per-element held
+temperature field. Rejected Newton/constitutive trials and excessive endpoint
+numerical loss halve the proposed interval. Material damage increments retain
+their own explicit refusal threshold. Accepted steps may grow up to twice the
+previous fraction using measured damage and numerical-loss margins. Explicit
+minimum fraction, maximum accepted steps and maximum total trials bound the
+work; each retry starts from the same last accepted pair and consumes no
+physical time until accepted. Load reversals must be separate intervals.
+
+The adapter independently checks whole-solid external work from actual native
+support reactions, applied forces and displacement increments. Original element
+volumes integrate stored-energy change, plastic dissipation, damage release and
+backward-Euler numerical loss. Original projected areas integrate the calibrated
+equivalent-plastic-work diagnostic; that diagnostic is not charged again as
+physical loss. Compensated totals and finite/sign gates preserve separate
+accounts. The declared numerical-loss and external-work tolerances are checked
+per accepted fraction and again over the whole interval. Numerical loss does
+not become heat or fracture energy, and its budget is not a trajectory-error
+certificate.
+
+No constitutive solve is repeated to audit an equilibrated endpoint. Only the
+final native full-field state and bounded scalar records are retained. Original
+material/source cards are borrowed, not cloned per point or trial. An error,
+budget exhaustion, minimum-interval refusal or cancellation returns no partially
+advanced interval and leaves the caller's accepted displacement and histories
+unchanged. Exact held-strain material replay prevents the native solver's
+initial assembly from inventing plastic flow from yield roundoff.
+
+Four regression definitions in `tests/ductile_evolution.rs` exercise actual
+native tetrahedral assembly: post-initiation reaction loss with bounded damage,
+an independently calculated shear/work oracle, whole-interval rollback and
+deterministic restart, ordinary non-axis-aligned normal admission, foreign
+geometry/width refusal, and heterogeneous widths with distinct histories and
+projected-area work. Native API, lifetime and oracle review passed. These four
+structural tests have NOT executed. The underlying numerical material closure
+has 17 passing tests, including the reproduced-and-fixed exact-replay defect;
+that is not full-crate or integrated structural execution.
+
+This is quasistatic reference-geometry small-strain continuation with fixed
+mechanical coefficients. It adds no finite-deformation degradation, automatic
+crack direction, crack insertion, geometric contact, erosion or fragment state.
+Directional length scaling and adaptive damage steps do not establish arbitrary-
+mesh fracture objectivity or experimentally calibrated component failure.
+MR63's broader topology/contact/post-failure-transfer requirements remain open.

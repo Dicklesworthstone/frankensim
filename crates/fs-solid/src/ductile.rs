@@ -35,6 +35,9 @@ use crate::plastic3::{
 /// Finite-deformation, thermoplastic and inertial consumers of the same gate.
 pub mod finite;
 
+/// Progressive J2 softening with adaptive native tetrahedral continuation.
+pub mod evolution;
+
 /// Read original equivalent plastic history without re-running a law.
 /// Implementations must exclude creep and retain accumulated reverse flow.
 pub trait PlasticStrainHistory {
