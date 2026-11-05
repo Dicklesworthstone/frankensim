@@ -8,10 +8,12 @@
 //! state, supports and uncracked mechanics. Constant Y=1 and the explicitly
 //! synthetic Y(a)=sqrt(a/a0) table retain independent analytic reference solutions.
 //! The finite-width mode declares a long elastic plate of full width 0.02 m under
-//! remote uniform gross-section tension, sampling the centre-crack secant helper
-//! at 129 logarithmically spaced half-lengths. The native uncracked coupon supplies
-//! nominal stress; plate/crack geometry is declared separately. Here a is physical
-//! half-crack length, full crack length is 2a, and growth leaves stiffness fixed.
+//! remote uniform gross-section tension. Adaptive secant-helper sampling requests
+//! a 1e-5 relative-Y interpolation criterion with a 1025-point cap. The native
+//! uncracked coupon supplies nominal stress; plate/crack geometry is declared
+//! separately. Here a is physical half-crack length, full crack length is 2a,
+//! and growth leaves stiffness fixed. The interpolation criterion is analytic;
+//! floating-point intervals and material lifetime are not certified.
 
 use std::sync::Arc;
 
@@ -39,7 +41,8 @@ const REFERENCE_RATE: f64 = 1e-10;
 const MINIMUM_STRESS_PA: f64 = 2e6;
 const MAXIMUM_STRESS_PA: f64 = 8e6;
 const FULL_PLATE_WIDTH_M: f64 = 0.02;
-const FINITE_WIDTH_TABLE_POINTS: usize = 129;
+const FINITE_WIDTH_RELATIVE_Y_TOLERANCE: f64 = 1e-5;
+const FINITE_WIDTH_MAXIMUM_POINTS: usize = 1025;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -120,23 +123,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let crack_geometry = if let Some(plate) = finite_plate {
         let minimum = 0.5 * INITIAL_LENGTH_M;
         let maximum = plate.maximum_half_length_m();
-        let log_span = (maximum / minimum).ln();
-        let half_lengths = (0..FINITE_WIDTH_TABLE_POINTS)
-            .map(|index| {
-                // Retain exact interval endpoints so rounding cannot leave support.
-                if index == 0 {
-                    minimum
-                } else if index + 1 == FINITE_WIDTH_TABLE_POINTS {
-                    maximum
-                } else {
-                    minimum
-                        * (log_span * index as f64 / (FINITE_WIDTH_TABLE_POINTS - 1) as f64).exp()
-                }
-            })
-            .collect();
-        CrackGeometry::Tabulated(Arc::new(
-            plate.tabulate(half_lengths, FINITE_WIDTH_TABLE_POINTS)?,
-        ))
+        // The bounded helper retains these exact endpoints and chooses the
+        // interior knots from its analytic relative-factor interpolation bound.
+        CrackGeometry::Tabulated(Arc::new(plate.tabulate_to_tolerance(
+            minimum,
+            maximum,
+            FINITE_WIDTH_RELATIVE_Y_TOLERANCE,
+            FINITE_WIDTH_MAXIMUM_POINTS,
+        )?))
     } else if varying_geometry {
         CrackGeometry::Tabulated(Arc::new(TabulatedCrackGeometry::new(
             CrackGeometryTableContext {
@@ -243,7 +237,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 plate.maximum_half_length_m(), 2.0 * step.after.crack_length_m / plate.plate_width_m());
             if let Some(CrackGeometry::Tabulated(table)) = path.geometry(0) {
                 let (minimum, maximum) = table.length_bounds();
-                println!("geometry_table_points={} spacing=logarithmic half_length_min_m={minimum:.6e} half_length_max_m={maximum:.6e}",
+                println!("geometry_table_points={} selection=adaptive relative_y_tolerance={FINITE_WIDTH_RELATIVE_Y_TOLERANCE:.6e} maximum_points={FINITE_WIDTH_MAXIMUM_POINTS} half_length_min_m={minimum:.6e} half_length_max_m={maximum:.6e}",
                     table.points().len());
                 println!("initial_tabulated_y={:.12e} final_tabulated_y={:.12e} final_direct_secant_y={:.12e}",
                     table.factor_at(step.before.crack_length_m)?,
@@ -261,7 +255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("crack_length_increased={} within_geometry_table={}",
                     step.after.crack_length_m > step.before.crack_length_m,
                     (minimum..=maximum).contains(&step.after.crack_length_m));
-                println!("Table resolution is declared; no interpolation-error certificate or material-life calibration is inferred.");
+                println!("Requested tolerance controls analytic relative-Y interpolation; floating-point intervals and material life are not certified.");
             }
         }
         Ok(())

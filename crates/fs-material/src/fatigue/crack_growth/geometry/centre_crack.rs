@@ -18,7 +18,7 @@
 
 use fs_math::det;
 
-use super::super::CrackGrowthError;
+use super::super::{CrackGrowthError, log1p_over_x, positive_log_ratio};
 use super::{CrackGeometryPoint, CrackGeometryTableContext, TabulatedCrackGeometry, poll};
 
 /// Finite-width elastic centre-crack solution, with physical half-length `a`.
@@ -119,5 +119,108 @@ impl FiniteWidthCentreCrack {
                     .into(),
         };
         TabulatedCrackGeometry::new_with_cancel(context, points, maximum_points, cancelled)
+    }
+
+    /// Choose samples for a declared relative geometry-factor interpolation
+    /// tolerance. Both endpoints are retained exactly; their interval must lie
+    /// in this model's support. Work and storage are bounded by `maximum_points`,
+    /// independent of the number of fatigue cycles subsequently integrated.
+    ///
+    /// In log length `x=ln(a)`, `f(x)=ln(Y)` is convex and has increasing
+    /// curvature `f''=(theta*tan(theta)+theta^2*sec(theta)^2)/2`, where
+    /// `theta=pi*a/W`. On a log interval of width `h`, the interpolation error
+    /// is at most `h^2*f''(right)/8`. Refinement continues until that bound is
+    /// at most `ln(1+tolerance)` for every interval. In real arithmetic the
+    /// table therefore overestimates Y by no more than the requested fraction.
+    ///
+    /// This is an analytical interpolation bound evaluated in ordinary floating
+    /// point, not an interval-arithmetic certificate. It does not bound the
+    /// handbook approximation, material calibration, crack-growth life error,
+    /// or applicability of this elastic geometry to a particular component.
+    pub fn tabulate_to_tolerance(
+        &self,
+        minimum_half_length_m: f64,
+        maximum_half_length_m: f64,
+        relative_factor_tolerance: f64,
+        maximum_points: usize,
+    ) -> Result<TabulatedCrackGeometry, CrackGrowthError> {
+        self.tabulate_to_tolerance_with_cancel(
+            minimum_half_length_m,
+            maximum_half_length_m,
+            relative_factor_tolerance,
+            maximum_points,
+            &mut || false,
+        )
+    }
+
+    /// Cancel between bounded refinements and during final table construction.
+    /// Exhausted point budgets and indistinguishable midpoints refuse without
+    /// returning a partially resolved table or relaxing the requested tolerance.
+    pub fn tabulate_to_tolerance_with_cancel(
+        &self,
+        minimum_half_length_m: f64,
+        maximum_half_length_m: f64,
+        relative_factor_tolerance: f64,
+        maximum_points: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<TabulatedCrackGeometry, CrackGrowthError> {
+        poll(cancelled)?;
+        self.factor_at(minimum_half_length_m)?;
+        self.factor_at(maximum_half_length_m)?;
+        if minimum_half_length_m >= maximum_half_length_m
+            || !relative_factor_tolerance.is_finite()
+            || relative_factor_tolerance <= 0.0
+        {
+            return Err(CrackGrowthError::Invalid(
+                "declare an increasing half-length interval and positive finite relative Y tolerance",
+            ));
+        }
+        if maximum_points < 2 {
+            return Err(CrackGrowthError::Budget);
+        }
+        let log_tolerance = relative_factor_tolerance * log1p_over_x(relative_factor_tolerance);
+        let mut lengths = vec![minimum_half_length_m];
+        let mut pending = vec![maximum_half_length_m];
+        let mut point_count = 2;
+        let mut left = minimum_half_length_m;
+        // Depth-first, left-to-right traversal: every split adds one unique
+        // point, so both stored endpoints and visited intervals are O(budget).
+        while let Some(right) = pending.pop() {
+            poll(cancelled)?;
+            let h = positive_log_ratio(left, right);
+            let theta = std::f64::consts::PI * (right / self.plate_width_m);
+            let (sine, cosine) = det::sin_cos(theta);
+            let scaled_theta = theta / cosine;
+            let curvature = 0.5 * (scaled_theta * sine + scaled_theta * scaled_theta);
+            let bound = (h * h / 8.0) * curvature;
+            if !h.is_finite() || h <= 0.0 || !bound.is_finite() || bound < 0.0 {
+                return Err(CrackGrowthError::Arithmetic);
+            }
+            if bound <= log_tolerance {
+                lengths.push(right);
+                left = right;
+                continue;
+            }
+            if point_count >= maximum_points {
+                return Err(CrackGrowthError::Budget);
+            }
+            let midpoint = if h < 0.5 {
+                left + left * det::expm1(0.5 * h)
+            } else {
+                det::exp(0.5 * det::ln(left) + 0.5 * det::ln(right))
+            };
+            if !midpoint.is_finite() || midpoint <= left || midpoint >= right {
+                return Err(CrackGrowthError::Arithmetic);
+            }
+            point_count += 1;
+            pending.push(right);
+            pending.push(midpoint);
+        }
+        let mut table = self.tabulate_with_cancel(lengths, maximum_points, cancelled)?;
+        table.context.source_reference.push_str(&format!(
+            "; log-length curvature-bound refinement with requested relative Y tolerance={relative_factor_tolerance:.17e}"
+        ));
+        poll(cancelled)?;
+        Ok(table)
     }
 }

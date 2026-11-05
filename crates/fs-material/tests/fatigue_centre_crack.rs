@@ -153,8 +153,7 @@ fn support_original_point_order_work_limit_and_cancellation_are_enforced() {
     assert!(model.tabulate(vec![INITIAL, TARGET], 2).is_ok());
 }
 
-#[test]
-fn refined_table_life_converges_to_independent_direct_secant_integration() {
+fn direct_secant_cycles() -> f64 {
     // Composite Simpson integration of dN/da using the unsampled handbook Y.
     // This reference uses platform math, not geometry interpolation or the
     // production analytical power-law integral.
@@ -170,7 +169,12 @@ fn refined_table_life_converges_to_independent_direct_secant_integration() {
         let weight = if i % 2 == 0 { 2.0 } else { 4.0 };
         sum += weight * reciprocal_rate(INITIAL + i as f64 * step);
     }
-    let reference_cycles = sum * step / 3.0;
+    sum * step / 3.0
+}
+
+#[test]
+fn refined_table_life_converges_to_independent_direct_secant_integration() {
+    let reference_cycles = direct_secant_cycles();
     let model = FiniteWidthCentreCrack::new(WIDTH).unwrap();
     let mut previous_error = f64::INFINITY;
     for intervals in [2, 8, 32, 128] {
@@ -215,4 +219,153 @@ fn finite_width_increases_growth_and_reduces_cycles_to_the_same_length() {
     let infinite_step = infinite.advance(cycle).unwrap();
     assert!(finite_step.after.crack_length_m > infinite_step.after.crack_length_m);
     assert!(finite_step.final_delta_k_pa_sqrt_m > infinite_step.final_delta_k_pa_sqrt_m);
+}
+
+#[test]
+fn automatic_table_obeys_the_relative_factor_envelope_between_knots() {
+    let model = FiniteWidthCentreCrack::new(WIDTH).unwrap();
+    let minimum = WIDTH * 0.01;
+    let maximum = model.maximum_half_length_m();
+    let tolerance = 1.0e-4;
+    let table = model
+        .tabulate_to_tolerance(minimum, maximum, tolerance, 512)
+        .unwrap();
+    assert_eq!(table.length_bounds(), (minimum, maximum));
+    assert!(table.points().len() < 512);
+    assert_eq!(
+        table,
+        model
+            .tabulate_to_tolerance(minimum, maximum, tolerance, 512)
+            .unwrap()
+    );
+    assert!(
+        table
+            .context()
+            .source_reference
+            .contains(&format!("relative Y tolerance={tolerance:.17e}"))
+    );
+    for interval in table.points().windows(2) {
+        let left = interval[0].crack_length_m;
+        let right = interval[1].crack_length_m;
+        assert!(left < right);
+        for i in 0..=64 {
+            let a = match i {
+                0 => left,
+                64 => right,
+                _ => left * (right / left).powf(i as f64 / 64.0),
+            };
+            let direct = (std::f64::consts::PI * a / WIDTH).cos().sqrt().recip();
+            let relative = table.factor_at(a).unwrap() / direct - 1.0;
+            assert!(relative >= -3.0e-14, "lost convex envelope: {relative:e}");
+            assert!(relative <= tolerance + 3.0e-14, "factor error {relative:e}");
+        }
+    }
+}
+
+#[test]
+fn tighter_factor_tolerance_improves_the_independent_paris_life_integral() {
+    let model = FiniteWidthCentreCrack::new(WIDTH).unwrap();
+    let reference = direct_secant_cycles();
+    let mut previous_error = f64::INFINITY;
+    let mut previous_points = 0;
+    for tolerance in [1.0e-2, 1.0e-4, 1.0e-6] {
+        let table = model
+            .tabulate_to_tolerance(INITIAL, TARGET, tolerance, 1025)
+            .unwrap();
+        assert!(table.points().len() > previous_points);
+        previous_points = table.points().len();
+        let cycles = evolution(table)
+            .cycles_to_length(MINIMUM_PA, MAXIMUM_PA, TARGET)
+            .unwrap()
+            .additional_cycles;
+        // For this fixed synthetic m=3 fit alone, the Y envelope bounds
+        // the inverse-rate integral between (1+tolerance)^-3 and 1.
+        assert!(cycles >= reference / (1.0 + tolerance).powi(3) * (1.0 - 1.0e-11));
+        assert!(cycles <= reference * (1.0 + 1.0e-11));
+        let error = (cycles / reference - 1.0).abs();
+        assert!(error < previous_error);
+        previous_error = error;
+    }
+    assert!(previous_error < 3.0e-6);
+}
+
+#[test]
+fn automatic_sampling_preserves_scaling_and_resolves_narrow_supported_intervals() {
+    let model = FiniteWidthCentreCrack::new(WIDTH).unwrap();
+    let table = model
+        .tabulate_to_tolerance(INITIAL, TARGET, 1.0e-4, 512)
+        .unwrap();
+    for scale in [1.0e-3, 1.0e3] {
+        let scaled = FiniteWidthCentreCrack::new(WIDTH * scale)
+            .unwrap()
+            .tabulate_to_tolerance(INITIAL * scale, TARGET * scale, 1.0e-4, 512)
+            .unwrap();
+        assert_eq!(scaled.points().len(), table.points().len());
+        for (point, original) in scaled.points().iter().zip(table.points()) {
+            close(point.crack_length_m / scale, original.crack_length_m);
+            close(point.geometry_factor, original.geometry_factor);
+        }
+    }
+    let maximum = model.maximum_half_length_m();
+    let adjacent = maximum.next_down();
+    let narrow = model
+        .tabulate_to_tolerance(adjacent, maximum, 1.0e-30, 2)
+        .unwrap();
+    assert_eq!(narrow.length_bounds(), (adjacent, maximum));
+    assert_eq!(narrow.points().len(), 2);
+    assert!(matches!(
+        model.tabulate_to_tolerance(adjacent, maximum, 1.0e-40, 3),
+        Err(CrackGrowthError::Arithmetic)
+    ));
+    assert_eq!(
+        model
+            .tabulate_to_tolerance(WIDTH * 1.0e-12, WIDTH * 2.0e-12, 1.0e-12, 2)
+            .unwrap()
+            .points()
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn automatic_sampling_refuses_bad_domains_exhausted_budgets_and_cancellation() {
+    let model = FiniteWidthCentreCrack::new(WIDTH).unwrap();
+    for tolerance in [0.0, -1.0e-3, f64::NAN, f64::INFINITY] {
+        assert!(
+            model
+                .tabulate_to_tolerance(INITIAL, TARGET, tolerance, 64)
+                .is_err()
+        );
+    }
+    for (minimum, maximum) in [
+        (INITIAL, INITIAL),
+        (TARGET, INITIAL),
+        (0.0, TARGET),
+        (INITIAL, model.maximum_half_length_m().next_up()),
+    ] {
+        assert!(
+            model
+                .tabulate_to_tolerance(minimum, maximum, 1.0e-3, 64)
+                .is_err()
+        );
+    }
+    for budget in [1, 2, 8] {
+        let mut polls = 0;
+        let result =
+            model.tabulate_to_tolerance_with_cancel(INITIAL, TARGET, 1.0e-8, budget, &mut || {
+                polls += 1;
+                false
+            });
+        assert!(matches!(result, Err(CrackGrowthError::Budget)));
+        assert!(polls <= 2 * budget + 1, "refinement exceeded bounded work");
+    }
+    for cancel_after in [1, 5] {
+        let mut polls = 0;
+        let result =
+            model.tabulate_to_tolerance_with_cancel(INITIAL, TARGET, 1.0e-6, 1025, &mut || {
+                polls += 1;
+                polls >= cancel_after
+            });
+        assert!(matches!(result, Err(CrackGrowthError::Cancelled)));
+    }
 }

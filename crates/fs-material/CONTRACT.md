@@ -287,6 +287,18 @@ No knots are inserted, and table resolution remains explicit: refinement tests
 compare life against independent integration of the unsampled secant formula.
 There is no finite-height, bending, plastic-zone or 3D crack-front correction.
 
+Alternatively, `tabulate_to_tolerance` generates a table over a declared
+half-length interval with a caller-supplied relative-Y interpolation tolerance
+and point cap. In logarithmic length, the secant model's positive increasing
+curvature bounds the exact linear-interpolation error on each interval.
+Bounded logarithmic refinement uses that analytical criterion, concentrates
+points where geometry changes faster, and preserves the exact requested
+endpoints. This criterion controls geometry interpolation in exact arithmetic;
+ordinary floating-point evaluation is not an interval-arithmetic certificate,
+and neither the handbook approximation nor material uncertainty is reduced by
+refining the table. Cancellation, unrepresentable refinement and exhausted
+point budgets refuse without publishing a partial geometry.
+
 Positive-range cycles require the supplied tensile R interval and Paris-region
 range bounds. Every sample can be checked against the current K limit before
 cycle closure. Growth checks every crossed interval's endpoints, including

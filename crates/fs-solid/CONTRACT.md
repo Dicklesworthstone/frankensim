@@ -1131,8 +1131,11 @@ Its optional `--varying-geometry` mode exercises a declared Y proportional to
 the square root of crack length and compares the independent rational solution.
 The `--finite-width` mode uses the bounded elastic centre-crack secant helper,
 retaining full plate width, physical half-crack length and remote gross-stress
-conventions. Its material coefficients remain explicitly synthetic, and its
-sampled geometry does not establish component or material validation.
+conventions. It requests a relative-Y interpolation tolerance and a point cap,
+and reports the actual adaptive table resolution and direct secant factor.
+Its material coefficients remain explicitly synthetic; the analytical
+interpolation criterion is not a floating-point error certificate and does not
+establish component or material validation.
 
 Both native owners expose a read-only `cycles_to_length` forecast for a gauge
 whose representative cycle is fully sampled but not yet explicitly consumed.
