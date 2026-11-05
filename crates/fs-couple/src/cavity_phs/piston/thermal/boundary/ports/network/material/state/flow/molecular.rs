@@ -35,6 +35,9 @@ impl<'m> MaterialExchangeState<'m> {
     /// allowance. Incoming material can react in this interval but cannot cross
     /// another face until the next interval. Source, entropy, withdrawal and
     /// final native-path driving-force gates remain with their original owners.
+    /// Every declared molecular endpoint is requalified after complete feedback,
+    /// including an initially zero-flux face; unrelated chambers are not admitted
+    /// against a molecular law that does not own their connection.
     ///
     /// The split is first order: molecular/native transport, reaction, then
     /// joint heat, circuit and piston feedback. It needs time refinement. The
@@ -155,6 +158,19 @@ impl<'m> MaterialExchangeState<'m> {
             .flow
             .transport
             .admit_endpoint_driving_forces(&endpoints, || cx.checkpoint().is_err())?;
+        let molecular_endpoints: BTreeSet<_> = report
+            .flow
+            .links
+            .iter()
+            .flat_map(|link| link.parcels)
+            .collect();
+        for id in molecular_endpoints {
+            let parcel = endpoints.get(&id).ok_or(MaterialFlowError::Invalid(
+                "missing final molecular gas owner",
+            ))?;
+            molecular
+                .qualify_parcel(parcel, molecular_controls.face, || cx.checkpoint().is_err())?;
+        }
         Ok((next, report))
     }
 

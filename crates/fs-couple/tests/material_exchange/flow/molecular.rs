@@ -2,6 +2,8 @@
 //! Synthetic source cards; no measured-material or engine validation claim.
 #[path = "molecular_coupled.rs"]
 mod coupled_tests;
+#[path = "molecular_endpoint.rs"]
+mod endpoint_tests;
 
 use super::*;
 use fs_gas::material::transport::parcel::{
