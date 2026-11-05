@@ -12,6 +12,10 @@
 //! caller's thermal balance must account for that exchange. A subsequent native
 //! mechanical interval uses the prepared law and produces its own physical
 //! relaxation loss. Changing-temperature trajectories require time refinement.
+//!
+//! Manufactured prestrain can be retained through an explicitly ordered
+//! composition with thermal expansion. The original prestrain and source frame
+//! are immutable across the trajectory; there is no inferred frame transport.
 
 use std::sync::Arc;
 
@@ -58,6 +62,31 @@ impl std::error::Error for ExpansionViscoelasticError {
     }
 }
 
+/// Explicit order of the original manufactured map `Gm` and the source thermal
+/// stretch `Gt(T)`. Both tensors use the axes declared by their owners. The
+/// caller must place the thermal frame in the corresponding intermediate or
+/// original configuration; anisotropic maps generally do not commute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThermalReferenceOrder {
+    /// `G(T) = Gt(T) Gm`: thermal stretching follows manufacturing.
+    ManufacturedThenThermal,
+    /// `G(T) = Gm Gt(T)`: manufacturing follows the source thermal map.
+    ThermalThenManufactured,
+}
+
+impl ThermalReferenceOrder {
+    fn compose(
+        self,
+        manufactured: ReferenceDeformation,
+        thermal: ReferenceDeformation,
+    ) -> Result<ReferenceDeformation, MaterialError> {
+        match self {
+            Self::ManufacturedThenThermal => manufactured.followed_by(thermal),
+            Self::ThermalThenManufactured => thermal.followed_by(manufactured),
+        }
+    }
+}
+
 /// One held-temperature endpoint retaining the same expansion source and
 /// native finite-strain material. Its borrowed [`Self::law`] drives the
 /// existing full or mixed native solids without a second constitutive solver.
@@ -72,6 +101,7 @@ pub struct ExpansionViscoelastic {
     original_law: Arc<ViscoHyperelastic>,
     thermal: ExpansionThermalReference,
     kinetics: Option<TemperatureShift>,
+    reference_order: ThermalReferenceOrder,
     law: ViscoHyperelastic,
 }
 
@@ -83,8 +113,8 @@ impl ExpansionViscoelastic {
     ///
     /// The supplied law must have the identity natural reference; an existing
     /// prestrain is refused rather than silently overwritten or composed in an
-    /// inferred order. Preserve manufactured prestrain in its own explicit
-    /// constitutive/reference owner when extending this thermal model.
+    /// inferred order. Use [`Self::try_new_with_prestrain`] to declare the
+    /// composition order for a manufactured reference.
     pub fn try_new(
         original_law: ViscoHyperelastic,
         thermal: ExpansionThermalReference,
@@ -95,14 +125,44 @@ impl ExpansionViscoelastic {
                 "the original thermal material must have an identity natural reference",
             ));
         }
-        Self::prepare(Arc::new(original_law), thermal, kinetics)
+        Self::try_new_with_prestrain(
+            original_law,
+            thermal,
+            kinetics,
+            ThermalReferenceOrder::ManufacturedThenThermal,
+        )
+    }
+
+    /// Retain the original law's reference as a manufactured stress-free map
+    /// and explicitly compose it with each thermal endpoint. At the source
+    /// expansion datum the original manufactured map is recovered exactly.
+    /// The source frame, original prestrain and composition order stay fixed
+    /// when temperature changes; accepted viscous metrics retain their original
+    /// material coordinates through the explicit history transaction.
+    ///
+    /// The manufactured map is caller-declared. Binding an expansion card does
+    /// not make that prestrain or the mechanical/kinetic calibration sourced.
+    pub fn try_new_with_prestrain(
+        original_law: ViscoHyperelastic,
+        thermal: ExpansionThermalReference,
+        kinetics: Option<TemperatureShift>,
+        reference_order: ThermalReferenceOrder,
+    ) -> Result<Self, ExpansionViscoelasticError> {
+        Self::prepare(Arc::new(original_law), thermal, kinetics, reference_order)
     }
 
     fn prepare(
         original_law: Arc<ViscoHyperelastic>,
         thermal: ExpansionThermalReference,
         kinetics: Option<TemperatureShift>,
+        reference_order: ThermalReferenceOrder,
     ) -> Result<Self, ExpansionViscoelasticError> {
+        let reference = reference_order
+            .compose(
+                *original_law.reference_deformation(),
+                *thermal.reference_deformation(),
+            )
+            .map_err(ExpansionViscoelasticError::Material)?;
         let temperature_k = thermal.geometry().temperature_k();
         let law = if let Some(shift) = kinetics {
             shift
@@ -126,11 +186,12 @@ impl ExpansionViscoelastic {
                 })
                 .map_err(ExpansionViscoelasticError::Material)?
         }
-        .with_reference_deformation(*thermal.reference_deformation());
+        .with_reference_deformation(reference);
         Ok(Self {
             original_law,
             thermal,
             kinetics,
+            reference_order,
             law,
         })
     }
@@ -151,7 +212,12 @@ impl ExpansionViscoelastic {
             self.thermal.frame(),
         )
         .map_err(ExpansionViscoelasticError::Thermal)?;
-        Self::prepare(Arc::clone(&self.original_law), thermal, self.kinetics)
+        Self::prepare(
+            Arc::clone(&self.original_law),
+            thermal,
+            self.kinetics,
+            self.reference_order,
+        )
     }
 
     /// Native equilibrium, viscous branches and current reference deformation.
@@ -169,6 +235,16 @@ impl ExpansionViscoelastic {
         self.kinetics
     }
 
+    /// Fixed order of the original manufactured and source thermal maps.
+    pub const fn reference_order(&self) -> ThermalReferenceOrder {
+        self.reference_order
+    }
+
+    /// Original manufactured stress-free map, independent of temperature.
+    pub fn manufactured_reference(&self) -> &ReferenceDeformation {
+        self.original_law.reference_deformation()
+    }
+
     /// Actual held temperature [K] of the expansion and kinetic endpoint.
     pub const fn temperature_k(&self) -> f64 {
         self.thermal.geometry().temperature_k()
@@ -177,6 +253,7 @@ impl ExpansionViscoelastic {
     fn check_transition(&self, previous: &Self) -> Result<(), ExpansionViscoelasticError> {
         if self.original_law != previous.original_law
             || self.kinetics != previous.kinetics
+            || self.reference_order != previous.reference_order
             || self.thermal.source().identity() != previous.thermal.source().identity()
             || self.thermal.source().material_card_identity()
                 != previous.thermal.source().material_card_identity()
@@ -184,7 +261,7 @@ impl ExpansionViscoelastic {
             || self.thermal.reference_context() != previous.thermal.reference_context()
         {
             return Err(ExpansionViscoelasticError::Incompatible(
-                "a thermal history must retain its original material, expansion path, datum, fixed frame and kinetic calibration",
+                "a thermal history must retain its original material, manufactured reference, composition order, expansion path, datum, fixed frame and kinetic calibration",
             ));
         }
         Ok(())

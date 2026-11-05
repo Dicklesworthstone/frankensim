@@ -189,6 +189,31 @@ impl ReferenceDeformation {
         self.volume_ratio
     }
 
+    /// Compose two prescribed maps in their declared order: apply `self`,
+    /// then `next`, so the resulting gradient is `next.G * self.G`.
+    ///
+    /// The output axes of the first map must be the input axes of the second.
+    /// The caller owns that physical convention: anisotropic thermal expansion,
+    /// manufactured prestrain and growth generally do not commute. This method
+    /// neither rotates material data nor transports accepted internal history.
+    /// The composed map is admitted once, outside constitutive point kernels.
+    /// Identity factors preserve the other prepared map exactly.
+    pub fn followed_by(&self, next: Self) -> Result<Self, MaterialError> {
+        if self.gradient == IDENTITY {
+            return Ok(next);
+        }
+        if next.gradient == IDENTITY {
+            return Ok(*self);
+        }
+        let gradient = core::array::from_fn(|ij| {
+            let (i, j) = (ij / 3, ij % 3);
+            (0..3)
+                .map(|k| next.gradient[3 * i + k] * self.gradient[3 * k + j])
+                .sum()
+        });
+        Self::try_new(gradient)
+    }
+
     /// Map total `F` to elastic `F G^-1`. Near the relaxed configuration,
     /// evaluate `I + (F-G) G^-1` to retain weak mechanical increments and
     /// return identity exactly at `F=G`. Away from it, direct multiplication

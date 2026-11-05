@@ -1,6 +1,8 @@
 //! Prescribed thermal reference changes retain source datum and viscous memory.
 use super::*;
-use fs_couple::finite_solid::thermal::visco::{ExpansionViscoelastic, ExpansionViscoelasticError};
+use fs_couple::finite_solid::thermal::visco::{
+    ExpansionViscoelastic, ExpansionViscoelasticError, ThermalReferenceOrder,
+};
 use fs_material::hyper::reference::ReferenceDeformation;
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_material::visco::temperature::{TemperatureShift, TemperatureShiftModel};
@@ -227,4 +229,134 @@ fn thermal_history_refuses_changed_source_frame_datum_and_unsupported_temperatur
             .is_err()
     );
     assert_eq!(state, before);
+}
+
+fn manufactured() -> ReferenceDeformation {
+    ReferenceDeformation::try_new([1.1, 0.17, 0.03, 0.0, 0.94, -0.04, 0.0, 0.0, 1.02]).unwrap()
+}
+
+#[test]
+fn manufactured_prestrain_survives_thermal_cycles_in_both_explicit_orders() {
+    let source = card(STRETCHES, "T", false);
+    for order in [
+        ThermalReferenceOrder::ManufacturedThenThermal,
+        ThermalReferenceOrder::ThermalThenManufactured,
+    ] {
+        let original = original_law().with_reference_deformation(manufactured());
+        let thermal = endpoint(&source, None).thermal_reference().clone();
+        let mut current = ExpansionViscoelastic::try_new_with_prestrain(
+            original.clone(),
+            thermal,
+            Some(shift()),
+            order,
+        )
+        .unwrap();
+        assert_eq!(current.law().reference_deformation(), &manufactured());
+        let placed = current
+            .law()
+            .step_response(&current.law().initial_state(), &TOTAL, 0.0)
+            .unwrap();
+        let mut history = current
+            .law()
+            .step_response(&placed.state, &TOTAL, 0.12)
+            .unwrap()
+            .state;
+        let initial = history.clone();
+        assert!(initial.dissipated > 0.0);
+        for temperature in [305.0, 310.0, 296.0, 307.0, 300.0] {
+            let next = current.at_temperature(&source, temperature).unwrap();
+            let thermal = *next.thermal_reference().reference_deformation();
+            let (left, right) = match order {
+                ThermalReferenceOrder::ManufacturedThenThermal => (thermal, manufactured()),
+                ThermalReferenceOrder::ThermalThenManufactured => (manufactured(), thermal),
+            };
+            for i in 0..3 {
+                for j in 0..3 {
+                    let expected: f64 = (0..3)
+                        .map(|k| {
+                            left.deformation_gradient()[3 * i + k]
+                                * right.deformation_gradient()[3 * k + j]
+                        })
+                        .sum();
+                    near(
+                        next.law().reference_deformation().deformation_gradient()[3 * i + j],
+                        expected,
+                        3e-14,
+                    );
+                }
+            }
+            assert_eq!(next.manufactured_reference(), &manufactured());
+            assert_eq!(next.reference_order(), order);
+            let shifted = shift().shift_hyperelastic(&original, temperature).unwrap();
+            assert_eq!(next.law().branches, shifted.law().branches);
+            let change = next.change_reference_from(&current, &history).unwrap();
+            near(
+                change.reference_work_pa,
+                change.state.stored - history.stored,
+                3e-12,
+            );
+            assert_eq!(
+                change.state.inverse_viscous_cauchy_green,
+                initial.inverse_viscous_cauchy_green
+            );
+            assert_eq!(change.state.work, initial.work);
+            assert_eq!(change.state.dissipated, initial.dissipated);
+            history = change.state;
+            current = next;
+        }
+        assert_eq!(current.law().reference_deformation(), &manufactured());
+        near(history.stored, initial.stored, 3e-11);
+        near(history.reference_work, initial.reference_work, 3e-11);
+    }
+}
+
+#[test]
+fn thermal_history_retains_manufacturing_order_even_at_a_commuting_endpoint() {
+    let source = card(STRETCHES, "T", false);
+    let thermal = endpoint(&source, None).thermal_reference().clone();
+    let original = original_law().with_reference_deformation(manufactured());
+    let after = ExpansionViscoelastic::try_new_with_prestrain(
+        original.clone(),
+        thermal.clone(),
+        None,
+        ThermalReferenceOrder::ManufacturedThenThermal,
+    )
+    .unwrap();
+    let before = ExpansionViscoelastic::try_new_with_prestrain(
+        original,
+        thermal.clone(),
+        None,
+        ThermalReferenceOrder::ThermalThenManufactured,
+    )
+    .unwrap();
+    let accepted = after.law().initial_state();
+    let preserved = accepted.clone();
+    // At the datum Gt = I, both endpoints have identical G. A change in the
+    // declared physical composition still changes the future thermal model.
+    assert_eq!(
+        after.law().reference_deformation(),
+        before.law().reference_deformation()
+    );
+    assert!(matches!(
+        before.change_reference_from(&after, &accepted),
+        Err(ExpansionViscoelasticError::Incompatible(_))
+    ));
+    let after_hot = after.at_temperature(&source, 310.0).unwrap();
+    let before_hot = before.at_temperature(&source, 310.0).unwrap();
+    assert_ne!(
+        after_hot.law().reference_deformation(),
+        before_hot.law().reference_deformation()
+    );
+    let changed_manufacture = ExpansionViscoelastic::try_new_with_prestrain(
+        original_law(),
+        thermal,
+        None,
+        ThermalReferenceOrder::ManufacturedThenThermal,
+    )
+    .unwrap();
+    assert!(matches!(
+        changed_manufacture.change_reference_from(&after, &accepted),
+        Err(ExpansionViscoelasticError::Incompatible(_))
+    ));
+    assert_eq!(accepted, preserved);
 }
