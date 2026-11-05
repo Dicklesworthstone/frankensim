@@ -12,6 +12,9 @@ pub mod input;
 /// Selected bulk absorption and acoustic dispersion for an admitted thermoviscous fluid.
 pub mod fluid;
 
+mod blocks;
+pub use blocks::MAX_OBSERVER_BLOCK_SAMPLES;
+
 use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_material::iso9613::{TerrestrialAir, iso9613_absorption};
@@ -771,8 +774,10 @@ pub struct ObserverFilterReceipt {
 }
 
 /// A causal FIR realization of an observer law over a fixed range, for
-/// renderers that emit pressure sample by sample. The sum runs in a fixed
-/// order, so output is bitwise independent of how samples are blocked.
+/// renderers that emit pressure sample by sample. Scalar [`Self::process`]
+/// sums in a fixed order, independent of callback boundaries. Explicit
+/// [`Self::process_block`] may instead use FFT arithmetic, which agrees to
+/// roundoff while preserving the original causal response and delay.
 ///
 /// How each law is made causal:
 /// - Molecular relaxation and ISO 9613-1's relaxation terms carry their own
@@ -793,6 +798,7 @@ pub struct ObserverFilter {
     history: Vec<f64>,
     head: usize,
     receipt: ObserverFilterReceipt,
+    blocks: Option<blocks::FirBlocks>,
 }
 
 // Response design is independent of the streaming receipt's integer clock.
@@ -1163,6 +1169,7 @@ impl ObserverFilter {
             taps: vec![1.0],
             history: vec![0.0],
             head: 0,
+            blocks: None,
             receipt: ObserverFilterReceipt {
                 absorption,
                 range_m,
@@ -1230,6 +1237,7 @@ impl ObserverFilter {
             taps: response.taps,
             history: vec![0.0; taps],
             head: 0,
+            blocks: None,
             receipt: ObserverFilterReceipt {
                 absorption,
                 range_m,
@@ -1264,6 +1272,34 @@ impl ObserverFilter {
     /// Filter one sample on the receipt's clock.
     pub fn process(&mut self, sample: f64) -> f64 {
         process_fir(&self.taps, &mut self.history, &mut self.head, sample)
+    }
+
+    /// Prepare reusable storage for checked block filtering, without resetting
+    /// sample history or changing the original physical/delay receipt.
+    /// Capacity is in `1..=MAX_OBSERVER_BLOCK_SAMPLES`. Preparation allocates;
+    /// [`Self::process_block`] does not. Repreparation retains accepted history.
+    pub fn prepare_blocks(&mut self, maximum_samples: usize) -> Result<(), AcousticRealizeError> {
+        self.blocks = Some(blocks::FirBlocks::prepare(&self.taps, maximum_samples)?);
+        Ok(())
+    }
+
+    /// Prepared maximum block size, or `None` before explicit preparation.
+    #[must_use]
+    pub fn block_capacity(&self) -> Option<usize> {
+        self.blocks.as_ref().map(blocks::FirBlocks::capacity)
+    }
+
+    /// Apply the original causal FIR without additional latency. Scalar and
+    /// block calls may interleave on the same history. Long blocks use FFT
+    /// overlap-save; their results match scalar convolution to roundoff, not
+    /// bitwise across differently partitioned callbacks. Samples outside the
+    /// block are retained in history, so a later block receives the full tail.
+    /// Requires explicit preparation. Invalid input, an oversized block or
+    /// nonfinite output leaves both pressure and accepted history unchanged.
+    pub fn process_block(&mut self, pressure_pa: &mut [f64]) -> Result<(), AcousticRealizeError> {
+        self.blocks.as_mut()
+            .ok_or_else(|| invalid("observer block filtering requires prepare_blocks"))?
+            .process(&self.taps, &mut self.history, &mut self.head, pressure_pa)
     }
 }
 

@@ -31,6 +31,30 @@ fn voice(gas: fs_material::gas::GasState) -> CompactPlateVoice {
 }
 
 #[test]
+fn prepared_atmosphere_blocks_preserve_pressure_arrival_and_mechanical_history() {
+    let (gas, air) = TerrestrialAir::moist_air(293.15, 101325.0, 0.5).unwrap();
+    let law = GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air };
+    let mut scalar = voice(gas).with_observer_law(law, None).unwrap();
+    let mut expected = vec![0.0; 12_000];
+    scalar.step_block(&mut expected).unwrap();
+    let peak = expected.iter().fold(0.0_f64, |m, p| m.max(p.abs()));
+    assert!(peak > 1e-6);
+    for callback in [37, 512, 4093] {
+        let mut prepared = voice(gas).with_observer_law(law, None).unwrap()
+            .with_observer_blocks(512).unwrap();
+        let mut actual = vec![0.0; expected.len()];
+        for chunk in actual.chunks_mut(callback) { prepared.step_block(chunk).unwrap(); }
+        assert!(actual.iter().zip(&expected).all(|(x, y)| (x - y).abs() < 2e-11 * peak));
+        assert_eq!(prepared.observer_receipt(), scalar.observer_receipt());
+        assert_eq!(prepared.samples_rendered(), scalar.samples_rendered());
+        assert_eq!(prepared.bodies()[0].volume_velocity().to_bits(), scalar.bodies()[0].volume_velocity().to_bits());
+        assert!(prepared.with_observer_blocks(512).is_err());
+    }
+    assert!(voice(gas).with_observer_blocks(512).is_err());
+    assert!(voice(gas).with_observer_law(law, None).unwrap().with_observer_blocks(0).is_err());
+}
+
+#[test]
 fn causal_atmosphere_matches_analytical_retarded_acceleration_without_changing_motion() {
     let (gas, air) = TerrestrialAir::moist_air(293.15, 101325.0, 0.5).unwrap();
     let count = 12_000;

@@ -113,4 +113,20 @@ fn admitted_no_alloc_assembly_allocates_nothing_per_block() {
     // The gate must not be vacuous: the stream is real sound.
     let rms = (block.iter().map(|p| p * p).sum::<f64>() / block.len() as f64).sqrt();
     assert!(rms > 1.0, "non-vacuous stream (rms {rms})");
+
+    // The same callback gate also covers explicitly prepared atmospheric
+    // convolution; spectral planning and dispatch warm-up happen before it.
+    let (gas, admission) = fs_material::iso9613::TerrestrialAir::moist_air(
+        293.15, 101_325.0, 0.5,
+    ).unwrap();
+    let mut filter = fs_couple::air_path::ObserverFilter::iso9613(
+        &admission, &gas, 0.5, 30.0, 48_000,
+    ).unwrap();
+    filter.prepare_blocks(512).unwrap();
+    assert!(filter.taps().len() > 32);
+    filter.process_block(&mut block).unwrap();
+    let before = ALLOCATIONS.load(Ordering::Relaxed);
+    for _ in 0..32 { filter.process_block(&mut block).unwrap(); }
+    let after = ALLOCATIONS.load(Ordering::Relaxed);
+    assert_eq!(after - before, 0, "prepared atmospheric blocks allocated");
 }

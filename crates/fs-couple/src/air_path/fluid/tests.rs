@@ -15,6 +15,35 @@ fn liquid(bulk: f64) -> ClassicalBulkAbsorption {
     ClassicalBulkAbsorption::from_material(&state, bulk).unwrap()
 }
 
+#[test]
+fn g3_material_blocks_share_scalar_history_and_preserve_refused_state() {
+    for model in [FluidPropagationModel::ClassicalMinimumPhase, FluidPropagationModel::ThermoviscousDispersion] {
+        let mut block = FluidObserverFilter::with_model(
+            liquid(0.1), 500.0, 1.0 / 48_000.25, 1e-10, model,
+        ).unwrap();
+        let mut scalar = block.clone();
+        let receipt = *block.receipt();
+        for i in 0..73 {
+            let sample = (i as f64 * 0.127).sin();
+            assert_eq!(block.process(sample).unwrap(), scalar.process(sample).unwrap());
+        }
+        block.prepare_blocks(512).unwrap();
+        assert_eq!(block.block_capacity(), Some(512));
+        let mut bad = [f64::NAN];
+        assert!(block.process_block(&mut bad).is_err());
+        assert!(bad[0].is_nan());
+        assert!(block.process_block(&mut vec![0.0; 513]).is_err());
+        for count in [512, 7, 489, 512] {
+            let mut samples: Vec<_> = (0..count).map(|i| (i as f64 * 0.41).sin()).collect();
+            let expected: Vec<_> = samples.iter().map(|&x| scalar.process(x).unwrap()).collect();
+            block.process_block(&mut samples).unwrap();
+            assert!(samples.iter().zip(expected).all(|(&x, y)| (x - y).abs() < 3e-12));
+        }
+        assert_eq!(*block.receipt(), receipt);
+        assert!((block.process(0.2).unwrap() - scalar.process(0.2).unwrap()).abs() < 3e-12);
+    }
+}
+
 fn magnitude(taps: &[f64], omega_dt: f64) -> f64 {
     let (re, im) = taps
         .iter()

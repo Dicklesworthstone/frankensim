@@ -76,6 +76,7 @@ pub struct FluidObserverFilter {
     history: Vec<f64>,
     head: usize,
     receipt: FluidPropagationReceipt,
+    blocks: Option<super::blocks::FirBlocks>,
 }
 
 impl FluidObserverFilter {
@@ -125,6 +126,7 @@ impl FluidObserverFilter {
             history,
             head: 0,
             receipt,
+            blocks: None,
         })
     }
 
@@ -154,6 +156,29 @@ impl FluidObserverFilter {
             return Err(invalid("fluid observer output is unrepresentable"));
         }
         Ok(output)
+    }
+
+    /// Prepare allocation-free block filtering of the same material response.
+    /// Retains accepted history, the exact clock and every original delay and
+    /// truncation bound. See [`super::ObserverFilter::prepare_blocks`].
+    pub fn prepare_blocks(&mut self, maximum_samples: usize) -> Result<(), AcousticRealizeError> {
+        self.blocks = Some(super::blocks::FirBlocks::prepare(&self.taps, maximum_samples)?);
+        Ok(())
+    }
+
+    /// Prepared maximum block size, or `None` before explicit preparation.
+    pub fn block_capacity(&self) -> Option<usize> {
+        self.blocks.as_ref().map(super::blocks::FirBlocks::capacity)
+    }
+
+    /// Filter a bounded block through the original causal material FIR without
+    /// additional delay. Shares history with [`Self::process`]; FFT arithmetic
+    /// agrees with scalar convolution to roundoff. Refusal leaves input and
+    /// accepted state unchanged. No allocation occurs after preparation.
+    pub fn process_block(&mut self, pressure_pa: &mut [f64]) -> Result<(), AcousticRealizeError> {
+        self.blocks.as_mut()
+            .ok_or_else(|| invalid("fluid observer block filtering requires prepare_blocks"))?
+            .process(&self.taps, &mut self.history, &mut self.head, pressure_pa)
     }
 }
 

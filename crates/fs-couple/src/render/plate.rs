@@ -214,6 +214,22 @@ impl CompactPlateVoice {
         Ok(self)
     }
 
+    /// Prepare block convolution for an already attached atmospheric law.
+    /// This cold, opt-in acceleration preserves the original material FIR,
+    /// physical arrival and body dynamics. It adds no block latency. FFT
+    /// rounding can differ across callback partitions; scalar filtering remains
+    /// available by omitting this preparation. Arbitrarily large callbacks are
+    /// processed in bounded chunks without allocating in the pressure loop.
+    pub fn with_observer_blocks(mut self, maximum_samples: usize) -> Result<Self, RenderError> {
+        if self.poisoned || self.sample_index != 0 {
+            return Err(invalid("plate observer blocks must prepare before the first sample"));
+        }
+        self.observer.as_mut()
+            .ok_or_else(|| invalid("plate observer blocks need an attached atmosphere law"))?
+            .prepare_blocks(maximum_samples).map_err(RenderError::Voice)?;
+        Ok(self)
+    }
+
     /// Applied observer law and its original delay/error accounting, if any.
     #[must_use]
     pub fn observer_receipt(&self) -> Option<&ObserverFilterReceipt> {
@@ -300,6 +316,9 @@ impl CompactPlateVoice {
         let count = u64::try_from(out.len()).map_err(|_| invalid("plate sample count overflow"))?;
         self.sample_index.checked_add(count).ok_or_else(|| invalid("plate sample clock overflow"))?;
         if self.spatial.is_some() { return self.step_spatial_block(out); }
+        if let Some(capacity) = self.observer.as_ref().and_then(ObserverFilter::block_capacity) {
+            return self.step_filtered_blocks(out, capacity);
+        }
         let dt = self.sample_period_s();
         let width = self.bodies.len();
         let rows = self.delay_whole + 1;
@@ -349,6 +368,26 @@ impl CompactPlateVoice {
             self.sample_index += 1;
         }
         Ok(())
+    }
+
+    fn step_filtered_blocks(&mut self, out: &mut [f64], capacity: usize) -> Result<(), RenderError> {
+        // Taking the observer lets the unchanged mechanics/retarded-pressure
+        // loop run first. It has no atmospheric feedback. The delay history was
+        // already compensated when the law attached and remains untouched.
+        let mut observer = self.observer.take().expect("prepared observer exists");
+        let result = (|| {
+            for block in out.chunks_mut(capacity) {
+                self.step_block(block)?;
+                observer.process_block(block).map_err(RenderError::Voice)?;
+                if block.iter().any(|x| x.abs() > self.config.maximum_abs_pressure_pa) {
+                    return Err(invalid("filtered plate pressure exceeds its declared finite output budget"));
+                }
+            }
+            Ok(())
+        })();
+        self.observer = Some(observer);
+        if result.is_err() { self.poisoned = true; }
+        result
     }
 }
 
