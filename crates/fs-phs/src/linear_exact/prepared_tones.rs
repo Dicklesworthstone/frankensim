@@ -1,7 +1,7 @@
 //! Continuous sources through the original complete quadratic pHS owner.
 mod affine;
 mod observer;
-mod power;
+pub(super) mod power;
 pub use observer::PreparedToneObserver;
 
 use super::{
@@ -211,13 +211,13 @@ impl<'a> PreparedExactTones<'a> {
             );
         }
         let q = split.quadratic_matrix();
-        let outputs: Vec<Vec<f64>> = (0..m)
-            .map(|p| {
-                (0..n)
-                    .map(|j| (0..n).map(|i| system.g[i * m + p] * q[i * n + j]).sum())
-                    .collect()
-            })
-            .collect();
+        let mut outputs = vec![vec![0.0; n]; m];
+        for (p, row) in outputs.iter_mut().enumerate() {
+            for (j, value) in row.iter_mut().enumerate() {
+                *value = crate::port_output_component(&system.g, m, p, |i| q[i * n + j])
+                    .ok_or_else(|| refuse("continuous-tone physical output map overflows"))?;
+            }
+        }
         let flow = PreparedQuadraticFlow::new_tones_controlled(
             system,
             &split,

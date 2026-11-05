@@ -1,5 +1,6 @@
 //! Original port work and resistance squares along continuous source motion.
 use super::super::{LinearSplit, finite, positive_heat, refuse};
+use crate::interconnection::accumulation::Sum as Contraction;
 use crate::{PhsError, PortHamiltonian, ResistanceWitness};
 use fs_math::det;
 
@@ -11,7 +12,7 @@ struct Observation {
     right: Option<Vec<f64>>,
 }
 
-pub(super) struct TonePower {
+pub(in crate::linear_exact) struct TonePower {
     n: usize,
     m: usize,
     sources: usize,
@@ -34,7 +35,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), crate::PreparedStepE
 
 impl TonePower {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
+    pub(in crate::linear_exact) fn new(
         system: &PortHamiltonian,
         split: &LinearSplit,
         frequencies: &[f64],
@@ -54,14 +55,14 @@ impl TonePower {
         for i in 0..n {
             poll(cancelled)?;
             for j in 0..n {
-                a[i * n + j] = (0..n)
-                    .map(|k| {
-                        (system.j[i * n + k] - system.r[i * n + k])
-                            * split.quadratic.matrix[k * n + j]
-                    })
-                    .sum::<f64>()
-                    * scales[i]
-                    / scales[j];
+                let mut value = Contraction::default();
+                let refused = || refuse("continuous-tone physical generator overflows");
+                for k in 0..n {
+                    let q = split.quadratic.matrix[k * n + j];
+                    value.product(system.j[i * n + k], q).ok_or_else(refused)?;
+                    value.product(-system.r[i * n + k], q).ok_or_else(refused)?;
+                }
+                a[i * n + j] = value.value().ok_or_else(refused)? * scales[i] / scales[j];
             }
         }
         let mut rate = frequencies.iter().copied().fold(1.0_f64, f64::max);
@@ -148,7 +149,7 @@ impl TonePower {
     /// Uses the original physical effort and force imbalance before any
     /// factor contraction. This keeps a stationary resistance nullspace and
     /// tiny forced motion from becoming subtraction of large heat terms.
-    pub(super) fn evaluate_into(
+    pub(in crate::linear_exact) fn evaluate_into(
         &self,
         system: &PortHamiltonian,
         effort: &[f64],
@@ -159,23 +160,23 @@ impl TonePower {
     ) -> Result<f64, PhsError> {
         let tones = self.sources / (self.stride * self.m);
         for i in 0..self.n {
-            let mut force = Sum::default();
-            let mut conservative = Sum::default();
-            let mut resistive = Sum::default();
+            // Keep the complete physical imbalance in one contraction. A weak
+            // drive can survive only after large port/internal forces cancel;
+            // rounding those groups first would erase its entire motion.
+            let mut value = Contraction::default();
+            let refused = || refuse("continuous-tone physical derivative overflows");
             for p in 0..self.m {
-                let mut total = Sum::default();
                 for t in 0..tones {
-                    total.add(input[self.stride * (p * tones + t)]);
+                    value
+                        .product(system.g[i * self.m + p], input[self.stride * (p * tones + t)])
+                        .ok_or_else(refused)?;
                 }
-                force.add(system.g[i * self.m + p] * total.value());
             }
             for (j, &e) in effort.iter().enumerate() {
-                conservative.add(system.j[i * self.n + j] * e);
-                resistive.add(system.r[i * self.n + j] * e);
+                value.product(system.j[i * self.n + j], e).ok_or_else(refused)?;
+                value.product(-system.r[i * self.n + j], e).ok_or_else(refused)?;
             }
-            derivative[i] = ((force.value() + conservative.value()) - resistive.value())
-                * self.scales[i]
-                / self.rate;
+            derivative[i] = value.value().ok_or_else(refused)? * self.scales[i] / self.rate;
         }
         let supplied = self.evaluate(&self.work, effort, derivative, input, None, coordinates)?;
         for (value, observation) in heat.iter_mut().zip(&self.heat) {
@@ -303,11 +304,15 @@ fn prepare_observation(
     for i in 0..rows {
         factor[i * d + i] = root_rate;
         for j in 0..n {
-            generator[i * d + rows + j] = root_rate
-                * (0..n)
-                    .map(|k| map[i * n + k] * split.quadratic.matrix[k * n + j])
-                    .sum::<f64>()
-                / scales[j];
+            let mut value = Contraction::default();
+            let refused = || refuse("continuous-tone physical observation map overflows");
+            for k in 0..n {
+                value
+                    .product(map[i * n + k], split.quadratic.matrix[k * n + j])
+                    .ok_or_else(refused)?;
+            }
+            generator[i * d + rows + j] =
+                root_rate * value.value().ok_or_else(refused)? / scales[j];
         }
     }
     for i in 0..n {
@@ -381,5 +386,47 @@ impl Sum {
     }
     pub(super) fn value(self) -> f64 {
         self.sum + self.correction
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{QuadraticStorage, linear_exact::{LinearSplitBudget, split_quadratic}};
+
+    #[test]
+    fn complete_tone_force_keeps_motion_after_internal_and_external_cancellation() {
+        let large = 2.0_f64.powi(54);
+        let delta = 2.0_f64.powi(-27);
+        for (g, cosine, effort, expected) in [
+            (vec![1.0, 1.0], vec![large, 1.0], large, 1.0),
+            (vec![1.0, 1.0], vec![1.0, large], large, 1.0),
+            (vec![1.0 + delta], vec![1.0 - delta], 1.0, -delta * delta),
+        ] {
+            let m = g.len();
+            let system = PortHamiltonian::new(
+                1, m, vec![0.0], vec![1.0], g,
+                Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+            ).unwrap();
+            let split = split_quadratic(&system, LinearSplitBudget {
+                max_modes: 1, max_omega_dt: 0.1,
+            }).unwrap();
+            let power = TonePower::new(
+                &system, &split, &[0.0], &vec![1.0; 2 * m], 0.125,
+                false, &[], &mut || false,
+            ).unwrap();
+            let mut input = vec![0.0; 2 * m];
+            for (p, value) in cosine.into_iter().enumerate() { input[2 * p] = value; }
+            let mut derivative = [f64::NAN];
+            let mut coordinates = vec![0.0; 1 + m.max(1) + 2 * m];
+            let mut heat = [0.0];
+            power.evaluate_into(
+                &system, &[effort], &input, &mut derivative, &mut coordinates, &mut heat,
+            ).unwrap();
+            // H=x²/2, J=0, R=1: the independently known physical derivative
+            // is sum_p(G_p*u_p)-x, including the product's FMA remainder.
+            assert_eq!(derivative[0] * power.rate / power.scales[0], expected);
+            assert!(heat[0].is_finite() && heat[0] > 0.0);
+        }
     }
 }

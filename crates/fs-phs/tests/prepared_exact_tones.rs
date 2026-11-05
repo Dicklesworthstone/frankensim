@@ -511,6 +511,35 @@ fn static_balance_and_tiny_motion_keep_original_heat_scale() {
 }
 
 #[test]
+fn physical_mean_output_preserves_a_weak_column_between_opposing_port_weights() {
+    let large = 2.0_f64.powi(54);
+    let system = PortHamiltonian::new(
+        3,
+        1,
+        vec![0.0; 9],
+        vec![0.0; 9],
+        vec![large, 1.0, -large],
+        Box::new(QuadraticStorage::new(vec![4.0, 1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 4.0], 3).unwrap()),
+    )
+    .unwrap();
+    // Keep the large physical observation inside the existing cold scaling
+    // capacity; the exact constant output is independent of interval length.
+    let mut prepared = PreparedExactTones::new(
+        &system, &[1.7], 2.0_f64.powi(-20), split(), dense(),
+    ).unwrap();
+    let initial = [0.0, 1.0, 0.0];
+    let mut next = [0.0; 3];
+    let mut output = [0.0];
+    let record = prepared.step_into(&initial, &[0.0], &[0.0], &mut next, &mut output).unwrap();
+    // J=R=0 and u=0 leave x fixed. Q*x=(1,1,1), hence the original
+    // work-conjugate output is large + 1 - large = 1 for the whole interval.
+    assert_eq!(next, initial);
+    assert_eq!(output, [1.0]);
+    assert_eq!(record.supplied, 0.0);
+    assert_eq!(record.dissipated, 0.0);
+}
+
+#[test]
 fn warm_multitone_channels_and_phase_allocate_nothing() {
     let frequencies = [0.0, 2.0, 2.03];
     let mut cosine = [0.2, 0.5, -0.31, -0.1, 0.22, 0.4];
