@@ -34,6 +34,9 @@ impl ImmersedRelaxation3 {
             CollisionModel3::CentralMoment {
                 second_order_rate, ..
             }
+            | CollisionModel3::CentralMomentBulk {
+                shear_rate: second_order_rate, ..
+            }
             | CollisionModel3::ReducedCumulant {
                 second_order_rate, ..
             } => {
@@ -157,6 +160,11 @@ mod tests {
             for model in [
                 CollisionModel3::CentralMoment {
                     second_order_rate: rate,
+                    higher_order_rate: 0.73,
+                },
+                CollisionModel3::CentralMomentBulk {
+                    shear_rate: rate,
+                    bulk_rate: 0.61,
                     higher_order_rate: 0.73,
                 },
                 CollisionModel3::ReducedCumulant {

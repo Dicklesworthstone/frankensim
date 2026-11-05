@@ -455,8 +455,8 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
 
 /// A collision family that can bind material shear viscosity without choosing
 /// a different equilibrium, bulk rate or higher-order damping model.
-/// D3Q19's moment models tie ALL second-order rates together; their existing
-/// bulk/shear tie and physical-frame forcing are retained. D3Q27 changes only
+/// D3Q19's original moment models retain their second-order bulk/shear tie;
+/// `CentralMomentBulk` retains its independent trace rate. D3Q27 changes only
 /// omega1, leaving its independent trace and eight higher groups untouched.
 /// TRT preserves its declared even/odd product, retuning the odd rate with tau
 /// so material and SGS viscosity changes do not silently change wall placement.
@@ -484,6 +484,15 @@ impl ViscousLattice3<19> for D3q19 {
                 higher_order_rate, ..
             } => CollisionModel3::CentralMoment {
                 second_order_rate: 1.0 / tau,
+                higher_order_rate,
+            },
+            CollisionModel3::CentralMomentBulk {
+                bulk_rate,
+                higher_order_rate,
+                ..
+            } => CollisionModel3::CentralMomentBulk {
+                shear_rate: 1.0 / tau,
+                bulk_rate,
                 higher_order_rate,
             },
             CollisionModel3::ReducedCumulant {
@@ -937,6 +946,9 @@ impl AcousticScalingPlan {
         Self::from_material(gas, dx_m, maximum_speed_m_s, maximum_mach)
     }
 }
+
+#[cfg(test)]
+mod bulk_viscosity_tests;
 
 #[cfg(test)]
 mod collision_field_tests {

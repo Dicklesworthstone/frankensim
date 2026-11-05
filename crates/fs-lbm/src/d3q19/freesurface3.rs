@@ -838,6 +838,7 @@ impl FreeSurface3 {
         let tau = match self.collision_model() {
             super::CollisionModel3::Bgk { tau } | super::CollisionModel3::Trt { tau, .. } => tau,
             super::CollisionModel3::CentralMoment { second_order_rate, .. }
+            | super::CollisionModel3::CentralMomentBulk { shear_rate: second_order_rate, .. }
             | super::CollisionModel3::ReducedCumulant { second_order_rate, .. } => {
                 1.0 / second_order_rate
             }

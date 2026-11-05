@@ -12624,3 +12624,31 @@ uniform/spatial mixed-strain rheology. This is a weakly compressible isothermal
 bulk-viscosity capability; it supplies no thermal acoustic attenuation or
 frequency-dependent molecular relaxation. D3Q19 and D3Q27 retain their existing
 collision contracts.
+
+## Independent bulk viscosity in the D3Q19 central-moment solver
+
+`CollisionModel3::CentralMomentBulk { shear_rate, bulk_rate, higher_order_rate }`
+relaxes the five deviatoric second moments independently of their trace. All
+three rates must be finite and strictly between zero and two. In lattice units,
+`nu = (1/shear_rate - 1/2)/3` and
+`zeta/rho = (2/9) (1/bulk_rate - 1/2)`; the latter is also exposed by
+`kinematic_bulk_viscosity`. The existing models retain their original bulk/shear
+relation. Equal bulk and shear rates preserve the original central-moment
+population arithmetic, including the selected higher-order rate and Guo force
+transform. The extra relaxation corrects only the isotropic second moment.
+
+Native material and lattice SGS shear rebinding preserve the independently
+configured bulk and higher-order rates. Curved-wall source rheology extracts
+the deviatoric stress numerator and fixed dilation from the physical Guo stress,
+then queries the original constitutive source at their combined `sqrt(2 D:D)`
+rate. The bounded local solve retains source-domain, iteration and cancellation
+refusals; zero fixed dilation preserves the original source-query arithmetic.
+Compression therefore cannot be reinterpreted as shear solely because a different
+bulk relaxation was configured. Native boundary and immersed-solid relaxation
+continue to use the shear rate for their viscous response. The separate
+free-surface stress SGS path retains its explicit BGK/TRT-only admission.
+
+This is a weakly compressible, isothermal collision capability. Longitudinal
+continuum waves decay at `Gamma = (4nu/3 + zeta/rho) k²/2`, while transverse waves
+decay at `nu k²`. It does not add a thermal equation, molecular relaxation,
+temperature-dependent bulk-viscosity sampling or bulk dissipation heating.
