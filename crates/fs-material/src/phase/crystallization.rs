@@ -18,6 +18,9 @@
 /// Prepared source-bound temperature-dependent Nakamura rates.
 pub mod kinetics;
 
+/// Original material properties evaluated on the accepted kinetic history.
+pub mod properties;
+
 /// Relative entropy and phase driving energy from the original caloric pair.
 pub mod entropy;
 

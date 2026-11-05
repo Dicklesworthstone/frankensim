@@ -16,10 +16,29 @@ insufficient; unidentified or crossing-but-different caloric curves refuse.
 Birth, contact, separation and boundary events use that original timeline's
 admission and coverage owner, in authored order. Every thermal/kinetic interval
 ends at the next event or target; target-time births activate without aging.
-Each newly deposited bound cell starts with explicitly zero exposure and its
+Each newly deposited bound cell defaults to explicitly zero exposure and its
 unchanged incoming enthalpy. Existing cells retain their exposure, and ordinary
-molds receive no crystal history. Precrystallized inflow requires an explicit
-history-transfer model and is not inferred. Empty intervals consume no thermal
+molds receive no crystal history. `new_with_incoming_states` instead accepts
+original `CrystallizationState` histories keyed by active cell or unique pending
+birth. The complete law identity and caloric reconstruction must validate and
+stored enthalpy must match exactly; no age or fraction is inferred from
+temperature. Missing keys, repeated births, ordinary-material targets, stale
+enthalpy and another law refuse the complete attachment. The immutable feed map
+is shared across cloned and implicit candidates, avoiding per-trial copies of
+the incoming phase inventory.
+
+Supplied feed retains its original exposure and crystal mass without aging
+before birth, including a birth exactly at the advance target. Its validated
+mixture temperature goes through the original birth admission owner, retaining
+all geometry, material, boundary, coverage and work-budget rules. This permits
+cold crystal mixtures whose enthalpy is outside the all-amorphous inverse chart;
+the parent chart never reinterprets their phase energy. Imported crystal mass
+is already part of incoming total mass, so `crystallized_mass_kg` counts only
+subsequent signed conversion. No extra latent heat is applied at ingress.
+Focused regressions cover active-state adoption, cold seeded feed and ordinary
+molds, exact endpoint birth/restart, implicit continuation, source and enthalpy
+mismatches, and rollback on late original admission failure or cancellation.
+Empty intervals consume no thermal
 steps; events do not renew the whole-advance substep budget. Incoming mass and
 birth enthalpy enter their original accounts once, while heat residuals retain
 cell-relative differences. A late birth-domain refusal or cancellation rolls

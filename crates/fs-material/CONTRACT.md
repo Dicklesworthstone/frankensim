@@ -234,6 +234,35 @@ the shared thermal timeline and native free/constrained shrinkage. The runnable
 temperature, both crystal fractions, free volume and the energy balance. Its
 inputs are explicitly manufactured; it is not a measured material prediction.
 
+### Original properties on the accepted crystallization history
+
+`phase::crystallization::properties::CrystallizationPropertySource` binds the
+original material card, caloric pair, kinetic law and exact selected scalar
+property claims. It updates the accepted temperature and explicitly named
+crystalline mass and/or volume fraction coordinates. Absolute crystal mass
+fraction is distinct from normalized conversion and from liquid fraction;
+the parent may itself be an amorphous solid. Volume fraction uses the original
+constituent densities. Other admitted pressure/composition conditions remain
+fixed, and unowned evolving coordinates refuse.
+
+Every evaluation validates the original kinetic state and refreshes the same
+source claims as one atomic material bundle. Unsupported crystallinity or
+temperature cannot select a different source, extrapolate or clamp. Thermal,
+electrical and mechanical consumers can request their own typed scalar
+requirements on that shared state. No conductivity or stiffness mixing rule is
+invented. A separately queried density/Cp does not replace the original mass,
+caloric or pressure-work owner, and changing elastic parameters does not by
+itself close thermomechanical energy feedback.
+
+Regressions cover distinct mass/volume coordinates, fixed conditions, original
+claims, foreign-history refusal and finite-body contact against an independent
+analytic heat balance with kinetic conductivity. Native triangle/quad mechanics
+consume the same source bundle through the existing elastic and shrinkage laws.
+The cooling example now preserves incoming crystal history and evaluates its
+declared conductivity source within the existing implicit network residual.
+These manufactured cases test numerical integration, not material calibration,
+source support between endpoints, morphology or coupled mechanical work.
+
 ## Original mixed pressure dual without unused remainder tangents
 
 `MixedFiniteStrainPotential::mixed_pressure_potential` exposes the original
