@@ -8196,6 +8196,23 @@ clarinet is one filling of those objects.
   quadrature/mass, zero-monopole cancellation, mode sign/scale invariance with
   and without the actual fitted self-load, conjugate pHS ports, and density
   scaling through the actual assembly pressure output.
+- Explicit anisotropic thermoelastic plate bending is available through
+  `AnisotropicPlateThermal`, `certified_radiators_with_anisotropic_thermoelastic`,
+  and `VkBody::from_plate_with_anisotropic_thermoelastic`. Thermal expansion is
+  `[alpha11, alpha22, 2 alpha12]` in the original section's material axes;
+  temperature, heat capacity at constant stress and through-thickness
+  conductivity are supplied explicitly. The original oriented plane-stress
+  tensor and DKT curvature retain the rank-one `Q alpha` thermal channel,
+  signed cross terms, lossless curvature directions and prestress dilution
+  through actual total modal strain energy. The material owner retains the
+  complete insulated-slab diffusion spectrum without a thermal-mode loop.
+  Both consumers keep the existing diagonal weak-loss modal reduction at
+  nominal elastic frequencies, for a homogeneous frozen specimen state.
+  Thermoelastic stiffness dispersion, strongly coupled modal clusters,
+  lateral or boundary heat transport and transient thermal history are not
+  solved. Caller-authored constants do not acquire material-pack authority.
+  Duplicate thermoelastic loss and nonzero authored modal damping refuse;
+  existing viscosity and material-source restrictions remain in force.
 - Plate damping: a single authored viscous ratio is the two-point
   Rayleigh fit (`fs-material::visco`) through that ratio at ω₀ and
   4ω₀ so higher certified modes sit on the stiffness limb. Both linear and
@@ -8208,8 +8225,8 @@ clarinet is one filling of those objects.
   law on an orthotropic plate refuses (including a mismatched shear modulus
   when E1=E2). The material owner evaluates the complete through-thickness
   thermal diffusion spectrum of a homogeneous isotropic slab with insulated
-  faces. It does not solve a transient thermal field or establish an anisotropic
-  loss law. Callers must exclude this addend
+  faces. That scalar entry does not establish an anisotropic loss law or
+  solve a transient thermal field. Callers must exclude this addend
   when authored damping or resolved thermal transport already includes it.
   Thermal participation is `E h^3/[12(1-nu)^2] integral (kappa_xx+kappa_yy)^2`
   divided by total modal stiffness. Original DKT quadrature gives a sum of

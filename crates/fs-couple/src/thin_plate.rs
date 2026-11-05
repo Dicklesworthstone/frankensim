@@ -20,6 +20,7 @@ use fs_material::state_point::{
     SHEAR_MODULUS_PROPERTY, ScalarAdmissibility, ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY,
 };
 use fs_material::visco::{RayleighDamping, ThermoelasticZener};
+use fs_material::visco::slab_ted::SlabThermoelasticBending;
 use fs_math::c64::C64;
 use fs_math::det;
 use fs_modal::time::LinearForceTransition;
@@ -36,6 +37,59 @@ use fs_vfit::discretize::{DigitalFilter, DigitalFilterState, realize_tabulated_i
 
 mod thermoelastic_loss;
 use thermoelastic_loss::ThermoelasticBendingProjection;
+
+
+/// Explicit frozen-state thermal data for a homogeneous anisotropic plate.
+/// Elasticity, density, thickness and material orientation come from the SAME
+/// ThinPlate. These caller-supplied constants do not imply material-pack authority.
+/// The model assumes weak coupling, insulated faces and through-thickness
+/// conduction; do not combine it with transport resolving the same thermal loss.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AnisotropicPlateThermal {
+    /// Absolute specimen temperature [K].
+    pub temperature_k: f64,
+    /// [alpha_11, alpha_22, 2 alpha_12] [1/K] in section MATERIAL axes.
+    /// The engineering shear entry is twice the tensor off-diagonal expansion.
+    /// It rotates with ThinPlate::material_angle_rad into rectangle coordinates.
+    pub engineering_expansion_per_k: [f64; 3],
+    /// Specific heat at constant stress [J/(kg K)].
+    pub specific_heat_j_kg_k: f64,
+    /// Conductivity normal to the plate [W/(m K)], not an in-plane average.
+    pub thickness_conductivity_w_m_k: f64,
+}
+
+impl AnisotropicPlateThermal {
+    fn resolve(self, plate: ThinPlate, section: &PlateSection)
+        -> Result<SlabThermoelasticBending, AcousticRealizeError>
+    {
+        if plate.thermoelastic.is_some() || plate.damping_ratio != 0.0 {
+            return Err(AcousticRealizeError::InvalidDescription {
+                what: "anisotropic thermal loss requires no parallel isotropic thermal law and zero authored damping",
+            });
+        }
+        // Retain the existing viscosity/source admission, rather than clearing
+        // physical flags to evade the isotropic-only Kelvin-Voigt restriction.
+        PlateBendingLaw::new(&plate)?;
+        let [a, b, shear] = self.engineering_expansion_per_k;
+        let alpha = if plate.material_angle_rad == 0.0 {
+            [a, b, shear]
+        } else {
+            // Inverse engineering-strain transform of the SAME material angle
+            // used by PlateSection::orthotropic_plane_stress_at_angle.
+            let (s, c) = plate.material_angle_rad.sin_cos();
+            let (cc, ss, cs) = (c*c, s*s, c*s);
+            [cc*a+ss*b-cs*shear, ss*a+cc*b+cs*shear,
+                2.0*cs*(a-b)+(cc-ss)*shear]
+        };
+        let q = section.d.map(|d| 12.0*d / plate.thickness_m.powi(3));
+        SlabThermoelasticBending::new(q, alpha, self.temperature_k,
+            plate.density_kg_m3*self.specific_heat_j_kg_k,
+            self.thickness_conductivity_w_m_k, plate.thickness_m)
+            .map_err(|_| AcousticRealizeError::InvalidDescription {
+                what: "invalid anisotropic plate thermal data or unrepresentable slab coupling",
+            })
+    }
+}
 
 /// Full DKT coordinates from the SAME solve as a material image's ports.
 /// Internal consumers use rotations for constitutive projection; a transverse
@@ -611,6 +665,26 @@ impl VkBody {
         Self::from_plate_ports(plate, false)
     }
 
+
+    /// The same nonlinear plate with explicit anisotropic thermal bending loss.
+    /// Uses the original sampled DKT route, including for isotropic elasticity,
+    /// so rotated expansion and thermal shear reach actual mode curvatures.
+    /// Retains the existing weak-loss diagonal modal approximation at nominal
+    /// elastic frequencies. Thermoelastic stiffness dispersion, transient thermal
+    /// history and strongly coupled modal clusters are not solved here.
+    ///
+    /// # Errors
+    /// Duplicate loss, invalid thermal data, or any existing section, viscosity,
+    /// modal, nonlinear-storage or render admission refusal.
+    pub fn from_plate_with_anisotropic_thermoelastic(
+        plate: ThinPlate,
+        thermal: AnisotropicPlateThermal,
+    ) -> Result<Self, AcousticRealizeError> {
+        let section = plane_stress_section(plate)?;
+        let slab = thermal.resolve(plate, &section)?;
+        Self::from_sampled_fe_with_slab(plate, false, Some(slab))
+    }
+
     fn from_plate_ports(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
         plane_stress_section(plate)?;
         PlateBendingLaw::new(&plate)?;
@@ -676,8 +750,14 @@ impl VkBody {
         finish_vk(model.storage, &zetas, &drive, areas, with_area)
     }
 
-    #[allow(clippy::too_many_lines)] // one coherent FE sampling stage
     fn from_sampled_fe(plate: ThinPlate, with_area: bool) -> Result<Self, AcousticRealizeError> {
+        Self::from_sampled_fe_with_slab(plate, with_area, None)
+    }
+
+    #[allow(clippy::too_many_lines)] // one coherent FE sampling stage
+    fn from_sampled_fe_with_slab(
+        plate: ThinPlate, with_area: bool, slab: Option<SlabThermoelasticBending>,
+    ) -> Result<Self, AcousticRealizeError> {
         if plate.n_modes == 0 {
             return Err(AcousticRealizeError::InvalidDescription {
                 what: "thin plate needs at least one mode",
@@ -713,7 +793,7 @@ impl VkBody {
             });
         }
         let n_keep = plate.n_modes.min(report.modes.len()).min(3);
-        let bending_loss = PlateBendingLoss::new(plate, &mesh, &section, &boundary)?;
+        let bending_loss = PlateBendingLoss::new_with_slab(plate, &mesh, &section, &boundary, slab)?;
         let nx = nx_c + 1;
         let ny = ny_c + 1;
         let mut disp = Vec::with_capacity(n_keep);
@@ -975,6 +1055,29 @@ fn odd_odd_modes(n: usize) -> Vec<fs_nlmodal::SineMode> {
 /// Section, mesh, or modal-window refusals.
 #[allow(clippy::too_many_lines)] // one coherent certification stage
 pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    certified_radiators_with_slab(plate, None)
+}
+
+/// Certified plate modes with anisotropic thermal expansion and the complete
+/// insulated-slab loss spectrum. Uses each original DKT curvature and total
+/// modal energy, retaining conservative prestress dilution. This is the existing
+/// weak-loss diagonal modal image at nominal elastic frequencies. Thermoelastic
+/// stiffness dispersion and full nonproportional thermal dynamics are not solved.
+///
+/// # Errors
+/// Duplicate loss, invalid thermal data, or existing section/viscosity/modal refusals.
+pub fn certified_radiators_with_anisotropic_thermoelastic(
+    plate: ThinPlate,
+    thermal: AnisotropicPlateThermal,
+) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    let section = plane_stress_section(plate)?;
+    let slab = thermal.resolve(plate, &section)?;
+    certified_radiators_with_slab(plate, Some(slab))
+}
+
+fn certified_radiators_with_slab(
+    plate: ThinPlate, slab: Option<SlabThermoelasticBending>,
+) -> Result<Vec<CompactBody>, AcousticRealizeError> {
     PlateBendingLaw::new(&plate)?;
     if plate.n_modes == 0 {
         return Err(AcousticRealizeError::InvalidDescription {
@@ -1004,7 +1107,7 @@ pub fn certified_radiators(plate: ThinPlate) -> Result<Vec<CompactBody>, Acousti
     let lo = (0.25 * omega11).powi(2);
     let hi = (omega11 * (plate.n_modes as f64 + 2.0) * 4.0).powi(2);
     let projection = PlateProjection::new(&mesh, plate.length_m / nx as f64);
-    let bending_loss = PlateBendingLoss::new(plate, &mesh, &section, &boundary)?;
+    let bending_loss = PlateBendingLoss::new_with_slab(plate, &mesh, &section, &boundary, slab)?;
     harvest_radiators(
         &model,
         &projection,
@@ -1258,19 +1361,20 @@ struct PlateBendingLoss {
 }
 
 impl PlateBendingLoss {
-    fn new(
-        plate: ThinPlate,
-        mesh: &PlateMesh,
-        section: &PlateSection,
-        boundary: &[usize],
+    fn new_with_slab(
+        plate: ThinPlate, mesh: &PlateMesh, section: &PlateSection,
+        boundary: &[usize], slab: Option<SlabThermoelasticBending>,
     ) -> Result<Option<Self>, AcousticRealizeError> {
         let law = PlateBendingLaw::new(&plate)?;
-        if !law.is_active() {
+        if !law.is_active() && slab.is_none() {
             return Ok(None);
         }
-        let thermal = law.thermal.map(|thermal| ThermoelasticBendingProjection::new(
-            mesh, thermal, plate.thickness_m, plate.nu12,
-        )).transpose()?;
+        let thermal = match slab {
+            Some(slab) => Some(ThermoelasticBendingProjection::from_slab(mesh, slab)?),
+            None => law.thermal.map(|thermal| ThermoelasticBendingProjection::new(
+                mesh, thermal, plate.thickness_m, plate.nu12,
+            )).transpose()?,
+        };
         let bending = if plate.pretension_n_m == 0.0 || law.viscous.is_none() {
             None
         } else {
@@ -2908,6 +3012,81 @@ mod tests {
             weight * x / (1.0 + x*x)
         }).sum();
         0.5 * delta * shape
+    }
+
+
+    #[test]
+    fn anisotropic_thermal_expansion_rotates_with_the_original_section() {
+        let mut plate = thermal_plate();
+        plate.thermoelastic = None;
+        plate.e2_pa *= 0.6;
+        let thermal = AnisotropicPlateThermal {
+            temperature_k: 300.0, engineering_expansion_per_k: [2e-5, 5e-5, 1e-5],
+            specific_heat_j_kg_k: 600.0, thickness_conductivity_w_m_k: 10.0,
+        };
+        let aligned = thermal.resolve(plate, &plane_stress_section(plate).unwrap())
+            .unwrap().relaxation_factor();
+        plate.material_angle_rad = 0.37;
+        let rotated = thermal.resolve(plate, &plane_stress_section(plate).unwrap())
+            .unwrap().relaxation_factor();
+        // Independent stress-tensor rotation: the factor is work-conjugate
+        // to engineering curvature, so its shear is NOT doubled.
+        let (s, c) = plate.material_angle_rad.sin_cos();
+        let expected = [
+            c*c*aligned[0]+s*s*aligned[1]-2.0*c*s*aligned[2],
+            s*s*aligned[0]+c*c*aligned[1]+2.0*c*s*aligned[2],
+            c*s*(aligned[0]-aligned[1])+(c*c-s*s)*aligned[2],
+        ];
+        for i in 0..3 {
+            assert!((rotated[i]-expected[i]).abs() < 1e-13 * expected[i].abs());
+        }
+    }
+
+    #[test]
+    fn anisotropic_thermal_loss_reaches_both_live_plate_consumers() {
+        let mut plate = thermal_plate();
+        plate.thermoelastic = None;
+        plate.e2_pa *= 0.6;
+        plate.material_angle_rad = 0.31;
+        let thermal = AnisotropicPlateThermal {
+            temperature_k: 300.0, engineering_expansion_per_k: [2e-5, 7e-5, 1e-5],
+            specific_heat_j_kg_k: 600.0, thickness_conductivity_w_m_k: 10.0,
+        };
+        let baseline = certified_radiators(plate).unwrap().remove(0);
+        let first = certified_radiators_with_anisotropic_thermoelastic(plate, thermal)
+            .unwrap().remove(0);
+        assert_eq!(first.omega.to_bits(), baseline.omega.to_bits());
+        assert_eq!(first.mass_kg.to_bits(), baseline.mass_kg.to_bits());
+        assert!(first.zeta > 0.0);
+        let doubled = AnisotropicPlateThermal {
+            engineering_expansion_per_k: thermal.engineering_expansion_per_k.map(|a| 2.0*a),
+            ..thermal
+        };
+        let second = certified_radiators_with_anisotropic_thermoelastic(plate, doubled)
+            .unwrap().remove(0);
+        assert!((second.zeta/first.zeta-4.0).abs() < 1e-12);
+        let first_vk = VkBody::from_plate_with_anisotropic_thermoelastic(plate, thermal).unwrap();
+        let second_vk = VkBody::from_plate_with_anisotropic_thermoelastic(plate, doubled).unwrap();
+        let first_r = first_vk.sys.structure().1[3];
+        assert!(first_r > 0.0);
+        assert!((second_vk.sys.structure().1[3]/first_r-4.0).abs() < 1e-12);
+        let initial = [0.0, 1e-4];
+        let step = fs_phs::step(&first_vk.sys, &initial, &[0.0], 1e-5).unwrap();
+        assert!(first_vk.sys.hamiltonian(&step.x) < first_vk.sys.hamiltonian(&initial));
+
+        for conflict in 0..3 {
+            let mut invalid = plate;
+            match conflict {
+                0 => invalid.thermoelastic = thermal_plate().thermoelastic,
+                1 => invalid.damping_ratio = 0.01,
+                _ => invalid.kelvin_voigt_bending = Some(IsotropicPlateBendingViscosity {
+                    viscosity_pa_s: 1.0, omega_band_rad_s: (0.0, 1e9),
+                    material_state_identity: None,
+                }),
+            }
+            assert!(certified_radiators_with_anisotropic_thermoelastic(invalid, thermal).is_err());
+            assert!(VkBody::from_plate_with_anisotropic_thermoelastic(invalid, thermal).is_err());
+        }
     }
 
     #[test]
