@@ -199,6 +199,51 @@ fn passive_body_births_retain_enthalpy_without_invented_mechanical_layers() {
     assert!(r.total_energy_residual_j.abs()<config().total_energy_tolerance_j);
 }
 
+// G3: passive inventories with opposing energy datums must not change active
+// deposition. Their large absolute energies cancel only AFTER local changes.
+#[test]
+fn large_passive_births_preserve_small_incoming_enthalpy_and_layer_heat() {
+    let materials = growth_materials(-0.005);
+    let mut incoming = event(99,2);
+    if let Event::Birth(c) = &mut incoming.event { c.specific_h_j_kg=20.0; }
+    let (heat,strip) = initial(&materials,0.002,vec![incoming.clone()]);
+    let (reference,_) = GrowingStrip::try_new(heat,strip,1,bindings(&materials).to_vec(),
+        vec![birth(&materials,99,2)],3,1e-9,||false).unwrap();
+    let (expected,expected_report) = reference.step_candidate(0.4,stretched(0.01),
+        config(),&[0.0;2],coefficients,||false).unwrap();
+
+    let mut events = vec![incoming];
+    for (index,sign) in [1.0,-1.0].into_iter().enumerate() {
+        let mut passive = cell(CellId(1000+index as u64),0);
+        passive.body_id=2+index as u64;
+        passive.mass_kg=1e14;
+        passive.geometry.volume_m3=passive.mass_kg/DENSITY;
+        passive.specific_h_j_kg=sign*50.0;
+        events.push(TimedEvent {time_s:0.4,event:Event::Birth(passive)});
+    }
+    let (heat,strip) = initial(&materials,0.002,events);
+    let (old,_) = GrowingStrip::try_new(heat,strip,1,bindings(&materials).to_vec(),
+        vec![birth(&materials,99,2)],3,1e-9,||false).unwrap();
+    let (next,r) = old.step_candidate(0.4,stretched(0.01),config(),&[0.0;2],
+        coefficients,||false).unwrap();
+    assert_eq!(next.strip(),expected.strip());
+    for id in CELLS.into_iter().chain([CellId(99)]) {
+        assert_eq!(next.thermal().cells()[&id],expected.thermal().cells()[&id]);
+    }
+    assert_eq!(r.events.incoming_energy_j,expected_report.events.incoming_energy_j);
+    assert_eq!(r.born_layers,1);
+    assert_eq!(next.remaining_births(),0);
+    // The affine modulus admits signed reversible exchange as well as loss.
+    assert!(r.interval.deposited_heat_j.abs()>1e-6);
+    assert!(r.total_energy_residual_j.abs()<=config().total_energy_tolerance_j);
+    // This is a live cancellation case: subtracting global inventory totals
+    // loses the new layer's enthalpy AND the representable interval heat.
+    assert_eq!(next.thermal().energy_j(),0.0);
+    assert!(expected.thermal().energy_j().abs()>1e-3);
+    assert_eq!(old.thermal().time_s(),0.0);
+    assert_eq!(old.remaining_births(),1);
+}
+
 #[test]
 fn registry_and_selected_body_completeness_are_checked_before_advancement() {
     let materials = [material(5.0,3e8,0.05,0.0),material(10.0,3e8,0.05,0.0)];

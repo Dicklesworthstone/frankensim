@@ -169,8 +169,11 @@ impl<'t,'m> GrowingBridge<'t,'m> {
         // The native append leaves all old points unchanged and adds Xi=0
         // stress-free points. Its mechanical entropy increment is also zero,
         // so this zero-duration birth storage difference is an internal one.
+        // The native event residual already subtracts birth enthalpy before
+        // reducing; repeating that subtraction from extensive report totals
+        // would lose small terms beside a large passive-body birth.
         let residual=finite(next.bridge.stored_energy_j()-self.bridge.stored_energy_j()
-            +audit.stored_energy_change_j-audit.incoming_energy_j-audit.external_heat_j)?;
+            +audit.residual_j)?;
         if residual.abs()>tolerance { return Err(invalid("spatial birth storage and incoming enthalpy do not close")); }
         poll(cancelled)?;
         Ok((next,BirthAudit {thermal:audit,mechanical:reports,energy_residual_j:residual}))
@@ -186,11 +189,14 @@ impl<'t,'m> GrowingBridge<'t,'m> {
             .map_err(GrowthError::Birth)?;
         // Births add no mechanical entropy; the original interval accounts for
         // every changing old point's T*s alongside actual spring free energy.
+        // DeltaH_total - H_in - Q_events is the interval's cell-relative
+        // storage change plus the disjoint event residual. Keep that grouping
+        // instead of subtracting large total inventories or incoming enthalpy.
         let total=next.bridge.stored_energy_j()-self.bridge.stored_energy_j()
             +interval.mechanical_entropy_energy_change_j
-            +next.thermal.energy_j()-self.thermal.energy_j()
+            +interval.thermal.stored_energy_change_j
             +interval.mechanical.energy_j.numerical_dissipation-interval.mechanical.load_work_j
-            -interval.non_mechanical_heat_j-births.thermal.incoming_energy_j-births.thermal.external_heat_j;
+            -interval.non_mechanical_heat_j+births.thermal.residual_j;
         if !total.is_finite() || total.abs()>config.feedback.total_energy_tolerance_j {
             return Err(GrowthError::Birth(invalid("complete spatial interval/birth energy does not close")));
         }

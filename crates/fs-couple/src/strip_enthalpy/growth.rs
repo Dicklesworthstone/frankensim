@@ -208,12 +208,16 @@ impl<'t, 'm> GrowingStrip<'t, 'm> {
         // stress-free points (Xi=0), so their mechanical entropy change is zero.
         // The actual full-interval spring storage is free energy; the interval's
         // original Delta(T*s) completes internal energy through the birth batch.
+        // For thermal storage, DeltaH_total - H_in - Q_events equals the
+        // interval's cell-relative DeltaH plus the disjoint event residual.
+        // Subtracting whole-state totals or incoming enthalpy would erase a
+        // representable interval heat beside a large newly deposited inventory.
         let residual = (layers.strip.stored_energy_j() - self.layers.strip.stored_energy_j())
             + interval.mechanical_entropy_energy_change_j
-            + (thermal.energy_j() - self.thermal.energy_j())
+            + interval.thermal.stored_energy_change_j
             + interval.mechanical.energy_j.numerical_dissipation
             - interval.external_mechanical_work_j - interval.non_mechanical_heat_j
-            - events.incoming_energy_j - events.external_heat_j;
+            + events.residual_j;
         if !residual.is_finite() || residual.abs() > config.total_energy_tolerance_j {
             return Err(GrowthError::Events(StripEnthalpyError::Invalid(
                 "combined interval and birth energy account does not close")));

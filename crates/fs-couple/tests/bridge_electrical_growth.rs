@@ -216,3 +216,49 @@ fn passive_incoming_enthalpy_is_not_charged_to_the_finite_electrical_supply() {
     assert_eq!(next.thermal().cells().len(),2); assert_eq!(next.bridge().cells().len(),1);
     assert!(r.total_energy_residual_j.abs()<config().total_energy_tolerance_j);
 }
+
+// G3: large incoming passive inventories cannot conceal or duplicate the
+// original capacitor debit, Joule heat, material loss or newborn enthalpy.
+#[test]
+fn large_passive_births_preserve_finite_supply_and_local_deposition_heat() {
+    let m=materials();
+    let mut incoming=arrival(99,3,LENGTH,0.02,1);
+    if let Event::Birth(c)=&mut incoming.event {c.specific_h_j_kg=20.0;}
+    let reference=seed(&m,vec![incoming.clone()],vec![birth(&m[1],99,3,0.02)]);
+    let context=point(300.0);let key=key();
+    let bound=cells(&m,&context,&key,&[(90,0)]);let resistors=resistors();
+    let network=MaterialNetwork {cells:&bound,resistors:&resistors,links:&[]};
+    let reference_transport=network.prepare(reference.thermal(),||false).unwrap();
+    let original_circuit=circuit(&reference_transport,reference.thermal());
+    let (expected,expected_circuit,expected_report)=reference.step_electrical_candidate(
+        &original_circuit,&reference_transport,&[],0.2,1.0,&[0.02],controls(),&[0.0],||false).unwrap();
+
+    let mut events=vec![incoming];
+    for (index,sign) in [1.0,-1.0].into_iter().enumerate() {
+        let mut passive=arrival(1000+index as u64,1000+index as u64,LENGTH,0.01,0);
+        if let Event::Birth(c)=&mut passive.event {
+            c.body_id=2+index as u64;
+            c.mass_kg=1e14;
+            c.geometry.volume_m3=c.mass_kg/DENSITY;
+            c.specific_h_j_kg=sign*50.0;
+        }
+        events.push(passive);
+    }
+    let old=seed(&m,events,vec![birth(&m[1],99,3,0.02)]);
+    let transport=network.prepare(old.thermal(),||false).unwrap();
+    let (next,next_circuit,r)=old.step_electrical_candidate(&original_circuit,&transport,&[],
+        0.2,1.0,&[0.02],controls(),&[0.0],||false).unwrap();
+    assert_eq!(next_circuit,expected_circuit);
+    assert_eq!(next.bridge(),expected.bridge());
+    for id in [CellId(90),CellId(99)] {
+        assert_eq!(next.thermal().cells()[&id],expected.thermal().cells()[&id]);
+    }
+    assert_eq!(r.births.thermal.incoming_energy_j,expected_report.births.thermal.incoming_energy_j);
+    assert!(r.interval.deposited_joule_j>0.0);
+    assert!(r.total_energy_residual_j.abs()<=config().total_energy_tolerance_j);
+    assert_eq!(next.thermal().energy_j(),0.0);
+    assert!(expected.thermal().energy_j()>1e-3);
+    assert_eq!(original_circuit.charges_c(),&[Q0]);
+    assert_eq!(old.thermal().time_s(),0.0);
+    assert_eq!(old.remaining_births(),1);
+}

@@ -156,18 +156,20 @@ impl<'t,'m> GrowingBridge<'t,'m> {
             maximum_deflection_m:config.bridge.maximum_deflection_m};
         let (next,births)=staged.synchronize(mechanics,c.thermal_energy_tolerance_j,cancelled)
             .map_err(ElectricalGrowthError::Birth)?;
-        // Reconstruct from the original accepted storage and the fully born
-        // endpoint, not by summing two reports that might share an internal heat.
-        // Native stress-free births add Xi=0 and preserve old histories. Thus
-        // Delta(T*s) belongs entirely to the original coupled physical interval.
+        // Native stress-free births add Xi=0 and preserve old histories, so
+        // Delta(T*s) belongs entirely to the coupled physical interval. Retain
+        // the independent full mechanical storage check. For thermal storage,
+        // DeltaH_total - H_in - Q_events equals the native interval's
+        // cell-relative DeltaH plus the disjoint event residual. Joule/material
+        // heat is already in DeltaH and is not counted again. Whole-inventory
+        // subtraction would erase that heat beside a large incoming body.
         let total=(interval.electrical.stored_after_j-interval.electrical.stored_before_j)
             +(next.bridge.stored_energy_j()-self.bridge.stored_energy_j())
             +interval.mechanical_entropy_energy_change_j
-            +(next.thermal.energy_j()-self.thermal.energy_j())
+            +interval.thermal.stored_energy_change_j
             +interval.mechanical.energy_j.numerical_dissipation
             -interval.electrical.native.supplied-interval.mechanical.load_work_j
-            -interval.other_external_heat_j-births.thermal.incoming_energy_j
-            -births.thermal.external_heat_j;
+            -interval.other_external_heat_j+births.thermal.residual_j;
         if !total.is_finite() || total.abs()>c.total_energy_tolerance_j {
             return Err(ElectricalGrowthError::Birth(invalid(
                 "electrical storage, spatial growth and incoming enthalpy do not close")));

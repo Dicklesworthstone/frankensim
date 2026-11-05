@@ -155,6 +155,48 @@ fn pending_endpoint_initialization_and_passive_birth_keep_original_incoming_ener
     near(next.thermal().temperature_k(CellId(55)).unwrap(),302.0,1e-10);
 }
 
+// G3: the growth balance must resolve millijoule births beside independently
+// declared passive inventories, without subtracting their absolute totals.
+#[test]
+fn large_passive_births_do_not_erase_tip_enthalpy_or_sag_heat() {
+    let m=materials();
+    let mut incoming=arrival(99,3,LENGTH,0.02,1);
+    if let Event::Birth(c)=&mut incoming.event {c.specific_h_j_kg=20.0;}
+    let (heat,beam)=seed(&m,vec![incoming.clone()]);
+    let (reference,_) = GrowingBridge::try_new(heat,beam,1,vec![binding(&m[0],90,20)],
+        vec![future(&m[1],99,3,0.02)],2,mechanics(),1e-9,||false).unwrap();
+    let (expected,expected_report)=reference.step_candidate(0.2,1.0,&[0.02],controls(),
+        &[0.0],coefficients,||false).unwrap();
+
+    let mut events=vec![incoming];
+    for (index,sign) in [1.0,-1.0].into_iter().enumerate() {
+        let mut passive=arrival(1000+index as u64,1000+index as u64,LENGTH,0.01,0);
+        if let Event::Birth(c)=&mut passive.event {
+            c.body_id=2+index as u64;
+            c.mass_kg=1e14;
+            c.geometry.volume_m3=c.mass_kg/DENSITY;
+            c.specific_h_j_kg=sign*50.0;
+        }
+        events.push(passive);
+    }
+    let (heat,beam)=seed(&m,events);
+    let (old,_) = GrowingBridge::try_new(heat,beam,1,vec![binding(&m[0],90,20)],
+        vec![future(&m[1],99,3,0.02)],2,mechanics(),1e-9,||false).unwrap();
+    let (next,r)=old.step_candidate(0.2,1.0,&[0.02],controls(),&[0.0],coefficients,||false).unwrap();
+    assert_eq!(next.bridge(),expected.bridge());
+    for id in [CellId(90),CellId(99)] {
+        assert_eq!(next.thermal().cells()[&id],expected.thermal().cells()[&id]);
+    }
+    assert_eq!(r.births.thermal.incoming_energy_j,expected_report.births.thermal.incoming_energy_j);
+    assert_eq!(r.births.mechanical.len(),1);
+    assert!(r.interval.deposited_heat_j>0.0);
+    assert!(r.total_energy_residual_j.abs()<=controls().feedback.total_energy_tolerance_j);
+    assert_eq!(next.thermal().energy_j(),0.0);
+    assert!(expected.thermal().energy_j()>1e-3);
+    assert_eq!(old.thermal().time_s(),0.0);
+    assert_eq!(old.remaining_births(),1);
+}
+
 #[test]
 fn bounded_complete_registry_is_required_without_reinitializing_material() {
     let m=materials();let (heat,beam)=seed(&m,vec![arrival(99,3,0.1,0.02,1)]);
