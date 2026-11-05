@@ -150,6 +150,69 @@ pub(super) fn rescale(matrix: &mut [f64], omega: &[f64], reference_omega: f64, s
     }
 }
 
+/// A printed modal damping law, `zeta(f) = zeta0 (f / f0_hz)^exponent` (a damping ratio, fraction of critical), that a card
+/// may impose on every retained mode of an assembled body ([`impose_modal_damping`]). It is the one opt-in exception to
+/// "no diagonal loss replacement": a law from a print, never a fit to a sound. `power_law(0.010, 400.0, -0.45)` is
+/// Bissinger's (2008) violin total damping, band-averaged 400-5000 Hz, radiation included.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModalDampingLaw {
+    zeta0: f64,
+    f0_hz: f64,
+    exponent: f64,
+}
+
+impl ModalDampingLaw {
+    /// `zeta0` in (0, 1), `f0_hz` > 0, finite `exponent` within [-2, 2].
+    pub fn power_law(zeta0: f64, f0_hz: f64, exponent: f64) -> Result<Self, super::AcousticRealizeError> {
+        if !(zeta0.is_finite() && zeta0 > 0.0 && zeta0 < 1.0)
+            || !(f0_hz.is_finite() && f0_hz > 0.0)
+            || !(exponent.is_finite() && exponent.abs() <= 2.0) {
+            return Err(super::invalid("modal damping law needs zeta0 in (0,1), a positive anchor frequency and an exponent within [-2,2]"));
+        }
+        Ok(Self { zeta0, f0_hz, exponent })
+    }
+
+    /// The damping ratio at `f_hz`.
+    #[must_use]
+    pub fn zeta(&self, f_hz: f64) -> f64 {
+        self.zeta0 * det::exp(self.exponent * det::ln(f_hz / self.f0_hz))
+    }
+
+    /// `(zeta0, f0_hz, exponent)`.
+    #[must_use]
+    pub const fn parameters(&self) -> (f64, f64, f64) {
+        (self.zeta0, self.f0_hz, self.exponent)
+    }
+}
+
+/// Give every retained mode its own damping ratio from `law`, at its own frequency: a positive-diagonal congruence
+/// `C_ab *= s_a s_b` of the row-major `n x n` modal viscosity matrix [1/s] (mass-normalized modes at angular frequencies
+/// `omega`), with `s_a = sqrt(2 zeta(f_a) omega_a / C_aa)` so that the diagonal reads exactly `C_aa = 2 zeta_a omega_a`.
+/// Cross terms scale by the geometric mean of the two modes' factors, as the films' loss does, so the matrix stays
+/// positive (semi)definite. Refuses a mode whose own loss is not positive and finite.
+pub(super) fn impose_modal_damping(matrix: &mut [f64], omega: &[f64], law: &ModalDampingLaw)
+    -> Result<(), super::AcousticRealizeError> {
+    let n = omega.len();
+    if matrix.len() != n * n {
+        return Err(super::invalid("modal damping law needs a square modal loss matrix"));
+    }
+    let mut s = Vec::with_capacity(n);
+    for (a, &w) in omega.iter().enumerate() {
+        let c = matrix[a * n + a];
+        let zeta = law.zeta(w / core::f64::consts::TAU);
+        if !(w.is_finite() && w > 0.0 && c.is_finite() && c > 0.0 && zeta.is_finite() && zeta > 0.0 && zeta < 1.0) {
+            return Err(super::invalid("modal damping law needs a positive loss on every retained mode and a damping ratio below one"));
+        }
+        s.push(det::sqrt(2.0 * zeta * w / c));
+    }
+    for (a, row) in matrix.chunks_mut(n).enumerate() {
+        for (b, value) in row.iter_mut().enumerate() {
+            *value *= s[a] * s[b];
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +288,60 @@ mod tests {
         let m2 = c[0] * c[4] - c[1] * c[3];
         let m3 = c[0] * (c[4] * c[8] - c[5] * c[7]) - c[1] * (c[3] * c[8] - c[5] * c[6]) + c[2] * (c[3] * c[7] - c[4] * c[6]);
         assert!(c[0] > 0.0 && m2 > 0.0 && m3 > 0.0);
+    }
+
+    // zeta(f) = zeta0 (f / f0)^x: the anchor reads zeta0, a decade up reads 10^x of it; unphysical parameters refuse.
+    #[test]
+    fn the_modal_damping_law_is_a_power_law_anchored_at_its_frequency() {
+        let law = ModalDampingLaw::power_law(0.010, 400.0, -0.45).unwrap();
+        assert!((law.zeta(400.0) - 0.010).abs() < 1e-15);
+        assert!((law.zeta(4000.0) - 0.010 * 10f64.powf(-0.45)).abs() < 1e-14);
+        assert_eq!(law.parameters(), (0.010, 400.0, -0.45));
+        for (z, f, x) in [(0.0, 400.0, -0.45), (1.0, 400.0, -0.45), (f64::NAN, 400.0, -0.45), (0.01, 0.0, -0.45),
+            (0.01, -400.0, -0.45), (0.01, 400.0, f64::INFINITY), (0.01, 400.0, 2.5)] {
+            assert!(ModalDampingLaw::power_law(z, f, x).is_err(), "{z} {f} {x}");
+        }
+    }
+
+    // After the congruence every mode carries zeta(f_a) exactly (C_aa = 2 zeta_a omega_a); cross terms keep their
+    // correlation C_ab^2 / (C_aa C_bb) (the geometric-mean scaling), so symmetry and positive definiteness survive.
+    #[test]
+    fn imposing_the_law_gives_each_mode_its_own_damping_ratio() {
+        let law = ModalDampingLaw::power_law(0.010, 400.0, -0.45).unwrap();
+        let omega = [core::f64::consts::TAU * 395.0, core::f64::consts::TAU * 1250.0, core::f64::consts::TAU * 3100.0];
+        let before = [
+            2.0e2, 0.3e2, -0.1e2,
+            0.3e2, 9.0e2, 0.2e2,
+            -0.1e2, 0.2e2, 4.0e3,
+        ];
+        let mut c = before.to_vec();
+        impose_modal_damping(&mut c, &omega, &law).unwrap();
+        for a in 0..3 {
+            let want = 2.0 * law.zeta(omega[a] / core::f64::consts::TAU) * omega[a];
+            assert!((c[a * 3 + a] - want).abs() <= 1e-12 * want, "mode {a}: {} {want}", c[a * 3 + a]);
+            for b in 0..3 {
+                assert_eq!(c[a * 3 + b], c[b * 3 + a]);
+                let before_corr = before[a * 3 + b].powi(2) / (before[a * 3 + a] * before[b * 3 + b]);
+                let after_corr = c[a * 3 + b].powi(2) / (c[a * 3 + a] * c[b * 3 + b]);
+                assert!((before_corr - after_corr).abs() <= 1e-12 * before_corr.max(1e-30), "({a},{b})");
+            }
+        }
+        let m2 = c[0] * c[4] - c[1] * c[3];
+        let m3 = c[0] * (c[4] * c[8] - c[5] * c[7]) - c[1] * (c[3] * c[8] - c[5] * c[6]) + c[2] * (c[3] * c[7] - c[4] * c[6]);
+        assert!(c[0] > 0.0 && m2 > 0.0 && m3 > 0.0);
+    }
+
+    // A mode with no loss of its own cannot be scaled to a law, a non-square matrix and a damping ratio of one or more refuse.
+    #[test]
+    fn imposing_the_law_refuses_what_it_cannot_scale() {
+        let law = ModalDampingLaw::power_law(0.010, 400.0, -0.45).unwrap();
+        let omega = [core::f64::consts::TAU * 400.0, core::f64::consts::TAU * 900.0];
+        let mut lossless = vec![1.0e2, 0.0, 0.0, 0.0];
+        assert!(impose_modal_damping(&mut lossless, &omega, &law).is_err());
+        let mut short = vec![1.0e2, 0.0, 0.0];
+        assert!(impose_modal_damping(&mut short, &omega, &law).is_err());
+        let steep = ModalDampingLaw::power_law(0.5, 400.0, -2.0).unwrap();
+        let mut c = vec![1.0e2, 0.0, 0.0, 1.0e2];
+        assert!(impose_modal_damping(&mut c, &[core::f64::consts::TAU * 100.0, core::f64::consts::TAU * 900.0], &steep).is_err());
     }
 }

@@ -162,6 +162,9 @@ impl Profile {
         if spec.cavity_molecular.is_some() && !self.has_thermal_cavity() {
             return Err("cavity_molecular requires the original interior FE with an air-thermal law".into());
         }
+        if spec.body_damping.is_some() && !matches!(self.model, BodyModel::Assembly(_)) {
+            return Err("body_damping requires an assembled (v4) shell body profile".into());
+        }
         match &self.model {
             BodyModel::Plate(_) if spec.body.modes > input::MAX_PLATE_BODY_MODES => Err(format!(
                 "flat plate body profiles admit 1..={} retained body modes", input::MAX_PLATE_BODY_MODES).into()),

@@ -377,7 +377,8 @@ impl Spec {
         -> Result<MaterialShellAssemblyImage>
     {
         let body = self.resolve_body(spec, catalog, loader, gate)?;
-        let image = body.specimen.reduce(&body.reduction, &body.force_ports, gate)?;
+        let image = body.specimen.reduce_with_modal_damping(&body.reduction, &body.force_ports,
+            body.modal_damping.as_ref(), gate)?;
         self.glue.require_modes(image.eigenvalue_intervals(), gate)?;
         Ok(image)
     }
@@ -436,6 +437,7 @@ impl Spec {
             bridges: spec.strings.iter().map(|s| s.bridge).collect(),
             modal_budget: modal_budget(),
             listener_m: spec.body.listener,
+            modal_damping: spec.body_damping,
         };
         Ok(body)
     }

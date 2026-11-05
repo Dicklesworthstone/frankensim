@@ -1298,6 +1298,35 @@ or incomplete source data refuse before rendering; a species name never supplies
 missing thermal or transport properties. The atmosphere remains frozen during a
 performance, with each original regional source reaching its own consumers.
 
+### A printed modal damping law on an assembled body
+
+An optional `body_damping` row, after the strings and their `prepared-linear` / `residual-flexibility` rows and before
+`body-radiation` and `cavity`, imposes a printed damping law on the retained modes of an assembled (`frankensim-string-body-v4`)
+body:
+
+```text
+body_damping power-law 0.010 400 -0.45
+```
+
+The fields are `ZETA0 F0_HZ EXPONENT`: every retained mode gets the damping ratio (fraction of critical)
+`zeta(f) = ZETA0 (f / F0_HZ)^EXPONENT` at its own frequency `f`. `ZETA0` is in (0, 1), `F0_HZ` is positive and
+`EXPONENT` is within [-2, 2]. The example above is read from Bissinger (2008, J. Acoust. Soc. Am. 124:1764, Fig. 4 and
+pp. 1767-1768): the exponent is printed (-0.40 to -0.45 for the total damping of 17 free violins), and the 1.0 % at 400 Hz
+is read off the figure's band averages (400-5000 Hz), radiation included. A law is a print, never a fit to a sound.
+
+The law is a positive-diagonal congruence of the summed modal loss matrix, `C_ab *= s_a s_b` with
+`s_a = sqrt(2 zeta(f_a) omega_a / C_aa)`, the way the surface films' loss is applied: each diagonal entry reads
+`2 zeta(f_a) omega_a` exactly, cross terms scale by the geometric mean of the two modes' factors, and the matrix stays
+positive (semi)definite. It replaces the wood, viscous-glue and film loss of the body together, so it is a total
+structural damping. Connection (joint) losses live in the interface columns, outside the matrix, and stay. A card that
+carries it should say, beside the row: whose law it is and for what instrument it was printed, that it includes radiation
+(a body without a radiating skin has no other radiation loss), that it is extrapolated below the band it was printed over
+(Bissinger's figure starts at the 400 Hz band), and where a printed damping of the instrument's own lowest poles differs.
+
+It refuses a flat plate or single-shell (`v3`) body profile, hereditary coating memory and substrate relaxation (which carry
+their own loss), a retained mode whose own loss is not positive, and a damping ratio of one or more. The library entry is
+`MaterialShellAssembly::reduce_with_modal_damping`; `reduce` is the same call without a law.
+
 ### Independent cavity and exterior atmospheres
 
 An optional `cavity_gas` row immediately after `gas` and before `body` declares

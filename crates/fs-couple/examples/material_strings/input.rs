@@ -8,6 +8,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::ShellCavityMolec
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 use fs_scenario::acoustic::BendingRelaxationProperties;
+use fs_couple::shear_shell::constant_loss::ModalDampingLaw;
 use fs_couple::material_assembly::measured_string::{MeasuredStringLossProperties, MeasuredStringProperties};
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemOptions;
@@ -328,6 +329,9 @@ pub struct Spec {
     pub axial_bearings: axial_bearings::Inputs,
     pub bending_memory: Option<bending_memory::Input>,
     pub body_radiation: Option<BodyRadiation>,
+    /// `body_damping power-law ZETA0 F0_HZ EXPONENT`: a printed modal damping law imposed on every retained mode of an
+    /// assembled (v4) body, replacing the sources' own structural loss (joint losses stay). Absent keeps the sources' loss.
+    pub body_damping: Option<ModalDampingLaw>,
     pub shell_bem_angular_refinement: u32,
     /// The same loaded plate surface with material gas on every receiver path.
     pub plate_observer: Option<PlateObserverOptions>,
@@ -893,6 +897,16 @@ impl Spec {
             }
             Some(bending_memory::Input::new(max_states,selections,&strings)?)
         } else { None };
+        let body_damping = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("body_damping") {
+            let mut row = r.row("body_damping")?;
+            let law = match row.word()? {
+                "power-law" => ModalDampingLaw::power_law(row.scalar()?, row.positive()?, row.scalar()?)?,
+                _ => return Err("body_damping requires power-law ZETA0 F0_HZ EXPONENT".into()),
+            };
+            row.end()?;
+            Some(law)
+        } else { None };
         let body_radiation = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("body-radiation") {
             let mut row = r.row("body-radiation")?;
@@ -1396,7 +1410,7 @@ impl Spec {
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching, stretching_memory,
-            longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
+            longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, body_damping, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, observer_molecular, cavity, friction, contact_thermal: false, dry_contact_thermal: false, material_body_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.validate_material_states()?;

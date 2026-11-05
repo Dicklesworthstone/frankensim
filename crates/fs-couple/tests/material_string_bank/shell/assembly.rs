@@ -156,6 +156,7 @@ fn body(gate: &CancelGate) -> SharedMaterialShellAssemblyBody {
         ],
         modal_budget: ModalAcousticTimeBudget::audible_reference(),
         listener_m: 1.0,
+        modal_damping: None,
     }
 }
 
@@ -652,6 +653,47 @@ fn g0_a_retained_mode_outside_a_part_band_is_refused_by_name_and_an_in_band_body
         assert_eq!(same.force_ports(), image.force_ports());
         assert_eq!(same.eigenvalue_intervals(), image.eigenvalue_intervals());
         assert_eq!(same.damping().matrix_per_s(), image.damping().matrix_per_s());
+    });
+}
+
+// A printed modal damping law reaches the assembled modal loss of every retained mode, and no law changes no byte.
+#[test]
+fn a_modal_damping_law_sets_every_retained_mode_and_no_law_changes_nothing() {
+    use fs_couple::shear_shell::constant_loss::ModalDampingLaw;
+    with_cx(|_, gate| {
+        // One part, no tie: the law acts on the summed modal loss of any assembled body, and the two-part tie fixtures are
+        // red on some bases ("tie tangent-frame angle mismatch").
+        let original = single_part_body(gate);
+        let plain = original.specimen.reduce(&original.reduction, &original.force_ports, gate).unwrap();
+        let reduce = |law: Option<ModalDampingLaw>| {
+            original.specimen
+                .reduce_with_modal_damping(&original.reduction, &original.force_ports, law.as_ref(), gate)
+                .unwrap()
+        };
+        assert_eq!(reduce(None).damping().matrix_per_s(), plain.damping().matrix_per_s());
+        let n = plain.damping().mode_count();
+        let diag = |m: &[f64]| (0..n).map(|a| m[a * n + a]).collect::<Vec<f64>>();
+        // A flat law (exponent 0): C_aa = 2 zeta omega_a, so doubling zeta doubles every diagonal entry and the diagonal
+        // rises with the mode frequency.
+        let one = reduce(Some(ModalDampingLaw::power_law(0.010, 400.0, 0.0).unwrap()));
+        let two = reduce(Some(ModalDampingLaw::power_law(0.020, 400.0, 0.0).unwrap()));
+        let (d1, d2) = (diag(one.damping().matrix_per_s()), diag(two.damping().matrix_per_s()));
+        for mode in 0..n {
+            assert!((d2[mode] / d1[mode] - 2.0).abs() < 1e-12, "mode {mode}: {} {}", d1[mode], d2[mode]);
+            if mode > 0 {
+                assert!(d1[mode] > d1[mode - 1], "mode {mode}");
+            }
+        }
+        let m = one.damping().matrix_per_s();
+        for i in 0..n {
+            for j in 0..n {
+                assert_eq!(m[i * n + j], m[j * n + i]);
+            }
+        }
+        // The law replaced the sources' own loss; the elastic basis is untouched.
+        assert_ne!(m, plain.damping().matrix_per_s());
+        assert_eq!(one.physical_modes(), plain.physical_modes());
+        assert_eq!(one.eigenvalue_intervals(), plain.eigenvalue_intervals());
     });
 }
 

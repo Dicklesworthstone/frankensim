@@ -72,6 +72,9 @@ pub struct SharedMaterialShellAssemblyBody {
     pub modal_budget: ModalAcousticTimeBudget,
     /// Physical compact exterior listener distance [m].
     pub listener_m: f64,
+    /// Optional printed modal damping law imposed on every retained mode's summed structural loss
+    /// ([`MaterialShellAssembly::reduce_with_modal_damping`]); `None` keeps each source's own loss.
+    pub modal_damping: Option<crate::shear_shell::constant_loss::ModalDampingLaw>,
 }
 impl ReciprocalStringBank {
     /// Connect every material string to one complete, tied material shell body.
@@ -143,8 +146,8 @@ impl ReciprocalStringBank {
             cavity.as_ref(), gate)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
-        let projected = body.specimen.reduce(&body.reduction, &body.force_ports, gate)
-            .map_err(ReciprocalStringError::Material)?;
+        let projected = body.specimen.reduce_with_modal_damping(&body.reduction, &body.force_ports,
+            body.modal_damping.as_ref(), gate).map_err(ReciprocalStringError::Material)?;
         cx.checkpoint().map_err(|_| ReciprocalStringError::Material(
             crate::acoustic_realize::AcousticRealizeError::Cancelled))?;
         let mut image = reduce_radiating_body(projected.radiators(), &gas,

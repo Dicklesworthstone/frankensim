@@ -220,7 +220,10 @@ impl MaterialShellAssembly {
 
     /// Assemble full source-bound components and ties BEFORE the one spectral
     /// slice. All force, fluid and loss terms then use that same physical basis.
-    /// No fitted frequency, diagonal loss replacement or per-part truncation.
+    /// No fitted frequency, diagonal loss replacement or per-part truncation;
+    /// the one opt-in exception is [`Self::reduce_with_modal_damping`], a
+    /// printed modal damping law imposed by congruence the way the films' loss
+    /// is. It is not a fit.
     ///
     /// Explicit pressure ownership is required on every part; an internal part
     /// may select neither fluid. Adjacent triangles of a component must give
@@ -235,6 +238,28 @@ impl MaterialShellAssembly {
         &self,
         options: &ShellAssemblyReductionOptions,
         force_ports: &[ShellAssemblyForcePort],
+        gate: &CancelGate,
+    ) -> Result<MaterialShellAssemblyImage, AcousticRealizeError> {
+        self.reduce_with_modal_damping(options, force_ports, None, gate)
+    }
+
+    /// [`Self::reduce`] with an optional printed modal damping law
+    /// ([`super::constant_loss::ModalDampingLaw`]) imposed on the summed modal
+    /// loss: every retained mode then carries the law's damping ratio at its
+    /// own frequency, by positive-diagonal congruence (cross terms by the
+    /// geometric mean, passivity kept). The law replaces the wood, viscous-glue
+    /// and film loss of the body together, so it is a TOTAL structural damping;
+    /// connection (joint) losses live in the interface columns and stay. It
+    /// refuses beside hereditary coating or substrate memory, which carry their
+    /// own loss, and on a mode whose own loss is not positive.
+    ///
+    /// # Errors
+    /// Those of [`Self::reduce`], and the law's refusals above.
+    pub fn reduce_with_modal_damping(
+        &self,
+        options: &ShellAssemblyReductionOptions,
+        force_ports: &[ShellAssemblyForcePort],
+        law: Option<&super::constant_loss::ModalDampingLaw>,
         gate: &CancelGate,
     ) -> Result<MaterialShellAssemblyImage, AcousticRealizeError> {
         poll(gate)?;
@@ -541,6 +566,14 @@ impl MaterialShellAssembly {
                     })
                     .map_err(owner)?,
             );
+        }
+        if let Some(law) = law {
+            if coating_options.is_some() || self.components.iter().any(|p| p.specimen.substrate_relaxation.is_some()) {
+                return Err(invalid(
+                    "a modal damping law cannot sit beside hereditary coating or substrate memory, which carry their own loss",
+                ));
+            }
+            super::constant_loss::impose_modal_damping(&mut matrix, &omega, law)?;
         }
         // Localized adhesive loss can have an undamped subspace. Reuse the
         // existing PSD channel owner without adding artificial diagonal loss.
