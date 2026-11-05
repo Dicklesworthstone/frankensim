@@ -20,6 +20,7 @@ use fs_thermal::enthalpy::{
 
 use crate::burnup::BurnupError;
 use crate::decay::DecayError;
+use crate::decay::activation::CaptureActivationError;
 use crate::kinetics::KineticsError;
 use crate::{EnergyChannels, FissionError, FissionState};
 
@@ -35,6 +36,8 @@ pub use burnup::{BurnupCellSource, BurnupHeating, BurnupHeatingBudget};
 
 mod production;
 pub use production::{DecayProductionCellSource, DecayProductionHeating};
+mod activation;
+pub use activation::{CaptureActivationCellSource, CaptureActivationHeating};
 
 mod kinetics;
 pub use kinetics::{
@@ -172,6 +175,8 @@ pub enum FissionThermalError {
     Burnup(BurnupError),
     /// Original radioactive inventory, production or propagation refusal.
     Decay(DecayError),
+    /// Original capture binding, coupled history or propagation refusal.
+    Activation(CaptureActivationError),
     /// Malformed schedule, duplicate owner or inconsistent hook sequence.
     Invalid(&'static str),
     /// A source names a cell that has not been activated.
@@ -232,6 +237,11 @@ impl From<DecayError> for FissionThermalError {
         Self::Decay(error)
     }
 }
+impl From<CaptureActivationError> for FissionThermalError {
+    fn from(error: CaptureActivationError) -> Self {
+        Self::Activation(error)
+    }
+}
 impl From<BurnupError> for FissionThermalError {
     fn from(error: BurnupError) -> Self {
         match error {
@@ -255,6 +265,7 @@ impl std::error::Error for FissionThermalError {
             Self::Kinetics(error) => Some(error),
             Self::Burnup(error) => Some(error),
             Self::Decay(error) => Some(error),
+            Self::Activation(error) => Some(error),
             _ => None,
         }
     }

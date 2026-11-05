@@ -55,7 +55,14 @@ pub mod radioactive {
         DecayProductionChange, DecayProductionSchedule, DecayProductionStep,
         PreparedDecayProduction,
     };
-    pub use fs_nuclear::thermal::{DecayProductionCellSource, DecayProductionHeating};
+    pub use fs_nuclear::decay::activation::{
+        CaptureActivationBudget, CaptureActivationError, CaptureActivationState,
+        CaptureActivationStep, CaptureProduct,
+    };
+    pub use fs_nuclear::thermal::{
+        CaptureActivationCellSource, CaptureActivationHeating,
+        DecayProductionCellSource, DecayProductionHeating,
+    };
 }
 
 pub mod acoustic_realize;

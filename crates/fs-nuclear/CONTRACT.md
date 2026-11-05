@@ -807,3 +807,49 @@ verification fixtures are not a calibrated isotope library. Regressions cover
 analytic equal/distinct rates, competing capture/fission energy, shutdown,
 interval composition, restart/cache reuse, channel export and atomic binding,
 budget, range and cancellation refusals.
+
+## Capture-activation heat and neutron kinetics on the shared timeline
+
+`thermal::{CaptureActivationCellSource, CaptureActivationHeating}` specialize
+the same `NuclearHeating` transaction used by fission, irradiation, kinetics,
+burnup and prescribed radioactive production. Each source binds the original
+irradiation parent and its explicit radioactive-product inventory to one active
+material cell and the existing multigroup neutron-flux schedule. Flux
+transitions, including shutdown, clip the final thermal interval before either
+nuclear history advances.
+
+Only the coupled step's integrated deposited release is credited to heat, once.
+Prompt capture/fission release, retained fission-energy reservoirs and radioactive
+capture-product emission retain their original physical owners. Radiation and
+escaped channels remain in the source account. Existing authored boundary heat,
+material calorics, fixed cell mass, geometry, storage basis and contact/boundary
+transport continue through the original thermal runtime.
+
+The adapter reuses the activation state's immutable propagation cache, carries
+both nuclear histories through thermal cloning/restart, preserves original
+checkpoint errors and reports typed activation refusals. The original
+irradiation temperature domain is admitted at binding and accepted thermal
+endpoints. The shared advance-wide audit includes captures, fissions, produced
+nuclei, actual radioactive transformations and noncancelling population/energy
+defects; all accepted intervals share the caller's combined allowances.
+A thermal or nuclear refusal publishes neither candidate history.
+
+The same source implements `FluxDrivenHeatSource`, so
+`KineticHeating<CaptureActivationCellSource>` uses the existing normalized
+neutron-population integral, controls and temperature feedback to drive its
+incident spectrum. Scheduled and neutron-driven paths call the same activation
+trial and accounting implementation. Composition reactivity defaults to zero;
+no nuclide-worth fit is inferred. For changing neutron amplitude, the shared
+kinetics bridge retains its mean-flux approximation: parent removal follows
+integrated fluence, but within-interval product ages and decay heat require
+coupled timestep refinement. Exact frozen-rate activation does not make that
+changing-rate thermal partition exact.
+
+The `fs_couple::radioactive` facade exposes the capture binding, state, budget,
+report and heat adapter under the existing `nuclear-thermal` feature. Five
+native thermal regressions exercise analytic capture/shutdown heat, competing
+fission against the original irradiation owner, domain/grid/checkpoint refusal,
+cached restart, and analytic constant-amplitude neutron-driven activation with
+late-checkpoint rollback. These preserve the concurrently added full burnup and
+generic kinetics owners; explicit burnup fission products and effective
+fission-energy reservoirs remain distinct model choices.
