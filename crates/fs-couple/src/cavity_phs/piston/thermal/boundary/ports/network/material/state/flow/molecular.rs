@@ -11,6 +11,10 @@ pub mod coupled;
 /// Molecular transport with caller-selected gas/body conductance and receipts.
 #[path = "molecular_gas_law.rs"]
 pub mod gas_law;
+
+/// Explicit held material baths and internal molecular exchange on the live assembly.
+#[path = "molecular_reservoir.rs"]
+pub mod reservoir;
 #[path = "molecular_stage.rs"]
 mod stage;
 

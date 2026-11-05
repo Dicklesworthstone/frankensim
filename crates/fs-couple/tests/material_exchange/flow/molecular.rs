@@ -7,6 +7,9 @@ mod endpoint_tests;
 #[path = "molecular_gas_law.rs"]
 mod gas_law_tests;
 
+#[path = "molecular_reservoir.rs"]
+mod reservoir_tests;
+
 use super::*;
 use fs_gas::material::transport::parcel::{
     ParcelMolecularError, ParcelMolecularLink, ParcelMolecularSolve, ParcelMolecularTransport,
