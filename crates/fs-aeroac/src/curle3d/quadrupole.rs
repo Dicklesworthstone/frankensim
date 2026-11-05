@@ -25,6 +25,8 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det};
 
 mod kernel;
+/// Material-scaled volume-stress histories from the native D3Q19 fluid.
+pub mod lbm;
 /// Physical-clock acquisition and propagation of resolved volume histories.
 pub mod recorded;
 mod welch;

@@ -1029,9 +1029,10 @@ determinism.
   content hash is FNV-1a: deterministic correlation identity only,
   never authenticity.
 - Supplied symmetric 3D Lighthill volume-stress moments propagate through
-  `curle3d::quadrupole`. Automatic flow-volume extraction, unresolved SGS
-  completion and inclusion in the existing surface-only rigs remain out of
-  scope; this capability alone does not qualify a turbulent jet-noise source.
+  `curle3d::quadrupole`; `quadrupole::lbm` extracts selected native D3Q19
+  Reynolds moments into the joint recorder. Automatic source-region completeness,
+  unresolved SGS completion and inclusion in the existing surface-only rigs
+  remain out of scope; this capability alone does not qualify a jet-noise source.
 - Only orders 0 and 1 of the Bessel functions are provided (all the
   2D monopole/dipole machinery needs); higher orders are not
   implemented.
@@ -1777,3 +1778,41 @@ homogeneous stationary lossless free-space point quadrature: cell-size error
 requires spatial refinement. There is no moving-source correction, mean-flow
 propagation, boundary scattering, absorption, feedback, unresolved SGS sound
 or measured-SPL qualification.
+
+## Native D3Q19 resolved-volume source acquisition
+
+`curle3d::quadrupole::lbm::PreparedLbmReynoldsVolume3` observes the original
+`BoundaryGrid3` through the original `MaterialScaling` density, dx and dt.
+The native fallible `macroscopic` accessor returns density and Guo half-force
+velocity in one population traversal; existing `velocity` retains the same
+accepted-state arithmetic. Each full fluid cell contributes instantaneous
+`rho u_i u_j dx^3` in xx, yy, zz, xy, xz, yz order. Density is the actual local
+lattice density times its material reference, not an assumed constant one.
+
+The caller authors a stationary proper frame, physical center of cell zero,
+and half-open source box. Positions use the original on-site indices times dx
+without an inferred half-cell shift. Source order is x-fastest within y/z,
+skipping only prepared voxel solids. Every sample checks dimensions and all
+selected-cell occupancy; it does not claim object identity or topology outside
+that box. The full-cell quadrature has no fill fractions, cut-cell volumes,
+periodic images, moving-frame correction or automatic source-extent completion.
+No mean velocity, SGS stress, viscous stress or thermodynamic correction is
+inferred. Spatial source and observation refinement remain necessary.
+
+Explicit cell/work and backing-buffer byte budgets precede allocation. Sampling
+reuses accepted/trial moment arrays and publishes all components plus a strictly
+increasing physical timestamp together. Data, topology or cancellation refusal
+retains the accepted sample and grid. `record_sample` forwards only accepted
+moments/time into the original geometry-bound joint Welch owner and requires
+exact equality of the original lattice and recording timesteps. Recorder
+refusal leaves that source sample available for retry and advances no record.
+The grid exposes no physical clock: the caller still binds accepted solver
+states to their real times; the recorder owns uniform cadence admission.
+
+Five G0/G1/G4 fixtures cover SI/frame and half-force tensor values, a real native
+force step, fixed fluid selection, memory/work/frame admission, late malformed
+cell/topology and cancellation refusal, and native endpoint-forced sinusoidal
+flow through source acquisition, joint recording and the coherent observer.
+The end-to-end oracle checks the actual quadratic stress's doubled frequency
+and distributed coherent pressure/vector-velocity power. These fixtures add no
+measured-SPL, developed-turbulence or unresolved-noise qualification.

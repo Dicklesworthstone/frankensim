@@ -1114,14 +1114,39 @@ impl BoundaryGrid3 {
     /// Panics for an out-of-range or solid cell.
     #[must_use]
     pub fn velocity(&self, x: usize, y: usize, z: usize) -> [f64; 3] {
+        self.macroscopic(x, y, z)
+            .expect("fluid density must remain positive and finite")
+            .1
+    }
+
+    /// Density and force-corrected velocity from one population traversal.
+    ///
+    /// Uses the same direction order and held total force as `velocity`.
+    /// Consumers needing both moments avoid a separate density population scan.
+    ///
+    /// # Errors
+    /// Refuses non-positive or non-finite density without mutating the grid.
+    ///
+    /// # Panics
+    /// Panics for an out-of-range or solid cell, like `density` and `velocity`.
+    #[must_use]
+    pub fn macroscopic(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+    ) -> Result<(f64, [f64; 3]), BoundaryStepError3> {
         assert!(
             !self.is_solid(x, y, z),
             "solid cells have no fluid velocity"
         );
-        let (rho, momentum) = self.raw_moments(x, y, z);
+        let (rho, momentum) = self.try_raw_moments(x, y, z)?;
         let (tile, lane) = self.addr(x, y, z);
         let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-        core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho)
+        Ok((
+            rho,
+            core::array::from_fn(|axis| (momentum[axis] + 0.5 * force[axis]) / rho),
+        ))
     }
 
     /// Total held body-force density (uniform plus per-cell, in lattice
@@ -2076,6 +2101,16 @@ impl BoundaryGrid3 {
     }
 
     fn raw_moments(&self, x: usize, y: usize, z: usize) -> (f64, [f64; 3]) {
+        self.try_raw_moments(x, y, z)
+            .expect("fluid density must remain positive and finite")
+    }
+
+    fn try_raw_moments(
+        &self,
+        x: usize,
+        y: usize,
+        z: usize,
+    ) -> Result<(f64, [f64; 3]), BoundaryStepError3> {
         let (tile, lane) = self.addr(x, y, z);
         let mut rho = 0.0;
         let mut momentum = [0.0; 3];
@@ -2086,11 +2121,10 @@ impl BoundaryGrid3 {
             momentum[1] += f64::from(velocity.1) * fq;
             momentum[2] += f64::from(velocity.2) * fq;
         }
-        assert!(
-            rho.is_finite() && rho > 0.0,
-            "fluid density must remain positive and finite"
-        );
-        (rho, momentum)
+        if !rho.is_finite() || rho <= 0.0 {
+            return Err(BoundaryStepError3::Unphysical { cell: [x, y, z] });
+        }
+        Ok((rho, momentum))
     }
 
     fn write_equilibrium(&mut self, x: usize, y: usize, z: usize, rho: f64, velocity: [f64; 3]) {
