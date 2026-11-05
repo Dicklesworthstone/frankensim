@@ -179,6 +179,10 @@ pub enum QuantityKind {
     Moisture(MoistureBasis),
     /// Empirical scale reading, never an unlabelled ratio or pressure.
     Hardness(HardnessScale),
+    /// Indentation resistance expressed as force per contact area [Pa].
+    /// Test geometry, loading and area convention remain explicit source
+    /// context. This is not a conversion from an empirical hardness scale.
+    IndentationHardness,
     /// Spatial amplitude/power/level loss with an explicit definition.
     Attenuation(AttenuationConvention),
     /// Thermal conductivity, often written `k`, in W/(m K).
@@ -203,6 +207,7 @@ impl QuantityKind {
             Self::Hardness(HardnessScale::Brinell) => "hardness-brinell",
             Self::Hardness(HardnessScale::ShoreA) => "hardness-shore-a",
             Self::Hardness(HardnessScale::ShoreD) => "hardness-shore-d",
+            Self::IndentationHardness => "indentation-hardness",
             Self::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre) => {
                 "attenuation-amplitude-np-per-m"
             }
@@ -230,6 +235,7 @@ impl QuantityKind {
             "hardness-brinell" => Self::Hardness(HardnessScale::Brinell),
             "hardness-shore-a" => Self::Hardness(HardnessScale::ShoreA),
             "hardness-shore-d" => Self::Hardness(HardnessScale::ShoreD),
+            "indentation-hardness" => Self::IndentationHardness,
             "attenuation-amplitude-np-per-m" => {
                 Self::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre)
             }
@@ -258,7 +264,9 @@ impl QuantityKind {
             Self::Attenuation(_) => Dims([-1, 0, 0, 0, 0, 0]),
             Self::ThermalConductivity => Dims([1, 1, -3, -1, 0, 0]),
             Self::Torque | Self::Energy => ENERGY_DIMS,
-            Self::Pressure | Self::Stress | Self::AcousticPressure => PRESSURE_DIMS,
+            Self::Pressure | Self::Stress | Self::AcousticPressure | Self::IndentationHardness => {
+                PRESSURE_DIMS
+            }
             Self::Mass => MASS_DIMS,
             Self::Amount => AMOUNT_DIMS,
             Self::MolarMass => MOLAR_MASS_DIMS,
@@ -309,6 +317,7 @@ impl QuantityKind {
             | Self::Frequency(_)
             | Self::Moisture(_)
             | Self::Hardness(_)
+            | Self::IndentationHardness
             | Self::Attenuation(_)
             | Self::ThermalConductivity
             | Self::OpticalExtinctionCoefficient => STATIC_FORM,
@@ -488,7 +497,7 @@ impl QuantitySpec {
                 actual: bytes.len(),
             });
         }
-        let expected_version = if bytes[7] == 1 && (20..=25).contains(&bytes[8]) {
+        let expected_version = if bytes[7] == 1 && (20..=26).contains(&bytes[8]) {
             MATERIAL_QUANTITY_SPEC_ENCODING_VERSION
         } else {
             QUANTITY_SPEC_ENCODING_VERSION
@@ -720,6 +729,7 @@ const fn encode_quantity_kind(kind: QuantityKind) -> (u8, u8, u8) {
         ),
         QuantityKind::ThermalConductivity => (24, 0, 0),
         QuantityKind::OpticalExtinctionCoefficient => (25, 0, 0),
+        QuantityKind::IndentationHardness => (26, 0, 0),
     }
 }
 
@@ -800,6 +810,7 @@ const fn decode_quantity_kind(kind: u8, parameter_a: u8, parameter_b: u8) -> Opt
         )),
         (24, 0, 0) => Some(QuantityKind::ThermalConductivity),
         (25, 0, 0) => Some(QuantityKind::OpticalExtinctionCoefficient),
+        (26, 0, 0) => Some(QuantityKind::IndentationHardness),
         _ => None,
     }
 }
@@ -2280,6 +2291,7 @@ mod tests {
             QuantityKind::Hardness(HardnessScale::Brinell),
             QuantityKind::Hardness(HardnessScale::ShoreA),
             QuantityKind::Hardness(HardnessScale::ShoreD),
+            QuantityKind::IndentationHardness,
             QuantityKind::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre),
             QuantityKind::Attenuation(AttenuationConvention::PowerNepersPerMetre),
             QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre),
@@ -2386,6 +2398,48 @@ mod tests {
                 FrequencyConvention::Cyclic
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn g0_indentation_hardness_has_pressure_dimensions_without_pressure_semantics() {
+        let kind = QuantityKind::IndentationHardness;
+        let spec = QuantitySpec::semantic(kind_type(kind, ValueForm::Static));
+        assert_eq!(spec.dims(), PRESSURE_DIMS);
+        assert_eq!(
+            spec.canonical_bytes(),
+            [2, 255, 1, 254, 0, 0, 0, 1, 26, 0, 0, 1]
+        );
+        assert_ne!(spec, QuantitySpec::dimensional(PRESSURE_DIMS));
+        let value = quantity(1e9, kind, ValueForm::Static);
+        for other in [
+            QuantityKind::Pressure,
+            QuantityKind::Stress,
+            QuantityKind::Hardness(HardnessScale::Vickers),
+        ] {
+            assert!(
+                value
+                    .require_type(kind_type(other, ValueForm::Static), "hardness input")
+                    .is_err()
+            );
+        }
+        assert!(
+            SemanticQty::new(
+                QtyAny::dimensionless(210.0),
+                kind_type(kind, ValueForm::Static)
+            )
+            .is_err()
+        );
+        for form in [ValueForm::Instantaneous, ValueForm::Peak, ValueForm::Rms] {
+            assert!(quantity_result(1e9, kind, form).is_err());
+        }
+        let vickers = QuantitySpec::semantic(kind_type(
+            QuantityKind::Hardness(HardnessScale::Vickers),
+            ValueForm::Static,
+        ));
+        assert_eq!(
+            vickers.canonical_bytes(),
+            [2, 0, 0, 0, 0, 0, 0, 1, 22, 2, 0, 1]
         );
     }
 

@@ -3175,6 +3175,7 @@ fn write_quantity_kind(kind: QuantityKind) -> Node {
         QuantityKind::Frequency(_)
         | QuantityKind::Moisture(_)
         | QuantityKind::Hardness(_)
+        | QuantityKind::IndentationHardness
         | QuantityKind::Attenuation(_)
         | QuantityKind::ThermalConductivity
         | QuantityKind::OpticalExtinctionCoefficient => form(

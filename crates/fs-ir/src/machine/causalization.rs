@@ -4867,6 +4867,7 @@ fn terminal_quantity_canonical_len(quantity: TerminalQuantitySpec) -> usize {
                 super::QuantityKind::Frequency(_)
                 | super::QuantityKind::Moisture(_)
                 | super::QuantityKind::Hardness(_)
+                | super::QuantityKind::IndentationHardness
                 | super::QuantityKind::Attenuation(_)
                 | super::QuantityKind::ThermalConductivity
                 | super::QuantityKind::OpticalExtinctionCoefficient => {

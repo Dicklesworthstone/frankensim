@@ -3660,6 +3660,7 @@ fn push_quantity_kind<O: MachineCanonicalBytes + ?Sized>(out: &mut O, kind: Quan
         QuantityKind::Frequency(_)
         | QuantityKind::Moisture(_)
         | QuantityKind::Hardness(_)
+        | QuantityKind::IndentationHardness
         | QuantityKind::Attenuation(_)
         | QuantityKind::ThermalConductivity
         | QuantityKind::OpticalExtinctionCoefficient => {

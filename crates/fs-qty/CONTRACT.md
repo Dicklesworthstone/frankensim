@@ -73,11 +73,14 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   convention fragments from drifting independently.
 - Material quantity kinds additionally distinguish cyclic/angular frequency,
   dry-mass/wet-mass moisture and relative humidity, five named hardness scales,
+  pressure-valued indentation hardness,
   amplitude-neper/power-neper/decibel spatial attenuation, thermal conductivity,
   and optical extinction coefficient. These are static descriptors; waveform
   and phasor forms refuse. `convert_frequency` explicitly applies `2*pi` and
   refuses overflow or positive-to-zero underflow. Hardness tags do not supply
   indenter/load/dwell/method metadata or authorize cross-scale conversion.
+  `IndentationHardness` has pressure dimensions and its own static-only kind;
+  fluid pressure, stress and dimensionless hardness readings remain distinct.
   Attenuation and optical tags do not assert passivity or a sign convention for
   the complex time harmonic exponential. Source provenance remains external.
 - `QuantitySpec` (also available as `semantic::QuantitySpec`) is the reusable
@@ -141,7 +144,8 @@ Appendix B). Layer: UTIL; its only production dependency is the Franken-only
   from the kind. Unknown future versions and tags refuse instead of falling
   back to dimension-only semantics.
 - Existing quantity-spec tokens retain their exact v1 bytes and decoder rules.
-  New material-kind tags 20–25 use the same 12-byte layout under version 2.
+  New material-kind tags 20–26 use the same 12-byte layout under version 2.
+  Tag 26 denotes `indentation-hardness`; all earlier tokens retain their bytes.
   A v1 token containing a new kind refuses, as does a v2 alias of an old kind.
   Thus old content identities do not move and old descriptors gain no new
   meaning from the extension. Legacy consumers must explicitly support the

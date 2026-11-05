@@ -1158,17 +1158,24 @@ fn g3_elastic_components_preserve_context_through_pack_query_and_replay() {
 
 #[test]
 fn g3_hardness_tests_select_exact_apparatus_through_material_interface_and_joint_replay() {
+    use fs_qty::semantic::{HardnessScale, QuantityKind};
+    for kind in [
+        QuantityKind::Hardness(HardnessScale::Vickers),
+        QuantityKind::IndentationHardness,
+    ] {
+        assert_hardness_context_selection(kind);
+    }
+}
+
+fn assert_hardness_context_selection(kind: fs_qty::semantic::QuantityKind) {
     use fs_matdb::{
         HardnessLoadStep, HardnessTestContext, MatDbError, QueryPoint, SelectionPolicy,
     };
     use fs_qty::{
         QtyAny, QuantitySpec,
-        semantic::{HardnessScale, QuantityKind, SemanticType, ValueForm},
+        semantic::{QuantityKind, SemanticType, ValueForm},
     };
-    let scale = QuantitySpec::semantic(SemanticType::new(
-        QuantityKind::Hardness(HardnessScale::Vickers),
-        ValueForm::Static,
-    ));
+    let scale = QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -1209,7 +1216,7 @@ fn g3_hardness_tests_select_exact_apparatus_through_material_interface_and_joint
         key: key.clone(),
         value: PropertyValue::Scalar {
             value: 210.0,
-            dims: Dims::NONE,
+            dims: scale.dims(),
         },
         validity: domain.clone(),
         uncertainty: UncertaintyModel::Unstated,

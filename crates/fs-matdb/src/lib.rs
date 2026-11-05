@@ -615,7 +615,8 @@ impl PropertyKey {
         }
     }
 
-    /// Bind the exact test conditions to an explicitly declared hardness scale.
+    /// Bind the exact test conditions to an explicitly declared hardness scale
+    /// or pressure-valued indentation hardness.
     /// The same property name may retain several incompatible measured tests.
     pub fn with_hardness_test(mut self, context: HardnessTestContext) -> Result<Self, MatDbError> {
         if !self.is_hardness() {
@@ -704,7 +705,11 @@ impl PropertyKey {
 
     pub(crate) fn is_hardness(&self) -> bool {
         self.quantity.semantic_type().is_some_and(|semantic| {
-            matches!(semantic.kind(), fs_qty::semantic::QuantityKind::Hardness(_))
+            matches!(
+                semantic.kind(),
+                fs_qty::semantic::QuantityKind::Hardness(_)
+                    | fs_qty::semantic::QuantityKind::IndentationHardness
+            )
         })
     }
 

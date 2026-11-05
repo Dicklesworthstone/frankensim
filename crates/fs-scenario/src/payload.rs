@@ -2742,6 +2742,7 @@ fn write_quantity_kind(
         QuantityKind::Frequency(_)
         | QuantityKind::Moisture(_)
         | QuantityKind::Hardness(_)
+        | QuantityKind::IndentationHardness
         | QuantityKind::Attenuation(_)
         | QuantityKind::ThermalConductivity
         | QuantityKind::OpticalExtinctionCoefficient => {

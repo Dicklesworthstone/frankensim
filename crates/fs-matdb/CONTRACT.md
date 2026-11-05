@@ -453,7 +453,11 @@ spelling is reinterpreted, and a quantity tag adds no empirical validation or
 authority to a source claim.
 
 Hardness queries require a `PropertyKey::with_hardness_test` selector in addition
-to the explicit scale. `HardnessTestContext` retains the source-declared
+to the explicit scale or pressure-valued `IndentationHardness` kind. The latter
+uses pascals without equating hardness to fluid pressure, bulk stress, or an
+empirical scale reading. The test protocol declares the relevant contact-area
+convention; no conversion or constitutive calibration is inferred.
+`HardnessTestContext` retains the source-declared
 indenter geometry/material specification, ordered force/dwell holds, procedure
 and revision, and an existing `ObservationId`. That observation binds specimen,
 process, method, raw artifact, caveats and licensed provenance; insertion

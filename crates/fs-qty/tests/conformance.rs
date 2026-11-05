@@ -329,6 +329,7 @@ fn all_semantic_kinds() -> Vec<QuantityKind> {
         QuantityKind::Hardness(H::Brinell),
         QuantityKind::Hardness(H::ShoreA),
         QuantityKind::Hardness(H::ShoreD),
+        QuantityKind::IndentationHardness,
         QuantityKind::Attenuation(A::AmplitudeNepersPerMetre),
         QuantityKind::Attenuation(A::PowerNepersPerMetre),
         QuantityKind::Attenuation(A::DecibelsPerMetre),
@@ -361,6 +362,7 @@ const fn expected_waveform_kind(kind: QuantityKind) -> bool {
         | QuantityKind::Frequency(_)
         | QuantityKind::Moisture(_)
         | QuantityKind::Hardness(_)
+        | QuantityKind::IndentationHardness
         | QuantityKind::Attenuation(_)
         | QuantityKind::ThermalConductivity
         | QuantityKind::OpticalExtinctionCoefficient => false,

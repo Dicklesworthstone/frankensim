@@ -1690,6 +1690,7 @@ pub mod transport {
             QuantityKind::Frequency(_)
             | QuantityKind::Moisture(_)
             | QuantityKind::Hardness(_)
+            | QuantityKind::IndentationHardness
             | QuantityKind::Attenuation(_)
             | QuantityKind::ThermalConductivity
             | QuantityKind::OpticalExtinctionCoefficient => kind
