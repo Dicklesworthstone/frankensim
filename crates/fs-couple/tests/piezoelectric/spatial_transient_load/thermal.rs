@@ -1,5 +1,8 @@
 //! Independent electrical/mechanical and finite-cell heat balances. Authored
 //! material data exercise the numerical model, not empirical qualification.
+#[path = "thermal/relaxation.rs"]
+mod relaxation;
+
 use super::*;
 use fs_couple::circuit_enthalpy::material::{
     CellResistor, ConductionLink, MaterialCell, MaterialNetwork,

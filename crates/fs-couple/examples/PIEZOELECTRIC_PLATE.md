@@ -234,10 +234,37 @@ material histories unchanged. Implicit midpoint is second order and passive,
 but very fast unresolved relaxation modes can alternate; time refinement is
 still needed to resolve their dynamics.
 
-Intrinsic heat is reported but not automatically deposited into a temperature
-field. The existing resistor-only thermal adapter refuses bodies with these
-memories because it has no named ceramic heat destinations. Temperature-driven
-coefficient changes require their own source admission and material work.
+### Finite ceramic heating
+
+`step_with_material_thermal_loads_candidate` deposits intrinsic ceramic losses
+and external resistor heat through the existing finite enthalpy solver. Supply
+one `ThermalCeramicCell { piezoelectric_cell, thermal_cell }` binding for every
+original tetrahedron and the original absolute-temperature axis. Multiple
+tetrahedra may share a thermal cell when their summed reference volume and mass
+match its complete caloric inventory. Duplicate, missing and foreign routes
+refuse; the resistor-only API continues to require explicit ceramic ownership
+before it can accept a body with intrinsic memories.
+
+Each receiver must retain the original ceramic card, density claim, complete
+nonthermal source conditions and actual caloric law. Its chart remains fully
+solid at the original reference density. The source owner checks every accepted
+and trial temperature against all original base and relaxation claims. A changed
+temperature refuses any coefficient with temperature dependence, including a
+flat sampled segment whose wider constancy has not been established. This
+models finite heating where the original claims support fixed coefficients.
+Temperature-driven stiffness, coupling, permittivity, polarization rates, thermal
+strain and depoling require their own source admission and material work.
+
+Ceramic losses are internal heat transfer into those named cells, never an
+extra external supply. The same enthalpy residual retains thermal conduction,
+source-dependent resistor feedback, caloric storage and the combined physical
+energy gate. The report preserves `ceramic_destinations` beside the original
+resistor destinations; heat amounts remain in the native per-cell material
+accounts. A rejected thermal candidate changes neither thermal nor material
+history. With no resistor feedback, the thermal Newton trials share one
+immutable spatial solve while still checking every trial's actual sources.
+With endpoint-dependent thermal or resistor coefficients, the combined thermal
+path remains generally first order; energy closure does not certify time accuracy.
 
 ## Verification and boundaries
 
@@ -250,7 +277,8 @@ cargo test -p fs-couple --test piezoelectric_spatial
 The new tests use explicitly synthetic source data and independent RC/LC/RLC
 and retained-coordinate equations. They exercise midpoint convergence,
 electrical and mechanical resonance, Maxwell decay, Debye charging, joint
-mechanical/polarization/shunt trajectories, mean-power factors and signs, open/short
+mechanical/polarization/shunt trajectories, separate ceramic/conductor heating,
+complete thermal source and inventory admission, mean-power factors and signs, open/short
 limits, orientation/gauge/phase invariance, full-cycle amplitude limits and
 transactional refusal. They verify implementation behavior, not measured
 material accuracy.

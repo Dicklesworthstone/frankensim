@@ -1,4 +1,6 @@
 //! Independent manufactured Maxwell/Debye references; no measured-material claim.
+#[path = "relaxation/thermal.rs"]
+mod thermal;
 #[path = "relaxation/transient.rs"]
 mod transient;
 

@@ -83,6 +83,12 @@ impl Relaxation {
     pub(super) fn steps(&self) -> &[CellRelaxationStep] {
         &self.steps
     }
+
+    /// Original source index and law for one original tetrahedron.
+    pub(super) fn material(&self, cell: usize) -> (usize, &RelaxingTensorPiezoelectric) {
+        let index = if self.materials.len() == 1 { 0 } else { cell };
+        (index, &self.materials[index])
+    }
 }
 
 /// Add local tangent and history terms to the existing coupled increment.

@@ -15861,9 +15861,42 @@ Four spatial synthetic groups independently verify current-driven Debye
 charging, Maxwell motion, a joint moving-piezo/Maxwell/Debye/R/RL trajectory,
 and source/frame/budget/band/amplitude/cancellation refusals. These are authored
 analytic cases, not measured ceramic calibration. The original resistor-only
-thermal adapter explicitly refuses intrinsic histories without named ceramic
-heat destinations; reported material heat is never silently dropped or assigned
-to a conductor. Temperature-driven coefficient work remains outside this path.
+thermal adapter refuses intrinsic histories without named ceramic destinations;
+the explicit finite-cell extension below owns their physical heat transfer.
+Temperature-driven coefficient work remains outside this path.
+
+### Finite ceramic heating on the original thermal residual
+
+`step_with_material_thermal_loads_candidate` adds complete
+`ThermalCeramicCell` correspondence to the original spatial/enthalpy candidate.
+Every retained tetrahedron has exactly one named receiver. Several tetrahedra
+may share one caloric cell only when aggregate reference volume and mass match
+the actual whole-cell inventory within 1e-10 relative tolerance. Duplicate,
+missing, inactive and unrelated routes refuse before publishing any history.
+
+The receiver retains the same ceramic card, original density claim, complete
+typed nonthermal source context and actual borrowed caloric law. Source receipts
+and the fully solid constant-density chart are checked from the original
+prepared material network. Every accepted and proposed temperature is admitted
+against the original piezoelectric/relaxation source claims. Changed temperature
+requires coefficients independent of that axis; source-domain excursions and
+unaccounted parameter changes refuse. No heat-capacity, material coefficient,
+thermal expansion or source provenance is invented.
+
+The native driver sums ceramic and conductor heat while keeping their individual
+reports separate. Ceramic heat enters the existing per-cell deposition callback
+exactly once, not external sources. Complete caloric storage, native conduction,
+material resistor feedback, source-work and cell/global energy audits remain in
+the same enthalpy/Newton solve. Intrinsic memory remains inside body storage.
+`ceramic_destinations` preserves the exact mesh-to-caloric correspondence in the
+accepted report. Both supplied histories remain unchanged on failure.
+
+With no resistor feedback, all thermal trials share one immutable spatial
+candidate. Actual source and caloric admission still runs at every trial;
+resistive feedback retains fresh coupled field solves. Three synthetic thermal
+groups specify Debye heating, distinct ceramic/conductor losses against an
+independent midpoint oracle, and atomic routing/source-temperature refusals.
+These tests establish intended numerical behavior, not measured PZT accuracy.
 
 ## Regional material walls in native duct propagation
 

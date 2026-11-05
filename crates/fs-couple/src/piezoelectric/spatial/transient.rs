@@ -143,6 +143,7 @@ pub struct TetPiezoelectricTransientStep {
 }
 
 /// Joint mechanical/electrical candidate; accepted state remains untouched.
+#[derive(Clone)]
 pub struct TetPiezoelectricTransientCandidate<'model, 'mesh> {
     body: TetPiezoelectricTransient<'model, 'mesh>,
     step: TetPiezoelectricTransientStep,

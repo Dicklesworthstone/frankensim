@@ -4,6 +4,11 @@
 //! accepted history. The original material network resolves resistor and thermal
 //! conductivities at the proposed enthalpies; the original thermal driver owns
 //! deposition, conduction, Newton iteration and joint energy acceptance.
+//! Explicit ceramic routes also deposit intrinsic material losses into their
+//! original finite caloric inventory, with unchanged source-backed coefficients.
+
+mod ceramic;
+pub use ceramic::ThermalCeramicCell;
 
 use super::{ElectrodeDrive, LoadedPiezoelectricStep, ResistiveElectrodeLoad};
 use crate::circuit_enthalpy::{
@@ -55,9 +60,14 @@ pub struct SpatialPiezoelectricThermalStep {
     pub loads: LoadedPiezoelectricStep,
     /// Original material-network heat routes, in the same order as `loads.loads`.
     pub destinations: Vec<ResistorCell>,
+    /// Complete original-tetrahedron to ceramic caloric-cell correspondence.
+    /// Heat amounts remain in the native body's per-cell relaxation reports.
+    pub ceramic_destinations: Vec<ThermalCeramicCell>,
 }
 
 /// Original coupled thermal account with complete accepted material receipts.
+/// The common report's `deposited_joule_j` includes both conductor and intrinsic
+/// ceramic losses here. Its native/load subreports retain their separate owners.
 pub type SpatialPiezoelectricThermalReport =
     CircuitEnthalpyReport<MaterialNetworkSample, SpatialPiezoelectricThermalStep>;
 
@@ -93,9 +103,10 @@ impl<'thermal, 'model, 'mesh> SpatialPiezoelectricThermalCandidate<'thermal, 'mo
 }
 
 struct LoadDriver<'model, 'mesh> {
-    candidate: TetPiezoelectricTransientCandidate<'model, 'mesh>,
+    candidate: Arc<TetPiezoelectricTransientCandidate<'model, 'mesh>>,
     loads: LoadedPiezoelectricStep,
     destinations: Vec<ResistorCell>,
+    ceramic_destinations: Arc<[ThermalCeramicCell]>,
 }
 impl<'model, 'mesh> ThermalDriver for LoadDriver<'model, 'mesh> {
     type Model = TetPiezoelectricTransient<'model, 'mesh>;
@@ -105,20 +116,21 @@ impl<'model, 'mesh> ThermalDriver for LoadDriver<'model, 'mesh> {
         DriverAccount {
             resistors: &[],
             contacts: &[],
-            heat_j: self.loads.joule_heat_j,
+            heat_j: self.loads.joule_heat_j + native.material_heat_j,
             numerical_dissipation_j: 0.0,
             stored_change_j: native.kinetic_energy_change_j + native.stored_energy_change_j,
             supplied_j: native.mechanical_work_j + self.loads.electrical_source_work_j,
         }
     }
     fn into_parts(self) -> (Self::Model, Self::Step) {
-        let (body, native) = self.candidate.into_parts();
+        let (body, native) = Arc::unwrap_or_clone(self.candidate).into_parts();
         (
             body,
             SpatialPiezoelectricThermalStep {
                 native,
                 loads: self.loads,
                 destinations: self.destinations,
+                ceramic_destinations: self.ceramic_destinations.to_vec(),
             },
         )
     }
@@ -194,14 +206,67 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         guess_j: &[f64],
         cx: &Cx<'_>,
     ) -> Result<SpatialPiezoelectricThermalCandidate<'thermal, 'model, 'mesh>> {
+        self.step_with_material_thermal_loads_candidate(
+            thermal,
+            target_s,
+            material,
+            bindings,
+            &[],
+            "T",
+            drives,
+            midpoint_nodal_forces_n,
+            endpoint_nodal_free_charge_c,
+            field_controls,
+            thermal_controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    /// Evolve intrinsic ceramic heating, physical resistor losses and the
+    /// original finite thermal network in one jointly accepted candidate.
+    /// Every original tetrahedron needs one explicit ceramic destination when
+    /// intrinsic memories are attached. Several tetrahedra may share one cell
+    /// only when their complete original volume and mass match that cell.
+    ///
+    /// Ceramic and caloric owners must retain the same card, complete nonthermal
+    /// context, density claim and actual borrowed caloric law. The full caloric
+    /// chart remains solid with constant reference density. Every accepted and
+    /// proposed temperature must lie inside all selected piezoelectric and
+    /// relaxation source claims; changed temperature refuses any coefficient
+    /// that depends on the owned temperature axis. This admits finite heating
+    /// of a fixed-coefficient ceramic, without inventing parameter work or
+    /// changing the native histories. Thermal strain, changing tensors, phase
+    /// transition and depoling require separately accounted models.
+    ///
+    /// Ceramic heat enters the native deposition callback exactly once and is
+    /// internal transfer, not an additional external heat source. All existing
+    /// conductivity, resistor feedback, Newton budgets and physical audits stay
+    /// authoritative. A refusal leaves both supplied histories unchanged.
+    /// With no resistor feedback, one immutable spatial candidate is reused
+    /// across thermal trials; every trial still validates its actual sources.
+    /// Endpoint-dependent resistor and transport coefficients retain the
+    /// original generally first-order thermal time discretization.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_thermal_loads_candidate<'thermal>(
+        &self,
+        thermal: &DepositionSimulation<'thermal>,
+        target_s: f64,
+        material: &PreparedMaterialNetwork<'_, '_>,
+        bindings: &[ThermalElectrodeLoad],
+        ceramic_bindings: &[ThermalCeramicCell],
+        temperature_axis: &str,
+        drives: &[ElectrodeDrive],
+        midpoint_nodal_forces_n: &[[f64; 3]],
+        endpoint_nodal_free_charge_c: &[f64],
+        field_controls: TetPiezoelectricControls,
+        thermal_controls: CircuitEnthalpySolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialPiezoelectricThermalCandidate<'thermal, 'model, 'mesh>> {
         let cancelled = || cx.checkpoint().is_err();
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
-        }
-        if self.material_relaxation_steps().is_some() {
-            return Err(CircuitEnthalpyError::Invalid(
-                "intrinsic piezoelectric heat requires a named ceramic thermal destination",
-            ));
         }
         admit_driver_unknowns(thermal, thermal_controls, guess_j)?;
         let dt = target_s - thermal.time_s();
@@ -210,6 +275,15 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 "spatial piezoelectric and thermal clocks must share one positive interval",
             ));
         }
+        let ceramic = ceramic::CeramicPlan::prepare(
+            self,
+            thermal,
+            material,
+            ceramic_bindings,
+            temperature_axis,
+            cx,
+        )?;
+        let ceramic_destinations: Arc<[ThermalCeramicCell]> = ceramic.destinations().into();
         let mut routes = material
             .resistor_destinations()
             .into_iter()
@@ -248,7 +322,37 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         };
         // Admit the existing source/geometry at the accepted state as well as
         // the proposed endpoint; a later in-domain trial cannot repair it.
-        bind_loads(resolve(thermal)?.resistors, bindings)?;
+        let original = resolve(thermal)?;
+        ceramic.admit(self, thermal, &original.source, cx)?;
+        let original_loads = bind_loads(original.resistors, bindings)?;
+        let spatial_candidate = |loads: &[ResistiveElectrodeLoad]| {
+            let (mut candidate, loads) = self
+                .step_with_loads_candidate(
+                    dt,
+                    drives,
+                    loads,
+                    midpoint_nodal_forces_n,
+                    endpoint_nodal_free_charge_c,
+                    field_controls,
+                    cx,
+                )
+                .map_err(|error| match error {
+                    TetPiezoelectricError::Cancelled => CircuitEnthalpyError::Cancelled,
+                    error => CircuitEnthalpyError::Source(LoadThermalError::Piezoelectric(error)),
+                })?;
+            // Preserve the caller's absolute endpoint rather than a separately
+            // rounded old_time + dt. Field integration still uses the exact dt.
+            candidate.body.state.time_s = target_s;
+            Ok::<_, CircuitEnthalpyError<LoadThermalError>>((Arc::new(candidate), loads))
+        };
+        // Held ceramic coefficients have no thermal feedback. When no resistor
+        // is present, source/heat-network Newton trials share one native field
+        // candidate; only final publication may clone its accepted state once.
+        let fixed_spatial = if original_loads.is_empty() {
+            Some(spatial_candidate(&[])?)
+        } else {
+            None
+        };
         let (thermal, body, report) = cell_driver_candidate(
             thermal,
             target_s,
@@ -256,33 +360,19 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             guess_j,
             |trial, _remaining| {
                 let coefficients = resolve(trial)?;
+                ceramic.admit(self, trial, &coefficients.source, cx)?;
                 let loads = bind_loads(coefficients.resistors, bindings)?;
-                let (mut candidate, loads) = self
-                    .step_with_loads_candidate(
-                        dt,
-                        drives,
-                        &loads,
-                        midpoint_nodal_forces_n,
-                        endpoint_nodal_free_charge_c,
-                        field_controls,
-                        cx,
-                    )
-                    .map_err(|error| match error {
-                        TetPiezoelectricError::Cancelled => CircuitEnthalpyError::Cancelled,
-                        error => {
-                            CircuitEnthalpyError::Source(LoadThermalError::Piezoelectric(error))
-                        }
-                    })?;
-                // The native duration solve retains its exact dt and physical
-                // result. Stamp the shared absolute endpoint instead of the
-                // separately rounded old_time + dt, which can differ by one ULP
-                // and otherwise make the next coupled interval refuse.
-                candidate.body.state.time_s = target_s;
+                let (candidate, loads) = if let Some((candidate, loads)) = &fixed_spatial {
+                    (Arc::clone(candidate), loads.clone())
+                } else {
+                    spatial_candidate(&loads)?
+                };
                 Ok(DrivenCoefficients {
                     circuit: LoadDriver {
                         candidate,
                         loads,
                         destinations: destinations.clone(),
+                        ceramic_destinations: Arc::clone(&ceramic_destinations),
                     },
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
@@ -305,6 +395,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                         return Err(DepositionError::Arithmetic.into());
                     }
                 }
+                ceramic.deposit(driver.candidate.body(), dt, &mut powers, checkpoint)?;
                 Ok(powers)
             },
             cancelled,

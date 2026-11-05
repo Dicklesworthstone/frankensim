@@ -34,7 +34,8 @@ use crate::visco_tensor::source::TensorBranchProperties;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::MaterialCard;
 use fs_math::{c64::C64, det};
-use fs_qty::{Dims, Pressure, QuantitySpec, Time};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Dims, Pressure, QuantitySpec, Temperature, Time};
 use std::sync::Arc;
 
 /// Model-bound material memories and exact passive midpoint companion laws.
@@ -498,6 +499,86 @@ impl RelaxingTensorPiezoelectric {
     pub fn frequency_band_rad_s(&self) -> [f64; 2] {
         let (low, high) = self.mechanical.band_rad_s();
         [low, high]
+    }
+
+    /// Admit a thermal receiver while retaining EVERY original coefficient,
+    /// branch, direction, query receipt and memory identity unchanged.
+    ///
+    /// The chosen axis must already describe an absolute temperature in the
+    /// original query (semantic AbsoluteTemperature/Static, or legacy `T`).
+    /// All other coordinates and their quantity conventions remain fixed.
+    /// Every original base and relaxation claim must support the proposed
+    /// typed point. A changed temperature additionally requires that none of
+    /// those selected source models depend on this temperature as a value axis.
+    /// Even an apparently flat sampled temperature curve needs a separate
+    /// source refresh; one frozen sample cannot prove a constant interval.
+    ///
+    /// `ResolvedScalarProperty` retains value axes from the exact selected
+    /// claim and its complete declared validity box. With no value dependence
+    /// on T, the existing interpolation coordinates stay unchanged; the convex
+    /// axis-interval validity therefore covers the original-to-proposed T path.
+    /// This admits the original constant source model, not new measured data,
+    /// temperature derivatives, parameter work or a replacement source receipt.
+    pub fn admit_held_temperature(&self, temperature_axis: &str, temperature_k: f64) -> Result<()> {
+        let original = self.base.material();
+        let original_temperature = original
+            .state_coordinate(temperature_axis)
+            .ok_or_else(|| invalid("held ceramic temperature requires its original query axis"))?;
+        let quantity = original.axis_quantities().get(temperature_axis).copied();
+        let absolute = QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::AbsoluteTemperature,
+            ValueForm::Static,
+        ));
+        let legacy = temperature_axis == "T"
+            && quantity.is_none_or(|q| q == QuantitySpec::dimensional(Temperature::DIMS));
+        if !original_temperature.is_finite()
+            || original_temperature <= 0.0
+            || !temperature_k.is_finite()
+            || temperature_k <= 0.0
+            || quantity != Some(absolute) && !legacy
+        {
+            return Err(invalid(
+                "held ceramic temperature requires positive absolute kelvin on its original axis",
+            ));
+        }
+        let trial = original
+            .query()
+            .with(temperature_axis, temperature_k)
+            .map_err(|_| invalid("held ceramic thermal query is not admissible"))?;
+        let changed = temperature_k != original_temperature;
+        for property in original
+            .properties()
+            .iter()
+            .chain(self.material.properties())
+        {
+            if !property.has_only_fixed_external_conditions(Some(temperature_axis), true) {
+                return Err(invalid(
+                    "held ceramic temperature cannot replace another source coordinate or thermal axis",
+                ));
+            }
+            if changed
+                && property
+                    .source_axes()
+                    .iter()
+                    .any(|(axis, _)| axis == temperature_axis)
+            {
+                return Err(invalid(
+                    "temperature-dependent piezoelectric coefficients require an explicit source refresh",
+                ));
+            }
+            if !property
+                .answer()
+                .evidence
+                .model
+                .validity
+                .contains_typed(trial.axes(), trial.axis_quantities())
+            {
+                return Err(invalid(
+                    "held ceramic temperature leaves an original base or relaxation source domain",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Co-rotate the complete reciprocal base and every memory direction. All

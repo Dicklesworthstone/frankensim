@@ -3,6 +3,12 @@
 use super::*;
 
 impl PreparedMaterialNetwork<'_, '_> {
+    /// Original immutable caloric/card/context bindings for composed physical
+    /// owners. Borrowing them cannot replace the native law or its source pins.
+    pub(crate) fn cell_bindings(&self) -> &[MaterialCell<'_>] {
+        self.network.cells
+    }
+
     /// Original branch-to-cell heat routes from this admitted material network.
     /// Coupled electrical consumers use these instead of an independently
     /// authored destination list that could heat a different material. The

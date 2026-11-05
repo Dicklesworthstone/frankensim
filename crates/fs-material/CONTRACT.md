@@ -5604,6 +5604,16 @@ beside large bias energies. The enclosing spatial owner applies its explicit
 energy tolerance. Midpoint is second order and passive but not L-stable; fast
 unresolved modes may alternate and require time refinement.
 
+`admit_held_temperature` admits finite caloric heating only within the exact
+original selected claims. It retains the complete typed nonthermal query and
+requires the owned axis to be absolute temperature. For a changed temperature,
+every base and auxiliary coefficient must be independent of that axis; a flat
+sample of a temperature-dependent source does not prove constancy. Each exact
+selected claim retains its convex typed validity box, so checked endpoints
+admit the intervening temperature interval without extrapolation. No source
+switch, coefficient refresh or memory rebind occurs. Two focused source tests
+exercise independent base/auxiliary domains and temperature semantics/dependence.
+
 Five harmonic and four transient synthetic groups in
 `tests/piezoelectric_tensor/relaxation.rs` and its `transient` child specify
 independent coefficient limits, Maxwell decay, Debye charging, second-order
