@@ -5,7 +5,9 @@
 //! A uniform gap therefore has C_infinity in parallel with series R_k/C_k
 //! branches, where `C_k = delta_epsilon_k A/d` and `R_k = tau_k/C_k`.
 //! Their resistor loss is polarization heat, not DC leakage or electrode ESR.
-//! The native circuit owns ALL charges, time integration and dissipation.
+//! The native circuit owns lumped charges, time integration and dissipation.
+//! [`bulk`] retains the same source roles as local polarization vectors for
+//! spatial electroquasistatic fields, without assigning capacitor geometry.
 //!
 //! Sources: COMSOL AC/DC 6.3, "Dispersion Theory", Debye and multipole model;
 //! <https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_theory.05.36.html>.
@@ -25,6 +27,8 @@ use crate::state_point::{
 pub mod reversible;
 /// Source-pinned temperature dependence and complete dielectric thermodynamics.
 pub mod thermal;
+/// Bulk multipole Debye polarization and passive local midpoint elimination.
+pub mod bulk;
 
 /// Explicit bound on retained polarization states and per-response work.
 pub const MAX_DIELECTRIC_POLES: usize = 16;

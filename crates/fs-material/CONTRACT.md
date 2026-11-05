@@ -10736,6 +10736,33 @@ single-pole frequency limits, multipole additivity, the zero-memory limit and
 passivity/source-domain refusals. These synthetic fixtures verify the model's
 implementation and do not establish experimental material accuracy.
 
+### Bulk polarization memory on native field cells
+
+`field_storage::dielectric::bulk::ResolvedDebyeMaterial` admits the same original
+parameter roles and complete material bundle without assigning capacitor
+geometry. Each fixed isotropic pole retains its own 1D, 2D or 3D polarization
+vector and obeys `tau Pdot + P = delta_epsilon E`. Total displacement is
+`D=epsilon_inf E+sum P`; physical storage density is
+`epsilon_inf |E|^2/2+sum |P|^2/(2 delta_epsilon)`. Polarization loss is separate
+from Ohmic conduction and must not be counted again as conductivity.
+
+Allocation-free midpoint elimination supplies a positive effective permittivity
+and vector history load for the native field solve. The matching bounded local
+recovery returns every polarization endpoint, total displacement, storage change,
+nonnegative polarization heat and midpoint electric work. Storage change uses
+actual component increments instead of subtracting biased total energies. The
+floating-point balance residual remains explicit for the field owner's physical
+tolerance. This midpoint law is second order and passive; it does not promise
+monotonic decay or an exact exponential response at unresolved relaxation times.
+
+Coefficients, their source query, and material orientation stay fixed. This
+opt-in constitutive owner adds no thermal refresh, anisotropic pole, ferroelectric
+hysteresis, breakdown, or measured-fit claim. Existing zero-pole storage and
+lumped uniform-gap reductions remain available. G0/G1/G3 tests in
+`tests/dielectric/bulk.rs` compare source retention and circuit storage, the
+independent pole ODE and work identity, second-order exponential-decay convergence,
+discrete harmonic response, vector rotation, lossless limits, and invalid inputs.
+
 ## Source-backed optical tables on finite vacuum-wavelength bands
 
 `state_point::SpectralConductorStatePoint` and
