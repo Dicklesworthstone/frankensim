@@ -443,3 +443,6 @@ fn g0_local_emissivity_refuses_runtime_source_support_without_shrinking_storage_
         "{refusal:?}"
     );
 }
+
+#[path = "material_emissivity/adjoint.rs"]
+mod adjoint;

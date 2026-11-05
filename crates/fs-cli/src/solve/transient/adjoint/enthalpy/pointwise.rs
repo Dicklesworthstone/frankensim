@@ -17,6 +17,19 @@ use super::{
     bad, failed, finite, json_string, lower, number, poll, radiation, zeros,
 };
 
+mod material;
+pub(in crate::solve::transient) use material::storage_bytes as material_storage_bytes;
+
+pub(super) fn model_workspace_entries(
+    nodes: usize, faces: usize, lowering: &radiation::LoweredRadiation,
+) -> Result<usize, SolveRefusal> {
+    if lowering.is_material_ambient() {
+        material::workspace_entries(nodes, faces, lowering)
+    } else {
+        workspace_entries(nodes, faces, lowering.surface_count())
+    }
+}
+
 pub(super) fn workspace_entries(
     nodes: usize, faces: usize, patches: usize,
 ) -> Result<usize, SolveRefusal> {
@@ -81,7 +94,25 @@ pub(super) fn linearize<'m>(
         absolute_heat_w: lowering.config.balance_tolerance_w,
         relative_heat: lowering.config.balance_relative_tolerance,
     };
-    let result = if let Some(model) = open_enclosure {
+    let result = if lowering.is_material_ambient() {
+        if enclosure.is_some() || open_enclosure.is_some() {
+            return Err(bad("local-temperature emissivity requires its original ambient owner"));
+        }
+        let owner = lowering.bind_material_ambient(cx, problem, engine).map_err(lower)?
+            .ok_or_else(|| bad("material history linearization lost its original source owner"))?;
+        if let Some(contacts) = contacts {
+            engine.linearize_temperature_contact_endpoint_with_radiation(
+                cx, problem, contacts, old_h, dt_s, config,
+                EnthalpyRadiation::MaterialAmbient(&owner), accepted,
+                physical_target_j, max_radiation_entries, max_contact_pairs,
+            )
+        } else {
+            engine.linearize_accepted_with_material_ambient_radiation(
+                cx, problem, interfaces, old_h, dt_s, config, &owner, accepted,
+                physical_target_j, max_radiation_entries,
+            )
+        }
+    } else if let Some(model) = open_enclosure {
         let owner = PointwiseEnclosureRadiation::new_open(
             cx, problem.mesh, problem.boundary, model,
             lowering.open_ambient_temperature_k()
@@ -145,7 +176,7 @@ struct Surface {
     reservoir_bar: f64,
 }
 
-pub(super) struct Controls {
+struct FixedControls {
     surfaces: Vec<Surface>,
     view_factor_identity: Option<String>,
     /// The open bath is one shared physical control, not one per surface.
@@ -158,7 +189,53 @@ struct BlackEnvironment {
     temperature_bar: f64,
 }
 
+enum ControlModel {
+    Fixed(FixedControls),
+    Material(material::Controls),
+}
+
+pub(super) struct Controls(ControlModel);
+
 impl Controls {
+    pub(super) fn new(
+        cx: &Cx<'_>, lowering: &radiation::LoweredRadiation,
+        enclosure: Option<&GrayDiffuseEnclosure>, open_enclosure: Option<&OpenDiffuseEnclosure>,
+        deadline: Option<(Instant, f64)>,
+    ) -> Result<Self, SolveRefusal> {
+        poll(cx, deadline)?;
+        if lowering.is_material_ambient() {
+            if enclosure.is_some() || open_enclosure.is_some() {
+                return Err(bad("material ambient controls cannot use a reflected enclosure owner"));
+            }
+            Ok(Self(ControlModel::Material(material::Controls::new(cx, lowering, deadline)?)))
+        } else {
+            Ok(Self(ControlModel::Fixed(FixedControls::new(lowering, enclosure, open_enclosure)?)))
+        }
+    }
+
+    pub(super) fn add(
+        &mut self, cx: &Cx<'_>, step: &EnthalpyStepLinearization<'_>,
+        nodal_load_adjoint: &[f64], deadline: Option<(Instant, f64)>,
+    ) -> Result<(), SolveRefusal> {
+        match &mut self.0 {
+            ControlModel::Fixed(controls) => controls.add(cx, step, nodal_load_adjoint, deadline),
+            ControlModel::Material(controls) => controls.add(cx, step, nodal_load_adjoint, deadline),
+        }
+    }
+
+    pub(super) fn fragment(
+        &self, cx: &Cx<'_>, expected_steps: usize, max_radiation_entries: usize,
+        workspace_bytes: usize, deadline: Option<(Instant, f64)>,
+    ) -> Result<String, SolveRefusal> {
+        poll(cx, deadline)?;
+        match &self.0 {
+            ControlModel::Fixed(controls) => controls.fragment(expected_steps, max_radiation_entries, workspace_bytes),
+            ControlModel::Material(controls) => controls.fragment(cx, expected_steps, max_radiation_entries, workspace_bytes, deadline),
+        }
+    }
+}
+
+impl FixedControls {
     /// Keep independent authored surfaces even when they share a source card.
     /// An initial selected peak retains these identities with zero derivatives.
     pub(super) fn new(
@@ -318,7 +395,18 @@ impl Controls {
 
 /// Keep the common history/control contract while describing the selected
 /// spatial owner accurately; historical patch-mean reports remain unchanged.
-pub(super) fn history_scope(common: &str) -> String {
+pub(super) fn history_scope(common: &str, local_material: bool) -> String {
+    if local_material {
+        // The common text describes frozen patch controls. Replace that entire
+        // radiation paragraph so a source-ordinate report cannot inherit an
+        // independent-per-patch or fixed-emissivity claim. These anchors belong
+        // to the caller's internal SCOPE constant, never user-provided text.
+        let start = common.find("Declared closed enclosures retain")
+            .expect("common enthalpy scope retains its radiation paragraph");
+        let end = start + common[start..].find("An isothermal plateau has zero direct temperature sensitivity")
+            .expect("common enthalpy scope retains its energetic-history paragraph");
+        return format!("{}{} {}", &common[..start], material::SCOPE, &common[end..]);
+    }
     common.replace(
         "Their absolute per-surface emissivity controls use the shared radiosity transpose with the same masked time-scaled thermal multiplier; view factors and geometry stay fixed.",
         "Their absolute per-surface emissivity controls contract the prepared reflected response and the local P1 emission with the same masked time-scaled thermal multiplier; view factors and geometry stay fixed.",
@@ -349,11 +437,23 @@ mod tests {
 
     #[test]
     fn pointwise_scope_preserves_history_controls_without_a_patch_mean_claim() {
-        let scope = history_scope(super::super::SCOPE);
+        let scope = history_scope(super::super::SCOPE, false);
         assert!(scope.contains("local P1 fourth-power emission tangent"));
         assert!(scope.contains("complete nonsymmetric reflected irradiation tangent"));
         assert!(scope.contains("Initial controls are additive nodal or regional specific-enthalpy offsets"));
         assert!(!scope.contains("nonlinear area-mean state feedback"));
+        assert!(!scope.contains("controls use the shared radiosity transpose"));
+    }
+
+    #[test]
+    fn material_scope_retains_history_and_names_original_shared_source_controls() {
+        let scope = history_scope(super::super::SCOPE, true);
+        assert!(scope.contains("original pinned scalar or linear T-curve emissivity"));
+        assert!(scope.contains("exact material-card and selected-claim identity"));
+        assert!(scope.contains("Initial controls are additive nodal or regional specific-enthalpy offsets"));
+        assert!(scope.contains("h history carry remains energetic"));
+        assert!(!scope.contains("sharing a card does not merge controls"));
+        assert!(!scope.contains("independent absolute surface emissivities"));
         assert!(!scope.contains("controls use the shared radiosity transpose"));
     }
 }

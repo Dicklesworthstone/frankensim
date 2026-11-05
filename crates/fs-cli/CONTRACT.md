@@ -1,5 +1,36 @@
 # CONTRACT: fs-cli
 
+## Original emissivity-source trajectory adjoints — driver 128
+
+Final-temperature and sampled-peak adjoints now consume the original accepted
+local-temperature emissivity histories. The native endpoint binder retains the
+complete emissivity-temperature tangent with heterogeneous storage, sourced
+conductivity, live contact, prescribed boundaries, natural convection and
+transported air. Original residual, energy, source-domain and smoothness gates
+remain active; reverse execution does not replace the forward state.
+
+Controls are the original scalar emissivity or each original temperature-curve
+ordinate at fixed abscissae. Exact material-card and selected-claim identity
+groups shared sources; their contributions sum once across physical surfaces
+and the selected history prefix. Reservoir temperatures remain independent per
+surface. Each parameter contraction uses the same masked, time-scaled physical
+dual, with the outward sign applied once and no extra parameter solve. Initial
+selected peaks retain the full source/control identity with zero future bars.
+
+The source-aware workspace allowance includes native face blocks, original
+ordinate bases and retained nodal source states before forward stepping, with
+the same cap used for reverse binding. Reports identify original knots and
+shared-source membership instead of relabeling frozen per-patch emissivities
+as material controls. Driver 128 invalidates prior cached producer results.
+
+Regressions compare whole-card perturbations against an independent scalar
+energy derivative, exercise both heat-flow signs, verify inactive source
+ordinates and initial-peak zeros, and split one source across four physical
+faces with independent bath perturbations. Compilation and numerical execution
+remain unverified in this session; syntax and source checks alone are not a
+gradient validation. Phase-dependent emissivity, local-state enclosure
+declarations and phase-dependent contact remain outside this CLI increment.
+
 ## Local-temperature material emissivity — driver 127
 
 An ambient radiation declaration may explicitly select
@@ -26,9 +57,8 @@ older cached producer results.
 This increment admits ambient gray exchange with scalar or temperature-curve
 sources; separate coatings, phase-dependent emissivity, local-state enclosure
 declarations, source switching and extrapolation remain outside this CLI mode.
-Requested trajectory derivatives must use original source ordinates; the
-adapter refuses them until that explicit control path is available. Forward
-regressions cover heating, cooling, source identity and domain refusal through
+Driver 128 adds the original-source trajectory control path described above.
+Forward regressions cover heating, cooling, source identity and domain refusal through
 the real CLI path. Syntax checks alone do not establish numerical execution.
 
 ## Pointwise radiation through live-contact enthalpy histories — driver 126
@@ -50,8 +80,8 @@ bath has no solid trace or enthalpy, and radiation never heats transported air.
 
 Source identities, surface ordering and view factors remain fixed. Native
 state-dependent material-emissivity owners retain their separate receipt and
-phase-response checks; the current CLI continues to lower fixed sourced
-emissivities and cannot replace those owners by scalars. Patch-mean live-contact
+phase-response checks; driver 127 adds their explicit local-temperature ambient
+lowering without replacing those owners by scalars. Patch-mean live-contact
 enthalpy radiation and phase-dependent contact resistance remain unsupported.
 Driver 126 invalidates earlier cached producer results.
 

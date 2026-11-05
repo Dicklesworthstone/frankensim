@@ -37,6 +37,7 @@ pub(in crate::solve::transient) use material_controls::storage_bytes as material
 pub(in crate::solve::transient) use convection::storage_bytes as convection_storage_bytes;
 pub(in crate::solve::transient) use convection::control_storage_bytes;
 pub(in crate::solve::transient) use pointwise::storage_bytes as pointwise_storage_bytes;
+pub(in crate::solve::transient) use pointwise::material_storage_bytes as pointwise_material_storage_bytes;
 
 // Forward native enthalpy also admits at most 24 Arnoldi columns. Keep the
 // transpose within the same bounded column scale before allocating its basis.
@@ -401,7 +402,9 @@ pub(in crate::solve::transient) fn finish(
         return Err(bad("enthalpy adjoint lost its exact bound enclosure model"));
     }
     let radiation_workspace = radiation.map(|lowering| {
-        if lowering.is_pointwise() {
+        if lowering.is_material_ambient() {
+            pointwise_material_storage_bytes(n, problem.mesh.boundary().len(), lowering, ends_s.len())
+        } else if lowering.is_pointwise() {
             pointwise_storage_bytes(
                 n, problem.mesh.boundary().len(), lowering.surface_count(), ends_s.len(),
                 open_enclosure.is_some(),
@@ -411,7 +414,7 @@ pub(in crate::solve::transient) fn finish(
         }
     }).transpose()?.unwrap_or(0);
     let max_radiation_entries = pointwise.map(|lowering|
-        pointwise::workspace_entries(n, problem.mesh.boundary().len(), lowering.surface_count()))
+        pointwise::model_workspace_entries(n, problem.mesh.boundary().len(), lowering))
         .transpose()?.unwrap_or(0);
     let max_feedback_entries = radiation.filter(|lowering| !lowering.is_pointwise()).map(|lowering|
         feedback_entries(n, lowering.surface_count())).transpose()?.unwrap_or(0);
@@ -533,7 +536,7 @@ pub(in crate::solve::transient) fn finish(
         .map(|model| enclosure::Controls::new(model))
         .transpose()?;
     let mut pointwise_controls = pointwise
-        .map(|lowering| pointwise::Controls::new(lowering, enclosure, open_enclosure.as_ref()))
+        .map(|lowering| pointwise::Controls::new(cx, lowering, enclosure, open_enclosure.as_ref(), deadline))
         .transpose()?;
     let mut carry = zeros(n)?;
     let mut dual_iterations = 0usize;
@@ -849,7 +852,7 @@ pub(in crate::solve::transient) fn finish(
     let selected_time = if selected.state == 0 { 0.0 } else { ends_s[selected.state - 1] };
     let radiation_fragment = radiation.map(|lowering| -> Result<String, SolveRefusal> {
         if let Some(controls) = pointwise_controls.as_ref() {
-            return controls.fragment(selected.state, max_radiation_entries, radiation_workspace);
+            return controls.fragment(cx, selected.state, max_radiation_entries, radiation_workspace, deadline);
         }
         if let (Some(model), Some(controls)) = (enclosure, enclosure_controls.as_ref()) {
             return controls.fragment(
@@ -902,7 +905,7 @@ pub(in crate::solve::transient) fn finish(
         ",\"convection\":{{\"method\":\"complete-natural-and-streamwise-air-enthalpy-feedback\",\"natural_ports\":{},\"air_ports\":{},\"max_combined_feedback_entries\":{combined_feedback_entries},\"additional_workspace_bytes\":{convection_workspace},\"control_workspace_bytes\":{control_workspace},\"physical_endpoint_rechecks\":{},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"air_energy\":\"actual-air-enthalpy-gain-with-separate-natural-and-radiation-reservoirs\"{controls_fragment}}}",
         natural.len(), airflow.map_or(0, |path| path.segments.len()), selected.state,
     ) };
-    let pointwise_scope = pointwise.is_some().then(|| pointwise::history_scope(SCOPE));
+    let pointwise_scope = pointwise.map(|lowering| pointwise::history_scope(SCOPE, lowering.is_material_ambient()));
     let flux_scope = (!flux_fragment.is_empty()).then(||
         pointwise_scope.as_deref().unwrap_or(SCOPE).replace(
             "Prescribed Neumann data, phase-law parameters and the time grid are fixed.",
@@ -913,8 +916,11 @@ pub(in crate::solve::transient) fn finish(
         ",\"temperature_contact\":{{\"method\":\"complete-total-enthalpy-contact-tangent\",\"control_steps\":{},\"max_face_pairs\":{max_contact_pairs},\"workspace_estimate_bytes\":{contact_workspace},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"source_context\":\"original-pinned-temperature-law-at-independent-endpoint-traces\"}}",
         selected.state,
     ) } else { String::new() };
+    let radiation_parameters = if pointwise.is_some_and(|lowering| lowering.is_material_ambient()) {
+        "shared original emissivity-source ordinates and independent ambient-reservoir controls"
+    } else { "absolute emissivity/reservoir controls" };
     let contact_scope = temperature_contacts.map(|_| format!(
-        "{original_scope} Live contact retains the original pinned temperature-dependent source owner and both trace-temperature partials in the complete specific-enthalpy tangent, including each chart's temperature response. Every consumed endpoint passes its original physical residual and energy targets, plus actual-air energy when present. Material contractions use the same complete masked nodal-load dual with its timestep already included. Prescribed-temperature columns retain contact feedback. History carry stays energetic across latent plateaus. Pointwise ambient or closed/open enclosure radiation retains its complete local-emission and reflected-irradiation tangent, original physical source receipts and absolute emissivity/reservoir controls in this same dual. The open black bath has one control and no solid state. Pressure, finish, source selection and geometry remain fixed; phase-dependent contact resistance and patch-mean live-contact enthalpy radiation are not supplied by this adapter."
+        "{original_scope} Live contact retains the original pinned temperature-dependent source owner and both trace-temperature partials in the complete specific-enthalpy tangent, including each chart's temperature response. Every consumed endpoint passes its original physical residual and energy targets, plus actual-air energy when present. Material contractions use the same complete masked nodal-load dual with its timestep already included. Prescribed-temperature columns retain contact feedback. History carry stays energetic across latent plateaus. Pointwise ambient or closed/open enclosure radiation retains its complete local-emission and reflected-irradiation tangent, original physical source receipts and {radiation_parameters} in this same dual. The open black bath has one control and no solid state. Pressure, finish, source selection and geometry remain fixed; phase-dependent contact resistance and patch-mean live-contact enthalpy radiation are not supplied by this adapter."
     ));
     let original_scope = contact_scope.as_deref().unwrap_or(original_scope);
     let history_scope = boundary_history.as_ref().map(|_| format!(
