@@ -21,6 +21,8 @@
 //! The law is the same port for a single reed, a paired reed, a modal
 //! aperture, a brass lip and a vocal fold. It is not instrument-shaped.
 
+use fs_math::det;
+
 /// The rung-A quasi-steady gap-flow law.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GapFlowLaw {
@@ -42,6 +44,8 @@ pub enum GapFlowError {
     InvalidInput,
     /// A coefficient is outside its declared domain.
     InvalidLaw,
+    /// The finite inputs require coefficients or outputs outside f64 range.
+    Unrepresentable,
 }
 
 impl core::fmt::Display for GapFlowError {
@@ -49,6 +53,7 @@ impl core::fmt::Display for GapFlowError {
         match self {
             Self::InvalidInput => f.write_str("gap flow: non-finite or non-positive width, opening, density or pressure"),
             Self::InvalidLaw => f.write_str("gap flow: contraction, channel length, effective length or viscosity outside its domain"),
+            Self::Unrepresentable => f.write_str("gap flow: coefficients, flow or Jacobian are not representable"),
         }
     }
 }
@@ -120,10 +125,21 @@ impl GapFlowLaw {
         if !(width_m > 0.0) || !(opening_m > 0.0) || !(density > 0.0) || !flow_m3_s.is_finite() {
             return 0.0;
         }
-        let a = density / (2.0 * (self.contraction * width_m * opening_m).powi(2));
-        let b = 12.0 * self.dynamic_viscosity_pa_s * self.channel_length_m
-            / (width_m * opening_m.powi(3));
-        a * flow_m3_s * flow_m3_s.abs() + b * flow_m3_s
+        if flow_m3_s == 0.0 {
+            return 0.0;
+        }
+        // Evaluate through mean slit velocity: h^-3 and a squared hydraulic
+        // resistance need not be representable for the actual pressure to be.
+        let velocity = flow_m3_s / width_m / opening_m;
+        let jet_velocity = velocity / self.contraction;
+        let inertial = 0.5 * density * jet_velocity * jet_velocity.abs();
+        let viscous = if self.dynamic_viscosity_pa_s == 0.0 || self.channel_length_m == 0.0 {
+            0.0
+        } else {
+            12.0 * self.dynamic_viscosity_pa_s * self.channel_length_m * (velocity / opening_m)
+                / opening_m
+        };
+        inertial + viscous
     }
 
     /// The unsteady rung-A pressure drop,
@@ -178,7 +194,11 @@ impl GapFlowLaw {
     ///
     /// # Errors
     /// [`GapFlowError::InvalidInput`] for a non-finite or non-positive
-    /// input, or [`GapFlowError::InvalidLaw`] for an invalid coefficient.
+    /// input, [`GapFlowError::InvalidLaw`] for an invalid coefficient, or
+    /// [`GapFlowError::Unrepresentable`] for unsupported finite arithmetic.
+    /// Underflow to zero is admitted. The legacy default keeps its original
+    /// arithmetic; other solves refuse nonfinite outputs except for the
+    /// declared inviscid pressure derivative at zero drop.
     pub fn volume_flow_and_jacobian(
         &self,
         width_m: f64,
@@ -200,9 +220,8 @@ impl GapFlowLaw {
         if opening_m == 0.0 {
             return Ok((0.0, 0.0, 0.0));
         }
-        let b = 12.0 * self.dynamic_viscosity_pa_s * self.channel_length_m
-            / (width_m * opening_m.powi(3));
-        if b == 0.0 && self.contraction == 1.0 {
+        let inviscid = self.dynamic_viscosity_pa_s == 0.0 || self.channel_length_m == 0.0;
+        if inviscid && self.contraction == 1.0 {
             // The declared inviscid rung: keep the legacy owner's arithmetic
             // and its exact dead-zone behavior, bit for bit.
             let flow = crate::bernoulli_volume_flow(width_m, opening_m, dp_pa, density);
@@ -213,21 +232,72 @@ impl GapFlowLaw {
             };
             return Ok((flow, derivative, flow / opening_m));
         }
-        let a = density / (2.0 * (self.contraction * width_m * opening_m).powi(2));
         let q = dp_pa.abs();
-        let disc = (b * b + 4.0 * a * q).sqrt();
-        // Rationalized root: U = 2q/(sqrt(B^2+4Aq)+B), which avoids the
-        // cancellation of (disc - B) when the laminar term dominates.
-        let denom = disc + b;
-        let u_mag = 2.0 * q / denom;
-        let flow = if dp_pa < 0.0 { -u_mag } else { u_mag };
-        // dU/d|dp| = 1 / sqrt(B^2 + 4 A q)
-        let d_dp = 1.0 / disc;
-        // A = a0 h^-2, B = b0 h^-3, so dA/dh = -2A/h and dB/dh = -3B/h.
-        let d_disc = (b * (-3.0 * b / opening_m) + 2.0 * q * (-2.0 * a / opening_m)) / disc;
-        let d_denom = d_disc - 3.0 * b / opening_m;
-        let d_h = -2.0 * q * d_denom / (denom * denom);
-        let d_h = if dp_pa < 0.0 { -d_h } else { d_h };
+        if inviscid && q == 0.0 {
+            return Ok((0.0, f64::INFINITY, 0.0));
+        }
+        // Solve q = rho v^2/(2 C_c^2) + b v for the mean slit velocity
+        // v = |U|/(w h), with b = 12 mu L/h^2. A scaled hypot avoids
+        // squaring b; halving the normalized denominator avoids 2*b overflow.
+        let laminar = if inviscid {
+            0.0
+        } else {
+            12.0 * self.dynamic_viscosity_pa_s * self.channel_length_m
+        };
+        if !inviscid && (!laminar.is_finite() || laminar == 0.0) {
+            return Err(GapFlowError::Unrepresentable);
+        }
+        let b = if inviscid {
+            0.0
+        } else {
+            laminar / opening_m / opening_m
+        };
+        let inertial =
+            det::sqrt(density) * det::sqrt(q) * std::f64::consts::SQRT_2 / self.contraction;
+        if !inertial.is_finite() {
+            return Err(GapFlowError::Unrepresentable);
+        }
+        let (velocity, mobility, laminar_fraction) = if b.is_infinite() {
+            // Divide the SAME quadratic by b. Its reciprocal remains usable
+            // after b overflows, and b^-1 * inertial is bounded here. Keep v
+            // and dv/dq separate so dU/dh survives when U rounds to zero.
+            let inverse_b = (opening_m / laminar) * opening_m;
+            let scale = det::hypot(1.0, inverse_b * inertial);
+            let laminar_velocity = if inverse_b == 0.0 {
+                // q may restore a representable v after b^-1 underflows.
+                (q * opening_m / laminar) * opening_m
+            } else {
+                q * inverse_b
+            };
+            (
+                laminar_velocity / (0.5 + 0.5 * scale),
+                inverse_b / scale,
+                1.0 / scale,
+            )
+        } else {
+            let scale = b.max(inertial);
+            if scale == 0.0 {
+                return Err(GapFlowError::Unrepresentable);
+            }
+            let normalized_b = b / scale;
+            let discriminant = det::hypot(normalized_b, inertial / scale);
+            let fraction = normalized_b / discriminant;
+            (
+                (q / scale) / (0.5 * discriminant + 0.5 * normalized_b),
+                (1.0 / scale) / discriminant,
+                fraction,
+            )
+        };
+        let signed_velocity = velocity.copysign(dp_pa);
+        let flow = (width_m * signed_velocity) * opening_m;
+        let d_dp = (width_m * mobility) * opening_m;
+        // Implicit differentiation gives dU/dh = w*v*(1+2*b/D).
+        // Unlike differentiating D explicitly, this needs neither h^-4 nor
+        // products of large resistances, and stays finite as h tends to zero.
+        let d_h = width_m * signed_velocity * (1.0 + 2.0 * laminar_fraction);
+        if !flow.is_finite() || !d_dp.is_finite() || !d_h.is_finite() {
+            return Err(GapFlowError::Unrepresentable);
+        }
         Ok((flow, d_dp, d_h))
     }
 }
@@ -248,7 +318,7 @@ mod tests {
     #[test]
     fn bernoulli_limit_is_bitwise() {
         let law = GapFlowLaw::default();
-        for opening in [1e-6, 1e-4, 4e-4, 1e-3] {
+        for opening in [1e-200, 1e-6, 1e-4, 4e-4, 1e-3] {
             for dp in [-1e3, -1e-3, -1e-12, 0.0, 1e-12, 1e-3, 1e3] {
                 assert_eq!(
                     law.volume_flow(0.013, opening, dp, 1.2).to_bits(),
@@ -257,6 +327,141 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn contracted_inviscid_flow_has_the_correct_zero_drop_limit() {
+        let law = GapFlowLaw {
+            contraction: 0.5,
+            ..GapFlowLaw::default()
+        };
+        let (w, h, rho) = (0.125, 0.002, 2.0);
+        for pressure in [0.0, -0.0] {
+            assert_eq!(
+                law.volume_flow_and_jacobian(w, h, pressure, rho),
+                Ok((0.0, f64::INFINITY, 0.0))
+            );
+        }
+        for pressure in [-4.0_f64, -1e-20, 1e-20, 4.0] {
+            let (flow, dp, dh) = law.volume_flow_and_jacobian(w, h, pressure, rho).unwrap();
+            let speed = 0.5 * pressure.abs().sqrt();
+            let expected_flow = w * h * speed.copysign(pressure);
+            assert!((flow / expected_flow - 1.0).abs() < 4e-15);
+            assert!((dp / (w * h / (4.0 * pressure.abs().sqrt())) - 1.0).abs() < 4e-15);
+            assert!((dh / (w * speed.copysign(pressure)) - 1.0).abs() < 4e-15);
+        }
+    }
+
+    #[test]
+    fn viscous_closure_keeps_the_poiseuille_flow_and_opening_jacobian() {
+        // 12 mu L = 1 exactly; at these openings the independently known
+        // Poiseuille limit differs from the quadratic root by less than an ULP.
+        let law = GapFlowLaw {
+            contraction: 0.5,
+            dynamic_viscosity_pa_s: 0.125,
+            channel_length_m: 2.0 / 3.0,
+            effective_length_m: 0.0,
+        };
+        let width = 0.25;
+        for h in [1e-12, 1e-40, 1e-60, 1e-100, 1e-110, 1e-150, 1e-160] {
+            for pressure in [-8.0_f64, 0.0, 8.0] {
+                let (flow, dp, dh) = law
+                    .volume_flow_and_jacobian(width, h, pressure, 2.0)
+                    .unwrap();
+                let velocity = (pressure * h) * h;
+                let expected = [
+                    width * velocity * h,
+                    width * h * h * h,
+                    3.0 * width * velocity,
+                ];
+                for (actual, exact) in [flow, dp, dh].into_iter().zip(expected) {
+                    assert!(actual.is_finite());
+                    assert!(
+                        (actual - exact).abs() <= 2e-14 * exact.abs() + 8.0 * f64::from_bits(1),
+                        "h={h:e}, pressure={pressure:e}: {actual:e} vs {exact:e}"
+                    );
+                }
+                assert!(pressure * flow >= 0.0);
+                if h <= 1e-110 && pressure != 0.0 {
+                    assert_eq!(flow, 0.0);
+                    assert_ne!(dh, 0.0, "a finite Jacobian must survive flow underflow");
+                }
+                if h >= 1e-100 {
+                    let back = law.pressure_drop(width, h, flow, 2.0);
+                    assert!((back - pressure).abs() <= 5e-14 * pressure.abs());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_quadratic_retains_the_inertial_limit_at_large_pressure() {
+        let law = law();
+        let (width, h, rho) = (0.125, 0.002, 2.0);
+        for pressure in [1e100_f64, 1e300] {
+            let (flow, dp, dh) = law
+                .volume_flow_and_jacobian(width, h, pressure, rho)
+                .unwrap();
+            let speed = law.contraction * pressure.sqrt();
+            assert!((flow / (width * h * speed) - 1.0).abs() < 5e-15);
+            assert!(
+                (dp / (width * h * law.contraction / (2.0 * pressure.sqrt())) - 1.0).abs() < 5e-15
+            );
+            assert!((dh / (width * speed) - 1.0).abs() < 5e-15);
+            let back = law.pressure_drop(width, h, flow, rho);
+            assert!((back / pressure - 1.0).abs() < 8e-15);
+        }
+    }
+
+    #[test]
+    fn overflowing_viscous_coefficient_retains_the_full_quadratic() {
+        let law = GapFlowLaw {
+            contraction: 0.5,
+            dynamic_viscosity_pa_s: 0.125,
+            channel_length_m: 2.0 / 3.0,
+            effective_length_m: 0.0,
+        };
+        let h = (5e-309_f64).sqrt();
+        let (flow, dp, dh) = law.volume_flow_and_jacobian(1.0, h, 4e307, 4e307).unwrap();
+        // Dividing the dimensional law by pressure gives 2 v^2 + 5 v = 1.
+        // Both terms matter despite b = 2e308 being unrepresentable.
+        let expected_v = 2.0 / (5.0 + 33.0_f64.sqrt());
+        let expected_dh = expected_v * (1.0 + 10.0 / 33.0_f64.sqrt());
+        assert!((flow / h / expected_v - 1.0).abs() < 5e-15);
+        assert_eq!(dp, 0.0, "only this final derivative underflows");
+        assert!((dh / expected_dh - 1.0).abs() < 5e-15);
+    }
+
+    #[test]
+    fn overflowing_discriminant_does_not_discard_representable_response() {
+        let law = GapFlowLaw {
+            contraction: 1.0,
+            dynamic_viscosity_pa_s: 1.25e307,
+            channel_length_m: 1.0,
+            effective_length_m: 0.0,
+        };
+        let (flow, dp, dh) = law
+            .volume_flow_and_jacobian(1.0, 1.0, 1e308, 1e308)
+            .unwrap();
+        // The independently scaled equation is v^2/2 + 1.5 v = 1.
+        let root = 4.25_f64.sqrt();
+        let expected = 2.0 / (root + 1.5);
+        assert!((flow / expected - 1.0).abs() < 5e-15);
+        assert!((dp / (1e-308 / root) - 1.0).abs() < 5e-15);
+        assert!((dh / (expected * (1.0 + 3.0 / root)) - 1.0).abs() < 5e-15);
+    }
+
+    #[test]
+    fn unsupported_arithmetic_refuses_instead_of_returning_nan() {
+        let law = GapFlowLaw {
+            dynamic_viscosity_pa_s: f64::MAX,
+            channel_length_m: f64::MAX,
+            ..GapFlowLaw::default()
+        };
+        assert_eq!(
+            law.volume_flow_and_jacobian(0.01, 0.001, 1.0, 1.2),
+            Err(GapFlowError::Unrepresentable)
+        );
     }
 
     #[test]

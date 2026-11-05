@@ -1039,6 +1039,26 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   1-DOF `mass_spring_damper` or a `modal_bank`. Music is not a
   special case.
 
+### Viscous slit flow through closure
+
+`GapFlowLaw` solves the same signed Bernoulli--Poiseuille pressure law in
+mean slit velocity. The normalized quadratic and its reciprocal-viscosity
+branch avoid squared hydraulic-resistance overflow; implicit differentiation
+retains the opening Jacobian even when the final volume flow underflows.
+Pressure inversion uses that same velocity law. Contracted inviscid apertures
+have zero flow and opening derivative at zero drop, with the genuine infinite
+pressure derivative; the default inviscid owner's arithmetic is preserved.
+Positive viscosity is never silently reclassified as zero because a product
+underflows. Unsupported finite coefficients or nonfinite outputs refuse as
+`GapFlowError::Unrepresentable` on the typed nonlegacy path.
+
+The allocation-free closed form adds no fitted damping or iterative solve.
+Focused G0/G3 tests cover signed passivity, independent Poiseuille and Bernoulli
+limits, pressure inversion, finite-difference Jacobians, closure, and scaled
+quadratics whose intermediate resistance or discriminant exceeds f64 range.
+These arithmetic checks do not extend the slit model's continuum-validity
+domain or add turbulence, entrance development, or unsteady boundary layers.
+
 ### Complete reciprocal rectangular power-port composition
 
 `interconnect_mapped` composes the original systems with `u_right = M*y_left`
