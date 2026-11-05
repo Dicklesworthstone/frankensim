@@ -1829,6 +1829,31 @@ momentum, reciprocity, original clocks, finite self-fields, and bounded input,
 work and cancellation refusals. Private tests cover every grazing branch,
 reflection zeros and physically scaled fields beyond raw exponential underflow.
 
+### Original forces reflected by the finite fluid layer
+
+`PreparedLayeredReflectedFullWaveForce` in the same module extends that original
+returning Green function to a prescribed three-component force ON fluid [N].
+Its two pressure-vector and five velocity-tensor coefficients reuse the exact
+analytic derivative expressions of the single-interface reflection owner;
+there is no finite-difference force or pressure/impedance velocity substitute.
+The opposite mixed signs and negative normal-normal term preserve the original
+normal-force image reversal through every coherent internal return.
+
+Two cached Cartesian 4-by-3 transfers serve reflected and coherent total fields
+at the original source clock. The native layer source/receiver restrictions,
+shared quadrature and resonance rules, exact first-interface reductions, and
+finite reflected versus singular total self-field distinction are unchanged.
+Force limits bound pressure-vector and velocity-tensor norms per newton; layer
+diagnostics retain those units and the reflected-only relative-error scope.
+Application uses fixed-order DD accumulation without allocation, quadrature,
+finite differences or transcendental work. No source feedback is inferred.
+
+`tests/full_wave_layer_reflected_force.rs` pins all seven channels against the
+independently refined direct-q oracle, compares rotated equal-speed image-force
+trains and coherent total intensity, verifies analytic source derivatives of
+the monopole, retains on-axis transverse motion, and covers matched-fluid,
+clock, self-field, invalid-input, work-limit and cancellation behavior.
+
 ## Full spherical-wave transmission through a finite fluid layer
 
 `curle3d::refraction::full_wave::layer::PreparedLayeredFullWaveMonopole`

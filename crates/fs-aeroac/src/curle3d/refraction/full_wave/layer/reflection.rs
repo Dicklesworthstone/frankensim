@@ -32,6 +32,12 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{FRAC_PI_2, PI};
 use fs_math::{c64::C64, dd::Dd, det};
 
+mod force;
+pub use force::{
+    FULL_WAVE_LAYER_REFLECTED_FORCE_SCOPE, FULL_WAVE_LAYER_TOTAL_FORCE_SCOPE,
+    PreparedLayeredReflectedFullWaveForce,
+};
+
 /// Applicability of the returning field, excluding the original direct field.
 pub const FULL_WAVE_LAYER_REFLECTED_MONOPOLE_SCOPE: &str = "Prescribed stationary compact \
 3D volume source; reflected spherical-wave field from one infinite planar homogeneous \
@@ -242,7 +248,7 @@ impl PreparedLayeredReflectedFullWaveMonopole {
     }
 }
 
-fn reduces_to_first_interface(layer: PlanarFluidLayer) -> bool {
+pub(super) fn reduces_to_first_interface(layer: PlanarFluidLayer) -> bool {
     layer.thickness_m == 0.0 || layer.layer_state() == layer.receiving_state()
 }
 

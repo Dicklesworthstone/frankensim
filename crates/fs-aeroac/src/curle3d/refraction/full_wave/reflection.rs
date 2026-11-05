@@ -35,6 +35,7 @@ mod force;
 pub use force::{
     FULL_WAVE_REFLECTED_FORCE_SCOPE, FULL_WAVE_TOTAL_FORCE_SCOPE, PreparedReflectedFullWaveForce,
 };
+pub(super) use force::{apply as apply_force, cartesian as force_cartesian, sample_force_spectrum};
 
 /// The returned field excludes the direct source contribution.
 pub const FULL_WAVE_REFLECTED_MONOPOLE_SCOPE: &str = "Prescribed stationary compact 3D volume \

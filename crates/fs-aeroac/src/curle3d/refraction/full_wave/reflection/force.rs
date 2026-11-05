@@ -14,7 +14,8 @@ use super::super::{
     integrate_spectrum, j0, j1, nonfinite, poll, positive,
 };
 use super::{
-    ReflectionCoordinates, ReflectionKernel, exact_reflection, field, line, singular_total,
+    ReflectionCoordinates, ReflectionKernel, ReflectionSpectralWeight, exact_reflection, field,
+    line, singular_total,
 };
 use crate::AeroacError;
 use crate::curle3d::statistics::ComplexSum;
@@ -275,7 +276,7 @@ impl PreparedReflectedFullWaveForce {
     }
 }
 
-fn cartesian(
+pub(in super::super) fn cartesian(
     value: [C64; 7],
     tangent: [f64; 3],
     normal: [f64; 3],
@@ -302,7 +303,10 @@ fn cartesian(
     Ok(field)
 }
 
-fn apply(transfer: &Transfer, force: [C64; 3]) -> Result<[C64; 4], AeroacError> {
+pub(in super::super) fn apply(
+    transfer: &Transfer,
+    force: [C64; 3],
+) -> Result<[C64; 4], AeroacError> {
     if force.iter().any(|v| !finite(*v)) {
         return Err(nonfinite("reflected force phasor"));
     }
@@ -339,38 +343,50 @@ impl Spectrum<7> for ReflectionForceKernel {
     }
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 7], AeroacError> {
         let weight = self.common.sample_weight(region, x)?;
-        let argument = weight.q * self.common.coordinates.range;
-        if !argument.is_finite() {
-            return Err(nonfinite("reflected force Bessel argument"));
-        }
-        let jzero = j0(argument);
-        let jone = j1(argument);
-        let ratio = j1_over_argument(argument, jone);
-        let q_log = det::ln(weight.q);
-        let magnitude = weight.zeta.abs();
-        let direction = if magnitude == 0.0 {
-            C64::ZERO
-        } else {
-            C64::new(weight.zeta.re / magnitude, weight.zeta.im / magnitude)
-        };
-        let z_log = det::ln(magnitude);
-        let i = C64::new(0.0, 1.0);
-        let values = [
-            weight.scaled(i, self.log_pressure + q_log, jone),
-            weight.scaled(direction, self.log_pressure + z_log, jzero),
-            weight.scaled(C64::ONE, self.log_velocity + 2.0 * q_log, jzero - ratio),
-            weight.scaled(C64::ONE, self.log_velocity + 2.0 * q_log, ratio),
-            weight.scaled(i * direction, self.log_velocity + q_log + z_log, jone),
-            weight.scaled(-i * direction, self.log_velocity + q_log + z_log, jone),
-            weight.scaled(
-                -(direction * direction),
-                self.log_velocity + 2.0 * z_log,
-                jzero,
-            ),
-        ];
-        if values.iter().any(|v| !finite(*v)) {
-            return Err(nonfinite("reflected force spectral field"));
-        }
-        Ok(values)
+        sample_force_spectrum(
+            weight,
+            self.common.coordinates.range,
+            self.log_pressure,
+            self.log_velocity,
+        )
     }
+}
+
+/// Analytic original-source and receiving derivatives of a reflected weight.
+/// Interfaces and finite layers differ only in that Green-function weight.
+pub(in super::super) fn sample_force_spectrum(
+    weight: ReflectionSpectralWeight,
+    range: f64,
+    log_pressure: f64,
+    log_velocity: f64,
+) -> Result<[C64; 7], AeroacError> {
+    let argument = weight.q * range;
+    if !argument.is_finite() {
+        return Err(nonfinite("reflected force Bessel argument"));
+    }
+    let jzero = j0(argument);
+    let jone = j1(argument);
+    let ratio = j1_over_argument(argument, jone);
+    let q_log = det::ln(weight.q);
+    let magnitude = weight.zeta.abs();
+    let direction = if magnitude == 0.0 {
+        C64::ZERO
+    } else {
+        C64::new(weight.zeta.re / magnitude, weight.zeta.im / magnitude)
+    };
+    let z_log = det::ln(magnitude);
+    let i = C64::new(0.0, 1.0);
+    let values = [
+        weight.scaled(i, log_pressure + q_log, jone),
+        weight.scaled(direction, log_pressure + z_log, jzero),
+        weight.scaled(C64::ONE, log_velocity + 2.0 * q_log, jzero - ratio),
+        weight.scaled(C64::ONE, log_velocity + 2.0 * q_log, ratio),
+        weight.scaled(i * direction, log_velocity + q_log + z_log, jone),
+        weight.scaled(-i * direction, log_velocity + q_log + z_log, jone),
+        weight.scaled(-(direction * direction), log_velocity + 2.0 * z_log, jzero),
+    ];
+    if values.iter().any(|v| !finite(*v)) {
+        return Err(nonfinite("reflected force spectral field"));
+    }
+    Ok(values)
 }
