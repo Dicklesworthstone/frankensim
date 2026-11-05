@@ -20,6 +20,23 @@ const KERNEL_GUST: u32 = 0x5C01;
 const KERNEL_GROUND: u32 = 0x5C02;
 const KERNEL_CARREAU: u32 = 0x5C03;
 
+/// Physical frequency quadrature, independent of the sample clock and duration.
+///
+/// Midpoint lines partition `[0, omega_max_rad_s]`. The one-sided PSD is
+/// integrated with respect to angular frequency, so a line contributes
+/// `S(omega_k) * delta_omega` to the ensemble variance, without another
+/// factor of `2*pi`. The omitted high-frequency tail is not redistributed.
+///
+/// Keeping this grid, model, seed and member fixed preserves the same
+/// continuous Gaussian excitation when refining a clock or extending a record.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpectralDiscretization {
+    /// Positive finite physical low-pass cutoff [rad/s], at most `pi/dt`.
+    pub omega_max_rad_s: f64,
+    /// Positive number of midpoint lines; increase to resolve narrow peaks.
+    pub frequency_lines: usize,
+}
+
 /// The spectral / band model behind an ensemble.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SpectrumModel {
@@ -260,6 +277,45 @@ impl StochasticEnsemble {
         member: u32,
         budget: RealizationBudget,
     ) -> Result<Realization, ScenarioError> {
+        self.realize_on_grid(member, None, budget)
+    }
+
+    /// Realize the same physical excitation on independently chosen sample clocks.
+    ///
+    /// Gaussian sine/cosine coefficients depend only on the model, explicit
+    /// frequency grid, seed and member. Duration and dt select observations of
+    /// that excitation; they do not redraw it or move its spectral lines.
+    /// Midpoint quadrature includes the low-frequency interval absent from the
+    /// legacy record-periodic grid. Every line is strictly below Nyquist.
+    ///
+    /// This is a finite-band Gaussian approximation, not an infinite-band PSD
+    /// integral or an uncertainty certificate. Bandwidth and frequency-grid
+    /// convergence are separate from timestep convergence. No periodic closure,
+    /// record-mean subtraction or variance renormalization is imposed.
+    ///
+    /// # Errors
+    /// Invalid inputs, a non-spectral model, a band above Nyquist, unresolved
+    /// frequency arithmetic, or the explicit sample/work budget are refused.
+    pub fn realize_with_spectrum(
+        &self,
+        member: u32,
+        spectrum: SpectralDiscretization,
+        budget: RealizationBudget,
+    ) -> Result<Realization, ScenarioError> {
+        self.realize_on_grid(member, Some(spectrum), budget)
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn realize_on_grid(
+        &self,
+        member: u32,
+        spectrum: Option<SpectralDiscretization>,
+        budget: RealizationBudget,
+    ) -> Result<Realization, ScenarioError> {
         let mut violations = Vec::new();
         self.check(&mut violations);
         if let Some(first) = violations.first() {
@@ -274,6 +330,23 @@ impl StochasticEnsemble {
                     self.name, self.members
                 ),
             });
+        }
+        if let Some(grid) = spectrum {
+            if !grid.omega_max_rad_s.is_finite()
+                || grid.omega_max_rad_s <= 0.0
+                || grid.frequency_lines == 0
+                || !(grid.omega_max_rad_s * self.dt.value <= core::f64::consts::PI)
+            {
+                return Err(ScenarioError::Evaluate {
+                    what: "explicit spectrum needs a positive finite cutoff at most pi/dt and positive line count"
+                        .to_string(),
+                });
+            }
+            if matches!(&self.model, SpectrumModel::CarreauBand { .. }) {
+                return Err(ScenarioError::Evaluate {
+                    what: "Carreau parameter bands do not define a frequency spectrum".to_string(),
+                });
+            }
         }
         let key = StreamKey {
             seed: self.seed,
@@ -348,7 +421,7 @@ impl StochasticEnsemble {
             });
         }
         let n_samples = rounded_samples as usize;
-        let n_harmonics = n_samples / 2;
+        let n_harmonics = spectrum.map_or(n_samples / 2, |grid| grid.frequency_lines);
         let synthesis_work =
             n_samples
                 .checked_mul(n_harmonics)
@@ -369,18 +442,36 @@ impl StochasticEnsemble {
                 ),
             });
         }
-        let d_omega = 2.0 * core::f64::consts::PI / (n_samples as f64 * self.dt.value);
+        let d_omega = spectrum.map_or_else(
+            || 2.0 * core::f64::consts::PI / (n_samples as f64 * self.dt.value),
+            |grid| grid.omega_max_rad_s / grid.frequency_lines as f64,
+        );
         if !d_omega.is_finite() || d_omega <= 0.0 {
             return Err(ScenarioError::Evaluate {
                 what: format!("ensemble {:?}: frequency spacing is invalid", self.name),
             });
         }
+        let root_d_omega = det::sqrt(d_omega);
         // Draw the Gaussian coefficient pairs in a fixed order (bitwise
         // determinism comes from the fixed draw and summation order).
         let mut coeffs = Vec::new();
         reserve_exact(&mut coeffs, n_harmonics, "spectral coefficients")?;
-        for k in 1..=n_harmonics {
-            let omega = k as f64 * d_omega;
+        for k in 0..n_harmonics {
+            let omega = if spectrum.is_some() {
+                (k as f64 + 0.5) * d_omega
+            } else {
+                (k + 1) as f64 * d_omega
+            };
+            if spectrum.is_some()
+                && !(omega.is_finite()
+                    && omega > 0.0
+                    && omega * self.dt.value < core::f64::consts::PI)
+            {
+                return Err(ScenarioError::Evaluate {
+                    what: "explicit spectral line must be representable and strictly below Nyquist"
+                        .to_string(),
+                });
+            }
             let spectral_density =
                 self.model
                     .try_psd(omega)
@@ -390,7 +481,14 @@ impl StochasticEnsemble {
                             self.name
                         ),
                     })?;
-            let amp = det::sqrt(spectral_density * d_omega);
+            let amp = if spectrum.is_some() {
+                // Preserve a representable amplitude even when S*d_omega
+                // would overflow or underflow before the square root.
+                det::sqrt(spectral_density) * root_d_omega
+            } else {
+                // Preserve the existing record-periodic stream bit for bit.
+                det::sqrt(spectral_density * d_omega)
+            };
             if !amp.is_finite() {
                 return Err(ScenarioError::Evaluate {
                     what: format!(

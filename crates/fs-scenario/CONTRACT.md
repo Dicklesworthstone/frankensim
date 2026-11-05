@@ -285,6 +285,17 @@ flagships.
   NaN/∞ through a direct query. Its one-sided spectral domain is ω ≥ 0;
   non-spectral Carreau bands are a typed refusal rather than a fictitious zero
   PSD.
+  `realize_with_spectrum(member, SpectralDiscretization, budget)` uses an
+  explicit angular-frequency cutoff and midpoint line count independent of
+  dt/duration. The same model/grid/seed/member therefore denotes one continuous
+  Gaussian excitation across clock refinement and record extension. Each line
+  contributes `S(omega_k) * delta_omega` to ensemble variance; the omitted tail
+  is neither aliased nor redistributed. Cutoffs above the sample Nyquist limit
+  and non-spectral parameter bands refuse. Sample/work admission, dimensional
+  validation and Gaussian stream ownership are shared with the existing
+  realization path. The legacy entry points retain their record-periodic grid
+  and original seeded output. Frequency quadrature and bandwidth convergence
+  remain caller obligations separate from timestep convergence.
 - `scenario::Scenario` — root value: frames, base BCs, `LoadCase`s,
   factored `Combination`s (`1.2D + 1.6L`), ensembles, `ContactLaw`s
   (Frictionless/Coulomb/Tied), explicit `Environment` (gravity, ambient

@@ -51,7 +51,8 @@ pub use acoustic::{
 };
 pub use bc::{BcKind, BcValue, BoundaryCondition, Compat, Physics};
 pub use ensemble::{
-    DEFAULT_REALIZATION_BUDGET, Realization, RealizationBudget, SpectrumModel, StochasticEnsemble,
+    DEFAULT_REALIZATION_BUDGET, Realization, RealizationBudget, SpectralDiscretization, SpectrumModel,
+    StochasticEnsemble,
 };
 pub use entity::{
     Binding, BindingRow, BindingTable, ContactSide, Correspondence, DEFAULT_ENTITY_BUDGET, Datum,
