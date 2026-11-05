@@ -1,5 +1,28 @@
 # CONTRACT: fs-thermochem
 
+## Electron-ion free-free emissive power on original plasma sources
+
+`plasma_radiation::ElectronIonBremsstrahlungV1` evaluates frequency-integrated
+electron-ion thermal bremsstrahlung from the existing canonical species bank:
+`P/V = 1.426e-40 * g * ne * sum(ni Zi^2) * sqrt(Te)` in SI. The coefficient
+is the direct CGS-to-SI conversion of [Itoh et al., Eq.(11)](https://arxiv.org/abs/astro-ph/0011044);
+it is separate from the caller's explicitly authored constant integrated
+Gaunt factor and temperature interval. No Gaunt fit or physical uncertainty
+is inferred. Newly populated helium ash contributes charge-square weight four.
+
+Allocation-free point evaluation checks the original populated caloric sources,
+canonical amounts, volume, electron identity and mass, electron degeneracy and
+relativity, and the neglected ion/electron thermal-variance ratio. These
+admission limits are explicit policies. The plasma owner still admits weak
+coupling and negligible collective spectral effects.
+
+Results distinguish emissive power, its temperature derivative and its
+square-root-temperature coefficient. Escaped radiation requires an explicit
+optically thin consumer closure. This law supplies no absorption, opacity,
+electron-electron, line, recombination or synchrotron radiation. Six focused
+native tests pass for source normalization, charge-square ash weighting,
+scaling/derivatives, source/domain refusals and cancellation.
+
 ## Quantum-diffraction Coulomb exchange and changing populations
 
 `CoulombModelV1::new_with_cutoff` retains an explicit classical closest-approach

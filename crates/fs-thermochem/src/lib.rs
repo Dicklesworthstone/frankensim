@@ -32,6 +32,7 @@ pub mod equilibrium;
 pub mod fusion;
 pub mod kinetics;
 pub mod mixture;
+pub mod plasma_radiation;
 pub mod solution;
 pub mod stoichiometry;
 pub mod transport;
