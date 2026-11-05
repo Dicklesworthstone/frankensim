@@ -32,6 +32,134 @@ fn tensor_energy(tensor: [[f64; 3]; 3], v: [f64; 3]) -> f64 {
 }
 
 #[test]
+fn affine_density_highorder_mass_and_diffusion_match_exact_whitney_restriction() {
+    use fs_feec::{incidence_to_csr, stiffness, weighted_mass_matrix};
+    let (complex, positions) = two_tets();
+    let geo = element_geometry(&complex, &positions);
+    let weights = [
+        CellWeight::AffineScalar([2.0, 5.0, 7.0, 11.0]),
+        CellWeight::AffineScalar([13.0, 3.0, 17.0, 2.0]),
+    ];
+    for pairing in [H1Pairing::Mass, H1Pairing::Diffusion] {
+        let degree = if pairing == H1Pairing::Mass { 0 } else { 1 };
+        let whitney = weighted_mass_matrix(
+            &complex,
+            &geo,
+            degree,
+            &weights,
+            Dims::NONE,
+            LIMITS,
+            &mut || false,
+        )
+        .unwrap();
+        let reference = if pairing == H1Pairing::Mass {
+            whitney.matrix().to_dense()
+        } else {
+            stiffness(&incidence_to_csr(&complex.d0()), whitney.matrix()).to_dense()
+        };
+        for r in [1, 2, 4, 6] {
+            let space = SimplexSpace::new(&complex, r);
+            let matrix = MaterialOperator::new(
+                &space,
+                &geo,
+                pairing,
+                &weights,
+                Dims::NONE,
+                LIMITS,
+                &mut || false,
+            )
+            .unwrap()
+            .assemble(&mut || false)
+            .unwrap();
+            let actual = matrix.matrix().to_dense();
+            for i in 0..positions.len() {
+                for j in 0..positions.len() {
+                    near(
+                        actual[i * space.ndof + j],
+                        reference[i * positions.len() + j],
+                    );
+                }
+            }
+            let trial: Vec<_> = (0..space.ndof)
+                .map(|i| 0.1 + (i % 7) as f64 / 7.0)
+                .collect();
+            assert!(energy(matrix.matrix(), &trial) > 0.0);
+        }
+    }
+}
+
+#[test]
+fn affine_highorder_weight_samples_the_original_higher_modes() {
+    use fs_feec::highorder::simplex::duffy_quadrature;
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let density = [2.0, 5.0, 7.0, 11.0];
+    for r in [2, 4, 6] {
+        let space = SimplexSpace::new(&complex, r);
+        let weights = [CellWeight::AffineScalar(density)];
+        let matrix = MaterialOperator::new(
+            &space,
+            &geo,
+            H1Pairing::Mass,
+            &weights,
+            Dims::NONE,
+            LIMITS,
+            &mut || false,
+        )
+        .unwrap()
+        .assemble(&mut || false)
+        .unwrap();
+        let trial: Vec<_> = (0..space.ndof)
+            .map(|i| ((3 * i + 1) % 11) as f64 / 11.0)
+            .collect();
+        let dofs = space.element_dofs(0);
+        let expected: f64 = duffy_quadrature(r + 4)
+            .into_iter()
+            .map(|(lambda, w)| {
+                let rho: f64 = (0..4).map(|a| density[a] * lambda[a]).sum();
+                let value: f64 = dofs
+                    .iter()
+                    .map(|(i, basis)| trial[*i] * basis.eval(lambda, r))
+                    .sum();
+                w * 6.0 * geo.vol_signed[0].abs() * rho * value * value
+            })
+            .sum();
+        near(energy(matrix.matrix(), &trial), expected);
+        let constant = [CellWeight::AffineScalar([5.0; 4])];
+        let old = [CellWeight::Scalar(5.0)];
+        let assemble = |weights| {
+            MaterialOperator::new(
+                &space,
+                &geo,
+                H1Pairing::Mass,
+                weights,
+                Dims::NONE,
+                LIMITS,
+                &mut || false,
+            )
+            .unwrap()
+            .assemble(&mut || false)
+            .unwrap()
+        };
+        assert_eq!(assemble(&constant), assemble(&old));
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                MaterialOperator::new(
+                    &space,
+                    &geo,
+                    H1Pairing::Mass,
+                    &[CellWeight::AffineScalar([1.0, bad, 2.0, 3.0])],
+                    Dims::NONE,
+                    LIMITS,
+                    &mut || false,
+                ),
+                Err(WeightedError::InvalidCoefficient { cell: 0, .. })
+            ));
+        }
+    }
+}
+
+#[test]
 fn unit_materials_reproduce_existing_highorder_operators() {
     let (complex, positions) = two_tets();
     let geo = element_geometry(&complex, &positions);

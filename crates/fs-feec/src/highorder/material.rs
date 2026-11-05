@@ -1,4 +1,4 @@
-//! Piecewise-constant materials on the hierarchical tetrahedral H1 space.
+//! Constant and affine materials on the hierarchical tetrahedral H1 space.
 //!
 //! Mass pairs scalar values; diffusion pairs physical gradients with a scalar
 //! or Cartesian SPD tensor. Both reuse the existing oriented basis and exact-
@@ -15,7 +15,8 @@
 
 use super::simplex::{LocalFn, SimplexSpace, duffy_quadrature, entity_dofs};
 use crate::weighted::{
-    CellWeight, WeightedAssemblyLimits, WeightedError, assemble_triplets, poll, validate_tensor,
+    CellWeight, WeightedAssemblyLimits, WeightedError, assemble_triplets, poll,
+    validate_affine_scalar, validate_tensor,
 };
 use crate::whitney::ElementGeometry;
 use fs_qty::Dims;
@@ -186,6 +187,7 @@ impl<'a, 'c> MaterialOperator<'a, 'c> {
                         reason: "scalar must be finite and strictly positive",
                     });
                 }
+                CellWeight::AffineScalar(values) => validate_affine_scalar(values, cell)?,
                 CellWeight::Tensor(tensor) if pairing == H1Pairing::Diffusion => {
                     validate_tensor(tensor, cell)?
                 }
@@ -271,16 +273,22 @@ impl<'a, 'c> MaterialOperator<'a, 'c> {
             .try_reserve_exact(triplets)
             .map_err(|_| WeightedError::Allocation)?;
         let mut local = zeros(nl * nl)?;
+        // An affine coefficient raises the mass integrand to degree 2r+1;
+        // Duffy's Jacobian adds at most two, so r+2 Gauss points still suffice.
         let quad = duffy_quadrature(self.space.r + 2);
         let mut values = [[0.0; 3]; MAX_LOCAL];
         for (cell, &weight) in self.weights.iter().enumerate() {
             poll(cancelled)?;
             local.fill(0.0);
             let dofs = self.space.element_dofs(cell);
-            let (scale, tensor) = normalized(weight);
+            let (scale, tensor, affine) = normalized(weight);
             for &(lam, w) in &quad {
                 self.sample(cell, lam, &dofs, &mut values, cancelled)?;
-                let factor = w * (6.0 * self.geometry.vol_signed[cell].abs());
+                let mut factor = w * (6.0 * self.geometry.vol_signed[cell].abs());
+                if let Some(values) = affine {
+                    let coefficient: f64 = values.iter().zip(lam).map(|(v, l)| v * l).sum();
+                    factor *= coefficient;
+                }
                 for i in 0..nl {
                     poll(cancelled)?;
                     for j in i..nl {
@@ -362,12 +370,21 @@ fn zeros(n: usize) -> Result<Vec<f64>, WeightedError> {
     Ok(values)
 }
 
-fn normalized(weight: CellWeight) -> (f64, [[f64; 3]; 3]) {
+fn normalized(weight: CellWeight) -> (f64, [[f64; 3]; 3], Option<[f64; 4]>) {
+    const IDENTITY: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
     match weight {
-        CellWeight::Scalar(value) => (value, [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        CellWeight::Scalar(value) => (value, IDENTITY, None),
+        CellWeight::AffineScalar(values) => {
+            if values.iter().all(|value| *value == values[0]) {
+                (values[0], IDENTITY, None)
+            } else {
+                let scale = values.into_iter().fold(0.0_f64, f64::max);
+                (scale, IDENTITY, Some(values.map(|v| v / scale)))
+            }
+        }
         CellWeight::Tensor(tensor) => {
             let scale = tensor.iter().flatten().fold(0.0_f64, |s, v| s.max(v.abs()));
-            (scale, tensor.map(|row| row.map(|v| v / scale)))
+            (scale, tensor.map(|row| row.map(|v| v / scale)), None)
         }
     }
 }

@@ -1,4 +1,4 @@
-//! Piecewise-constant material weights for Whitney mass/Hodge operators.
+//! Cellwise material weights for Whitney mass/Hodge operators.
 //!
 //! These are Galerkin pairings of primal forms, with rows representing the
 //! corresponding dual test functionals. They do not change the incidence
@@ -11,12 +11,18 @@ use fs_sparse::Csr;
 
 use crate::whitney::ElementGeometry;
 
-/// A constant material weight on one tetrahedron, in the global Cartesian
-/// frame. Tensor weights act on vector proxies of one- and two-forms.
+/// A material weight on one tetrahedron, in the global Cartesian frame.
+/// Tensor weights act on vector proxies of one- and two-forms.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CellWeight {
     /// Strictly positive scalar, admitted for degrees zero through three.
     Scalar(f64),
+    /// Positive affine scalar, specified at the four vertices in the stored
+    /// tetrahedron order. The physical field is `sum(values[a] * lambda[a])`.
+    /// Values are local to each cell, so material interfaces may retain jumps.
+    /// Inertia uses reference density on reference geometry; the assembler
+    /// does not convert current density or infer a deformation Jacobian.
+    AffineScalar([f64; 4]),
     /// Exactly symmetric positive-definite tensor, admitted for degrees one
     /// and two. An inconclusive interval positivity check refuses the tensor.
     Tensor([[f64; 3]; 3]),
@@ -264,7 +270,7 @@ pub(crate) fn validate_tensor<const N: usize>(
     Ok(())
 }
 
-/// Assemble piecewise-constant Whitney element integrals, rounded to f64,
+/// Assemble exact constant/affine Whitney element integrals, rounded to f64,
 /// in deterministic cell/insertion order. Coefficients may jump across cells.
 ///
 /// `cancelled` is polled throughout validation, assembly, sorting, reduction,
@@ -326,6 +332,7 @@ pub fn weighted_mass_matrix(
                     });
                 }
             }
+            CellWeight::AffineScalar(values) => validate_affine_scalar(values, cell)?,
             CellWeight::Tensor(tensor) => {
                 if !matches!(degree, 1 | 2) {
                     return Err(WeightedError::InvalidCoefficient {
@@ -345,12 +352,23 @@ pub fn weighted_mass_matrix(
     for (cell, weight) in weights.iter().enumerate() {
         poll(cancelled)?;
         let normalized;
-        let (scale, tensor) = match weight {
-            CellWeight::Scalar(value) => (*value, None),
+        let (scale, element_weight) = match weight {
+            CellWeight::Scalar(value) => (*value, crate::whitney::ElementWeight::Unit),
+            CellWeight::AffineScalar(values) => {
+                if values.iter().all(|value| *value == values[0]) {
+                    (values[0], crate::whitney::ElementWeight::Unit)
+                } else {
+                    let scale = values.iter().copied().fold(0.0_f64, f64::max);
+                    (
+                        scale,
+                        crate::whitney::ElementWeight::AffineScalar(values.map(|v| v / scale)),
+                    )
+                }
+            }
             CellWeight::Tensor(tensor) => {
                 let scale = tensor.iter().flatten().fold(0.0f64, |s, v| s.max(v.abs()));
                 normalized = tensor.map(|row| row.map(|v| v / scale));
-                (scale, Some(&normalized))
+                (scale, crate::whitney::ElementWeight::Tensor(&normalized))
             }
         };
         crate::whitney::element_mass_entries(
@@ -358,7 +376,7 @@ pub fn weighted_mass_matrix(
             geo,
             degree,
             cell,
-            tensor,
+            element_weight,
             &mut |row, col, value| {
                 // Mirror one evaluated triangle so finite-precision symmetry is
                 // exact, independently of reassociation in transposed formulas.
@@ -390,6 +408,19 @@ pub fn weighted_mass_matrix(
         coefficient_dims,
         entry_dims,
     ))
+}
+
+pub(crate) fn validate_affine_scalar(values: &[f64; 4], cell: usize) -> Result<(), WeightedError> {
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || *value <= 0.0)
+    {
+        return Err(WeightedError::InvalidCoefficient {
+            cell,
+            reason: "affine scalar must be finite and strictly positive at all four vertices",
+        });
+    }
+    Ok(())
 }
 
 fn validate_geometry(

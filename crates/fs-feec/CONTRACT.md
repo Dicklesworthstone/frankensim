@@ -56,13 +56,22 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   primal measures: positive on EVERY valid mesh, low-order —
   monotonicity-first). Tradeoffs stated at the definition.
 - `weighted::{CellWeight, WeightedMass, WeightedStar, weighted_mass_matrix}`
-  adds piecewise-constant material weights on tetrahedra: positive scalar
+  adds cellwise material weights on tetrahedra: positive scalar
   weights for degrees 0–3 and symmetric positive-definite Cartesian tensors
   for the vector proxies of degrees 1 and 2. The Galerkin-star entry point
   `hodge::weighted_galerkin_star` uses the same implementation. Coefficient
   jumps are integrated per element before shared degrees of freedom are
   summed. The ordinary and weighted paths share one closed-form Whitney
   element rule; the ordinary path retains its previous arithmetic order.
+  `CellWeight::AffineScalar` retains four positive scalar samples in stored
+  tetrahedron order, with independent values on either side of an interface.
+  Exact cubic barycentric moments integrate this spatial density through all
+  four Whitney degrees; centroid averaging would change kinetic energy and
+  the center of mass. Constant affine data uses the original scalar path.
+  The same field is integrated by hierarchical H1 mass and diffusion using
+  the existing exact-degree Duffy rule through order six. Reference density
+  must be paired with reference geometry by the physical owner; no implicit
+  current/reference conversion or deformation law is supplied here.
 - `weighted2::{CellWeight2, weighted_mass_matrix_2d}` supplies scalar degrees
   0–2 and SPD 2×2 tensor degree-1 pairings on `TriComplex2`. Canonical edge
   orientation follows the complex. Planar thickness and the affine radial
@@ -106,8 +115,13 @@ orientation and coordinate scaling, positivity/refusal boundaries, resource
 limits, and cancellation with deterministic retry (G0/G3/G4). The 3-D battery
 also solves an anisotropic manufactured diffusion problem through the actual
 `d0^T M1 d0` composition and checks second-order refinement (G1).
+Affine-density controls check first mass moments, nonuniform kinetic energy,
+independent volume quadrature for every Whitney degree, interface jumps,
+orientation, the exact constant limit and positivity/cancellation refusals.
+`tests/material_highorder.rs` compares the H1 restriction with closed-form
+Whitney integration and checks higher-mode energy using an overintegrated rule.
 
-This is the piecewise-constant, lowest-order bulk-operator slice of
+This includes the constant/affine scalar bulk-operator slice of
 `frankensim-ext-feec-weighted-operators-vxth`. It does not close that bead's
 high-order, nonlinear/quadrature-point, constitutive-history, or full
 formulation proof lanes. Incidence is unchanged, so its exact algebraic
