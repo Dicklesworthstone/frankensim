@@ -68,6 +68,104 @@ fn exact_exponential_dissolution_and_precipitation_are_opposite_transfers() {
 }
 
 #[test]
+fn declared_half_life_halves_active_deficits_and_composes_across_steps() {
+    let active = model(2.0, 1.5, PrecipitationPolicyV1::ExistingSolidOnly);
+    let volume = Volume::new(3.0);
+    let half_life = active.saturation_deficit_half_life(volume).unwrap().unwrap();
+    near(half_life.value(), 2.0 * core::f64::consts::LN_2);
+    let advance = |state: &SolubilityKineticStateV1, duration| {
+        active
+            .advance(Temperature::new(300.0), volume, state, duration)
+            .unwrap()
+    };
+
+    for initial in [state(15.0, 1.5), state(15.0, 12.0)] {
+        let deficit = 6.0 - initial.dissolved().value();
+        let direct = advance(&initial, half_life);
+        near(6.0 - direct.state().dissolved().value(), 0.5 * deficit);
+        assert_eq!(direct.solid_exhaustion_time(), None);
+        assert_eq!(direct.state().total_solute(), initial.total_solute());
+
+        let first = advance(&initial, Time::new(half_life.value() / 3.0));
+        let split = advance(first.state(), Time::new(2.0 * half_life.value() / 3.0));
+        near(
+            split.state().dissolved().value(),
+            direct.state().dissolved().value(),
+        );
+        near(split.state().solid().value(), direct.state().solid().value());
+        let second_half = advance(direct.state(), half_life);
+        near(
+            6.0 - second_half.state().dissolved().value(),
+            0.25 * deficit,
+        );
+    }
+}
+
+#[test]
+fn half_life_preserves_solid_exhaustion_and_blocked_precipitation() {
+    let exhausting = model(4.0, 1.0, PrecipitationPolicyV1::ExistingSolidOnly);
+    let half_life = exhausting
+        .saturation_deficit_half_life(Volume::new(1.0))
+        .unwrap()
+        .unwrap();
+    let end = step(&exhausting, &state(1.0, 0.0), half_life.value());
+    let event = end.solid_exhaustion_time().unwrap().value();
+    near(event, (4.0_f64 / 3.0).ln());
+    assert!(event < half_life.value());
+    assert_eq!(end.state().dissolved().value(), 1.0);
+    assert_eq!(end.state().solid().value(), 0.0);
+    // Saturation remains unreachable after the finite donor has run out.
+    assert_eq!(4.0 - end.state().dissolved().value(), 3.0);
+
+    let unseeded = model(2.0, 1.0, PrecipitationPolicyV1::ExistingSolidOnly);
+    let initial = state(5.0, 5.0);
+    let blocked = step(&unseeded, &initial, half_life.value());
+    assert!(blocked.precipitation_blocked());
+    assert_eq!(blocked.state(), &initial);
+}
+
+#[test]
+fn half_life_distinguishes_closed_contact_from_unrepresentable_times() {
+    let closed = model(2.0, 0.0, PrecipitationPolicyV1::SeededSurface);
+    assert_eq!(
+        closed
+            .saturation_deficit_half_life(Volume::new(1.0))
+            .unwrap(),
+        None,
+    );
+    let active = model(2.0, 1.0, PrecipitationPolicyV1::SeededSurface);
+    for volume in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        for owner in [&active, &closed] {
+            assert!(matches!(
+                owner.saturation_deficit_half_life(Volume::new(volume)),
+                Err(SolubilityErrorV1::Invalid(_))
+            ));
+        }
+    }
+
+    // Scaling both extensive quantities preserves V/G, including subnormal
+    // inputs for which forming ln(2)/G first would overflow.
+    for scale in [1e-320, 1.0, 1e300] {
+        let scaled = model(2.0, scale, PrecipitationPolicyV1::SeededSurface);
+        near(
+            scaled
+                .saturation_deficit_half_life(Volume::new(scale))
+                .unwrap()
+                .unwrap()
+                .value(),
+            core::f64::consts::LN_2,
+        );
+    }
+    for (volume, conductance) in [(1e300, 1e-300), (1e-300, 1e300)] {
+        let extreme = model(2.0, conductance, PrecipitationPolicyV1::SeededSurface);
+        assert!(matches!(
+            extreme.saturation_deficit_half_life(Volume::new(volume)),
+            Err(SolubilityErrorV1::Unrepresentable(_))
+        ));
+    }
+}
+
+#[test]
 fn finite_solid_exhaustion_occurs_at_the_analytic_event() {
     let model = model(4.0, 0.25, PrecipitationPolicyV1::ExistingSolidOnly);
     let initial = state(2.0, 1.0);

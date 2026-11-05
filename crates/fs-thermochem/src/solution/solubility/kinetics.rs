@@ -4,6 +4,9 @@
 //! `dn_d/dt = G (c_sat - n_d/V)`. The original pair law supplies c_sat;
 //! its value is not a kinetic coefficient. The active trajectory is
 //! `n_d(t) = n_d(0) + (V*c_sat-n_d(0))*(1-exp(-G*t/V))`.
+//! Its saturation-deficit half-life is `ln(2)*V/G`: the magnitude of
+//! `V*c_sat-n_d` halves during each interval of that length while exchange
+//! remains active. This is not the time to dissolve half the initial solid.
 //! If it exhausts the finite solid stock, the exact exhaustion event ends
 //! dissolution. This is a fixed-area, well-mixed film approximation, not a
 //! shrinking-particle, nucleation, or crystal-population model.
@@ -15,7 +18,8 @@
 //! <https://doi.org/10.1021/ja02086a003>.
 
 use super::{IdealSolubilityV1, SolubilityErrorV1, SolubilityPartitionV1};
-use fs_math::det::{exp, expm1, ln};
+use fs_math::decay::{attenuate, decayed_fraction};
+use fs_math::det::{expm1, ln};
 use fs_qty::{Amount, Temperature, Time, Volume, VolumetricFlowRate};
 
 /// The caller, not supersaturation alone, supplies a surface for crystal growth.
@@ -141,6 +145,36 @@ impl SolubilityKineticsV1 {
         self.precipitation
     }
 
+    /// Time for an active saturation deficit or supersaturation to halve [s].
+    ///
+    /// At fixed temperature, volume and surface conductance, this is
+    /// `ln(2)*V/G`. It describes the distance from saturation, not an arbitrary
+    /// fraction of the initial solid stock. Finite solid exhaustion ends the
+    /// trajectory, and a blocked precipitation branch does not relax at all.
+    /// No finite half-life exists for zero conductance (`Ok(None)`). A positive
+    /// conductance with an unrepresentable time scale returns an error.
+    pub fn saturation_deficit_half_life(
+        &self,
+        solvent_volume: Volume,
+    ) -> Result<Option<Time>, SolubilityErrorV1> {
+        let volume = solvent_volume.value();
+        if !volume.is_finite() || volume <= 0.0 {
+            return Err(SolubilityErrorV1::Invalid(
+                "finite positive solvent volume required",
+            ));
+        }
+        if self.conductance.value() == 0.0 {
+            return Ok(None);
+        }
+        let half_life = product_ratio(volume, core::f64::consts::LN_2, self.conductance.value())?;
+        if !half_life.is_finite() {
+            return Err(SolubilityErrorV1::Unrepresentable(
+                "finite saturation-deficit half-life",
+            ));
+        }
+        Ok(Some(Time::new(half_life)))
+    }
+
     /// Allocation-free analytical update at fixed T, V and kA. The total is
     /// unchanged, no solid crosses an interface, and refusal changes no input.
     /// Every nonlinear source evaluation remains owned by the original law.
@@ -195,7 +229,7 @@ impl SolubilityKineticsV1 {
             duration.value(),
             solvent_volume.value(),
         )?;
-        let fraction = -expm1(-exponent);
+        let fraction = decayed_fraction(exponent);
         if !(0.0..=1.0).contains(&fraction) {
             return Err(SolubilityErrorV1::Unrepresentable(
                 "kinetic relaxation fraction",
@@ -243,7 +277,7 @@ impl SolubilityKineticsV1 {
                     // donor. The event has not occurred, so this is positive.
                     excess_capacity * expm1(event - exponent)
                 } else {
-                    (solid - gap) + decayed(gap, exponent)
+                    (solid - gap) + attenuate(gap, exponent)
                 };
                 (dissolved + transfer, remaining, transfer)
             }
@@ -253,7 +287,7 @@ impl SolubilityKineticsV1 {
             let remaining = if transfer <= 0.5 * dissolved {
                 dissolved - transfer
             } else {
-                capacity + decayed(surplus, exponent)
+                capacity + attenuate(surplus, exponent)
             };
             (remaining, solid + transfer, -transfer)
         };
@@ -335,20 +369,6 @@ fn product_ratio(a: f64, b: f64, c: f64) -> Result<f64, SolubilityErrorV1> {
         .ok_or(SolubilityErrorV1::Unrepresentable(
             "positive kinetic time scale",
         ))
-}
-
-// A subnormal exp(-x) loses relative accuracy even when its scaled donor is
-// normal. Splitting the exponent avoids that loss and the cancellation in
-// ln(amount)-x; each multiplication can only decrease the finite donor.
-fn decayed(amount: f64, exponent: f64) -> f64 {
-    let fraction = exp(-exponent);
-    let direct = amount * fraction;
-    if fraction.is_normal() && direct > 0.0 {
-        direct
-    } else {
-        let half = exp(-0.5 * exponent);
-        (amount * half) * half
-    }
 }
 
 #[cfg(test)]

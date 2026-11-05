@@ -29,7 +29,7 @@ use crate::{
     StoichiometricMatrix, ThermochemErrorV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R,
     verify_conservation,
 };
-use fs_qty::{Pressure, Temperature};
+use fs_qty::{Pressure, Temperature, Time};
 
 mod caloric;
 pub use caloric::{ReactionCaloricChangeV1, admit_caloric_interval};
@@ -180,6 +180,43 @@ pub struct ElementaryReactionV1 {
     reversible: bool,
 }
 impl ElementaryReactionV1 {
+    /// Declare an irreversible, temperature-independent first-order chemical
+    /// destruction using an authored half-life in seconds.
+    ///
+    /// The single reactant has order one and cannot appear among the products;
+    /// its removal rate is `ln(2)/half_life`. The reference concentration is
+    /// still exactly 1 mol/m3, as in every existing elementary law. Mechanism
+    /// admission continues to enforce elemental, charge and molecular-mass
+    /// conservation and to use the original species calorics. Nuclear
+    /// transmutation is not admitted through this chemical constructor.
+    /// The half-life applies while no other reaction feeds or consumes the
+    /// reactant; attaching a pressure law changes that declared rate.
+    pub fn from_half_life(
+        reaction: ReactionId,
+        reactant: SpeciesId,
+        products: Vec<(SpeciesId, u32)>,
+        half_life: Time,
+        reference_temperature: Temperature,
+    ) -> Result<Self, KineticsErrorV1> {
+        if products.iter().any(|(species, _)| species == &reactant) {
+            return Err(KineticsErrorV1::Invalid(
+                "half-life destruction cannot regenerate its reactant",
+            ));
+        }
+        let decay =
+            crate::decay::DecayLawV1::from_half_life(half_life).map_err(|error| match error {
+                crate::decay::DecayErrorV1::Invalid(message) => KineticsErrorV1::Invalid(message),
+                crate::decay::DecayErrorV1::Arithmetic(message) => KineticsErrorV1::Arithmetic(message),
+            })?;
+        let rate = ArrheniusRateV1::new(
+            reference_temperature,
+            ReactionProgressRateQuantityV1::new(decay.decay_constant().value()),
+            0.0,
+            MolarEnergyQuantityV1::new(0.0),
+        )?;
+        Ok(Self::new(reaction, vec![(reactant, 1)], products, rate)?.irreversible())
+    }
+
     /// Canonicalize both sides and admit positive bounded integer orders.
     pub fn new(
         reaction: ReactionId,
@@ -1004,3 +1041,65 @@ impl Sum {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod half_life_tests {
+    use super::*;
+
+    fn reaction(half_life: f64, product: &str) -> Result<ElementaryReactionV1, KineticsErrorV1> {
+        ElementaryReactionV1::from_half_life(
+            ReactionId::new("first-order-isomerization").unwrap(),
+            SpeciesId::new("A").unwrap(),
+            vec![(SpeciesId::new(product).unwrap(), 1)],
+            Time::new(half_life),
+            Temperature::new(300.0),
+        )
+    }
+
+    #[test]
+    fn g0_half_life_constructor_uses_existing_first_order_forward_law() {
+        let half_life = 5.0;
+        let reaction = reaction(half_life, "B").unwrap();
+        assert!(!reaction.is_reversible());
+        assert_eq!(reaction.reactants(), &[(SpeciesId::new("A").unwrap(), 1)]);
+        assert_eq!(reaction.products(), &[(SpeciesId::new("B").unwrap(), 1)]);
+        assert_eq!(
+            reaction.pressure_dependence(),
+            &PressureDependenceV1::Independent
+        );
+        let ForwardRateV1::Arrhenius(law) = reaction.forward_rate() else {
+            panic!("half-life must use the existing Arrhenius owner");
+        };
+        assert_eq!(law.reference_temperature(), Temperature::new(300.0));
+        assert_eq!(
+            law.reference_rate().value(),
+            core::f64::consts::LN_2 / half_life
+        );
+        assert_eq!(law.temperature_exponent(), 0.0);
+        assert_eq!(law.activation_energy().value(), 0.0);
+        for temperature in [200.0, 300.0, 1500.0, 6000.0] {
+            let (log_rate, derivative) = law.log_rate(temperature).unwrap();
+            assert_eq!(derivative, 0.0);
+            let hazard = fs_math::det::exp(log_rate);
+            assert!(((-hazard * half_life).exp() - 0.5).abs() < 1e-15);
+        }
+    }
+
+    #[test]
+    fn g0_half_life_constructor_refuses_catalytic_regeneration_and_bad_times() {
+        assert!(reaction(5.0, "A").is_err());
+        for bad in [0.0, -1.0, f64::INFINITY, f64::NAN, f64::from_bits(1)] {
+            assert!(reaction(bad, "B").is_err());
+        }
+        assert!(
+            ElementaryReactionV1::from_half_life(
+                ReactionId::new("bad-temperature").unwrap(),
+                SpeciesId::new("A").unwrap(),
+                vec![(SpeciesId::new("B").unwrap(), 1)],
+                Time::new(5.0),
+                Temperature::new(0.0),
+            )
+            .is_err()
+        );
+    }
+}

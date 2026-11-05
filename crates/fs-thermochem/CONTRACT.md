@@ -1,5 +1,38 @@
 # CONTRACT: fs-thermochem
 
+## Shared half-life and first-order removal laws
+
+`decay::DecayLawV1` admits a finite positive half-life or a finite nonnegative
+inverse-second hazard. Stability is explicit: rate zero and no finite
+half-life. The mean lifetime is `1/lambda`, while the half-life is
+`ln(2)/lambda`. Independent competing removal channels add their hazards;
+this operation does not model consecutive daughter decays or transfer one
+channel's heat/particle attribution to another.
+
+The allocation-free fraction closure consumes the canonical `fs-math::decay`
+kernel. Survival and loss are evaluated separately, preserving tiny positive
+losses when rounded survival is still one, and tiny positive survivors when
+rounded loss is already one. Finite nonnegative elapsed time is required,
+zero time is exact, and enormous positive exposures saturate to full decay.
+Positive rate/exposure underflow and unrepresentable finite lifetimes refuse;
+the eventual survivor may round to zero. These are binary64 evaluations,
+not interval certificates or independently validated isotope data. All
+half-lives, rates and their applicable physical conditions remain caller data.
+This L1 closure owns no evolving inventory, decay-chain solver or heat transport.
+The decay and activity conventions follow IAEA TECDOC 1741:
+<https://www-pub.iaea.org/MTCD/Publications/PDF/TE-1741_web.pdf>.
+
+`ElementaryReactionV1::from_half_life` binds the same hazard into the existing
+irreversible elementary ideal-gas path with one first-order reactant, fixed
+temperature-independent Arrhenius coefficient and no pressure modifier. The
+reactant cannot be regenerated among the products. This is chemical removal:
+existing mechanism admission still enforces atoms, charge, source molecular
+masses and species thermodynamics. It does not permit nuclear transmutation.
+Another reaction feeding that species, or a subsequently attached pressure
+modifier, changes the actual inventory's observed halving time. G0/G3 tests
+cover one-half survival, mean lifetime, time partition/rescaling, separate
+small tails, independent competing removal and invalid/range refusals.
+
 ## Silver-sulfide leaching and sulfur cyanide demand
 
 Three matched NBS packs add fourteen literal reference facts for historical
