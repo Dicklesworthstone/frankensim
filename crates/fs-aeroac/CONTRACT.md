@@ -1518,3 +1518,32 @@ remains prescribed compact sources in a stationary homogeneous lossless fluid
 with ideal infinite walls. Molecular absorption still refuses; finite wall
 impedance, general diffraction, source feedback and experimental SPL authority
 are not inferred.
+
+## Stationary planar acoustic refraction
+
+`curle3d::refraction::PreparedRefractedMonopole` observes one prescribed physical
+volume source across an infinite plane between two original `FluidAcousticState`
+snapshots. A bounded monotone Fermat solve locates the crossing. Sound speeds set
+the two ray directions and travel time; both densities and speeds set the oblique
+pressure transmission and normal-power partition. Refracted spreading uses both
+principal ray-tube widths, not the sum of the ray lengths. The source-clock
+exp(-i omega t) transfer is `-i omega rho1 Tp exp(i omega T)/(4 pi D)`.
+
+The API requires explicit minimum k*h on each side, minimum direction cosine on
+both legs, crossing half-width tolerance and root-iteration cap. These are
+caller-selected high-frequency/grazing controls, not certified bounds on the
+geometrical-acoustics error. Sources and receivers must be strictly on their
+declared sides. Cancellation, exhaustion and unrepresentable fields refuse
+without returning a partial owner. Preparation and application allocate nothing;
+application reuses four cached complex coefficients without transcendental work.
+
+Output uses the existing coherent-field and harmonic-line types, including
+integration with the original finite-window observation owner. Velocity is the
+leading-order transmitted `p n2/Z2`; reactive near-field induction is absent.
+The model returns the selected transmitted geometrical arrival only. It does
+not add head/lateral waves, evanescent transmission, critical diffraction,
+reflected source feedback, flow, absorption or experimental source authority.
+G1/G3 tests in `tests/refraction.rs` check Snell fields, normal energy partition,
+equal-speed spherical pressure, reciprocal source/receiver exchange, independent
+stationary-phase Hessians, rotation/scaling, physical clock integration and
+explicit admission/work refusals.
