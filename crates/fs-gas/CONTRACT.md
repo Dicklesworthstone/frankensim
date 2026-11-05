@@ -4770,3 +4770,42 @@ Multifluids*, JCP 169 (2001), section 3.2, DOI 10.1006/jcph.2000.6685.
 The volume-weighted accounting above is for this implemented ALE map. This
 Estimated extension does not assert general shock accuracy, entropy stability
 or pressure preservation outside the explicitly admitted contact stencils.
+
+## Admitted contact pressure driving a finite-inertia piston
+
+`MixtureEuler1d::step_with_piston_and_contact_equilibrium` and
+`step_with_suspended_piston_and_contact_equilibrium` compose that same ALE
+projection with the existing midpoint piston solve. Every scalar speed proposal
+starts from accepted gas/geometry and resets the supplied `ContactWorkspace`,
+including bracket endpoints and halved retries. The final evaluated proposal
+alone supplies the accepted field, pressure impulse, pressure work, correction,
+piston speed and mesh. The native no-correction APIs retain their arithmetic.
+
+The public gas report is `ContactEquilibriumStepReport<StepReport>` inside the
+original `PistonStep` or `SuspendedPistonStep`. Its native `transport` retains
+actual gas before/after energy and raw conservation residual; its `correction`
+retains signed and absolute numerical changes. Both outer
+`total_energy_residual_j` accounts subtract only the signed numerical defect
+before acceptance. In particular, the admitted free-piston balance is
+`Delta E_gas + Delta K_piston + W_exterior - W_drive - Delta E_numerical`.
+The suspended account additionally includes the actual spring-storage increment
+and nonnegative midpoint viscous loss. Neither pressure work, spring work nor
+damper loss is relabeled as a contact correction or gas heating. The absolute
+numerical-defect budget and independent mechanical tolerances remain separate.
+
+Species and momentum remain conservative. Physical wall cells, resolved
+pressure/velocity gradients and HLL fallbacks remain ineligible for projection;
+finite wall inertia does not relax the original contact criterion. Budget
+failure halves the coupled interval without forcing MUSCL to first order.
+Refusal/cancellation leaves all accepted gas, geometry, clock and piston state
+untouched, and the caller's contact scratch is reusable. No per-trial numerical
+allocation or field clone is introduced.
+
+Focused G0/G1/G4 regressions cover contact pressure during compression and
+expansion, both reconstruction orders, native-map identity on resolved
+gradients, final-trial replay against prescribed corrected motion, exact
+zero-suspension equivalence, large species-energy-reference invariance,
+gas/kinetic/spring/loss/defect closure, budget retries and early/late cancellation.
+This remains the same Estimated constant-area, one-piston, nonreacting model.
+Shared two-chamber pistons, thermal/molecular/reacting composition, shocks,
+fully discrete entropy and general FSI stability are not established here.

@@ -1,7 +1,10 @@
 //! Inertial right-wall motion driven by the original evolving species field.
 
 use super::evolve::totals;
-use super::moving::{attempt, geometry_error, reported_step};
+use super::moving::{attempt, attempt_with_contact, geometry_error, reported_step};
+use super::pressure_equilibrium::{
+    ContactCorrection, ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
+};
 use super::{
     Boundaries, Boundary, Error, MixtureEuler1d, Reconstruction, StepControl, StepReport, poll,
     positive,
@@ -60,8 +63,69 @@ impl MixtureEuler1d {
         cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<StepReport>, PistonError> {
         self.step_with_piston_suspension(
-            piston, maximum_duration, gas_controls, load, None, controls, cancelled,
-        ).map(|step| step.piston)
+            piston,
+            maximum_duration,
+            gas_controls,
+            load,
+            None,
+            controls,
+            None,
+            cancelled,
+        )
+        .map(|step| step.piston)
+    }
+
+    /// Couple admitted contact pressure to a finite-inertia right piston.
+    ///
+    /// Every proposed midpoint wall speed runs the original extensive ALE
+    /// predictor/corrector with the bounded contact projection. Its mask and
+    /// numerical energy account restart for EACH scalar proposal, including
+    /// bracket endpoints and halved retries. The accepted field, geometry,
+    /// clock and piston all belong to the final evaluated proposal.
+    ///
+    /// Species, momentum, actual wall-pressure impulse and conjugate pressure
+    /// work retain their native owners. The gas report exposes the actual raw
+    /// energy residual and the signed/absolute contact defect separately. The
+    /// outer `total_energy_residual_j` subtracts only that signed numerical
+    /// defect before mechanical acceptance; physical work is never subtracted
+    /// as a correction. The caller supplies independent defect and mechanical
+    /// balance budgets. Budget retries retain the requested reconstruction.
+    ///
+    /// Uses the same strict contact admission and constant-area closed geometry
+    /// as [`Self::step_with_moving_walls_and_contact_equilibrium`]. Physical
+    /// wall cells and pressure/velocity gradients stay on the conservative map.
+    /// This is an opt-in energy correction, not a conservative or general FSI
+    /// stability theorem. No chemistry, diffusion or network composition is
+    /// enabled. Caller-owned contact scratch is reused without per-trial
+    /// allocation.
+    ///
+    /// # Errors
+    /// Invalid controls/workspace, source or geometry refusal, nonlinear or
+    /// balance failure, exhausted retries and cancellation publish no owners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_piston_and_contact_equilibrium(
+        &mut self,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        load: PistonLoad,
+        controls: PistonControl,
+        equilibrium: ContactEquilibriumControl,
+        workspace: &mut ContactWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PistonStep<ContactEquilibriumStepReport<StepReport>>, PistonError> {
+        let step = self.step_with_piston_suspension(
+            piston,
+            maximum_duration,
+            gas_controls,
+            load,
+            None,
+            controls,
+            Some((equilibrium, &mut *workspace)),
+            cancelled,
+        )?;
+        let correction = workspace.receipt();
+        Ok(step.piston.map_gas(|gas| contact_report(gas, correction)))
     }
 
     /// Resolve spring/damper feedback with evolving species and pressure waves.
@@ -84,8 +148,51 @@ impl MixtureEuler1d {
         cancelled: impl FnMut() -> bool,
     ) -> Result<SuspendedPistonStep<StepReport>, PistonError> {
         self.step_with_piston_suspension(
-            piston, maximum_duration, gas_controls, load, Some(suspension), controls, cancelled,
+            piston,
+            maximum_duration,
+            gas_controls,
+            load,
+            Some(suspension),
+            controls,
+            None,
+            cancelled,
         )
+    }
+
+    /// Use the same admitted contact correction with a passive suspension.
+    ///
+    /// Spring/damper feedback enters every corrected pressure trial at the
+    /// original midpoint velocity. Spring storage and nonnegative damper loss
+    /// retain their separate mechanical accounts. Both outer total-energy
+    /// residuals exclude only the gas report's declared numerical defect;
+    /// pressure work and suspension work are untouched. Admission, workspace
+    /// reuse and transactional publication follow
+    /// [`Self::step_with_piston_and_contact_equilibrium`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_suspended_piston_and_contact_equilibrium(
+        &mut self,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        load: PistonLoad,
+        suspension: PistonSuspension,
+        controls: PistonControl,
+        equilibrium: ContactEquilibriumControl,
+        workspace: &mut ContactWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<ContactEquilibriumStepReport<StepReport>>, PistonError> {
+        let step = self.step_with_piston_suspension(
+            piston,
+            maximum_duration,
+            gas_controls,
+            load,
+            Some(suspension),
+            controls,
+            Some((equilibrium, &mut *workspace)),
+            cancelled,
+        )?;
+        let correction = workspace.receipt();
+        Ok(step.map_gas(|gas| contact_report(gas, correction)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -97,13 +204,17 @@ impl MixtureEuler1d {
         load: PistonLoad,
         suspension: Option<PistonSuspension>,
         controls: PistonControl,
+        mut equilibrium: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SuspendedPistonStep<StepReport>, PistonError> {
         poll(&mut cancelled)?;
         validate(*piston, maximum_duration, gas_controls, load, controls)?;
-        let suspension = suspension.map(|law| {
-            law.bind(self.mesh.positions()[self.mesh.cell_count()])
-        }).transpose()?;
+        if let Some((control, workspace)) = equilibrium.as_ref() {
+            workspace.admit(self.cell_count(), *control)?;
+        }
+        let suspension = suspension
+            .map(|law| law.bind(self.mesh.positions()[self.mesh.cell_count()]))
+            .transpose()?;
         if self.boundaries
             != (Boundaries::Ends {
                 left: Boundary::Reflecting,
@@ -176,10 +287,13 @@ impl MixtureEuler1d {
             };
             let result = solve(piston.velocity_m_s(), controls, |speed| {
                 gas_trials += 1;
+                if let Some((control, workspace)) = equilibrium.as_mut() {
+                    workspace.begin_attempt(*control)?;
+                }
                 moving
                     .prepare_velocities(&self.mesh, [0.0, speed], &mut cancelled)
                     .map_err(geometry_error)?;
-                let (a, b) = attempt(
+                let (a, b) = attempt_with_contact(
                     &self.gas,
                     &self.states,
                     &self.mesh,
@@ -189,6 +303,7 @@ impl MixtureEuler1d {
                     reconstruction,
                     &mut self.work,
                     moving,
+                    equilibrium.as_mut().map(|(_, workspace)| &mut **workspace),
                     &mut cancelled,
                 )?;
                 let after = totals(
@@ -198,13 +313,27 @@ impl MixtureEuler1d {
                     &mut cancelled,
                 )?;
                 let gas = reported_step(before, after, [a, b], dt, area, n)?;
-                let exchange = MechanicalExchange::from(&gas);
+                let mut exchange = MechanicalExchange::from(&gas);
+                if let Some((_, workspace)) = equilibrium.as_ref() {
+                    // Admit only the physical gas/piston balance here. The raw
+                    // gas change remains in `gas`, and the final accepted
+                    // proposal's numerical defect is returned beside it.
+                    exchange.energy_change -= workspace.receipt().signed_energy_j;
+                }
                 let displacement = moving.mesh.positions()[count] - self.mesh.positions()[count];
-                let trial_load = suspension.map_or(Ok(load), |spring| {
-                    spring.load(load, speed, displacement)
-                })?;
-                mechanical_report(gas, exchange, *piston, trial_load, speed, displacement, area)
-            }).and_then(|report| suspension::finish(suspension, report, load, dt, controls));
+                let trial_load =
+                    suspension.map_or(Ok(load), |spring| spring.load(load, speed, displacement))?;
+                mechanical_report(
+                    gas,
+                    exchange,
+                    *piston,
+                    trial_load,
+                    speed,
+                    displacement,
+                    area,
+                )
+            })
+            .and_then(|report| suspension::finish(suspension, report, load, dt, controls));
             match result {
                 Ok(mut step) => {
                     let report = &mut step.piston;
@@ -224,7 +353,7 @@ impl MixtureEuler1d {
                     return Err(PistonError::MixtureGas(Error::Allocation));
                 }
                 Err(error) => {
-                    if matches!(&error, PistonError::MixtureGas(cause) if !matches!(cause, Error::CflExceeded { .. }))
+                    if matches!(&error, PistonError::MixtureGas(cause) if !matches!(cause, Error::CflExceeded { .. } | Error::ContactEnergyBudget { .. }))
                     {
                         first_order_retry = true;
                     }
@@ -237,6 +366,18 @@ impl MixtureEuler1d {
             attempts: gas_controls.maximum_halvings + 1,
             last: Box::new(last),
         })
+    }
+}
+
+fn contact_report(
+    transport: StepReport,
+    correction: ContactCorrection,
+) -> ContactEquilibriumStepReport<StepReport> {
+    ContactEquilibriumStepReport {
+        corrected_energy_residual_j: transport.conservation_residual.energy
+            - correction.signed_energy_j,
+        transport,
+        correction,
     }
 }
 

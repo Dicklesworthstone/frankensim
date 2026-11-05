@@ -221,7 +221,9 @@ pub struct PistonStep<R = StepReport> {
     /// minus additional-force work [J]. A thermal composing owner also includes
     /// its finite-wall storage change and subtracts prescribed-reservoir heat;
     /// the accompanying `gas` report retains those separate source quantities.
-    /// No artificial energy correction is applied.
+    /// An opt-in contact-equilibrium composing owner subtracts its separately
+    /// reported signed numerical energy defect; its native gas report retains
+    /// the raw change. Conservative owners apply no such correction.
     pub total_energy_residual_j: f64,
     /// Interior scalar proposals in the accepted coupled attempt.
     pub iterations: usize,

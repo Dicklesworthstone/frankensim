@@ -479,7 +479,7 @@ pub(super) fn attempt(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attempt_with_contact(
+pub(super) fn attempt_with_contact(
     gas: &MixtureGas,
     states: &[f64],
     mesh: &Mesh1d,

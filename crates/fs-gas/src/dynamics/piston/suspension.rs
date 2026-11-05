@@ -113,8 +113,25 @@ pub struct SuspendedPistonStep<R = StepReport> {
     /// Native mechanical balance including spring storage and viscous loss [J].
     pub mechanical_energy_residual_j: f64,
     /// Gas energy + piston kinetic + spring storage + damping loss + exterior
-    /// pressure work - independently authored drive work [J].
+    /// pressure work - independently authored drive work [J]. An opt-in contact
+    /// owner also subtracts its separately reported numerical energy defect.
     pub total_energy_residual_j: f64,
+}
+
+impl<R> SuspendedPistonStep<R> {
+    /// Preserve the accepted mechanics while exposing a composing gas report.
+    pub(crate) fn map_gas<S>(self, map: impl FnOnce(R) -> S) -> SuspendedPistonStep<S> {
+        SuspendedPistonStep {
+            piston: self.piston.map_gas(map),
+            spring_energy_j: self.spring_energy_j,
+            spring_energy_change_j: self.spring_energy_change_j,
+            damping_energy_j: self.damping_energy_j,
+            suspension_impulse_n_s: self.suspension_impulse_n_s,
+            applied_force_work_j: self.applied_force_work_j,
+            mechanical_energy_residual_j: self.mechanical_energy_residual_j,
+            total_energy_residual_j: self.total_energy_residual_j,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
