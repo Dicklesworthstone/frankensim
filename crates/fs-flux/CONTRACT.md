@@ -6019,3 +6019,61 @@ These new APIs do not add time-dependent reactive, adaptive, finite-inertia,
 body-forcing or wall-acceleration compositions. Smooth prescribed-data order
 and native conservation do not establish nonlinear RKL stability, a turbulent
 spectrum, nonreflecting inflow or experimental validation.
+
+## Conditional Mann OU paths in native compressible stage consumers
+
+`MannReservoirInflow3::step_frozen_bridge` and `step_mixture_bridge` observe
+one prepared `fs-atmo::MannOuBridge` at the native Euler SSP stage times.
+`step_molecular_frozen_bridge` and `step_molecular_mixture_bridge`, with their
+`step_stabilized_molecular_*_bridge` counterparts, observe the same path
+through the original molecular/Euler/molecular composition and RKL2 stages.
+The original atmosphere owns the full tensor, temporal correlations, shared
+conditional innovations and exact fixed-clock endpoints. The original gas
+owners retain EOS admission, canonical species, Maxwell--Stefan transport,
+partial enthalpies, Fourier heat, complete stress/work and conservative fluxes.
+The adapter only adds the shared velocity fluctuation to a replayable authored
+baseline; it does not synthesize density, species, pressure or temperature noise.
+
+`MannReservoirSource3::BridgeFrame` admits one held observation for existing
+profile preparation. The dedicated bridge steps then reuse a caller-prepared
+frame. One update supplies every consecutive face at the same stage time;
+nonmonotone split stages and retries deterministically reconstruct the same
+path. Point/frame rotation and exact rectangular face filters use the same
+observation implementation as existing held/frozen inlet consumers. No
+successful adapter stage allocates numerical storage, and no per-face random
+draws occur. Original native lazy RKL workspaces retain their separate budgets.
+
+The complete call charges two independent turbulence work limits:
+`maximum_mode_samples` counts every face times represented modes, and
+`maximum_normal_draws` counts every conditional frame reconstruction, including
+discarded trials. `MannReservoirBridgeReport3` reports actual face/mode work,
+normal draws, frame updates and the admitted maximum duration beside the
+original native conservation report. Preparing the right OU endpoint has its
+own explicit atmosphere budget. A source or draw-budget refusal terminates the
+native transaction without advancing accepted fluid state or the original
+stochastic owner. The mutable frame is observation scratch and may retain its
+last successful observation after flow failure; querying again replays the same
+path. It is not an additional physical source clock.
+
+Each step is capped by the retained right endpoint and by the advected spatial
+phase bound. OU fluctuations have no temporal bandlimit; this cap is not a
+stochastic accuracy estimate. Flow time must start inside the retained interval,
+and another interval must be explicitly prepared when its right endpoint is
+reached. Neither the adapter nor its callbacks advance the fixed-step source.
+Canonical molecular phase clocks ensure that the last bath observation is the
+same represented physical endpoint as the accepted native flow, including
+nonzero epochs where adding two rounded half-step origins would overshoot.
+
+Six native consumer regressions exercise direct original-source filtered
+synthesis against frozen and mixture Euler results, canonical species and
+enthalpy balances, coupled SSP/RKL bath conservation, exhausted-draw rollback
+and replay, source immutability, interval clipping, and the represented
+`6e-6 -> 7e-6` split endpoint for both gas families and both integrators.
+The original held/frozen Mann tests and molecular/SGS bath regressions also
+remain passing. Validation uses selected original-source native builds;
+it does not substitute for Cargo/constellation gates, measured atmospheric
+calibration, mesh-resolution studies or turbulent-flow validation. The exact
+stochastic path is the admitted finite-mode Gaussian OU model. Existing
+independently keyed interval-average observations are not jointly coupled to
+this path. Timed reacting, body-force and finite-wall-inertia compositions
+remain outside these entry points.

@@ -45,9 +45,9 @@ impl<'a> StageSampler<'a> {
                 convection_velocity_m_s,
                 ..
             } => convection_velocity_m_s,
-            MannReservoirSource3::Evolving(_) => {
+            MannReservoirSource3::Evolving(_) | MannReservoirSource3::BridgeFrame(_) => {
                 return Err(MannReservoirError3::Input(
-                    "stage-time Mann forcing requires a frozen advected field; OU endpoints have no continuous bridge",
+                    "use step_*_bridge with a prepared path for evolving stage-time Mann forcing",
                 ));
             }
         };

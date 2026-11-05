@@ -10,8 +10,9 @@
 //! `apply_*` publishes a trace held through the existing SSP stages and retries.
 //! `step_*` instead observes a frozen advected realization at the actual two
 //! SSP stage times, including every retry, and publishes the accepted endpoint
-//! with the fluid. Fixed-clock OU endpoints have no continuous bridge here and
-//! remain available through the held-trace interface. These are complete-state
+//! with the fluid. `step_*_bridge` observes a prepared conditional OU path
+//! between the original fixed-clock endpoints at those same physical times.
+//! These are complete-state
 //! exterior Riemann data, not nonreflecting or characteristic inlet conditions.
 
 use super::mixture::{
@@ -21,13 +22,15 @@ use super::{
     AxisBoundaries, Boundaries3d, BoundarySide, CartesianGrid, Error, Euler3d, ReservoirFaceState,
 };
 use fs_atmo::mann_field::filter::MannBoxFilter;
-use fs_atmo::mann_field::fixed_step::FixedStepMannField;
+use fs_atmo::mann_field::fixed_step::{FixedStepMannField, MannOuBridge, MannOuBridgeFrame};
 use fs_atmo::mann_field::{HomogeneousMannField, MannSpectralModel};
 
 mod geometry;
 use geometry::{half_edges, rotation_is_proper, speed, to_field, to_grid};
 mod stages;
 pub use stages::MannReservoirStepReport3;
+mod bridge;
+pub use bridge::MannReservoirBridgeReport3;
 
 /// The Cartesian grid uses metres already. Its origin is a cell CORNER, unlike
 /// the on-site lattice-node origin used by the D3Q19 adapter.
@@ -38,7 +41,7 @@ pub struct MannReservoirConfig3 {
     /// Proper orthonormal rotation: field vectors -> grid vectors.
     pub field_to_grid: [[f64; 3]; 3],
     /// Maximum face observations times represented wavevectors per apply or
-    /// entire `step_*`, including both SSP stages and all rejected attempts.
+    /// entire `step_*`, including every native stage and rejected attempt.
     pub maximum_mode_samples: usize,
 }
 
@@ -64,6 +67,9 @@ pub enum MannReservoirSource3<'a> {
     /// Observe an accepted OU endpoint at exactly the native fluid time.
     /// Caller coordinates its fixed clock with accepted fluid timesteps.
     Evolving(&'a FixedStepMannField),
+    /// One accepted observation of a prepared conditional OU bridge. This is
+    /// a held trace; use `step_*_bridge` to sample changing integration times.
+    BridgeFrame(&'a MannOuBridgeFrame),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,6 +100,13 @@ pub enum MannReservoirError3 {
     Atmosphere(fs_atmo::Refusal),
     Flow(Error),
     Mixture(MixtureError),
+    Molecular(super::molecular::MolecularError),
+    MixtureMolecular(fs_gas::multicomponent::dissipation::DissipationError),
+    /// Conditional OU normal variates across every stage and rejected trial.
+    BridgeWork {
+        required: usize,
+        maximum: usize,
+    },
 }
 impl core::fmt::Display for MannReservoirError3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -114,6 +127,16 @@ impl From<Error> for MannReservoirError3 {
 impl From<MixtureError> for MannReservoirError3 {
     fn from(error: MixtureError) -> Self {
         Self::Mixture(error)
+    }
+}
+impl From<super::molecular::MolecularError> for MannReservoirError3 {
+    fn from(error: super::molecular::MolecularError) -> Self {
+        Self::Molecular(error)
+    }
+}
+impl From<fs_gas::multicomponent::dissipation::DissipationError> for MannReservoirError3 {
+    fn from(error: fs_gas::multicomponent::dissipation::DissipationError) -> Self {
+        Self::MixtureMolecular(error)
     }
 }
 
@@ -288,8 +311,8 @@ impl MannReservoirInflow3 {
         maximum_hold_s: f64,
         source: MannReservoirSource3<'a>,
     ) -> Result<MannReservoirTrace3<'a>, MannReservoirError3> {
-        if grid != &self.grid
-            || !fluid_time_s.is_finite()
+        self.validate_geometry(grid, boundaries)?;
+        if !fluid_time_s.is_finite()
             || !maximum_hold_s.is_finite()
             || maximum_hold_s <= 0.0
             || !(fluid_time_s + maximum_hold_s).is_finite()
@@ -298,15 +321,6 @@ impl MannReservoirInflow3 {
             return Err(MannReservoirError3::Input(
                 "original grid and representable fluid time/hold bound required",
             ));
-        }
-        for &side in self.sides() {
-            for axis in 0..3 {
-                if axis != side.axis() && boundaries.axis(axis) == AxisBoundaries::Periodic {
-                    return Err(MannReservoirError3::Input(
-                        "Mann cross-sections require nonperiodic transverse axes",
-                    ));
-                }
-            }
         }
         let (displacement_m, advection) = match source {
             MannReservoirSource3::Frozen {
@@ -337,6 +351,14 @@ impl MannReservoirInflow3 {
                 // Norm is frame invariant, so the source's field-frame vector
                 // supplies the same conservative advective phase bound.
                 ([0.0; 3], field.advection_mps())
+            }
+            MannReservoirSource3::BridgeFrame(frame) => {
+                if frame.time_s() != fluid_time_s {
+                    return Err(MannReservoirError3::Input(
+                        "Mann bridge frame differs from native fluid time",
+                    ));
+                }
+                ([0.0; 3], frame.advection_mps())
             }
         };
         if !displacement_m.iter().all(|x| x.is_finite()) {
@@ -476,6 +498,64 @@ impl MannReservoirInflow3 {
     }
 }
 
+impl MannReservoirInflow3 {
+    fn validate_geometry(
+        &self,
+        grid: &CartesianGrid,
+        boundaries: Boundaries3d,
+    ) -> Result<(), MannReservoirError3> {
+        if grid != &self.grid {
+            return Err(MannReservoirError3::Input(
+                "original prepared Mann grid required",
+            ));
+        }
+        for &side in self.sides() {
+            for axis in 0..3 {
+                if axis != side.axis() && boundaries.axis(axis) == AxisBoundaries::Periodic {
+                    return Err(MannReservoirError3::Input(
+                        "Mann cross-sections require nonperiodic transverse axes",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Share the physical point, exact spatial filter and vector rotation with
+    // held traces and mutable stage-frame consumers, without self-borrows or
+    // reconstructing inlet geometry for every face.
+    fn fluctuation_at(
+        &self,
+        side: BoundarySide,
+        face: usize,
+        displacement_m: [f64; 3],
+        sample: impl FnOnce([f64; 3], &MannBoxFilter) -> Result<[f64; 3], fs_atmo::Refusal>,
+    ) -> Result<[f64; 3], MannReservoirError3> {
+        let filter = self
+            .spatial_filter(side)
+            .ok_or(MannReservoirError3::Input("unprepared Mann inlet side"))?;
+        let point = self
+            .grid
+            .face_center(side, face)
+            .ok_or(MannReservoirError3::Input(
+                "Mann inlet face outside prepared grid",
+            ))?;
+        let field_point = to_field(
+            self.config.field_to_grid,
+            self.config.grid_origin_in_field_m,
+            point,
+            displacement_m,
+        );
+        let velocity = to_grid(self.config.field_to_grid, sample(field_point, filter)?);
+        if !velocity.iter().all(|x| x.is_finite()) {
+            return Err(MannReservoirError3::Input(
+                "rotated Mann velocity is not representable",
+            ));
+        }
+        Ok(velocity)
+    }
+}
+
 impl MannReservoirTrace3<'_> {
     pub const fn report(&self) -> MannReservoirReport3 {
         self.report
@@ -488,38 +568,19 @@ impl MannReservoirTrace3<'_> {
         side: BoundarySide,
         face: usize,
     ) -> Result<[f64; 3], MannReservoirError3> {
-        let filter = self
-            .inlet
-            .spatial_filter(side)
-            .ok_or(MannReservoirError3::Input("unprepared Mann inlet side"))?;
-        let point = self
-            .inlet
-            .grid
-            .face_center(side, face)
-            .ok_or(MannReservoirError3::Input(
-                "Mann inlet face outside prepared grid",
-            ))?;
-        let field_point = to_field(
-            self.inlet.config.field_to_grid,
-            self.inlet.config.grid_origin_in_field_m,
-            point,
-            self.displacement_m,
-        );
-        let sample = match self.source {
-            MannReservoirSource3::Frozen { source, .. } => {
-                source.sample_filtered(field_point, filter)?
-            }
-            MannReservoirSource3::Evolving(source) => {
-                source.sample_filtered(field_point, filter)?
-            }
-        };
-        let velocity = to_grid(self.inlet.config.field_to_grid, sample.u);
-        if !velocity.iter().all(|x| x.is_finite()) {
-            return Err(MannReservoirError3::Input(
-                "rotated Mann velocity is not representable",
-            ));
-        }
-        Ok(velocity)
+        self.inlet
+            .fluctuation_at(side, face, self.displacement_m, |point, filter| {
+                let sample = match self.source {
+                    MannReservoirSource3::Frozen { source, .. } => {
+                        source.sample_filtered(point, filter)
+                    }
+                    MannReservoirSource3::Evolving(source) => source.sample_filtered(point, filter),
+                    MannReservoirSource3::BridgeFrame(frame) => {
+                        frame.sample_filtered(point, filter)
+                    }
+                }?;
+                Ok(sample.u)
+            })
     }
 
     pub fn frozen_state(
