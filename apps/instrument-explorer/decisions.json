@@ -699,6 +699,17 @@
    "refs": [
     "frankensim-irp-v5-instrument-realism-pexfp.270"
    ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "ruling",
+   "title": "The saxophone gets first pages from printed fragments, as a stand-in, before any measured alto bore exists",
+   "decided": "C4, E3 and F3 post as a stand-in saxophone: printed neck, bell, mouthpiece and reed fit, with one straight cone per note, no tone holes, and a borrowed reed opening, width and area. Each page says so first. One mouthpiece position, solved once, is the only pitch setting. An earlier ruling not to hunt further for this family is withdrawn.",
+   "why": "No measured alto air column is printed, and the family's pages were empty for that reason. The fragments that are printed are enough to make an honest first sound, and a stated stand-in tells a reader more than an empty page does. E3 and F3 are silent on this reed at their printed mf, under the printed threshold, so they play at their printed ff.",
+   "effect": "C4 grades 12 of 15, E3 6 of 14 and F3 7 of 14, which doesn't mean they're right. The three spread 35 c, and no single position closes that. All three are cleaner than the recordings. Ab4 and E5 need a register hole and have no render yet.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.241"
+   ]
   }
  ]
 }
