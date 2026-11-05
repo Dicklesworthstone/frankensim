@@ -15,6 +15,11 @@ pub use boundary::IntegratedCaloricBoundary;
 pub mod gray_boundary;
 pub use gray_boundary::IntegratedCaloricGrayBoundary;
 
+/// Source-integrated material surfaces joined by one gray conducting gap.
+#[path = "conduction/gray_link.rs"]
+pub mod gray_link;
+pub use gray_link::IntegratedCaloricGrayLink;
+
 use super::{
     isobaric::conduction::IsobaricConductionLaw, isochoric::conduction::IsochoricConductionLaw,
 };
@@ -111,6 +116,48 @@ impl<'a, 'm> CaloricConductionLayer<'a, 'm> {
         }
         .map_err(|_| DepositionError::MaterialDomain)
     }
+}
+
+// Shared admission for every integrated flux on an original finite-body link.
+// Probe each concrete interface only AFTER this binding, so finite physical
+// jumps do not first have to admit an unrelated perfect-contact solution.
+fn admit_original_link(
+    thermal: &DepositionSimulation<'_>,
+    link_id: u64,
+    layers: [&CaloricConductionLayer<'_, '_>; 2],
+    geometry: LayerGeometry,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(ContactPatch, [f64; 2]), DepositionError> {
+    checkpoint()?;
+    let patch = thermal
+        .contact_patch(link_id)
+        .ok_or(DepositionError::InvalidInput(
+            "integrated caloric link requires an active original contact",
+        ))?;
+    if patch.link.area_m2 != geometry.contact_area_m2() {
+        return Err(DepositionError::InvalidInput(
+            "integrated caloric geometry must retain the original contact area",
+        ));
+    }
+    let mut energies = [0.0; 2];
+    for (side, id) in [patch.link.a, patch.link.b].into_iter().enumerate() {
+        checkpoint()?;
+        let cell = thermal
+            .cells()
+            .get(&id)
+            .ok_or(DepositionError::InvalidInput(
+                "integrated caloric endpoint is not active",
+            ))?;
+        let caloric = layers[side].caloric_law();
+        if !thermal.uses_material_law(cell.material_id, caloric) {
+            return Err(DepositionError::InvalidInput(
+                "integrated caloric link requires the original ordered caloric objects",
+            ));
+        }
+        caloric.validate_cell(cell)?;
+        energies[side] = cell.specific_h_j_kg;
+    }
+    Ok((patch, energies))
 }
 
 /// One bound source-integrated face of the original implicit chain or graph.
@@ -257,35 +304,8 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
         contact: Option<BoundCaloricContact<'l>>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
-        checkpoint()?;
-        let patch = thermal
-            .contact_patch(link_id)
-            .ok_or(DepositionError::InvalidInput(
-                "integrated caloric link requires an active original contact",
-            ))?;
-        if patch.link.area_m2 != geometry.contact_area_m2() {
-            return Err(DepositionError::InvalidInput(
-                "integrated caloric geometry must retain the original contact area",
-            ));
-        }
-        let mut energies = [0.0; 2];
-        for (side, id) in [patch.link.a, patch.link.b].into_iter().enumerate() {
-            checkpoint()?;
-            let cell = thermal
-                .cells()
-                .get(&id)
-                .ok_or(DepositionError::InvalidInput(
-                    "integrated caloric endpoint is not active",
-                ))?;
-            let caloric = layers[side].caloric_law();
-            if !thermal.uses_material_law(cell.material_id, caloric) {
-                return Err(DepositionError::InvalidInput(
-                    "integrated caloric link requires the original ordered caloric objects",
-                ));
-            }
-            caloric.validate_cell(cell)?;
-            energies[side] = cell.specific_h_j_kg;
-        }
+        let (patch, energies) =
+            admit_original_link(thermal, link_id, layers, geometry, checkpoint)?;
         let link = Self {
             layers,
             patch,

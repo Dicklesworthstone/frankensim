@@ -8616,6 +8616,41 @@ bounded/nonrectangular support and disjoint-temperature contact admission.
 All 18 focused native Cp/Cv conduction, integrated-link, boundary and contact
 tests pass with the original full thermal owner and numerical solver kernels.
 
+## Source-integrated Cp/Cv radiation between finite bodies
+
+`thermal::transport::conduction::IntegratedCaloricGrayLink` attaches the existing
+integrated gray-gap kernel to the original finite Cp/Cv thermal chain or graph.
+Both original material half-cells integrate their own k(T) curves to the two
+solved material surfaces. The declared nonradiative gap HTC and gray radiation
+act in parallel between those surfaces. Their reported powers are components
+of ONE equal/opposite heat transfer, never additional heating channels.
+
+Each endpoint tangent uses its own original 1/Cp or 1/Cv and exact conductivity
+integral. Enthalpy and internal energy remain distinct inventories. Preparation
+shares the original link's ordered caloric identity, density/mass admission,
+contact coverage and geometric checks with the existing conductive adapter;
+each link borrows the already prepared original source tables. No trial tables,
+new thermal state or separate time integrator are allocated by this adapter.
+
+The gray-gap source explicitly declares equal-area opaque diffuse-gray faces
+with full mutual view and a nonparticipating gap. Only planar geometry is
+admitted, and both physical covered areas must equal the nominal transfer area.
+The native geometric resistance is zero because the gray gap owns the entire
+interface; an extra authored resistance or separate contact attachment refuses.
+Fixed emissivities/HTC and source-free quasi-steady single-phase legs do not
+infer finite gap storage, evolving surfaces, radial view factors or phase
+fronts. Each material profile stays on its own original source support. Initial
+admission uses the actual gap, permitting disjoint temperature charts where a
+finite supported jump exists instead of imposing an unrelated perfect contact.
+
+Three new native regressions pass: independent nonlinear material/gray-gap
+surface balances and complete mixed-Cp/Cv tangents in either direction and at
+equilibrium; actual 300-second implicit evolution with conserved energy,
+original entropy and late cancellation/replay; and identity, geometry,
+asymmetric coverage, source-domain, disjoint-support, insulation and exact
+radiation-disabled contact limits. All 25 focused native original Cp/Cv and
+integrated exchange tests pass.
+
 ## Source-integrated Cp/Cv convection and radiation at one surface
 
 `thermal::transport::conduction::IntegratedCaloricGrayBoundary` couples one
