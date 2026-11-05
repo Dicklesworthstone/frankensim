@@ -1676,6 +1676,23 @@ proposed-mass sources and resolved bath/radiation/pair-transfer inputs, both
 flux reversals, original inventory/source-domain refusal, independent
 local/mass/cancellation gates, and pending endpoint event exposure.
 
+`DepositionSimulation::solve_implicit_evaporating_step` drives that endpoint
+with the original `fs_solver::NewtonKrylovState` and fallible numerical
+Jacobian actions. It solves the entire active heat network with one selected
+liquid interface; other cells retain their original heat-only response.
+`EvaporationImplicitControls::new(range)` requires an explicit liquid branch
+and keeps nonlinear tolerances, physical joule/kilogram gates and bounded work
+separate. No conductive CFL restriction is introduced.
+
+A two-entry cache avoids duplicate residual reconstructions in numerical
+Jacobian actions. The final physical state and coefficient payload are always
+recomputed, charged to the same evaluation budget and passed through the
+original local/global energy and mass gates. Numerical convergence cannot
+replace physical acceptance. Source/domain/stencil errors retain their cause;
+failed work or final cancellation publishes no candidate. The method uses
+numerical derivatives, requires a resolvable difference scale, and remains
+first order in time without automatic time-error estimation.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry

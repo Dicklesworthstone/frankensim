@@ -24,6 +24,11 @@ use crate::evaporation::{
 };
 use std::cell::RefCell;
 
+/// Bounded automatic nonlinear solves of this original endpoint residual.
+#[path = "implicit/solve.rs"]
+pub mod solve;
+pub use solve::{EvaporationImplicitControls, EvaporationImplicitError, EvaporationImplicitReport};
+
 /// Physical open-system account for one interval, before endpoint events.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvaporatingBackwardEulerAudit {

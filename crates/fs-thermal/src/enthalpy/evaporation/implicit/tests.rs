@@ -1,4 +1,7 @@
 //! G0 admission/atomicity and G1 independently closed endpoint energy balances.
+#[path = "tests/solve.rs"]
+mod solve;
+
 use super::*;
 use crate::enthalpy::backward_euler::{BoundaryExchanges, PrescribedBathHeat};
 use crate::enthalpy::{
