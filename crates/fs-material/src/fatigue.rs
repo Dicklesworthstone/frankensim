@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 /// Source-backed S-N calibration admission with original material receipts.
 pub mod source;
+/// Calibrated Mode-I Paris crack growth with evolving stress intensity.
+pub mod crack_growth;
 pub mod critical_plane;
 /// Bounded Coffin-Manson-Basquin total mechanical strain-life estimates.
 pub mod strain_life;

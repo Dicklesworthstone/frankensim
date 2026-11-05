@@ -1,5 +1,41 @@
 # fs-material — CONTRACT
 
+## Paris-region fatigue crack growth
+
+`fatigue::crack_growth` adds an immutable, explicitly scoped Paris calibration
+and an evolving `ParisCrackGrowth` state. The normalized law is
+`da/dN = reference_rate * (delta_K/reference_delta_K)^m`, with length in metres,
+full cycles, and the complete stress-intensity range in Pa sqrt(m). The
+reference rate avoids the exponent-dependent units of the conventional C.
+The original `FatigueScope` retains material, process, surface/geometry,
+environment, load basis, temperature and caller-declared source reference.
+These declarations do not confer material-database or measured-data authority.
+
+For a caller-declared constant geometry factor, `K=Y*sigma*sqrt(pi*a)`.
+Constant-amplitude blocks integrate evolving crack length analytically for
+all positive exponents, including the exponential m=2 limit. Work and storage
+are constant per block, independent of cycle count. Ordered spectra preserve
+their input order, and clones retain the complete accepted state. This
+memoryless Paris law supplies no overload/retardation sequence interaction.
+It must not consume rainflow completion order as a chronological spectrum.
+
+Positive-range cycles require the supplied tensile R interval and Paris-region
+range bounds. Every sample can be checked against the current K limit before
+cycle closure. Growth rechecks the complete monotone interval through its
+endpoints, including the declared crack-length and exclusive upper-K limits.
+Zero-range exposure adds no fatigue growth but still checks static K.
+The lower fit bound is not a threshold: unsupported low loads refuse. Blocks,
+spectra, cancellation and failed endpoint admission publish no partial growth.
+
+G0/G1/G3 regressions compare independent m=1/2/4 integrals, the m=2 limiting
+case, range/full-cycle conventions, partition/restart behavior, source-scope
+retention, static and evolving-domain refusals, budgets and rollback. The
+formula follows NASA-HDBK-5010 Volume 2 Revision A §7.3 and AFGROW DTD Handbook
+§5.1.2. These synthetic checks verify implementation, not component life.
+This lane supplies no inferred crack initiation, closure/compression correction,
+mixed-mode growth, thermal transfer, evolving geometry factor, resolved mesh
+crack, stiffness degradation, heat, toughness measurement or rupture guarantee.
+
 ## Objective small-strain magnitude
 
 `tensor::frobenius_norm` evaluates the physical symmetric-tensor norm in the
