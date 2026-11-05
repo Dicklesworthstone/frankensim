@@ -278,6 +278,7 @@ export function mountLiveKit(root: HTMLElement): void {
   const impactLoss = numberInput(0.05, 0, 1000);
   const lossMode = el("select", {}, el("option", { value: "preset" }, "Preset decay times (drum heads refuse)"),
     el("option", { value: "material" }, "Surface material viscosity"),
+    el("option", { value: "film-curve" }, "Sourced head-film loss curve"),
     el("option", { value: "stated-unknown" }, "Head film loss: stated unknown, entered as 0"));
   const lossFrequencyAxis = el("input", { type: "text", value: "f", required: "" });
   const lossFrequency = numberInput(1000, 1e-9, 1e9);
@@ -288,8 +289,13 @@ export function mountLiveKit(root: HTMLElement): void {
       labelled("Frequency coordinate in cards", lossFrequencyAxis), labelled("Source query frequency · Hz", lossFrequency),
       labelled("Primary viscosity orientation · °", primaryLossAngle), labelled("Secondary viscosity orientation · °", secondaryLossAngle)),
     el("p", { class: "small muted" }, "Both surface cards must supply the six plane_stress_viscosity tensor coefficients in Pa·s. The Kelvin–Voigt law replaces preset structural decay. Its source frequency band must cover zero through half the internal simulation sample rate; insufficient source coverage is refused. The orientations rotate each material's viscosity axes within the surface."));
+  const filmFrequencyAxis = el("input", { type: "text", value: "f", required: "" });
+  const filmFields = el("fieldset", { disabled: "", hidden: "" },
+    el("div", { class: "kit-atmosphere-grid" }, labelled("Frequency coordinate in head cards", filmFrequencyAxis)),
+    el("p", { class: "small muted" }, "Each head card must supply a loss_tangent_tensile curve over its own frequency band at the declared solid temperature. The drum model uses that curve across the band; no single query frequency is selected. Edge loss remains a stated unknown entered as 0. This selection applies to drum heads; cymbals and the hi-hat retain their existing native loss."));
   lossMode.addEventListener("change", () => {
     lossFields.hidden = lossFields.disabled = lossMode.value !== "material";
+    filmFields.hidden = filmFields.disabled = lossMode.value !== "film-curve";
   });
   const materialFields = el("fieldset", { disabled: "", hidden: "" },
     el("div", { class: "kit-atmosphere-grid" },
@@ -297,10 +303,10 @@ export function mountLiveKit(root: HTMLElement): void {
       labelled("Striker card", strikerFile), labelled("Solid temperature · K", solidTemperature),
       labelled("Temperature coordinate in cards", temperatureAxis), labelled("Effective striker volume · cm³", strikerVolume),
       labelled("Spherical tip radius · mm", tipRadius), labelled("Impact loss · s/m", impactLoss),
-      labelled("Structural decay", lossMode)), lossFields,
+      labelled("Structural decay", lossMode)), lossFields, filmFields,
     el("p", { class: "small muted" }, "Import FrankenSim material-card pack files. Cards must supply density, Young's modulus and Poisson ratio at the declared solid temperature, with a typed absolute-temperature coordinate in kelvin when that coordinate is constrained. Primary applies to batter heads and upper cymbals; secondary applies to resonant heads and lower hi-hats, and defaults to primary."),
     el("p", { class: "small muted" }, "The imported striker replaces every preset beater, including the kick. Its material and effective volume set its mass; both contact materials and tip radius set elastic contact stiffness. Structural decay uses the selection above. Supports, muffling, wire contacts and hi-hat rim friction retain their separate assumptions."),
-    el("p", { class: "small muted" }, "Drum heads built from imported cards never fall back to the preset decay times, which were fitted to recordings. Without a sourced viscosity they refuse, unless you declare the head film loss a stated unknown: it is then entered as 0, edge loss too, and the result omits the measured high-mode excess loss, so decay times above the first two modes are upper bounds. Cymbals and the hi-hat keep their preset decay in every mode."));
+    el("p", { class: "small muted" }, "Drum heads built from imported cards never fall back to the preset decay times, which were fitted to recordings. Select a sourced surface viscosity, a sourced head-film curve, or declare head film loss a stated unknown. The unknown declaration enters film and edge loss as 0 and omits the measured high-mode excess loss, so decay times above the first two modes are upper bounds. A head-film curve applies only to drum heads; cymbals and the hi-hat retain their existing native loss."));
   const materialStatus = el("p", { class: "small muted", role: "status" },
     "Material changes rebuild the kit from rest. Geometry and tuning remain the declared presets.");
   const materialForm = el("form", {}, labelled("Solid materials", materialMode), materialFields,
@@ -338,13 +344,20 @@ export function mountLiveKit(root: HTMLElement): void {
       || ![bendingLoss.frequencyHz, bendingLoss.primaryAngleRad, bendingLoss.secondaryAngleRad].every(Number.isFinite))) {
       throw new Error("Material loss needs a named frequency coordinate, positive finite frequency and finite orientations.");
     }
-    const statedUnknown = lossMode.value === "stated-unknown";
-    return { label: `${primary.name}${secondary ? ` / ${secondary.name}` : ""} · striker ${striker.name} · ${state.temperatureK} K · ${bendingLoss ? "sourced bending loss" : statedUnknown ? "head film loss stated unknown (0)" : "preset decay"}`,
+    const filmLoss: KitMaterialOptions["filmLoss"] = lossMode.value === "film-curve"
+      ? { model: "generalized-maxwell", frequencyAxis: filmFrequencyAxis.value.trim() }
+      : lossMode.value === "stated-unknown" ? "stated-unknown" : undefined;
+    if (typeof filmLoss === "object" && !filmLoss.frequencyAxis) {
+      throw new Error("The head-film curve needs the frequency coordinate named in the head cards.");
+    }
+    const lossLabel = bendingLoss ? "sourced bending loss" : typeof filmLoss === "object"
+      ? "sourced head-film loss curve" : filmLoss === "stated-unknown" ? "head film loss stated unknown (0)" : "preset decay";
+    return { label: `${primary.name}${secondary ? ` / ${secondary.name}` : ""} · striker ${striker.name} · ${state.temperatureK} K · ${lossLabel}`,
       load: async () => {
         const [surfacePack, secondaryPack, strikerPack] = await Promise.all([
           primary.arrayBuffer(), secondary?.arrayBuffer(), striker.arrayBuffer(),
         ]);
-        return { ...state, ...(bendingLoss ? { bendingLoss } : {}), ...(statedUnknown ? { filmLoss: "stated-unknown" as const } : {}), surfacePack: new Uint8Array(surfacePack),
+        return { ...state, ...(bendingLoss ? { bendingLoss } : {}), ...(filmLoss ? { filmLoss } : {}), surfacePack: new Uint8Array(surfacePack),
           ...(secondaryPack ? { secondaryPack: new Uint8Array(secondaryPack) } : {}), strikerPack: new Uint8Array(strikerPack) };
       } };
   }
@@ -724,8 +737,14 @@ export function mountLiveKit(root: HTMLElement): void {
         if (materials?.bendingLoss && r.info.materials?.bendingLoss?.model !== materials.bendingLoss.model) {
           throw new Error("The kit engine did not retain the selected material bending loss. Rebuild the live kit before applying it.");
         }
-        if (materials?.filmLoss && !r.info.materials?.filmLossStatedUnknown) {
+        if (materials?.filmLoss === "stated-unknown" && !r.info.materials?.filmLossStatedUnknown) {
           throw new Error("The kit engine did not retain the stated-unknown film-loss declaration. Rebuild the live kit before applying it.");
+        }
+        if (typeof materials?.filmLoss === "object") {
+          const curve = r.info.materials?.filmLossCurve;
+          if (curve?.property !== "loss_tangent_tensile" || curve.temperatureK !== materials.temperatureK) {
+            throw new Error("The kit engine did not retain the sourced head-film loss curve at the requested temperature. Rebuild the live kit before applying it.");
+          }
         }
         L.ready = r;
         // map every surface node to a cell of a square image the size of the grid
@@ -751,8 +770,12 @@ export function mountLiveKit(root: HTMLElement): void {
       atmosphereStatus.textContent = `${environment.label}. ${gas
         ? `Density ${gas.densityKgM3.toFixed(3)} kg/m³ · sound speed ${gas.soundSpeedMps.toFixed(1)} m/s. ` : ""}All seven pieces use this atmosphere.`;
       const solid = lives.get("kick")?.ready?.info.materials;
+      const curve = solid?.filmLossCurve;
+      const filmReceipt = curve
+        ? ` Drum heads use ${curve.property} at ${curve.temperatureK} K. Source bands: batter ${curve.bandHz[0][0]}–${curve.bandHz[0][1]} Hz · resonant ${curve.bandHz[1][0]}–${curve.bandHz[1][1]} Hz. ${curve.edgeLoss}. Cymbals and the hi-hat retain their existing native loss.`
+        : solid?.filmLossStatedUnknown ? ` Drum heads: ${solid.filmLossStatedUnknown}.` : "";
       materialStatus.textContent = solid
-        ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All seven pieces use these material cards.${solid.filmLossStatedUnknown ? ` Drum heads: ${solid.filmLossStatedUnknown}.` : ""}`
+        ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All seven pieces use these material cards.${filmReceipt}`
         : `Standard kit materials are active. ${lives.get("kick")?.ready?.info.headLoss ?? ""}`.trimEnd();
       overlay.hidden = true;
       kickDraw();

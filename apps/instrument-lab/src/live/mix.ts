@@ -183,9 +183,10 @@ export interface KitMaterialOptions {
     primaryAngleRad: number;
     secondaryAngleRad: number;
   };
-  /** Without a sourced bending loss, drum heads refuse unless their film loss
-   *  is declared a stated unknown entered as 0 (exclusive with bendingLoss). */
-  filmLoss?: 'stated-unknown';
+  /** Drum-head loss, exclusive with bendingLoss. A curve reads each original
+   *  head card at temperatureK; its source band and coefficients stay in Rust.
+   *  Cymbals and hi-hats retain their existing loss in either film mode. */
+  filmLoss?: 'stated-unknown' | { model: 'generalized-maxwell'; frequencyAxis: string };
 }
 export interface KitMaterialInfo {
   primary: { stateIdentity: string; cardIdentity: string; densityKgM3: number; youngPa: number; poisson: number };
@@ -203,12 +204,19 @@ export interface KitMaterialInfo {
   };
   /** The stated-unknown receipt, or null when no such declaration was made. */
   filmLossStatedUnknown?: string | null;
+  /** Native source-curve receipt; the remaining edge loss is explicitly unknown. */
+  filmLossCurve?: null | {
+    property: 'loss_tangent_tensile';
+    temperatureK: number;
+    bandHz: [[number, number], [number, number]];
+    edgeLoss: string;
+  };
 }
 export interface KitReady {
   info: { piece: string; gridScale: number; radius: number; surfaceNodes: number; h: number; bodies: { name: string; nodes: number }[];
     gas?: { temperatureK: number; pressurePa: number; densityKgM3: number; soundSpeedMps: number; sourceSpecies?: number };
     materials?: KitMaterialInfo | null;
-    /** A drum's head-loss receipt: FITTED on the preset heads (ruling 6533), null for cymbals. */
+    /** A drum's head-loss receipt: preset fit, stated unknown, or remaining unknown edge loss; null for cymbals. */
     headLoss?: string | null };
   /** Exact requested atmosphere, retained through every grid trial and rebuild. */
   gasRecord?: string;

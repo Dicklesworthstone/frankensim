@@ -97,6 +97,32 @@ access disabled. The selected input identity is retained through unplug/replug,
 and a cancelled or disposed connection cannot attach after permission arrives.
 Web MIDI availability and device permission are determined by the browser.
 
+## Material-card film loss
+
+Imported drum heads can use their material cards' frequency-dependent film-loss
+curves. In **Solid and striker materials**, import the head and striker packs,
+select the sourced head-film curve under **Structural decay**, and enter the
+card's frequency coordinate name. The existing solid temperature is used for
+both elasticity and film loss.
+
+Both head cards must supply a resolvable `loss_tangent_tensile` curve over a typed
+cyclic-frequency axis at that temperature. The native material resolver owns
+source validity and refusal. Each head's existing generalized-Maxwell model is
+fitted to its own material curve; the browser supplies no fitted coefficients,
+replacement decay times, or recording-derived normalization. This selection is
+exclusive with the separate material-viscosity and stated-unknown loss routes.
+
+The worker retains the curve selection, material packs, striker geometry and
+atmosphere through grid trials, cloning and startup. Readiness reports the
+batter and resonant head source bands, temperature, and the native statement
+that edge, hoop, shell and mount losses remain unknown. Cymbals and the hi-hat
+retain their existing loss laws under this drum-head selection.
+
+Rebuild `engine-kit` with the frontend for `withMaterialFilmLossCurve` and
+`withMaterialFilmLossCurveAndGasSources`. An older engine refuses the requested
+curve explicitly. This exposes the existing native model; it does not establish
+new acoustic-fidelity or real-time performance measurements.
+
 ## Rebuilding
 
 The workspace needs its sibling repos at the `constellation.lock` pins. If the shared sibling

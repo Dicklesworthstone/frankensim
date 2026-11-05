@@ -353,12 +353,21 @@ shape is retained.
 
 The PET law keeps 11 branches, each updated on every node at every step. That is
 0.5 % of the 3.5 mm snare render's profile. On the smallest live grids of the card
-film route (not in the browser), it adds up to +36 % per output sample.
+film route (measured natively), it adds up to +36 % per output sample. The browser
+binding uses the same law, with its grid selected by the existing runtime probe;
+no new browser timing claim follows from those native measurements.
 
 The drum's notes carry the law's receipts and
 `materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT`, since no edge, hoop, shell or mount
-loss law exists, and `info_json` has `filmLossCurve`. Only the native card route
-uses it, offline and in `live`; the browser page's drums keep the stated unknown.
+loss law exists, and `info_json` has `filmLossCurve`. Native offline/live and the
+browser's imported-material route can select it. The browser supplies
+`filmLoss: { model: 'generalized-maxwell', frequencyAxis }` and the existing
+material temperature through `KitPiece.withMaterialFilmLossCurve` (or its
+`AndGasSources` variant), preserving both source packs and the atmosphere.
+Its material controls display the native source bands and edge-loss statement.
+The film-curve selection is exclusive with a material bending-loss law or the
+stated-unknown declaration; older WASM binaries refuse it explicitly. Cymbals
+and hi-hats keep their existing loss under this drum-head selection.
 
 `packs/head-film-pet-mylar-dupont-matsuzawa1959.fsmatpk` is a sourced head-film
 card, compiled with `xtask matdb-pack` from

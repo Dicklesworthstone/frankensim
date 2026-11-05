@@ -11,7 +11,8 @@ pub const FITTED_HEAD_LOSS_RECEIPT: &str = "head loss: FITTED (declared estimate
 
 /// The head-loss receipt of one live piece, for drums only (cymbal and hi-hat
 /// loss is pexfp.372): FITTED on the preset heads, the stated-unknown receipt
-/// on a card route that declared it, and none when the cards source the loss.
+/// on a card route that declared it, the remaining edge-loss receipt for a film
+/// curve, and none for a sourced bending-viscosity law.
 pub fn head_loss_receipt(piece: &str, materials: Option<&KitMaterials>) -> Option<&'static str> {
     if !matches!(piece, "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") {
         return None;
@@ -19,8 +20,19 @@ pub fn head_loss_receipt(piece: &str, materials: Option<&KitMaterials>) -> Optio
     match materials {
         None => Some(FITTED_HEAD_LOSS_RECEIPT),
         Some(m) if m.film_loss_is_stated_unknown() => Some(fs_vkplate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT),
+        Some(m) if m.has_film_loss_curve() => Some(fs_vkplate::materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT),
         Some(_) => None,
     }
+}
+
+/// Resolve the original packs once, then select the native head-film curve owner.
+#[cfg(any(target_arch = "wasm32", test))]
+fn film_loss_materials(surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+    temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+    striker_tip_radius_m: f64, impact_loss_s_m: f64, frequency_axis: &str) -> Result<KitMaterials, String> {
+    KitMaterials::from_packs_at_temperature(surface_pack, secondary_pack, striker_pack,
+        temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m)
+        .and_then(|materials| materials.with_film_loss_curve(temperature_axis, frequency_axis, temperature_k))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -97,6 +109,36 @@ mod wasm {
                 frequency_axis, frequency_hz, [primary_angle_rad, secondary_angle_rad])
                 .map_err(|e| JsError::new(&e))?;
             Live::with_materials_record(piece, grid_scale, gas_record, materials)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// Head-film loss from each original card's loss_tangent_tensile curve.
+        /// The native owner admits the source band and temperature, fits its
+        /// generalized-Maxwell law and retains the remaining edge-loss unknown.
+        #[wasm_bindgen(js_name = withMaterialFilmLossCurve)]
+        pub fn with_material_film_loss_curve(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64, frequency_axis: &str) -> Result<KitPiece, JsError> {
+            let materials = film_loss_materials(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m,
+                frequency_axis).map_err(|e| JsError::new(&e))?;
+            Live::with_materials_record(piece, grid_scale, gas_record, materials)
+                .map(|live| KitPiece { live, scale: grid_scale })
+                .map_err(|e| JsError::new(&e))
+        }
+        /// The same source-bound film loss with an independently sourced gas.
+        #[wasm_bindgen(js_name = withMaterialFilmLossCurveAndGasSources)]
+        pub fn with_material_film_loss_curve_and_gas_sources(piece: &str, grid_scale: f64, gas_record: &str,
+            surface_pack: &[u8], secondary_pack: &[u8], striker_pack: &[u8],
+            temperature_axis: &str, temperature_k: f64, striker_volume_m3: f64,
+            striker_tip_radius_m: f64, impact_loss_s_m: f64, frequency_axis: &str,
+            gas_bytes: &[u8], gas_lengths: &[u32], water_species: &str, phase: &str) -> Result<KitPiece, JsError> {
+            let materials = film_loss_materials(surface_pack, secondary_pack, striker_pack,
+                temperature_axis, temperature_k, striker_volume_m3, striker_tip_radius_m, impact_loss_s_m,
+                frequency_axis).map_err(|e| JsError::new(&e))?;
+            Live::with_gas_source_packet(piece, grid_scale, gas_record, gas_bytes, gas_lengths,
+                water_species, phase, Some(materials))
                 .map(|live| KitPiece { live, scale: grid_scale })
                 .map_err(|e| JsError::new(&e))
         }
@@ -227,7 +269,7 @@ mod wasm {
             self.live.force
         }
         /// JSON: name, grid scale, surface radius and node count, every body's name and nodes,
-        /// and a drum's head-loss receipt (`headLoss`, null for cymbals and sourced loss).
+        /// and a drum's head-loss receipt (`headLoss`, including unknown edge loss with a film curve).
         pub fn info(&self) -> String {
             let b: Vec<String> = self.live.ins.bodies.iter().map(|b| format!("{{\"name\":\"{}\",\"nodes\":{}}}", b.name, b.n)).collect();
             format!(
@@ -237,7 +279,7 @@ mod wasm {
                 self.live.ins.gas().density, self.live.ins.gas().sound_speed,
                 self.live.gas_source_species(),
                 self.live.ins.materials().map_or_else(|| "null".into(), KitMaterials::info_json),
-                // Both receipts are fixed ASCII constants without quotes or backslashes.
+                // The receipts are fixed ASCII constants without quotes or backslashes.
                 head_loss_receipt(&self.live.name, self.live.ins.materials()).map_or_else(|| "null".into(), |r| format!("\"{r}\"")),
                 b.join(",")
             )
@@ -273,5 +315,25 @@ mod tests {
             Some(fs_vkplate::materials::FILM_LOSS_STATED_UNKNOWN_RECEIPT)
         );
         assert_eq!(head_loss_receipt("crash", Some(&declared)), None);
+    }
+
+    #[test]
+    fn film_curve_binding_retains_source_band_and_reports_the_remaining_edge_loss() {
+        // Film as the striker is a binding control, not a hickory-stick claim.
+        let bind = |temperature, axis| film_loss_materials(HEAD_FILM, &[], HEAD_FILM,
+            "T", temperature, 9e-6, 0.005, 0.05, axis);
+        let film = bind(293.15, "frequency").unwrap();
+        assert!(film.has_film_loss_curve());
+        assert!(!film.film_loss_is_stated_unknown());
+        assert_eq!(film.film_band_hz(0), Ok((20.0, 20000.0)));
+        assert_eq!(film.film_band_hz(1), Ok((20.0, 20000.0)));
+        assert!(film.info_json().contains("\"filmLossCurve\":{\"property\":\"loss_tangent_tensile\""));
+        for name in ["kick", "snare", "snare-off", "tom-12", "tom-14"] {
+            assert_eq!(head_loss_receipt(name, Some(&film)),
+                Some(fs_vkplate::materials::EDGE_LOSS_STATED_UNKNOWN_RECEIPT));
+        }
+        assert_eq!(head_loss_receipt("crash", Some(&film)), None);
+        assert!(bind(296.15, "frequency").is_err(), "the source curve is valid only at its declared temperature");
+        assert!(bind(293.15, "missing-axis").is_err());
     }
 }

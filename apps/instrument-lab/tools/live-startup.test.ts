@@ -3,15 +3,23 @@ import { test } from "bun:test";
 import { loadWorkletModule } from "../src/live/liveAudio";
 import { KitLane, PianoLane } from "../src/live/mix";
 
-test("kit lane startup and replacement forward the caller's full atmosphere record", async () => {
+test("kit lane startup and replacement retain atmosphere, film source selection and native receipts", async () => {
   const previousWorker = globalThis.Worker;
   const workers: WorkerBoundary[] = [], ports: MessagePort[] = [];
+  const materials = { surfacePack: new Uint8Array([1]), secondaryPack: new Uint8Array([2]),
+    strikerPack: new Uint8Array([3]), temperatureAxis: "T", temperatureK: 293.15,
+    strikerVolumeM3: 9e-6, strikerTipRadiusM: 0.005, impactLossSM: 0.05,
+    filmLoss: { model: "generalized-maxwell" as const, frequencyAxis: "frequency" } };
+  const gasSources = { phase: "frozen" as const, waterSpecies: null,
+    components: [{ speciesPack: new Uint8Array([4]), nasa9Pack: new Uint8Array([5]), transportPack: new Uint8Array([6]) }] };
+  const receipt = { property: "loss_tangent_tensile", temperatureK: 293.15,
+    bandHz: [[20, 20000], [80, 15000]], edgeLoss: "native edge-loss receipt" };
   class WorkerBoundary {
     onmessage: ((event: { data: object }) => void) | null = null;
     onerror: ((event: ErrorEvent) => void) | null = null;
-    messages: { type: string; gasRecord?: string; port?: MessagePort }[] = [];
+    messages: { type: string; gasRecord?: string; materials?: typeof materials; gasSources?: typeof gasSources; port?: MessagePort }[] = [];
     constructor() { workers.push(this); }
-    postMessage(message: { type: string; gasRecord?: string; port?: MessagePort }) {
+    postMessage(message: { type: string; gasRecord?: string; materials?: typeof materials; gasSources?: typeof gasSources; port?: MessagePort }) {
       this.messages.push(message); if (message.port) ports.push(message.port);
     }
     terminate() {}
@@ -20,12 +28,20 @@ test("kit lane startup and replacement forward the caller's full atmosphere reco
   const mix = { attach(_id: string, port: MessagePort) { ports.push(port); }, dropLane() {} } as unknown as ConstructorParameters<typeof KitLane>[0];
   const lanes: KitLane[] = [];
   try {
-    for (const gasRecord of ["293.15 101325 0.6", "mixture 300 80000 mass 2 N2 0.8 CO2 0.2"]) {
-      const lane = new KitLane(mix, "kick", { gain: 0.2, gasRecord }); lanes.push(lane);
+    for (const gasRecord of ["293.15 101325 0.6", "mixture 300 80000 mass 2 N2 0.8 CO2 0.2",
+      "thermochemical 293.15 80000 mole 1 carbon-dioxide 1"]) {
+      const sources = gasRecord.startsWith("thermochemical") ? gasSources : undefined;
+      const lane = new KitLane(mix, "kick", { gain: 0.2, gasRecord, materials, gasSources: sources }); lanes.push(lane);
       const worker = workers.at(-1)!;
       assert.equal(worker.messages[0]!.gasRecord, gasRecord);
-      worker.onmessage!({ data: { type: "ready", gasRecord } });
-      assert.equal((await lane.ready).gasRecord, gasRecord);
+      assert.deepEqual(worker.messages[0]!.materials, materials);
+      assert.deepEqual(worker.messages[0]!.gasSources, sources);
+      worker.onmessage!({ data: { type: "ready", gasRecord,
+        info: { materials: { filmLossCurve: receipt }, headLoss: receipt.edgeLoss } } });
+      const ready = await lane.ready;
+      assert.equal(ready.gasRecord, gasRecord);
+      assert.deepEqual(ready.info.materials?.filmLossCurve, receipt);
+      assert.equal(ready.info.headLoss, receipt.edgeLoss);
       lane.dispose();
     }
   } finally {

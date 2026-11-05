@@ -13,8 +13,8 @@
 //       materials    canonical primary/secondary/striker card-pack bytes and
 //                    declared temperature + spherical-impactor geometry/loss
 //                    (KitMaterialOptions in mix.ts); no browser material laws.
-//                    Drum heads need its bendingLoss, or filmLoss 'stated-unknown'
-//                    (entered as 0, with a receipt); otherwise they refuse.
+//                    Drum heads need bendingLoss, a generalized-Maxwell filmLoss curve,
+//                    or filmLoss 'stated-unknown' (entered as 0, with a receipt).
 //       hihatPedal  {initialForceN}: settle the shared hihat before playback, with all sources retained
 //       chunk        most frames per audio message (default 128; lane.js)
 //       fieldHz      fields per second of wall time (0: no fields)
@@ -144,14 +144,26 @@ function buildPiece(name, scale, gasRecord, materials, gasSources) {
     const inputs = [name, scale, gasRecord ?? '293.15 101325 0', surfacePack, secondaryPack,
       strikerPack, temperatureAxis, temperatureK, strikerVolumeM3, strikerTipRadiusM, impactLossSM];
     if (materials.filmLoss !== undefined) {
-      if (materials.filmLoss !== 'stated-unknown' || materials.bendingLoss !== undefined) {
-        throw new Error("Head film loss is either a sourced bending loss or the declaration 'stated-unknown', not both.");
+      if (materials.bendingLoss !== undefined) {
+        throw new Error('Select either a film-loss curve, stated-unknown film loss, or sourced bending loss; the selections are exclusive.');
       }
-      const constructor = gasSources ? 'withMaterialsStatedUnknownFilmLossAndGasSources' : 'withMaterialsStatedUnknownFilmLoss';
+      const loss = materials.filmLoss;
+      if (loss === 'stated-unknown') {
+        const constructor = gasSources ? 'withMaterialsStatedUnknownFilmLossAndGasSources' : 'withMaterialsStatedUnknownFilmLoss';
+        if (typeof KitPiece[constructor] !== 'function') {
+          throw new Error('This kit engine needs rebuilding with the stated-unknown film-loss route; the declaration was not applied.');
+        }
+        return KitPiece[constructor](...inputs, ...(gasSources ?? []));
+      }
+      if (!loss || loss.model !== 'generalized-maxwell'
+          || typeof loss.frequencyAxis !== 'string' || !loss.frequencyAxis.trim()) {
+        throw new Error('Declare generalized-Maxwell film loss with the head cards’ cyclic-frequency axis, or stated-unknown film loss.');
+      }
+      const constructor = gasSources ? 'withMaterialFilmLossCurveAndGasSources' : 'withMaterialFilmLossCurve';
       if (typeof KitPiece[constructor] !== 'function') {
-        throw new Error('This kit engine needs rebuilding with the stated-unknown film-loss route; the declaration was not applied.');
+        throw new Error('This kit engine needs rebuilding with source film-loss curve support; the selected head loss was not applied.');
       }
-      return KitPiece[constructor](...inputs, ...(gasSources ?? []));
+      return KitPiece[constructor](...inputs, loss.frequencyAxis, ...(gasSources ?? []));
     }
     if (materials.bendingLoss !== undefined) {
       const loss = materials.bendingLoss;
