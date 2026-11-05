@@ -144,6 +144,7 @@ pub mod render;
 /// Finite propellant storage and nozzle impulse on the original variable-mass vehicle.
 pub mod rocket_blowdown;
 pub mod scenario_velocity;
+pub mod scenario_wall_velocity;
 pub mod selector;
 /// Independent characterized sheet bending and inertia on the original DKT owner.
 pub mod sheet_plate;

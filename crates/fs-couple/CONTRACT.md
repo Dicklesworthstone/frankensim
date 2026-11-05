@@ -32855,3 +32855,12 @@ the adapter. The subsequent native step owns physical force correction and
 measured reservoir exchange. Regression cases drive signed rotated histories
 through actual factorized D3Q27 steps and check later-face refusal, native Mach
 and kind errors, cancellation and unchanged accepted state.
+
+
+## Analytic scenario frames drive fixed-topology moving walls
+
+`scenario_wall_velocity::FrameWallVelocity3` binds a prepared analytic frame path, the grid's admitted `MaterialScaling`, and an explicit Cartesian WORLD grid origin in metres. At a caller-selected physical sample time it evaluates the frame once, maps each original native wall-link position into WORLD metres, evaluates the carrier velocity at that fixed Eulerian point, and converts all three signed velocity components through the material scaling. Query work allocates nothing: the caller supplies one scratch vector per selected wall link, and long traversals poll cancellation every 64 links. The complete speed norm must fit the supplied scaling's admitted maximum speed. Invalid samples, history corners, unit conversion failures, insufficient scratch, overspeed, or cancellation enter no fluid step; scratch is not a published control and may be partially filled on refusal.
+
+Serial and pooled adapters then call the original shared D3Q19/D3Q27 moving-wall operator. That owner remains authoritative for probe topology, wall tangency, discrete impermeability, collision Mach limits, actual momentum/work receipts and atomic population/step-count publication. Returned `MovingWallMomentum3` retains native lattice units. The time sample is explicit, allowing midpoint sampling without assuming a solver clock. This is prescribed surface motion on fixed geometry; it does not implement normal wall displacement, swept cells or remeshing.
+
+The integration target `scenario_wall_velocity` checks translating drives against the original moving-wall populations, impulse and mechanical work on both native lattices, independently checks rotation at fixed WORLD wall-link locations, and checks overspeed, forbidden normal motion, cancellation and scratch-length refusal. Source review and parsing passed. These integration tests are not claimed as executed while the unchanged `asupersync` dependency blocks the full native crate build.
