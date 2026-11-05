@@ -67,8 +67,10 @@ pub enum GlobalPassivityUnresolved {
     DepthLimit,
 }
 
-/// All-frequency result for the exact real values of the stored coefficients.
-/// It does not certify a time discretization, rounded filter, or coupled solver.
+/// Global result for the exact real values of the stored coefficients.
+/// The producing checker determines whether the domain is the continuous axis
+/// or the digital frequency circle. This does not certify rounded runtime
+/// stepping, a coupled solver, or the physical accuracy of the represented law.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GlobalPassivityReport {
     /// Certified, proved active, or unresolved.
@@ -386,7 +388,7 @@ pub(crate) fn check_bernstein_nonnegative(
     )
 }
 
-fn value(coefficients: &[Interval], t: Interval) -> Interval {
+pub(crate) fn value(coefficients: &[Interval], t: Interval) -> Interval {
     if coefficients.is_empty() {
         return point(0.0);
     }

@@ -22,6 +22,17 @@ use fs_math::det;
 #[path = "discretize_scattering.rs"]
 mod scattering;
 
+#[path = "discretize_passivity.rs"]
+mod passivity;
+#[path = "discretize_impedance.rs"]
+mod impedance_realization;
+
+pub use passivity::check_digital_passivity;
+pub use impedance_realization::{
+    ImpedanceRealization, ImpedanceSampleErrors, realize_tabulated_impedance,
+    realize_tabulated_impedance_with_report,
+};
+
 /// One second-order (or degenerate first-order) parallel section:
 /// `(b0 + b1 z^-1 + b2 z^-2) / (1 + a1 z^-1 + a2 z^-2)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -340,40 +351,6 @@ pub fn realize_tabulated(
     bilinear(&fit.model, t_s, prewarp).map_err(RealizeError::Discretize)
 }
 
-/// Fit tabulated **impedance** `Z(iω)`, convex-repair passivity, then
-/// bilinear-discretize.
-///
-/// `repair_passivity` is the impedance-form primitive (`Re Z ≥ 0`).
-/// A raw fit that is already passive is returned unchanged. Repair
-/// exhaustion keeps the raw stable fit — it does not invent residues.
-/// The repair band spans the complete sampled frequency range regardless
-/// of input sample order.
-///
-/// Conjugate `e^{-iωt}` acoustics data before calling.
-///
-/// # Errors
-/// Vector-fitting or bilinear refusals. Passivity repair failure is
-/// not an error; the unrepaired model is discretized.
-pub fn realize_tabulated_impedance(
-    omega: &[f64],
-    z: &[C64],
-    t_s: f64,
-    opts: &crate::vf::FitOptions,
-    prewarp: f64,
-) -> Result<DigitalFilter, RealizeError> {
-    let fit = crate::vf::vector_fit(omega, z, opts).map_err(RealizeError::Fit)?;
-    let mut model = fit.model;
-    let lo = omega.iter().copied().fold(f64::INFINITY, f64::min);
-    let hi = omega.iter().copied().fold(0.0_f64, f64::max);
-    if hi > lo
-        && model.is_stable()
-        && let Ok((repaired, _)) = crate::passivity::repair_passivity(&model, (lo, hi))
-    {
-        model = repaired;
-    }
-    bilinear(&model, t_s, prewarp).map_err(RealizeError::Discretize)
-}
-
 /// Typed failure from tabulated-response realization.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RealizeError {
@@ -381,6 +358,17 @@ pub enum RealizeError {
     Fit(crate::vf::VfError),
     /// Bilinear map refused.
     Discretize(DiscretizeError),
+    /// Continuous or digital passivity preparation refused.
+    Passivity(crate::passivity::PassivityError),
+    /// The rounded runtime coefficients were active or unresolved.
+    UncertifiedDigital {
+        /// Result of the full-circle interval check.
+        verdict: crate::passivity::GlobalPassivityVerdict,
+        /// A proved violating frequency when representable.
+        frequency_rad_s: Option<f64>,
+        /// Named work, conditioning or boundary limit for an unresolved check.
+        reason: Option<crate::passivity::GlobalPassivityUnresolved>,
+    },
 }
 
 impl core::fmt::Display for RealizeError {
@@ -388,6 +376,10 @@ impl core::fmt::Display for RealizeError {
         match self {
             Self::Fit(e) => write!(f, "tabulated realization fit refused: {e}"),
             Self::Discretize(e) => write!(f, "tabulated realization discretize refused: {e}"),
+            Self::Passivity(e) => write!(f, "tabulated impedance passivity refused: {e}"),
+            Self::UncertifiedDigital { verdict, frequency_rad_s, reason } => write!(
+                f, "rounded digital impedance was not certified: {verdict:?}, frequency {frequency_rad_s:?}, reason {reason:?}"
+            ),
         }
     }
 }

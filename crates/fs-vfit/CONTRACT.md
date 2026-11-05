@@ -109,13 +109,31 @@ to parallel biquad sections and discrete state-space.
   spurious negative resistance. The manufactured inertance regressions in
   `tests/lossless_spectrum.rs` compare independent high-precision reactance
   references and prewarp agreement.
+- `discretize::check_digital_passivity` checks the entire frequency circle
+  using outward-rounded Bernstein factors of the actual stored coefficients.
+  Ordinary sections require established strict Jury stability. Parallel terms
+  are admitted by their combined real part; negative individual sections or
+  feedthrough can be compensated. Exact Tustin differentiators retain their
+  zero real part and a nonnegative summed boundary-storage coefficient.
+  Exact coefficient expansions preserve endpoint zeros and weak negative
+  remainders; unresolved conditioning or finite work limits never become a
+  pass. This is coefficient-level positive realness, not a roundoff-free
+  runtime work guarantee or a physical approximation-error bound.
 - `discretize::DigitalFilter::step` — transposed DF-II runtime of the
   parallel bank. `reflectance` is the scattering map
   `(Z−Zc)/(Z+Zc)`. `modulate_delay` peels or applies a known
   bulk delay. `realize_tabulated` is the foundry-to-runtime door:
   vector-fit + bilinear. `realize_tabulated_impedance` is the same
-  door after `repair_passivity` (`Re Z ≥ 0`); repair exhaustion
-  keeps the raw stable fit. `DigitalFilter::enforce_abs_bound` is
+  door after globally certified residue repair and a second interval
+  certificate on the actual rounded digital coefficients. Failed repair,
+  active output or an unresolved certificate refuses. The report-bearing
+  variant retains the final continuous model, original fit diagnostics,
+  actual repair perturbation, both global certificates, and final continuous
+  and digital maximum absolute errors against the original samples. The
+  digital error includes frequency warping; sampled errors are not between-
+  sample bounds or evidence of physical validity outside the authored data.
+  Preparation has finite work allowances; the audio stepping path gains no
+  checks or allocations. `DigitalFilter::enforce_abs_bound` is
   the scattering projection `|H| ≤ bound`. `DelayedFilter` is a
   characteristic port (delay ⊕ residual filter). `scattering_peak`
   measures `max |R|` on a caller grid and changes nothing; render callers
