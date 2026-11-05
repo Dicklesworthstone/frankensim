@@ -39,6 +39,18 @@ for QMC Gaussian germs instead of duplicating the polynomial.
   contract makes COUPLING explicit (level ℓ returns the correction
   Y_ℓ driven by one germ — that coupling is what makes variance
   decay); per-level statistics ledgered in the report.
+- `mlmc::coupled_mlmc_summary` summarizes an already-observed cohort of raw
+  physical values at every resolution level. Rows retain the same member,
+  excitation and physical horizon. Original level solves are counted once;
+  no sampler or allocation top-up runs. Correction moments describe refinement,
+  while the mean and variance of the finest original values retain cross-level
+  covariance and small results that cancellation of large level means would lose.
+  The single-pass iterator uses O(rows × levels) work and O(levels) state.
+  `CoupledMlmcError` refuses empty data, invalid costs, nonfinite observations,
+  unrepresentable corrections/moments and unrepresentable total work. Moments
+  remain descriptive under adaptive stopping: they provide no anytime interval,
+  continuum-error bound or population qualification. The three inline G0/G1/G3
+  regressions cover covariance, cancellation, single-pass consumption and refusals.
 - `product_lhs::LhsExecution` executes independent replicated Latin hypercubes.
   Its `freeze_linear_control_variate` and `assess_linear_control_variate`
   methods share the existing physical marginal means and centered-control
@@ -145,8 +157,10 @@ cross-ISA or experimental seismic-accuracy claim.
   reconstruction error audit bounds what was dropped.
 - PCE bases are orthonormal (mean = c₀, variance = Σc²_{≥1} are
   exact identities, not approximations).
-- The MLMC estimate is exactly the sum of level means (telescoping
-  bookkeeping is an identity, tested to 1e−14).
+- Independent-level MLMC sums the level means (telescoping bookkeeping is
+  tested to 1e−14). Coupled observed-level summaries use the original finest
+  values directly, preserving that physical quantity even when floating-point
+  subtraction destroys a small remainder between large correction means.
 - Everything is deterministic per seed.
 
 ## Error model

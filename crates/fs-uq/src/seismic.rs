@@ -910,7 +910,7 @@ mod tests {
     #[test]
     fn g1_cqc_close_distinct_frequencies_retain_their_physical_residual() {
         let damping = 0.05_f64;
-        for separation in [1.0e-5, 1.0e-7, 1.0e-9, 1.0e-11] {
+        for separation in [1.0e-5_f64, 1.0e-7, 1.0e-9, 1.0e-11] {
             for unit in [1.0e-100, 1.0, 1.0e100] {
                 let hi = (10.0 + separation) * unit;
                 let lo = 10.0 * unit;

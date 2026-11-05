@@ -20,14 +20,18 @@ pub struct LevelStats {
 /// MLMC outcome.
 #[derive(Debug, Clone)]
 pub struct MlmcReport {
-    /// The multilevel estimate Σ mean_ℓ.
+    /// Estimated finest-level expectation. Independent-level MLMC sums the
+    /// correction means; a coupled summary retains the original finest values
+    /// so cancellation between large level means cannot erase a small result.
     pub estimate: f64,
     /// Per-level statistics (the ledgered evidence).
     pub levels: Vec<LevelStats>,
     /// Total cost spent (Σ N_ℓ·C_ℓ).
     pub total_cost: f64,
-    /// Estimator variance (Σ V_ℓ/N_ℓ), using the Bessel-corrected
-    /// per-level sample variances.
+    /// Sample estimate of variance of the mean. Independent-level MLMC uses
+    /// Σ V_ℓ/N_ℓ; coupled summaries include within-row level covariance by
+    /// accumulating the original finest-level values directly. This quantity
+    /// is descriptive after data-dependent stopping, not an anytime bound.
     pub estimator_variance: f64,
 }
 
@@ -156,5 +160,197 @@ pub fn mlmc_estimate(
         levels,
         total_cost,
         estimator_variance: est_var,
+    }
+}
+
+/// Refusal while summarizing already-observed, coupled resolution levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoupledMlmcError {
+    /// A resolution ladder must contain at least one level.
+    EmptyLevels,
+    /// No physical observations were supplied.
+    EmptySamples,
+    /// An original level's unit cost was not finite and strictly positive.
+    InvalidCost { level: usize },
+    /// An original physical observation was not finite.
+    NonFiniteSample { sample: usize, level: usize },
+    /// A level correction or its centered moments could not be represented.
+    UnrepresentableMoments { level: usize },
+    /// The complete observed work could not be represented.
+    UnrepresentableCost,
+}
+
+impl core::fmt::Display for CoupledMlmcError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "coupled refinement summary: {self:?}")
+    }
+}
+impl std::error::Error for CoupledMlmcError {}
+
+/// Summarize one observed cohort evaluated on a common resolution ladder.
+///
+/// Each row contains the original physical values [P_0, ..., P_L] for ONE
+/// member, with the same excitation and physical horizon at every level.
+/// Level statistics describe P_0 and the differences P_l - P_(l-1).
+/// Costs are the original per-level solve costs, counting reused solves once.
+///
+/// Rows are consumed once, without calling a model, allocating more samples,
+/// or imposing an independence assumption on level means. The estimate and
+/// its sample variance come directly from P_L: this includes all cross-level
+/// covariances and preserves a small P_L even when large corrections cancel.
+/// A singleton has zero descriptive sample variance, not certainty.
+///
+/// Work is O(rows * levels), with O(levels) state and one report allocation.
+/// These are observed-sample diagnostics. Population uncertainty needs the
+/// caller's sampling assumptions; adaptive stopping needs its own confidence
+/// sequence. No bias, discretization, or anytime-coverage bound is supplied.
+///
+/// # Errors
+/// Empty levels/samples, nonpositive or nonfinite costs, nonfinite observations,
+/// or unrepresentable corrections, moments, or total work.
+pub fn coupled_mlmc_summary<const LEVELS: usize>(
+    values: impl IntoIterator<Item = [f64; LEVELS]>,
+    costs: [f64; LEVELS],
+) -> Result<MlmcReport, CoupledMlmcError> {
+    if LEVELS == 0 {
+        return Err(CoupledMlmcError::EmptyLevels);
+    }
+    for (level, &cost) in costs.iter().enumerate() {
+        if !cost.is_finite() || cost <= 0.0 {
+            return Err(CoupledMlmcError::InvalidCost { level });
+        }
+    }
+    let mut statistics = [RunningStats::default(); LEVELS];
+    let mut finest = RunningStats::default();
+    for (sample, row) in values.into_iter().enumerate() {
+        let mut previous = 0.0;
+        for (level, (&value, stats)) in row.iter().zip(&mut statistics).enumerate() {
+            if !value.is_finite() {
+                return Err(CoupledMlmcError::NonFiniteSample { sample, level });
+            }
+            let correction = value - previous;
+            if !correction.is_finite() {
+                return Err(CoupledMlmcError::UnrepresentableMoments { level });
+            }
+            stats.push(correction);
+            if !stats.mean.is_finite() || !stats.centered_sum_squares.is_finite() {
+                return Err(CoupledMlmcError::UnrepresentableMoments { level });
+            }
+            previous = value;
+        }
+        finest.push(previous);
+        if !finest.mean.is_finite() || !finest.centered_sum_squares.is_finite() {
+            return Err(CoupledMlmcError::UnrepresentableMoments { level: LEVELS - 1 });
+        }
+    }
+    if finest.samples == 0 {
+        return Err(CoupledMlmcError::EmptySamples);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let count = finest.samples as f64;
+    let mut total_cost = 0.0;
+    let levels = statistics
+        .iter()
+        .zip(costs)
+        .map(|(stats, cost)| {
+            total_cost = count.mul_add(cost, total_cost);
+            LevelStats {
+                samples: stats.samples,
+                mean: stats.mean,
+                variance: stats.sample_variance(),
+                cost,
+            }
+        })
+        .collect();
+    if !total_cost.is_finite() {
+        return Err(CoupledMlmcError::UnrepresentableCost);
+    }
+    Ok(MlmcReport {
+        estimate: finest.mean,
+        levels,
+        total_cost,
+        estimator_variance: finest.sample_variance() / count,
+    })
+}
+
+#[cfg(test)]
+mod coupled_tests {
+    use super::{CoupledMlmcError, coupled_mlmc_summary};
+
+    #[test]
+    fn g1_coupled_refinement_includes_cross_level_covariance() {
+        let report =
+            coupled_mlmc_summary([[1.0, 2.0], [2.0, 4.0], [3.0, 6.0], [4.0, 8.0]], [3.0, 6.0])
+                .unwrap();
+        assert_eq!(report.estimate, 5.0);
+        assert_eq!(report.total_cost, 36.0);
+        assert_eq!(report.levels[0].samples, 4);
+        assert_eq!(report.levels[1].samples, 4);
+        assert!((report.estimator_variance - 5.0 / 3.0).abs() < 1e-14);
+        let independent = report
+            .levels
+            .iter()
+            .map(|level| level.variance / 4.0)
+            .sum::<f64>();
+        assert!((report.estimator_variance - 2.0 * independent).abs() < 1e-14);
+
+        let opposing =
+            coupled_mlmc_summary([[100.0, 1.0], [200.0, 2.0], [300.0, 3.0]], [1.0; 2]).unwrap();
+        assert_eq!(opposing.estimate, 2.0);
+        assert!((opposing.estimator_variance - 1.0 / 3.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn g3_coupled_summary_retains_original_finest_values_and_visits_once() {
+        let report =
+            coupled_mlmc_summary([[1e200, 1.0], [1e200, 2.0], [1e200, 3.0]], [1.0; 2]).unwrap();
+        // Rounded coarse and correction means cancel to zero; the supplied
+        // physical finest responses still have mean two and variance one.
+        assert_eq!(report.levels[0].mean + report.levels[1].mean, 0.0);
+        assert_eq!(report.estimate, 2.0);
+        assert!((report.estimator_variance - 1.0 / 3.0).abs() < 1e-14);
+
+        let visits = core::cell::Cell::new(0);
+        let rows = [3.0, 5.0, 7.0].into_iter().map(|value| {
+            visits.set(visits.get() + 1);
+            [value]
+        });
+        let single = coupled_mlmc_summary(rows, [2.0]).unwrap();
+        assert_eq!(visits.get(), 3);
+        assert_eq!(single.estimate, 5.0);
+        assert_eq!(single.levels[0].variance, 4.0);
+        assert_eq!(single.estimator_variance, 4.0 / 3.0);
+        assert_eq!(single.total_cost, 6.0);
+    }
+
+    #[test]
+    fn g0_coupled_summary_refuses_invalid_or_unrepresentable_observations() {
+        assert!(matches!(
+            coupled_mlmc_summary([[0.0; 0]], []),
+            Err(CoupledMlmcError::EmptyLevels)
+        ));
+        assert!(matches!(
+            coupled_mlmc_summary(core::iter::empty::<[f64; 1]>(), [1.0]),
+            Err(CoupledMlmcError::EmptySamples)
+        ));
+        assert!(matches!(
+            coupled_mlmc_summary([[1.0]], [f64::INFINITY]),
+            Err(CoupledMlmcError::InvalidCost { level: 0 })
+        ));
+        assert!(matches!(
+            coupled_mlmc_summary([[1.0, f64::NAN]], [1.0; 2]),
+            Err(CoupledMlmcError::NonFiniteSample {
+                sample: 0,
+                level: 1
+            })
+        ));
+        assert!(matches!(
+            coupled_mlmc_summary([[-f64::MAX, f64::MAX]], [1.0; 2]),
+            Err(CoupledMlmcError::UnrepresentableMoments { level: 1 })
+        ));
+        assert!(matches!(
+            coupled_mlmc_summary([[0.0], [0.0]], [f64::MAX]),
+            Err(CoupledMlmcError::UnrepresentableCost)
+        ));
     }
 }
