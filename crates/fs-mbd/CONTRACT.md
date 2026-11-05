@@ -6229,6 +6229,47 @@ elastic preslip and heat allocation are outside this operation.
 breakaway, off-centre and third-body recoil, full-tensor frame covariance,
 native RATTLE continuation and atomic refusal.
 
+## Coupled finite-joint friction and native slider phases
+
+`rigid_rattle::distance::graph::joint_friction::apply_joint_friction_impulses`
+solves explicitly supplied axial friction capacities on several original
+`ArticulatedJoint::Revolute` and `ArticulatedJoint::Prismatic` joints at once.
+It retains the full projected port mobility
+`P M^-1 P^T - B^T (J M^-1 J^T)^-1 B`, including every cross response through
+the existing bilateral graph. One original bilateral factorization supplies
+all port reaction columns. Hinge coordinates use the original authored length
+`L`: rate `L * relative_spin`, impulse `angular_impulse / L`.
+The rail coordinate reuses the original moving-plane Jacobian along the
+carrier's joint-frame Z axis, including its rotating-axis/current-point terms
+and reciprocal force arms. Full body inertia and finite carrier recoil remain
+in the native response.
+
+The shared `fs-contact` bounded friction owner solves the complete port problem.
+Native point impulses, couples and summed bilateral reactions then act on the
+original bodies in increasing joint-index order. Actual final port rates,
+original bilateral closure, capacity support, native kinetic change, and
+linear/angular momentum increments are independently gated before returning the
+candidate. Signed midpoint work at one port may be positive through coupling;
+only the aggregate friction work is a mechanical-loss statement. Bilateral
+residual work is separately bounded and neither quantity allocates local heat.
+
+`apply_prismatic_friction_impulse` additionally provides explicit single-slider
+`Sliding` and `RestingDrive` phases. An exactly resting drive below its static
+capacity has exactly zero resultant impulse and work. Breakaway uses the
+kinetic capacity; pre-existing slip cannot borrow the static capacity or be
+captured by a numerical speed band. The existing single-revolute API retains
+its physical behavior and shares the same native momentum-accounting helper.
+
+These are fixed-pose events with caller-supplied impulse capacities, not a
+continuous trajectory, inferred load law or automatic multi-joint friction
+history. Up to six selected hinges/sliders fit the original 32 bilateral rows;
+other graph constraints share that same row budget. Port and cross-response
+matrices use bounded stack banks. Empty port sets preserve the admitted native
+state without factoring a friction mobility. Duplicate, locked/dependent,
+numerically non-SPD, nonrepresentable, cancelled, over-budget and unresolved
+events refuse without changing borrowed states. Numerical effort bounds never
+replace or shrink the authored physical friction capacities.
+
 ## Driven distance actuators inside finite ball-and-hinge mechanisms
 
 `rigid_rattle::distance::graph::advance_driven_joint_graph` accepts a single

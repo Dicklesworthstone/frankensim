@@ -592,12 +592,15 @@ fn relative_rate(
     Ok(value)
 }
 
-fn account(
+// Shared fixed-pose native momentum account for the single hinge and the
+// coupled revolute/prismatic friction owner. Keep the measured native momentum
+// differences and polarized work in one implementation.
+pub(in crate::rigid_rattle::distance::graph) fn account(
     before: &[RigidBodyState],
     after: &[RigidBodyState],
     properties: &[MassProperties],
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(Dd, Vec3, Vec3), RevoluteFrictionError> {
+) -> Result<(Dd, Vec3, Vec3), DistanceGraphError> {
     let mut work = MomentumWork::default();
     let mut linear = [Dd::ZERO; 3];
     let mut angular = [Dd::ZERO; 3];

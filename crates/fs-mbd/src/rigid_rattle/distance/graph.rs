@@ -60,6 +60,10 @@ pub use planes::PointPlaneJoint;
 mod prismatic;
 pub use prismatic::PrismaticJoint;
 
+/// Simultaneous finite-joint friction and explicit single-slider phases.
+#[path = "graph/friction.rs"]
+pub mod joint_friction;
+
 #[path = "graph/angular.rs"]
 mod angular;
 pub use angular::{AngularDrive, AngularDriveStep, RevoluteMotorJoint};
