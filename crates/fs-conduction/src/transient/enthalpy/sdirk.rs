@@ -1,6 +1,6 @@
 //! Alexander's two-stage, stiffly accurate SDIRK2 on the original h residual.
 //!
-//! With E_i(h)=m_i*h+Cfilm_i*T_i(h) and gamma=1-1/sqrt(2),
+//! With E_i(h)=m_i*h+Efilm_i(T_i(h)) and gamma=1-1/sqrt(2),
 //! E(h1)-E(h0)=gamma*dt*Q(h1), while
 //! E(h2)-E(h0)=dt*((1-gamma)*Q(h1)+gamma*Q(h2)). Both stages retain the
 //! ORIGINAL h0. A dual-joule carry enters the existing residual without ever
@@ -15,6 +15,8 @@ use super::heterogeneous::EnthalpyRadiation;
 use crate::interface::temperature::{TemperatureContactEvaluation, TemperatureContacts};
 use crate::interface::temperature::enthalpy::ContactEnthalpyNewtonConfig;
 use fs_math::dd::Dd;
+
+mod entropy;
 
 /// Diagonal coefficient and first physical stage time, matching the existing
 /// SDIRK2 gas-chemistry tableau without a dependency on that peer domain.
@@ -101,6 +103,14 @@ impl EnthalpyBackwardEuler<'_, '_> {
         &self, cx: &Cx<'_>, inputs: [EnthalpySdirk2Input<'_>; 2],
         old_h: &[f64], dt_s: f64, config: EnthalpyStepConfig,
     ) -> Result<EnthalpySdirk2Step, EnthalpyError> {
+        self.advance_sdirk2_accounted(cx, inputs, old_h, dt_s, config, false)
+            .map(|(step, _)| step)
+    }
+
+    fn advance_sdirk2_accounted(
+        &self, cx: &Cx<'_>, inputs: [EnthalpySdirk2Input<'_>; 2],
+        old_h: &[f64], dt_s: f64, config: EnthalpyStepConfig, with_entropy: bool,
+    ) -> Result<(EnthalpySdirk2Step, Option<entropy::SdirkEntropyEvaluation>), EnthalpyError> {
         validate_work(self.masses.len(), dt_s, config)?;
         config.newton.validate().map_err(EnthalpyError::Newton)?;
         config.max_newton_iterations.checked_mul(2)
@@ -117,6 +127,13 @@ impl EnthalpyBackwardEuler<'_, '_> {
         // Admit both samplings before the first costly Newton stage.
         for input in inputs {
             self.admit_step(cx, input.problem, old_h, diagonal_dt, config)?;
+            if with_entropy {
+                if !matches!(input.radiation, EnthalpyRadiation::None) {
+                    return Err(EnthalpyError::InvalidInput(
+                        "SDIRK2 conductive entropy requires a separate photon entropy owner"));
+                }
+                super::entropy::admit_boundary(cx, input.problem)?;
+            }
             self.sdirk_radiation(cx, input)?;
             if let Some((_, contact)) = input.contacts {
                 if input.interfaces.is_some() || contact.step != config {
@@ -126,7 +143,8 @@ impl EnthalpyBackwardEuler<'_, '_> {
                 contact.validate()?;
             }
         }
-        let first_stage = self.sdirk_stage(cx, inputs[0], old_h, diagonal_dt, config, None, None)?;
+        let (first_stage, first_entropy) = self.sdirk_stage(
+            cx, inputs[0], old_h, diagonal_dt, config, None, None, with_entropy)?;
         let mut carry = Vec::with_capacity(old_h.len());
         for (vertex, &input) in first_stage.net_nodal_input_w.iter().enumerate() {
             if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
@@ -134,8 +152,9 @@ impl EnthalpyBackwardEuler<'_, '_> {
             checked(joules)?;
             carry.push(joules);
         }
-        let second_stage = self.sdirk_stage(cx, inputs[1], old_h, diagonal_dt, config,
-            Some(&carry), Some(&first_stage.specific_enthalpy_j_kg))?;
+        let (second_stage, second_entropy) = self.sdirk_stage(
+            cx, inputs[1], old_h, diagonal_dt, config,
+            Some(&carry), Some(&first_stage.specific_enthalpy_j_kg), with_entropy)?;
         let integral = |a: f64, b: f64| checked(Dd::from_f64(first_weight) * Dd::from_f64(a)
             + Dd::from_f64(diagonal_dt) * Dd::from_f64(b));
         let source_j = integral(first_stage.source_w, second_stage.source_w)?;
@@ -157,9 +176,17 @@ impl EnthalpyBackwardEuler<'_, '_> {
         check_residual(&nodal_residual_j, config.energy_tolerance_j)?;
         check_energy(residual, config.energy_tolerance_j)?;
         poll(cx, old_h.len())?;
-        Ok(EnthalpySdirk2Step { duration_s: dt_s, first_stage, second_stage, source_j,
+        let entropy = if with_entropy {
+            Some(entropy::combine(
+                first_entropy.expect("requested first-stage entropy"),
+                second_entropy.expect("requested second-stage entropy"),
+                finite(first_weight / diagonal_dt)?,
+            )?)
+        } else { None };
+        Ok((EnthalpySdirk2Step { duration_s: dt_s, first_stage, second_stage, source_j,
             neumann_out_j, robin_out_j, radiation_out_j, dirichlet_in_j,
-            stored_energy_change_j: checked(stored)?, energy_residual_j: residual, nodal_residual_j })
+            stored_energy_change_j: checked(stored)?, energy_residual_j: residual, nodal_residual_j },
+            entropy))
     }
 
     pub(super) fn sdirk_radiation<'a>(&self, cx: &Cx<'_>, input: EnthalpySdirk2Input<'a>)
@@ -191,8 +218,9 @@ impl EnthalpyBackwardEuler<'_, '_> {
 
     #[allow(clippy::too_many_arguments)]
     fn sdirk_stage(&self, cx: &Cx<'_>, input: EnthalpySdirk2Input<'_>, old_h: &[f64],
-        dt: f64, config: EnthalpyStepConfig, carry: Option<&[Dd]>, guess: Option<&[f64]>)
-        -> Result<EnthalpySdirk2Stage, EnthalpyError>
+        dt: f64, config: EnthalpyStepConfig, carry: Option<&[Dd]>, guess: Option<&[f64]>,
+        with_entropy: bool)
+        -> Result<(EnthalpySdirk2Stage, Option<entropy::StageEntropy>), EnthalpyError>
     {
         let radiation = self.sdirk_radiation(cx, input)?;
         let base = StepContext { storage: self, cx, problem: input.problem,
@@ -207,7 +235,8 @@ impl EnthalpyBackwardEuler<'_, '_> {
         };
         let context = StepContext { interfaces: contacts.as_ref()
             .map(TemperatureContactEvaluation::frozen_interfaces).or(input.interfaces), ..base };
-        let mut stage = finish_stage(&context, h, newton, carry, config.energy_tolerance_j)?;
+        let (mut stage, entropy) = finish_stage(
+            &context, h, newton, carry, config.energy_tolerance_j, with_entropy)?;
         if let Some((_, contact_config)) = input.contacts {
             if stage.stage_residual_norm_j > contact_config.residual_tolerance_j {
                 return Err(EnthalpyError::EndpointResidual { residual_j: stage.stage_residual_norm_j,
@@ -215,7 +244,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             }
         }
         stage.physical_contacts = contacts;
-        Ok(stage)
+        Ok((stage, entropy))
     }
 }
 
@@ -240,7 +269,8 @@ fn finish_stage(
     newton: NewtonReport,
     carry: Option<&[Dd]>,
     tolerance_j: f64,
-) -> Result<EnthalpySdirk2Stage, EnthalpyError> {
+    with_entropy: bool,
+) -> Result<(EnthalpySdirk2Stage, Option<entropy::StageEntropy>), EnthalpyError> {
     context.check_prescribed_values(&h)?;
     let temperature = context.temperatures(&h)?;
     let scales = context.phase_scales(&h)?;
@@ -253,6 +283,7 @@ fn finish_stage(
     let mut storage = Dd::ZERO;
     let mut carried = Dd::ZERO;
     let mut reaction = Dd::ZERO;
+    let mut entropy_terms = with_entropy.then(entropy::StageEntropyTerms::default);
     for (i, &value) in h.iter().enumerate() {
         if i % ASSEMBLY_TILE == 0 { poll(context.cx, i)?; }
         let delta = context.storage.storage_change_dd(
@@ -267,7 +298,11 @@ fn finish_stage(
         let outward = match &radiation { Some((load, _)) => finite(outward + load[i])?, None => finite(outward)? };
         let known = finite(system.load[i] - outward)?;
         let residual = delta - prior - Dd::from_f64(context.dt) * Dd::from_f64(known);
-        if context.is_prescribed(i) {
+        let prescribed = context.is_prescribed(i);
+        if let Some(terms) = &mut entropy_terms {
+            terms.add(delta, prior, residual, temperature[i], prescribed)?;
+        }
+        if prescribed {
             reaction = reaction + residual / Dd::from_f64(context.dt);
             net_nodal_input_w.push(checked((delta - prior) / Dd::from_f64(context.dt))?);
             nodal_residual.push(0.0);
@@ -290,12 +325,15 @@ fn finish_stage(
     };
     let (pointwise_radiation, pointwise_enclosure_radiation) = radiation
         .map_or((None, None), |(_, report)| report.into_reports());
+    let entropy = entropy_terms.map(|terms| entropy::finish_stage(
+        context, &h, &system, &temperature, &dofs, terms,
+    )).transpose()?;
     poll(context.cx, h.len())?;
-    Ok(EnthalpySdirk2Stage { specific_enthalpy_j_kg: h, temperature, liquid_mass_fraction,
+    Ok((EnthalpySdirk2Stage { specific_enthalpy_j_kg: h, temperature, liquid_mass_fraction,
         source_w: finite(energy.source_w)?, neumann_out_w: finite(energy.neumann_out_w)?,
         robin_out_w: finite(energy.robin_out_w)?, radiation_out_w: finite(radiation_out_w)?,
         dirichlet_in_w: checked(reaction)?, robin_fluxes, contact_fluxes, pointwise_radiation,
         pointwise_enclosure_radiation, physical_contacts: None, newton, stage_residual_norm_j,
-        stage_energy_residual_j, net_nodal_input_w })
+        stage_energy_residual_j, net_nodal_input_w }, entropy))
 }
 

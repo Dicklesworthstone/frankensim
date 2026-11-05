@@ -4554,3 +4554,37 @@ work. Spatially varying Robin-bath entropy and photon entropy require their
 own integration and are not inferred by this interface. Acceptance is a check
 of this admitted discrete state, not a whole-system second-law certificate or
 a continuum, mesh-monotonicity or time-accuracy theorem.
+
+
+## Entropy admission on actual second-order spatial stages
+
+`advance_sdirk2_with_entropy` is available on uniform and assigned heterogeneous
+enthalpy storage. It reuses the original two nonlinear SDIRK2 stages, their
+final physical operators, source-dependent contacts and original film calorics.
+The prior-stage dual-joule carry stays inside the stage equation; it is never
+added as a heat source or evaluated as an extrapolated material history.
+
+Every physical source, bath, bulk/contact and Robin entropy contribution uses
+its actual tableau temperature and the same positive weight as energy. Exact
+material and film entropy storage is counted once, from original to final state.
+The native double-double stage loop supplies prescribed-bath reactions and free
+residuals, including subtraction of prior heat on constrained nodes.
+
+With tau=gamma*dt and r=(1-gamma)*dt/tau, the signed temporal defect is
+deltaS - r*sum(deltaE1/T1) - sum((deltaE2-carry)/T2). The separate algebraic
+account is r*sum(residual1/T1)+sum(residual2/T2), over the actual free rows.
+These are tableau-stage terms, not final residual/Tfinal. The temporal defect
+can be negative even during ordinary physical cooling and is never clipped or
+converted to material heating. The combined identity is independently closed.
+
+The optional gate checks each weighted stage's signed bulk/contact and Robin
+production before checking the whole interval's storage-minus-input and closure.
+An energy-conserving coarse prescribed-temperature history can fail this gate;
+no state or partial interval is returned on refusal. Photon entropy requires
+a separate owner and is rejected before the first nonlinear solve. The existing
+energy-only API takes the same implementation with entropy disabled. Additional
+work consists of scalar accumulation in the existing stage loop and one entropy
+pass per converged stage, with no additional spatial assembly or Newton solve.
+Five focused regression definitions cover an independent uniform Robin ODE,
+latent and film storage, enthalpy-datum shifts, heterogeneous reference masses,
+negative discrete spatial production, and carry-dependent prescribed-bath refusal.

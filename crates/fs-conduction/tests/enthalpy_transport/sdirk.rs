@@ -115,3 +115,6 @@ fn sdirk2_prescribed_stage_storage_and_sources_are_integrated_once() {
         assert_eq!(result.second_stage.source_w, -50.0 * VOLUME);
     });
 }
+
+#[path = "sdirk_entropy.rs"]
+mod entropy;

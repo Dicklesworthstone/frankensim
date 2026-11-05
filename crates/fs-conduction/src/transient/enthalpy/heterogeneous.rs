@@ -201,6 +201,17 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         self.inner.advance_sdirk2(cx, inputs, old_h, dt_s, config)
     }
 
+    /// Advance both original heterogeneous SDIRK2 stages with additional
+    /// physical entropy admission on their native time quadrature.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sdirk2_with_entropy(
+        &self, cx: &Cx<'_>, inputs: [super::sdirk::EnthalpySdirk2Input<'_>; 2],
+        old_h: &[f64], dt_s: f64, config: EnthalpyStepConfig, entropy_tolerance_j_k: f64,
+    ) -> Result<(super::sdirk::EnthalpySdirk2Step, super::entropy::EnthalpyEntropyBalance),
+        super::entropy::EnthalpyEntropyError> {
+        self.inner.advance_sdirk2_with_entropy(cx, inputs, old_h, dt_s, config, entropy_tolerance_j_k)
+    }
+
     /// Solve and bind both SDIRK2 stages on the original heterogeneous charts.
     /// Reference inventory, material parameters and the time grid stay fixed.
     /// The radiation entry allowance covers both retained stage tangents.
