@@ -34,6 +34,8 @@ pub mod combined;
 pub mod creep;
 /// Traction-free thickness/shear relaxation of the original finite return map.
 pub mod plane_stress;
+/// Pressure-sensitive finite deformation with retained plastic volume.
+pub mod porous;
 /// Explicit-time Perzyna kinetics on this same finite return and tangent owner.
 pub mod rate;
 /// Strict, explicit model-card binding for this exact Kirchhoff-yield law.
@@ -817,23 +819,7 @@ impl FiniteJ2 {
         // rounds to one. Forming that sum first loses its normal strain.
         let reference_increment = left_metric_increment(f);
         let reference_is_small = matrix_norm_inf(&reference_increment) <= SMALL_METRIC;
-        let history_increment = subtract_identity(&cp_inv);
-        let spectrum = if reference_is_small && matrix_norm_inf(&history_increment) <= SMALL_METRIC
-        {
-            // F Cp^-1 F^T - I = (F F^T - I) + F (Cp^-1 - I) F^T.
-            // No unit-sized diagonal enters the second term.
-            let correction = multiply(&multiply(f, &history_increment), &transpose(f));
-            let increment = symmetric(&core::array::from_fn(|i| {
-                reference_increment[i] + correction[i]
-            }));
-            if matrix_norm_inf(&increment) <= SMALL_METRIC {
-                Spectrum::near_identity(&increment)
-            } else {
-                Spectrum::spd(&multiply(&multiply(f, &cp_inv), &transpose(f)))?
-            }
-        } else {
-            Spectrum::spd(&multiply(&multiply(f, &cp_inv), &transpose(f)))?
-        };
+        let spectrum = elastic_metric_spectrum(f, &cp_inv, &reference_increment)?;
         let log_j = if reference_is_small {
             // det(I + A) - 1 = tr(A) + I2(A) + det(A). This retains
             // second-order volume changes even when the reported J rounds to 1.
@@ -849,6 +835,28 @@ impl FiniteJ2 {
             deviator,
         })
     }
+}
+
+/// Shared metric preparation only; each material owns its history/volume law.
+fn elastic_metric_spectrum(
+    f: &[f64; 9],
+    cp_inv: &[f64; 9],
+    reference_increment: &[f64; 9],
+) -> Result<Spectrum, FiniteJ2Error> {
+    let history_increment = subtract_identity(cp_inv);
+    if matrix_norm_inf(reference_increment) <= SMALL_METRIC
+        && matrix_norm_inf(&history_increment) <= SMALL_METRIC
+    {
+        // F Cp^-1 F^T - I = (F F^T - I) + F (Cp^-1 - I) F^T.
+        let correction = multiply(&multiply(f, &history_increment), &transpose(f));
+        let increment = symmetric(&core::array::from_fn(|i| {
+            reference_increment[i] + correction[i]
+        }));
+        if matrix_norm_inf(&increment) <= SMALL_METRIC {
+            return Ok(Spectrum::near_identity(&increment));
+        }
+    }
+    Spectrum::spd(&multiply(&multiply(f, cp_inv), &transpose(f)))
 }
 
 struct ElasticEndpoint {

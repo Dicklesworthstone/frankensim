@@ -15806,3 +15806,43 @@ existing-history reset, all-plane mixed-mode criterion or experimental
 calibration. Focused regression definitions cover physical plane discovery,
 source/context mismatch, temperature-dependent onset and bounded refusals; Rust
 parsing/formatting passed, while compiled execution remains outstanding.
+
+## Finite porous compaction and native potential coupling
+
+`plastic::finite::porous::FinitePorous` adds multiplicative
+pressure-sensitive plasticity with quadratic Hencky elastic storage and
+linear energetic hardening. Its explicit coefficients act on Kirchhoff
+stress; energy and yield heat are per original reference volume. An authored
+finite law is required: a small-strain or Cauchy-yield calibration is not
+silently reinterpreted.
+
+The accepted SPD inverse plastic metric retains its determinant. Trials use
+`b_trial = F Cp^-1 F^T`, the original finite spectral/logarithm owner, and
+the same scalar pressure-sensitive return kernel as `plastic::porous`.
+The corrected metric is `F^-1 exp(2 e_returned) F^-T`, without determinant
+normalization. The law reports both total and plastic volume ratios.
+History admission includes finite SPD resolution, explicit elastic/plastic
+log-strain and accumulation bounds, positive total Jacobian, and the
+necessary weighted SPD-distance reachability bound. Hydrostatic compression
+can retain a finite permanent volume loss; the zero-sensitivity limit
+retains native finite J2 behavior.
+
+The analytic full Piola tangent differentiates the same return through the
+Frechet matrix logarithm, including the inverse-deformation geometric term.
+The reduced incremental potential is stored energy plus physical yield
+dissipation. `FrozenPorousTrial` implements the existing
+`FiniteStrainPotential` interface, borrowing one accepted history through
+all Newton and line-search evaluations. A trial never commits history.
+Callers admit all material points and their full coupled step before
+publishing returned candidates. The endpoint Piola work defect is distinct
+from physical heat; this law does not assert that the finite-step defect is
+nonnegative.
+
+This is isothermal, rate independent, symmetric in mean Kirchhoff stress,
+and bounded by explicitly supplied applicability limits. It does not infer
+evolving porosity, cell-wall densification, pore-fluid pressure, tensile
+damage, or experimental foam accuracy. No mixed-pressure or locking-free
+element claim is added. Numerical G0/G3 fixtures cover independent
+hydrostatic volume/storage/heat, all nine tangent columns and potential
+gradient after mixed history, objectivity and exact holds, native J2,
+logarithmic small-strain correspondence, unit scaling and refusals.

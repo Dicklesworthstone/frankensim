@@ -7964,3 +7964,22 @@ The focused regression definitions in `tests/brittle_tet_solid/path.rs` cover
 complete Gc-times-area failure, retained unloading/reclosure, force histories and
 transactional refusal. Rust parsing/formatting and independent bilinear arithmetic
 checks passed; native compiled execution remains outstanding.
+
+## Finite porous compression through the native tetrahedral solver
+
+`fs_material::plastic::finite::porous::FrozenPorousTrial` is consumed by
+the existing generic `HyperTetProblem` and its per-element
+`HyperelasticLawField`. Its accepted material metric remains borrowed and
+immutable throughout assembly, Newton and line searches. The caller checks
+all returned material candidates before committing any history. The solver's
+reported potential is the reduced incremental potential; physical stored
+energy and plastic heat remain separate in the native material response.
+
+The focused `hyper_porous` regression drives all six deformational degrees
+of freedom of a P1 tetrahedron with dead referential force resultants.
+It compresses to stretch 0.8 in all directions, unloads to retain permanent
+volume loss, and reloads elastically. Independent hydrostatic formulas check
+deformation, Piola/Cauchy stress, current/plastic volume, storage and physical
+heat. This uses the original geometry, constitutive adapter and nonlinear
+solver. It does not provide automatic retained-body stepping, contact,
+remeshing, finite-porosity densification or a locking-free mixed element.

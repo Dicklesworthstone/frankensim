@@ -18,8 +18,11 @@
 /// Fixed-condition material sources for the native porous plasticity law.
 pub mod source;
 
+pub(super) mod return_map;
+use return_map::ReturnParameters as Moduli;
+
 use super::energy::{EnergyTolerances, IncrementEnergy, StoredEnergy};
-use crate::elastic::{IsotropicElastic, bulk_shear_stiffness};
+use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Tangent6, Voigt};
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
@@ -61,16 +64,6 @@ pub struct PorousEnergyIncrement {
     pub strain: Voigt,
     pub response: PorousResponse,
     pub energy: IncrementEnergy,
-}
-
-#[derive(Clone, Copy)]
-struct Moduli {
-    bulk: f64,
-    shear: f64,
-    c: f64,
-    a2: f64,
-    dev_return: f64,
-    vol_return: f64,
 }
 
 fn invalid(what: &str) -> MaterialError {
@@ -133,36 +126,13 @@ impl PorousPlasticity {
         }
         let bulk = e.youngs / (3.0 * (1.0 - 2.0 * e.poisson));
         let shear = e.youngs / (2.0 * (1.0 + e.poisson));
-        let a2 = self.pressure_sensitivity * self.pressure_sensitivity;
-        let c = 1.0 + a2 / 9.0;
-        let dev_return = 3.0 * (shear / c);
-        let vol_return = bulk * (a2 / c);
-        if !positive(bulk)
-            || !positive(shear)
-            || !a2.is_finite()
-            || !positive(c)
-            || !positive(dev_return)
-            || !vol_return.is_finite()
-            || (self.pressure_sensitivity > 0.0 && !positive(vol_return))
-            || !(self.hardening + dev_return).is_finite()
-            || !(self.hardening + vol_return).is_finite()
-            || bulk_shear_stiffness(bulk, shear)
-                .iter()
-                .flatten()
-                .any(|v| !v.is_finite())
-        {
-            return Err(MaterialError::Parameters {
-                what: "porous elastic or return moduli are unrepresentable".into(),
-            });
-        }
-        Ok(Moduli {
+        Moduli::new(
             bulk,
             shear,
-            c,
-            a2,
-            dev_return,
-            vol_return,
-        })
+            self.yield_stress,
+            self.hardening,
+            self.pressure_sensitivity,
+        )
     }
 
     fn admit(
@@ -227,129 +197,24 @@ impl PorousPlasticity {
     ) -> Result<PorousResponse, MaterialError> {
         let m = self.moduli()?;
         let elastic = self.admit(strain, state, m)?;
-        let (s_trial, p_trial, q_trial) = self.predictor(&elastic, m);
-        let root_c = det::sqrt(m.c);
-        let qn = q_trial / root_c;
-        let pn = (self.pressure_sensitivity / root_c) * p_trial;
-        let phi_trial = hypot(qn, pn);
-        let y0 = self.yield_stress + self.hardening * state.alpha;
-        if !phi_trial.is_finite() || !positive(y0) || s_trial.iter().any(|x| !x.is_finite()) {
-            return Err(invalid("trial stress or yield strength is unrepresentable"));
-        }
-        if phi_trial <= y0 {
-            return Ok(PorousResponse {
-                stress_pa: core::array::from_fn(|i| s_trial[i] + if i < 3 { p_trial } else { 0.0 }),
-                tangent_pa: bulk_shear_stiffness(m.bulk, m.shear),
-                state: state.clone(),
-                plastic_multiplier: 0.0,
-                yield_residual_pa: phi_trial - y0,
-            });
-        }
-        let (minimum, maximum) = match (qn != 0.0, pn != 0.0) {
-            (true, true) => (
-                m.dev_return.min(m.vol_return),
-                m.dev_return.max(m.vol_return),
-            ),
-            (true, false) => (m.dev_return, m.dev_return),
-            (false, true) => (m.vol_return, m.vol_return),
-            _ => return Err(invalid("nonzero yielding requires a represented stress")),
+        let returned = m.response(&elastic, state.alpha, 0.0)?;
+        let candidate = if returned.multiplier == 0.0 {
+            state.clone()
+        } else {
+            PorousState {
+                plastic_strain: core::array::from_fn(|i| {
+                    state.plastic_strain[i] + returned.plastic_increment[i]
+                }),
+                alpha: returned.alpha,
+            }
         };
-        let mut lower = (phi_trial - y0) / (self.hardening + maximum);
-        let mut upper = (phi_trial - y0) / (self.hardening + minimum);
-        if !lower.is_finite() || !positive(upper) {
-            return Err(invalid("return bracket is unrepresentable"));
-        }
-        // The lower bound is near the J2 root when sensitivity is tiny. Starting
-        // there avoids bisecting an enormous pressure-axis upper bound.
-        let mut dl = lower;
-        let mut solved = false;
-        for _ in 0..96 {
-            let dd = y0 + (self.hardening + m.dev_return) * dl;
-            let dp = y0 + (self.hardening + m.vol_return) * dl;
-            let (u, v) = (qn / dd, pn / dp);
-            let value = hypot(u, v);
-            if !(positive(dd) && positive(dp) && value.is_finite()) {
-                return Err(invalid("scalar return left the finite set"));
-            }
-            let residual = value - 1.0;
-            if residual.abs() <= 32.0 * f64::EPSILON {
-                solved = true;
-                break;
-            }
-            if residual > 0.0 {
-                lower = dl;
-            } else {
-                upper = dl;
-            }
-            let derivative = -(u * u * ((self.hardening + m.dev_return) / dd)
-                + v * v * ((self.hardening + m.vol_return) / dp))
-                / value;
-            let newton = dl - residual / derivative;
-            dl = if newton.is_finite() && newton > lower && newton < upper {
-                newton
-            } else {
-                0.5 * lower + 0.5 * upper
-            };
-        }
-        if !solved {
-            return Err(invalid("bounded scalar return did not converge"));
-        }
-        let y = y0 + self.hardening * dl;
-        let dd = y0 + (self.hardening + m.dev_return) * dl;
-        let dp = y0 + (self.hardening + m.vol_return) * dl;
-        let theta_d = y / dd;
-        let theta_p = y / dp;
-        let sd = s_trial.map(|v| v / dd);
-        let pd = p_trial / dp;
-        let flow: Voigt = core::array::from_fn(|i| {
-            1.5 / m.c * sd[i] + if i < 3 { (m.a2 / m.c) * pd / 3.0 } else { 0.0 }
-        });
-        let candidate = PorousState {
-            plastic_strain: core::array::from_fn(|i| state.plastic_strain[i] + dl * flow[i]),
-            alpha: state.alpha + dl,
-        };
-        if !(candidate.alpha.is_finite() && candidate.alpha > state.alpha) {
-            return Err(invalid(
-                "plastic increment cannot advance the represented history",
-            ));
-        }
         self.admit(strain, &candidate, m)?;
-        let stress_pa = core::array::from_fn(|i| {
-            theta_d * s_trial[i] + if i < 3 { theta_p * p_trial } else { 0.0 }
-        });
-        // Differentiate h = .5[(qn/Dd)^2 + (pn/Dp)^2 - 1] = 0.
-        // h_lambda=-denominator, h_strain=v, sigma_lambda=-Y0*v.
-        let v: Voigt = core::array::from_fn(|i| {
-            (m.dev_return / dd) * sd[i] + if i < 3 { (m.vol_return / dp) * pd } else { 0.0 }
-        });
-        let denominator = (qn / dd).powi(2) * ((self.hardening + m.dev_return) / dd)
-            + (pn / dp).powi(2) * ((self.hardening + m.vol_return) / dp);
-        if !positive(denominator) {
-            return Err(invalid("consistent return derivative is singular"));
-        }
-        let mut tangent_pa = bulk_shear_stiffness(m.bulk * theta_p, m.shear * theta_d);
-        for (i, row) in tangent_pa.iter_mut().enumerate() {
-            for (j, value) in row.iter_mut().enumerate() {
-                let weight = if j < 3 { 1.0 } else { 2.0 };
-                *value -= (y0 / denominator) * v[i] * v[j] * weight;
-            }
-        }
-        let yield_residual_pa = hypot(qn * theta_d, pn * theta_p)
-            - (self.yield_stress + self.hardening * candidate.alpha);
-        if stress_pa
-            .iter()
-            .chain(tangent_pa.iter().flatten())
-            .any(|v| !v.is_finite())
-            || !yield_residual_pa.is_finite()
-        {
-            return Err(invalid("corrected stress or tangent is unrepresentable"));
-        }
         Ok(PorousResponse {
-            stress_pa,
-            tangent_pa,
+            stress_pa: returned.stress,
+            tangent_pa: returned.tangent,
             state: candidate,
-            plastic_multiplier: dl,
-            yield_residual_pa,
+            plastic_multiplier: returned.multiplier,
+            yield_residual_pa: returned.yield_residual,
         })
     }
 
