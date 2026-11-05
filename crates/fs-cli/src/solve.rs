@@ -318,7 +318,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// throughout live-contact capacity histories through the same complete dual.
 /// Version 124 composes those histories with natural and transported-air
 /// sensitivities while retaining the solid and separate air-energy gates.
-pub const SOLVE_DRIVER_VERSION: u32 = 124;
+/// Version 125 reverses original live-contact total-enthalpy endpoints through
+/// latent storage, phase conductivity and prescribed/natural/air boundaries.
+pub const SOLVE_DRIVER_VERSION: u32 = 125;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

@@ -311,7 +311,7 @@ pub(in crate::solve::transient) fn finish(
     // identities. Ordinary capacity reports do not acquire this extra work.
     let mut material_controls = if objective.material_controls() {
         Some(if let Some(contacts) = temperature_contacts {
-            material_controls::Controls::new_live_capacity(
+            material_controls::Controls::new_live(
                 cx, spec, problem, contacts, labels, region_ids, &tape.states[0], deadline,
             )?
         } else {

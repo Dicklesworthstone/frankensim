@@ -398,26 +398,23 @@ pub(super) fn admit(
     let capacity_contact = transient.is_some() && !enthalpy_contact;
     // The capacity owner differentiates the unchanged accepted R(T) endpoint.
     // Natural, air and mean-radiation feedback compose with that same owner.
-    // Total enthalpy still needs its distinct complete trajectory derivative.
+    // Total enthalpy retains its own energetic history and full h tangent.
+    let trajectory_outputs = spec.outputs.iter().flatten()
+        .filter(|output| output.name.contains("adjoint"))
+        .all(|output| matches!(output.name.as_str(),
+            "temperature-final-adjoint" | "temperature-sampled-peak-adjoint"
+                | "temperature-final-material-adjoint" | "temperature-sampled-peak-material-adjoint"));
     let capacity_adjoint = capacity_contact
         && setup.radiation.as_ref().is_none_or(|row|
             row.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise))
         && setup.enclosure_radiation.as_ref().is_none_or(|row|
             row.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise))
-        && spec
-            .outputs
-            .iter()
-            .flatten()
-            .filter(|output| output.name.contains("adjoint"))
-            .all(|output| {
-                matches!(
-                    output.name.as_str(),
-                    "temperature-final-adjoint" | "temperature-sampled-peak-adjoint"
-                        | "temperature-final-material-adjoint" | "temperature-sampled-peak-material-adjoint"
-                )
-            });
+        && trajectory_outputs;
+    let enthalpy_adjoint = enthalpy_contact && trajectory_outputs
+        && setup.radiation.is_none() && setup.enclosure_radiation.is_none();
+    let trajectory_adjoint = capacity_adjoint || enthalpy_adjoint;
     let unsupported_transient = transient.is_some()
-        && !capacity_adjoint
+        && !trajectory_adjoint
         && spec
             .outputs
             .iter()
@@ -436,7 +433,7 @@ pub(super) fn admit(
         !((enthalpy_contact && pointwise)
             || (!pointwise && (transient.is_none() || capacity_contact)))
     });
-    let unsupported_adjoint = adjoint && transient.is_some() && !capacity_adjoint;
+    let unsupported_adjoint = adjoint && transient.is_some() && !trajectory_adjoint;
     if unsupported_transient
         || unsupported_radiation
         || unsupported_adjoint
@@ -448,8 +445,8 @@ pub(super) fn admit(
     {
         return Err(conduction_error(
             "cli-solve-conduction-contact-composition",
-            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed/open enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed/open enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node and regional volume-mean adjoints admit steady prescribed, natural or transported-air boundaries with optional area-mean ambient or closed/open enclosure radiation, whole-law contact controls and prescribed-temperature controls. Capacity final/sampled-peak adjoints and their explicit material-control reports admit prescribed, scheduled, natural and transported-air boundaries with optional area-mean ambient or closed/open enclosure radiation; this requested composition needs additional complete contact feedback",
-            "use an admitted storage and boundary composition; steady contact adjoints require prescribed, natural or transported-air boundaries with optional area-mean ambient or closed/open enclosure radiation and no pointwise radiation; capacity contact adjoints require temperature-final-adjoint, temperature-sampled-peak-adjoint or their explicit material-adjoint variants with prescribed, scheduled, natural or transported-air boundaries and optional area-mean ambient or closed/open enclosure radiation, with no pointwise radiation; steady and capacity radiation admit area-mean ambient and closed/open enclosure exchange; pointwise emission requires total enthalpy; never replace the contact law by a frozen resistance",
+            "temperature-varying native contact admits steady base/uniform-ladder solves with prescribed, natural or airflow convection and optional area-mean ambient or closed/open enclosure radiation, or capacity/total-enthalpy transient solves with prescribed, scheduled, natural or transported-air boundaries; capacity also admits area-mean ambient and closed/open enclosure radiation, while total enthalpy admits pointwise ambient/enclosure radiation. Selected-node and regional volume-mean adjoints admit steady prescribed, natural or transported-air boundaries with optional area-mean ambient or closed/open enclosure radiation, whole-law contact controls and prescribed-temperature controls. Capacity final/sampled-peak adjoints and their explicit material-control reports admit prescribed, scheduled, natural and transported-air boundaries with optional area-mean ambient or closed/open enclosure radiation. Total-enthalpy final/sampled-peak adjoints admit prescribed, scheduled, natural or transported-air boundaries without radiation; this requested composition needs additional complete contact feedback",
+            "use an admitted storage and boundary composition; steady contact adjoints require prescribed, natural or transported-air boundaries with optional area-mean ambient or closed/open enclosure radiation and no pointwise radiation; capacity contact adjoints require temperature-final-adjoint, temperature-sampled-peak-adjoint or their explicit material-adjoint variants with prescribed, scheduled, natural or transported-air boundaries and optional area-mean ambient or closed/open enclosure radiation, with no pointwise radiation; total-enthalpy contact adjoints admit the same trajectory output names and prescribed, scheduled, natural or transported-air boundaries without radiation; steady and capacity radiation admit area-mean ambient and closed/open enclosure exchange; pointwise emission requires total enthalpy; never replace the contact law by a frozen resistance",
         ));
     }
     Ok(())

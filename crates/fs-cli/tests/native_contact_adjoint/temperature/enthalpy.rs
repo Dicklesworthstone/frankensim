@@ -8,6 +8,8 @@ mod convection;
 mod airflow;
 #[path = "enthalpy/surface_radiation.rs"]
 mod surface_radiation;
+#[path = "transient/enthalpy/adjoint.rs"]
+mod adjoint;
 use fs_project::{
     ConductionEnclosure, ConductionTransient, EnclosureRadiatingSurface,
     EnclosureViewFactorEvidence, RadiationSpatialModel, ThermalBoundaryCondition,

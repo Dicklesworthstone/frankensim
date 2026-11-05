@@ -1,5 +1,41 @@
 # CONTRACT: fs-cli
 
+## Live-contact total-enthalpy trajectory adjoints — driver 125
+
+Final-temperature and sampled-peak reports now reverse the original accepted
+total-enthalpy history with live temperature-dependent contact laws. Their
+material-report aliases retain the same controls. Prescribed and scheduled
+boundaries, natural convection and transported air compose through the native
+heterogeneous endpoint owner. This increment admits no radiative live-contact
+enthalpy adjoint; existing forward pointwise-radiation support is unchanged.
+
+The temperature objective maps to specific enthalpy once. Subsequent history
+carry remains in enthalpy coordinates, including through latent plateaus. Each
+consumed endpoint re-queries its original source laws, checks the retained
+physical residual and energy targets, and attaches both contact-temperature
+partials and the phase-chart response to the complete bulk/phase tangent.
+Natural and air audits include the actual contact flux; transported air also
+passes its independent energy check. No accepted state or old history is
+replaced, and prescribed-temperature columns retain complete contact feedback.
+
+Initial enthalpy, delivered power, reference density, regional conductivity,
+whole resistance-law multipliers and admitted boundary controls use the same
+physical dual. Native phase-aware conductivity bars and masked nodal-load bars
+already include the timestep once; material aggregation adds no extra factor.
+The original live source owner survives the whole selected prefix. CLI contact
+laws remain temperature dependent at fixed joint context; phase-dependent
+contact resistance is outside this lowering. Additional contact/source workspace
+is charged before the forward trajectory. Driver 125 invalidates older cached
+producer results.
+
+Imported-project regressions perturb complete curve/Newton and source-surface
+histories through unequal regional densities and real latent storage, covering
+final and interior sampled peaks, initial-enthalpy, source, density, conductivity
+and whole-law resistance controls. An initial selected peak retains identities
+and exactly zero future influence. Original field, phase and energy receipts
+remain equal. Syntax and source review are complete; these new numerical
+regressions still require runtime execution.
+
 ## Cooling controls through live contact histories — driver 124
 
 Final-time and sampled-peak capacity adjoints, including their explicit

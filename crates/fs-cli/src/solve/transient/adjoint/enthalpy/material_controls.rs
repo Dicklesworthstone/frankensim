@@ -95,14 +95,14 @@ impl<'m, 'c> Controls<'m, 'c> {
             ids, initial_temperature, deadline)
     }
 
-    /// Bind capacity controls to the original source laws, not one frozen R(T).
+    /// Bind trajectory controls to the original source laws, not one frozen R(T).
     /// Every accepted endpoint re-queries this SAME owner. Its mesh, paired
     /// traces, source pins and nonthermal context cannot be replaced by a
     /// per-step interface object carrying only matching names and face counts.
     /// Initial binding needs physical source values, but no derivative or solve;
     /// an initial sampled peak therefore retains exactly zero future controls.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::solve::transient::adjoint) fn new_live_capacity(
+    pub(in crate::solve::transient::adjoint) fn new_live(
         cx: &Cx<'_>,
         spec: &ProjectSpec,
         problem: ConductionProblem<'m>,
@@ -262,8 +262,10 @@ impl<'m, 'c> Controls<'m, 'c> {
         nodal_load_adjoint: &[f64],
         deadline: Option<(Instant, f64)>,
     ) -> Result<(), SolveRefusal> {
+        poll(cx, deadline)?;
+        let physical = self.evaluate_live(cx, problem, interfaces, temperature)?;
         self.add_scaled(
-            cx, problem, interfaces, None, temperature, element_conductivity,
+            cx, problem, interfaces, physical.as_ref(), temperature, element_conductivity,
             nodal_load_adjoint, 1.0, deadline,
         )
     }
@@ -292,15 +294,7 @@ impl<'m, 'c> Controls<'m, 'c> {
         deadline: Option<(Instant, f64)>,
     ) -> Result<(), SolveRefusal> {
         poll(cx, deadline)?;
-        let physical = match self.contact_owner {
-            ContactOwner::Fixed(_) => None,
-            ContactOwner::Live(contacts) => {
-                if interfaces.is_some() {
-                    return Err(bad("live capacity controls cannot substitute a frozen interface owner"));
-                }
-                Some(contacts.evaluate(cx, problem.boundary, temperature).map_err(lower)?)
-            },
-        };
+        let physical = self.evaluate_live(cx, problem, interfaces, temperature)?;
         let conductivity = fs_conduction::adjoint::RobinResponse::conductivity_scale_pullback(
             cx, problem, temperature, nodal_load_adjoint, self.mesh.element_count(),
         ).map_err(lower)?;
@@ -308,6 +302,28 @@ impl<'m, 'c> Controls<'m, 'c> {
             cx, problem, interfaces, physical.as_ref(), temperature, &conductivity,
             nodal_load_adjoint, 1.0, deadline,
         )
+    }
+
+    /// Both storage formulations supply a nodal-load dual with dt accounted for.
+    /// Re-query only this retained owner; a per-step frozen replacement cannot
+    /// supply source identity for either capacity or total-enthalpy histories.
+    fn evaluate_live(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        temperature: &[f64],
+    ) -> Result<Option<TemperatureContactEvaluation>, SolveRefusal> {
+        let physical = match self.contact_owner {
+            ContactOwner::Fixed(_) => None,
+            ContactOwner::Live(contacts) => {
+                if interfaces.is_some() {
+                    return Err(bad("live trajectory controls cannot substitute a frozen interface owner"));
+                }
+                Some(contacts.evaluate(cx, problem.boundary, temperature).map_err(lower)?)
+            },
+        };
+        Ok(physical)
     }
 
     /// Element bars are already objective derivatives. Contact uses the
@@ -338,8 +354,8 @@ impl<'m, 'c> Controls<'m, 'c> {
                 (None, None) => true,
                 _ => false,
             },
-            // Only add_capacity can create this evaluation, from the retained
-            // live owner above. The enthalpy add path has no such witness.
+            // Both add paths can create this evaluation only through the
+            // retained live owner above, never an externally supplied witness.
             ContactOwner::Live(_) => interfaces.is_none() && physical.is_some(),
         };
         let n = self.mesh.vertex_count();

@@ -18,6 +18,7 @@ use fs_conduction::transient::enthalpy::{
 use fs_conduction::{
     ConductionError, ConductionProblem, LinearConfig, PowerMap, ScalarField, ThermalInterfaces,
 };
+use fs_conduction::interface::temperature::TemperatureContacts;
 use fs_exec::Cx;
 use fs_project::{ProjectSpec, TransientEnthalpy};
 use fs_solver::NewtonReport;
@@ -45,6 +46,18 @@ const REVERSE_RESTART_LIMIT: usize = 24;
 // number of fine steps. The ordinary radiation allowance covers active core
 // parameter scratch, source metadata and face records.
 const RADIATION_PARAMETER_BYTES_PER_SURFACE: usize = 2 * std::mem::size_of::<f64>() + 2048;
+
+/// Reserve the complete contact tangent and one additional physical source
+/// evaluation for the material contractions. Existing enthalpy storage already
+/// accounts for its chart, phase-conductivity and energetic history work.
+pub(in crate::solve::transient) fn contact_storage_bytes(
+    n: usize, elements: usize, max_pairs: usize, restart: usize,
+) -> Result<usize, SolveRefusal> {
+    super::contact_storage_bytes(n, elements, max_pairs, restart)?
+        .checked_mul(2)
+        .filter(|&bytes| isize::try_from(bytes).is_ok())
+        .ok_or_else(|| bad("live enthalpy contact adjoint workspace overflows"))
+}
 
 enum BoundEndpoint<'m> {
     Prescribed(HeterogeneousEnthalpyStepLinearization<'m>),
@@ -315,6 +328,8 @@ pub(in crate::solve::transient) fn finish(
     engine: &HeterogeneousEnthalpyBackwardEuler<'_, '_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
+    temperature_contacts: Option<&TemperatureContacts<'_, '_>>,
+    max_contact_pairs: usize,
     ends_s: &[f64],
     workload: Option<&Workload<'_>>,
     config: EnthalpyStepConfig,
@@ -341,6 +356,9 @@ pub(in crate::solve::transient) fn finish(
     let boundary_history = super::super::boundary_history::BoundaryHistory::bind(
         cx, spec, policy, problem, deadline,
     )?;
+    if temperature_contacts.is_some() && (interfaces.is_some() || radiation.is_some()) {
+        return Err(bad("live enthalpy contact adjoints require the original source owner without duplicate frozen interfaces or radiation"));
+    }
     if ends_s.is_empty() || tape.temperature.n != n || tape.initial_h.len() != n
         || tape.accepted.len() != ends_s.len()
         || tape.physical_tolerances_j.len() != ends_s.len()
@@ -403,6 +421,9 @@ pub(in crate::solve::transient) fn finish(
         n, elements, spec.materials.as_deref().unwrap_or(&[]).len(),
         spec.interface_cards.as_deref().unwrap_or(&[]).len(),
     )?;
+    let contact_workspace = temperature_contacts.map(|_| contact_storage_bytes(
+        n, elements, max_contact_pairs, linear.restart,
+    )).transpose()?.unwrap_or(0);
     let flux_workspace = flux_controls::storage_bytes(spec, n)?;
     let combined_feedback_entries = max_feedback_entries
         .checked_add(convection::feedback_entries(n, convection_ports)?)
@@ -416,6 +437,7 @@ pub(in crate::solve::transient) fn finish(
         .and_then(|v| v.checked_add(convection_workspace))
         .and_then(|v| v.checked_add(control_workspace))
         .and_then(|v| v.checked_add(material_workspace))
+        .and_then(|v| v.checked_add(contact_workspace))
         .filter(|&v| isize::try_from(v).is_ok())
         .ok_or_else(|| bad("combined enthalpy adjoint storage allowance overflows"))?;
     let mut start = 0.0;
@@ -519,9 +541,15 @@ pub(in crate::solve::transient) fn finish(
     let mut prescribed_controls = prescribed_controls::Controls::new(cx, spec, problem, deadline)?;
     let mut robin_controls = robin_controls::Controls::new(cx, spec, problem, deadline)?;
     let mut flux_controls = flux_controls::Controls::new(cx, spec, problem, deadline)?;
-    let mut material_controls = material_controls::Controls::new(
-        cx, spec, problem, interfaces, labels, region_ids, &tape.temperature.states[0], deadline,
-    )?;
+    let mut material_controls = if let Some(contacts) = temperature_contacts {
+        material_controls::Controls::new_live(
+            cx, spec, problem, contacts, labels, region_ids, &tape.temperature.states[0], deadline,
+        )?
+    } else {
+        material_controls::Controls::new(
+            cx, spec, problem, interfaces, labels, region_ids, &tape.temperature.states[0], deadline,
+        )?
+    };
     let EnthalpyTape { temperature, mut accepted, initial_h, mut physical_tolerances_j } = tape;
     if selected.state == 0 {
         carry[selected.vertex] = initial_slope(
@@ -576,11 +604,18 @@ pub(in crate::solve::transient) fn finish(
             ..source_problem
         };
         let mut endpoint_config = config;
-        if feedback.is_some() || enclosure.is_some() || pointwise.is_some() {
+        if temperature_contacts.is_some() || feedback.is_some() || enclosure.is_some() || pointwise.is_some() {
             // The physical target belongs to the accepted forward solve.
             // Reconstructing a target from old h with endpoint-frozen boundary
             // values could loosen that contract. Recheck it explicitly here.
-            let physical = if let Some(lowering) = pointwise {
+            let physical = if let Some(contacts) = temperature_contacts {
+                // The updated convection boundary must still contain the
+                // original live contact heat at this unchanged enthalpy state.
+                super::super::contact::enthalpy::evaluate(
+                    cx, engine, step_problem, contacts, old_h, &endpoint.specific_enthalpy_j_kg,
+                    dt, config, radiation, enclosure, deadline,
+                )?.0
+            } else if let Some(lowering) = pointwise {
                 super::super::enthalpy::evaluate_pointwise_endpoint(
                     cx, engine, step_problem, interfaces, old_h, &endpoint.specific_enthalpy_j_kg,
                     dt, config, lowering, enclosure,
@@ -617,7 +652,12 @@ pub(in crate::solve::transient) fn finish(
             }
             poll(cx, deadline)?;
         }
-        let mut step = if let Some(lowering) = pointwise {
+        let mut step = if let Some(contacts) = temperature_contacts {
+            BoundEndpoint::Prescribed(engine.linearize_temperature_contact_endpoint(
+                cx, step_problem, contacts, old_h, dt, endpoint_config, endpoint,
+                physical_tolerance_j, max_contact_pairs,
+            ).map_err(failed)?)
+        } else if let Some(lowering) = pointwise {
             BoundEndpoint::Prescribed(pointwise::linearize(
                 cx, engine, step_problem, interfaces, old_h, dt, endpoint_config,
                 lowering, enclosure, open_enclosure.as_ref(), endpoint,
@@ -868,12 +908,20 @@ pub(in crate::solve::transient) fn finish(
             "Independent original outward heat-flux densities use the same complete physical dual and exact named P1 traces throughout the selected prefix. Phase-law parameters and the time grid are fixed.",
         ));
     let original_scope = flux_scope.as_deref().or(pointwise_scope.as_deref()).unwrap_or(SCOPE);
+    let contact_fragment = if temperature_contacts.is_some() { format!(
+        ",\"temperature_contact\":{{\"method\":\"complete-total-enthalpy-contact-tangent\",\"control_steps\":{},\"max_face_pairs\":{max_contact_pairs},\"workspace_estimate_bytes\":{contact_workspace},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"source_context\":\"original-pinned-temperature-law-at-independent-endpoint-traces\"}}",
+        selected.state,
+    ) } else { String::new() };
+    let contact_scope = temperature_contacts.map(|_| format!(
+        "{original_scope} Live contact retains the original pinned temperature-dependent source owner and both trace-temperature partials in the complete specific-enthalpy tangent, including each chart's temperature response. Every consumed endpoint passes its original physical residual and energy targets, plus actual-air energy when present. Material contractions use the same complete masked nodal-load dual with its timestep already included. Prescribed-temperature columns retain contact feedback. History carry stays energetic across latent plateaus. Pressure, finish, source selection and geometry remain fixed; phase-dependent contact resistance and radiative live-contact trajectory derivatives are not supplied by this adapter."
+    ));
+    let original_scope = contact_scope.as_deref().unwrap_or(original_scope);
     let history_scope = boundary_history.as_ref().map(|_| format!(
         "{original_scope} Authored thermal boundary histories are held fixed and reconstructed at each original fine-interval start before coupled feedback is bound. Marked static temperature placeholders have exactly zero derivative because the history replaces them; this is not a derivative of held values. Replaced static Neumann controls are omitted. No schedule-value or switch-time derivative is supplied, and the declared initial enthalpy remains unchanged."
     ));
     poll(cx, deadline)?;
     Ok(format!(
-        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment}{flux_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
+        "{{\"schema\":\"fs-cli-native-enthalpy-adjoint-v1\",\"output\":{},\"method\":\"discrete-total-enthalpy-backward-euler-reverse\",\"value_k\":{},\"time_s\":{},\"state_index\":{},\"active_vertex\":{},\"active_ties\":{},\"unique_sampled_maximum\":{},\"dtemperature_duniform_initial_specific_enthalpy_k_kg_per_j\":{},\"dtemperature_dinitial_specific_enthalpy_k_kg_per_j\":[{}],\"dtemperature_dreference_density_multiplier_k\":{},\"regional_storage\":[{}],\"regional_power\":[{}],\"intervals\":[{}],\"revalidated_solid_endpoints\":{},\"adjoint_krylov_iterations\":{},\"maximum_dual_relative_residual\":{},\"max_reverse_steps\":{},\"max_krylov_iterations_per_linear_solve\":{},\"max_restart_columns_per_linear_solve\":{},\"max_adjoint_krylov_iterations\":{},\"additional_storage_estimate_bytes\":{}{radiation_fragment}{convection_fragment}{material_fragment}{prescribed_fragment}{robin_fragment}{flux_fragment}{contact_fragment},\"authority\":\"Estimated\",\"scope\":{}}}",
         json_string(objective.name()), number(selected.value)?, number(selected_time)?,
         selected.state, selected.vertex, selected.ties, selected.ties == 1,
         number(initial_uniform)?, initial_rows.join(","), number(density_multiplier)?,

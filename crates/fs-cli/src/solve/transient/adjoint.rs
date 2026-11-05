@@ -24,6 +24,7 @@ pub(super) use enthalpy::{
     convection_storage_bytes as enthalpy_convection_storage_bytes,
     control_storage_bytes as enthalpy_control_storage_bytes,
     material_control_storage_bytes as enthalpy_material_control_storage_bytes,
+    contact_storage_bytes as enthalpy_contact_storage_bytes,
 };
 
 #[cfg(test)]
