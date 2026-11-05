@@ -17,7 +17,7 @@ mod recoil;
 pub use recoil::{
     RecoilControl, RecoilLaw, RecoilUpdate, SharedRecoilCell, SharedRecoilCellUpdate,
     SharedRecoilControl, SharedRecoilUpdate, SharedRecoilWorkspace, SlidingSupport,
-    exchange_cell_with_recoil,
+    exchange_cell_with_recoil, exchange_cell_with_recoil_and_heat_storage,
 };
 pub(crate) mod shared;
 pub use shared::{SharedWallControl, SharedWallStorage};

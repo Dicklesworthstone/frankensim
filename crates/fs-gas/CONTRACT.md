@@ -2738,6 +2738,22 @@ frame covariance, heat fractions 0/0.5/1 with subsequent conduction, actual
 combined storage, and late cancellation. Friction coefficients and the heat
 fraction are authored; the thermal step retains its original first-order law.
 
+`exchange_cell_with_recoil_and_heat_storage` retains the same mechanical owner
+and accepts the support's original `MaterialWallCaloric`. Frictional wall heat
+is deposited through that source's exact capacity integral or native energy
+coordinate before the existing implicit heat exchange. Temperature-dependent
+capacity and latent internal-energy plateaus therefore remain active during
+support recoil. The energy audit uses the complete original-to-returned wall
+storage difference, not a frozen capacity or a sum of rounded stage changes.
+The source must explicitly declare internal energy or negligible solid
+expansion; unqualified enthalpy and sensible-capacity storage cannot close this
+mechanical balance. Generic heat-only wall exchange still accepts those source
+coordinates and retains their declared interpretation. The thermal amount is
+already part of the authored support inertia and is not added to it again.
+Original source-domain exits and cancellation return neither endpoint. Focused
+regressions cover analytic variable-capacity slip heating, variable-Cv mixture
+exchange, a latent plateau, the constant-capacity limit, and atomic refusals.
+
 Thermal contacts may be adiabatic, a prescribed-temperature reservoir, or a
 finite lumped wall with explicit heat capacity in J/K. A contact's conductance
 is the complete exposed h*A in W/K. A safeguarded backward-Euler temperature

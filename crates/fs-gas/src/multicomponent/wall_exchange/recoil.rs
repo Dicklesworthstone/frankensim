@@ -6,8 +6,9 @@
 //! the lost relative kinetic energy before the original caloric heat solve.
 
 use super::{
-    Cell, MixtureCaloric, MixtureGas, Time, WallContact, WallControl, WallDrag, WallExchangeError,
-    WallGasCaloric, WallThermal, WallUpdate, nonnegative, poll, positive,
+    Cell, MaterialWallCaloric, MixtureCaloric, MixtureGas, Time, WallCaloricConstraint,
+    WallContact, WallControl, WallDrag, WallExchangeError, WallGasCaloric, WallThermal, WallUpdate,
+    nonnegative, poll, positive,
 };
 
 mod mechanics;
@@ -34,7 +35,8 @@ pub struct RecoilLaw {
     /// Nonnegative quadratic coefficient b [1/m].
     pub quadratic_per_m: f64,
     /// Authored fraction of slip dissipation retained by gas, in [0,1]. The
-    /// remainder heats a finite `WallThermal::Lumped` support. No fraction is inferred.
+    /// remainder heats a finite support through its authored constant capacity
+    /// or explicitly supplied original material storage. No fraction is inferred.
     pub gas_heat_fraction: f64,
 }
 
@@ -101,6 +103,53 @@ pub fn exchange_cell_with_recoil(
         support,
         law,
         thermal,
+        None,
+        control,
+        cancelled,
+    )
+}
+
+/// The same exact recoil with the support's original temperature-dependent or
+/// latent heat storage, followed by the existing implicit material heat owner.
+///
+/// The wall share of slip dissipation enters the original storage integral;
+/// no frozen tangent is substituted for a finite energy change. The returned
+/// wall state retains its temperature or native energy coordinate, including
+/// latent inventory. Its complete endpoint storage change, the gas energy and
+/// the support kinetic energy must close the original conservation budget.
+///
+/// The source must declare internal energy or the existing negligible-solid-
+/// expansion approximation. Unqualified enthalpy or sensible heat alone does
+/// not close this mechanical energy balance. The fixed thermal amount belongs
+/// to the authored support inertia; it is not added to that inertia again.
+/// Conductance, friction and geometry remain frozen over this split interval;
+/// the heat solve remains backward Euler. A refusal publishes neither endpoint.
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_cell_with_recoil_and_heat_storage(
+    gas: &MixtureGas,
+    state: Cell<'_>,
+    volume_m3: f64,
+    duration: Time,
+    support: SlidingSupport,
+    law: RecoilLaw,
+    thermal: WallThermal,
+    wall: &MaterialWallCaloric<'_>,
+    control: RecoilControl,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RecoilUpdate, WallExchangeError> {
+    exchange_caloric_with_recoil(
+        &MixtureCaloric {
+            gas,
+            partial_densities: state.partial_densities,
+        },
+        state.momentum,
+        state.energy,
+        volume_m3,
+        duration,
+        support,
+        law,
+        thermal,
+        Some(wall),
         control,
         cancelled,
     )
@@ -116,20 +165,35 @@ fn exchange_caloric_with_recoil(
     support: SlidingSupport,
     law: RecoilLaw,
     thermal: WallThermal,
+    wall: Option<&MaterialWallCaloric<'_>>,
     control: RecoilControl,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RecoilUpdate, WallExchangeError> {
     poll(&mut cancelled)?;
     control.wall.validate()?;
-    let mut contact = WallContact {
+    let mut initial_contact = WallContact {
         drag: WallDrag::None,
         thermal,
     };
-    contact.validate()?;
+    initial_contact.validate()?;
+    if let Some(wall) = wall {
+        if !matches!(
+            wall.constraint(),
+            WallCaloricConstraint::IsochoricInternalEnergy
+                | WallCaloricConstraint::StationarySolidNegligibleExpansion
+        ) {
+            return Err(WallExchangeError::Invalid(
+                "finite-support recoil requires internal energy or explicit negligible expansion",
+            ));
+        }
+        initial_contact = wall.bind_contact(initial_contact)?;
+    }
     if !positive(control.momentum_tolerance_ns)
         || !law.gas_heat_fraction.is_finite()
         || !(0.0..=1.0).contains(&law.gas_heat_fraction)
-        || (law.gas_heat_fraction < 1.0 && !matches!(thermal, WallThermal::Lumped { .. }))
+        || (law.gas_heat_fraction < 1.0
+            && wall.is_none()
+            && !matches!(thermal, WallThermal::Lumped { .. }))
     {
         return Err(WallExchangeError::Invalid(
             "recoil momentum budget or finite-wall heat partition",
@@ -152,15 +216,16 @@ fn exchange_caloric_with_recoil(
     }
     let gas_heating = law.gas_heat_fraction * motion.dissipation_j;
     let wall_heating = motion.dissipation_j - gas_heating;
-    let mut deposited_wall_heat = 0.0;
-    if let WallThermal::Lumped {
+    let mut contact = initial_contact;
+    if let Some(wall) = wall {
+        contact = wall.after(contact, wall_heating)?.contact;
+    } else if let WallThermal::Lumped {
         temperature_k,
         heat_capacity_j_per_k,
         conductance_w_per_k,
     } = thermal
     {
         let next = temperature_k + wall_heating / heat_capacity_j_per_k;
-        deposited_wall_heat = heat_capacity_j_per_k * (next - temperature_k);
         contact.thermal = WallThermal::Lumped {
             temperature_k: next,
             heat_capacity_j_per_k,
@@ -168,16 +233,30 @@ fn exchange_caloric_with_recoil(
         };
     }
     let mechanical_energy = initial_energy + (motion.work_to_gas_j - wall_heating) / volume_m3;
-    let mut update = super::exchange_caloric(
-        gas,
-        motion.momentum,
-        mechanical_energy,
-        volume_m3,
-        duration,
-        contact,
-        control.wall,
-        &mut cancelled,
-    )?;
+    let mut update = match wall {
+        Some(wall) => super::exchange_caloric_with_heat_storage(
+            gas,
+            motion.momentum,
+            mechanical_energy,
+            volume_m3,
+            duration,
+            contact,
+            wall,
+            None,
+            control.wall,
+            &mut cancelled,
+        )?,
+        None => super::exchange_caloric(
+            gas,
+            motion.momentum,
+            mechanical_energy,
+            volume_m3,
+            duration,
+            contact,
+            control.wall,
+            &mut cancelled,
+        )?,
+    };
     update.report.wall_impulse_ns = -motion.gas_impulse_ns;
     update.report.mechanical_work_to_gas_j = motion.work_to_gas_j;
     // Preserve the original sensible-energy account: total slip loss heats
@@ -185,7 +264,25 @@ fn exchange_caloric_with_recoil(
     // fields below expose the net shares without counting that transfer twice.
     update.report.drag_heating_j = motion.dissipation_j;
     update.report.heat_to_gas_j -= wall_heating;
-    update.report.wall_energy_change_j += deposited_wall_heat;
+    // Audit the complete returned storage endpoints, not a sum of separately
+    // rounded frictional-heating and thermal-exchange differences.
+    if let Some(wall) = wall {
+        update.report.wall_energy_change_j =
+            wall.energy_change_j(initial_contact, update.contact)?;
+    } else if let (
+        WallThermal::Lumped {
+            temperature_k: initial,
+            heat_capacity_j_per_k,
+            ..
+        },
+        WallThermal::Lumped {
+            temperature_k: final_temperature,
+            ..
+        },
+    ) = (initial_contact.thermal, update.contact.thermal)
+    {
+        update.report.wall_energy_change_j = heat_capacity_j_per_k * (final_temperature - initial);
+    }
     let storage_change = (update.energy - initial_energy) * volume_m3
         + update.report.wall_energy_change_j
         - update.report.external_heat_to_gas_j;

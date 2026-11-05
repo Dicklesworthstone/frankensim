@@ -98,6 +98,7 @@ fn recoil_and_heat_partition_close_actual_gas_support_and_wall_storage() {
                 support,
                 law(fraction),
                 thermal(conductance),
+                None,
                 controls(),
                 || false,
             )
@@ -182,6 +183,7 @@ fn recoil_complete_source_is_frame_covariant_and_zero_duration_is_exact_identity
         support,
         law(0.5),
         thermal(0.3),
+        None,
         controls(),
         || false,
     )
@@ -203,6 +205,7 @@ fn recoil_complete_source_is_frame_covariant_and_zero_duration_is_exact_identity
             },
             law(0.5),
             thermal(0.3),
+            None,
             control,
             || false,
         )
@@ -235,6 +238,7 @@ fn recoil_complete_source_is_frame_covariant_and_zero_duration_is_exact_identity
         support,
         law(0.5),
         thermal(0.3),
+        None,
         controls(),
         || false,
     )
@@ -268,6 +272,7 @@ fn recoil_refusal_and_late_cancellation_publish_neither_endpoint() {
         support,
         law(0.5),
         thermal(0.3),
+        None,
         controls(),
         || {
             polls += 1;
@@ -285,6 +290,7 @@ fn recoil_refusal_and_late_cancellation_publish_neither_endpoint() {
         support,
         law(0.5),
         thermal(0.3),
+        None,
         controls(),
         || {
             visits += 1;
@@ -301,6 +307,7 @@ fn recoil_refusal_and_late_cancellation_publish_neither_endpoint() {
         support,
         law(0.5),
         thermal(0.3),
+        None,
         controls(),
         || false,
     )
@@ -316,6 +323,7 @@ fn recoil_refusal_and_late_cancellation_publish_neither_endpoint() {
             support,
             law(0.5),
             WallThermal::Adiabatic,
+            None,
             controls(),
             || false
         )
@@ -334,6 +342,7 @@ fn recoil_refusal_and_late_cancellation_publish_neither_endpoint() {
             },
             law(1.0),
             WallThermal::Adiabatic,
+            None,
             controls(),
             || false
         )
