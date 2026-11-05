@@ -3,8 +3,11 @@ use super::*;
 use fs_contact::interface_binding::wear::SourceArchardWear;
 use fs_couple::friction_heat::directional::trajectory::apply_source_directional_trajectory_heat;
 use fs_couple::friction_heat::directional::wear::*;
+use fs_matdb::{HardnessLoadStep, HardnessTestContext, ObservationDataset, ObservationId};
+use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
 use fs_material::state_point::resolve_interface_state_point;
 use fs_qty::Pressure;
+use fs_qty::QtyAny;
 use fs_tribo::WearState;
 use fs_tribo::tangential::elliptic::relaxation::EllipticRelaxationControls;
 
@@ -17,12 +20,38 @@ fn wear_close(a: f64, b: f64) {
     );
 }
 fn hardness_key() -> PropertyKey {
-    PropertyKey::new("indentation-hardness", Pressure::DIMS)
+    PropertyKey::with_quantity("indentation-hardness", INDENTATION_HARDNESS_QUANTITY)
+        .with_hardness_test(
+            HardnessTestContext::new(
+                "synthetic spherical diamond indenter, radius 1 mm",
+                vec![
+                    HardnessLoadStep::new(
+                        QtyAny::new(10.0, Dims([1, 1, -2, 0, 0, 0])),
+                        QtyAny::new(5.0, Dims([0, 0, 1, 0, 0, 0])),
+                    )
+                    .unwrap(),
+                ],
+                "synthetic projected-contact-area protocol revision 1",
+                ObservationId(hardness_observation().content_hash()),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+}
+fn hardness_observation() -> ObservationDataset {
+    ObservationDataset {
+        specimen: "synthetic original sliding surfaces".into(),
+        method: "synthetic temperature-dependent indentation pressure".into(),
+        artifact: fs_blake3::hash_domain("fixture", b"synthetic sliding hardness"),
+        caveats: "numerical fixture only; no measured calibration".into(),
+        provenance: provenance(),
+    }
 }
 
 fn material_with_hardness(side: usize, limit: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) {
     let (original, _) = material(side);
     let mut claims = original.claims().clone();
+    let observation = claims.register_observation(hardness_observation()).unwrap();
     claims
         .insert_claim(PropertyClaim {
             key: hardness_key(),
@@ -40,7 +69,7 @@ fn material_with_hardness(side: usize, limit: f64) -> (MaterialCard, ResolvedHea
             ),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::LinearInside,
-            observations: vec![],
+            observations: vec![observation],
             provenance: provenance(),
         })
         .unwrap();

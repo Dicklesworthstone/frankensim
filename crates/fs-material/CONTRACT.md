@@ -1,5 +1,27 @@
 # fs-material — CONTRACT
 
+## Source indentation hardness for contact and wear
+
+`hardness::IndentationHardnessStatePoint` selects a positive static
+pressure-valued `IndentationHardness` claim from an original material bundle.
+It retains the exact apparatus, load/dwell, protocol, specimen and source
+selection through the existing complete property key. Refresh uses the same
+card, query conventions and pinned claims, preserving any additional coupled
+properties and refusing absent coverage or nonpositive hardness atomically.
+
+The shared borrowed `indentation_hardness_property` admission is used by dry
+sliding and Mindlin fretting wear. Existing explicitly selected dimension-only
+Pa values remain caller-declared hardness estimates; they do not become typed
+test-qualified measurements. Typed fluid pressure/stress, empirical hardness
+numbers, and tensor components refuse. Consumer owners still admit the source
+coordinates and fixed/thermal operating conditions. This adapter evolves no
+plasticity or wear and infers no HRC/Shore/Vickers conversion, yield stress,
+fracture toughness, hardening law, or empirical validation.
+
+Focused G0/G3 tests exercise distinct tests under the same property name,
+temperature refresh of original claims, full-bundle retention, exact context,
+changed-card/coverage refusal, and the declared-versus-typed admission boundary.
+
 ## Bulk brittle crack bands through the original cohesive history
 
 `brittle::BrittleCrackBand` composes isotropic small-strain elasticity with the

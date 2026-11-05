@@ -12,9 +12,8 @@
 
 use super::*;
 use fs_matdb::PropertyKey;
+use fs_material::hardness::indentation_hardness_property;
 use fs_material::state_point::ResolvedMaterialStatePoint;
-use fs_qty::Pressure;
-use fs_qty::semantic::{QuantityKind, ValueForm};
 use fs_tribo::mindlin::surface::sliding::{MindlinSurfaceAdvance, MindlinSurfaceSliding};
 use fs_tribo::{ArchardLaw, WearAdvance, WearState};
 
@@ -190,22 +189,12 @@ impl SourceMindlinWear {
             let k = coefficients
                 .property_by_key(&coefficient_keys[side])
                 .ok_or_else(|| invalid("missing exact original wear coefficient"))?;
-            let h = hardness[side]
-                .property_by_key(&hardness_keys[side])
-                .ok_or_else(|| invalid("missing exact original hardness and test context"))?;
-            let quantity = hardness_keys[side].quantity();
-            let physical_hardness = quantity.dims() == Pressure::DIMS
-                && quantity.semantic_type().is_none_or(|kind| {
-                    matches!(kind.kind(), QuantityKind::Hardness(_))
-                        && kind.form() == ValueForm::Static
-                });
+            let h = indentation_hardness_property(&hardness[side], &hardness_keys[side])
+                .map_err(|_| invalid("missing or inadmissible original indentation hardness"))?;
             if coefficient_keys[side].quantity() != QuantitySpec::dimensional(Dims::NONE)
                 || !k.value_si().is_finite()
                 || k.value_si() < 0.0
                 || !k.is_static_at_fixed_external_conditions()
-                || !physical_hardness
-                || !h.value_si().is_finite()
-                || h.value_si() <= 0.0
                 || !h.is_static_at_fixed_external_conditions()
                 || hardness[side].card_identity() != bulk[side].card_identity()
                 || hardness[side].material() != bulk[side].material()

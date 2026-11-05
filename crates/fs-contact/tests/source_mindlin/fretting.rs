@@ -1,8 +1,12 @@
 //! Original source-bound local fretting, Archard limits and joint acceptance.
 use super::*;
 use fs_contact::interface_binding::mindlin::fretting::{SourceFrettingError, SourceMindlinWear};
-use fs_matdb::{MaterialCard, QueryPoint};
+use fs_matdb::{
+    HardnessLoadStep, HardnessTestContext, MaterialCard, ObservationDataset, ObservationId, QueryPoint,
+};
+use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
 use fs_material::state_point::{ResolvedMaterialStatePoint, resolve_material_state_point};
+use fs_qty::QtyAny;
 use fs_tribo::WearState;
 
 #[path = "fretting/loading.rs"]
@@ -14,7 +18,36 @@ fn coefficient_keys() -> [PropertyKey; 2] {
     ["wear-a", "wear-b"].map(|name| PropertyKey::new(name, Dims::NONE))
 }
 fn hardness_key() -> PropertyKey {
-    PropertyKey::new("indentation-hardness", Pressure::DIMS)
+    PropertyKey::with_quantity("indentation-hardness", INDENTATION_HARDNESS_QUANTITY)
+        .with_hardness_test(
+            HardnessTestContext::new(
+                "synthetic spherical diamond indenter, radius 1 mm",
+                vec![
+                    HardnessLoadStep::new(
+                        QtyAny::new(10.0, Dims([1, 1, -2, 0, 0, 0])),
+                        QtyAny::new(5.0, Dims([0, 0, 1, 0, 0, 0])),
+                    )
+                    .unwrap(),
+                ],
+                "synthetic projected-contact-area protocol revision 1",
+                ObservationId(hardness_observation().content_hash()),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+}
+fn hardness_observation() -> ObservationDataset {
+    ObservationDataset {
+        specimen: "synthetic original fretting surfaces".into(),
+        method: "synthetic indentation pressure".into(),
+        artifact: fs_blake3::hash_domain("fixture", b"synthetic fretting hardness"),
+        caveats: "numerical fixture only; no measured calibration".into(),
+        provenance: Provenance {
+            source: "synthetic source fretting fixture; not measured data".into(),
+            license: "CC0-1.0".into(),
+            artifact: None,
+        },
+    }
 }
 fn near(a: f64, b: f64) {
     assert!(
@@ -23,6 +56,11 @@ fn near(a: f64, b: f64) {
     );
 }
 fn claim(key: PropertyKey, value: f64) -> PropertyClaim {
+    let observations = key
+        .hardness_test()
+        .map(HardnessTestContext::observation)
+        .into_iter()
+        .collect();
     PropertyClaim {
         value: PropertyValue::Scalar {
             value,
@@ -32,7 +70,7 @@ fn claim(key: PropertyKey, value: f64) -> PropertyClaim {
         validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::ConstantWithinValidity,
-        observations: vec![],
+        observations,
         provenance: Provenance {
             source: "synthetic source fretting fixture; not measured data".into(),
             license: "CC0-1.0".into(),
@@ -49,6 +87,7 @@ fn fixture(mu: f64, coefficients: [f64; 2], hardness: [f64; 2]) -> Fixture {
     let cards = [0, 1].map(|i| {
         let original = common::solid(["A", "B"][i], [1000.0, 2000.0][i], [1e7, 2e7][i]);
         let mut claims = original.claims().clone();
+        claims.register_observation(hardness_observation()).unwrap();
         claims
             .insert_claim(claim(hardness_key(), hardness[i]))
             .unwrap();

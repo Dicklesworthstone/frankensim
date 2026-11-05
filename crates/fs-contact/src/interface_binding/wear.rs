@@ -7,11 +7,11 @@ use super::BoundDryInterfaceSystem;
 use super::thermal_friction::elliptic::SourceThermalEllipticCoulomb;
 use fs_blake3::ContentHash;
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
+use fs_material::hardness::indentation_hardness_property;
 use fs_material::phase::EquilibriumPhaseState;
 use fs_material::state_point::{ResolvedInterfaceStatePoint, ResolvedMaterialStatePoint};
 use fs_material::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
-use fs_qty::semantic::{QuantityKind, ValueForm};
-use fs_qty::{Dims, Pressure, QuantitySpec};
+use fs_qty::{Dims, QuantitySpec};
 use fs_tribo::{ArchardLaw, TriboError, WearAdvance, WearState};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -108,22 +108,13 @@ impl SourceArchardWear {
                 .ok_or(SourceWearError::Invalid(
                     "missing exact wear coefficient key",
                 ))?;
-            let h = hardness[side].property_by_key(&hardness_keys[side]).ok_or(
-                SourceWearError::Invalid("missing exact hardness key and test context"),
-            )?;
-            let hq = hardness_keys[side].quantity();
-            let physical_hardness = hq.dims() == Pressure::DIMS
-                && hq.semantic_type().is_none_or(|ty| {
-                    matches!(ty.kind(), QuantityKind::Hardness(_)) && ty.form() == ValueForm::Static
-                });
+            let h = indentation_hardness_property(&hardness[side], &hardness_keys[side])
+                .map_err(ThermalMaterialError::Material)?;
             if coefficient_keys[side].quantity() != QuantitySpec::dimensional(Dims::NONE)
                 || !k.value_si().is_finite()
                 || k.value_si() < 0.0
                 || !k.has_only_owned_coordinates_and_fixed_external_conditions(&owned)
                 || hardness[side].material() != &interface.surface_materials()[side]
-                || !physical_hardness
-                || !h.value_si().is_finite()
-                || h.value_si() <= 0.0
                 || !h.has_only_fixed_external_conditions(Some(&temperature_axes[side]), false)
                 || !hardness[side]
                     .state_coordinate(&temperature_axes[side])
@@ -229,9 +220,8 @@ impl SourceArchardWear {
                     "wear coefficient disappeared on refresh",
                 ))?
                 .value_si();
-            let h = next.hardness[side]
-                .property_by_key(&self.hardness_keys[side])
-                .ok_or(SourceWearError::Invalid("hardness disappeared on refresh"))?
+            let h = indentation_hardness_property(&next.hardness[side], &self.hardness_keys[side])
+                .map_err(ThermalMaterialError::Material)?
                 .value_si();
             Ok::<_, SourceWearError>(
                 ArchardLaw {

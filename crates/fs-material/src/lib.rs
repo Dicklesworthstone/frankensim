@@ -67,6 +67,8 @@ pub mod moist_air;
 /// Shared dilute-solution activities, finite inventories and selective membrane transport.
 pub mod osmosis;
 pub mod graph;
+/// Original force/area indentation hardness shared by contact and wear.
+pub mod hardness;
 /// Contact-temperature history and explicit strength handoff for polymer welding.
 pub mod healing;
 mod heat_capacity_state;

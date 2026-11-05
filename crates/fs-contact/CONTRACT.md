@@ -2638,3 +2638,20 @@ counterwork regression and circular/directional inactive-response regression
 exercise physical transfers that sequential f64 accumulation can erase. This
 is finite floating-point arithmetic, not an interval conservation certificate
 or a benchmark performance claim.
+
+## Pressure-valued indentation hardness in wear
+
+The Archard sliding and Mindlin fretting source adapters share
+`fs_material::hardness::indentation_hardness_property` admission. The typed route
+requires `QuantityKind::IndentationHardness` in Pa and retains the exact
+indenter, loading/dwell protocol and linked observation in the property key.
+Empirical Rockwell, Brinell, Vickers and Shore values, typed pressure/stress,
+and tensor components cannot silently enter an Archard hardness denominator.
+
+The explicitly selected legacy dimension-only Pa route remains a caller-declared
+hardness estimate; admission does not convert units, infer a test, upgrade source
+authority, or reinterpret yield strength as hardness. Both paths require a
+finite positive value and the exact requested key. Existing ordered-surface,
+condition, selected-claim and thermal-refresh checks remain binding. Wear remains
+a volume diagnostic with the original k*N*distance/H law; geometry recession,
+debris transport and a heat partition require their own physical owners.
