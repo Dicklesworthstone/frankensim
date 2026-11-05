@@ -1866,3 +1866,31 @@ not inferred. Products of cell averages do not reconstruct unresolved products.
 Periodic fields supply only the selected physical box, with no implicit image
 sum. Cell quadrature and source-region truncation require their own refinement;
 wall scattering, noise calibration and measured-SPL qualification remain absent.
+
+## Coherent recorded force and volume-stress sound
+
+`PreparedCompactSourceObserver::evaluate_welch_bin_with_quadrupoles` propagates
+one joint record containing 4N compact channels [Q, Fx, Fy, Fz] followed by 6M
+volume-stress channels [xx, yy, zz, xy, xz, yz]. Both source groups enter the
+same pressure and three-component velocity sums inside each original Welch
+factor, before the existing second-moment reduction. Recorded cross-mechanism
+interference is retained; separate mechanism powers are not substituted for
+their coherent sum. The original peak-equivalent bin normalization applies once.
+
+Both prepared observers must have identical acoustic state, receiver and exact
+frequency. Only homogeneous stationary lossless free-space propagation is
+admitted: molecular, reflected-plane and wedge compact paths refuse because
+the quadrupole owner does not provide those matching propagation operators.
+The caller must provide disjoint physical mechanisms; a volume source already
+represented by a permeable acoustic surface must not be counted twice.
+
+Application reuses both prepared transfer banks and the shared quadrupole factor
+accumulator without allocating source vectors, another spectrum or a dense
+covariance. Checked combined channel and (N+M)*segment work bounds precede the
+bounded-cancellation reduction. Three G1/G3/G4 fixtures cover independently
+specified mixed-source field moments, destructive/constructive/decorrelated
+cross-mechanism sound including surviving pressure-null velocity, and
+medium/receiver/frequency/path/shape/work/cancellation refusals. Window leakage,
+sampling and source-volume limits remain; this is bin-integrated statistics,
+not deterministic cross-frequency phase, inferred independence or calibrated
+turbulence sound.
