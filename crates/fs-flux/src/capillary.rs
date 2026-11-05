@@ -20,6 +20,10 @@ mod sealed_mechanics;
 #[cfg(feature = "continuum")]
 pub mod material;
 
+/// Original Carreau rheology in horizontal filling and drainage.
+#[cfg(feature = "continuum")]
+pub mod rheology;
+
 /// Energy-consistent mean-flow inertia, reservoir exchange and stopping events.
 pub mod inertia;
 pub use inertia::{

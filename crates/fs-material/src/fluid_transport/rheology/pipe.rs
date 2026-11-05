@@ -221,6 +221,17 @@ impl LaminarCarreauPipe {
     pub const fn length_m(&self) -> f64 {
         self.length_m
     }
+    /// Rebind only the positive physical length, retaining the prepared
+    /// original temperature shift, constitutive support and radius. Moving
+    /// menisci can reuse the same law without resolving its thermal state.
+    pub fn with_length(&self, length_m: f64) -> Result<Self, MaterialError> {
+        if !positive(length_m) {
+            return Err(parameters(
+                "Carreau pipe length must be positive and finite",
+            ));
+        }
+        Ok(Self { length_m, ..*self })
+    }
     pub const fn maximum_laminar_wall_rate_per_s(&self) -> f64 {
         self.ceiling.rate
     }

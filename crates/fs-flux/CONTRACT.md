@@ -3471,6 +3471,35 @@ numerical checks of the reduced model, not experimental validation. The
 two-fluid resistance follows Budaraju et al. (2016),
 <https://doi.org/10.1021/acs.langmuir.6b02788>.
 
+## Carreau capillary filling and drainage
+
+`capillary::rheology::CarreauCapillaryTube` advances a horizontal meniscus
+through the original `LaminarCarreauPipe` law, frozen temperature and explicit
+laminar shear-rate support. At each liquid length the actual radial viscosity
+profile supplies Q; bounded travel-time quadrature integrates A dx/Q, and
+safeguarded Newton uses the endpoint A/|Q| derivative. The prepared material
+pipe's `with_length` changes geometry without repeating its thermal admission.
+No apparent viscosity or timestep-lagged constitutive state replaces the law.
+
+The same positive quadrature integrates accepted viscous pressure times signed
+volume. Reservoir pressure work, wall wetting-energy change, positive viscous
+dissipation, constitutive/quadrature work defect and travel-time residual remain
+separate. The endpoint profile retains the actual liquid length and original
+material law. Filling and drainage stop at the declared geometric endpoint,
+returning only its arrival time; no post-event throughflow is inferred.
+
+The caller supplies surface tension, equilibrium angle and a strictly positive
+minimum wet length. Each fixed pressure load must be source-supported over the
+whole declared wet-length interval. This is a fully developed, no-slip,
+quasisteady, vented-gas reduction with no dry-entry singularity model, inertia,
+gravity, displaced-fluid resistance, dynamic wetting or thermal evolution.
+Success adds no experimental authority. Two consecutive Simpson refinements
+supply an error estimate, not a rigorous quadrature certificate. Numerical
+root, refinement and total profile-evaluation budgets are explicit; refusal
+publishes no partial state. Focused G1 numerical tests cover analytic Washburn
+limits, an independently inverted nonlinear constitutive/radial/travel solution,
+signed work, temporal subdivision, reversal, endpoint time and support refusal.
+
 ## Material-bound circular capillary transport
 
 `capillary::material::MaterialCapillaryTube` binds the original
