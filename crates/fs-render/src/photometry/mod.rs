@@ -42,6 +42,8 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
+/// Version 10 refuses ideal point fixtures with smooth metal mirrors because
+/// the estimator does not connect point sources through specular boundaries.
 /// Version 9 resolves smooth cosine-power beams at natural intensity contours
 /// and refuses source widths that cannot be represented in cosine space.
 /// Version 8 resolves near-source inverse-square variation with mandatory
@@ -53,7 +55,7 @@ use transport::{PhotometricMedium, photopic_transmittance};
 /// reflectance. Version 4's
 /// shared tabulated haze phase laws, version 3's fixture
 /// angular partitions and version 2's published CIE observer remain in use.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 9;
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 10;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -578,10 +580,24 @@ impl<'a> PhotometricScene<'a> {
                     Some("legacy emission has no luminous calibration")
                 }
                 _ => match primitive.material {
+                    Material::Conductor { surface, .. }
+                        if surface.is_delta() && has_point_emission =>
+                    {
+                        // A sampled reflected ray cannot hit an ideal point
+                        // source, and a straight next-event connection cannot
+                        // integrate the mirror's delta reflection. Accepting
+                        // this scene would silently omit reflected fixture
+                        // light from calibrated luminance and illuminance.
+                        Some(
+                            "active point fixtures with smooth metal mirrors require specular point-source connections",
+                        )
+                    }
                     Material::CoatedDiffuse { coating, .. }
                         if !coating.is_matched() && has_point_emission =>
                     {
-                        Some("active point fixtures with coated mirrors require specular point-source connections")
+                        Some(
+                            "active point fixtures with coated mirrors require specular point-source connections",
+                        )
                     }
                     Material::Dielectric { .. } if !native_paths => {
                         Some("refractive connections are not yet supported")

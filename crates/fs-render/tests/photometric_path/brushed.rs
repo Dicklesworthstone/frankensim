@@ -2,10 +2,12 @@
 
 use super::*;
 use fs_render::conductor::{
-    ConductorDataStatus, ConductorIorSample, ConductorOptics, ConductorSource,
+    ConductorDataStatus, ConductorIorSample, ConductorOptics, ConductorSource, ConductorSurface,
 };
 use fs_render::instances::{GeometryInstance, SharedGeometry};
+use fs_render::photometry::PhotometricScene;
 use fs_render::photometry::area::{EmissionSidedness, PhotometricAreaEmitter, PhotometricEmitters};
+use fs_render::photometry::medium::HomogeneousMedium;
 use fs_render::surface_detail::{BrushingPattern, SurfaceDetail};
 
 fn optics() -> ConductorOptics {
@@ -33,6 +35,144 @@ fn brushed_scene(alpha: f64, ratio: f64) -> Scene {
     };
     scene.primitives.push(receiver);
     scene
+}
+
+#[test]
+fn g0_point_fixture_mirror_paths_refuse_without_rejecting_rough_or_dark_sources() {
+    with_cx(|cx, _| {
+        let mut scene = empty_scene([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]);
+        let mut mirror = floor(0.0, 10.0, LiftedSpectrum { c: [0.0; 3] });
+        mirror.material = Material::Conductor {
+            optics: optics(),
+            surface: ConductorSurface::SMOOTH,
+        };
+        scene.primitives.push(mirror);
+        let points = [isotropic(
+            [0.0, 0.0, 2.0],
+            10.0,
+            SourceSpectrum::equal_energy(),
+        )];
+        assert!(matches!(
+            PhotometricScene::try_new(
+                &scene.primitives,
+                &points,
+                HomogeneousMedium::vacuum(),
+                TransportOptions::default(),
+                cx,
+            ),
+            Err(PhotometryError::UnsupportedPrimitive { primitive: 0, .. })
+        ));
+        assert!(matches!(
+            PathLuminanceJob::new(
+                &scene,
+                &points,
+                PathMedium::Vacuum,
+                TransportOptions::default(),
+                settings(3, 8),
+                cx,
+            ),
+            Err(PhotometryError::UnsupportedPrimitive { primitive: 0, .. })
+        ));
+        // A finite GGX lobe has a density against the ordinary point-source
+        // connection, unlike the smooth mirror's delta. Keep that useful
+        // calibrated reflection path admitted.
+        scene.primitives[0].material = Material::Conductor {
+            optics: optics(),
+            surface: ConductorSurface::try_rough(0.15).unwrap(),
+        };
+        let mut rough = PathLuminanceJob::new(
+            &scene,
+            &points,
+            PathMedium::Vacuum,
+            TransportOptions::default(),
+            settings(2, 32),
+            cx,
+        )
+        .unwrap();
+        rough.advance(cx, usize::MAX).unwrap();
+        assert!(rough.pixel_estimate(0).unwrap().luminance_cd_m2 > 0.0);
+
+        let dark = [isotropic(
+            [0.0, 0.0, 2.0],
+            0.0,
+            SourceSpectrum::equal_energy(),
+        )];
+        scene.primitives[0].material = Material::Conductor {
+            optics: optics(),
+            surface: ConductorSurface::SMOOTH,
+        };
+        assert!(
+            PathLuminanceJob::new(
+                &scene,
+                &dark,
+                PathMedium::Vacuum,
+                TransportOptions::default(),
+                settings(2, 8),
+                cx,
+            )
+            .is_ok()
+        );
+    });
+}
+
+#[test]
+fn g1_smooth_metal_retains_calibrated_finite_emitter_reflection() {
+    with_cx(|cx, _| {
+        let mut scene = empty_scene([0.0, 0.0, 1.0], [0.0, 0.0, -1.0]);
+        let mut mirror = floor(0.0, 10.0, LiftedSpectrum { c: [0.0; 3] });
+        mirror.material = Material::Conductor {
+            optics: optics(),
+            surface: ConductorSurface::SMOOTH,
+        };
+        scene.primitives.push(mirror);
+        // Front emission faces down, toward the mirror; the camera looks away
+        // from the source and receives it only after a specular reflection.
+        scene.primitives.push(Primitive {
+            shape: Shape::Mesh(TriMesh::new(
+                vec![
+                    [-2.0, -2.0, 2.0],
+                    [2.0, -2.0, 2.0],
+                    [2.0, 2.0, 2.0],
+                    [-2.0, 2.0, 2.0],
+                ],
+                vec![[0, 2, 1], [0, 3, 2]],
+            )),
+            material: Material::Lambertian {
+                reflectance: LiftedSpectrum { c: [0.0; 3] },
+            },
+            emission: None,
+        });
+        let luminance = 100.0;
+        let surfaces = [PhotometricAreaEmitter::try_new(
+            1,
+            luminance * PI * 16.0,
+            1.0,
+            SourceSpectrum::equal_energy(),
+            EmissionSidedness::Front,
+        )
+        .unwrap()];
+        let mut job = PathLuminanceJob::new_with_emitters(
+            &scene,
+            PhotometricEmitters {
+                points: &[],
+                surfaces: &surfaces,
+            },
+            PathMedium::Vacuum,
+            TransportOptions::default(),
+            settings(2, 2048),
+            cx,
+        )
+        .unwrap();
+        job.advance(cx, usize::MAX).unwrap();
+        // Independent normal-incidence complex Fresnel: n=2, k=3 gives
+        // ((n-1)^2+k^2)/((n+1)^2+k^2)=10/18, with no extra cosine/distance loss.
+        close(
+            job.pixel_estimate(0).unwrap().luminance_cd_m2,
+            luminance * 10.0 / 18.0,
+            0.005,
+            "finite emitter radiance survives the smooth metal Fresnel reflection",
+        );
+    });
 }
 
 fn brdf_normal_view(wx: f64, wy: f64, wz: f64, alpha_x: f64, alpha_y: f64) -> f64 {

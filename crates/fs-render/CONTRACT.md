@@ -5361,6 +5361,15 @@ point-connection estimator remains absent. The public direct-only
 `PhotometricScene` retains its opaque-material admission rather than presenting
 straight-through or missing refractive transport as total illumination.
 
+Photometry semantics v10 and path semantics v14 also refuse active point
+fixtures with `ConductorSurface::SMOOTH`. A mirror's delta reflection has no
+finite BSDF density for the straight point-source connection, and a sampled
+mirror continuation cannot hit an ideal point emitter. Omitting that reflected
+light must not produce an accepted calibrated luminance or illuminance result.
+Rough metal retains its ordinary point-source connections; dark point fixtures
+do not impose this restriction. Smooth metal with finite emitters retains
+native reflected paths and the original wavelength-dependent Fresnel loss.
+
 `Material::BrushedConductor` uses its existing body-local tangent frame for
 calibrated point/area connections and BSDF sampling, including rigid placement.
 The original optical table, surface detail and medium-index conventions remain
