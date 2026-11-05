@@ -1,5 +1,16 @@
 # CONTRACT: fs-conduction
 
+## Fully prescribed steady fields
+
+The steady spatial solver and its initial-field preparation accept meshes with
+no free temperature degrees of freedom. The solve still assembles and validates
+the original physical operator at the prescribed temperatures, including bulk
+material laws, sources and boundary/interface exchange. It returns the prescribed
+field and its reservoir heat reactions with zero nonlinear/Krylov iterations.
+The zero free-node residual says that no temperature equations remain; it does
+not certify the continuum accuracy of a coarse, fully constrained mesh. Separate
+adjoint, verification and coupled-owner admission limits remain unchanged.
+
 ## Heat-imbalance solves for linear transient conduction
 
 The theta march solves `(C + theta*dt*K) delta_T = dt*(b - K*T_old)` with zero

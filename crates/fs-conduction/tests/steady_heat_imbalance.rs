@@ -7,10 +7,13 @@ mod support;
 use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::fixtures::{box_grid, on_box_face};
 use fs_conduction::solve::{
-    ConductionProblem, ConductionSolver, InitialGuess, Nonlinearity, SolveConfig, solve,
+    ConductionProblem, ConductionSolver, InitialGuess, Nonlinearity, SolveConfig,
+    element_heat_flux, solve,
 };
-use fs_conduction::{ConductionError, ConductionMesh, ConductivityModel, ScalarField};
-use support::with_cx;
+use fs_conduction::{
+    ConductionError, ConductionMesh, ConductivityModel, ConductivityTable, ScalarField,
+};
+use support::{with_cancelled_cx, with_cx};
 
 fn slab() -> ConductionMesh {
     let (complex, positions) = box_grid([4, 2, 2], [1.0, 1.0, 1.0]);
@@ -335,5 +338,149 @@ fn a_small_damped_step_cannot_publish_unbalanced_heat_as_converged() {
             other => panic!("expected unresolved heat, got {other}"),
         }
         assert_eq!(solver.state(), &before);
+    });
+}
+
+#[test]
+fn fully_prescribed_anisotropic_field_retains_flux_and_every_heat_balance_term() {
+    let (complex, positions) = box_grid([1, 1, 1], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let prescribed: Vec<_> = mesh
+        .positions()
+        .iter()
+        .map(|p| 300.0 + 20.0 * p[0] - 10.0 * p[1] + 5.0 * p[2])
+        .collect();
+    // Both x faces together prescribe every vertex of this coarse mesh.
+    // The other faces can still exchange heat with external reservoirs.
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .region(
+            "temperature walls",
+            |face| on_box_face(face.centroid[0], 0.0) || on_box_face(face.centroid[0], 1.0),
+            ThermalBc::Dirichlet {
+                temperature: ScalarField::Nodal(prescribed.clone()),
+            },
+        )
+        .unwrap()
+        .region(
+            "heater",
+            |face| on_box_face(face.centroid[1], 0.0),
+            ThermalBc::neumann(-4.0).unwrap(),
+        )
+        .unwrap()
+        .region(
+            "coolant",
+            |face| on_box_face(face.centroid[1], 1.0),
+            ThermalBc::robin(5.0, 295.0).unwrap(),
+        )
+        .unwrap()
+        .adiabatic_remainder()
+        .finish()
+        .unwrap();
+    let material =
+        ConductivityModel::constant_tensor([[10.0, 1.0, 0.5], [1.0, 4.0, 0.25], [0.5, 0.25, 2.0]])
+            .unwrap();
+    let source = ScalarField::Uniform(120.0);
+    for nonlinearity in drivers() {
+        let problem = ConductionProblem {
+            mesh: &mesh,
+            boundary: &boundary,
+            material: &material,
+            element_materials: None,
+            source: &source,
+        };
+        let config = SolveConfig {
+            nonlinearity,
+            initial: InitialGuess::Free(Vec::new()),
+            ..SolveConfig::default()
+        };
+        assert_eq!(
+            ConductionSolver::initial_temperature(problem, &config).unwrap(),
+            prescribed
+        );
+        let solution = with_cx(|cx| solve(cx, problem, config).unwrap());
+        assert_eq!(solution.temperature, prescribed);
+        assert_eq!(solution.report.free_dofs, 0);
+        assert_eq!(solution.report.iterations, 0);
+        assert!(solution.report.linear.is_empty());
+        assert_eq!(solution.report.final_residual, 0.0);
+        let energy = &solution.report.energy;
+        assert!((energy.source_w - 120.0).abs() < 1e-12);
+        assert!((energy.neumann_out_w + 4.0).abs() < 1e-12);
+        assert!((energy.robin_out_w - 37.5).abs() < 1e-12);
+        assert!((energy.dirichlet_in_w + 86.5).abs() < 1e-10);
+        assert!(energy.closure_w.abs() < 1e-10);
+        for flux in element_heat_flux(&mesh, &material, &solution.temperature).unwrap() {
+            for (actual, expected) in flux.into_iter().zip([-192.5, 18.75, -17.5]) {
+                assert!((actual - expected).abs() < 1e-12);
+            }
+        }
+    }
+}
+
+#[test]
+fn fully_prescribed_field_uses_actual_nonlinear_conductivity_and_keeps_admission_checks() {
+    let (complex, positions) = box_grid([1, 1, 1], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, positions).unwrap();
+    let prescribed: Vec<_> = mesh
+        .positions()
+        .iter()
+        .map(|p| 300.0 + 20.0 * p[0])
+        .collect();
+    let boundary = ThermalBoundaryBuilder::new(&mesh)
+        .remainder(
+            "temperature walls",
+            ThermalBc::Dirichlet {
+                temperature: ScalarField::Nodal(prescribed.clone()),
+            },
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    let material = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(300.0, 2.0), (320.0, 2.2)]).unwrap(),
+    );
+    let source = ScalarField::Nodal(mesh.positions().iter().map(|p| 7.0 + 2.0 * p[0]).collect());
+    let problem = ConductionProblem {
+        mesh: &mesh,
+        boundary: &boundary,
+        material: &material,
+        element_materials: None,
+        source: &source,
+    };
+    let solution = with_cx(|cx| solve(cx, problem, SolveConfig::default()).unwrap());
+    assert_eq!(solution.temperature, prescribed);
+    assert!((solution.report.energy.source_w - 8.0).abs() < 1e-12);
+    assert!((solution.report.energy.dirichlet_in_w + 8.0).abs() < 1e-11);
+    let fluxes = element_heat_flux(&mesh, &material, &solution.temperature).unwrap();
+    for (tet, flux) in mesh.complex().tets.iter().zip(fluxes) {
+        let mean_x = tet
+            .iter()
+            .map(|&v| mesh.positions()[v as usize][0])
+            .sum::<f64>()
+            / 4.0;
+        assert!((flux[0] + 20.0 * (2.0 + 0.2 * mean_x)).abs() < 1e-12);
+        assert!(flux[1].abs() < 1e-12 && flux[2].abs() < 1e-12);
+    }
+    with_cancelled_cx(|cx| {
+        assert!(matches!(
+            solve(cx, problem, SolveConfig::default()),
+            Err(ConductionError::Cancelled { .. })
+        ));
+    });
+    let limited_material = ConductivityModel::isotropic(
+        ConductivityTable::declared_curve(vec![(300.0, 2.0), (310.0, 2.1)]).unwrap(),
+    );
+    with_cx(|cx| {
+        assert!(matches!(
+            solve(
+                cx,
+                ConductionProblem {
+                    material: &limited_material,
+                    ..problem
+                },
+                SolveConfig::default()
+            ),
+            Err(ConductionError::OutsideTemperatureSpan { .. })
+        ));
     });
 }

@@ -110,8 +110,8 @@ impl DofMap {
         Ok(dofs)
     }
 
-    /// Transient storage/reaction accounting also needs a map when every
-    /// temperature is prescribed and no spatial solve remains.
+    /// Steady flux/reaction and transient storage accounting also need a map
+    /// when every temperature is prescribed and no spatial solve remains.
     pub(crate) fn new_allow_fully_prescribed(
         boundary: &ThermalBoundary,
         vertex_count: usize,

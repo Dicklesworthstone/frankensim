@@ -725,9 +725,11 @@ pub struct StepReport {
 impl<'m> ConductionSolver<'m> {
     /// Build a solver over a problem.
     ///
+    /// Fully prescribed fields still assemble the physical operator and
+    /// report reservoir reactions, without nonlinear or Krylov iterations.
+    ///
     /// # Errors
     /// [`ConductionError::Config`] for an inadmissible configuration;
-    /// [`ConductionError::NoFreeDofs`] when everything is pinned;
     /// [`ConductionError::SingularPureNeumann`] when neither a Dirichlet
     /// nor a Robin row exists (the operator is singular up to a
     /// constant, and a Krylov method would return a plausible wrong
@@ -758,7 +760,8 @@ impl<'m> ConductionSolver<'m> {
         if let Some(assigned) = problem.element_materials {
             assigned.validate_for(problem.mesh)?;
         }
-        let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
+        let dofs =
+            DofMap::new_allow_fully_prescribed(problem.boundary, problem.mesh.vertex_count())?;
         let free = initial_free(&problem, &dofs, &config.initial)?;
         Ok(dofs.scatter(&free))
     }
@@ -790,7 +793,8 @@ impl<'m> ConductionSolver<'m> {
         if let Some(assigned) = problem.element_materials {
             assigned.validate_for(problem.mesh)?;
         }
-        let dofs = DofMap::new(problem.boundary, problem.mesh.vertex_count())?;
+        let dofs =
+            DofMap::new_allow_fully_prescribed(problem.boundary, problem.mesh.vertex_count())?;
         if dofs.fixed().is_empty() && !problem.boundary.has_robin() {
             return Err(ConductionError::SingularPureNeumann);
         }
