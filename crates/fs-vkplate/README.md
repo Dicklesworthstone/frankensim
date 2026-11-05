@@ -942,3 +942,87 @@ Their cymbals and hi-hat take `kit::DECLARED_CYMBAL_INTERFACE` (and the hi-hat
 `--preset-heads` (anywhere on the command line) renders the recording-fitted presets instead, and
 adds "heads: PRESET, recording-fitted T60 (opt-in --preset-heads); not a sourced head loss" to the
 drums' notes.
+
+### Full mutual resistance between bodies
+
+`Instrument::attach_mutual_radiation` accepts a complete symmetric, positive
+semidefinite `mutual_radiation::ResistanceSample` and one nodal projection per
+generalized coordinate. This adds reciprocal cross-body forces inside the
+mechanical step. Signed off-diagonal entries remain signed: collective motion
+can reinforce or cancel the load, including exact zero-loss dark modes.
+
+Use the full real matrix from an authored Rayleigh/BEM sample, for example
+`ModalLoadingBake::at_omega(omega)?.impedance().iter().map(|z| z.re)`, with the
+same density, sound speed and `omega / (2*pi)` reference frequency. For surface
+velocity shapes Phi and area weights W, supply the work-conjugate projection
+`P=(Phi^T W Phi)^-1 Phi^T W`, not bare shapes. The consumer applies
+`qdot=P*v` and `f=-P^T*Re(Z)*qdot`. For length coordinates Re(Z) is kg/s and
+the projection weights are dimensionless. The geometry, modal basis and
+projection must describe the same physical body motion.
+
+The application performing the offline bake supplies `fs-bem`. This assembly
+example is not executed by the standalone crate's tests:
+
+```rust,ignore
+use fs_bem::helmholtz::{Medium, rayleigh_modal::AreaSample};
+use fs_bem::modal_loading::{
+    LoadingRoute, SurfaceModeTraces, modal_radiation_loading,
+};
+use fs_vkplate::{Body, Instrument, standard_gas};
+use fs_vkplate::mutual_radiation::ResistanceSample;
+
+let gas = standard_gas();
+let omega = 2.0 * std::f64::consts::PI * 200.0;
+let medium = Medium { density: gas.density, sound_speed: gas.sound_speed };
+let distance = 4.5 * gas.sound_speed / omega;
+let cells = [
+    AreaSample { position_m: [0.0, 0.0], area_m2: 0.01,
+                 mode_shape: vec![2.0, 0.0] },
+    AreaSample { position_m: [distance, 0.0], area_m2: 0.01,
+                 mode_shape: vec![0.0, 4.0] },
+];
+let bake = modal_radiation_loading(
+    SurfaceModeTraces::PlanarBaffled { samples: &cells },
+    LoadingRoute::PlanarBaffledRayleigh, &[omega], medium,
+    fs_blake3::hash_bytes(b"two declared baffled piston cells"), 4, || false,
+).unwrap();
+let row = bake.at_omega(omega).unwrap();
+let source = ResistanceSample::new(
+    bake.modes(), row.omega() / (2.0 * std::f64::consts::PI),
+    medium.density, medium.sound_speed,
+    row.impedance().iter().map(|z| z.re).collect(),
+).unwrap();
+let mut instrument = Instrument::with_gas(48_000.0, gas).unwrap();
+instrument.add(Body::point("left rigid piston", 2.0));
+instrument.add(Body::point("right rigid piston", 0.7));
+// Phi=diag(2,4); P=(Phi^T W Phi)^-1 Phi^T W=diag(1/2,1/4).
+instrument.attach_mutual_radiation(
+    source, vec![vec![(0, 0, 0.5)], vec![(1, 0, 0.25)]],
+).unwrap();
+instrument.bodies[0].wp[0] = -instrument.k(); // left piston starts at 1 m/s
+instrument.step(&mut []);
+```
+
+
+This is a **narrowband resistance approximation at the declared frequency**.
+It does not consume Im(Z), fit a broadband causal impedance, add a propagation
+delay to the mechanical load, or calculate scattering between closed bodies.
+Those effects require the existing broader passive-realization work. The
+complete sample owns both self and cross resistance; attaching overlapping
+compact, dipole, modal or other mutual loads refuses instead of counting self
+loss twice. The reference frequency must be below internal Nyquist.
+
+Preparation bounds ports (128) and footprint terms (65,536). Sparse
+projection and reciprocal scatter cost O(footprint terms + rank * ports) per
+pass; the cached physical diagonal makes timestep admission O(nodes). A pivoted double-double semidefinite factor keeps
+coherent sums before squaring; nonreciprocal or negative/unresolved resistance
+refuses without a diagonal fallback or loss floor. After preparation, force and loss passes allocate no storage. The existing explicit leapfrog stability admission includes
+`2*rate*trace(M^-1 P^T Re(Z) P)`; source admission refuses a clock outside the assembled rest-state bound. After assembly changes, `validate_mutual_radiation()` rechecks ownership,
+clock and masses. Preparation also performs that check.
+
+`mutual_radiated_j()` counts nonnegative centered-velocity dissipation.
+For a discrete energy balance add `mutual_radiation_energy_correction()` to
+the mechanical energy: the backward-velocity force contributes
+`-dt/4 * v_half^T C v_half`. This is a numerical storage correction, not
+physical energy in the air. Export retains `InstrumentImage::has_mutual_radiation`;
+external steppers must refuse until they implement the same complete load.

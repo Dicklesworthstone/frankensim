@@ -383,6 +383,9 @@ impl Plan {
         if ins.mics.iter().any(|m| m.closed_body().is_some()) {
             return Err("a microphone hears its drum as one closed body (fs_vkplate::closed_body, pexfp.378), an observer the GPU kernel does not replay: render the instrument natively".into());
         }
+        if ins.has_mutual_radiation() || img.has_mutual_radiation {
+            return Err("this GPU stepper has no mutual radiation load; render the instrument natively".into());
+        }
         if img.rate != ins.rate || img.bodies.len() != ins.bodies.len() {
             return Err("exported and live instrument clocks or bodies differ".into());
         }
@@ -846,6 +849,9 @@ impl Plan {
 
     /// The state and strikes of one simulation of this plan's instrument.
     pub fn state(&self, img: &InstrumentImage) -> Result<SimState, String> {
+        if img.has_mutual_radiation {
+            return Err("a batch member has mutual radiation loading the GPU stepper cannot replay".into());
+        }
         if self.rate != img.rate { return Err("a batch member's internal clock differs from the first member's".into()); }
         if self.gas != Some(img.gas) {
             return Err("a batch member's atmosphere differs from the first member's".into());
