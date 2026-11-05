@@ -14,7 +14,7 @@
   "physics_missing": [
     "a measured bore profile and bell flare: only reads from the paper's graphs exist",
     "pad and key heights, undercut geometry and a full fingering chart",
-    "a double-reed valve driving this bore (paired reed or the material-modal valve)",
+    "a double-reed valve driving this bore: the paired-reed and material-modal valves exist in the engine, but the dense DG propagator's 2048-DOF cap refuses this bore. Its wall-loss fit needs 8 poles at the 0.87 mm reed tube, 13 to 16 at 2.4 mm, 17 to 20 at 5 mm and more than 32 at the 19 mm bell, and 8 poles alone put the 39-span bore and its 20 holes at 2124 DOF on the smallest mesh the grammar allows",
     "staple and reed channel geometry",
     "a modern specimen: the only complete table is from 1967",
     "A printed pressure for every note: Fuks and Sundberg print one for D4, F4, Bb4, D5 and F5 only, as a range (Table A6, two players, four dynamics, up and down); the pages use the second oboist's ff, rising. F4 (6865 Pa) plays in the first register and D5 (8041 Pa) speaks; Bb4 at 7551 Pa scored 5 of 15 against 6 and was not posted; D4 at 6178 Pa does not speak; F5 has no printed fingering. Every other note uses the pages' 7.4 kPa",
