@@ -38,6 +38,17 @@ pub const ELASTICITY_APPLY_VJP_OP: &str = "fs-cutfem.elasticity-apply.v1";
 /// that evidence to the nearly incompressible limit.
 pub const MAX_PLANE_STRAIN_STIFFNESS_RATIO: f64 = 4.0;
 
+/// Kinematic reduction of the original three-dimensional isotropic material.
+/// Both reductions use force and energy per unit reference thickness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElasticPlane {
+    /// The out-of-plane strain vanishes; the transverse stress generally does not.
+    Strain,
+    /// The transverse stresses vanish and thickness strain relaxes locally.
+    /// This is an in-plane thin-body model, without bending or transverse inertia.
+    Stress,
+}
+
 type FaceKey = (CellKey, CellKey);
 type NodeExpansion = Vec<(usize, f64)>;
 type TerminalIds = BTreeMap<NodeKey, usize>;
@@ -240,8 +251,10 @@ pub struct CutElasticity<'a> {
     pub grid: &'a Quadtree,
     /// Certified negative-inside level set.
     pub sdf: &'a dyn CutSdf,
-    /// Isotropic small-strain material (plane-strain restriction). The v1
-    /// certified regime requires `(lambda + 2*mu) / mu <= 4`.
+    /// Original three-dimensional isotropic small-strain material. Ordinary
+    /// entries use plane strain; explicit `*_plane_stress*` entries eliminate
+    /// transverse stress. The reduced stiffness must satisfy
+    /// `(lambda + 2*mu) / mu <= 4` in either case.
     pub material: &'a IsotropicElastic,
     /// Symmetric-Nitsche constant. The applied penalty is
     /// `nitsche_beta * modulus / h`, never divided by cut fraction.
@@ -292,6 +305,7 @@ impl core::fmt::Debug for CutElasticity<'_> {
 /// through CG iterations.
 #[derive(Debug, Clone)]
 pub struct CutElasticityOperator {
+    plane: ElasticPlane,
     matrix: Csr,
     rhs: Vec<f64>,
     node_ids: TerminalIds,
@@ -306,6 +320,12 @@ pub struct CutElasticityOperator {
 }
 
 impl CutElasticityOperator {
+    /// Physical plane reduction used by bulk, boundary and stabilization terms.
+    #[must_use]
+    pub const fn plane(&self) -> ElasticPlane {
+        self.plane
+    }
+
     /// Canonical symmetric CSR matrix.
     #[must_use]
     pub fn matrix(&self) -> &Csr {
@@ -516,6 +536,7 @@ fn solve_cg_to_true_euclidean_gate(
 /// Solved vector field plus convergence and integration metadata.
 #[derive(Debug, Clone)]
 pub struct CutElasticitySolution {
+    plane: ElasticPlane,
     coefficients: Vec<f64>,
     nodal: BTreeMap<NodeKey, [f64; 2]>,
     active: Vec<CellKey>,
@@ -531,6 +552,12 @@ pub struct CutElasticitySolution {
 }
 
 impl CutElasticitySolution {
+    /// Physical plane reduction of the solved operator.
+    #[must_use]
+    pub const fn plane(&self) -> ElasticPlane {
+        self.plane
+    }
+
     /// Typed provenance for [`Self::rel_residual`].
     #[must_use]
     pub fn residual_claim(&self) -> ResidualClaim {
@@ -683,7 +710,7 @@ impl CutElasticitySolution {
 }
 
 impl CutElasticity<'_> {
-    fn validate_assembly(&self) -> Result<(f64, f64), CutFemError> {
+    fn validate_assembly(&self, plane: ElasticPlane) -> Result<(f64, f64), CutFemError> {
         if !(self.traction_free_interface
             || (self.nitsche_beta > 0.0 && self.nitsche_beta.is_finite()))
         {
@@ -734,7 +761,17 @@ impl CutElasticity<'_> {
                 ),
             });
         }
-        let (lambda, mu) = self.material.lame();
+        let (lambda, mu) = match plane {
+            ElasticPlane::Strain => self.material.lame(),
+            ElasticPlane::Stress => {
+                // Eliminate sigma_zz = 0 analytically, before evaluating the
+                // three-dimensional lambda that diverges as nu approaches 1/2.
+                // Bower, Applied Mechanics of Solids, section 3.2.3.
+                let e = self.material.youngs;
+                let nu = self.material.poisson;
+                (e * nu / ((1.0 + nu) * (1.0 - nu)), e / (2.0 * (1.0 + nu)))
+            }
+        };
         let bulk_2d = lambda + mu;
         if !(lambda.is_finite()
             && mu > 0.0
@@ -743,15 +780,16 @@ impl CutElasticity<'_> {
             && bulk_2d.is_finite())
         {
             return Err(CutFemError::InvalidElasticityInput {
-                what: "material Lamé parameters do not define a finite coercive plane-strain law"
-                    .to_string(),
+                what: format!(
+                    "material parameters do not define a finite coercive {plane:?} plane law"
+                ),
             });
         }
         let stiffness_ratio = (lambda + 2.0 * mu) / mu;
         if !(stiffness_ratio.is_finite() && stiffness_ratio <= MAX_PLANE_STRAIN_STIFFNESS_RATIO) {
             return Err(CutFemError::InvalidElasticityInput {
                 what: format!(
-                    "plane-strain stiffness ratio (lambda + 2*mu)/mu = {stiffness_ratio} exceeds the certified compressible-regime limit {MAX_PLANE_STRAIN_STIFFNESS_RATIO}; near-incompressible stabilization is not claimed"
+                    "{plane:?} plane stiffness ratio (lambda + 2*mu)/mu = {stiffness_ratio} exceeds the admitted limit {MAX_PLANE_STRAIN_STIFFNESS_RATIO}; near-incompressible plane-strain stabilization is not claimed"
                 ),
             });
         }
@@ -826,6 +864,7 @@ impl CutElasticity<'_> {
         g: &dyn Fn(f64, f64) -> [f64; 2],
     ) -> Result<CutElasticityOperator, CutFemError> {
         self.assemble_impl(
+            ElasticPlane::Strain,
             f,
             g,
             self.boundary_traction.map(BoundaryTraction::Uncertified),
@@ -848,17 +887,59 @@ impl CutElasticity<'_> {
         boundary_traction: BoundaryTraction<'_>,
     ) -> Result<CutElasticityOperator, CutFemError> {
         self.require_explicit_boundary_traction_slot()?;
-        self.assemble_impl(f, g, Some(boundary_traction))
+        self.assemble_impl(ElasticPlane::Strain, f, g, Some(boundary_traction))
+    }
+
+    /// Assemble a traction-free-thickness plane-stress material on the same
+    /// SDF, with the original Nitsche, ghost and hanging-node operators.
+    ///
+    /// The original E and nu are retained. The reduced first Lamé coefficient
+    /// is E*nu/(1-nu^2), while the shear modulus is unchanged. Thus thin-body
+    /// in-plane response remains finite as the 3-D Poisson ratio approaches
+    /// 1/2; this is not a mixed formulation for incompressible plane strain.
+    /// Loads and energy are per unit reference thickness. There is no bending,
+    /// thickness variation or finite-strain interpretation.
+    ///
+    /// # Errors
+    /// The same material, geometry, callback and stabilization refusals as
+    /// [`Self::assemble`], evaluated on the plane-stress reduction.
+    pub fn assemble_plane_stress(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+    ) -> Result<CutElasticityOperator, CutFemError> {
+        self.assemble_impl(
+            ElasticPlane::Stress,
+            f,
+            g,
+            self.boundary_traction.map(BoundaryTraction::Uncertified),
+        )
+    }
+
+    /// Plane-stress assembly with explicit, checked boundary-traction support.
+    ///
+    /// # Errors
+    /// In addition to [`Self::assemble_plane_stress`] refusals, requires the
+    /// legacy [`Self::boundary_traction`] slot to be empty.
+    pub fn assemble_plane_stress_with_boundary_traction(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+        boundary_traction: BoundaryTraction<'_>,
+    ) -> Result<CutElasticityOperator, CutFemError> {
+        self.require_explicit_boundary_traction_slot()?;
+        self.assemble_impl(ElasticPlane::Stress, f, g, Some(boundary_traction))
     }
 
     #[allow(clippy::too_many_lines)]
     fn assemble_impl(
         &self,
+        plane: ElasticPlane,
         body: &dyn Fn(f64, f64) -> [f64; 2],
         g: &dyn Fn(f64, f64) -> [f64; 2],
         boundary_traction: Option<BoundaryTraction<'_>>,
     ) -> Result<CutElasticityOperator, CutFemError> {
-        let (lambda, mu) = self.validate_assembly()?;
+        let (lambda, mu) = self.validate_assembly(plane)?;
         let modulus = self.effective_stabilization_modulus(lambda, mu)?;
         let mut active = Vec::new();
         let mut cut = BTreeSet::new();
@@ -1053,6 +1134,7 @@ impl CutElasticity<'_> {
             }
         }
         Ok(CutElasticityOperator {
+            plane,
             matrix: coo.assemble(),
             rhs,
             node_ids,
@@ -1298,6 +1380,7 @@ impl CutElasticity<'_> {
         g: &dyn Fn(f64, f64) -> [f64; 2],
     ) -> Result<CutElasticitySolution, CutFemError> {
         self.solve_impl(
+            ElasticPlane::Strain,
             f,
             g,
             self.boundary_traction.map(BoundaryTraction::Uncertified),
@@ -1317,17 +1400,51 @@ impl CutElasticity<'_> {
         boundary_traction: BoundaryTraction<'_>,
     ) -> Result<CutElasticitySolution, CutFemError> {
         self.require_explicit_boundary_traction_slot()?;
-        self.solve_impl(f, g, Some(boundary_traction))
+        self.solve_impl(ElasticPlane::Strain, f, g, Some(boundary_traction))
+    }
+
+    /// Assemble and solve the explicit plane-stress model with the existing
+    /// deterministic CG and recomputed Euclidean residual gate.
+    ///
+    /// # Errors
+    /// All [`Self::assemble_plane_stress`] and [`Self::solve`] refusals.
+    pub fn solve_plane_stress(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+    ) -> Result<CutElasticitySolution, CutFemError> {
+        self.solve_impl(
+            ElasticPlane::Stress,
+            f,
+            g,
+            self.boundary_traction.map(BoundaryTraction::Uncertified),
+        )
+    }
+
+    /// Plane-stress solve with an explicit boundary-traction support descriptor.
+    ///
+    /// # Errors
+    /// All [`Self::assemble_plane_stress_with_boundary_traction`] and
+    /// [`Self::solve`] refusals.
+    pub fn solve_plane_stress_with_boundary_traction(
+        &self,
+        f: &dyn Fn(f64, f64) -> [f64; 2],
+        g: &dyn Fn(f64, f64) -> [f64; 2],
+        boundary_traction: BoundaryTraction<'_>,
+    ) -> Result<CutElasticitySolution, CutFemError> {
+        self.require_explicit_boundary_traction_slot()?;
+        self.solve_impl(ElasticPlane::Stress, f, g, Some(boundary_traction))
     }
 
     fn solve_impl(
         &self,
+        plane: ElasticPlane,
         f: &dyn Fn(f64, f64) -> [f64; 2],
         g: &dyn Fn(f64, f64) -> [f64; 2],
         boundary_traction: Option<BoundaryTraction<'_>>,
     ) -> Result<CutElasticitySolution, CutFemError> {
         self.validate_solver()?;
-        let operator = self.assemble_impl(f, g, boundary_traction)?;
+        let operator = self.assemble_impl(plane, f, g, boundary_traction)?;
         let preconditioner = JacobiPrecond::new(operator.matrix());
         let (coefficients, iters, residual_claim) = solve_cg_to_true_euclidean_gate(
             &operator,
@@ -1347,6 +1464,7 @@ impl CutElasticity<'_> {
         let nodal = operator.nodal_values(&coefficients);
         let compliance = operator.algebraic_compliance(&coefficients)?;
         Ok(CutElasticitySolution {
+            plane,
             coefficients,
             nodal,
             active: operator.active,

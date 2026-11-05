@@ -68,7 +68,7 @@ pub use controlled::ControlledElasticitySolution;
 pub use elastic::MAX_PLANE_STRAIN_STIFFNESS_RATIO;
 pub use elastic::{
     BoundaryTraction, CutElasticity, CutElasticityOperator, CutElasticitySolution,
-    CutStabilizationScaling, DesignBoxEdge, EdgeBand, SupportedTractionSegment,
+    CutStabilizationScaling, DesignBoxEdge, EdgeBand, ElasticPlane, SupportedTractionSegment,
     supported_traction_segment,
 };
 #[cfg(feature = "adjoint-vjp")]

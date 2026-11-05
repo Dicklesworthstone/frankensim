@@ -458,14 +458,16 @@ ledger evidence.
   Level jumps greater than one, incomplete/overlapping face coverage, 3D face
   geometry, and higher-order normal-derivative jumps refuse or remain outside
   the claimed surface.
-- Vector constitutive scope is two-dimensional plane-strain isotropic
-  small-strain elasticity. Plane stress, orthotropy, nonlinear
+- Vector constitutive scope is two-dimensional isotropic small-strain
+  elasticity. Ordinary entries use plane strain; explicit plane-stress
+  entries condense transverse stress with the original E and nu. Orthotropy, nonlinear
   material state updates, finite strain, and higher-order vector
   elements are not claimed.
 - Nearly incompressible plane strain is not claimed. The v1 frontend
   refuses `(lambda + 2*mu) / mu > 4`; extending the `mu`-scaled
   stabilization beyond that compressible regime requires a separate
   material-robust coercivity analysis and locking/conditioning battery.
+
 - The vector operator currently assembles canonical CSR. It exposes a
   matrix-free-shaped `apply` / `apply_transpose` seam, but a genuinely
   matrix-free cut-cell kernel is not yet claimed.
@@ -490,3 +492,27 @@ ledger evidence.
   bead).
 - Time-dependent problems and the speculative Delaunay-vs-CutFEM race
   (the executor's bead).
+
+## Traction-free-thickness plane-stress elasticity
+
+`CutElasticity::{assemble,solve}_plane_stress` and their checked
+`_with_boundary_traction` entries use the same bulk, symmetric Nitsche, ghost,
+2:1 hanging-node elimination, CSR operator, adjoint apply and residual-checked
+solve. They analytically eliminate transverse stress before evaluating the
+3-D first Lamé coefficient: `lambda_plane = E*nu/(1-nu^2)`, with the original
+shear modulus. Both boundary consistency terms and stabilization use this
+reduced law. Operator and solution retain the explicit `ElasticPlane` choice.
+The original plane-strain arithmetic and material gate remain unchanged.
+
+For thin in-plane bodies, stiffness stays finite as the original 3-D nu
+approaches 1/2. This does not extend the admissible nearly incompressible
+plane-strain model. All forces and energies use unit reference thickness;
+there is no bending, variable-thickness, anisotropic or finite-strain claim.
+Reference: A. F. Bower, *Applied Mechanics of Solids*, section 3.2.3,
+https://solidmechanics.org/Text/Chapter3_2/Chapter3_2.php.
+
+`tests/plane_stress.rs` checks independent affine strain energy on uniform
+and graded cut meshes, auxetic and near-incompressible thin materials,
+three-rung curved-domain manufactured L2/H1 displacement orders, checked
+traction resultants, controlled-solve parity, and identical original operator
+bits at nu=0. These are numerical model checks, not experimental qualification.
