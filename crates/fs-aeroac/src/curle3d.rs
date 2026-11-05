@@ -20,6 +20,8 @@ pub mod array;
 pub mod moving;
 /// Analytic whole-sphere power of coherent compact-source arrays.
 pub mod power;
+/// Coherent radiation of resolved three-dimensional Lighthill volume stresses.
+pub mod quadrupole;
 /// Geometrical transmission of stationary monopoles across a two-fluid plane.
 pub mod refraction;
 mod statistics;

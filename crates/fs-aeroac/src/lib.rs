@@ -16,6 +16,8 @@
 //! not promote the flow-derived spectra into calibrated SPL predictions.
 //! The separate [`curle3d`] owner accepts prescribed 3D SI forces and retains
 //! the same distinction between an acoustic transfer and source validation.
+//! [`curle3d::quadrupole`] additionally propagates symmetric Lighthill volume
+//! stresses, including their trace, with coherent pressure and vector velocity.
 //!
 //! Modules:
 //! - [`bessel`]: self-contained deterministic J0/J1/Y0/Y1 and the

@@ -1028,8 +1028,10 @@ determinism.
   receipts (the .10.1 sweep is the pending producer). The card
   content hash is FNV-1a: deterministic correlation identity only,
   never authenticity.
-- Quadrupole (volume) sources: dipoles dominate at low Mach over
-  rigid surfaces; the Lighthill volume term is out of scope v1.
+- Supplied symmetric 3D Lighthill volume-stress moments propagate through
+  `curle3d::quadrupole`. Automatic flow-volume extraction, unresolved SGS
+  completion and inclusion in the existing surface-only rigs remain out of
+  scope; this capability alone does not qualify a turbulent jet-noise source.
 - Only orders 0 and 1 of the Bessel functions are provided (all the
   2D monopole/dipole machinery needs); higher orders are not
   implemented.
@@ -1602,3 +1604,52 @@ flow, absorption, finite surfaces, layers, force dipoles or source feedback.
 references, important evanescent contributions, exact reactive equal-speed
 fields, reciprocity, pressure-gradient velocity, ray-tube asymptotics, geometry,
 refinement, original observation clocks and explicit work/cancellation refusals.
+
+## Resolved volume-stress quadrupoles
+
+`curle3d::quadrupole::PreparedQuadrupoleObserver` propagates prescribed symmetric
+Lighthill stress moments in the original `FluidAcousticState`. Each cell supplies
+`Q_ij = integral_cell T_ij dV` in N m, ordered xx, yy, zz, xy, xz, yz; shear
+entries are physical tensor entries, not pre-doubled. The complete trace and
+cross stresses are retained. Source cells keep their own phase and position;
+the cell quadrature is compact, not the entire distributed source region.
+
+For the existing peak-phasor convention exp(-i omega t), the free-space Green
+function is `G = exp(ikr)/(4 pi r)`. Analytic Hessians give `p = Q_ij d_i d_j G`;
+the corresponding third derivatives give all three components of
+`u = grad(p)/(i rho omega)`. This includes transverse and reactive near fields,
+including velocity at pressure-null directions. The isotropic identity
+`Q = q I => p = -k^2 q G` retains the physically relevant trace. Source physics
+follows Lighthill (1952), DOI 10.1098/rspa.1952.0060; a resolved-flow application
+is Sarkar & Hussaini, NASA-CR-191543 (1993),
+<https://ntrs.nasa.gov/citations/19940017407>.
+
+`resolved_reynolds_moment_n_m` computes instantaneous `rho u_i u_j dV` from
+actual density, volume and velocity in the propagation frame. The original
+stress history must be integrated or Fourier transformed on its original
+clock; squaring velocity phasors at the same frequency is not a source model.
+The helper infers no mean subtraction, detrending, pressure/density correction,
+viscous stress or SGS completion. Full prescribed Lighthill moments can instead
+be supplied directly. Surface-force and volume-source decompositions remain
+the caller's physical responsibility; no source is added automatically.
+
+Preparation caches 24 complex coefficients per cell. Application is O(N),
+allocation-free and contains no transcendental work; fixed-order double-double
+reductions retain coherent cancellation. The separate observer leaves existing
+monopole/dipole transfer storage unchanged. `evaluate_harmonic_line` feeds the
+original pressure/vector-velocity finite-window observer; equal-frequency
+lines combine before quadratic statistics. Explicit coherence modes use the
+existing bounded statistics reduction without inferring independence or random
+phase. Source, geometry, finite-value, work and cancellation admission publish
+no partial prepared observer or field.
+
+Kernel regressions cover units, the isotropic Helmholtz identity, independent
+Green-function Hessian refinement, all-component linear momentum, rotation
+covariance, far-field directivity/impedance, pressure-null transverse velocity,
+and the actual quadratic source's DC/doubled-frequency content. Observer
+fixtures cover coherent cancellation, explicit independent modes, native
+harmonic-field bridging and admission/cancellation refusals. This is
+homogeneous stationary lossless free-space point quadrature: cell-size error
+requires spatial refinement. There is no moving-source correction, mean-flow
+propagation, boundary scattering, absorption, feedback, unresolved SGS sound
+or measured-SPL qualification.
