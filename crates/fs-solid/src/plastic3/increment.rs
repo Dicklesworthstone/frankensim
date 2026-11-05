@@ -1,4 +1,4 @@
-//! One Newton/load-path owner for native small- and finite-strain 3D elements.
+//! One Newton/load-path owner for native small- and finite-strain elements.
 //!
 //! Element operators own geometry, quadrature and constitutive history. This
 //! module owns frozen-history trials, prescribed increments, force scaling,
@@ -16,6 +16,13 @@ pub(crate) trait IncrementOperator {
     type State: Clone + PartialEq;
 
     fn initial_states(&self) -> Vec<Self::State>;
+
+    /// Translational components per node, used to remove a common translation
+    /// from the connected force scale. Existing spatial elements retain 3-D
+    /// indexing; plane sheets use the same Newton owner with two components.
+    fn components_per_node(&self) -> usize {
+        3
+    }
 
     /// Internal force and an upper cap on element stress forces on free rows.
     /// The cap alone must not normalize equilibrium: it can include stresses
@@ -90,6 +97,12 @@ pub(crate) fn solve<O: IncrementOperator>(
         load_path,
         settings,
     } = controls;
+    let components = operator.components_per_node();
+    if !(1..=3).contains(&components) || !dofs.is_multiple_of(components) {
+        return Err(SmallStrainTetError::InvalidInput {
+            what: "increment displacement layout requires one to three components per node".into(),
+        });
+    }
     let mut is_prescribed = vec![false; dofs];
     for &(dof, _) in prescribed_m {
         is_prescribed[dof] = true;
@@ -180,8 +193,8 @@ pub(crate) fn solve<O: IncrementOperator>(
                         coo.push(row, row_of[c], v);
                     }
                     if inertia.is_none() && v != 0.0 {
-                        let component = c % 3;
-                        let difference = u[c] - u[3 * (dof / 3) + component];
+                        let component = c % components;
+                        let difference = u[c] - u[components * (dof / components) + component];
                         deformation[component] = v.mul_add(difference, deformation[component]);
                     }
                 }

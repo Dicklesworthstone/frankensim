@@ -862,6 +862,37 @@ is implied. Existing `solve()` and continuation retain plane-strain semantics.
 under nominal traction and reports displacement, relaxed thickness and support
 reaction. Its constitutive coefficients are explicitly authored model inputs.
 
+## Retained finite-plastic sheet forming
+
+`hyper2d::plastic::FinitePlasticSheet` advances a P1/Q1 sheet through the
+original three-dimensional finite J2 return map and shared plastic increment
+solver. All three transverse nominal tractions relax at each point; the
+Schur-complement material tangent enters the actual element tangent. The sheet
+retains full accepted deformation, plastic history and original per-element
+native/source-resolved law bindings. Geometry is prepared once, and every
+weight is reference area times original element thickness. P1 has one exact
+centroid evaluation; Q1 retains four independent Gauss-point histories.
+
+Each endpoint starts from the accepted displacement and uses frozen history
+through local/global Newton and backtracking. Free in-plane coordinates solve
+equilibrium; recovered normal thickness is `h0 * F22`. Independent energy
+checks distinguish elastic/hardening storage, physical plastic dissipation,
+support/dead-load work and the signed endpoint quadrature defect. An exhausted
+solve, material-domain exit, folded element, energy refusal or cancellation
+returns no partially updated sheet. `SheetAssemblyBudget` bounds topology and
+free coordinates; cancellation is polled between material points. Assembly is
+sequential and deterministic. The shared increment solver's component count
+defaults to three; sheets select two solely for translation-free force scaling.
+
+G0/G1/G3/G4 regressions in `tests/finite_plastic_sheet.rs` exercise independent
+Hencky/J2 uniaxial tension/compression formulas, free lateral/interior motion,
+unloading with permanent shape and thickness, hardening versus heat, assembled
+force/tangent/energy derivatives, heterogeneous original laws and thicknesses,
+and transactional refusal/cancellation. Coefficients are synthetic. This is
+an isothermal, rate-independent in-plane continuum; it does not claim shell
+bending, wrinkling, necking, contact, anisotropic yielding, fracture, calibrated
+forming limits or a general mesh-convergence result.
+
 ## Exactly incompressible finite-strain plane stress
 
 `HyperProblem::solve_incompressible_plane_stress(PlaneStressSettings, &Cx)`

@@ -33,6 +33,8 @@ use std::collections::BTreeMap;
 pub mod mean_dilatation;
 /// Traction-free thickness relaxation on the original hyperelastic energy.
 pub mod plane_stress;
+/// Retained finite-plastic P1/Q1 sheet forming with solved transverse thickness.
+pub mod plastic;
 
 #[derive(Clone, Copy)]
 enum Reduction<'a, 'cx> {
