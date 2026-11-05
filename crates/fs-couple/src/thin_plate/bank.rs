@@ -2,10 +2,11 @@
 use super::piston::BaffledPistonRadiation;
 use super::{
     AcousticRealizeError, CompactBody, GasState, PreparedVkBody, PreparedVkStep,
-    ProposedCompactStep, VkBody, prepare_render_linear, render_step_error,
+    PreparedVkTones, ProposedCompactStep, VkBody, VkToneConfig, prepare_render_linear,
+    render_step_error,
 };
 use fs_exec::CancelGate;
-use fs_phs::{PortHamiltonian, PreparedStepRecord};
+use fs_phs::{PortHamiltonian, PreparedStepRecord, ResistanceWitness};
 
 pub(super) struct PlateCavity {
     sys: PortHamiltonian,
@@ -50,6 +51,55 @@ impl PlateBankImage {
     #[must_use]
     pub fn into_parts(self) -> (PortHamiltonian, Vec<f64>, PlateBankObservation) {
         (self.system, self.state, self.observation)
+    }
+
+    /// Prepare continuous tones on the complete original force and face ports.
+    /// Coefficients are port-major: port zero is force [N], port one is outward
+    /// face pressure [Pa]. Signed surface projections and all accepted material,
+    /// cavity and radiation histories are retained. Optional resistance channels
+    /// keep their original state coordinates and caller order/interpretation.
+    /// This consumes a snapshot; it does not advance or synchronize its source bank.
+    pub fn into_prepared_tones(
+        self, frequencies: &[f64], config: VkToneConfig, channels: &[ResistanceWitness],
+    ) -> Result<PreparedVkTones, AcousticRealizeError> {
+        self.into_prepared_tones_controlled(frequencies, config, channels, || false)
+    }
+
+    /// Same complete fixed-amplitude source, with cancellation during preparation.
+    pub fn into_prepared_tones_controlled(
+        self, frequencies: &[f64], config: VkToneConfig, channels: &[ResistanceWitness],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedVkTones, AcousticRealizeError> {
+        self.prepare_tones(frequencies, config, channels, false, cancelled)
+    }
+
+    /// Prepare affine effort envelopes on the same complete physical ports.
+    /// Both endpoints use the interval-start carrier basis. The caller rotates
+    /// accepted endpoint pairs; no acoustic or constitutive history is reset.
+    pub fn into_prepared_affine_tones(
+        self, frequencies: &[f64], config: VkToneConfig, channels: &[ResistanceWitness],
+    ) -> Result<PreparedVkTones, AcousticRealizeError> {
+        self.into_prepared_affine_tones_controlled(frequencies, config, channels, || false)
+    }
+
+    /// Same affine source, with cancellation during preparation.
+    pub fn into_prepared_affine_tones_controlled(
+        self, frequencies: &[f64], config: VkToneConfig, channels: &[ResistanceWitness],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedVkTones, AcousticRealizeError> {
+        self.prepare_tones(frequencies, config, channels, true, cancelled)
+    }
+
+    fn prepare_tones(
+        self, frequencies: &[f64], config: VkToneConfig, channels: &[ResistanceWitness],
+        affine: bool, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedVkTones, AcousticRealizeError> {
+        if cancelled() { return Err(AcousticRealizeError::Cancelled); }
+        let linear = prepare_render_linear(&self.system)?;
+        PreparedVkTones::prepare(
+            self.system, &linear, self.state, self.observation.areas, frequencies,
+            config, channels, affine, cancelled,
+        )
     }
 }
 
@@ -914,3 +964,91 @@ mod tests;
 
 #[cfg(test)]
 mod image_tests;
+
+#[cfg(test)]
+mod tone_tests {
+    use super::*;
+    use fs_nlmodal::{SosModalStorage, StressChannel};
+    use fs_phs::{QuadraticStorage, RelaxationBranch};
+    use fs_phs::linear_exact::DenseExponentialBudget;
+
+    fn image() -> PlateBankImage {
+        let body = VkBody::from_modal_storage_with_damping(
+            SosModalStorage { omegas: vec![2.0, 3.0], channels: vec![StressChannel {
+                coefficient: 30.0, coupling: vec![1.0, 0.2, 0.2, 0.6],
+            }] }, &[0.4, -0.1, -0.1, 0.2], &[1.0, 0.3], vec![0.02, -0.01],
+        ).unwrap().with_relaxation_branches(vec![RelaxationBranch {
+            projection: vec![1.0, 0.0, -0.5, 0.0], stiffness: 3.5, relaxation_time_s: 0.15,
+        }], 1).unwrap();
+        // Actual reciprocal cavity/exterior impedance owners, in appended
+        // volume/flow-momentum coordinates. Internal reactions share the solve.
+        let load = |mass: f64, stiffness: f64| PortHamiltonian::new(
+            2, 1, vec![0.0, 1.0, -1.0, 0.0], vec![0.0, 0.0, 0.0, 0.2],
+            vec![1.0, 0.0], Box::new(QuadraticStorage::new(
+                vec![stiffness, 0.0, 0.0, mass.recip()], 2,
+            ).unwrap()),
+        ).unwrap();
+        let system = body.sys
+            .with_parallel_load_columns(load(3.0, 2.0), &[0.0, -0.02, 0.0, 0.01, 0.0]).unwrap()
+            .with_parallel_load_columns(load(2.0, 5.0), &[0.0, 0.02, 0.0, -0.01, 0.0, 0.0, 0.0]).unwrap()
+            .with_additional_ports(1, &[0.0, 0.02, 0.0, -0.01, 0.0, 0.0, 0.0, 0.0, 0.0]).unwrap();
+        PlateBankImage { system, state: vec![0.12, -0.07, -0.08, 0.03, 0.11, 0.02, -0.04, -0.01, 0.05],
+            observation: PlateBankObservation { extent: 9, areas: body.areas } }
+    }
+
+    fn config() -> VkToneConfig {
+        VkToneConfig { time_step_s: 0.001, nyquist_guard_fraction: 0.8,
+            dense_budget: DenseExponentialBudget { max_dimension: 64,
+                max_dense_bytes: 64 * 1024 * 1024, max_multiply_terms: 10_000_000_000 } }
+    }
+
+    fn memory_heat() -> ResistanceWitness {
+        let mut matrix = vec![0.0; 81]; matrix[40] = 1.0 / 0.15;
+        let mut row = vec![0.0; 9]; row[4] = (1.0_f64 / 0.15).sqrt();
+        ResistanceWitness::try_from_source_rows(9, matrix, row).unwrap()
+    }
+
+    #[test]
+    fn two_port_tones_preserve_moving_complete_history_and_physical_work() {
+        for affine in [false, true] {
+            let image = image();
+            let initial = image.state.clone();
+            let initial_energy = image.system.hamiltonian(&initial);
+            let observer = image.observation.clone();
+            let mut source = if affine {
+                image.into_prepared_affine_tones(&[0.0], config(), &[memory_heat()])
+            } else { image.into_prepared_tones(&[0.0], config(), &[memory_heat()]) }.unwrap();
+            assert_eq!(source.state(), initial);
+            assert_eq!(source.stored_energy_j(), initial_energy);
+            assert_eq!(source.port_count(), 2);
+            for _ in 0..80 {
+                let before = source.state().to_vec();
+                let frame = if affine {
+                    source.drive_affine_and_radiate(&[0.7, 12.0], &[0.0; 2], &[0.7, 12.0], &[0.0; 2], 1.2, 1.5)
+                } else { source.drive_and_radiate(&[0.7, 12.0], &[0.0; 2], 1.2, 1.5) }.unwrap();
+                let dq0 = source.state()[0] - before[0];
+                let dq1 = source.state()[2] - before[2];
+                let work = 0.7 * (dq0 + 0.3 * dq1) + 12.0 * (0.02 * dq0 - 0.01 * dq1);
+                assert!((frame.work.supplied - work).abs() < 2e-12);
+                assert!(frame.work.balance_residual().abs() < 2e-12);
+                assert_eq!(frame.pressure_pa, observer.pressure_between(&before, source.state(), 0.001, 1.2, 1.5).unwrap());
+                assert_eq!(frame.volume_velocity_m3_s, observer.volume_velocity(source.state()).unwrap());
+                assert!(source.channel_heat_j()[0] > 0.0);
+                assert!(source.channel_heat_j()[0] <= frame.work.dissipated + 2e-14);
+            }
+            for i in 4..9 { assert!((source.state()[i] - initial[i]).abs() > 1e-6, "history {i}"); }
+        }
+    }
+
+    #[test]
+    fn cancelled_image_preparation_and_steps_publish_no_history() {
+        assert!(matches!(image().into_prepared_tones_controlled(&[2.0], config(), &[], || true), Err(AcousticRealizeError::Cancelled)));
+        let mut polls = 0;
+        assert!(matches!(image().into_prepared_affine_tones_controlled(&[2.0], config(), &[], || { polls += 1; polls == 2 }), Err(AcousticRealizeError::Cancelled)));
+        let mut source = image().into_prepared_affine_tones(&[2.0], config(), &[memory_heat()]).unwrap();
+        let before = source.state().to_vec();
+        assert!(matches!(source.drive_affine_and_radiate_controlled(&[0.7, 12.0], &[0.0; 2], &[0.8, 10.0], &[0.0; 2], 1.2, 1.0, || true), Err(AcousticRealizeError::Cancelled)));
+        assert_eq!(source.state(), before);
+        assert_eq!(source.channel_heat_j(), &[0.0]);
+    }
+}
