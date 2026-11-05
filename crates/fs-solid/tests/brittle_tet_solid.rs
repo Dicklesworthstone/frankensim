@@ -18,9 +18,10 @@ use fs_material::cohesive::source::FRACTURE_ENERGY_PER_AREA_DIMS;
 use fs_material::state_point::{
     MaterialPropertySelection, POISSON_RATIO_PROPERTY, YOUNG_MODULUS_PROPERTY,
 };
-use fs_qty::{Dims, Pressure};
+use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 use fs_solid::TetAssemblyBudget;
 use fs_solid::brittle::TetCrackBandGeometry;
+use fs_solid::brittle::solid::temperature::BrittleTetTemperatureError;
 use fs_solid::brittle::solid::{BrittleTetControls, BrittleTetError, BrittleTetSolid};
 use fs_solid::loads3::TetLoadGeometry3;
 use fs_solid::plastic3::{IncrementSettings, SmallStrainTetError};
@@ -69,10 +70,18 @@ fn points(length: f64) -> [[f64; 3]; 4] {
 }
 
 fn card(strength: f64, tag: &str) -> MaterialCard {
+    source_card(strength, tag, false)
+}
+
+fn source_card(strength: f64, tag: &str, thermal: bool) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
         (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, YOUNG),
-        (POISSON_RATIO_PROPERTY, Dims::NONE, POISSON),
+        (
+            POISSON_RATIO_PROPERTY,
+            Dims::NONE,
+            if thermal { 0.0 } else { POISSON },
+        ),
         (BRITTLE_TENSILE_STRENGTH_PROPERTY, Pressure::DIMS, strength),
         (BRITTLE_SHEAR_STRENGTH_PROPERTY, Pressure::DIMS, 4.0e6),
         (
@@ -87,12 +96,36 @@ fn card(strength: f64, tag: &str) -> MaterialCard {
         ),
         (BRITTLE_BK_EXPONENT_PROPERTY, Dims::NONE, 1.5),
     ] {
+        let varied = thermal
+            && (name == YOUNG_MODULUS_PROPERTY || name == BRITTLE_TENSILE_STRENGTH_PROPERTY);
+        let hot_factor = if name == YOUNG_MODULUS_PROPERTY {
+            0.5
+        } else {
+            0.25
+        };
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
-                value: PropertyValue::Scalar { value, dims },
-                validity: ValidityDomain::unconstrained(),
-                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                value: if varied {
+                    PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: vec![(300.0, value), (600.0, hot_factor * value)],
+                        dims,
+                    }
+                } else {
+                    PropertyValue::Scalar { value, dims }
+                },
+                validity: if varied {
+                    ValidityDomain::unconstrained().with("T", 300.0, 600.0)
+                } else {
+                    ValidityDomain::unconstrained()
+                },
+                interpolation: if varied {
+                    InterpolationPolicy::LinearInside
+                } else {
+                    InterpolationPolicy::ConstantWithinValidity
+                },
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
                 provenance: Provenance {
@@ -522,5 +555,317 @@ fn geometry_domain_newton_energy_and_cancellation_refusals_preserve_accepted_sol
             2e-9,
         );
         close(resumed.solid.fracture_dissipation_j(), loss, 2e-12);
+    });
+}
+
+fn thermal_material(
+    source: &MaterialCard,
+    geometry: &TetLoadGeometry3<'_>,
+    temperature: f64,
+) -> ResolvedBrittleCrackBand {
+    let band = TetCrackBandGeometry::from_element(geometry, 0, [1.0, 0.0, 0.0]).unwrap();
+    resolve_brittle_crack_band(
+        source,
+        &QueryPoint::new()
+            .with_quantity(
+                "T",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                temperature,
+            )
+            .unwrap(),
+        MaterialPropertySelection::SingleClaimOnly,
+        band.material_settings(0.03, 1e-7),
+    )
+    .unwrap()
+}
+
+#[test]
+fn temperature_transfer_re_equilibrates_a_supported_load_and_can_initiate_held_strain_damage() {
+    with_cx(false, |cx| {
+        let nodes = points(0.03);
+        let geometry =
+            TetLoadGeometry3::new(&nodes, &TETS, TetAssemblyBudget::standard(), 4, cx).unwrap();
+        let source = source_card(STRENGTH, "thermal loading", true);
+        let cold = [thermal_material(&source, &geometry, 300.0)];
+        let hot = [cold[0].at_temperature(&source, "T", 600.0).unwrap()];
+        let virgin =
+            BrittleTetSolid::try_new(&geometry, &cold, TetAssemblyBudget::standard(), cx).unwrap();
+        let damaged = virgin
+            .advance(
+                &prescribed(0.03, 0.002),
+                &[],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solid;
+        let unloaded = damaged
+            .advance(
+                &prescribed(0.03, 0.0002),
+                &[],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solid;
+        let old_stress = unloaded.solution().element_stress[0][0];
+        let old_damage = unloaded.solution().element_states[0].damage();
+        let volume = unloaded.band_geometry()[0].reference_volume_m3();
+        let force = old_stress * volume / 0.03;
+        let fixed: Vec<_> = prescribed(0.03, 0.0)
+            .into_iter()
+            .filter(|(d, _)| *d != 3)
+            .collect();
+        let heated = unloaded
+            .advance_at_temperature(
+                &hot,
+                "T",
+                &fixed,
+                &[(3, force)],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        let final_solid = &heated.mechanical.solid;
+        close(
+            final_solid.solution().element_stress[0][0],
+            old_stress,
+            2e-9,
+        );
+        // At retained damage, halving E doubles the unloading compliance.
+        // This load remains below the evolved hot envelope.
+        close(final_solid.solution().element_strain[0][0], 0.0004, 2e-8);
+        assert!(final_solid.solution().element_states[0].damage() >= old_damage);
+        close(
+            final_solid.solution().element_states[0].damage(),
+            old_damage,
+            2e-10,
+        );
+        assert!(final_solid.fracture_dissipation_j() >= unloaded.fracture_dissipation_j());
+        assert!(heated.transfer.parameter_work_j < 0.0);
+        assert!(heated.transfer.fracture_dissipation_j >= 0.0);
+        assert!(heated.mechanical.energy.material_work_j > 0.0);
+        assert!(heated.transfer.balance_error_j.abs() < 1e-9);
+        assert!(heated.total_balance_error_j.abs() < 1e-9);
+        close(
+            final_solid.stored_energy_j(),
+            2.0 * unloaded.stored_energy_j(),
+            2e-8,
+        );
+        assert_eq!(
+            final_solid.materials()[0].material().state_coordinate("T"),
+            Some(600.0)
+        );
+        assert_eq!(
+            unloaded.materials()[0].material().state_coordinate("T"),
+            Some(300.0)
+        );
+        assert_eq!(
+            final_solid.materials()[0].material().card_identity(),
+            source.content_hash()
+        );
+        close(
+            heated.transfer.parameter_work_j,
+            volume * heated.element_transfer[0].parameter_work_j_m3,
+            2e-12,
+        );
+
+        // An intact point below its original strength crosses the hot
+        // strength at the SAME held strain. No imposed thermal strain is used.
+        let held_strain = 0.75 * STRENGTH / YOUNG;
+        let held = virgin
+            .advance(
+                &prescribed(0.03, held_strain),
+                &[],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solid;
+        assert_eq!(held.solution().element_states[0].damage(), 0.0);
+        let heated_held = held
+            .advance_at_temperature(
+                &hot,
+                "T",
+                &prescribed(0.03, held_strain),
+                &[],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        let hot_strength = 0.25 * STRENGTH;
+        let hot_young = 0.5 * YOUNG;
+        let failure = 2.0 * FRACTURE_WORK
+            / (hot_strength * heated_held.mechanical.solid.band_geometry()[0].band_width_m());
+        let expected_stress =
+            hot_strength * (failure - held_strain) / (failure - hot_strength / hot_young);
+        assert!(heated_held.mechanical.solid.solution().element_states[0].damage() > 0.0);
+        assert!(heated_held.transfer.fracture_dissipation_j > 0.0);
+        close(
+            heated_held.mechanical.solid.solution().element_stress[0][0],
+            expected_stress,
+            2e-10,
+        );
+        assert_eq!(
+            heated_held.mechanical.solid.solution().element_strain,
+            held.solution().element_strain
+        );
+        assert_eq!(heated_held.mechanical.energy.material_work_j, 0.0);
+        assert_eq!(heated_held.mechanical.energy.fracture_dissipation_j, 0.0);
+        assert!(heated_held.total_balance_error_j.abs() < 1e-9);
+    });
+}
+
+#[test]
+fn temperature_source_overload_and_late_work_refusals_keep_the_cold_solid_retryable() {
+    with_cx(false, |cx| {
+        let nodes = points(0.03);
+        let geometry =
+            TetLoadGeometry3::new(&nodes, &TETS, TetAssemblyBudget::standard(), 4, cx).unwrap();
+        let source = source_card(STRENGTH, "thermal rollback", true);
+        let cold = [thermal_material(&source, &geometry, 300.0)];
+        let hot = [cold[0].at_temperature(&source, "T", 600.0).unwrap()];
+        let virgin =
+            BrittleTetSolid::try_new(&geometry, &cold, TetAssemblyBudget::standard(), cx).unwrap();
+        let damaged = virgin
+            .advance(
+                &prescribed(0.03, 0.002),
+                &[],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solid;
+        let accepted = damaged
+            .advance(
+                &prescribed(0.03, 0.0002),
+                &[],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solid;
+        let snapshot = (*accepted.solution()).clone();
+        let old_storage = accepted.stored_energy_j();
+        let old_loss = accepted.fracture_dissipation_j();
+        let volume = accepted.band_geometry()[0].reference_volume_m3();
+        let force = accepted.solution().element_stress[0][0] * volume / 0.03;
+        let fixed: Vec<_> = prescribed(0.03, 0.0)
+            .into_iter()
+            .filter(|(d, _)| *d != 3)
+            .collect();
+        let strict = BrittleTetControls {
+            maximum_endpoint_work_defect_j: 0.0,
+            ..controls()
+        };
+        assert!(matches!(
+            accepted.advance_at_temperature(
+                &hot,
+                "T",
+                &fixed,
+                &[(3, force)],
+                IncrementSettings::default(),
+                strict,
+                cx
+            ),
+            Err(BrittleTetTemperatureError::Solid(
+                BrittleTetError::EnergyGate {
+                    account: "signed endpoint integration defect",
+                    ..
+                }
+            ))
+        ));
+        // Positive axial stress cannot exceed the hot source peak; the native
+        // static solver must refuse this unsupported load, not reset damage.
+        let overload = 1.2 * (0.25 * STRENGTH) * volume / 0.03;
+        let bounded = IncrementSettings {
+            max_newton_iterations: 8,
+            ..IncrementSettings::default()
+        };
+        assert!(
+            accepted
+                .advance_at_temperature(
+                    &hot,
+                    "T",
+                    &fixed,
+                    &[(3, overload)],
+                    bounded,
+                    controls(),
+                    cx
+                )
+                .is_err()
+        );
+        let other = source_card(STRENGTH, "different source", true);
+        let wrong = [thermal_material(&other, &geometry, 600.0)];
+        assert!(matches!(
+            accepted.advance_at_temperature(
+                &wrong,
+                "T",
+                &fixed,
+                &[(3, force)],
+                IncrementSettings::default(),
+                controls(),
+                cx
+            ),
+            Err(BrittleTetTemperatureError::Source { element: 0, .. })
+        ));
+        with_cx(true, |cancelled| {
+            assert!(matches!(
+                accepted.advance_at_temperature(
+                    &hot,
+                    "T",
+                    &fixed,
+                    &[(3, force)],
+                    IncrementSettings::default(),
+                    controls(),
+                    cancelled
+                ),
+                Err(BrittleTetTemperatureError::Solid(
+                    BrittleTetError::Cancelled
+                ))
+            ));
+        });
+        assert_eq!(accepted.solution(), &snapshot);
+        assert_eq!(accepted.stored_energy_j(), old_storage);
+        assert_eq!(accepted.fracture_dissipation_j(), old_loss);
+        assert_eq!(
+            accepted.materials()[0].material().state_coordinate("T"),
+            Some(300.0)
+        );
+        let resumed = accepted
+            .advance_at_temperature(
+                &hot,
+                "T",
+                &fixed,
+                &[(3, force)],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        let repeated = accepted
+            .advance_at_temperature(
+                &hot,
+                "T",
+                &fixed,
+                &[(3, force)],
+                IncrementSettings::default(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(
+            resumed.mechanical.solid.solution(),
+            repeated.mechanical.solid.solution()
+        );
+        assert_eq!(resumed.transfer, repeated.transfer);
+        assert_eq!(resumed.mechanical.energy, repeated.mechanical.energy);
     });
 }

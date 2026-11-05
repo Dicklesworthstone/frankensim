@@ -6,9 +6,14 @@
 //! Fracture dissipation is physical loss; the signed endpoint-work defect is
 //! integration error and is never converted into damage or heat.
 //!
-//! External material conditions stay fixed. This adds no crack nucleation,
-//! rotating planes, finite kinematics, contact, inertia or limit-load tracking.
+//! Ordinary mechanical endpoints keep material conditions fixed. The explicit
+//! [`temperature`] path transfers sourced coefficients and history before
+//! re-equilibrating. This owner adds no crack nucleation, rotating planes,
+//! finite kinematics, contact, inertia or limit-load tracking.
 //! The caller resolves loading reversals and softening with physical endpoints.
+
+/// Checked temperature/source transfer followed by native mechanical equilibration.
+pub mod temperature;
 
 use std::sync::Arc;
 

@@ -7799,3 +7799,27 @@ elastic reloading against the material's closed-form hydrostatic solution.
 This establishes the intended native interface and small-strain load path;
 it does not extend the material to finite-strain foam crushing, contact or
 densification.
+
+## Temperature-dependent brittle solid equilibrium
+
+`BrittleTetSolid::advance_at_temperature` transfers each original accepted
+history through the material owner's checked temperature-successor API, then
+executes the native P1 equilibrium endpoint with those new coefficients. Source
+card/claim identity, nonthermal coordinates, Poisson ratio, crack plane, band
+width and numerical bounds remain subject to the original material checks.
+Transfer at held strain may initiate further damage; existing damage and
+cumulative fracture loss cannot heal. Parameter work, transfer-induced fracture
+loss and storage change are integrated separately from the subsequent mechanical
+work, support work and signed endpoint integration defect. A combined exact-work
+balance gates the complete result. Source mismatch, cancellation, failed Newton
+iteration, loss of supported static capacity or a late energy refusal returns no
+candidate and leaves the old material/history usable for retry.
+
+The temperature path changes constitutive coefficients only. It introduces no
+thermal expansion, caloric equation, heat conversion or entropy-production
+claim; the caller resolves the ordered transfer/equilibrium split with physical
+temperature and load increments. The added manufactured regression definitions
+cover retained-damage compliance under load, damage onset at held strain,
+source/overload/cancellation refusals and deterministic retries. Rust parsing and
+formatting were checked; compilation and execution of these new tests remain
+outstanding because the execution environment had no free disk space.
