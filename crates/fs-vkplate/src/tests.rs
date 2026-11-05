@@ -121,7 +121,7 @@ fn g0_affine_mount_energy_and_admission() {
 
 #[test]
 fn g3_streaming_filter_matches_offline_phase_and_clones() {
-    for factor in [1,2,3,4,6,8] {
+    for factor in [1,2,3,4,6,8,12,16,24,32] {
         let input:Vec<_>=(0..512*factor).map(|i| (0.31*i as f64).sin()+0.2*(1.13*i as f64).cos()).collect();
         let reference=decimate(&input,factor);
         let mut filter=StreamingDecimator::new(factor);
@@ -136,7 +136,7 @@ fn g3_streaming_filter_matches_offline_phase_and_clones() {
             }
             if i%factor==0 { output.push(filter.value()); }
         }
-        let delay=if factor==1 {0}else{16};
+        let delay=if factor==1 {0}else{DECIMATION_RADIUS_FRAMES};
         for (i,x) in output.iter().enumerate().skip(delay) {
             assert_eq!(x.to_bits(),reference[i-delay].to_bits(),"factor {factor}, frame {i}");
         }
@@ -147,7 +147,7 @@ fn g3_streaming_filter_matches_offline_phase_and_clones() {
 fn g3_live_internal_clock_matches_offline_and_arbitrary_output_blocks() {
     let mut a=crate::live::Live::new("snare-off",8.0).unwrap();
     assert!(a.ins.rate>=96_000.0);
-    assert_eq!(a.filter_latency_frames(),16);
+    assert_eq!(a.filter_latency_frames(),DECIMATION_RADIUS_FRAMES);
     a.strike(0.3*a.radius,0.0,2.0);
     let mut b=a.clone();
     let mut raw=a.ins.clone();
@@ -157,7 +157,9 @@ fn g3_live_internal_clock_matches_offline_and_arbitrary_output_blocks() {
     let reference=decimate(&source,factor);
     let mut x=vec![0.0_f32;512];a.render(&mut x,1.0);
     assert!(x.iter().any(|x| *x!=0.0));
-    for i in 16..512 { assert_eq!(x[i].to_bits(),(reference[i-16] as f32).to_bits()); }
+    for i in DECIMATION_RADIUS_FRAMES..512 {
+        assert_eq!(x[i].to_bits(),(reference[i-DECIMATION_RADIUS_FRAMES] as f32).to_bits());
+    }
     let mut y=vec![0.0_f32;512];
     b.render(&mut y[..193],1.0);
     let mut copied=b.clone();

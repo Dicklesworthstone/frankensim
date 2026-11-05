@@ -621,7 +621,12 @@ the open hat, whose rims seldom touch, is unchanged (balance 4.8 dB, decay 2.6 o
 
 `live::Live` is one piece on a grid with spacing multiplied by `scale`, struck anywhere on its
 playing surface. It retains the preset's internal physics substeps and returns 48 kHz audio.
-Substepped output uses the offline sinc kernel with 16 output frames of causal filter delay;
+Substepped output uses the offline sinc kernel with 32 output frames of causal filter delay.
+Its retained band is 0–21.6 kHz at 48 kHz output, with at most 0.0022 dB gain error;
+frequencies from 26.4 kHz up to the internal Nyquist limit are suppressed by at least 74 dB.
+Symmetric tap pairs keep one multiplication per pair,
+so the longer kernel has the previous filter's multiplication count while preserving upper
+harmonics. This is output anti-aliasing, not a remedy for unresolved mechanical frequencies;
 filter history and fixed 128-frame sleep windows survive arbitrary caller block sizes and clones.
 It stops stepping once its motion and microphone output have decayed. On grids too coarse to put four nodes in
 the 6.5-20 mm annulus round a cymbal's hole, the felt washers and the hi-hat clutch spread their

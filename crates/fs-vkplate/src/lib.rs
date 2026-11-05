@@ -4054,23 +4054,32 @@ impl Body {
 }
 
 // --------------------------------------------------------------------- decimation
-const DECIMATION_RADIUS_FRAMES: usize = 16;
+const DECIMATION_RADIUS_FRAMES: usize = 32;
 
 fn decimation_kernel(factor: usize) -> Vec<f64> {
     let taps = 2 * DECIMATION_RADIUS_FRAMES * factor + 1;
-    let fc = 0.46 / factor as f64; // cycles per input sample: 0.92 x output Nyquist
-    let mid = (taps / 2) as f64;
-    (0..taps)
-        .map(|i| {
-            let t = i as f64 - mid;
-            let s = if t == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * t).sin() / (PI * t) };
-            let wdw = 0.42 - 0.5 * (2.0 * PI * i as f64 / (taps - 1) as f64).cos() + 0.08 * (4.0 * PI * i as f64 / (taps - 1) as f64).cos();
-            s * wdw
-        })
-        .collect()
+    let half = taps / 2;
+    let fc = 0.5 / factor as f64;
+    let mut kernel = vec![0.0; taps];
+    // Exact symmetry permits one multiply per tap pair. The doubled support
+    // retains 0..0.45 of the output rate without the previous 4 dB rolloff at
+    // the upper edge, and suppresses foldover from 0.55 and above.
+    for offset in 0..=half {
+        let phase = PI * offset as f64 / half as f64;
+        let window = 0.42 + 0.5 * phase.cos() + 0.08 * (2.0 * phase).cos();
+        let sinc = if offset == 0 { 2.0 * fc }
+            else if offset % factor == 0 { 0.0 }
+            else { (2.0 * PI * fc * offset as f64).sin() / (PI * offset as f64) };
+        let value = sinc * window;
+        kernel[half - offset] = value;
+        kernel[half + offset] = value;
+    }
+    let normalization = 2.0 * kernel[..half].iter().sum::<f64>() + kernel[half];
+    for value in &mut kernel { *value /= normalization; }
+    kernel
 }
 
-/// The offline filter in causal streaming form: 16 output frames of delay.
+/// The offline filter in causal streaming form: 32 output frames of delay.
 /// Phase and history survive arbitrary render blocks and cloned instruments.
 #[derive(Clone)]
 pub(crate) struct StreamingDecimator {
@@ -4089,14 +4098,25 @@ impl StreamingDecimator {
     }
     fn value(&self) -> f64 {
         let (a,b) = self.history.split_at(self.next);
+        let mut samples = b.iter().chain(a);
+        let half = self.kernel.len() / 2;
         let mut value = 0.0;
-        for (h,x) in self.kernel.iter().zip(b.iter().chain(a)) { value += h*x; }
+        for h in &self.kernel[..half] {
+            let left = *samples.next().expect("one history sample per kernel tap");
+            let right = *samples.next_back().expect("symmetric history pair");
+            value += h * (left + right);
+        }
+        value += self.kernel[half] * samples.next().expect("odd kernel's central sample");
         value
     }
     fn clear(&mut self) { self.history.fill(0.0); self.next = 0; }
 }
 
 /// Windowed-sinc low-pass then keep every `factor`-th sample.
+/// The retained band is 0..0.45 of the output rate (21.6 kHz at 48 kHz).
+/// The transition extends through Nyquist to 0.55 of that rate; frequencies
+/// beyond it are rejected before they can fold into the retained band.
+/// This observation filter cannot repair aliasing at the mechanical clock.
 pub fn decimate(x: &[f64], factor: usize) -> Vec<f64> {
     decimate_from(x, factor, 0)
 }
@@ -4117,12 +4137,13 @@ pub fn decimate_from(x: &[f64], factor: usize, start: usize) -> Vec<f64> {
         .map(|o| {
             let c = start + o * factor;
             let mut acc = 0.0;
-            for (j, hj) in h.iter().enumerate() {
-                let idx = c as i64 + j as i64 - half as i64;
-                if idx >= 0 && (idx as usize) < x.len() {
-                    acc += hj * x[idx as usize];
-                }
+            for (j, hj) in h[..half].iter().enumerate() {
+                let offset = half - j;
+                let left = c.checked_sub(offset).map_or(0.0, |i| x[i]);
+                let right = c.checked_add(offset).and_then(|i| x.get(i)).copied().unwrap_or(0.0);
+                acc += hj * (left + right);
             }
+            acc += h[half] * x[c];
             acc
         })
         .collect()
@@ -4133,13 +4154,60 @@ mod settling_decimation_tests {
     use super::*;
 
     #[test]
+    fn upper_partials_survive_while_out_of_band_partials_do_not_fold_back() {
+        for factor in [2, 3, 4, 6, 8, 12, 16, 24, 32] {
+            let kernel = decimation_kernel(factor);
+            let midpoint = (kernel.len() / 2) as f64;
+            // Evaluate the full FIR's Fourier response independently of the
+            // paired streaming/offline evaluation. Frequencies are cycles per
+            // output frame: .45 is 21.6 kHz at the kit's 48 kHz output rate.
+            let gain = |frequency: f64| -> f64 {
+                kernel.iter().enumerate().map(|(i, h)| {
+                    h * (2.0 * PI * frequency * (i as f64 - midpoint) / factor as f64).cos()
+                }).sum()
+            };
+            for i in 0..=450 {
+                let frequency = i as f64 / 1000.0;
+                assert!((gain(frequency) - 1.0).abs() < 2.5e-4,
+                    "factor {factor}: attenuated retained partial at {frequency}");
+            }
+            // Cover the entire internal Nyquist band, including higher
+            // folding images when the plate runs at 12x..32x the audio clock.
+            let stop_width = factor as f64 / 2.0 - 0.55;
+            let steps = (stop_width * 200.0).ceil() as usize;
+            for i in 0..=steps {
+                let frequency = 0.55 + stop_width * i as f64 / steps as f64;
+                assert!(gain(frequency).abs() < 2.0e-4,
+                    "factor {factor}: aliased partial at {frequency}");
+            }
+        }
+    }
+
+    #[test]
+    fn rendered_upper_partial_has_the_right_amplitude_and_phase() {
+        for factor in [2, 3, 8, 32] {
+            let input: Vec<_> = (0..256 * factor).map(|i| {
+                let t = i as f64 / factor as f64;
+                (2.0 * PI * 0.45 * t).cos() + (2.0 * PI * 0.55 * t).cos()
+            }).collect();
+            let output = decimate_from(&input, factor, 64 * factor);
+            // The .55 partial would alias directly onto the wanted .45
+            // partial. Away from zero-padding edges, retain only the latter.
+            for (i, sample) in output.iter().enumerate().take(128) {
+                let expected = (2.0 * PI * 0.45 * (64 + i) as f64).cos();
+                assert!((sample - expected).abs() < 3.0e-4,
+                    "factor {factor}, frame {i}: {sample} vs {expected}");
+            }
+        }
+    }
+
+    #[test]
     fn settled_constant_does_not_acquire_a_startup_transient() {
         for factor in [2, 3, 4, 6, 8] {
             let input = vec![1.0; 100 * factor];
             let output = decimate_from(&input, factor, 32 * factor);
-            let dc = decimation_kernel(factor).iter().sum::<f64>();
-            assert_eq!(output[0].to_bits(), dc.to_bits());
-            assert!((decimate(&input[32 * factor..], factor)[0] - dc).abs() > 0.2);
+            assert!((output[0] - 1.0).abs() < 2e-14);
+            assert!((decimate(&input[32 * factor..], factor)[0] - 1.0).abs() > 0.2);
         }
     }
 
