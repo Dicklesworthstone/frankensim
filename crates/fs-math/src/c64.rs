@@ -182,7 +182,8 @@ impl core::ops::Div for C64 {
 /// Keep the existing hot-path operation tree when every nonzero component
 /// is between 2^-500 and 2^500. Outside this range, Smith's denominator or
 /// numerator can overflow, or its ratio/products can underflow before the
-/// final quotient restores a representable component.
+/// final quotient restores a representable component. On either coordinate
+/// axis Smith is already range-safe and preserves the signs of exact zeros.
 #[inline]
 fn needs_scaled_division(n: C64, d: C64) -> bool {
     fn ordinary(x: f64) -> bool {
@@ -194,7 +195,8 @@ fn needs_scaled_division(n: C64, d: C64) -> bool {
         && n.im.is_finite()
         && d.re.is_finite()
         && d.im.is_finite()
-        && (d.re != 0.0 || d.im != 0.0)
+        && d.re != 0.0
+        && d.im != 0.0
 }
 
 /// Exact finite decomposition x = mantissa * 2^exponent, |mantissa| in
@@ -269,12 +271,6 @@ fn scaled_dot(a: f64, b: f64, c: f64, d: f64) -> (Dd, i32) {
 
 #[cold]
 fn scaled_division(n: C64, d: C64) -> C64 {
-    if d.im == 0.0 {
-        return C64::new(n.re / d.re, n.im / d.re);
-    }
-    if d.re == 0.0 {
-        return C64::new(n.im / d.im, -n.re / d.im);
-    }
     let (denominator, de) = scaled_dot(d.re, d.re, d.im, d.im);
     let component = |a, b, c, d| {
         let (numerator, ne) = scaled_dot(a, b, c, d);
@@ -322,6 +318,23 @@ mod tests {
         let q = z.recip();
         assert!(crate::ulp_distance(q.re, 5e-309) <= 1, "{q:?}");
         assert!(crate::ulp_distance(q.im, 5e-309) <= 1, "{q:?}");
+    }
+
+    #[test]
+    fn reciprocal_preserves_signed_zero_on_coordinate_axes() {
+        for exponent in [-1074, -1022, -600, 600, 1023] {
+            for sign in [-1.0, 1.0] {
+                let value = sign * power_of_two(exponent);
+                for zero in [-0.0_f64, 0.0] {
+                    let real_axis = C64::new(value, zero).recip();
+                    assert_eq!(real_axis.re.to_bits(), (1.0 / value).to_bits());
+                    assert_eq!(real_axis.im.to_bits(), (-zero).to_bits());
+                    let imaginary_axis = C64::new(zero, value).recip();
+                    assert_eq!(imaginary_axis.re.to_bits(), zero.to_bits());
+                    assert_eq!(imaginary_axis.im.to_bits(), (-1.0 / value).to_bits());
+                }
+            }
+        }
     }
 
     #[test]
