@@ -64,11 +64,14 @@ Node count alone does not establish audio-band fidelity.
   table, each head's own share taken off the volume shapes' baffled load. It is an estimate: free-field
   law, no floor, `w` the membrane-law lower hybrid. An optional port models a vented front head.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
-  A microphone hears only surfaces facing it. Over a rigid floor (any plane, `floor_z`, `floor_y`)
-  it also hears, by the floor's image, the surfaces facing that image.
-  A cymbal is not in a baffle: its microphones apply the unbaffled-disc limit (a dipole,
-  `(4/3pi) ka` times the baffled field, for `ka << 1`), joined to the baffled field for `ka >> 1`
-  by a first-order high-pass with `tau = 4a/(3 pi c)`.
+  A baffled microphone hears only surfaces facing it. Over a rigid floor (any plane,
+  `floor_z`, `floor_y`) it also hears, by the floor's image, the surfaces facing that image.
+  A cymbal is not in a baffle: its microphones hear both faces with opposite pressure polarity,
+  including the delayed back-face sound reflected by a floor. They apply the unbaffled-disc
+  axial amplitude limit (`(4/3pi) ka` times the baffled field for `ka << 1`), joined to the
+  baffled field for `ka >> 1` by a first-order high-pass with `tau = 4a/(3 pi c)`.
+  This receiver approximation does not resolve edge diffraction or the low-frequency dipole's
+  angular directivity; it is not a full exterior acoustic solve.
 
 ## Shared atmosphere
 

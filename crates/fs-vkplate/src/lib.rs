@@ -2598,7 +2598,7 @@ impl Drive {
     }
 }
 
-/// Rayleigh (baffled) pressure microphone.
+/// Rayleigh pressure microphone, optionally with the unbaffled thin-source approximation.
 #[derive(Clone)]
 pub struct Mic {
     pub pos: [f64; 3],
@@ -2606,8 +2606,10 @@ pub struct Mic {
     ptaps: Vec<(usize, usize, f64, f64)>,      // cavity port, delay, weight lo, weight hi
     ring: Vec<f64>,
     /// Unbaffled thin source of radius a: the far field tends to the baffled (Rayleigh) one for
-    /// ka >> 1 and to a dipole (4/3pi) ka times it for ka << 1 (rigid disc). A first-order
-    /// high-pass with tau = 4a/(3 pi c) joins the two limits. None = baffled.
+    /// ka >> 1 and to the axial dipole amplitude (4/3pi) ka times it for ka << 1 (rigid disc).
+    /// A first-order high-pass with tau = 4a/(3 pi c) joins the two limits. Both faces radiate,
+    /// with opposite pressure polarity. This approximation does not resolve edge diffraction
+    /// or the low-frequency dipole's angular directivity. None = baffled, facing side only.
     pub unbaffled: Option<f64>,
     /// A rigid floor: head and cavity-port radiation both include the delayed,
     /// positive-pressure image path. Sources facing away from the microphone
@@ -3574,15 +3576,20 @@ impl Instrument {
                     for i in 0..b.n {
                         let p = [b.origin[0] + b.xy[i][0], b.origin[1] + b.xy[i][1], b.origin[2] + b.facing * b.rest_z[i]];
                         let d = [tp[0] - p[0], tp[1] - p[1], tp[2] - p[2]];
-                        if d[2] * b.facing <= 0.0 {
-                            continue; // the other side of this surface faces away from this path
+                        let side = d[2] * b.facing;
+                        if side == 0.0 || (side < 0.0 && m.unbaffled.is_none()) {
+                            continue;
                         }
                         let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
                         let delay = r / self.gas.sound_speed * self.rate;
                         let di = delay.floor() as usize;
                         let fr = delay - di as f64;
-                        // w is the OUTWARD displacement of the facing side, so no sign flip
-                        let wgt = self.gas.density * h2 / (2.0 * PI * r) / (k * k);
+                        // w is outward on the facing side. An unbaffled sheet's back face
+                        // has the opposite outward velocity: it radiates rarefaction when
+                        // the front compresses. Use the path's side, including floor images;
+                        // a rigid reflection itself still has positive pressure gain.
+                        let polarity = if side < 0.0 { -1.0 } else { 1.0 };
+                        let wgt = polarity * self.gas.density * h2 / (2.0 * PI * r) / (k * k);
                         m.taps.push((bi, i, di, wgt * (1.0 - fr), wgt * fr));
                         dmax = dmax.max(di + 2);
                     }
