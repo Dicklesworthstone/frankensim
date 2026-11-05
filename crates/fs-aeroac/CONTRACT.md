@@ -1643,6 +1643,21 @@ existing bounded statistics reduction without inferring independence or random
 phase. Source, geometry, finite-value, work and cancellation admission publish
 no partial prepared observer or field.
 
+`evaluate_welch_bin` consumes the original synchronized `WelchCrossSpectrum`
+factors with six source-major N m channels per prepared cell, ordered xx, yy,
+zz, xy, xz, yz. Every cell and tensor component is summed coherently within
+one recorded factor before p/u second moments are formed. The original
+`sqrt(2 df)` peak conversion is applied once, yielding bin-integrated moments
+rather than PSD/Hz or fitted tone amplitudes. Native window/detrending, leakage,
+finite-record and source limitations remain; overlapping segments imply no
+independence, and distinct bins imply no cross-frequency coherence. Frequency,
+channel count and cell/factor work are admitted before allocation-free cached
+propagation, with cancellation at least every 256 cells and between factors.
+The G1/G3/G4 `quadrupole_welch` fixtures cover independently prescribed tensor
+phasors and all p/u moments, Hann bin power, instantaneous velocity-to-stress
+frequency doubling, cross-cell interference, pressure-null transverse motion,
+and shape/frequency/work/cancellation refusals.
+
 Kernel regressions cover units, the isotropic Helmholtz identity, independent
 Green-function Hessian refinement, all-component linear momentum, rotation
 covariance, far-field directivity/impedance, pressure-null transverse velocity,

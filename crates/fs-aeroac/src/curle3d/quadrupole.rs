@@ -25,6 +25,7 @@ use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det};
 
 mod kernel;
+mod welch;
 
 /// Physical scope retained by every quadrupole observation.
 pub const QUADRUPOLE_SCOPE: &str = "Prescribed symmetric 3D Lighthill stress moments [N m]; \

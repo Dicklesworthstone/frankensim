@@ -96,6 +96,8 @@ pub enum AeroacError {
     HarmonicFit(fs_fft::harmonic::HarmonicFitError),
     /// The original exact-length transform refused its storage, buffers or data.
     Fft(fs_fft::GeneralFftError),
+    /// Joint recorded-source estimation retained its original typed refusal.
+    Welch(fs_fft::welch::WelchError),
     /// Non-finite input.
     NonFinite {
         /// Where.
@@ -123,6 +125,7 @@ impl core::fmt::Display for AeroacError {
             AeroacError::Cancelled { what } => write!(f, "cancelled: {what}"),
             AeroacError::HarmonicFit(error) => write!(f, "force harmonic fit: {error}"),
             AeroacError::Fft(error) => write!(f, "force spectrum: {error}"),
+            AeroacError::Welch(error) => write!(f, "recorded source spectrum: {error}"),
             AeroacError::NonFinite { what } => write!(f, "non-finite input: {what}"),
             AeroacError::InvalidParameter { what } => write!(f, "invalid parameter: {what}"),
             AeroacError::NotConverged { what, residual } => {
