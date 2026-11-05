@@ -11254,6 +11254,46 @@ first-order frozen-source split with caller-owned thermodynamic work and phase
 support, not a pressure-dependent EOS or deformable-solid closure. All stages
 must accept before any endpoint is returned.
 
+## Implicit original-source heat driving thermal volume and momentum
+
+With `implicit-enthalpy-coupling`,
+`advance_isotropic_implicit_conductive_thermal_volume_with_baths` and its
+momentum counterpart solve one backward-Euler heat interval before the existing
+phase-density/pressure/material transport. The caller supplies bounded native
+Newton/Krylov work and a reusable workspace sized to the actual fluid cells.
+The original flow duration is the heat interval; there are no hidden thermal
+substeps or retries, and no explicit conductive mixing-weight restriction.
+
+The adapter uses the existing `ImplicitConductionGraph` and the SAME
+`PreparedPhaseConductivity`/borrowed caloric objects. Actual mass and graded
+geometry are held during this heat interval. T(h), k(h), dT/dh and dk/dh are
+evaluated at each nonlinear trial; latent storage retains zero dT/dh and its
+actual phase-dependent conductivity. An admitted zero conductivity must retain
+the source's zero selected tangent. Native sparse analytic linearization,
+line search, source-domain checks and work limits decide acceptance.
+
+Every selected exterior or embedded-wall face retains its actual fluid half
+distance, area, bath temperature and resistance. Multiple baths on one cell
+contribute separate Fourier powers and their complete analytic derivatives.
+They are attached as local native feedback powers without blending bath
+temperatures or adding thermal inventory. Their native entropy contribution is
+explicitly unclassified; the native report is not a complete fluid/bath entropy
+audit. Original authored heat is additive over the same interval.
+
+Accepted endpoint internal/bath heat is independently reassembled and compared
+with each cell's native implicit storage change. Absolute local mismatches,
+heat-addition defects, boundary balance and the original transport defect share
+the existing total enthalpy budget. Only the accepted physical heat enters
+native volume/momentum once; pressure work and numerical losses keep their
+existing accounts. Fixed solids retain zero material inventory. The optional
+mechanical pressure profile keeps its original owner and actual mass routes.
+This remains a first-order conduction/flow split requiring time refinement.
+
+Focused definitions cover stiff pair/cycle/cube backward-Euler limits, decimal
+graded face coverage, nonlinear k(T) and k(f) latent storage, opposed baths on
+an embedded wall, independent caloric/momentum transfer and transactional
+source/work/cancellation refusal. Explicit APIs retain their original behavior.
+
 ## Prescribed thermal baths driving phase-volume heat and momentum
 
 `advance_isotropic_conductive_thermal_volume_with_baths` and

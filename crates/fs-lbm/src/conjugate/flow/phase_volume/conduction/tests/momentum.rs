@@ -10,7 +10,7 @@ use crate::conjugate::flow::{
     ThermalVolumeMomentumInput,
 };
 
-fn coupled_controls(dt: f64) -> ConductiveThermalVolumeMomentumControls {
+pub(super) fn coupled_controls(dt: f64) -> ConductiveThermalVolumeMomentumControls {
     let heat = controls(dt);
     ConductiveThermalVolumeMomentumControls {
         evolution: ThermalVolumeMomentumControls {

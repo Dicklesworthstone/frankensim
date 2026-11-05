@@ -1,7 +1,7 @@
 //! Original source conductivity drives the existing caloric/volume transport.
 
 use fs_blake3::ContentHash;
-use fs_material::thermal::conduction::phase::PreparedPhaseConductivity;
+use fs_material::thermal::conduction::phase::{PhaseConductivitySample, PreparedPhaseConductivity};
 
 use super::{
     CancelGate, ChtError, CoexistenceVolumeInput, FlowFace, FlowField,
@@ -10,8 +10,16 @@ use super::{
 };
 
 mod boundary;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+mod implicit;
 mod momentum;
 pub use boundary::ThermalVolumeBathFace;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use implicit::{
+    ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
+    ImplicitConductiveThermalVolumeStep, ImplicitThermalVolumeLinearControls,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace,
+};
 pub use momentum::{
     ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeMomentumControls, ConductiveThermalVolumeMomentumStep,
@@ -211,74 +219,13 @@ impl FlowField {
         advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
         thermal: impl Fn(&T) -> (&ThermalVolumeStep, f64),
     ) -> Result<ConductiveAdvance<T>, ChtError> {
-        poll(gate)?;
         let n = domain.cell_count();
         let transport = controls.volume.thermal.volume.transport;
-        if n > transport.max_cells
-            || input.mass_kg.len() != n
-            || input.phase_states.len() != n
-            || input.net_enthalpy_increment_j.len() != n
-        {
-            return Err(refuse(
-                "conductive inventory shape or cell budget is invalid",
-            ));
-        }
         let dt = transport.projection.duration_s;
-        finite_positive("flow.conductive_duration", dt)?;
         let energy_budget = transport.maximum_enthalpy_defect_j;
-        if !energy_budget.is_finite() || energy_budget < 0.0 {
-            return Err(refuse("invalid combined conductive enthalpy-defect budget"));
-        }
-        let curve = conductivity.caloric_curve();
-        let chart_identity = curve.identity();
-        let card_identity = curve.material_card_identity();
         let bounds = conductivity.enthalpy_bounds_j_kg();
-        let baths = boundary::prepare(domain, baths, controls.max_conductive_faces, gate)?;
-        let admit = |state: fs_material::phase::EquilibriumPhaseState| {
-            if state.phase_curve_identity() != chart_identity
-                || state.material_card_identity() != card_identity
-                || !(bounds[0]..=bounds[1]).contains(&state.specific_enthalpy_j_kg())
-            {
-                Err(refuse(
-                    "phase state is outside the original conductivity source/chart",
-                ))
-            } else {
-                Ok(())
-            }
-        };
-        for state in input.boundary_inflow.into_iter().flatten() {
-            admit(state)?;
-        }
-        let mut samples = Vec::with_capacity(n);
-        for c in 0..n {
-            poll_every(gate, c)?;
-            finite(
-                "flow.authored_net_enthalpy_increment",
-                input.net_enthalpy_increment_j[c],
-            )?;
-            if !domain.is_fluid(c) {
-                if input.mass_kg[c] != 0.0
-                    || input.phase_states[c].is_some()
-                    || input.net_enthalpy_increment_j[c] != 0.0
-                {
-                    return Err(refuse(
-                        "solid grid cells cannot contain conductive phase inventory",
-                    ));
-                }
-                samples.push(None);
-                continue;
-            }
-            finite_positive("flow.conductive_cell_mass", input.mass_kg[c])?;
-            let state = input.phase_states[c].ok_or_else(|| {
-                refuse("each fluid cell needs an original conductive phase state")
-            })?;
-            admit(state)?;
-            samples.push(Some(
-                conductivity
-                    .state_at_specific_enthalpy(state.specific_enthalpy_j_kg())
-                    .map_err(|error| refuse(error.to_string()))?,
-            ));
-        }
+        let PreparedInput { samples, baths } =
+            prepare_input(domain, conductivity, baths, input, controls, gate)?;
 
         let mut increments = vec![0.0; n];
         let mut mixing_weights = vec![Sum::default(); n];
@@ -417,7 +364,7 @@ impl FlowField {
         for (c, state) in thermal.volume.phase_states.iter().enumerate() {
             poll_every(gate, c)?;
             if let Some(state) = state {
-                admit(*state)?;
+                admit_state(conductivity, *state)?;
             }
         }
         poll(gate)?;
@@ -438,6 +385,90 @@ impl FlowField {
             },
         })
     }
+}
+
+struct PreparedInput<'a> {
+    samples: Vec<Option<PhaseConductivitySample>>,
+    baths: std::collections::BTreeMap<(usize, usize), &'a ThermalVolumeBathFace>,
+}
+
+fn admit_state(
+    conductivity: &PreparedPhaseConductivity<'_>,
+    state: fs_material::phase::EquilibriumPhaseState,
+) -> Result<(), ChtError> {
+    let curve = conductivity.caloric_curve();
+    let bounds = conductivity.enthalpy_bounds_j_kg();
+    if state.phase_curve_identity() != curve.identity()
+        || state.material_card_identity() != curve.material_card_identity()
+        || !(bounds[0]..=bounds[1]).contains(&state.specific_enthalpy_j_kg())
+    {
+        Err(refuse(
+            "phase state is outside the original conductivity source/chart",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn prepare_input<'a>(
+    domain: &VoxelDomain,
+    conductivity: &PreparedPhaseConductivity<'_>,
+    baths: &'a [ThermalVolumeBathFace],
+    input: CoexistenceVolumeInput<'_>,
+    controls: ConductiveThermalVolumeControls,
+    gate: &CancelGate,
+) -> Result<PreparedInput<'a>, ChtError> {
+    poll(gate)?;
+    let n = domain.cell_count();
+    let transport = controls.volume.thermal.volume.transport;
+    if n > transport.max_cells
+        || input.mass_kg.len() != n
+        || input.phase_states.len() != n
+        || input.net_enthalpy_increment_j.len() != n
+    {
+        return Err(refuse(
+            "conductive inventory shape or cell budget is invalid",
+        ));
+    }
+    finite_positive("flow.conductive_duration", transport.projection.duration_s)?;
+    if !transport.maximum_enthalpy_defect_j.is_finite() || transport.maximum_enthalpy_defect_j < 0.0
+    {
+        return Err(refuse("invalid combined conductive enthalpy-defect budget"));
+    }
+    let baths = boundary::prepare(domain, baths, controls.max_conductive_faces, gate)?;
+    for state in input.boundary_inflow.into_iter().flatten() {
+        admit_state(conductivity, state)?;
+    }
+    let mut samples = Vec::with_capacity(n);
+    for c in 0..n {
+        poll_every(gate, c)?;
+        finite(
+            "flow.authored_net_enthalpy_increment",
+            input.net_enthalpy_increment_j[c],
+        )?;
+        if !domain.is_fluid(c) {
+            if input.mass_kg[c] != 0.0
+                || input.phase_states[c].is_some()
+                || input.net_enthalpy_increment_j[c] != 0.0
+            {
+                return Err(refuse(
+                    "solid grid cells cannot contain conductive phase inventory",
+                ));
+            }
+            samples.push(None);
+            continue;
+        }
+        finite_positive("flow.conductive_cell_mass", input.mass_kg[c])?;
+        let state = input.phase_states[c]
+            .ok_or_else(|| refuse("each fluid cell needs an original conductive phase state"))?;
+        admit_state(conductivity, state)?;
+        samples.push(Some(
+            conductivity
+                .state_at_specific_enthalpy(state.specific_enthalpy_j_kg())
+                .map_err(|error| refuse(error.to_string()))?,
+        ));
+    }
+    Ok(PreparedInput { samples, baths })
 }
 
 /// Error-free addition residual for finite nonoverflowing binary64 operands.

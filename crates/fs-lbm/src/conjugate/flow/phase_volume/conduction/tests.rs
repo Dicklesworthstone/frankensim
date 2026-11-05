@@ -1,6 +1,8 @@
 //! Manufactured original sources and independent conservative physical limits.
 mod momentum;
 mod boundary;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+mod implicit;
 
 use super::*;
 use crate::conjugate::domain::Voxel;

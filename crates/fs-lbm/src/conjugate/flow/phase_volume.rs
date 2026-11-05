@@ -1,6 +1,12 @@
 //! Original-chart thermal volume evolution on the conservative flux owner.
 
 mod conduction;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use conduction::{
+    ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
+    ImplicitConductiveThermalVolumeStep, ImplicitThermalVolumeLinearControls,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace,
+};
 pub use conduction::{
     ConductiveResistiveThermalVolumeMomentumControls, ConductiveResistiveThermalVolumeMomentumStep,
     ConductiveThermalVolumeControls, ConductiveThermalVolumeMomentumControls,

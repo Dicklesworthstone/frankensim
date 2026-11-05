@@ -101,6 +101,12 @@ mod energy;
 #[cfg(feature = "enthalpy-coupling")]
 pub mod enthalpy;
 mod flow;
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub use flow::{
+    ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
+    ImplicitConductiveThermalVolumeStep, ImplicitThermalVolumeLinearControls,
+    ImplicitThermalVolumeSolveControls, ImplicitThermalVolumeWorkspace,
+};
 pub(crate) use flow::scale_rows;
 pub(crate) mod krylov;
 pub mod material_coupling;
