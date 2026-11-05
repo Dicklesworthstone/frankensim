@@ -209,6 +209,48 @@ covers steady-owner compatibility, coupled Kelvin/Kutta/normal-flow constraints,
 independent exterior fields, clockwise contour circulation, frame/unit changes,
 and singular or invalid inputs (G0/G3).
 
+### Native panel-coupled wake evolution
+
+`WakeSim::new_panel_coupled` selects this closure in the original wake owner.
+The section is transformed once into the existing unit-chord frame, and one
+prepared factorization serves the entire run. The original `WakeSim::new`
+screen retains its existing arithmetic and empirical closure. Native
+`steady_circulation` is actual sheet density times perimeter, never `Cl/2`.
+
+Each interval releases one packet at the existing downstream release position.
+Old wake strengths remain fixed. Initial and midpoint stages simultaneously
+solve its new strength and the body sheet at their actual geometry, then
+convect using freestream, the complete source/vortex panel field and the
+original counterclockwise VPM kernel through the explicit clockwise conversion.
+Explicit midpoint transport is second order for smooth constrained motion
+within a release interval; discrete release placement/shedding has its own
+refinement error. A final boundary solve uses the accepted endpoint geometry,
+so `panel_state` contains current normal-flow/Kutta residuals and surface
+velocities. The prior bound circulation is the Kelvin target at every stage.
+
+`step_panel_coupled_at_angle` supplies a chord-relative unit-speed incidence
+held for one interval. Previously shed strengths survive the incidence change;
+the new packet carries the resulting bound-circulation change. Two prepared
+unit-axis responses update the steady reference without refactorization.
+The accepted angle also governs subsequent ordinary steps. This describes a
+prescribed freestream/gust schedule around a fixed body, not body rotation.
+
+The existing panel/vortex/step ceilings bound this direct evolution. A step
+uses two complete wake-velocity sweeps, three coupled boundary solves and
+O(panels*particles) incident/body samples; it adds no FMM speed claim. Private
+stage vectors are reserved fallibly. Initial/midpoint/endpoint vortices must
+remain outside the section and its 1e-12 unit-chord contact layer. This is a
+sampled clearance check, not continuous collision detection. Any numerical,
+body-contact, input or allocation refusal preserves the wake, history, angle
+and accepted panel state. No asynchronous cancellation receipt is claimed.
+
+Traces identify this mode as `inviscid-panel-kelvin`. It supplies no unsteady
+Bernoulli pressure/load, viscous wall production, separation or measured
+Wagner/Theodorsen validation. `tests/panel_wake.rs` checks actual endpoint
+boundary reconstruction, Kelvin conservation and old-strength retention,
+prescribed incidence, geometric normalization and refusal; the native module
+also exercises rollback on a body-contact candidate (G0/G3).
+
 ## Purpose and layer
 
 Layer: L3 (FLUX). Laplace BEM panel methods (plan §8.3 [F], bead

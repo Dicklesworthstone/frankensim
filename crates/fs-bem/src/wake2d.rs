@@ -11,6 +11,10 @@
 //! (the Wagner transient), and the shed sheet rolls up without
 //! blowing up — stability and determinism are asserted, shapes are
 //! ledgered.
+//!
+//! [`WakeSim::new_panel_coupled`] selects the native Hess–Smith/Kutta/Kelvin
+//! path instead: actual panel circulation and the complete body field enter
+//! every transport stage. The original screening constructor is unchanged.
 
 use crate::BemError;
 use crate::panel2d::{Airfoil2d, solve_with_lift_slope};
@@ -18,6 +22,7 @@ use crate::panel2d::{Airfoil2d, solve_with_lift_slope};
 mod convection;
 #[cfg(test)]
 mod convection_tests;
+mod panel;
 
 /// Largest admitted number of wake steps/vortices in one v1 state.
 pub const MAX_WAKE_STEPS: usize = 1_000_000;
@@ -32,6 +37,44 @@ const MAX_WAKE_DT: f64 = 1.0;
 const MIN_WAKE_CORE: f64 = 1.0e-6;
 const MAX_WAKE_CORE: f64 = 1.0;
 const MAX_WAKE_TRACE_BYTES: usize = MAX_WAKE_STEPS * 128 + 192;
+
+fn local_configuration(foil: &Airfoil2d, alpha: f64, dt: f64, core: f64) -> Result<f64, BemError> {
+    if !alpha.is_finite() {
+        return Err(BemError::InvalidScalar {
+            name: "wake freestream angle",
+            value: alpha,
+            requirement: "finite radians",
+        });
+    }
+    if !dt.is_finite() || dt <= 0.0 || dt > MAX_WAKE_DT {
+        return Err(BemError::InvalidScalar {
+            name: "wake time step",
+            value: dt,
+            requirement: "finite and in (0, 1] nondimensional time",
+        });
+    }
+    if !core.is_finite() || !(MIN_WAKE_CORE..=MAX_WAKE_CORE).contains(&core) {
+        return Err(BemError::InvalidScalar {
+            name: "wake regularization radius",
+            value: core,
+            requirement: "finite and in [1e-6, 1] chord lengths",
+        });
+    }
+    let (_, chord_direction, _) = foil.chord_frame();
+    let (sin_alpha, cos_alpha) = (fs_math::det::sin(alpha), fs_math::det::cos(alpha));
+    let local_alpha = fs_math::det::atan2(
+        sin_alpha * chord_direction[0] - cos_alpha * chord_direction[1],
+        cos_alpha * chord_direction[0] + sin_alpha * chord_direction[1],
+    );
+    if local_alpha.abs() > MAX_ABS_WAKE_ALPHA {
+        return Err(BemError::InvalidScalar {
+            name: "wake angle of attack",
+            value: local_alpha,
+            requirement: "finite radians with |alpha relative to chord| <= pi/2",
+        });
+    }
+    Ok(local_alpha)
+}
 
 #[derive(Default)]
 struct ByteCounter {
@@ -94,6 +137,7 @@ pub struct WakeSim {
     steady_gamma: f64,
     circulation_slope: f64,
     te: [f64; 2],
+    panel_coupling: Option<panel::PanelCoupling>,
 }
 
 impl WakeSim {
@@ -103,40 +147,7 @@ impl WakeSim {
     /// chord frame, so a rigid transform or change of geometric units cannot
     /// change the transient lift history.
     pub fn new(foil: &Airfoil2d, alpha: f64, dt: f64, core: f64) -> Result<WakeSim, BemError> {
-        if !alpha.is_finite() {
-            return Err(BemError::InvalidScalar {
-                name: "wake freestream angle",
-                value: alpha,
-                requirement: "finite radians",
-            });
-        }
-        if !dt.is_finite() || dt <= 0.0 || dt > MAX_WAKE_DT {
-            return Err(BemError::InvalidScalar {
-                name: "wake time step",
-                value: dt,
-                requirement: "finite and in (0, 1] nondimensional time",
-            });
-        }
-        if !core.is_finite() || !(MIN_WAKE_CORE..=MAX_WAKE_CORE).contains(&core) {
-            return Err(BemError::InvalidScalar {
-                name: "wake regularization radius",
-                value: core,
-                requirement: "finite and in [1e-6, 1] chord lengths",
-            });
-        }
-        let (_, chord_direction, _) = foil.chord_frame();
-        let (sin_alpha, cos_alpha) = (fs_math::det::sin(alpha), fs_math::det::cos(alpha));
-        let local_alpha = fs_math::det::atan2(
-            sin_alpha * chord_direction[0] - cos_alpha * chord_direction[1],
-            cos_alpha * chord_direction[0] + sin_alpha * chord_direction[1],
-        );
-        if local_alpha.abs() > MAX_ABS_WAKE_ALPHA {
-            return Err(BemError::InvalidScalar {
-                name: "wake angle of attack",
-                value: local_alpha,
-                requirement: "finite radians with |alpha relative to chord| <= pi/2",
-            });
-        }
+        let local_alpha = local_configuration(foil, alpha, dt, core)?;
         let lift = solve_with_lift_slope(foil, alpha)?;
         // Cache the section's local attached-flow response from one panel LU
         // and its analytic tangent. Unlike Γ/sin(α), this stays finite when
@@ -154,12 +165,14 @@ impl WakeSim {
             steady_gamma: lift.solution.cl / 2.0,
             circulation_slope,
             te: [1.0, 0.0],
+            panel_coupling: None,
         };
         sim.validate_state()?;
         Ok(sim)
     }
 
-    /// Steady screening-model circulation scale (the transient asymptote).
+    /// Steady circulation scale. The original screen uses pressure-derived
+    /// `Cl/2`; the panel-coupled mode uses the actual bound sheet circulation.
     #[must_use]
     pub fn steady_circulation(&self) -> f64 {
         self.steady_gamma
@@ -207,6 +220,9 @@ impl WakeSim {
     #[allow(clippy::too_many_lines)] // one transactional wake update, including all refusal checks
     pub fn step(&mut self) -> Result<(), BemError> {
         self.validate_state()?;
+        if self.panel_coupling.is_some() {
+            return self.step_panels();
+        }
         if self.history.len() >= MAX_WAKE_STEPS {
             return Err(BemError::WorkEnvelopeExceeded {
                 operation: "wake steps",
@@ -367,8 +383,16 @@ impl WakeSim {
         let core = fs_math::det::sqrt(self.core2);
         write!(
             out,
-            "{{\"schema\":\"fs-bem.wake-trace.v1\",\"model\":\"inviscid-screening\",\"alpha_rad\":{},\"dt_nondimensional\":{},\"core_radius_chord\":{},\"stride\":{},\"rows\":[",
-            self.alpha, self.dt, core, stride
+            "{{\"schema\":\"fs-bem.wake-trace.v1\",\"model\":\"{}\",\"alpha_rad\":{},\"dt_nondimensional\":{},\"core_radius_chord\":{},\"stride\":{},\"rows\":[",
+            if self.panel_coupling.is_some() {
+                "inviscid-panel-kelvin"
+            } else {
+                "inviscid-screening"
+            },
+            self.alpha,
+            self.dt,
+            core,
+            stride
         )?;
         let mut first = true;
         for (i, st) in self.history.iter().enumerate() {
