@@ -459,7 +459,7 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             let (boundary_id, id, kg_s) = boundary.identity();
             let cell = thermal.cells().get(&id).ok_or(invalid("inactive mass-flow boundary cell"))?;
             if thermal.material_storage_basis(cell.material_id)? != ThermalStorageBasis::Enthalpy {
-                return Err(invalid("mass flow requires enthalpy storage, not fixed-volume internal energy").into());
+                return Err(invalid("mass flow requires an explicitly enthalpy-based storage law").into());
             }
             if let Some(carrier) = &self.liquid_carrier {
                 carrier.admit_boundary(boundary)?;
@@ -545,7 +545,7 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
             let Some((up_id, _, rate)) = flow.directed() else { continue; };
             if thermal.material_storage_basis(a.material_id)? != ThermalStorageBasis::Enthalpy
                 || thermal.material_storage_basis(b.material_id)? != ThermalStorageBasis::Enthalpy {
-                return Err(invalid("mass flow requires enthalpy storage, not fixed-volume internal energy").into());
+                return Err(invalid("mass flow requires an explicitly enthalpy-based storage law").into());
             }
             if a.material_id != b.material_id && self.stationary_species.is_none() {
                 return Err(invalid("advection across different material IDs requires a composition model").into());

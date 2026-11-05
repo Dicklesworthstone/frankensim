@@ -69,14 +69,19 @@ pub struct CellId(pub u64);
 pub struct MaterialId(pub u64);
 
 /// Physical thermodynamic coordinate stored by the original thermal law.
-/// Heat-only exchange can couple either basis; mass transport requires enthalpy
-/// and must not silently treat fixed-volume internal energy as stream enthalpy.
+/// Heat-only exchange can couple every basis. Mass transport requires enthalpy;
+/// neither internal energy nor a measured capacity alone supplies flow work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThermalStorageBasis {
     /// Specific enthalpy h [J/kg], with pressure work owned by the material model.
     Enthalpy,
     /// Specific internal energy u [J/kg] for an explicitly fixed-volume model.
     InternalEnergy,
+    /// Integral of a declared sensible heat capacity, normalized by fixed mass.
+    /// The measurement or assembly does not establish thermodynamic Cp or Cv.
+    /// This coordinate supports heat-only exchange under its original boundary
+    /// constraints, but cannot supply stream enthalpy or phase-transfer energy.
+    DeclaredSensibleStorage,
 }
 
 /// Replaceable thermal-storage/temperature law. All materials must use a consistent
@@ -84,7 +89,8 @@ pub enum ThermalStorageBasis {
 /// must be continuous and nondecreasing over the admitted domain, and the law
 /// must remain immutable throughout an advance and checkpoint/restart.
 pub trait ThermalLaw {
-    /// Coordinate selected by this immutable law. Existing laws store enthalpy.
+    /// Coordinate selected by this immutable law. The default declares enthalpy;
+    /// capacity-based laws without that physical interpretation must override it.
     fn storage_basis(&self) -> ThermalStorageBasis { ThermalStorageBasis::Enthalpy }
     /// Optional identity of this original caloric law, including its energy
     /// datum, state domain and constitutive data. State-dependent consumers
@@ -104,9 +110,11 @@ pub trait ThermalLaw {
     /// Admitted once at timeline construction and reused across advances and
     /// checkpoints; the bound must remain valid for the immutable law.
     fn maximum_temperature_slope(&self) -> f64;
-    /// Exact relative thermal entropy integral `integral de / T(e)` [J/(kg K)]
+    /// Relative thermal integral `integral de / T(e)` [J/(kg K)]
     /// on this same admitted caloric law: dh/T at fixed pressure/composition,
-    /// or du/T for explicitly fixed volume/composition.
+    /// or du/T for explicitly fixed volume/composition. A declared sensible
+    /// storage law may opt into its original reversible heat convention; this
+    /// integral alone does not identify Cp, Cv or a thermodynamic potential.
     /// `None` explicitly means unavailable; the transport owner never invents
     /// a heat capacity, entropy datum, mixing law or extrapolated chart.
     /// Implementations must retain latent heat in this integral exactly once.

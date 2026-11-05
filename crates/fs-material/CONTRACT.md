@@ -8380,6 +8380,9 @@ cell therefore stores m*h = V0*integral C_vol(T) dT. rho0 is an authored scenari
 basis, not a new measured density, temperature-dependent density or source Cp
 claim. Mass and volume remain fixed. Callers must select a compatible caloric
 constraint; this does not infer pressure work, phase change or moisture exchange.
+Its `DeclaredSensibleStorage` basis preserves this distinction at runtime:
+ordinary heat exchange remains available, while stream and phase-mass transfer
+cannot treat an unspecified measured capacity as thermodynamic Cp or Cv.
 
 Preparation retains the original source identity, includes the mass basis and
 datum in the adapter identity, checks representable storage bounds and computes
@@ -8689,10 +8692,13 @@ work test, not a hardware throughput or experimental-accuracy claim.
 
 `HeatStorageThermalLaw` binds this total storage to the existing thermal
 timeline's specific-energy coordinate with an explicit total mass and datum.
+Its basis is likewise `DeclaredSensibleStorage`, including after a sensible-
+entropy opt-in. Both generic capacity wrappers use v3 identities for this
+physical interpretation; source identities and capacity curves are unchanged.
 Mass-only assemblies must match their known total mass; mixed assemblies require
-additional positive mass for their volume-based constituents. Call `admit_cell`
-before inserting a birth event, since the generic `ThermalLaw` evaluation cannot
-inspect cell mass. The timeline continues to own power, evolution, cancellation
+additional positive mass for their volume-based constituents. The native
+timeline invokes each law's `validate_cell` before birth or inventory change;
+`admit_cell` also permits an explicit precheck. The timeline owns power, evolution, cancellation
 and energy acceptance. Sensible entropy is opt-in and changes the law identity.
 
 Four focused assembly tests exercise independent mass/volume integrals,

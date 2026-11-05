@@ -88,8 +88,8 @@ impl<'law> PistonThermalEnds<'law> {
     /// walls. A source-backed contact must be constructed from its same caloric
     /// law. Internal-energy storage is admitted directly; the source's explicit
     /// stationary-solid/negligible-expansion convention is also admitted.
-    /// Unqualified source enthalpy refuses because its missing pressure work
-    /// cannot be inserted into a gas-plus-piston internal-energy balance.
+    /// Unqualified source enthalpy or sensible storage refuses because an
+    /// unspecified work convention cannot close a gas-plus-piston energy balance.
     /// Radial drag refuses: longitudinal wall stress belongs to the original
     /// moving molecular operator and must not be applied a second time here.
     pub fn new(
@@ -110,7 +110,11 @@ impl<'law> PistonThermalEnds<'law> {
             }
             match source {
                 Some(source) => {
-                    if source.constraint() == WallCaloricConstraint::SourceEnthalpy {
+                    if !matches!(
+                        source.constraint(),
+                        WallCaloricConstraint::IsochoricInternalEnergy
+                            | WallCaloricConstraint::StationarySolidNegligibleExpansion
+                    ) {
                         return Err(WallExchangeError::Invalid(
                             "thermal piston requires a rigid internal-energy storage convention",
                         ));

@@ -3,7 +3,7 @@
 use super::super::capacity::{CapacityCurve, CapacityInverse};
 use super::{HeatStorageAmount, PreparedHeatStorage, ThermalTransportError, invalid, positive};
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_thermal::enthalpy::{DepositedCell, DepositionError, ThermalLaw};
+use fs_thermal::enthalpy::{DepositedCell, DepositionError, ThermalLaw, ThermalStorageBasis};
 
 /// One assembly used as one uniform-temperature thermal cell.
 ///
@@ -11,6 +11,9 @@ use fs_thermal::enthalpy::{DepositedCell, DepositionError, ThermalLaw};
 /// coordinate. Volumetric source capacities remain volumetric; no measured
 /// density or source specific heat is manufactured. Conduction, boundaries,
 /// spatial resolution and time stepping remain with their existing owners.
+/// This amount-normalized sensible storage does not identify stream enthalpy or
+/// thermodynamic internal energy. Open-mass and phase-transfer owners refuse it;
+/// enabling reversible sensible entropy does not change that storage basis.
 /// The thermal owner's cell admission enforces the assembly's declared mass;
 /// `admit_cell` also supports checking a proposed cell before scheduling it.
 #[derive(Clone, Debug)]
@@ -82,7 +85,7 @@ impl<'a> HeatStorageThermalLaw<'a> {
         }
         let inverse =
             CapacityInverse::new(&CapacityCurve::new(&storage.knots), datum_temperature_k).ok();
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.heat-storage-thermal-law.v2");
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.heat-storage-thermal-law.v3");
         hash.update(storage.identity().as_bytes());
         hash.update(&reference_mass_kg.to_bits().to_le_bytes());
         hash.update(&datum_temperature_k.to_bits().to_le_bytes());
@@ -158,6 +161,10 @@ impl<'a> HeatStorageThermalLaw<'a> {
 }
 
 impl ThermalLaw for HeatStorageThermalLaw<'_> {
+    fn storage_basis(&self) -> ThermalStorageBasis {
+        ThermalStorageBasis::DeclaredSensibleStorage
+    }
+
     fn caloric_identity(&self) -> Option<[u8; 32]> {
         Some(*self.identity.as_bytes())
     }

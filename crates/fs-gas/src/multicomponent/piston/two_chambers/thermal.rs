@@ -110,9 +110,9 @@ impl From<WallExchangeError> for SharedPistonThermalError {
 /// no second multiplication by the mechanical cross section is performed.
 /// Thermal mass belongs to this inventory once, and does not add to the
 /// separately authored total piston inertia. Translation adds no wall p dV.
-/// Source enthalpy is refused unless its existing caloric binding explicitly
-/// declares negligible solid expansion; rigid translation cannot pay hidden
-/// pressure/deformation work.
+/// Source enthalpy or unqualified sensible storage is refused unless its
+/// existing binding explicitly declares internal energy or negligible solid
+/// expansion; rigid translation cannot pay hidden pressure/deformation work.
 ///
 /// Two complete private flow workspaces are allocated once. Every duration
 /// retry resets them from accepted fields; velocity proposals reuse the
@@ -151,7 +151,11 @@ impl<'law> SharedPistonThermal<'law> {
         };
         contact.validate()?;
         let temperature = if let Some(source) = &storage.heat_storage {
-            if source.constraint() == WallCaloricConstraint::SourceEnthalpy {
+            if !matches!(
+                source.constraint(),
+                WallCaloricConstraint::IsochoricInternalEnergy
+                    | WallCaloricConstraint::StationarySolidNegligibleExpansion
+            ) {
                 return Err(WallExchangeError::Invalid(
                     "translating shared piston requires internal energy or explicit negligible expansion",
                 ).into());

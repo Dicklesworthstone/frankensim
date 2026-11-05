@@ -1462,8 +1462,10 @@ validity and nonlinear/time accuracy remain the composing caller's responsibilit
 ## Declared thermal storage and closed-volume admission
 
 `ThermalLaw::storage_basis` declares whether the original caloric law stores
-specific enthalpy or fixed-volume specific internal energy. Existing laws retain
-the enthalpy default. The inherited `specific_h_j_kg` field carries the selected
+specific enthalpy, fixed-volume specific internal energy, or declared sensible
+heat storage whose capacity does not identify either potential. Existing
+enthalpy laws retain their default; generic measured or assembled capacities
+use `DeclaredSensibleStorage`. The inherited `specific_h_j_kg` field carries the selected
 coordinate; the timeline applies the same conservative heat exchange and
 `integral de/T` entropy account without converting one thermodynamic potential
 into another. Each law can admit its own mass/geometry relationship through
@@ -1474,7 +1476,8 @@ Nonzero prescribed mass flow and inlet calorics require enthalpy storage. The
 single-surface, joint-chamber and external-endpoint sublimation paths also require
 enthalpy before constructing or publishing open-mass exchange. Batch admission
 finishes before any endpoint mutation. Zero-flow connections remain available
-for heat-only internal-energy storage.
+for heat-only internal-energy and declared sensible storage. A reversible
+`integral de/T` opt-in does not grant either source an enthalpy interpretation.
 
 Direct liquid evaporation/condensation, direct and shared-chamber sublimation,
 and externally solved solid/condensed endpoints validate the complete candidate

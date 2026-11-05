@@ -213,9 +213,11 @@ impl CellBinding {
         {
             hash.update(&value.to_bits().to_le_bytes());
         }
-        hash.update(&[u8::from(
-            self.storage == ThermalStorageBasis::InternalEnergy,
-        )]);
+        hash.update(&[match self.storage {
+            ThermalStorageBasis::Enthalpy => 0,
+            ThermalStorageBasis::InternalEnergy => 1,
+            ThermalStorageBasis::DeclaredSensibleStorage => 2,
+        }]);
         hash.update(&[u8::from(self.caloric.is_some())]);
         if let Some(caloric) = self.caloric {
             hash.update(&caloric);

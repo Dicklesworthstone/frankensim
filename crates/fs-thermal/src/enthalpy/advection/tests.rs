@@ -61,6 +61,17 @@ impl ThermalLaw for RigidStorage {
     }
 }
 
+struct DeclaredCapacity;
+impl ThermalLaw for DeclaredCapacity {
+    fn storage_basis(&self) -> ThermalStorageBasis {
+        ThermalStorageBasis::DeclaredSensibleStorage
+    }
+    fn temperature_k(&self, energy: f64) -> Result<f64, DepositionError> {
+        RigidStorage.temperature_k(energy)
+    }
+    fn maximum_temperature_slope(&self) -> f64 { 0.001 }
+}
+
 #[test]
 fn fixed_volume_storage_uses_original_heat_exchange_and_admits_its_mass_volume_constraint() {
     assert_eq!(LAW.storage_basis(), ThermalStorageBasis::Enthalpy);
@@ -87,33 +98,35 @@ fn fixed_volume_storage_uses_original_heat_exchange_and_admits_its_mass_volume_c
 }
 
 #[test]
-fn internal_energy_storage_cannot_silently_become_open_stream_enthalpy() {
-    let s = prepared(&RigidStorage,
-        vec![cell(0, 1.0, 10_000.0), cell(1, 1.0, 20_000.0), cell(2, 1.0, 30_000.0)], vec![]);
-    let original = s.cells().clone();
-    for rate in [0.1, -0.1] {
-        let observer = Advected::new(Witness::default(), ring(rate), 3).unwrap();
+fn non_enthalpy_storage_cannot_silently_become_open_stream_enthalpy() {
+    for law in [&RigidStorage as &dyn ThermalLaw, &DeclaredCapacity] {
+        let s = prepared(law,
+            vec![cell(0, 1.0, 10_000.0), cell(1, 1.0, 20_000.0), cell(2, 1.0, 30_000.0)], vec![]);
+        let original = s.cells().clone();
+        for rate in [0.1, -0.1] {
+            let observer = Advected::new(Witness::default(), ring(rate), 3).unwrap();
+            assert!(matches!(s.advance_observed(&observer, 0.1, cfg(0.1), || Ok(())),
+                Err(DepositionError::InvalidInput("mass flow requires an explicitly enthalpy-based storage law"))));
+            assert!(observer.inner().durations.is_empty());
+            assert_eq!(observer.audit().substeps, 0);
+        }
+        let boundaries = vec![
+            MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 0.1,
+                material_id: MaterialId(1), specific_h_j_kg: 20_000.0 },
+            MassBoundary::Outlet { id: 11, cell: CellId(0), kg_s: 0.1 },
+        ];
+        let observer = Advected::new(Witness::default(), vec![], 0).unwrap()
+            .with_boundaries(boundaries, 2).unwrap();
         assert!(matches!(s.advance_observed(&observer, 0.1, cfg(0.1), || Ok(())),
-            Err(DepositionError::InvalidInput("mass flow requires enthalpy storage, not fixed-volume internal energy"))));
+            Err(DepositionError::InvalidInput("mass flow requires an explicitly enthalpy-based storage law"))));
         assert!(observer.inner().durations.is_empty());
-        assert_eq!(observer.audit().substeps, 0);
+        let zero = Advected::new((), ring(0.0), 3).unwrap();
+        let (unchanged, _, audit) = s.advance_observed(&zero, 0.1, cfg(0.1), || Ok(())).unwrap();
+        assert_eq!(unchanged.cells(), &original);
+        assert_eq!(audit.external_heat_j, 0.0);
+        assert_eq!(s.cells(), &original);
+        assert_eq!(s.time_s(), 0.0);
     }
-    let boundaries = vec![
-        MassBoundary::Inlet { id: 10, cell: CellId(0), kg_s: 0.1,
-            material_id: MaterialId(1), specific_h_j_kg: 20_000.0 },
-        MassBoundary::Outlet { id: 11, cell: CellId(0), kg_s: 0.1 },
-    ];
-    let observer = Advected::new(Witness::default(), vec![], 0).unwrap()
-        .with_boundaries(boundaries, 2).unwrap();
-    assert!(matches!(s.advance_observed(&observer, 0.1, cfg(0.1), || Ok(())),
-        Err(DepositionError::InvalidInput("mass flow requires enthalpy storage, not fixed-volume internal energy"))));
-    assert!(observer.inner().durations.is_empty());
-    let zero = Advected::new((), ring(0.0), 3).unwrap();
-    let (unchanged, _, audit) = s.advance_observed(&zero, 0.1, cfg(0.1), || Ok(())).unwrap();
-    assert_eq!(unchanged.cells(), &original);
-    assert_eq!(audit.external_heat_j, 0.0);
-    assert_eq!(s.cells(), &original);
-    assert_eq!(s.time_s(), 0.0);
 }
 
 #[test]

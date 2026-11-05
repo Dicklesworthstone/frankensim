@@ -21,6 +21,10 @@ pub enum WallCaloricConstraint {
     /// Specific enthalpy from an original thermal chart. The source owns its
     /// pressure-work convention; this storage is not rigid-vessel U.
     SourceEnthalpy,
+    /// Original sensible-capacity integral without an established Cp/Cv or
+    /// pressure/deformation-work convention. Heat-only exchange retains this
+    /// coordinate; it is neither stream enthalpy nor rigid-body internal energy.
+    SourceSensibleStorage,
 }
 
 /// Immutable source and fixed constituent amounts, shared without copying tables.
@@ -73,6 +77,9 @@ impl<'law> MaterialWallCaloric<'law> {
         let constraint = match law.storage_basis() {
             ThermalStorageBasis::InternalEnergy => WallCaloricConstraint::IsochoricInternalEnergy,
             ThermalStorageBasis::Enthalpy => WallCaloricConstraint::SourceEnthalpy,
+            ThermalStorageBasis::DeclaredSensibleStorage => {
+                WallCaloricConstraint::SourceSensibleStorage
+            }
         };
         Ok(Self {
             storage: Storage::Energy(EnergyStorage::new(law, initial, energy_range_j_kg)?),
@@ -153,6 +160,9 @@ impl<'law> MaterialWallCaloric<'law> {
             WallCaloricConstraint::IsochoricInternalEnergy => ThermalStorageBasis::InternalEnergy,
             WallCaloricConstraint::StationarySolidNegligibleExpansion
             | WallCaloricConstraint::SourceEnthalpy => ThermalStorageBasis::Enthalpy,
+            WallCaloricConstraint::SourceSensibleStorage => {
+                ThermalStorageBasis::DeclaredSensibleStorage
+            }
         }
     }
     pub const fn constraint(&self) -> WallCaloricConstraint {

@@ -1,10 +1,12 @@
 //! Native volumetric caloric data on the existing conservative thermal timeline.
 //!
-//! The timeline stores `m*h`. This adapter uses a caller-declared, fixed reference
-//! mass/volume ratio rho0 and `h(T) = integral C_vol(T) dT / rho0`, so a compatible
+//! The timeline stores `m*e`. This adapter uses a caller-declared, fixed reference
+//! mass/volume ratio rho0 and `e(T) = integral C_vol(T) dT / rho0`, so a compatible
 //! cell stores exactly `V0 * integral C_vol(T) dT`. rho0 is a scenario input, not a
 //! newly measured density or a temperature-dependent density law. The caller
 //! selects the source's caloric constraint and justifies fixed volume and mass.
+//! This declared sensible storage is neither stream enthalpy nor a claim of
+//! thermodynamic internal energy; mass-flow and phase-transfer owners refuse it.
 //! The existing timeline owns all state, time integration, sources and balances.
 //! No pressure work, phase change, moisture exchange or moving volume is added.
 
@@ -16,6 +18,7 @@ use crate::thermal::conduction::{
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_thermal::enthalpy::{
     CellId, DepositedCell, DepositionError, DepositionSimulation, ThermalLaw, ThermalLink,
+    ThermalStorageBasis,
     series_contact_conductance_w_k,
 };
 
@@ -81,7 +84,7 @@ impl<'p> FixedVolumeThermalLaw<'p> {
             ));
         }
         let inverse = path.capacity_inverse(datum_temperature_k);
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.fixed-volume-thermal-law.v2");
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.fixed-volume-thermal-law.v3");
         hash.update(path.identity().as_bytes());
         hash.update(&reference_density_kg_m3.to_bits().to_le_bytes());
         hash.update(&datum_temperature_k.to_bits().to_le_bytes());
@@ -192,6 +195,10 @@ impl<'p> FixedVolumeThermalLaw<'p> {
 }
 
 impl ThermalLaw for FixedVolumeThermalLaw<'_> {
+    fn storage_basis(&self) -> ThermalStorageBasis {
+        ThermalStorageBasis::DeclaredSensibleStorage
+    }
+
     fn caloric_identity(&self) -> Option<[u8; 32]> {
         Some(*self.identity.as_bytes())
     }
