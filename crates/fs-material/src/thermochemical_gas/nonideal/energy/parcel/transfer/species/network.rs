@@ -1,0 +1,180 @@
+//! Simultaneous selective streams and heat on original real-gas inventories.
+//!
+//! Every edge uses its ORIGINAL donor's partial enthalpy. Gross withdrawals
+//! are admitted before source mixing, and every affected endpoint is solved
+//! once. Incoming material cannot leave again during the same explicit step.
+//! Prescribed streams/heat do not supply rates, separation work or an entropy
+//! guarantee. A physical transport owner chooses and refines this interval.
+
+mod caloric;
+mod snapshot;
+
+use super::{GasEnergyError, GasEnergySolve, IsochoricRealGasParcel, Sum};
+use std::collections::BTreeMap;
+
+pub use crate::thermochemical_gas::energy::parcel::transfer::species::network::{
+    SpeciesNetworkError, SpeciesNetworkExternalHeat, SpeciesNetworkFlux,
+    SpeciesNetworkHeatTransfer, SpeciesNetworkParcelStep, SpeciesNetworkSolve,
+    SpeciesNetworkTransfer,
+};
+use SpeciesNetworkError as Error;
+
+/// Complete original-stream and additional-heat accounts, in canonical order.
+/// External heat's opposite finite storage belongs to the enclosing operator.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RealGasSpeciesNetworkStep {
+    pub fluxes: Vec<SpeciesNetworkFlux>,
+    pub heat: Vec<SpeciesNetworkHeatTransfer>,
+    pub external_heat: Vec<SpeciesNetworkExternalHeat>,
+    pub parcels: Vec<SpeciesNetworkParcelStep>,
+    pub total_mass_residual_kg: f64,
+    pub maximum_species_mass_residual_kg: f64,
+    /// Sum of local original-caloric defects, after the species reference
+    /// cancels. Includes external heat once, separately from stream enthalpy.
+    pub total_energy_residual_j: f64,
+}
+
+/// All proposed endpoints, or none. Accepted inputs are never mutated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RealGasSpeciesNetworkCandidate {
+    parcels: BTreeMap<u64, IsochoricRealGasParcel>,
+    step: RealGasSpeciesNetworkStep,
+}
+impl RealGasSpeciesNetworkCandidate {
+    pub fn parcels(&self) -> &BTreeMap<u64, IsochoricRealGasParcel> {
+        &self.parcels
+    }
+    pub const fn step(&self) -> &RealGasSpeciesNetworkStep {
+        &self.step
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        BTreeMap<u64, IsochoricRealGasParcel>,
+        RealGasSpeciesNetworkStep,
+    ) {
+        (self.parcels, self.step)
+    }
+}
+
+type Parcels<'a> = BTreeMap<u64, &'a IsochoricRealGasParcel>;
+fn check(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+    if cancelled() {
+        Err(Error::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+fn material(id: u64, error: GasEnergyError) -> Error {
+    if error == GasEnergyError::Cancelled {
+        Error::Cancelled
+    } else {
+        Error::Parcel { id, error }
+    }
+}
+
+/// Combine all species edges from one unchanged snapshot. Parallel rows are
+/// aggregated in deterministic donor/receiver/species/mass order. Source joins
+/// contain only the original node and its ORIGINAL incoming donors, so an
+/// unrelated disconnected material cannot change another component's domain.
+/// Idle nodes retain their exact accepted state. The map and all row kinds
+/// share the existing 256-node/4096-submitted-record snapshot bounds.
+pub fn exchange_candidate(
+    parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    exchange_candidate_with_external_heat(
+        parcels,
+        transfers,
+        &[],
+        &[],
+        endpoints,
+        controls,
+        cancelled,
+    )
+}
+
+/// Additional internal heat shares the same conserved endpoint solve as all
+/// species streams. Positive heat leaves parcels[0] and enters parcels[1].
+pub fn exchange_candidate_with_heat(
+    parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    exchange_candidate_with_external_heat(
+        parcels,
+        transfers,
+        heat,
+        &[],
+        endpoints,
+        controls,
+        cancelled,
+    )
+}
+
+/// Joint species, antisymmetric gas/gas heat, and explicitly identified external
+/// heat. External IDs are unique, including zero rows. No heat is hidden in
+/// species enthalpy or applied to an already-reconstructed candidate. This
+/// supplies no external thermostat, boundary material or entropy audit.
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_candidate_with_external_heat(
+    parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    external_heat: &[SpeciesNetworkExternalHeat],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    check(&mut cancelled)?;
+    snapshot::admit_work(
+        parcels.len(),
+        transfers.len(),
+        heat.len(),
+        external_heat.len(),
+    )?;
+    let borrowed = parcels.iter().map(|(&id, parcel)| (id, parcel)).collect();
+    exchange_borrowed(
+        &borrowed,
+        transfers,
+        heat,
+        external_heat,
+        endpoints,
+        controls,
+        &mut cancelled,
+    )
+}
+
+// The pair API lowers into this SAME owner without cloning its two complete
+// material states merely to construct a temporary input map.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn exchange_borrowed(
+    parcels: &Parcels<'_>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    external_heat: &[SpeciesNetworkExternalHeat],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    let mut snapshot = snapshot::prepare(
+        parcels,
+        transfers,
+        heat,
+        external_heat,
+        endpoints,
+        controls,
+        cancelled,
+    )?;
+    let fluxes = caloric::streams(parcels, &mut snapshot, cancelled)?;
+    caloric::finish(parcels, snapshot, fluxes, endpoints, controls, cancelled)
+}
+
+#[cfg(test)]
+mod tests;

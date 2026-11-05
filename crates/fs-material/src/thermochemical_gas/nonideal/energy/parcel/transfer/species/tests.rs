@@ -10,7 +10,7 @@ use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{Composition, CompositionBasis};
 
-fn source(x_a: f64, references: [f64; 2]) -> ThermochemicalGasModel {
+pub(super) fn source(x_a: f64, references: [f64; 2]) -> ThermochemicalGasModel {
     ThermochemicalGasModel::new(
         FrozenIdealGasMixtureModelV1::new(
             vec![
@@ -26,7 +26,7 @@ fn source(x_a: f64, references: [f64; 2]) -> ThermochemicalGasModel {
     .unwrap()
 }
 
-fn real_model(source: ThermochemicalGasModel, interaction: f64) -> ThermochemicalPengRobinsonModel {
+pub(super) fn real_model(source: ThermochemicalGasModel, interaction: f64) -> ThermochemicalPengRobinsonModel {
     let bindings: Vec<_> = source
         .thermodynamics()
         .components()
@@ -52,7 +52,7 @@ fn real_model(source: ThermochemicalGasModel, interaction: f64) -> Thermochemica
     };
     ThermochemicalPengRobinsonModel::new(source, bindings, interactions).unwrap()
 }
-fn at(
+pub(super) fn at(
     model: ThermochemicalPengRobinsonModel,
     temperature: f64,
     pressure: f64,
@@ -66,7 +66,7 @@ fn at(
     )
     .unwrap()
 }
-fn pair(references: [f64; 2]) -> [IsochoricRealGasParcel; 2] {
+pub(super) fn pair(references: [f64; 2]) -> [IsochoricRealGasParcel; 2] {
     [
         at(real_model(source(0.75, references), 0.03), 300.0, 5e6, 11.0),
         at(
@@ -77,7 +77,7 @@ fn pair(references: [f64; 2]) -> [IsochoricRealGasParcel; 2] {
         ),
     ]
 }
-fn energy() -> GasEnergySolve {
+pub(super) fn energy() -> GasEnergySolve {
     GasEnergySolve {
         minimum_temperature_k: 250.0,
         maximum_temperature_k: 450.0,
@@ -85,7 +85,7 @@ fn energy() -> GasEnergySolve {
         maximum_iterations: 128,
     }
 }
-fn controls() -> GasSpeciesExchangeSolve {
+pub(super) fn controls() -> GasSpeciesExchangeSolve {
     GasSpeciesExchangeSolve {
         gas: [energy(); 2],
         maximum_species_fraction: 0.25,
@@ -93,7 +93,7 @@ fn controls() -> GasSpeciesExchangeSolve {
         energy_tolerance_j: 1e-7,
     }
 }
-fn close(a: f64, b: f64, tolerance: f64) {
+pub(super) fn close(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance,
         "{a:.15e} != {b:.15e}, tolerance {tolerance:.3e}"
@@ -105,12 +105,12 @@ fn row(name: &str, mass: f64) -> SpeciesMassTransfer {
         mass_left_to_right_kg: mass,
     }
 }
-fn counterflow() -> [SpeciesMassTransfer; 2] {
+pub(super) fn counterflow() -> [SpeciesMassTransfer; 2] {
     [row("A", 0.0002), row("B", -0.0002)]
 }
 
 // Independent conversion of the published mole inventory into extensive mass.
-fn species_mass(gas: &IsochoricRealGasParcel, id: &SpeciesId) -> f64 {
+pub(super) fn species_mass(gas: &IsochoricRealGasParcel, id: &SpeciesId) -> f64 {
     gas.model()
         .source()
         .thermodynamics()
@@ -123,7 +123,7 @@ fn species_mass(gas: &IsochoricRealGasParcel, id: &SpeciesId) -> f64 {
                 / gas.model().mechanics().molar_mass().value()
         })
 }
-fn partial_enthalpy(gas: &IsochoricRealGasParcel, id: &SpeciesId) -> f64 {
+pub(super) fn partial_enthalpy(gas: &IsochoricRealGasParcel, id: &SpeciesId) -> f64 {
     let index = gas
         .model()
         .source()

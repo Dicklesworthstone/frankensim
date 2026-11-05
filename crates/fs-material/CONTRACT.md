@@ -14665,3 +14665,45 @@ zero conductivity, independent midpoint/Maxwell relaxation laws, second-order
 convergence, DC/transient heat separation, biased increments, representable
 extreme coefficients, and invalid-source/state refusal. Native integration
 validation remains required; these fixtures are not measured qualification.
+
+### Simultaneous partial-enthalpy transport on real-gas networks
+
+`nonideal::energy::parcel::transfer::species::network` advances prescribed
+species streams on branching and cyclic maps of original PR parcels. All edges
+read the same unchanged donor snapshot; each affected endpoint is reconstructed
+once after every species and heat contribution is combined. The pair-selective
+API delegates to this same borrowed core, retaining its signed-row admission and
+canonical SpeciesId reports without cloning an input map of complete materials.
+
+The original shared stream, heat, control and error types are reused. Work is
+bounded by 256 parcels and 4096 submitted species/internal-heat/external-heat
+records before allocation. Parallel streams are sorted and combined with
+compensated summation. GROSS withdrawal is admitted against each ORIGINAL
+species inventory before source joins or caloric evaluation. A receipt cannot
+fund an outflow or forward an initially absent species during this interval.
+
+Each active donor's original partial calorics is evaluated once. A receiving
+catalog joins only that node and its original incoming donors, preserving all
+NASA, transport, pack, critical and known PR pair checks. Disconnected sources
+do not impose fictitious compatibility requirements. Idle states remain exact;
+heat-only nodes retain their original material and accepted density. Exact
+zero-net-mass transport likewise preserves the retained density bits.
+
+Each final composition at final density and old node temperature owns the
+caloric anchor. Signed species amounts are grouped before multiplying formation
+references or RT; original NASA enthalpy increments and PR partial departures
+supply the relative stream terms. The original finite PR caloric solver resolves
+the resulting extensive energy once. Local/global mass, individual species and
+energy defects retain their absolute budgets, independent of arbitrary energy
+reference magnitudes. Nonzero net increments that disappear in floating-point
+inventory arithmetic refuse; exactly balanced throughflow remains admissible.
+
+Internal antisymmetric heat and uniquely identified external heat enter that
+same reconstruction, separately from transported species enthalpy. The external
+thermal owner retains opposite storage and any complete entropy audit. These
+prescribed records supply no rate law, separation work, phase flash or general
+entropy-production guarantee. Source refusal, budget exhaustion or cancellation
+returns no proposed network. Regressions cover dense branches/cycles, joint heat,
+independent absolute EOS energy, canonical parallel rows, large species reference
+shifts, balanced throughflow, node-local catalogs, original-inventory depletion,
+work bounds and late transactional failures.

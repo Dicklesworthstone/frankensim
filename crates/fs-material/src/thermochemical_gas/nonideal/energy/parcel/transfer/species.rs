@@ -5,15 +5,17 @@
 //! advanced from one snapshot. Prescribed streams supply no rate law, membrane
 //! work or entropy-production guarantee; those belong to the transport owner.
 
+/// Simultaneous selective streams and additional heat on real-gas graphs.
+pub mod network;
+
 use super::{
-    GasEnergyError, GasEnergySolve, IsochoricRealGasParcel, mixing, poll, positive, updated_point,
+    GasEnergyError, GasEnergySolve, IsochoricRealGasParcel, poll, positive, updated_point,
 };
-use crate::thermochemical_gas::energy::parcel::transfer::species::model_for_inventory;
-use crate::thermochemical_gas::energy::parcel::transfer::{inventory, mixed_model_from_portions};
-use crate::thermochemical_gas::{failure, nonideal::ThermochemicalPengRobinsonModel};
+use crate::thermochemical_gas::energy::parcel::transfer::inventory;
+use crate::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;
 use fs_qty::Temperature;
+use fs_thermochem::SpeciesId;
 use fs_thermochem::eos::peng_robinson::MAX_PENG_ROBINSON_COMPONENTS_V1;
-use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use std::collections::BTreeMap;
 
 /// The same signed species-stream controls and extensive accounts as ideal gas
@@ -170,26 +172,16 @@ fn endpoint(
 }
 
 impl IsochoricRealGasParcel {
-    /// Apply all signed species streams to the SAME pair of fixed-volume states.
-    ///
+    /// Apply signed species streams to the SAME pair of fixed-volume states.
     /// Positive mass moves left to right; negative mass moves right to left.
-    /// Counterflow with zero net mass can still exchange substantial enthalpy.
-    /// Rows are canonicalized by SpeciesId. Each nonzero stream must remain
-    /// representable and below its original donor's species withdrawal bound.
-    /// NASA/transport/pack/critical sources and every PR pair entry must agree;
-    /// a missing cross-species interaction is never inferred as zero.
+    /// Each stream carries its original upstream partial enthalpy, including
+    /// flow work once. The simultaneous network owner supplies the same source
+    /// joins, reference-safe caloric target, endpoint solves and balance audits.
     ///
-    /// A species carries its actual upstream partial h_i, with flow work once.
-    /// Each new composition at its final density and old temperature supplies a
-    /// caloric anchor. Conserved ideal species datums cancel analytically before
-    /// evaluating NASA Delta h, RT and PR departures. The original finite PR
-    /// caloric owner reconstructs both final temperatures and complete states.
-    /// Actual inventory roundoff retains its separate absolute mass budget.
-    ///
-    /// This first-order stream primitive does not select rates, add separation
-    /// work, infer phase equilibrium or assert entropy production for arbitrary
-    /// prescribed fluxes. Volumes and extra material axes remain unchanged.
-    /// Cancellation or any source/conservation refusal returns neither endpoint.
+    /// The pair interface retains unique SpeciesId rows and its strict local
+    /// increment representability checks. No accepted input is mutated. These
+    /// prescribed streams imply neither rates, separation work nor entropy
+    /// production; the physical transport owner must supply them separately.
     pub fn exchange_species_with(
         &self,
         right: &Self,
@@ -205,7 +197,7 @@ impl IsochoricRealGasParcel {
             ));
         }
         let old = [self, right];
-        let mut ordered = BTreeMap::new();
+        let mut ordered: BTreeMap<SpeciesId, f64> = BTreeMap::new();
         for row in transfers {
             poll(&mut cancelled)?;
             if !row.mass_left_to_right_kg.is_finite()
@@ -252,22 +244,22 @@ impl IsochoricRealGasParcel {
             inventory(self.model().source(), self.mass_kg())?,
             inventory(right.model().source(), right.mass_kg())?,
         ];
-        let mut target = before.clone();
         let mut mass = Sum::default();
-        for (id, &dm) in &ordered {
+        let mut rows = Vec::with_capacity(ordered.len());
+        for (species, &dm) in &ordered {
             poll(&mut cancelled)?;
             if dm == 0.0 {
                 continue;
             }
             let donor = usize::from(dm < 0.0);
-            let available = before[donor].get(id).copied().unwrap_or(0.0);
+            let available = before[donor].get(species).copied().unwrap_or(0.0);
             if !positive(available) || dm.abs() / available > controls.maximum_species_fraction {
                 return Err(invalid(
                     "real-gas selective stream exceeds original species withdrawal allowance",
                 ));
             }
             for (side, sign) in [(0, -1.0), (1, 1.0)] {
-                let previous = before[side].get(id).copied().unwrap_or(0.0);
+                let previous = before[side].get(species).copied().unwrap_or(0.0);
                 let next = previous + sign * dm;
                 if !positive(next)
                     || next == previous
@@ -277,19 +269,23 @@ impl IsochoricRealGasParcel {
                         "real-gas selective species increment vanished or exhausted its inventory",
                     ));
                 }
-                target[side].insert(id.clone(), next);
             }
             mass.add(dm)?;
+            rows.push(network::SpeciesNetworkTransfer {
+                donor: donor as u64,
+                receiver: (1 - donor) as u64,
+                species: species.clone(),
+                mass_kg: dm.abs(),
+            });
         }
-        let masses = [self.mass_kg() - mass.value, right.mass_kg() + mass.value];
         for (side, sign) in [(0, -1.0), (1, 1.0)] {
-            let density = endpoint_density(old[side], masses[side]);
-            if !positive(masses[side])
+            let next = old[side].mass_kg() + sign * mass.value;
+            let density = endpoint_density(old[side], next);
+            if !positive(next)
                 || !positive(density)
                 || (mass.value != 0.0
-                    && (masses[side] == old[side].mass_kg()
-                        || density == old[side].density_kg_m3()))
-                || ((masses[side] - old[side].mass_kg()) - sign * mass.value).abs()
+                    && (next == old[side].mass_kg() || density == old[side].density_kg_m3()))
+                || ((next - old[side].mass_kg()) - sign * mass.value).abs()
                     > controls.mass_tolerance_kg
             {
                 return Err(invalid(
@@ -297,176 +293,66 @@ impl IsochoricRealGasParcel {
                 ));
             }
         }
-        let catalog = mixed_model_from_portions(
-            &[
-                (self.model().source(), self.mass_kg()),
-                (right.model().source(), right.mass_kg()),
-            ],
-            self.mass_kg() + right.mass_kg(),
-        )?;
-        let originals = [self.model(), right.model()];
-        let models = [
-            mixing::model_for_source(&originals, model_for_inventory(&catalog, &target[0])?)?,
-            mixing::model_for_source(&originals, model_for_inventory(&catalog, &target[1])?)?,
-        ];
-        let partial = [
-            self.model()
-                .partial_calorics_at_density(self.density_kg_m3(), self.state().temperature_k())?,
-            right.model().partial_calorics_at_density(
-                right.density_kg_m3(),
-                right.state().temperature_k(),
-            )?,
-        ];
-        let mut caloric = [Sum::default(), Sum::default()];
-        let mut molar_flow = [Sum::default(), Sum::default()];
-        for (side, sign) in [(0, -1.0), (1, 1.0)] {
-            let anchor = models[side]
-                .caloric_at_density(
-                    endpoint_density(old[side], masses[side]),
-                    old[side].state().temperature_k(),
-                )?
-                .residual_energy_j_kg;
-            let departure = old[side].state().root().residual_internal_energy_j_mol()
-                / old[side].model().mechanics().molar_mass().value();
-            // Separate departure change from extensive mass change before adding
-            // streams; absolute ideal energy references never enter this sum.
-            caloric[side].add(old[side].mass_kg() * (departure - anchor))?;
-            caloric[side].add(-sign * mass.value * anchor)?;
-        }
+        let candidate = network::exchange_borrowed(
+            &BTreeMap::from([(0, self), (1, right)]),
+            &rows,
+            &[],
+            &[],
+            &BTreeMap::from([(0, controls.gas[0]), (1, controls.gas[1])]),
+            network::SpeciesNetworkSolve {
+                maximum_species_fraction: controls.maximum_species_fraction,
+                mass_tolerance_kg: controls.mass_tolerance_kg,
+                energy_tolerance_j: controls.energy_tolerance_j,
+            },
+            &mut cancelled,
+        )
+        .map_err(|error| match error {
+            network::SpeciesNetworkError::Cancelled => GasEnergyError::Cancelled,
+            network::SpeciesNetworkError::Invalid(message) => invalid(message),
+            network::SpeciesNetworkError::Parcel { error, .. } => error,
+            network::SpeciesNetworkError::Withdrawal { .. } => {
+                invalid("real-gas selective stream exceeds original species withdrawal allowance")
+            }
+        })?;
+        let (mut parcels, step) = candidate.into_parts();
+        let mut species: Vec<_> = step
+            .fluxes
+            .iter()
+            .map(|flux| {
+                let sign = if flux.transfer.donor == 0 { 1.0 } else { -1.0 };
+                SpeciesEnergyTransfer {
+                    transfer: SpeciesMassTransfer {
+                        species: flux.transfer.species.clone(),
+                        mass_left_to_right_kg: sign * flux.transfer.mass_kg,
+                    },
+                    source_enthalpy_j_kg: flux.source_enthalpy_j_kg,
+                    enthalpy_left_to_right_j: sign * flux.carried_enthalpy_j,
+                }
+            })
+            .collect();
+        // Preserve the pair's original SpeciesId order, regardless of direction.
+        species.sort_by(|a, b| a.transfer.species.cmp(&b.transfer.species));
         let mut carried = Sum::default();
-        let mut species = Vec::with_capacity(ordered.len());
-        for (id, &dm) in &ordered {
-            poll(&mut cancelled)?;
-            if dm == 0.0 {
-                continue;
-            }
-            let donor = usize::from(dm < 0.0);
-            let (index, source) = old[donor]
-                .model()
-                .source()
-                .thermodynamics()
-                .components()
-                .iter()
-                .enumerate()
-                .find(|(_, species)| species.species() == id)
-                .ok_or(invalid(
-                    "real-gas selective species absent from its upstream owner",
-                ))?;
-            let molar_mass = source.molar_mass().value();
-            let residual_h =
-                partial[donor].departure().components()[index].residual_enthalpy_j_mol();
-            let h = partial[donor].partial_specific_enthalpies_j_kg()[index];
-            let stream_h = dm * h;
-            carried.add(stream_h)?;
-            for (side, sign) in [(0, -1.0), (1, 1.0)] {
-                let sensible_h = source
-                    .molar_enthalpy_change(
-                        Temperature::new(old[side].state().temperature_k()),
-                        Temperature::new(old[donor].state().temperature_k()),
-                    )
-                    .map_err(|error| failure("real-gas selective caloric increment", error))?
-                    .value();
-                let amount = sign * dm / molar_mass;
-                if amount == 0.0 {
-                    return Err(invalid(
-                        "real-gas selective molar stream is unrepresentable",
-                    ));
-                }
-                molar_flow[side].add(amount)?;
-                caloric[side].add(amount * sensible_h)?;
-                caloric[side].add(amount * residual_h)?;
-            }
-            species.push(SpeciesEnergyTransfer {
-                transfer: SpeciesMassTransfer {
-                    species: id.clone(),
-                    mass_left_to_right_kg: dm,
-                },
-                source_enthalpy_j_kg: h,
-                enthalpy_left_to_right_j: stream_h,
-            });
+        for row in &species {
+            carried.add(row.enthalpy_left_to_right_j)?;
         }
-        for side in 0..2 {
-            // h_i(Tup)-u_i(T0) = Delta h_i(T0,Tup)+R*T0. Summing molar
-            // counterflow before multiplying RT retains balanced-stream heat.
-            caloric[side].add(R * old[side].state().temperature_k() * molar_flow[side].value)?;
-        }
-        let [left_model, right_model] = models;
-        let (left, left_residual, left_iterations) = endpoint(
-            self,
-            left_model,
-            masses[0],
-            caloric[0].value,
-            controls.gas[0],
-            &mut cancelled,
-        )?;
-        let (right_next, right_residual, right_iterations) = endpoint(
-            right,
-            right_model,
-            masses[1],
-            caloric[1].value,
-            controls.gas[1],
-            &mut cancelled,
-        )?;
-        let after = [
-            inventory(left.model().source(), left.mass_kg())?,
-            inventory(right_next.model().source(), right_next.mass_kg())?,
+        let residual = [
+            step.parcels[0].energy_residual_j,
+            step.parcels[1].energy_residual_j,
         ];
-        let mut maximum_species_mass_residual_kg = 0.0_f64;
-        for source in catalog.thermodynamics().components() {
-            let id: &SpeciesId = source.species();
-            let dm = ordered.get(id).copied().unwrap_or(0.0);
-            let changes = core::array::from_fn::<_, 2, _>(|side| {
-                after[side].get(id).copied().unwrap_or(0.0)
-                    - before[side].get(id).copied().unwrap_or(0.0)
-            });
-            for defect in [changes[0] + dm, changes[1] - dm, changes[0] + changes[1]] {
-                if !defect.is_finite() {
-                    return Err(invalid(
-                        "real-gas selective species balance is unrepresentable",
-                    ));
-                }
-                maximum_species_mass_residual_kg =
-                    maximum_species_mass_residual_kg.max(defect.abs());
-            }
-        }
-        let energy_residual_j = left_residual + right_residual;
-        let mass_residual_kg =
-            (left.mass_kg() - self.mass_kg()) + (right_next.mass_kg() - right.mass_kg());
-        let energy_change_j = [
-            -carried.value + left_residual,
-            carried.value + right_residual,
-        ];
-        if ![
-            energy_residual_j,
-            mass_residual_kg,
-            energy_change_j[0],
-            energy_change_j[1],
-        ]
-        .into_iter()
-        .all(f64::is_finite)
-            || [left_residual, right_residual, energy_residual_j]
-                .into_iter()
-                .any(|error| error.abs() > controls.energy_tolerance_j)
-            || mass_residual_kg.abs() > controls.mass_tolerance_kg
-            || maximum_species_mass_residual_kg > controls.mass_tolerance_kg
-        {
-            return Err(invalid(
-                "real-gas selective exchange did not close local and paired mass/energy",
-            ));
-        }
         poll(&mut cancelled)?;
         Ok(RealGasSpeciesExchangeCandidate {
-            left,
-            right: right_next,
+            left: parcels.remove(&0).expect("admitted pair endpoint"),
+            right: parcels.remove(&1).expect("admitted pair endpoint"),
             step: GasSpeciesExchangeStep {
                 species,
                 net_mass_left_to_right_kg: mass.value,
                 enthalpy_left_to_right_j: carried.value,
-                energy_change_j,
-                mass_residual_kg,
-                maximum_species_mass_residual_kg,
-                energy_residual_j,
-                iterations: left_iterations + right_iterations,
+                energy_change_j: [-carried.value + residual[0], carried.value + residual[1]],
+                mass_residual_kg: step.total_mass_residual_kg,
+                maximum_species_mass_residual_kg: step.maximum_species_mass_residual_kg,
+                energy_residual_j: step.total_energy_residual_j,
+                iterations: step.parcels.iter().map(|p| p.iterations).sum(),
             },
         })
     }
