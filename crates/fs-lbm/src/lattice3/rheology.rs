@@ -102,7 +102,11 @@ impl<C, F> RheologyWorkspace3<C, F> {
         self.has_report.then_some(&self.accepted)
     }
 
-    fn publish(&mut self) -> &RheologyStep3<C, F> {
+    pub(super) fn pending_collisions(&self) -> &[C] {
+        &self.trial.collisions
+    }
+
+    pub(super) fn publish(&mut self) -> &RheologyStep3<C, F> {
         core::mem::swap(&mut self.accepted, &mut self.trial);
         self.has_report = true;
         &self.accepted
@@ -177,7 +181,7 @@ fn prepare<L: ViscousLattice3<Q>, const Q: usize, R: FluidTransport + ?Sized, F:
         grid,
         reference,
         forces,
-        None,
+        |cell, velocity| grid.velocity_gradient(cell, velocity),
         &mut velocity,
         &mut report,
         resolve,
@@ -196,7 +200,7 @@ fn prepare_into<
     grid: &Grid3<L, Q>,
     reference: &MaterialScaling<'_, R>,
     forces: Option<&[[f64; 3]]>,
-    channel_walls: Option<(usize, [[f64; 3]; 2])>,
+    mut gradient: impl FnMut(usize, &[[f64; 3]]) -> [[f64; 3]; 3],
     velocity: &mut Vec<[f64; 3]>,
     report: &mut RheologyStep3<L::Collision, F>,
     mut resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
@@ -253,16 +257,7 @@ fn prepare_into<
             collisions.push(grid.collision);
             continue;
         }
-        let gradient = match channel_walls {
-            Some((normal, walls)) => {
-                grid.velocity_gradient_with_walls(cell, velocity, |_, axis, upper| {
-                    debug_assert_eq!(axis, normal);
-                    walls[usize::from(upper)]
-                })
-            }
-            None => grid.velocity_gradient(cell, velocity),
-        };
-        let lattice_rate = strain_rate(gradient);
+        let lattice_rate = strain_rate(gradient(cell, velocity));
         let rate = lattice_rate / dt;
         if !rate.is_finite() || (lattice_rate != 0.0 && rate == 0.0) {
             return Err(GridError3::MaterialField {
@@ -341,6 +336,42 @@ fn prepare_workspace_with_walls<
     resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
     poll: impl FnMut() -> Result<(), GridError3<L::Error>>,
 ) -> Result<(), RheologyError3<L::Error>> {
+    prepare_workspace_with_gradient(
+        grid,
+        reference,
+        forces,
+        workspace,
+        |cell, velocity| match channel_walls {
+            Some((normal, walls)) => {
+                grid.velocity_gradient_with_walls(cell, velocity, |_, axis, upper| {
+                    debug_assert_eq!(axis, normal);
+                    walls[usize::from(upper)]
+                })
+            }
+            None => grid.velocity_gradient(cell, velocity),
+        },
+        resolve,
+        poll,
+    )
+}
+
+// Geometry owners provide their original boundary-aware gradient. Sampling,
+// source retention, physical scaling and report publication remain shared.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn prepare_workspace_with_gradient<
+    L: ViscousLattice3<Q>,
+    const Q: usize,
+    R: FluidTransport + ?Sized,
+    F: FluidTransport,
+>(
+    grid: &Grid3<L, Q>,
+    reference: &MaterialScaling<'_, R>,
+    forces: Option<&[[f64; 3]]>,
+    workspace: &mut RheologyWorkspace3<L::Collision, F>,
+    gradient: impl FnMut(usize, &[[f64; 3]]) -> [[f64; 3]; 3],
+    resolve: impl FnMut(RheologyPoint3, &FluidTransportState) -> Result<F, MaterialError>,
+    poll: impl FnMut() -> Result<(), GridError3<L::Error>>,
+) -> Result<(), RheologyError3<L::Error>> {
     if workspace.dimensions != grid.dims {
         return Err(GridError3::Input("rheology workspace dimensions differ").into());
     }
@@ -348,7 +379,7 @@ fn prepare_workspace_with_walls<
         grid,
         reference,
         forces,
-        channel_walls,
+        gradient,
         &mut workspace.velocity,
         &mut workspace.trial,
         resolve,

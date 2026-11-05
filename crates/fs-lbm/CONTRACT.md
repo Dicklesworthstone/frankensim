@@ -31,6 +31,28 @@ late cancellation/admission rollback. This owner currently retains uniform
 body forces and fixed geometry; spatial/endpoint force fields, moving walls,
 spatial inlet profiles and nonreflecting characteristics remain separate.
 
+`OpenBoundaryGrid3::{step_serial_with_material_rheology_workspace,
+step_pooled_with_material_rheology_workspace}` resolves each original material
+at the incoming physical strain rate and applies its molecular `mu/rho0` to
+the actual native shear relaxation. Velocity reservoirs use quadratic on-site
+one-sided derivatives, with a linear fallback if the second interior donor is
+solid. Pressure reservoirs retain their zero-normal-velocity-gradient donor
+condition. Interior/periodic and tangential halfway-wall derivatives preserve
+the shared grid's stencil, including open/wall seams. Uniform forced plug flow
+therefore does not acquire false wall shear at a reservoir. Bulk and higher
+rates, TRT magic and the equilibrium choice remain explicit native settings.
+
+The reusable `RheologyWorkspace3` reserves velocity scratch and two original
+source epochs; successful fluid/reservoir publication swaps the accepted epoch
+without adapter-owned step allocations. Source, scaling, native admission or
+cancellation failure preserves accepted populations and the prior report.
+Sources own temperature, composition, history and any external side effects.
+The adapter is an explicit generalized-Newtonian update; it does not add
+implicit stress iteration, SGS viscosity or thermal evolution. Focused module
+regressions cover physical plug and quadratic shear in every reservoir axis,
+wall seams, solid-donor fallback, actual collision coefficients, pooled parity,
+buffer reuse and failed-trial retention.
+
 ## Physical velocity initialization on shared D3Q19/D3Q27 grids
 
 `Grid3::try_new_equilibrium` accepts physical lattice density and velocity.

@@ -25,6 +25,8 @@ use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, TileKernel, TilePlan};
 use fs_math::dd::Dd;
 use std::sync::Mutex;
 
+mod rheology;
+
 /// Original native grid with fixed-topology velocity/pressure face ownership.
 /// Populations, physical time and measured reservoir exchange publish together.
 pub struct OpenBoundaryGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
