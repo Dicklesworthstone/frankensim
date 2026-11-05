@@ -451,9 +451,9 @@ through staging rollback in both public predicate-driven entry points.
 
 `orthant::active_set::solve_spd_orthant` minimizes a supplied dense quadratic
 over nonnegative coordinates with a deterministic primal active-set method.
-It reuses `fs-la::factor::cholesky`, equilibrates by the positive diagonal,
-and bounds the event to at most 64 variables and 4096 principal subproblem
-solves. The most negative scaled inactive gradient enters, with input-index
+It reuses `fs-la::factor::cholesky_cancellable` and equilibrates by the positive
+diagonal. The default dimension cap remains 64; explicit budgets may admit
+up to `MAX_SPD_VARIABLES = 768` variables and 4096 principal subproblem solves. The most negative scaled inactive gradient enters, with input-index
 ties; a bound-crossing principal solution takes a feasible step and releases
 its blocking coordinate. It does not silently clip an unconstrained answer
 into a purported constrained solution.
@@ -466,10 +466,19 @@ Small admitted asymmetry is averaged for factorization; acceptance still uses
 a freshly reconstructed gradient and KKT residual from the original matrix.
 The result reports primal, dual, complementarity and stationarity residuals,
 objective, principal-solve count and minimum normalized pivot. Diagonal scaling
-changes variables without regularizing the supplied objective.
+changes variables without regularizing the supplied objective. The effective
+normalized pivot floor is the larger of the declared threshold and n*EPSILON.
 
-Cancellation polls bracket each bounded factorization/solve and row operation,
-including final publication; failure returns no accepted partial solution.
+`admit_spd_matrix` exposes the same bounded normalized matrix admission to
+nonlinear owners without performing orthant iterations or inventing an
+optimization result. Its receipt contains the dimension and minimum squared
+normalized pivot. It does not certify a contact law or its determinacy: those
+remain separate obligations of the consuming nonlinear/physical owner.
+
+Cancellation polls inside factorization panels and trailing-update row tiles,
+at triangular solve rows, at original-system row operations, and before final
+publication. Private triangular-solve scratch and candidate states ensure
+failure returns no accepted partial solution.
 The candidate provides no adjoint, interval enclosure, general cone solve, or
 PSD nonuniqueness classification. Its principal consumer here is the active
 normal-contact Delassus problem, while contact geometry, restitution and global

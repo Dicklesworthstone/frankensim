@@ -78,6 +78,32 @@ impl core::fmt::Display for FactorError {
     }
 }
 
+/// A controlled factor operation either completes or reports cancellation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FactorRunError {
+    /// The original numerical factorization refused its input.
+    Factor(FactorError),
+    /// The caller requested cancellation before publication.
+    Cancelled,
+}
+
+impl From<FactorError> for FactorRunError {
+    fn from(error: FactorError) -> Self {
+        Self::Factor(error)
+    }
+}
+
+impl core::fmt::Display for FactorRunError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Factor(error) => write!(f, "{error}"),
+            Self::Cancelled => f.write_str("factor operation cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for FactorRunError {}
+
 // ---------------------------------------------------------------------------
 // Cholesky
 // ---------------------------------------------------------------------------
@@ -95,13 +121,46 @@ pub struct Cholesky {
 /// # Errors
 /// [`FactorError::NotSpd`] with the failing diagonal index.
 pub fn cholesky(a: &[f64], n: usize) -> Result<Cholesky, FactorError> {
+    match cholesky_impl::<false>(a, n, &mut || false) {
+        Ok(factor) => Ok(factor),
+        Err(FactorRunError::Factor(error)) => Err(error),
+        Err(FactorRunError::Cancelled) => unreachable!("uncontrolled factor cannot cancel"),
+    }
+}
+
+/// The original blocked Cholesky with cancellation inside numerical work.
+///
+/// Panel columns and row tiles, packed trailing-update row tiles, and final
+/// publication poll the caller. Each trailing GEMM tile keeps the original
+/// complete reduction dimension and KC order, so completed factors have the
+/// same bits as [`cholesky`]. The caller still owns the dimension/storage
+/// budget. No partial factor or modification of `a` is published on refusal.
+pub fn cholesky_cancellable(
+    a: &[f64],
+    n: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Cholesky, FactorRunError> {
+    cholesky_impl::<true>(a, n, &mut cancelled)
+}
+
+fn cholesky_impl<const CONTROLLED: bool>(
+    a: &[f64],
+    n: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Cholesky, FactorRunError> {
     admit_matrix_storage(a, n, n, "cholesky");
+    if CONTROLLED && cancelled() {
+        return Err(FactorRunError::Cancelled);
+    }
     let mut l = a.to_vec();
     let mut j = 0;
     while j < n {
         let nb = NB.min(n - j);
         // Unblocked panel factor on the diagonal block + rows below.
         for jj in j..j + nb {
+            if CONTROLLED && cancelled() {
+                return Err(FactorRunError::Cancelled);
+            }
             // d = a_jj − Σ_{k<jj, k≥j} l_jk² (columns < j already folded in
             // by earlier trailing updates).
             let mut d = l[jj * n + jj];
@@ -109,11 +168,14 @@ pub fn cholesky(a: &[f64], n: usize) -> Result<Cholesky, FactorError> {
                 d = (-l[jj * n + k]).mul_add(l[jj * n + k], d);
             }
             if d <= 0.0 || !d.is_finite() {
-                return Err(FactorError::NotSpd { index: jj });
+                return Err(FactorError::NotSpd { index: jj }.into());
             }
             let piv = d.sqrt();
             l[jj * n + jj] = piv;
             for i in jj + 1..n {
+                if CONTROLLED && (i - jj - 1) % NB == 0 && cancelled() {
+                    return Err(FactorRunError::Cancelled);
+                }
                 let mut v = l[i * n + jj];
                 for k in j..jj {
                     v = (-l[i * n + k]).mul_add(l[jj * n + k], v);
@@ -131,25 +193,57 @@ pub fn cholesky(a: &[f64], n: usize) -> Result<Cholesky, FactorError> {
             // L21 is rest×nb at rows j+nb.., cols j..j+nb — extract packed.
             let mut l21 = vec![0.0f64; rest * nb];
             for r in 0..rest {
+                if CONTROLLED && r % NB == 0 && cancelled() {
+                    return Err(FactorRunError::Cancelled);
+                }
                 for cc in 0..nb {
                     l21[r * nb + cc] = l[(j + nb + r) * n + j + cc];
                 }
             }
             let mut l21t = vec![0.0f64; nb * rest];
             for r in 0..rest {
+                if CONTROLLED && r % NB == 0 && cancelled() {
+                    return Err(FactorRunError::Cancelled);
+                }
                 for cc in 0..nb {
                     l21t[cc * rest + r] = l21[r * nb + cc];
                 }
             }
             let mut upd = vec![0.0f64; rest * rest];
-            gemm_f64(rest, rest, nb, 1.0, &l21, &l21t, 0.0, &mut upd);
+            if CONTROLLED {
+                for first in (0..rest).step_by(NB) {
+                    if cancelled() {
+                        return Err(FactorRunError::Cancelled);
+                    }
+                    let last = (first + NB).min(rest);
+                    gemm_f64(
+                        last - first,
+                        rest,
+                        nb,
+                        1.0,
+                        &l21[first * nb..last * nb],
+                        &l21t,
+                        0.0,
+                        &mut upd[first * rest..last * rest],
+                    );
+                }
+            } else {
+                // Preserve the original unrestricted packing/performance path.
+                gemm_f64(rest, rest, nb, 1.0, &l21, &l21t, 0.0, &mut upd);
+            }
             for r in 0..rest {
+                if CONTROLLED && r % NB == 0 && cancelled() {
+                    return Err(FactorRunError::Cancelled);
+                }
                 for cc in 0..=r {
                     l[(j + nb + r) * n + j + nb + cc] -= upd[r * rest + cc];
                 }
             }
         }
         j += nb;
+    }
+    if CONTROLLED && cancelled() {
+        return Err(FactorRunError::Cancelled);
     }
     Ok(Cholesky { n, l })
 }
@@ -164,9 +258,43 @@ impl Cholesky {
     /// Solve A·x = b in place (forward + back substitution) — the
     /// refinement hook fs-la-mixed-precision consumes.
     pub fn solve(&self, b: &mut [f64]) {
+        self.solve_impl::<false>(b, &mut || false)
+            .expect("uncontrolled triangular solve cannot cancel");
+    }
+
+    /// Solve with row-boundary cancellation and atomic output publication.
+    ///
+    /// The same forward/back substitution runs on private O(n) scratch. On
+    /// cancellation the caller's right-hand side remains byte-for-byte intact.
+    pub fn solve_cancellable(
+        &self,
+        b: &mut [f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), FactorRunError> {
+        assert_eq!(b.len(), self.n, "b must have length n");
+        if cancelled() {
+            return Err(FactorRunError::Cancelled);
+        }
+        let mut candidate = b.to_vec();
+        self.solve_impl::<true>(&mut candidate, &mut cancelled)?;
+        if cancelled() {
+            return Err(FactorRunError::Cancelled);
+        }
+        b.copy_from_slice(&candidate);
+        Ok(())
+    }
+
+    fn solve_impl<const CONTROLLED: bool>(
+        &self,
+        b: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FactorRunError> {
         let n = self.n;
         assert_eq!(b.len(), n, "b must have length {n}");
         for i in 0..n {
+            if CONTROLLED && cancelled() {
+                return Err(FactorRunError::Cancelled);
+            }
             let mut v = b[i];
             for (k, &bk) in b.iter().enumerate().take(i) {
                 v = (-self.l[i * n + k]).mul_add(bk, v);
@@ -174,12 +302,16 @@ impl Cholesky {
             b[i] = v / self.l[i * n + i];
         }
         for i in (0..n).rev() {
+            if CONTROLLED && cancelled() {
+                return Err(FactorRunError::Cancelled);
+            }
             let mut v = b[i];
             for (k, &bk) in b.iter().enumerate().take(n).skip(i + 1) {
                 v = (-self.l[k * n + i]).mul_add(bk, v);
             }
             b[i] = v / self.l[i * n + i];
         }
+        Ok(())
     }
 }
 

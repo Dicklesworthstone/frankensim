@@ -136,6 +136,14 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
   `row_block = 0` exactly when `n = 0`, because that path schedules no leaves.
   Nonempty storage for any zero-entry shape is a programmer error and is
   refused rather than ignored.
+  `factor::cholesky_cancellable` polls inside panel work and trailing-update
+  row tiles. Complete dot-product reduction dimensions and KC order are
+  retained, so completed factors agree bitwise with the original owner.
+  `Cholesky::solve_cancellable` polls each triangular row and stages its
+  O(n) right-hand side privately; cancellation leaves the caller's buffer
+  unchanged. `FactorRunError` distinguishes cancellation from the original
+  numerical factor refusal. Uncontrolled entry points keep their original
+  packing and arithmetic paths; callers own dimension/storage budgets.
   `Cholesky::solve`, `Lu::{solve, solve_transpose, condition_1}` (Hager
   1-norm estimate), `Qr::{apply_q, apply_qt, solve_ls}` are the
   refinement/consumer hooks. LU pivot tie-break: LOWEST index under equal

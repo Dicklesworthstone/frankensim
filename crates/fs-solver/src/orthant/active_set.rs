@@ -6,12 +6,17 @@
 //! converts them into a uniqueness claim. The separate Gram-coordinate solver
 //! remains the PSD baseline. This numerical owner knows nothing about contact.
 
-use fs_la::factor::{FactorError, cholesky};
+use fs_la::factor::{FactorError, FactorRunError, cholesky_cancellable};
+
+/// Hard dimension ceiling for bounded dense SPD admission and active sets.
+/// Larger operators require a separately budgeted sparse or matrix-free owner.
+pub const MAX_SPD_VARIABLES: usize = 768;
 
 /// Bounded dense-solve work and acceptance tolerances.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpdOrthantConfig {
-    /// Maximum dimension, in `1..=64`; empty problems are also admitted.
+    /// Maximum dimension, in `1..=MAX_SPD_VARIABLES`; defaults to 64.
+    /// Empty problems are also admitted. Dense storage is quadratic in this cap.
     pub max_variables: usize,
     /// Maximum principal-subproblem solves, in `1..=4096`.
     pub max_iterations: usize,
@@ -20,6 +25,7 @@ pub struct SpdOrthantConfig {
     /// Positive symmetry tolerance after diagonal normalization, at most `1e-6`.
     pub symmetry_tolerance: f64,
     /// Minimum normalized squared Cholesky pivot, in `[64*EPSILON, 1e-4]`.
+    /// Admission also retains a dimension-scaled floor of `n*EPSILON`.
     pub relative_pivot_tolerance: f64,
 }
 
@@ -33,6 +39,42 @@ impl Default for SpdOrthantConfig {
             relative_pivot_tolerance: 1e-12,
         }
     }
+}
+
+/// Read-only numerical admission of a diagonally normalized SPD matrix.
+/// This does not solve an orthant problem or make an interval positivity claim.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpdMatrixAdmission {
+    /// Number of admitted scalar rows, including zero for an empty matrix.
+    pub dimension: usize,
+    /// Minimum normalized squared Cholesky pivot; one for an empty matrix.
+    pub min_normalized_pivot: f64,
+}
+
+/// Admit SPD mobility without constructing an artificial optimization result.
+///
+/// This shares the original diagonal normalization, symmetry and positive-pivot
+/// gates with [`solve_spd_orthant`], but performs no active-set iterations. It
+/// is useful for nonlinear owners whose own residual and uniqueness gates
+/// consume the admitted matrix. Numerical factorization polls cancellation
+/// inside panels and trailing updates; no partial admission is returned.
+pub fn admit_spd_matrix(
+    hessian: &[f64],
+    dimension: usize,
+    config: SpdOrthantConfig,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SpdMatrixAdmission, SpdOrthantError> {
+    poll(&mut cancelled)?;
+    if dimension > config.max_variables || dimension > MAX_SPD_VARIABLES {
+        return Err(SpdOrthantError::Invalid("matrix admission dimension"));
+    }
+    let zero = vec![0.0; dimension];
+    let problem = Problem::new(hessian, &zero, config, &mut cancelled)?;
+    poll(&mut cancelled)?;
+    Ok(SpdMatrixAdmission {
+        dimension,
+        min_normalized_pivot: problem.min_pivot,
+    })
 }
 
 /// A nonnegative point with independently reconstructed original-system KKT
@@ -112,9 +154,11 @@ impl std::error::Error for SpdOrthantError {}
 /// Admitted small asymmetry is averaged for factorization; publication still
 /// requires the KKT residual of the original supplied matrix. No diagonal
 /// shift or truncation of negative multipliers hides a failed solve.
-/// Cancellation is checked at rows, before/after each at-most-64-dimensional
-/// factorization and solve, and immediately before publication. All state is
-/// private scratch. This bounded candidate does not provide an adjoint.
+/// Cancellation is checked at rows, inside factorization panels and trailing
+/// update tiles, during triangular solves, and immediately before publication.
+/// All state is private scratch. This bounded candidate does not provide an
+/// adjoint. Large nonlinear consumers can use [`admit_spd_matrix`] directly
+/// instead of paying for an unnecessary orthant solve.
 pub fn solve_spd_orthant(
     hessian: &[f64],
     linear: &[f64],
@@ -212,7 +256,7 @@ impl<'a> Problem<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, SpdOrthantError> {
         poll(cancelled)?;
-        if !(1..=64).contains(&config.max_variables)
+        if !(1..=MAX_SPD_VARIABLES).contains(&config.max_variables)
             || !(1..=4096).contains(&config.max_iterations)
             || !config.gradient_tolerance.is_finite()
             || config.gradient_tolerance <= 0.0
@@ -256,12 +300,13 @@ impl<'a> Problem<'a> {
             }
         }
         poll(cancelled)?;
-        let factor = cholesky(&matrix, n).map_err(factor_error)?;
+        let factor = cholesky_cancellable(&matrix, n, &mut *cancelled).map_err(run_error)?;
         poll(cancelled)?;
         let mut min_pivot = if n == 0 { 1.0 } else { f64::MAX };
         for i in 0..n {
             let pivot = finite(factor.l(i, i) * factor.l(i, i))?;
-            if pivot < config.relative_pivot_tolerance {
+            let minimum = config.relative_pivot_tolerance.max(n as f64 * f64::EPSILON);
+            if pivot < minimum {
                 return Err(SpdOrthantError::Degenerate { index: i, pivot });
             }
             min_pivot = min_pivot.min(pivot);
@@ -294,9 +339,11 @@ impl<'a> Problem<'a> {
             }
             rhs.push(-self.scaled_linear[i]);
         }
-        let factor = cholesky(&matrix, m).map_err(factor_error)?;
+        let factor = cholesky_cancellable(&matrix, m, &mut *cancelled).map_err(run_error)?;
         poll(cancelled)?;
-        factor.solve(&mut rhs);
+        factor
+            .solve_cancellable(&mut rhs, &mut *cancelled)
+            .map_err(run_error)?;
         poll(cancelled)?;
         let mut candidate = vec![0.0; n];
         for (&i, value) in indices.iter().zip(rhs) {
@@ -362,6 +409,13 @@ impl<'a> Problem<'a> {
             iterations,
             min_normalized_pivot: self.min_pivot,
         })
+    }
+}
+
+fn run_error(error: FactorRunError) -> SpdOrthantError {
+    match error {
+        FactorRunError::Factor(error) => factor_error(error),
+        FactorRunError::Cancelled => SpdOrthantError::Cancelled,
     }
 }
 
