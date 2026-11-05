@@ -22,6 +22,9 @@ pub mod harmonic;
 /// Retarded moving compact sources sampled from accepted physical histories.
 pub mod moving;
 
+/// Causal volume-stress fields, ideal reflected paths and directional PCM.
+pub mod quadrupole;
+
 mod policy;
 pub use policy::{ObservationError, ObservationPolicy, validate_reaction_medium};
 

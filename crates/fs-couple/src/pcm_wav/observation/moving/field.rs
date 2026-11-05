@@ -29,9 +29,9 @@ pub struct CompactFieldSample {
 }
 
 impl CompactFieldSample {
-    // Stationary force/volume and moving volume observations use the same
+    // Stationary force/volume/stress and moving volume observations use the same
     // physical reduction. Preserve the stationary owner's rounding order.
-    pub(super) fn observe(
+    pub(in crate::pcm_wav::observation) fn observe(
         time: f64,
         pressure: Dd,
         velocity: [Dd; 3],

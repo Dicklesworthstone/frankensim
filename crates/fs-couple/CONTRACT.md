@@ -33645,3 +33645,45 @@ whole-system energy; latent-enthalpy midpoints; exact insulation reduction;
 late source/domain/clock/budget refusal with deterministic retry; and
 cancellation after actual interface evaluation. Focused native command:
 `cargo test -p fs-couple --test solid_enthalpy valve::gas_motion::nonideal::thermal`.
+
+## Causal reflected volume stresses on the native microphone/PCM path
+
+`pcm_wav::observation::quadrupole::TransientQuadrupoleRenderer` borrows an
+original `PreparedTransientQuadrupoleObserver` and read-only physical source
+histories. The observer retains each direct/image path's actual retarded time,
+full tensor transformation and coherent pressure/particle-velocity sum. The
+existing ideal `FirstOrder` microphone reduces that physical field, and the
+existing `PressureRenderer`, decimator and WAV stream retain their own clocks,
+filter delay and explicit Pa-to-PCM scaling. No second propagation, interpolation,
+source evolution, gain normalization or audio encoder is introduced.
+
+`QuadrupoleSourceWindow` declares each original history's closed DD-clock
+support and bandwidth. The history reader supplies consistent stress moment,
+rate, acceleration and integral, including its original integration constant;
+the same source can be read at different times for its images. Preparation
+checks the complete receiver window against every source's shortest/longest
+propagation delay, source and receiver bandwidths against strict Nyquist, and
+physical-source, all-image work and scratch-storage budgets before reading any
+history. A bandwidth declaration is not an interpolation-convergence or source
+compactness certificate. Missing reflected prehistory/tails and unresolved
+timestamps refuse; no zero history or artificial tail is synthesized.
+
+One bounded field buffer serves all callbacks. Integer-index timestamps use
+the native `HarmonicSampleClock` without imposing a harmonic source assumption,
+and emission times retain DD precision through the original transient observer.
+`receiver_time_at` exposes that full clock; the field sample's f64 time is an
+inspection value. Field and microphone callbacks share one accepted cursor and
+are partition invariant. History refusal or cancellation leaves both caller
+output and accepted sample count unchanged. Readers must be read-only: hidden
+history mutation is outside this adapter's atomicity contract. Runtime observation
+adds no allocation; borrowed history-query costs remain with their original owner.
+
+Five focused regression groups cover original harmonic full-tensor and vector
+field parity, ideal-microphone directionality and instantaneous `p*u`, split
+field/pressure callbacks, existing PCM streaming and causal decimation, large
+epoch translation, callback rollback and complete reflected-history admission.
+These controls are authored; a complete native dependency build has not been
+executed in the current constrained environment. The original stationary ideal
+rigid/release boundary and homogeneous lossless propagation scope is retained;
+this observer does not add radiation feedback, moving geometry or finite wall
+impedance.
