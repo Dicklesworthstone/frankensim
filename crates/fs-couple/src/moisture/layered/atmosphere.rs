@@ -1,8 +1,9 @@
 //! Layered transport against the original finite, source-qualified gas owner.
 //!
-//! All exposed exterior ends use one candidate endpoint RH. Each trial starts
-//! from the accepted layered fields; internal material interfaces retain their
-//! own source partition. The original atmosphere owner alone reconstructs gas
+//! Single-atmosphere entry points use one candidate endpoint RH; paired
+//! chambers retain separate RH values at their assigned exterior ends. Each
+//! trial starts from the accepted layered fields; internal material interfaces
+//! retain their own source partition. The original atmosphere owner reconstructs gas
 //! composition/pressure and accepts vapor, carrier and total mass conservation.
 //! This is isothermal, fixed-volume transport, without sorption heat or
 //! condensation. Source dependence on changing gas pressure/composition refuses.
@@ -13,6 +14,10 @@ use crate::moisture::atmosphere::{
     AtmosphereMoistureCandidate, AtmosphereMoistureError, AtmosphereMoistureSolve,
     AtmosphereMoistureStep, FiniteMoistureAtmosphere, SharedAtmosphereMoistureCandidate,
     SharedMoistureSolid, admit_participants,
+};
+use crate::moisture::atmosphere::pair::{
+    MoistureAtmospherePort, PairedAtmosphereMoistureCandidate,
+    PairedAtmosphereMoistureSolve, advance_pair_with,
 };
 use crate::moisture::reservoir::water_sum;
 use crate::moisture::surface::admit_environment;
@@ -31,6 +36,9 @@ pub type LayeredAtmosphereMoistureCandidate =
     AtmosphereMoistureCandidate<MoistureLayeredSlab, MoistureLayeredReport>;
 pub type SharedLayeredAtmosphereMoistureCandidate =
     SharedAtmosphereMoistureCandidate<MoistureLayeredSlab, MoistureLayeredReport>;
+/// Two independently evolving chambers and the original heterogeneous stack.
+pub type PairedLayeredAtmosphereMoistureCandidate =
+    PairedAtmosphereMoistureCandidate<MoistureLayeredSlab, MoistureLayeredReport>;
 
 pub(in crate::moisture) fn water_change(
     old: &MoistureLayeredSlab,
@@ -86,6 +94,71 @@ fn endpoint_sorption(
 }
 
 impl FiniteMoistureAtmosphere {
+    /// Diffuse through a heterogeneous stack between two finite vapor chambers.
+    /// The receiver is First and second is Second; each exterior end names its
+    /// one physical inventory, or None seals it. Each original layer retains its
+    /// dry capacity, nonlinear sorption partition, diffusivity and interface law.
+    /// No additional exterior isotherm may replace the prepared material source.
+    ///
+    /// Both finite RH balances share the existing nested solver and cumulative
+    /// field-evaluation budget. Every trial restarts this accepted stack, with
+    /// the actual per-port endpoint RH. Authored sealed exterior transfers stay
+    /// sealed and do not impose a transport-source RH bracket on that chamber.
+    /// Signed per-face accounts preserve chamber-to-chamber through-flow even
+    /// when the stack gains no net water. Original gas and field owners publish
+    /// together only after their individual and whole-system water/mass gates.
+    ///
+    /// Temperature, gas free volumes and solid reference geometry remain fixed.
+    /// This does not infer carrier permeation, sorption heat, condensation or
+    /// swelling-displacement work. The existing bounded nested root may refuse
+    /// unsupported probe paths rather than extend a source domain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_paired_layered(
+        &self,
+        second: &Self,
+        moisture: &MoistureLayeredSlab,
+        dt_s: f64,
+        faces: &[Option<MoistureAtmospherePort>; 2],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        controls: PairedAtmosphereMoistureSolve,
+        cx: &Cx<'_>,
+    ) -> Result<PairedLayeredAtmosphereMoistureCandidate, AtmosphereMoistureError> {
+        poll(cx)?;
+        let mut face_atmospheres = *faces;
+        for (port, atmosphere, solve) in [
+            (MoistureAtmospherePort::First, self, controls.atmospheres[0]),
+            (MoistureAtmospherePort::Second, second, controls.atmospheres[1]),
+        ] {
+            let exposed = std::array::from_fn(|side| face_atmospheres[side] == Some(port));
+            let admitted = admit_exchange(
+                moisture, atmosphere.gas().state().state().temperature, exposed, solve, cx,
+            )?;
+            for side in 0..2 {
+                if exposed[side] && !admitted[side] {
+                    face_atmospheres[side] = None;
+                }
+            }
+        }
+        advance_pair_with(
+            [self, second], moisture.time_s(), face_atmospheres, controls, cx,
+            |rh| {
+                let boundary = face_atmospheres.map(|port| match port {
+                    Some(MoistureAtmospherePort::First) =>
+                        MoistureLayeredFace::PrescribedRelativeHumidity(rh[0]),
+                    Some(MoistureAtmospherePort::Second) =>
+                        MoistureLayeredFace::PrescribedRelativeHumidity(rh[1]),
+                    None => MoistureLayeredFace::Sealed,
+                });
+                let (next, report) = moisture.advance(dt_s, &boundary, transport, nonlinear, cx)?;
+                let transfers = report.boundary_water_kg;
+                let end_time = next.time_s();
+                Ok((next, report, transfers, end_time))
+            },
+            |next| water_change(moisture, next),
+        )
+    }
+
     /// Couple one whole layered stack to this finite vapor inventory. The
     /// exterior source law comes from each end layer; no separate sorption law
     /// may silently override the material's interface partition relation.

@@ -179,6 +179,53 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
     face_water: impl Fn(&F::Report) -> [f64; N],
 ) -> Result<PairedAtmosphereMoistureCandidate<F, F::Report, N>, AtmosphereMoistureError> {
     poll(cx)?;
+    let temperature = atmospheres[0].gas().state().state().temperature;
+    if field.inventory().reference.query().axes()["temperature"].to_bits()
+        != temperature.to_bits()
+    {
+        return Err(invalid(
+            "paired atmospheres and specimen need the same prescribed temperature",
+        ));
+    }
+    let face_atmospheres =
+        std::array::from_fn(|i| faces[i].as_ref().map(|face| face.atmosphere));
+    advance_pair_with(
+        atmospheres, field.inventory().time_s, face_atmospheres, controls, cx,
+        |rh| {
+            let mut boundary: [ResolvedMoistureFace; N] =
+                std::array::from_fn(|_| ResolvedMoistureFace::default());
+            for (side, face) in faces.iter().enumerate() {
+                poll(cx)?;
+                if let Some(face) = face {
+                    boundary[side] =
+                        face.sorption.resolve(temperature, rh[face.atmosphere.index()])?;
+                }
+            }
+            let (next, report) = field.advance_resolved(dt_s, boundary, transport, cx)?;
+            let transfers = face_water(&report);
+            let end_time = next.inventory().time_s;
+            Ok((next, report, transfers, end_time))
+        },
+        |next| field.water_change_to(next),
+    )
+}
+
+/// One shared nested gas balance for original homogeneous or heterogeneous
+/// field owners. Each proposal starts from its accepted field, retains every
+/// native face transfer, and returns the actual accepted clock. The separate
+/// water-change callback measures original-to-final storage, not summed flux.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(in crate::moisture) fn advance_pair_with<Field, Report, const N: usize>(
+    atmospheres: [&FiniteMoistureAtmosphere; 2],
+    time_s: f64,
+    face_atmospheres: [Option<MoistureAtmospherePort>; N],
+    controls: PairedAtmosphereMoistureSolve,
+    cx: &Cx<'_>,
+    mut propose: impl FnMut([f64; 2])
+        -> Result<(Field, Report, [f64; N], f64), AtmosphereMoistureError>,
+    water_change: impl Fn(&Field) -> f64,
+) -> Result<PairedAtmosphereMoistureCandidate<Field, Report, N>, AtmosphereMoistureError> {
+    poll(cx)?;
     if controls.maximum_evaluations == 0
         || controls.maximum_evaluations > 100_000
         || !positive(controls.mass_tolerance_kg)
@@ -190,8 +237,6 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
     let [first, second] = atmospheres;
     let temperature = first.gas().state().state().temperature;
     if second.gas().state().state().temperature.to_bits() != temperature.to_bits()
-        || field.inventory().reference.query().axes()["temperature"].to_bits()
-            != temperature.to_bits()
     {
         return Err(invalid(
             "paired atmospheres and specimen need the same prescribed temperature",
@@ -207,13 +252,10 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
             "paired atmospheres must identify the same water species and molar mass",
         ));
     }
-    let face_atmospheres: [Option<MoistureAtmospherePort>; N] =
-        std::array::from_fn(|i| faces[i].as_ref().map(|face| face.atmosphere));
     let sealed = [
         !face_atmospheres.contains(&Some(MoistureAtmospherePort::First)),
         !face_atmospheres.contains(&Some(MoistureAtmospherePort::Second)),
     ];
-    let time_s = field.inventory().time_s;
     let mut evaluations = 0usize;
     let (second_next, accepted, second_step) = second.advance_exchange(
         time_s, sealed[1], controls.atmospheres[1], cx, |second_rh| {
@@ -227,19 +269,7 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
                         });
                     }
                     evaluations += 1;
-                    let rh = [first_rh, second_rh];
-                    let mut boundary: [ResolvedMoistureFace; N] =
-                        std::array::from_fn(|_| ResolvedMoistureFace::default());
-                    for (side, face) in faces.iter().enumerate() {
-                        poll(cx)?;
-                        if let Some(face) = face {
-                            boundary[side] =
-                                face.sorption.resolve(temperature, rh[face.atmosphere.index()])?;
-                        }
-                    }
-                    let (next, report) =
-                        field.advance_resolved(dt_s, boundary, transport, cx)?;
-                    let transfers = face_water(&report);
+                    let (next, report, transfers, end_time) = propose([first_rh, second_rh])?;
                     let received: [f64; 2] = std::array::from_fn(|port| {
                         water_sum(transfers.iter().zip(&face_atmospheres).filter_map(
                             |(&water, assignment)| match *assignment {
@@ -248,17 +278,15 @@ fn advance_pair<F: ReservoirField<N>, const N: usize>(
                             },
                         ))
                     });
-                    let end_time = next.inventory().time_s;
-                    Ok(((next, report, received), received[0], end_time))
+                    Ok(((next, report, received, end_time), received[0], end_time))
                 },
             )?;
-            let (next, report, received) = accepted;
-            let end_time = next.inventory().time_s;
+            let (next, report, received, end_time) = accepted;
             Ok(((first_next, next, report, first_step), received[1], end_time))
         },
     )?;
     let (first_next, moisture, report, first_step) = accepted;
-    let water_change_kg = field.water_change_to(&moisture);
+    let water_change_kg = water_change(&moisture);
     let water_balance_residual_kg = water_sum([
         water_change_kg,
         first_next.vapor_mass_kg()? - first.vapor_mass_kg()?,

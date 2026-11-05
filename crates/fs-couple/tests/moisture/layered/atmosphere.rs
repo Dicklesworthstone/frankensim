@@ -1,4 +1,7 @@
 //! Finite native vapor, material partition and complete stack inventories.
+#[path = "atmosphere/pair.rs"]
+mod pair;
+
 use super::super::atmosphere as air;
 use super::*;
 use fs_couple::moisture::atmosphere::AtmosphereMoistureError;
