@@ -2,14 +2,18 @@
 //!
 //! A rational impedance is passive iff it is positive-real; for a
 //! STABLE model that reduces to `Re H(i*omega) >= 0` for all real
-//! omega, plus non-negative asymptotic terms. Two detection layers:
+//! omega, plus non-negative asymptotic terms. The legacy diagnostic uses two
+//! detection layers:
 //!
 //! 1. Dense grid: log-spaced band sweep plus refinement around each
 //!    pole's resonant frequency — fast, but a grid can miss a narrow
 //!    dip.
-//! 2. Hamiltonian eigenvalue test (exact): the purely imaginary
-//!    eigenvalues of the positive-real Hamiltonian matrix are exactly
-//!    the frequencies where `Re H` crosses zero. No grid to fool.
+//! 2. Numerical Hamiltonian crossing test: in exact arithmetic imaginary
+//!    eigenvalues locate zero crossings. The implemented floating eigensolve
+//!    uses tolerances and is not an all-frequency enclosure certificate.
+//!
+//! `check_global_passivity` instead proves polynomial nonnegativity with
+//! outward-rounded Bernstein coefficients; its unresolved result is explicit.
 //!
 //! DESCRIPTOR-FORM STATEMENT (improper models, `e != 0`): on the
 //! imaginary axis `Re(i*omega*e) = 0`, so the `s*e` term is LOSSLESS
@@ -34,10 +38,17 @@ use fs_la::eigen_complex::{EigFailure, eig};
 use fs_la::factor::lu;
 use fs_math::c64::C64;
 
+pub(crate) mod global;
+pub use global::{
+    GlobalPassivityBudget, GlobalPassivityReport, GlobalPassivityUnresolved,
+    GlobalPassivityVerdict, GlobalRepairReport, check_global_passivity, repair_passivity_global,
+};
+
 /// How strong the passivity certificate is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertificateClass {
-    /// Grid AND Hamiltonian crossing test both clean.
+    /// Legacy name: grid and numerical Hamiltonian crossing test are clean.
+    /// This is not a rigorous enclosure; use `check_global_passivity` for one.
     HamiltonianExact,
     /// Grid clean but `d <= tol` makes the Hamiltonian arm unavailable
     /// — a named weaker certificate, not a silent claim.
@@ -84,6 +95,16 @@ pub enum PassivityError {
     /// Asymptotic terms negative (`d < 0` or `e < 0`) — the LS solve
     /// should have prevented this; refuse rather than repair silently.
     NegativeAsymptote,
+    /// A finite, conjugate-closed model or finite fitting band was required.
+    InvalidModel {
+        /// Failed precondition.
+        what: &'static str,
+    },
+    /// A bounded all-frequency proof could not be completed. No model is returned.
+    GlobalUnresolved {
+        /// Explicit degree, numerical-range, or subdivision limit.
+        reason: GlobalPassivityUnresolved,
+    },
 }
 
 impl core::fmt::Display for PassivityError {
@@ -102,6 +123,10 @@ impl core::fmt::Display for PassivityError {
                 "passivity repair needs {required_bytes} working bytes, allowance is {allowed_bytes}"
             ),
             PassivityError::NegativeAsymptote => write!(f, "negative d or e asymptote"),
+            PassivityError::InvalidModel { what } => write!(f, "invalid passivity model: {what}"),
+            PassivityError::GlobalUnresolved { reason } => {
+                write!(f, "global passivity is unresolved: {reason:?}")
+            }
         }
     }
 }
@@ -110,7 +135,8 @@ impl std::error::Error for PassivityError {}
 
 const D_TOL: f64 = 1.0e-12;
 
-/// Certify passivity of a stable impedance-form model.
+/// Diagnose passivity using the legacy grid and floating Hamiltonian arms.
+/// A clean result is not a rigorous global enclosure; see `check_global_passivity`.
 ///
 /// # Errors
 /// [`PassivityError::Unstable`] / [`PassivityError::NegativeAsymptote`]

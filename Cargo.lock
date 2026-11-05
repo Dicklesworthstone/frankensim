@@ -3105,6 +3105,7 @@ name = "fs-vfit"
 version = "0.0.1"
 dependencies = [
  "fs-duct",
+ "fs-ivl",
  "fs-la",
  "fs-material",
  "fs-math",

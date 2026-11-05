@@ -70,19 +70,28 @@ to parallel biquad sections and discrete state-space.
   estimates is shared.
 - `loewner::cross_check` — pole and response agreement diagnostics
   between the two front ends.
-- `passivity::check_passivity` — grid arm (log sweep + per-resonance
-  refinement, violations compressed to per-band representatives) plus
-  the Hamiltonian eigenvalue crossing test (exact) when `d > tol`;
-  otherwise the certificate is the named weaker `GridOnly` class.
-  Descriptor-form statement: on the imaginary axis `Re(i*omega*e) = 0`
-  — the improper term is lossless and the Hamiltonian test applies to
-  the proper part unchanged; general improper descriptor passivity
-  (even matrix pencils) is a no-claim.
-- `passivity::repair_passivity` — convex residue perturbation
-  (poles, d, e FIXED): active-set QP (KKT equality solves via fs-la
-  LU) over accumulated violation frequencies, iterated with
-  re-certification; reports rounds, relative perturbation, and the
-  final KKT stationarity residual.
+- `passivity::check_passivity` and `repair_passivity` retain the
+  existing grid/Hamiltonian numerical diagnostic and residue-repair APIs.
+  The historical `HamiltonianExact` class name denotes the floating-point
+  crossing test; it is not an outward-rounded proof, and `GridOnly` cannot
+  exclude a narrow or out-of-band active interval.
+- `passivity::check_global_passivity` admits finite, strictly stable scalar
+  rational impedances over the complete frequency axis. Positive denominator
+  factors reduce the real part to an interval-enclosed Bernstein polynomial
+  on a compactified half-line. Bounded de Casteljau subdivision returns
+  `Certified`, `Violated`, or `Unresolved`; a clean sample grid is never
+  promoted to a global proof. Nonnegative direct resistance and inertance
+  are checked separately. Zero direct resistance, exact zero loss and the
+  lossless improper term need no artificial resistance. Order, subdivision,
+  depth and representability limits remain explicit; isolated touching zeros
+  or unresolved cancellation can legitimately remain `Unresolved`.
+- `passivity::repair_passivity_global` holds poles, direct resistance and
+  inertance fixed, using globally proved finite violation witnesses in the
+  existing residue QP. A certified original is returned unchanged. The
+  positive repair margin is scaled in impedance units at the actual
+  constraints, and the report retains the residue perturbation and global
+  certificate. Unresolved proof, an unusable witness or exhausted repair
+  refuses; it never returns the raw active fit as a successful repair.
 - `discretize::bilinear` — prewarped bilinear transform to PARALLEL
   first-order/biquad sections (`K = omega_pw / tan(omega_pw T/2)`);
   exact at the prewarp frequency; the improper term maps to the exact
