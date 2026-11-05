@@ -5,7 +5,7 @@
 //! fs-math's expm1 exists for). Krylov φ-actions for large nonsymmetric
 //! A are recorded follow-up (needs Arnoldi).
 
-use fs_la::eigen::jacobi_eigh;
+use fs_la::eigen::{admit_jacobi_eigh, jacobi_eigh};
 use fs_la::factor::{Lu, lu};
 use fs_math::det;
 use fs_solver::{FgmresState, FlexiblePreconditioner, LinearOp, SolveReport};
@@ -540,42 +540,209 @@ fn solve_report_bits_equal(left: &SolveReport, right: &SolveReport) -> bool {
 
 /// Exponential Euler for u′ = A·u + N(u), SYMMETRIC A:
 /// u⁺ = e^{hA}·u + h·φ₁(hA)·N(u), computed in A's eigenbasis with
-/// φ₁(x) = expm1(x)/x (exact limit 1 at x = 0). EXACT for N ≡ 0.
+/// φ₁(x) = expm1(x)/x (exact limit 1 at x = 0). Exact for constant N,
+/// up to floating-point and eigensolve error; first order for nonlinear N.
+/// Preparation scales the matrix and checks the resulting eigenpairs. It is
+/// a bounded dense kernel, with no internal cancellation point or certificate
+/// of the physical model. Use [`Self::workspace`] and [`Self::step_checked`]
+/// to reuse storage and refuse invalid steps without changing the state.
 pub struct ExpEuler {
     n: usize,
     h: f64,
     /// Eigenvectors (columns) of A.
     vecs: Vec<f64>,
-    /// e^{hλ} per eigenvalue.
+    /// e^{hλ}, or e^{hλ/4} when direct retention is subnormal/zero.
     exp_h: Vec<f64>,
+    /// Four successive factors retain finite tails of large initial states.
+    split_exp: Vec<bool>,
     /// h·φ₁(hλ) per eigenvalue.
     hphi1: Vec<f64>,
 }
 
+/// A refusal from spectral preparation or exponential stepping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpEulerError {
+    /// Invalid step, matrix, or dense workspace admission.
+    InvalidInput(&'static str),
+    /// A matrix, state, or reusable workspace has the wrong length.
+    Dimension {
+        /// Required length.
+        expected: usize,
+        /// Supplied length.
+        actual: usize,
+    },
+    /// Opposite matrix entries differ by more than roundoff.
+    NonSymmetric {
+        /// Row of the upper-triangle entry.
+        row: usize,
+        /// Column of the upper-triangle entry.
+        column: usize,
+    },
+    /// The eigenpairs or scalar response could not be resolved in binary64.
+    Spectrum(&'static str),
+    /// An input state entry is nonfinite.
+    NonFiniteState {
+        /// Entry index.
+        index: usize,
+    },
+    /// The callback left an entry unwritten or supplied a nonfinite source.
+    NonFiniteSource {
+        /// Entry index.
+        index: usize,
+    },
+    /// A modal projection or proposed endpoint is unrepresentable.
+    Arithmetic,
+}
+
+impl fmt::Display for ExpEulerError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FS-TIME-EXP-EULER: {self:?}")
+    }
+}
+
+impl std::error::Error for ExpEulerError {}
+
+/// Reusable scratch storage for one exponential step. It owns no accepted
+/// state and can be reused with any [`ExpEuler`] of the same dimension.
+pub struct ExpEulerWorkspace {
+    source: Vec<f64>,
+    modal: Vec<f64>,
+    next: Vec<f64>,
+}
+
 impl ExpEuler {
     /// Build from symmetric A (row-major n×n) and step h.
+    ///
+    /// # Panics
+    /// Panics on a refusal from [`Self::try_new`].
     #[must_use]
     pub fn new(a: &[f64], n: usize, h: f64) -> ExpEuler {
-        let (vals, vecs) = jacobi_eigh(a, n);
-        let exp_h: Vec<f64> = vals.iter().map(|&l| det::exp(h * l)).collect();
-        let hphi1: Vec<f64> = vals
+        Self::try_new(a, n, h).expect("valid symmetric exponential-Euler problem")
+    }
+
+    /// Prepare a finite symmetric operator and positive finite duration.
+    /// Opposite entries may differ by at most 64 eps relative to that pair;
+    /// their mean then defines the symmetric operator. The scaled Jacobi
+    /// eigenpairs must pass residual and orthogonality checks at roundoff
+    /// scale. Unresolved dynamic range and unrepresentable growth refuse.
+    ///
+    /// # Errors
+    /// Returns [`ExpEulerError`] before creating a usable stepper when the
+    /// inputs, spectrum, or scalar propagator cannot be admitted.
+    pub fn try_new(a: &[f64], n: usize, h: f64) -> Result<Self, ExpEulerError> {
+        if !h.is_finite() || h <= 0.0 {
+            return Err(ExpEulerError::InvalidInput("require a positive finite step"));
+        }
+        let admission = admit_jacobi_eigh(n)
+            .map_err(|_| ExpEulerError::InvalidInput("dense eigensolve exceeds its work cap"))?;
+        let square = admission.matrix_entries();
+        if a.len() != square {
+            return Err(ExpEulerError::Dimension {
+                expected: square,
+                actual: a.len(),
+            });
+        }
+        if a.iter().any(|value| !value.is_finite()) {
+            return Err(ExpEulerError::InvalidInput("require a finite matrix"));
+        }
+        let maximum = a
             .iter()
-            .map(|&l| {
-                let x = h * l;
-                if x.abs() < 1e-300 {
-                    h
-                } else {
-                    h * (det::expm1(x) / x)
+            .fold(0.0_f64, |scale, value| scale.max(value.abs()));
+        // Binary scaling changes no ordinary-range significand bits. Besides
+        // avoiding diagonal-sum overflow inside Jacobi, it preserves the
+        // existing operation tree for already well-scaled operators.
+        let exponent_bits = maximum.to_bits() & 0x7ff0_0000_0000_0000;
+        let scale = if exponent_bits == 0 {
+            f64::MIN_POSITIVE
+        } else {
+            f64::from_bits(exponent_bits)
+        };
+        let mut scaled = vec![0.0; square];
+        for i in 0..n {
+            for j in i..n {
+                let upper = a[i * n + j];
+                let lower = a[j * n + i];
+                let pair_scale = upper.abs().max(lower.abs());
+                if pair_scale > 0.0
+                    && (upper / pair_scale - lower / pair_scale).abs() > 64.0 * f64::EPSILON
+                {
+                    return Err(ExpEulerError::NonSymmetric { row: i, column: j });
                 }
-            })
-            .collect();
-        ExpEuler {
+                let value = if scale == 0.0 {
+                    0.0
+                } else {
+                    0.5 * (upper / scale + lower / scale)
+                };
+                if pair_scale > 0.0 && value == 0.0 {
+                    return Err(ExpEulerError::Spectrum("matrix scaling underflows"));
+                }
+                scaled[i * n + j] = value;
+                scaled[j * n + i] = value;
+            }
+        }
+        let (vals, vecs) = jacobi_eigh(&scaled, n);
+        let tolerance = 128.0 * f64::EPSILON * n.max(1) as f64;
+        let norm = scaled.chunks(n.max(1)).fold(0.0_f64, |norm, row| {
+            norm.max(row.iter().map(|value| value.abs()).sum())
+        });
+        for i in 0..n {
+            if !vals[i].is_finite() {
+                return Err(ExpEulerError::Spectrum("nonfinite eigenvalue"));
+            }
+            for j in 0..n {
+                let mut av = 0.0;
+                let mut gram = 0.0;
+                for k in 0..n {
+                    av = scaled[j * n + k].mul_add(vecs[k * n + i], av);
+                    gram = vecs[k * n + j].mul_add(vecs[k * n + i], gram);
+                }
+                let residual = av - vals[i] * vecs[j * n + i];
+                let identity = if i == j { 1.0 } else { 0.0 };
+                if !residual.is_finite()
+                    || residual.abs() > tolerance * norm
+                    || !gram.is_finite()
+                    || (gram - identity).abs() > tolerance
+                {
+                    return Err(ExpEulerError::Spectrum("unresolved eigenbasis"));
+                }
+            }
+        }
+        let mut exp_h = Vec::with_capacity(n);
+        let mut split_exp = Vec::with_capacity(n);
+        let mut hphi1 = Vec::with_capacity(n);
+        for value in vals {
+            let lambda = value * scale;
+            if !lambda.is_finite() || (value != 0.0 && scale > 0.0 && lambda == 0.0) {
+                return Err(ExpEulerError::Spectrum("eigenvalue scaling is unrepresentable"));
+            }
+            let x = h * lambda;
+            let retention = det::exp(x);
+            // For stiff decay, dividing by lambda avoids h*(1/|h*lambda|):
+            // the latter erases a finite forced equilibrium when h*lambda
+            // overflows. Near zero use phi_1 to retain its exact limit.
+            let source = if x.abs() < f64::EPSILON {
+                h
+            } else if x.abs() <= 1.0 {
+                h * (det::expm1(x) / x)
+            } else {
+                det::expm1(x) / lambda
+            };
+            if !retention.is_finite() || !source.is_finite() || source <= 0.0 {
+                return Err(ExpEulerError::Spectrum("scalar response is unrepresentable"));
+            }
+            let split = retention < f64::MIN_POSITIVE;
+            exp_h.push(if split { det::exp(0.25 * x) } else { retention });
+            split_exp.push(split);
+            hphi1.push(source);
+        }
+        Ok(Self {
             n,
             h,
             vecs,
             exp_h,
+            split_exp,
             hphi1,
-        }
+        })
     }
 
     /// The step size.
@@ -584,33 +751,93 @@ impl ExpEuler {
         self.h
     }
 
-    /// One exponential-Euler step (u updated in place).
+    /// Allocate scratch once for repeated allocation-free checked steps.
+    #[must_use]
+    pub fn workspace(&self) -> ExpEulerWorkspace {
+        ExpEulerWorkspace {
+            source: vec![0.0; self.n],
+            modal: vec![0.0; self.n],
+            next: vec![0.0; self.n],
+        }
+    }
+
+    /// One exponential-Euler step, allocating temporary workspace. The callback
+    /// must write every source entry, including explicit zeros.
+    ///
+    /// # Panics
+    /// Panics on a refusal from [`Self::step_checked`], before publishing state.
     pub fn step<N: Fn(&[f64], &mut [f64])>(&self, u: &mut [f64], nonlin: &N) {
+        self.step_checked(u, nonlin, &mut self.workspace())
+            .expect("valid exponential-Euler state and source");
+    }
+
+    /// Advance with reusable storage. The callback reads the original state
+    /// and must write every source entry. No allocation occurs in this method;
+    /// callback side effects and allocation remain the caller's responsibility.
+    ///
+    /// # Errors
+    /// Invalid shapes, nonfinite/unwritten values and arithmetic overflow
+    /// return an error without changing any entry of `u`. Workspace contents
+    /// are scratch and may change on a refusal.
+    pub fn step_checked<N: Fn(&[f64], &mut [f64])>(
+        &self,
+        u: &mut [f64],
+        nonlin: &N,
+        workspace: &mut ExpEulerWorkspace,
+    ) -> Result<(), ExpEulerError> {
         let n = self.n;
-        let mut nu = vec![0.0f64; n];
-        nonlin(u, &mut nu);
+        for actual in [u.len(), workspace.source.len()] {
+            if actual != n {
+                return Err(ExpEulerError::Dimension { expected: n, actual });
+            }
+        }
+        for (index, value) in u.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(ExpEulerError::NonFiniteState { index });
+            }
+        }
+        workspace.source.fill(f64::NAN);
+        nonlin(u, &mut workspace.source);
+        for (index, value) in workspace.source.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(ExpEulerError::NonFiniteSource { index });
+            }
+        }
         // Transform to eigenbasis: û = Vᵀu, n̂ = VᵀN.
-        let mut uh = vec![0.0f64; n];
-        let mut nh = vec![0.0f64; n];
         for i in 0..n {
             let (mut au, mut an) = (0.0f64, 0.0f64);
             for j in 0..n {
                 au = self.vecs[j * n + i].mul_add(u[j], au);
-                an = self.vecs[j * n + i].mul_add(nu[j], an);
+                an = self.vecs[j * n + i].mul_add(workspace.source[j], an);
             }
-            uh[i] = au;
-            nh[i] = an;
+            if !au.is_finite() || !an.is_finite() {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            workspace.modal[i] = if self.split_exp[i] {
+                // A vanished e^(h lambda) can still leave a finite tail when
+                // u is large. Four factors stay normal throughout that range.
+                let factor = self.exp_h[i];
+                let tail = ((au * factor) * factor) * factor;
+                factor.mul_add(tail, self.hphi1[i] * an)
+            } else {
+                self.exp_h[i].mul_add(au, self.hphi1[i] * an)
+            };
+            if !workspace.modal[i].is_finite() {
+                return Err(ExpEulerError::Arithmetic);
+            }
         }
-        // Apply the scalar filters and transform back.
-        for (i, uhi) in uh.iter_mut().enumerate() {
-            *uhi = self.exp_h[i].mul_add(*uhi, self.hphi1[i] * nh[i]);
-        }
-        for (j, uj) in u.iter_mut().enumerate() {
+        // Transform into scratch; publish only a complete finite endpoint.
+        for j in 0..n {
             let mut acc = 0.0f64;
-            for (i, &uhi) in uh.iter().enumerate() {
+            for (i, &uhi) in workspace.modal.iter().enumerate() {
                 acc = self.vecs[j * n + i].mul_add(uhi, acc);
             }
-            *uj = acc;
+            if !acc.is_finite() {
+                return Err(ExpEulerError::Arithmetic);
+            }
+            workspace.next[j] = acc;
         }
+        u.copy_from_slice(&workspace.next);
+        Ok(())
     }
 }

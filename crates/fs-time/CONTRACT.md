@@ -533,7 +533,26 @@ where claimed below.
   insufficient budgets and cancellation return no partial value or gradient.
 - `stiff::ExpEuler::new(a, n, h)` + `.step(u, nonlin)` — exponential
   Euler for u′ = Au + N(u), **symmetric A** via the fs-la Jacobi
-  eigenbasis; φ₁(x) = expm1(x)/x (cancellation-free). Exact for N ≡ 0.
+  eigenbasis. `try_new` admits finite matrices and positive finite durations,
+  scales the dense eigenproblem, and checks eigenpair residuals and
+  orthogonality. Opposite entries within 64 eps relative to that pair use
+  their symmetric mean; larger asymmetry refuses. Unresolved matrix/rate
+  scaling and unrepresentable growth refuse rather than publish a false
+  decay. The source coefficient uses h·φ₁(hλ) near zero and expm1(hλ)/λ
+  for stiff rates, retaining finite forced equilibria even if hλ overflows
+  negatively. Split exponential factors preserve finite homogeneous tails
+  when the unscaled retention is subnormal or zero. The method is exact
+  for a constant additive source up to eigenbasis/roundoff error, and remains
+  first order for nonlinear N; it adds no positivity or energy certificate.
+  `workspace` + `step_checked` reuse three scratch vectors without per-step
+  allocation. Every callback output must be written and finite. Shape,
+  input, source and arithmetic refusals leave the entire accepted state
+  unchanged; callback effects remain caller-owned. Construction and stepping
+  are dense synchronous kernels with no internal cancellation point.
+  `tests/exponential_decay.rs` checks analytic forcing, timestep partition,
+  zero and extreme decay rates, large coupled spectra, retained tails, and
+  transactional refusal. Existing `new`/`step` convenience calls delegate to
+  these checks and panic on refusal.
 - `adaptive::{AdaptiveState, PiController, rk45_adaptive}` —
   Dormand–Prince 5(4), max-norm error against atol + rtol·|u|, PI
   update h ← h·safety·err^{−0.14}·err_prev^{0.08} clamped to
