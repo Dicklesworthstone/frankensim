@@ -13,7 +13,7 @@ use super::{
 };
 use fs_exec::CancelGate;
 
-mod endpoint;
+pub(super) mod endpoint;
 pub use endpoint::BoussinesqEndpointStep;
 
 /// Explicit Boussinesq approximation and physical gravity for one step.
@@ -179,7 +179,40 @@ fn advance<
     config: BoussinesqConfig<D>,
     endpoint_average: bool,
     gate: &CancelGate,
+    resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
+) -> Result<BoussinesqEndpointStep<F>, MaterialTransportError> {
+    advance_with_candidate::<S, F, D, Q>(
+        slab, power, forces, depth_m, limits, config, gate, resolve,
+        |mapping, input, applied, mut bounded| {
+            if endpoint_average {
+                endpoint::candidate::<S, F, D, Q>(
+                    mapping, input, forces, applied, limits.temperature_range_k,
+                    config, gate, &mut bounded,
+                )
+            } else {
+                let (trial, heat) = candidate_with_buoyancy::<S, BoussinesqMaterial<F>, D, Q>(
+                    mapping, input, forces, applied, config, gate,
+                    |material| material.resolved.density_kg_m3(),
+                )?;
+                Ok((trial, heat, Vec::new()))
+            }
+        },
+    )
+}
+
+// All Boussinesq transport variants retain the same bounded source and
+// publication owner. Extra force queries stay with the tentative candidate.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(super) fn advance_with_candidate<
+    S: Slab<D, Q> + BackgroundBuoyancy, F: FluidTransport, const D: usize, const Q: usize,
+>(
+    slab: &mut MaterialSlab<S>, power: &[f64], forces: &[[f64; D]], depth_m: f64,
+    limits: HeatSourceLimits, config: BoussinesqConfig<D>, gate: &CancelGate,
     mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<F, MaterialError>,
+    candidate: impl FnOnce(
+        &MaterialSlab<S>, super::super::Inputs<D>, &[super::TransportSample<BoussinesqMaterial<F>>],
+        &mut dyn FnMut(usize, f64, &FluidTransportState) -> Result<BoussinesqMaterial<F>, MaterialError>,
+    ) -> Result<(S, super::HeatBalance, Vec<super::TransportSample<BoussinesqMaterial<F>>>), MaterialTransportError>,
 ) -> Result<BoussinesqEndpointStep<F>, MaterialTransportError> {
     poll(gate)?;
     config.validate()?;
@@ -209,18 +242,7 @@ fn advance<
         gate,
         &mut bounded,
     )?;
-    let (trial, heat, force_endpoint) = if endpoint_average {
-        endpoint::candidate::<S, F, D, Q>(
-            slab, input, forces, &applied, limits.temperature_range_k,
-            config, gate, &mut bounded,
-        )?
-    } else {
-        let (trial, heat) = candidate_with_buoyancy::<S, BoussinesqMaterial<F>, D, Q>(
-            slab, input, forces, &applied, config, gate,
-            |material| material.resolved.density_kg_m3(),
-        )?;
-        (trial, heat, Vec::new())
-    };
+    let (trial, heat, force_endpoint) = candidate(slab, input, &applied, &mut bounded)?;
     let endpoint = sample::<S, BoussinesqMaterial<F>, D, Q>(
         slab,
         &trial,

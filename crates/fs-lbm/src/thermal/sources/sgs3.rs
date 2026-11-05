@@ -156,6 +156,24 @@ fn admit_velocity(rho: f64, u: [f64; 3], cell: usize, maximum: f64) -> Result<()
     Ok(())
 }
 
+// Both closures and material force quadrature use the same accepted-flow gate.
+// It runs after the actual flow/source step, before any candidate publication.
+pub(crate) fn admit_endpoint(
+    candidate: &ThermalLbm3,
+    maximum_mach: f64,
+    gate: &CancelGate,
+) -> Result<(), ThermalSgsError> {
+    let (cells, plane) = candidate.layout()?;
+    for cell in plane..cells - plane {
+        if cell % 64 == 0 {
+            poll(gate)?;
+        }
+        let (rho, u) = candidate.grid.moments3(cell);
+        admit_velocity(rho, u, cell, maximum_mach)?;
+    }
+    poll(gate)
+}
+
 impl ThermalLbm3 {
     /// Allocate SGS scratch once, subject to an explicit complete-cell budget.
     pub fn thermal_sgs_workspace(
@@ -388,17 +406,7 @@ pub(crate) fn step_sgs_mapped<R>(
         limits,
         Some(workspace.relaxation()),
         |candidate, balance| {
-            admission = (|| {
-                let (cells, plane) = candidate.layout()?;
-                for cell in plane..cells - plane {
-                    if cell % 64 == 0 {
-                        poll(gate)?;
-                    }
-                    let (rho, u) = candidate.grid.moments3(cell);
-                    admit_velocity(rho, u, cell, config.maximum_mach)?;
-                }
-                poll(gate)
-            })();
+            admission = admit_endpoint(candidate, config.maximum_mach, gate);
             if admission.is_err() {
                 return Err(ThermalSourceError::Invalid("SGS endpoint admission failed"));
             }

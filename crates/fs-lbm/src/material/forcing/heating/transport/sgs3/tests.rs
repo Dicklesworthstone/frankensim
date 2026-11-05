@@ -374,3 +374,235 @@ fn g0_g4_g5_material_endpoints_refuse_or_cancel_before_either_sgs_family_publish
         }
     }
 }
+
+fn nonlinear_density(t: f64) -> FluidTransportState {
+    let local = varying(t);
+    let delta = t - 305.0;
+    FluidTransportState::try_new(2.0 * (1.0 - 0.002 * delta - 0.0001 * delta * delta),
+        3.0, local.thermal_conductivity_w_m_k(), local.dynamic_viscosity_pa_s()).unwrap()
+}
+
+fn endpoint_slab() -> MaterialSlab<ThermalLbm3> {
+    let mut state = slab();
+    let rates: Vec<_> = (0..CELLS).map(|cell| 0.9 + 0.1 * (cell % 3) as f64).collect();
+    state.lattice.grid.set_central_moment_bulk_field(&rates, 1.3).unwrap();
+    state.lattice.gbeta = 5e-5;
+    state
+}
+
+#[test]
+fn g0_endpoint_sgs_zero_closure_matches_material_density_quadrature() {
+    let gate = CancelGate::new_clock_free();
+    let (power, force) = loads();
+    for dynamic in [false, true] {
+        let mut actual = endpoint_slab();
+        let mut expected = endpoint_slab();
+        if dynamic {
+            // Zero accepted velocity makes both independent channel fits zero.
+            for state in [&mut actual, &mut expected] {
+                for cell in PLANE..CELLS - PLANE {
+                    state.lattice.grid.f[cell] = equilibrium3(1.0, [0.0; 3]);
+                    state.lattice.grid.fext[cell] = [0.0; 3];
+                }
+            }
+        }
+        let baseline = expected.step_with_boussinesq_material_transport_endpoint_averaged(
+            &power, &force, limits(), buoyancy(), &gate, |_, t, _| Ok(nonlinear_density(t))).unwrap();
+        let material = if dynamic {
+            let mut workspace = actual.lattice.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+            let result = actual.step_with_boussinesq_material_transport_and_channel_sgs_endpoint_averaged(
+                &power, &force, limits(), buoyancy(), channel(), &mut workspace, &gate,
+                |_, t, _| Ok(nonlinear_density(t))).unwrap();
+            assert_eq!(result.sgs.transport.maximum_eddy_diffusivity_lu, 0.0);
+            result.material
+        } else {
+            let mut workspace = actual.lattice.thermal_sgs_workspace(CELLS).unwrap();
+            let mut config = local();
+            config.closure.model = SgsModel::Smagorinsky { cs: 0.0 };
+            let result = actual.step_with_boussinesq_material_transport_and_sgs_endpoint_averaged(
+                &power, &force, limits(), buoyancy(), config, &mut workspace, &gate,
+                |_, t, _| Ok(nonlinear_density(t))).unwrap();
+            assert_eq!(result.sgs.maximum_eddy_diffusivity_lu, 0.0);
+            result.material
+        };
+        assert_eq!(material, baseline);
+        assert_eq!(bits(&actual), bits(&expected));
+        for cell in PLANE..CELLS - PLANE {
+            assert_eq!(actual.lattice.grid.collision_model_at(cell),
+                expected.lattice.grid.collision_model_at(cell));
+        }
+    }
+}
+
+#[test]
+fn g1_endpoint_sgs_feeds_actual_turbulent_heat_into_original_density_queries() {
+    let gate = CancelGate::new_clock_free();
+    let (power, external) = loads();
+    for dynamic in [false, true] {
+        let mut actual = endpoint_slab();
+        let mut laminar = endpoint_slab();
+        let initial = endpoint_slab();
+        let mut local_work = actual.lattice.thermal_sgs_workspace(CELLS).unwrap();
+        let mut channel_work = actual.lattice.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+        let local_pointer = local_work.relaxation().thermal.as_ptr();
+        let channel_bytes = channel_work.workspace_bytes();
+        let reads = Rc::new(Cell::new(0));
+        let resolve = |cell, t, _: &FluidTransportState| Ok(Ticket {
+            value: nonlinear_density(t), query_k: t, cell, reads: reads.clone(),
+        });
+        let (material, report) = if dynamic {
+            let r = actual.step_with_boussinesq_material_transport_and_channel_sgs_endpoint_averaged(
+                &power, &external, limits(), buoyancy(), channel(), &mut channel_work, &gate, resolve).unwrap();
+            (r.material, r.sgs.transport)
+        } else {
+            let r = actual.step_with_boussinesq_material_transport_and_sgs_endpoint_averaged(
+                &power, &external, limits(), buoyancy(), local(), &mut local_work, &gate, resolve).unwrap();
+            (r.material, r.sgs)
+        };
+        assert_eq!(reads.get(), 3 * FLUID);
+        assert!(report.maximum_eddy_diffusivity_lu > 0.0);
+        assert_eq!(local_pointer, local_work.relaxation().thermal.as_ptr());
+        assert_eq!(channel_bytes, channel_work.workspace_bytes());
+        let baseline = laminar.step_with_boussinesq_material_transport_endpoint_averaged(
+            &power, &external, limits(), buoyancy(), &gate, |_, t, _| Ok(nonlinear_density(t))).unwrap();
+        assert!(material.force_endpoint.iter().zip(&baseline.force_endpoint)
+            .any(|(a, b)| (a.temperature_k - b.temperature_k).abs() > 1e-8));
+        let mut momentum = vec![1.0; CELLS];
+        let mut thermal = vec![1.0; CELLS];
+        for value in &material.transport.applied {
+            momentum[value.cell] = value.momentum_relaxation;
+            thermal[value.cell] = value.thermal_relaxation;
+        }
+        let molecular = RelaxationField { momentum: &momentum, thermal: &thermal };
+        let independently_prepared = if dynamic {
+            let mut work = initial.lattice.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+            let fit = initial.lattice.prepare_thermal_channel_sgs(channel(), Some(molecular), &mut work, &gate).unwrap();
+            assert!(material.transport.applied.iter().any(|s|
+                work.relaxation().momentum[s.cell] == s.momentum_relaxation
+                && work.relaxation().thermal[s.cell] > s.thermal_relaxation));
+            assert_eq!(channel_work.relaxation().momentum, work.relaxation().momentum);
+            assert_eq!(channel_work.relaxation().thermal, work.relaxation().thermal);
+            fit.transport
+        } else {
+            let mut work = initial.lattice.thermal_sgs_workspace(CELLS).unwrap();
+            let fit = initial.lattice.prepare_thermal_sgs(local(), Some(molecular), &mut work, &gate).unwrap();
+            assert_eq!(local_work.relaxation().momentum, work.relaxation().momentum);
+            assert_eq!(local_work.relaxation().thermal, work.relaxation().thermal);
+            fit
+        };
+        assert_eq!(report, independently_prepared);
+        for value in material.transport.applied.iter().chain(&material.force_endpoint)
+            .chain(&material.transport.endpoint) {
+            assert_eq!(value.material.material().query_k.to_bits(), value.temperature_k.to_bits());
+            assert_eq!(value.material.material().cell, value.cell);
+            assert_eq!(*value.material.resolved_transport(), nonlinear_density(value.temperature_k));
+            assert_eq!(value.transport.density_kg_m3(), reference().density_kg_m3());
+            assert_eq!(value.transport.specific_heat_j_kg_k(), reference().specific_heat_j_kg_k());
+        }
+        for value in &material.transport.endpoint {
+            let actual_k = actual.temperature_si(actual.lattice.gpop[value.cell].iter().sum()).unwrap();
+            assert_eq!(value.temperature_k.to_bits(), actual_k.to_bits());
+        }
+        let mut changed = false;
+        for (opening, predicted) in material.transport.applied.iter().zip(&material.force_endpoint) {
+            let initial_departure = opening.material.resolved_transport().density_kg_m3() - 2.0;
+            let endpoint_departure = predicted.material.resolved_transport().density_kg_m3() - 2.0;
+            for axis in 0..3 {
+                let averaged = external[predicted.cell][axis]
+                    + (0.5 * initial_departure + 0.5 * endpoint_departure) * buoyancy().gravity_m_s2[axis];
+                assert_eq!(actual.lattice.grid.fext[predicted.cell][axis],
+                    actual.force_units.component(averaged).unwrap());
+                let held = external[predicted.cell][axis] + initial_departure * buoyancy().gravity_m_s2[axis];
+                changed |= actual.lattice.grid.fext[predicted.cell][axis]
+                    != actual.force_units.component(held).unwrap();
+            }
+        }
+        assert!(changed);
+        assert!(material.transport.heat.defect_j.abs() <= limits().balance_tolerance_j);
+        assert_eq!(actual.lattice.grid.tau, initial.lattice.grid.tau);
+        assert_eq!(actual.lattice.tau_g, initial.lattice.tau_g);
+        assert_eq!(actual.lattice.gbeta, initial.lattice.gbeta);
+    }
+}
+
+#[test]
+fn g0_g4_endpoint_sgs_refuses_force_final_source_and_post_flow_mach_atomically() {
+    let (power, original_force) = loads();
+    for dynamic in [false, true] {
+        for refusal in 0..4 {
+            let mut actual = endpoint_slab();
+            let before = bits(&actual);
+            let bulk: Vec<_> = (PLANE..CELLS - PLANE)
+                .map(|cell| actual.lattice.grid.collision_model_at(cell)).collect();
+            let mut local_work = actual.lattice.thermal_sgs_workspace(CELLS).unwrap();
+            let mut channel_work = actual.lattice.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+            let mut force = original_force.clone();
+            if refusal == 2 { force[PLANE..CELLS - PLANE].fill([4e5, 0.0, 0.0]); }
+            let gate = CancelGate::new_clock_free();
+            let mut calls = 0;
+            let mut resolve = |_: usize, t: f64, _: &FluidTransportState| {
+                calls += 1;
+                if (refusal == 0 && calls == FLUID + 1) || (refusal == 1 && calls == 2 * FLUID + 1) {
+                    return Err(MaterialError::State { what: "original source refusal".into() });
+                }
+                if refusal == 3 && calls == 3 * FLUID { gate.request(); }
+                Ok(nonlinear_density(t))
+            };
+            let result = if dynamic {
+                let mut config = channel();
+                config.maximum_mach = 0.08;
+                actual.step_with_boussinesq_material_transport_and_channel_sgs_endpoint_averaged(
+                    &power, &force, limits(), buoyancy(), config, &mut channel_work, &gate,
+                    &mut resolve).map(|r| r.material)
+            } else {
+                let mut config = local();
+                config.maximum_mach = 0.08;
+                actual.step_with_boussinesq_material_transport_and_sgs_endpoint_averaged(
+                    &power, &force, limits(), buoyancy(), config, &mut local_work, &gate,
+                    &mut resolve).map(|r| r.material)
+            };
+            match refusal {
+                0 | 1 => {
+                    assert!(matches!(result, Err(MaterialTransportError::State { cell: PLANE,
+                        source: crate::material::MaterialLbmError::Transport(MaterialError::State { ref what }), .. })
+                        if what == "original source refusal"));
+                    assert_eq!(calls, (refusal + 1) * FLUID + 1);
+                }
+                2 => {
+                    assert!(matches!(result, Err(MaterialTransportError::Subgrid(ThermalSgsError::Mach { .. }))));
+                    assert_eq!(calls, 2 * FLUID);
+                }
+                _ => {
+                    assert!(matches!(result, Err(MaterialTransportError::Cancelled)));
+                    assert_eq!(calls, 3 * FLUID);
+                }
+            }
+            assert_eq!(bits(&actual), before);
+            for (cell, expected) in (PLANE..CELLS - PLANE).zip(bulk) {
+                assert_eq!(actual.lattice.grid.collision_model_at(cell), expected);
+            }
+            let gate = CancelGate::new_clock_free();
+            let mut fresh = endpoint_slab();
+            if dynamic {
+                let mut fresh_work = fresh.lattice.thermal_channel_sgs_workspace(usize::MAX).unwrap();
+                let retry = actual.step_with_boussinesq_material_transport_and_channel_sgs_endpoint_averaged(
+                    &power, &original_force, limits(), buoyancy(), channel(), &mut channel_work, &gate,
+                    |_, t, _| Ok(nonlinear_density(t))).unwrap();
+                let expected = fresh.step_with_boussinesq_material_transport_and_channel_sgs_endpoint_averaged(
+                    &power, &original_force, limits(), buoyancy(), channel(), &mut fresh_work, &gate,
+                    |_, t, _| Ok(nonlinear_density(t))).unwrap();
+                assert_eq!(retry, expected);
+            } else {
+                let mut fresh_work = fresh.lattice.thermal_sgs_workspace(CELLS).unwrap();
+                let retry = actual.step_with_boussinesq_material_transport_and_sgs_endpoint_averaged(
+                    &power, &original_force, limits(), buoyancy(), local(), &mut local_work, &gate,
+                    |_, t, _| Ok(nonlinear_density(t))).unwrap();
+                let expected = fresh.step_with_boussinesq_material_transport_and_sgs_endpoint_averaged(
+                    &power, &original_force, limits(), buoyancy(), local(), &mut fresh_work, &gate,
+                    |_, t, _| Ok(nonlinear_density(t))).unwrap();
+                assert_eq!(retry, expected);
+            }
+            assert_eq!(bits(&actual), bits(&fresh));
+        }
+    }
+}

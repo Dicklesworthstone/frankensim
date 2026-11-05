@@ -22,6 +22,9 @@ use crate::thermal::sources::sgs3::{
 };
 use fs_exec::CancelGate;
 
+mod endpoint;
+pub use endpoint::MaterialSgsEndpointStep;
+
 /// Original molecular material records and SI heat balance, together with the
 /// closure actually applied to this step. Material records never contain SGS.
 #[derive(Debug, Clone, PartialEq)]

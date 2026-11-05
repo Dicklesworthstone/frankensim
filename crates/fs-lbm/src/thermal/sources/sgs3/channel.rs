@@ -372,17 +372,7 @@ pub(crate) fn step_channel_sgs_mapped<R>(
         limits,
         Some(workspace.relaxation()),
         |candidate, balance| {
-            admission = (|| {
-                let (cells, plane) = candidate.layout()?;
-                for cell in plane..cells - plane {
-                    if cell % 64 == 0 {
-                        poll(gate)?;
-                    }
-                    let (rho, u) = candidate.grid.moments3(cell);
-                    admit_velocity(rho, u, cell, config.maximum_mach)?;
-                }
-                poll(gate)
-            })();
+            admission = admit_endpoint(candidate, config.maximum_mach, gate);
             if admission.is_err() {
                 return Err(ThermalSourceError::Invalid(
                     "channel SGS endpoint admission failed",

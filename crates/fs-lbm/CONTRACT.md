@@ -4548,6 +4548,33 @@ state. Endpoint sampling checks source support, not implicit convergence.
 The coefficients remain explicit, and no modeled dissipation heat or
 total-energy qualification is introduced.
 
+The explicit `step_with_boussinesq_material_transport_and_sgs_endpoint_averaged`
+and `step_with_boussinesq_material_transport_and_channel_sgs_endpoint_averaged`
+variants return `MaterialSgsEndpointStep`. The original SGS owner prepares total
+rates once from accepted Guo-centered velocity, accepted scalar state where
+needed, and fresh initial molecular mu/k. The existing density endpoint
+projector consumes the one scalar transport performed under those total rates;
+its original bounded source queries and density departures drive the one
+subsequent flow step. The report retains initial, force-predictor and
+independently sampled actual-final material epochs. Initial molecular and SGS
+coefficients remain frozen for that step; no augmented rate becomes a
+material property.
+
+Both families retain original ratio/usage limits, reusable scratch,
+independent dynamic momentum/heat fits, wall/source heat checks and post-flow
+Mach admission. Typed source/SGS failures and cancellation publish no candidate.
+Fixed rho0/Cp0, sensible storage and the existing no-global-time-order/no-total-
+energy boundaries remain unchanged.
+
+Three additional G0/G1/G4 regressions cover zero-SGS parity, nonlinear source
+density driven by nonzero modeled thermal transport, exact query/report
+identity, original force-frame preparation, independent positive channel heat,
+scratch reuse and late-source/Mach/cancellation rollback with nonuniform bulk
+relaxation. These three, the five existing material SGS checks and two native
+force-resolution checks passed in a bounded original-source build with actual
+material, SGS and numerical owners. Unrelated registries/executor scheduling
+and the full Cargo dependency graph were not built.
+
 Five focused regressions are included for native-step equivalence, evolving
 molecular transport, independent channel heat, shared source/force ownership,
 ratio bounds and endpoint/cancellation rollback. All five pass in the native

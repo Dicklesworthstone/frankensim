@@ -1,6 +1,6 @@
 //! Density quadrature from one transported scalar endpoint prediction.
 
-use super::super::{TransportSample, candidate_with_transport, sample_temperatures};
+use super::super::{RelaxationField, TransportSample, candidate_with_transport, sample_temperatures};
 use super::{
     BackgroundBuoyancy, BoussinesqConfig, BoussinesqMaterial, FluidTransport, FluidTransportState,
     HeatSourceLimits, MaterialError, MaterialSlab, MaterialTransportError, MaterialTransportStep,
@@ -33,7 +33,7 @@ pub(super) fn candidate<
     const Q: usize,
 >(
     slab: &MaterialSlab<S>,
-    mut input: super::super::super::Inputs<D>,
+    input: super::super::super::Inputs<D>,
     forces: &[[f64; D]],
     applied: &[TransportSample<BoussinesqMaterial<F>>],
     range_k: [f64; 2],
@@ -44,6 +44,32 @@ pub(super) fn candidate<
         f64,
         &FluidTransportState,
     ) -> Result<BoussinesqMaterial<F>, MaterialError>,
+) -> Result<(S, HeatBalance, Vec<TransportSample<BoussinesqMaterial<F>>>), MaterialTransportError> {
+    candidate_with_step::<S, F, D, Q>(
+        slab, input, forces, applied, range_k, config, gate, resolve,
+        |trial, input, molecular, force| {
+            source_step_resolved_mapped::<S, D, Q, _, MaterialTransportError>(
+                trial, &input.heat, &input.force, input.limits, molecular, force,
+                |_, raw| input.balance(raw).map_err(MaterialTransportError::from),
+            )
+        },
+    )
+}
+
+// SGS augments fresh molecular rates, then consumes this exact density
+// projector through the original one-heat/one-flow source transaction.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(in crate::material::forcing::heating::transport) fn candidate_with_step<
+    S: Slab<D, Q> + BackgroundBuoyancy, F: FluidTransport, const D: usize, const Q: usize,
+>(
+    slab: &MaterialSlab<S>, mut input: super::super::super::Inputs<D>, forces: &[[f64; D]],
+    applied: &[TransportSample<BoussinesqMaterial<F>>], range_k: [f64; 2],
+    config: BoussinesqConfig<D>, gate: &CancelGate,
+    resolve: &mut impl FnMut(usize, f64, &FluidTransportState) -> Result<BoussinesqMaterial<F>, MaterialError>,
+    step: impl FnOnce(
+        &mut S, &super::super::super::Inputs<D>, RelaxationField<'_>,
+        &mut dyn FnMut(&S, Vec<f64>) -> Result<Vec<[f64; D]>, MaterialTransportError>,
+    ) -> Result<HeatBalance, MaterialTransportError>,
 ) -> Result<(S, HeatBalance, Vec<TransportSample<BoussinesqMaterial<F>>>), MaterialTransportError> {
     project_force::<S, BoussinesqMaterial<F>, D, Q>(
         slab,
@@ -63,13 +89,11 @@ pub(super) fn candidate<
         gate,
         |candidate| candidate.set_coefficient(0.0),
         |trial, input, molecular| {
-            source_step_resolved_mapped::<S, D, Q, _, MaterialTransportError>(
+            step(
                 trial,
-                &input.heat,
-                &input.force,
-                input.limits,
+                input,
                 molecular,
-                |transported, mut predicted| {
+                &mut |transported, mut predicted| {
                     let (cells, plane) = transported.layout()?;
                     for value in &mut predicted[plane..cells - plane] {
                         *value = slab
@@ -102,7 +126,6 @@ pub(super) fn candidate<
                     force_endpoint = endpoint;
                     Ok(resolved_forces)
                 },
-                |_, raw| input.balance(raw).map_err(MaterialTransportError::from),
             )
         },
     )?;
