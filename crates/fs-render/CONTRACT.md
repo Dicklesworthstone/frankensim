@@ -7475,3 +7475,28 @@ conditional grazing/subnormal power and mixed forward/reverse PDFs. Native
 scene, scalar Material and BDPT integration regressions are also present.
 The model supplies no finite thickness, coherent interference, roughness,
 bulk absorption or lateral displacement.
+
+## Selected point-fixture transmission through ordinary scene glass
+
+`PhotometricSource::transmitted_slab_irradiance` measures one selected image
+through the two smooth parallel broad faces of a named static mesh instance in
+the ordinary `tracer::Scene`. The original slab owner solves each of the 80
+native wavelengths and supplies receiving area per source solid angle; the
+actual source intensity, native s/p Mueller transmission history, original
+surface coatings and Beer loss then supply spectral irradiance and CIE lux.
+The first face's induced polarization survives the second face. Geometry and
+its acceleration are prepared once; spectral queries allocate no workspace.
+
+Body-only slab discovery cannot make unrelated chord or normal-probe blockers
+into optical occlusion. All three solved physical segments retain original
+scene visibility and endpoint exclusion. Source and receiver must be in vacuum
+on opposite sides; the full refracted distance is budgeted. Opaque blockers
+produce zero bins; unsupported media, roughness, nonparallel/edge exits,
+back-facing receivers and cancellation refuse the complete reading.
+The returned spectrum is the selected two-transmission image, with no claim to
+total illuminance, reflected/internal-return images, bulk interference,
+scattering, calibration bounds or a certified numerical enclosure. Existing
+path jobs retain their stricter point-fixture/glass admission. Focused controls
+cover analytic axial spreading, independent oblique Snell rays and angular
+finite differences, retained s/p power, dispersion, native visibility and
+physical-domain/work refusals.

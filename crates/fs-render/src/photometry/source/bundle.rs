@@ -251,6 +251,16 @@ impl<'a> BundleIrradianceMeter<'a> {
         Ok(())
     }
 
+    /// Native source adapters have already solved their physical connection.
+    pub(super) fn record_solved_irradiance(
+        &mut self,
+        bin: usize,
+        value: f64,
+    ) -> Result<(), BundlePhotometryError> {
+        let bit = self.admit_bin(bin, wavelength_nm(bin))?;
+        self.record_value(bin, bit, value)
+    }
+
     pub fn spectral_irradiance_w_m2_nm(&self, bin: usize) -> Option<f64> {
         (bin < SPECTRAL_BINS && self.present & (1_u128 << bin) != 0).then(|| self.bins_w_m2_nm[bin])
     }

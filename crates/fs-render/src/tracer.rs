@@ -10707,6 +10707,20 @@ fn discover_parallel_slab(
     first_hit: SceneIntersection,
     ray_time: Option<&PathTime>,
 ) -> Result<ParallelSlab, TracerError> {
+    discover_parallel_slab_with_probe(scene, first_ray, first_hit, |probe| {
+        intersect(scene, cx, probe, ray_time)
+    })
+}
+
+/// Share the original slab admission while allowing selected-image consumers
+/// to discover the authored body independently of unrelated occluders. The
+/// caller still owns full-scene visibility along the solved optical path.
+fn discover_parallel_slab_with_probe(
+    scene: &Scene,
+    first_ray: &Ray,
+    first_hit: SceneIntersection,
+    intersect_probe: impl FnOnce(&Ray) -> Result<Option<SceneIntersection>, TracerError>,
+) -> Result<ParallelSlab, TracerError> {
     let boundary_primitive = first_hit.primitive_index;
     require_instanced_mesh_face_witness(
         scene,
@@ -10748,7 +10762,7 @@ fn discover_parallel_slab(
         origin: first_hit.spawn_boundary_ray(entry_frame.geometric, axis),
         dir: axis,
     };
-    let Some(opposite) = intersect(scene, cx, &probe, ray_time)? else {
+    let Some(opposite) = intersect_probe(&probe)? else {
         return Err(slab_nee_refusal(
             boundary_primitive,
             "normal probe escaped before finding the opposite interface",

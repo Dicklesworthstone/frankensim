@@ -25,6 +25,7 @@ use crate::volumes::transport::scattering::{PhaseFunction, ScatteringGrid};
 
 pub(super) mod area;
 pub(crate) mod geometry;
+pub(crate) mod slab;
 mod point_sampling;
 
 #[cfg(test)]

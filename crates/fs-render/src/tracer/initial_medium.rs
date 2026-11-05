@@ -108,6 +108,34 @@ impl<'scene> InitialMedia<'scene> {
         Ok(result)
     }
 
+    /// Query one original boundary's closure and interior ownership without
+    /// importing unrelated media at this diagnostic point into a path stack.
+    #[cfg(feature = "photometry")]
+    pub(super) fn boundary_contains(
+        &self,
+        cx: &Cx<'_>,
+        primitive: usize,
+        origin: Point3,
+        time: Option<&PathTime>,
+    ) -> Result<bool, TracerError> {
+        cx.checkpoint()?;
+        let boundary = self
+            .boundaries
+            .iter()
+            .find(|boundary| boundary.primitive == primitive)
+            .ok_or_else(|| {
+                refusal(
+                    primitive,
+                    "selected primitive has no dielectric medium boundary",
+                )
+            })?;
+        let local = boundary
+            .placement(cx, time)?
+            .inverse()?
+            .transform_point(origin);
+        boundary.geometry.contains(cx, local, primitive)
+    }
+
     pub(super) fn stack<'path>(
         &self,
         scene: &'path Scene,
