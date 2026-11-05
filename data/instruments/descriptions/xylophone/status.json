@@ -19,7 +19,7 @@
     "Why Fig. 4 and Table I differ: Fig. 4's eta is 4.22 times Table I's 9.16e-8, and they may not be the same bar. We looked at the figure because the upper partials decayed too slowly against the recording, so it was found after the gap was seen. On Ab4 its cost is the first partial going from 2.0 under the recording to 6.7 over",
     "The recorded instrument's wood and bars, and on Db5 its mallet: the recording names rosewood mallets, and the render uses boxwood",
     "Lines not explained: Ab4's 2424.8 Hz line is 21 dB too strong and 6 % low against the recording's 2580 Hz. Db5's recording has a line at 3545 Hz with nothing to match it here",
-    "Db5's pitch and Eb5's cepstral envelope stay outside the ruler. Eb5's attack is 3.2 ms against 18.5 ms",
+    "Eb5's pitch and cepstral envelope stay outside the ruler. Db5's pitch passes by .04 c, against a ruler whose widest take is a roll read on one tooth of its comb. Eb5's attack is 3.2 ms against 18.5 ms",
     "Any note beyond these three"
   ],
   "blocked": null,

@@ -710,6 +710,17 @@
    "refs": [
     "frankensim-irp-v5-instrument-realism-pexfp.241"
    ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "method",
+   "title": "A bar's pitch is read from its strongest line near f1, and the bar rulers are re-measured with that read",
+   "decided": "On xylophone and marimba pages the grader (instrgrade-6) reads pitch from the strongest spectral line near the bar's first mode instead of a harmonic comb. The pitch and partial-frequency rulers of those pages were re-measured from the same recordings with the new read; the old grader on the refetched recordings reproduces every live ruler to 1e-3 first. Ruler membership is unchanged, rolled takes included.",
+   "why": "A bar's modes are not harmonics, so a comb read on a bar measures where the comb lands, not the bar. On a clean bar the old read moved 33 c, and some pages passed or failed pitch by that accident.",
+   "effect": "Marimba Gb2 10 to 11 (on a harmonics-to-noise read already called not real), C5 13 to 12, xylophone Db5 13 to 14 and Eb5 13 to 12; A3, Eb6 and Ab4 unchanged. On C5 and Db5 the widest pitch ruler is a rolled take, read on one tooth of its comb, and the pages say so. The bar harmonics-to-noise row still measures a window edge on some pages; a fix is being tested.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.270"
+   ]
   }
  ]
 }
