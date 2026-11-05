@@ -24,19 +24,24 @@
 //! stationary-wall, full-film thin-gap reduction. The original owner uses
 //! zero-gauge reservoirs; [`pressure::PressureDrivenPowerLawFilm`] adds explicit
 //! pressure supplies and their work without changing the constitutive solver.
-//! Pressure-dependent viscosity, cavitation, sliding entrainment, fluid
-//! inertia, layer/thermal evolution and shear-history models are not inferred.
+//! [`shear::ShearedPowerLawFilm`] supplies the combined nonlinear sliding and
+//! pressure profile with work-conjugate wall tractions. Pressure-dependent
+//! viscosity, cavitation, fluid inertia, layer/thermal evolution and shear-history
+//! models are not inferred.
 
 use fs_math::det;
 
 /// Prescribed pressure supplies on the same non-Newtonian pressure operator.
 pub mod pressure;
 pub use pressure::{PressureDrivenPowerLawFilm, PressureDrivenPowerLawReport};
+/// Moving walls on the same pressure-fed nonlinear film.
+pub mod shear;
+pub use shear::{ShearedPowerLawChannelReport, ShearedPowerLawFilm};
 
 use super::pressure::ReservoirPressures;
 use super::{
-    FilmChannelReport, FilmError, FilmReport, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm,
-    Solution, dot, fail, solve_factored,
+    FilmChannelReport, FilmError, FilmReport, FlowBalance, MAX_CELLS, MAX_CHANNELS, MAX_PORTS,
+    ResistiveFilm, Solution, dot, fail, solve_factored,
 };
 
 /// Explicit SI law for one original hydraulic channel.
@@ -60,7 +65,8 @@ pub struct RegularizedPowerLaw {
 /// Work defects have units W; they are numerical residuals, never extra heat.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PowerLawControls {
-    /// At most 128 Newton corrections. Zero refuses.
+    /// At most 128 pressure corrections. A moving-wall binding also uses this
+    /// ceiling for each local scalar stress-offset solve. Zero refuses.
     pub maximum_iterations: usize,
     /// At most 64 candidate trials per correction. Zero refuses.
     pub maximum_line_search_steps: usize,
@@ -68,6 +74,8 @@ pub struct PowerLawControls {
     pub absolute_flow_tolerance_m3_s: f64,
     /// Relative cell defect against the largest original swept-volume rate.
     /// A pressure-fed film also includes its largest actual passage flow.
+    /// Moving-wall films use reduced pressure forcing and pressure-only flux,
+    /// retaining small pressure response under large divergence-free transport.
     pub relative_flow_tolerance: f64,
     /// Nonnegative absolute force/flow work defect [W].
     pub absolute_power_tolerance_w: f64,
@@ -504,6 +512,7 @@ impl PowerLawFilm {
         &self,
         q: &[f64],
         velocity: &[f64],
+        walls: Option<&[shear::Coefficients]>,
         check: &mut impl FnMut() -> Result<(), FilmError>,
     ) -> Result<Geometry, FilmError> {
         check()?;
@@ -515,9 +524,12 @@ impl PowerLawFilm {
             gaps: [0.0; MAX_CHANNELS],
             core_conductance: [0.0; MAX_CHANNELS],
             source: [0.0; MAX_CELLS],
+            pressure_source: [0.0; MAX_CELLS],
             source_scale: 0.0,
             minimum_gap,
+            motion: [shear::Motion::default(); MAX_CHANNELS],
         };
+        let mut entrainment = [FlowBalance::default(); MAX_CELLS];
         for (k, edge) in self.film.channels.iter().enumerate() {
             if k.is_multiple_of(32) {
                 check()?;
@@ -533,6 +545,14 @@ impl PowerLawFilm {
                 return fail("power-law core differential conductance is unrepresentable");
             }
             geometry.core_conductance[k] = g;
+            if let Some(wall) = walls.map(|walls| &walls[k]) {
+                geometry.motion[k] = wall.motion(gap, edge.width_m, velocity)?;
+                let flow = geometry.motion[k].entrainment;
+                entrainment[edge.from].add(flow);
+                if let Some(j) = edge.to {
+                    entrainment[j].add(-flow);
+                }
+            }
         }
         for (i, cell) in self.film.cells.iter().enumerate() {
             let source = cell.area_m2 * dot(&cell.gap.closure, velocity);
@@ -540,7 +560,16 @@ impl PowerLawFilm {
                 return fail("power-law swept-volume rate is unrepresentable");
             }
             geometry.source[i] = source;
-            geometry.source_scale = geometry.source_scale.max(source.abs());
+            let pressure_source = if walls.is_some() {
+                source - entrainment[i].value()
+            } else {
+                source
+            };
+            if !pressure_source.is_finite() {
+                return fail("power-law reduced pressure forcing is unrepresentable");
+            }
+            geometry.pressure_source[i] = pressure_source;
+            geometry.source_scale = geometry.source_scale.max(pressure_source.abs());
         }
         Ok(geometry)
     }
@@ -579,6 +608,7 @@ impl PowerLawFilm {
                 flow,
                 differential: core_conductance,
                 aperture_derivative,
+                ..Channel::default()
             });
         }
         if !wall_stress.is_finite() || wall_stress <= 0.0 {
@@ -617,32 +647,30 @@ impl PowerLawFilm {
             flow: flow.copysign(dp),
             differential,
             aperture_derivative: aperture_derivative.copysign(dp),
+            ..Channel::default()
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn at_pressure(
         &self,
         geometry: &Geometry,
         pressure: &[f64; MAX_CELLS],
         reservoirs: Option<&ReservoirPressures>,
+        walls: Option<&[shear::Coefficients]>,
+        state: &mut State,
         check: &mut impl FnMut() -> Result<(), FilmError>,
-    ) -> Result<State, FilmError> {
+    ) -> Result<(), FilmError> {
         let n = self.film.cell_count();
-        let mut state = State {
-            system: Solution::new(n, geometry.minimum_gap),
-            channels: [Channel::default(); MAX_CHANNELS],
-            residual: geometry.source.map(|q| -q),
-            maximum_residual: 0.0,
-            power: 0.0,
-            source_work: 0.0,
-            reservoir_power: 0.0,
-            supply_magnitude: 0.0,
-            flow_scale: geometry.source_scale,
-            force: [0.0; MAX_PORTS],
-            port_work: 0.0,
-            iterations: 0,
-            backtracks: 0,
-        };
+        state.system.lower[..n * n].fill(0.0);
+        state.residual = geometry.pressure_source.map(|q| -q);
+        state.maximum_residual = 0.0;
+        state.power = 0.0;
+        state.source_work = 0.0;
+        state.wall_work = 0.0;
+        state.reservoir_power = 0.0;
+        state.supply_magnitude = 0.0;
+        state.flow_scale = geometry.source_scale;
         state.system.pressure = *pressure;
         state.system.potential = *pressure;
         if let Some(boundary) = reservoirs {
@@ -668,18 +696,43 @@ impl PowerLawFilm {
             if !dp.is_finite() {
                 return fail("power-law pressure drop is unrepresentable");
             }
-            let channel = self.channel(k, geometry.gaps[k], geometry.core_conductance[k], dp)?;
-            let loss = channel.flow * dp;
+            let moving = walls.is_some_and(|walls| walls[k].moving);
+            let channel = if moving {
+                shear::channel::evaluate(
+                    self,
+                    k,
+                    geometry.gaps[k],
+                    geometry.core_conductance[k],
+                    dp,
+                    geometry.motion[k],
+                    check,
+                )?
+            } else {
+                self.channel(k, geometry.gaps[k], geometry.core_conductance[k], dp)?
+            };
+            let pressure_flow = if moving {
+                channel.wall.pressure_flow
+            } else {
+                channel.flow
+            };
+            let loss = if moving {
+                let motion = geometry.motion[k];
+                state.wall_work += channel.wall.mean_effort * motion.mean
+                    + channel.wall.relative_effort * motion.relative;
+                channel.wall.pressure_flow * dp + channel.wall.relative_effort * motion.relative
+            } else {
+                channel.flow * dp
+            };
             if !loss.is_finite() || loss < 0.0 {
                 return fail("nonfinite or negative power-law channel work");
             }
             state.power += loss;
-            state.residual[edge.from] += channel.flow;
+            state.residual[edge.from] += pressure_flow;
             let g = channel.differential;
             let i = edge.from;
             state.system.lower[i * n + i] += g;
             if let Some(j) = edge.to {
-                state.residual[j] -= channel.flow;
+                state.residual[j] -= pressure_flow;
                 state.system.lower[j * n + j] += g;
                 state.system.lower[i * n + j] -= g;
                 state.system.lower[j * n + i] -= g;
@@ -689,8 +742,8 @@ impl PowerLawFilm {
                 state.reservoir_power += supplied;
                 state.supply_magnitude += supplied.abs();
             }
-            if reservoirs.is_some() {
-                state.flow_scale = state.flow_scale.max(channel.flow.abs());
+            if reservoirs.is_some() || walls.is_some() {
+                state.flow_scale = state.flow_scale.max(pressure_flow.abs());
             }
             state.channels[k] = channel;
         }
@@ -700,13 +753,14 @@ impl PowerLawFilm {
         }
         if !state.power.is_finite()
             || !state.source_work.is_finite()
+            || !state.wall_work.is_finite()
             || !state.reservoir_power.is_finite()
             || !state.supply_magnitude.is_finite()
             || state.residual[..n].iter().any(|r| !r.is_finite())
         {
             return fail("power-law film volume or work sum is unrepresentable");
         }
-        Ok(state)
+        Ok(())
     }
 
     // Force and tangent accept the same solved state, including the rounding
@@ -716,9 +770,22 @@ impl PowerLawFilm {
         &self,
         state: &mut State,
         velocity: &[f64],
+        walls: Option<&[shear::Coefficients]>,
         supplied: bool,
     ) -> Result<(), FilmError> {
         self.film.project(&state.system.pressure, &mut state.force);
+        if let Some(walls) = walls {
+            for (k, coefficients) in walls.iter().enumerate() {
+                if !coefficients.moving {
+                    continue;
+                }
+                let wall = state.channels[k].wall;
+                for (j, force) in state.force[..self.film.ports].iter_mut().enumerate() {
+                    *force += coefficients.mean[j] * wall.mean_effort
+                        + coefficients.relative[j] * wall.relative_effort;
+                }
+            }
+        }
         state.port_work = dot(velocity, &state.force[..self.film.ports]);
         if state.force[..self.film.ports]
             .iter()
@@ -748,9 +815,38 @@ impl PowerLawFilm {
         reservoirs: Option<&ReservoirPressures>,
         check: &mut impl FnMut() -> Result<(), FilmError>,
     ) -> Result<State, FilmError> {
-        let geometry = self.geometry(q, velocity, check)?;
+        self.solve_with_motion(q, velocity, reservoirs, None, check)
+    }
+
+    fn solve_with_motion(
+        &self,
+        q: &[f64],
+        velocity: &[f64],
+        reservoirs: Option<&ReservoirPressures>,
+        walls: Option<&[shear::Coefficients]>,
+        check: &mut impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<State, FilmError> {
+        let geometry = self.geometry(q, velocity, walls, check)?;
+        let mut state = State::new(self.film.cell_count(), geometry.minimum_gap);
         if self.all_newtonian {
-            let native = if let Some(boundary) = reservoirs {
+            let native = if walls.is_some() {
+                let entrainment = geometry.motion.map(|motion| motion.entrainment);
+                if let Some(boundary) = reservoirs {
+                    self.film.solve_with_boundaries::<true, true>(
+                        q,
+                        velocity,
+                        &entrainment[..self.film.channel_count()],
+                        &boundary.potential,
+                        boundary.datum,
+                    )?
+                } else {
+                    self.film.solve_with_entrainment::<true>(
+                        q,
+                        velocity,
+                        &entrainment[..self.film.channel_count()],
+                    )?
+                }
+            } else if let Some(boundary) = reservoirs {
                 self.film.solve_with_boundaries::<false, true>(
                     q,
                     velocity,
@@ -762,21 +858,38 @@ impl PowerLawFilm {
                 self.film.solve(q, velocity)?
             };
             check()?;
-            let mut state = self.at_pressure(&geometry, &native.potential, reservoirs, check)?;
+            self.at_pressure(
+                &geometry,
+                &native.potential,
+                reservoirs,
+                walls,
+                &mut state,
+                check,
+            )?;
             state.system = native;
             if state.maximum_residual > self.flow_tolerance(&state)?
                 || !self.controls.admits_supplied_work(
-                    state.source_work,
+                    state.source_work + state.wall_work,
                     &state,
                     reservoirs.is_some(),
                 )
             {
                 return fail("native Newtonian limit exceeds power-law residual budgets");
             }
-            self.admit_port_work(&mut state, velocity, reservoirs.is_some())?;
+            self.admit_port_work(&mut state, velocity, walls, reservoirs.is_some())?;
             return Ok(state);
         }
-        let mut state = self.at_pressure(&geometry, &[0.0; MAX_CELLS], reservoirs, check)?;
+        self.at_pressure(
+            &geometry,
+            &[0.0; MAX_CELLS],
+            reservoirs,
+            walls,
+            &mut state,
+            check,
+        )?;
+        // Two bounded workspaces avoid returning/copying the whole pressure
+        // factorization and channel state for every line-search candidate.
+        let mut trial = State::new(self.film.cell_count(), geometry.minimum_gap);
         let mut backtracks = 0;
         for iteration in 0..=self.controls.maximum_iterations {
             check()?;
@@ -788,14 +901,14 @@ impl PowerLawFilm {
             if (iteration > 0 || state.maximum_residual == 0.0)
                 && state.maximum_residual <= self.flow_tolerance(&state)?
                 && self.controls.admits_supplied_work(
-                    state.source_work,
+                    state.source_work + state.wall_work,
                     &state,
                     reservoirs.is_some(),
                 )
             {
                 state.iterations = iteration;
                 state.backtracks = backtracks;
-                self.admit_port_work(&mut state, velocity, reservoirs.is_some())?;
+                self.admit_port_work(&mut state, velocity, walls, reservoirs.is_some())?;
                 return Ok(state);
             }
             if iteration == self.controls.maximum_iterations {
@@ -829,7 +942,7 @@ impl PowerLawFilm {
             if !fraction.is_finite() || fraction <= 0.0 {
                 return fail("power-law Newton step cannot remain inside the pressure domain");
             }
-            let mut accepted = None;
+            let mut accepted = false;
             for _ in 0..self.controls.maximum_line_search_steps {
                 check()?;
                 let mut pressure = state.system.potential;
@@ -839,35 +952,45 @@ impl PowerLawFilm {
                 // A nonrepresentable physical trial can shorten the numerical
                 // Newton step. Callback refusals must never be swallowed here.
                 let mut callback_failure = None;
-                let trial = self.at_pressure(&geometry, &pressure, reservoirs, &mut || {
-                    let result = check();
-                    if let Err(error) = result {
-                        callback_failure = Some(error);
-                    }
-                    result
-                });
+                let trial_result = self.at_pressure(
+                    &geometry,
+                    &pressure,
+                    reservoirs,
+                    walls,
+                    &mut trial,
+                    &mut || {
+                        let result = check();
+                        if let Err(error) = result {
+                            callback_failure = Some(error);
+                        }
+                        result
+                    },
+                );
                 if let Some(error) = callback_failure {
                     return Err(error);
                 }
                 check()?;
-                if let Ok(trial) = trial {
+                if trial_result.is_ok() {
                     let decreased =
                         trial.maximum_residual <= state.maximum_residual * (1.0 - 1e-4 * fraction);
                     let converged = trial.maximum_residual <= self.flow_tolerance(&trial)?
                         && self.controls.admits_supplied_work(
-                            trial.source_work,
+                            trial.source_work + trial.wall_work,
                             &trial,
                             reservoirs.is_some(),
                         );
                     if decreased || converged {
-                        accepted = Some(trial);
+                        core::mem::swap(&mut state, &mut trial);
+                        accepted = true;
                         break;
                     }
                 }
                 backtracks += 1;
                 fraction *= 0.5;
             }
-            state = accepted.ok_or(FilmError("power-law film line-search budget exhausted"))?;
+            if !accepted {
+                return fail("power-law film line-search budget exhausted");
+            }
         }
         unreachable!("bounded pressure loop returns an accepted state or refusal")
     }
@@ -878,14 +1001,17 @@ struct Channel {
     flow: f64,
     differential: f64,
     aperture_derivative: f64,
+    wall: shear::WallResponse,
 }
 
 struct Geometry {
     gaps: [f64; MAX_CHANNELS],
     core_conductance: [f64; MAX_CHANNELS],
     source: [f64; MAX_CELLS],
+    pressure_source: [f64; MAX_CELLS],
     source_scale: f64,
     minimum_gap: f64,
+    motion: [shear::Motion; MAX_CHANNELS],
 }
 
 struct State {
@@ -894,6 +1020,7 @@ struct State {
     residual: [f64; MAX_CELLS],
     maximum_residual: f64,
     source_work: f64,
+    wall_work: f64,
     reservoir_power: f64,
     supply_magnitude: f64,
     flow_scale: f64,
@@ -902,6 +1029,27 @@ struct State {
     port_work: f64,
     iterations: usize,
     backtracks: usize,
+}
+
+impl State {
+    fn new(n: usize, minimum_gap: f64) -> Self {
+        Self {
+            system: Solution::new(n, minimum_gap),
+            channels: [Channel::default(); MAX_CHANNELS],
+            residual: [0.0; MAX_CELLS],
+            maximum_residual: 0.0,
+            source_work: 0.0,
+            wall_work: 0.0,
+            reservoir_power: 0.0,
+            supply_magnitude: 0.0,
+            flow_scale: 0.0,
+            power: 0.0,
+            force: [0.0; MAX_PORTS],
+            port_work: 0.0,
+            iterations: 0,
+            backtracks: 0,
+        }
+    }
 }
 
 /// Fast ordinary arithmetic is retained when its positive result is finite.

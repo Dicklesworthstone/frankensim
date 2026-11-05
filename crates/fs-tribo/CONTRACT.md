@@ -1974,10 +1974,12 @@ The numerical work defect is diagnostic, never extra heat; irreversible
 power remains `sum(Q * delta_p)`. Channel diagnostics retain original order,
 including closed passages.
 
-This owner does not combine its nonlinear law with sliding entrainment,
-stratification, temperature evolution, Barus pressure dependence, cavitation,
-fluid inertia, or yield memory. The exposed `pressure_operator()` is the
-core-viscosity geometry view, not a substitute for the nonlinear evaluator.
+The original binding retains stationary walls; `ShearedPowerLawFilm` below
+explicitly adds moving walls to the same constitutive owner. Stratification,
+temperature evolution, Barus pressure dependence, cavitation, fluid inertia,
+and yield memory remain outside this reduction. The exposed
+`pressure_operator()` is the core-viscosity geometry view, not a substitute
+for the nonlinear evaluator.
 
 Seven focused regressions cover the exact Newtonian image, independent
 no-slip profile integration through the core transition, mixed-law network
@@ -2016,11 +2018,79 @@ Zero supplies preserve the original passive path; `n=1` uses the original
 pressure-fed Newtonian solve. Supply or constitutive-law rebinding retains the
 geometry and numerical controls without introducing a thermal clock. All
 refusals, including caller cancellation before publication, preserve outputs.
-Sliding entrainment, pressure-dependent rheology, cavitation and fluid inertia
-remain outside this combination.
+This pressure-only binding omits moving walls; the explicit sliding binding
+below adds them. Pressure-dependent rheology, cavitation and fluid inertia
+remain outside both combinations.
 
 Six focused G1/G3/G4 groups recover independent through-gap momentum integrals
 for thinning and thickening supplied flow, reversed throughflow, mixed-law
 cell continuity, both signs of external power, the native Newtonian limit,
 geometry/rate/supply finite-difference tangents and velocity reciprocity,
 zero-supply parity, law refresh, and atomic domain/budget/cancellation refusal.
+
+### Moving-wall non-Newtonian Couette--Poiseuille films
+
+`resistive_film::power_law::ShearedPowerLawFilm` binds native
+`WallVelocityPorts` to a `PressureDrivenPowerLawFilm`. Normal motion, both
+tangential walls, prescribed pressure supplies and the original regularized
+power-law liquid participate in one complete Reynolds solve. The flow is
+computed from the simultaneous nonlinear stress field, not by superposing
+a pressure-only non-Newtonian flux and an independently evaluated drag.
+
+For a centered through-gap coordinate `x` in `[-1,1]`, stress is
+`tau=c-delta_p*h*x/(2*length)`. A bounded scalar solve finds `c` from the
+integral of the original inverse stress law and the authored relative wall
+speed. Integration is analytic across the Newtonian-core transitions.
+Near-coincident stress endpoints use convergent divided-difference series;
+pressure-dominated sliding retains the small antisymmetric stress component.
+The positive weighted variance of the inverse constitutive differential
+gives passage pressure conductance without subtracting nearly equal second
+moments. The native graph Newton solve and pressure factorization are reused.
+
+Mean wall translation adds exactly `width*h*Umean` to flux. Its reciprocal
+pressure traction contributes signed wall input and no heat. Lower/upper
+resisting tractions, total flow, mean entrainment and signed wall power are
+reported in original channel order. Irreversible power is
+`(Q-Qentrained)*delta_p + width*length*c*(Uupper-Ulower)`; both terms use the
+same combined profile. Full mechanical input plus signed reservoir input
+equals this heat within the original declared work budget. A pressure supply
+can drive the walls and the walls can pump fluid back into a supply.
+
+Wall-transport incidence is summed with compensation before combining it
+with the normal swept source, including in the original native Newtonian
+pressure solve. Nonlinear residuals and tangents retain pressure flow and
+entrainment separately until the latter's incidence cancels. Moving-film
+flow tolerances use reduced pressure forcing and pressure-only flux, so
+large divergence-free translation does not hide a small pressure defect.
+Channel reports retain pressure-only flow separately from total transport.
+
+The consistent tangent differentiates geometry, normal/sliding velocities
+and reservoir pressures, including the implicit stress offset and complete
+wall traction. Pure-Couette pressure conductance uses the law's differential
+viscosity (`n*mu` outside the core). At the exact uniform core-transition
+shear rate, the authored law has no unique full tangent: force remains
+available and tangent evaluation refuses atomically. Fixed-wall evaluations
+retain the original supplied arithmetic; `n=1` uses the native moving-wall
+pressure solve. Constitutive and supply rebinding retain the original wall
+ports without introducing a thermal clock.
+
+Every call uses bounded stack storage and no heap allocation. Two reusable
+Newton trial workspaces avoid copies of the complete pressure factorization
+and channel state on each line-search candidate. Local stress corrections
+use the original iteration ceiling and poll caller cancellation. Closed
+moving passages, failed local velocity closure, failed graph continuity or
+work, nonfinite outputs and exhausted budgets refuse before publication.
+The complete film remains homogeneous, no-slip, incompressible and full-film;
+this increment does not add cavitation, thermal/layer evolution or inertia.
+
+Seven new native G1/G3/G4 test groups cover independent through-gap momentum
+and viscous-heat integrals for thinning and thickening fluids, coupled flow
+reversal, both directions of external work, Galilean heat invariance, pure
+Couette and native Newtonian limits, pressure/slide scale separation, finite
+normal loading under large common translation in both n=1 and n=0.5, full
+configuration/velocity/supply finite-difference tangents, reciprocity,
+positive incremental resistance, stationary parity, and atomic refusals.
+All 123 original-source resistive-film tests pass through the existing narrow
+Rust facade with real `fs-math` and `fs-rand` dependencies, including all 20
+power-law tests. This focused run does not claim a full constellation build
+or cross-ISA execution.

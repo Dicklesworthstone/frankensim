@@ -35,8 +35,9 @@ pub struct PressureDrivenPowerLawReport {
 ///
 /// Geometry, laws and supplies are frozen within a solve. Evaluation and the
 /// full tangent use bounded stack storage without per-query heap allocation.
-/// Fluid inertia, sliding walls, cavitation, supply storage and a thermal time
-/// owner are not supplied by this instantaneous Reynolds reduction.
+/// [`super::shear::ShearedPowerLawFilm`] explicitly binds sliding walls. Fluid
+/// inertia, cavitation, supply storage and a thermal time owner are not supplied
+/// by this instantaneous Reynolds reduction.
 #[derive(Debug, Clone)]
 pub struct PressureDrivenPowerLawFilm {
     film: PowerLawFilm,
@@ -87,7 +88,7 @@ impl PressureDrivenPowerLawFilm {
         )
     }
 
-    fn evaluation_reservoirs(&self) -> Option<&ReservoirPressures> {
+    pub(super) fn evaluation_reservoirs(&self) -> Option<&ReservoirPressures> {
         if self.ambient {
             None
         } else {

@@ -432,12 +432,22 @@ impl ResistiveFilm {
             s.pressure[i] = cell.area_m2 * dot(&cell.gap.closure, v);
         }
         if ENTRAINMENT {
+            // Resolve transport incidence before combining it with the small
+            // swept source. Large divergence-free wall translation must not
+            // erase a finite normal load by rounding it inside total flow.
+            let mut balance = [FlowBalance::default(); MAX_CELLS];
             for (edge, &flow) in self.channels.iter().zip(entrainment) {
                 if flow != 0.0 {
-                    s.pressure[edge.from] -= flow;
+                    balance[edge.from].add(-flow);
                     if let Some(j) = edge.to {
-                        s.pressure[j] += flow;
+                        balance[j].add(flow);
                     }
+                }
+            }
+            for (i, balance) in balance[..n].iter().enumerate() {
+                let transported = balance.value();
+                if transported != 0.0 {
+                    s.pressure[i] += transported;
                 }
             }
         }
@@ -690,6 +700,30 @@ impl ResistiveFilm {
                 f[j] += weight * force;
             }
         }
+    }
+}
+
+// Shared compensated incidence sum for wall transport. It carries no state
+// between calls and introduces no extra mass, source or pressure datum.
+#[derive(Clone, Copy, Default)]
+struct FlowBalance {
+    sum: f64,
+    roundoff: f64,
+}
+
+impl FlowBalance {
+    fn add(&mut self, flow: f64) {
+        let next = self.sum + flow;
+        self.roundoff += if self.sum.abs() >= flow.abs() {
+            (self.sum - next) + flow
+        } else {
+            (flow - next) + self.sum
+        };
+        self.sum = next;
+    }
+
+    fn value(self) -> f64 {
+        self.sum + self.roundoff
     }
 }
 
