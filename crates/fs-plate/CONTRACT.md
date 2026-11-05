@@ -1773,3 +1773,26 @@ Native validation: `cargo check --offline --locked -p fs-plate --tests` passed,
 including all four new regressions. Runtime execution remains unverified: the
 shared native test build was killed by the 8 GiB memory limit while compiling
 upstream asupersync, before any test ran. No executed-test pass is claimed.
+
+### Graded reference density in tapered round shafts
+
+`shell::stiffened::beam::round_element_with_reference_density` integrates a
+positive linear reference-density field with the original linearly tapered
+circular geometry. Translational and section-rotary inertia use the same
+local density. The existing five-point Gauss rule integrates every kinetic
+entry through degree nine; stiffness and its original interpolation stay fixed.
+`RoundBeamModes::with_reference_density` admits one endpoint pair per original
+geometry interval, including density jumps at material interfaces. It preserves
+that field through mesh subdivision and pivot insertion, adds explicitly
+attached bodies to the original mass matrix, then computes rigid inertia,
+elastic frequencies, mass-normalized modes and reciprocal force rows from
+that matrix. The field replaces `RoundBeamSpec::density_kg_m3`; no mean-density
+or effective-tip-mass substitution is made. Uniform fields retain the original
+scalar-path arithmetic. Density is reference data, not an evolving thermal or
+finite-strain density; the existing cold planar Rayleigh-beam and bounded
+frequency-slice assumptions remain unchanged.
+
+Focused regressions cover independent polynomial kinetic integrals, constant
+profile bit parity, discontinuous-density rigid inertia across three mesh
+levels, equal-mass redistribution and density scaling of the actual spectrum,
+attached inertia, and invalid-profile/numeric refusals.

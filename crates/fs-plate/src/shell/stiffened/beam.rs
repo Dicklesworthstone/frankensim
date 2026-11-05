@@ -50,7 +50,20 @@ pub fn hermite(t: f64, l: f64) -> ([f64;4], [f64;4], [f64;4]) {
 /// Five-point Gauss integrates every term (degree at most eight), up to rounding.
 pub fn round_element(l: f64, radii: [f64;2], e: f64, rho: f64)
     -> Result<([f64;16], [f64;16]), PlateError> {
-    if [l,e,rho].iter().any(|v| !v.is_finite() || *v<=0.)
+    round_element_with_reference_density(l, radii, e, [rho; 2])
+}
+
+/// Linearly graded reference density [kg/m³] at the two ends of the original
+/// segment. Both translational and rotary inertia use this same local density;
+/// the stiffness is unchanged. Five Gauss points integrate the tapered,
+/// graded kinetic polynomial (degree at most nine) exactly up to rounding.
+/// A constant profile preserves the scalar-density kernel's arithmetic.
+/// # Errors
+/// Nonpositive/nonfinite length, Young's modulus or density, empty/invalid
+/// radii, or overflowing matrix entries.
+pub fn round_element_with_reference_density(l: f64, radii: [f64;2], e: f64,
+    reference_density_kg_m3: [f64;2]) -> Result<([f64;16], [f64;16]), PlateError> {
+    if [l,e].iter().chain(&reference_density_kg_m3).any(|v| !v.is_finite() || *v<=0.)
         || radii.iter().any(|v| !v.is_finite() || *v<0.) || radii==[0.,0.] {
         return Err(bad("round beam element needs positive length/E/rho and a nonempty radius profile"));
     }
@@ -60,6 +73,9 @@ pub fn round_element(l: f64, radii: [f64;2], e: f64, rho: f64)
         (0.5384693101056831,0.4786286704993665),(0.906179845938664,0.2369268850561891)] {
         let t=0.5*(1.+t); let w=0.5*l*w;
         let radius=(1.-t)*radii[0]+t*radii[1];
+        let rho=if reference_density_kg_m3[0]==reference_density_kg_m3[1] {
+            reference_density_kg_m3[0]
+        } else {(1.-t)*reference_density_kg_m3[0]+t*reference_density_kg_m3[1]};
         let a=std::f64::consts::PI*radius*radius; let inertia=a*radius*radius/4.;
         let (n,d,dd)=hermite(t,l);
         for i in 0..4 { for j in 0..4 {
@@ -84,14 +100,42 @@ impl RoundBeamModes {
     /// the same loaded mass metric. Empty input preserves `new` exactly.
     pub fn with_inertias(stations: &[RoundStation], spec: RoundBeamSpec,
         attached: &[RoundInertia]) -> Result<Self, PlateError> {
+        Self::assemble(stations, spec, attached, None)
+    }
+
+    /// Build the original shaft pencil with one pair of positive reference
+    /// densities [kg/m³] per adjacent pair of supplied geometry stations.
+    /// Density is linear within each interval; adjoining intervals may have
+    /// different densities at a shared station, preserving material interfaces.
+    /// The explicit profile replaces `spec.density_kg_m3`; E and geometry remain
+    /// unchanged. Subdivision and insertion of the pivot preserve this field.
+    /// Attached bodies are added to the same matrix before rigid separation,
+    /// spectral selection, modal normalization and force-port projection.
+    /// # Errors
+    /// Invalid density count/value, or any refusal of [`Self::with_inertias`].
+    pub fn with_reference_density(stations: &[RoundStation], spec: RoundBeamSpec,
+        reference_density_kg_m3: &[[f64;2]], attached: &[RoundInertia])
+        -> Result<Self, PlateError> {
+        Self::assemble(stations, spec, attached, Some(reference_density_kg_m3))
+    }
+
+    fn assemble(stations: &[RoundStation], spec: RoundBeamSpec,
+        attached: &[RoundInertia], reference_density_kg_m3: Option<&[[f64;2]]>)
+        -> Result<Self, PlateError> {
         let s=spec;
         if stations.len()<2 || stations.len()>33 || s.subdivisions==0 || s.subdivisions>16
             || !(2..=17).contains(&s.maximum_modes)
-            || [s.young_pa,s.density_kg_m3,s.maximum_hz].iter().any(|x| !x.is_finite() || *x<=0.)
+            || [s.young_pa,s.maximum_hz].iter().any(|x| !x.is_finite() || *x<=0.)
+            || (reference_density_kg_m3.is_none() && (!s.density_kg_m3.is_finite() || s.density_kg_m3<=0.))
             || [s.pivot_m,s.contact_m,s.hand_m].iter().any(|x| !x.is_finite())
             || stations.iter().any(|v| !v.x_m.is_finite() || !v.radius_m.is_finite() || v.radius_m<0.)
             || stations.windows(2).any(|w| w[0].x_m>=w[1].x_m || w[0].radius_m==0. && w[1].radius_m==0.) {
             return Err(bad("invalid bounded round beam specification"));
+        }
+        if let Some(density)=reference_density_kg_m3 {
+            if density.len()!=stations.len()-1 || density.iter().flatten().any(|v|!v.is_finite() || *v<=0.) {
+                return Err(bad("round beam reference density needs one positive endpoint pair per geometry interval"));
+            }
         }
         let start=stations[0].x_m; let end=stations[stations.len()-1].x_m; let length=end-start;
         if !length.is_finite() || length<=0. || !(start..end).contains(&s.pivot_m)
@@ -126,7 +170,17 @@ impl RoundBeamModes {
         };
         let mut k=vec![0.;nd*nd]; let mut m=vec![0.;nd*nd];
         for (a,x) in nodes.windows(2).enumerate() {
-            let (ke,me)=round_element(x[1]-x[0],[radius(x[0]),radius(x[1])],s.young_pa,s.density_kg_m3)?;
+            let density=if let Some(profile)=reference_density_kg_m3 {
+                let i=stations.partition_point(|p|p.x_m<=x[0]).saturating_sub(1).min(stations.len()-2);
+                let rho=profile[i];
+                if rho[0]==rho[1] {rho} else {
+                    [x[0],x[1]].map(|coordinate| {
+                        let t=(coordinate-stations[i].x_m)/(stations[i+1].x_m-stations[i].x_m);
+                        (1.-t)*rho[0]+t*rho[1]
+                    })
+                }
+            } else {[s.density_kg_m3;2]};
+            let (ke,me)=round_element_with_reference_density(x[1]-x[0],[radius(x[0]),radius(x[1])],s.young_pa,density)?;
             // Scale slopes by total length to avoid mixing metre and radian
             // magnitudes in the generalized eigensolver. Ports undo this scale.
             for i in 0..4 { for j in 0..4 {

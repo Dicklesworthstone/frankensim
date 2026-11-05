@@ -108,3 +108,92 @@ fn empty_inertia_is_identical_and_invalid_physical_attachments_refuse() {
     assert!(RoundBeamModes::with_inertias(&shaft(),s,&[good;9]).is_err());
     assert!(b.slope(f64::NAN).is_err());
 }
+
+#[test]
+fn graded_tapered_element_matches_independent_polynomial_kinetic_integrals() {
+    // Coefficient integration is independent of the production Gauss rule.
+    fn product(a: &[f64], b: &[f64]) -> Vec<f64> {
+        let mut c=vec![0.;a.len()+b.len()-1];
+        for (i,a) in a.iter().enumerate() {for (j,b) in b.iter().enumerate() {c[i+j]+=a*b;}}
+        c
+    }
+    fn integral(a: &[f64]) -> f64 {a.iter().enumerate().map(|(i,a)|a/(i+1) as f64).sum()}
+    let l=0.7; let e=12e9; let radii=[0.003,0.009]; let rho=[430.,1800.];
+    let (k,m)=round_element_with_reference_density(l,radii,e,rho).unwrap();
+    assert_eq!(k,round_element(l,radii,e,800.).unwrap().0);
+    let r2=product(&[radii[0],radii[1]-radii[0]],&[radii[0],radii[1]-radii[0]]);
+    let r4=product(&r2,&r2); let density=[rho[0],rho[1]-rho[0]];
+    let area=product(&density,&r2); let inertia=product(&density,&r4);
+    let n=[[1.,0.,-3.,2.],[0.,l,-2.*l,l],[0.,0.,3.,-2.],[0.,0.,-l,l]];
+    let d=[[0.,-6./l,6./l],[1.,-4.,3.],[0.,6./l,-6./l],[0.,-2.,3.]];
+    for i in 0..4 {for j in 0..4 {
+        let expected=std::f64::consts::PI*l*(integral(&product(&area,&product(&n[i],&n[j])))
+            +0.25*integral(&product(&inertia,&product(&d[i],&d[j]))));
+        assert!((m[4*i+j]-expected).abs()<2e-12*expected.abs().max(1e-8),"M[{i},{j}]: {} != {expected}",m[4*i+j]);
+    }}
+}
+
+#[test]
+fn uniform_reference_profile_keeps_original_modes_and_attached_inertia_bits() {
+    let s=spec(); let attached=[RoundInertia{x_m:0.35,mass_kg:0.01,rotary_kg_m2:2e-7}];
+    let original=RoundBeamModes::with_inertias(&shaft(),s,&attached).unwrap();
+    let explicit=RoundBeamModes::with_reference_density(&shaft(),s,&[[s.density_kg_m3;2]],&attached).unwrap();
+    assert_eq!(original.omega,explicit.omega); assert_eq!(original.shapes,explicit.shapes);
+    assert_eq!(original.pivot_inertia_kg_m2,explicit.pivot_inertia_kg_m2);
+    assert_eq!(original.tip,explicit.tip); assert_eq!(original.hand,explicit.hand);
+    assert_eq!(round_element(0.4,[0.005,0.002],12e9,800.).unwrap(),
+        round_element_with_reference_density(0.4,[0.005,0.002],12e9,[800.;2]).unwrap());
+}
+
+#[test]
+fn density_interfaces_and_subdivision_preserve_the_physical_pivot_inertia() {
+    let stations=[RoundStation{x_m:0.,radius_m:0.005},RoundStation{x_m:0.17,radius_m:0.005},
+        RoundStation{x_m:0.4,radius_m:0.005}];
+    let density=[[400.,1200.],[1900.,900.]];
+    let attached=RoundInertia{x_m:0.39,mass_kg:0.012,rotary_kg_m2:1.7e-7};
+    let s=spec(); let area=std::f64::consts::PI*0.005_f64.powi(2);
+    let second=area*0.005_f64.powi(2)/4.;
+    let mut expected=attached.mass_kg*(attached.x_m-s.pivot_m).powi(2)+attached.rotary_kg_m2;
+    for (x,rho) in stations.windows(2).zip(density) {
+        let l=x[1].x_m-x[0].x_m; let a=x[0].x_m-s.pivot_m; let dr=rho[1]-rho[0];
+        expected+=area*l*(rho[0]*(a*a+a*l+l*l/3.)+dr*(a*a/2.+2.*a*l/3.+l*l/4.))
+            +second*l*(rho[0]+rho[1])/2.;
+    }
+    for subdivisions in [4,8,12] {
+        let mut s=s; s.subdivisions=subdivisions;
+        // The resolved profile replaces the unused homogeneous density.
+        s.density_kg_m3=f64::NAN;
+        let modes=RoundBeamModes::with_reference_density(&stations,s,&density,&[attached]).unwrap();
+        assert!((modes.pivot_inertia_kg_m2/expected-1.).abs()<2e-13);
+        assert!((modes.tip[0]*expected.sqrt()-(s.contact_m-s.pivot_m)).abs()<2e-14);
+        assert!((modes.slope(s.hand_m).unwrap()[0]*expected.sqrt()-1.).abs()<2e-14);
+    }
+}
+
+#[test]
+fn equal_total_mass_with_different_density_distribution_changes_the_spectrum() {
+    let mut s=spec(); s.pivot_m=0.;
+    // Both constant-area shafts have rho_mean=800 kg/m³ and identical stiffness.
+    let light_tip=RoundBeamModes::with_reference_density(&shaft(),s,&[[1200.,400.]],&[]).unwrap();
+    let heavy_tip=RoundBeamModes::with_reference_density(&shaft(),s,&[[400.,1200.]],&[]).unwrap();
+    assert!(heavy_tip.pivot_inertia_kg_m2>1.5*light_tip.pivot_inertia_kg_m2);
+    assert!((light_tip.omega[1]/heavy_tip.omega[1]-1.).abs()>0.01,
+        "equal mean density must not replace the spatial inertia");
+    let mut scaled=s; scaled.maximum_hz/=2.;
+    let heavier=RoundBeamModes::with_reference_density(&shaft(),scaled,&[[1600.,4800.]],&[]).unwrap();
+    assert_eq!(heavy_tip.omega.len(),heavier.omega.len());
+    for (a,b) in heavy_tip.omega.iter().zip(&heavier.omega).skip(1) {assert!((b/(0.5*a)-1.).abs()<2e-7);}
+    assert!((heavier.tip[0]/heavy_tip.tip[0]-0.5).abs()<1e-13);
+}
+
+#[test]
+fn graded_density_rejects_bad_counts_values_and_overflow() {
+    for density in [vec![],vec![[800.;2];2],vec![[0.,800.]],vec![[-1.,800.]],
+        vec![[800.,f64::NAN]],vec![[f64::INFINITY,800.]]] {
+        assert!(RoundBeamModes::with_reference_density(&shaft(),spec(),&density,&[]).is_err());
+    }
+    for rho in [[800.,0.],[-1.,800.],[800.,f64::NAN],[f64::INFINITY,800.]] {
+        assert!(round_element_with_reference_density(0.4,[0.005;2],12e9,rho).is_err());
+    }
+    assert!(round_element_with_reference_density(4.,[1.;2],1.,[f64::MAX/2.,f64::MAX]).is_err());
+}
