@@ -21,6 +21,8 @@ use fs_math::{c64::C64, det};
 /// Original volume sources inside the layer radiating into its incident exterior.
 pub mod source;
 
+/// Coherent original exterior volume-flow and force arrays observed in the layer.
+pub mod array;
 mod force;
 pub use force::{FULL_WAVE_LAYER_INTERIOR_FORCE_SCOPE, PreparedInteriorFullWaveForce};
 

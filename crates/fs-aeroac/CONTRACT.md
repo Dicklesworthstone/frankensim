@@ -2268,6 +2268,39 @@ are also covered. A private phase regression retains a second-face distance
 smaller than one ulp of its leading component. Numerical diagnostics remain
 estimates plus analytic spectral-tail bounds, not interval certificates.
 
+### Coherent exterior source arrays observed inside the layer
+
+`interior::array::PreparedInteriorFullWaveCompactSourceObserver` composes the
+native interior monopole and force owners for original incident-exterior source
+positions. It retains the original layer, strict interior receiver and physical
+source clock. One cached 4-by-4 Cartesian transfer per source maps the original
+Q [m³/s] and three force [N] channels into actual pressure and vector velocity.
+All forward/backward propagation and internal returns stay coherent within
+each original source. Applying source amplitudes uses the existing fixed-order
+double-double array reduction, without allocation or additional quadrature.
+
+The same transfer bank supports coherent fields and native harmonic lines,
+explicit independent-source statistics, and caller-supplied low-rank coherence
+factors. Phase is retained across Q/F channels, sources and internal paths
+before pressure/velocity moments, active intensity and signed reactive intensity
+are formed. Independence is never inferred from an unknown phase. These are
+peak-phasor line powers, not spectral densities or an added propagation clock.
+
+Per-source Q/F tolerances retain their own physical units, while one shared
+evaluation cap bounds all preparations. Source and observation counts, strict
+face clearances, numerical limits and cancellation refuse partial publication;
+empty arrays enforce the same interior receiver domain. An invisible second
+face with equal original exterior speeds uses the exact zero-quadrature path.
+Equal speeds alone do not erase unequal-density internal reflections. Native
+source diagnostics remain available; relative per-source tolerances do not
+guarantee relative array accuracy at an interference null. Interior sources,
+face traces, zero-thickness interiors and guided poles remain outside this API.
+
+`tests/full_wave_layer_interior_array.rs` checks exact original reductions,
+actual layer Q/F composition and all pressure/velocity moments, coherent versus
+independent source powers, shared work exhaustion, equal-speed density-layer
+work, original clocks, empty arrays and domain/cancellation refusal.
+
 ## Causal transient Lighthill volume-stress observation
 
 `curle3d::quadrupole::transient::PreparedTransientQuadrupoleObserver` observes
