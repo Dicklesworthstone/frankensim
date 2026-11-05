@@ -5032,6 +5032,29 @@ Three native temperature groups cover unequal source temperatures with nonzero
 actual momentum and subsequent whole-body energy closure, exact no-op transfer
 after an accepted step, and stale frame/rates/geometry/mobility/twist plus
 cancellation refusal with retry.
+
+`continue_at_geometry` accepts compatible caller-owned pose endpoints without
+restarting the source trajectory. The private native token seals ordered body
+indices, full mass properties, accepted endpoint momenta, accumulated pending
+COM travel and whether each pending phase had angular motion. The same material
+markers and normal datum must reproduce the retained approach; actual COM
+travel, individual linear and world-spin momenta, total orbital-plus-spin angular
+momentum and full kinetic energy must pass the original native tolerances.
+An attitude or common spin unsupported by any accepted angular motion refuses.
+The existing tangent isometry re-expresses elastic shear, and the source owner
+retains its source, static capacity, normal coordinate, policy, time and steps
+while admitting the new actual full mobility and rates. Transport storage
+roundoff remains in the native energy gate; a change of contact-projected
+kinetic energy is diagnostic only, with no work or heat attribution.
+
+This handoff is not an attitude integrator or a general moving-contact path.
+Noncollinear original material markers, unowned COM corrections, unsupported
+torsion and failed conservation gates refuse without projection or relocation.
+The caller still owns finite-rotation evolution and path refinement. Four
+geometry groups cover two actual loaded normal phases with retained shear,
+changed midpoint arms and full-tensor mobility, tangent/world covariance,
+accumulated common travel, zero-motion attitude/common-spin refusal and atomic
+geometry, momentum, property and cancellation failures with retry.
 Source/native execution remains subject to the documented dependency build
 limitation.
 

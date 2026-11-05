@@ -1,6 +1,8 @@
 //! Original mixed-mode area/work and actual full-inertia paired-body recoil.
 #[path = "../../fs-contact/tests/adhesive_dmt_coupled/common.rs"]
 mod common;
+#[path = "adhesive_jkr_mixed_mode/geometry.rs"]
+mod geometry;
 #[path = "adhesive_jkr_mixed_mode/temperature.rs"]
 mod temperature;
 
@@ -492,8 +494,9 @@ fn all_three_point_axes_keep_full_tensor_cross_recoil_and_world_covariance() {
     let mut swapped = f.contact(&source, &shear);
     swapped.binding.body_a = 1;
     swapped.binding.body_b = 0;
-    assert_eq!(
-        c,
+    // The physical result is independent of container order, but a retained
+    // native token cannot silently acquire a different ordered body identity.
+    assert!(
         prepare_rigid_jkr_mixed_mode(
             &[f.bodies[1], f.bodies[0]],
             &[f.properties[1], f.properties[0]],
@@ -504,8 +507,28 @@ fn all_three_point_axes_keep_full_tensor_cross_recoil_and_world_covariance() {
             controls(&source),
             &CancelGate::new()
         )
-        .unwrap()
+        .is_err()
     );
+    let mut swapped_pair = PreparedRigidJkrMixedModePair::new(
+        &[f.bodies[1], f.bodies[0]],
+        &[f.properties[1], f.properties[0]],
+        swapped,
+        controls(&source),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    let swapped_initial = swapped_pair
+        .initialize([0.6 * length, -0.3 * length], &CancelGate::new())
+        .unwrap();
+    let reordered = swapped_pair
+        .advance_with_wrenches(swapped_initial, wrenches, dt, &CancelGate::new())
+        .unwrap();
+    assert_eq!(reordered.bodies_after, c.bodies_after);
+    assert_eq!(
+        reordered.state_after.motion_state(),
+        c.state_after.motion_state()
+    );
+    assert_eq!(reordered.report, c.report);
 
     let rotation = UnitQuaternion::from_axis_angle(Vec3::new(1.0, 2.0, -1.0), 0.7).unwrap();
     let mut rotated = fixture(f.arms);

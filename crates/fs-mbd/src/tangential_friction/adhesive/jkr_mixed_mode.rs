@@ -21,6 +21,8 @@
 //! transfer. Torsion, sliding and radius instability refuse: this owner invents
 //! no spin law, snap continuation, heat, contact migration or finite rotation.
 
+/// Compatible endpoint poses with retained original native/source history.
+pub mod geometry;
 /// Original-source temperature continuation at unchanged native state.
 pub mod temperature;
 
@@ -77,7 +79,22 @@ pub struct RigidJkrMixedModeState {
     frame: TangentFrame,
     marker_arms: [Vec3; 2],
     reference_approach_m: f64,
+    endpoint: NativeEndpoint,
 }
+
+/// Accepted momenta remain at the phase geometry until a pose owner supplies
+/// compatible endpoints. Pending COM travel is consumed only by that handoff.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NativeEndpoint {
+    body_indices: [usize; 2],
+    properties: [MassProperties; 2],
+    bodies: [RigidBodyState; 2],
+    pending_com_travel_m: [Vec3; 2],
+    // A sum of angular vectors is not a finite-rotation history. Retain whether
+    // any pending phase moved so cancellation cannot erase that distinction.
+    pending_angular_motion: [bool; 2],
+}
+
 impl RigidJkrMixedModeState {
     pub const fn motion_state(self) -> JkrMixedModeMotionState {
         self.motion
@@ -242,46 +259,15 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         }
         let before = [bodies[binding.body_a], bodies[binding.body_b]];
         let properties = [properties[binding.body_a], properties[binding.body_b]];
-        let marker_arms = [binding.arm_a_body, binding.arm_b_body];
-        let axes = [
-            contact.frame.normal(),
-            contact.frame.longitudinal(),
-            contact.frame.lateral(),
-        ]
-        .map(vector);
-        let markers_before = points(before, properties, marker_arms)?;
-        let separation = markers_before[1]
-            .point_world
-            .sub(markers_before[0].point_world);
-        let normal_separation = finite(separation.dot(axes[0]))?;
-        if magnitude(separation.sub(axes[0].scale(normal_separation)))
-            > controls.geometry_tolerance_m
-        {
-            return Err(RigidJkrMixedModeError::Invalid(
-                "normal geometry markers must be collinear",
-            ));
-        }
-        let approach_m = finite(contact.reference_approach_m - normal_separation)?;
-        let reaction_arms = core::array::from_fn(|i| {
-            marker_arms[i].add(
-                before[i]
-                    .pose()
-                    .orientation()
-                    .rotate_world_to_body(separation.scale(if i == 0 { 0.5 } else { -0.5 })),
-            )
-        });
-        let reaction_before = points(before, properties, reaction_arms)?;
-        if magnitude(
-            reaction_before[0]
-                .point_world
-                .sub(reaction_before[1].point_world),
-        ) > controls.geometry_tolerance_m
-        {
-            return Err(RigidJkrMixedModeError::Invalid(
-                "unrepresentable common reaction plane",
-            ));
-        }
-        let mobility = point_response(before, properties, reaction_arms, axes)?;
+        let CapturedGeometry {
+            marker_arms,
+            reaction_arms,
+            axes,
+            markers_before,
+            reaction_before,
+            approach_m,
+            mobility,
+        } = capture_geometry(before, properties, contact, controls)?;
         let motion =
             JkrMixedModeMotion::new(contact.source, contact.shear, mobility, controls.motion)?;
         poll(gate)?;
@@ -335,6 +321,13 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
             frame: self.contact.frame,
             marker_arms: self.marker_arms,
             reference_approach_m: self.contact.reference_approach_m,
+            endpoint: NativeEndpoint {
+                body_indices: [self.contact.binding.body_a, self.contact.binding.body_b],
+                properties: self.properties,
+                bodies: self.before,
+                pending_com_travel_m: [Vec3::ZERO; 2],
+                pending_angular_motion: [false; 2],
+            },
         })
     }
 
@@ -543,11 +536,28 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         {
             return Err(RigidJkrMixedModeError::Audit(Box::new(audit)));
         }
+        let mut pending_com_travel_m = previous.endpoint.pending_com_travel_m;
+        let mut pending_angular_motion = previous.endpoint.pending_angular_motion;
+        for i in 0..2 {
+            pending_com_travel_m[i] = pending_com_travel_m[i].add(body_travel[i]);
+            pending_angular_motion[i] |= angular_travel[i] != Vec3::ZERO;
+            if !pending_com_travel_m[i].is_finite() {
+                return Err(RigidJkrMixedModeError::Invalid(
+                    "unrepresentable pending COM travel",
+                ));
+            }
+        }
         poll(gate)?;
         Ok(RigidJkrMixedModeCandidate {
             bodies_after: after,
             state_after: RigidJkrMixedModeState {
                 motion: step.state(),
+                endpoint: NativeEndpoint {
+                    bodies: after,
+                    pending_com_travel_m,
+                    pending_angular_motion,
+                    ..previous.endpoint
+                },
                 ..previous
             },
             report: RigidJkrMixedModeReport {
@@ -582,6 +592,9 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         if previous.frame != self.contact.frame
             || previous.marker_arms != self.marker_arms
             || previous.reference_approach_m != self.contact.reference_approach_m
+            || previous.endpoint.properties != self.properties
+            || previous.endpoint.body_indices
+                != [self.contact.binding.body_a, self.contact.binding.body_b]
         {
             return Err(RigidJkrMixedModeError::StateMismatch);
         }
@@ -602,6 +615,9 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
         }
         let spin = finite(relative_spin(self.reaction_before).dot(self.axes[0]))?;
         self.admit_spin([spin; 2])?;
+        if previous.endpoint.bodies != self.before {
+            return Err(RigidJkrMixedModeError::StateMismatch);
+        }
         Ok((rates, spin))
     }
 
@@ -618,6 +634,74 @@ impl<'a> PreparedRigidJkrMixedModePair<'a> {
             Ok(())
         }
     }
+}
+
+/// Capture the real common reaction plane once, without preparing a duplicate
+/// constitutive factor when only the geometry owner changes.
+struct CapturedGeometry {
+    marker_arms: [Vec3; 2],
+    reaction_arms: [Vec3; 2],
+    axes: [Vec3; 3],
+    markers_before: [PointKinematics; 2],
+    reaction_before: [PointKinematics; 2],
+    approach_m: f64,
+    mobility: [[f64; 3]; 3],
+}
+
+fn capture_geometry(
+    before: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    contact: RigidJkrMixedModeContact<'_>,
+    controls: RigidJkrMixedModeControls,
+) -> Result<CapturedGeometry, RigidJkrMixedModeError> {
+    let binding = contact.binding;
+    let marker_arms = [binding.arm_a_body, binding.arm_b_body];
+    let axes = [
+        contact.frame.normal(),
+        contact.frame.longitudinal(),
+        contact.frame.lateral(),
+    ]
+    .map(vector);
+    let markers_before = points(before, properties, marker_arms)?;
+    let separation = markers_before[1]
+        .point_world
+        .sub(markers_before[0].point_world);
+    let normal_separation = finite(separation.dot(axes[0]))?;
+    if magnitude(separation.sub(axes[0].scale(normal_separation))) > controls.geometry_tolerance_m {
+        return Err(RigidJkrMixedModeError::Invalid(
+            "normal geometry markers must be collinear",
+        ));
+    }
+    let approach_m = finite(contact.reference_approach_m - normal_separation)?;
+    let reaction_arms = core::array::from_fn(|i| {
+        marker_arms[i].add(
+            before[i]
+                .pose()
+                .orientation()
+                .rotate_world_to_body(separation.scale(if i == 0 { 0.5 } else { -0.5 })),
+        )
+    });
+    let reaction_before = points(before, properties, reaction_arms)?;
+    if magnitude(
+        reaction_before[0]
+            .point_world
+            .sub(reaction_before[1].point_world),
+    ) > controls.geometry_tolerance_m
+    {
+        return Err(RigidJkrMixedModeError::Invalid(
+            "unrepresentable common reaction plane",
+        ));
+    }
+    let mobility = point_response(before, properties, reaction_arms, axes)?;
+    Ok(CapturedGeometry {
+        marker_arms,
+        reaction_arms,
+        axes,
+        markers_before,
+        reaction_before,
+        approach_m,
+        mobility,
+    })
 }
 
 /// Stage the complete native phase; wrenches are in original A/B order.
