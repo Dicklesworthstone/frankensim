@@ -86,6 +86,12 @@ impl<'a> IsochoricConductionLaw<'a> {
         self.conductivity.source_line()
     }
 
+    pub(in crate::thermal::transport) fn integrated_conductivity_curve(
+        &self,
+    ) -> Result<crate::thermal::conduction::ConductivityCurve, DepositionError> {
+        self.conductivity.integrated_curve()
+    }
+
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
@@ -142,4 +148,5 @@ impl ImplicitConductionLaw for IsochoricConductionLaw<'_> {
 }
 
 #[cfg(test)]
+#[path = "conduction/tests.rs"]
 mod tests;

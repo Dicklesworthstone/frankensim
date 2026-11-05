@@ -90,6 +90,20 @@ impl PreparedScalarConductivity {
         &self.source
     }
 
+    // Optional integrated-layer preparation retains every original k knot.
+    // Its separate bounded kernel never narrows admission of the point law.
+    pub(super) fn integrated_curve(
+        &self,
+    ) -> Result<crate::thermal::conduction::ConductivityCurve, fs_thermal::enthalpy::DepositionError>
+    {
+        if self.knots.len() > crate::thermal::conduction::MAX_CONDUCTIVITY_KNOTS {
+            return Err(fs_thermal::enthalpy::DepositionError::Budget(
+                "integrated conductivity source knots",
+            ));
+        }
+        crate::thermal::conduction::ConductivityCurve::new(self.knots.clone())
+    }
+
     // Preserve the existing isobaric identity preimage: original knot count
     // followed by each original receipt, without a new wrapper hash or tag.
     pub(super) fn append_identity(&self, hash: &mut DomainHasher) {

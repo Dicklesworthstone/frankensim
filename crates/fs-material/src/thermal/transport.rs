@@ -44,6 +44,10 @@ pub mod isobaric;
 #[path = "transport/isochoric.rs"]
 pub mod isochoric;
 
+/// Source-integrated conductive faces on the original Cp or Cv energy laws.
+#[path = "transport/conduction.rs"]
+pub mod conduction;
+
 // Shared affine-capacity integration and inversion, independent of its units.
 #[path = "transport/capacity.rs"]
 mod capacity;

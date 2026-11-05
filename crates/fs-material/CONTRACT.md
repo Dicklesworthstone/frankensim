@@ -8483,6 +8483,42 @@ This is numerical single-phase calorimetry, not an EOS, pressure prediction,
 phase transition, chemical reaction, evolving strain model or experimental
 material validation.
 
+## Source-integrated conduction between original Cp and Cv regions
+
+`thermal::transport::conduction::CaloricConductionLayer` retains an original
+`IsobaricConductionLaw` or `IsochoricConductionLaw` and prepares its unchanged
+conductivity knots once for the existing Kirchhoff integral owner. Many faces
+borrow that same prepared layer. `IntegratedCaloricLink` binds the actual
+ordered caloric objects, contact coverage and planar/cylindrical/spherical
+geometry, then supplies the existing implicit chain or graph with the complete
+source-integrated flux and analytic derivatives with respect to each original
+specific h or u. The exact Cp/Cv integrals, source identity, density admission
+and entropy remain with the original caloric owner.
+
+The original two-layer kernel resolves both material-face temperatures and a
+finite contact jump. Its dQ/dT derivatives chain with 1/Cp(T) or 1/Cv(T), rather
+than differentiating a frozen effective conductance. The native residual's
+actual secant power must agree with that same constitutive solve. Successful
+face evaluations allocate nothing and query no material card; preparation is
+bounded by the existing conductivity-curve knot limit. Point-only Cp/Cv paths
+keep their previous admission, arithmetic and identity conventions.
+
+Either side may use Cp or Cv; a heat transfer does not identify h with u or
+supply unmodeled pressure-volume work. The layer profile is source-free,
+single-phase and quasi-steady within each leg, at fixed source context and
+geometry. This adds no separate half-cell storage, latent account, flow,
+mechanical work or time integrator. Original source-domain, contact, geometry
+and cancellation refusals publish no candidate. Spatial and temporal accuracy
+still require the consuming discretization's independent refinement.
+
+Four focused native regressions pass against independent quadratic flux and
+caloric references: unequal Cp/Cv source paths and analytic contact tangents;
+planar/radial, equal-temperature and reversed heat flow; a large actual implicit
+step with original stored-energy and entropy closure; and original-object,
+geometry, source-domain and late-cancellation refusal with exact replay. These
+are numerical model checks on synthetic source cards, not measured-material
+validation.
+
 ## Source-exact fixed-density heat capacity in implicit conduction
 
 `thermal::transport::isochoric::conduction::IsochoricConductionLaw` binds the
@@ -8502,9 +8538,9 @@ phase change or permission to use internal energy as stream enthalpy.
 
 Four G0/G1 tests cover exact constitutive tangents, source/density refusals,
 nonlinear two-cell exchange against an independent heat root, and branched
-adaptive SDIRK2 decay against an analytic network mode. The focused Rust test
-build was killed by shared-memory pressure while compiling the genuine pinned
-asupersync dependency, before fs-material; these tests are not yet executed.
+adaptive SDIRK2 decay against an analytic network mode. All four pass in the
+focused native build with the original full thermal owner and numerical solver
+kernels; this is not a full workspace Cargo verification.
 
 ## Source-exact isobaric heat capacity in implicit conduction
 
@@ -8527,10 +8563,9 @@ caloric law declares no phase fraction.
 Four regressions specify separate Cp and conductivity knots, analytic tangent
 checks against independent finite differences, source/card/pressure admission,
 and native implicit two-cell exchange against an independently derived nonlinear
-heat root with total-energy and entropy checks. These newly added tests were
-not executed in the authoring session after dependency compilation exhausted
-shared storage and the execution environment disconnected. This is source-bound
-single-phase isobaric transport, not a phase/EOS closure or experimental validation.
+heat root with total-energy and entropy checks. All four pass in the same
+focused native build. This is source-bound single-phase isobaric transport,
+not a phase/EOS closure or experimental validation.
 
 ## Source-exact heat capacity in finite-rate crystallization
 
