@@ -220,6 +220,161 @@ fn g1_implicit_latent_feedback_conserves_mass_and_full_stream_enthalpy() {
 }
 
 #[test]
+fn g1_condensation_finds_the_physical_root_below_a_boiling_trial() {
+    // At 5000 Pa the original liquid chart reaches boiling at 310 K.
+    // Both cases have an admissible condensation endpoint below their dew
+    // point. In the second case the first supported trial (307.5 K) is still
+    // below the root, so simply accepting the first nonboiling bracket fails.
+    for (duration, vapor_pressure) in [(20.0, 4500.0), (2000.0, 4900.0)] {
+        let bath = GasFilm {
+            total_pressure_pa: 5000.0,
+            vapor_partial_pressure_pa: vapor_pressure,
+            ..film(0.0)
+        };
+        let dew_point = 300.0 + (vapor_pressure - 4000.0) / 100.0;
+        // Independent energy/rate reconstruction uses ordinary ln, not the
+        // production flux or its safeguarded enthalpy solve.
+        let transfer = |t: f64| {
+            duration * 0.01 * 0.01 * 5000.0 * 0.018
+                / (MOLAR_GAS_CONSTANT * 300.0)
+                * ((5000.0 - vapor_pressure) / (1000.0 - 100.0 * (t - 300.0))).ln()
+        };
+        let mut lower = 300.0;
+        let mut upper = dew_point;
+        for _ in 0..60 {
+            let t = lower + 0.5 * (upper - lower);
+            let residual = 0.1 * 4000.0 * (t - 300.0) + transfer(t) * 2.4e6;
+            if residual < 0.0 {
+                lower = t;
+            } else {
+                upper = t;
+            }
+        }
+        let reference_temperature = lower + 0.5 * (upper - lower);
+        let reference_transfer = transfer(reference_temperature);
+        // A tight valid interval, an endpoint exactly at boiling and a wider
+        // source-supported interval must produce the same physical result.
+        for maximum_temperature in [dew_point, 310.0, 330.0] {
+            let next = advance_surface(
+                &law(),
+                bath,
+                liquid(),
+                duration,
+                SolverConfig {
+                    specific_enthalpy_bracket_j_kg: [
+                        -80_000.0,
+                        4000.0 * (maximum_temperature - 300.0),
+                    ],
+                    ..controls(0.0)
+                },
+                |h| Ok(300.0 + h / 4000.0),
+                || Ok(()),
+            )
+            .unwrap();
+            near(next.surface_temperature_k, reference_temperature, 2e-10);
+            near(next.transferred_mass_kg, reference_transfer, 2e-14);
+            assert!(next.surface_temperature_k > 300.0);
+            assert!(next.surface_temperature_k < dew_point);
+            assert!(next.transferred_mass_kg < 0.0);
+            assert!(next.liquid.mass_kg > liquid().mass_kg);
+            near(next.mass_rate_residual_kg, 0.0, 2e-17);
+            near(
+                next.liquid.mass_kg * next.liquid.specific_enthalpy_j_kg
+                    + next.vapor_energy_j,
+                0.0,
+                5e-8,
+            );
+        }
+    }
+}
+
+#[test]
+fn g3_condensation_safeguard_retains_the_original_caloric_datum() {
+    let run = |offset| {
+        advance_surface(
+            &law(),
+            GasFilm {
+                total_pressure_pa: 5000.0,
+                vapor_partial_pressure_pa: 4500.0,
+                ..film(0.0)
+            },
+            LiquidSurfaceState {
+                specific_enthalpy_j_kg: offset,
+                ..liquid()
+            },
+            20.0,
+            controls(offset),
+            |h| Ok(300.0 + (h - offset) / 4000.0),
+            || Ok(()),
+        )
+        .unwrap()
+    };
+    let original = run(0.0);
+    let shifted = run(1e7);
+    near(original.surface_temperature_k, shifted.surface_temperature_k, 5e-10);
+    near(original.transferred_mass_kg, shifted.transferred_mass_kg, 2e-16);
+    near(
+        shifted.vapor_energy_j - original.vapor_energy_j,
+        1e7 * shifted.transferred_mass_kg,
+        5e-8,
+    );
+}
+
+#[test]
+fn g4_condensation_bracket_safeguards_preserve_refusals_and_work_limits() {
+    let bath = GasFilm {
+        total_pressure_pa: 5000.0,
+        vapor_partial_pressure_pa: 4500.0,
+        ..film(0.0)
+    };
+    let evaluations = std::cell::Cell::new(0);
+    assert_eq!(
+        advance_surface(
+            &law(), bath, liquid(), 20.0,
+            SolverConfig { max_iterations: 2, ..controls(0.0) },
+            |h| {
+                evaluations.set(evaluations.get() + 1);
+                Ok(300.0 + h / 4000.0)
+            },
+            || Ok(()),
+        ),
+        Err(EvaporationError::NonConverged),
+    );
+    assert_eq!(evaluations.get(), 2);
+    let checkpoints = std::cell::Cell::new(0);
+    assert_eq!(
+        advance_surface(
+            &law(), bath, liquid(), 20.0, controls(0.0),
+            |h| Ok(300.0 + h / 4000.0),
+            || {
+                checkpoints.set(checkpoints.get() + 1);
+                if checkpoints.get() == 3 { Err(EvaporationError::Cancelled) } else { Ok(()) }
+            },
+        ),
+        Err(EvaporationError::Cancelled),
+    );
+    // A bad source sample encountered while narrowing is still fatal.
+    let source_error = EvaporationError::Invalid("original caloric source refused trial");
+    assert_eq!(
+        advance_surface(
+            &law(), bath, liquid(), 20.0, controls(0.0),
+            |h| {
+                if h == 60_000.0 { Err(source_error) } else { Ok(300.0 + h / 4000.0) }
+            },
+            || Ok(()),
+        ),
+        Err(source_error),
+    );
+    assert!(matches!(
+        advance_surface(
+            &law(), GasFilm { total_pressure_pa: 4000.0, ..film(3500.0) },
+            liquid(), 20.0, controls(0.0), |h| Ok(300.0 + h / 4000.0), || Ok(()),
+        ),
+        Err(EvaporationError::Boiling { .. }),
+    ));
+}
+
+#[test]
 fn g3_caloric_reference_shift_preserves_cooling_and_evaporation() {
     let run = |offset| {
         advance_surface(

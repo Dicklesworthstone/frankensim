@@ -330,6 +330,10 @@ struct Endpoint {
 /// carries `h1+L`, and latent heat must not be debited a second time. Bracket
 /// endpoints must belong to the SAME pure-liquid chart. A missing bracket,
 /// lost mass increment, exhausted inventory or cancellation publishes no state.
+/// A condensation trial at or above the film's boiling pressure is narrowed
+/// within that chart until a subboiling residual bracket is found. This never
+/// clamps temperature or admits a boiling initial/accepted state; all trial
+/// evaluations share the original work budget and cancellation checks.
 /// Condensation draws from a prescribed reservoir of unlimited inventory; a
 /// finite-gas owner must provide its own inventory and energy acceptance.
 #[allow(clippy::too_many_arguments)]
@@ -404,7 +408,32 @@ pub fn advance_surface<L: EvaporationLaw + ?Sized>(
                 residual_j: [initial.residual; 2],
             });
         }
-        let far = evaluate(bound)?;
+        let far = match evaluate(bound) {
+            Ok(endpoint) => endpoint,
+            Err(EvaporationError::Boiling { .. }) if initial.residual < 0.0 => {
+                // Condensation can heat a valid liquid without reaching the
+                // source chart's upper temperature. A boiling trial is not a
+                // physical endpoint or a positive residual. Narrow the domain
+                // until an ACTUAL opposite-sign liquid residual is available.
+                let mut supported_h = initial.h;
+                let mut boiling_h = bound;
+                loop {
+                    let h = supported_h + 0.5 * (boiling_h - supported_h);
+                    if !h.is_finite() || h == supported_h || h == boiling_h {
+                        return Err(EvaporationError::NonConverged);
+                    }
+                    match evaluate(h) {
+                        Ok(endpoint) if balanced(endpoint) || endpoint.residual > 0.0 => {
+                            break endpoint;
+                        }
+                        Ok(endpoint) => supported_h = endpoint.h,
+                        Err(EvaporationError::Boiling { .. }) => boiling_h = h,
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        };
         if balanced(far) {
             far
         } else {

@@ -1602,6 +1602,15 @@ account. Latent energy is separately visible only as a subaccount of vapor
 enthalpy; it is never added as a second thermal source. Numerical balances use
 the unchanged absolute whole-window joule allowance.
 
+During condensation, a trial at the upper caloric bracket may exceed the film's
+boiling pressure even though the physical endpoint is subboiling. The original
+surface solver now narrows that trial within the admitted liquid chart until
+it obtains an actual opposite-sign residual. It neither treats boiling as a
+residual nor clamps temperature. Initial boiling, source refusals, cancellation
+and the shared source-evaluation budget retain their original semantics.
+Native evaporation regressions compare broad and tight brackets against the
+independent mass/energy equation, including roots near the boiling boundary.
+
 G0 unit regressions cover latent cooling and condensation warming, actual mass
 and energy conservation with conduction and heat sources, event exposure,
 birth timing, original branch/storage refusal, cumulative work limits and late
