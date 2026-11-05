@@ -8,9 +8,11 @@
 //!        [--reduction MAX,KEEP_LOW,HZ,... | pod,MAX,KEEP_LOW,COUNT,TOP_HZ] [--max-modes N] [--max-keys N]
 //!        [--board FILE.bin]   (a board file written by gen_board, as the browser fetches it)
 //!        [--rt0425-string-damping] (RT-0425 per-key string losses, as the browser plays)
-//!        [--rt0425-hammer-stiffness] (RT-0425's K_H on each unison string, as the browser plays)
-//!        [--rt0425-hammer-dissipation] (with it, RT-0425's R_H instead of crush and Prony, as the browser plays)
+//!        [--rt0425-hammer-stiffness] (RT-0425's alternative K_H on each unison string)
+//!        [--rt0425-hammer-dissipation] (with it, RT-0425's R_H instead of crush and Prony)
+//!        [--felt-pack-hammers] (the browser's measured Stulov/Abel hammer pack)
 //!        [--silent-bank HZ] (silent strings' partials to HZ move, as the browser plays at 600)
+//!        [--partitioned-receiver] [--active-coefficients] (opt-in CPU comparisons; no quality change)
 //! `--scale` + `--isolated` reproduces the reference binary run with the same
 //! sparse `--scale` (nothing else attached to the bridge, no retirement).
 use fs_live_piano::refmods::geometry;
@@ -63,6 +65,9 @@ fn run() -> Result<(), String> {
             "--rt0425-string-damping" => cfg.rt0425_string_damping = true,
             "--rt0425-hammer-stiffness" => cfg.rt0425_hammer_stiffness = true,
             "--rt0425-hammer-dissipation" => cfg.rt0425_hammer_dissipation = true,
+            "--felt-pack-hammers" => cfg.felt_pack_hammers = true,
+            "--partitioned-receiver" => cfg.partitioned_receiver = true,
+            "--active-coefficients" => cfg.active_coefficients = true,
             "--no-duplex" => cfg.duplex = false,
             other => return Err(format!("unknown option {other}")),
         }
@@ -99,6 +104,8 @@ fn run() -> Result<(), String> {
     println!("board: {} coordinates; {}", desc.board.len(), desc.board_provenance);
     let mut piano = LivePiano::new(&desc, cfg.clone())?;
     println!("{}", fs_live_piano::describe(&piano));
+    println!("partitioned receiver: {}; active coefficients: {}",
+        piano.uses_partitioned_receiver(), cfg.active_coefficients);
     let mut out = vec![0.0_f32; count];
     let mut next = 0;
     let scale = 1.0 / cfg.full_scale_pa;
