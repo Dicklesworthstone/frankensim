@@ -12,6 +12,10 @@ use crate::ns::boundary::{
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 
+#[path = "mixed/density.rs"]
+mod density;
+pub use density::{MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution};
+
 /// Physical effort per metre of out-of-plane depth, about an explicit origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialBoundaryWrench {
@@ -460,62 +464,19 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         timestep_s: f64,
     ) -> Result<MaterialStokesSolution, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
-        let scaled_tractions: Vec<_> = boundaries
-            .iter()
-            .map(|boundary| {
-                move |point: [f64; 2], normal: [f64; 2]| match boundary {
-                    MaterialStokesBoundary::TotalTraction { value, .. } => {
-                        let physical = value(point, normal);
-                        [physical[0] / density, physical[1] / density]
-                    }
-                    MaterialStokesBoundary::Velocity { .. }
-                    | MaterialStokesBoundary::NavierSlip { .. } => {
-                        unreachable!("only traction owners request stress samples")
-                    }
-                }
-            })
-            .collect();
-        let primitive_boundaries: Vec<_> = boundaries
-            .iter()
-            .zip(&scaled_tractions)
-            .map(|(boundary, scaled)| match boundary {
-                MaterialStokesBoundary::Velocity { edge, value } => StokesBoundary::Velocity {
-                    edge: *edge,
-                    value: *value,
-                },
-                MaterialStokesBoundary::NavierSlip {
-                    edge,
-                    value,
-                    tangential_resistance_pa_s_per_m,
-                } => StokesBoundary::NavierSlip {
-                    edge: *edge,
-                    value: *value,
-                    tangential_resistance_m_s: kinematic_slip_resistance(
-                        *tangential_resistance_pa_s_per_m,
-                        density,
-                    ),
-                },
-                MaterialStokesBoundary::TotalTraction { edge, .. } => {
-                    StokesBoundary::TotalTraction {
-                        edge: *edge,
-                        value: scaled,
-                    }
-                }
-            })
-            .collect();
-        let flow = self
-            .system
-            .bdf1_stokes_mixed_step(
+        let flow = with_physical_boundaries(boundaries, density, |primitive_boundaries| {
+            self.system.bdf1_stokes_mixed_step(
                 self.params,
                 &|point| {
                     let physical = force_density(point);
                     [physical[0] / density, physical[1] / density]
                 },
-                &primitive_boundaries,
+                primitive_boundaries,
                 previous_velocity,
                 timestep_s,
             )
-            .map_err(MaterialFluxError::Boundary)?;
+        })
+        .map_err(MaterialFluxError::Boundary)?;
         self.material_stokes_solution(flow)
     }
 
@@ -663,4 +624,55 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             samples,
         })
     }
+}
+
+// Keep velocity, traction and Navier resistance under one fixed normalization,
+// shared by homogeneous and spatial source-owned linear Stokes entries.
+fn with_physical_boundaries<R>(
+    boundaries: &[MaterialStokesBoundary<'_>],
+    density: f64,
+    run: impl FnOnce(&[StokesBoundary<'_>]) -> R,
+) -> R {
+    let scaled_tractions: Vec<_> = boundaries
+        .iter()
+        .map(|boundary| {
+            move |point: [f64; 2], normal: [f64; 2]| match boundary {
+                MaterialStokesBoundary::TotalTraction { value, .. } => {
+                    let physical = value(point, normal);
+                    [physical[0] / density, physical[1] / density]
+                }
+                MaterialStokesBoundary::Velocity { .. }
+                | MaterialStokesBoundary::NavierSlip { .. } => {
+                    unreachable!("only traction owners request stress samples")
+                }
+            }
+        })
+        .collect();
+    let primitive_boundaries: Vec<_> = boundaries
+        .iter()
+        .zip(&scaled_tractions)
+        .map(|(boundary, scaled)| match boundary {
+            MaterialStokesBoundary::Velocity { edge, value } => StokesBoundary::Velocity {
+                edge: *edge,
+                value: *value,
+            },
+            MaterialStokesBoundary::NavierSlip {
+                edge,
+                value,
+                tangential_resistance_pa_s_per_m,
+            } => StokesBoundary::NavierSlip {
+                edge: *edge,
+                value: *value,
+                tangential_resistance_m_s: kinematic_slip_resistance(
+                    *tangential_resistance_pa_s_per_m,
+                    density,
+                ),
+            },
+            MaterialStokesBoundary::TotalTraction { edge, .. } => StokesBoundary::TotalTraction {
+                edge: *edge,
+                value: scaled,
+            },
+        })
+        .collect();
+    run(&primitive_boundaries)
 }

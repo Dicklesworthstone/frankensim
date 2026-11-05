@@ -14,6 +14,8 @@
 //! resolve cellwise material responses at the evolving strain, retaining their
 //! exact owners. They infer no gas compressibility, phase validity or thermal
 //! evolution.
+//! The prepared mixed-Stokes material field instead admits fixed cellwise
+//! density and viscosity, with one reference density for all SI conversions.
 //! Force and boundary callbacks must be pure and fixed during admission and
 //! solution. Prescribed velocities on each sealed component must have zero
 //! net outward flux.
@@ -39,7 +41,8 @@ mod porous;
 mod rheology;
 pub use mixed::{
     MaterialBoundaryLoad, MaterialBoundaryTransport, MaterialBoundaryWrench,
-    MaterialStokesBoundary, MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution,
+    MaterialStokesRheologySolution, MaterialStokesSolution,
 };
 pub use navier_stokes::{
     MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep, MaterialNavierStokesStep,
@@ -686,36 +689,46 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
         velocity: &[f64],
         viscosity_pa_s: &dyn Fn(usize) -> f64,
     ) -> Result<MaterialViscousDissipation, MaterialFluxError> {
-        let mut cell_heating_w_m3 = self.system.shear_rates(velocity);
-        let mut total_power_w_per_m = 0.0;
-        let mut compensation = 0.0;
-        for (cell, heating) in cell_heating_w_m3.iter_mut().enumerate() {
-            let mu = viscosity_pa_s(cell);
-            // sqrt(mu)*gamma avoids overflowing gamma² or underflowing
-            // mu*gamma when the final, dimensioned heating is representable.
-            let scaled_rate = mu.sqrt() * *heating;
-            *heating = scaled_rate * scaled_rate;
-            let power = *heating * self.system.mesh.areas[cell];
-            if !positive(mu) || !heating.is_finite() || !power.is_finite() {
-                return Err(MaterialFluxError::Invalid(
-                    "physical viscous heating is not representable",
-                ));
-            }
-            let corrected = power - compensation;
-            let next = total_power_w_per_m + corrected;
-            compensation = (next - total_power_w_per_m) - corrected;
-            total_power_w_per_m = next;
-        }
-        if !total_power_w_per_m.is_finite() {
+        physical_viscous_dissipation(self.system, velocity, viscosity_pa_s)
+    }
+}
+
+// The homogeneous and spatial material bindings observe the same resolved
+// strain and actual dynamic viscosity; neither reporting path re-queries laws.
+fn physical_viscous_dissipation(
+    system: &FluxSystem<'_>,
+    velocity: &[f64],
+    viscosity_pa_s: &dyn Fn(usize) -> f64,
+) -> Result<MaterialViscousDissipation, MaterialFluxError> {
+    let mut cell_heating_w_m3 = system.shear_rates(velocity);
+    let mut total_power_w_per_m = 0.0;
+    let mut compensation = 0.0;
+    for (cell, heating) in cell_heating_w_m3.iter_mut().enumerate() {
+        let mu = viscosity_pa_s(cell);
+        // sqrt(mu)*gamma avoids overflowing gamma² or underflowing
+        // mu*gamma when the final, dimensioned heating is representable.
+        let scaled_rate = mu.sqrt() * *heating;
+        *heating = scaled_rate * scaled_rate;
+        let power = *heating * system.mesh.areas[cell];
+        if !positive(mu) || !heating.is_finite() || !power.is_finite() {
             return Err(MaterialFluxError::Invalid(
-                "integrated viscous power is not representable",
+                "physical viscous heating is not representable",
             ));
         }
-        Ok(MaterialViscousDissipation {
-            cell_heating_w_m3,
-            total_power_w_per_m,
-        })
+        let corrected = power - compensation;
+        let next = total_power_w_per_m + corrected;
+        compensation = (next - total_power_w_per_m) - corrected;
+        total_power_w_per_m = next;
     }
+    if !total_power_w_per_m.is_finite() {
+        return Err(MaterialFluxError::Invalid(
+            "integrated viscous power is not representable",
+        ));
+    }
+    Ok(MaterialViscousDissipation {
+        cell_heating_w_m3,
+        total_power_w_per_m,
+    })
 }
 
 fn positive(value: f64) -> bool {

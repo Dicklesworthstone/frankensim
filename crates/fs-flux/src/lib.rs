@@ -80,8 +80,9 @@ pub use material::{
     MaterialFluxNewtonStep, MaterialFluxNumerics, MaterialFluxRheologyPoint,
     MaterialFluxRheologySample, MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem,
     MaterialFluxViscosityTangent, MaterialNavierStokesBoundary, MaterialNavierStokesRheologyStep,
-    MaterialNavierStokesStep, MaterialStokesBoundary, MaterialStokesRheologySolution,
-    MaterialStokesSolution, MaterialViscousDissipation,
+    MaterialNavierStokesStep, MaterialStokesBoundary, MaterialStokesCell, MaterialStokesField,
+    MaterialStokesFieldSolution, MaterialStokesRheologySolution, MaterialStokesSolution,
+    MaterialViscousDissipation,
 };
 #[cfg(feature = "continuum")]
 pub use ns::adjoint::{FluxAdjointError, FluxAdjointSolution};

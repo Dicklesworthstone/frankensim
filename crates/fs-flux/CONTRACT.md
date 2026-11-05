@@ -858,6 +858,50 @@ stratified-density shear with analytic energy and supported stress/torque,
 invariance under the reference-density choice, original unit-density matrix
 identity, retained sampling and typed refusal regressions.
 
+### Source-bound spatial Stokes material fields
+
+`MaterialFluxSystem::bind_stokes_materials` prepares one original
+`FluidTransport` owner per triangle for the density-weighted mixed-Stokes
+entry. Owned sources and heterogeneous `&dyn FluidTransport` sources are
+supported. Shape admission precedes source queries; each owner is queried once,
+and its exact density/dynamic-viscosity snapshot and original source are retained.
+Original material refusals propagate unchanged, with no query after the first
+refusal and no partial field publication.
+
+`MaterialStokesField` uses the existing binding's density only as ONE fixed
+normalization. Every actual cell supplies `rho/rho_reference` to inertia and
+`mu/rho_reference` to one-sided viscous stress. Force density [N/m³], total
+traction [Pa] and physical Navier resistance [Pa s/m] share that reference;
+pressure [Pa], reactions [N/m, N] and slip power [W/m] recover through the same
+reference. The homogeneous reference viscosity is unused. Positive conversions
+that overflow or underflow to zero are refused.
+
+Repeated `bdf1_stokes_mixed_step` calls reuse the frozen source snapshots.
+Consistent density-weighted mass, immutable history, support reactions and
+kinetic energy use the existing native operator and its retained quadrature.
+The resulting `MaterialStokesFieldSolution` reports energy [J/m] from that
+weighted metric, and bulk heat from the actual cell dynamic viscosities.
+Snapshots and original sources are shared into each result without cloning
+owners or querying material laws again; physical output remains tied to the
+admitted state even if a source can subsequently change.
+
+The piecewise-constant material field remains fixed across time levels on the
+original mesh. This supports stationary stratification and flow parallel to
+material layers. It does not transport density, mix fluids, move interfaces,
+add convection, evolve temperature or infer gas compressibility; changing
+density requires a separately conservative state transfer. Existing rheological
+paths still require constant reference density rather than silently changing
+their inertial metric. Cancellation and spatial-order limitations remain those
+of the native mixed Stokes solver.
+
+`tests/material_flow/density.rs` specifies G1/G3 regressions using original
+dry-air evaluations in two layers: unequal density and viscosity, continuous
+interface shear stress, physical Navier slip, repeated-step momentum and
+history, analytic weighted energy, actual-mu heating, physical pressure and
+boundary force/moment, and invariance under two reference normalizations.
+Focused admission tests retain original material errors, freeze source
+snapshots across solves/reporting, and refuse unrepresentable normalization.
+
 ## Nonlinear pressure-driven flow with explicit backflow behavior
 
 `bdf1_navier_stokes_mixed_step` advances constant-density incompressible

@@ -12,6 +12,8 @@ use fs_solid::Mesh2;
 use std::cell::Cell;
 use std::rc::Rc;
 
+#[path = "material_flow/density.rs"]
+mod density;
 #[path = "material_flow/navier_stokes.rs"]
 mod navier_stokes;
 #[path = "material_flow/newton.rs"]
