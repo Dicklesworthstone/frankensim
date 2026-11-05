@@ -6,6 +6,11 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [nonideal residence guide](MINING_NONIDEAL_RESIDENCE.md) adds unequal
+active/stagnant tank volumes, explicit bypass and exchange during flow stops.
+Its callable forward model independently accounts for outlet and retained
+material through feed pulses, shutdowns, restarts and flushing.
+
 The [sulfite-treatment guide](MINING_SULFITE_TREATMENT.md) adds four matched
 NBS source profiles and seven conserved endpoints for reagent preparation,
 free-cyanide SO2/air treatment, competing oxygen demand and sulfite protonation.

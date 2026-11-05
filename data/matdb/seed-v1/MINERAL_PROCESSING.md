@@ -1,5 +1,10 @@
 # Mineral processing: public sources and callable physics
 
+The [nonideal residence guide](MINING_NONIDEAL_RESIDENCE.md) adds unequal
+active/stagnant tank volumes, explicit bypass and exchange during flow stops.
+Its callable forward model independently accounts for outlet and retained
+material through feed pulses, shutdowns, restarts and flushing.
+
 Manufacturer [grinding-media records](MINING_GRINDING_MEDIA.md) now supply
 discrete forged-ball masses, geometry and hardness specifications, plus a
 separate theoretical SAG charge packing-density reference. They support

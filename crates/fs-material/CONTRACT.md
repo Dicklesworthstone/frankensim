@@ -14237,3 +14237,27 @@ conversion, common material scaling, original domain limits and cancellation.
 This is an infinite bulk-wave surface model, not a flexural plate-edge law,
 Rayleigh-wave source, compliant support, rough surface, attenuation model or
 experimental qualification of the source material.
+
+## Nonideal passive plant residence
+
+`recovery::residence::nonideal::NonidealTankCascade` advances one named
+conserved constituent through up to 64 unequal active/stagnant tank pairs.
+Declared total flow splits into an instantaneous bypass and the train flow;
+active residence uses the latter. Explicit counterflow exchanges mass with
+stagnant regions, including during an external-flow stop. Zero exchange keeps
+a dead region exactly isolated. Geometry, initial inventories, original
+provenance and each interval's flows remain explicit.
+
+Positive exponential propagation independently integrates the train outlet and
+both exchange directions. Active, stagnant and overall balances must close;
+there is no balancing plug or normalization. Work is bounded by 4096 transition
+exposures per interval and 256 series terms per substep. Invalid, nonfinite,
+unrepresentable or cancelled calculations leave the original state unchanged.
+This is a passive forward transport model, not a recovery law, fitted residence
+distribution, tracer deconvolution or two-phase slip model. Binary64 results are
+not interval enclosures. Analytical regressions cover ideal-tank reduction,
+bypass, unequal tanks, exchange-only shutdown, retained dead inventory, resumed
+flow, partitioned intervals and transactional refusal/cancellation. The
+`nonideal_residence` example and
+`data/matdb/seed-v1/MINING_NONIDEAL_RESIDENCE.md` demonstrate a complete authored
+pulse/stop/restart/flush inventory account without implying plant calibration.
