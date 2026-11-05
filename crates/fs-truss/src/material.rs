@@ -1,9 +1,11 @@
 //! Material-driven truss layout, catalog sizing, mass and rod re-analysis.
 //!
 //! The same immutable state-point bundle supplies density, Young's modulus
-//! and yield stress to every stage. Assignment is per member; different cards
+//! and signed axial strength limits to every stage. Assignment is per member; different cards
 //! and temperatures require data changes, never a different equilibrium solver.
-//! This is the existing axial, symmetric-yield, solid-square, pin-jointed model.
+//! This is the existing axial, solid-square, pin-jointed model. The caller
+//! explicitly selects either symmetric yield or separate tension/compression
+//! limits; the same choice reaches layout, refitting and catalog sizing.
 //! It does not infer a code allowable from an ultimate strength, model creep or
 //! thermal strain, or add self-weight implicitly to the declared load case.
 
@@ -41,7 +43,10 @@ pub struct TrussMaterial {
     resolved: ResolvedMaterialStatePoint,
     density: f64,
     youngs: f64,
-    yield_stress: f64,
+    tensile_limit: f64,
+    compressive_limit: f64,
+    tension_property: String,
+    compression_property: String,
 }
 
 impl TrussMaterial {
@@ -58,7 +63,36 @@ impl TrussMaterial {
         point: &QueryPoint,
         selection: MaterialPropertySelection,
     ) -> Result<Self, MaterialStatePointError> {
-        let requirements = [
+        Self::resolve_axial_limits(
+            card,
+            point,
+            YIELD_STRESS_PROPERTY,
+            YIELD_STRESS_PROPERTY,
+            selection,
+        )
+    }
+
+    /// Resolve density, axial modulus and explicitly named tensile/compressive
+    /// stress limits at one physical state. Limits need not be equal, and a
+    /// property used for both signs is resolved only once.
+    ///
+    /// These are caller-admitted uniaxial limits, not an inferred yield surface,
+    /// allowable stress, safety factor or post-failure law. A directional claim
+    /// is appropriate only for a member aligned with that measured direction;
+    /// this scalar model does not rotate anisotropic strengths.
+    ///
+    /// # Errors
+    /// Missing, ambiguous, mistyped, nonpositive or dynamic properties refuse
+    /// through the shared resolver. No absent compression limit is copied from
+    /// tension, and no ultimate strength is silently substituted for yield.
+    pub fn resolve_axial_limits(
+        card: &MaterialCard,
+        point: &QueryPoint,
+        tension_property: &str,
+        compression_property: &str,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, MaterialStatePointError> {
+        let mut requirements = vec![
             ScalarPropertyRequirement::try_new(
                 DENSITY_PROPERTY,
                 Density::DIMS,
@@ -70,17 +104,21 @@ impl TrussMaterial {
                 ScalarAdmissibility::StrictlyPositive,
             )?,
             ScalarPropertyRequirement::try_new(
-                YIELD_STRESS_PROPERTY,
+                tension_property,
                 Pressure::DIMS,
                 ScalarAdmissibility::StrictlyPositive,
             )?,
         ];
+        if compression_property != tension_property {
+            requirements.push(ScalarPropertyRequirement::try_new(
+                compression_property,
+                Pressure::DIMS,
+                ScalarAdmissibility::StrictlyPositive,
+            )?);
+        }
         let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
-        for name in [
-            DENSITY_PROPERTY,
-            YOUNG_MODULUS_PROPERTY,
-            YIELD_STRESS_PROPERTY,
-        ] {
+        for requirement in &requirements {
+            let name = requirement.name();
             if !resolved
                 .property(name)
                 .expect("required property was resolved")
@@ -101,7 +139,10 @@ impl TrussMaterial {
         Ok(Self {
             density: value(DENSITY_PROPERTY),
             youngs: value(YOUNG_MODULUS_PROPERTY),
-            yield_stress: value(YIELD_STRESS_PROPERTY),
+            tensile_limit: value(tension_property),
+            compressive_limit: value(compression_property),
+            tension_property: tension_property.into(),
+            compression_property: compression_property.into(),
             resolved,
         })
     }
@@ -124,16 +165,35 @@ impl TrussMaterial {
         self.youngs
     }
 
-    /// Current symmetric yield stress [Pa].
+    /// Current tensile stress limit [Pa], without an implicit safety factor.
     #[must_use]
-    pub const fn yield_stress_pa(&self) -> f64 {
-        self.yield_stress
+    pub const fn tensile_limit_pa(&self) -> f64 {
+        self.tensile_limit
+    }
+
+    /// Current compressive stress magnitude limit [Pa]. Euler buckling is a
+    /// separate limit imposed during catalog sizing.
+    #[must_use]
+    pub const fn compressive_limit_pa(&self) -> f64 {
+        self.compressive_limit
+    }
+
+    /// Exact sourced property selected for positive axial force.
+    #[must_use]
+    pub fn tension_property(&self) -> &str {
+        &self.tension_property
+    }
+
+    /// Exact sourced property selected for negative axial force.
+    #[must_use]
+    pub fn compression_property(&self) -> &str {
+        &self.compression_property
     }
 }
 
 /// A material assignment and its admitted layout operator. Borrowing immutable
 /// geometry and source states prevents later sizing from accidentally using a
-/// different member order, temperature, modulus or yield stress.
+/// different member order, temperature, modulus or signed axial limits.
 pub struct MaterialLayout<'a> {
     ground: &'a GroundStructure,
     materials: &'a [TrussMaterial],
@@ -141,7 +201,7 @@ pub struct MaterialLayout<'a> {
     case: LayoutCase,
     limits: LayoutLimits,
     lp: LayoutLp,
-    yield_scale_pa: f64,
+    strength_scale_pa: f64,
 }
 
 /// Layout iterates and their physical volume. The numerical report uses the
@@ -152,7 +212,7 @@ pub struct MaterialLayoutSolution {
     pub forces: Vec<f64>,
     /// Dual iterate in the normalized objective convention.
     pub dual: Vec<f64>,
-    /// Existing PDHG diagnostics; `volume` is `yield_scale_pa * volume_m3`.
+    /// Existing PDHG diagnostics; `volume` is `strength_scale_pa * volume_m3`.
     pub numerical: PdhgReport,
     /// Approximate returned-iterate material volume [m³], before catalog sizing.
     pub volume_m3: f64,
@@ -195,7 +255,8 @@ pub struct MaterialCatalogAudit {
 impl<'a> MaterialLayout<'a> {
     /// Assemble the existing LP with one source-material index per member.
     /// Material rows can be reused by any number of members. Costs are
-    /// `length * reference_yield / member_yield`: one common positive scaling
+    /// `length * reference_strength / member_limit` separately for each sign:
+    /// one common positive scaling
     /// preserves the heterogeneous optimum while avoiding tiny SI objective
     /// coefficients that stall the unscaled PDHG lane.
     ///
@@ -235,11 +296,17 @@ impl<'a> MaterialLayout<'a> {
                 ));
             }
         }
-        let yield_scale_pa = materials[assignments[0]].yield_stress;
-        let lp = LayoutLp::assemble_member_yields(
+        let strength_scale_pa = materials[assignments[0]].tensile_limit;
+        let lp = LayoutLp::assemble_member_limits(
             ground,
             case,
-            |member| materials[assignments[member]].yield_stress / yield_scale_pa,
+            |member| {
+                let state = &materials[assignments[member]];
+                (
+                    state.tensile_limit / strength_scale_pa,
+                    state.compressive_limit / strength_scale_pa,
+                )
+            },
             limits,
             cx,
         )?;
@@ -251,12 +318,12 @@ impl<'a> MaterialLayout<'a> {
             case: case.clone(),
             limits,
             lp,
-            yield_scale_pa,
+            strength_scale_pa,
         })
     }
 
     /// Common equilibrium/PDHG/certificate API. Its objective is uniformly
-    /// scaled; divide objective values by [`Self::yield_scale_pa`] for m³.
+    /// scaled; divide objective values by [`Self::strength_scale_pa`] for m³.
     #[must_use]
     pub const fn lp(&self) -> &LayoutLp {
         &self.lp
@@ -271,8 +338,8 @@ impl<'a> MaterialLayout<'a> {
 
     /// Shared positive objective normalization [Pa].
     #[must_use]
-    pub const fn yield_scale_pa(&self) -> f64 {
-        self.yield_scale_pa
+    pub const fn strength_scale_pa(&self) -> f64 {
+        self.strength_scale_pa
     }
 
     /// Original state used for an assigned member, or `None` for an absent member.
@@ -297,7 +364,7 @@ impl<'a> MaterialLayout<'a> {
             .lp
             .solve(None, None, settings)
             .map_err(MaterialLayoutSolveError::Solver)?;
-        let volume_m3 = numerical.volume / self.yield_scale_pa;
+        let volume_m3 = numerical.volume / self.strength_scale_pa;
         if !volume_m3.is_finite() || volume_m3 < 0.0 || (numerical.volume > 0.0 && volume_m3 == 0.0)
         {
             return Err(MaterialLayoutSolveError::UnrepresentableVolume);
@@ -310,9 +377,10 @@ impl<'a> MaterialLayout<'a> {
         })
     }
 
-    /// Refit equilibrium and size every survivor with its own resolved yield
-    /// stress and modulus. Mass comes from its source density and actual snapped
-    /// geometry, so swapping a material propagates through all three stages.
+    /// Refit equilibrium and size every survivor with the resolved limit for
+    /// its REFITTED force sign and its own modulus. Mass comes from its source
+    /// density and actual snapped geometry, so swapping a material propagates
+    /// through all three stages.
     ///
     /// # Errors
     /// Invalid force shape/domain, catalog ordering, pruning controls, overflow
@@ -356,7 +424,7 @@ impl<'a> MaterialLayout<'a> {
             forces,
             |member| {
                 let state = &self.materials[self.assignments[member]];
-                (state.yield_stress, state.youngs)
+                (state.tensile_limit, state.compressive_limit, state.youngs)
             },
             catalog,
             prune_frac,

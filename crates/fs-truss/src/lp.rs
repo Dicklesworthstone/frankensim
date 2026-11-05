@@ -1,7 +1,9 @@
 //! The plastic-design layout LP with a first-order primal-dual solver.
 //!
 //! Variables: per member, split tension/compression forces
-//! `q⁺, q⁻ ≥ 0`. Objective: material volume `Σ lᵢ(qᵢ⁺ + qᵢ⁻)/σ_y`.
+//! `q⁺, q⁻ ≥ 0`. Objective: material volume
+//! `Σ lᵢ(qᵢ⁺/σᵢ,t + qᵢ⁻/σᵢ,c)` with separately admitted tensile and
+//! compressive limits (the uniform symmetric-yield constructor sets both to σ_y).
 //! Constraints: nodal equilibrium `B·(q⁺ − q⁻) = f` on FREE degrees of
 //! freedom (supports drop their rows). Standard form:
 //! `min cᵀx  s.t.  A x = b, x ≥ 0`.
@@ -1044,17 +1046,18 @@ impl LayoutLp {
                 requirement: "must be finite and positive",
             });
         }
-        Self::assemble_member_yields(gs, case, |_| sigma_y, limits, cx)
+        Self::assemble_member_limits(gs, case, |_| (sigma_y, sigma_y), limits, cx)
     }
 
-    /// Shared assembly for uniform and material-assigned members. Yield values
+    /// Shared assembly for uniform and material-assigned members. Axial limits
     /// may be uniformly nondimensionalized by the material-driven caller; no
-    /// material name or second equilibrium operator enters the solver.
+    /// material name or second equilibrium operator enters the solver. The
+    /// returned pair is (tension, compression magnitude), both strictly positive.
     #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
-    pub(crate) fn assemble_member_yields(
+    pub(crate) fn assemble_member_limits(
         gs: &GroundStructure,
         case: &LayoutCase,
-        sigma_y: impl Fn(usize) -> f64,
+        axial_limits: impl Fn(usize) -> (f64, f64),
         limits: LayoutLimits,
         cx: &Cx<'_>,
     ) -> Result<LayoutLp, TrussConstructionError> {
@@ -1338,31 +1341,28 @@ impl LayoutLp {
         }
 
         let mut c = empty_with_capacity(variables, "layout objective costs")?;
-        for (index, &length) in lengths.iter().enumerate() {
-            if index % LAYOUT_POLL_STRIDE == 0 {
-                poll(cx, "layout cost assembly")?;
+        for compression in [false, true] {
+            for (index, &length) in lengths.iter().enumerate() {
+                if index % LAYOUT_POLL_STRIDE == 0 {
+                    poll(cx, "layout cost assembly")?;
+                }
+                let (tensile, compressive) = axial_limits(index);
+                let strength = if compression { compressive } else { tensile };
+                if !strength.is_finite() || strength <= 0.0 {
+                    return Err(TrussConstructionError::InvalidInput {
+                        field: "member axial strength limit",
+                        requirement: "tensile and compressive limits must be finite and positive",
+                    });
+                }
+                let cost = length / strength;
+                if !cost.is_finite() || cost <= 0.0 {
+                    return Err(TrussConstructionError::InvalidInput {
+                        field: "layout objective costs",
+                        requirement: "must remain finite and positive",
+                    });
+                }
+                c.push(cost);
             }
-            let strength = sigma_y(index);
-            if !strength.is_finite() || strength <= 0.0 {
-                return Err(TrussConstructionError::InvalidInput {
-                    field: "member yield stress",
-                    requirement: "must be finite and positive",
-                });
-            }
-            let cost = length / strength;
-            if !cost.is_finite() || cost <= 0.0 {
-                return Err(TrussConstructionError::InvalidInput {
-                    field: "layout objective costs",
-                    requirement: "must remain finite and positive",
-                });
-            }
-            c.push(cost);
-        }
-        for index in 0..lengths.len() {
-            if index % LAYOUT_POLL_STRIDE == 0 {
-                poll(cx, "layout cost assembly")?;
-            }
-            c.push(c[index]);
         }
         // Power iteration for ‖A‖ (deterministic start).
         let mut v = empty_with_capacity(variables, "layout norm input")?;

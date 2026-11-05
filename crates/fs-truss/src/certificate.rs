@@ -152,7 +152,7 @@ impl<'a> LayoutCertificateProblem<'a> {
         self.a
     }
 
-    /// Symmetric split-variable costs.
+    /// Positive split-variable costs, in `[tension | compression]` order.
     #[must_use]
     pub const fn c(&self) -> &'a [f64] {
         self.c
@@ -1183,9 +1183,9 @@ fn validate_inputs<P: CertificateProblemView + ?Sized>(
         }
         let positive = lp.c()[member];
         let negative = lp.c()[members + member];
-        if !positive.is_finite() || positive <= 0.0 || positive.to_bits() != negative.to_bits() {
+        if !positive.is_finite() || positive <= 0.0 || !negative.is_finite() || negative <= 0.0 {
             return Err(LayoutCertificateError::InvalidProblem {
-                requirement: "must have finite positive symmetric split-variable costs",
+                requirement: "must have finite positive split-variable costs for both force signs",
             });
         }
     }
@@ -1756,7 +1756,19 @@ fn prove_primal(
     let mut objective = Interval::point(0.0);
     for (member, &force) in member_forces.iter().enumerate() {
         counter.step(cx, "certificate primal objective enclosure")?;
-        objective = objective + Interval::point(lp.c()[member]) * force.abs();
+        let tensile_cost = lp.c()[member];
+        let compressive_cost = lp.c()[members + member];
+        let contribution = if tensile_cost.to_bits() == compressive_cost.to_bits() {
+            // Retain the symmetric model's tighter enclosure and arithmetic.
+            Interval::point(tensile_cost) * force.abs()
+        } else {
+            // These intervals already enclose the nonnegative split of the
+            // SAME repaired equilibrated force. Separate coefficients matter
+            // even when the input iterate had the opposite sign before repair.
+            Interval::point(tensile_cost) * split_forces[member]
+                + Interval::point(compressive_cost) * split_forces[members + member]
+        };
+        objective = objective + contribution;
     }
     let upper_bound = objective.hi();
     if !upper_bound.is_finite() {

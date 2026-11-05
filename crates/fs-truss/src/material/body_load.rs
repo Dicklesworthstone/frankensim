@@ -44,7 +44,7 @@ pub enum BodyLoadDesignError {
         gap: f64,
         equilibrium_residual: f64,
     },
-    /// Catalog, equilibrium, yield or Euler checks failed at this iteration.
+    /// Catalog, equilibrium, axial-limit or Euler checks failed at this iteration.
     InvalidSizing {
         iteration: usize,
     },
@@ -206,7 +206,7 @@ impl MaterialLayout<'_> {
     ///
     /// First solve and size the unchanged external-load case. Then derive body
     /// forces from those actual snapped sections, add them ONCE to the original
-    /// loads, and use the same LP/refit/yield/Euler/catalog owners again. Only
+    /// loads, and use the same LP/refit/axial-limit/Euler/catalog owners again. Only
     /// exact equality of the complete section vector (including absent members)
     /// accepts. The returned loads, mass and design therefore describe one state.
     /// Original support loads, material assignments and assembly limits persist.

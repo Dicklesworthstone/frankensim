@@ -61,8 +61,11 @@ steel-and-concrete flagship's engine (§15.2).
   contains one correlated exactly equilibrated force; its positive/negative
   split is therefore nonnegative by construction. Independent residual boxes
   are sanity checks only: zero containment by itself is not the existence
-  proof. The primal upper endpoint is the outward sum of cost times the
-  supremum absolute repaired force.
+  proof. The primal upper endpoint uses each sign's own positive cost and
+  repaired split-force enclosure. Equal costs retain the tighter original
+  absolute-force enclosure. Unequal tensile/compressive limits therefore pass
+  through the same outward proof rather than borrowing the tensile coefficient
+  for compression.
 - The dual witness uses this crate's `c + A^T y >= 0`, `-b^T y` convention.
   A representable uniform shrink is re-evaluated directly from authoritative
   `A` with `fs-ivl`; every outward slack lower endpoint must be nonnegative.
@@ -99,30 +102,47 @@ The axial-direction regression checks both signs along all four coordinate direc
 
 ### Source-bound material assignments
 
-`material::TrussMaterial` resolves exactly density, axial Young's modulus and
-symmetric yield stress through `fs-material::state_point`, retaining the
-original card, physical query and selected claims. `MaterialLayout` binds one
+`material::TrussMaterial::resolve` resolves density, axial Young's modulus and
+an explicitly admitted symmetric yield stress. `resolve_axial_limits` instead
+requires separately named positive tensile and compressive magnitude limits
+through `fs-material::state_point`, retaining the original card, physical query,
+property roles and selected claims. Equal property names resolve once. Neither
+constructor infers a missing strength, freezes a dynamic strength law, converts
+an ultimate strength into yield, or applies an unstated safety factor.
+`MaterialLayout` binds one
 material row per ground member and reuses the ordinary equilibrium assembly,
-PDHG, force refit, Euler sizing and rod spot-check owners. Heterogeneous yield
-stress changes the actual layout objective; local modulus changes compression
+PDHG, force refit, Euler sizing and rod spot-check owners. Each sign's own
+strength changes the actual split-force objective; local modulus changes compression
 buckling, and density changes the mass of the actual snapped member geometry.
 No material names, default steel properties or guessed strengths select physics.
 
-The LP costs use one common positive reference-yield scaling for numerical
+The LP costs use one common positive reference-strength scaling for numerical
 conditioning. `lp()` and its optional certificates describe that normalized
 problem; `MaterialLayoutSolution::volume_m3` reports physical approximate volume.
-The source-bound catalog audit labels symmetric yield and pinned Euler as
+`strength_scale_pa()` is the common divisor back to physical volume. Sizing
+chooses the tensile or compressive limit from the force AFTER equilibrium
+refitting, including when refitting reverses an input iterate's sign. The
+existing `SizedMember::area_yield` field is the area from that declared limit;
+for `resolve` and the uniform legacy path it is still the yield-based area.
+The source-bound catalog audit labels axial limits and pinned Euler as
 physical model checks, not building-code certification. Absent catalog sections
 leave mass/volume totals unavailable. Immutable geometry/material assignments
 prevent using a different ordering or temperature state during sizing.
 
-This is a frozen-state pin-jointed, symmetric-yield, solid-square model, not
-anisotropic/brittle failure, creep, thermally restrained strain or a mass-optimal
-layout objective. Body acceleration remains an explicit physical input. The existing synchronous
+This is a frozen-state pin-jointed, solid-square force-equilibrium sizing model,
+not elastic-compatible force distribution, rotating anisotropic failure,
+post-failure redistribution, creep, thermally restrained strain or a mass-optimal
+layout objective. A named ultimate strength is a caller-admitted axial limit,
+not evidence of a plastic mechanism or a validated brittle-failure prediction.
+Body acceleration remains an explicit physical input. The existing synchronous
 PDHG/refit/rod kernels retain their cancellation limitations; material admission
 and result publication poll `Cx`. `tests/material.rs` checks source-temperature
 substitution, heterogeneous optimal load-path changes, per-member Euler floors,
-snapped mass, unsupported states, malformed inputs and cancellation.
+snapped mass, unsupported states, malformed inputs and cancellation. Its
+asymmetric regressions exercise load reversal, refitted sign selection,
+independent hand-computed volume/certificate bounds, equal-yield equivalence,
+and persistence through self-weight rebuilding. Frame material layouts consume
+this same path.
 
 `MaterialLayout::body_loads` derives uniform member mass and equivalent endpoint
 forces from those same source densities and actual sections. `solve_with_body_loads`

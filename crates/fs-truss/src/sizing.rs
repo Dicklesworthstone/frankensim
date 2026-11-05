@@ -1,5 +1,5 @@
 //! The nonlinear sizing pass: surviving members get cross-sections
-//! from yield, compression members get EULER BUCKLING floors
+//! from their declared axial limit, compression members get EULER BUCKLING floors
 //! (solid-square closed form `I = A²/12` ⇒ `A ≥ √(12|q|l²/(π²E))`),
 //! joint parsimony prunes negligible members with a MANDATORY
 //! least-squares equilibrium re-verification on the survivors, and
@@ -23,7 +23,8 @@ pub struct SizedMember {
     pub force: f64,
     /// Length.
     pub length: f64,
-    /// Continuous area from yield.
+    /// Continuous area from the declared limit for the refitted force sign.
+    /// The uniform legacy entry point uses symmetric yield stress.
     pub area_yield: f64,
     /// Euler-governed floor (compression members; 0 for tension).
     pub area_buckling: f64,
@@ -68,7 +69,7 @@ pub fn size_and_snap(
         gs,
         lp,
         x,
-        |_| (sigma_y, youngs),
+        |_| (sigma_y, sigma_y, youngs),
         catalog,
         prune_frac,
         ConstraintKind::Code {
@@ -77,14 +78,15 @@ pub fn size_and_snap(
     )
 }
 
-/// Shared sizing kernel: a material assignment supplies each member's yield
-/// stress and modulus to the same refit, buckling, snap and audit path.
+/// Shared sizing kernel: a material assignment supplies each member's tensile
+/// limit, compressive magnitude limit and modulus to the same refit, buckling,
+/// snap and audit path. The force sign is selected AFTER the equilibrium refit.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn size_and_snap_members(
     gs: &GroundStructure,
     lp: &LayoutLp,
     x: &[f64],
-    properties: impl Fn(usize) -> (f64, f64),
+    properties: impl Fn(usize) -> (f64, f64, f64),
     catalog: &[f64],
     prune_frac: f64,
     checks: ConstraintKind,
@@ -112,14 +114,19 @@ pub(crate) fn size_and_snap_members(
     };
     let check_description = match checks {
         ConstraintKind::Code { standard } => format!("\"code\":\"{standard}\""),
-        _ => "\"physics\":\"symmetric-yield-and-pinned-euler\"".to_string(),
+        _ => "\"physics\":\"signed-axial-limits-and-pinned-euler\"".to_string(),
     };
     let mut all_pass = true;
     for (si, &k) in survivors.iter().enumerate() {
-        let (sigma_y, youngs) = properties(k);
+        let (tensile_limit, compressive_limit, youngs) = properties(k);
         let q = q_refit[si];
+        let stress_limit = if q < 0.0 {
+            compressive_limit
+        } else {
+            tensile_limit
+        };
         let l = gs.lengths()[k];
-        let area_yield = q.abs() / sigma_y;
+        let area_yield = q.abs() / stress_limit;
         let area_buckling = if q < 0.0 {
             // Euler with pinned ends, solid square I = A²/12:
             // |q| ≤ π²EI/l² ⇒ A ≥ √(12|q|l²/(π²E)).
@@ -135,7 +142,7 @@ pub(crate) fn size_and_snap_members(
             .unwrap_or(f64::NAN);
         // Post-snap re-verification (the checks the code row names).
         let stress_ok =
-            area_catalog.is_finite() && q.abs() / area_catalog <= sigma_y * (1.0 + 1e-9);
+            area_catalog.is_finite() && q.abs() / area_catalog <= stress_limit * (1.0 + 1e-9);
         let buckling_ok = q >= 0.0
             || (area_catalog.is_finite()
                 && q.abs()
@@ -150,6 +157,7 @@ pub(crate) fn size_and_snap_members(
             row,
             "{{\"member\":{k},\"force\":{q:.4e},\"len\":{l:.3},\"a_yield\":{area_yield:.4e},\
              \"a_euler\":{area_buckling:.4e},\"a_catalog\":{area_catalog:.4e},\
+             \"stress_limit_pa\":{stress_limit:.4e},\
              {check_description},\"stress_ok\":{stress_ok},\"buckling_ok\":{buckling_ok}}}"
         );
         audit.rows.push(row);
