@@ -11,7 +11,7 @@
     "The string modes above the kept set carry their exact static compliance into the bridge (residual flexibility)",
     "On G3, B3, E4 and Gb4: viscoelastic bending loss from the pack's cited Kelvin-Voigt row, air loading on the string (cylinder-gas-loading 0.3 30 4) and longitudinal string modes",
     "On E2: the friction and bending loss factors Woodhouse fitted to that string",
-    "The body of the 1964 Madrid guitar in Zimmer and Mores' 2024 plan: a braced Sitka spruce top with its sound hole, a barred rosewood back, rosewood ribs and a rosewood bridge, with 128 body modes. On F5 and E2 the bridge's wall is drawn from the plan's own section (shell-assembly-h12-bridge-plan.tsv); the other notes keep the first table's wall until their own renders on the plan table are graded",
+    "The body of the 1964 Madrid guitar in Zimmer and Mores' 2024 plan: a braced Sitka spruce top with its sound hole, a barred rosewood back, rosewood ribs and a rosewood bridge, with 128 body modes. On F5, E2, Gb4, B3 and E4 the bridge's wall is drawn from the plan's own section (shell-assembly-h12-bridge-plan.tsv); G3 keeps the first table's wall. On those five notes the plan's lighter bridge moves a body line from about 189 Hz to about 198 Hz (192.5 to 199.0 Hz on E2)",
     "Wood constants from the Wood Handbook (FPL-GTR-282), with wood loss measured on other samples",
     "A boundary-element air load on the shell and sound-hole port (body-radiation skin, 20-1100 Hz). It changes how the body moves, not how the note is picked up",
     "The enclosed air with a radiating sound-hole neck, whose outer end takes its mass and radiation from that air load",
