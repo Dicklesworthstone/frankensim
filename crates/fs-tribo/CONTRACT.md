@@ -1269,8 +1269,8 @@ All-Newtonian laws dispatch directly to the original cavitation step, retaining
 its trajectory and reports exactly. Law and reservoir refresh preserve accepted
 inventory and compatible state identity; a foreign film cannot reinterpret it.
 
-This combination retains a fixed homogeneous liquid density and rupture
-pressure. It does not supply cavitated tangential traction, viscous heat
+This combination retains homogeneous liquid density and rupture pressure
+within each step. It does not supply cavitated tangential traction, viscous heat
 partition, latent heat, thermal/material time evolution, pressure-dependent
 viscosity or compressibility of trapped full liquid. Relative wall motion is
 refused through a closed passage. Original native normal force is the only
@@ -1286,6 +1286,31 @@ conditioning; and sealed, exhausted-budget or late-cancellation atomic refusal.
 All 132 original-source resistive-film tests pass through the established narrow
 Rust facade with real `fs-math` and `fs-rand` dependencies. This focused run does
 not claim a full constellation build or cross-ISA execution.
+
+`CavitatingFilm::with_power_law` now binds the nonlinear law to the original
+compatible liquid inventory, preserving geometry, explicit supplies and mass
+tolerances. Native Barus coefficients refuse through the original nonlinear
+law constructor rather than being discarded. The new
+`CavitatingPowerLawFilm::advance_with_liquid` uses explicit endpoint liquid
+data and channel laws in the same original backward-Euler mass equation:
+`rho_next*(V_next*theta_next + dt*div Q_next) = rho_old*V_old*theta_old`.
+The original accepted state is validated at its old material epoch, and the
+new pressure/content solution uses the endpoint density and rupture pressure.
+Newtonian and nonlinear continuation share the original coefficient/reservoir
+preparation. Explicit supplies must remain admissible at the new rupture
+pressure. A changed liquid receives a distinct inventory identity; a law-only
+update retains state compatibility. All-n=1 endpoint laws use the native
+Newtonian kernel exactly, even if the previous laws were nonlinear.
+
+The returned `CavitatingPowerLawContinuation` pairs the refreshed owner and
+candidate state for joint acceptance by the surrounding thermal/mechanical
+owner. This first-order endpoint constitutive split infers no temperature,
+caloric energy, latent heat or cavitated tangential work. Four new G1/G3/G4
+groups exercise nonlinear thermal-expansion pressure against independent
+momentum quadrature, sealed heating/cooling mass, exact Newtonian continuation,
+retained versus changed liquid identities, explicit supply/Barus refusal and
+late cancellation. All 136 original-source film tests pass in the same focused
+native-source lane; full constellation and cross-ISA validation remain open.
 
 A common Barus law now uses `chi=(1-exp(-alpha*(p-p_c)))/alpha`, with channel
 conductances multiplied by `exp(alpha*(p_ambient-p_c))`; supplied viscosities

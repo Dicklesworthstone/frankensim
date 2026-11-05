@@ -23,7 +23,7 @@ use super::{
     CavitationSolveConfig, CavitationStep, FilmError, FlowBalance, MAX_CELLS, MAX_CHANNELS,
     ResistiveFilm, dot, fail, poll, solve_local,
 };
-use crate::resistive_film::power_law::{PowerLawFilm, RegularizedPowerLaw};
+use crate::resistive_film::power_law::{PowerLawControls, PowerLawFilm, RegularizedPowerLaw};
 
 /// The original liquid-content owner with explicit SI power-law rheology.
 ///
@@ -38,6 +38,36 @@ use crate::resistive_film::power_law::{PowerLawFilm, RegularizedPowerLaw};
 pub struct CavitatingPowerLawFilm {
     inventory: CavitatingFilm,
     rheology: PowerLawFilm,
+}
+
+/// Endpoint constitutive owner and the matching conservative liquid candidate.
+/// Accept both together after the surrounding thermal/mechanical step succeeds.
+#[derive(Clone, Debug)]
+pub struct CavitatingPowerLawContinuation {
+    pub film: CavitatingPowerLawFilm,
+    pub step: CavitationStep,
+}
+
+impl CavitatingFilm {
+    /// Bind explicit nonlinear laws to the SAME accepted liquid inventory.
+    ///
+    /// Existing states, geometry, supplies and mass tolerances remain valid.
+    /// Only the transport law changes; source validity and thermal/rheological
+    /// history remain with the caller. A native Barus law is not compatible
+    /// with this pressure-independent generalized-Newtonian reduction.
+    pub fn with_power_law(
+        &self,
+        laws: Vec<RegularizedPowerLaw>,
+        controls: PowerLawControls,
+    ) -> Result<CavitatingPowerLawFilm, FilmError> {
+        let rheology = PowerLawFilm::new(self.geometry(), laws, controls)?;
+        let inventory =
+            self.with_channel_viscosities(rheology.pressure_operator().channel_viscosities_pa_s())?;
+        Ok(CavitatingPowerLawFilm {
+            inventory,
+            rheology,
+        })
+    }
 }
 
 impl CavitatingPowerLawFilm {
@@ -146,6 +176,78 @@ impl CavitatingPowerLawFilm {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CavitationStep, FilmError> {
         poll(&mut cancelled)?;
+        self.validate_relative_motion(q_next, relative_wall_speed_m_s)?;
+        self.advance_kernel(
+            &self.inventory,
+            state,
+            q_next,
+            entrainment_m3_s,
+            relative_wall_speed_m_s,
+            dt_s,
+            &mut cancelled,
+        )
+    }
+
+    /// Continue the ORIGINAL mass using explicit endpoint liquid and rheology.
+    ///
+    /// The native balance remains
+    /// `rho_next*(V_next*theta_next + dt*div Q_next) = rho_old*V_old*theta_old`.
+    /// Endpoint channel laws drive the simultaneous pressure/sliding profiles;
+    /// a new density never reprices the old liquid volume. Pressure/content is
+    /// solved at the endpoint rupture pressure. Explicit reservoirs retain
+    /// their original pressure/content and must satisfy that new domain.
+    ///
+    /// This is a first-order endpoint constitutive split. The caller supplies
+    /// the source/temperature proposal and temporal refinement; no caloric
+    /// energy, phase heat or rheological evolution is inferred. A changed
+    /// liquid has a distinct inventory identity, while a rheology-only refresh
+    /// keeps the original state compatibility. If every ENDPOINT law is n=1,
+    /// the existing Newtonian mass-transfer kernel is used exactly.
+    ///
+    /// Any material, domain, budget or cancellation refusal leaves the accepted
+    /// state and both original owners intact. The returned film and candidate
+    /// are a pair, to be accepted together by the surrounding time owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_liquid(
+        &self,
+        state: &CavitatingFilmState,
+        q_next: &[f64],
+        entrainment_m3_s: &[f64],
+        relative_wall_speed_m_s: &[f64],
+        dt_s: f64,
+        liquid: CavitationLiquid,
+        laws: Vec<RegularizedPowerLaw>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CavitatingPowerLawContinuation, FilmError> {
+        poll(&mut cancelled)?;
+        self.inventory.validate_state(state)?;
+        self.validate_relative_motion(q_next, relative_wall_speed_m_s)?;
+        let rheology = PowerLawFilm::new(self.geometry(), laws, self.rheology.controls())?;
+        let inventory = self.inventory.prepare_liquid(
+            liquid,
+            rheology.pressure_operator().channel_viscosities_pa_s(),
+        )?;
+        let film = Self {
+            inventory,
+            rheology,
+        };
+        let step = film.advance_kernel(
+            &self.inventory,
+            state,
+            q_next,
+            entrainment_m3_s,
+            relative_wall_speed_m_s,
+            dt_s,
+            &mut cancelled,
+        )?;
+        Ok(CavitatingPowerLawContinuation { film, step })
+    }
+
+    fn validate_relative_motion(
+        &self,
+        q_next: &[f64],
+        relative_wall_speed_m_s: &[f64],
+    ) -> Result<(), FilmError> {
         if relative_wall_speed_m_s.len() != self.inventory.channel_count()
             || relative_wall_speed_m_s.iter().any(|v| !v.is_finite())
         {
@@ -157,22 +259,36 @@ impl CavitatingPowerLawFilm {
                 return fail("relative sliding through a closed cavitating passage");
             }
         }
-        if self.rheology.is_newtonian() {
-            return self
-                .inventory
-                .advance(state, q_next, entrainment_m3_s, dt_s, cancelled);
-        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_kernel(
+        &self,
+        previous: &CavitatingFilm,
+        state: &CavitatingFilmState,
+        q_next: &[f64],
+        entrainment_m3_s: &[f64],
+        relative_wall_speed_m_s: &[f64],
+        dt_s: f64,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<CavitationStep, FilmError> {
+        let transport = if self.rheology.is_newtonian() {
+            None
+        } else {
+            Some(Transport {
+                rheology: &self.rheology,
+                relative: relative_wall_speed_m_s,
+            })
+        };
         self.inventory.advance_kernel(
-            &self.inventory,
+            previous,
             state,
             q_next,
             entrainment_m3_s,
             dt_s,
-            Some(Transport {
-                rheology: &self.rheology,
-                relative: relative_wall_speed_m_s,
-            }),
-            &mut cancelled,
+            transport,
+            cancelled,
         )
     }
 }

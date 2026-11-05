@@ -651,3 +651,339 @@ fn g1_branching_full_at_rupture_reforms_before_merit_globalization() {
     assert_eq!(original.pressure_pa(), &[2000.0; 4]);
     assert_eq!(original.liquid_fraction(), &[1.0; 4]);
 }
+
+#[test]
+fn g1_endpoint_density_and_nonlinear_viscosity_preserve_mass_and_physical_pressure() {
+    let base = geometry(false);
+    let inventory = CavitatingFilm::new(base.clone(), liquid(), mass_controls()).unwrap();
+    let original = inventory.initial_state(&[0.0]).unwrap();
+    let endpoint = CavitationLiquid {
+        density_kg_m3: 800.0,
+        cavitation_pressure_pa: 6000.0,
+        ..liquid()
+    };
+    let dt = 0.1;
+    let volume = 1e-6;
+    let required_flow = (liquid().density_kg_m3 / endpoint.density_kg_m3 - 1.0) * volume / dt;
+    for exponent in [0.5, 1.7] {
+        let film = inventory
+            .with_power_law(vec![law(exponent)], controls())
+            .unwrap();
+        let material = RegularizedPowerLaw {
+            consistency_pa_s_n: 0.6 * law(exponent).consistency_pa_s_n,
+            ..law(exponent)
+        };
+        let next = film
+            .advance_with_liquid(
+                &original,
+                &[0.0],
+                &[0.0],
+                &[0.0],
+                dt,
+                endpoint,
+                vec![material],
+                || false,
+            )
+            .unwrap();
+        // Independent no-slip momentum quadrature, followed by a scalar
+        // bracket: this does not use the production flux or pressure root.
+        let edge = &base.channels[0];
+        let mut lo = 0.0;
+        let mut hi = 1.0;
+        while pressure_flow(material, edge, 0.001, hi) < required_flow {
+            hi *= 2.0;
+            assert!(hi < base.limits.maximum_pressure_pa);
+        }
+        for _ in 0..64 {
+            let mid = 0.5 * (lo + hi);
+            if pressure_flow(material, edge, 0.001, mid) < required_flow {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let gauge = 0.5 * (lo + hi);
+        near(
+            next.step.state.pressure_pa()[0],
+            endpoint.ambient_pressure_pa + gauge,
+            1e-7,
+            3e-10,
+        );
+        near(next.step.generalized_force[0], 0.001 * gauge, 1e-10, 3e-10);
+        near(
+            next.step.channel_volume_flow_m3_s[0],
+            required_flow,
+            1e-18,
+            2e-12,
+        );
+        assert_eq!(next.step.state.liquid_fraction(), &[1.0]);
+        assert_eq!(next.step.report.liquid_mass_before_kg, 1000.0 * volume);
+        near(
+            next.step.report.liquid_mass_after_kg,
+            800.0 * volume,
+            1e-18,
+            1e-13,
+        );
+        near(
+            next.step.report.boundary_mass_out_kg,
+            200.0 * volume,
+            1e-18,
+            1e-12,
+        );
+        assert_eq!(next.film.laws(), &[material]);
+        assert_eq!(next.film.liquid(), endpoint);
+        assert_eq!(original.pressure_pa(), &[liquid().ambient_pressure_pa]);
+    }
+}
+
+#[test]
+fn g3_thermal_nonlinear_inventory_conversion_and_sealed_cycles_keep_original_mass() {
+    let native = CavitatingFilm::new(geometry(true), liquid(), mass_controls()).unwrap();
+    let original = native.initialize(&[0.0], &[0.25]).unwrap();
+    let mut film = native.with_power_law(vec![law(0.7)], controls()).unwrap();
+    // The constitutive conversion accepts the ORIGINAL state without reset.
+    let same = film
+        .advance(&original, &[0.0], &[0.0], &[0.0], 0.1, || false)
+        .unwrap();
+    assert_eq!(same.state, original);
+    let mut state = original.clone();
+    let mut accepted_mass = 1000.0 * (1e-6 * 0.25);
+    for (density, rupture, scale) in [
+        (800.0, 6000.0, 0.6),
+        (1200.0, 1000.0, 1.4),
+        (1000.0, 2000.0, 1.0),
+    ] {
+        let material = RegularizedPowerLaw {
+            consistency_pa_s_n: scale * law(0.7).consistency_pa_s_n,
+            ..law(0.7)
+        };
+        let next = film
+            .advance_with_liquid(
+                &state,
+                &[0.0],
+                &[0.0],
+                &[0.0],
+                0.1,
+                CavitationLiquid {
+                    density_kg_m3: density,
+                    cavitation_pressure_pa: rupture,
+                    ..liquid()
+                },
+                vec![material],
+                || false,
+            )
+            .unwrap();
+        assert_eq!(next.step.report.liquid_mass_before_kg, accepted_mass);
+        near(
+            next.step.report.liquid_mass_after_kg,
+            accepted_mass,
+            1e-18,
+            2e-13,
+        );
+        assert_eq!(next.step.report.boundary_mass_out_kg, 0.0);
+        near(
+            next.step.state.liquid_fraction()[0],
+            250.0 / density,
+            1e-14,
+            1e-13,
+        );
+        assert_eq!(next.step.state.pressure_pa(), &[rupture]);
+        assert!(
+            film.advance(&next.step.state, &[0.0], &[0.0], &[0.0], 0.1, || false)
+                .is_err()
+        );
+        assert!(
+            next.film
+                .advance(&state, &[0.0], &[0.0], &[0.0], 0.1, || false)
+                .is_err()
+        );
+        accepted_mass = next.step.report.liquid_mass_after_kg;
+        state = next.step.state;
+        film = next.film;
+    }
+    assert_eq!(original.liquid_fraction(), &[0.25]);
+    let refreshed = film
+        .advance_with_liquid(
+            &state,
+            &[0.0],
+            &[0.0],
+            &[0.0],
+            0.1,
+            film.liquid(),
+            vec![law(1.4)],
+            || false,
+        )
+        .unwrap();
+    // A law-only update changes transport, so both material epochs retain the
+    // original liquid identity. It does not erase or recreate filling.
+    assert!(
+        film.advance(&refreshed.step.state, &[0.0], &[0.0], &[0.0], 0.1, || false)
+            .is_ok()
+    );
+    assert!(
+        refreshed
+            .film
+            .advance(&state, &[0.0], &[0.0], &[0.0], 0.1, || false)
+            .is_ok()
+    );
+}
+
+#[test]
+fn g3_newtonian_endpoint_continuation_is_the_exact_original_mass_transfer() {
+    let native = CavitatingFilm::new(geometry(false), medium(), mass_controls()).unwrap();
+    let state = native.initialize(&[0.0], &[0.3]).unwrap();
+    // Switching from n!=1 to n=1 must also delegate by the ENDPOINT law.
+    let film = native.with_power_law(vec![law(0.5)], controls()).unwrap();
+    let endpoint = CavitationLiquid {
+        density_kg_m3: 850.0,
+        cavitation_pressure_pa: 1800.0,
+        ..medium()
+    };
+    let material = RegularizedPowerLaw {
+        consistency_pa_s_n: 0.015,
+        flow_index: 1.0,
+        minimum_shear_rate_per_s: 3.0,
+    };
+    let expected = native
+        .advance_with_liquid(&state, &[-0.0002], &[1e-8], 0.1, endpoint, &[0.015], || {
+            false
+        })
+        .unwrap();
+    let actual = film
+        .advance_with_liquid(
+            &state,
+            &[-0.0002],
+            &[1e-8],
+            &[0.004],
+            0.1,
+            endpoint,
+            vec![material],
+            || false,
+        )
+        .unwrap();
+    assert_eq!(
+        actual.step.state.configuration(),
+        expected.step.state.configuration()
+    );
+    assert_eq!(
+        actual.step.state.pressure_pa(),
+        expected.step.state.pressure_pa()
+    );
+    assert_eq!(
+        actual.step.state.liquid_fraction(),
+        expected.step.state.liquid_fraction()
+    );
+    assert_eq!(
+        actual.step.channel_volume_flow_m3_s,
+        expected.step.channel_volume_flow_m3_s
+    );
+    assert_eq!(
+        actual.step.generalized_force,
+        expected.step.generalized_force
+    );
+    assert_eq!(actual.step.report, expected.step.report);
+}
+
+#[test]
+fn g4_thermal_nonlinear_transition_refuses_sources_domains_and_late_cancellation_atomically() {
+    let barus = CavitatingFilm::new(
+        geometry(false).with_barus_viscosity(1e-6).unwrap(),
+        medium(),
+        mass_controls(),
+    )
+    .unwrap();
+    assert!(barus.with_power_law(vec![law(0.5)], controls()).is_err());
+    let native = CavitatingFilm::new(geometry(false), medium(), mass_controls()).unwrap();
+    let film = native.with_power_law(vec![law(0.5)], controls()).unwrap();
+    let state = native.initial_state(&[0.0]).unwrap();
+    let saved = state.clone();
+    let endpoint = CavitationLiquid {
+        density_kg_m3: 800.0,
+        ..medium()
+    };
+    let trial = |cancelled: &mut dyn FnMut() -> bool| {
+        film.advance_with_liquid(
+            &state,
+            &[0.0],
+            &[1e-8],
+            &[0.002],
+            0.1,
+            endpoint,
+            vec![law(0.7)],
+            cancelled,
+        )
+    };
+    let mut polls = 0;
+    trial(&mut || {
+        polls += 1;
+        false
+    })
+    .unwrap();
+    assert!(polls > 5);
+    for stop in [1, 5, polls - 1, polls] {
+        let mut count = 0;
+        assert!(
+            trial(&mut || {
+                count += 1;
+                count == stop
+            })
+            .is_err()
+        );
+        assert_eq!(state, saved);
+        assert_eq!(film.liquid(), medium());
+        assert_eq!(film.laws(), &[law(0.5)]);
+    }
+    let supplied = film
+        .with_reservoirs(&[Some(CavitationReservoir {
+            pressure_pa: 2050.0,
+            liquid_fraction: 1.0,
+        })])
+        .unwrap();
+    assert!(
+        supplied
+            .advance_with_liquid(
+                &state,
+                &[0.0],
+                &[0.0],
+                &[0.0],
+                0.1,
+                CavitationLiquid {
+                    cavitation_pressure_pa: 2060.0,
+                    ..endpoint
+                },
+                vec![law(0.7)],
+                || false,
+            )
+            .is_err()
+    );
+    assert!(
+        film.advance_with_liquid(
+            &state,
+            &[0.0],
+            &[0.0],
+            &[f64::NAN],
+            0.1,
+            endpoint,
+            vec![law(0.7)],
+            || false,
+        )
+        .is_err()
+    );
+    assert!(
+        film.advance_with_liquid(
+            &state,
+            &[0.0],
+            &[0.0],
+            &[0.0],
+            0.1,
+            endpoint,
+            vec![],
+            || false,
+        )
+        .is_err()
+    );
+    assert_eq!(state, saved);
+    // A rejected proposal leaves the accepted owner immediately retryable.
+    film.advance(&state, &[0.0], &[0.0], &[0.0], 0.1, || false)
+        .unwrap();
+}

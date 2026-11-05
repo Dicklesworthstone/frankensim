@@ -37,7 +37,7 @@ use std::sync::Arc;
 
 /// Generalized-Newtonian pressure transport with the same retained inventory.
 pub mod power_law;
-pub use power_law::CavitatingPowerLawFilm;
+pub use power_law::{CavitatingPowerLawContinuation, CavitatingPowerLawFilm};
 
 /// Explicit liquid and reservoir data, frozen within each step, in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -604,6 +604,27 @@ impl CavitatingFilm {
     ) -> Result<CavitationContinuation, FilmError> {
         poll(&mut cancelled)?;
         self.validate_state(state)?;
+        let film = self.prepare_liquid(liquid, channel_viscosities_pa_s)?;
+        let step = film.advance_kernel(
+            self,
+            state,
+            q_next,
+            entrainment_m3_s,
+            dt_s,
+            None,
+            &mut cancelled,
+        )?;
+        Ok(CavitationContinuation { film, step })
+    }
+
+    // Newtonian and generalized-Newtonian continuation share the original
+    // reservoir, coefficient and inventory-epoch admission. Preparation never
+    // reinterprets accepted mass or publishes a changed material independently.
+    fn prepare_liquid(
+        &self,
+        liquid: CavitationLiquid,
+        channel_viscosities_pa_s: &[f64],
+    ) -> Result<Self, FilmError> {
         let geometry = self
             .geometry
             .with_channel_viscosities(channel_viscosities_pa_s)?;
@@ -615,16 +636,7 @@ impl CavitatingFilm {
         if liquid == self.liquid {
             film.owner = Arc::clone(&self.owner);
         }
-        let step = film.advance_kernel(
-            self,
-            state,
-            q_next,
-            entrainment_m3_s,
-            dt_s,
-            None,
-            &mut cancelled,
-        )?;
-        Ok(CavitationContinuation { film, step })
+        Ok(film)
     }
 
     // Keep one numerical kernel for all caller cancellation closures. Dynamic
