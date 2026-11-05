@@ -389,8 +389,9 @@ pub(in crate::solve::transient) fn finish(
     let open_enclosure = radiation.map(|lowering|
         lowering.bind_open_enclosure(cx, problem).map_err(lower))
         .transpose()?.flatten();
-    // Pointwise parameters contract the already prepared local/reflected load.
-    // The patch-mean enclosure additionally runs its radiosity control transpose.
+    // Pointwise parameters use the prepared local/reflected load; material
+    // enclosures add a retained direct radiosity backsolve, not Krylov work.
+    // The patch-mean enclosure separately runs its iterative control transpose.
     let iteration_limit = ends_s.len().checked_mul(linear.max_iterations)
         .and_then(|v| v.checked_mul(if enclosure.is_some() && pointwise.is_none() { 2 } else { 1 }))
         .ok_or_else(|| bad("enthalpy reverse iteration allowance overflows"))?;
@@ -402,7 +403,7 @@ pub(in crate::solve::transient) fn finish(
         return Err(bad("enthalpy adjoint lost its exact bound enclosure model"));
     }
     let radiation_workspace = radiation.map(|lowering| {
-        if lowering.is_material_ambient() {
+        if lowering.is_material() {
             pointwise_material_storage_bytes(n, problem.mesh.boundary().len(), lowering, ends_s.len())
         } else if lowering.is_pointwise() {
             pointwise_storage_bytes(
@@ -905,7 +906,9 @@ pub(in crate::solve::transient) fn finish(
         ",\"convection\":{{\"method\":\"complete-natural-and-streamwise-air-enthalpy-feedback\",\"natural_ports\":{},\"air_ports\":{},\"max_combined_feedback_entries\":{combined_feedback_entries},\"additional_workspace_bytes\":{convection_workspace},\"control_workspace_bytes\":{control_workspace},\"physical_endpoint_rechecks\":{},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"air_energy\":\"actual-air-enthalpy-gain-with-separate-natural-and-radiation-reservoirs\"{controls_fragment}}}",
         natural.len(), airflow.map_or(0, |path| path.segments.len()), selected.state,
     ) };
-    let pointwise_scope = pointwise.map(|lowering| pointwise::history_scope(SCOPE, lowering.is_material_ambient()));
+    let pointwise_scope = pointwise.map(|lowering| pointwise::history_scope(
+        SCOPE, lowering.is_material(), lowering.is_material_enclosure(),
+    ));
     let flux_scope = (!flux_fragment.is_empty()).then(||
         pointwise_scope.as_deref().unwrap_or(SCOPE).replace(
             "Prescribed Neumann data, phase-law parameters and the time grid are fixed.",
@@ -916,7 +919,9 @@ pub(in crate::solve::transient) fn finish(
         ",\"temperature_contact\":{{\"method\":\"complete-total-enthalpy-contact-tangent\",\"control_steps\":{},\"max_face_pairs\":{max_contact_pairs},\"workspace_estimate_bytes\":{contact_workspace},\"residual_target\":\"original-accepted-forward-physical-tolerance\",\"source_context\":\"original-pinned-temperature-law-at-independent-endpoint-traces\"}}",
         selected.state,
     ) } else { String::new() };
-    let radiation_parameters = if pointwise.is_some_and(|lowering| lowering.is_material_ambient()) {
+    let radiation_parameters = if pointwise.is_some_and(|lowering| lowering.is_material_enclosure()) {
+        "shared original emissivity-source ordinates and, for an open enclosure, one shared black-bath temperature control"
+    } else if pointwise.is_some_and(|lowering| lowering.is_material_ambient()) {
         "shared original emissivity-source ordinates and independent ambient-reservoir controls"
     } else { "absolute emissivity/reservoir controls" };
     let contact_scope = temperature_contacts.map(|_| format!(

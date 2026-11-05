@@ -328,7 +328,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// independent radiation reservoirs through those complete enthalpy histories.
 /// Version 129 admits local-temperature material emission and reflection in
 /// closed/open pointwise enthalpy enclosures, including source-backed contact.
-pub const SOLVE_DRIVER_VERSION: u32 = 129;
+/// Version 130 differentiates original material-emissivity sources through
+/// closed/open enclosure histories, including one shared black-bath control.
+pub const SOLVE_DRIVER_VERSION: u32 = 130;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

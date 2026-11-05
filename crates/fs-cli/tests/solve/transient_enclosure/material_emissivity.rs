@@ -522,3 +522,6 @@ fn g0_local_enclosure_refuses_foreign_source_owners_and_uncovered_initial_states
         );
     }
 }
+
+#[path = "material_emissivity/adjoint.rs"]
+mod adjoint;

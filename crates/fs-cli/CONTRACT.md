@@ -1,5 +1,37 @@
 # CONTRACT: fs-cli
 
+## Original material-source adjoints through reflected enclosures — driver 130
+
+Final-temperature and sampled-peak adjoints now consume the original accepted
+local-temperature closed/open enclosure histories. Endpoint binding retains
+both the correlated P1 emission response and changing reflected irradiation in
+the complete enthalpy tangent, including original live contact, sourced bulk
+conductivity, natural convection and transported air. Physical residual,
+energy, source-domain and smoothness gates remain active.
+
+Controls are each original scalar emissivity or temperature-curve ordinate at
+fixed abscissae. Exact card/claim identity groups shared sources once across
+patches and the selected history prefix. Enclosure surfaces do not acquire
+independent reservoirs. An open enclosure exposes one shared external
+black-environment temperature; its reflected contribution accumulates once.
+
+Parameter contractions use the same masked, time-scaled physical dual with
+the outward sign applied once. Each selected endpoint performs one prepared
+radiosity transpose backsolve for all source controls and the shared bath,
+with zero extra thermal linear solves or parameter Krylov iterations. Reports
+separate these direct patch backsolves from thermal work. Initial selected
+peaks retain complete source and bath identity with zero future derivatives.
+
+Admission now charges original-ordinate bases, material trace state and the
+completed open-bath matrix before forward stepping; reverse execution uses the
+same workspace cap. Driver 130 invalidates older cached producer results.
+Regression cases perturb whole original cards, the shared bath, initial
+enthalpy and delivered power, covering the reflected thermal tangent and
+source grouping. Rust syntax and source review passed; compilation and native
+numerical execution remain unverified because the required build runner is
+unavailable. These changes advance MR19/MR20 without completing their wider
+phase-dependent material/contact scope.
+
 ## Local-temperature emissivity in reflected enclosures — driver 129
 
 Closed and open `enclosure-radiation` declarations may now select
@@ -28,9 +60,9 @@ Material report storage is charged before either time grid starts. Driver 129
 invalidates older cached producer results. Forward regressions reconstruct P1
 emission moments and two-patch radiosity independently and check closed/open
 energy accounting. Syntax and source review do not establish runtime execution.
-Local enclosure trajectory controls are refused until their original-source
-reflected pullback is connected. Phase-dependent source emissivity, separate
-coatings, moving visibility and participating media remain outside this CLI mode.
+Driver 130 connects the original-source reflected trajectory controls described
+above. Phase-dependent source emissivity, separate coatings, moving visibility
+and participating media remain outside this CLI mode.
 
 ## Original emissivity-source trajectory adjoints — driver 128
 

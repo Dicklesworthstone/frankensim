@@ -718,9 +718,6 @@ pub(super) fn solve(
         .as_ref()
         .ok_or_else(|| bad("missing enthalpy storage"))?;
     let objective = adjoint::requested(spec)?;
-    if objective.is_some() && radiation.is_some_and(radiation::LoweredRadiation::is_material_enclosure) {
-        return Err(bad("local-temperature enclosure emissivity requires its original-source reflected trajectory controls; fixed-emissivity controls cannot replace them"));
-    }
     if temperature_contacts.is_some() && (interfaces.is_some()
         || radiation.is_some_and(|lowering| !lowering.is_pointwise()))
     {
@@ -923,7 +920,7 @@ pub(super) fn solve(
             problem.boundary.conditions().len(), config.max_newton_iterations,
             linear.max_iterations,
         )?.checked_add(radiation.map(|lowering| {
-            if lowering.is_material_ambient() {
+            if lowering.is_material() {
                 adjoint::enthalpy_pointwise_material_storage_bytes(
                     n, problem.mesh.boundary().len(), lowering, grids.fine.len(),
                 )
