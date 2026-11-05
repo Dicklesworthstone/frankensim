@@ -23,6 +23,7 @@ use fs_qty::Dims;
 use fs_sparse::Csr;
 
 mod action;
+pub(crate) use action::scaled_entry;
 pub use action::{MAX_FIELD_QUADRATURE, MaterialAction};
 
 /// Largest admitted polynomial order; at most 84 local basis functions.

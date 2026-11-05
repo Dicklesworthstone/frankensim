@@ -255,6 +255,24 @@ definiteness of an arbitrary global constrained/unconstrained problem.
   consistent CSR/action parity, all block scaling under geometry dilation,
   relabeling, anisotropic energy, bounded work and atomic refusals.
 
+- `VecSpace::prepare_material_mass_with_scalar_field` freezes an authored
+  positive spatial scalar multiplier into that same vector mass owner. Cell
+  weights retain scalar/P1/tensor meaning; field and coefficient dimensions
+  multiply. Original cell/barycentric source queries occur once per quadrature
+  point after geometry, units and total retained storage admission. Samples
+  and their per-cell scales are retained; warm action, diagonal and symmetric
+  CSR assembly share them without re-querying evolving material state.
+  Independent field/material scales are restored after integration using the
+  existing H1 rescaling arithmetic. Caller-selected r+3..=16 Duffy-axis Gauss
+  counts retain the existing polynomial contraction cost; storage adds Q+1
+  scalars per cell, with no warm allocations. Arbitrary-field quadrature error
+  and unsampled source validity remain caller responsibilities. Reference
+  density on reference geometry is closed-body inertia, not mass transport.
+  `tests/material_vecfam_field.rs` covers exact quadratic density inventory,
+  centroid and energy, source freezing, anisotropic CSR/action/diagonal parity,
+  inverse-density quadrature convergence, independent extreme scales, and
+  source/cancellation refusals without publishing a partial output.
+
 - `cohomology` module (plan §8.1, bead tfz.7): harmonic cochains and
   the discrete Hodge decomposition — the correct treatment of
   multiply-connected domains. `hodge_decompose` splits any k-cochain

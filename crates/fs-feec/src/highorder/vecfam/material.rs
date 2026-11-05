@@ -1,18 +1,21 @@
 //! Material inertia in the original Nedelec and RT moment coordinates.
 
 use super::{ElementBasis, Family, VecSpace, dot3, mpow};
+use crate::highorder::material::scaled_entry;
 use crate::highorder::simplex::duffy_quadrature;
 use crate::weighted::{CellWeight, WeightedAssemblyLimits, WeightedError, assemble_triplets, poll};
 use fs_qty::Dims;
 use fs_sparse::Csr;
 
 mod admit;
+mod field;
 
 const MAX_LOCAL: usize = 84;
 const MAX_MONOMIAL: usize = 35;
 
 /// Prepared consistent vector mass for scalar, P1 scalar, or Cartesian SPD
-/// material coefficients on the existing H(curl)/H(div) moment layout.
+/// material coefficients, optionally multiplied by a frozen positive spatial
+/// scalar field, on the existing H(curl)/H(div) moment layout.
 ///
 /// The physical pairing is `integral test . W trial dV`. Density on reference
 /// geometry gives inertia and kinetic energy; other material coefficients
@@ -33,6 +36,7 @@ pub struct VectorMaterialMass<'a, 'c> {
     vol6: Vec<f64>,
     local_count: usize,
     quadrature: Vec<([f64; 4], f64)>,
+    scalar_field: Option<field::SampledScalarField>,
     diagonal: Vec<f64>,
     coefficient_dims: Dims,
     limits: WeightedAssemblyLimits,
@@ -72,6 +76,7 @@ impl<'c> VecSpace<'c> {
             positions,
             weights,
             limits,
+            None,
             max_storage_bytes,
             cancelled,
         )?;
@@ -82,7 +87,8 @@ impl<'c> VecSpace<'c> {
             dofs: admitted.dofs,
             vol6: admitted.vol6,
             local_count: admitted.local_count,
-            quadrature: duffy_quadrature(self.r + 3),
+            quadrature: duffy_quadrature(admitted.quadrature_order),
+            scalar_field: None,
             diagonal: zeros(self.ndof)?,
             coefficient_dims,
             limits,
@@ -178,11 +184,11 @@ impl VectorMaterialMass<'_, '_> {
             poll(cancelled)?;
             let (scale, tensor, affine) = weight.normalized_3d();
             let mut local = [0.0_f64; MAX_LOCAL];
-            for &(lambda, w) in &self.quadrature {
+            for (point, &(lambda, w)) in self.quadrature.iter().enumerate() {
                 poll(cancelled)?;
                 self.sample_monomials(cell, lambda, &mut monomials);
                 basis_values(&self.space.elements[cell], &monomials, &mut values);
-                let factor = quadrature_factor(w * self.vol6[cell], affine, lambda);
+                let factor = self.point_factor(cell, point, w, affine, lambda);
                 for i in 0..self.local_count {
                     local[i] =
                         factor.mul_add(dot3(values[i], tensor_action(tensor, values[i])), local[i]);
@@ -190,7 +196,7 @@ impl VectorMaterialMass<'_, '_> {
             }
             for i in 0..self.local_count {
                 let global = self.dofs[cell * self.local_count + i];
-                let value = scale * local[i];
+                let value = self.restore_scale(cell, scale, local[i]);
                 let sum = self.diagonal[global] + value;
                 if !value.is_finite() || !sum.is_finite() {
                     return Err(WeightedError::NonFiniteEntry);
@@ -229,14 +235,14 @@ impl VectorMaterialMass<'_, '_> {
             poll(cancelled)?;
             let (scale, tensor, affine) = weight.normalized_3d();
             let mut local = [0.0_f64; MAX_LOCAL * MAX_LOCAL];
-            for &(lambda, w) in &self.quadrature {
+            for (point, &(lambda, w)) in self.quadrature.iter().enumerate() {
                 poll(cancelled)?;
                 self.sample_monomials(cell, lambda, &mut monomials);
                 basis_values(&self.space.elements[cell], &monomials, &mut values);
                 for i in 0..self.local_count {
                     weighted[i] = tensor_action(tensor, values[i]);
                 }
-                let factor = quadrature_factor(w * self.vol6[cell], affine, lambda);
+                let factor = self.point_factor(cell, point, w, affine, lambda);
                 for i in 0..self.local_count {
                     for j in i..self.local_count {
                         let entry = &mut local[i * self.local_count + j];
@@ -248,7 +254,11 @@ impl VectorMaterialMass<'_, '_> {
             for (i, &row) in dofs.iter().enumerate() {
                 poll(cancelled)?;
                 for (j, &col) in dofs.iter().enumerate() {
-                    let value = scale * local[i.min(j) * self.local_count + i.max(j)];
+                    let value = self.restore_scale(
+                        cell,
+                        scale,
+                        local[i.min(j) * self.local_count + i.max(j)],
+                    );
                     if !value.is_finite() {
                         return Err(WeightedError::NonFiniteEntry);
                     }
@@ -314,7 +324,7 @@ impl VectorMaterialMass<'_, '_> {
                 }
             }
             let mut moments = [[0.0_f64; MAX_MONOMIAL]; 3];
-            for &(lambda, w) in &self.quadrature {
+            for (point, &(lambda, w)) in self.quadrature.iter().enumerate() {
                 poll(cancelled)?;
                 self.sample_monomials(cell, lambda, &mut monomials);
                 let mut value = [0.0_f64; 3];
@@ -324,7 +334,7 @@ impl VectorMaterialMass<'_, '_> {
                     }
                 }
                 let flux = tensor_action(tensor, value);
-                let factor = quadrature_factor(w * self.vol6[cell], affine, lambda);
+                let factor = self.point_factor(cell, point, w, affine, lambda);
                 for c in 0..3 {
                     for m in 0..s {
                         moments[c][m] = (factor * monomials[m]).mul_add(flux[c], moments[c][m]);
@@ -338,7 +348,7 @@ impl VectorMaterialMass<'_, '_> {
                         local = function.comp[c][m].mul_add(moments[c][m], local);
                     }
                 }
-                let value = scale * local;
+                let value = self.restore_scale(cell, scale, local);
                 let sum = scratch[global] + value;
                 if !value.is_finite() || !sum.is_finite() {
                     return Err(WeightedError::NonFiniteEntry);
@@ -354,6 +364,32 @@ impl VectorMaterialMass<'_, '_> {
     #[inline]
     fn cell_dofs(&self, cell: usize) -> &[usize] {
         &self.dofs[cell * self.local_count..(cell + 1) * self.local_count]
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn point_factor(
+        &self,
+        cell: usize,
+        point: usize,
+        weight: f64,
+        affine: Option<[f64; 4]>,
+        lambda: [f64; 4],
+    ) -> f64 {
+        let base = quadrature_factor(weight * self.vol6[cell], affine, lambda);
+        self.scalar_field.as_ref().map_or(base, |field| {
+            base * field.values[cell * self.quadrature.len() + point]
+        })
+    }
+
+    #[allow(clippy::inline_always)]
+    #[inline(always)]
+    fn restore_scale(&self, cell: usize, material: f64, value: f64) -> f64 {
+        scaled_entry(
+            material,
+            self.scalar_field.as_ref().map(|field| field.scales[cell]),
+            value,
+        )
     }
 
     #[allow(clippy::inline_always)]

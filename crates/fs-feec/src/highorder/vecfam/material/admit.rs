@@ -13,17 +13,20 @@ pub(super) struct Admitted {
     pub(super) dofs: Vec<usize>,
     pub(super) vol6: Vec<f64>,
     pub(super) local_count: usize,
+    pub(super) quadrature_order: usize,
 }
 
 fn invalid(cell: usize, reason: &'static str) -> WeightedError {
     WeightedError::InvalidGeometry { cell, reason }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn admit(
     space: &VecSpace<'_>,
     positions: &[[f64; 3]],
     weights: &[CellWeight],
     limits: WeightedAssemblyLimits,
+    field_quadrature_order: Option<usize>,
     max_storage_bytes: usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Admitted, WeightedError> {
@@ -98,14 +101,28 @@ pub(super) fn admit(
     let flat_count = cells
         .checked_mul(local_count)
         .ok_or(WeightedError::SizeOverflow)?;
-    let order = space.r + 3;
+    let order = field_quadrature_order.unwrap_or(space.r + 3);
+    if order < space.r + 3 || order > crate::highorder::material::MAX_FIELD_QUADRATURE {
+        return Err(invalid(
+            0,
+            "sampled vector material quadrature order must be r+3..=16",
+        ));
+    }
     let quadrature_count = order.checked_pow(3).ok_or(WeightedError::SizeOverflow)?;
+    let field_count = if field_quadrature_order.is_some() {
+        cells
+            .checked_mul(quadrature_count + 1)
+            .ok_or(WeightedError::SizeOverflow)?
+    } else {
+        0
+    };
     let mut bytes = 0usize;
     for (count, width) in [
         (flat_count, core::mem::size_of::<usize>()),
         (cells, core::mem::size_of::<f64>()),
         (ndof, core::mem::size_of::<f64>()),
         (quadrature_count, core::mem::size_of::<([f64; 4], f64)>()),
+        (field_count, core::mem::size_of::<f64>()),
     ] {
         bytes = count
             .checked_mul(width)
@@ -276,5 +293,6 @@ pub(super) fn admit(
         dofs,
         vol6,
         local_count,
+        quadrature_order: order,
     })
 }

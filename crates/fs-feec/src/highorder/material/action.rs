@@ -380,7 +380,7 @@ impl MaterialAction<'_, '_, '_> {
 /// Restore independent coefficient scales only after integration. Their raw
 /// product may overflow when anticorrelated fields have a finite product.
 /// Choose the multiplication order before rescaling a subnormal intermediate.
-fn scaled_entry(base: f64, field: Option<f64>, value: f64) -> f64 {
+pub(crate) fn scaled_entry(base: f64, field: Option<f64>, value: f64) -> f64 {
     let Some(field) = field else {
         return base * value;
     };
