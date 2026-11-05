@@ -1,5 +1,43 @@
 # CONTRACT: fs-airflow
 
+## Steady shear-thinning hydraulic networks
+
+`graph::rheology::CarreauPipeGraph` connects original `LaminarCarreauPipe`
+owners through arbitrary ideal pressure junctions, including parallel paths,
+loops, flow reversal and disconnected components with their own reservoirs.
+Every branch retains the same original thermal Carreau-Yasuda law and frozen
+temperature; geometry and explicit laminar wall-rate ceilings may differ.
+Volume continuity assumes one incompressible fluid at fixed density. This is
+not a variable-density mass-flow or thermal-feedback solve.
+
+Each pressure trial resolves the original radial viscosity profile. Junction
+Newton corrections use that accepted profile's positive differential
+`dQ/d(delta_p)`, including its finite true zero-flow limit, in a grounded
+matrix-free graph Laplacian. The existing checked CG and Jacobi preconditioner
+solve each correction; no apparent-viscosity replacement, secant Jacobian,
+epsilon resistance or independent Krylov implementation is introduced.
+Storage is O(nodes + pipes). Accepted profiles and conductances are reused
+through the linear solve and retained unchanged in the final result.
+
+Bounded pressure continuation and damped corrections can recover when an
+intermediate guess exceeds a pipe's source support even though the final
+network is admissible. Each anchored component starts at its own uniform
+pressure, so another component's pressure gauge cannot consume its rate
+support or continuation work. Every evaluated pipe stays under its original source
+and numerical controls. Only convergence at every original target boundary
+pressure may publish; unresolved source states, exhausted work, unreferenced
+components and cancellation return no partial network. Checkpoints surround
+each finite pipe evaluation and bounded graph/linear traversals.
+
+The returned signed reservoir work, nonnegative accepted viscous dissipation,
+constitutive pressure-residual work and remaining free-node residual work
+satisfy an explicitly reported floating-point power balance. Numerical defects
+are never relabeled as heat or silently omitted. Heat is available to a thermal
+owner and is not deposited by this steady solver. Continuity convergence does
+not certify radial quadrature accuracy, source uncertainty or a laminar regime.
+The original no-slip, fully developed pipe assumptions remain; there is no
+new gravity, transient inertia, entrance, turbulence or compressibility model.
+
 ## Unsteady laminar pipe networks with internal continuity
 
 `graph::inertial::laminar::network::LaminarNetwork` connects original

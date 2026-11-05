@@ -29,6 +29,8 @@ mod fan;
 pub use fan::{GraphFanConfig, GraphFanError, GraphOperatingPoint};
 pub mod inertial;
 pub mod sensitivity;
+/// Steady junction-balanced flow of the original shear-thinning pipe material.
+pub mod rheology;
 pub mod thermal;
 pub mod porous;
 pub use porous::{LinearLossElement, LinearLossResistance, PassiveBranch};
