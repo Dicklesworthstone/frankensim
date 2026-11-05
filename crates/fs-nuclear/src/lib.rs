@@ -1,4 +1,4 @@
-//! Conservative fission energy from explicitly prescribed fission histories.
+//! Conservative nuclear sources with explicit physical inventories and histories.
 //!
 //! The same accepted event count consumes finite fuel, releases prompt energy
 //! and fills delayed-energy groups. Each group solves dE/dt = q F - lambda E
@@ -8,15 +8,20 @@
 //! separate. A caller must supply and identify its own admitted nuclear data;
 //! no isotope, energy yield, irradiation history or deposition fraction is guessed.
 //!
-//! This is a reduced source model, not neutron transport, criticality, a nuclide
-//! depletion network or a radiation-transport solver. Its effective decay groups
-//! are energy reservoirs, not delayed-neutron precursor populations. Thermal
+//! The fission source is a reduced model, not neutron transport, criticality or
+//! a radiation-transport solver. Its effective decay groups are energy reservoirs,
+//! not delayed-neutron precursor populations. The separate [`decay`] owner evolves
+//! source-identified radioactive parent/daughter populations and branch energy
+//! on the shared `fs_la` propagator and `fs_thermochem` half-life laws. Thermal
 //! material mass is a separate nonrelativistic storage coordinate; consumed fuel
 //! nuclei must not be subtracted as lost bulk material mass.
 
 #![deny(unsafe_code)]
 
 use fs_math::decay::{attenuate, decayed_fraction};
+
+/// Source-bound radioactive populations, daughter branches and integrated energy.
+pub mod decay;
 use std::sync::Arc;
 
 /// Source coupling on the original material-backed thermal timeline.

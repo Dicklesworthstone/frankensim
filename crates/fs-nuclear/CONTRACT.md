@@ -86,7 +86,7 @@ agree to floating-point tolerance; cross-ISA equality is not claimed.
 
 ## Physical scope
 
-This is a reduced prescribed-source model. It does not infer neutron flux,
+The fission source is a reduced prescribed-source model. It does not infer neutron flux,
 cross sections, criticality, reaction rates, temperature reactivity feedback,
 isotopic product yields, activation, poisoning or a nuclide depletion network.
 It does not solve radiation transport or assign dose. The radiation channel is
@@ -178,6 +178,62 @@ cargo test -p fs-nuclear --features thermal --locked
 
 before treating those coupled regressions as executed evidence. DSR and the
 complete constellation/layout checks were not available as successful gates.
+
+## Radioactive parent/daughter inventories
+
+`decay::DecayModel` binds caller-owned unique nuclide identities, a dataset
+identity, admitted `fs_thermochem::decay::DecayLawV1` laws, and ordered decay
+branches. Each unstable parent selects one represented daughter, with explicit
+stable endpoints. A branch retains its own probability and deposited, outward
+radiation and escaped joules per event. Multiple branches can share a daughter
+without merging their energy destinations. Fractions are never silently
+normalized and no isotope catalog or equilibrium history is inferred.
+
+`DecayInventory` owns nonnegative expected populations, compensated lifetime
+transformation counts and released-energy channels. `activity_bq` evaluates
+lambda times the current population; `decay_power_w` reports instantaneous
+channel power. Neither diagnostic is used as an interval-energy rectangle.
+For every accepted interval, branch events equal the independently integrated
+parent transformations times the branch probability. Those events release the
+branch's authored energy, including daughters produced and decayed within the
+same interval. Stable species have exactly zero activity and transformation count.
+
+Numerical propagation remains owned by `fs_la::decay::DecayPlan`: bounded
+nonnegative uniformization, exact survival/loss diagonals at every composition
+scale, equal-rate support, arbitrary original node order, work limits and
+cooperative cancellation. `DecayModel::prepare` retains both endpoint and
+integrated-count maps. Reusing a `PreparedDecay` avoids repeated matrix
+preparation; application costs O(nodes squared + branches). The same immutable
+model Arc and numerical limits must be retained. Source-bound maps cannot be
+silently applied to inventories carrying different half-lives or branch energies.
+
+`trial` and `trial_prepared` return independent candidates; `advance` and
+`advance_prepared` publish only after propagation, physical accounts and the
+final checkpoint all succeed. Signed total population residuals are supplemented
+by a noncancelling sum of per-nuclide transfer, branch-product and lifetime-counter
+defects. Tiny unresolved parent debits consume that explicit population budget.
+Emission-product and accumulated-energy rounding consume a separate joule
+budget. These numerical accounting limits are not nuclear-data uncertainties or
+certified forward-error enclosures.
+
+The model is closed, constant-rate, acyclic, and limited to the numerical owner's
+64-node bound. It has no irradiation, injection, removal, activation, fission
+product yields, temperature-dependent rates or transport of emitted particles.
+The represented daughter's population is not a full nuclear mass/charge ledger.
+Original chemical composition, bulk thermal mass and material caloric laws remain
+with their existing owners. Large inventories that could amplify vanished or
+subnormal propagator coefficients retain the numerical owner's explicit refusal;
+the physical wrapper never bypasses its range checks or invents a zero tail.
+
+Ten focused physical regressions cover analytic repeated-rate ingrowth and
+integrated emissions, distinct energy channels for duplicate daughters, activity
+versus interval energy, preparation reuse and model binding, partition/restart,
+tiny heat with charged unresolved depletion, stable and zero-duration identities,
+input admission, early/mid/final cancellation, and energy/range refusals. All ten
+passed, alongside the 19 fission-source tests, in a native Rust source build
+using the unchanged production decay modules from `fs-la` and `fs-thermochem`
+and the real `fs-math` and `fs-qty` crates. This isolated the applicable owners
+from unavailable constellation dependencies; it is not a workspace Cargo gate.
 
 ## Shared coupling facade and original-water example
 

@@ -5,7 +5,7 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Conservative prescribed fission sources, finite fuel inventory, delayed energy and shared material heat transport."
+description = "Conservative nuclear sources, radioactive daughter inventories, integrated decay energy and shared material heat transport."
 
 [package.metadata.frankensim]
 layer = "L3"
@@ -15,13 +15,14 @@ default = []
 thermal = ["dep:fs-thermal"]
 
 [dependencies]
+fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
+fs-thermochem = { path = "../fs-thermochem" }
 fs-thermal = { path = "../fs-thermal", optional = true }
 
 [dev-dependencies]
 fs-material = { path = "../fs-material" }
 fs-qty = { path = "../fs-qty" }
-fs-thermochem = { path = "../fs-thermochem" }
 
 [[example]]
 name = "prescribed_fission_water"
