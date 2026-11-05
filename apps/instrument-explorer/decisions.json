@@ -721,6 +721,17 @@
    "refs": [
     "frankensim-irp-v5-instrument-realism-pexfp.270"
    ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "method",
+   "title": "A bar's harmonics-to-noise is read against the bar's own partial lines",
+   "decided": "On xylophone and marimba pages the grader (instrgrade-7) reads harmonics-to-noise against the lines its own inharmonic partial read returns for the note, up to 12 within 60 dB of the strongest, each masked 14 Hz either side, instead of windows around multiples of the pitch. Those pages' harmonics-to-noise rulers were re-measured from the same recordings with the new read; their pitch and partial rows equal instrgrade-6's.",
+   "why": "A bar's partials are not multiples of its pitch, so windows around multiples counted the bar's own lines as noise, and on one file the read moved from 9.6 to 57.8 dB as the pitch read moved by 2 Hz.",
+   "effect": "No count moved on the seven graded bar pages; only harmonics-to-noise rows changed. The recordings now read 54.5, 52.6 and 57.9 dB on xylophone Ab4, Db5 and Eb5, and 48.5, 49.4 and 52.6 dB on marimba Gb2, A3 and C5. Iowa recorded these bars in an anechoic chamber, so what stays noise in a recording is mallet and broadband sound, plus any lines past the twelfth; the pages no longer say a room is missing.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.270"
+   ]
   }
  ]
 }
