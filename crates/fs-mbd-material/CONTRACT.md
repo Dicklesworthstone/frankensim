@@ -1318,8 +1318,12 @@ omitted cutoffs are explicit numerical resolution. `impedance_kg_s` exposes
 the actual discrete operator; the omitted-tail bound excludes quadrature and
 time error. Refine all three spectral axes and dt on the intended time window.
 The steady Stokes coefficient and added mass remain exact at every resolution.
-Initial relative translation and spin are zero, up to the native momentum
-conversion's represented roundoff. Clones retain all accepted memory;
+Initial native momentum must equal the authored `mass * ambient_velocity`
+exactly, and spin must vanish. Endpoint slip is evaluated as `(p-mass*U)/mass`:
+velocity-conversion roundoff cannot seed drag or fluid history in an exactly
+comoving held flow. Rounded velocity equality alone does not admit an initial
+momentum mismatch; no tolerance or clipping supplies missing prehistory.
+Clones retain all accepted memory;
 resuming never reconstructs it from current body velocity alone.
 
 Each accepted step reports represented fluid storage, viscous heat, native
@@ -1354,7 +1358,7 @@ ambient strain/vorticity, Faxen corrections or a finite-vessel fluid solution.
 
 The accepted ambient velocity travels with the body, clock and all history;
 ordinary `step`/`step_with_wrench` hold that current velocity. Initial native
-velocity or canonical momentum `mass*U` must match the supplied ambient flow;
+momentum is authored as `mass*U` from the supplied ambient flow;
 no arbitrary slipping prehistory or velocity impulse is silently inserted.
 The existing spectral-velocity getter returns RELATIVE branch velocities in
 world axes. Added-mass and branch energies/momenta use those same relative
@@ -1369,6 +1373,10 @@ G1/G3/G4 additions in `tests/creeping_flow/unsteady.rs` cover the neutral
 comoving limit, density-dependent startup, a continuum inverse-Laplace
 acceleration-response ladder, Galilean equivalence of slip/history/heat,
 native replay, and refusal/cancellation/restart of the complete flow state.
+Roundoff-boundary tests check exact canonical co-motion and refusal of
+momentum mismatches hidden by velocity rounding. The Galilean test also
+reconstructs lab/relative endpoint storage independently and checks the
+transformation of both applied and background work, including buoyancy.
 The rotating wrapper exposes the same explicit flow-acceleration operation;
 uniform translation leaves its world-fixed rotary memory unchanged.
 

@@ -499,6 +499,83 @@ fn vector_close(actual: NativeVec3, expected: NativeVec3, tolerance: f64) {
 }
 
 #[test]
+fn canonical_co_motion_does_not_seed_drag_from_velocity_conversion_roundoff() {
+    let source = sphere(1000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let mass = body.properties().mass();
+    let rest = body
+        .state_from_kinematics(Se3::identity(), Twist::zero())
+        .unwrap();
+    // Canonical momentum need not round-trip through the native reciprocal.
+    let speed = [0.01, 0.03, 0.1, 0.3, 0.37, 0.7, 1.1, 1.3]
+        .into_iter()
+        .find(|v| (*v * mass) * mass.recip() != *v)
+        .unwrap();
+    let ambient = NativeVec3::new(speed, -2.0 * speed, 0.5 * speed);
+    let medium = CreepingSphere::new(&material, RADIUS, gravity(), ambient, limits()).unwrap();
+    let initial =
+        fs_mbd::RigidBodyState::new(rest.pose(), ambient.scale(mass), NativeVec3::ZERO).unwrap();
+    assert_ne!(
+        initial
+            .center_of_mass_velocity_world(body.properties())
+            .unwrap(),
+        ambient
+    );
+    let motion = medium
+        .unsteady_motion(&body, initial, resolution(0.001, 1000.0, 64), || false)
+        .unwrap();
+    let (next, receipt) = motion.step(step_controls(0.001), || false).unwrap();
+    assert_eq!(
+        next.state().linear_momentum_world(),
+        initial.linear_momentum_world()
+    );
+    assert!(
+        next.fluid_velocities_world_m_s()
+            .iter()
+            .all(|v| *v == NativeVec3::ZERO)
+    );
+    assert_eq!(receipt.history_force_world_n, NativeVec3::ZERO);
+    assert_eq!(receipt.added_mass_force_world_n, NativeVec3::ZERO);
+    assert_eq!(receipt.viscous_heat_j, 0.0);
+    assert_eq!(receipt.background_work_j, 0.0); // Buoyancy is not flow work.
+    assert_eq!(receipt.memory_energy_change_j, 0.0);
+    assert_eq!(receipt.energy_defect_j, 0.0);
+
+    // Conversely, velocity rounding can conceal a one-ULP momentum mismatch.
+    // Find that exact arithmetic boundary in this source-derived native mass.
+    let (speed, momentum) = (1..=64)
+        .find_map(|i| {
+            let speed = f64::from(i) / 100.0;
+            let canonical = speed * mass;
+            [canonical.next_down(), canonical.next_up()]
+                .into_iter()
+                .find(|p| *p * mass.recip() == speed)
+                .map(|p| (speed, p))
+        })
+        .unwrap();
+    let ambient = NativeVec3::new(speed, 0.0, 0.0);
+    let medium = CreepingSphere::new(&material, RADIUS, gravity(), ambient, limits()).unwrap();
+    let slipping = fs_mbd::RigidBodyState::new(
+        rest.pose(),
+        NativeVec3::new(momentum, 0.0, 0.0),
+        NativeVec3::ZERO,
+    )
+    .unwrap();
+    assert_eq!(
+        slipping
+            .center_of_mass_velocity_world(body.properties())
+            .unwrap(),
+        ambient
+    );
+    assert_ne!(slipping.linear_momentum_world(), ambient.scale(mass));
+    assert!(matches!(
+        medium.unsteady_motion(&body, slipping, resolution(0.001, 1000.0, 64), || false),
+        Err(CreepingFlowError::Invalid(_))
+    ));
+}
+
+#[test]
 fn neutrally_buoyant_sphere_follows_accelerating_fluid_without_slip_heat() {
     let source = sphere(1000.0);
     let body = source.principal_body(1e-12, || false).unwrap();
@@ -661,19 +738,16 @@ fn ambient_translation_preserves_slip_memory_and_heat_under_a_galilean_boost() {
     let rest = body
         .state_from_kinematics(Se3::identity(), Twist::zero())
         .unwrap();
-    let boosted = body
-        .state_from_kinematics(
-            Se3::identity(),
-            Twist::new(Vec3::default(), Vec3::new(0.125, -0.25, 0.0625)),
-        )
-        .unwrap();
-    let boost = boosted
-        .center_of_mass_velocity_world(body.properties())
-        .unwrap();
+    let boost = NativeVec3::new(0.13, -0.07, 0.2);
+    let boosted = fs_mbd::RigidBodyState::new(
+        rest.pose(),
+        boost.scale(body.properties().mass()),
+        NativeVec3::ZERO,
+    )
+    .unwrap();
     let still_medium =
-        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
-    let moving_medium =
-        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, boost, limits()).unwrap();
+        CreepingSphere::new(&material, RADIUS, gravity(), NativeVec3::ZERO, limits()).unwrap();
+    let moving_medium = CreepingSphere::new(&material, RADIUS, gravity(), boost, limits()).unwrap();
     let mut still = still_medium
         .unsteady_motion(&body, rest, resolution(0.001, 1000.0, 64), || false)
         .unwrap();
@@ -681,6 +755,10 @@ fn ambient_translation_preserves_slip_memory_and_heat_under_a_galilean_boost() {
         .unsteady_motion(&body, boosted, resolution(0.001, 1000.0, 64), || false)
         .unwrap();
     let dt = 0.001;
+    let buoyancy = gravity()
+        .acceleration_world()
+        .scale(-material.density_kg_m3() * 4.0 * core::f64::consts::PI * RADIUS.powi(3) / 3.0);
+    let mut accounts = [0.0; 3]; // heat, applied work, maintained-flow work
     for i in 0..100 {
         let acceleration = if i < 50 {
             NativeVec3::new(0.01, -0.02, 0.015)
@@ -727,9 +805,52 @@ fn ambient_translation_preserves_slip_memory_and_heat_under_a_galilean_boost() {
         }
         assert!((a.viscous_heat_j - b.viscous_heat_j).abs() < 1e-20);
         assert!((a.added_mass_energy_change_j - b.added_mass_energy_change_j).abs() < 1e-20);
+        assert!(
+            (b.applied_work_j - a.applied_work_j - dt * applied.force_world.dot(boost)).abs()
+                < 1e-18
+        );
+        // Pressure, drag, history and added mass all transform their work;
+        // buoyancy is already represented by the gravitational potential.
+        assert!(
+            (b.background_work_j
+                - a.background_work_j
+                - dt * a.fluid_wrench.force_world.sub(buoyancy).dot(boost))
+            .abs()
+                < 2e-17
+        );
+        accounts[0] += b.viscous_heat_j;
+        accounts[1] += b.applied_work_j;
+        accounts[2] += b.background_work_j;
         still = next_still;
         moving = next_moving;
     }
+    // Independently reconstruct endpoint storage: dry kinetic energy remains
+    // in the lab frame, while added mass and all history branches use slip.
+    let final_state = moving.state();
+    let mass = body.properties().mass();
+    let slip = final_state
+        .center_of_mass_velocity_world(body.properties())
+        .unwrap()
+        .sub(moving.ambient_velocity_world_m_s());
+    let kinetic_change = (final_state.linear_momentum_world().norm_squared()
+        - boosted.linear_momentum_world().norm_squared())
+        / (2.0 * mass);
+    let effective_weight = gravity().acceleration_world().scale(mass).add(buoyancy);
+    let storage = kinetic_change
+        - effective_weight.dot(
+            final_state
+                .pose()
+                .position_world()
+                .sub(boosted.pose().position_world()),
+        )
+        + 0.5 * moving.added_mass_kg() * slip.norm_squared()
+        + moving
+            .branches()
+            .iter()
+            .zip(moving.fluid_velocities_world_m_s())
+            .map(|(branch, velocity)| 0.5 * branch.mass_kg * velocity.norm_squared())
+            .sum::<f64>();
+    assert!((storage + accounts[0] - accounts[1] - accounts[2]).abs() < 2e-17);
     // The ordinary no-acceleration API holds the accepted current, not the
     // immutable reservoir's initial velocity and not a new quiescent history.
     let (held, held_audit) = moving

@@ -133,8 +133,10 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
     /// Reynolds cap. The quasi-steady diffusion/relaxation restriction is replaced
     /// by actual added mass and viscous memory; it is NOT relaxed by density.
     /// Initial translation must be comoving and angular momentum must vanish.
-    /// The native velocity or its canonical momentum `mass * ambient_velocity`
-    /// must match; ordinary momentum/velocity roundoff is retained, not clipped.
+    /// Author the initial native momentum as `mass * ambient_velocity`, with
+    /// equality in momentum units. A velocity division can hide a one-ULP
+    /// momentum mismatch or create apparent slip from exact co-motion, so
+    /// rounded velocity equality alone does not admit the initial state.
     /// All relative memory starts at zero; arbitrary slip and prior history
     /// are not inferred.
     /// No spin, thermal shape/source change, free surface, wall, other particle,
@@ -156,11 +158,9 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         self.load_frame(body.frame(), state, &mut cancelled)?;
         let lo = resolution.minimum_wavenumber_radius;
         let hi = resolution.maximum_wavenumber_radius;
-        let initial_velocity = state.center_of_mass_velocity_world(body.properties())?;
         let comoving_momentum =
             vector(self.ambient_velocity_world.scale(body.properties().mass()))?;
-        if (initial_velocity != self.ambient_velocity_world
-            && state.linear_momentum_world() != comoving_momentum)
+        if state.linear_momentum_world() != comoving_momentum
             || state.angular_momentum_body() != Vec3::ZERO
             || !lo.is_finite()
             || lo <= 0.0
@@ -384,7 +384,16 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
                 return Err(Error::Invalid("unresolved ambient velocity increment"));
             }
         }
-        let slip0 = vector(v0.sub(self.ambient_velocity_world))?;
+        // Subtract before dividing: canonical co-motion remains exactly zero
+        // even when (m*U)*recip(m) does not round-trip to U. This introduces no
+        // velocity tolerance, clipping or alternate body trajectory.
+        let ambient_momentum_before = vector(self.ambient_velocity_world.scale(p.mass()))?;
+        let slip0 = vector(
+            self.state
+                .linear_momentum_world()
+                .sub(ambient_momentum_before)
+                .scale(p.mass().recip()),
+        )?;
         let half_dt = positive(0.5 * dt)?;
         let added_mass = self.added_mass_kg();
         let moving_mass = positive(p.mass() + added_mass)?;
@@ -475,7 +484,14 @@ impl<F: FluidTransport + ?Sized> UnsteadySphereMotion<'_, '_, '_, F> {
         )?;
         let v1 = dynamics.state_after.center_of_mass_velocity_world(p)?;
         let vm = vector(v0.add(v1).scale(0.5))?;
-        let slip1 = vector(v1.sub(ambient_after))?;
+        let ambient_momentum_after = vector(ambient_after.scale(p.mass()))?;
+        let slip1 = vector(
+            dynamics
+                .state_after
+                .linear_momentum_world()
+                .sub(ambient_momentum_after)
+                .scale(p.mass().recip()),
+        )?;
         let slip_midpoint = vector(slip0.add(slip1).scale(0.5))?;
         let ambient_midpoint = vector(self.ambient_velocity_world.add(ambient_after).scale(0.5))?;
         let mut fluid_velocities = Vec::with_capacity(self.branches.len());
