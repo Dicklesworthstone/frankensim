@@ -27,6 +27,8 @@ use fs_material::gas::GasState;
 mod profile;
 mod gas;
 pub use gas::ChannelGasUpdate;
+/// Concentric annular passages with two independent axial material walls.
+pub mod annular;
 /// Axisymmetric passages using the same no-slip momentum and work owner.
 pub mod circular;
 /// Original continuous cell equations and physical harmonic observations.

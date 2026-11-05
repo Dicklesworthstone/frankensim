@@ -1,5 +1,31 @@
 # CONTRACT: fs-couple
 
+## Resolved axial laminar flow in concentric annuli
+
+`slit_channel::annular::AnnularChannel` retains a coherent source gas and
+the original shared finite-volume momentum field between two material walls.
+Each cell uses its actual annular area. Face shear uses integrated cylindrical
+resistance, `2*pi*mu*L / ln(r_right/r_left)`, including the half-cell wall
+intervals. Gap-product areas and compensated logarithms retain narrow-gap
+resolution without subtracting nearly equal squared radii. No hydraulic
+diameter or fitted annular drag replaces the field.
+
+Both prescribed wall velocities are axial, in inner/outer order. The existing
+pressure port, implicit kinetic-head terminal, signed wall work, impulses on
+the fluid, relative-shear heat, kinetic storage and numerical dissipation
+remain on the shared momentum owner. The factorization and hot-step buffers
+are reused. Flow previews and gas changes publish only after acceptance;
+gas changes preserve each cell's momentum and expose their signed parameter
+work through the original material-transfer receipt.
+
+G1/G3 `annular_channel` covers the independent logarithmic Couette solution,
+wall traction and heat, annular Poiseuille refinement, thin-gap behavior,
+startup/reversal, pressure condensation and material/refusal behavior.
+This is fixed concentric geometry, incompressible fully developed Newtonian
+flow. It does not supply cylinder rotation, eccentricity, normal wall motion,
+entrance flow, thermal evolution or transition prediction. A zero inner
+radius must use the existing circular symmetry owner.
+
 ## Native rigid JKR motion and event-timed snap heat
 
 `friction_heat::adhesive::snap::native` composes the original loaded finite-body
