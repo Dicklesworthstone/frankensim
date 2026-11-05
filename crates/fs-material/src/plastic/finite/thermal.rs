@@ -13,8 +13,11 @@
 //! `P=P_native/theta` and `dP/dF=A_native/theta²` by the exact chain rule.
 //!
 //! For `g=ln(det(Fm))` and `e=dev(Ee)`, mechanical free energy is
-//! `psi=mu(T)e:e+K(T)g²/2+H(T)alpha²/2`. Entropy is its negative temperature
-//! derivative at FIXED total F/history; internal energy is `psi+T*s`.
+//! `psi=mu(T)e:e+K(T)g²/2+H(T)alpha²/2`. Explicit Voce hardening adds
+//! `Q(T)*[alpha-(1-exp(-b*alpha))/b]`, with affine nonnegative Q and constant
+//! positive b. Entropy is the negative temperature derivative at FIXED total
+//! F/history; internal energy is `psi+T*s`. The saturation entropy remains
+//! present at an endpoint where Q is zero but its temperature slope is not.
 //! Caloric storage stays with the supplied thermal owner. No latent heat,
 //! pressure-flow conversion, configurational plastic entropy, damage, or
 //! independent Taylor–Quinney coefficient is inferred here.
@@ -123,12 +126,27 @@ pub struct FiniteJ2ThermalOverstress {
     pub activation_temperature_k: f64,
 }
 
+/// Explicit energetic saturation in original-volume Kirchhoff stress units.
+/// The strength is `Q(T)*(1-exp(-b*alpha))`, added to the existing linear
+/// hardening. Only Q changes with temperature; fixing b makes the additional
+/// free energy affine at fixed history, with no heat-capacity correction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteJ2ThermalVoceHardening {
+    /// Added saturation strength at the family's reference temperature.
+    pub reference_saturation_pa: f64,
+    /// Positive dimensionless rate per equivalent plastic strain.
+    pub rate_per_strain: f64,
+    /// Explicit derivative dQ/dT, in Pa/K; Q must remain nonnegative.
+    pub saturation_slope_pa_k: f64,
+}
+
 /// Immutable native family; source admission is separate from this constitutive law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AffineThermalFiniteJ2 {
     parameters: FiniteJ2ThermalParameters,
     limits: FiniteJ2Limits,
     minimum_mechanical_heat_capacity_j_m3_k: f64,
+    voce_hardening: Option<FiniteJ2ThermalVoceHardening>,
     overstress: Option<FiniteJ2ThermalOverstress>,
     norton_creep: bool,
     maximum_accumulated_creep_strain: Option<f64>,
@@ -148,11 +166,22 @@ enum FrozenNative {
     Combined(FiniteNortonJ2),
 }
 
+/// Retain the thermal derivative even when Q=0 makes the mechanical backbone
+/// exactly linear. Deriving this from the native optional hardening would lose
+/// the entropy at such an endpoint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FrozenVoceHardening {
+    saturation_pa: f64,
+    rate_per_strain: f64,
+    saturation_slope_pa_k: f64,
+}
+
 /// One owned endpoint-temperature law, without a borrowed temporary source field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrozenThermalFiniteJ2 {
     native: FrozenNative,
     slopes: FiniteJ2TemperatureSlopes,
+    voce_hardening: Option<FrozenVoceHardening>,
     temperature_k: f64,
     log_thermal_stretch: f64,
     thermal_stretch: f64,
@@ -354,6 +383,7 @@ impl AffineThermalFiniteJ2 {
             parameters,
             limits,
             minimum_mechanical_heat_capacity_j_m3_k: 0.0,
+            voce_hardening: None,
             overstress: None,
             norton_creep,
             maximum_accumulated_creep_strain: None,
@@ -376,7 +406,8 @@ impl AffineThermalFiniteJ2 {
             .max(high.backbone().parameters().bulk_modulus_pa);
         let max_expansion = low.expansion_per_k.abs().max(high.expansion_per_k.abs());
         let max_log_volume = det::sqrt(3.0) * limits.maximum_elastic_log_strain;
-        // mu''=H''=0. Bound the remaining volumetric/thermal contribution
+        // mu''=H''=Q''=0, with constant Voce b when selected. Bound the remaining
+        // volumetric/thermal contribution
         // throughout the full admitted elastic and temperature envelope.
         let capacity_magnitude = finite(
             hi * ((6.0 * p.slopes.bulk_modulus_pa_k.abs() * max_expansion
@@ -430,6 +461,52 @@ impl AffineThermalFiniteJ2 {
     /// source/coupling owner must require a strictly positive total capacity.
     pub fn minimum_mechanical_heat_capacity_j_m3_k(&self) -> f64 {
         self.minimum_mechanical_heat_capacity_j_m3_k
+    }
+
+    /// Add affine energetic Voce saturation, preserving the original metric,
+    /// plastic counter, flow direction and temperature mapping. Saturation is
+    /// an added yield strength Q, not the final yield radius. Its rate b is
+    /// constant; Q and all native moduli must be admissible over the whole
+    /// temperature span. Perzyna and simultaneous Norton/J2 can retain this
+    /// hardening; threshold-free Norton has no plastic hardening and refuses.
+    pub fn with_voce_hardening(
+        mut self,
+        reference_saturation_pa: f64,
+        rate_per_strain: f64,
+        saturation_slope_pa_k: f64,
+    ) -> Result<Self, FiniteJ2ThermalError> {
+        let hardening = FiniteJ2ThermalVoceHardening {
+            reference_saturation_pa,
+            rate_per_strain,
+            saturation_slope_pa_k,
+        };
+        if self.norton_creep
+            || !saturation_slope_pa_k.is_finite()
+            || self.voce_hardening.is_some_and(|old| old != hardening)
+        {
+            return Err(FiniteJ2ThermalError::Parameters(
+                "finite thermal Voce requires a plastic family, a finite saturation slope and no replacement of selected coefficients",
+            ));
+        }
+        self.voce_hardening = Some(hardening);
+        // The coefficient is affine; endpoint admission bounds all its values.
+        // Inspection works with either static or already selected timed flow.
+        for temperature in self.parameters.temperature_range_k {
+            self.at_temperature_for_inspection(temperature)?;
+        }
+        let maximum_shape = super::voce::saturation_primitive(
+            self.limits.maximum_accumulated_plastic_strain,
+            rate_per_strain,
+        );
+        let entropy = finite(saturation_slope_pa_k * maximum_shape)?;
+        finite(self.parameters.temperature_range_k[1] * entropy)?;
+        Ok(self)
+    }
+
+    /// Original admitted saturation coefficients, including the derivative at
+    /// zero-Q endpoints. None retains the exact original linear-hardening law.
+    pub const fn voce_hardening(&self) -> Option<&FiniteJ2ThermalVoceHardening> {
+        self.voce_hardening.as_ref()
     }
 
     /// Select explicit power-law/Arrhenius kinetics without changing any elastic,
@@ -613,7 +690,7 @@ impl AffineThermalFiniteJ2 {
         let p = &self.parameters;
         let delta = temperature_k - p.reference_temperature_k;
         let coefficient = |value: f64, slope: f64| finite(slope.mul_add(delta, value));
-        let native = self.native_backbone(FiniteJ2Parameters {
+        let mut native = self.native_backbone(FiniteJ2Parameters {
             shear_modulus_pa: coefficient(
                 p.reference.shear_modulus_pa,
                 p.slopes.shear_modulus_pa_k,
@@ -625,6 +702,20 @@ impl AffineThermalFiniteJ2 {
                 p.slopes.hardening_modulus_pa_k,
             )?,
         })?;
+        let voce_hardening = if let Some(hardening) = self.voce_hardening {
+            let saturation_pa = coefficient(
+                hardening.reference_saturation_pa,
+                hardening.saturation_slope_pa_k,
+            )?;
+            native = native.with_voce_hardening(saturation_pa, hardening.rate_per_strain)?;
+            Some(FrozenVoceHardening {
+                saturation_pa,
+                rate_per_strain: hardening.rate_per_strain,
+                saturation_slope_pa_k: hardening.saturation_slope_pa_k,
+            })
+        } else {
+            None
+        };
         let expansion_per_k = coefficient(
             p.logarithmic_expansion_per_k,
             p.logarithmic_expansion_slope_per_k2,
@@ -676,6 +767,7 @@ impl AffineThermalFiniteJ2 {
         Ok(FrozenThermalFiniteJ2 {
             native,
             slopes: p.slopes,
+            voce_hardening,
             temperature_k,
             log_thermal_stretch,
             thermal_stretch,
@@ -759,7 +851,7 @@ impl AffineThermalFiniteJ2 {
         let new = new_endpoint.thermodynamics;
         let old_p = old_law.backbone().parameters();
         let new_p = new_law.backbone().parameters();
-        let coefficient_storage_change_j_m3 = finite(
+        let mut coefficient_storage_change_j_m3 = finite(
             (new_p.shear_modulus_pa - old_p.shear_modulus_pa) * old_endpoint.deviator_squared
                 + 0.5
                     * (new_p.bulk_modulus_pa - old_p.bulk_modulus_pa)
@@ -768,11 +860,22 @@ impl AffineThermalFiniteJ2 {
                     * (new_p.hardening_modulus_pa - old_p.hardening_modulus_pa)
                     * old_state.alpha.powi(2),
         )?;
-        let frozen_old_storage = finite(
+        let mut frozen_old_storage = finite(
             new_p.shear_modulus_pa * old_endpoint.deviator_squared
                 + 0.5 * new_p.bulk_modulus_pa * old_endpoint.log_volume.powi(2)
                 + 0.5 * new_p.hardening_modulus_pa * old_state.alpha.powi(2),
         )?;
+        if let (Some(old), Some(new)) = (old_law.voce_hardening, new_law.voce_hardening) {
+            let shape = super::voce::saturation_primitive(old_state.alpha, new.rate_per_strain);
+            let change = new.saturation_pa - old.saturation_pa;
+            if change != 0.0 {
+                coefficient_storage_change_j_m3 =
+                    finite(coefficient_storage_change_j_m3 + change * shape)?;
+            }
+            if new.saturation_pa != 0.0 {
+                frozen_old_storage = finite(frozen_old_storage + new.saturation_pa * shape)?;
+            }
+        }
         let delta_f = core::array::from_fn(|i| new_f[i] - old_f[i]);
         let delta_fm = core::array::from_fn(|i| new_fm[i] - old_fm[i]);
         let mechanical_work_j_m3 = finite(super::dot(&mechanical.first_piola_pa, &delta_f))?;
@@ -998,12 +1101,24 @@ impl FrozenThermalFiniteJ2 {
         let a = self.expansion_per_k;
         let shape = super::dot(&endpoint.deviator, &endpoint.deviator);
         let free_energy_j_m3 = self.backbone().energy(g, &endpoint.deviator, state.alpha)?;
-        let entropy_j_m3_k = finite(
+        let mut entropy_j_m3_k = finite(
             3.0 * p.bulk_modulus_pa * a * g
                 - s.shear_modulus_pa_k * shape
                 - 0.5 * s.bulk_modulus_pa_k * g * g
                 - 0.5 * s.hardening_modulus_pa_k * state.alpha * state.alpha,
         )?;
+        if let Some(hardening) = self.voce_hardening {
+            if hardening.saturation_slope_pa_k != 0.0 {
+                entropy_j_m3_k = finite(
+                    entropy_j_m3_k
+                        - hardening.saturation_slope_pa_k
+                            * super::voce::saturation_primitive(
+                                state.alpha,
+                                hardening.rate_per_strain,
+                            ),
+                )?;
+            }
+        }
         let internal_energy_j_m3 =
             finite(self.temperature_k.mul_add(entropy_j_m3_k, free_energy_j_m3))?;
         let heat_capacity_j_m3_k = finite(

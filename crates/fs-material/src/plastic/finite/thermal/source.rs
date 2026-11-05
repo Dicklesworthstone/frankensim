@@ -44,6 +44,19 @@
 //! owner once. Accepted combined states satisfy equilibrium yield; the selected
 //! viscosity drives Norton creep and does not make yielding rate dependent.
 //!
+//! Explicit Voce saturation has separate selectors:
+//! `finite-j2-voce-hencky-kirchhoff-thermal-affine`,
+//! `finite-j2-voce-hencky-kirchhoff-thermal-perzyna`, and
+//! `finite-norton-j2-voce-hencky-kirchhoff-thermal`. Each adds three mandatory
+//! parameters to its corresponding linear-hardening family:
+//! `voce_saturation_pa` at the reference temperature, dimensionless positive
+//! `voce_rate_per_strain`, and `voce_saturation_slope_pa_k` in Pa/K. Q(T) is
+//! affine and nonnegative over the complete interval; b stays constant. Their
+//! extra free energy is `Q(T)*[alpha-(1-exp(-b*alpha))/b]` per original volume,
+//! with entropy from its explicit temperature derivative. Law version remains
+//! 1; state version is 2 for simultaneous creep/plasticity and 1 otherwise.
+//! The original selectors and pure Norton reject these additional keys.
+//!
 //! The four reference coefficients `shear_modulus_pa`, `bulk_modulus_pa`,
 //! `yield_stress_pa`, `hardening_modulus_pa` are in Pa. Their four derivatives
 //! `shear_modulus_slope_pa_k`, `bulk_modulus_slope_pa_k`,
@@ -101,6 +114,14 @@ pub const THERMAL_PERZYNA_FINITE_J2_LAW_ID: &str = "finite-j2-hencky-kirchhoff-t
 pub const THERMAL_FINITE_NORTON_LAW_ID: &str = "finite-norton-hencky-kirchhoff-thermal";
 /// Simultaneous finite Norton creep and energetic J2 plasticity, state schema 2.
 pub const THERMAL_FINITE_NORTON_J2_LAW_ID: &str = "finite-norton-j2-hencky-kirchhoff-thermal";
+/// Affine thermal J2 with explicit energetic Voce saturation.
+pub const THERMAL_FINITE_J2_VOCE_LAW_ID: &str = "finite-j2-voce-hencky-kirchhoff-thermal-affine";
+/// Finite Perzyna flow with affine energetic Voce saturation.
+pub const THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID: &str =
+    "finite-j2-voce-hencky-kirchhoff-thermal-perzyna";
+/// Simultaneous Norton/J2 with energetic Voce saturation and state schema 2.
+pub const THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID: &str =
+    "finite-norton-j2-voce-hencky-kirchhoff-thermal";
 
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const PA_S: Dims = Dims([-1, 1, -1, 0, 0, 0]);
@@ -146,6 +167,11 @@ const CREEP_PARAMETERS: [&str; 4] = [
     "creep_activation_temperature_k",
 ];
 const CREEP_BOUND: &str = "maximum_accumulated_creep_strain";
+const VOCE_PARAMETERS: [&str; 3] = [
+    "voce_saturation_pa",
+    "voce_rate_per_strain",
+    "voce_saturation_slope_pa_k",
+];
 
 /// Original source family, fixed external context and explicit evolving T axis.
 ///
@@ -289,14 +315,17 @@ fn kinetics(
 fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, MaterialError> {
     card.validate()
         .map_err(|error| refusal(error.to_string()))?;
-    let (selected_overstress, selected_norton, selected_combined) = match card.law.0.as_str() {
-        THERMAL_FINITE_J2_LAW_ID => (false, false, false),
-        THERMAL_PERZYNA_FINITE_J2_LAW_ID => (true, false, false),
-        THERMAL_FINITE_NORTON_LAW_ID => (false, true, false),
-        THERMAL_FINITE_NORTON_J2_LAW_ID => (false, false, true),
+    let (selected_overstress, selected_norton, selected_combined, selected_voce) = match card.law.0.as_str() {
+        THERMAL_FINITE_J2_LAW_ID => (false, false, false, false),
+        THERMAL_PERZYNA_FINITE_J2_LAW_ID => (true, false, false, false),
+        THERMAL_FINITE_NORTON_LAW_ID => (false, true, false, false),
+        THERMAL_FINITE_NORTON_J2_LAW_ID => (false, false, true, false),
+        THERMAL_FINITE_J2_VOCE_LAW_ID => (false, false, false, true),
+        THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID => (true, false, false, true),
+        THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID => (false, false, true, true),
         _ => {
             return Err(refusal(format!(
-                "unsupported finite thermal law {}; expected {THERMAL_FINITE_J2_LAW_ID}, {THERMAL_PERZYNA_FINITE_J2_LAW_ID}, {THERMAL_FINITE_NORTON_LAW_ID} or {THERMAL_FINITE_NORTON_J2_LAW_ID}",
+                "unsupported finite thermal law {}; an exact thermal Hencky/Kirchhoff J2, Perzyna, Norton or Norton/J2 selector is required, with explicit Voce selection when used",
                 card.law.0
             )));
         }
@@ -311,6 +340,9 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
     }
     if let Some(name) = card.parameters.keys().find(|name| {
         let name = name.as_str();
+        if selected_voce && VOCE_PARAMETERS.contains(&name) {
+            return false;
+        }
         if selected_norton {
             !(PARAMETERS.contains(&name) && !PLASTIC_PARAMETERS.contains(&name)
                 || CREEP_PARAMETERS.contains(&name))
@@ -396,6 +428,17 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
     };
     let family = AffineThermalFiniteJ2::new(parameters, limits)
         .map_err(|error| refusal(format!("inadmissible finite thermal J2 family: {error}")))?;
+    let family = if selected_voce {
+        family
+            .with_voce_hardening(
+                parameter(card, "voce_saturation_pa", PA)?,
+                parameter(card, "voce_rate_per_strain", Dims::NONE)?,
+                parameter(card, "voce_saturation_slope_pa_k", PA_K)?,
+            )
+            .map_err(|error| refusal(format!("inadmissible finite thermal Voce family: {error}")))?
+    } else {
+        family
+    };
     if selected_combined {
         family
             .with_norton_creep(

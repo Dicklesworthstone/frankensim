@@ -4,7 +4,9 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance, QueryPoint,
 };
-use fs_material::plastic::finite::source::{FINITE_J2_LAW_ID, ResolvedFiniteJ2};
+use fs_material::plastic::finite::source::{
+    FINITE_J2_LAW_ID, FINITE_J2_VOCE_LAW_ID, ResolvedFiniteJ2,
+};
 use fs_material::plastic::finite::{FiniteJ2Limits, FiniteJ2Material, FiniteJ2Parameters};
 use fs_qty::semantic::{
     FrequencyConvention, QuantityKind, SemanticType, StrainBasis, StrainComponent, ValueForm,
@@ -46,6 +48,73 @@ fn fixture() -> ConstitutiveModelCard {
             license: "test fixture".into(),
             artifact: Some(source),
         },
+    }
+}
+
+fn voce_fixture() -> ConstitutiveModelCard {
+    let mut card = fixture();
+    card.law = LawId(FINITE_J2_VOCE_LAW_ID.into());
+    for (name, value, dims) in [
+        ("voce_saturation_pa", 12e6, PA),
+        ("voce_rate_per_strain", 9.0, Dims::NONE),
+    ] {
+        card.parameters.insert(name.into(), LawParameter { value, dims });
+    }
+    card
+}
+
+#[test]
+fn explicit_finite_voce_source_retains_energetic_saturation_at_nonunit_volume() {
+    let card = voce_fixture();
+    let source = ResolvedFiniteJ2::try_from_model_card(&card).unwrap();
+    assert_eq!(source.model_card(), &card);
+    assert_eq!(source.model_card().content_hash(), card.content_hash());
+    let hardening = source.law().voce_hardening().unwrap();
+    assert_eq!(hardening.saturation_pa(), 12e6);
+    assert_eq!(hardening.rate_per_strain(), 9.0);
+    let (v, a) = (0.04, 0.2);
+    let response = source.finite_j2()
+        .response(&diagonal_deformation(v, a), &source.law().initial_state()).unwrap();
+    let alpha = response.state.alpha;
+    let strength = 12e6 * -(-9.0 * alpha).exp_m1();
+    let hardening_storage = 0.5 * H * alpha * alpha + 12e6 * (alpha + (-9.0 * alpha).exp_m1() / 9.0);
+    assert!(alpha > 0.0);
+    assert!(response.jacobian > 1.1);
+    close(response.equivalent_kirchhoff_pa, YIELD + H * alpha + strength);
+    close(response.stored_energy_j_m3,
+        1.5 * MU * (a - alpha).powi(2) + 0.5 * KAPPA * (3.0 * v).powi(2) + hardening_storage);
+    close(response.plastic_dissipation_j_m3, YIELD * alpha);
+    close(response.incremental_potential_j_m3,
+        response.stored_energy_j_m3 + response.plastic_dissipation_j_m3);
+}
+
+#[test]
+fn finite_voce_parameters_are_explicit_dimensioned_and_cannot_select_an_old_law() {
+    let original = voce_fixture();
+    for name in ["voce_saturation_pa", "voce_rate_per_strain"] {
+        let mut card = original.clone();
+        card.parameters.remove(name);
+        assert!(ResolvedFiniteJ2::try_from_model_card(&card).is_err(), "missing {name}");
+        let mut card = original.clone();
+        card.parameters.get_mut(name).unwrap().dims = Dims([0, 0, 0, 1, 0, 0]);
+        assert!(ResolvedFiniteJ2::try_from_model_card(&card).is_err(), "units {name}");
+        let mut card = original.clone();
+        card.parameters.get_mut(name).unwrap().value = f64::NAN;
+        assert!(ResolvedFiniteJ2::try_from_model_card(&card).is_err(), "finite {name}");
+    }
+    let mut old_id = original.clone();
+    old_id.law = LawId(FINITE_J2_LAW_ID.into());
+    assert!(ResolvedFiniteJ2::try_from_model_card(&old_id).is_err());
+    for (name, value) in [("voce_saturation_pa", -1.0), ("voce_rate_per_strain", 0.0)] {
+        let mut card = original.clone();
+        card.parameters.get_mut(name).unwrap().value = value;
+        assert!(ResolvedFiniteJ2::try_from_model_card(&card).is_err());
+    }
+    for (law_version, state_schema_version) in [(2, 1), (1, 2)] {
+        let mut card = original.clone();
+        card.law_version = law_version;
+        card.state_schema_version = state_schema_version;
+        assert!(ResolvedFiniteJ2::try_from_model_card(&card).is_err());
     }
 }
 

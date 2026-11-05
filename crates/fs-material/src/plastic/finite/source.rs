@@ -21,6 +21,13 @@
 //! Names, units, versions and initial-state policy are exact: no aliases,
 //! unused selectors, inferred moduli or silent constitutive defaults.
 //!
+//! The separate `finite-j2-voce-hencky-kirchhoff` law, law/state version 1,
+//! additionally requires `voce_saturation_pa` in Pa and dimensionless
+//! `voce_rate_per_strain`. Its added strength is `Q*(1-exp(-b*alpha))`, with
+//! Q nonnegative and b positive; Q is an added strength, not the final yield
+//! radius. Its recoverable storage is `Q*[alpha-(1-exp(-b*alpha))/b]` per
+//! original volume. The original linear selector rejects both extra keys.
+//!
 //! State schema 1 means the inverse plastic right Cauchy-Green tensor plus
 //! accumulated equivalent plastic strain. `ZeroInternalState` means zero
 //! plastic logarithmic strain and zero accumulated strain, represented natively
@@ -30,8 +37,8 @@
 //! The admitted temperature and other external conditions stay fixed for the
 //! entire mechanical path. Re-resolving a card at another temperature does not
 //! authorize transferring plastic history or omit coefficient/thermal work.
-//! Kinematic/Voce hardening, creep, thermal evolution and changing reference
-//! configurations are not variants of this version-1 law.
+//! Kinematic hardening, creep, thermal evolution and changing reference
+//! configurations are not inferred by either isothermal selector.
 //!
 //! The multiplicative/logarithmic return-map family is described by
 //! [Simo (1992)](https://doi.org/10.1016/0045-7825(92)90123-2).
@@ -47,6 +54,8 @@ use fs_qty::Dims;
 
 /// Exact version-1 model identity, including its finite-strain stress convention.
 pub const FINITE_J2_LAW_ID: &str = "finite-j2-hencky-kirchhoff";
+/// Explicit energetic Voce saturation in the same finite stress convention.
+pub const FINITE_J2_VOCE_LAW_ID: &str = "finite-j2-voce-hencky-kirchhoff";
 
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const PARAMETERS: [&str; 8] = [
@@ -59,6 +68,7 @@ const PARAMETERS: [&str; 8] = [
     "maximum_plastic_log_strain",
     "maximum_accumulated_plastic_strain",
 ];
+const VOCE_PARAMETERS: [&str; 2] = ["voce_saturation_pa", "voce_rate_per_strain"];
 
 /// One finite-strain plastic law retaining its exact source and fixed context.
 ///
@@ -132,7 +142,7 @@ impl ResolvedFiniteJ2 {
         &self.context
     }
 
-    /// Native constitutive owner, including all eight admitted coefficients/limits.
+    /// Native constitutive owner, including all admitted coefficients and limits.
     pub const fn law(&self) -> &FiniteJ2 {
         &self.law
     }
@@ -152,7 +162,7 @@ fn parameter(card: &ConstitutiveModelCard, name: &str, dims: Dims) -> Result<f64
     let parameter = card
         .parameters
         .get(name)
-        .ok_or_else(|| refusal(format!("{FINITE_J2_LAW_ID}: missing parameter {name}")))?;
+        .ok_or_else(|| refusal(format!("{}: missing parameter {name}", card.law.0)))?;
     if parameter.dims != dims || !parameter.value.is_finite() {
         return Err(refusal(format!(
             "finite J2 parameter {name}: expected finite {dims:?}, got {parameter:?}"
@@ -164,12 +174,16 @@ fn parameter(card: &ConstitutiveModelCard, name: &str, dims: Dims) -> Result<f64
 fn parse_law(card: &ConstitutiveModelCard) -> Result<FiniteJ2, MaterialError> {
     card.validate()
         .map_err(|error| refusal(error.to_string()))?;
-    if card.law.0 != FINITE_J2_LAW_ID {
-        return Err(refusal(format!(
-            "unsupported finite J2 law {}; expected {FINITE_J2_LAW_ID}",
-            card.law.0
-        )));
-    }
+    let selected_voce = match card.law.0.as_str() {
+        FINITE_J2_LAW_ID => false,
+        FINITE_J2_VOCE_LAW_ID => true,
+        _ => {
+            return Err(refusal(format!(
+                "unsupported finite J2 law {}; expected {FINITE_J2_LAW_ID} or {FINITE_J2_VOCE_LAW_ID}",
+                card.law.0
+            )));
+        }
+    };
     if card.law_version != 1
         || card.state_schema_version != 1
         || card.initial_state != InitialStatePolicy::ZeroInternalState
@@ -181,10 +195,13 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<FiniteJ2, MaterialError> {
     if let Some(name) = card
         .parameters
         .keys()
-        .find(|name| !PARAMETERS.contains(&name.as_str()))
+        .find(|name| {
+            !PARAMETERS.contains(&name.as_str())
+                && !(selected_voce && VOCE_PARAMETERS.contains(&name.as_str()))
+        })
     {
         return Err(refusal(format!(
-            "unrecognized finite J2 card parameter {name}; this law has fixed isotropic linear hardening and fixed external conditions"
+            "unrecognized finite J2 card parameter {name}; hardening must match the explicit selector and external conditions remain fixed"
         )));
     }
     let parameters = FiniteJ2Parameters {
@@ -203,6 +220,15 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<FiniteJ2, MaterialError> {
             Dims::NONE,
         )?,
     };
-    FiniteJ2::new(parameters, limits)
-        .map_err(|error| refusal(format!("inadmissible finite J2 parameters/domain: {error}")))
+    let law = FiniteJ2::new(parameters, limits)
+        .map_err(|error| refusal(format!("inadmissible finite J2 parameters/domain: {error}")))?;
+    if selected_voce {
+        law.with_voce_hardening(
+            parameter(card, "voce_saturation_pa", PA)?,
+            parameter(card, "voce_rate_per_strain", Dims::NONE)?,
+        )
+        .map_err(|error| refusal(format!("inadmissible finite Voce hardening: {error}")))
+    } else {
+        Ok(law)
+    }
 }

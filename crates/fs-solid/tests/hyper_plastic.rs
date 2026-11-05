@@ -146,6 +146,16 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 // p need not equal accumulated alpha after reversal. Kirchhoff tau remains the
 // energetic elastic stress, while nominal Pxx=tau/lambda.
 fn check_uniaxial(solid: &FinitePlasticTetSolid<'_>, a: f64, p: f64, alpha: f64) {
+    check_uniaxial_with_hardening(solid, a, p, alpha, 0.5 * HARDENING * alpha * alpha);
+}
+
+fn check_uniaxial_with_hardening(
+    solid: &FinitePlasticTetSolid<'_>,
+    a: f64,
+    p: f64,
+    alpha: f64,
+    hardening_storage: f64,
+) {
     let tau = E * (a - p);
     let axial = a.exp();
     let lateral = (-NU * tau / E - 0.5 * p).exp();
@@ -175,9 +185,155 @@ fn check_uniaxial(solid: &FinitePlasticTetSolid<'_>, a: f64, p: f64, alpha: f64)
     // Unit reference volume; finite elastic Hencky energy plus stored hardening.
     close(
         solid.stored_energy_j(),
-        0.5 * tau * tau / E + 0.5 * HARDENING * alpha * alpha,
+        0.5 * tau * tau / E + hardening_storage,
         0.01,
     );
+}
+
+#[test]
+fn voce_coupon_solves_lateral_contraction_unloading_and_reverse_flow_with_stored_saturation() {
+    with_cx(|cx| {
+        let (nodes, tets) = cube();
+        let saturation = 6.0e6;
+        let rate = 20.0;
+        let material = law().with_voce_hardening(saturation, rate).unwrap();
+        let strength = |alpha: f64| YIELD + HARDENING * alpha - saturation * (-rate * alpha).exp_m1();
+        let hardening_storage = |alpha: f64| {
+            0.5 * HARDENING * alpha * alpha
+                + saturation * (alpha + (-rate * alpha).exp_m1() / rate)
+        };
+        // Independent scalar reduction of a free-sided Hencky coupon:
+        // |E(a-p_old)|-E*dp = Y+H(alpha_old+dp)+Q(1-exp(-b(alpha_old+dp))).
+        // Bisection of this monotone equation does not use the native return
+        // map, its 3mu predictor, its yield diagnostic or its hardening helper.
+        let reference = |a: f64, p: f64, alpha: f64| {
+            let trial = E * (a - p);
+            if trial.abs() <= strength(alpha) {
+                return (p, alpha);
+            }
+            let (mut lo, mut hi) = (0.0, trial.abs() / E);
+            for _ in 0..80 {
+                let increment = f64::midpoint(lo, hi);
+                if trial.abs() - E * increment > strength(alpha + increment) {
+                    lo = increment;
+                } else {
+                    hi = increment;
+                }
+            }
+            let increment = f64::midpoint(lo, hi);
+            (p + trial.signum() * increment, alpha + increment)
+        };
+        let mut solid = FinitePlasticTetSolid::try_new(
+            &nodes,
+            &tets,
+            FinitePlasticLawField::Uniform(&material),
+            TetAssemblyBudget::standard(),
+            cx,
+        )
+        .unwrap();
+        let (mut old_a, mut p, mut alpha, mut storage, mut heat) = (0.0_f64, 0.0, 0.0, 0.0, 0.0);
+        for reverse in [false, true] {
+            let start = if reverse { p } else { 0.0 };
+            let count = if reverse { 12 } else { 10 };
+            for index in 1..=count {
+                let a = start + if reverse { -0.012 } else { 0.01 } * f64::from(index);
+                let (next_p, next_alpha) = reference(a, p, alpha);
+                let tau = E * (a - next_p);
+                let next_storage = 0.5 * tau * tau / E + hardening_storage(next_alpha);
+                let dissipation = YIELD * (next_alpha - alpha);
+                let work = (tau / a.exp()) * (a.exp() - old_a.exp());
+                let step = solid
+                    .advance(
+                        &rollers(&nodes, Some(a.exp())),
+                        &[],
+                        [0.0; 3],
+                        HyperTetSettings::default(),
+                        controls(),
+                        cx,
+                    )
+                    .unwrap();
+                // Lateral-face coordinates and the interior vertex remain
+                // unknown: this checks the assembled nonlinear equilibrium.
+                assert!(step.equilibrium.steps[0].linear_iterations > 0);
+                check_uniaxial_with_hardening(
+                    &step.solid,
+                    a,
+                    next_p,
+                    next_alpha,
+                    hardening_storage(next_alpha),
+                );
+                close(step.energy.stored_before_j, storage, 0.01);
+                close(step.energy.stored_after_j, next_storage, 0.01);
+                close(step.energy.plastic_dissipation_j, dissipation, 0.005);
+                close(step.energy.support_endpoint_work_j, work, 0.005);
+                close(
+                    step.energy.endpoint_work_defect_j,
+                    work - (next_storage - storage) - dissipation,
+                    0.02,
+                );
+                close(
+                    step.equilibrium.strain_energy_j,
+                    next_storage + dissipation,
+                    0.01,
+                );
+                (old_a, p, alpha, storage) = (a, next_p, next_alpha, next_storage);
+                heat += step.energy.plastic_dissipation_j;
+                solid = step.solid;
+            }
+            if !reverse {
+                assert!(p > 0.06, "the coupon must retain substantial finite plastic stretch");
+                assert!(hardening_storage(alpha) - 0.5 * HARDENING * alpha * alpha > 150_000.0);
+                // Remove the right displacement restraint and unload actual
+                // dead face traction. All right-face axial DOFs are now free.
+                let loaded_a = old_a;
+                let loaded_nominal = E * (loaded_a - p) / loaded_a.exp();
+                for fraction in [0.75, 0.5, 0.25, 0.0] {
+                    let nominal = fraction * loaded_nominal;
+                    let (mut lo, mut hi) = (p, loaded_a);
+                    for _ in 0..80 {
+                        let a = f64::midpoint(lo, hi);
+                        if E * (a - p) / a.exp() < nominal {
+                            lo = a;
+                        } else {
+                            hi = a;
+                        }
+                    }
+                    let a = f64::midpoint(lo, hi);
+                    let forces = [
+                        (3, nominal / 3.0),
+                        (9, nominal / 6.0),
+                        (21, nominal / 3.0),
+                        (15, nominal / 6.0),
+                    ];
+                    let step = solid
+                        .advance(
+                            &rollers(&nodes, None),
+                            &forces,
+                            [0.0; 3],
+                            HyperTetSettings::default(),
+                            controls(),
+                            cx,
+                        )
+                        .unwrap();
+                    check_uniaxial_with_hardening(&step.solid, a, p, alpha, hardening_storage(alpha));
+                    close(step.energy.plastic_dissipation_j, 0.0, 0.005);
+                    close(step.energy.support_endpoint_work_j, 0.0, 0.0);
+                    close(
+                        step.energy.dead_load_endpoint_work_j,
+                        nominal * (a.exp() - old_a.exp()),
+                        0.005,
+                    );
+                    old_a = a;
+                    storage = 0.5 * E * (a - p).powi(2) + hardening_storage(alpha);
+                    solid = step.solid;
+                }
+                close(old_a, p, 1e-14);
+                close(solid.stored_energy_j(), hardening_storage(alpha), 0.01);
+            }
+        }
+        assert!(p < 0.0 && alpha > 0.15, "reversal changes the metric while accumulation grows");
+        close(heat, YIELD * alpha, 0.02);
+    });
 }
 
 #[test]

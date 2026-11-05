@@ -5,10 +5,13 @@ use fs_matdb::{
     ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance, QueryPoint,
 };
 use fs_material::plastic::finite::thermal::source::{
-    ResolvedAffineThermalFiniteJ2, THERMAL_FINITE_J2_LAW_ID,
+    ResolvedAffineThermalFiniteJ2, THERMAL_FINITE_J2_LAW_ID, THERMAL_FINITE_J2_VOCE_LAW_ID,
+    THERMAL_FINITE_NORTON_J2_LAW_ID, THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID,
+    THERMAL_PERZYNA_FINITE_J2_LAW_ID, THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID,
 };
 use fs_material::plastic::finite::thermal::{
-    FiniteJ2TemperatureSlopes, FiniteJ2ThermalParameters, FiniteThermalJ2Material,
+    FiniteJ2TemperatureSlopes, FiniteJ2ThermalOverstress, FiniteJ2ThermalParameters,
+    FiniteThermalJ2Material,
 };
 use fs_material::plastic::finite::{FiniteJ2Limits, FiniteJ2Parameters};
 use fs_qty::semantic::{
@@ -125,6 +128,140 @@ fn fixture() -> ConstitutiveModelCard {
             license: "test fixture".into(),
             artifact: Some(source),
         },
+    }
+}
+
+const VOCE_KINETICS: FiniteJ2ThermalOverstress = FiniteJ2ThermalOverstress {
+    reference_viscosity_pa_s: 40e6,
+    stress_scale_pa: 3e6,
+    exponent: 2.0,
+    activation_temperature_k: 600.0,
+};
+
+fn voce_fixture(id: &str) -> ConstitutiveModelCard {
+    let mut card = fixture();
+    card.law = LawId(id.into());
+    for (name, value, dims) in [
+        ("voce_saturation_pa", 12e6, PA),
+        ("voce_rate_per_strain", 9.0, Dims::NONE),
+        ("voce_saturation_slope_pa_k", -20_000.0, PA_K),
+    ] {
+        card.parameters.insert(name.into(), LawParameter { value, dims });
+    }
+    let prefix = match id {
+        THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID => Some("overstress"),
+        THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID => {
+            card.state_schema_version = 2;
+            card.parameters.insert("maximum_accumulated_creep_strain".into(), LawParameter { value: 3.0, dims: Dims::NONE });
+            Some("creep")
+        }
+        _ => None,
+    };
+    if let Some(prefix) = prefix {
+        for (suffix, value, dims) in [
+            ("reference_viscosity_pa_s", VOCE_KINETICS.reference_viscosity_pa_s, Dims([-1, 1, -1, 0, 0, 0])),
+            ("stress_scale_pa", VOCE_KINETICS.stress_scale_pa, PA),
+            ("exponent", VOCE_KINETICS.exponent, Dims::NONE),
+            ("activation_temperature_k", VOCE_KINETICS.activation_temperature_k, K),
+        ] {
+            card.parameters.insert(format!("{prefix}_{suffix}"), LawParameter { value, dims });
+        }
+    }
+    card
+}
+
+#[test]
+fn each_explicit_thermal_voce_selector_reaches_the_same_native_material_owner() {
+    for id in [
+        THERMAL_FINITE_J2_VOCE_LAW_ID,
+        THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID,
+        THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID,
+    ] {
+        let card = voce_fixture(id);
+        let source = resolve(&card);
+        assert_eq!(source.model_card(), &card);
+        assert_eq!(source.model_card().content_hash(), card.content_hash());
+        assert_eq!(source.context(), &context());
+        let expected = resolve(&fixture()).law().clone()
+            .with_voce_hardening(12e6, 9.0, -20_000.0).unwrap();
+        let expected = match id {
+            THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID => expected.with_overstress(VOCE_KINETICS).unwrap(),
+            THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID => expected.with_norton_creep(VOCE_KINETICS, 3.0).unwrap(),
+            _ => expected,
+        };
+        assert_eq!(source.law(), &expected);
+        let t = 380.0;
+        let f = deformation(t, 0.02, 0.2);
+        let old = source.law().initial_state();
+        let response = source.thermal_finite_j2().at_temperature_for_step(t, 0.12).unwrap()
+            .response(&f, &old).unwrap();
+        assert_eq!(response, expected.at_temperature_for_step(t, 0.12).unwrap().response(&f, &old).unwrap());
+        assert!(response.state.alpha > 0.0);
+        assert!(response.jacobian > 1.0);
+        let p = coefficients(t);
+        let alpha = response.state.alpha;
+        let q = 12e6 - 20_000.0 * (t - T_REF);
+        let equilibrium_yield = p.yield_stress_pa + p.hardening_modulus_pa * alpha + q * -(-9.0 * alpha).exp_m1();
+        if id == THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID {
+            assert!(response.equivalent_kirchhoff_pa > equilibrium_yield);
+        } else {
+            close(response.equivalent_kirchhoff_pa, equilibrium_yield);
+        }
+        if id == THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID {
+            assert!(response.state.creep_alpha > 0.0);
+        }
+    }
+}
+
+#[test]
+fn thermal_voce_requires_all_three_typed_coefficients_and_full_temperature_admission() {
+    let original = voce_fixture(THERMAL_FINITE_J2_VOCE_LAW_ID);
+    let admission = |card: &ConstitutiveModelCard| {
+        ResolvedAffineThermalFiniteJ2::try_from_model_card_at(card, &context(), "temperature")
+    };
+    for name in ["voce_saturation_pa", "voce_rate_per_strain", "voce_saturation_slope_pa_k"] {
+        let mut card = original.clone();
+        card.parameters.remove(name);
+        assert!(admission(&card).is_err(), "missing {name}");
+        let mut card = original.clone();
+        card.parameters.get_mut(name).unwrap().dims = K;
+        assert!(admission(&card).is_err(), "units {name}");
+        let mut card = original.clone();
+        card.parameters.get_mut(name).unwrap().value = f64::NAN;
+        assert!(admission(&card).is_err(), "finite {name}");
+    }
+    for (name, value) in [
+        ("voce_saturation_pa", -1.0),
+        ("voce_rate_per_strain", 0.0),
+        ("voce_saturation_slope_pa_k", -100_001.0),
+        ("voce_saturation_slope_pa_k", 600_001.0),
+    ] {
+        let mut card = original.clone();
+        card.parameters.get_mut(name).unwrap().value = value;
+        assert!(admission(&card).is_err(), "span {name}={value}");
+    }
+    let mut changing_rate = original;
+    changing_rate.parameters.insert("voce_rate_slope_per_strain_k".into(), LawParameter { value: 0.0, dims: INV_K });
+    assert!(admission(&changing_rate).is_err());
+}
+
+#[test]
+fn saturation_cannot_leak_into_original_selectors_or_a_different_history_schema() {
+    for (new_id, old_id, wrong_state) in [
+        (THERMAL_FINITE_J2_VOCE_LAW_ID, THERMAL_FINITE_J2_LAW_ID, 2),
+        (THERMAL_PERZYNA_FINITE_J2_VOCE_LAW_ID, THERMAL_PERZYNA_FINITE_J2_LAW_ID, 2),
+        (THERMAL_FINITE_NORTON_J2_VOCE_LAW_ID, THERMAL_FINITE_NORTON_J2_LAW_ID, 1),
+    ] {
+        let original = voce_fixture(new_id);
+        let mut old = original.clone();
+        old.law = LawId(old_id.into());
+        assert!(ResolvedAffineThermalFiniteJ2::try_from_model_card_at(&old, &context(), "temperature").is_err());
+        let mut state = original.clone();
+        state.state_schema_version = wrong_state;
+        assert!(ResolvedAffineThermalFiniteJ2::try_from_model_card_at(&state, &context(), "temperature").is_err());
+        let mut version = original;
+        version.law_version = 2;
+        assert!(ResolvedAffineThermalFiniteJ2::try_from_model_card_at(&version, &context(), "temperature").is_err());
     }
 }
 
