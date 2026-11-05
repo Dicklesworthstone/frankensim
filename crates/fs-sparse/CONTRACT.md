@@ -86,6 +86,23 @@ results are machine-specific, not a universal throughput guarantee.
   counts, and max front dimension. `LdltFactor::solve` serves repeated
   right-hand sides.
 
+`LdltFactor::solve_into(rhs, output)` and `solve_in_place(values)` reuse the
+same immutable numeric factor without allocating solve buffers or using a
+mutable shared cache. The factor prepares one leader per nontrivial permutation
+cycle; this retained capacity is included in numeric-payload admission. Each
+call applies the permutation in place, visits the original block-then-panel
+fused reductions and original 1x1/2x2 diagonal arithmetic, then restores the
+original variable order. Independent callers own separate output slices.
+The original allocating `solve` remains available and unchanged.
+
+These entries are synchronous, like the original owner. They do not add
+mid-solve cancellation, a throughput target, or a cross-ISA qualification.
+The existing residual and RHS-scale fixtures now compare allocating, portable
+in-place, dispatched in-place and caller-output results bitwise, including
+indefinite/delayed pivots. Empty and disconnected factors are covered.
+Native execution of the added paths remains pending; earlier green runs do
+not qualify these new entries.
+
 ## Invariants
 IRP M1.5-W1 extends the direct owner with `DirectOrdering::NestedDissection`
 and `ordering_nd::{NdOptions, NdOrdering, SeparatorTree}`. AMD remains the
@@ -110,7 +127,7 @@ payload bound covers factor, fronts, live updates and numeric scratch; it is
 not an OS RSS/allocator-overhead or symbolic-construction memory guarantee.
 `symbolic_bytes`, `estimated_flops` and `FactorStats.peak_factor_bytes` disclose
 retained symbolic payload, no-delay work estimate and conservative numeric
-peak respectively. Numeric arithmetic, AMD permutation and legacy factor
+peak respectively. Numeric arithmetic, AMD permutation and the pre-existing fill/pivot
 statistics remain unchanged. Tests `nested_dissection` cover permutation,
 separator separation/order, repeat identity, leaf/coordinate refusals, exact
 budget cap versus cap+1, five-shift analytic 3-D inertia and release-only fill

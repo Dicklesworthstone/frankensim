@@ -1,7 +1,7 @@
 # SAFETY — fs-sparse x86 FMA-codegen capsule
 
 Scope: `crates/fs-sparse/src/fma/mod.rs` (`spmv_x86`, `spmm_x86` and
-the format/product dispatchers, and the direct LDLT solve dispatcher),
+the format/product dispatchers, and the direct LDLT solve dispatchers),
 compiled only on `target_arch = "x86_64"`.
 
 ## Invariants the `unsafe` calls rely on
@@ -11,7 +11,8 @@ compiled only on `target_arch = "x86_64"`.
    `is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma")`
    verified the CPU supports it. No other call sites exist (the fns are
    private to this module).
-2. **The bodies are safe code.** the format/product bodies and `LdltFactor::solve_body` are
+2. **The bodies are safe code.** the format/product bodies,
+   `LdltFactor::solve_body`, and `LdltFactor::solve_in_place_body` are
    `#[inline(always)]` safe slice arithmetic; the `unsafe` here is ONLY
    the `target_feature` calling contract, never memory access.
 3. **Bit identity.** `mul_add` compiles to the native fused instruction
@@ -28,7 +29,7 @@ host and on every non-x86 architecture.
 
 ## Direct LDLT solve
 
-The direct solve uses the same block/panel order and fused reductions in both
+The allocating direct solve uses the same block/panel order and fused reductions in both
 arms. Pivot choices, permutations, diagonal 1x1/2x2 solves, and gather/scatter
 operations are unchanged. The existing direct-solve residual fixtures compare
 the dispatched result bitwise with a non-inlined portable caller, including
@@ -36,3 +37,11 @@ indefinite and delayed-pivot cases. A separate RHS-scale case covers signed
 zeros and small/large finite values. This extends code generation only; it
 does not assert a new cross-ISA qualification or make the direct solver the
 instrument engine's default.
+
+The in-place entry uses that same dispatch boundary. Its precomputed cycles
+move permutation values without floating-point arithmetic, and direct global
+updates follow the original block-then-panel fused reduction order. The
+existing residual fixtures compare both solve entries bitwise, including
+indefinite and delayed-pivot factors. The factor stays immutable; each caller
+owns its output slice, and no mutable shared workspace is introduced.
+

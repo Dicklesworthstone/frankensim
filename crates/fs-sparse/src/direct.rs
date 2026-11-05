@@ -589,6 +589,10 @@ impl SymbolicLdlt {
     fn numeric_base_bytes(&self) -> usize {
         self.n
             .saturating_mul(2 * core::mem::size_of::<usize>())
+            // One leader for each nontrivial solve-permutation cycle; every
+            // such cycle contains at least two variables. The numeric `pos`
+            // scratch is reused to prepare these leaders after factorization.
+            .saturating_add((self.n / 2).saturating_mul(core::mem::size_of::<usize>()))
             .saturating_add(
                 (self.pat_row_ptr.len() + self.pat_col_idx.len())
                     .saturating_mul(core::mem::size_of::<usize>()),
@@ -987,9 +991,29 @@ impl SymbolicLdlt {
         } else {
             stats.nnz_l as f64 / a.nnz() as f64
         };
+        // Retain only cycle leaders. Both directions of the permutation can
+        // then be applied in place with one scalar temporary and no visited
+        // array in the warm solve. Reuse the existing numeric position scratch.
+        pos.fill(usize::MAX);
+        let mut solve_cycles = Vec::with_capacity(n / 2);
+        for start in 0..n {
+            if pos[start] != usize::MAX || self.perm[start] == start {
+                continue;
+            }
+            solve_cycles.push(start);
+            let mut current = start;
+            loop {
+                pos[current] = start;
+                current = self.perm[current];
+                if current == start {
+                    break;
+                }
+            }
+        }
         Ok(LdltFactor {
             n,
             perm: self.perm.clone(),
+            solve_cycles,
             snodes: snodes_num,
             inertia,
             stats,
@@ -1242,6 +1266,9 @@ struct SnodeNum {
 pub struct LdltFactor {
     n: usize,
     perm: Vec<usize>,
+    // Leaders of disjoint nontrivial cycles of `perm`, prepared once. The
+    // factor-byte admission includes the reserved capacity of this vector.
+    solve_cycles: Vec<usize>,
     snodes: Vec<SnodeNum>,
     inertia: Inertia,
     stats: FactorStats,
@@ -1265,6 +1292,126 @@ impl LdltFactor {
     #[must_use]
     pub fn solve(&self, b: &[f64]) -> Vec<f64> {
         crate::fma::direct_solve_dispatch(self, b)
+    }
+
+    /// Solve A·x = b into caller-owned storage without allocating a solve
+    /// buffer. Both slices use the original variable order. The immutable
+    /// factor can be shared by independent callers with separate outputs.
+    ///
+    /// This uses the same pivots, fused reductions and diagonal arithmetic as
+    /// [`Self::solve`]. Preparation stores permutation-cycle leaders once;
+    /// numeric factor-byte admission includes their retained capacity.
+    ///
+    /// # Panics
+    /// Either slice has a length different from the factored dimension.
+    /// The original direct solve is synchronous; this entry adds no internal
+    /// cancellation point or automatic time-step stability guarantee.
+    pub fn solve_into(&self, b: &[f64], x: &mut [f64]) {
+        assert_eq!(b.len(), self.n, "solve_into: rhs length must equal n");
+        assert_eq!(x.len(), self.n, "solve_into: output length must equal n");
+        x.copy_from_slice(b);
+        self.solve_in_place(x);
+    }
+
+    /// Replace a right-hand side by its solution in the original variable
+    /// order. No mutable factor cache, heap allocation or external workspace
+    /// is needed, including for indefinite and delayed-pivot factors.
+    ///
+    /// # Panics
+    /// `values` has a length different from the factored dimension.
+    /// The solve remains synchronous, like [`Self::solve`].
+    pub fn solve_in_place(&self, values: &mut [f64]) {
+        crate::fma::direct_solve_in_place_dispatch(self, values);
+    }
+
+    // The gathered original solve below remains a separate parity oracle.
+    // Direct updates preserve its block/panel reduction order: those variable
+    // lists are disjoint within each front, including delayed pivots.
+    #[inline(always)]
+    pub(crate) fn solve_in_place_body(&self, values: &mut [f64]) {
+        assert_eq!(
+            values.len(),
+            self.n,
+            "solve_in_place: rhs length must equal n"
+        );
+        // Gather P b by following each precomputed permutation cycle.
+        for &start in &self.solve_cycles {
+            let saved = values[start];
+            let mut current = start;
+            loop {
+                let next = self.perm[current];
+                if next == start {
+                    values[current] = saved;
+                    break;
+                }
+                values[current] = values[next];
+                current = next;
+            }
+        }
+        // Forward: the same L z = P b updates, directly in elimination order.
+        for s in &self.snodes {
+            let w = s.block_vars.len();
+            let m = w + s.panel_vars.len();
+            for k in 0..w {
+                let vk = values[s.block_vars[k]];
+                for i in k + 1..w {
+                    let value = &mut values[s.block_vars[i]];
+                    *value = s.l[i + k * m].mul_add(-vk, *value);
+                }
+                for (i, &variable) in s.panel_vars.iter().enumerate() {
+                    let value = &mut values[variable];
+                    *value = s.l[w + i + k * m].mul_add(-vk, *value);
+                }
+            }
+        }
+        // Diagonal: retain the original 1x1/2x2 pivot arithmetic verbatim.
+        for s in &self.snodes {
+            let mut k = 0usize;
+            for block in &s.d {
+                match *block {
+                    DBlock::Single(d) => {
+                        values[s.block_vars[k]] /= d;
+                        k += 1;
+                    }
+                    DBlock::Pair(d11, d21, d22) => {
+                        let det = d11 * d22 - d21 * d21;
+                        let z1 = values[s.block_vars[k]];
+                        let z2 = values[s.block_vars[k + 1]];
+                        values[s.block_vars[k]] = (d22 * z1 - d21 * z2) / det;
+                        values[s.block_vars[k + 1]] = (d11 * z2 - d21 * z1) / det;
+                        k += 2;
+                    }
+                }
+            }
+        }
+        // Backward: the same L^T x = w reductions, block rows before panels.
+        for s in self.snodes.iter().rev() {
+            let w = s.block_vars.len();
+            let m = w + s.panel_vars.len();
+            for k in (0..w).rev() {
+                let mut acc = values[s.block_vars[k]];
+                for i in k + 1..w {
+                    acc = s.l[i + k * m].mul_add(-values[s.block_vars[i]], acc);
+                }
+                for (i, &variable) in s.panel_vars.iter().enumerate() {
+                    acc = s.l[w + i + k * m].mul_add(-values[variable], acc);
+                }
+                values[s.block_vars[k]] = acc;
+            }
+        }
+        // Scatter P^T x along the same cycles in the opposite direction.
+        for &start in &self.solve_cycles {
+            let mut saved = values[start];
+            let mut current = start;
+            loop {
+                let next = self.perm[current];
+                core::mem::swap(&mut saved, &mut values[next]);
+                current = next;
+                if current == start {
+                    break;
+                }
+            }
+        }
     }
 
     // Compile the identical fixed-order solve inside the existing FMA capsule.
@@ -1427,6 +1574,26 @@ mod tests {
         factor.solve_body(rhs)
     }
 
+    fn check_in_place(factor: &LdltFactor, rhs: &[f64], expected: &[f64]) {
+        let mut in_place = rhs.to_vec();
+        factor.solve_in_place(&mut in_place);
+        let mut portable = rhs.to_vec();
+        factor.solve_in_place_body(&mut portable);
+        let mut output = vec![f64::NAN; rhs.len()];
+        factor.solve_into(rhs, &mut output);
+        for (name, actual) in [
+            ("dispatched in-place", &in_place),
+            ("portable in-place", &portable),
+            ("caller output", &output),
+        ] {
+            assert_eq!(
+                actual.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "{name} changed the original direct-solve arithmetic"
+            );
+        }
+    }
+
     #[test]
     fn dispatched_solve_preserves_portable_bits_across_rhs_scales() {
         for ordering in [DirectOrdering::Natural, DirectOrdering::Amd] {
@@ -1442,6 +1609,7 @@ mod tests {
                     dispatched.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                     portable.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
                 );
+                check_in_place(&factor, &rhs, &dispatched);
             }
         }
     }
@@ -1462,6 +1630,7 @@ mod tests {
             x.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             portable.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
         );
+        check_in_place(f, &b, &x);
         let mut ax = vec![0.0; n];
         a.spmv(&x, &mut ax);
         let xin: f64 = x.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
@@ -1493,6 +1662,30 @@ mod tests {
         let parent = etree(&ladj);
         // col 0: first lower neighbor is row 1 → parent 1; col 1 → 2; col 2 → 3.
         assert_eq!(parent, vec![1, 2, 3, NONE]);
+    }
+
+    #[test]
+    fn in_place_solve_handles_empty_and_disconnected_factors() {
+        fn send_and_sync<T: Send + Sync>() {}
+        send_and_sync::<LdltFactor>();
+        let empty = Coo::new(0, 0).assemble();
+        let empty_factor = factor(&empty, DirectOrdering::Natural, &LdltOptions::default());
+        check_in_place(&empty_factor, &[], &[]);
+
+        let mut coo = Coo::new(7, 7);
+        for i in 0..7 {
+            coo.push(i, i, (i + 2) as f64);
+        }
+        for (a, b) in [(0, 6), (6, 2), (1, 5)] {
+            coo.push(a, b, -0.125);
+            coo.push(b, a, -0.125);
+        }
+        let matrix = coo.assemble();
+        for ordering in [DirectOrdering::Natural, DirectOrdering::Amd] {
+            let factor = factor(&matrix, ordering, &LdltOptions::default());
+            assert!(factor.solve_cycles.len() <= factor.n / 2);
+            check_solve(&matrix, &factor, 93, 8.0);
+        }
     }
 
     #[test]

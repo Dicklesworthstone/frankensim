@@ -90,6 +90,7 @@ macro_rules! fma_dispatch {
 }
 
 fma_dispatch!(direct_solve_dispatch, LdltFactor, solve_body, (b: &[f64]) -> Vec<f64>);
+fma_dispatch!(direct_solve_in_place_dispatch, LdltFactor, solve_in_place_body, (values: &mut [f64]));
 fma_dispatch!(bsr_spmv_dispatch, Bsr, spmv_body, (x: &[f64], y: &mut [f64]));
 fma_dispatch!(bsr_spmm_dispatch, Bsr, spmm_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
 fma_dispatch!(bsr_spmm_blocked_dispatch, Bsr, spmm_blocked_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
@@ -122,6 +123,7 @@ mod paste_x86 {
     }
 
     fma_body!(direct_solve_dispatch, LdltFactor, solve_body, (b: &[f64]) -> Vec<f64>);
+    fma_body!(direct_solve_in_place_dispatch, LdltFactor, solve_in_place_body, (values: &mut [f64]));
     fma_body!(bsr_spmv_dispatch, Bsr, spmv_body, (x: &[f64], y: &mut [f64]));
     fma_body!(bsr_spmm_dispatch, Bsr, spmm_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
     fma_body!(bsr_spmm_blocked_dispatch, Bsr, spmm_blocked_body, (x: &[f64], nrhs: usize, y: &mut [f64]));
