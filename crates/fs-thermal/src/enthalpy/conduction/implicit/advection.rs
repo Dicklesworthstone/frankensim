@@ -1,12 +1,47 @@
 //! A prepared directed tangent for the original endpoint upwind flux owner.
 use super::*;
 use crate::enthalpy::advection::Advected;
+use crate::enthalpy::advection::reconstruction::LimitedEnthalpyReconstruction;
 
 pub(super) struct ImplicitAdvection {
     pub(super) flow: Advected<()>,
     // d(heat into row)/d(cell energy in column), in 1/s. Fixed mass and
     // prescribed flow make this constant even for nonlinear/latent T(h).
     pub(super) tangent: Vec<(usize, usize, f64)>,
+    reconstruction: Option<LimitedEnthalpyReconstruction>,
+}
+
+impl ImplicitAdvection {
+    pub(super) fn endpoint(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        index: &BTreeMap<CellId, usize>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(TransportStepCoefficients<()>, Vec<(usize, usize, f64)>), ImplicitConductionError>
+    {
+        let Some(reconstruction) = &self.reconstruction else {
+            return Ok((
+                self.flow.endpoint_transport(thermal, checkpoint)?,
+                Vec::new(),
+            ));
+        };
+        let (transport, rates) =
+            self.flow
+                .reconstructed_endpoint(thermal, reconstruction, true, &mut checkpoint)?;
+        let mut tangent = Vec::new();
+        tangent
+            .try_reserve_exact(rates.len())
+            .map_err(|_| TridiagonalError::Capacity)?;
+        for (row, col, rate) in rates {
+            checkpoint()?;
+            let derivative = finite(rate / thermal.cells[&col].mass_kg)?;
+            if derivative == 0.0 {
+                return Err(DepositionError::Arithmetic.into());
+            }
+            tangent.push((index[&row], index[&col], derivative));
+        }
+        Ok((transport, tangent))
+    }
 }
 
 impl ImplicitConductionChain<'_> {
@@ -71,8 +106,37 @@ impl ImplicitConductionChain<'_> {
         self.advection = Some(ImplicitAdvection {
             flow: flow.clone(),
             tangent,
+            reconstruction: None,
         });
         checkpoint()?;
         Ok(self)
+    }
+
+    pub(super) fn with_implicit_advection_reconstruction(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        flow: &Advected<()>,
+        reconstruction: &LimitedEnthalpyReconstruction,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        checkpoint()?;
+        if !matches!(self.topology, LinearTopology::Graph(_)) {
+            return Err(ImplicitConductionError::Invalid(
+                "limited enthalpy reconstruction requires the graph solver",
+            ));
+        }
+        let mut result = self.with_implicit_advection(thermal, flow, &mut checkpoint)?;
+        if !reconstruction.is_empty() {
+            // Existing source, geometry, topology and face-domain admission is
+            // authoritative. No reconstruction is frozen at the initial state.
+            flow.endpoint_transport_with_reconstruction(thermal, reconstruction, &mut checkpoint)?;
+            result
+                .advection
+                .as_mut()
+                .ok_or(DepositionError::Arithmetic)?
+                .reconstruction = Some(reconstruction.clone());
+        }
+        checkpoint()?;
+        Ok(result)
     }
 }

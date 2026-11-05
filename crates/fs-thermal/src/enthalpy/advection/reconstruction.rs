@@ -51,6 +51,13 @@ struct BoundCell {
     material_id: MaterialId,
 }
 
+struct FaceIncrement {
+    value: f64,
+    // The active limited increment depends on one neighbor and the donor
+    // with opposite coefficients. None selects the flat/extremum branch.
+    neighbor_partial: Option<(CellId, f64)>,
+}
+
 /// Immutable numerical geometry for selected interior pipe cells.
 ///
 /// The plan pins every referenced cell's mass, geometry and material ID. Every
@@ -236,27 +243,36 @@ impl LimitedEnthalpyReconstruction {
         thermal: &DepositionSimulation<'_>,
         up: CellId,
         down: CellId,
-    ) -> Result<f64, DepositionError> {
+    ) -> Result<FaceIncrement, DepositionError> {
         let Some(stencil) = self.stencils.get(&up) else {
-            return Ok(0.0);
+            return Ok(FaceIncrement {
+                value: 0.0,
+                neighbor_partial: None,
+            });
         };
         let centre = thermal.cells()[&up].specific_h_j_kg;
         let left = finite(centre - thermal.cells()[&stencil.previous].specific_h_j_kg)?;
         let right = finite(thermal.cells()[&stencil.next].specific_h_j_kg - centre)?;
         // Limit physical derivatives times the SAME half-width. Fractions lie
         // in [0,1], avoiding overflow from dividing a finite jump by tiny length.
-        let slope_half = minmod(left * stencil.left_fraction, right * stencil.right_fraction);
-        let increment = if down == stencil.next {
-            slope_half
+        let limited_left = left * stencil.left_fraction;
+        let limited_right = right * stencil.right_fraction;
+        let slope_half = minmod(limited_left, limited_right);
+        let direction = if down == stencil.next {
+            1.0
         } else if down == stencil.previous {
-            -slope_half
+            -1.0
         } else {
             return Err(invalid(
                 "reconstructed face is outside its original axial stencil",
             ));
         };
+        let increment = direction * slope_half;
         if increment == 0.0 {
-            return Ok(0.0);
+            return Ok(FaceIncrement {
+                value: 0.0,
+                neighbor_partial: None,
+            });
         }
         let face_h = finite(centre + increment)?;
         let law = thermal
@@ -266,7 +282,18 @@ impl LimitedEnthalpyReconstruction {
         if !positive(law.temperature_k(face_h)?) {
             return Err(DepositionError::MaterialDomain);
         }
-        Ok(increment)
+        // At equal nonzero slopes choose the left active derivative. At a
+        // sign switch the zero branch above supplies a generalized derivative.
+        // Minmod is piecewise linear, not classically differentiable there.
+        let neighbor_partial = if limited_left.abs() <= limited_right.abs() {
+            (stencil.previous, -direction * stencil.left_fraction)
+        } else {
+            (stencil.next, direction * stencil.right_fraction)
+        };
+        Ok(FaceIncrement {
+            value: increment,
+            neighbor_partial: Some(neighbor_partial),
+        })
     }
 }
 
@@ -279,21 +306,49 @@ impl Advected<()> {
     /// Flow reversal uses the newly upstream cell's actual opposite face.
     ///
     /// No observer/CFL, entropy-mixing account, physical step, nonlinear solver
-    /// or accepted-state clamp is supplied. Feed the result to the original
-    /// `BackwardEulerStep::evaluate_with_transport` and its acceptance gates.
+    /// or accepted-state clamp is supplied by this query. Feed the result to
+    /// the original `BackwardEulerStep::evaluate_with_transport`, or attach
+    /// this plan with `ImplicitConductionGraph::with_implicit_advection_reconstruction`
+    /// to use the native nonlinear solve and its acceptance gates.
     /// Spatial and temporal refinement remain independent obligations.
     pub fn endpoint_transport_with_reconstruction(
         &self,
         thermal: &DepositionSimulation<'_>,
         reconstruction: &LimitedEnthalpyReconstruction,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<TransportStepCoefficients<()>, DepositionError> {
+        self.reconstructed_endpoint(thermal, reconstruction, false, checkpoint)
+            .map(|(transport, _)| transport)
+    }
+
+    /// The native implicit owner can request the active face-correction
+    /// tangent in the same pass as the physical flux. Entries differentiate
+    /// heat into a row with respect to a column's specific enthalpy [kg/s].
+    /// The original upwind/component-reference tangent remains separate.
+    pub(in crate::enthalpy) fn reconstructed_endpoint(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        reconstruction: &LimitedEnthalpyReconstruction,
+        differentiate: bool,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(TransportStepCoefficients<()>, Vec<(CellId, CellId, f64)>), DepositionError> {
         checkpoint()?;
         if reconstruction.is_empty() {
-            return self.endpoint_transport(thermal, checkpoint);
+            return Ok((self.endpoint_transport(thermal, checkpoint)?, Vec::new()));
         }
         reconstruction.admit(thermal, self, &mut checkpoint)?;
         let mut endpoint = self.endpoint_transport(thermal, &mut checkpoint)?;
+        let mut tangent = Vec::new();
+        if differentiate {
+            let capacity = self
+                .flows
+                .len()
+                .checked_mul(4)
+                .ok_or(DepositionError::Budget("axial enthalpy tangent"))?;
+            tangent
+                .try_reserve(capacity)
+                .map_err(|_| DepositionError::Budget("axial enthalpy tangent"))?;
+        }
         let mut transfers = endpoint.transfers.iter_mut();
         for edge in &self.flows {
             checkpoint()?;
@@ -305,15 +360,30 @@ impl Advected<()> {
                 return Err(invalid("native upwind transfer order changed"));
             }
             let increment = reconstruction.face_increment(thermal, up, down)?;
-            if increment != 0.0 {
-                transfer.power_w = finite(transfer.power_w + finite(rate * increment)?)?;
+            if increment.value != 0.0 {
+                transfer.power_w = finite(transfer.power_w + finite(rate * increment.value)?)?;
+            }
+            if let Some((neighbor, partial)) = increment.neighbor_partial.filter(|_| differentiate)
+            {
+                let derivative = finite(rate * partial)?;
+                if derivative == 0.0 {
+                    return Err(DepositionError::Arithmetic);
+                }
+                // One power, two opposite physical accounts. Equal opposite
+                // column coefficients preserve the original enthalpy datum.
+                tangent.extend([
+                    (up, neighbor, -derivative),
+                    (down, neighbor, derivative),
+                    (up, up, derivative),
+                    (down, up, -derivative),
+                ]);
             }
         }
         if transfers.next().is_some() {
             return Err(invalid("native upwind transfer count changed"));
         }
         checkpoint()?;
-        Ok(endpoint)
+        Ok((endpoint, tangent))
     }
 }
 

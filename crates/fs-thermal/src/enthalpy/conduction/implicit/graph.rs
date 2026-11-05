@@ -63,6 +63,37 @@ impl<'a> ImplicitConductionGraph<'a> {
         })
     }
 
+    /// Solve limited axial enthalpy transport with the original conduction
+    /// residual, nonlinear iteration and energy accounts.
+    ///
+    /// Every trial reconstructs the actual endpoint h on the supplied original
+    /// geometry. Its analytic active-minmod tangent joins the native upwind
+    /// tangent in the sparse nonsymmetric solver; the wider stencil requires
+    /// this graph path even for a straight channel. At limiter switches Newton
+    /// uses a deterministic generalized derivative and the existing line search.
+    ///
+    /// Empty plans preserve the upwind path. The original reconstruction's
+    /// source, topology, fixed-mass, geometry and unsupported-carrier refusals
+    /// remain active. Backward Euler is still first-order in time; neither a
+    /// large accepted step nor a small energy residual certifies transport
+    /// accuracy or a maximum principle for arbitrary coupled sources.
+    pub fn with_implicit_advection_reconstruction(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        flow: &crate::enthalpy::advection::Advected<()>,
+        reconstruction: &crate::enthalpy::advection::reconstruction::LimitedEnthalpyReconstruction,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_implicit_advection_reconstruction(
+                thermal,
+                flow,
+                reconstruction,
+                checkpoint,
+            )?,
+        })
+    }
+
     /// Replace selected reservoir and ambient fluxes in the same original
     /// residual and Jacobian. See the chain method for original caloric,
     /// geometric and boundary-channel ownership requirements.

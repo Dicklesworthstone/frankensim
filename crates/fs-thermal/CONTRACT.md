@@ -1666,4 +1666,35 @@ SIMPLEC face fluxes to the same implicit owner, checking serial latent inventory
 and inlet-minus-outlet joules at Courant 10 in one accepted interval. These are
 synthetic numerical checks, not experimental validation or throughput claims.
 
+## Limited axial convection in the native implicit graph
+
+`ImplicitConductionGraph::with_implicit_advection_reconstruction` binds the
+existing `LimitedEnthalpyReconstruction` to the same nonlinear conduction and
+enthalpy residual. Every trial evaluates the actual endpoint face enthalpy and
+its active-minmod tangent together. The original upwind/component-reference
+derivative remains compiled once; sparse face corrections retain equal opposite
+heat accounts and the original cell-mass conversion to joule coordinates.
+No finite-difference Jacobian, dense matrix, separate energy store or frozen
+starting-state reconstruction is introduced.
+
+The limiter is continuous and piecewise linear. Equal nonzero slopes select
+the left active derivative; a zero or opposite-sign slope selects the flat
+branch. These are deterministic generalized derivatives at limiter switches,
+not claims of classical differentiability. The existing Newton line search,
+interval retries, adaptive controller and local/total joule gates remain active.
+The wider stencil uses the graph's nonsymmetric sparse solver; the direct
+tridiagonal chain retains its upwind API. An empty reconstruction preserves the
+original upwind arithmetic.
+
+Original face-domain, geometry, fixed-mass, junction, external-gradient and
+unsupported-carrier refusals apply on each trial. The frozen flow and supplied
+observer histories remain unchanged. G1/G3/G4 regressions compare the complete
+endpoint Jacobian against finite differences after limiter branches change,
+resolve a reversed/datum-shifted latent channel at Courant four against an
+independent affine endpoint balance, and refine a circulating cell-average
+sine wave against its exact translation and the upwind result. Late cancellation
+retains the original thermal history. Backward Euler remains first-order in
+time; these bounded checks do not establish a global TVD, arbitrary-source
+maximum-principle, experimental-validation or throughput claim.
+
 
