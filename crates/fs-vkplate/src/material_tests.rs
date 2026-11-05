@@ -1205,6 +1205,17 @@ fn snare_wire_binding(m: KitMaterials) -> Result<KitMaterials, String> {
     )
 }
 
+// Eighteen strands at y = (+/-2, +/-6, ..., +/-34) mm on a 21 mm grid.
+// These independent counts also cover unequal groups at the edge of the wire bed.
+fn snare_scale_six_row_strands(wire: &Body) -> f64 {
+    match wire.name.as_str() {
+        "wire -2" | "wire 2" => 1.0,
+        "wire -1" | "wire 1" => 5.0,
+        "wire 0" => 6.0,
+        name => panic!("unexpected snare row {name}"),
+    }
+}
+
 #[test]
 fn g1_card_snare_wires_are_coils_of_the_sourced_steel_and_say_what_is_declared() {
     use crate::coil::{CANOPUS_VINTAGE, COIL_ENDS_NOTE, CoilWire};
@@ -1260,14 +1271,33 @@ fn g1_card_snare_wires_are_coils_of_the_sourced_steel_and_say_what_is_declared()
         .iter()
         .filter(|b| b.name.starts_with("wire "))
         .collect();
-    assert!(!wires.is_empty());
+    assert_eq!(wires.len(), 5);
+    let declared = spec.wires.unwrap();
     for w in &wires {
+        let copies = snare_scale_six_row_strands(w);
         assert!(w.modal.is_some(), "{} is not a coil", w.name);
         assert!(w.s0.iter().all(|&s| s == 0.0));
         for &m in &w.mass {
-            near(m, wire.mass_per_m() * w.h);
+            near(m, copies * wire.mass_per_m() * w.h);
+        }
+        near(w.tension, copies * declared.tension / w.h);
+        for &f in &w.bias { near(f, -copies * declared.preload_per_m * w.h); }
+        // Grouping preserves each physical partial and its material/gas decay, while the
+        // actual assembled mass, bending and damping operators carry all of the strands.
+        for j in [1, w.n / 2, w.n] {
+            let shape: Vec<f64> = (1..=w.n)
+                .map(|i| (PI * (i * j) as f64 / (w.n + 1) as f64).sin()).collect();
+            let modal_mass: f64 = w.mass.iter().zip(&shape).map(|(m, q)| m * q * q).sum();
+            let beta2 = 4.0 / w.h.powi(2) * (PI * j as f64 / (2 * (w.n + 1)) as f64).sin().powi(2);
+            let omega2 = (declared.tension * beta2 + wire.bending_n_m2() * beta2 * beta2) / wire.mass_per_m();
+            let share = wire.bending_n_m2() * beta2 / (declared.tension + wire.bending_n_m2() * beta2);
+            near((w.tension * w.lap.quad(&shape) + w.stiff.quad(&shape)) / modal_mass, omega2);
+            near(w.modal.as_ref().unwrap().c.quad(&shape) / modal_mass,
+                2.0 * wire.decay_rate(omega2.sqrt(), share).unwrap());
         }
     }
+    near(wires.iter().flat_map(|w| &w.mass).sum(),
+        declared.strands as f64 * wire.mass_per_m() * wires[0].h * wires[0].n as f64);
     assert!(piece.notes.iter().any(|n| n.starts_with("snare wires: sourced coils")));
     assert!(piece.notes.iter().any(|n| n == COIL_ENDS_NOTE));
     assert!(!piece.notes.iter().any(|n| n == kit::FITTED_WIRES_RECEIPT));
@@ -1281,8 +1311,9 @@ fn g1_card_snare_wires_are_coils_of_the_sourced_steel_and_say_what_is_declared()
     let contacts: Vec<&Contact> = piece.instrument.contacts.iter().filter(on_wires).collect();
     assert!(!contacts.is_empty());
     for c in contacts {
+        let copies = snare_scale_six_row_strands(&piece.instrument.bodies[c.b[0].0]);
         let Law::Power { k, alpha, mu } = c.law;
-        near(k, turn.k() * (spec.grid / p));
+        near(k, copies * turn.k() * (spec.grid / p));
         assert_eq!((alpha, mu), (1.5, declared_loss));
     }
     assert!(piece.notes.iter().any(|n| n.starts_with("snare wire contact: computed from the cards (Hertz, elliptical, helix)")));
@@ -1319,11 +1350,12 @@ fn g1_snare_wires_without_a_sourced_steel_stay_the_fitted_strings_and_say_so() {
             .iter()
             .filter(|b| b.name.starts_with("wire "))
             .collect();
-        assert!(!wires.is_empty());
+        assert_eq!(wires.len(), 5);
         for w in &wires {
+            let copies = snare_scale_six_row_strands(w);
             assert!(w.modal.is_none());
             assert!(w.s0.iter().all(|&s| s == 6.907755 / 0.35));
-            assert!(w.mass.iter().all(|&m| m == 0.004 * w.h));
+            assert!(w.mass.iter().all(|&m| m == copies * 0.004 * w.h));
         }
         assert!(piece.notes.iter().any(|n| n == kit::FITTED_WIRES_RECEIPT));
         assert!(!piece.notes.iter().any(|n| n.starts_with("snare wires: sourced coils")));
@@ -1331,8 +1363,9 @@ fn g1_snare_wires_without_a_sourced_steel_stay_the_fitted_strings_and_say_so() {
         let on_wires = |c: &&Contact| c.b.iter().any(|&(b, _, _)| piece.instrument.bodies[b].name.starts_with("wire "));
         let Law::Power { k: k0, alpha: a0, mu: m0 } = spec.wires.unwrap().contact;
         assert!(piece.instrument.contacts.iter().filter(on_wires).all(|c| {
+            let copies = snare_scale_six_row_strands(&piece.instrument.bodies[c.b[0].0]);
             let Law::Power { k, alpha, mu } = c.law;
-            (k, alpha, mu) == (k0, a0, m0)
+            (k, alpha, mu) == (copies * k0, a0, m0)
         }));
         assert!(!piece.notes.iter().any(|n| n.starts_with("snare wire contact:")));
     }

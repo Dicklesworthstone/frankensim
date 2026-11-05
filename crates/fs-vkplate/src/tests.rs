@@ -902,6 +902,70 @@ fn centered_contact_preserves_elastic_impact_energy_and_dissipates_only_declared
 }
 
 #[test]
+fn coincident_snare_strands_preserve_partial_energy_and_shared_head_reaction() {
+    // frankensim-0nxhr: a coarse membrane row represents N identical strands. Their common
+    // displacement must retain N times the energy and force without changing their partials.
+    let (n, h, line_mass, tension, bending, dt) = (9, 0.025, 0.002, 2.0, 4.8e-4, 1.0 / 96_000.0);
+    let close = |a: f64, b: f64| assert!((a - b).abs() < 3e-11 * b.abs().max(1e-20), "{a} != {b}");
+    for coil in [false, true] {
+        let build = |copies: f64| {
+            if coil {
+                Body::coil("coincident strands", n, h, copies * line_mass, copies * tension,
+                    copies * bending, &|omega, share| Ok(0.4 + 3e-5 * omega * share), 0.0, 0.0).unwrap()
+            } else {
+                Body::string("coincident strands", n, h, copies * line_mass, copies * tension,
+                    0.35, 0.0, 0.0)
+            }
+        };
+        for copies in [1, 5, 6] {
+            let count = copies as f64;
+            let (mut single, mut group) = (build(1.0), build(count));
+            for body in [&mut single, &mut group] {
+                for i in 0..n {
+                    let phase = PI * (i + 1) as f64 / (n + 1) as f64;
+                    body.w[i] = 2e-4 * phase.sin() + 7e-5 * (3.0 * phase).sin();
+                    body.wp[i] = body.w[i] - dt * (0.2 * (2.0 * phase).sin() - 0.1 * phase.sin());
+                }
+            }
+            // The explicit ensemble has one copy of the same physical state per strand.
+            let ensemble: Vec<Body> = (0..copies).map(|_| single.clone()).collect();
+            close(group.energy(dt), ensemble.iter().map(|wire| wire.energy(dt)).sum());
+            for mode in [1, 3, n] {
+                let shape: Vec<f64> = (1..=n).map(|i| (PI * (i * mode) as f64 / (n + 1) as f64).sin()).collect();
+                let modal_mass: f64 = group.mass.iter().zip(&shape).map(|(m, q)| m * q * q).sum();
+                let beta2 = 4.0 / (h * h) * (PI * mode as f64 / (2 * (n + 1)) as f64).sin().powi(2);
+                let bend = if coil { bending } else { 0.0 };
+                let omega2 = (tension * beta2 + bend * beta2 * beta2) / line_mass;
+                close((group.tension * group.lap.quad(&shape) + group.stiff.quad(&shape)) / modal_mass, omega2);
+                if let Some(loss) = &group.modal {
+                    let share = bend * beta2 / (tension + bend * beta2);
+                    close(loss.c.quad(&shape) / modal_mass, 2.0 * (0.4 + 3e-5 * omega2.sqrt() * share));
+                } else {
+                    assert_eq!(group.s0, single.s0);
+                }
+            }
+            // Independent simultaneous contact reference: each strand feels its own compliance
+            // plus N times the common head compliance. Summing those N equal forces is the
+            // aggregate row reaction. Sequential one-pass contacts are not this joint solve.
+            let head_compliance = dt * dt / 1e-4;
+            let wire_compliance = single.compliance(n / 2, dt);
+            let group_compliance = group.compliance(n / 2, dt);
+            close(count * group_compliance, wire_compliance);
+            for (previous, predicted) in [(0.0, 8e-5), (2e-5, 6e-5), (2e-5, -1e-5)] {
+                let per_strand = contact_force(predicted, count * head_compliance + wire_compliance,
+                    0.0, previous, Law::Power { k: 3e7, alpha: 1.5, mu: 0.35 }, true, dt);
+                let aggregate = contact_force(predicted, head_compliance + group_compliance,
+                    0.0, previous, Law::Power { k: count * 3e7, alpha: 1.5, mu: 0.35 }, true, dt);
+                assert!(per_strand > 0.0, "loading and unloading must both exercise contact");
+                close(aggregate, count * per_strand);
+                close(group_compliance * aggregate, wire_compliance * per_strand);
+                close(head_compliance * aggregate, count * head_compliance * per_strand);
+            }
+        }
+    }
+}
+
+#[test]
 fn centered_contact_unloads_beyond_zero_penetration_and_the_old_bracket() {
     let law=Law::Power { k:1e9, alpha:1.5, mu:0.0 };
     for predicted in [-1e-4,1e-5] {

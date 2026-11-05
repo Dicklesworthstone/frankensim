@@ -42,7 +42,9 @@ pub struct Head {
 /// Strand count, spacing, length, tension, preload and contact are declared, not sourced. Without
 /// a sourced wire (`KitMaterials::with_snare_wire`) each strand is a plain string of the fitted
 /// `mass_per_m` and `t60` (FITTED_WIRES_RECEIPT); with one it is the coil `coil` of that steel
-/// (`crate::coil`), and `mass_per_m` and `t60` are unused.
+/// (`crate::coil`), and `mass_per_m` and `t60` are unused. Strands projected onto the same
+/// membrane row share one displacement, with their mass, stiffness, preload and contact forces
+/// added. Coarsening the membrane therefore retains the declared number of strands.
 #[derive(Clone, Copy, Debug)]
 pub struct Wires {
     pub strands: i32,
@@ -63,6 +65,23 @@ impl Wires {
         // a loosely set strainer: slack strands slap the head instead of tracking it (measured: the most buzz)
         Wires { strands: 18, spacing: 0.004, length: 0.36, mass_per_m: 0.004, tension: 0.8, preload_per_m: 0.22, t60: 0.35,
                 contact: Law::Power { k: 3.0e7, alpha: 1.5, mu: 0.35 }, coil: CANOPUS_VINTAGE }
+    }
+
+    /// One resolved displacement per membrane row, retaining every identical strand's load.
+    /// This is the symmetric motion of collocated strands, not a reduction in their count
+    /// (frankensim-0nxhr). Rows retain their first-occurrence order.
+    fn rows(&self, h: f64) -> Vec<(i64, usize)> {
+        let mut rows: Vec<(i64, usize)> = vec![];
+        for strand in 0..self.strands {
+            let y = (strand as f64 - (self.strands as f64 - 1.0) / 2.0) * self.spacing;
+            let row = (y / h).round() as i64;
+            if let Some((_, count)) = rows.iter_mut().find(|(existing, _)| *existing == row) {
+                *count += 1;
+            } else {
+                rows.push((row, 1));
+            }
+        }
+        rows
     }
 }
 
@@ -446,37 +465,35 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
         // the next
         let n = 2 * ((len / h - 1.0) / 2.0).round() as usize + 1;
         let x0 = -(n as f64 - 1.0) * h / 2.0;
-        let mut count = 0;
-        let mut rows: Vec<i64> = vec![];
-        for k in 0..wr.strands {
-            let y = (k as f64 - (wr.strands as f64 - 1.0) / 2.0) * wr.spacing;
-            let row = (y / h).round() as i64;
-            if rows.contains(&row) {
-                continue; // two strands on one grid row would share contact nodes
-            }
-            rows.push(row);
+        let rows = wr.rows(h);
+        for &(row, count) in &rows {
+            let copies = count as f64;
             let y = row as f64 * h;
             let name = format!("wire {row}");
+            // Equal strands on the same membrane port have identical motion. Summing M, T,
+            // B and the contact law preserves their total force and energy, while T/M, B/M,
+            // the bending-energy share and every per-strand decay rate remain unchanged.
             let mut wb = match &coil {
-                Some(c) => Body::coil(&name, n, h, c.mass_per_m(), tension, c.bending_n_m2(), &|omega, share| c.decay_rate(omega, share), x0, y)?,
-                None => Body::string(&name, n, h, mass_per_m, tension, wr.t60, x0, y),
+                Some(c) => Body::coil(&name, n, h, copies * c.mass_per_m(), copies * tension, copies * c.bending_n_m2(), &|omega, share| c.decay_rate(omega, share), x0, y)?,
+                None => Body::string(&name, n, h, copies * mass_per_m, copies * tension, wr.t60, x0, y),
             };
             wb.origin = [0.0, 0.0, -s.depth];
             for k in 0..n {
-                wb.bias[k] = -preload_per_m * h; // toward the head (outward is +, the head is above)
+                wb.bias[k] = -copies * preload_per_m * h; // toward the head (outward is +, the head is above)
             }
             let wi = ins.add(wb);
+            let Law::Power { k, alpha, mu } = contact;
+            let row_contact = Law::Power { k: copies * k, alpha, mu };
             for k in 0..n {
                 let x = x0 + k as f64 * h;
                 if let Some(hn) = ins.bodies[ri].node_at(x, y) {
-                    let mut c = Contact::new(vec![(ri, hn, 1.0)], vec![(wi, k, 1.0)], 0.0, contact);
+                    let mut c = Contact::new(vec![(ri, hn, 1.0)], vec![(wi, k, 1.0)], 0.0, row_contact);
                     c.fixed_point_exit = true;
                     ins.contacts.push(c);
                 }
             }
-            count += 1;
         }
-        notes.push(format!("snare: {count} wires of {n} nodes, {:.0} contact points", ins.contacts.len()));
+        notes.push(format!("snare: {} strands in {} resolved rows of {n} nodes, {} contact points; coincident strands share motion with summed mass, stiffness, preload and contact force", wr.strands, rows.len(), ins.contacts.len()));
         settle = 0.25;
     }
     let (m, law, foot) = match materials {
@@ -1774,6 +1791,56 @@ mod settling_render_tests {
 #[cfg(test)]
 mod wire_alignment_tests {
     use super::*;
+
+    #[test]
+    fn coarse_rows_retain_every_declared_snare_strand() {
+        let wires = Wires::estimated();
+        // Independently counted from +/-2, +/-6, ..., +/-34 mm.
+        assert_eq!(wires.rows(0.021), vec![(-2, 1), (-1, 5), (0, 6), (1, 5), (2, 1)]);
+        assert_eq!(wires.rows(0.0245), vec![(-1, 6), (0, 6), (1, 6)]);
+        let fine = wires.rows(0.0035);
+        assert_eq!(fine.len(), 18);
+        assert!(fine.iter().all(|&(_, count)| count == 1));
+    }
+
+    #[test]
+    fn assembled_snare_rows_preserve_total_mass_preload_and_contact_strength() {
+        for scale in [6.0, 7.0] {
+            let mut spec = snare();
+            spec.grid *= scale;
+            let wires = spec.wires.unwrap();
+            let piece = drum(&spec, &[]).unwrap();
+            let ins = &piece.instrument;
+            let bodies: Vec<(usize, &Body)> = ins.bodies.iter().enumerate()
+                .filter(|(_, body)| body.name.starts_with("wire ")).collect();
+            let copies = if scale == 6.0 { vec![1.0, 5.0, 6.0, 5.0, 1.0] } else { vec![6.0; 3] };
+            assert_eq!(bodies.len(), copies.len());
+            let close = |a: f64, b: f64| assert!((a - b).abs() < 2e-13 * b.abs().max(1e-20), "{a} != {b}");
+            let (mut mass, mut preload) = (0.0, 0.0);
+            for ((index, body), count) in bodies.iter().zip(copies) {
+                for (&m, &f) in body.mass.iter().zip(&body.bias) {
+                    close(m, count * wires.mass_per_m * spec.grid);
+                    close(f, -count * wires.preload_per_m * spec.grid);
+                    mass += m;
+                    preload -= f;
+                }
+                close(body.tension, count * wires.tension / spec.grid);
+                assert!(body.s0.iter().all(|&s| s == 6.907755 / wires.t60));
+                let contacts: Vec<&Contact> = ins.contacts.iter()
+                    .filter(|c| c.b.iter().any(|&(b, _, _)| b == *index)).collect();
+                assert!(!contacts.is_empty());
+                let Law::Power { k: stiffness, alpha: exponent, mu: loss } = wires.contact;
+                for contact in contacts {
+                    let Law::Power { k, alpha, mu } = contact.law;
+                    close(k, count * stiffness);
+                    assert_eq!((alpha, mu), (exponent, loss));
+                }
+            }
+            let represented_length = wires.strands as f64 * bodies[0].1.n as f64 * spec.grid;
+            close(mass, represented_length * wires.mass_per_m);
+            close(preload, represented_length * wires.preload_per_m);
+        }
+    }
 
     #[test]
     fn every_wire_node_presses_the_head_node_under_it_whatever_the_grid() {
