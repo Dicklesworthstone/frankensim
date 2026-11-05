@@ -13,6 +13,8 @@ use fs_thermochem::{Composition, CompositionBasis};
 
 #[path = "gas/transport.rs"]
 mod transport;
+#[path = "gas/convection.rs"]
+mod convection;
 
 // Reuse the existing manufactured NASA9/transport fixture, not a new gas law.
 #[allow(dead_code)]
@@ -195,6 +197,7 @@ fn contacts(areas: [f64; 2]) -> [SolidGasContact; 2] {
             gas_distance_m: 0.001,
             cell_distance_m: 0.02,
         },
+        convection: None,
         conductivity: PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
         selection: MaterialPropertySelection::SingleClaimOnly,
     })

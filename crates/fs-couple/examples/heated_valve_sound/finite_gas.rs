@@ -217,6 +217,7 @@ pub(super) fn transport(
                 gas_distance_m: options.gas_distance_m,
                 cell_distance_m: distance,
             },
+            convection: None,
             conductivity: PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
             selection: MaterialPropertySelection::SingleClaimOnly,
         });

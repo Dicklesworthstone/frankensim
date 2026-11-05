@@ -380,6 +380,7 @@ pub fn contacts() -> [SolidGasContact; 2] {
             gas_distance_m: 0.001,
             cell_distance_m: 0.02,
         },
+        convection: None,
         conductivity: PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
         selection: MaterialPropertySelection::SingleClaimOnly,
     })

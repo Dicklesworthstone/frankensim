@@ -57,6 +57,11 @@ pub(super) fn prepare(
     let mut films = Vec::with_capacity(ordered.len());
     for (i, contact) in ordered.iter().enumerate() {
         poll(cx)?;
+        if contact.convection.is_some() {
+            return Err(CavityError::Invalid(
+                "dynamic cavity films require conduction layers; source convection belongs to the finite-gas endpoint solver",
+            ));
+        }
         if i > 0 && ordered[i - 1].id == contact.id {
             return Err(CavityError::Invalid("unique gas-film patch IDs required"));
         }

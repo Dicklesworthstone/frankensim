@@ -14207,6 +14207,54 @@ Independent three-reservoir regressions cover local heat, source conductivity
 and gas-volume changes reaching displacement, zero-net spatial exchange,
 source continuity, cancellation and transactional refusal.
 
+### Source convection at spatial solid–finite-gas patches
+
+`SolidGasContact::convection` optionally attaches the original
+`air_path::input::convection::GasConvectionBoundary` to the existing spatial
+solid/finite-gas endpoint residual. `None` retains the original two conduction
+layers. Forced, natural, aiding mixed and finite plate-section models retain
+their original geometry, regime, property-temperature conventions, source
+receipts and correlation evidence. Their exposed area must equal the contact
+area exactly, and the gas conduction distance must be zero: a film and an
+invented gas layer cannot both account for the same interface resistance.
+
+With positive solid half-distance, each proposed endpoint resolves the pinned
+solid conductivity at its actual cell phase and solves
+`A*k_cell/d_s*(T_cell-T_surface) = -Q_film(T_surface)`. The film source law is
+rebuilt from that endpoint's actual gas pressure, composition and complete
+material conditions; holding pressure for a local film-property query does
+not hold the finite parcel's pressure fixed across the step. Gas and solid
+source-domain refusals remain authoritative. Zero solid distance explicitly
+admits an isothermal cell/surface patch. Zero source conductivity represents
+solid insulation; an absent natural-equilibrium coefficient never becomes an
+insulating law for a driven interface or an invented heat derivative.
+
+The surface solve uses a held-coefficient initial trial and safeguarded secant
+steps with midpoint fallback, reusing bracket residuals without numerical
+derivatives or additional interpolation source queries. The bracket contracts
+by at least half within two trials. Work is bounded and cancellation is polled
+around every film evaluation. Acceptance requires the actual absolute power
+residual in watts; a small temperature bracket alone cannot admit a surface.
+The accepted film's signed power supplies the one heat removed from its cell
+and added to its finite gas. The reported series conductance is diagnostic:
+its bulk-temperature product can differ from that power within the admitted
+surface residual. Reports retain the actual film/surface queries, source and
+correlation evidence, solid-layer power and residual, iteration count, and
+separate instantaneous film and solid-layer entropy production.
+
+The shared owner also serves the existing multi-gas, reactive and
+thermoplastic endpoints. The separate snapshot-only dynamic-cavity heat path
+explicitly refuses the new source-film mode. This remains prescribed external
+flow/geometry against a well-mixed gas, with cell-phase conductivity held
+through the solid half-layer. It does not establish global uniqueness, an
+integrated conductivity profile, resolved boundary-layer or wall-flow
+dynamics, time/spatial refinement, or time-integrated entropy accuracy.
+Focused native regression specifications cover the sphere's sourced `Nu=2`
+series limit in both heat directions, the isothermal limit, nonlinear material
+and actual gas-pressure feedback, original source identity, reciprocal energy,
+geometry/area admission, and atomic refusal of an unclosed power balance.
+Their native integration execution remains required for numerical validation.
+
 ### Computed DG radiation and source-bound exterior pressure
 
 DgPortLoad::new_with_computed_baffled derives the single circular outlet from

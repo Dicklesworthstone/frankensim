@@ -86,6 +86,7 @@ fn heat(curve: &EquilibriumEnthalpyPhaseCurve, rho: f64, reservoir: bool) -> Dep
 fn contacts(k_area: f64) -> [SolidGasContact; 1] {
     [SolidGasContact { id: 17, cell: IDS[0],
         geometry: GasConductionGeometry { area_m2: k_area, gas_distance_m: 0.001, cell_distance_m: 0.02 },
+        convection: None,
         conductivity: PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
         selection: MaterialPropertySelection::SingleClaimOnly }]
 }

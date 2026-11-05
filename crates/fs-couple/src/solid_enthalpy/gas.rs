@@ -2,7 +2,9 @@
 //!
 //! The existing thermal backward-Euler owner supplies every local storage/rate
 //! residual. The existing gas owner supplies NASA9 internal energy and EOS; the
-//! existing material-layer owner supplies each source-bound conductance. One
+//! existing material-layer or gas-convection owner supplies each source-bound
+//! interface flux. A convective patch solves its actual surface temperature
+//! through the declared solid half-layer before evaluating the gas film. One
 //! Newton--Krylov solve closes all cell and gas joule balances at the same
 //! endpoint. No thermal body is collapsed into a mean temperature.
 //!
@@ -33,6 +35,8 @@ use std::cell::Cell;
 mod transport;
 pub(super) use transport::GasHeatTransport;
 use transport::GasTransportSample;
+mod convection;
+pub use convection::{SolidGasConvection, SolidGasConvectionSample};
 /// Separate finite gases sharing the same spatial material wall and heat solve.
 pub mod network;
 /// Declared chemistry, finite gas heat and the same spatial solid state.
@@ -55,6 +59,11 @@ pub struct SolidGasContact {
     pub id: u64,
     pub cell: CellId,
     pub geometry: GasConductionGeometry,
+    /// None retains the original two conduction layers. A convective patch
+    /// requires zero gas distance and a nonnegative solid half-distance; zero
+    /// solid distance explicitly admits an isothermal cell-to-surface patch.
+    /// Its boundary area must equal geometry.area_m2 exactly.
+    pub convection: Option<SolidGasConvection>,
     pub conductivity: PropertyKey,
     /// Select at the original stress-free reference; keep that claim in later intervals.
     pub selection: MaterialPropertySelection,
@@ -90,6 +99,12 @@ pub enum SolidGasError {
     Source(ThermalMaterialError),
     Transport(MaterialNetworkError),
     HeatNetwork(HeatNetworkError),
+    Convection(crate::air_path::input::convection::GasConvectionError),
+    /// A bounded surface solve could not close its actual flux balance.
+    SurfaceBalance {
+        residual_w: f64,
+        iterations: usize,
+    },
     Newton(NewtonError),
     NotConverged(NewtonReport),
     Interrupted(SolverRunProgress),
@@ -169,17 +184,29 @@ impl From<HeatNetworkError> for SolidGasError {
         }
     }
 }
+impl From<crate::air_path::input::convection::GasConvectionError> for SolidGasError {
+    fn from(error: crate::air_path::input::convection::GasConvectionError) -> Self {
+        Self::Convection(error)
+    }
+}
 
 /// Exact endpoint material snapshot and reciprocal transfer of one patch.
 #[derive(Clone, Debug)]
 pub struct SolidGasContactSample {
     pub id: u64,
     pub cell: CellId,
+    /// Cell-centre caloric temperature, not an inferred surface temperature.
     pub solid_temperature_k: f64,
+    /// Original layer conductance, or the diagnostic series conductance using
+    /// the accepted film/solid coefficients. Convection transfers its retained
+    /// film power directly: G*(T_cell-T_gas) may differ within the admitted
+    /// surface power residual. A zero natural equilibrium value is not a tangent.
     pub conductance_w_k: f64,
     /// Positive from this cell into the shared gas; negative heats this cell.
     pub solid_to_gas_heat_j: f64,
     pub source: ResolvedMaterialStatePoint,
+    /// Actual gas-film source/evidence and surface balance, when selected.
+    pub convection: Option<SolidGasConvectionSample>,
 }
 
 /// Both original caloric accounts, with internal interface heats excluded from supply.
@@ -362,6 +389,12 @@ struct PreparedContact<'a> {
     element: usize,
     selection: MaterialPropertySelection,
 }
+struct ContactSample {
+    conductance_w_k: f64,
+    power_to_gas_w: f64,
+    source: ResolvedMaterialStatePoint,
+    convection: Option<SolidGasConvectionSample>,
+}
 impl PreparedContact<'_> {
     fn layers<'a>(&'a self, source: &'a StructuralSource<'_>) -> MaterialConductionLayers<'a> {
         MaterialConductionLayers {
@@ -380,20 +413,27 @@ impl PreparedContact<'_> {
     fn resolve(
         &self,
         source: &StructuralSource<'_>,
-        gas: &fs_material::thermochemical_gas::ResolvedThermochemicalGasState,
+        gas: &IsochoricGasParcel,
         phase: EquilibriumPhaseState,
         transport: Option<&MaterialNetworkSample>,
-    ) -> Result<
-        crate::cavity_phs::piston::thermal::ConductanceSample<ResolvedMaterialStatePoint>,
-        SolidGasError,
-    > {
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ContactSample, SolidGasError> {
+        if let Some(film) = self.contact.convection {
+            return self.resolve_convection(source, gas, phase, transport, film, checkpoint);
+        }
         let layers = self.layers(source);
-        Ok(
-            match transport::cell_material(transport, self.contact.cell)? {
-                Some(material) => layers.resolve_from_material(gas, phase, material.clone())?,
-                None => layers.resolve(gas, phase)?,
-            },
-        )
+        let sample = match transport::cell_material(transport, self.contact.cell)? {
+            Some(material) => layers.resolve_from_material(gas.state(), phase, material.clone())?,
+            None => layers.resolve(gas.state(), phase)?,
+        };
+        Ok(ContactSample {
+            conductance_w_k: sample.conductance_w_k,
+            power_to_gas_w: finite(
+                sample.conductance_w_k * (phase.temperature_k() - gas.state().state().temperature),
+            )?,
+            source: sample.source,
+            convection: None,
+        })
     }
 }
 
@@ -407,6 +447,9 @@ impl<'m> SolidEnthalpy<'m> {
     /// Each trial starts from the accepted inventories; the original thermal
     /// owner evaluates all existing conduction and external boundaries. Every
     /// trial also admits all structural phase/stiffness/expansion sources.
+    /// A convective contact evaluates the native gas film at its solved surface
+    /// temperature and the actual endpoint gas pressure/composition. Its signed
+    /// film heat is used directly on both sides, without a synthetic gas layer.
     ///
     /// Source selection is pinned at the original stress-free reference, including
     /// repeated calls on this specimen. Missing properties,
@@ -784,9 +827,16 @@ impl StructuralGasProblem<'_, '_> {
                 .curve
                 .state_at_specific_enthalpy(bound.reference_h_j_kg)
                 .map_err(SolidEnthalpyError::from)?;
-            let sample = entry.layers(bound).resolve(gas.state(), reference_phase)?;
-            let claim = sample
-                .source
+            let material = if let Some(film) = contact.convection {
+                film.validate(contact.geometry)?;
+                entry.convection_material(bound, reference_phase, None)?
+            } else {
+                entry
+                    .layers(bound)
+                    .resolve(gas.state(), reference_phase)?
+                    .source
+            };
+            let claim = material
                 .property_by_key(&contact.conductivity)
                 .ok_or(SolidGasError::Invalid(
                     "layer conductivity snapshot lacks its selected property",
@@ -802,7 +852,7 @@ impl StructuralGasProblem<'_, '_> {
             // a supplied initial guess happens to return to an earlier domain.
             entry.resolve(
                 bound,
-                gas.state(),
+                gas,
                 bound
                     .curve
                     .state_at_specific_enthalpy(cell.specific_h_j_kg)
@@ -811,6 +861,7 @@ impl StructuralGasProblem<'_, '_> {
                     .sample
                     .as_ref()
                     .map(GasTransportSample::material),
+                &mut || checkpoint(),
             )?;
             prepared.push((gas_index, entry));
         }
@@ -915,13 +966,12 @@ impl StructuralGasProblem<'_, '_> {
                             .map_err(SolidEnthalpyError::from)?;
                         let sample = entry.resolve(
                             source,
-                            next_gas.state(),
+                            next_gas,
                             phase,
                             transport_sample.as_ref().map(GasTransportSample::material),
+                            &mut || checkpoint(),
                         )?;
-                        let difference =
-                            phase.temperature_k() - next_gas.state().state().temperature;
-                        let power = finite(sample.conductance_w_k * difference)?;
+                        let power = sample.power_to_gas_w;
                         let heat = finite(dt * power)?;
                         if power != 0.0 && heat == 0.0 {
                             return Err(SolidGasError::Invalid("gas patch heat underflows"));
@@ -939,6 +989,7 @@ impl StructuralGasProblem<'_, '_> {
                             conductance_w_k: sample.conductance_w_k,
                             solid_to_gas_heat_j: heat,
                             source: sample.source,
+                            convection: sample.convection,
                         });
                     }
                     let mut transferred = 0.0;
