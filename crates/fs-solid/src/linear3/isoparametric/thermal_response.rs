@@ -3,8 +3,8 @@
 //! admission remain in the existing isoparametric owners.
 use super::super::{
     QuadraticThermalStrainField, TetAssemblyBudget, TetElasticError, TetMaterialField,
-    TetStaticSolveConfig, add_nodal_forces_to_thermal_load, hash_usize,
-    validate_rigid_mode_constraints,
+    TetStaticSolveConfig, add_nodal_forces_to_thermal_load, hash_usize, relative_mandel_force,
+    relative_mandel_strain, validate_rigid_mode_constraints,
 };
 use super::{
     Point, StrainProjection, assemble_with_formulation, mandel_b, thermal_load_with_formulation,
@@ -430,10 +430,10 @@ pub(in crate::linear3) fn solve_with_formulation<const N: usize, const D: usize,
                 mean_elastic_strain_mandel[i] += dv * elastic[i];
                 mean_stress_mandel_pa[i] += dv * stress[i];
             }
+            let force = relative_mandel_force(&b, &stress, dv);
             for d in 0..D {
-                let force = (0..6).fold(0.0, |sum, i| b[i][d].mul_add(stress[i], sum)) * dv;
                 let accumulated = &mut nodal_internal_force_n[connectivity[d / 3]][d % 3];
-                *accumulated += force;
+                *accumulated += force[d];
                 if !accumulated.is_finite() {
                     return Err(TetElasticError::InvalidStressObservation {
                         what: "quadratic nodal internal force is nonfinite",
@@ -552,12 +552,13 @@ fn elastic_strain_at<const N: usize, const D: usize>(
     displacement_m: &[[f64; 3]],
     free_strain_mandel: &[f64; 6],
     maximum_absolute_mandel_strain: f64,
-) -> Result<[f64; 6], TetElasticError> {
-    let total: [f64; 6] = core::array::from_fn(|i| {
-        (0..D).fold(0.0, |sum, d| {
-            b[i][d].mul_add(displacement_m[connectivity[d / 3]][d % 3], sum)
-        })
-    });
+) -> Result<[f64; 6], TetElasticError>{
+    debug_assert_eq!(D, 3 * N);
+    let total = relative_mandel_strain(
+        N,
+        |d| core::array::from_fn(|i| b[i][d]),
+        |d| displacement_m[connectivity[d / 3]][d % 3],
+    );
     let elastic: [f64; 6] = core::array::from_fn(|i| total[i] - free_strain_mandel[i]);
     if total
         .iter()
@@ -569,4 +570,116 @@ fn elastic_strain_at<const N: usize, const D: usize>(
         });
     }
     Ok(elastic)
+}
+
+#[cfg(test)]
+mod strain_tests {
+    use super::*;
+    use crate::linear3::{hex, tet10};
+
+    fn geometry([x, y, z]: [f64; 3]) -> [f64; 3] {
+        [
+            0.25 + 1.25 * x + 0.125 * y,
+            -0.5 + 0.25 * x + 0.875 * y + 0.125 * z,
+            0.75 - 0.125 * x + 1.5 * z,
+        ]
+    }
+
+    fn check<const N: usize, const D: usize>(nodes: [[f64; 3]; N], gradients: [[f64; 3]; N]) {
+        let b = mandel_b::<N, D>(gradients);
+        let connectivity: [usize; N] = core::array::from_fn(|i| i);
+        // Exactly representable nodal data keeps the test independent of input
+        // quantization when a common, much larger displacement is added.
+        let u = nodes.map(|[x, y, z]| {
+            [
+                x / 1024.0 + y / 2048.0 - z / 4096.0,
+                -x / 4096.0 + y / 2048.0 + z / 1024.0,
+                x / 2048.0 - y / 4096.0 + z / 2048.0,
+            ]
+        });
+        let shift = [2.0_f64.powi(35), -2.0_f64.powi(36), 2.0_f64.powi(34)];
+        let translated = u.map(|x| core::array::from_fn(|c| x[c] + shift[c]));
+        let free = [1.0, -0.5, 0.25, -0.75, 0.5, 0.25].map(|x| x / 8192.0);
+        let c = core::array::from_fn(|i| {
+            core::array::from_fn(|j| if i == j { 30.0 * (i + 1) as f64 } else { 0.0 })
+        });
+        let (elastic, stress) =
+            elastic_response_at(&b, &connectivity, &u, &c, &free, 0.01).unwrap();
+        assert_eq!(
+            (elastic, stress),
+            elastic_response_at(&b, &connectivity, &translated, &c, &free, 0.01).unwrap()
+        );
+        assert_eq!(
+            elastic_strain_at(&b, &connectivity, &[shift; N], &[0.0; 6], 1e-20).unwrap(),
+            [0.0; 6]
+        );
+        let s = core::f64::consts::FRAC_1_SQRT_2;
+        let total = [
+            1.0 / 1024.0,
+            1.0 / 2048.0,
+            1.0 / 2048.0,
+            s / 4096.0,
+            3.0 * s / 4096.0,
+            s / 4096.0,
+        ];
+        for i in 0..6 {
+            assert!((elastic[i] - (total[i] - free[i])).abs() < 2e-16);
+        }
+        let force = relative_mandel_force(&b, &stress, 1.7);
+        let work: f64 = force
+            .iter()
+            .enumerate()
+            .map(|(d, f)| f * u[d / 3][d % 3])
+            .sum();
+        let exact_work: f64 = total.iter().zip(stress).map(|(e, s)| 1.7 * e * s).sum();
+        assert!((work - exact_work).abs() < 2e-16);
+        for axis in 0..3 {
+            assert!(force.iter().skip(axis).step_by(3).sum::<f64>().abs() < 2e-15);
+        }
+    }
+
+    #[test]
+    fn g3_all_isoparametric_families_preserve_translated_affine_thermal_strain() {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+        .map(geometry);
+        let tet_nodes = core::array::from_fn(|a| {
+            if a < 4 {
+                vertices[a]
+            } else {
+                let [i, j] = tet10::TET10_EDGES[a - 4];
+                core::array::from_fn(|c| 0.5 * (vertices[i][c] + vertices[j][c]))
+            }
+        });
+        let tet_point = tet10::tet10_point(tet_nodes, [0.1, 0.2, 0.3, 0.4], 1e-12, 0, 0).unwrap();
+        check::<10, 30>(tet_nodes, tet_point.gradients);
+        let hex8_nodes =
+            core::array::from_fn(|a| geometry(hex::HEX27_REFERENCE_NODES[a].map(f64::from)));
+        let hex20_nodes = hex::HEX20_REFERENCE_NODES.map(|x| geometry(x.map(f64::from)));
+        let hex27_nodes = hex::HEX27_REFERENCE_NODES.map(|x| geometry(x.map(f64::from)));
+        for p in [[0.17, -0.23, 0.41], [-0.51, 0.31, -0.11]] {
+            check::<8, 24>(
+                hex8_nodes,
+                hex::hex8_point(hex8_nodes, p, 1e-12, 0, 0)
+                    .unwrap()
+                    .gradients,
+            );
+            check::<20, 60>(
+                hex20_nodes,
+                hex::hex20_point(hex20_nodes, p, 1e-12, 0, 0)
+                    .unwrap()
+                    .gradients,
+            );
+            check::<27, 81>(
+                hex27_nodes,
+                hex::hex27_point(hex27_nodes, p, 1e-12, 0, 0)
+                    .unwrap()
+                    .gradients,
+            );
+        }
+    }
 }

@@ -12,7 +12,7 @@ impl TetLinearElasticProblem<'_> {
         thermal: Option<TetThermalStrainField<'_>>,
         maximum_strain: f64,
         cx: &Cx<'_>,
-    ) -> Result<(Vec<[f64; 3]>, Vec<f64>), TetElasticError> {
+    ) -> Result<(Vec<[f64; 3]>, Vec<f64>), TetElasticError>{
         let invalid = |what| TetElasticError::InvalidStressObservation { what };
         let finite = |value: f64| {
             if value.is_finite() {
@@ -77,11 +77,11 @@ impl TetLinearElasticProblem<'_> {
                 }
                 None => [0.0; 6],
             };
-            let total: [f64; 6] = core::array::from_fn(|i| {
-                (0..12).fold(0.0, |sum, d| {
-                    b[i][d].mul_add(displacement[tet[d / 3]][d % 3], sum)
-                })
-            });
+            let total = relative_mandel_strain(
+                tet.len(),
+                |d| core::array::from_fn(|i| b[i][d]),
+                |d| displacement[tet[d / 3]][d % 3],
+            );
             let elastic: [f64; 6] = core::array::from_fn(|i| total[i] - free[i]);
             if total
                 .iter()
@@ -114,9 +114,9 @@ impl TetLinearElasticProblem<'_> {
             }
             stiffness_bar[element] =
                 finite((0..6).fold(0.0, |sum, i| weights[i].mul_add(stress[i], sum)))?;
+            let force = relative_mandel_force(&b, &elastic_bar, 1.0);
             for d in 0..12 {
-                let value =
-                    finite((0..6).fold(0.0, |sum, i| b[i][d].mul_add(elastic_bar[i], sum)))?;
+                let value = finite(force[d])?;
                 let accumulated = &mut displacement_bar[tet[d / 3]][d % 3];
                 *accumulated = finite(*accumulated + value)?;
             }

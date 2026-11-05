@@ -2594,11 +2594,11 @@ impl TetLinearElasticProblem<'_> {
                 self.budget.minimum_scaled_jacobian,
             )?;
             let b = strain_displacement_matrix(&geometry);
-            let total: [f64; 6] = core::array::from_fn(|i| {
-                (0..12).fold(0.0, |sum, d| {
-                    b[i][d].mul_add(solution.displacement_m[tet[d / 3]][d % 3], sum)
-                })
-            });
+            let total = relative_mandel_strain(
+                tet.len(),
+                |d| core::array::from_fn(|i| b[i][d]),
+                |d| solution.displacement_m[tet[d / 3]][d % 3],
+            );
             let elastic_strain_mandel: [f64; 6] = core::array::from_fn(|i| {
                 total[i] - thermal_strains.at(element).free_strain_mandel[i]
             });
@@ -2630,11 +2630,10 @@ impl TetLinearElasticProblem<'_> {
                     what: "recovered stress or stored elastic energy is nonfinite or energy is negative",
                 });
             }
+            let force = relative_mandel_force(&b, &stress_mandel_pa, geometry.volume);
             for d in 0..12 {
-                let force = (0..6).fold(0.0, |sum, i| b[i][d].mul_add(stress_mandel_pa[i], sum))
-                    * geometry.volume;
                 let accumulated = &mut nodal_internal_force_n[tet[d / 3]][d % 3];
-                *accumulated += force;
+                *accumulated += force[d];
                 if !accumulated.is_finite() {
                     return Err(TetElasticError::InvalidStressObservation {
                         what: "recovered nodal internal force is nonfinite",
@@ -3188,7 +3187,7 @@ pub(crate) fn p1_tet_mass_scale(volume_m3: f64, density_kg_m3: f64) -> f64 {
     density_kg_m3 * volume_m3 / 20.0
 }
 
-fn strain_displacement_matrix(geometry: &TetGeometry) -> [[f64; 12]; 6] {
+fn strain_displacement_matrix(geometry: &TetGeometry) -> [[f64; 12]; 6]{
     let mut b = [[0.0; 12]; 6];
     let inverse_sqrt_two = core::f64::consts::FRAC_1_SQRT_2;
     for (node, g) in geometry.gradients.iter().enumerate() {
@@ -3204,6 +3203,46 @@ fn strain_displacement_matrix(geometry: &TetGeometry) -> [[f64; 12]; 6] {
         b[5][column + 2] = g[0] * inverse_sqrt_two;
     }
     b
+}
+
+/// Contract partition-of-unity strain columns against relative nodal motion.
+/// Removing one common translation before multiplication prevents roundoff in
+/// the gradient sum from becoming strain, even far from the displacement origin.
+/// This is infinitesimal kinematics; finite rigid rotations still need the
+/// finite-deformation owners. Both column layouts use this allocation-free path.
+fn relative_mandel_strain(
+    node_count: usize,
+    b_column: impl Fn(usize) -> [f64; 6],
+    displacement: impl Fn(usize) -> f64,
+) -> [f64; 6] {
+    debug_assert!(node_count > 0);
+    let anchor = [displacement(0), displacement(1), displacement(2)];
+    let mut strain = [0.0; 6];
+    for d in 3..3 * node_count {
+        let relative = displacement(d) - anchor[d % 3];
+        let column = b_column(d);
+        for i in 0..6 {
+            strain[i] = column[i].mul_add(relative, strain[i]);
+        }
+    }
+    strain
+}
+
+/// Work-conjugate transpose of `relative_mandel_strain`, including the anchor.
+/// Accumulate weighted non-anchor forces first so a common translation does no
+/// internal work. Reference-volume weighting is not applied to pointwise seeds.
+fn relative_mandel_force<const D: usize>(
+    b: &[[f64; D]; 6],
+    stress: &[f64; 6],
+    weight: f64,
+) -> [f64; D] {
+    debug_assert!(D >= 3 && D % 3 == 0);
+    let mut force = [0.0; D];
+    for d in 3..D {
+        force[d] = (0..6).fold(0.0, |sum, i| b[i][d].mul_add(stress[i], sum)) * weight;
+        force[d % 3] -= force[d];
+    }
+    force
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -6352,4 +6391,3 @@ mod tests {
             + columns[2][0] * (columns[0][1] * columns[1][2] - columns[0][2] * columns[1][1])
     }
 }
-
