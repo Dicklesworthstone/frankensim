@@ -3,20 +3,24 @@
 //! Every species density, all three momenta and full referenced total energy
 //! share the original mixture Riemann solve. The spatial topology, six-trace
 //! limiter, conservative divergence and boundary quadrature are shared with
-//! the frozen 3-D field. This is an Estimated stationary Cartesian lane; it
-//! does not assert pressure-equilibrium preservation at unequal-caloric moving
-//! contacts or a fully discrete entropy/invariant-domain theorem.
+//! the frozen 3-D field. The default update conserves energy; the explicit
+//! contact-equilibrium option accounts for each admitted caloric energy change.
+//! This Estimated stationary Cartesian lane does not assert a fully discrete
+//! entropy/invariant-domain theorem or general contact preservation near shocks.
 
 pub use super::super::mixture::MAX_MIXTURE_WORKSPACE_BYTES;
 use super::super::{
     cartesian as stepping,
     mixture::{allocated, sum},
 };
+use super::forcing::{BodyForce3d, ForceChange3d, ForceControl3d};
 use super::{
     Boundaries3d, BoundaryCondition, BoundarySide, CartesianGrid, Primitive, cartesian, tangents,
 };
 pub use super::{Reconstruction, StepControl};
-use super::forcing::{BodyForce3d, ForceChange3d, ForceControl3d};
+pub use fs_gas::multicomponent::pressure_equilibrium::{
+    ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
+};
 pub use fs_gas::multicomponent::{Error, MixtureGas};
 use fs_gas::multicomponent::{FaceFlux, MAX_SPECIES, SpatialCell, SpatialPrimitive};
 use fs_qty::Time;
@@ -433,6 +437,46 @@ impl MixtureEuler3d {
         self.step_impl(maximum_duration, controls, None, cancelled)
     }
 
+    /// Keep eligible advected material contacts at their admitted pressure
+    /// through the original mixture calorics, with explicit numerical energy
+    /// accounting. Species, all momenta and physical face fluxes are unchanged.
+    ///
+    /// Every incident reconstructed pair must match the original cell pressure
+    /// and full velocity in both stages. Physical boundary cells and any HLL
+    /// fallback remain conservative. Reacting, molecular and forced owners do
+    /// not silently inherit this optional correction.
+    pub fn step_with_contact_equilibrium(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        contact_control: ContactEquilibriumControl,
+        workspace: &mut ContactWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactEquilibriumStepReport<StepReport>, Error> {
+        workspace.admit(self.grid.len(), contact_control)?;
+        if self
+            .workspace_bytes
+            .checked_add(workspace.workspace_bytes())
+            .is_none_or(|bytes| bytes > MAX_MIXTURE_WORKSPACE_BYTES)
+        {
+            return Err(Error::Invalid("volumetric contact workspace budget"));
+        }
+        let transport = self.step_impl_with_contact(
+            maximum_duration,
+            controls,
+            None,
+            Some((contact_control, &mut *workspace)),
+            cancelled,
+        )?;
+        let correction = workspace.receipt();
+        Ok(ContactEquilibriumStepReport {
+            corrected_energy_residual_j: transport.absolute_energy_residual_j
+                - correction.signed_energy_j,
+            transport,
+            correction,
+        })
+    }
+
     /// Initial pressure-wave bound shared by Euler and complete split owners.
     fn pressure_outlet_rate(&self, cancelled: &mut impl FnMut() -> bool) -> Result<f64, Error> {
         let n = self.gas.species_count();
@@ -489,7 +533,18 @@ impl MixtureEuler3d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        forcing: Option<forcing::Context<'_, '_>>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.step_impl_with_contact(maximum_duration, controls, forcing, None, cancelled)
+    }
+
+    fn step_impl_with_contact(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        mut contact: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         stepping::poll::<Error>(&mut cancelled)?;
@@ -521,6 +576,9 @@ impl MixtureEuler3d {
             controls,
             &mut cancelled,
             |dt, reconstruction, cancelled| {
+                if let Some((control, workspace)) = contact.as_mut() {
+                    workspace.begin_attempt(*control)?;
+                }
                 if let Some((force, control, workspace)) = forcing.as_mut() {
                     copy_values(&self.states, &mut workspace.kicked, cancelled)?;
                     let mut source = forcing::Accumulator::default();
@@ -544,9 +602,10 @@ impl MixtureEuler3d {
                     source_change = source.finish()?;
                     Ok(stats)
                 } else {
-                    attempt(
+                    attempt_with_contact(
                         &self.gas, &self.grid, self.boundaries, &self.reservoirs, &self.states,
                         &mut self.work, dt, controls.cfl, reconstruction, None,
+                        contact.as_mut().map(|(_, workspace)| &mut **workspace),
                         cancelled,
                     )
                 }
@@ -589,6 +648,15 @@ impl MixtureEuler3d {
             absolute_energy_residual_j: conservation_residual.absolute_energy(&self.gas)?,
             conservation_residual,
         };
+        if let Some((_, workspace)) = contact.as_ref() {
+            if !(report.absolute_energy_residual_j - workspace.receipt().signed_energy_j)
+                .is_finite()
+            {
+                return Err(Error::Invalid(
+                    "volumetric corrected energy balance overflow",
+                ));
+            }
+        }
         stepping::poll::<Error>(&mut cancelled)?;
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
@@ -613,8 +681,39 @@ fn attempt(
     force_control: Option<ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<stepping::StageStats, Error> {
+    attempt_with_contact(
+        gas,
+        grid,
+        boundaries,
+        reservoirs,
+        original,
+        work,
+        dt,
+        cfl,
+        reconstruction,
+        force_control,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_contact(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    reservoirs: &reservoir::Reservoirs,
+    original: &[f64],
+    work: &mut Workspace,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    force_control: Option<ForceControl3d>,
+    mut contact: Option<&mut ContactWorkspace>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<stepping::StageStats, Error> {
     stepping::rk2(cancelled, |final_stage, cancelled| {
-        let mut stats = spatial(
+        let mut stats = spatial_with_contact(
             gas,
             grid,
             boundaries,
@@ -626,18 +725,39 @@ fn attempt(
             &mut work.metadata,
             reconstruction,
             force_control,
+            contact
+                .as_deref_mut()
+                .map(|workspace| (workspace, !final_stage)),
             cancelled,
         )?;
         stepping::check_cfl::<Error>(stats.rate * dt, cfl)?;
         let stage_rate = if final_stage {
-            update(
-                gas, grid, original, &work.stage, &work.flux,
-                &mut work.candidate, dt, true, force_control, cancelled,
+            update_with_contact(
+                gas,
+                grid,
+                original,
+                &work.stage,
+                &work.flux,
+                &mut work.candidate,
+                dt,
+                true,
+                force_control,
+                contact.as_deref_mut(),
+                cancelled,
             )?
         } else {
-            update(
-                gas, grid, original, original, &work.flux,
-                &mut work.stage, dt, false, force_control, cancelled,
+            update_with_contact(
+                gas,
+                grid,
+                original,
+                original,
+                &work.flux,
+                &mut work.stage,
+                dt,
+                false,
+                force_control,
+                contact.as_deref_mut(),
+                cancelled,
             )?
         };
         if force_control.is_some() {
@@ -676,12 +796,52 @@ fn spatial(
     force_control: Option<ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<stepping::StageStats, Error> {
+    spatial_with_contact(
+        gas,
+        grid,
+        boundaries,
+        reservoirs,
+        states,
+        primitive,
+        slopes,
+        fluxes,
+        metadata,
+        reconstruction,
+        force_control,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spatial_with_contact(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    reservoirs: &reservoir::Reservoirs,
+    states: &[f64],
+    primitive: &mut [Primitive],
+    slopes: &mut [f64],
+    fluxes: &mut [Vec<f64>; 3],
+    metadata: &mut [Vec<FaceFlux>; 3],
+    reconstruction: Reconstruction,
+    force_control: Option<ForceControl3d>,
+    mut contact: Option<(&mut ContactWorkspace, bool)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<stepping::StageStats, Error> {
     let n = gas.species_count();
     let width = n + 4;
     let slope_width = width + 1;
     let mut cell_rate: f64 = 0.0;
-    for (q, p) in states.chunks_exact(width).zip(primitive.iter_mut()) {
+    for (k, (q, p)) in states
+        .chunks_exact(width)
+        .zip(primitive.iter_mut())
+        .enumerate()
+    {
         *p = cell(q, n).primitive(gas, &mut *cancelled)?;
+        if let Some((workspace, first_stage)) = contact.as_mut() {
+            workspace.set_reference(k, p.pressure, p.velocity, p.sound_speed, *first_stage)?;
+        }
         if let Some(control) = force_control {
             control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
             cell_rate = cell_rate.max(forcing::acoustic_rate(*p, grid)?);
@@ -857,6 +1017,31 @@ fn spatial(
             }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
+        if let Some((workspace, _)) = contact.as_mut() {
+            match face.kind {
+                cartesian::FaceKind::Interior { left: l, right: r } => {
+                    let (pl, vl, pr, vr) = if first_order {
+                        (
+                            primitive[l].pressure,
+                            primitive[l].velocity,
+                            primitive[r].pressure,
+                            primitive[r].velocity,
+                        )
+                    } else {
+                        (
+                            left[n + 3],
+                            [left[n], left[n + 1], left[n + 2]],
+                            right[n + 3],
+                            [right[n], right[n + 1], right[n + 2]],
+                        )
+                    };
+                    workspace.observe_pair(l, pl, vl, pr, vr, receipt.used_hll_fallback)?;
+                    workspace.observe_pair(r, pl, vl, pr, vr, receipt.used_hll_fallback)?;
+                }
+                cartesian::FaceKind::Boundary { cell, .. } => workspace.exclude(cell)?,
+                cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
+            }
+        }
         stats.fallback += usize::from(receipt.used_hll_fallback);
         let momentum = [result[n], result[n + 1], result[n + 2]];
         let [a, b] = tangents(axis);
@@ -915,6 +1100,67 @@ fn update(
     )?;
     Ok(rate)
 }
+
+#[allow(clippy::too_many_arguments)]
+fn update_with_contact(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    original: &[f64],
+    stage: &[f64],
+    fluxes: &[Vec<f64>; 3],
+    output: &mut [f64],
+    dt: f64,
+    final_stage: bool,
+    force_control: Option<ForceControl3d>,
+    contact: Option<&mut ContactWorkspace>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    let Some(workspace) = contact else {
+        return update(
+            gas,
+            grid,
+            original,
+            stage,
+            fluxes,
+            output,
+            dt,
+            final_stage,
+            force_control,
+            cancelled,
+        );
+    };
+    let n = gas.species_count();
+    let width = n + 4;
+    cartesian::update_energy_projected::<WIDTH_LIMIT, Error, _>(
+        grid,
+        width,
+        dt,
+        final_stage,
+        |k, d| original[k * width + d],
+        |k, d| stage[k * width + d],
+        |axis, face, d| fluxes[axis][face * width + d],
+        cancelled,
+        |k, row, weight, cancelled| {
+            workspace.project_energy(
+                gas,
+                k,
+                &row[..n],
+                &row[n..n + 3],
+                row[n + 3],
+                grid.cell_volume(),
+                weight,
+                cancelled,
+            )
+        },
+        |k, row, cancelled| {
+            cell(row, n).primitive(gas, &mut *cancelled)?;
+            output[k * width..(k + 1) * width].copy_from_slice(row);
+            Ok(())
+        },
+    )?;
+    Ok(0.0)
+}
+
 fn normal_primitive(q: &[f64], n: usize, axis: usize) -> SpatialPrimitive<'_> {
     let [a, b] = tangents(axis);
     SpatialPrimitive {

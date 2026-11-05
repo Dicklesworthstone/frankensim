@@ -24,6 +24,9 @@ use super::{
     StepControl, cartesian,
 };
 use cartesian::StageStats;
+pub use fs_gas::multicomponent::pressure_equilibrium::{
+    ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
+};
 pub use fs_gas::multicomponent::{Error, MixtureGas};
 use fs_gas::multicomponent::{FaceFlux, MAX_SPECIES, NormalCell, NormalPrimitive};
 use fs_qty::Time;
@@ -429,6 +432,46 @@ impl MixtureEuler2d {
         self.step_impl(maximum_duration, controls, None, cancelled)
     }
 
+    /// Transport eligible material contacts at their original pressure through
+    /// the original species calorics. Species and momentum stay conservative;
+    /// every numerical energy change is bounded and returned explicitly.
+    ///
+    /// Eligibility requires both actual traces on every incident face to share
+    /// the cell's pressure and full velocity in both stages. Physical boundary
+    /// cells and HLL fallback faces remain on the conservative path. This option
+    /// does not enable corrections in reacting, molecular or forced owners.
+    pub fn step_with_contact_equilibrium(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        contact_control: ContactEquilibriumControl,
+        workspace: &mut ContactWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactEquilibriumStepReport<StepReport>, Error> {
+        workspace.admit(self.grid.len(), contact_control)?;
+        if self
+            .workspace_bytes
+            .checked_add(workspace.workspace_bytes())
+            .is_none_or(|bytes| bytes > MAX_MIXTURE_WORKSPACE_BYTES)
+        {
+            return Err(Error::Invalid("Cartesian contact workspace budget"));
+        }
+        let transport = self.step_impl_with_contact(
+            maximum_duration,
+            controls,
+            None,
+            Some((contact_control, &mut *workspace)),
+            cancelled,
+        )?;
+        let correction = workspace.receipt();
+        Ok(ContactEquilibriumStepReport {
+            corrected_energy_residual_j: transport.absolute_energy_residual_j
+                - correction.signed_energy_j,
+            transport,
+            correction,
+        })
+    }
+
     /// Initial pressure-wave bound shared by Euler and complete split owners.
     fn pressure_outlet_rate(&self, cancelled: &mut impl FnMut() -> bool) -> Result<f64, Error> {
         let n = self.gas.species_count();
@@ -459,7 +502,18 @@ impl MixtureEuler2d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        forcing: Option<forcing::Context<'_, '_>>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.step_impl_with_contact(maximum_duration, controls, forcing, None, cancelled)
+    }
+
+    fn step_impl_with_contact(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        mut contact: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         cartesian::poll::<Error>(&mut cancelled)?;
@@ -491,6 +545,9 @@ impl MixtureEuler2d {
             controls,
             &mut cancelled,
             |dt, reconstruction, cancelled| {
+                if let Some((control, workspace)) = contact.as_mut() {
+                    workspace.begin_attempt(*control)?;
+                }
                 if let Some((force, control, workspace)) = forcing.as_mut() {
                     copy_values(&self.states, &mut workspace.kicked, cancelled)?;
                     let mut source = forcing::Accumulator::default();
@@ -536,7 +593,7 @@ impl MixtureEuler2d {
                     source_change = source.finish()?;
                     Ok(stats)
                 } else {
-                    attempt(
+                    attempt_with_contact(
                         &self.gas,
                         &self.grid,
                         self.boundaries,
@@ -547,6 +604,7 @@ impl MixtureEuler2d {
                         controls.cfl,
                         reconstruction,
                         None,
+                        contact.as_mut().map(|(_, workspace)| &mut **workspace),
                         cancelled,
                     )
                 }
@@ -577,6 +635,13 @@ impl MixtureEuler2d {
         }
         let conservation_residual = Totals::from_row(&residual[..width], n);
         let absolute_energy_residual_j = conservation_residual.absolute_energy(&self.gas)?;
+        if let Some((_, workspace)) = contact.as_ref() {
+            if !(absolute_energy_residual_j - workspace.receipt().signed_energy_j).is_finite() {
+                return Err(Error::Invalid(
+                    "Cartesian corrected energy balance overflow",
+                ));
+            }
+        }
         let report = StepReport {
             elapsed: Time::new(accepted.dt),
             maximum_cfl: accepted.stats.rate * accepted.dt,
@@ -615,8 +680,39 @@ fn attempt(
     force_control: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
+    attempt_with_contact(
+        gas,
+        grid,
+        boundaries,
+        reservoirs,
+        original,
+        work,
+        dt,
+        cfl,
+        reconstruction,
+        force_control,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_contact(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries2d,
+    reservoirs: &reservoir::Reservoirs,
+    original: &[f64],
+    work: &mut Workspace,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    force_control: Option<ForceControl2d>,
+    mut contact: Option<&mut ContactWorkspace>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StageStats, Error> {
     cartesian::rk2(cancelled, |final_stage, cancelled| {
-        let mut stats = spatial(
+        let mut stats = spatial_with_contact(
             gas,
             grid,
             boundaries,
@@ -630,11 +726,14 @@ fn attempt(
             &mut work.y_metadata,
             reconstruction,
             force_control,
+            contact
+                .as_deref_mut()
+                .map(|workspace| (workspace, !final_stage)),
             cancelled,
         )?;
         cartesian::check_cfl::<Error>(stats.rate * dt, cfl)?;
         let stage_rate = if final_stage {
-            update(
+            update_with_contact(
                 gas,
                 grid,
                 original,
@@ -645,10 +744,11 @@ fn attempt(
                 dt,
                 true,
                 force_control,
+                contact.as_deref_mut(),
                 cancelled,
             )?
         } else {
-            update(
+            update_with_contact(
                 gas,
                 grid,
                 original,
@@ -659,6 +759,7 @@ fn attempt(
                 dt,
                 false,
                 force_control,
+                contact.as_deref_mut(),
                 cancelled,
             )?
         };
@@ -706,12 +807,62 @@ fn spatial(
     force_control: Option<ForceControl2d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
+    spatial_with_contact(
+        gas,
+        grid,
+        boundaries,
+        reservoirs,
+        states,
+        primitive,
+        slopes,
+        x_flux,
+        y_flux,
+        x_metadata,
+        y_metadata,
+        reconstruction,
+        force_control,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spatial_with_contact(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries2d,
+    reservoirs: &reservoir::Reservoirs,
+    states: &[f64],
+    primitive: &mut [Primitive],
+    slopes: &mut [f64],
+    x_flux: &mut [f64],
+    y_flux: &mut [f64],
+    x_metadata: &mut [FaceFlux],
+    y_metadata: &mut [FaceFlux],
+    reconstruction: Reconstruction,
+    force_control: Option<ForceControl2d>,
+    mut contact: Option<(&mut ContactWorkspace, bool)>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StageStats, Error> {
     let n = gas.species_count();
     let width = n + 3;
     let slope_width = width + 1;
     let mut cell_rate: f64 = 0.0;
-    for (q, p) in states.chunks_exact(width).zip(primitive.iter_mut()) {
+    for (k, (q, p)) in states
+        .chunks_exact(width)
+        .zip(primitive.iter_mut())
+        .enumerate()
+    {
         *p = cell(q, n).primitive(gas, &mut *cancelled)?;
+        if let Some((workspace, first_stage)) = contact.as_mut() {
+            workspace.set_reference(
+                k,
+                p.pressure,
+                [p.velocity[0], p.velocity[1], 0.0],
+                p.sound_speed,
+                *first_stage,
+            )?;
+        }
         if let Some(control) = force_control {
             control.admit_velocity::<Error>(p.velocity, p.sound_speed)?;
             cell_rate = cell_rate.max(forcing::acoustic_rate(*p, grid)?);
@@ -888,6 +1039,31 @@ fn spatial(
             }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };
+        if let Some((workspace, _)) = contact.as_mut() {
+            match face.kind {
+                cartesian::FaceKind::Interior { left: l, right: r } => {
+                    let (pl, vl, pr, vr) = if first_order {
+                        (
+                            primitive[l].pressure,
+                            [primitive[l].velocity[0], primitive[l].velocity[1], 0.0],
+                            primitive[r].pressure,
+                            [primitive[r].velocity[0], primitive[r].velocity[1], 0.0],
+                        )
+                    } else {
+                        (
+                            left[n + 2],
+                            [left[n], left[n + 1], 0.0],
+                            right[n + 2],
+                            [right[n], right[n + 1], 0.0],
+                        )
+                    };
+                    workspace.observe_pair(l, pl, vl, pr, vr, receipt.used_hll_fallback)?;
+                    workspace.observe_pair(r, pl, vl, pr, vr, receipt.used_hll_fallback)?;
+                }
+                cartesian::FaceKind::Boundary { cell, .. } => workspace.exclude(cell)?,
+                cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
+            }
+        }
         stats.fallback += usize::from(receipt.used_hll_fallback);
         if axis == 1 {
             result.swap(n, n + 1);
@@ -957,6 +1133,75 @@ fn update(
     )?;
     Ok(rate)
 }
+
+#[allow(clippy::too_many_arguments)]
+fn update_with_contact(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    original: &[f64],
+    stage: &[f64],
+    x_flux: &[f64],
+    y_flux: &[f64],
+    output: &mut [f64],
+    dt: f64,
+    final_stage: bool,
+    force_control: Option<ForceControl2d>,
+    contact: Option<&mut ContactWorkspace>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, Error> {
+    let Some(workspace) = contact else {
+        return update(
+            gas,
+            grid,
+            original,
+            stage,
+            x_flux,
+            y_flux,
+            output,
+            dt,
+            final_stage,
+            force_control,
+            cancelled,
+        );
+    };
+    let n = gas.species_count();
+    let width = n + 3;
+    cartesian::update_energy_projected::<WIDTH_LIMIT, Error, _>(
+        grid,
+        width,
+        dt,
+        final_stage,
+        |k, d| original[k * width + d],
+        |k, d| stage[k * width + d],
+        |axis, face, d| {
+            if axis == 0 {
+                x_flux[face * width + d]
+            } else {
+                y_flux[face * width + d]
+            }
+        },
+        cancelled,
+        |k, row, weight, cancelled| {
+            workspace.project_energy(
+                gas,
+                k,
+                &row[..n],
+                &row[n..n + 2],
+                row[n + 2],
+                grid.cell_volume(),
+                weight,
+                cancelled,
+            )
+        },
+        |k, row, cancelled| {
+            cell(row, n).primitive(gas, &mut *cancelled)?;
+            output[k * width..(k + 1) * width].copy_from_slice(row);
+            Ok(())
+        },
+    )?;
+    Ok(0.0)
+}
+
 fn normal_primitive(q: &[f64], n: usize, axis: usize) -> NormalPrimitive<'_> {
     NormalPrimitive {
         partial_densities: &q[..n],

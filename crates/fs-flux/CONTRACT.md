@@ -4534,3 +4534,43 @@ or nonreflecting boundaries. This increment does not define molecular species
 diffusion or heat/stress exchange with the exterior; the existing molecular
 owner continues to refuse transmissive sides. It adds no pressure-equilibrium
 guarantee for unequal-caloric moving contacts or fully discrete entropy theorem.
+
+
+## Opt-in mixture contact-pressure equilibrium on Cartesian grids
+
+The standalone `MixtureEuler2d` and `MixtureEuler3d` owners provide
+`step_with_contact_equilibrium` with the original `fs-gas::multicomponent`
+`pressure_equilibrium::{ContactEquilibriumControl, ContactWorkspace}`.
+Both first-order and MUSCL transport retain the native species/momentum fluxes,
+source thermodynamics, CFL admission and RK2 discretization. The same prepared
+contact workspace is reused across steps; each owner admits its combined
+numerical workspace against the existing hard storage bound.
+
+Each cell's original pressure and full Cartesian velocity are checked against
+both actual traces at every incident face. Physical boundary cells, HLL
+fallback stencils and variations exceeding the caller's tolerance retain
+the conservative update. The second stage can only remove eligibility.
+All velocity components participate, so a normal-velocity match does not
+erase a shear interface. Velocity tolerance is scaled by sound speed.
+
+Eligible cells reconstruct energy through the original mixture calorics
+after both forward-Euler updates and the final SSP average. All represented
+momenta and transported species remain unchanged; zero species stay zero.
+The correction includes every kinetic component and uses the physical cell
+volume and RK weights 1/2, 1/2 and 1. The native arithmetic is preserved for
+default stepping and cells without correction.
+
+The generic `ContactEquilibriumStepReport` retains the native transport
+report and adds the signed numerical energy defect, absolute-defect sum,
+unique corrected-cell count and corrected energy residual. The original
+energy residual still exposes the defect. The caller bounds the sum of
+absolute corrections per accepted step, so opposite signs cannot cancel
+the budget. A budget retry halves time without downgrading MUSCL.
+Cancellation or refusal publishes no field, clock or load change.
+
+This is an Estimated, explicitly nonconservative energy option for admitted
+equilibrium contacts. It is not an entropy or general shock-accuracy theorem.
+The default transport's moving unequal-caloric contact limitation remains.
+Hydrostatic/body-force, molecular, reacting, moving-wall, rotor and network
+compositions continue through their existing methods and do not enable
+this contact correction implicitly.

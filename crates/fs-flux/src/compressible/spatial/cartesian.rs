@@ -202,6 +202,69 @@ pub(super) fn update<const MAX: usize, E: Failure, C: FnMut() -> bool>(
     cancelled: &mut C,
     mut write: impl FnMut(usize, &[f64], &mut C) -> Result<(), E>,
 ) -> Result<(), E> {
+    let mut row = [0.0; MAX];
+    divergence::<MAX, E, C>(grid, width, dt, flux, cancelled, |k, delta, cancelled| {
+        for (d, out) in row[..width].iter_mut().enumerate() {
+            *out = if final_stage {
+                0.5 * original(k, d) + 0.5 * stage(k, d) + 0.5 * delta[d]
+            } else {
+                stage(k, d) + delta[d]
+            };
+        }
+        write(k, &row[..width], cancelled)
+    })
+}
+
+/// Project only energy through its source owner, preserving the exact native
+/// component arithmetic whenever the optional projection leaves it unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update_energy_projected<const MAX: usize, E: Failure, C: FnMut() -> bool>(
+    grid: &CartesianGrid,
+    width: usize,
+    dt: f64,
+    final_stage: bool,
+    original: impl Fn(usize, usize) -> f64,
+    stage: impl Fn(usize, usize) -> f64,
+    flux: impl Fn(usize, usize, usize) -> f64,
+    cancelled: &mut C,
+    mut project: impl FnMut(usize, &[f64], f64, &mut C) -> Result<f64, E>,
+    mut write: impl FnMut(usize, &[f64], &mut C) -> Result<(), E>,
+) -> Result<(), E> {
+    let mut forward = [0.0; MAX];
+    let mut row = [0.0; MAX];
+    divergence::<MAX, E, C>(grid, width, dt, flux, cancelled, |k, delta, cancelled| {
+        for d in 0..width {
+            forward[d] = stage(k, d) + delta[d];
+            row[d] = if final_stage {
+                0.5 * original(k, d) + 0.5 * stage(k, d) + 0.5 * delta[d]
+            } else {
+                forward[d]
+            };
+        }
+        let e = width - 1;
+        let energy = project(k, &forward[..width], 0.5, cancelled)?;
+        if energy != forward[e] {
+            row[e] = if final_stage {
+                row[e] + 0.5 * (energy - forward[e])
+            } else {
+                energy
+            };
+        }
+        if final_stage {
+            row[e] = project(k, &row[..width], 1.0, cancelled)?;
+        }
+        write(k, &row[..width], cancelled)
+    })
+}
+
+fn divergence<const MAX: usize, E: Failure, C: FnMut() -> bool>(
+    grid: &CartesianGrid,
+    width: usize,
+    dt: f64,
+    flux: impl Fn(usize, usize, usize) -> f64,
+    cancelled: &mut C,
+    mut write: impl FnMut(usize, &[f64], &mut C) -> Result<(), E>,
+) -> Result<(), E> {
     let strides = grid.face_strides();
     let scale = grid.spacing.map(|h| dt / h);
     let mut row = [0.0; MAX];
@@ -214,13 +277,6 @@ pub(super) fn update<const MAX: usize, E: Failure, C: FnMut() -> bool>(
             for (d, delta) in row[..width].iter_mut().enumerate() {
                 *delta += scale[axis] * (flux(axis, low, d) - flux(axis, low + strides[axis], d));
             }
-        }
-        for (d, out) in row[..width].iter_mut().enumerate() {
-            *out = if final_stage {
-                0.5 * original(k, d) + 0.5 * stage(k, d) + 0.5 * *out
-            } else {
-                stage(k, d) + *out
-            };
         }
         write(k, &row[..width], cancelled)?;
     }
