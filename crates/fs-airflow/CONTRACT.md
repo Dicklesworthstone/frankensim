@@ -3585,6 +3585,14 @@ remain caller obligations. Local temperature updates remain the existing
 held-property approximation; they do not resolve boundary-layer history or
 establish experimental accuracy. Native test execution is reported separately.
 
+### Forced spheres on native graph endpoints
+
+`GraphConvectionLaw::ForcedSphere` connects the existing Whitaker evaluator to original liquid and gas graph storage, using native solved speed and the whole sphere diameter. Bulk temperature, density, viscosity, Cp and conductivity supply the primary correlation state. The same pinned fluid source is additionally resolved at the actual wall temperature solely for its viscosity correction; source pressure, composition and identity remain unchanged. Finite-wall and prescribed-reservoir reports retain both material owners. The surface property query has no separate stored mass or energy, so only the primary bulk state receives the native reference-density admission.
+
+The original sphere area, Reynolds, Prandtl and bulk/surface viscosity-ratio bounds remain active. Initial and final speeds use the retained two-state snapshot; a supported average cannot hide an unsupported endpoint or the zero-speed crossing inside a reversal. Equal already-admitted speeds avoid repeated correlation/evidence construction. Mean-film substitution, a unit viscosity-ratio default, extrapolation through stagnation, confinement and natural/mixed-convection corrections are not introduced.
+
+The existing implicit native graph refreshes flow, bulk and wall properties at each actual thermal candidate. Original reciprocal links debit finite walls once; prescribed reservoirs enter external heat once. Whitaker's conductive contribution stays inside its single coefficient. Focused `source_graph::spheres` regressions cover nonunit liquid/gas viscosity ratios, source and interval refusals, gas surface-property versus storage-density separation, and coupled momentum/enthalpy evolution with finite-wall and total energy checks. The isolated stationary isothermal sphere and uniform external-flow assumptions remain; numerical execution and experimental validation are reported separately.
+
 ## Reversible total-pressure hydraulic nodes and physical static tractions
 
 `graph::inertial::total_pressure::TotalPressureGraph` is an explicitly selected,

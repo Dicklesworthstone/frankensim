@@ -29,6 +29,7 @@ use crate::graph::thermal::medium::convection::{
         },
     },
     evaluate_flat_plate_section_from_material, evaluate_forced_from_material,
+    evaluate_sphere_from_material,
 };
 use fs_convection::{CorrelationId, ThermalDirection};
 use fs_material::fluid_transport::ThermalFluidTransport;
@@ -54,6 +55,16 @@ pub enum GraphConvectionLaw {
         branch: usize,
         correlation: CorrelationId,
         settings: ForcedConvectionSettings,
+    },
+    /// Original Whitaker isolated stationary isothermal sphere in external flow.
+    /// The binding's characteristic length is the whole sphere diameter.
+    /// Select `Reservoir` properties: Re, Pr and k use the actual bulk state;
+    /// the same source is also queried at the wall solely for its viscosity.
+    /// Original Reynolds, Prandtl and viscosity-ratio bounds apply at every
+    /// native flow endpoint and any interior zero crossing. No stagnant-flow,
+    /// natural-convection or confinement correction is inferred.
+    ForcedSphere {
+        branch: usize,
     },
     /// An external isothermal plate strip using the original laminar or
     /// leading-edge-corrected turbulent mean. `start` and the binding's
@@ -166,12 +177,17 @@ pub(super) fn evaluate_links<M: ThermalFluidTransport>(
         |binding, _, temperature| {
             poll(cx)?;
             let material = resolve(temperature)?;
-            core.admit_density(
-                binding.fluid_cell,
-                material
-                    .transport_state()
-                    .map_err(SourceGraphError::Material)?,
-            )?;
+            if !matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+                core.admit_density(
+                    binding.fluid_cell,
+                    material
+                        .transport_state()
+                        .map_err(SourceGraphError::Material)?,
+                )?;
+            }
+            // A sphere's second source supplies only wall viscosity. Its
+            // density is not a second stored fluid state; admit the retained
+            // primary bulk snapshot below instead.
             Ok(material)
         },
         || cx.checkpoint().is_err(),
@@ -192,6 +208,10 @@ pub(super) fn evaluate_links<M: ThermalFluidTransport>(
             )));
         }
         poll(cx).map_err(source_error)?;
+        if matches!(binding.law, GraphConvectionLaw::ForcedSphere { .. }) {
+            core.admit_density(binding.fluid_cell, sample.thermal.transport())
+                .map_err(source_error)?;
+        }
         laws::admit_envelope(
             core,
             thermal,
@@ -204,6 +224,7 @@ pub(super) fn evaluate_links<M: ThermalFluidTransport>(
                 fluid_temperature_k: sample.fluid_temperature_k,
                 material: &sample.material,
                 thermal: &sample.thermal,
+                surface: sample.surface.as_ref().map(|surface| &surface.thermal),
             },
         ).map_err(|error| link_law_error(binding.link, error))?;
     }

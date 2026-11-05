@@ -1212,3 +1212,6 @@ mod developing;
 
 #[path = "source_graph/plate_sections.rs"]
 mod plate_sections;
+
+#[path = "source_graph/spheres.rs"]
+mod spheres;

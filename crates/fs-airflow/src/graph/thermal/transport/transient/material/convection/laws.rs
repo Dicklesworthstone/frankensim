@@ -19,6 +19,7 @@ pub(super) struct FlowConvectionPoint<'a, M> {
     pub fluid_temperature_k: f64,
     pub material: &'a M,
     pub thermal: &'a ThermalFluidTransportState,
+    pub surface: Option<&'a ThermalFluidTransportState>,
 }
 
 pub(super) fn gravity(core: &BoundGraphCore<'_>) -> Result<f64, SourceGraphError> {
@@ -130,6 +131,25 @@ pub(super) fn resolve(
                 settings,
             }
         }
+        GraphConvectionLaw::ForcedSphere { branch } => {
+            let &(actual_branch, section) = location.as_ref().ok_or_else(|| {
+                source_error(SourceGraphError::Invalid(
+                    "forced sphere convection requires a pipe cell with native flow area",
+                ))
+            })?;
+            if actual_branch != branch {
+                return Err(source_error(SourceGraphError::Invalid(
+                    "forced sphere branch does not own the fluid cell",
+                )));
+            }
+            let speed = flow.average(branch).abs() / core.section_areas[branch][section];
+            if !nonnegative(speed) {
+                return Err(source_error(SourceGraphError::Invalid(
+                    "actual graph sphere speed is unrepresentable",
+                )));
+            }
+            SourceCellConvectionLaw::ForcedSphere { speed_m_s: speed }
+        }
         GraphConvectionLaw::ForcedPlateSection {
             branch,
             correlation,
@@ -221,6 +241,45 @@ pub(super) fn admit_envelope<M: ThermalFluidTransport>(
 ) -> Result<(), FlowConvectionError> {
     let source_error = FlowConvectionError::Source;
     match point.law {
+        GraphConvectionLaw::ForcedSphere { branch } => {
+            let Some(Some((_, section))) = core.locations.get(&point.fluid_cell) else {
+                return Err(source_error(SourceGraphError::Invalid(
+                    "missing admitted sphere flow geometry",
+                )));
+            };
+            let surface = point.surface.ok_or_else(|| {
+                source_error(SourceGraphError::Invalid(
+                    "forced sphere needs its retained original fluid at wall temperature",
+                ))
+            })?;
+            let area = core.section_areas[branch][*section];
+            let admit = |volume_flow: f64| {
+                evaluate_sphere_from_material(
+                    &point.thermal.transport(),
+                    &surface.transport(),
+                    volume_flow.abs() / area,
+                    point.characteristic_length,
+                ).map(|_| ()).map_err(FlowConvectionError::Envelope)
+            };
+            let average = flow.average(branch).abs();
+            let endpoints = [flow.initial(branch), flow.final_flow(branch)];
+            for (index, volume_flow) in endpoints.into_iter().enumerate() {
+                // The average already used these exact two snapshots. A held
+                // speed needs no repeated source query or evidence allocation.
+                if volume_flow.abs() != average
+                    && (index == 0 || volume_flow.abs() != endpoints[0].abs())
+                {
+                    admit(volume_flow)?;
+                }
+            }
+            if (endpoints[0] < 0.0 && endpoints[1] > 0.0)
+                || (endpoints[0] > 0.0 && endpoints[1] < 0.0)
+            {
+                // Supported endpoint magnitudes cannot hide the unsupported
+                // stagnant point inside a native reversal.
+                admit(0.0)?;
+            }
+        }
         GraphConvectionLaw::Forced {
             branch,
             correlation,

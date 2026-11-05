@@ -9,6 +9,7 @@ use super::*;
 use super::laws::{FlowConvectionError, FlowConvectionPoint};
 use crate::graph::thermal::medium::convection::deposition::{
     CellConvectionEvaluation, ConvectionSourceError,
+    source::{SurfaceConvectionMaterialSample, material_at},
 };
 use fs_conduction::transient::deposition::backward_euler::BoundaryConductances;
 use fs_material::fluid_transport::ThermalFluidTransportState;
@@ -61,6 +62,9 @@ pub struct ReservoirConvectionSample<M> {
     pub heat_into_fluid_w: f64,
     pub material: M,
     pub thermal: ThermalFluidTransportState,
+    /// The same source at the actual sphere wall temperature. Only viscosity
+    /// enters the correction; this property sample has no stored mass or heat.
+    pub surface: Option<SurfaceConvectionMaterialSample<M>>,
     /// None only at exact natural-convection thermal equilibrium.
     pub evaluation: Option<CellConvectionEvaluation>,
 }
@@ -184,30 +188,27 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
                 0.5 * wall_temperature_k + 0.5 * fluid_temperature_k
             }
         };
-        let material = resolve(Temperature::new(property_temperature_k))
-            .map_err(|source| GraphReservoirConvectionError::Convection(
-                SourceCellConvectionError::Source {
-                    cell: fluid_cell,
-                    property_temperature_k,
-                    source,
-                },
-            ))?;
-        let snapshot = material.thermal_transport_state()
-            .map_err(|error| native_error(ConvectionSourceError::Material(error.into())))?;
-        let transport = material.transport_state()
-            .map_err(|error| native_error(ConvectionSourceError::Material(error.into())))?;
-        if snapshot.temperature_k() != property_temperature_k || snapshot.transport() != transport {
-            return Err(invalid(
-                "fluid source does not match the requested temperature and transport state",
-            ));
-        }
+        let primary = material_at(fluid_cell, property_temperature_k, || {
+            resolve(Temperature::new(property_temperature_k))
+        }).map_err(GraphReservoirConvectionError::Convection)?;
+        let transport = primary.thermal.transport();
         core.admit_density(fluid_cell, transport).map_err(source_error)?;
+        let surface = if matches!(law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+            poll(cx).map_err(source_error)?;
+            Some(material_at(fluid_cell, wall_temperature_k, || {
+                resolve(Temperature::new(wall_temperature_k))
+            }).map_err(GraphReservoirConvectionError::Convection)?)
+        } else { None };
+        let resolved = law.resolve(
+            &primary.thermal, surface.as_ref().map(|surface| &surface.thermal),
+        ).map_err(native_error)?;
+        resolved.admit_area(reservoir.area_m2, binding.characteristic_length).map_err(native_error)?;
         let evaluation = evaluate_convection_state(
             &transport,
             wall_temperature_k,
             Temperature::new(fluid_temperature_k),
             binding.characteristic_length,
-            law.resolve(&snapshot, None).map_err(native_error)?,
+            resolved,
         ).map_err(|error| native_error(ConvectionSourceError::Material(error)))?;
         // Identical actual-source and signed old/new/crossing admission to
         // finite walls; maximum-speed envelopes are never substituted for Q.
@@ -221,8 +222,9 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
                 law: binding.law,
                 wall_temperature_k,
                 fluid_temperature_k,
-                material: &material,
-                thermal: &snapshot,
+                material: &primary.material,
+                thermal: &primary.thermal,
+                surface: surface.as_ref().map(|surface| &surface.thermal),
             },
         ).map_err(|error| law_error(fluid_cell, error))?;
         let conductance_w_k = match &evaluation {
@@ -246,8 +248,9 @@ pub(in super::super) fn evaluate<M: ThermalFluidTransport>(
             area_m2: reservoir.area_m2,
             conductance_w_k,
             heat_into_fluid_w,
-            material,
-            thermal: snapshot,
+            material: primary.material,
+            thermal: primary.thermal,
+            surface,
             evaluation,
         });
     }
