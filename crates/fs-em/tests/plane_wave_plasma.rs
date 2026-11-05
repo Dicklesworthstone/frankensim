@@ -321,6 +321,54 @@ fn g1_vector_fields_close_maxwell_poynting_and_original_carrier_heat_at_depth() 
 }
 
 #[test]
+fn g1_propagation_scales_match_the_original_complex_wave_number_and_fields() {
+    let gas = gas();
+    let transport = gas.prepare_harmonic(|| false).unwrap();
+    let background = background(&gas);
+    for omega in [1e9_f64, 1e12, 1e14] {
+        let law = IonizedGasWaveResponse::try_new(&transport, &background, omega, || false).unwrap();
+        let interface = PlanarDielectricInterface::try_new(
+            &background, DielectricResponse::IonizedGas(law),
+        ).unwrap();
+        for cosine in [1.0_f64, 0.5, 0.03] {
+            let wave = interface.prepare_ionized_gas_wave(
+                cosine, Polarization::Te, C64::new(0.003, -0.004), || false,
+            ).unwrap();
+            let kz = wave.interface_response().transmitted_normal_wavenumber_rad_m;
+            let scales = wave.propagation_scales();
+            let wavelength = scales.normal_phase_wavelength_m.unwrap();
+            let phase_speed = scales.normal_phase_velocity_m_s.unwrap();
+            let amplitude_depth = scales.amplitude_skin_depth_m.unwrap();
+            let intensity_depth = scales.intensity_skin_depth_m.unwrap();
+            near(wavelength * kz.re, core::f64::consts::TAU, 3e-15);
+            near(phase_speed * kz.re, omega, 3e-15);
+            near(amplitude_depth * -kz.im, 1.0, 3e-15);
+            near(intensity_depth * -2.0 * kz.im, 1.0, 3e-15);
+            near(
+                scales.phase_cycles_per_amplitude_efold.unwrap(),
+                kz.re / (-core::f64::consts::TAU * kz.im),
+                3e-15,
+            );
+
+            let entrance = wave.field(0.0).unwrap();
+            let one_cycle = wave.field(wavelength).unwrap();
+            let axis = entrance.electric_v_m.iter().position(|e| e.abs() > 0.0).unwrap();
+            let ratio = one_cycle.electric_v_m[axis] / entrance.electric_v_m[axis];
+            near(ratio.im, 0.0, 2e-12);
+            near(ratio.re, (kz.im * wavelength).exp(), 2e-12);
+
+            let one_intensity = wave.field(intensity_depth).unwrap();
+            near(
+                one_intensity.complex_poynting_w_m2[2].re
+                    / entrance.complex_poynting_w_m2[2].re,
+                (-1.0_f64).exp(),
+                3e-12,
+            );
+        }
+    }
+}
+
+#[test]
 fn g3_coulomb_drag_and_signed_thermal_partition_survive_wave_propagation() {
     let original = gas();
     let gas = original

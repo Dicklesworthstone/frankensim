@@ -139,6 +139,26 @@ pub struct PreparedIonizedGasWave<'a> {
 /// Actual peak vector fields at x=y=0, z=depth_m in the original half-space.
 /// Carrier rows and signed thermal partitions are read from the retained
 /// surface response and scaled by the same passive propagation factor.
+/// Wavelength and attenuation scales of the admitted normal propagation.
+/// These come from the same complex normal wave number used by `field`; no
+/// second material solve, vacuum-index substitution or fitted skin depth is
+/// introduced. `None` means that the corresponding finite positive scale is
+/// absent (for example a purely evanescent phase or a lossless amplitude).
+/// Group velocity is deliberately not inferred from one monochromatic sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IonizedGasWaveScales {
+    /// 2*pi/Re(k_z) [m], when the transmitted normal phase propagates.
+    pub normal_phase_wavelength_m: Option<f64>,
+    /// omega/Re(k_z) [m/s], a phase velocity, never a group velocity.
+    pub normal_phase_velocity_m_s: Option<f64>,
+    /// 1/(-Im(k_z)) [m], where field amplitude falls by e^-1.
+    pub amplitude_skin_depth_m: Option<f64>,
+    /// 1/(-2 Im(k_z)) [m], where intensity/mean power falls by e^-1.
+    pub intensity_skin_depth_m: Option<f64>,
+    /// Re(k_z)/(2*pi*(-Im(k_z))): phase cycles per amplitude e-fold.
+    pub phase_cycles_per_amplitude_efold: Option<f64>,
+}
+
 pub struct IonizedGasWavePoint<'w, 'a> {
     wave: &'w PreparedIonizedGasWave<'a>,
     depth_m: f64,
@@ -287,6 +307,26 @@ impl<'a> PreparedIonizedGasWave<'a> {
         self.power_balance_relative_residual
     }
 
+    /// Physical normal wavelength, phase speed and attenuation lengths of this
+    /// already-admitted wave. Every value is derived from the retained complex
+    /// `k_z`; the original carrier conductivity is not reevaluated.
+    #[must_use]
+    pub fn propagation_scales(&self) -> IonizedGasWaveScales {
+        let kz = self.reflection.transmitted_normal_wavenumber_rad_m;
+        let phase_wavelength = positive_scale(core::f64::consts::TAU / kz.re);
+        let phase_velocity = positive_scale(self.plasma.omega_rad_s / kz.re);
+        let amplitude_depth = positive_scale(-1.0 / kz.im);
+        let intensity_depth = positive_scale(-0.5 / kz.im);
+        let cycles = positive_scale(kz.re / (-core::f64::consts::TAU * kz.im));
+        IonizedGasWaveScales {
+            normal_phase_wavelength_m: phase_wavelength,
+            normal_phase_velocity_m_s: phase_velocity,
+            amplitude_skin_depth_m: amplitude_depth,
+            intensity_skin_depth_m: intensity_depth,
+            phase_cycles_per_amplitude_efold: cycles,
+        }
+    }
+
     /// Evaluate an admitted outgoing wave at finite depth >=0 [m].
     /// Fully attenuated tails need no otherwise unrepresentable phase.
     /// Thermal terms are scaled as (surface_power*a)*a rather than multiplying
@@ -413,6 +453,10 @@ impl<'w, 'a> IonizedGasWavePoint<'w, 'a> {
     pub fn reactive_carrier_power_var_m3(&self) -> f64 {
         scaled_power(self.wave.surface.reactive_power_var_m3, self.attenuation)
     }
+}
+
+fn positive_scale(value: f64) -> Option<f64> {
+    (value.is_finite() && value > 0.0).then_some(value)
 }
 
 fn admit_background(

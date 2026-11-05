@@ -4290,6 +4290,23 @@ films/evanescent exits, two-face magnetic standing nodes, source identity and
 work/storage admission. Full Cargo/DSR remains blocked by absent constellation
 sibling repositories.
 
+## Collisional-plasma wavelength and skin-depth scales
+
+`PreparedIonizedGasWave::propagation_scales` now exposes the distinct physical
+normal phase wavelength, phase velocity, amplitude skin depth, intensity skin
+depth, and phase cycles per amplitude e-fold from the already-admitted complex
+`k_z`. The query is O(1), allocation-free, and does not repeat carrier transport
+or replace the original frequency-dependent conductivity with a vacuum or DC
+surrogate. Undefined finite positive scales are `None`; a monochromatic sample
+does not invent group velocity.
+
+A focused regression checks every reported scale directly against the original
+complex wave number across three decades of frequency and oblique incidence,
+then verifies one phase wavelength against the propagated complex field and one
+intensity skin depth against the Poynting decay. This is a homogeneous local
+plasma-wave diagnostic, not a pulse/group-velocity, sheath, kinetic-spatial, or
+broadband-material claim.
+
 ## Original IAPWS water dispersion in native interfaces, films and beams
 
 `plane_wave::optical::WaterOpticalResponse::try_lossless` and `DielectricResponse::WaterOptical` bind the original IAPWS R9-97 phase-index law to temperature, bulk density and absolute SI magnetic permeability from one complete `ResolvedMaterialStatePoint`. Absolute-temperature semantics, original stationary property sources, native state bounds and strict vacuum-frequency/wavelength support remain attached. The caller explicitly selects ordinary-water applicability and a zero-absorption approximation; material names do not infer purity, an EOS, or measured optical loss.
