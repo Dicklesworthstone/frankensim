@@ -2,8 +2,9 @@
 
 ## Prescribed fission, finite inventory and delayed energy
 
-`fs-nuclear` is an L3 source owner. The default kernel uses only `std` and
-shares immutable nuclear model data with `Arc`. It accepts a prescribed total
+`fs-nuclear` is an L3 source owner. The source kernel uses the shared deterministic
+`fs-math` decay primitives and shares immutable nuclear model data with `Arc`.
+It accepts a prescribed total
 fission rate in expected nuclei per second, finite fuel inventory, explicit
 initial delayed-energy reservoirs, SI energy coefficients and caller budgets.
 An identified dataset and its domain of applicability remain the caller's
@@ -17,6 +18,11 @@ groups. A group's coefficients are integrated joules per fission, with a
 positive decay constant in inverse seconds. They describe effective energy
 reservoirs, not delayed-neutron precursor populations. For impulse-power fit
 coefficients `alpha * exp(-lambda * t)`, integrated energy is `alpha/lambda`.
+
+`DecayHeatGroup::from_half_life_s` admits a finite positive effective half-life
+and derives `lambda = ln(2)/half_life`; `half_life_s` returns the corresponding
+finite half-life of a directly authored rate. These group lifetimes govern
+stored energy release, not a claim about any individual isotope's population.
 
 For a constant prescribed rate `F`, each group obeys
 
@@ -39,6 +45,14 @@ independently of subtracting large stored-energy totals. It therefore retains
 small positive decay heat. No explicit decay substeps or endpoint-power
 rectangle are needed. Group storage remains nonnegative. Turning the rate to
 zero does not erase the accepted reservoirs or stop their heat release.
+
+Scaled survival uses `fs_math::decay::attenuate`, retaining a representable
+large-reservoir tail even when the unscaled exponential underflows. Overflow
+of `lambda * duration` uses the fully decayed limit for existing energy;
+uniformly generated surviving energy evaluates the equivalent divided product
+without first rounding its retention fraction to zero. Unrepresentable positive
+exposures and nonfinite physical outputs still refuse through the original
+transaction and accounting budgets.
 
 ## Accounting, numerics and work
 
@@ -67,7 +81,7 @@ work, at every group, and before publication. `trial` never modifies its input;
 `advance` publishes only a fully accepted candidate. The group count is bounded
 by the caller. Cloning retains the full accepted inventory and accumulated
 accounts. Replay with identical coefficients and interval partition is bitwise
-stable on the same ISA/toolchain/libm profile. Different interval partitions
+stable on the same ISA/toolchain profile. Different interval partitions
 agree to floating-point tolerance; cross-ISA equality is not claimed.
 
 ## Physical scope
@@ -98,6 +112,12 @@ replay. These passed using the pinned Rust 1.99.0-nightly toolchain through
 `rustc --edition=2024 --test crates/fs-nuclear/src/lib.rs`. Coefficients are
 explicitly synthetic: equation verification is not isotope validation or a
 performance benchmark. Workspace Cargo/DSR verification remains separate.
+
+Six additional source regressions cover half-life admission and conversion,
+scaled normal/subnormal late tails, overflowing exposure, representable forced
+source retention, and accounting refusal. All 19 current source tests passed
+through the pinned native `rustc` test build linked to the real `fs-math` crate.
+This is a focused source-kernel result, not a workspace or thermal-feature gate.
 
 The exponential source-history formulation and distinction between prompt and
 delayed fission energy follow the public [Argonne SAS4A/SASSYS-1 decay-heat
@@ -186,3 +206,4 @@ budgeting total-yield product roundoff were added after the execution environmen
 became unavailable. They have not been compiled or executed in this session;
 the final snapshot must be rerun through the native checks above. The previously
 executed 12-test result is not a claim that these later changes passed.
+

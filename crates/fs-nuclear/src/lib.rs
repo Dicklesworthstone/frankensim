@@ -16,6 +16,7 @@
 
 #![deny(unsafe_code)]
 
+use fs_math::decay::{attenuate, decayed_fraction};
 use std::sync::Arc;
 
 /// Source coupling on the original material-backed thermal timeline.
@@ -68,6 +69,38 @@ pub struct DecayHeatGroup {
     /// Integrated energy released by this group per fission [J/fission].
     /// For a supplied impulse-power fit alpha exp(-lambda t), this is alpha/lambda.
     pub energy_per_fission: EnergyChannels,
+}
+
+impl DecayHeatGroup {
+    /// Admit a positive effective reservoir half-life [s] and its integrated
+    /// energy per fission. This does not identify a physical nuclide or supply
+    /// nuclear data. Under a continuing source, stored energy need not halve.
+    pub fn from_half_life_s(
+        half_life_s: f64,
+        energy_per_fission: EnergyChannels,
+    ) -> Result<Self, FissionError> {
+        if !positive(half_life_s) {
+            return Err(FissionError::InvalidInput("half-life must be positive and finite"));
+        }
+        energy_per_fission.validate()?;
+        if !positive(energy_per_fission.total_j()) {
+            return Err(FissionError::InvalidInput("decay groups require positive energy"));
+        }
+        Ok(Self {
+            decay_constant_s_inv: finite(core::f64::consts::LN_2 / half_life_s)?,
+            energy_per_fission,
+        })
+    }
+
+    /// Shutdown half-life [s] of this effective energy reservoir, `ln(2)/lambda`.
+    /// Public coefficients are checked here too; zero or invalid decay rates
+    /// are not assigned a fictitious finite half-life.
+    pub fn half_life_s(&self) -> Result<f64, FissionError> {
+        if !positive(self.decay_constant_s_inv) {
+            return Err(FissionError::InvalidInput("decay constant must be positive and finite"));
+        }
+        finite(core::f64::consts::LN_2 / self.decay_constant_s_inv)
+    }
 }
 
 /// Immutable nuclear source data, kept distinct from chemical material laws.
@@ -284,15 +317,16 @@ impl FissionState {
             let q = group.energy_per_fission.total_j();
             let input = finite(fissions * q)?;
             generated.add(input)?;
-            let (survival, lost) = decay_factors(group.decay_constant_s_inv, duration_s)?;
-            let (cooling_survival, cooling_lost) = decay_factors(group.decay_constant_s_inv, cooling_s)?;
-            let (retained_fraction, released_fraction) = source_factors(group.decay_constant_s_inv, active_s)?;
-            let retained_input = finite(input * retained_fraction)?;
-            let final_energy = finite(initial * survival + retained_input * cooling_survival)?;
+            let exposure = decay_exposure(group.decay_constant_s_inv, duration_s)?;
+            let cooling_exposure = decay_exposure(group.decay_constant_s_inv, cooling_s)?;
+            let (retained_input, released_input) = source_energy(input, group.decay_constant_s_inv, active_s)?;
+            let final_energy = finite(attenuate(initial, exposure)
+                + attenuate(retained_input, cooling_exposure))?;
             // Stable integrals retain tiny heat releases when subtracting two
             // large reservoir totals would round them to zero.
             let output = finite(sum(&[
-                initial * lost, input * released_fraction, retained_input * cooling_lost,
+                initial * decayed_fraction(exposure), released_input,
+                retained_input * decayed_fraction(cooling_exposure),
             ]))?;
             let destinations = partition(output, group.energy_per_fission)?;
             add_channels(&mut released, destinations)?;
@@ -445,30 +479,37 @@ fn partition(total: f64, per_fission: EnergyChannels) -> Result<EnergyChannels, 
     }.scaled(total)
 }
 
-// Return survival and loss separately: 1-exp(-x) must survive x << 1.
-fn decay_factors(lambda: f64, duration: f64) -> Result<(f64, f64), FissionError> {
-    if duration == 0.0 { return Ok((1.0, 0.0)); }
-    let x = finite(lambda * duration)?;
+// Overflow of an exposure is a resolved complete-decay limit, not overflow
+// of a physical energy account. An underflowed positive exposure still refuses.
+fn decay_exposure(lambda: f64, duration: f64) -> Result<f64, FissionError> {
+    if duration == 0.0 { return Ok(0.0); }
+    let x = lambda * duration;
     if x == 0.0 { return Err(FissionError::Arithmetic); }
-    Ok(((-x).exp(), -(-x).exp_m1()))
+    Ok(x)
 }
 
 // phi=(1-exp(-x))/x is the retained fraction of uniformly produced energy.
 // Its complement needs a series to avoid cancellation for short intervals.
-fn source_factors(lambda: f64, duration: f64) -> Result<(f64, f64), FissionError> {
-    if duration == 0.0 { return Ok((1.0, 0.0)); }
-    let x = finite(lambda * duration)?;
-    if x == 0.0 { return Err(FissionError::Arithmetic); }
+// Return energies rather than only fractions: input/x can remain representable
+// even when x overflows. In that case both finite divisors exceed one, so the
+// sequential divisions cannot overflow or prematurely erase a surviving result.
+fn source_energy(input: f64, lambda: f64, duration: f64) -> Result<(f64, f64), FissionError> {
+    if duration == 0.0 { return Ok((input, 0.0)); }
+    let x = decay_exposure(lambda, duration)?;
     if x < 0.01 {
         let released = x * (0.5 + x * (-1.0 / 6.0 + x * (1.0 / 24.0
             + x * (-1.0 / 120.0 + x * (1.0 / 720.0
             + x * (-1.0 / 5040.0 + x / 40320.0))))));
-        Ok((1.0 - released, released))
+        Ok((input * (1.0 - released), input * released))
+    } else if x.is_infinite() {
+        let retained = input / lambda / duration;
+        Ok((retained, input - retained))
     } else {
-        let retained = -(-x).exp_m1() / x;
-        Ok((retained, 1.0 - retained))
+        let retained = decayed_fraction(x) / x;
+        Ok((input * retained, input * (1.0 - retained)))
     }
 }
 
 #[cfg(test)]
 mod tests;
+

@@ -15,6 +15,7 @@ default = []
 thermal = ["dep:fs-thermal"]
 
 [dependencies]
+fs-math = { path = "../fs-math" }
 fs-thermal = { path = "../fs-thermal", optional = true }
 
 [dev-dependencies]
@@ -29,3 +30,4 @@ required-features = ["thermal"]
 
 [lints]
 workspace = true
+

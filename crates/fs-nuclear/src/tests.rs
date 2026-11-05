@@ -228,3 +228,140 @@ fn g0_total_yield_roundoff_is_budgeted_independently_of_component_products() {
     assert!(report.energy_roundoff_j > 0.0);
     assert!(report.energy_residual_j.abs() <= report.energy_roundoff_j);
 }
+
+#[test]
+fn g1_effective_half_life_halves_shutdown_storage_and_composes_across_steps() {
+    let group = DecayHeatGroup::from_half_life_s(2.0, energy(1.0, 2.0, 1.0)).unwrap();
+    assert_eq!(group.half_life_s().unwrap(), 2.0);
+    let model = Arc::new(FissionModel::new(
+        "synthetic-half-life".into(), EnergyChannels::default(), vec![group],
+    ).unwrap());
+    let original = FissionState::new(model, 10.0, vec![80.0]).unwrap();
+    let (whole, report) = original.trial(2.0, 0.0, budget(), || Ok(())).unwrap();
+    close(whole.stored_delayed_energy_j(), 40.0, 1e-14);
+    close(report.released.deposited_j, 10.0, 1e-14);
+    close(report.released.radiation_j, 20.0, 1e-14);
+    close(report.released.escaped_j, 10.0, 1e-14);
+    assert_eq!(whole.remaining_fuel_nuclei(), 10.0);
+    let mut split = original;
+    split.advance(0.75, 0.0, budget(), || Ok(())).unwrap();
+    split.advance(1.25, 0.0, budget(), || Ok(())).unwrap();
+    close(split.stored_delayed_energy_j(), whole.stored_delayed_energy_j(), 1e-14);
+    split.advance(2.0, 0.0, budget(), || Ok(())).unwrap();
+    close(split.stored_delayed_energy_j(), 20.0, 1e-14);
+}
+
+#[test]
+fn g0_effective_half_life_admission_refuses_invalid_or_unrepresentable_data() {
+    let channels = energy(1.0, 0.0, 0.0);
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            DecayHeatGroup::from_half_life_s(bad, channels),
+            Err(FissionError::InvalidInput(_)),
+        ));
+        assert!(matches!(
+            DecayHeatGroup { decay_constant_s_inv: bad, energy_per_fission: channels }.half_life_s(),
+            Err(FissionError::InvalidInput(_)),
+        ));
+    }
+    assert_eq!(
+        DecayHeatGroup::from_half_life_s(f64::from_bits(1), channels),
+        Err(FissionError::Arithmetic),
+    );
+    assert_eq!(
+        DecayHeatGroup {
+            decay_constant_s_inv: f64::from_bits(1), energy_per_fission: channels,
+        }.half_life_s(),
+        Err(FissionError::Arithmetic),
+    );
+    for invalid in [EnergyChannels::default(), energy(-1.0, 0.0, 0.0)] {
+        assert!(DecayHeatGroup::from_half_life_s(1.0, invalid).is_err());
+    }
+    for half_life in [1e-300, 1.0, 1e300] {
+        let group = DecayHeatGroup::from_half_life_s(half_life, channels).unwrap();
+        close(group.half_life_s().unwrap(), half_life, 4e-15 * half_life);
+    }
+}
+
+#[test]
+fn g1_shutdown_keeps_scaled_energy_after_the_unscaled_exponential_underflows() {
+    let model = Arc::new(FissionModel::new(
+        "synthetic-late-tail".into(), EnergyChannels::default(), vec![DecayHeatGroup {
+            decay_constant_s_inv: 1.0, energy_per_fission: energy(1.0, 0.0, 0.0),
+        }],
+    ).unwrap());
+    let original = FissionState::new(Arc::clone(&model), 0.0, vec![1e300]).unwrap();
+    let tolerant = FissionBudget { energy_tolerance_j: 1e286, ..budget() };
+    let (whole, _) = original.trial(800.0, 0.0, tolerant, || Ok(())).unwrap();
+    let expected = (1e300_f64.ln() - 800.0).exp();
+    assert!(whole.stored_delayed_energy_j() > 0.0);
+    close(whole.stored_delayed_energy_j(), expected, 3e-13 * expected);
+    let mut split = original;
+    split.advance(400.0, 0.0, tolerant, || Ok(())).unwrap();
+    split.advance(400.0, 0.0, tolerant, || Ok(())).unwrap();
+    close(split.stored_delayed_energy_j(), expected, 3e-13 * expected);
+
+    // This scaled survivor rounds to the least positive binary64 value.
+    let mut subnormal = FissionState::new(model, 0.0, vec![0.4]).unwrap();
+    subnormal.advance(744.1, 0.0, budget(), || Ok(())).unwrap();
+    assert_eq!(subnormal.stored_delayed_energy_j(), f64::from_bits(1));
+}
+
+#[test]
+fn g1_overflowing_shutdown_exposure_has_a_finite_complete_decay_limit() {
+    let model = Arc::new(FissionModel::new(
+        "synthetic-overflowing-exposure".into(), EnergyChannels::default(), vec![DecayHeatGroup {
+            decay_constant_s_inv: 1e300, energy_per_fission: energy(1.0, 0.0, 0.0),
+        }],
+    ).unwrap());
+    let mut state = FissionState::new(model, 0.0, vec![7.0]).unwrap();
+    let report = state.advance(1e300, 0.0, budget(), || Ok(())).unwrap();
+    assert_eq!(state.stored_delayed_energy_j(), 0.0);
+    assert_eq!(report.released.deposited_j, 7.0);
+    assert_eq!(report.generated_energy_j, 0.0);
+    assert_eq!(report.energy_roundoff_j, 0.0);
+}
+
+#[test]
+fn g1_overflowing_forced_exposure_retains_the_finite_source_equilibrium() {
+    let group = DecayHeatGroup {
+        decay_constant_s_inv: 1e200, energy_per_fission: energy(1e300, 0.0, 0.0),
+    };
+    let model = Arc::new(FissionModel::new(
+        "synthetic-stiff-forcing".into(), EnergyChannels::default(), vec![group],
+    ).unwrap());
+    let original = FissionState::new(model, 2.0, vec![0.0]).unwrap();
+    let (mut whole, _) = original.trial(1e200, 1e-200, budget(), || Ok(())).unwrap();
+    // Independent constant-power equilibrium: q*F/lambda, without lambda*t.
+    let expected = (1e300 * 1e-200) / 1e200;
+    close(whole.stored_delayed_energy_j(), expected, 3e-15 * expected);
+    assert!(whole.stored_delayed_energy_j() > 0.0);
+    let mut split = original;
+    split.advance(5e199, 1e-200, budget(), || Ok(())).unwrap();
+    split.advance(5e199, 1e-200, budget(), || Ok(())).unwrap();
+    close(split.stored_delayed_energy_j(), expected, 3e-15 * expected);
+    whole.advance(group.half_life_s().unwrap(), 0.0, budget(), || Ok(())).unwrap();
+    close(whole.stored_delayed_energy_j(), 0.5 * expected, 3e-15 * expected);
+}
+
+#[test]
+fn g4_retaining_a_finite_forced_tail_still_charges_unresolved_release_roundoff() {
+    let model = Arc::new(FissionModel::new(
+        "synthetic-stiff-accounting".into(), EnergyChannels::default(), vec![DecayHeatGroup {
+            decay_constant_s_inv: 2.0, energy_per_fission: energy(1.0, 0.0, 0.0),
+        }],
+    ).unwrap());
+    let mut state = FissionState::new(model, f64::MAX, vec![0.0]).unwrap();
+    let original = state.clone();
+    assert_eq!(
+        state.advance(f64::MAX, 1.0, budget(), || Ok(())),
+        Err(FissionError::Budget("energy accounting roundoff")),
+    );
+    assert_eq!(state, original);
+    let report = state.advance(
+        f64::MAX, 1.0, FissionBudget { energy_tolerance_j: 2.0, ..budget() }, || Ok(()),
+    ).unwrap();
+    assert_eq!(state.stored_delayed_energy_j(), 0.5);
+    assert!(report.energy_roundoff_j >= 0.5);
+}
+
