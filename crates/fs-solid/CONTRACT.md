@@ -3052,6 +3052,17 @@ cancellation, budget and late-jump rollback.
   cards (Menegotto–Pinto steel; Mander concrete with the
   compression-positive convention flipped at the section boundary);
   `respond`/`commit` split (pure response vs state commitment);
+  `try_respond` uses the native checked Mander response, including finite
+  parameters, envelope-consistent history and the inclusive ultimate compression
+  strain. `try_commit` admits the complete section before publishing any proposed
+  fiber histories; a later fiber's refusal cannot partially update earlier ones.
+  The infallible `commit` convenience requires an admitted strain and panics
+  before mutation on refusal. A virgin concrete fiber and a closed residual
+  gap use the compression-side tangent; tensile gaps remain traction-free.
+  `tests/fiber_material.rs` checks a concrete-only axial frame against the
+  independent `r=2` envelope inverse, then verifies an over-crushing displacement
+  refuses with the accepted frame state intact. Section tests exercise the
+  inclusive bound, corrupted parameters/history and atomic commitment.
   `update_sections_batched` — the §15.2 hot loop through fs-la's
   batched Cholesky with a per-outlier direct fallback, throughput
   measured and ledgered; `rc_section` fixture (confined core +
@@ -3136,9 +3147,9 @@ cancellation, budget and late-jump rollback.
   mass-stabilized damping and retained zero-loss directions.
   The `static_load` and `newmark` Newton steps backtrack
   (step 1, ½, … down to 2⁻⁹) on the free residual norm, because fiber laws
-  are non-smooth: Mander concrete has zero tangent at exactly zero strain, so
-  the first tangent of an unstressed RC section is steel-only and full steps
-  from rest overshoot and cycle.
+  are non-smooth at tensile-gap closure and load reversals. Concrete's virgin
+  tangent includes its compression-side stiffness; subsequent trials still
+  evaluate the original active branch, including zero stiffness in an open gap.
 - `koiter` [F], feature `koiter-asymptotics` (off by default): FD
   energy expansion along the buckling mode at the critical state →
   a/b coefficients and `Bifurcation` classification, with the

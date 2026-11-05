@@ -3556,7 +3556,23 @@ homogenization, the P2 milestone.
   (R0/a1/a2 curvature degradation, Bauschinger via branch-state
   asymptote intersection) and `ManderConcrete` (confined envelope
   `f = f′cc·x·r/(r−1+xʳ)`, elastic unload/reload lines with residual
-  strain, zero tension).
+  strain, zero tension). `ManderConcrete::response` readmits finite positive
+  parameters with representable `Ec > Esec` and `r > 1`, and admits the
+  committed maximum against that same envelope before producing stress,
+  tangent and a proposed history. The ultimate compression strain `eps_cu`
+  is inclusive; exceeding it or providing a corrupt/nonfinite history
+  refuses without mutation. At zero virgin strain and at residual-gap closure
+  the tangent is the compression-side derivative, while an open tensile gap
+  has zero stress and tangent. This unilateral convention supplies no tensile
+  capacity. The infallible trait stress/tangent methods return NaN on refusal;
+  its history update retains the accepted input. Consumers needing a diagnosis
+  use the checked response. `envelope` remains the analytic curve evaluator,
+  without history or domain admission. Focused G0 tests in `conformance.rs`
+  verify the rational `r=2` envelope, one-sided startup, gap reloading,
+  the inclusive limit and invalid history/parameter refusal. The formula is
+  Mander, Priestley and Park (1988), Eqs. (3), (4), (6), (8),
+  doi:10.1061/(ASCE)0733-9445(1988)114:8(1804); the elastic cyclic lines remain
+  the declared simplified rule. No post-crushing damage evolution is supplied.
   Menegotto–Pinto's virgin state has direction zero. Its first nonzero
   excursion selects the signed yield asymptote while retaining `R0` and zero
   reversal history; starting in compression is not a prior plastic cycle.
@@ -4076,8 +4092,9 @@ anisotropic spectra across modulus scales, and singular/indefinite refusals.
 ## Error model
 
 `MaterialError`: `Parameters`, `State` (e.g. det F ≤ 0), `Calibration`.
-Out-of-calibration-domain USE is not an error — it is flagged through
-`Evidence.model.in_domain` so upstream policy decides.
+The generic `evidence_stress` adapter flags calibration-domain exit through
+`Evidence.model.in_domain`. Checked constitutive paths retain their own explicit
+domain refusals, including the Mander ultimate-compression bound above.
 
 ## Determinism class
 

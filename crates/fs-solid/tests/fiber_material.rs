@@ -12,6 +12,8 @@ use fs_qty::{Density, Dims, Pressure};
 use fs_solid::fiber::material::{
     ConcreteFiberProperties, FiberMaterial, RcSection, RcSectionGeometry, SteelFiberProperties,
 };
+use fs_solid::fiber::{Fiber, FiberLaw, FiberState, Section};
+use fs_solid::{Frame2d, Geometry, SectionModel};
 
 fn properties() -> ConcreteFiberProperties {
     ConcreteFiberProperties {
@@ -127,6 +129,133 @@ fn close(actual: f64, expected: f64) {
     assert!(
         (actual - expected).abs() <= 2e-12 * expected.abs().max(1.0),
         "{actual} != {expected}"
+    );
+}
+
+#[test]
+fn concrete_compression_starts_a_virgin_frame_and_preserves_the_crushing_limit() {
+    // No reinforcement provides an artificial startup stiffness. The r=2
+    // envelope has the independent inverse x = s / (1 + sqrt(1-s²)).
+    let law = ManderConcrete::new(30e6, 0.002, 30e9, 0.005).unwrap();
+    let area = 0.04;
+    let length = 2.0;
+    let section = Section::new(
+        [-0.1, 0.1]
+            .into_iter()
+            .map(|y| Fiber {
+                y,
+                area: 0.5 * area,
+                law: FiberLaw::Concrete(law.clone()),
+            })
+            .collect(),
+    );
+    let virgin = section.try_respond(0.0, 0.0).unwrap();
+    close(virgin.tangent[0][0], law.ec * area);
+    close(virgin.tangent[1][1], law.ec * area * 0.1_f64.powi(2));
+    let mut frame = Frame2d::new(Geometry::Linear);
+    let base = frame.add_node(0.0, 0.0);
+    let tip = frame.add_node(length, 0.0);
+    frame.fix(base, [true; 3]);
+    frame.fix(tip, [false, true, true]);
+    frame
+        .add_element(base, tip, 3, 0.0, &|| SectionModel::Fiber(section.clone()))
+        .unwrap();
+    let mut load = vec![0.0; frame.ndof()];
+    for ratio in [0.1_f64, 0.4, 0.8] {
+        load[3 * tip] = -ratio * law.fcc * area;
+        frame.static_load(&load, 1).unwrap();
+        let strain = law.eps_cc * ratio / (1.0 + (1.0 - ratio * ratio).sqrt());
+        let expected = -length * strain;
+        assert!(
+            (frame.displacements()[3 * tip] - expected).abs() < 3e-8 * expected.abs(),
+            "native compression {} != {expected}",
+            frame.displacements()[3 * tip],
+        );
+        for &(eps, curvature) in frame.section_deformations(0) {
+            assert!((eps + strain).abs() < 3e-8 * strain);
+            assert!(curvature.abs() < 1e-12);
+        }
+    }
+    let displacement = frame.displacements().to_vec();
+    let deformations = frame.section_deformations(0).to_vec();
+    let forces = frame.element_forces(0);
+    let mut pattern = vec![0.0; frame.ndof()];
+    pattern[3 * tip] = -1.0;
+    assert!(
+        frame
+            .displacement_control(&pattern, 3 * tip, &[-1.01 * length * law.eps_cu])
+            .is_err()
+    );
+    assert_eq!(frame.displacements(), displacement);
+    assert_eq!(frame.section_deformations(0), deformations);
+    assert_eq!(frame.element_forces(0), forces);
+}
+
+#[test]
+fn concrete_compression_refuses_an_invalid_fiber_before_any_history_is_committed() {
+    let confined = ManderConcrete::new(42e6, 0.004, 32e9, 0.015).unwrap();
+    let cover = ManderConcrete::new(30e6, 0.002, 30e9, 0.005).unwrap();
+    let mut section = Section::new(
+        [confined, cover.clone()]
+            .into_iter()
+            .enumerate()
+            .map(|(i, law)| Fiber {
+                y: i as f64 - 0.5,
+                area: 0.02,
+                law: FiberLaw::Concrete(law),
+            })
+            .collect(),
+    );
+    section.try_commit(-0.003, 0.0).unwrap();
+    let histories = |section: &Section| {
+        section
+            .states
+            .iter()
+            .map(|state| {
+                let FiberState::Concrete(state) = state else {
+                    unreachable!()
+                };
+                state.clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = histories(&section);
+    assert!(section.try_respond(-cover.eps_cu, 0.0).is_ok());
+    let beyond = f64::from_bits(cover.eps_cu.to_bits() + 1);
+    assert!(section.try_respond(-beyond, 0.0).is_err());
+    assert!(section.respond(-beyond, 0.0).n.is_nan());
+    assert!(section.try_commit(-beyond, 0.0).is_err());
+    assert_eq!(histories(&section), before);
+    // The first fiber's proposed 0.004 excursion must not survive a refusal
+    // from the later fiber, including when the latter was publicly corrupted.
+    for damage in 0..3 {
+        let mut invalid = section.clone();
+        match damage {
+            0 => {
+                let FiberLaw::Concrete(law) = &mut invalid.fibers[1].law else {
+                    unreachable!()
+                };
+                law.ec = f64::INFINITY;
+            }
+            1 => {
+                let FiberState::Concrete(state) = &mut invalid.states[1] else {
+                    unreachable!()
+                };
+                state.sig_max *= 0.9;
+            }
+            _ => {
+                invalid.states.pop();
+            }
+        }
+        let before = histories(&invalid);
+        assert!(invalid.try_commit(-0.004, 0.0).is_err());
+        assert_eq!(histories(&invalid), before);
+    }
+    section.try_commit(-0.004, 0.0).unwrap();
+    assert!(
+        histories(&section)
+            .iter()
+            .all(|state| state.eps_max == 0.004)
     );
 }
 

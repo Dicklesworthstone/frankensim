@@ -33,6 +33,150 @@ fn conservative_wool_felt_limit_has_no_loading_cycle_loss() {
     assert!(WoolFelt::new(2.0e6, 0.2, 2.5, 3.0, 0.0, 0.8).is_err());
 }
 
+#[test]
+fn mander_compression_starts_with_the_one_sided_elastic_tangent() {
+    let law = ManderConcrete::new(30e6, 0.002, 30e9, 0.005).unwrap();
+    let virgin = law.initial_state();
+    let zero = law.response(0.0, &virgin).unwrap();
+    assert_eq!(zero.stress_pa, 0.0);
+    assert_eq!(zero.tangent_pa, law.ec);
+    assert_eq!(zero.state, virgin);
+    let h = 1e-9;
+    let right = law.response(h, &virgin).unwrap();
+    assert!((right.stress_pa / h / law.ec - 1.0).abs() < 1e-10);
+    let left = law.response(-h, &virgin).unwrap();
+    assert_eq!((left.stress_pa, left.tangent_pa), (0.0, 0.0));
+
+    // For Ec = 2 Esec, r = 2 gives an independent rational envelope.
+    for strain in [0.0003, 0.002, 0.004, law.eps_cu] {
+        let response = law.response(strain, &virgin).unwrap();
+        let x = strain / law.eps_cc;
+        let denominator = 1.0 + x * x;
+        let stress = law.fcc * 2.0 * x / denominator;
+        let tangent = law.ec * (1.0 - x * x) / denominator.powi(2);
+        assert!((response.stress_pa - stress).abs() < 1e-8);
+        assert!((response.tangent_pa - tangent).abs() < 1e-5);
+    }
+}
+
+#[test]
+fn mander_compression_reloads_the_retained_gap_and_refuses_crushing() {
+    let law = ManderConcrete::new(30e6, 0.002, 30e9, 0.005).unwrap();
+    let virgin = law.initial_state();
+    let accepted = law.response(0.003, &virgin).unwrap().state;
+    let before = accepted.clone();
+    let gap = accepted.eps_max - accepted.sig_max / law.ec;
+    assert!(gap > 0.0);
+    let open = law.response(0.5 * gap, &accepted).unwrap();
+    assert_eq!((open.stress_pa, open.tangent_pa), (0.0, 0.0));
+    assert_eq!(open.state, accepted);
+    let closed = law.response(gap, &accepted).unwrap();
+    assert_eq!(closed.stress_pa, 0.0);
+    assert!((closed.tangent_pa / law.ec - 1.0).abs() < 2e-15);
+    let reloading_strain = 0.5 * (gap + accepted.eps_max);
+    let reloading = law.response(reloading_strain, &accepted).unwrap();
+    assert!((reloading.stress_pa / accepted.sig_max - 0.5).abs() < 1e-14);
+    let h = 1e-9;
+    let fd = (law
+        .response(reloading_strain + h, &accepted)
+        .unwrap()
+        .stress_pa
+        - law
+            .response(reloading_strain - h, &accepted)
+            .unwrap()
+            .stress_pa)
+        / (2.0 * h);
+    assert!((fd / reloading.tangent_pa - 1.0).abs() < 1e-9);
+
+    assert!(law.response(law.eps_cu, &accepted).is_ok());
+    for strain in [
+        f64::from_bits(law.eps_cu.to_bits() + 1),
+        f64::INFINITY,
+        f64::NAN,
+    ] {
+        assert!(law.response(strain, &accepted).is_err());
+        assert!(law.stress(strain, &accepted).is_nan());
+        assert!(law.tangent(strain, &accepted).is_nan());
+        assert_eq!(law.update_state(strain, &accepted), before);
+        assert_eq!(accepted, before);
+    }
+}
+
+#[test]
+fn mander_compression_readmits_public_parameters_and_committed_history() {
+    use fs_material::fiber::ManderState;
+
+    let law = ManderConcrete::new(30e6, 0.002, 30e9, 0.005).unwrap();
+    let state = law.response(0.003, &law.initial_state()).unwrap().state;
+    for bad in [
+        ManderState {
+            eps_max: -0.001,
+            sig_max: 0.0,
+        },
+        ManderState {
+            eps_max: law.eps_cu * 1.01,
+            sig_max: state.sig_max,
+        },
+        ManderState {
+            eps_max: f64::NAN,
+            sig_max: state.sig_max,
+        },
+        ManderState {
+            eps_max: state.eps_max,
+            sig_max: f64::INFINITY,
+        },
+        ManderState {
+            eps_max: state.eps_max,
+            sig_max: -1.0,
+        },
+        ManderState {
+            eps_max: state.eps_max,
+            sig_max: 0.9 * state.sig_max,
+        },
+        ManderState {
+            eps_max: 0.0,
+            sig_max: 1.0,
+        },
+    ] {
+        // Unloading cannot sanitize a state whose stored maximum is invalid.
+        assert!(law.response(-0.001, &bad).is_err());
+    }
+    for bad in [
+        ManderConcrete {
+            fcc: f64::INFINITY,
+            ..law.clone()
+        },
+        ManderConcrete {
+            eps_cc: f64::NAN,
+            ..law.clone()
+        },
+        ManderConcrete {
+            ec: f64::INFINITY,
+            ..law.clone()
+        },
+        ManderConcrete {
+            ec: law.fcc / law.eps_cc,
+            ..law.clone()
+        },
+        ManderConcrete {
+            eps_cu: f64::INFINITY,
+            ..law.clone()
+        },
+        ManderConcrete {
+            eps_cu: law.eps_cc,
+            ..law.clone()
+        },
+    ] {
+        assert!(ManderConcrete::new(bad.fcc, bad.eps_cc, bad.ec, bad.eps_cu).is_err());
+        assert!(bad.response(0.0, &law.initial_state()).is_err());
+    }
+    let changed = ManderConcrete {
+        fcc: 0.9 * law.fcc,
+        ..law
+    };
+    assert!(changed.response(0.0, &state).is_err());
+}
+
 fn lcg(seed: &mut u64) -> f64 {
     *seed = seed
         .wrapping_mul(6364136223846793005)

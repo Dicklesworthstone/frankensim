@@ -158,7 +158,8 @@ impl Section {
     }
 
     /// Checked response for nonlinear structural solvers. J2 admission uses
-    /// the full compatible tensor strain, including lateral contraction.
+    /// the full compatible tensor strain, including lateral contraction. Concrete
+    /// retains the material's inclusive crushing-strain bound and history checks.
     /// Failure leaves every fiber's accepted history unchanged.
     pub fn try_respond(&self, eps0: f64, kappa: f64) -> Result<SectionState, SolidError> {
         self.response(eps0, kappa, true)
@@ -262,9 +263,11 @@ impl Section {
                     }
                     (f64::NAN, f64::NAN)
                 }
-                (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
-                    (-l.stress(-eps, s), l.tangent(-eps, s))
-                }
+                (FiberLaw::Concrete(l), FiberState::Concrete(s)) => match l.response(-eps, s) {
+                    Ok(response) => (-response.stress_pa, response.tangent_pa),
+                    Err(error) if checked => return Err(refused(&error.to_string())),
+                    Err(_) => (f64::NAN, f64::NAN),
+                },
                 _ => return Err(refused("fiber law and committed state must match")),
             };
             out.n += sig * f.area;
@@ -286,9 +289,24 @@ impl Section {
         Ok(out)
     }
 
-    /// Commit the states at (ε₀, κ).
+    /// Commit an admitted strain pair. Prefer [`Self::try_commit`] when the input
+    /// has not already passed [`Self::try_respond`].
+    ///
+    /// # Panics
+    /// Panics on a refused strain pair or invalid public fiber/history data,
+    /// before changing any accepted history.
     pub fn commit(&mut self, eps0: f64, kappa: f64) {
-        for (f, st) in self.fibers.iter().zip(self.states.iter_mut()) {
+        self.try_commit(eps0, kappa)
+            .expect("fiber section commit requires an admitted response");
+    }
+
+    /// Admit every fiber and atomically commit the proposed section history.
+    /// A failure in any fiber leaves all accepted states unchanged, including
+    /// fibers earlier in the section that would otherwise have loaded plastically.
+    pub fn try_commit(&mut self, eps0: f64, kappa: f64) -> Result<(), SolidError> {
+        self.try_respond(eps0, kappa)?;
+        let mut proposed = self.states.clone();
+        for (f, st) in self.fibers.iter().zip(proposed.iter_mut()) {
             let eps = eps0 - f.y * kappa;
             match (&f.law, st) {
                 (FiberLaw::Norton(l), FiberState::Norton(s)) => *s = l.update_state(eps, s),
@@ -307,11 +325,18 @@ impl Section {
                 }
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
-                    *s = l.update_state(-eps, s);
+                    *s = l
+                        .response(-eps, s)
+                        .map_err(|error| SolidError::MaterialRefused {
+                            what: error.to_string(),
+                        })?
+                        .state;
                 }
                 _ => unreachable!("law/state pairing fixed at construction"),
             }
         }
+        self.states = proposed;
+        Ok(())
     }
 }
 

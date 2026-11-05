@@ -231,6 +231,14 @@ impl Uniaxial for MenegottoPintoSteel {
 
 /// Mander confined-concrete envelope with elastic unload/reload lines
 /// (compression positive; zero tension capacity — documented no-claims).
+/// [`Self::response`] admits the parameters, committed history and the inclusive
+/// ultimate-strain bound before returning a proposed state. At a closed tensile
+/// gap it selects the compression-side tangent; this is a one-sided derivative,
+/// not tensile stiffness.
+///
+/// Envelope: Mander, Priestley and Park (1988), Eqs. (3), (4), (6), (8),
+/// doi:10.1061/(ASCE)0733-9445(1988)114:8(1804). The elastic cyclic lines here
+/// remain a simplified rule, not that paper's full unloading/reloading model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManderConcrete {
     /// Confined compressive strength f′cc (Pa, positive).
@@ -252,6 +260,18 @@ pub struct ManderState {
     pub sig_max: f64,
 }
 
+/// Admitted concrete response and its proposed, independently committable history.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ManderResponse {
+    /// Compression-positive stress in Pa; zero in an open tensile gap.
+    pub stress_pa: f64,
+    /// `d(stress)/d(compression strain)` in Pa. At gap closure the
+    /// compression-side derivative is selected; post-peak tangents may be negative.
+    pub tangent_pa: f64,
+    /// History after accepting this strain. Evaluating a trial never mutates input.
+    pub state: ManderState,
+}
+
 impl ManderConcrete {
     /// Construct with checks (requires Ec > Esec so the envelope shape
     /// parameter r is positive).
@@ -259,15 +279,22 @@ impl ManderConcrete {
     /// # Errors
     /// [`MaterialError::Parameters`] on inadmissible parameters.
     pub fn new(fcc: f64, eps_cc: f64, ec: f64, eps_cu: f64) -> Result<Self, MaterialError> {
-        if !(fcc > 0.0 && eps_cc > 0.0 && ec > 0.0 && eps_cu > eps_cc) {
+        if ![fcc, eps_cc, ec, eps_cu]
+            .into_iter()
+            .all(|value| value.is_finite() && value > 0.0)
+            || eps_cu <= eps_cc
+        {
             return Err(MaterialError::Parameters {
-                what: "need fcc, eps_cc, Ec > 0 and eps_cu > eps_cc".to_string(),
+                what: "Mander needs finite positive fcc, eps_cc, Ec and eps_cu > eps_cc".to_string(),
             });
         }
         let esec = fcc / eps_cc;
-        if ec <= esec {
+        let r = ec / (ec - esec);
+        if !(esec.is_finite() && esec > 0.0 && ec > esec && r.is_finite() && r > 1.0) {
             return Err(MaterialError::Parameters {
-                what: format!("Ec {ec} must exceed the secant modulus {esec}"),
+                what: format!(
+                    "Mander Ec {ec} must exceed finite positive Esec {esec}, with representable r > 1"
+                ),
             });
         }
         Ok(ManderConcrete {
@@ -283,12 +310,17 @@ impl ManderConcrete {
         self.ec / (self.ec - esec)
     }
 
-    /// The monotonic envelope σ(ε) and its derivative (ε ≥ 0,
-    /// compression positive).
+    /// The analytic monotonic envelope and its derivative, compression positive.
+    /// At zero strain the compression-side derivative is `Ec`; tensile strains
+    /// have zero stress and stiffness. Use [`Self::response`] to enforce the
+    /// original parameters, history and ultimate-strain domain.
     #[must_use]
     pub fn envelope(&self, strain: f64) -> (f64, f64) {
-        if strain <= 0.0 {
+        if strain < 0.0 {
             return (0.0, 0.0); // no tension capacity
+        }
+        if strain == 0.0 {
+            return (0.0, self.ec);
         }
         let r = self.shape_r();
         let x = strain / self.eps_cc;
@@ -303,6 +335,69 @@ impl ManderConcrete {
     fn eps_plastic(&self, state: &ManderState) -> f64 {
         (state.eps_max - state.sig_max / self.ec).max(0.0)
     }
+
+    /// Checked compression trial with elastic unloading and a retained tensile gap.
+    ///
+    /// The declared `eps_cu` is an inclusive validity bound, not a post-crushing
+    /// damage law. A trial beyond it refuses; no stress clipping or history reset
+    /// extends that domain. The public parameters and history are readmitted on
+    /// every call, including during unloading. A retained maximum must lie on
+    /// this same law's envelope within floating-point roundoff.
+    pub fn response(
+        &self,
+        strain: f64,
+        state: &ManderState,
+    ) -> Result<ManderResponse, MaterialError> {
+        Self::new(self.fcc, self.eps_cc, self.ec, self.eps_cu)?;
+        let invalid = |what: &str| MaterialError::State {
+            what: format!("Mander concrete: {what}"),
+        };
+        if !strain.is_finite() || strain > self.eps_cu {
+            return Err(invalid("trial strain must be finite and at or below eps_cu"));
+        }
+        if !(state.eps_max.is_finite()
+            && (0.0..=self.eps_cu).contains(&state.eps_max)
+            && state.sig_max.is_finite()
+            && state.sig_max >= 0.0)
+        {
+            return Err(invalid("committed maximum strain/stress is inadmissible"));
+        }
+        let expected_max = self.envelope(state.eps_max).0;
+        let history_scale = expected_max.abs().max(state.sig_max);
+        if !expected_max.is_finite()
+            || (state.sig_max - expected_max).abs() > 64.0 * f64::EPSILON * history_scale
+        {
+            return Err(invalid(
+                "committed maximum does not belong to the original envelope",
+            ));
+        }
+        let (stress_pa, tangent_pa) = if strain >= state.eps_max {
+            self.envelope(strain)
+        } else {
+            let eps_p = self.eps_plastic(state);
+            if strain < eps_p {
+                (0.0, 0.0)
+            } else {
+                let tangent = state.sig_max / (state.eps_max - eps_p);
+                (tangent * (strain - eps_p), tangent)
+            }
+        };
+        if !(stress_pa.is_finite() && stress_pa >= 0.0 && tangent_pa.is_finite()) {
+            return Err(invalid("stress or tangent is unrepresentable"));
+        }
+        Ok(ManderResponse {
+            stress_pa,
+            tangent_pa,
+            state: if strain > state.eps_max {
+                ManderState {
+                    eps_max: strain,
+                    sig_max: stress_pa,
+                }
+            } else {
+                state.clone()
+            },
+        })
+    }
 }
 
 impl Uniaxial for ManderConcrete {
@@ -313,38 +408,20 @@ impl Uniaxial for ManderConcrete {
     }
 
     fn stress(&self, strain: f64, state: &ManderState) -> f64 {
-        if strain >= state.eps_max {
-            return self.envelope(strain).0;
-        }
-        // Unload/reload line between (eps_p, 0) and (eps_max, sig_max).
-        let eps_p = self.eps_plastic(state);
-        if strain <= eps_p {
-            return 0.0;
-        }
-        state.sig_max * (strain - eps_p) / (state.eps_max - eps_p)
+        self.response(strain, state)
+            .map_or(f64::NAN, |response| response.stress_pa)
     }
 
     fn tangent(&self, strain: f64, state: &ManderState) -> f64 {
-        if strain >= state.eps_max {
-            return self.envelope(strain).1;
-        }
-        let eps_p = self.eps_plastic(state);
-        if strain <= eps_p {
-            return 0.0;
-        }
-        state.sig_max / (state.eps_max - eps_p)
+        self.response(strain, state)
+            .map_or(f64::NAN, |response| response.tangent_pa)
     }
 
     fn update_state(&self, strain: f64, state: &ManderState) -> ManderState {
-        if strain > state.eps_max {
-            let (sig, _) = self.envelope(strain);
-            ManderState {
-                eps_max: strain,
-                sig_max: sig,
-            }
-        } else {
-            state.clone()
-        }
+        // This infallible trait cannot return a refusal. Preserve the accepted
+        // history; callers that need the diagnosis use the checked trial owner.
+        self.response(strain, state)
+            .map_or_else(|_| state.clone(), |response| response.state)
     }
 
     fn admissibility(&self) -> MaterialAdmissibility {
