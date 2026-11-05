@@ -100,7 +100,10 @@ impl core::ops::Add for Dd {
     fn add(self, o: Dd) -> Dd {
         let (s1, s2) = two_sum(self.hi, o.hi);
         let (t1, t2) = two_sum(self.lo, o.lo);
-        let (s1, s2) = quick_two_sum(s1, s2 + t1);
+        // Cancellation of the high components can leave their sum smaller
+        // than the combined low components, even for normalized operands.
+        // Restore magnitude ordering before the final fast renormalization.
+        let (s1, s2) = two_sum(s1, s2 + t1);
         let (hi, lo) = quick_two_sum(s1, s2 + t2);
         Dd { hi, lo }
     }
@@ -184,6 +187,33 @@ mod tests {
         let b = a - Dd::from_f64(1e16);
         assert_eq!(b.hi.to_bits(), 1.0f64.to_bits());
         assert_eq!(b.lo.to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn addition_retains_low_terms_when_cancelled_high_terms_are_smaller() {
+        // Across the binade boundary at 1, the normalized low components
+        // may add to more than the difference of the adjacent high values.
+        // Exact dyadic arithmetic gives (-9 * 2^-55, -2^-107), including
+        // a nonzero trailing term that ordinary f64 addition cannot retain.
+        let unit = f64::EPSILON / 8.0;
+        let tail = unit * f64::EPSILON;
+        for exponent in [-500, 0, 500] {
+            for sign in [-1.0, 1.0] {
+                let scale = sign * 2.0f64.powi(exponent);
+                let a = Dd::from_pair(-scale, -4.0 * unit * scale);
+                let b = Dd::from_pair((1.0 - f64::EPSILON / 2.0) * scale, -(unit + tail) * scale);
+                assert_eq!(a.hi.to_bits(), (-scale).to_bits());
+                assert_eq!(
+                    b.hi.to_bits(),
+                    ((1.0 - f64::EPSILON / 2.0) * scale).to_bits()
+                );
+                for result in [a + b, b + a, a - (-b), b - (-a)] {
+                    assert_eq!(result.hi.to_bits(), (-9.0 * unit * scale).to_bits());
+                    assert_eq!(result.lo.to_bits(), (-tail * scale).to_bits());
+                    assert_eq!((result.hi + result.lo).to_bits(), result.hi.to_bits());
+                }
+            }
+        }
     }
 
     #[test]
