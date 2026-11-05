@@ -44,7 +44,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut path = TetFatiguePath::new(&problem, TetThermalStrainField::Uniform(&thermal),
             ContentHash([9; 32]), vec![TetFatigueGauge {
                 element: 0, normal_in_mesh_frame: [1.0, 0.0, 0.0], material_state_identity: [7; 32],
-                curve, mean_stress: MeanStressCorrection::Uncorrected,
+                material_source: None, curve, mean_stress: MeanStressCorrection::Uncorrected,
             }], TetFatigueConfig { solver: Default::default(), maximum_absolute_mandel_strain: 0.01,
                 history: RainflowLimits { maximum_samples: u64::from(2*cycles+1), maximum_residue: 16 },
                 maximum_gauges: 1, maximum_total_residue: 16 }, &cx)?;

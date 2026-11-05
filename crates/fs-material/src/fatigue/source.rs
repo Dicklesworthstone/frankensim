@@ -105,6 +105,27 @@ impl SnCalibrationSource {
     pub fn observations(&self) -> &[(f64, MaterialAnswer)] {
         &self.observations
     }
+
+    /// Bind the actual native material card/state and every fixed typed
+    /// physical coordinate. Life and fully reversed calibration R identify
+    /// the original S-N observations; they are not native state coordinates.
+    /// A mean-stress policy remains a separately declared empirical model.
+    pub fn matches_material_state(
+        &self,
+        card_identity: ContentHash,
+        material: &MaterialStateId,
+        point: &QueryPoint,
+    ) -> bool {
+        self.card_identity == card_identity
+            && &self.material_state == material
+            && self.query.axes().iter().all(|(axis, value)| {
+                axis == self.request.life_measure.axis_name()
+                    || axis == &self.request.stress_ratio_axis
+                    || (point.axes().get(axis) == Some(value)
+                        && point.axis_quantities().get(axis)
+                            == self.query.axis_quantities().get(axis))
+            })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

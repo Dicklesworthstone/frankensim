@@ -1138,6 +1138,17 @@ stress and samples every gauge once. Inertia, support motion, damping, thermal
 eigenstrain, reactions and work remain in their original mechanical owners;
 zero applied load does not imply zero vibration stress or zero fatigue.
 
+Source-resolved S-N curves require the original immutable material bundle in
+`TetFatigueGauge::material_source`. The shared observer verifies its actual
+elastic identity, original material card, named state and complete fixed typed
+query; only calibration life and R coordinates are excluded. Missing bundles,
+foreign cards or states and different fixed physical context refuse before
+observations begin. Both native paths expose the retained bundle through
+`material_source(gauge)`. Caller-declared curves remain explicitly supported;
+an optional bundle still has to be the actual elastic state. The synthetic
+`tests/fatigue_source.rs` regressions cover static damage, native Newmark motion,
+source refusals and complete checkpoint replay without changing mechanics.
+
 The wrapper exposes no mutable run, external stress injection or material/thermal
 reconfiguration. A late gauge refusal, stress-domain failure or cancellation
 commits neither native mechanics nor any fatigue counter. Cloning retains both

@@ -120,6 +120,10 @@ impl<'g, 'm, 'p, 's> TetTransientFatigueRun3<'g, 'm, 'p, 's> {
         self.observation.curve(gauge)
     }
 
+    pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
+        self.observation.material_source(gauge)
+    }
+
     pub fn summaries(&self) -> Vec<FatigueSummary> {
         self.observation.summaries()
     }

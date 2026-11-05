@@ -2935,6 +2935,13 @@ absolute temperature. Strength, censored runouts and an unsupported endurance
 limit cannot replace finite-life observations. Applicability labels remain
 caller declarations; material/process/environment equivalence is not inferred.
 
+`SnCalibrationSource::matches_material_state` binds the original card, named
+material state and every fixed typed physical query coordinate to a native
+material bundle. Only the calibration life axis and fully reversed R axis are
+excluded from physical-state matching. Custom temperature axes and additional
+fixed environmental coordinates remain exact. A mean-stress correction is a
+separately declared empirical model; it does not confer new source support.
+
 Focused G0/G1/G3 regressions check analytic strain-life inversion and single-term
 limits, cycle/reversal and range/amplitude conversion, hand-countable damage,
 shared rainflow behavior, chunk/restart equivalence, source conflicts and

@@ -110,6 +110,7 @@ fn gauge(normal: [f64; 3], maximum: f64) -> TetFatigueGauge {
         element: 0,
         normal_in_mesh_frame: normal,
         material_state_identity: [97; 32],
+        material_source: None,
         curve: curve(maximum, 293.15),
         mean_stress: MeanStressCorrection::Uncorrected,
     }

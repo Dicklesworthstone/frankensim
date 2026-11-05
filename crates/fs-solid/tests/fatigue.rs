@@ -29,7 +29,7 @@ fn curve(maximum: f64, temperature: f64) -> Arc<SnCurve> {
 }
 fn gauge(element: usize) -> TetFatigueGauge {
     TetFatigueGauge { element, normal_in_mesh_frame: [1.0, 0.0, 0.0],
-        material_state_identity: [7; 32], curve: curve(10e6, 293.15),
+        material_state_identity: [7; 32], material_source: None, curve: curve(10e6, 293.15),
         mean_stress: MeanStressCorrection::Uncorrected }
 }
 fn config() -> TetFatigueConfig {

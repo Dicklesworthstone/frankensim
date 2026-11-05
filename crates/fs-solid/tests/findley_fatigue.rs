@@ -70,6 +70,7 @@ fn sn_gauge(normal: [f64; 3]) -> TetFatigueGauge {
         element: 0,
         normal_in_mesh_frame: normal,
         material_state_identity: [101; 32],
+        material_source: None,
         curve: Arc::new(
             SnCurve::new(
                 scope(),

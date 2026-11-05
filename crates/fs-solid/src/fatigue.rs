@@ -50,6 +50,10 @@ pub struct TetFatigueGauge {
     pub normal_in_mesh_frame: [f64; 3],
     /// Exact elastic state to which the caller applies this calibration.
     pub material_state_identity: [u8; 32],
+    /// Original immutable elastic material bundle. Required for a curve
+    /// resolved from a material card; its card, named state and fixed typed
+    /// physical query must match the original S-N calibration.
+    pub material_source: Option<Arc<ResolvedMaterialStatePoint>>,
     pub curve: Arc<SnCurve>,
     pub mean_stress: MeanStressCorrection,
 }
@@ -157,6 +161,7 @@ impl From<TransientError3> for TetFatigueError {
 struct GaugeState {
     element: usize,
     direction: NormalStressDirection,
+    material_source: Option<Arc<ResolvedMaterialStatePoint>>,
     counter: RainflowMiner,
 }
 
@@ -266,6 +271,10 @@ impl<'p, 'm> TetFatiguePath<'p, 'm> {
     /// Complete original S-N calibration, including its declared scope.
     pub fn curve(&self, gauge: usize) -> Option<&SnCurve> {
         self.observation.curve(gauge)
+    }
+
+    pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
+        self.observation.material_source(gauge)
     }
 
     pub fn summaries(&self) -> Vec<FatigueSummary> {
@@ -412,6 +421,32 @@ impl TetFatigueObserver {
                 gauge.material_state_identity,
                 gauge.curve.scope().temperature_k,
             )?;
+            if let Some(material) = gauge.material_source.as_deref() {
+                if material.identity().0 != gauge.material_state_identity {
+                    return Err(TetFatigueError::SourceMismatch {
+                        gauge: index,
+                        what: "S-N material receipt is not the actual elastic state identity",
+                    });
+                }
+            }
+            if let Some(source) = gauge.curve.source() {
+                let material = gauge.material_source.as_deref().ok_or(
+                    TetFatigueError::SourceMismatch {
+                        gauge: index,
+                        what: "source-backed S-N requires the original immutable elastic material bundle",
+                    },
+                )?;
+                if !source.matches_material_state(
+                    material.card_identity(),
+                    material.material(),
+                    &material.query(),
+                ) {
+                    return Err(TetFatigueError::SourceMismatch {
+                        gauge: index,
+                        what: "S-N source card, named material or typed query differs from the actual elastic bundle",
+                    });
+                }
+            }
             let direction =
                 NormalStressDirection::new(gauge.normal_in_mesh_frame).map_err(|error| {
                     TetFatigueError::Gauge {
@@ -427,6 +462,7 @@ impl TetFatigueObserver {
             states.push(GaugeState {
                 element: gauge.element,
                 direction,
+                material_source: gauge.material_source,
                 counter,
             });
         }
@@ -517,6 +553,12 @@ impl TetFatigueObserver {
 
     pub(crate) fn curve(&self, gauge: usize) -> Option<&SnCurve> {
         self.gauges.get(gauge).map(|g| g.counter.curve())
+    }
+
+    pub(crate) fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
+        self.gauges
+            .get(gauge)
+            .and_then(|g| g.material_source.as_deref())
     }
 
     pub(crate) fn summaries(&self) -> Vec<FatigueSummary> {

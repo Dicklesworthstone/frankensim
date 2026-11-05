@@ -17,6 +17,79 @@ use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 
 const SINGLE: ClaimSelection = ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly);
 
+#[test]
+fn native_binding_retains_the_original_card_and_fixed_typed_physical_context() {
+    for life in [SnLifeMeasure::Cycles, SnLifeMeasure::Reversals] {
+        let request = request(SnStressMeasure::Amplitude, life);
+        let mut original = claim(&request, InterpolationPolicy::TabulatedOnly);
+        original.validity = original.validity.with_quantity(
+            "humidity",
+            QuantitySpec::dimensional(Dims::NONE),
+            0.0,
+            1.0,
+        );
+        let card = card(vec![original]);
+        let calibration = point(&request)
+            .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.2)
+            .unwrap();
+        let curve = resolve_log_log_sn(&card, &calibration, &request, SINGLE).unwrap();
+        let source = curve.source().unwrap();
+        let native = QueryPoint::new()
+            .with_quantity(
+                "temperature",
+                QuantitySpec::dimensional(Temperature::DIMS),
+                293.15,
+            )
+            .unwrap()
+            .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.2)
+            .unwrap();
+        assert!(source.matches_material_state(card.content_hash(), card.id(), &native));
+        // Calibration life and R are excluded from physical-state matching.
+        let with_fit_coordinates = native
+            .clone()
+            .with_quantity(
+                request.life_measure.axis_name(),
+                QuantitySpec::dimensional(Dims::NONE),
+                100.0,
+            )
+            .unwrap()
+            .with_quantity(
+                &request.stress_ratio_axis,
+                QuantitySpec::dimensional(Dims::NONE),
+                0.5,
+            )
+            .unwrap();
+        assert!(source.matches_material_state(
+            card.content_hash(),
+            card.id(),
+            &with_fit_coordinates
+        ));
+        for changed in [
+            native.clone().with("temperature", 300.0).unwrap(),
+            native.clone().with("humidity", 0.8).unwrap(),
+            QueryPoint::new()
+                .with_quantity(
+                    "temperature",
+                    QuantitySpec::dimensional(Temperature::DIMS),
+                    293.15,
+                )
+                .unwrap(),
+            QueryPoint::new()
+                .with_quantity("temperature", QuantitySpec::dimensional(Dims::NONE), 293.15)
+                .unwrap()
+                .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.2)
+                .unwrap(),
+        ] {
+            assert!(!source.matches_material_state(card.content_hash(), card.id(), &changed));
+        }
+        let foreign = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+        assert!(!source.matches_material_state(foreign.content_hash(), card.id(), &native));
+        let mut other_state = card.id().clone();
+        other_state.process.push_str(" changed");
+        assert!(!source.matches_material_state(card.content_hash(), &other_state, &native));
+    }
+}
+
 fn request(stress_measure: SnStressMeasure, life_measure: SnLifeMeasure) -> SnSourceRequest {
     SnSourceRequest {
         stress_measure,
