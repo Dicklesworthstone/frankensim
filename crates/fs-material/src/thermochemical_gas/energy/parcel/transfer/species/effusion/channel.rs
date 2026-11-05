@@ -16,6 +16,8 @@
 
 mod geometry;
 pub use geometry::CylindricalMolecularGeometry;
+/// Molecular escape through the same diffuse channel into a true vacuum.
+pub mod vacuum;
 
 use super::{
     ClosedGasParcel, EffusiveFlux, EffusiveInterface, GasEnergyError, R, SpeciesId, invalid, poll,
@@ -23,6 +25,7 @@ use super::{
 };
 use fs_math::dd::Dd;
 use fs_qty::Temperature;
+use fs_thermochem::Nasa9StandardStateModelV1;
 
 /// Original gas-qualified entrance mouths plus a finite diffuse-wall channel.
 ///
@@ -156,31 +159,12 @@ impl DiffuseMolecularChannel {
         if transmitted.species.is_empty() || self.geometry.length_m() == 0.0 {
             return Ok(result);
         }
-        let support = self.mouth.support().temperature_k;
-        if !positive(wall_temperature_k)
-            || wall_temperature_k < support.0
-            || wall_temperature_k > support.1
-        {
-            return Err(invalid(
-                "channel wall temperature exceeds the original caloric support",
-            ));
-        }
+        self.admit_wall_temperature(wall_temperature_k)?;
         let temperatures = gases.map(|gas| gas.state().state().temperature);
-        let tau = self.geometry.transmission_probability();
         let mut heat = [Dd::ZERO; 2];
         for row in &transmitted.species {
             poll(&mut cancelled)?;
-            let original = self
-                .mouth
-                .gas_catalog()
-                .thermodynamics()
-                .components()
-                .iter()
-                .find(|s| s.species() == &row.species)
-                .ok_or(invalid(
-                    "channel species is missing its original caloric source",
-                ))?;
-            let molar_mass = original.molar_mass().value();
+            let original = self.original_species(&row.species)?;
             let mut reflected = [0.0; 2];
             for (side, beam) in [row.left_to_right, row.right_to_left]
                 .into_iter()
@@ -191,35 +175,15 @@ impl DiffuseMolecularChannel {
                 }
                 // Match the original network owner's rate*duration rounding.
                 let mass = beam.mass_rate_kg_s * duration_s;
-                if !positive(mass) {
-                    return Err(invalid("integrated channel beam is unrepresentable"));
-                }
-                let scaled = |probability| {
-                    if probability == 0.0 {
-                        Ok(0.0)
-                    } else {
-                        positive_product_ratio(&[mass, probability], &[tau])
-                    }
-                };
-                reflected[side] = scaled(self.geometry.reflected_probability())?;
-                let accommodated = scaled(self.geometry.wall_transmitted_probability())?;
-                // Formation references cancel analytically before multiplication.
-                let dh = original
-                    .molar_enthalpy_change(
-                        Temperature::new(temperatures[side]),
-                        Temperature::new(wall_temperature_k),
-                    )
-                    .map_err(source_error)?
-                    .value()
-                    / molar_mass;
-                let selection =
-                    (R / molar_mass) * (0.5 * (wall_temperature_k - temperatures[side]));
-                let de = (Dd::from_f64(dh) - Dd::from_f64(selection)).to_f64();
-                if !de.is_finite() {
-                    return Err(invalid("channel accommodation energy is unrepresentable"));
-                }
-                heat[side] = heat[side] + Dd::from_f64(signed_product(reflected[side], de)?);
-                heat[1 - side] = heat[1 - side] + Dd::from_f64(signed_product(accommodated, de)?);
+                let wall = self.integrate_beam_wall_exchange(
+                    original,
+                    mass,
+                    temperatures[side],
+                    wall_temperature_k,
+                )?;
+                reflected[side] = wall.reflected_mass_kg;
+                heat[side] = heat[side] + Dd::from_f64(wall.heat_into_source_j);
+                heat[1 - side] = heat[1 - side] + Dd::from_f64(wall.heat_into_transmitted_j);
             }
             if reflected.iter().any(|&mass| mass > 0.0) {
                 result.reflected_species.push(ChannelReflectedSpecies {
@@ -241,6 +205,81 @@ impl DiffuseMolecularChannel {
         poll(&mut cancelled)?;
         Ok(result)
     }
+
+    fn admit_wall_temperature(&self, wall_temperature_k: f64) -> Result<(), GasEnergyError> {
+        let support = self.mouth.support().temperature_k;
+        if !positive(wall_temperature_k)
+            || wall_temperature_k < support.0
+            || wall_temperature_k > support.1
+        {
+            return Err(invalid(
+                "channel wall temperature exceeds the original caloric support",
+            ));
+        }
+        Ok(())
+    }
+
+    fn original_species(
+        &self,
+        species: &SpeciesId,
+    ) -> Result<&Nasa9StandardStateModelV1, GasEnergyError> {
+        let components = self.mouth.gas_catalog().thermodynamics().components();
+        let index = components
+            .binary_search_by(|original| original.species().cmp(species))
+            .map_err(|_| invalid("channel species is missing its original caloric source"))?;
+        Ok(&components[index])
+    }
+
+    // A single caloric owner for finite receivers AND true vacuum. The caller
+    // supplies its already-rounded transmitted mass. Return heat belongs to
+    // the source; transmitted heat belongs to the receiving gas or escaped
+    // beam. Never subtract two rounded absolute formation energies.
+    fn integrate_beam_wall_exchange(
+        &self,
+        original: &Nasa9StandardStateModelV1,
+        transmitted_mass_kg: f64,
+        source_temperature_k: f64,
+        wall_temperature_k: f64,
+    ) -> Result<BeamWallExchange, GasEnergyError> {
+        if !positive(transmitted_mass_kg) {
+            return Err(invalid("integrated channel beam is unrepresentable"));
+        }
+        let tau = self.geometry.transmission_probability();
+        let scaled = |probability| {
+            if probability == 0.0 {
+                Ok(0.0)
+            } else {
+                positive_product_ratio(&[transmitted_mass_kg, probability], &[tau])
+            }
+        };
+        let reflected_mass_kg = scaled(self.geometry.reflected_probability())?;
+        let accommodated_mass_kg = scaled(self.geometry.wall_transmitted_probability())?;
+        let molar_mass = original.molar_mass().value();
+        let dh = original
+            .molar_enthalpy_change(
+                Temperature::new(source_temperature_k),
+                Temperature::new(wall_temperature_k),
+            )
+            .map_err(source_error)?
+            .value()
+            / molar_mass;
+        let selection = (R / molar_mass) * (0.5 * (wall_temperature_k - source_temperature_k));
+        let de = (Dd::from_f64(dh) - Dd::from_f64(selection)).to_f64();
+        if !de.is_finite() {
+            return Err(invalid("channel accommodation energy is unrepresentable"));
+        }
+        Ok(BeamWallExchange {
+            reflected_mass_kg,
+            heat_into_source_j: signed_product(reflected_mass_kg, de)?,
+            heat_into_transmitted_j: signed_product(accommodated_mass_kg, de)?,
+        })
+    }
+}
+
+struct BeamWallExchange {
+    reflected_mass_kg: f64,
+    heat_into_source_j: f64,
+    heat_into_transmitted_j: f64,
 }
 
 /// Molecules that leave and return to the SAME original reservoir. They spend
