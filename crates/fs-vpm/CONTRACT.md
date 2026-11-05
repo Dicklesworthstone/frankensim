@@ -73,6 +73,41 @@ geometry, exceptional component ranges, the original ordinary arithmetic, and
 transactional refusal. These checks concern the represented algebraic vortex
 model, not the continuum validity of fluid mechanics at arbitrary lengths.
 
+### Analytic two-dimensional vorticity and velocity gradients
+
+`induced_kinematics` / `kinematics2d::induced_kinematics` returns one
+`ParticleKinematics2` with velocity [m/s], full spatial Jacobian [1/s], and
+counterclockwise-positive vorticity [1/s]. The velocity uses the original
+algebraic-core kernel and original source accumulation order. For one particle,
+`omega = Gamma * core² / (pi * (r² + core²)²)`, the curl of that same velocity.
+This Eulerian sample is distinct from the PSE quadrature value `Gamma/area`.
+No particle area, Gaussian profile or finite-difference spacing is inferred.
+
+The derivative is divergence-free. A positive-core center has zero velocity
+and finite rotation; a nonzero zero-core vortex is singular at its center and
+has zero ordinary curl elsewhere. Its distributional circulation cannot be
+represented by an ordinary scalar point sample. Zero-strength sources do not
+create a singularity. Nonfinite/negative inputs, unrepresentable coordinate
+differences, contributions or accumulated fields return `None` without changing
+any source. No cancellation between unrepresentable contributions is promised.
+
+The curl is evaluated directly before subtracting the Jacobian's potentially
+large strain terms. Thus a resolved tiny core can retain finite tail vorticity
+even when the corresponding rounded off-diagonal derivatives are equal.
+Original factors and binary exponents avoid intermediate squared/fourth-power
+overflow or underflow. This also admits positive radii whose squares cannot
+be represented. Exact-kernel arithmetic is not a continuum spatial-error
+certificate, and signed-source summation retains floating-point cancellation.
+
+The one-pass query is O(N), uses O(1) stack storage and allocates nothing. Like
+the existing exact per-probe 3-D kinematics and compatibility velocity helpers,
+it has no `Cx` or cancellation receipt; callers bound bulk sampling work.
+`tests/kinematics2d.rs` checks independent finite differences, finite-disk Stokes
+circulation, center rotation, point-vortex singularities, signed sources,
+frame covariance, bitwise velocity parity, length/strength scaling from
+`1e-300` through `1e300`, recoverable tiny-core tails and numerical refusals
+(G0/G1/G3).
+
 ## Error model
 
 The checked path validates finite particle coordinates/circulations and finite

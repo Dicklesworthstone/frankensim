@@ -29,6 +29,9 @@ pub mod diffusion;
 pub mod farfield3d;
 pub mod filament3d;
 pub mod images3d;
+/// Exact velocity derivatives and vorticity of the 2-D algebraic-core field.
+pub mod kinematics2d;
+pub use kinematics2d::{ParticleKinematics2, induced_kinematics};
 /// Allocation-free exact flow for a pair sharing the algebraic velocity core.
 pub mod pairwise;
 /// Moment-preserving redistribution onto explicit Cartesian quadrature.
@@ -456,9 +459,7 @@ impl VelocityKernel {
         {
             return ordinary;
         }
-        if !r.into_iter().all(f64::is_finite)
-            || !circulation.is_finite()
-            || !self.core.is_finite()
+        if !r.into_iter().all(f64::is_finite) || !circulation.is_finite() || !self.core.is_finite()
         {
             return [f64::NAN; 2];
         }
@@ -492,12 +493,7 @@ fn binary_parts(x: f64) -> (f64, i32) {
 // Evaluate Gamma * component / (scale^2 * normalized) without overflowing
 // a quotient or losing a tiny component before multiplication by Gamma.
 // Only exceptional-range pairs use this path; no logarithms or allocations.
-fn scaled_velocity_component(
-    circulation: f64,
-    component: f64,
-    scale: f64,
-    normalized: f64,
-) -> f64 {
+fn scaled_velocity_component(circulation: f64, component: f64, scale: f64, normalized: f64) -> f64 {
     let negative = circulation.is_sign_negative() ^ component.is_sign_negative();
     let sign = if negative { -1.0 } else { 1.0 };
     if circulation == 0.0 || component == 0.0 {
@@ -509,19 +505,28 @@ fn scaled_velocity_component(
     let fraction = (gamma_m * component_m) / (scale_m * scale_m * normalized);
     let (mantissa, adjustment) = binary_parts(fraction);
     let exponent = gamma_e + component_e - 2 * scale_e + adjustment;
-    let magnitude = if exponent > 1023 {
+    scale_binary(mantissa, exponent).copysign(sign)
+}
+
+// Restore a normalized binary significand with one final subnormal rounding.
+// Shared by velocity and its analytic derivatives; no squared physical scale
+// or intermediate quotient has to fit in f64.
+fn scale_binary(mantissa: f64, exponent: i32) -> f64 {
+    let magnitude = if mantissa == 0.0 {
+        0.0
+    } else if exponent > 1023 {
         f64::INFINITY
     } else if exponent < -1075 {
         0.0
     } else if exponent >= -1022 {
-        mantissa * f64::from_bits(((exponent + 1023) as u64) << 52)
+        mantissa.abs() * f64::from_bits(((exponent + 1023) as u64) << 52)
     } else {
         // One final rounding into the subnormal range, including the
         // half-minimum tie. The intermediate is an exact normal scaling.
         let shifted = f64::from_bits(((exponent + 1023 + 54) as u64) << 52);
-        (mantissa * shifted) * (1.0 / 18_014_398_509_481_984.0)
+        (mantissa.abs() * shifted) * (1.0 / 18_014_398_509_481_984.0)
     };
-    magnitude.copysign(sign)
+    magnitude.copysign(mantissa)
 }
 
 fn add_induced_contribution(
