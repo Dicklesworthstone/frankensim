@@ -27,20 +27,33 @@ impl Point {
     }
 }
 
+// Contacts condensed over omitted modes: their complete closure columns and the
+// omitted modes' static compliance G among them, row-major [m/N]. Each closure
+// reads x = N^T q - G R, and the omitted modes store R G R / 2.
+pub(super) struct Condensed<'a> {
+    pub(super) columns: &'a [Vec<f64>],
+    pub(super) compliance: &'a [f64],
+}
+
+// Returns the stored energy and the solved reactions.
 pub(super) fn initialize(
     network: &mut CoupledModalSystem,
     external: &[f64],
     contacts: &[(ModalContact, ModalContactConfig)],
+    condensed: Option<&Condensed<'_>>,
     config: MultiContactConfig,
     gate: &CancelGate,
-) -> Result<f64, ModalCouplingError> {
+) -> Result<(f64, Vec<f64>), ModalCouplingError> {
     poll(Some(gate))?;
     network.require_static_initialization(external)?;
     admit_setup(network, contacts.len(), config)?;
     let mut points = Vec::with_capacity(contacts.len());
-    for (contact, c) in contacts {
+    for (index, (contact, c)) in contacts.iter().enumerate() {
         poll(Some(gate))?;
-        let column = contact_column(network, contact, *c)?;
+        let column = match condensed {
+            Some(set) => set.columns[index].clone(),
+            None => contact_column(network, contact, *c)?,
+        };
         let storage = ContactStorage::new(Box::new(ZeroStorage), 1, vec![contact.law.clone()])
             .map_err(ModalCouplingError::ContactLaw)?;
         points.push(Point { column, storage, config: *c, gap: contact.law.gaps()[0] });
@@ -49,7 +62,7 @@ pub(super) fn initialize(
     // Contact can restrain this prediction; apply physical caps only to the
     // final contacted equilibrium, not a fictional unrestrained load state.
     let free_q = response.solve(network, external, true, false, gate)?;
-    let free_x: Vec<f64> = points.iter().map(|p| dot(&p.column, &free_q)).collect::<Result<_,_>>()?;
+    let mut free_x: Vec<f64> = points.iter().map(|p| dot(&p.column, &free_q)).collect::<Result<_,_>>()?;
     let p = points.len();
     let mut compliance = vec![0.0; p*p];
     for j in 0..p {
@@ -61,17 +74,48 @@ pub(super) fn initialize(
             return Err(invalid("contact attachment needs positive representable static compliance"));
         }
     }
-    let mut reactions = vec![0.0; p];
-    let sweeps = solve_joint(&compliance, &free_x, |i| points[i].config,
-        |i,x| points[i].force(x), config.max_sweeps, &mut reactions, Some(gate))?;
-    let mut forces = external.to_vec();
-    for (point, reaction) in points.iter().zip(&reactions) {
-        if *reaction != 0.0 {
-            for (f,b) in forces.iter_mut().zip(&point.column) { *f = finite(*f-b*reaction)?; }
-        }
+    if let Some(set) = condensed {
+        for (a, g) in compliance.iter_mut().zip(set.compliance) { *a = finite(*a+g)?; }
     }
-    let q = response.solve(network, &forces, true, true, gate)?;
-    let mut energy = network.stage_static_equilibrium(&q, &forces, gate)?;
+    let mut reactions = vec![0.0; p];
+    let mut sweeps = solve_joint(&compliance, &free_x, |i| points[i].config,
+        |i,x| points[i].force(x), config.max_sweeps, &mut reactions, Some(gate))?;
+    let mut corrected = false;
+    let mut energy = loop {
+        let mut forces = external.to_vec();
+        for (point, reaction) in points.iter().zip(&reactions) {
+            if *reaction != 0.0 {
+                for (f,b) in forces.iter_mut().zip(&point.column) { *f = finite(*f-b*reaction)?; }
+            }
+        }
+        let q = response.solve(network, &forces, true, true, gate)?;
+        let staged = network.stage_static_equilibrium(&q, &forces, gate)?;
+        let Some(set) = condensed else { break staged };
+        if corrected { break staged; }
+        // The solve's closure `free_x - A R` and the actual `N^T q - G R` each cancel
+        // terms far larger than the closure, along different sums. A stiff stop turns
+        // their rounded difference into a force past its tolerance. Where the gate
+        // below would refuse for that, carry the measured difference into `free_x`
+        // and solve once more. The law, load, tolerances and gate don't change.
+        let mut measured = free_x.clone();
+        let mut misses = false;
+        for index in 0..p {
+            let point = &points[index];
+            let lag = dot(&set.compliance[index*p..(index+1)*p], &reactions)?;
+            let actual = finite(extension(&network.candidates, &point.column, 0.0)?-lag)?;
+            let expected = point.force(actual)?;
+            let tolerance = force_tolerance(reactions[index], expected, point.config)?;
+            misses |= finite(reactions[index]-expected)?.abs() > tolerance;
+            let mut solved = free_x[index];
+            for j in 0..p { solved = finite(solved-compliance[index*p+j]*reactions[j])?; }
+            measured[index] = finite(free_x[index]+(actual-solved))?;
+        }
+        if !misses { break staged; }
+        free_x = measured;
+        corrected = true;
+        sweeps = solve_joint(&compliance, &free_x, |i| points[i].config,
+            |i,x| points[i].force(x), config.max_sweeps, &mut reactions, Some(gate))?;
+    };
     // Recompute contact law on ACTUAL rounded states. In addition to the
     // bilateral force-balance gate above, report no equilibrium if one of
     // these contact equations fails. Neither candidate states nor reactions
@@ -80,9 +124,14 @@ pub(super) fn initialize(
     let mut actual_forces = external.to_vec();
     let mut actual_scale: Vec<f64> = external.iter().map(|f| f.abs()).collect();
     let mut contact_allowance = vec![0.0; network.mode_count()];
-    for (point, reaction) in points.iter().zip(&reactions) {
+    for (index, (point, reaction)) in points.iter().zip(&reactions).enumerate() {
         poll(Some(gate))?;
-        let x = extension(&network.candidates, &point.column, 0.0)?;
+        let mut x = extension(&network.candidates, &point.column, 0.0)?;
+        if let Some(set) = condensed {
+            let lag = dot(&set.compliance[index*p..(index+1)*p], &reactions)?;
+            x = finite(x-lag)?;
+            energy = finite(energy+0.5*reaction*lag)?;
+        }
         let expected = point.force(x)?;
         let residual = finite(reaction-expected)?;
         let tolerance = force_tolerance(*reaction, expected, point.config)?;
@@ -135,5 +184,5 @@ pub(super) fn initialize(
     poll(Some(gate))?;
     std::mem::swap(&mut network.models, &mut network.candidates);
     std::mem::swap(&mut network.material_memory, &mut network.candidate_material_memory);
-    Ok(energy)
+    Ok((energy, reactions))
 }

@@ -217,8 +217,12 @@ impl MultiFrictionModalSystem {
     /// coordinate sweep between them converges at rate (kA/(1+kA))^2 per sweep,
     /// which G makes slow, so the pair is solved together on its net force.
     ///
-    /// Translating or moving supports, released static preload and bound
-    /// nonlinear storage refuse: their residual is not wired.
+    /// A released static preload settles the same closures, in series with G,
+    /// and the first step holds its reactions. A load that projects only on the
+    /// retained modes does not deflect the omitted ones, in either path.
+    ///
+    /// Translating or moving supports and bound nonlinear storage refuse: their
+    /// residual is not wired.
     pub fn with_obstacle_residual_compliance(mut self, compliance: Vec<f64>, gate: &CancelGate)
         -> Result<Self, ModalFrictionError>
     {
@@ -584,15 +588,11 @@ impl ObstacleSet {
     // Reuse the original stationary potential and inverse stiffness. Dynamic
     // secants/compliances are not static constitutive laws. No new root solver,
     // artificial settling interval or discarded startup vibration is introduced.
-    pub(super) fn initialize_equilibrium(&self,
+    pub(super) fn initialize_equilibrium(&mut self,
         network: &mut super::super::super::super::CoupledModalSystem,
         external: &[f64], max_sweeps: usize, gate: &CancelGate,
     ) -> Result<f64, ModalCouplingError> {
         poll(Some(gate))?;
-        if self.residual.is_some() {
-            // The equilibrium owner condenses the retained network only.
-            return Err(invalid("released static preload does not include the obstacles' residual compliance"));
-        }
         let contacts: Vec<_> = self.points.iter()
             .map(|point| (point.contact.clone(), point.config)).collect();
         let config = super::super::super::multiple::MultiContactConfig {
@@ -603,7 +603,17 @@ impl ObstacleSet {
         // stored energy and actual force balance. Dynamic prepare() reconstructs
         // its disposable secants from the newly accepted state on the next step.
         // No dynamic report or sample is fabricated by this initial condition.
-        network.initialize_contact_equilibrium(external, &contacts, config, gate)
+        let Some(residual) = &self.residual else {
+            return network.initialize_contact_equilibrium(external, &contacts, config, gate);
+        };
+        // The omitted modes settle too, on the dynamic steps' complete columns and G.
+        let columns: Vec<_> = self.points.iter().map(|point| point.column.clone()).collect();
+        let (energy, reactions) = network.initialize_condensed_contact_equilibrium(external, &contacts,
+            &columns, &residual.compliance, config, gate)?;
+        // `prepare` and `energy` hold the omitted modes' deflection from these. A
+        // published report still waits for a sample (`last_obstacle_frames`).
+        for (frame, reaction) in self.accepted.iter_mut().zip(reactions) { frame.normal_force_n = reaction; }
+        Ok(energy)
     }
     pub(super) fn prepare(&mut self, old_q: &[f64], free_delta: &[f64], offsets: Option<&[f64]>, gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>

@@ -2236,8 +2236,13 @@ pitch changes.
 - The receipt prints each condensed bridge, the stops' compliance and pairs.
   Every run prints `linear_frequency_upper_bound_rad_s`, the coupled stiffness
   bound the Nyquist guard checks.
-- Refused: a released static preload with stops (use `forces retain`), receiver
-  stops, moving or migrating stops, bound nonlinear storage,
+- A released static preload settles the stops in series with the same
+  compliance, and the first sample holds its reactions. A closure that misses its
+  force tolerance on rounding gets one more solve, with the measured difference
+  carried into its prediction. A load applied through `forces` projects on the
+  retained modes only, on both paths, so the omitted modes do not deflect under
+  the load itself.
+- Refused: moving or migrating stops, bound nonlinear storage,
   additional directed translational bridges, rotational and constant-loss bridges, and a string with other than
   one bridge connection.
 - Bow ports retain their original maps unless the separate record below is supplied.

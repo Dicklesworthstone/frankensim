@@ -55,7 +55,21 @@ impl CoupledModalSystem {
         config: contact::multiple::MultiContactConfig,
         gate: &CancelGate,
     ) -> Result<f64, ModalCouplingError> {
-        preload::initialize(self, external, contacts, config, gate)
+        preload::initialize(self, external, contacts, None, config, gate).map(|(energy, _)| energy)
+    }
+
+    // The same equilibrium for contacts condensed over omitted modes (see
+    // `preload::Condensed`). `columns` replace the contacts' own maps. Also returns
+    // the solved reactions, which the dynamic owner holds as its first lag.
+    pub(super) fn initialize_condensed_contact_equilibrium(&mut self, external: &[f64],
+        contacts: &[(contact::ModalContact, contact::ModalContactConfig)], columns: &[Vec<f64>], compliance: &[f64],
+        config: contact::multiple::MultiContactConfig, gate: &CancelGate,
+    ) -> Result<(f64, Vec<f64>), ModalCouplingError> {
+        let p = contacts.len();
+        if columns.len() != p || compliance.len() != p*p || columns.iter().any(|c| c.len() != self.mode_count()) {
+            return Err(invalid("condensed contacts need one complete column per contact and one compliance per pair"));
+        }
+        preload::initialize(self, external, contacts, Some(&preload::Condensed { columns, compliance }), config, gate)
     }
 
     pub(super) fn require_static_initialization(&self, external: &[f64]) -> Result<(), ModalCouplingError> {

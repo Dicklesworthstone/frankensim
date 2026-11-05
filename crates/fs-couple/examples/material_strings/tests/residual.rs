@@ -80,11 +80,21 @@ fn a_fixed_stop_gains_the_bridge_cross_term_and_its_own_omitted_compliance() {
 }
 
 #[test]
+fn a_released_preload_reaches_the_stopped_card_with_the_record() {
+    scoped(|cx, gate| {
+        let mut plain = stopped(cx, gate, input::Spec::parse(pluck().as_bytes()).unwrap()).unwrap();
+        let mut soft = stopped(cx, gate, flexible(&pluck())).unwrap();
+        assert!(soft.performance.bank().system().obstacle_residual_compliance().is_some());
+        assert!(soft.performance.preload_energy_j().unwrap() > 0.0);
+        let (x, y) = (pressure(&mut plain, 128), pressure(&mut soft, 128));
+        assert!(y.iter().any(|p| p.abs() > 1e-12));
+        assert!(x.iter().zip(&y).any(|(x, y)| (x-y).abs() > 1e-12));
+    });
+}
+
+#[test]
 fn what_the_residual_does_not_own_refuses_by_name() {
     scoped(|cx, gate| {
-        // The released static preload's equilibrium owner has no residual.
-        let error = stopped(cx, gate, flexible(&pluck())).err().unwrap().to_string();
-        assert!(error.contains("residual compliance"), "{error}");
         // A stop on the bridge's own receiver keeps that receiver as its opposite participant;
         // the bridge correction is added beside it, not substituted for it.
         let receiver = flexible(&struck()).compile_with_profiles(cx, gate, None,

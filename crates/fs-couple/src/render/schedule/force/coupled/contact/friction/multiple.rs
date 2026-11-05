@@ -559,7 +559,7 @@ impl MultiFrictionModalSystem {
             state.preload = Some(report);
             return Ok(energy);
         }
-        if let Some(obstacles) = &self.obstacles {
+        if let Some(obstacles) = &mut self.obstacles {
             return obstacles.initialize_equilibrium(&mut self.core.network, external,
                 self.config.max_sweeps, gate).map_err(Into::into);
         }
