@@ -156,6 +156,7 @@ pub fn solve_hb_adaptive<P: OrbitProblem>(
         hb,
         budget,
         None,
+        None,
     )
 }
 
@@ -188,6 +189,7 @@ pub fn solve_hb_adaptive_seeded<P: OrbitProblem>(
         hb,
         budget,
         None,
+        None,
     )
 }
 
@@ -213,7 +215,47 @@ pub fn solve_hb_adaptive_scaled_seeded<P: OrbitProblem>(
 ) -> Result<AdaptiveHbOrbit, OrbitError> {
     admit(problem.dim(), anchor, hb, budget)?;
     let initial = solve_hb_scaled_seeded(problem, anchor, seed, hb, scales)?.orbit;
-    refine(problem, anchor, initial, hb, budget, Some(scales))
+    refine(problem, anchor, initial, hb, budget, Some(scales), None)
+}
+
+/// Refine an autonomous cycle with a fixed full-waveform phase reference and
+/// independently declared physical state/equation scales at every solved order.
+///
+/// The initial full physical seed defines the phase chart documented by
+/// [`super::solve_hb_autonomous_scaled_seeded`]. That same reference is extended
+/// by zero for every newly retained harmonic; it is never replaced by a warm
+/// start. This preserves phase across orders even when the first coordinate is
+/// static or its fundamental vanishes. All original balance rows remain active.
+///
+/// Independent sampling, omitted-equation defects, inter-order waveform change
+/// and frequency change use the same physical checks as [`solve_hb_adaptive`].
+/// They are measured finite-resolution evidence, not an infinite-tail bound.
+///
+/// # Errors
+/// The refusals of [`super::solve_hb_autonomous_scaled_seeded`] and
+/// [`solve_hb_adaptive`], before source evaluation for invalid inputs.
+pub fn solve_hb_autonomous_adaptive_scaled_seeded<P: OrbitProblem>(
+    problem: &P,
+    seed: Vec<f64>,
+    hb: &HbBudget,
+    budget: &HbRefinementBudget,
+    scales: &HbScales,
+) -> Result<AdaptiveHbOrbit, OrbitError> {
+    let anchor = HbAnchor::Autonomous {
+        omega_guess: seed.last().copied().unwrap_or(f64::NAN),
+    };
+    admit(problem.dim(), anchor, hb, budget)?;
+    let reference = super::phase::PhaseCondition::new(problem, &seed, hb, scales)?;
+    let initial = super::phase::solve_with_reference(problem, seed, hb, scales, &reference)?.orbit;
+    refine(
+        problem,
+        anchor,
+        initial,
+        hb,
+        budget,
+        Some(scales),
+        Some(&reference),
+    )
 }
 
 // Parseval RMS for a real Fourier series, normalized BEFORE squaring so tiny
@@ -511,6 +553,7 @@ fn refine<P: OrbitProblem>(
     hb: &HbBudget,
     budget: &HbRefinementBudget,
     scales: Option<&HbScales>,
+    phase: Option<&super::phase::PhaseCondition>,
 ) -> Result<AdaptiveHbOrbit, OrbitError> {
     let mut previous: Option<HbOrbit> = None;
     let mut trace = Vec::new();
@@ -567,7 +610,12 @@ fn refine<P: OrbitProblem>(
             ..*hb
         };
         let next_orbit = if let Some(scales) = scales {
-            solve_hb_scaled_seeded(problem, anchor, seed, &next_budget, scales)?.orbit
+            if let Some(reference) = phase {
+                super::phase::solve_with_reference(problem, seed, &next_budget, scales, reference)?
+                    .orbit
+            } else {
+                solve_hb_scaled_seeded(problem, anchor, seed, &next_budget, scales)?.orbit
+            }
         } else {
             solve_hb_seeded(problem, anchor, seed, &next_budget)?
         };

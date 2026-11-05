@@ -47,6 +47,20 @@ API — never instrument-shaped.
   retained alongside the original physical residual trace. This is the entry
   for mixed-unit or very small physical responses; the original unscaled
   entry points retain their existing coefficient-relative convergence rule.
+- `solve_hb_autonomous_scaled_seeded` uses a complete physical seed and a
+  fixed full-waveform phase hyperplane in the normalized Parseval state chart.
+  All original coefficients and balance rows remain active; the first state may
+  be static or lack a fundamental, and higher harmonics can define the phase.
+  Its exact phase row is separate from dynamical deflation and enters only the
+  normalized residual; raw diagnostics retain original physical balance units.
+  `solve_hb_autonomous_adaptive_scaled_seeded` preserves that initial reference
+  across order extensions, retaining independent physical refinement checks.
+  Nonautonomous problems and malformed inputs refuse before source callbacks;
+  a DC-only reference refuses as `TrivialCollapse`. This local phase chart does
+  not prescribe amplitude or establish primitive period, existence or stability.
+  G1/G3 checks in `tests/autonomous_harmonic_phase.rs` cover a static first state,
+  independent state/equation units, exact/probed tangents, deflation, a reference
+  containing only a second harmonic, and phase preservation across refinement.
 - `HbRefinementBudget` / `solve_hb_adaptive` /
   `solve_hb_adaptive_seeded` -> `AdaptiveHbOrbit`. These additive entry
   points retain the fixed-order Newton budget, start at its harmonic order,

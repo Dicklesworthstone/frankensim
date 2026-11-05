@@ -32,6 +32,7 @@ pub struct ScaledHbOrbit {
     pub orbit: HbOrbit,
     /// Independently sampled normalized Parseval residual. For a backbone,
     /// includes its relative first-harmonic amplitude error as an extra row.
+    /// A full-waveform autonomous solve includes its normalized phase row.
     pub scaled_residual: f64,
     /// Normalized Parseval change of the balance on the finer AFT grid.
     pub scaled_sampling_defect: f64,
@@ -67,7 +68,7 @@ pub fn solve_hb_scaled_seeded<P: OrbitProblem>(
     scales: &HbScales,
 ) -> Result<ScaledHbOrbit, OrbitError> {
     let admitted = AdmittedScales::new(problem.dim(), anchor, &seed, budget, scales)?;
-    super::solve_hb_seeded_impl(problem, anchor, seed, budget, Some(&admitted))
+    super::solve_hb_seeded_impl(problem, anchor, seed, budget, Some(&admitted), None)
 }
 
 pub(super) struct AdmittedScales {

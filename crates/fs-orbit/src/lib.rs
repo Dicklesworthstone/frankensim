@@ -40,10 +40,14 @@ mod adaptive;
 pub use adaptive::{
     AdaptiveHbOrbit, HbRefinementBudget, HbRefinementCheck, solve_hb_adaptive,
     solve_hb_adaptive_scaled_seeded, solve_hb_adaptive_seeded,
+    solve_hb_autonomous_adaptive_scaled_seeded,
 };
 
 mod scaling;
 pub use scaling::{HbScales, ScaledHbOrbit, solve_hb_scaled_seeded};
+
+mod phase;
+pub use phase::solve_hb_autonomous_scaled_seeded;
 
 mod forced;
 pub use forced::{ContinuationScales, ScaledContinuationPoint, continue_branch_scaled_seeded};
@@ -780,7 +784,7 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
     u: Vec<f64>,
     budget: &HbBudget,
 ) -> Result<HbOrbit, OrbitError> {
-    solve_hb_seeded_impl(problem, anchor, u, budget, None).map(|result| result.orbit)
+    solve_hb_seeded_impl(problem, anchor, u, budget, None, None).map(|result| result.orbit)
 }
 
 #[allow(clippy::too_many_lines)] // the same Newton owner serves both physical charts
@@ -790,6 +794,7 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
     mut u: Vec<f64>,
     budget: &HbBudget,
     scales: Option<&scaling::AdmittedScales>,
+    phase: Option<&phase::PhaseCondition>,
 ) -> Result<ScaledHbOrbit, OrbitError> {
     let amplitude_row = admitted_backbone_amplitude(anchor, budget.tolerance)?;
     let d = problem.dim();
@@ -829,16 +834,17 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
     // amplitude, so omega is phase-independent).
     let (fixed, dropped): (Vec<usize>, Vec<usize>) = match anchor {
         HbAnchor::Forced { .. } | HbAnchor::Backbone { .. } => (vec![], vec![]),
-        HbAnchor::Autonomous { .. } => (vec![pack.im_index(1, 0)], vec![]),
+        HbAnchor::Autonomous { .. } if phase.is_none() => (vec![pack.im_index(1, 0)], vec![]),
+        HbAnchor::Autonomous { .. } => (vec![], vec![]),
     };
-    if let HbAnchor::Autonomous { .. } = anchor {
+    if matches!(anchor, HbAnchor::Autonomous { .. }) && phase.is_none() {
         u[pack.im_index(1, 0)] = 0.0;
     }
     let free: Vec<usize> = (0..pack.len()).filter(|i| !fixed.contains(i)).collect();
     let kept: Vec<usize> = (0..pack.coeff_len())
         .filter(|i| !dropped.contains(i))
         .collect();
-    let extra = usize::from(amplitude_row.is_some());
+    let extra = usize::from(amplitude_row.is_some() || phase.is_some());
     if free.len() != kept.len() + extra {
         return Err(OrbitError::BadParameter {
             what: "anchor produced a non-square system",
@@ -873,20 +879,29 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
             1.0
         }
     };
-    let amp_residual = |u: &[f64]| -> f64 {
-        amplitude_row.map_or(0.0, |a| {
-            let re = u[pack.re_index(1, 0)];
-            let im = u[pack.im_index(1, 0)];
-            det::hypot(re, im) - 0.5 * a
-        })
+    let constraint_residual = |u: &[f64]| -> f64 {
+        phase.map_or_else(
+            || {
+                amplitude_row.map_or(0.0, |a| {
+                    let re = u[pack.re_index(1, 0)];
+                    let im = u[pack.im_index(1, 0)];
+                    det::hypot(re, im) - 0.5 * a
+                })
+            },
+            |phase| phase.value(u),
+        )
     };
     for iter in 0..budget.max_newton {
         hb_residual(problem, &pack, &u, omega_fixed, &mut aft, &mut res);
         let mut r: Vec<f64> = kept.iter().map(|&i| res[i]).collect();
-        if amplitude_row.is_some() {
-            r.push(amp_residual(&u));
+        if extra != 0 {
+            r.push(constraint_residual(&u));
         }
-        let rn = scales.map_or_else(|| norm(&r), |_| scaling::length(r.iter().copied()));
+        let physical_rows = if phase.is_some() { &res } else { &r };
+        let rn = scales.map_or_else(
+            || norm(physical_rows),
+            |_| scaling::length(physical_rows.iter().copied()),
+        );
         let measured = row_norm(&r);
         if scales.is_some() && !measured.is_finite() {
             return Err(OrbitError::BadParameter {
@@ -911,7 +926,7 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
             )
         };
         let relative_amplitude_error =
-            amplitude_row.map_or(0.0, |a| 2.0 * (amp_residual(&u) / a).abs());
+            amplitude_row.map_or(0.0, |a| 2.0 * (constraint_residual(&u) / a).abs());
         if measured < budget.tolerance * scale && relative_amplitude_error < budget.tolerance {
             let (finer, checked, sampling_defect) =
                 check_sampling(problem, &pack, &u, omega_fixed, &aft, &res)?;
@@ -920,15 +935,24 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
             });
             let mut checked_sq: f64 = kept.iter().map(|&i| checked[i] * checked[i]).sum();
             if amplitude_row.is_some() {
-                let ar = amp_residual(&u);
+                let ar = constraint_residual(&u);
                 checked_sq += ar * ar;
             }
             let checked_norm = scales.map_or_else(
                 || det::sqrt(checked_sq),
-                |_| det::hypot(scaling::length(checked.iter().copied()), amp_residual(&u)),
+                |_| {
+                    det::hypot(
+                        scaling::length(checked.iter().copied()),
+                        if amplitude_row.is_some() {
+                            constraint_residual(&u)
+                        } else {
+                            0.0
+                        },
+                    )
+                },
             );
             let checked_metric = scales.map_or(checked_norm, |scales| {
-                scales.balance_norm(&checked, amp_residual(&u))
+                scales.balance_norm(&checked, constraint_residual(&u))
             });
             let sampling_metric = scales.map_or(sampling_defect, |scales| {
                 scales.difference_norm(&checked, &res)
@@ -979,7 +1003,7 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
         // otherwise retain residual probes. Frequency remains a residual probe.
         let mut jac = vec![0.0f64; nn * nn];
         let mut res2 = vec![0.0f64; pack.coeff_len()];
-        let amp0 = amp_residual(&u);
+        let constraint0 = constraint_residual(&u);
         let amplitude_gradient = amplitude_row.map(|_| {
             let re = u[pack.re_index(1, 0)];
             let im = u[pack.im_index(1, 0)];
@@ -1015,6 +1039,10 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
         }
         let ac_norm = oscillatory_norm(&u);
         for (col, &ui) in free.iter().enumerate() {
+            if let Some(phase) = phase {
+                jac[kept.len() * nn + col] =
+                    phase.scaled_derivative(ui, scales.map_or(1.0, |scales| scales.columns[ui]));
+            }
             if let Some(gradient) = amplitude_gradient {
                 // Keep the physical amplitude equation separate from dynamical
                 // deflation, including when the source supplies its exact tangent.
@@ -1116,18 +1144,18 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
         };
         let m_now = deflate(&u);
         let mut step: Vec<f64> = r.iter().map(|v| v * m_now).collect();
-        if amplitude_row.is_some() {
-            // Deflation applies to the dynamical balance, not the prescribed
-            // amplitude row, whose analytic Jacobian is unscaled above.
-            step[kept.len()] = amp0;
+        if extra != 0 {
+            // Deflation applies only to the dynamical balance; the exact
+            // amplitude/phase equation retains its original constraint.
+            step[kept.len()] = constraint0;
         }
         if let Some(scales) = scales {
             for (value, unit) in step.iter_mut().zip(&scales.rows) {
                 *value /= unit;
             }
         }
-        let merit = if amplitude_row.is_some() {
-            norm(&step)
+        let merit = if extra != 0 {
+            scales.map_or_else(|| norm(&step), |_| scaling::length(step.iter().copied()))
         } else {
             measured * m_now
         };
@@ -1162,13 +1190,16 @@ fn solve_hb_seeded_impl<P: OrbitProblem>(
             let physical_norm = det::sqrt(physical_sq) * deflate(&u_try);
             let tn = if let Some(scales) = scales {
                 let physical = scales.row_norm(&trial) * deflate(&u_try);
-                if amplitude_row.is_some() {
-                    det::hypot(physical, amp_residual(&u_try) / scales.rows[kept.len()])
+                if extra != 0 {
+                    det::hypot(
+                        physical,
+                        constraint_residual(&u_try) / scales.rows[kept.len()],
+                    )
                 } else {
                     physical
                 }
-            } else if amplitude_row.is_some() {
-                det::hypot(physical_norm, amp_residual(&u_try))
+            } else if extra != 0 {
+                det::hypot(physical_norm, constraint_residual(&u_try))
             } else {
                 physical_norm
             };
