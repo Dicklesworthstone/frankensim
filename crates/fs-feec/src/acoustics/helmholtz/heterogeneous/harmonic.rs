@@ -437,6 +437,9 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         traces: &[VelocityTrace],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), HeterogeneousError> {
+        if self.pressure_release.faces.is_empty() {
+            return Ok(());
+        }
         for &(face, _) in traces {
             poll(cancelled)?;
             let mut key = face;

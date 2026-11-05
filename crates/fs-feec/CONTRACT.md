@@ -1890,3 +1890,27 @@ energy components, a conforming density/sound-speed interface with independent
 transfer-matrix pressure and passive boundary heat, P4 traces, original volume
 sources, dense-memory bounds and conflicting-law refusals. An ideal zero-pressure
 termination is still not a finite-opening radiation or end-correction model.
+
+`HeterogeneousHelmholtzFe::prepare_time_with_pressure_release` extends the same
+trace elimination to sparse midpoint evolution. The original positive-definite
+effective operator is factored only on free coordinates, with its native sparse
+memory limits; pressure, potential, sources and physical work retain their full
+original coordinates. Free-equation residual corrections lift exact zeros into
+the constrained pressure trace. No dense mass inverse or extra modal basis is
+introduced, and the existing mechanical-wall path keeps its empty constraint
+map and original ordering.
+
+This time owner explicitly admits zero pressure AND zero pressure-potential
+trace. Since `p = psi_dot`, zero pressure alone would permit a time-independent
+nonzero potential trace; arbitrary stationary flow components are outside this
+entry point. Imported states must choose a compatible potential gauge and are
+refused rather than projected when a constrained coefficient is nonzero. State
+identity, passive boundary work, original volume-source work and transactional
+cancellation checks remain in force. Empty release sets preserve the original
+warm-step path without extra source-face sorting or repeated finite-state scans.
+
+Transient regressions separate spatial mode accuracy from midpoint temporal
+phase refinement, verify conserved acoustic energy, and compare a forced P2
+polynomial pressure/potential solution with independent kinetic, compression,
+volume-input and passive-wall work. They also exercise strict high-order state
+admission, conflicting laws, free-DOF limits and reusable factors after refusal.

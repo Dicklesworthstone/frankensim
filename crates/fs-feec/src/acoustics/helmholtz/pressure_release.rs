@@ -31,7 +31,7 @@ pub struct PressureReleaseModes {
     pub free_dofs: usize,
 }
 
-/// Shared by modal and full-space harmonic solves on the same geometry.
+/// Shared by modal, harmonic and sparse transient solves on the same geometry.
 pub(super) struct PressureReleaseConstraints {
     pub(super) free_dofs: Vec<usize>,
     pub(super) constrained: Vec<bool>,
