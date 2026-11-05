@@ -15588,11 +15588,13 @@ coordinates cannot silently acquire fracture calibration.
 Eight core tests and seven source regression definitions cover independent
 formula/analytic initiation, signed-factor admission, path irreversibility,
 rotation/scaling, restart, source meaning, typed domains, ambiguity pins and
-original material/context binding. These new tests have not executed: the
-execution environment failed during dependency preparation. This owner adds
-no post-initiation softening, fracture energy, characteristic length, crack
-topology, mesh-objective failure, Lode dependence or experimentally validated
-component failure. Those broader fracture tasks remain open.
+original material/context binding. The eight initiation tests now pass in the
+bounded actual-source numeric build described below; the source regressions
+remain unexecuted. Initiation alone adds no post-initiation softening, fracture
+energy, characteristic length, crack topology, mesh-objective failure, Lode
+dependence or experimentally validated component failure. Progressive small-
+strain evolution is now provided by the separate owner below; broader fracture
+tasks remain open.
 
 ## Hyperelastic models with explicit Cauchy tensile limits
 
@@ -15672,3 +15674,66 @@ Four focused regressions cover source-driven hydrostatic compaction and mixed
 loading, fixed-temperature interpolation with extra physics and receipts,
 missing/wrong/other-law calibration refusal, explicit zero limits, ambiguous
 source pinning, and refusal to freeze evolving mechanical conditions.
+
+
+## Progressive ductile J2 softening with explicit work and length
+
+`ductile::evolution::DuctileJ2` composes the ORIGINAL native J2 radial return,
+energetic isotropic/Prager hardening, native work audit and algorithmic tangent
+with irreversible exponential attenuation. After initiation,
+`g = exp[-h/Gp * integral (sigma_y + H_iso*alpha) d(alpha)]`. The receiving
+geometry supplies the original fixed characteristic length h. Gp is explicitly
+POST-INITIATION EQUIVALENT PLASTIC WORK PER AREA; it is not total thermodynamic
+fracture dissipation, cohesive Gc or toughness. The scalar degraded-work
+diagnostic is `Gp*(1-g)`; it is not added again to mechanical dissipation.
+
+The tensile volumetric and deviatoric response degrade while compressive bulk
+stiffness remains intact. The stored potential is
+`g*psi_native + (1-g)*K/2*min(trace(strain),0)^2`. Physical stress and tangent
+differentiate this split consistently. The tangent includes native accumulated-
+plastic-strain sensitivity and moving onset, including triaxiality and rate
+effects during the crossing increment. Initiation remains endpoint quadrature;
+after its first accepted crossing the initiation observation freezes, while
+the original native plastic clock continues. Supported temperature is required
+even during elastic unloading. The tangent may be nonsymmetric and indefinite.
+
+Endpoint external work closes into stored-energy change, native plastic
+dissipation, released stored energy from damage, and backward-Euler numerical
+loss. Numerical loss is not plastic heat or fracture energy. This discrete
+identity does not certify an unresolved physical trajectory. An explicit
+maximum damage increment refuses excessive trials without clipping damage or
+the tangent; native continuation must refine the physical loading interval.
+There is no residual stiffness floor. Underflowed integrity and nonfinite
+work refuse. Trial updates are fixed-size and allocation-free, preserve the
+old state, and bind history to the exact immutable material/length owner.
+
+`ductile::evolution::source::ResolvedDuctileJ2` retains the complete original
+`ResolvedJ2Plasticity` source bundle and the same-card initiation calibration.
+It requires exactly `ductile_post_initiation_equivalent_plastic_work_per_area`
+with scalar J/m2 dimensions, positive original data and supported fixed
+external conditions. Engineering elongation, toughness and other fracture-work
+properties are not aliases. Card/state identity and the complete fixed context
+must match in both directions. Geometry supplies length explicitly; calibration
+cannot be overridden through numerical settings. Prepared runtime updates
+make no material-database queries or source-card copies.
+
+FACT (bounded actual-source numeric execution): all nine new evolution tests
+and all eight existing initiation tests pass. They exercise intact/native
+agreement, the independent hardening-work integral, all 36 tangent entries
+through coupled initiation and compressive reclosure, length/work scaling,
+irreversibility, plastic reversal energy balance, repeatability, transactional
+refusals and numerical-loss decay on sufficiently refined paths. A reproduced
+held-strain restart defect now replays the exact accepted state with zero
+incremental work; nonzero loading still obeys the original rate support. The build
+used the actual native J2, elasticity, tensor and energy bodies with genuine
+current dependencies. It excluded unrelated module declarations and source
+forwarding; this is not a full-crate or integrated structural build. Five new
+source-adapter regression definitions cover original receipts/context, physical
+response and source/domain refusal; those tests have not executed.
+
+This owner advances the post-initiation part of MR63
+(`frankensim-material-reality-ui2if.7.11`) without closing that broader bead.
+Characteristic-length scaling does not establish arbitrary-mesh crack-path
+objectivity. Finite deformation, crack topology, new-surface contact, erosion,
+fragments, history transfer, Lode dependence, heat partition and experimental
+qualification remain outside this model.

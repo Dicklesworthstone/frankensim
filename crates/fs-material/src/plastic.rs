@@ -124,6 +124,29 @@ impl J2Plasticity {
         core::array::from_fn(|i| scale * strain[i])
     }
 
+    /// Derivative of the native endpoint accumulated plastic strain with
+    /// respect to the six total tensor-Voigt strain coordinates, holding the
+    /// accepted history fixed. This reuses the original radial predictor and
+    /// therefore retains mixed-hardening and hydrostatic-shift behavior.
+    ///
+    /// The elastic branch returns zero. At first yield this is the native
+    /// elastic-side selection; a unique classical derivative does not exist.
+    /// Shear entries include the factor of two from tensor contraction.
+    #[must_use]
+    pub fn accumulated_plastic_strain_gradient(
+        &self,
+        strain: &Voigt,
+        state: &J2State,
+    ) -> Voigt {
+        let update = self.radial_return(strain, state, 0.0);
+        if !update.plastic {
+            return [0.0; 6];
+        }
+        let (_, mu) = self.elastic.lame();
+        let scale = (2.0 * mu / (3.0 * mu + self.combined_hardening())) * det::sqrt(1.5);
+        core::array::from_fn(|j| scale * update.n_hat[j] * if j < 3 { 1.0 } else { 2.0 })
+    }
+
     fn radial_return(&self, strain: &Voigt, state: &J2State, overstress_modulus: f64) -> Update {
         let (lambda, mu) = self.elastic.lame();
         let mut elastic_strain = [0.0f64; 6];
