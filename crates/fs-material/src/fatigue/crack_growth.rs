@@ -6,6 +6,11 @@
 //! Normalization avoids an exponent-dependent and easily misconverted unit
 //! for the conventional Paris coefficient C. Parameters are caller-supplied
 //! empirical calibration, with the existing material/process/environment scope.
+//! An explicitly calibrated Walker option adds the normalized multiplier
+//! `[(1-R_ref)/(1-R)]^[exponent*(1-gamma)]`. The reference rate then applies
+//! at both the reference full range and reference load ratio. Gamma is the
+//! exponent on `(1-R)` inside Walker's equivalent intensity, not the outer
+//! crack-growth exponent. No Walker exponent is inferred from a Paris fit.
 //!
 //! Stress intensity is `K = Y(a) sigma sqrt(pi a)`. Constant geometry retains
 //! an analytical O(1) fast path. Declared tabulated geometry uses log-log Y(a)
@@ -28,7 +33,9 @@
 //!
 //! References: NASA-HDBK-5010 Volume 2 Revision A, §7.3, equations 7.3-1–3;
 //! <https://standards.nasa.gov/standard/NASA/NASA-HDBK-5010-VOLUME_2>;
-//! AFGROW Damage Tolerant Design Handbook, §5.1.2 (Paris-region applicability).
+//! AFGROW Damage Tolerant Design Handbook, §5.1.2, equation 5.1.3, p. 5.1.9
+//! (Walker convention and Paris-region applicability):
+//! <https://www.afgrow.net/applications/dtdhandbook/pdfs/sec5_1_0.pdf>.
 
 use std::sync::Arc;
 
@@ -51,14 +58,29 @@ pub struct ParisParameters {
     /// Positive reference stress-intensity RANGE in Pa sqrt(m).
     pub reference_delta_k_pa_sqrt_m: f64,
     /// Positive crack extension at the reference range, in m/full cycle.
+    /// With Walker correction, this is at its declared reference load ratio.
     pub reference_rate_m_per_cycle: f64,
     /// Positive dimensionless Paris exponent.
     pub exponent: f64,
 }
 
+/// Calibrated tensile Walker load-ratio dependence. AFGROW equation 5.1.3 is
+/// `da/dN=C[(1-R)^gamma*K_max]^exponent`; equivalently, its intensity is
+/// `Delta-K/(1-R)^(1-gamma)`. Only the declared `0 <= gamma <= 1` branch is
+/// supported. Gamma=1 recovers Paris; gamma=0 depends on K_max alone within
+/// the still-required positive-range fit domain. Neither is a static-growth law.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WalkerParameters {
+    /// Load ratio at which `ParisParameters` declares its reference rate/range.
+    pub reference_load_ratio: f64,
+    /// Walker's inner `(1-R)` exponent; distinct from the Paris growth exponent.
+    pub gamma: f64,
+}
+
 /// Supported fit/LEFM domain at the fixed temperature in `FatigueScope`.
-/// R support declares where this same fit is applicable; it does not introduce
-/// a Walker/Forman correction or infer support between disjoint datasets.
+/// The bounds apply to actual Delta-K and R, including when Walker is selected.
+/// Declaring R support alone introduces no correction and does not infer support
+/// between disjoint datasets. A Walker law needs its own calibrated parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParisDomain {
     /// Inclusive lower Paris-region bound, NOT an arrest threshold.
@@ -79,6 +101,7 @@ pub struct ParisLaw {
     scope: FatigueScope,
     parameters: ParisParameters,
     domain: ParisDomain,
+    walker: Option<WalkerParameters>,
     source: Option<Arc<source::ParisCalibrationSource>>,
 }
 
@@ -245,8 +268,33 @@ impl ParisLaw {
             scope,
             parameters,
             domain,
+            walker: None,
             source: None,
         })
+    }
+
+    /// Declare a normalized Walker fit over the supplied actual-range/R domain.
+    /// The reference rate/range must be admissible at the reference R itself.
+    /// This creates caller-declared calibration; original material-card fits
+    /// must be resolved through their dedicated source adapter instead.
+    pub fn new_walker(
+        scope: FatigueScope,
+        parameters: ParisParameters,
+        domain: ParisDomain,
+        walker: WalkerParameters,
+    ) -> Result<Self, CrackGrowthError> {
+        let mut law = Self::new(scope, parameters, domain)?;
+        if !walker.gamma.is_finite() || !(0.0..=1.0).contains(&walker.gamma) {
+            return Err(CrackGrowthError::Invalid(
+                "declare a calibrated Walker gamma in [0, 1]",
+            ));
+        }
+        law.check_ratio(walker.reference_load_ratio)?;
+        law.check_maximum_k(
+            parameters.reference_delta_k_pa_sqrt_m / (1.0 - walker.reference_load_ratio),
+        )?;
+        law.walker = Some(walker);
+        Ok(law)
     }
 
     pub fn scope(&self) -> &FatigueScope {
@@ -257,6 +305,11 @@ impl ParisLaw {
     }
     pub fn domain(&self) -> ParisDomain {
         self.domain
+    }
+
+    /// Explicit Walker calibration, or None for the unchanged plain Paris law.
+    pub fn walker(&self) -> Option<WalkerParameters> {
+        self.walker
     }
 
     /// Original immutable calibration, when resolved from a material card.
@@ -274,11 +327,28 @@ impl ParisLaw {
         self.check_ratio(load_ratio)?;
         self.check_delta_k(delta_k_pa_sqrt_m)?;
         self.check_maximum_k(delta_k_pa_sqrt_m / (1.0 - load_ratio))?;
-        if delta_k_pa_sqrt_m == self.parameters.reference_delta_k_pa_sqrt_m {
+        let active_walker = self
+            .walker
+            .filter(|walker| walker.gamma != 1.0 && load_ratio != walker.reference_load_ratio);
+        if delta_k_pa_sqrt_m == self.parameters.reference_delta_k_pa_sqrt_m
+            && active_walker.is_none()
+        {
             return Ok(self.parameters.reference_rate_m_per_cycle);
         }
-        let log_ratio =
+        let mut log_ratio =
             det::ln(delta_k_pa_sqrt_m) - det::ln(self.parameters.reference_delta_k_pa_sqrt_m);
+        if let Some(walker) = active_walker {
+            // Form the small difference directly from R, before subtraction
+            // from one could erase it. For separated ratios, subtract logs to
+            // avoid loss near a relative change of -1.
+            let relative = (load_ratio - walker.reference_load_ratio) / (1.0 - load_ratio);
+            let log_ratio_shift = if relative.abs() < 0.5 {
+                relative * log1p_over_x(relative)
+            } else {
+                det::ln(1.0 - walker.reference_load_ratio) - det::ln(1.0 - load_ratio)
+            };
+            log_ratio += (1.0 - walker.gamma) * log_ratio_shift;
+        }
         let log_rate = det::ln(self.parameters.reference_rate_m_per_cycle)
             + self.parameters.exponent * log_ratio;
         let rate = det::exp(log_rate);

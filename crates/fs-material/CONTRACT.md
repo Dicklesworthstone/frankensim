@@ -241,6 +241,21 @@ The original `FatigueScope` retains material, process, surface/geometry,
 environment, load basis, temperature and caller-declared source reference.
 These declarations do not confer material-database or measured-data authority.
 
+`ParisLaw::new_walker` explicitly selects calibrated tensile load-ratio
+dependence. Its reference rate belongs to both the reference full Delta-K and
+`WalkerParameters::reference_load_ratio`. The normalized multiplier is
+`((1-R_ref)/(1-R))^[m*(1-gamma)]`, following AFGROW DTD Handbook equation
+5.1.3; gamma is the inner Walker exponent and m is the existing growth
+exponent. The admitted gamma branch is `[0,1]`: gamma=1 retains plain Paris
+arithmetic, and gamma=0 gives Kmax dependence for supported positive ranges.
+The reference R and reference Kmax must themselves satisfy the original fit.
+Every runtime check still uses actual R, actual full Delta-K and actual Kmax.
+Near-equal ratios use their direct difference before logarithmic evaluation.
+At fixed stress extrema this correction changes the rate multiplier while the
+existing constant/table geometry power and analytical integrations remain
+unchanged. No compression, closure, overload retardation, near-threshold law
+or high-K fracture acceleration is inferred by selecting Walker.
+
 `crack_growth::source::resolve_paris` resolves four original material-card
 claims: squared reference full Delta-K, growth in metres per full cycle,
 the Delta-K exponent, and squared exclusive maximum-K validity cutoff.
