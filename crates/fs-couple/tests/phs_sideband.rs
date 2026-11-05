@@ -54,6 +54,15 @@ fn scales(n: usize) -> SidebandScales {
         equations: (0..n).map(|k| 0.7 + 0.4 * k as f64).collect(),
     }
 }
+
+fn derivative_controls() -> fs_orbit::sideband::sensitivity::SidebandCarrierDerivativeControls {
+    fs_orbit::sideband::sensitivity::SidebandCarrierDerivativeControls {
+        maximum_payload_bytes: 32 << 20,
+        maximum_work: 1_000_000_000,
+        maximum_relative_residual: 1e-12,
+        maximum_omitted_residual: 2e-8,
+    }
+}
 fn orbit(omega: f64, coeffs: Vec<Vec<C64>>) -> HbOrbit {
     // Deliberately untrusted metadata: the adapter must re-evaluate the source.
     HbOrbit {

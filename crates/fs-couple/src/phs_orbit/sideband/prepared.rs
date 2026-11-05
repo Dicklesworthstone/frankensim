@@ -21,6 +21,9 @@ use fs_orbit::{
     },
 };
 
+mod sensitivity;
+pub use sensitivity::PhsPortSidebandCarrierDerivativeResponse;
+
 /// A complete physical response with independently measured sideband convergence.
 /// The state order is `response.state_harmonics`; the output order remains the
 /// separately authored `response.output_harmonics`. Neither finite-grid trace

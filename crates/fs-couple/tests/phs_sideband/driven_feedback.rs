@@ -1,4 +1,4 @@
-use super::{QuarticOnly, controls, near, orbit, scales};
+use super::{QuarticOnly, controls, derivative_controls, near, orbit, scales};
 use core::cell::Cell;
 use fs_couple::phs_orbit::{
     AutonomousPortFeedback, PeriodicPortInput,
@@ -47,6 +47,24 @@ fn full_hessian(_: &[f64], direction: &[f64], out: &mut [f64]) -> bool {
     out[1] = direction[1] / MASS;
     out[2] = direction[2] - det::sqrt(ARM) * direction[0];
     true
+}
+
+fn exact_derivative(frequency: f64, force: C64, force_derivative: C64, gain: f64) -> [C64; 3] {
+    let state = exact(frequency, force, gain);
+    let s = C64::new(0.0, frequency);
+    let relaxation = C64::ONE + s.scale(TAU);
+    let denominator = C64::new(
+        STIFFNESS - MASS * frequency * frequency,
+        (DAMPING + gain) * frequency,
+    ) + (s.scale(TAU) / relaxation).scale(ARM);
+    let denominator_derivative = C64::new(-2.0 * MASS * frequency, DAMPING + gain)
+        + C64::new(0.0, ARM * TAU) / (relaxation * relaxation);
+    let q = (force_derivative - denominator_derivative * state[0]) / denominator;
+    [
+        q,
+        C64::new(0.0, MASS) * (state[0] + q.scale(frequency)),
+        q.scale(det::sqrt(ARM)) / relaxation - C64::new(0.0, TAU) * state[2] / relaxation,
+    ]
 }
 
 #[test]
@@ -510,5 +528,228 @@ fn adaptive_original_output_refinement_refusal_grid_budgets_and_cancellation_rem
     near(result.state_response.coefficients[31], dq, 2e-12);
     near(result.port_coefficients[0], modulation.conj() * dq, 2e-12);
     near(result.port_coefficients[4], modulation * dq, 2e-12);
+    assert_eq!(base.coeffs, original);
+}
+
+#[test]
+fn carrier_derivative_preserves_dc_kinematics_source_phase_and_full_maxwell_dispersion() {
+    let gain = 0.7;
+    let feedback = VelocityFeedback(gain);
+    let system = fs_phs::mass_spring_damper(MASS, STIFFNESS, DAMPING)
+        .unwrap()
+        .with_relaxation_branches(vec![RelaxationBranch {
+            projection: vec![1.0, 0.0],
+            stiffness: ARM,
+            relaxation_time_s: TAU,
+        }])
+        .unwrap();
+    let base_force = C64::new(0.04, -0.02);
+    let base = orbit(
+        OMEGA,
+        exact(OMEGA, base_force, gain)
+            .into_iter()
+            .map(|z| vec![C64::ZERO, z])
+            .collect(),
+    );
+    let original = base.coeffs.clone();
+    let input = PeriodicPortInput::new(OMEGA, vec![vec![C64::ZERO, base_force]]).unwrap();
+    let calls = Cell::new(0_usize);
+    let derivative = |_: &[f64], _: &[f64], out: &mut [f64]| {
+        calls.set(calls.get() + 1);
+        out.fill(0.0);
+        out[1] = -gain / MASS;
+        true
+    };
+    let mut c = controls(3, 1, 1, 1);
+    c.max_hessian_actions = 1792;
+    let forcing = [
+        C64::from_re(0.2),
+        C64::new(0.1, -0.07),
+        C64::new(0.03, 0.09),
+    ];
+    let slope = [
+        C64::new(-0.03, 0.04),
+        C64::new(0.02, -0.05),
+        C64::new(0.01, 0.03),
+    ];
+    let mut source = PhsPortSidebandSource::forced_feedback_analytic(
+        &system,
+        &input,
+        &feedback,
+        &derivative,
+        &base,
+        &c,
+        &full_hessian,
+    )
+    .unwrap();
+    let mut prepared = source.prepare(&scales(3), || false).unwrap();
+    let preparations = calls.get();
+    assert_eq!(preparations, 385);
+    for carrier in [OMEGA, 1.2, -0.4] {
+        let mut factor = prepared.factor(carrier, || false).unwrap();
+        for authored_slope in [None, Some(slope.as_slice())] {
+            let pair = factor
+                .solve_with_carrier_derivative(
+                    &forcing,
+                    authored_slope,
+                    derivative_controls(),
+                    &[2e-10],
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(pair.total_hessian_actions, 1792);
+            assert_eq!(pair.response.hessian_actions, 896);
+            assert_eq!(pair.derivative_observation_trace.len(), 3);
+            assert_eq!(calls.get(), preparations);
+            for (band, force) in forcing.into_iter().enumerate() {
+                let w = carrier + (band as f64 - 1.0) * OMEGA;
+                let expected = exact(w, force, gain);
+                let expected_derivative = exact_derivative(
+                    w,
+                    force,
+                    authored_slope.map_or(C64::ZERO, |s| s[band]),
+                    gain,
+                );
+                for j in 0..3 {
+                    near(
+                        pair.response.state_response.coefficients[3 * band + j],
+                        expected[j],
+                        5e-12,
+                    );
+                    near(
+                        pair.state_angular_derivative.coefficients[3 * band + j],
+                        expected_derivative[j],
+                        6e-12,
+                    );
+                }
+                near(
+                    pair.response.port_coefficients[band],
+                    expected[1].scale(1.0 / MASS),
+                    5e-12,
+                );
+                near(
+                    pair.port_angular_derivative[band],
+                    expected_derivative[1].scale(1.0 / MASS),
+                    6e-12,
+                );
+            }
+            if carrier == OMEGA {
+                // The DC band has zero velocity, but its continuous carrier
+                // derivative contains i*q even with a frequency-independent force.
+                assert!(pair.response.port_coefficients[0].abs() < 1e-13);
+                near(
+                    pair.port_angular_derivative[0],
+                    C64::new(0.0, forcing[0].re / STIFFNESS),
+                    5e-12,
+                );
+            }
+        }
+    }
+    assert_eq!(base.coeffs, original);
+}
+
+#[test]
+fn carrier_derivative_has_independent_output_checks_and_atomic_combined_observation_budgets() {
+    let system =
+        PortHamiltonian::new(1, 1, vec![0.0], vec![0.0], vec![1.0], Box::new(QuarticOnly)).unwrap();
+    let (omega, amplitude, phase, carrier) = (1.1, 0.4, 0.2, 0.01);
+    let q1 = C64::new(det::cos(phase), det::sin(phase)).scale(0.5 * amplitude);
+    let base = orbit(omega, vec![vec![C64::ZERO, q1]]);
+    let original = base.coeffs.clone();
+    let input =
+        PeriodicPortInput::new(omega, vec![vec![C64::ZERO, C64::new(0.0, omega) * q1]]).unwrap();
+    let force = C64::from_re(1e-9);
+    let actions = Cell::new(0_usize);
+    let hessian = |x: &[f64], v: &[f64], out: &mut [f64]| {
+        actions.set(actions.get() + 1);
+        out[0] = (2.0 + 9.0 * x[0] * x[0]) * v[0];
+        true
+    };
+    let mut c = controls(1, 1, 0, 0);
+    c.max_hessian_actions = 1792;
+    c.envelope_tolerances[0] = 1e-6;
+    {
+        let mut source =
+            PhsPortSidebandSource::forced_analytic(&system, &input, &base, &c, &hessian).unwrap();
+        let mut prepared = source.prepare(&scales(1), || false).unwrap();
+        let mut factor = prepared.factor(carrier, || false).unwrap();
+        // Its state derivative is exact. The primal output tail fits its own
+        // units/tolerance, but the omitted derivative output is 100 times larger.
+        assert!(matches!(
+            factor.solve_with_carrier_derivative(
+                &[force],
+                None,
+                derivative_controls(),
+                &[1e-8],
+                || false,
+            ),
+            Err(PhsPortSidebandError::DerivativeObservationUnresolved { .. })
+        ));
+        factor.solve(&[force], || false).unwrap();
+    }
+    c.output_harmonics = 2;
+    for limitation in 0..3 {
+        let mut limited = c.clone();
+        match limitation {
+            0 => limited.max_hessian_actions = 1791,
+            1 => limited.max_observation_work = 1_000_000,
+            // Enough for one 256-point observation, but not the first returned
+            // output/history retained alongside the derivative's final grid.
+            _ => limited.max_workspace_bytes = 43_592,
+        }
+        let mut source =
+            PhsPortSidebandSource::forced_analytic(&system, &input, &base, &limited, &hessian)
+                .unwrap();
+        let mut prepared = source.prepare(&scales(1), || false).unwrap();
+        let mut factor = prepared.factor(carrier, || false).unwrap();
+        let before = actions.get();
+        assert!(matches!(
+            factor.solve_with_carrier_derivative(
+                &[force],
+                None,
+                derivative_controls(),
+                &[1e-8],
+                || false,
+            ),
+            Err(PhsPortSidebandError::Budget(_))
+        ));
+        if limitation < 2 {
+            assert_eq!(actions.get(), before);
+        }
+        factor.solve(&[force], || false).unwrap();
+    }
+    let mut source =
+        PhsPortSidebandSource::forced_analytic(&system, &input, &base, &c, &hessian).unwrap();
+    let mut prepared = source.prepare(&scales(1), || false).unwrap();
+    let mut factor = prepared.factor(carrier, || false).unwrap();
+    let before = actions.get();
+    assert!(matches!(
+        factor.solve_with_carrier_derivative(
+            &[force],
+            None,
+            derivative_controls(),
+            &[1e-8],
+            || actions.get() > before + 896,
+        ),
+        Err(PhsPortSidebandError::Cancelled)
+    ));
+    assert_eq!(actions.get(), before + 897);
+    let pair = factor
+        .solve_with_carrier_derivative(&[force], None, derivative_controls(), &[1e-8], || false)
+        .unwrap();
+    let q = force / C64::new(0.0, carrier);
+    let dq = -q.scale(1.0 / carrier);
+    let modulation = (q1 * q1).scale(9.0);
+    near(pair.state_angular_derivative.coefficients[0], dq, 2e-12);
+    for (actual, expected) in pair.port_angular_derivative.iter().zip([
+        modulation.conj() * dq,
+        C64::ZERO,
+        dq.scale(2.0 + 4.5 * amplitude * amplitude),
+        C64::ZERO,
+        modulation * dq,
+    ]) {
+        near(*actual, expected, 2e-12);
+    }
+    assert_eq!(pair.total_hessian_actions, 1792);
     assert_eq!(base.coeffs, original);
 }

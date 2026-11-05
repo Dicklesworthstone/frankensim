@@ -27,8 +27,9 @@ use fs_phs::PortHamiltonian;
 
 mod prepared;
 pub use prepared::{
-    AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsPortSidebandSource,
-    PreparedPhsPortSidebands, solve_forced_feedback_port_sideband_response,
+    AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands,
+    PhsPortSidebandCarrierDerivativeResponse, PhsPortSidebandSource, PreparedPhsPortSidebands,
+    solve_forced_feedback_port_sideband_response,
     solve_forced_feedback_port_sideband_response_analytic,
 };
 
@@ -47,8 +48,10 @@ pub struct PhsPortSidebandControls {
     /// Largest power-of-two grid, at most 65536 and at least four times the
     /// first. Two successive grid comparisons must pass independently.
     pub max_samples: usize,
-    /// Maximum observation Hessian actions PER response; two per sample, for the real and
-    /// imaginary envelopes. Generic tangent preparation has its own budget.
+    /// Maximum observation Hessian actions per operation; two per sample, for
+    /// the real and imaginary envelopes. A response-with-carrier-derivative
+    /// operation shares this cap across BOTH observations. Generic tangent
+    /// preparation has its own budget.
     pub max_hessian_actions: usize,
     /// Extra adapter numerical payload, including mapped input, retained state
     /// response, tangent scratch, FFT plans/samples and both output spectra.
@@ -58,8 +61,10 @@ pub struct PhsPortSidebandControls {
     /// Original model/caller storage, callback-internal allocation and allocator
     /// metadata are excluded. Adapter source/tolerance scratch is included.
     pub max_workspace_bytes: usize,
-    /// Conservative observer/port-map arithmetic cap PER response, including dense quadratic
-    /// Hessian actions. Other source callbacks' internal work is source-defined.
+    /// Conservative observer/port-map arithmetic cap per operation, including
+    /// dense quadratic Hessian actions. A response/derivative pair shares this
+    /// cap across both observations and its exact physical port derivative.
+    /// Other source callbacks' internal work is source-defined.
     pub max_observation_work: u64,
     /// Absolute complex-envelope L2 tolerance per original output port, in its
     /// physical units. Retained sampling change and observed omitted-band norm
@@ -67,7 +72,9 @@ pub struct PhsPortSidebandControls {
     pub envelope_tolerances: Vec<f64>,
 }
 
-/// Independent finite-grid output evidence in the original physical port units.
+/// Independent finite-grid output evidence in the observed envelope's units:
+/// original physical port units, or those units per angular frequency for a
+/// carrier-derivative observation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhsPortSidebandCheck {
     pub samples: usize,
@@ -102,7 +109,14 @@ pub enum PhsPortSidebandError {
     SourceRefused,
     Cancelled,
     Sideband(SidebandError),
-    ObservationUnresolved { last: PhsPortSidebandCheck },
+    ObservationUnresolved {
+        last: PhsPortSidebandCheck,
+    },
+    /// The primal output resolved, but its carrier derivative did not. The
+    /// last norms are in physical output units per angular frequency.
+    DerivativeObservationUnresolved {
+        last: PhsPortSidebandCheck,
+    },
 }
 impl core::fmt::Display for PhsPortSidebandError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -416,11 +430,8 @@ fn admit_source(
             "two independent output comparisons exceed the Hessian-action cap",
         ));
     }
-    let minimum_work = 128 * n as u128 * m as u128 * bands as u128
-        + [1, 2, 4]
-            .iter()
-            .map(|factor| observation_work(n, m, c.initial_samples * factor))
-            .sum::<u128>();
+    let minimum_work =
+        input_work(n, m, c.sideband.harmonics) + minimum_observation_work(n, m, c.initial_samples);
     if minimum_work > c.max_observation_work as u128 {
         return Err(PhsPortSidebandError::Budget(
             "two independent output comparisons exceed the arithmetic cap",
@@ -431,13 +442,24 @@ fn admit_source(
 }
 
 fn admit_storage(n: usize, m: usize, c: &PhsPortSidebandControls, samples: usize) -> Result<()> {
+    admit_storage_with_retained(n, m, c, samples, 0)
+}
+
+fn admit_storage_with_retained(
+    n: usize,
+    m: usize,
+    c: &PhsPortSidebandControls,
+    samples: usize,
+    retained_bytes: u128,
+) -> Result<()> {
     let (n, m, s) = (n as u128, m as u128, samples as u128);
     let bytes = (24 * n + 16 * m + 128) * s
         + 32 * m * (2 * c.output_harmonics + 1) as u128
         + 32 * n * (2 * c.sideband.harmonics + 1) as u128
         + 24 * n * n
         + 64 * n
-        + 296 * m;
+        + 296 * m
+        + retained_bytes;
     if bytes > c.max_workspace_bytes as u128 {
         Err(PhsPortSidebandError::Budget(
             "physical sideband adapter exceeds its extra numeric payload cap",
@@ -483,6 +505,26 @@ fn observation_work(n: usize, m: usize, samples: usize) -> u128 {
     s * (64 * (2 * n + m) * samples.ilog2() as u128 + 64 * n * (2 * n + m) + 64 * (n + m))
 }
 
+fn input_work(n: usize, m: usize, harmonics: usize) -> u128 {
+    128 * n as u128 * m as u128 * (2 * harmonics + 1) as u128
+}
+
+fn minimum_observation_work(n: usize, m: usize, initial_samples: usize) -> u128 {
+    [1, 2, 4]
+        .iter()
+        .map(|factor| observation_work(n, m, initial_samples * factor))
+        .sum()
+}
+
+// One operation can observe several related envelopes. Retained results are
+// charged while the next grid is live; work and actions never restart between
+// the primal and its derivative. Single-response calls retain their old costs.
+struct ObservationBudget {
+    actions: usize,
+    work: u128,
+    retained_bytes: u128,
+}
+
 fn observe(
     problem: &PhsOrbitProblem<'_>,
     orbit: &HbOrbit,
@@ -491,23 +533,49 @@ fn observe(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
     let (n, m) = (problem.system.state_dim(), problem.system.port_dim());
+    let mut budget = ObservationBudget {
+        actions: 0,
+        work: input_work(n, m, c.sideband.harmonics),
+        retained_bytes: 0,
+    };
+    observe_with_budget(
+        problem,
+        orbit,
+        response,
+        c,
+        &c.envelope_tolerances,
+        &mut budget,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_with_budget(
+    problem: &PhsOrbitProblem<'_>,
+    orbit: &HbOrbit,
+    response: &[C64],
+    c: &PhsPortSidebandControls,
+    envelope_tolerances: &[f64],
+    budget: &mut ObservationBudget,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<C64>, Vec<PhsPortSidebandCheck>, usize)> {
+    let (n, m) = (problem.system.state_dim(), problem.system.port_dim());
+    let starting_actions = budget.actions;
     let mut previous: Option<Vec<C64>> = None;
     let mut trace = Vec::new();
     let mut samples = c.initial_samples;
-    let mut actions = 0_usize;
-    let mut work = 128 * n as u128 * m as u128 * (2 * c.sideband.harmonics + 1) as u128;
     let mut consecutive = 0;
     loop {
         poll(cancelled)?;
-        admit_storage(n, m, c, samples)?;
-        actions += 2 * samples;
-        if actions > c.max_hessian_actions {
+        admit_storage_with_retained(n, m, c, samples, budget.retained_bytes)?;
+        budget.actions += 2 * samples;
+        if budget.actions > c.max_hessian_actions {
             return Err(PhsPortSidebandError::Budget(
                 "physical output Hessian-action cap exhausted",
             ));
         }
-        work += observation_work(n, m, samples);
-        if work > c.max_observation_work as u128 {
+        budget.work += observation_work(n, m, samples);
+        if budget.work > c.max_observation_work as u128 {
             return Err(PhsPortSidebandError::Budget(
                 "physical output arithmetic cap exhausted",
             ));
@@ -526,7 +594,7 @@ fn observe(
             delta
                 .iter()
                 .zip(&omitted)
-                .zip(&c.envelope_tolerances)
+                .zip(envelope_tolerances)
                 .all(|((&d, &tail), &limit)| d + tail <= limit)
         });
         consecutive = if resolved { consecutive + 1 } else { 0 };
@@ -537,7 +605,7 @@ fn observe(
         };
         trace.push(check.clone());
         if consecutive >= 2 {
-            return Ok((coefficients, trace, actions));
+            return Ok((coefficients, trace, budget.actions - starting_actions));
         }
         if samples == c.max_samples {
             return Err(PhsPortSidebandError::ObservationUnresolved { last: check });

@@ -1,4 +1,4 @@
-use super::{controls, near, orbit, scales};
+use super::{controls, derivative_controls, near, orbit, scales};
 use fs_couple::phs_orbit::{
     AutonomousPortFeedback,
     sideband::{
@@ -123,6 +123,37 @@ fn exact_mechanical(
             let clock = C64::new(det::cos(angle), det::sin(angle));
             let i = C64::new(0.0, 0.5 * tau as f64);
             let band = (sigma + tau + 2) as usize;
+            answer[band][0] = answer[band][0] + clock * (radial.scale(0.5) - i * tangent);
+            answer[band][1] = answer[band][1] + clock * (i * radial + tangent.scale(0.5));
+        }
+    }
+    answer
+}
+
+// Differentiate the independent rotating-coordinate filters analytically.
+// The original base phase/rotation is fixed; only the signed carrier changes.
+fn exact_mechanical_derivative(
+    source: &CycleDrive,
+    phase: f64,
+    carrier: f64,
+    force: [C64; 2],
+) -> Vec<[C64; 2]> {
+    let mut answer = vec![[C64::ZERO; 2]; 5];
+    for sigma in [-1, 1] {
+        let angle = sigma as f64 * phase;
+        let clock = C64::new(det::cos(angle), det::sin(angle));
+        let i = C64::new(0.0, 0.5 * sigma as f64);
+        let rate = C64::new(0.0, carrier + sigma as f64 * source.omega);
+        let radial_rate = rate + C64::from_re(2.0 * source.gain);
+        let radial = C64::new(0.0, -1.0) * (force[0].scale(0.5) + i * force[1]) * clock
+            / (radial_rate * radial_rate);
+        let tangent =
+            C64::new(0.0, -1.0) * (-i * force[0] + force[1].scale(0.5)) * clock / (rate * rate);
+        for rotate_sign in [-1, 1] {
+            let angle = rotate_sign as f64 * phase;
+            let clock = C64::new(det::cos(angle), det::sin(angle));
+            let i = C64::new(0.0, 0.5 * rotate_sign as f64);
+            let band = (sigma + rotate_sign + 2) as usize;
             answer[band][0] = answer[band][0] + clock * (radial.scale(0.5) - i * tangent);
             answer[band][1] = answer[band][1] + clock * (i * radial + tangent.scale(0.5));
         }
@@ -536,5 +567,100 @@ fn adaptive_autonomous_probe_resolves_generated_bands_before_original_memory_and
     assert!(result.state_response.coefficients[(7 + 2) * 3].abs() > 1e-3);
     assert!(result.port_coefficients[0].abs() > 1e-4);
     assert!(result.port_coefficients[16].abs() > 1e-4);
+    assert_eq!(base.coeffs, original);
+}
+
+#[test]
+fn autonomous_carrier_derivative_matches_rotating_filters_original_memory_and_nonlinear_outputs() {
+    let drive = CycleDrive {
+        omega: 1.2,
+        gain: 0.45,
+        resistance: 0.2,
+        cubic: 0.6,
+        memory: 0.3,
+    };
+    let (tau, phase, carrier) = (0.7, 0.31, 0.47);
+    let system = system(&drive, tau, None);
+    let base = candidate(&drive, tau, phase);
+    let original = base.coeffs.clone();
+    let calls = core::cell::Cell::new(0_usize);
+    let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| {
+        calls.set(calls.get() + 1);
+        drive.total_derivative(x, y, out)
+    };
+    let mut c = controls(3, 2, 2, 4);
+    c.max_hessian_actions = 1792;
+    let force = [C64::new(0.12, -0.04), C64::new(-0.03, 0.05)];
+    let mut forcing = vec![C64::ZERO; 10];
+    forcing[4..6].copy_from_slice(&force);
+    let mut source =
+        PhsPortSidebandSource::autonomous_feedback(&system, &drive, &derivative, &base, &c)
+            .unwrap();
+    let mut prepared = source.prepare(&scales(3), || false).unwrap();
+    assert_eq!(calls.get(), 385);
+    let mut factor = prepared.factor(carrier, || false).unwrap();
+    let pair = factor
+        .solve_with_carrier_derivative(&forcing, None, derivative_controls(), &[2e-10; 2], || false)
+        .unwrap();
+    assert_eq!(calls.get(), 385);
+    assert_eq!(pair.response.hessian_actions, 896);
+    assert_eq!(pair.total_hessian_actions, 1792);
+    let mechanics = exact_mechanical(&drive, phase, carrier, force);
+    let mechanical_derivative = exact_mechanical_derivative(&drive, phase, carrier, force);
+    let state = |k: isize, j: usize, tangent: bool| {
+        if k.unsigned_abs() > 2 {
+            return C64::ZERO;
+        }
+        let band = (k + 2) as usize;
+        if j < 2 {
+            if tangent {
+                mechanical_derivative[band][j]
+            } else {
+                mechanics[band][j]
+            }
+        } else {
+            let relaxation = C64::new(1.0, tau * (carrier + k as f64 * drive.omega));
+            let memory = mechanics[band][0].scale(det::sqrt(drive.memory)) / relaxation;
+            if tangent {
+                mechanical_derivative[band][0].scale(det::sqrt(drive.memory)) / relaxation
+                    - C64::new(0.0, tau) * memory / relaxation
+            } else {
+                memory
+            }
+        }
+    };
+    for k in -2..=2 {
+        for j in 0..3 {
+            near(
+                pair.response.state_response.coefficients[(k + 2) as usize * 3 + j],
+                state(k, j, false),
+                5e-11,
+            );
+            near(
+                pair.state_angular_derivative.coefficients[(k + 2) as usize * 3 + j],
+                state(k, j, true),
+                6e-11,
+            );
+        }
+    }
+    let modulation = (base.coeffs[0][1] * base.coeffs[0][1]).scale(3.0 * drive.cubic);
+    for k in -4..=4 {
+        let effort = state(k, 0, true).scale(1.0 + drive.memory + 1.5 * drive.cubic)
+            + modulation * state(k - 2, 0, true)
+            + modulation.conj() * state(k + 2, 0, true)
+            - state(k, 2, true).scale(det::sqrt(drive.memory));
+        near(
+            pair.port_angular_derivative[(k + 4) as usize * 2],
+            effort,
+            6e-11,
+        );
+        near(
+            pair.port_angular_derivative[(k + 4) as usize * 2 + 1],
+            state(k, 1, true),
+            6e-11,
+        );
+    }
+    assert!(pair.port_angular_derivative[0].abs() > 1e-6);
+    assert!(pair.port_angular_derivative[16].abs() > 1e-6);
     assert_eq!(base.coeffs, original);
 }
