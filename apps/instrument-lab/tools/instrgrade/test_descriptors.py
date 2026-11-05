@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -20,6 +21,7 @@ TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parents[3]
 sys.path.insert(0, str(TOOLS))
 import instrgrade as ig  # noqa: E402
+import decompose as dec  # noqa: E402
 
 try:
     import descriptors as desc_mod  # noqa: E402
@@ -482,6 +484,71 @@ class BarPitch(unittest.TestCase):
         s = 1e6 / (1.0 + (f - 50.0) ** 2) + 2000.0 * np.exp(-0.5 * ((f - 100.0) / 2.0) ** 2)
         self.assertGreater(s[np.argmin(np.abs(f - 62.0))], s[np.argmin(np.abs(f - 100.0))])  # the skirt tops the line
         self.assertAlmostEqual(ig.strongest_line(f, s, 62.0, 140.0), 100.0, delta=0.1)
+
+
+class BarHnr(unittest.TestCase):
+    """instrgrade-7: a bar's HNR masks the lines its own partial read returns, descriptors.modal_lines (the lines decompose's
+    partial_freq_cents compares), to HNR_MODULATION_HZ either side, and nothing else. That read has two limits, and a line it
+    leaves out counts as noise: it keeps the MODAL_LINES_MAX = 12 strongest lines, and none under MODAL_LINES_FLOOR, -60 dB
+    of the strongest."""
+
+    @staticmethod
+    def bar(f1, modes, dur=1.2, noise=0.0, decay=True):
+        """Lines at (ratio to f1, level dB), falling at a C5 bar's loss law unless decay is False, over white noise."""
+        t = np.arange(int(dur * ig.SR), dtype=np.float64) / ig.SR
+        y = np.random.default_rng(20261105).normal(0.0, noise, len(t)) if noise else np.zeros_like(t)
+        for r, lv in modes:
+            env = np.exp(-(7.263 + 2.1237e-5 * (r * f1) ** 2) * t) if decay else 1.0
+            y += 10.0 ** (lv / 20.0) * env * np.sin(2.0 * np.pi * r * f1 * t)
+        return y
+
+    def test_a_bars_hnr_masks_its_own_lines_at_any_pitch_read(self):
+        self.assertEqual((desc_mod.MODAL_LINES_MAX, desc_mod.MODAL_LINES_FLOOR), (12, 1e-6))
+        # The rendered Gb2 bar's three lines: f1, the second mode at 3.99 f1, and the strongest, the third at 9.26 f1 (856.5 Hz)
+        f1 = 92.5
+        y = self.bar(f1, ((1.0, -12.0), (3.99, -23.0), (9.26, 0.0)), noise=1e-4)
+        d = ig.describe(y, "decaying", f1, inharmonic=True, _skip_q3_heavy=True)
+        t0, t1 = d["windows"]["sustain"]
+        seg = y[int(t0 * ig.SR):int(t1 * ig.SR)]
+        old, new = {}, {}
+        for read in (91.2, 92.2, 92.5, 93.1):  # pitch reads of the same bar
+            lines = desc_mod.modal_lines(y, read)
+            self.assertEqual(lines, dec.modal_partials(y, read, None, None))  # the lines partial_freq_cents compares
+            self.assertTrue(any(abs(f - 856.5) < 1.0 for f in lines), lines)
+            parts = desc_mod.track_partials(y, read, kmax=int(min(30, 15000 // read)), sr=ig.SR, fit_inharmonicity=False,
+                                            t_window=(t0, t1))
+            old[read] = desc_mod.hnr_band(seg, parts)  # instrgrade-6: the tracker's windows around k x the read
+            new[read] = desc_mod.hnr_band(seg, parts, inharmonic_lines=(read, lines))
+        print(json.dumps(dict(test="bar_hnr", by_read_old={str(k): round(v, 3) for k, v in old.items()},
+                              by_read_new={str(k): round(v, 3) for k, v in new.items()}, describe=round(d["hnr_db"], 3))))
+        self.assertGreater(max(old.values()) - min(old.values()), 20.0, old)  # the lottery this replaces
+        self.assertLess(max(new.values()) - min(new.values()), 1e-9, new)
+        self.assertAlmostEqual(d["hnr_db"], new[92.5], delta=1e-9)
+        # The cap: 14 steady lines 2 dB apart. The read keeps the 12 strongest; the two left out, at -24 and -26 dB, are noise
+        f1 = 523.25
+        ratios = (1.0, 1.37, 1.83, 2.41, 3.12, 3.97, 4.93, 6.11, 7.42, 8.86, 10.6, 12.3, 14.1, 16.2)
+        hnr = {}
+        for n in (12, 14):
+            y = self.bar(f1, [(r, -2.0 * i) for i, r in enumerate(ratios[:n])], noise=1e-5, decay=False)
+            lines = desc_mod.modal_lines(y, f1)
+            self.assertEqual(len(lines), 12)
+            for f, r in zip(lines, ratios):
+                self.assertAlmostEqual(f / f1, r, delta=0.002)
+            hnr[n] = desc_mod.hnr_band(y[int(0.1 * ig.SR):int(1.0 * ig.SR)], [], inharmonic_lines=(f1, lines))
+        self.assertGreater(hnr[12], 90.0, hnr)
+        self.assertLess(hnr[14], 30.0, hnr)
+        # The floor: a line 59 dB under the strongest is read, one 61 dB under isn't
+        lines = desc_mod.modal_lines(self.bar(1000.0, ((1.0, 0.0), (2.3, -59.0), (3.7, -61.0)), decay=False), 1000.0)
+        self.assertEqual(len(lines), 2, lines)
+        self.assertAlmostEqual(lines[1], 2300.0, delta=1.0)
+
+    def test_a_harmonic_note_never_reads_bar_lines(self):
+        # Harmonic families keep instrgrade-6's HNR to the bit: describe doesn't reach the bar branch
+        t = np.arange(int(2.0 * ig.SR), dtype=np.float64) / ig.SR
+        x = sum(np.sin(2.0 * np.pi * k * 196.0 * t) / k for k in range(1, 31)) + np.random.default_rng(196).normal(0.0, 0.01, len(t))
+        with mock.patch.object(ig, "modal_lines", side_effect=AssertionError("a harmonic note read bar lines")):
+            d = ig.describe(x, "sustained", 196.0, _skip_q3_heavy=True)
+        self.assertTrue(math.isfinite(d["hnr_db"]))
 
 
 if __name__ == "__main__":

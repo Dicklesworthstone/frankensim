@@ -43,6 +43,7 @@ from descriptors import (  # noqa: E402
     hnr_band,
     intonation_fingerprint,
     jitter_and_shimmer,
+    modal_lines,
     null_baselines,
     partial_envelopes,
     partial_onset_order,
@@ -52,7 +53,7 @@ from descriptors import (  # noqa: E402
     windows,
 )
 
-GRADER_VERSION = "instrgrade-6"
+GRADER_VERSION = "instrgrade-7"
 SR = 48000
 NOTE = {"C": 0, "Db": 1, "D": 2, "Eb": 3, "E": 4, "F": 5, "Gb": 6, "G": 7, "Ab": 8, "A": 9, "Bb": 10, "B": 11}
 NAMES = ["C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"]
@@ -531,7 +532,9 @@ def describe(
     seg_sustain = x[int(t0 * SR):int(t1 * SR)]
     if len(seg_sustain) < 64:
         seg_sustain = x
-    if partials:
+    if inharmonic and not chord:  # a bar's own lines, the ones its partial read returns (instrgrade-7)
+        hnr = hnr_band(seg_sustain, partials, (80.0, 10000.0), sr=SR, inharmonic_lines=(f0r, modal_lines(x, f0r, sr=SR)))
+    elif partials:
         hnr = hnr_band(seg_sustain, partials, (80.0, 10000.0), sr=SR, harmonic_law=None if (chord or inharmonic) else (f0r, b_fit))
     else:
         m_fallback = (f > 80) & (f < 10000)
