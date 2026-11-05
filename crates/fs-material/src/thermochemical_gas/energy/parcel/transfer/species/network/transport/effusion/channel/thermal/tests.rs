@@ -27,8 +27,7 @@ fn point(t: f64) -> QueryPoint {
         )
         .unwrap()
 }
-/// Explicitly authored isochoric C_vol=A+B*T; no measurement claim.
-fn material(a: f64, b: f64, span: [f64; 2]) -> PreparedVolumetricThermalTransport {
+/// Explicitly authored isochoric C_vol=A+B*T; no measurement claim.\npub(super) fn material(a: f64, b: f64, span: [f64; 2]) -> PreparedVolumetricThermalTransport {
     let capacity = PropertyKey::new(
         "isochoric-volumetric-capacity",
         VOLUMETRIC_HEAT_CAPACITY_DIMS,
@@ -99,8 +98,7 @@ fn material(a: f64, b: f64, span: [f64; 2]) -> PreparedVolumetricThermalTranspor
         },
     )
     .unwrap()
-}
-fn channel(length: f64) -> DiffuseMolecularChannel {
+}\npub(super) fn channel(length: f64) -> DiffuseMolecularChannel {
     DiffuseMolecularChannel::try_new(
         interface(0.0),
         CylindricalMolecularGeometry::try_new(
@@ -112,8 +110,7 @@ fn channel(length: f64) -> DiffuseMolecularChannel {
         .unwrap(),
     )
     .unwrap()
-}
-fn link(channel: &DiffuseMolecularChannel) -> FiniteChannelNetworkLink<'_> {
+}\npub(super) fn link(channel: &DiffuseMolecularChannel) -> FiniteChannelNetworkLink<'_> {
     FiniteChannelNetworkLink {
         id: 7,
         parcels: [0, 1],
@@ -121,8 +118,7 @@ fn link(channel: &DiffuseMolecularChannel) -> FiniteChannelNetworkLink<'_> {
         area_m2: 1e-6,
         wall: 9,
     }
-}
-fn endpoints(gases: &BTreeMap<u64, ClosedGasParcel>) -> BTreeMap<u64, GasEnergySolve> {
+}\npub(super) fn endpoints(gases: &BTreeMap<u64, ClosedGasParcel>) -> BTreeMap<u64, GasEnergySolve> {
     gases.keys().map(|&id| (id, energy())).collect()
 }
 
