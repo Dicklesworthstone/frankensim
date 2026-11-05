@@ -295,6 +295,64 @@ fn initial_yielding_then_shape_hold_relaxes_below_yield_without_more_plastic_har
 }
 
 #[test]
+fn g0_creep_yield_ties_preserve_history_but_resolved_overstress_activates_plasticity() {
+    for scale in [1e-6, 1.0, 1e6] {
+        for exponent in [1.0, 2.5, 5.0] {
+            let shear = scale * MU;
+            let yield_stress = scale * Y;
+            let eta = scale * 400e6;
+            let dt = 0.2;
+            let elastic = FiniteJ2::new(
+                FiniteJ2Parameters {
+                    shear_modulus_pa: shear,
+                    bulk_modulus_pa: scale * K,
+                    yield_stress_pa: yield_stress,
+                    hardening_modulus_pa: scale * H,
+                },
+                limits(),
+            )
+            .unwrap();
+            let material = FiniteNortonJ2::new(
+                elastic,
+                FiniteOverstressParameters {
+                    viscosity_pa_s: eta,
+                    stress_scale_pa: yield_stress,
+                    exponent,
+                },
+                dt,
+                3.0,
+            )
+            .unwrap();
+            let old = material.initial_state();
+            // At q=Y the Norton factor is exactly one for every exponent.
+            let creep_at_yield = dt * yield_stress / eta;
+            let axial_at_yield = creep_at_yield + yield_stress / (3.0 * shear);
+            for offset in [-1e-8, 0.0, 1e-8] {
+                let response = material
+                    .response(&coaxial(0.0, axial_at_yield + offset), &old)
+                    .unwrap();
+                if offset <= 0.0 {
+                    assert_eq!(response.plastic_increment, 0.0);
+                    assert_eq!(response.state.alpha, 0.0);
+                    assert_eq!(response.plastic_dissipation_j_m3, 0.0);
+                } else {
+                    assert!(response.plastic_increment > 0.0);
+                    assert!(response.state.alpha > 0.0);
+                    assert!(response.plastic_dissipation_j_m3 > 0.0);
+                }
+                assert!(response.creep_increment > 0.0);
+                assert!(response.creep_dissipation_j_m3 > 0.0);
+                if offset == 0.0 {
+                    near(response.creep_increment, creep_at_yield, 1e-15, 2e-12);
+                    near(response.equivalent_kirchhoff_pa, yield_stress, 0.0, 2e-12);
+                }
+            }
+            assert_eq!(old, material.initial_state());
+        }
+    }
+}
+
+#[test]
 fn perfectly_plastic_limit_jointly_flows_and_resolves_the_creep_only_transition() {
     let (eta, dt) = (10e6, 0.1);
     let law = FiniteNortonJ2::new(backbone(0.0), kinetics(eta, 1.0), dt, 3.0).unwrap();

@@ -142,11 +142,18 @@ impl FiniteNortonJ2 {
         }
         // Monotonicity identifies the active set with one log-rate evaluation.
         // A floating-point tie takes the inactive side; no increment is clipped.
-        let inactive = trial <= yield_old || {
+        // The trial stress itself has rounding error from F and the retained
+        // metric, in addition to the logarithms below. Resolve the gap in stress
+        // units before taking its logarithm, within the independently audited
+        // return-equation tolerance. Otherwise a shape hold at the yield radius
+        // can manufacture plastic hardening from an unresolved stress surplus.
+        let stress_tie = 64.0 * f64::EPSILON * trial.max(yield_old);
+        let resolved_gap = (trial - yield_old) - stress_tie;
+        let inactive = resolved_gap <= 0.0 || {
             let log_h = det::ln(h);
             let log_creep = self.native.log_increment_at_stress(yield_old);
             let log_flow = log_h + log_creep;
-            let log_gap = det::ln(trial - yield_old);
+            let log_gap = det::ln(resolved_gap);
             let tie = 8.0 * f64::EPSILON * (log_h.abs() + log_creep.abs() + log_gap.abs());
             log_flow >= log_gap || log_flow.is_finite() && log_gap - log_flow <= tie
         };
