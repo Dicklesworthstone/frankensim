@@ -7,6 +7,8 @@
 use super::*;
 use fs_material::conductor::{OhmicDrive, ResolvedConductor};
 
+/// Retained material capacitance and inductance on the same spatial solve.
+pub mod reactive;
 /// Finite load heating and material feedback through the original enthalpy solve.
 pub mod thermal;
 
@@ -77,39 +79,19 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         LoadedPiezoelectricStep,
     )> {
         poll(cx)?;
-        if drives.len() != self.state.electrode_conditions.len() {
-            return Err(invalid("complete external electrode drives required"));
-        }
-        let mut endpoints = Vec::with_capacity(drives.len());
-        for (&drive, &old) in drives.iter().zip(&self.state.electrode_conditions) {
-            poll(cx)?;
-            endpoints.push(match (drive, old) {
-                (ElectrodeDrive::Voltage(v), ElectrodeCondition::Voltage(_)) if v.is_finite() => {
-                    ElectrodeCondition::Voltage(v)
-                }
-                (ElectrodeDrive::Current(i), ElectrodeCondition::Charge(q)) if i.is_finite() => {
-                    ElectrodeCondition::Charge(dt_s.mul_add(i, q))
-                }
-                _ => {
-                    return Err(invalid(
-                        "finite drives must preserve voltage/current electrode topology",
-                    ));
-                }
-            });
-        }
-        let (candidate, heat) = self.advance_with_loads(
+        let endpoints = endpoint_conditions(self, dt_s, drives, cx)?;
+        let (candidate, heat, _) = self.advance_with_loads(
             dt_s,
             &endpoints,
             loads,
+            &[],
+            &[],
             midpoint_nodal_forces_n,
             endpoint_nodal_free_charge_c,
             controls,
             cx,
         )?;
         let next = &candidate.body.state;
-        let midpoint = |node: usize| {
-            0.5 * self.state.relative_voltage_v[node] + 0.5 * next.relative_voltage_v[node]
-        };
         let mut outgoing = vec![0.0; drives.len()];
         let mut joule_heat_j = 0.0;
         for flow in &heat {
@@ -118,28 +100,15 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             outgoing[flow.load.electrodes[1]] -= flow.transferred_charge_c;
             joule_heat_j += flow.joule_heat_j;
         }
-        let mut electrical_source_work_j = 0.0;
-        for (node, (&a, &b)) in self
-            .state
-            .nodal_free_charge_c
-            .iter()
-            .zip(endpoint_nodal_free_charge_c)
-            .enumerate()
-        {
-            poll(cx)?;
-            electrical_source_work_j += midpoint(node) * (b - a);
-        }
-        for (id, drive) in drives.iter().enumerate() {
-            poll(cx)?;
-            let supplied = match *drive {
-                ElectrodeDrive::Current(i) => dt_s * i,
-                ElectrodeDrive::Voltage(_) => {
-                    next.field.electrodes[id].charge_c - self.state.field.electrodes[id].charge_c
-                        + outgoing[id]
-                }
-            };
-            electrical_source_work_j += midpoint(self.boundary.electrode_nodes[id][0]) * supplied;
-        }
+        let electrical_source_work_j = source_work(
+            self,
+            next,
+            dt_s,
+            drives,
+            endpoint_nodal_free_charge_c,
+            &outgoing,
+            cx,
+        )?;
         let energy_residual_j = next.total_energy_j() - self.state.total_energy_j() + joule_heat_j
             - candidate.step.mechanical_work_j
             - electrical_source_work_j;
@@ -167,6 +136,78 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             },
         ))
     }
+}
+
+fn endpoint_conditions(
+    body: &TetPiezoelectricTransient<'_, '_>,
+    dt_s: f64,
+    drives: &[ElectrodeDrive],
+    cx: &Cx<'_>,
+) -> Result<Vec<ElectrodeCondition>> {
+    if !positive(dt_s) || drives.len() != body.state.electrode_conditions.len() {
+        return Err(invalid(
+            "positive timestep and complete external electrode drives required",
+        ));
+    }
+    drives
+        .iter()
+        .zip(&body.state.electrode_conditions)
+        .map(|(&drive, &old)| {
+            poll(cx)?;
+            match (drive, old) {
+                (ElectrodeDrive::Voltage(v), ElectrodeCondition::Voltage(_)) if v.is_finite() => {
+                    Ok(ElectrodeCondition::Voltage(v))
+                }
+                (ElectrodeDrive::Current(i), ElectrodeCondition::Charge(q)) if i.is_finite() => {
+                    Ok(ElectrodeCondition::Charge(dt_s.mul_add(i, q)))
+                }
+                _ => Err(invalid(
+                    "finite drives must preserve voltage/current electrode topology",
+                )),
+            }
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn source_work(
+    body: &TetPiezoelectricTransient<'_, '_>,
+    next: &TetPiezoelectricTransientState,
+    dt_s: f64,
+    drives: &[ElectrodeDrive],
+    endpoint_nodal_free_charge_c: &[f64],
+    outgoing: &[f64],
+    cx: &Cx<'_>,
+) -> Result<f64> {
+    let midpoint = |node: usize| {
+        0.5 * body.state.relative_voltage_v[node] + 0.5 * next.relative_voltage_v[node]
+    };
+    let mut work = 0.0;
+    for (node, (&a, &b)) in body
+        .state
+        .nodal_free_charge_c
+        .iter()
+        .zip(endpoint_nodal_free_charge_c)
+        .enumerate()
+    {
+        poll(cx)?;
+        work += midpoint(node) * (b - a);
+    }
+    for (id, drive) in drives.iter().enumerate() {
+        poll(cx)?;
+        let supplied = match *drive {
+            ElectrodeDrive::Current(i) => dt_s * i,
+            ElectrodeDrive::Voltage(_) => {
+                next.field.electrodes[id].charge_c - body.state.field.electrodes[id].charge_c
+                    + outgoing[id]
+            }
+        };
+        work += midpoint(body.boundary.electrode_nodes[id][0]) * supplied;
+    }
+    if !work.is_finite() {
+        return Err(invalid("electrode source work is not representable"));
+    }
+    Ok(work)
 }
 
 /// Stamp in the original COO assembly once; never rebuild an assembled matrix.
@@ -277,6 +318,17 @@ pub(super) fn recover_load_charge(
             joule_heat_j,
         });
     }
+    update_charge_conditions(body, endpoint, normalized_endpoint, midpoint, cx)?;
+    Ok(heat)
+}
+
+fn update_charge_conditions(
+    body: &TetPiezoelectricTransient<'_, '_>,
+    endpoint: &[ElectrodeCondition],
+    normalized_endpoint: &mut [ElectrodeCondition],
+    midpoint: &mut [ElectrodeCondition],
+    cx: &Cx<'_>,
+) -> Result<()> {
     for (id, condition) in endpoint.iter().enumerate() {
         poll(cx)?;
         if let ElectrodeCondition::Charge(next) = *condition {
@@ -290,5 +342,5 @@ pub(super) fn recover_load_charge(
             midpoint[id] = ElectrodeCondition::Charge(0.5 * old + 0.5 * next);
         }
     }
-    Ok(heat)
+    Ok(())
 }

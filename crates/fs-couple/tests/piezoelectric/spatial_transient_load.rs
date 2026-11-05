@@ -1,6 +1,8 @@
 //! G1/G3/G4: actual electrode currents and source-bound dissipation on the mesh.
 #[path = "spatial_transient_load/thermal.rs"]
 mod thermal;
+#[path = "spatial_transient_load/reactive.rs"]
+pub(super) mod reactive;
 
 use super::*;
 use fs_couple::piezoelectric::spatial::transient::{
@@ -12,7 +14,7 @@ use fs_material::conductor::{
 };
 use std::sync::Arc;
 
-fn resistor(resistance: f64, electrodes: [usize; 2]) -> Load {
+pub(super) fn resistor(resistance: f64, electrodes: [usize; 2]) -> Load {
     let length = 0.01;
     let area = 1e-6;
     let mut claims = ClaimSet::new();

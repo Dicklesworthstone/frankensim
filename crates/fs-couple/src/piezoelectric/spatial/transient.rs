@@ -263,12 +263,14 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             dt_s,
             endpoint_electrode_conditions,
             &[],
+            &[],
+            &[],
             midpoint_nodal_forces_n,
             endpoint_nodal_free_charge_c,
             controls,
             cx,
         )
-        .map(|(candidate, _)| candidate)
+        .map(|(candidate, _, _)| candidate)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -277,6 +279,8 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         dt_s: f64,
         endpoint_electrode_conditions: &[ElectrodeCondition],
         loads: &[load::ResistiveElectrodeLoad],
+        reactive_loads: &[load::reactive::ReactiveElectrodeLoad],
+        reactive_states: &[load::reactive::ReactiveElectrodeState],
         midpoint_nodal_forces_n: &[[f64; 3]],
         endpoint_nodal_free_charge_c: &[f64],
         controls: TetPiezoelectricControls,
@@ -284,6 +288,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
     ) -> Result<(
         TetPiezoelectricTransientCandidate<'model, 'mesh>,
         Vec<load::ElectrodeLoadHeat>,
+        load::reactive::ReactiveUpdate,
     )> {
         poll(cx)?;
         validate_controls(controls)?;
@@ -396,7 +401,16 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 _ => unreachable!("source types checked before normalization"),
             }
         }
-        let load_entries = load::stamp(self, loads, dt_s, &mut boundary, cx)?;
+        let mut load_entries = load::stamp(self, loads, dt_s, &mut boundary, cx)?;
+        load_entries.extend(load::reactive::stamp(
+            self,
+            reactive_loads,
+            reactive_states,
+            dt_s,
+            &mut boundary,
+            controls,
+            cx,
+        )?);
         let (matrix, rhs) =
             self.model
                 .reduced_system(&boundary, mass_coefficient, &load_entries, cx)?;
@@ -452,6 +466,18 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             &mut accepted_conditions,
             &mut next_conditions,
             &mut midpoint_conditions,
+            cx,
+        )?;
+        let reactive = load::reactive::recover(
+            self,
+            reactive_loads,
+            reactive_states,
+            dt_s,
+            &full_midpoint[nu..],
+            &mut accepted_conditions,
+            &mut next_conditions,
+            &mut midpoint_conditions,
+            controls,
             cx,
         )?;
         let inertial_force = mass_action(self.model, &acceleration, cx)?;
@@ -567,6 +593,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 step,
             },
             load_heat,
+            reactive,
         ))
     }
 }
