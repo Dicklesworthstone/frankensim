@@ -22,7 +22,10 @@ use fs_exec::CancelGate;
 use fs_solid::rod::material_field::SpatialRodError;
 use fs_solid::rod::material_field::motion::{PreparedRodMotion, RodMotionPose,
     RodMotionResponse, RodNodalInertia, RodNodalSpatialInertia};
-use fs_time::{LieStepError, So3, Vec3, rigid_body_momentum_step};
+use fs_math::dd::Dd;
+use fs_time::{LieStepError, So3, Vec3};
+
+mod momentum;
 
 mod inertia {
 //! Static centroid/principal-axis lowering, shared by both rod trajectories.
@@ -32,7 +35,7 @@ use fs_exec::CancelGate;
 use fs_mbd::articulated::SpatialInertia;
 use fs_mbd_material::principal::PrincipalFrame;
 use fs_solid::rod::material_field::motion::{RodNodalInertia, RodNodalSpatialInertia};
-use super::{RodMotionError, So3, a, v, rotate, finite, checkpoint, rigid_body_momentum_step};
+use super::{RodMotionError, So3, v, rotate, finite, checkpoint, momentum};
 
 mod sealed {
     pub trait Sealed {}
@@ -112,23 +115,14 @@ impl KineticFrame {
         let p=match self.body_from_principal { Some(q)=>rotate(q,p)?,None=>p };
         finite(&p)?;Ok(p)
     }
-    pub(super) fn drift(self,frame:So3,spin:[f64;3],dt:f64)
-        ->Result<(So3,[f64;3]),RodMotionError> {
-        match self.body_from_principal {
-            None=>{
-                let (r,p)=rigid_body_momentum_step(frame,v(spin),v(self.principal),dt)?;
-                Ok((r,a(p)))
-            }
-            Some(q)=>{
-                // An exact zero-spin pose must not drift through Q Q^-1 roundoff.
-                if spin.iter().all(|p|*p==0.0) { return Ok((frame,spin)); }
-                let r=frame.compose(q).map_err(fs_time::LieStepError::from)?;
-                let p=rotate(q.inverse(),spin)?;
-                let (r,p)=rigid_body_momentum_step(r,v(p),v(self.principal),dt)?;
-                let frame=r.compose(q.inverse()).map_err(fs_time::LieStepError::from)?;
-                Ok((frame,rotate(q,a(p))?))
-            }
-        }
+    pub(super) fn omega_retained(self,spin:momentum::Vector)
+        ->Result<momentum::Vector,RodMotionError> {
+        momentum::angular_velocity(spin,self.principal,self.body_from_principal)
+            .map_err(RodMotionError::Invalid)
+    }
+    pub(super) fn drift(self,frame:So3,spin:momentum::Vector,dt:f64)
+        ->Result<(So3,momentum::Vector),RodMotionError> {
+        Ok(momentum::rotate(frame,spin,self.principal,self.body_from_principal,dt)?)
     }
 }
 
@@ -699,49 +693,49 @@ impl<I:RodMotionInertia> RodMotion<I> {
             Ok(())
         };
         loss_flow(&mut candidate,&mut accounts)?;
-        candidate.kick(0.5*dt,loads,controls.balance_origin_m,&mut accounts,gate)?;
+        // Only this kick/drift/kick interval owns the low words. Material
+        // losses before and after it act on the original rounded native state.
+        let mut remainders=vec![momentum::Remainder::default();loads.len()];
+        let mut work=Dd::from_f64(accounts.work);
+        candidate.kick_retained(0.5*dt,loads,controls.balance_origin_m,
+            &mut remainders,&mut work,&mut accounts,gate)?;
         for node in 0..loads.len() {
             checkpoint(gate)?;
             let k=candidate.kinetics[node];let old_frame=candidate.pose.frames[node];
             if !candidate.model.fixed_frames()[node] {
-                let pi=candidate.spin[node];
-                let swept=dt*(fs_math::det::hypot(fs_math::det::hypot(pi[0],pi[1]),pi[2])
-                    /k.principal.into_iter().fold(f64::INFINITY,f64::min));
-                if !swept.is_finite() || swept>controls.maximum_rotation_rad {
+                let pi=momentum::join(candidate.spin[node],remainders[node].spin);
+                let swept=momentum::swept_angle(pi,k.principal,dt)
+                    .map_err(RodMotionError::Invalid)?;
+                if Dd::from_f64(controls.maximum_rotation_rad).lt(swept) {
                     return Err(RodMotionError::Invalid("rotor swept-angle budget exceeded; reduce the interval"));
                 }
                 let (frame,spin)=k.drift(old_frame,pi,dt)?;
-                candidate.pose.frames[node]=frame;candidate.spin[node]=spin;
+                candidate.pose.frames[node]=frame;
+                (candidate.spin[node],remainders[node].spin)=momentum::split(spin)
+                    .map_err(RodMotionError::Invalid)?;
             }
             let centroid_offsets=if k.eccentric() && !candidate.model.fixed_frames()[node] {
                 Some((rotate(old_frame,k.center)?,rotate(candidate.pose.frames[node],k.center)?))
             } else {None};
             for c in 0..3 {
                 if !candidate.model.fixed_positions()[node][c] {
-                    let drift=dt*(candidate.linear[node][c]/k.mass);
-                    // Keep the rotating-centroid transport's subtraction and
-                    // addition remainders too. The material node must follow
-                    // the native COM drift, rather than accumulating a false
-                    // translation as its eccentric frame rotates.
-                    let (shift,shift_error)=if let Some((old_offset,new_offset))=centroid_offsets {
-                        let (correction,error)=fs_math::eft::two_sum(old_offset[c],-new_offset[c]);
-                        let (shift,roundoff)=fs_math::eft::two_sum(drift,correction);
-                        (shift,error+roundoff)
-                    } else {(drift,0.0)};
-                    let old=candidate.pose.positions_m[node][c];
-                    let (next,roundoff)=fs_math::eft::two_sum(old,shift);
-                    let remainder=candidate.translation_remainder_m[node][c]+(roundoff+shift_error);
-                    let (next,remainder)=fs_math::eft::two_sum(next,remainder);
-                    if !shift.is_finite() || !next.is_finite() || !remainder.is_finite() {
-                        return Err(RodMotionError::Invalid("rod translation step is unrepresentable at this world position"));
-                    }
+                    let p=Dd::from_pair(candidate.linear[node][c],remainders[node].linear[c]);
+                    let (next,remainder)=momentum::translate(candidate.pose.positions_m[node][c],
+                        candidate.translation_remainder_m[node][c],p,dt,k.mass,
+                        centroid_offsets.map(|(old,new)|(old[c],new[c])))
+                        .map_err(RodMotionError::Invalid)?;
                     candidate.pose.positions_m[node][c]=next;
                     candidate.translation_remainder_m[node][c]=remainder;
                 }
             }
         }
         candidate.response=candidate.model.evaluate(&candidate.pose,gate)?;
-        candidate.kick(0.5*dt,loads,controls.balance_origin_m,&mut accounts,gate)?;
+        candidate.kick_retained(0.5*dt,loads,controls.balance_origin_m,
+            &mut remainders,&mut work,&mut accounts,gate)?;
+        accounts.work=momentum::checked(work).map_err(RodMotionError::Invalid)?.to_f64();
+        // The candidate high words now are the accepted rounded momenta.
+        // Never reapply these discarded tails after a dissipative state change.
+        drop(remainders);
         loss_flow(&mut candidate,&mut accounts)?;
         let after=candidate.observe(controls.balance_origin_m)?;
         let mut defect=(after.kinetic_energy_j-before.kinetic_energy_j)
@@ -766,7 +760,18 @@ impl<I:RodMotionInertia> RodMotion<I> {
             external_angular_impulse_nm_s:accounts.angular,linear_balance_residual_n_s:linear_residual,
             angular_balance_residual_nm_s:angular_residual,support_impulses:accounts.supports}))
     }
+    #[cfg(test)]
     fn kick(&mut self,h:f64,loads:StageLoads<'_>,origin:[f64;3],accounts:&mut KickAccounts,
+        gate:&CancelGate)->Result<(),RodMotionError> {
+        let mut remainders=vec![momentum::Remainder::default();loads.len()];
+        let mut work=Dd::from_f64(accounts.work);
+        self.kick_retained(h,loads,origin,&mut remainders,&mut work,accounts,gate)?;
+        accounts.work=momentum::checked(work).map_err(RodMotionError::Invalid)?.to_f64();
+        Ok(())
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn kick_retained(&mut self,h:f64,loads:StageLoads<'_>,origin:[f64;3],
+        remainders:&mut [momentum::Remainder],work:&mut Dd,accounts:&mut KickAccounts,
         gate:&CancelGate)->Result<(),RodMotionError> {
         let body_loads=self.model.body_loads(&self.pose,gate)?;
         for node in 0..loads.len() {
@@ -779,24 +784,30 @@ impl<I:RodMotionInertia> RodMotion<I> {
                 else {total_torque};
             let applied_central=if k.eccentric() {sub(applied_body,cross(k.center,rotate(frame.inverse(),load.force_n)?))}
                 else {applied_body};
-            let old_p=self.linear[node];let old_omega=k.omega(self.spin[node])?;
+            let old_p=momentum::join(self.linear[node],remainders[node].linear);
+            let old_spin=momentum::join(self.spin[node],remainders[node].spin);
+            let mut p=old_p;let mut spin=old_spin;
             let mut support_f=[0.0;3];let mut support_t=[0.0;3];
             for c in 0..3 {
                 if self.model.fixed_positions()[node][c] {support_f[c]=-h*total[c];}
-                else {self.linear[node][c]=h.mul_add(total[c],old_p[c]);}
+                else {p[c]=momentum::kick(old_p[c],total[c],h).map_err(RodMotionError::Invalid)?;}
                 if self.model.fixed_frames()[node] {support_t[c]=-h*central_torque[c];}
-                else {self.spin[node][c]=h.mul_add(central_torque[c],self.spin[node][c]);}
+                else {spin[c]=momentum::kick(old_spin[c],central_torque[c],h).map_err(RodMotionError::Invalid)?;}
             }
             // A fixed material frame may translate. Its balancing pure couple
             // includes the moment of both applied and constrained linear kicks.
             if k.eccentric() && self.model.fixed_frames()[node] {
                 support_t=add(support_t,cross(k.center,rotate(frame.inverse(),support_f)?));
             }
-            let omega=k.omega(self.spin[node])?;
-            for c in 0..3 {
-                accounts.work+=h*load.force_n[c]*(0.5*(old_p[c]/k.mass)+0.5*(self.linear[node][c]/k.mass));
-                accounts.work+=h*applied_central[c]*(0.5*old_omega[c]+0.5*omega[c]);
-            }
+            let velocity=momentum::velocity(momentum::mean(old_p,p),k.mass)
+                .map_err(RodMotionError::Invalid)?;
+            let omega=k.omega_retained(momentum::mean(old_spin,spin))?;
+            *work=*work+momentum::work(load.force_n,h,velocity).map_err(RodMotionError::Invalid)?
+                +momentum::work(applied_central,h,omega).map_err(RodMotionError::Invalid)?;
+            (self.linear[node],remainders[node].linear)=momentum::split(p)
+                .map_err(RodMotionError::Invalid)?;
+            (self.spin[node],remainders[node].spin)=momentum::split(spin)
+                .map_err(RodMotionError::Invalid)?;
             let support_t=rotate(frame,support_t)?;
             let body_force=body_loads.force_n[node];
             let body_couple=rotate(frame,body_loads.torque_body_nm[node])?;

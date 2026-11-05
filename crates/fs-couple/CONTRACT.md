@@ -25389,7 +25389,28 @@ points, world-held nodal forces/couples and material-following free couples.
 actual endpoint frames through the original momentum-kick, centroid-drift,
 free-rotation and accounting owner. A rotating force arm contributes `(R r) x F`
 at each kick; it is never frozen to its starting world moment. The existing
-`step_candidate` fixed-world wrench API retains its previous behavior.
+`step_candidate` fixed-world wrench API uses the same physical stage.
+
+The original kick/drift/kick interval retains six low momentum words per node
+beside the candidate's native high words. A first half-impulse therefore reaches
+both the COM displacement and the second kick even when it is below the spacing
+of the stored momentum. The same retained spin drives swept-angle admission,
+the original compensated `fs-time` free-rotation owner and the endpoint kick.
+For full inertia, that owner conjugates the increment through the fixed
+principal frame without a rounded full-state basis roundtrip. Applied kick work
+pairs each impulse with the retained mean velocity through the same mass and
+inverse-inertia map. Existing position remainders and eccentric COM offsets are
+included before the translated position rounds.
+
+This scratch is initialized after the first material-loss flow and discarded
+before the final one. Torsional, bending, axial and transverse loss operators
+consume the rounded native state; no old impulse tail can reappear after
+dissipation. Accepted state remains f64, supports retain their original masks
+and reactions, and the whole candidate keeps its original refusal semantics.
+Native regression definitions cover signed force and axial torque impulses,
+uniform source-owned rods, and a displacement exposed by large drift
+cancellation. This does not change the temporal splitting order, make the
+complete timestep allocation-free, or claim exact finite-step energy.
 
 Offsets and reported nodal moments refer to material nodes. The existing native
 kick alone transports them to eccentric mass centroids and retains the full
