@@ -69,10 +69,11 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 
     /// Advance the complete interval atomically using second-order RKL2.
     ///
-    /// Periodic faces and static prescribed slip/no-slip thermal walls retain
-    /// their original transport laws. Optional SGS is recomputed by the same
-    /// spatial callback at every state. Finite wall inertia is refused because
-    /// its reciprocal carrier solve is not this fixed-wall recurrence.
+    /// Periodic faces, static prescribed slip/no-slip thermal walls and held
+    /// complete reservoir traces retain their original transport laws. Optional
+    /// SGS is recomputed by the same spatial callback at every state. Finite
+    /// wall inertia refuses because its reciprocal carrier solve is not this
+    /// fixed-wall recurrence.
     ///
     /// `transport.maximum_step_s` controls physical macrostep accuracy; this
     /// path does not estimate temporal error. The enlarged linear parabolic
@@ -130,6 +131,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut self.source,
                             &self.grid,
                             self.boundaries,
+                            &flow.reservoirs,
                             &self.walls,
                             &self.work.current,
                             &mut self.work.primitive,
@@ -147,6 +149,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         first,
                         cached,
                     } => self.rkl_trial(
+                        &flow.reservoirs,
                         dt,
                         scheme,
                         first,
@@ -244,6 +247,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     #[allow(clippy::too_many_arguments)]
     fn rkl_trial(
         &mut self,
+        reservoirs: &Reservoirs,
         dt: f64,
         scheme: Rkl2Scheme,
         first: Stage,
@@ -261,6 +265,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &mut self.source,
                 &self.grid,
                 self.boundaries,
+                reservoirs,
                 &self.walls,
                 &self.work.current,
                 &mut self.work.primitive,
@@ -313,6 +318,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &mut self.source,
                 &self.grid,
                 self.boundaries,
+                reservoirs,
                 &self.walls,
                 &self.work.stage,
                 &mut self.work.primitive,
@@ -384,6 +390,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             &mut self.source,
             &self.grid,
             self.boundaries,
+            reservoirs,
             &self.walls,
             &self.work.stage,
             &mut self.work.primitive,

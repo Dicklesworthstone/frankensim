@@ -212,8 +212,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         Ok(self)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn solve_wall_trial(
         &mut self,
+        reservoirs: &Reservoirs,
         dt: f64,
         controls: DissipationControl,
         drive: Option<(&WallDrive3d, f64)>,
@@ -252,6 +254,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             }
             let mut owner = owner.borrow_mut();
             let stage = owner.ssp_trial(
+                reservoirs,
                 dt,
                 controls,
                 drive,

@@ -106,6 +106,7 @@ fn faces(op: &mut MolecularTransport3d<ConstantTransport>, flow: &MixtureEuler3d
         &mut op.source,
         &op.grid,
         op.boundaries,
+        &flow.reservoirs,
         &op.walls,
         flow.states(),
         &mut op.work.primitive,

@@ -81,6 +81,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 flow.gas(),
                 flow.grid(),
             )?)
+            .and_then(|bytes| bytes.checked_add(flow.reservoirs.workspace_bytes()))
             .and_then(|bytes| bytes.checked_add(molecular.workspace_bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(
@@ -125,6 +126,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 "coupled spatial mixture molecular binding differs",
             ));
         }
+        reservoir::admit(flow.boundaries, &flow.reservoirs)?;
         let required = Self::required_workspace_bytes(&flow, &molecular)?;
         admit_workspace(required, maximum_workspace_bytes)?;
         let mut states = allocated(flow.states.len(), 0.0)?;
@@ -137,6 +139,13 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             MixtureEuler3d::required_workspace_bytes(flow.gas(), flow.grid())?,
             &mut cancelled,
         )?;
+        trial.reservoirs = flow.reservoirs.try_clone(&mut cancelled)?;
+        trial.workspace_bytes = trial
+            .workspace_bytes
+            .checked_add(trial.reservoirs.workspace_bytes())
+            .ok_or(DissipationError::Invalid(
+                "coupled reservoir workspace size overflow",
+            ))?;
         copy_physical(&flow, &mut trial, &mut cancelled)?;
         let mut boundary_impulses = allocated(flow.boundary_impulses.len(), 0.0)?;
         copy_values(
@@ -163,6 +172,28 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     /// middle phase; this owner's report and face loads describe the whole split.
     pub const fn flow(&self) -> &MixtureEuler3d {
         &self.accepted
+    }
+    /// Atomically refresh all prepared exterior profiles on both split fields.
+    /// Prepare their topology/storage on the Euler field before composition.
+    /// The callback and original caloric admission run once per face; the
+    /// molecular halves and middle HLLC step then use the same held traces.
+    /// Cancellation preserves both profiles, cells, clocks and accepted reports.
+    pub fn update_reservoir_profiles(
+        &mut self,
+        sample: impl FnMut(
+            BoundarySide,
+            usize,
+            [f64; 3],
+            &mut [f64],
+        ) -> Result<super::super::ReservoirFaceState, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        super::super::reservoir_profiles::update_pair(
+            &mut self.accepted,
+            &mut self.trial,
+            sample,
+            cancelled,
+        )
     }
     /// Bound original operator; its published report describes the second half.
     pub const fn molecular(&self) -> &MolecularTransport3d<L> {

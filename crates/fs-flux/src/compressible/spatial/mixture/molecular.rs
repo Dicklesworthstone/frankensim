@@ -6,6 +6,7 @@
 //! gradient and face buffers compose these owners without a second transport
 //! law or an additional viscous-heating source.
 
+use super::reservoir::Reservoirs;
 use super::{
     Boundaries3d, BoundaryCondition, BoundaryImpulse, BoundarySide, CartesianGrid,
     MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler3d, Primitive, Totals, WIDTH_LIMIT, allocated,
@@ -24,6 +25,7 @@ use fs_qty::Time;
 mod coupled;
 mod driving;
 mod inertia;
+mod reservoir;
 mod stabilized;
 pub use coupled::{
     MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, StabilizedMolecularStepControl,
@@ -94,9 +96,13 @@ struct Workspace {
 /// One stored face flux serves both neighbors, including exact periodic copies.
 /// Reflecting faces default to stationary adiabatic slip walls and may be
 /// configured as impermeable no-slip walls with prescribed tangential velocity
-/// and fixed-temperature or adiabatic heat transfer. Transmissive Euler ends do
-/// not define a molecular reservoir
-/// and refuse at preparation. All successful field stages reuse flat buffers.
+/// and fixed-temperature or adiabatic heat transfer. A transmissive end needs
+/// the same complete, source-admitted reservoir used by the Euler face. Its
+/// species diffusion, heat and stress use the physical half-cell distance and
+/// the bath's enthalpy/velocity for boundary energy transfer. Uniform and
+/// face-resolved reservoirs remain held throughout the requested interval.
+/// Unbound open ends and pressure-only outlets refuse. All successful field
+/// stages reuse flat buffers; no independent reservoir inventory is introduced.
 pub struct MolecularTransport3d<L: TransportLaw> {
     source: SpatialTransport<L>,
     grid: CartesianGrid,
@@ -165,16 +171,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "volumetric molecular source or caloric path differs",
             ));
         }
-        for boundary in [flow.boundaries.x, flow.boundaries.y, flow.boundaries.z] {
-            if let AxisBoundaries::Ends { lower, upper } = boundary
-                && (lower != BoundaryCondition::Reflecting
-                    || upper != BoundaryCondition::Reflecting)
-            {
-                return Err(DissipationError::Invalid(
-                    "open Euler ends do not define a species/thermal molecular reservoir",
-                ));
-            }
-        }
+        reservoir::admit(flow.boundaries, &flow.reservoirs)?;
         admit_workspace(
             Self::required_workspace_bytes(flow, &source)?,
             maximum_workspace_bytes,
@@ -473,6 +470,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &mut self.source,
                             &self.grid,
                             self.boundaries,
+                            &flow.reservoirs,
                             &walls,
                             &self.work.current,
                             &mut self.work.primitive,
@@ -488,6 +486,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         wall_work.trial(self.inertia)?;
                         if self.inertia.is_some() {
                             self.solve_wall_trial(
+                                &flow.reservoirs,
                                 dt,
                                 controls,
                                 drive,
@@ -498,6 +497,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             )?
                         } else {
                             let stage = self.ssp_trial(
+                                &flow.reservoirs,
                                 dt,
                                 controls,
                                 drive,
@@ -557,6 +557,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "volumetric molecular field ownership differs",
             ));
         }
+        reservoir::admit(flow.boundaries, &flow.reservoirs)?;
         let bytes = self
             .workspace_bytes()
             .checked_add(flow.workspace_bytes())
@@ -661,6 +662,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     #[allow(clippy::too_many_arguments)]
     fn ssp_trial(
         &mut self,
+        reservoirs: &Reservoirs,
         dt: f64,
         controls: DissipationControl,
         drive: Option<(&WallDrive3d, f64)>,
@@ -680,6 +682,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &mut self.source,
                 &self.grid,
                 self.boundaries,
+                reservoirs,
                 &walls,
                 &self.work.current,
                 &mut self.work.primitive,
@@ -721,6 +724,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             &mut self.source,
             &self.grid,
             self.boundaries,
+            reservoirs,
             &walls,
             &self.work.stage,
             &mut self.work.primitive,
@@ -762,6 +766,7 @@ fn spatial<L: TransportLaw>(
     source: &mut SpatialTransport<L>,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
+    reservoirs: &Reservoirs,
     walls: &[MolecularWall3d; 6],
     states: &[f64],
     primitive: &mut [Primitive],
@@ -777,35 +782,19 @@ fn spatial<L: TransportLaw>(
         *value = cell(row, species).primitive(source.gas(), &mut *cancelled)?;
     }
     // A single nine-derivative cache supplies both tangential directions of
-    // every face. Slip ghosts reflect only normal velocity; no-slip ghosts
-    // mirror every velocity component about the prescribed wall value.
+    // every face. Slip ghosts reflect only normal velocity. No-slip and
+    // complete reservoir ghosts mirror all components about their face trace.
     for (index, row) in gradient.iter_mut().enumerate() {
         poll(cancelled)?;
         for (axis, derivative) in row.iter_mut().enumerate() {
-            let (low, reflect_low) = cartesian::neighbour(grid, boundaries, index, axis, false);
-            let (high, reflect_high) = cartesian::neighbour(grid, boundaries, index, axis, true);
+            let low = reservoir::velocity_neighbour(
+                grid, boundaries, reservoirs, primitive, index, axis, false, walls,
+            )?;
+            let high = reservoir::velocity_neighbour(
+                grid, boundaries, reservoirs, primitive, index, axis, true, walls,
+            )?;
             for (component, value) in derivative.iter_mut().enumerate() {
-                let low = wall_velocity_sample(
-                    primitive,
-                    low,
-                    index,
-                    axis,
-                    false,
-                    component,
-                    reflect_low,
-                    walls,
-                );
-                let high = wall_velocity_sample(
-                    primitive,
-                    high,
-                    index,
-                    axis,
-                    true,
-                    component,
-                    reflect_high,
-                    walls,
-                );
-                *value = (high - low) / (2.0 * grid.spacing[axis]);
+                *value = (high[component] - low[component]) / (2.0 * grid.spacing[axis]);
             }
         }
     }
@@ -900,8 +889,51 @@ fn spatial<L: TransportLaw>(
                         )?,
                 }
             }
-            cartesian::FaceKind::Boundary { .. } => {
-                return Err(DissipationError::Invalid("unbound molecular reservoir"));
+            cartesian::FaceKind::Boundary {
+                cell,
+                sign,
+                condition: BoundaryCondition::Transmissive,
+            } => {
+                let side = side_for(axis, sign > 0.0);
+                let face = reservoir::face_index(grid, cell, axis);
+                let exterior = reservoirs
+                    .normal_face(axis, sign, face, species)
+                    .ok_or(DissipationError::Invalid("unbound molecular reservoir"))?;
+                let interior = normal(cell, axis);
+                let (left, right) = if sign < 0.0 {
+                    (exterior, interior)
+                } else {
+                    (interior, exterior)
+                };
+                let tangential = reservoir::tangential_gradient(
+                    grid,
+                    boundaries,
+                    reservoirs,
+                    side,
+                    cell,
+                    &gradient[cell],
+                )?;
+                // The original source uses bath enthalpies and velocity for
+                // the physical boundary energy effort. Modeled SGS flux is
+                // not extrapolated across this externally maintained bath.
+                source.reservoir_face_from_primitives(
+                    left,
+                    right,
+                    0.5 * grid.spacing[axis],
+                    tangential,
+                    sign < 0.0,
+                    controls.diffusion,
+                    output,
+                    &mut *cancelled,
+                )?
+            }
+            cartesian::FaceKind::Boundary {
+                condition: BoundaryCondition::PressureOutlet { .. },
+                ..
+            } => {
+                return Err(DissipationError::Invalid(
+                    "pressure alone does not define a species/thermal molecular reservoir",
+                ));
             }
             cartesian::FaceKind::PeriodicCopy { .. } => unreachable!(),
         };

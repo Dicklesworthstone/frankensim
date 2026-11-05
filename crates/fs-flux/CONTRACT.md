@@ -2726,7 +2726,8 @@ bounded stack scratch and supplied-law storage/allocations remain excluded.
 Periodic axes and stationary adiabatic impermeable slip walls are admitted.
 Wall normal stress includes both transverse dilatations; species, both shear
 tractions, heat and stationary-wall work are exactly zero. Transmissive Euler
-ends refuse because they do not define a molecular reservoir law. Soret/Dufour
+ends require complete source-admitted reservoir traces; unbound and
+pressure-only sides refuse molecular evolution. Soret/Dufour
 effects, no-slip layers, moving geometry, dense-gas transport and calibrated
 shock/flame thickness remain separate capabilities.
 
@@ -2779,8 +2780,8 @@ scaled by the Legendre extension.
 
 The planar path retains periodic axes, reflecting slip walls and the existing
 source-owned held gas-reservoir faces. The volumetric path retains
-periodic axes and static prescribed molecular walls, including the original
-thermal and no-slip conditions. Its optional SGS law, when selected, is
+periodic axes, complete held reservoir traces and static prescribed molecular
+walls, including the original thermal and no-slip conditions. Its optional SGS law, when selected, is
 recomputed through the existing spatial owner at every stage. Finite wall
 inertia is explicitly incompatible with this stabilized path; prescribed
 wall-acceleration histories continue through their original SSP stage-time and
@@ -5063,9 +5064,9 @@ persistence without coupling retries. G4 covers source/topology/byte admission
 and late cancellation preserving accepted state, time, loads and reports.
 
 These are prescribed infinite reservoirs, not finite inventories, pressure-only
-or nonreflecting boundaries. This increment does not define molecular species
-diffusion or heat/stress exchange with the exterior; the existing molecular
-owner continues to refuse transmissive sides. It adds no pressure-equilibrium
+or nonreflecting boundaries. The optional molecular owner uses those same
+complete traces for source-owned species, heat and stress exchange with the
+exterior, as specified below. It adds no pressure-equilibrium
 guarantee for unequal-caloric moving contacts or fully discrete entropy theorem.
 
 
@@ -5195,3 +5196,49 @@ interpolate its stages; callers author the sampling cadence and hold one
 coherent realization. A face-averaged primitive is not an exact average of its
 nonlinear Riemann flux. No turbulent-inflow spectrum, wall/DNS accuracy, or
 experimental qualification is implied by the boundary adapter alone.
+
+
+## Molecular exchange through volumetric mixture reservoir profiles
+
+`spatial::mixture::molecular::MolecularTransport3d` admits uniform and
+face-resolved complete reservoirs already bound to the original Euler owner.
+Each molecular evaluation borrows those same accepted traces. The original
+`SpatialTransport::reservoir_face_from_primitives` supplies Maxwell–Stefan
+species flux, partial enthalpy transport, Fourier heat and all Newtonian
+stress/work components at the physical half-cell normal distance. Midpoint
+constitutive coefficients retain their existing source law; the prescribed
+bath temperature and velocity supply boundary enthalpy and mechanical work.
+No additional heat source, species normalization or finite bath inventory is
+introduced.
+
+The native nine-derivative cache uses velocity ghosts mirrored about each
+physical reservoir trace. Tangential profile derivatives use centered
+stencils, periodic wrapping or quadratic one-sided end stencils; two faces
+use a linear derivative and one face resolves no tangential variation.
+Interior and exterior derivatives enter the source midpoint approximation.
+Local SGS therefore sees consistent adjacent-cell gradients, while modeled
+SGS flux at the externally maintained reservoir remains zero. This does not
+extend periodic/channel dynamic-fit admission to arbitrary open topologies.
+
+SSP stages, stabilized RKL stages and existing finite-wall trials share this
+same spatial operator and original boundary quadrature. No additional
+numerical buffers or per-face allocations are needed. All complete exterior
+traces remain held during an accepted interval and its retries. Unbound
+transmissive ends and pressure-only outlets still refuse molecular evolution.
+
+`MolecularEuler3d` clones and budgets complete reservoir state in its trial
+field. Its `update_reservoir_profiles` reuses the original paired transaction:
+one callback evaluation per face, original caloric admission, copying into
+existing trial storage, then joint publication. Both molecular halves and the
+middle HLLC solve use the same controls. Failed control replacement or a
+cancelled flow step preserves accepted profiles, cells, clock and reports.
+Prepare profile topology on the Euler field before constructing this owner.
+
+Four focused regression groups were added for analytic six-face heat,
+viscous traction and bath work; steady three-axis species/enthalpy flux with
+both integrators; periodic and one-sided profile derivatives; and coupled
+update/cancellation/replay. Rustfmt and source/API review passed. These new
+full-owner tests were not executed in the resource-constrained editing
+environment; no native integration or turbulence calibration result is claimed.
+The boundary is a prescribed infinite bath, not a nonreflecting inlet,
+characteristic wave-injection method or validated turbulent entry length.
