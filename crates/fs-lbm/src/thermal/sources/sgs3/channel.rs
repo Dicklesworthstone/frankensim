@@ -3,7 +3,7 @@
 //! Only the two periodic tangent directions are test-filtered. Each z layer
 //! fits its own coefficient, with the actual stationary halfway velocity and
 //! prescribed-temperature or insulating wall conditions where supplied. For
-//! nonzero flux/film walls, physical and Favre scalar gradients are reconstructed
+//! nonzero flux/film or spatially varying walls, scalar gradients are reconstructed
 //! from three current fluid layers. The original source owner still imposes
 //! the actual wall law, measures its heat and publishes the complete candidate.
 //! This remains resolved-wall, low-Mach Boussinesq sensible-temperature
@@ -136,7 +136,7 @@ impl ThermalLbm3 {
 
     /// Allocate once for the existing periodic-x/y, rigid-z slab. At least
     /// three cells in each tangent direction and two fluid layers are required.
-    /// Insulation and reconstructed flux/film gradients require three fluid
+    /// Insulation and reconstructed flux/film/spatial gradients require three fluid
     /// layers when preparing the scalar fit; fixed-temperature walls need two.
     pub fn thermal_channel_sgs_workspace(
         &self,
@@ -167,7 +167,7 @@ impl ThermalLbm3 {
     /// the plates. Molecular rates come from the caller or original slab;
     /// coefficients are frozen for one source/flow/temperature step.
     /// Active prescribed temperatures and zero-flux walls supply the scalar
-    /// derivatives. Nonzero flux/film walls use second-order reconstruction
+    /// derivatives. Nonzero flux/film or spatial walls use second-order reconstruction
     /// from three current fluid values at both physical and Favre scales.
     /// Their actual flux remains with the original wall transport: no ambient
     /// temperature is substituted for the surface and no diffusivity is needed
@@ -186,21 +186,21 @@ impl ThermalLbm3 {
     ) -> Result<ThermalChannelSgsReport, ThermalSgsError> {
         poll(gate)?;
         config.validate()?;
+        let (cells, plane) = self.layout()?;
         let mut scalar_walls = [ScalarWall::ZeroGradient; 2];
-        for (scalar, wall) in scalar_walls.iter_mut().zip(self.thermal_walls()) {
-            wall.validate()
+        for (scalar, field) in scalar_walls.iter_mut().zip(self.thermal_wall_fields()) {
+            field.validate(plane)
                 .map_err(|_| ThermalSgsError::Invalid("invalid thermal wall for channel SGS"))?;
-            *scalar = match wall {
-                ThermalWall::Temperature(value) => ScalarWall::Value(value),
-                ThermalWall::Adiabatic => ScalarWall::ZeroGradient,
-                ThermalWall::HeatFlux(flux) if flux == 0.0 => ScalarWall::ZeroGradient,
-                ThermalWall::Convective { transfer, .. } if transfer == 0.0 => {
+            *scalar = match field.uniform() {
+                Some(ThermalWall::Temperature(value)) => ScalarWall::Value(value),
+                Some(ThermalWall::Adiabatic) => ScalarWall::ZeroGradient,
+                Some(ThermalWall::HeatFlux(flux)) if flux == 0.0 => ScalarWall::ZeroGradient,
+                Some(ThermalWall::Convective { transfer, .. }) if transfer == 0.0 => {
                     ScalarWall::ZeroGradient
                 }
-                ThermalWall::HeatFlux(_) | ThermalWall::Convective { .. } => ScalarWall::Interior,
+                _ => ScalarWall::Interior,
             };
         }
-        let (cells, plane) = self.layout()?;
         let fluid = cells - 2 * plane;
         if workspace.filter.shape() != [self.grid.nx, self.grid.ny, self.grid.nz - 2]
             || workspace.velocity.len() != fluid

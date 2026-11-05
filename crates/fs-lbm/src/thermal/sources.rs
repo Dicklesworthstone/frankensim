@@ -13,7 +13,7 @@ pub mod sgs3;
 pub mod transport;
 
 use super::{ThermalForcingError, ThermalLbm};
-use super::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
+use super::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange, ThermalWallField};
 use crate::core2::{Cell, CollisionModel2};
 use crate::d3q19::{CollisionModel3, ThermalLbm3};
 
@@ -143,7 +143,7 @@ pub(crate) trait Slab<const D: usize, const Q: usize>: Sized {
     fn snapshot(&self) -> (Self, [f64; Q]);
     // Original coordinate anchors, retained for physical-unit consistency checks.
     fn walls(&self) -> (f64, f64);
-    fn thermal_walls(&self) -> [ThermalWall; 2];
+    fn thermal_wall_fields(&self) -> [ThermalWallField<'_>; 2];
     fn wall_exchange(&self) -> Option<[ThermalWallExchange; 2]>;
     fn flow_valid(&self) -> bool;
     fn advance(&mut self, forces: &[[f64; D]]) -> Result<(), ThermalForcingError>;
@@ -251,12 +251,14 @@ fn source_step_with_advance<
     }
     if !state.flow_valid() { return Err(invalid("invalid thermal/flow state or unsupported slab topology").into()); }
     check_temperatures(state.populations(), plane, limits.temperature_range)?;
-    for wall in state.thermal_walls() {
-        wall.validate().map_err(ThermalSourceError::Wall)?;
-        if let ThermalWall::Temperature(temperature) = wall
-            && (temperature < limits.temperature_range[0] || temperature > limits.temperature_range[1])
-        {
-            return Err(invalid("prescribed wall temperature is outside the admitted interval").into());
+    for field in state.thermal_wall_fields() {
+        field.validate(plane).map_err(ThermalSourceError::Wall)?;
+        for wall in field.laws() {
+            if let ThermalWall::Temperature(temperature) = wall
+                && (temperature < limits.temperature_range[0] || temperature > limits.temperature_range[1])
+            {
+                return Err(invalid("prescribed wall temperature is outside the admitted interval").into());
+            }
         }
     }
     let source: f64 = heat[plane..cells-plane].iter().sum();
@@ -334,7 +336,9 @@ impl Slab<2, 5> for ThermalLbm {
     fn layout(&self) -> Result<(usize, usize), ThermalSourceError> {
         let g = &self.grid;
         let n = g.nx.checked_mul(g.ny).ok_or(invalid("cell count overflows"))?;
-        if g.nx == 0 || g.ny < 4 || [g.f.len(), g.flags.len(), g.tau.len(), g.fext.len(), self.gpop.len()].iter().any(|l| *l != n) {
+        if g.nx == 0 || g.ny < 4 || [g.f.len(), g.flags.len(), g.tau.len(), g.fext.len(), self.gpop.len()].iter().any(|l| *l != n)
+            || self.spatial_wall_boundaries.as_ref().is_some_and(|walls| walls.iter().any(|wall| wall.len() != g.nx))
+        {
             return Err(invalid("invalid 2D slab storage"));
         }
         Ok((n, g.nx))
@@ -356,11 +360,12 @@ impl Slab<2, 5> for ThermalLbm {
             buoyancy_direction: self.buoyancy_direction,
             buoyancy_quadrature: self.buoyancy_quadrature,
             wall_boundaries: self.wall_boundaries, wall_exchange: self.wall_exchange,
+            spatial_wall_boundaries: self.spatial_wall_boundaries.clone(),
             advection_history: self.advection_history.clone(),
         }, super::W5)
     }
     fn walls(&self) -> (f64, f64) { (self.t_bottom, self.t_top) }
-    fn thermal_walls(&self) -> [ThermalWall; 2] { self.thermal_walls() }
+    fn thermal_wall_fields(&self) -> [ThermalWallField<'_>; 2] { self.thermal_wall_fields() }
     fn wall_exchange(&self) -> Option<[ThermalWallExchange; 2]> { self.wall_exchange }
     fn flow_valid(&self) -> bool {
         let g = &self.grid;
@@ -397,7 +402,9 @@ impl Slab<3, 7> for ThermalLbm3 {
         let g = &self.grid;
         let plane = g.nx.checked_mul(g.ny).ok_or(invalid("wall plane overflows"))?;
         let n = plane.checked_mul(g.nz).ok_or(invalid("cell count overflows"))?;
-        if plane == 0 || g.nz < 4 || [g.f.len(), g.tau.len(), g.fext.len(), self.gpop.len()].iter().any(|l| *l != n) {
+        if plane == 0 || g.nz < 4 || [g.f.len(), g.tau.len(), g.fext.len(), self.gpop.len()].iter().any(|l| *l != n)
+            || self.spatial_wall_boundaries.as_ref().is_some_and(|walls| walls.iter().any(|wall| wall.len() != plane))
+        {
             return Err(invalid("invalid 3D slab storage"));
         }
         Ok((n, plane))
@@ -425,10 +432,11 @@ impl Slab<3, 7> for ThermalLbm3 {
         s.buoyancy_direction = self.buoyancy_direction;
         s.buoyancy_quadrature = self.buoyancy_quadrature;
         s.wall_boundaries = self.wall_boundaries; s.wall_exchange = self.wall_exchange;
+        s.spatial_wall_boundaries.clone_from(&self.spatial_wall_boundaries);
         (s, weights)
     }
     fn walls(&self) -> (f64, f64) { (self.t_bottom, self.t_top) }
-    fn thermal_walls(&self) -> [ThermalWall; 2] { self.thermal_walls() }
+    fn thermal_wall_fields(&self) -> [ThermalWallField<'_>; 2] { self.thermal_wall_fields() }
     fn wall_exchange(&self) -> Option<[ThermalWallExchange; 2]> { self.wall_exchange }
     fn flow_valid(&self) -> bool {
         flow_valid(&self.grid.f, &self.grid.tau, &self.grid.fext, self.tau_g) && self.gbeta.is_finite() && self.t_ref.is_finite()

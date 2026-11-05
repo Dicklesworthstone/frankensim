@@ -13,6 +13,9 @@ use fs_lbm::material::{
 use fs_lbm::thermal::sources::HeatSourceLimits;
 use fs_material::fluid_transport::FluidTransportState;
 
+#[path = "material_thermal_walls/spatial.rs"]
+mod spatial;
+
 const DX: f64 = 0.1;
 const DT: f64 = 0.05;
 const DEPTH: f64 = 0.25;

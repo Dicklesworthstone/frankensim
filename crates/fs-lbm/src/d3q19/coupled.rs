@@ -34,7 +34,7 @@ use crate::rheology::{
     PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
 };
 use crate::thermal::{BuoyancyQuadrature, ThermalForcingError, advection, forcing::validate_external_forces};
-use crate::thermal::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
+use crate::thermal::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange, ThermalWallField};
 
 mod moving_walls;
 
@@ -749,6 +749,7 @@ pub struct ThermalLbm3 {
     pub(crate) buoyancy_direction: [f64; 3],
     pub(crate) buoyancy_quadrature: BuoyancyQuadrature,
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
+    pub(crate) spatial_wall_boundaries: Option<[Vec<ThermalWall>; 2]>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
     pub(crate) advection_history: advection::FluxHistory<3>,
 }
@@ -804,6 +805,7 @@ impl ThermalLbm3 {
             buoyancy_direction: [0.0, 0.0, 1.0],
             buoyancy_quadrature: BuoyancyQuadrature::OpeningTemperature,
             wall_boundaries: None,
+            spatial_wall_boundaries: None,
             wall_exchange: None,
             advection_history: advection::FluxHistory::default(),
         }
@@ -862,26 +864,53 @@ impl ThermalLbm3 {
 
     /// Set bottom/top thermal laws without changing populations, buoyancy or
     /// scalar coordinates. Uses the same stationary halfway-wall law as 2-D;
-    /// invalid declarations leave the previous laws and report intact.
+    /// spatial fields are replaced, and invalid declarations leave the
+    /// previous laws and report intact.
     pub fn set_thermal_walls(&mut self, walls: [ThermalWall; 2]) -> Result<(), ThermalWallError> {
         for wall in walls { wall.validate()?; }
         self.wall_boundaries = Some(walls);
+        self.spatial_wall_boundaries = None;
         self.wall_exchange = None;
         Ok(())
     }
 
-    /// Restore the original prescribed `t_bottom` and `t_top` boundaries.
+    /// Set one law per bottom/top link in x-fastest order (`x + nx*y`).
+    /// Both vectors must contain exactly `grid.nx * grid.ny` entries. Local
+    /// heaters, insulation and film cooling may share a plate. Validation
+    /// precedes mutation; the streaming operator borrows the owned fields.
+    pub fn set_spatial_thermal_walls(
+        &mut self, walls: [Vec<ThermalWall>; 2],
+    ) -> Result<(), ThermalWallError> {
+        let links = self.grid.nx.checked_mul(self.grid.ny)
+            .ok_or(ThermalWallError::Invalid("wall plane overflows"))?;
+        for wall in &walls { ThermalWallField::Spatial(wall).validate(links)?; }
+        self.spatial_wall_boundaries = Some(walls);
+        self.wall_exchange = None;
+        Ok(())
+    }
+
+    /// Restore the original prescribed `t_bottom` and `t_top` boundaries,
+    /// clearing both uniform overrides and spatial wall fields.
     pub fn reset_thermal_walls(&mut self) {
         self.wall_boundaries = None;
+        self.spatial_wall_boundaries = None;
         self.wall_exchange = None;
     }
 
-    /// Active bottom/top laws in the solver's scalar and per-step flux units.
+    /// Uniform bottom/top laws in scalar and per-step flux units. Spatial
+    /// overrides supersede these; [`Self::thermal_wall_fields`] returns the
+    /// complete active declarations without allocating.
     #[must_use]
     pub fn thermal_walls(&self) -> [ThermalWall; 2] {
         self.wall_boundaries.unwrap_or([
             ThermalWall::Temperature(self.t_bottom), ThermalWall::Temperature(self.t_top),
         ])
+    }
+
+    /// Active bottom/top wall fields, including spatial overrides.
+    #[must_use]
+    pub fn thermal_wall_fields(&self) -> [ThermalWallField<'_>; 2] {
+        ThermalWallField::pair(self.thermal_walls(), self.spatial_wall_boundaries.as_ref())
     }
 
     /// Actual link exchange and wall traces from the last completed transport
@@ -893,8 +922,8 @@ impl ThermalLbm3 {
     }
 
     fn wall_temperature_difference(&self) -> f64 {
-        match self.thermal_walls() {
-            [ThermalWall::Temperature(bottom), ThermalWall::Temperature(top)] => bottom - top,
+        match self.thermal_wall_fields().map(ThermalWallField::uniform) {
+            [Some(ThermalWall::Temperature(bottom)), Some(ThermalWall::Temperature(top))] => bottom - top,
             _ => self.wall_exchange.map_or(f64::NAN, |walls| {
                 walls[0].mean_temperature - walls[1].mean_temperature
             }),
@@ -1097,7 +1126,9 @@ impl ThermalLbm3 {
                 |cell| grid.moments3(cell).1,
             );
         }
-        let walls = self.thermal_walls();
+        let walls = ThermalWallField::pair(
+            self.thermal_walls(), self.spatial_wall_boundaries.as_ref(),
+        );
         self.wall_exchange = Some(advection::D3Q7.stream_with_walls(
             &mut self.gpop,
             post.as_flattened(),
@@ -1150,7 +1181,7 @@ impl ThermalLbm3 {
     }
 
     /// Volume Nusselt diagnostic: 1 + ⟨u_z·T⟩·H / (α·ΔT).
-    /// With flux/film walls, ΔT is the last measured mean wall contrast;
+    /// With flux/film or spatial walls, ΔT is the last measured mean wall contrast;
     /// before its first step this returns NaN. A zero contrast is singular.
     /// A steady source-free slab is needed to interpret this as wall transfer.
     #[must_use]
@@ -1174,7 +1205,7 @@ impl ThermalLbm3 {
     }
 
     /// Rayleigh diagnostic using prescribed or last measured mean wall
-    /// contrast and the original background diffusivity. Flux/film walls need
+    /// contrast and the original background diffusivity. Flux/film or spatial walls need
     /// one completed step; before that this returns NaN.
     /// This uses the full buoyancy coefficient; the wall-normal driving value
     /// is this number times `buoyancy_direction()[2]`. The Rayleigh–Bénard onset

@@ -7,7 +7,7 @@
 use super::{MaterialLbmError, MaterialSlab, ThermalLbm, ThermalLbm3};
 use crate::thermal::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
 
-/// Prescribed thermal law on one stationary, impermeable slab wall.
+/// Prescribed thermal law on one stationary, impermeable wall or surface link.
 /// Bottom/top orientation never changes the sign convention: positive flux
 /// enters the fluid. Wall area comes from the existing lattice, not this law.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -73,10 +73,10 @@ impl<L> MaterialSlab<L> {
         Ok(normalized)
     }
 
-    fn thermal_wall_inputs(
+    fn thermal_wall_inputs<const N: usize>(
         &self,
-        walls: [MaterialThermalWall; 2],
-    ) -> Result<[ThermalWall; 2], MaterialLbmError> {
+        walls: [MaterialThermalWall; N],
+    ) -> Result<[ThermalWall; N], MaterialLbmError> {
         let units = self.force_units;
         // Heat-flux density times dt/(rho Cp dx) gives the scalar entering
         // ONE normal lattice link per step. DeltaT is signed for q, while H
@@ -91,7 +91,7 @@ impl<L> MaterialSlab<L> {
             }
             Ok(lattice)
         };
-        let mut result = [ThermalWall::Adiabatic; 2];
+        let mut result = [ThermalWall::Adiabatic; N];
         for (output, input) in result.iter_mut().zip(walls) {
             *output = match input {
                 MaterialThermalWall::Temperature(temperature) => {
@@ -123,6 +123,21 @@ impl<L> MaterialSlab<L> {
                 }
             };
             output.validate().map_err(wall_error)?;
+        }
+        Ok(result)
+    }
+
+    fn spatial_thermal_wall_inputs(
+        &self, walls: [Vec<MaterialThermalWall>; 2], links: usize,
+    ) -> Result<[Vec<ThermalWall>; 2], MaterialLbmError> {
+        if links == 0 || walls.iter().any(|wall| wall.len() != links) {
+            return Err(invalid("one physical thermal law per wall link is required"));
+        }
+        let mut result = [Vec::new(), Vec::new()];
+        for (output, input) in result.iter_mut().zip(walls) {
+            *output = input.into_iter().map(|wall| {
+                self.thermal_wall_inputs([wall]).map(|native| native[0])
+            }).collect::<Result<_, _>>()?;
         }
         Ok(result)
     }
@@ -194,6 +209,22 @@ impl MaterialSlab<ThermalLbm> {
         self.lattice.set_thermal_walls(walls).map_err(wall_error)
     }
 
+    /// Set local bottom/top surface laws in SI, one entry per x link. Both
+    /// arrays must contain `lattice.grid.nx` entries. Shape admission and all
+    /// signed temperature/heat conversions precede mutation of the slab.
+    /// Local patches use the same conservative reflection as uniform walls.
+    pub fn set_spatial_thermal_walls(
+        &mut self, walls: [Vec<MaterialThermalWall>; 2],
+    ) -> Result<(), MaterialLbmError> {
+        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+            return Err(invalid(
+                "material thermal walls refuse independently changed normalized wall temperatures",
+            ));
+        }
+        let walls = self.spatial_thermal_wall_inputs(walls, self.lattice.grid.nx)?;
+        self.lattice.set_spatial_thermal_walls(walls).map_err(wall_error)
+    }
+
     /// Last measured wall heat and trace temperatures, with explicit 2-D
     /// extrusion depth [m]. Changing depth scales joules, never temperature or
     /// flow. `None` means no exchange is available after initialization or a
@@ -221,6 +252,24 @@ impl MaterialSlab<ThermalLbm3> {
         }
         let walls = self.thermal_wall_inputs(walls)?;
         self.lattice.set_thermal_walls(walls).map_err(wall_error)
+    }
+
+    /// Set local bottom/top surface laws in SI, in x-fastest (`x + nx*y`)
+    /// order. Each array must contain `lattice.grid.nx * lattice.grid.ny`
+    /// entries. Every patch uses the captured material and thermal coordinate;
+    /// invalid shape or conversion preserves all prior laws and reports.
+    pub fn set_spatial_thermal_walls(
+        &mut self, walls: [Vec<MaterialThermalWall>; 2],
+    ) -> Result<(), MaterialLbmError> {
+        if self.lattice.t_bottom != 1.0 || self.lattice.t_top != 0.0 {
+            return Err(invalid(
+                "material thermal walls refuse independently changed normalized wall temperatures",
+            ));
+        }
+        let links = self.lattice.grid.nx.checked_mul(self.lattice.grid.ny)
+            .ok_or(invalid("wall plane overflows"))?;
+        let walls = self.spatial_thermal_wall_inputs(walls, links)?;
+        self.lattice.set_spatial_thermal_walls(walls).map_err(wall_error)
     }
 
     /// Last measured wall heat [J] and mean trace temperatures [K], using the

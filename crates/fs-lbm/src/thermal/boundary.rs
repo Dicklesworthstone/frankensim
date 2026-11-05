@@ -7,7 +7,7 @@
 //! The original collision owns diffusivity; no relaxation factor is applied
 //! again to the incoming-minus-outgoing boundary exchange.
 
-/// One spatially uniform thermal law on a planar slab wall.
+/// One thermal law on a planar slab wall or one of its surface links.
 ///
 /// All temperatures use the same coordinates as the thermal populations.
 /// Positive heat flux enters the fluid at either wall. Geometry, material
@@ -28,6 +28,67 @@ pub enum ThermalWall {
         /// Ambient temperature in the populations' scalar coordinates.
         ambient: f64,
     },
+}
+
+/// Borrowed laws on one wall, in x-fastest surface order (`x` in 2-D,
+/// `x + nx*y` in 3-D). Each spatial entry owns exactly one normal link.
+/// Uniform fields require no per-link storage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThermalWallField<'a> {
+    /// One law over the complete wall.
+    Uniform(ThermalWall),
+    /// One law per surface link; lengths are admitted by the slab owner.
+    Spatial(&'a [ThermalWall]),
+}
+
+impl<'a> ThermalWallField<'a> {
+    /// Authored laws, visiting a uniform declaration once. A spatial field
+    /// visits every surface link, even if several links use the same law.
+    pub fn laws(self) -> impl Iterator<Item = ThermalWall> + 'a {
+        let (uniform, spatial) = match self {
+            Self::Uniform(wall) => (Some(wall), &[][..]),
+            Self::Spatial(walls) => (None, walls),
+        };
+        uniform.into_iter().chain(spatial.iter().copied())
+    }
+
+    /// The common law, if this field is spatially uniform. This also detects
+    /// constant spatial inputs so scalar diagnostics and SGS retain their
+    /// original fixed-temperature or insulating boundary treatment.
+    #[must_use]
+    pub fn uniform(self) -> Option<ThermalWall> {
+        match self {
+            Self::Uniform(wall) => Some(wall),
+            Self::Spatial(walls) => walls.first().copied()
+                .filter(|first| walls.iter().all(|wall| wall == first)),
+        }
+    }
+
+    pub(crate) fn validate(self, links: usize) -> Result<(), ThermalWallError> {
+        if let Self::Spatial(walls) = self
+            && (links == 0 || walls.len() != links)
+        {
+            return Err(ThermalWallError::Invalid("one thermal law per wall link is required"));
+        }
+        for wall in self.laws() { wall.validate()?; }
+        Ok(())
+    }
+
+    pub(crate) fn at(self, link: usize) -> ThermalWall {
+        match self {
+            Self::Uniform(wall) => wall,
+            Self::Spatial(walls) => walls[link],
+        }
+    }
+
+    pub(crate) fn pair(
+        uniform: [ThermalWall; 2], spatial: Option<&'a [Vec<ThermalWall>; 2]>,
+    ) -> [Self; 2] {
+        spatial.map_or_else(
+            || uniform.map(Self::Uniform),
+            |walls| [Self::Spatial(&walls[0]), Self::Spatial(&walls[1])],
+        )
+    }
 }
 
 /// Invalid wall data; admission precedes mutation of the original slab.

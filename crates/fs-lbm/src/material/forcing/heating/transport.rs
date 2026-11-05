@@ -132,7 +132,7 @@ fn admit_wall_temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
     // The declared reservoir temperature is physical boundary data; unused
     // constructor ghost populations are not. Check declarations before any
     // material callback, including callers with explicit midpoint coordinates.
-    for wall in state.thermal_walls() {
+    for wall in state.thermal_wall_fields().into_iter().flat_map(|field| field.laws()) {
         wall.validate().map_err(ThermalSourceError::Wall)?;
         if let ThermalWall::Temperature(value) = wall {
             let t = mapping.temperature_si(value).map_err(ThermalSourceError::from)?;

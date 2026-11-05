@@ -4381,6 +4381,17 @@ inward heat flux, or a film to a prescribed ambient. With no override, the
 original public `t_bottom`/`t_top` temperatures retain their original
 anti-bounce-back arithmetic. Resetting the override restores that behavior.
 
+`set_spatial_thermal_walls` supplies one law per surface link on both plates,
+in x order for 2-D and x-fastest `x + nx*y` order for 3-D. Heaters, cooling
+patches, films and insulation may share a plate. Both complete arrays are
+admitted before publication; ordinary streaming borrows the retained fields
+without allocation or copies. `thermal_wall_fields` exposes the active laws,
+while the existing `thermal_walls` getter retains the uniform defaults.
+Setting uniform laws or resetting walls clears spatial overrides. For a
+nonuniform field, Rayleigh/Nusselt diagnostics use the last measured mean wall
+contrast and are unavailable before its first step; the existing steady,
+source-free interpretation of the volume Nusselt diagnostic still applies.
+
 For each reflected normal pair, `q = g_in - g_out` is the actual scalar
 exchange and `T_wall = (g_in + g_out)/(2w)` is the surface trace. The film
 closure solves `q = H*(T_ambient - T_wall)` locally, with bounded arithmetic
@@ -4397,7 +4408,8 @@ report. It admits active fluid temperatures, prescribed wall temperatures,
 and every resolved wall trace against the caller's scalar interval. A late
 refusal preserves the original populations, histories, wall laws and report.
 The channel dynamic SGS filter retains declared temperatures and zero-flux
-conditions independently at each wall. For nonzero flux/film walls it uses
+conditions independently at each wall. For nonzero flux/film or nonuniform
+spatial walls it uses
 three-fluid-centre reconstruction of both physical and Favre scalar gradients.
 The original reflected-pair operator still applies actual surface heat, and
 the same source transaction admits temperature, Mach, cancellation and heat
@@ -4408,7 +4420,8 @@ source-resolved material adapters use the same coupling. Other ordinary/source
 thermal steps share the original wall streaming operator in both dimensions.
 
 `MaterialThermalWall` provides the same laws in SI through the retained
-material slab. It converts signed `q''` by `dt/(rho*Cp*dx*DeltaT)` and `h`
+material slab, including local fields through `set_spatial_thermal_walls`.
+It converts signed `q''` by `dt/(rho*Cp*dx*DeltaT)` and `h`
 by `dt/(rho*Cp*dx)`; reversing the original temperature coordinate does not
 reverse physical heating. The wall report converts actual link exchange to
 joules using the same captured material heat capacity and physical cell
@@ -4423,7 +4436,10 @@ Focused kernel regressions cover the original temperature arithmetic, exact
 insulation, signed imposed flux, local film balance, and the analytic series
 resistance of a conductive slab between two films across several relaxation
 times. Source and channel-SGS regressions cover boundary publication and
-refusal. This closure is limited to the existing planar, uniform-cell,
+refusal. Spatial regressions compare constant fields bit for bit with uniform
+laws, preserve wall patterns and derivative history after rejected steps, and
+check opposed buoyant plumes driven by balanced local surface heating/cooling
+in 2-D and 3-D. This closure is limited to the existing planar, uniform-cell,
 constant-capacity temperature slabs; it adds neither curved boundaries nor
 a finite ambient reservoir or a general unsteady accuracy guarantee.
 

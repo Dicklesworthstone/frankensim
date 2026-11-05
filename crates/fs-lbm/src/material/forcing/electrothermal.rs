@@ -123,22 +123,19 @@ fn temperatures<S: Slab<D, Q>, const D: usize, const Q: usize>(
         _ => invalid("material temperature admission failed"),
     })?;
     let (cells, plane) = slab.lattice.layout()?;
-    for (side, wall) in slab.lattice.thermal_walls().into_iter().enumerate() {
-        poll(gate)?;
+    for (side, field) in slab.lattice.thermal_wall_fields().into_iter().enumerate() {
         let start = if side == 0 { 0 } else { cells - plane };
-        if let ThermalWall::Temperature(value) = wall {
-            let kelvin = slab.temperature_si(value).map_err(ThermalSourceError::from)?;
-            temperature[start..start + plane].fill(kelvin);
-        } else {
-            // Electrical admission requires positive Kelvin even in insulating
-            // cells, before querying resistivity. Both stationary and magnetic
-            // source adapters exclude these wall slots from the caller's law.
-            // Extend adjacent admitted fluid values as metadata only: these
-            // slots carry neither heat storage nor a reconstructed wall trace.
-            // The same extension at both endpoints also preserves midpoint
-            // residuals, because each padding value duplicates a fluid value.
-            let near = if side == 0 { plane } else { cells - 2 * plane };
-            temperature.copy_within(near..near + plane, start);
+        let near = if side == 0 { plane } else { cells - 2 * plane };
+        for link in 0..plane {
+            if link % 256 == 0 { poll(gate)?; }
+            temperature[start + link] = if let ThermalWall::Temperature(value) = field.at(link) {
+                slab.temperature_si(value).map_err(ThermalSourceError::from)?
+            } else {
+                // Electrical admission requires positive Kelvin in ghost slots.
+                // Extend the adjacent admitted fluid value as metadata only:
+                // these slots carry neither heat storage nor a wall trace.
+                temperature[near + link]
+            };
         }
     }
     poll(gate)?;

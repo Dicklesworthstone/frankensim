@@ -12,7 +12,9 @@
 //! temporal order of the complete partitioned buoyancy/source solver.
 
 use core::ops::Range;
-use super::boundary::{ThermalWall, ThermalWallExchange};
+use super::boundary::{ThermalWallExchange, ThermalWallField};
+#[cfg(test)]
+use super::boundary::ThermalWall;
 
 /// One vector per cell; retained by transactional snapshots, never by a
 /// step-local relaxation field. Wall entries are unused.
@@ -185,7 +187,9 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
             populations,
             post,
             shape,
-            walls.map(|temperatures| temperatures.map(ThermalWall::Temperature)),
+            walls.map(|temperatures| temperatures.map(|t| {
+                ThermalWallField::Uniform(ThermalWall::Temperature(t))
+            })),
         );
     }
 
@@ -199,7 +203,7 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
         populations: &mut [[f64; Q]],
         post: &[f64],
         shape: [usize; D],
-        walls: Option<[ThermalWall; 2]>,
+        walls: Option<[ThermalWallField<'_>; 2]>,
     ) -> [ThermalWallExchange; 2] {
         let mut stride = [1; D];
         for axis in 1..D {
@@ -250,7 +254,8 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
                 if let Some([bottom, top]) = walls.filter(|_| axis == D - 1) {
                     incoming[positive] = if cell < 2 * plane {
                         let outgoing = post[Q * cell + negative];
-                        let (reflected, wall) = bottom.reflect(outgoing, self.weights[positive]);
+                        let (reflected, wall) = bottom.at(cell - plane)
+                            .reflect(outgoing, self.weights[positive]);
                         record(0, reflected, outgoing, wall);
                         reflected
                     } else {
@@ -258,7 +263,8 @@ impl<const D: usize, const Q: usize> AxisLattice<D, Q> {
                     };
                     incoming[negative] = if cell >= cells - 2 * plane {
                         let outgoing = post[Q * cell + positive];
-                        let (reflected, wall) = top.reflect(outgoing, self.weights[negative]);
+                        let (reflected, wall) = top.at(cell - (cells - 2 * plane))
+                            .reflect(outgoing, self.weights[negative]);
                         record(1, reflected, outgoing, wall);
                         reflected
                     } else {

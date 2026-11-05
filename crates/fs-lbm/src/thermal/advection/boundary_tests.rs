@@ -145,7 +145,7 @@ fn equilibrate<const D: usize, const Q: usize>(
             &mut history,
             |_| [0.0; D],
         );
-        exchange = lattice.stream_with_walls(&mut populations, &post, shape, Some(walls));
+        exchange = lattice.stream_with_walls(&mut populations, &post, shape, Some(walls.map(ThermalWallField::Uniform)));
         boundary_heat += exchange[0].heat_in + exchange[1].heat_in;
     }
     near(storage(&populations, plane) - initial, boundary_heat, 3e-10);
@@ -273,7 +273,7 @@ fn insulated<const D: usize, const Q: usize>(lattice: &AxisLattice<D, Q>, shape:
             &mut populations,
             &post,
             shape,
-            Some([ThermalWall::Adiabatic; 2]),
+            Some([ThermalWallField::Uniform(ThermalWall::Adiabatic); 2]),
         );
         assert_eq!(report[0].heat_in, 0.0);
         assert_eq!(report[1].heat_in, 0.0);
@@ -306,7 +306,7 @@ fn g0_trace_extrema_retain_nonfinite_refusals_after_later_finite_links() {
         &mut populations,
         &post,
         shape,
-        Some([ThermalWall::Adiabatic; 2]),
+        Some([ThermalWallField::Uniform(ThermalWall::Adiabatic); 2]),
     );
     assert!(report[0].min_temperature.is_nan());
     assert!(report[0].max_temperature.is_nan());
