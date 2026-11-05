@@ -308,12 +308,11 @@ impl ViscoElementState<'_> {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let stress = constant_stress.unwrap_or_else(|| stress_at(q));
-                for (b, &dof) in point.b.iter().zip(&element.dofs) {
-                    if let Some(row) = reduced[dof] {
-                        force[row] +=
-                            point.volume_m3 * b.iter().zip(stress).map(|(b, s)| b * s).sum::<f64>();
+                point.for_each_force(stress, |local, contribution| {
+                    if let Some(row) = reduced[element.dofs[local]] {
+                        force[row] += contribution;
                     }
-                }
+                });
             }
         }
         Ok(())

@@ -247,9 +247,8 @@ impl ViscoElements {
                 let mut compatible = point.compatible_gradients.as_ref()
                     .map(|_| Vec::with_capacity(n));
                 for column in columns {
-                    let mandel: [f64; 6] = core::array::from_fn(|i|
-                        point.b.iter().zip(&reduced).map(|(b, r)|
-                            r.map_or(0.0, |r| b[i]*column[r])).sum());
+                    let mandel = point.strain_from_local(|i|
+                        reduced[i].map_or(0.0, |r| column[r]));
                     // The element uses Mandel shear; project_strain takes
                     // tensor shear. This conversion retains stress:strain work.
                     strains.push(core::array::from_fn(|i| if i < 3 { mandel[i] }

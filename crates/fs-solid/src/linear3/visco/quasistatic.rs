@@ -223,14 +223,13 @@ impl<'a> ViscoElementState<'a> {
                 let mut stress = element
                     .law
                     .step(&mut hold, accepted.strain, prepared.dt_s)?;
-                let mut delta: [f64; 6] = core::array::from_fn(|i| {
-                    point
-                        .b
-                        .iter()
-                        .zip(&element.dofs)
-                        .filter(|(_, d)| prepared.reduced[**d].is_none())
-                        .map(|(b, &d)| b[i] * (support_displacement_m[d] - self.displacement_m[d]))
-                        .sum::<f64>()
+                let mut delta = point.strain_from_local(|i| {
+                    let dof = element.dofs[i];
+                    if prepared.reduced[dof].is_none() {
+                        support_displacement_m[dof] - self.displacement_m[dof]
+                    } else {
+                        0.0
+                    }
                 });
                 if thermal.is_some() {
                     for i in 0..6 {
@@ -240,15 +239,11 @@ impl<'a> ViscoElementState<'a> {
                 for i in 0..6 {
                     stress[i] += (0..6).map(|j| tangent[i][j] * delta[j]).sum::<f64>();
                 }
-                for (b, &dof) in point.b.iter().zip(&element.dofs) {
-                    if let Some(row) = prepared.reduced[dof] {
-                        history_force[row] += point.volume_m3
-                            * b.iter()
-                                .zip(stress)
-                                .map(|(b, stress)| b * stress)
-                                .sum::<f64>();
+                point.for_each_force(stress, |local, contribution| {
+                    if let Some(row) = prepared.reduced[element.dofs[local]] {
+                        history_force[row] += contribution;
                     }
-                }
+                });
             }
         }
         let rhs: Vec<_> = free

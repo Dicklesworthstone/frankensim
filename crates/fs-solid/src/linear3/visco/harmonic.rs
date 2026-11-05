@@ -296,37 +296,22 @@ impl ViscoElements {
         displacement: &[C64],
         cx: &Cx<'_>,
     ) -> Result<(), ViscoElementError> {
+        let mut local = Vec::new();
         for element in &self.elements {
             checkpoint(cx)?;
+            local.clear();
+            local.extend(element.dofs.iter().map(|dof| {
+                self.equilibrium.free_dofs.binary_search(dof)
+                    .map_or(C64::ZERO, |row| displacement[row])
+            }));
             for point in &element.points {
                 checkpoint(cx)?;
-                let mut re = [0.0; 6];
-                let mut im = [0.0; 6];
-                for (b, &dof) in point.b.iter().zip(&element.dofs) {
-                    if let Ok(row) = self.equilibrium.free_dofs.binary_search(&dof) {
-                        let u = displacement[row];
-                        for i in 0..6 {
-                            re[i] = b[i].mul_add(u.re, re[i]);
-                            im[i] = b[i].mul_add(u.im, im[i]);
-                        }
-                    }
-                }
+                let re = point.strain_from_local(|i| local[i].re);
+                let im = point.strain_from_local(|i| local[i].im);
                 validate_harmonic_strain(&element.law, re, im)?;
-                if let Some(gradients) = &point.compatible_gradients {
-                    // B-bar preserves the shear rows. Recover raw normal
-                    // strains directly from gradients, without subtracting
-                    // nearly equal projected terms in a high-bulk material.
-                    re[..3].fill(0.0);
-                    im[..3].fill(0.0);
-                    for (g, dofs) in gradients.iter().zip(element.dofs.chunks_exact(3)) {
-                        for i in 0..3 {
-                            if let Ok(row) = self.equilibrium.free_dofs.binary_search(&dofs[i]) {
-                                let u = displacement[row];
-                                re[i] = g[i].mul_add(u.re, re[i]);
-                                im[i] = g[i].mul_add(u.im, im[i]);
-                            }
-                        }
-                    }
+                if point.compatible_gradients.is_some() {
+                    let re = point.compatible_strain_from_local(re, |i| local[i].re);
+                    let im = point.compatible_strain_from_local(im, |i| local[i].im);
                     validate_harmonic_strain(&element.law, re, im)?;
                 }
             }

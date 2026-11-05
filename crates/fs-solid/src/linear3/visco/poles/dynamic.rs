@@ -390,32 +390,39 @@ pub(super) fn body_energy(
     let m = prepared.free_dofs().len();
     let mut storage = 0.0;
     let mut loss = 0.0;
-    // Read the original source operators, independently of any attached K/C/M
-    // port law. Forced response uses these same accounts without subtracting
-    // potentially very different body and load energy scales.
+    // Retain absolute velocity for physical kinetic energy. Constitutive
+    // storage and loss below use the original pointwise relative strain map,
+    // independently of attached K/C/M port laws and rigid translations.
     for i in 0..m {
         poll(cancelled)?;
-        let (columns, values) = prepared.source.equilibrium.stiffness.row(i);
-        for (&j, &value) in columns.iter().zip(values) {
-            storage += 0.5 * inner(vector[i], vector[j]) * value;
-        }
         let (columns, values) = prepared.source.equilibrium.mass.row(i);
         for (&j, &value) in columns.iter().zip(values) {
             storage += 0.5 * inner(rate * vector[i], rate * vector[j]) * value;
         }
     }
+    let mut local = Vec::new();
     for element in &prepared.source.elements {
-        if let Some(viscosity) = element.law.kv_pa_s() {
-            for point in &element.points {
-                poll(cancelled)?;
-                let mut strain_rate = [C64::ZERO; 6];
-                for (b, &dof) in point.b.iter().zip(&element.dofs) {
-                    if let Ok(row) = prepared.free_dofs().binary_search(&dof) {
-                        for i in 0..6 {
-                            strain_rate[i] = strain_rate[i] + (rate * vector[row]).scale(b[i]);
-                        }
-                    }
+        poll(cancelled)?;
+        local.clear();
+        local.extend(element.dofs.iter().map(|dof| {
+            prepared.free_dofs().binary_search(dof)
+                .map_or(C64::ZERO, |row| vector[row])
+        }));
+        for point in &element.points {
+            poll(cancelled)?;
+            let re = point.strain_from_local(|i| local[i].re);
+            let im = point.strain_from_local(|i| local[i].im);
+            let strain: [C64; 6] = core::array::from_fn(|i| C64::new(re[i], im[i]));
+            for i in 0..6 {
+                for j in 0..6 {
+                    storage += 0.5 * point.volume_m3
+                        * inner(strain[i], strain[j]) * element.law.c_eq()[i][j];
                 }
+            }
+            if let Some(viscosity) = element.law.kv_pa_s() {
+                // Differentiate strain after removing translation; multiplying
+                // large absolute nodal phasors first can erase deformation.
+                let strain_rate = strain.map(|value| rate * value);
                 for i in 0..6 {
                     for j in 0..6 {
                         loss += point.volume_m3

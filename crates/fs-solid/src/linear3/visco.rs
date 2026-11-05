@@ -271,14 +271,31 @@ struct IntegrationPoint {
 }
 
 impl IntegrationPoint {
-    fn strain(&self, dofs: &[usize], displacement: &[f64]) -> [f64; 6] {
-        core::array::from_fn(|i| {
-            self.b
-                .iter()
-                .zip(dofs)
-                .map(|(b, &d)| b[i] * displacement[d])
-                .sum()
-        })
+    fn strain(&self, dofs: &[usize], displacement: &[f64]) -> [f64; 6]{
+        self.strain_from_local(|i| displacement[dofs[i]])
+    }
+
+    fn strain_from_local(&self, displacement: impl Fn(usize) -> f64) -> [f64; 6] {
+        super::relative_mandel_strain(self.b.len() / 3, |i| self.b[i], displacement)
+    }
+
+    // Transpose of the relative-displacement map: the anchor receives the
+    // negative sum of the remaining nodal forces, so common translation does
+    // not depend on independently rounded partition-of-unity coefficients.
+    fn for_each_force(&self, stress: [f64; 6], mut add: impl FnMut(usize, f64)) {
+        let mut anchor_force = [0.0; 3];
+        for (local, b) in self.b.iter().enumerate().skip(3) {
+            let force = self.volume_m3
+                * b.iter()
+                    .zip(stress)
+                    .map(|(b, stress)| b * stress)
+                    .sum::<f64>();
+            anchor_force[local % 3] -= force;
+            add(local, force);
+        }
+        for (component, force) in anchor_force.into_iter().enumerate() {
+            add(component, force);
+        }
     }
 
     fn validate_compatible_strain(
@@ -307,14 +324,16 @@ impl IntegrationPoint {
         &self,
         mut strain: [f64; 6],
         displacement: impl Fn(usize) -> f64,
-    ) -> [f64; 6] {
+    ) -> [f64; 6]{
         if let Some(gradients) = &self.compatible_gradients {
-            for i in 0..3 {
-                strain[i] = gradients
-                    .iter()
-                    .enumerate()
-                    .map(|(node, g)| g[i] * displacement(3 * node + i))
-                    .sum();
+            // Use the same relative displacement as the assumed B-bar strain.
+            // Rounded gradient sums must not turn translation into a refusal.
+            let anchor: [f64; 3] = core::array::from_fn(&displacement);
+            strain[..3].fill(0.0);
+            for (node, g) in gradients.iter().enumerate().skip(1) {
+                for i in 0..3 {
+                    strain[i] = g[i].mul_add(displacement(3 * node + i) - anchor[i], strain[i]);
+                }
             }
         }
         strain
@@ -1296,6 +1315,9 @@ impl<'a> ViscoElementState<'a> {
             .or(self.thermal_strains.as_deref());
         for (element, (e, states)) in self.system.elements.iter().zip(&mut histories).enumerate() {
             let mut element_step = ViscoElementStep::default();
+            let new_anchor: [f64; 3] = core::array::from_fn(|i| u_new[e.dofs[i]]);
+            let old_anchor: [f64; 3] =
+                core::array::from_fn(|i| self.displacement_m[e.dofs[i]]);
             for (point, (p, state)) in e.points.iter().zip(states).enumerate() {
                 checkpoint(cx)?;
                 let delta_free =
@@ -1326,17 +1348,20 @@ impl<'a> ViscoElementState<'a> {
                 {
                     return Err(ViscoElementError::NonFiniteResult);
                 }
-                for (b, &d) in p.b.iter().zip(&e.dofs) {
-                    force[d] += p.volume_m3 * b.iter().zip(stress).map(|(a, s)| a * s).sum::<f64>();
-                    let mean_contribution = p.volume_m3
-                        * b.iter()
-                            .zip(response.mean_stress)
-                            .map(|(a, s)| a * s)
-                            .sum::<f64>();
-                    mean_force[d] += mean_contribution;
-                    element_step.step_mechanical_work_j +=
-                        mean_contribution * (u_new[d] - self.displacement_m[d]);
-                }
+                p.for_each_force(stress, |local, contribution| {
+                    force[e.dofs[local]] += contribution;
+                });
+                p.for_each_force(response.mean_stress, |local, contribution| {
+                    let dof = e.dofs[local];
+                    mean_force[dof] += contribution;
+                    // Subtract each endpoint's translation before taking the
+                    // increment. Internal work must not rely on cancellation
+                    // of large nodal products or large absolute increments.
+                    let axis = local % 3;
+                    let relative_increment = (u_new[dof] - new_anchor[axis])
+                        - (self.displacement_m[dof] - old_anchor[axis]);
+                    element_step.step_mechanical_work_j += contribution * relative_increment;
+                });
                 energy.stored_j += p.volume_m3 * state.stored;
                 energy.work_j += p.volume_m3 * state.work;
                 energy.dissipated_j += p.volume_m3 * state.dissipated;
@@ -1376,10 +1401,9 @@ impl<'a> ViscoElementState<'a> {
             }
             element_steps.push(element_step);
         }
-        let step_mechanical_work_j = mean_force
+        let step_mechanical_work_j = element_steps
             .iter()
-            .zip(u_new.iter().zip(&self.displacement_m))
-            .map(|(f, (new, old))| f * (new - old))
+            .map(|step| step.step_mechanical_work_j)
             .sum::<f64>();
         let eigenstrain_work_j = self.eigenstrain_work_j + step_eigenstrain_work_j;
         if force.iter().chain(&mean_force).any(|v| !v.is_finite())

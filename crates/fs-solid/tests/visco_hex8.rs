@@ -155,6 +155,84 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 }
 
 #[test]
+fn translated_thermal_history_retains_compatible_strain_and_separate_work() {
+    use fs_blake3::ContentHash;
+    use fs_solid::linear3::{TetThermalStrainField, TetThermalStrainState};
+    with_cx(|cx, _| {
+        let nodes = NODES.map(|[x, y, z]| [x + y * z / 8.0, y + x * z / 16.0, z + x * y / 8.0]);
+        let material = coupled();
+        let offset = [1073741824.0, -2147483648.0, 536870912.0];
+        for formulation in FORMS {
+            let solid = system(&nodes, &material, formulation, &[], 3, cx);
+            let mut reference = solid.state(cx).unwrap();
+            let mut translated = solid.state(cx).unwrap();
+            for (amplitude, expansion, shift) in
+                [(1.0, 1.0, 1.0), (-0.5, 0.5, -1.0), (0.0, 0.5, 0.5)]
+            {
+                let base: Vec<_> = nodes
+                    .iter()
+                    .flat_map(|[x, y, z]| {
+                        [
+                            amplitude * (x + y) / 1024.0,
+                            amplitude * (y - z) / 1024.0,
+                            amplitude * (x + 2.0 * z) / 1024.0,
+                        ]
+                    })
+                    .collect();
+                let shifted: Vec<_> = base
+                    .iter()
+                    .enumerate()
+                    .map(|(d, u)| u + shift * offset[d % 3])
+                    .collect();
+                let free = [expansion / 4096.0, expansion / 8192.0, 0.0, 0.0, 0.0, 0.0];
+                let thermal = TetThermalStrainState::try_new(
+                    300.0 + expansion,
+                    300.0,
+                    free,
+                    material.material_state_identity,
+                    ContentHash([81; 32]),
+                    0.02,
+                )
+                .unwrap();
+                let expected = reference
+                    .step_internal_force_with_thermal_strain(
+                        &base,
+                        0.01,
+                        TetThermalStrainField::Uniform(&thermal),
+                        cx,
+                    )
+                    .unwrap();
+                let actual = translated
+                    .step_internal_force_with_thermal_strain(
+                        &shifted,
+                        0.01,
+                        TetThermalStrainField::Uniform(&thermal),
+                        cx,
+                    )
+                    .unwrap();
+                assert_eq!(actual.full_force_n, expected.full_force_n);
+                assert_eq!(actual.full_mean_force_n, expected.full_mean_force_n);
+                assert_eq!(actual.energy, expected.energy);
+                assert_eq!(actual.element_steps, expected.element_steps);
+                assert_eq!(
+                    actual.step_mechanical_work_j,
+                    expected.step_mechanical_work_j
+                );
+                assert_eq!(
+                    actual.step_eigenstrain_work_j,
+                    expected.step_eigenstrain_work_j
+                );
+                relative(
+                    actual.step_mechanical_work_j + actual.step_eigenstrain_work_j,
+                    actual.step_work_j,
+                    2e-12,
+                );
+            }
+        }
+    });
+}
+
+#[test]
 fn warped_history_and_mass_use_the_original_elastic_pencil() {
     with_cx(|cx, _| {
         let nodes = NODES.map(|[x, y, z]| [x + 0.1 * y * z, y + 0.07 * x * z, z + 0.05 * x * y]);

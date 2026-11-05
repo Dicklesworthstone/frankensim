@@ -99,6 +99,209 @@ fn system(mesh: SolidMeshRef<'_>, m: &TetViscoMaterial, cx: &Cx<'_>) -> ViscoEle
     .unwrap()
 }
 
+// Dyadic coordinates and displacements keep the translated affine field
+// exactly representable. These fixtures isolate kinematic cancellation from
+// information already lost when a caller forms floating-point input.
+fn with_translation_fixtures(cx: &Cx<'_>, mut check: impl FnMut(&ViscoElements, &[[f64; 3]])) {
+    use fs_solid::linear::Formulation;
+    let tet4_nodes = [
+        [0.0; 3],
+        [1.0, 0.125, 0.0],
+        [0.25, 1.0, 0.125],
+        [0.0, 0.25, 1.0],
+    ];
+    let tet4 = [[0, 1, 2, 3]];
+    let (tet10_nodes, tet10) = promote_p1_to_p2(&tet4_nodes, &tet4, None, cx).unwrap();
+    let warp = |[x, y, z]: [f64; 3]| [x + y * z / 8.0, y + x * z / 16.0, z + x * y / 8.0];
+    let hex8_nodes = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ]
+    .map(warp);
+    let physical = |p: [i8; 3]| warp(p.map(|v| 0.5 * (f64::from(v) + 1.0)));
+    let hex20_nodes = HEX20_REFERENCE_NODES.map(physical);
+    let hex27_nodes = HEX27_REFERENCE_NODES.map(physical);
+    let hex8 = [core::array::from_fn(|i| i)];
+    let hex20 = [core::array::from_fn(|i| i)];
+    let hex27 = [core::array::from_fn(|i| i)];
+    let mut material = fixture(2);
+    material.law = material
+        .law
+        .with_kelvin_viscosity_mandel(diagonal([2e5; 6]))
+        .unwrap();
+    for mesh in [
+        SolidMeshRef::Tet4 {
+            nodes_m: &tet4_nodes,
+            elements: &tet4,
+        },
+        SolidMeshRef::Tet10 {
+            nodes_m: &tet10_nodes,
+            elements: &tet10,
+            quadrature: Q,
+        },
+        SolidMeshRef::Hex8 {
+            nodes_m: &hex8_nodes,
+            elements: &hex8,
+            formulation: Formulation::Standard,
+            stiffness_points_per_dir: 3,
+        },
+        SolidMeshRef::Hex8 {
+            nodes_m: &hex8_nodes,
+            elements: &hex8,
+            formulation: Formulation::BBar,
+            stiffness_points_per_dir: 3,
+        },
+        SolidMeshRef::Hex {
+            nodes_m: &hex20_nodes,
+            elements: HexConnectivity::Hex20(&hex20),
+            quadrature: HexQuadrature { points_per_dir: 3 },
+        },
+        SolidMeshRef::Hex {
+            nodes_m: &hex27_nodes,
+            elements: HexConnectivity::Hex27(&hex27),
+            quadrature: HexQuadrature { points_per_dir: 3 },
+        },
+    ] {
+        let coordinates = match mesh {
+            SolidMeshRef::Tet4 { nodes_m, .. }
+            | SolidMeshRef::Tet10 { nodes_m, .. }
+            | SolidMeshRef::Hex8 { nodes_m, .. }
+            | SolidMeshRef::Hex { nodes_m, .. } => nodes_m,
+        };
+        check(&system(mesh, &material, cx), coordinates);
+    }
+}
+
+fn dyadic_affine_displacement(nodes: &[[f64; 3]], amplitude: f64) -> Vec<f64> {
+    nodes
+        .iter()
+        .flat_map(|[x, y, z]| {
+            [
+                amplitude * (x + 2.0 * y - z),
+                amplitude * (-2.0 * x + y + 3.0 * z),
+                amplitude * (x - y + 2.0 * z),
+            ]
+        })
+        .collect()
+}
+
+fn translated(u: &[f64], offset: [f64; 3]) -> Vec<f64> {
+    u.iter()
+        .enumerate()
+        .map(|(d, u)| u + offset[d % 3])
+        .collect()
+}
+
+#[test]
+fn g0_rigid_translation_creates_no_viscoelastic_memory_or_heat_in_any_family() {
+    with_cx(|cx, _| {
+        with_translation_fixtures(cx, |solid, coordinates| {
+            let zero = vec![0.0; 3 * coordinates.len()];
+            let mut translated_history = solid.state(cx).unwrap();
+            for offset in [
+                [17592186044416.0, -8796093022208.0, 35184372088832.0],
+                [0.0; 3],
+            ] {
+                let u = translated(&zero, offset);
+                solid.validate_displacement(&u, || false).unwrap();
+                let step = translated_history
+                    .step_internal_force(&u, 0.001, cx)
+                    .unwrap();
+                assert!(
+                    step.full_force_n
+                        .iter()
+                        .chain(&step.full_mean_force_n)
+                        .all(|&f| f == 0.0)
+                );
+                assert_eq!(step.energy, ViscoEnergy::default());
+                assert_eq!(step.step_mechanical_work_j, 0.0);
+                assert_eq!(step.step_dissipated_j, 0.0);
+                assert!(
+                    step.element_steps
+                        .iter()
+                        .all(|s| *s == ViscoElementStep::default())
+                );
+            }
+            // A later deformation detects memory that a zero endpoint force alone
+            // could conceal. Its response must equal a never-translated history.
+            let mut pristine = solid.state(cx).unwrap();
+            let u = dyadic_affine_displacement(coordinates, 1.0 / 1024.0);
+            let expected = pristine.step_internal_force(&u, 0.001, cx).unwrap();
+            let actual = translated_history
+                .step_internal_force(&u, 0.001, cx)
+                .unwrap();
+            assert_eq!(actual.full_force_n, expected.full_force_n);
+            assert_eq!(actual.energy, expected.energy);
+            assert_eq!(actual.element_steps, expected.element_steps);
+        })
+    });
+}
+
+#[test]
+fn g3_translated_affine_strain_preserves_projection_history_and_internal_work() {
+    with_cx(|cx, _| {
+        with_translation_fixtures(cx, |solid, coordinates| {
+            let offset = [1073741824.0, -2147483648.0, 536870912.0];
+            let u = dyadic_affine_displacement(coordinates, 1.0 / 1024.0);
+            let shifted = translated(&u, offset);
+            let rigid = translated(&vec![0.0; u.len()], offset);
+            let projected = solid
+                .project_basis(
+                    &[u.clone(), shifted, rigid],
+                    SolidProjectionBudget {
+                        max_coordinates: 3,
+                        max_basis_scalars: 300,
+                        max_material_points: 100,
+                        max_scalar_terms: 1_000_000,
+                    },
+                    cx,
+                )
+                .unwrap();
+            // Translation is removed only from strain; its physical inertia remains.
+            assert!(projected.mass_matrix_kg()[8] > 0.0);
+            for point in projected.material_points() {
+                let columns = point.strain_columns();
+                assert_eq!(columns[0], columns[1]);
+                assert_eq!(columns[2], [0.0; 6]);
+                if let Some(columns) = point.compatible_strain_columns() {
+                    assert_eq!(columns[0], columns[1]);
+                    assert_eq!(columns[2], [0.0; 6]);
+                }
+            }
+            let mut reference = solid.state(cx).unwrap();
+            let mut moving = solid.state(cx).unwrap();
+            for (amplitude, shift, dt) in [
+                (1.0, 1.0, 0.0002),
+                (-0.5, -1.0, 0.001),
+                (-0.5, 0.5, 0.02),
+                (0.25, 0.0, 0.005),
+                (0.0, 1.0, 0.001),
+            ] {
+                let base: Vec<_> = u.iter().map(|v| amplitude * v).collect();
+                let shifted = translated(&base, offset.map(|v| shift * v));
+                solid.validate_displacement(&shifted, || false).unwrap();
+                let expected = reference.step_internal_force(&base, dt, cx).unwrap();
+                let actual = moving.step_internal_force(&shifted, dt, cx).unwrap();
+                assert_eq!(actual.full_force_n, expected.full_force_n);
+                assert_eq!(actual.full_mean_force_n, expected.full_mean_force_n);
+                assert_eq!(actual.energy, expected.energy);
+                assert_eq!(actual.element_steps, expected.element_steps);
+                assert_eq!(
+                    actual.step_mechanical_work_j,
+                    expected.step_mechanical_work_j
+                );
+                close(actual.step_mechanical_work_j, actual.step_work_j, 2e-12);
+            }
+        })
+    });
+}
+
 #[test]
 fn g0_high_order_tensor_dynamics_close_original_mass_material_energy() {
     with_cx(|cx, _| {

@@ -518,12 +518,11 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
                     let strain = point.strain(&element.dofs, increment);
                     let stress: [f64; 6] =
                         core::array::from_fn(|i| (0..6).map(|j| tangent[i][j] * strain[j]).sum());
-                    for (b, &d) in point.b.iter().zip(&element.dofs) {
-                        if let Some(i) = prepared.reduced[d] {
-                            held.reduced_mean_force_n[i] += point.volume_m3
-                                * b.iter().zip(stress).map(|(b, s)| b * s).sum::<f64>();
+                    point.for_each_force(stress, |local, contribution| {
+                        if let Some(row) = prepared.reduced[element.dofs[local]] {
+                            held.reduced_mean_force_n[row] += contribution;
                         }
-                    }
+                    });
                 }
             }
         }
