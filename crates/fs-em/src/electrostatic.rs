@@ -13,11 +13,15 @@
 //! with Ohmic transport on a retained charge history at constant permittivity.
 
 mod force;
-pub(crate) mod virtual_work;
 mod sources;
+pub(crate) mod virtual_work;
 pub use sources::{
     ElectrostaticChargeSheet, ElectrostaticDisplacementTrace, PlanarElectrostaticSources,
 };
+/// Rotationally symmetric scalar fields with the original radial volume metric.
+pub mod axisymmetric;
+/// Spatially resolved Debye polarization and dielectric relaxation history.
+pub mod dispersion;
 /// Multiple source-resolved electrodes and passive native circuit reduction.
 pub mod network;
 /// Reversible nonlinear dielectrics, mixed electrode controls and bias tangents.
@@ -73,7 +77,7 @@ pub enum ElectrostaticError {
 }
 impl core::fmt::Display for ElectrostaticError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "planar electrostatics: {self:?}")
+        write!(f, "electrostatics: {self:?}")
     }
 }
 impl std::error::Error for ElectrostaticError {}
@@ -185,6 +189,20 @@ impl PlanarElectrostatics {
                 "this dielectric owner requires a planar metric",
             ));
         }
+        Self::assemble_metric(mesh, materials, laws, limits, cancelled)
+    }
+
+    // Shared scalar dielectric core. Public planar construction keeps its
+    // metric refusal; the axisymmetric owner exposes its own field type and
+    // never exports planar force/motion semantics for a revolved domain.
+    fn assemble_metric(
+        mesh: TriComplex2,
+        materials: Vec<ResolvedMaterialStatePoint>,
+        laws: Option<Vec<PlanarDielectricLaw>>,
+        limits: WeightedAssemblyLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ElectrostaticError> {
+        poll(cancelled)?;
         if materials.len() != mesh.faces().len()
             || laws
                 .as_ref()
@@ -329,6 +347,9 @@ impl PlanarElectrostatics {
         }
         let prescribed =
             scalar_potential::prescribed_boundary(&self.mesh, boundary_voltage_v, cancelled)?;
+        if matches!(self.mesh.metric(), Metric2::Axisymmetric { .. }) {
+            axisymmetric::admit_prescribed_traces(&self.mesh, &prescribed, cancelled)?;
+        }
         let loads = sources::assemble(&self.mesh, sources, &prescribed, cancelled)?;
         let solved = scalar_potential::solve_relative(
             &self.stiffness,

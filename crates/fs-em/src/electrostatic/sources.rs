@@ -1,4 +1,4 @@
-//! Exact P1 charge moments on the original extruded planar complex.
+//! Exact P1 charge moments on the original extruded or revolved complex.
 //!
 //! D=epsilon E+P, div(D)=rho and E=-grad(V) give
 //! K V = integral(N rho) + integral_interface(N sigma)
@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use fs_rep_mesh::TriComplex2;
+use fs_rep_mesh::{Metric2, TriComplex2};
 
 use super::{ElectricField, ElectrostaticError, accumulate, finite, geometry, poll};
 use crate::planar::gradients;
@@ -65,6 +65,41 @@ pub(super) struct SourceLoads {
     loaded_cells: Vec<bool>,
 }
 
+// Integral(N_i r)/integral(r) on a triangle equals
+// (1 + r_i/(r_0+r_1+r_2))/4. Scaling radii first avoids overflowing
+// their sum even when the already-admitted physical measure is finite.
+fn volume_shares(mesh: &TriComplex2, face: [u32; 3]) -> [f64; 3] {
+    match mesh.metric() {
+        Metric2::Planar { .. } => [1.0 / 3.0; 3],
+        Metric2::Axisymmetric { .. } => {
+            let radii = face.map(|v| mesh.vertices()[v as usize][0]);
+            let scale = radii.into_iter().fold(0.0_f64, f64::max);
+            let scaled = radii.map(|r| r / scale);
+            let total = scaled.iter().sum::<f64>();
+            scaled.map(|r| 0.25 * (1.0 + r / total))
+        }
+    }
+}
+
+// Integral(N_i r ds)/integral(r ds) = (1+r_i/(r_0+r_1))/3.
+// A zero-radius edge has no physical surface measure; its zero source
+// remains zero and a nonzero authored density is refused below.
+fn surface_shares(mesh: &TriComplex2, vertices: [usize; 2]) -> [f64; 2] {
+    match mesh.metric() {
+        Metric2::Planar { .. } => [0.5; 2],
+        Metric2::Axisymmetric { .. } => {
+            let radii = vertices.map(|v| mesh.vertices()[v][0]);
+            let scale = radii[0].max(radii[1]);
+            if scale == 0.0 {
+                return [0.5; 2];
+            }
+            let scaled = radii.map(|r| r / scale);
+            let total = scaled[0] + scaled[1];
+            scaled.map(|r| (1.0 + r / total) / 3.0)
+        }
+    }
+}
+
 pub(super) fn assemble(
     mesh: &TriComplex2,
     sources: PlanarElectrostaticSources<'_>,
@@ -107,11 +142,17 @@ pub(super) fn assemble(
         ))?;
         let charge = finite(sources.free_charge_density_c_m3[cell] * volume)?;
         accumulate(&mut volume_charge_c, &mut volume_correction, charge)?;
-        for &vertex in face {
+        // Preserve the planar path's original division/rounding while using
+        // the exact radial first moment for a revolved cell.
+        let loads = match mesh.metric() {
+            Metric2::Planar { .. } => [charge / 3.0; 3],
+            Metric2::Axisymmetric { .. } => volume_shares(mesh, *face).map(|share| charge * share),
+        };
+        for (&vertex, load) in face.iter().zip(loads) {
             accumulate(
                 &mut rhs[vertex as usize],
                 &mut corrections[vertex as usize],
-                charge / 3.0,
+                load,
             )?;
         }
         if let Some(polarization) = sources.impressed_polarization_c_m2 {
@@ -217,8 +258,8 @@ pub(super) fn assemble(
                 "charge source lacks physical edge area",
             ))?;
             let charge = finite(area * density)?;
-            let half = 0.5 * charge;
-            if density != 0.0 && half == 0.0 {
+            let loads = surface_shares(mesh, vertices).map(|share| charge * share);
+            if density != 0.0 && loads.contains(&0.0) {
                 return Err(ElectrostaticError::Invalid(
                     "edge source charge is not representable",
                 ));
@@ -228,11 +269,11 @@ pub(super) fn assemble(
             } else {
                 accumulate(&mut outward_displacement_c, &mut outward_correction, charge)?;
             }
-            for vertex in vertices {
+            for (vertex, load) in vertices.into_iter().zip(loads) {
                 accumulate(
                     &mut rhs[vertex],
                     &mut corrections[vertex],
-                    if is_sheet { half } else { -half },
+                    if is_sheet { load } else { -load },
                 )?;
             }
             if density != 0.0 {

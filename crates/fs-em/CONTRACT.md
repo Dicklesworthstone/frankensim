@@ -4336,3 +4336,77 @@ aggregate work and peak-storage admission, rank-zero depths and cancellation
 with replay. Detector heat, quantum efficiency, finite-edge convergence and
 source temporal coherence remain outside this monochromatic periodic-field
 observation model.
+
+## Axisymmetric dielectric fields and capacitance
+
+`electrostatic::axisymmetric::AxisymmetricElectrostatics` solves linear
+electrostatics on the original `TriComplex2` meridian with coordinates `(r,z)`
+and an explicit `Metric2::Axisymmetric` angular span. It reuses the same
+source-resolved material laws, native weighted Whitney Hodge, scalar boundary
+elimination, checked Jacobi-CG and charge/energy recovery as the planar owner.
+The public owners reject each other's metrics and return distinct field types;
+no planar force or moving-geometry API is exposed for a revolved field.
+
+The native Hodge exactly integrates the affine radius in
+`dV = angular_span * r dr dz`. Constant free-volume-charge P1 loads use
+`Q_i = Q * (1 + r_i / sum(r))/4`; surface-charge and normal-displacement loads
+use `Q_i = Q * (1 + r_i / sum(r))/3` on the two endpoint radii. Equal nodal
+shares would be incorrect. Radial ratios are scaled before summation. Fixed
+impressed polarization uses the same exact weak gradient load and contributes
+to D, while storage remains `integral E.epsilon.E/2`; its separate E.P pairing
+does not invent source energy. The zero-area symmetry axis cannot anchor an
+electrode or carry an authored nonzero surface displacement source.
+
+E and D are local radial/axial components, independent of azimuth. Directional
+material frames are explicitly meridional and rotate with azimuth; the omitted
+azimuthal response must be decoupled. Charge, capacitance and energy already
+include the supplied angular span. TAU gives a complete body of revolution;
+a smaller span describes its symmetry sector, not a separately driven wedge.
+The two-terminal capacitor checks Q/V against 2U/V² and lowers into the original
+native circuit branch, with one storage account for the same field.
+
+G0/G1/G3/G4 cases in `tests/axisymmetric_electrostatic.rs` cover coaxial and
+layered-coaxial capacitance, charged-cylinder refinement, exact axial fields
+including the axis, sector scaling, exact radial volume/surface moments, free
+sheet charge, impressed polarization, large common voltage offsets, an oblique
+meridional tensor, original source retention, cancellation and admission limits.
+The model is fixed-geometry linear electrostatics with explicit algebraic
+acceptance, not a continuum error bound or measured-device qualification.
+External fields absent from the mesh, azimuthal variation, dielectric memory,
+conduction, breakdown, electrostriction and electromechanical force/motion
+remain outside this owner.
+
+## Distributed Debye dielectric memory
+
+`electrostatic::dispersion::PlanarDebyeDielectric` advances source-backed,
+isotropic multipole polarization on the original extruded P1 triangle mesh.
+Every cell retains its complete `ResolvedDebyeMaterial` and a vector state per
+original pole. `D = epsilon_infinity E + sum(P)`; polarization is not absorbed
+into a fictitious fixed permittivity or counted again as Ohmic conduction.
+
+`prepare_step` eliminates the local midpoint pole equations into the existing
+weighted FEEC operator. Reusing that prepared object avoids Hodge assembly on
+subsequent equal-sized steps; no global polarization unknowns or alternate
+linear solver are introduced. Native checked CG solves only the potential
+coordinates. Geometry, coefficients and external material conditions are fixed.
+
+Unprescribed nodes retain their initial weak free charges. The original complete
+voltage traces exchange physical charge with linearly ramped voltage sources.
+Each candidate reports cell polarization heat, original field and pole storage,
+boundary charge exchange, and source work. Independent source-work/energy and
+free-charge budgets gate publication. Gauge-separated fields preserve physical
+response under independent reference changes on disconnected components.
+Cancellation, invalid trace changes and foreign prepared operators leave the
+accepted field, polarization and clock untouched.
+
+`tests/dielectric_dispersion.rs` checks held-voltage and isolated-charge analytic
+relaxation, second-order convergence, heterogeneous field redistribution,
+multiple poles, the instantaneous zero-pole limit, source power, independent
+component gauges, deterministic replay and transactional refusal (G1/G3/G4).
+This is synthetic numerical verification, not measured dielectric qualification.
+Midpoint does not promise monotone relaxation at unresolved time steps; resolve
+the pole times and refine time and mesh separately. Changing material/temperature,
+anisotropic memory, Ohmic leakage, magnetic induction, carrier transport,
+breakdown, thermal evolution and mechanical work require their own coupled
+owners. Local heat is available to a thermal consumer but is not silently
+deposited into an unspecified reservoir.
