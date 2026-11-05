@@ -6190,6 +6190,22 @@ gradient, including its generally nonsymmetric contribution. These are numerical
 constitutive tests, not adhesive calibration or
 wall-clock performance claims.
 
+`trial_over_time_with_damage_weighted_compression_tangent` also returns the
+unchanged timed trial, vector mean and original damaged-area compression
+`integral d(s) Kc max(-gn(s),0) ds`, with separate optional derivatives of the
+mean traction and compression measure with respect to the endpoint jump.
+The pressure gradient reuses the analytic pressure primitive and moving
+initiation/failure/contact crossings, including first BK mode selection; it
+does not freeze endpoint damage or introduce another fracture history.
+Accepted history and physical time are fixed. Bond viscosity enters the
+traction derivative, never the compression-pressure measure. Ordinary scalar
+callers execute no derivative work; this path is bounded and allocation-free.
+Held kinks or unrepresentable crossing derivatives return `None` independently
+without changing admitted forces, work or state. Focused G0/G1/G3 regressions
+check independent derivatives through rotating mixed modes, reclosure, complete
+rupture and a small newly damaged area, plus exact intact/failed limits and
+source-preserving refusal.
+
 `resolve_mixed_mode_bilinear_cohesive` requires eight explicit ordered-interface
 claims: normal/shear stiffness [Pa/m], normal/shear strength [Pa], mode-I/mode-II
 fracture energy [J/m2], dimensionless BK exponent, and compression stiffness. No
