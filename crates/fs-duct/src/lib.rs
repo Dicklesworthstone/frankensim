@@ -212,6 +212,8 @@ pub enum DuctError {
     CompliantWallHeatUnresolved { reason: fs_phs::PhsError },
     /// The physical fluid-viscosity source integral retained its original refusal.
     ViscousHeatUnresolved { reason: fs_phs::PhsError },
+    /// The original intrinsic porous viscous/thermal source integral refused.
+    PorousHeatUnresolved { reason: fs_phs::PhsError },
 }
 
 impl core::fmt::Display for DuctError {
@@ -256,6 +258,8 @@ impl core::fmt::Display for DuctError {
                 "FS-DUCT-COMPLIANT-WALL-HEAT: {reason}"),
             DuctError::ViscousHeatUnresolved { reason } => write!(f,
                 "FS-DUCT-VISCOUS-HEAT: {reason}"),
+            DuctError::PorousHeatUnresolved { reason } => write!(f,
+                "FS-DUCT-POROUS-HEAT: {reason}"),
         }
     }
 }
@@ -4632,4 +4636,5 @@ mod register_vortex_tests {
         }
     }
 }
+
 

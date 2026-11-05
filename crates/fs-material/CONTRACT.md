@@ -14138,3 +14138,7 @@ allocation-free correction changes accounting precision, not the constitutive
 model or physical heat/work convention. Focused numerical regressions cover a
 false-zero binary64 balance, exact closed/insulated accounts, nonfinite inputs,
 and early refusal with the parcel unchanged.
+
+### Causal rigid-frame porous diffusion
+
+`porous::diffusive::PorousDiffusive` retains the original `PorousFluidLaw` and one coherent thermoviscous fluid snapshot. High-frequency storage is `alpha_inf*rho/phi` and `K_s/phi`, with the original static Darcy drag and positive viscous/thermal relaxation arms. Analytic positive measures are discretized by bounded midpoint quadrature; thermal relaxation includes its isolated real pole. Cp=Cv removes only thermal memory. Fluid substitution keeps intrinsic permeability and actual adiabatic modulus. Admission checks both complex response and each nonzero real loss against the original JCA/JCAL law on 129 logarithmic frequencies inside the card's support. Reported maxima are sampled discrepancies, not continuous-band bounds. This frozen rigid-frame realization supplies coefficients rather than an integrator; it does not qualify elastic-frame waves, mean flow, phase change, or source accuracy outside its declared band.

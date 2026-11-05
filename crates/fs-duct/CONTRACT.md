@@ -3827,3 +3827,11 @@ convergence, finite reflection at an actual discrete impedance pole, coherent
 signed multiport work and factor reuse, zero-flow unselected ports, original
 viscothermal/Maxwell absorption, and malformed-input/resource/cancellation
 regressions. Native execution of these new full DG tests is pending.
+
+### Native transient porous specimens and intrinsic heat
+
+`DgDuct::from_porous_material` binds an admitted porous realization and its original fluid source to the existing constant-area DG owner. Full specimen area carries superficial volume flow; porosity is included once in effective storage. The shared uniform positive-arm stamp advances pressure, flow and every material memory in one native DenseSeries exponential. No circular-wall loss is added. Complete harmonic/scattering/pole consumers retain the same operator and admitted material band. `porous_dissipated_power_w` reports separate viscous and thermal source powers; the legacy aggregate loss also includes them.
+
+`prepare_porous_heat` independently integrates static drag and each original positive source square on that complete trajectory. It reports viscous and thermal joules without advancing state or allocating total energy deficit to heat. Caller-owned scratch permits allocation-free warm observation. Both caches share the declared byte/work budget; the existing positive-integral owner requires at most 128 complete state coordinates and never truncates arms to fit. Thermal deposition and live temperature/source refresh remain receiving-owner transactions. Circular-wall model getters do not imply losslessness when absent; intrinsic porous memory has its own source/model view.
+
+Six production-source material tests and five native stamp/propagation/source-integral tests passed. The latter use the actual DenseSeries and positive heat kernels with a prescribed skew acoustic image; full DG geometry/scattering integration regressions are authored but remain unrun because sibling Cargo dependencies are unavailable.
