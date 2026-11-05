@@ -677,6 +677,28 @@
    "refs": [
     "frankensim-irp-v5-instrument-realism-pexfp.306"
    ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "ruling",
+   "title": "Flute G4 and C5 start on the one printed start from rest; A5 and the phrases keep their authored start",
+   "decided": "G4 and C5 now start on player FA's printed rest onset (de la Cuadra 2005 Fig. 3.4), which is printed only for D4, scaled to each note and stated as borrowed. A5 tried it and keeps its authored start. The scale and melody stay on their authored attack.",
+   "why": "The printed start brings the attack inside the ruler on both notes (gaps 4.21 to 0.88 and 3.17 to 0.08 log2), at the cost of a flat start, -24 and -27 c in the first 100 ms. On A5 the same start speaks an octave under, on A4, for about 0.12 s: a wrong first note, for a gain on one number with no ruler. In the scale and melody 26 of the 30 notes last 0.6 s or less, and that start takes 0.30 s to reach held pressure.",
+   "effect": "G4 goes 6 to 7 of 14 and C5 10 to 11. Neither note is any less clean than it was, and each start dips about twice as far as its recording's. It's D4's start on every other note, not theirs.",
+   "refs": [
+    "frankensim-05c2j"
+   ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "ruling",
+   "title": "The marimba's A3 tube has its stop set to its bar, the way a maker sets one",
+   "decided": "The A3 page plays La Favre's printed tube with its stop moved 4.18 mm from the print, solved once on the passive column to this bar's f1, with no recording in it. The tube at its printed length isn't posted, although it scored 13 of 14 against this one's 12.",
+   "why": "Tube and bar come from two instruments. At the printed length the tube sits 18.8 c sharp of this bar and the note beats at about 2.5 Hz, with dips of 22 and 18 dB that the recording doesn't have.",
+   "effect": "f1 now swells for 110 ms, and from 30 to 300 ms its band is within 2 dB of the recording's, from printed numbers with nothing fitted. It still falls at 64.2 dB/s against about 31, so the tube closes little of the decay gap, and spectrum, band envelope and partial trajectories moved further from the recording. Only A3 has a tube, and its code isn't on main yet.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.270"
+   ]
   }
  ]
 }
