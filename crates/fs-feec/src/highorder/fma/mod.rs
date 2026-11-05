@@ -11,7 +11,8 @@
 //! golden, which does not move). Registered capsule; SAFETY.md beside.
 #![allow(unsafe_code)] // registered capsule — see SAFETY.md beside this file
 
-use super::hex::TensorSpace;
+use super::hex::{TensorMass, TensorSpace};
+use crate::weighted::WeightedError;
 
 /// Run the const-P element loop with FMA codegen when the CPU has it,
 /// portable codegen otherwise. Unconditionally safe to call.
@@ -40,4 +41,39 @@ pub(crate) fn apply_mono_dispatch<const P: usize>(space: &TensorSpace, u: &[f64]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn apply_mono_x86<const P: usize>(space: &TensorSpace, u: &[f64], y: &mut [f64]) {
     space.apply_mono_body::<P>(u, y);
+}
+
+/// Apply prepared spatial mass with the same fused arithmetic on both paths.
+#[inline]
+pub(crate) fn apply_tensor_mass_dispatch(
+    mass: &TensorMass<'_>,
+    input: &[f64],
+    output: &mut [f64],
+    workspace: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), WeightedError> {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
+        {
+            // SAFETY: both target features are checked immediately above;
+            // the inlined mass body uses only safe slices and scalar arithmetic.
+            return unsafe { apply_tensor_mass_x86(mass, input, output, workspace, cancelled) };
+        }
+    }
+    mass.apply_body(input, output, workspace, cancelled)
+}
+
+/// # Safety
+/// Requires avx2+fma, checked by the only caller immediately before dispatch.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn apply_tensor_mass_x86(
+    mass: &TensorMass<'_>,
+    input: &[f64],
+    output: &mut [f64],
+    workspace: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), WeightedError> {
+    mass.apply_body(input, output, workspace, cancelled)
 }

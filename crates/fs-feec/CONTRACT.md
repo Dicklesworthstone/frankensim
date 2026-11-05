@@ -181,6 +181,22 @@ definiteness of an arbitrary global constrained/unconstrained problem.
   1D reference operators, exact Kronecker Jacobi diagonal,
   tensor-quadrature load and L2 error, and `pcg_matfree` (P6: never
   assemble what we can apply).
+- `TensorSpace::prepare_weighted_mass` freezes a positive, potentially
+  nonseparable spatial density/material field into `highorder::hex::TensorMass`.
+  Original cell coordinates and physical quadrature points reach the source
+  exactly once per sample; source errors are retained. The native hierarchical
+  Q_r layout and full consistent mass are preserved. Six rectangular axis
+  contractions apply the mass in O(r⁴) work when q = O(r), with O(q³) retained
+  samples per cell and no element/global matrix. Squared-basis contractions
+  prepare the diagonal with the same complexity. Warm `apply_into` has no
+  allocation or source queries, uses `ndof + 2*q³` caller workspace, and publishes
+  output only on success. SI matrix dimensions are coefficient dimensions plus
+  metre³; original reference density belongs on reference geometry for closed
+  inventory. Cell-local discontinuities are not averaged across interfaces.
+  Positive Gauss sampling uses `r+1 <= q <= 16`; coordinate-wise polynomial
+  coefficient degree k is exact when `2q-1 >= 2r+k`. General constitutive fields
+  require quadrature-error assessment. Storage is admitted before source work;
+  independent per-cell scaling avoids premature overflow of large densities.
 - `highorder::simplex::SimplexSpace` — hierarchical high-order H¹ on
   tet complexes (slice 3): Szabó–Babuška entity hierarchy (vertex λ,
   edge λλ·P_k, face λλλ·P_iP_j, interior bubble products) with the

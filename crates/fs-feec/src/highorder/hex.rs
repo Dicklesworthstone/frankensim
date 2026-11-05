@@ -19,6 +19,9 @@
 
 use crate::highorder::quad1d::{element_matrices, gauss_legendre, lobatto_shapes};
 
+mod mass;
+pub use mass::{MAX_TENSOR_MASS_QUADRATURE, TensorMass};
+
 /// A Q_r tensor-product H¹ space on an m×m×m grid of the unit cube.
 pub struct TensorSpace {
     /// Cells per axis.
