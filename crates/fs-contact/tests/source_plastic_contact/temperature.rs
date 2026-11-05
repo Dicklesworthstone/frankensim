@@ -3,7 +3,8 @@
 use super::*;
 use fs_contact::normal_patch::plastic_source::temperature::SourcePlasticTemperatureError;
 use fs_contact::normal_patch::{
-    FiniteGapPlasticContinuationKind, FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError,
+    FiniteGapPlasticContinuationKind, FiniteGapPlasticDrive, FiniteGapPlasticLoadControls,
+    FiniteGapPlasticLoadError,
 };
 use fs_matdb::ClaimSet;
 use fs_qty::Temperature;
@@ -548,5 +549,184 @@ fn g0_thermal_source_coverage_and_late_depth_refusals_leave_originals_unchanged(
                 .is_err()
         );
         assert_eq!(saved, loaded.candidate);
+    });
+}
+
+#[test]
+fn g1_softening_at_a_held_device_releases_spring_energy_and_cooling_retains_the_dent() {
+    with_cx(|cx, _| {
+        let (cards, law) =
+            thermal_source([1.0e6, 2.0e6], [0.5e6, 2.0e6], [2.0e7; 2], envelope(), cx);
+        let c = self_compliance(&law);
+        let h = 1.0e6;
+        let area = 1.0e-8;
+        let drive = FiniteGapPlasticDrive {
+            stiffness_n_per_m: area / c,
+            position_m: 3.0 * c * h,
+        };
+        let loaded = law
+            .advance_with_drive(&law.initial_state(), drive, thermal_load_controls(), cx)
+            .unwrap();
+        let before = loaded.candidate;
+        let saved = before.clone();
+        common::close(before.contact_state().plastic_depth_m()[12], c * h);
+        let unchanged = law
+            .refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                drive,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(unchanged.source(), &law);
+        assert_eq!(unchanged.candidate(), &before);
+        assert_eq!(unchanged.drive().equilibrium_evaluations, 0);
+        assert_eq!(unchanged.receipt().normal_work_j, 0.0);
+        assert_eq!(unchanged.receipt().parameter_work_j, 0.0);
+
+        let hot = law
+            .refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [HOT, COLD],
+                COLD,
+                drive,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        let next = hot.candidate().contact_state();
+        let account = hot.receipt();
+        let scale = area * c * h * h;
+        assert_eq!(
+            account.kind,
+            FiniteGapPlasticContinuationKind::MaterialRefreshWithDrive
+        );
+        assert_eq!(hot.original_source_identity(), law.identity());
+        assert_eq!(hot.drive().boundary, drive);
+        assert_eq!(
+            hot.drive().predecessor_state_identity,
+            before.contact_state().identity()
+        );
+        assert_eq!(hot.drive().response_identity, account.response.identity);
+        common::close(hot.drive().achieved_force_n, 0.5 * area * h);
+        common::close(next.approach_m(), 2.5 * c * h);
+        common::close(next.plastic_depth_m()[12], 2.0 * c * h);
+        common::close(account.response.plastic_work_j, 0.5 * scale);
+        common::close(account.elastic_energy_change_j, -0.375 * scale);
+        common::close(account.normal_work_j, 0.375 * scale);
+        common::close(account.parameter_work_j, -0.25 * scale);
+        common::close(hot.drive().spring_energy_j, 0.125 * scale);
+        common::close(
+            account.normal_work_j,
+            loaded.drive.spring_energy_j - hot.drive().spring_energy_j,
+        );
+        assert_eq!(
+            hot.source().hardness_sources()[1],
+            law.hardness_sources()[1]
+        );
+        assert_eq!(
+            hot.source().hardness_sources()[0].key(),
+            law.hardness_sources()[0].key()
+        );
+        assert!(
+            law.advance_with_drive(hot.candidate(), drive, thermal_load_controls(), cx)
+                .is_err()
+        );
+
+        let cooled = hot
+            .source()
+            .refresh_at_temperatures_with_drive(
+                hot.candidate(),
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                drive,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(
+            cooled.candidate().contact_state().plastic_depth_m(),
+            next.plastic_depth_m()
+        );
+        assert_eq!(
+            cooled
+                .candidate()
+                .contact_state()
+                .cumulative_plastic_work_j(),
+            next.cumulative_plastic_work_j()
+        );
+        assert_eq!(cooled.receipt().response.plastic_work_j, 0.0);
+        common::close(cooled.drive().achieved_force_n, 0.5 * area * h);
+        common::close(
+            cooled.candidate().contact_state().approach_m(),
+            next.approach_m(),
+        );
+        let (source, state, _, receipt) = cooled.into_parts();
+        assert_eq!(receipt.boundary, drive);
+        assert!(
+            source
+                .advance_with_drive(&state, drive, thermal_load_controls(), cx)
+                .is_ok()
+        );
+        assert_eq!(before, saved);
+    });
+}
+
+#[test]
+fn g1_independent_body_temperature_follows_the_elastic_series_spring_reference() {
+    with_cx(|cx, _| {
+        let (cards, law) = thermal_source([1.0e8; 2], [1.0e8; 2], [1.0e7, 2.0e7], envelope(), cx);
+        let c = self_compliance(&law);
+        let area = 1.0e-8;
+        let drive = FiniteGapPlasticDrive {
+            stiffness_n_per_m: area / c,
+            position_m: 1.0e-6,
+        };
+        let loaded = law
+            .advance_with_drive(&law.initial_state(), drive, thermal_load_controls(), cx)
+            .unwrap();
+        let before = loaded.candidate;
+        let old_pressure = drive.position_m / (2.0 * c);
+        common::close(before.contact_state().pressure_pa()[12], old_pressure);
+        common::close(before.contact_state().approach_m(), 0.5 * drive.position_m);
+
+        // Halving only E_A increases the two-body compliance by 3/2. The
+        // series-spring equation p=(u-z-r)/(C+A/K) gives p_new=4*p_old/5.
+        let hot = law
+            .refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [HOT, COLD],
+                COLD,
+                drive,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        let next = hot.candidate().contact_state();
+        let scale = drive.stiffness_n_per_m * drive.position_m * drive.position_m;
+        common::close(self_compliance(hot.source()), 1.5 * c);
+        common::close(next.pressure_pa()[12], 0.8 * old_pressure);
+        common::close(next.approach_m(), 0.6 * drive.position_m);
+        common::close(hot.drive().achieved_force_n, 0.8 * area * old_pressure);
+        common::close(hot.drive().spring_energy_j, 0.08 * scale);
+        common::close(hot.receipt().elastic_energy_j, 0.12 * scale);
+        common::close(hot.receipt().elastic_energy_change_j, -0.005 * scale);
+        common::close(hot.receipt().normal_work_j, 0.045 * scale);
+        common::close(hot.receipt().parameter_work_j, -0.05 * scale);
+        assert_eq!(hot.receipt().response.plastic_work_j, 0.0);
+        assert_eq!(
+            next.plastic_depth_m(),
+            before.contact_state().plastic_depth_m()
+        );
+        assert_eq!(
+            hot.source().hardness_sources()[1],
+            law.hardness_sources()[1]
+        );
     });
 }

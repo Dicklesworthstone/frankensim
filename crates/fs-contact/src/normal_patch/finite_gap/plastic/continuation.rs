@@ -33,6 +33,8 @@ pub enum FiniteGapPlasticContinuationKind {
     MaterialRefreshAtLoad = 3,
     /// Relative surface recession at a fixed finite-stiffness drive position.
     SurfaceRecessionWithDrive = 4,
+    /// New material parameters at a fixed finite-stiffness drive position.
+    MaterialRefreshWithDrive = 5,
 }
 
 /// Complete candidate from an explicitly authorized physical continuation.
@@ -390,29 +392,41 @@ impl FiniteGapPlasticModel {
         )
     }
 
-    pub(super) fn finish_boundary_recession(
+    pub(super) fn finish_drive_continuation(
         &self,
+        previous_model: &Self,
         before: &FiniteGapPlasticState,
         advance: FiniteGapPlasticAdvance,
-        actual_recession_increment_m: Vec<f64>,
+        actual_recession_increment_m: Option<Vec<f64>>,
         normal_work_j: f64,
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticContinuation, FiniteGapPlasticError> {
-        self.check_state_owner(before)?;
+        previous_model.check_state_owner(before)?;
         if !normal_work_j.is_finite() {
             return Err(invalid("finite drive normal work"));
         }
-        let (previous_elastic_energy_j, opening) = self.stored_energy_and_opening(before, cx)?;
+        let (previous_elastic_energy_j, opening) =
+            previous_model.stored_energy_and_opening(before, cx)?;
+        let (kind, recession_increment_m) = match actual_recession_increment_m {
+            Some(increment) => (
+                FiniteGapPlasticContinuationKind::SurfaceRecessionWithDrive,
+                increment,
+            ),
+            None => (
+                FiniteGapPlasticContinuationKind::MaterialRefreshWithDrive,
+                vec![0.0; self.gap_m.len()],
+            ),
+        };
         self.finish_continuation(
-            self,
+            previous_model,
             before,
             advance,
             ContinuationAccounting {
-                kind: FiniteGapPlasticContinuationKind::SurfaceRecessionWithDrive,
+                kind,
                 previous_elastic_energy_j,
                 previous_opening_m: Some(opening),
                 normal_work_j,
-                recession_increment_m: actual_recession_increment_m,
+                recession_increment_m,
             },
             cx,
         )

@@ -10,7 +10,8 @@
 //! plus incremental plastic work. At maintained force it additionally subtracts
 //! normal work `F * delta(approach)`. This is an endpoint account for the prescribed
 //! condition change, not heat, entropy, thermal expansion, or a continuous
-//! thermal-path integral.
+//! thermal-path integral. A held finite-stiffness loading device instead supplies
+//! normal work from its spring-storage change; its fixed actuator does no work.
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -19,7 +20,8 @@ use fs_material::state_point::MaterialStatePointError;
 
 use crate::normal_patch::adhesive::temperature::{AdhesiveTemperatureError, AdhesiveTemperatures};
 use crate::normal_patch::{
-    FiniteGapContactError, FiniteGapPlasticContinuationReceipt, FiniteGapPlasticError,
+    FiniteGapContactError, FiniteGapPlasticContinuationReceipt, FiniteGapPlasticDrive,
+    FiniteGapPlasticDriveError, FiniteGapPlasticDriveReceipt, FiniteGapPlasticError,
     FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError, FiniteGapPlasticLoadReceipt,
 };
 
@@ -39,6 +41,8 @@ pub enum SourcePlasticTemperatureError {
     Contact(SourcePlasticContactError),
     /// The maintained normal force or native load search refused.
     Load(FiniteGapPlasticLoadError),
+    /// The fixed loading device or native spring/contact balance refused.
+    Drive(FiniteGapPlasticDriveError),
 }
 
 impl From<AdhesiveTemperatureError> for SourcePlasticTemperatureError {
@@ -68,6 +72,12 @@ impl From<FiniteGapPlasticError> for SourcePlasticTemperatureError {
 impl From<FiniteGapPlasticLoadError> for SourcePlasticTemperatureError {
     fn from(error: FiniteGapPlasticLoadError) -> Self {
         Self::Load(error)
+    }
+}
+
+impl From<FiniteGapPlasticDriveError> for SourcePlasticTemperatureError {
+    fn from(error: FiniteGapPlasticDriveError) -> Self {
+        Self::Drive(error)
     }
 }
 
@@ -171,6 +181,53 @@ impl SourcePlasticThermalLoadRefresh {
     }
 }
 
+/// Original-source temperature continuation with a held finite-stiffness device.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticThermalDriveRefresh {
+    thermal: SourcePlasticThermalRefresh,
+    drive: FiniteGapPlasticDriveReceipt,
+}
+
+impl SourcePlasticThermalDriveRefresh {
+    /// Complete original source owner before changing prescribed temperatures.
+    pub const fn original_source_identity(&self) -> ContentHash {
+        self.thermal.original_source_identity()
+    }
+
+    /// Original selected material and interface claims at their new temperatures.
+    pub const fn source(&self) -> &SourcePlasticContact {
+        self.thermal.source()
+    }
+
+    /// Direct spring/contact equilibrium with retained original irreversible history.
+    pub const fn candidate(&self) -> &SourcePlasticContactState {
+        self.thermal.candidate()
+    }
+
+    /// Contact storage, indentation, spring-to-contact work, and parameter work.
+    pub const fn receipt(&self) -> &FiniteGapPlasticContinuationReceipt {
+        self.thermal.receipt()
+    }
+
+    /// Fixed device, spring storage, force balance, and native solve diagnostics.
+    pub const fn drive(&self) -> &FiniteGapPlasticDriveReceipt {
+        &self.drive
+    }
+
+    /// Move the complete original-source continuation without copying fields.
+    pub fn into_parts(
+        self,
+    ) -> (
+        SourcePlasticContact,
+        SourcePlasticContactState,
+        FiniteGapPlasticContinuationReceipt,
+        FiniteGapPlasticDriveReceipt,
+    ) {
+        let (source, candidate, receipt) = self.thermal.into_parts();
+        (source, candidate, receipt, self.drive)
+    }
+}
+
 impl SourcePlasticContact {
     /// Change prescribed body and interface temperatures at fixed rigid approach.
     ///
@@ -267,7 +324,61 @@ impl SourcePlasticContact {
         })
     }
 
-    // Source selection is independent of the normal boundary condition. Both
+    /// Refresh original temperatures with the finite-stiffness device held fixed.
+    ///
+    /// The predecessor must already balance the supplied device; the caller
+    /// holds its position and stiffness fixed for this condition change. Contact
+    /// history does not retain a historical machine identity. Pressure is
+    /// recomputed directly with the new original
+    /// E, nu, and hardness and the accepted plastic/recession history. Device
+    /// compliance selects a displacement even when the softened contact is fully
+    /// plastic. A later hardness increase cannot heal the existing dent.
+    ///
+    /// The original approach, depth, and footprint bounds still apply. Normal
+    /// work is energy exchanged with the loading spring, not external work from
+    /// the held actuator. Material parameter work remains an endpoint account;
+    /// neither it nor plastic work is automatically converted to heat.
+    pub fn refresh_at_temperatures_with_drive(
+        &self,
+        before: &SourcePlasticContactState,
+        material_cards: [&MaterialCard; 2],
+        bulk_temperatures_k: [f64; 2],
+        interface_temperature_k: f64,
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticThermalDriveRefresh, SourcePlasticTemperatureError> {
+        self.admit_load_controls(controls)?;
+        let source = self.resolve_temperature_sources(
+            before,
+            material_cards,
+            bulk_temperatures_k,
+            interface_temperature_k,
+            cx,
+        )?;
+        let next = source.model.refresh_from_with_drive(
+            &self.model,
+            &before.contact,
+            drive,
+            controls,
+            cx,
+        )?;
+        source.admit_candidate(&next.continuation.candidate, cx)?;
+        Ok(SourcePlasticThermalDriveRefresh {
+            thermal: SourcePlasticThermalRefresh {
+                original_source_identity: self.identity,
+                candidate: SourcePlasticContactState {
+                    owner: source.identity,
+                    contact: next.continuation.candidate,
+                },
+                source,
+                receipt: next.continuation.receipt,
+            },
+            drive: next.drive,
+        })
+    }
+
+    // Source selection is independent of the normal boundary condition. All
     // continuations retain these exact claims, test contexts, and fixed axes.
     fn resolve_temperature_sources(
         &self,

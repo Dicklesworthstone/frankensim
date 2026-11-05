@@ -10,6 +10,8 @@
 //! Every pressure trial starts from the original accepted irreversible history.
 //! Recession at a fixed drive position exchanges work with the spring; its
 //! normal work is minus the spring-storage change, separate from geometry work.
+//! Material refresh solves the new modulus/hardness on the same drive boundary,
+//! preserving original irreversible history without a fixed-approach detour.
 //! A change of drive position returns an endpoint equilibrium, not an inferred
 //! actuator-work integral, inertia, damping, or a dynamic loading-machine model.
 
@@ -58,6 +60,15 @@ pub struct FiniteGapPlasticDriveRecessionAdvance {
     /// Contact continuation; its normal work comes from the loading spring.
     pub continuation: FiniteGapPlasticContinuation,
     /// Spring force, storage, and balance at the continued equilibrium.
+    pub drive: FiniteGapPlasticDriveReceipt,
+}
+
+/// Material continuation while the supplied loading spring and position stay fixed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiniteGapPlasticDriveRefreshAdvance {
+    /// Original material history continued directly into the successor model.
+    pub continuation: FiniteGapPlasticContinuation,
+    /// Successor force balance and reversible loading-spring storage.
     pub drive: FiniteGapPlasticDriveReceipt,
 }
 
@@ -122,7 +133,7 @@ pub enum FiniteGapPlasticDriveError {
         approach_bracket_m: [f64; 2],
         best_force_residual_n: Option<f64>,
     },
-    /// Fixed-drive recession requires an already equilibrated predecessor.
+    /// Fixed-drive continuation requires an already equilibrated predecessor.
     PredecessorDriveMismatch {
         contact_force_n: f64,
         drive_force_n: f64,
@@ -232,7 +243,55 @@ impl FiniteGapPlasticModel {
         controls: FiniteGapPlasticLoadControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticDriveAdvance, FiniteGapPlasticDriveError> {
-        self.drive_at_recession(before, &before.recession_m, drive, controls, cx)
+        self.drive_at_recession(self, before, &before.recession_m, drive, controls, cx)
+    }
+
+    /// Change modulus and/or hardness at a fixed finite-stiffness drive position.
+    ///
+    /// The original model must own `before`, and the original grid, gap, datum,
+    /// and numerical controls remain exact. Every trial applies the successor's
+    /// compliance and caps to the ORIGINAL plastic depth, recession, and work.
+    /// A held-approach intermediate could create a dent that the actual loading
+    /// spring never produces; this method does not adopt such an intermediate.
+    ///
+    /// The caller supplies the loading device, whose force must match the
+    /// predecessor within tolerance. Contact history itself does not store a
+    /// historical machine identity. Normal work is minus the fixed spring's
+    /// energy change, and material parameter work is `delta(U) + D - W_normal`.
+    /// This endpoint continuation supplies no heat or thermal-path integral.
+    pub fn refresh_from_with_drive(
+        &self,
+        previous_model: &Self,
+        before: &FiniteGapPlasticState,
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticDriveRefreshAdvance, FiniteGapPlasticDriveError> {
+        checkpoint(cx)?;
+        let previous_spring_force =
+            previous_model.admit_maintained_drive(before, drive, controls, cx)?;
+        let next = self.drive_at_recession(
+            previous_model,
+            before,
+            &before.recession_m,
+            drive,
+            controls,
+            cx,
+        )?;
+        let normal_work_j = fixed_drive_work(before.approach_m, previous_spring_force, &next)?;
+        let continuation = self.finish_drive_continuation(
+            previous_model,
+            before,
+            next.contact,
+            None,
+            normal_work_j,
+            cx,
+        )?;
+        checkpoint(cx)?;
+        Ok(FiniteGapPlasticDriveRefreshAdvance {
+            continuation,
+            drive: next.drive,
+        })
     }
 
     /// Remove material while holding this loading spring and its position fixed.
@@ -252,23 +311,7 @@ impl FiniteGapPlasticModel {
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticDriveRecessionAdvance, FiniteGapPlasticDriveError> {
         checkpoint(cx)?;
-        self.check_state_owner(before)?;
-        validate_drive(drive, controls)?;
-        let previous_force = self.drive_accepted_force(before, cx)?;
-        let previous_spring_force = spring_force(drive, before.approach_m)?;
-        let tolerance = force_tolerance(previous_force, previous_spring_force, controls)?;
-        if !balanced(
-            previous_force,
-            previous_spring_force,
-            previous_force - previous_spring_force,
-            tolerance,
-        ) {
-            return Err(FiniteGapPlasticDriveError::PredecessorDriveMismatch {
-                contact_force_n: previous_force,
-                drive_force_n: previous_spring_force,
-                force_tolerance_n: tolerance,
-            });
-        }
+        let previous_spring_force = self.admit_maintained_drive(before, drive, controls, cx)?;
         if recession_increment_m.len() != self.gap_m.len() {
             return Err(invalid_drive("recession field shape"));
         }
@@ -290,17 +333,13 @@ impl FiniteGapPlasticModel {
                 return Err(invalid_drive("representable recession increment"));
             }
         }
-        let next = self.drive_at_recession(before, &recession, drive, controls, cx)?;
-        let mean_spring_force = 0.5 * previous_spring_force + 0.5 * next.drive.drive_force_n;
-        let normal_work_j =
-            mean_spring_force * (next.contact.candidate.approach_m - before.approach_m);
-        if !normal_work_j.is_finite() {
-            return Err(invalid_drive("finite fixed-drive spring work"));
-        }
-        let continuation = self.finish_boundary_recession(
+        let next = self.drive_at_recession(self, before, &recession, drive, controls, cx)?;
+        let normal_work_j = fixed_drive_work(before.approach_m, previous_spring_force, &next)?;
+        let continuation = self.finish_drive_continuation(
+            self,
             before,
             next.contact,
-            actual_increment,
+            Some(actual_increment),
             normal_work_j,
             cx,
         )?;
@@ -313,6 +352,7 @@ impl FiniteGapPlasticModel {
 
     fn drive_at_recession(
         &self,
+        previous_model: &Self,
         before: &FiniteGapPlasticState,
         recession_m: &[f64],
         drive: FiniteGapPlasticDrive,
@@ -320,7 +360,10 @@ impl FiniteGapPlasticModel {
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticDriveAdvance, FiniteGapPlasticDriveError> {
         checkpoint(cx)?;
-        self.check_state_owner(before)?;
+        previous_model.check_state_owner(before)?;
+        if self.identity != previous_model.identity {
+            self.check_refresh_geometry(previous_model)?;
+        }
         validate_drive(drive, controls)?;
         // Nonadhesive equilibrium cannot stretch the spring into tension. If
         // the entire admitted interval is above its unloaded position, test
@@ -337,7 +380,8 @@ impl FiniteGapPlasticModel {
             best_residual_n: None,
             zero_pressure: vec![0.0; self.gap_m.len()],
         };
-        if recession_m == before.recession_m.as_slice()
+        if self.identity == previous_model.identity
+            && recession_m == before.recession_m.as_slice()
             && before.approach_m >= progress.bracket_m[0]
             && before.approach_m <= progress.bracket_m[1]
         {
@@ -518,6 +562,33 @@ impl FiniteGapPlasticModel {
         Ok(force)
     }
 
+    fn admit_maintained_drive(
+        &self,
+        before: &FiniteGapPlasticState,
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<f64, FiniteGapPlasticDriveError> {
+        self.check_state_owner(before)?;
+        validate_drive(drive, controls)?;
+        let previous_force = self.drive_accepted_force(before, cx)?;
+        let previous_spring_force = spring_force(drive, before.approach_m)?;
+        let tolerance = force_tolerance(previous_force, previous_spring_force, controls)?;
+        if !balanced(
+            previous_force,
+            previous_spring_force,
+            previous_force - previous_spring_force,
+            tolerance,
+        ) {
+            return Err(FiniteGapPlasticDriveError::PredecessorDriveMismatch {
+                contact_force_n: previous_force,
+                drive_force_n: previous_spring_force,
+                force_tolerance_n: tolerance,
+            });
+        }
+        Ok(previous_spring_force)
+    }
+
     fn finish_drive(
         &self,
         before: &FiniteGapPlasticState,
@@ -599,6 +670,19 @@ impl FiniteGapPlasticModel {
     }
 }
 
+fn fixed_drive_work(
+    previous_approach_m: f64,
+    previous_spring_force_n: f64,
+    next: &FiniteGapPlasticDriveAdvance,
+) -> Result<f64, FiniteGapPlasticDriveError> {
+    let mean_spring_force = 0.5 * previous_spring_force_n + 0.5 * next.drive.drive_force_n;
+    let work = mean_spring_force * (next.contact.candidate.approach_m - previous_approach_m);
+    if !work.is_finite() {
+        return Err(invalid_drive("finite fixed-drive spring work"));
+    }
+    Ok(work)
+}
+
 fn validate_drive(
     drive: FiniteGapPlasticDrive,
     controls: FiniteGapPlasticLoadControls,
@@ -622,9 +706,13 @@ fn spring_force(
     drive: FiniteGapPlasticDrive,
     approach_m: f64,
 ) -> Result<f64, FiniteGapPlasticDriveError> {
-    let force = drive.stiffness_n_per_m * (drive.position_m - approach_m);
+    let extension = drive.position_m - approach_m;
+    let force = drive.stiffness_n_per_m * extension;
     if !force.is_finite() {
         return Err(invalid_drive("finite loading-spring force"));
+    }
+    if extension != 0.0 && force == 0.0 {
+        return Err(invalid_drive("representable nonzero loading-spring force"));
     }
     Ok(force)
 }

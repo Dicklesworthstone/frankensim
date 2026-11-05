@@ -1,7 +1,11 @@
 //! G1/G3: original thermal k/H changes future wear without resetting its history.
 
 use super::*;
-use fs_contact::normal_patch::{FiniteGapPlasticContinuationKind, FiniteGapPlasticLoadControls};
+use fs_contact::normal_patch::plastic_source::temperature::SourcePlasticTemperatureError;
+use fs_contact::normal_patch::{
+    FiniteGapPlasticContinuationKind, FiniteGapPlasticDrive, FiniteGapPlasticDriveError,
+    FiniteGapPlasticLoadControls,
+};
 use fs_matdb::ClaimSet;
 use fs_qty::{Pressure, Temperature};
 
@@ -409,6 +413,251 @@ fn g0_temperature_load_and_late_coefficient_refusals_leave_wear_unchanged() {
                 [COLD; 2],
                 COLD,
                 force,
+                load_controls(),
+                cx,
+            )
+            .is_err()
+        );
+        assert_eq!(before, saved);
+    });
+}
+
+#[test]
+fn g1_worn_contact_heats_and_continues_original_archard_wear_with_the_device_held() {
+    with_cx(|cx, _| {
+        let (cards, law) = thermal_fixture(cx);
+        let area = 1.0e-8;
+        let width = law.contact().model().config().grid.cell_width_m;
+        let modulus = law.contact().normal_source().elastic().reduced_modulus_pa();
+        let c = 4.0 * width * (1.0 + 2.0_f64.sqrt()).ln() / (core::f64::consts::PI * modulus);
+        let h = 1.0e6;
+        let drive = FiniteGapPlasticDrive {
+            stiffness_n_per_m: area / c,
+            position_m: 3.0 * c * h,
+        };
+        let loaded = law
+            .advance_normal_with_drive(&law.initial_state(), drive, load_controls(), cx)
+            .unwrap()
+            .candidate;
+        let first = law
+            .advance_wear_with_drive(&loaded, &[1.0e-5; 25], drive, load_controls(), cx)
+            .unwrap();
+        let before = first.wear.candidate;
+        let saved = before.clone();
+        let old = before.contact_state().contact_state();
+        let recession = old.recession_m()[12];
+        close(recession, 2.5e-7);
+        close(old.plastic_depth_m()[12], c * h);
+        let unchanged = law
+            .refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                drive,
+                load_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(unchanged.source(), &law);
+        assert_eq!(unchanged.candidate(), &before);
+        assert_eq!(unchanged.drive().equilibrium_evaluations, 0);
+
+        let hot = law
+            .refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [HOT, COLD],
+                0.5 * (HOT + COLD),
+                drive,
+                load_controls(),
+                cx,
+            )
+            .unwrap();
+        let next = hot.candidate().contact_state().contact_state();
+        assert_eq!(
+            hot.receipt().kind,
+            FiniteGapPlasticContinuationKind::MaterialRefreshWithDrive
+        );
+        assert_eq!(hot.drive().boundary, drive);
+        close(next.pressure_pa()[12], 0.75 * h);
+        close(next.approach_m(), 2.25 * c * h);
+        close(next.plastic_depth_m()[12], 1.125 * c * h - recession);
+        close(
+            hot.receipt().response.plastic_work_j,
+            area * 0.75 * h * (0.125 * c * h - recession),
+        );
+        close(
+            hot.receipt().normal_work_j,
+            first.drive.spring_energy_j - hot.drive().spring_energy_j,
+        );
+        assert_eq!(hot.candidate().volumes_m3(), before.volumes_m3());
+        assert_eq!(hot.candidate().recession_m(), before.recession_m());
+        assert_eq!(next.recession_m(), old.recession_m());
+        assert!(next.plastic_depth_m()[12] > old.plastic_depth_m()[12]);
+        for side in 0..2 {
+            close(
+                hot.source().hardness_sources()[side].hardness_pa(),
+                [0.75e6, 2.0e6][side],
+            );
+            assert_eq!(
+                hot.source().hardness_sources()[side].key(),
+                law.hardness_sources()[side].key()
+            );
+            assert_eq!(
+                hot.source().coefficient_keys()[side],
+                law.coefficient_keys()[side]
+            );
+        }
+        assert!(
+            law.advance_wear_with_drive(hot.candidate(), &[1.0e-5; 25], drive, load_controls(), cx)
+                .is_err()
+        );
+
+        // At the new 0.75 MPa pressure, the independently prescribed interface
+        // k values 0.015/0.045 and body H values 0.75/2 MPa set different removals.
+        let continued = hot
+            .source()
+            .advance_wear_with_drive(hot.candidate(), &[1.0e-5; 25], drive, load_controls(), cx)
+            .unwrap();
+        for side in 0..2 {
+            let volume = [1.5e-15, 1.6875e-15][side];
+            close(continued.wear.wear[side].increment_m3, volume);
+            close(
+                continued.wear.candidate.volumes_m3()[side],
+                before.volumes_m3()[side] + volume,
+            );
+        }
+        close(
+            continued
+                .wear
+                .candidate
+                .contact_state()
+                .contact_state()
+                .pressure_pa()[12],
+            0.75 * h - 3.1875e-7 / (2.5 * c),
+        );
+        assert_eq!(continued.wear.receipt.response.plastic_work_j, 0.0);
+        assert_eq!(
+            continued
+                .wear
+                .candidate
+                .contact_state()
+                .contact_state()
+                .plastic_depth_m(),
+            next.plastic_depth_m()
+        );
+        let (source, state, _, receipt) = hot.into_parts();
+        assert_eq!(receipt.boundary, drive);
+        assert!(
+            source
+                .advance_wear_with_drive(&state, &[0.0; 25], drive, load_controls(), cx)
+                .is_ok()
+        );
+        assert_eq!(before, saved);
+    });
+}
+
+#[test]
+fn g0_thermal_device_and_late_wear_source_refusals_are_atomic() {
+    with_cx(|cx, gate| {
+        let (cards, law) = thermal_fixture(cx);
+        let drive = FiniteGapPlasticDrive {
+            stiffness_n_per_m: 1000.0,
+            position_m: 1.0e-6,
+        };
+        let loaded = law
+            .advance_normal_with_drive(&law.initial_state(), drive, load_controls(), cx)
+            .unwrap()
+            .candidate;
+        let before = law
+            .advance_wear_with_drive(&loaded, &[1.0e-5; 25], drive, load_controls(), cx)
+            .unwrap()
+            .wear
+            .candidate;
+        let saved = before.clone();
+        assert!(matches!(
+            law.refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                318.0,
+                drive,
+                load_controls(),
+                cx,
+            ),
+            Err(SourcePlasticWearError::Material(_))
+        ));
+        let moved = FiniteGapPlasticDrive {
+            position_m: 2.0e-6,
+            ..drive
+        };
+        assert!(matches!(
+            law.refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [HOT, COLD],
+                COLD,
+                moved,
+                load_controls(),
+                cx,
+            ),
+            Err(SourcePlasticWearError::Temperature(
+                SourcePlasticTemperatureError::Drive(
+                    FiniteGapPlasticDriveError::PredecessorDriveMismatch { .. }
+                )
+            ))
+        ));
+        let revised =
+            MaterialCard::supersede(&cards[0], cards[0].claims().clone(), vec![]).unwrap();
+        assert!(
+            law.refresh_at_temperatures_with_drive(
+                &before,
+                [&revised, &cards[1]],
+                [COLD; 2],
+                COLD,
+                drive,
+                load_controls(),
+                cx,
+            )
+            .is_err()
+        );
+        assert!(
+            law.refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [330.0, COLD],
+                COLD,
+                drive,
+                load_controls(),
+                cx,
+            )
+            .is_err()
+        );
+        let outside = FiniteGapPlasticLoadControls {
+            maximum_approach_m: 1.01e-4,
+            ..load_controls()
+        };
+        assert!(
+            law.refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                drive,
+                outside,
+                cx,
+            )
+            .is_err()
+        );
+        gate.request();
+        assert!(
+            law.refresh_at_temperatures_with_drive(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                drive,
                 load_controls(),
                 cx,
             )

@@ -1,15 +1,16 @@
-//! Prescribed material temperatures with maintained load and original wear.
+//! Prescribed material temperatures with original loading and wear histories.
 //!
 //! Normal contact is solved directly under the selected boundary condition.
 //! The same original-source refresh retains separate Archard coefficients,
-//! hardness tests, per-body removal profiles, and inventories for either a
-//! held-approach or maintained-force temperature continuation.
+//! hardness tests, per-body removal profiles, and inventories for held-approach,
+//! maintained-force, and fixed-device temperature continuation.
 
 use fs_exec::Cx;
 use fs_matdb::MaterialCard;
 
 use crate::normal_patch::{
-    FiniteGapPlasticContinuationReceipt, FiniteGapPlasticLoadControls, FiniteGapPlasticLoadReceipt,
+    FiniteGapPlasticContinuationReceipt, FiniteGapPlasticDrive, FiniteGapPlasticDriveReceipt,
+    FiniteGapPlasticLoadControls, FiniteGapPlasticLoadReceipt,
 };
 
 use super::{
@@ -60,6 +61,48 @@ impl SourcePlasticWearThermalLoadRefresh {
     }
 }
 
+/// Temperature-dependent original contact and wear sources at a held device.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticWearThermalDriveRefresh {
+    thermal: SourcePlasticWearThermalRefresh,
+    drive: FiniteGapPlasticDriveReceipt,
+}
+
+impl SourcePlasticWearThermalDriveRefresh {
+    /// Original normal, coefficient, and hardness sources at their new temperatures.
+    pub const fn source(&self) -> &SourcePlasticArchardWear {
+        self.thermal.source()
+    }
+
+    /// Continued equilibrium with original indentation and both wear inventories.
+    pub const fn candidate(&self) -> &SourcePlasticWearState {
+        self.thermal.candidate()
+    }
+
+    /// Contact storage, plastic work, spring-to-contact work, and parameter work.
+    pub const fn receipt(&self) -> &FiniteGapPlasticContinuationReceipt {
+        self.thermal.receipt()
+    }
+
+    /// Fixed device, final spring storage, and the native force-balance diagnostics.
+    pub const fn drive(&self) -> &FiniteGapPlasticDriveReceipt {
+        &self.drive
+    }
+
+    /// Adopt the complete original-source continuation without cloning fields.
+    pub fn into_parts(
+        self,
+    ) -> (
+        SourcePlasticArchardWear,
+        SourcePlasticWearState,
+        FiniteGapPlasticContinuationReceipt,
+        FiniteGapPlasticDriveReceipt,
+    ) {
+        let (source, candidate, receipt) = self.thermal.into_parts();
+        (source, candidate, receipt, self.drive)
+    }
+}
+
 impl SourcePlasticArchardWear {
     /// Refresh original temperatures while retaining the accepted normal load.
     ///
@@ -99,6 +142,47 @@ impl SourcePlasticArchardWear {
                     .map_err(SourcePlasticWearError::from)
             })?;
         Ok(SourcePlasticWearThermalLoadRefresh { thermal, load })
+    }
+
+    /// Refresh original temperatures while holding the loading device fixed.
+    ///
+    /// Both original removal profiles and inventories survive, while changed
+    /// contact hardness and elasticity can alter force, approach, and permanent
+    /// indentation through the device compliance. Each original wear hardness
+    /// follows its body's temperature; original coefficients follow the separate
+    /// interface temperature. Subsequent wear uses those refreshed sources.
+    ///
+    /// No material is removed by this temperature operation. The resulting
+    /// contact must still fit both remaining homogeneous depths. Normal work
+    /// comes from loading-spring storage; the held actuator performs no work.
+    /// Thermal evolution, heat partition, and unresolved material paths remain
+    /// the enclosing physical owner's responsibility.
+    pub fn refresh_at_temperatures_with_drive(
+        &self,
+        before: &SourcePlasticWearState,
+        material_cards: [&MaterialCard; 2],
+        bulk_temperatures_k: [f64; 2],
+        interface_temperature_k: f64,
+        drive: FiniteGapPlasticDrive,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearThermalDriveRefresh, SourcePlasticWearError> {
+        let (thermal, drive) =
+            self.refresh_temperature_with(before, material_cards, bulk_temperatures_k, cx, || {
+                self.contact
+                    .refresh_at_temperatures_with_drive(
+                        &before.contact,
+                        material_cards,
+                        bulk_temperatures_k,
+                        interface_temperature_k,
+                        drive,
+                        controls,
+                        cx,
+                    )
+                    .map(|refresh| refresh.into_parts())
+                    .map_err(SourcePlasticWearError::from)
+            })?;
+        Ok(SourcePlasticWearThermalDriveRefresh { thermal, drive })
     }
 
     // Reuse one original-source and inventory transfer for every normal boundary.

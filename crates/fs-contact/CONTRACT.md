@@ -3025,3 +3025,34 @@ finite-stiffness plastic indentation, spring-energy release during wear, exponen
 finite-distance pressure decay, adaptive recovery from oversized steps, and atomic
 source/domain/budget/cancellation refusals. Their analytical fixtures are numerical
 model checks and do not establish experimental accuracy or benchmark performance.
+
+
+## Temperature continuation with a held finite-stiffness device
+
+Original-source contact and wear also continue temperature-dependent modulus and
+hardness with a finite loading spring held at its prescribed position. The native
+successor model solves the new pressure field and approach directly from original
+plastic depth, recession and prior work. It does not pass through either a
+held-approach or held-force intermediate. The requested drive must balance the
+accepted predecessor; its stiffness and position are fixed over this continuation.
+The enclosing physical owner supplies the device boundary and retains its history.
+
+A reduced cap can release loading-spring energy and produce further permanent
+indentation while changing the force. A later hardness increase preserves the
+dent rather than restoring the previous force by healing material. Modulus changes
+also redistribute deformation between the contact and spring. The continuation
+uses both material compliances for contact-storage change and the actual spring
+endpoint forces for normal work. Thus parameter_work = delta(U_contact) +
+plastic_work + delta(U_spring), with zero external work at the stationary actuator.
+This remains an endpoint material-parameter account; unresolved condition paths
+need refinement and no term is silently treated as heat.
+
+Contact temperature resolution and original k/H/inventory transfer are shared
+with the existing held-approach and maintained-force paths. Separate body and
+interface temperatures, exact original test/claim selection, per-body removal,
+remaining homogeneous depth and transactional late refusal are retained. The
+returned refreshed source can continue wear against that same specified drive.
+Native and source analytical regressions cover series compliance, cap-softening
+indentation, retained dents on cooling, absence of fictitious intermediate flow,
+changed future wear, and immutable refusal. They do not supply a thermal evolution
+law, caloric closure, strain hardening, or experimental validation.
