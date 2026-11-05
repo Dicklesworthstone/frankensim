@@ -7349,3 +7349,52 @@ cannot silently disappear from event timing. This does not reinterpret a vector
 support displacement as a moving frame origin or change the native transient
 integration law. The focused translating-frame case in `tests/transient_events3.rs`
 checks retained finite schedule knots.
+
+
+## Ductile-initiation gates on native inelastic continua
+
+`ductile::DuctileHistory` retains the original immutable calibration field and
+one initiation history per native material point. Its small-strain tetrahedral,
+plane-stress/plane-strain and fully integrated/B-bar hexahedral entry points
+propose exactly one native mechanical increment and gate every returned point.
+A tetrahedral backward-Euler entry uses the same physical duration for inertia
+and plastic strain rate. Full three-dimensional stress drives plane reductions;
+neither element-averaged stress nor total strain replaces native point history.
+
+Finite static/moving tetrahedra and thermoplastic tetrahedra/hexahedra use the
+same owner through `ductile::finite`. Spatial Kirchhoff stress is reconstructed
+as `P F^T`, with symmetry/finite checks and no repeated constitutive solve.
+For B-bar hexes, the native assumed deformation is paired with its conjugate
+stored Piola stress. Per-cell temperatures broadcast to their eight native
+points without allocating an expanded temperature field.
+
+The adapters read original accumulated plastic alpha for J2, Chaboche,
+plane reductions and combined creep/plastic histories. Creep accumulation is
+excluded. Native pure-creep thermal families explicitly refuse because their
+alpha has a different meaning. Isothermal finite trait bounds and the
+small-strain history trait exclude native pure-creep owners. Timed small-strain
+laws must be prepared for the same physical duration supplied to the gate.
+
+Native and ductile alpha must match exactly before every proposal; resetting
+history after plastic loading or skipping increments refuses. Mechanics and
+ductility publish together only after all point, source/domain and cancellation
+checks pass. Initiation, native failure or invalid input leaves the borrowed
+accepted state unchanged. Callers refine from that accepted pair to bracket
+initiation. Reported crossing fraction refers to the held-condition PLASTIC
+increment and is not a resolved event time.
+
+`from_source_bound_j2_tet` binds every calibration to its actual source-resolved
+J2 material, and `advance_source_bound_j2_tet` rechecks original card, named
+state and fixed context at every subsequent increment. Changing material/context
+does not silently preserve a source qualification. Generic authored numeric
+entry points retain their explicitly supplied calibration assumptions.
+
+Regression definitions exercise actual native uniaxial plastic response,
+initiation refusal and refined retry, unloading/reversal/replay, all plane and
+hex point histories, rotated finite deformation, creep separation, source/card
+changes, cancellation and old-history mismatch. Static interface review checked
+the original native calls and stress/deformation pairing. New Rust compilation
+and test execution remain outstanding after the execution environment failed.
+The gate stops at damage initiation: it supplies no stress erosion, fracture
+energy, characteristic length, crack insertion, fragments or post-failure
+load transfer, and does not close the broader regularized-fracture bead.

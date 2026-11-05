@@ -40,6 +40,8 @@ pub mod continuation;
 pub mod cutfront;
 /// Thermoviscoelastic deposited strips with retained history and release geometry.
 pub mod deposition;
+/// Transactional ductile-initiation gates on native plastic continuum steps.
+pub mod ductile;
 /// Complete-coordinate exact held/affine force dynamics on the original solid pencil.
 pub mod dynamics;
 /// Signed stress-life histories driven by the original tetrahedral load solver.
