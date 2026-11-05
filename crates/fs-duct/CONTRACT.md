@@ -2213,16 +2213,25 @@ NASA-9 source and adds what a played bore needs:
 - **Wall memory.** Per distinct cell radius, the `fs_phs::ZkDiffusiveBasis`
   binding of the gas's own density, viscosity, gamma and Prandtl number on a
   declared band and error: viscous drag plus series arms on the momentum,
-  shunt arms on the pressure. Each cell's arms advance between accepted steps
+  thermal drag plus series arms on temperature relative to the room wall.
+  Each cell's arms advance between accepted steps
   by the exact propagator `exp(G dt)` of a symmetric negative-semidefinite
   generator, held in the generator's eigen-coordinates (fs-la cyclic Jacobi,
   residual-checked): a step replaces the mean coordinate along one row of the
   eigenbasis and decays each coordinate by `exp(lambda dt) <= 1`, so it is
   contractive and costs O(arms) per cell. Only dissipated arm energy heats the
   gas (the arms store the boundary-layer kinetic energy); thermal exchange
-  changes pressure at fixed density. Finite viscous heating and subsequent
-  wall heat exchange use the original NASA-9 caloric inversion and integral
-  of Cv(T), including source-temperature admission; a frozen local gamma is
+  changes temperature at the current cell density. The thermal kernel is
+  `H(s)=gamma*s*F_t/(1-F_t)`, obtained from the same positive series spectrum
+  at thermal diffusivity `nu/Pr`, with gamma multiplying drag and gains. The
+  independent band admission covers this kernel. Its coupling to the original
+  density equation retains the acoustic compliance
+  `[1+(gamma-1)*F_t]/(gamma*p0)`. Temperature coordinates keep transported
+  density from reinterpreting thermal history as heat, and constant-density
+  cooling reaches the wall temperature instead of retaining a pressure offset.
+  Finite viscous heating and subsequent wall heat exchange use the original
+  NASA-9 caloric inversion and integral of Cv(T), including source-temperature
+  admission; a frozen local gamma is
   not substituted for either finite energy change. Zero thermal exchange
   retains the conservative viscous energy transfer without a caloric round
   trip. The update is transactional (`apply_cell_sources`), including every
@@ -2248,16 +2257,20 @@ Tests (`nonlinear::bore::tests`): the piston weights sum to one and reproduce
 keep exact volume and move faces off steps; wall propagators equal an
 independent Taylor exponential of their generator within 1e-13, square to the
 doubled step and never grow energy; a step the field cannot take refuses by
-name; `g3`: a small-amplitude bore (48 wall poles, 20-8000 Hz, 1 %) reproduces the
-transfer-matrix input impedance (Bessel loss, the same piston load) on the
-first six peaks within 10 cents and 1.5 dB, measured +0.17 to +1.69 cents and -0.27 to -0.65 dB (wall
-admitted at 6.2e-4 complex, 7.3e-4 loss); `g2`: a 2 kPa,
+name; `g3`: a small-amplitude bore (48 wall poles, 20-8000 Hz, 1 %) is compared
+with the transfer-matrix input impedance (Bessel loss, the same piston load)
+on the first six peaks, with limits of 10 cents and 1.5 dB; `g2`: a 2 kPa,
 1 kHz sinusoid steepens to the lossless shock distance `rho c^3/(beta omega p)`
 within 5 %, measured 3.2394 m against
 3.2317 m (+0.24 %). The caloric wall regressions compare heating and cooling
 against an independent analytic Cv(T) integral, combine viscous heating with
 thermal exchange, preserve total gas energy for pure drag, and refuse an
 out-of-domain thermal endpoint without publishing any cell or wall history.
+Density regressions preserve zero heat across isothermal density variations,
+retain thermal history through density changes, and reach the wall temperature
+at different densities. A bounded frequency oracle compares the actual thermal
+generator with the exact Bessel acoustic compliance across density, gamma and
+the admitted band.
 
 ### Conservative molecular transport in nonlinear bores
 

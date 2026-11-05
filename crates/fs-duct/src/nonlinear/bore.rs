@@ -11,7 +11,8 @@
 //!   diffusive arms of the local radius, applied between accepted steps by
 //!   their exact propagator (a symmetric negative semidefinite generator, so
 //!   the update is contractive). Wall friction turns kinetic into internal
-//!   energy; wall heat exchange changes internal energy at fixed density.
+//!   energy; wall heat exchange follows temperature relative to the room wall,
+//!   changing internal energy at the cell's current density.
 //! - A radiating end: a rigid circular piston in an infinite baffle. Its
 //!   radiation impedance has the exact impulse response
 //!   `z(t) = (rho c / S) [delta(t) - (4/(pi T)) sqrt(1 - (t/T)^2)]`, `0 <= t <= T = 2a/c`
@@ -119,7 +120,7 @@ impl NonlinearBore {
     /// Mesh `duct`, fill it with room gas at rest and bind its wall memory.
     ///
     /// `room` is the stationary exterior (and initial bore) state: its density
-    /// and sound speed set the piston's radiation, and its pressure is the
+    /// and sound speed set the piston's radiation, and its temperature is the
     /// reference of the thermal wall arms. `wall_gas` is required with
     /// `spec.wall` and is ignored without it.
     pub fn new(
@@ -155,7 +156,7 @@ impl NonlinearBore {
                 &geometry.wall_radii,
                 memory,
                 transport,
-                room.pressure,
+                room.temperature,
                 spec.step_s,
             )?),
         };
@@ -206,19 +207,20 @@ impl NonlinearBore {
     ) -> Result<BoreStep, NonlinearDuctError> {
         let gas = &self.gas;
         let (step_s, cfl) = (self.step_s, self.cfl);
-        let mut attempt =
-            |solver: &mut Euler1d, radiation: &mut PistonRadiation, reconstruction: Reconstruction| {
-                solver.step_with_ports(
-                    Time::new(step_s),
-                    StepControl {
-                        cfl,
-                        reconstruction,
-                        maximum_halvings: 0,
-                    },
-                    |stage| Ok([inlet(stage)?, Some(radiation.flux(gas, stage)?)]),
-                    || false,
-                )
-            };
+        let mut attempt = |solver: &mut Euler1d,
+                           radiation: &mut PistonRadiation,
+                           reconstruction: Reconstruction| {
+            solver.step_with_ports(
+                Time::new(step_s),
+                StepControl {
+                    cfl,
+                    reconstruction,
+                    maximum_halvings: 0,
+                },
+                |stage| Ok([inlet(stage)?, Some(radiation.flux(gas, stage)?)]),
+                || false,
+            )
+        };
         let guess = self.radiation.guess;
         let report = match attempt(&mut self.solver, &mut self.radiation, Reconstruction::Muscl) {
             Ok(report) => report,
@@ -714,7 +716,7 @@ struct Walls {
     spare_viscous: Vec<f64>,
     spare_thermal: Vec<f64>,
     state_stride: usize,
-    reference_pressure: f64,
+    wall_temperature: f64,
     receipt: WallReceipt,
 }
 
@@ -723,7 +725,7 @@ impl Walls {
         radii: &[f64],
         memory: WallMemory,
         gas: WallGas,
-        reference_pressure: f64,
+        wall_temperature: f64,
         dt: f64,
     ) -> Result<Self, NonlinearDuctError> {
         let basis = ZkDiffusiveBasis::new(memory.poles)
@@ -769,14 +771,50 @@ impl Walls {
                         .collect::<Vec<_>>()
                 };
                 let viscous = arms(zk.series_terms());
-                let thermal = arms(zk.shunt_terms());
+                // A nonlinear caloric cell owns both density and temperature.
+                // Its heat source must vanish at T_wall, for every density.
+                // With theta = p - rho R T_wall, the circular-wall kernel is
+                // H(s) = gamma s F_t/(1-F_t), rather than the pressure-only
+                // acoustic shunt (gamma-1) s F_t. Indeed,
+                // s p + H theta = gamma R T_wall s rho gives the same ZK
+                // compliance [1+(gamma-1) F_t]/(gamma p0).
+                // Reuse the admitted positive series spectrum at thermal
+                // diffusivity nu/Pr, with gamma multiplying its drag/gains.
+                let thermal_model = basis
+                    .bind(
+                        radius,
+                        gas.density_kg_m3,
+                        gas.dynamic_viscosity_pa_s / gas.prandtl,
+                        1.0,
+                        1.0,
+                        band,
+                        memory.maximum_relative_error,
+                    )
+                    .map_err(|_| {
+                        unsupported(
+                            "thermal wall memory does not resolve this radius on the band: add poles, narrow the band or relax the error",
+                        )
+                    })?;
+                let thermal: Vec<_> = thermal_model
+                    .series_terms()
+                    .iter()
+                    .map(|term| (gas.gamma * term.gain_per_s, term.rate_per_s))
+                    .collect();
                 receipt.maximum_arms = receipt.maximum_arms.max(viscous.len()).max(thermal.len());
-                receipt.maximum_complex_error =
-                    receipt.maximum_complex_error.max(zk.max_complex_error());
-                receipt.maximum_loss_error =
-                    receipt.maximum_loss_error.max(zk.max_real_loss_error());
+                receipt.maximum_complex_error = receipt
+                    .maximum_complex_error
+                    .max(zk.max_complex_error())
+                    .max(thermal_model.max_complex_error());
+                receipt.maximum_loss_error = receipt
+                    .maximum_loss_error
+                    .max(zk.max_real_loss_error())
+                    .max(thermal_model.max_real_loss_error());
                 propagators.push(Propagator::new(zk.series_drag_per_s(), &viscous, dt)?);
-                propagators.push(Propagator::new(0.0, &thermal, dt)?);
+                propagators.push(Propagator::new(
+                    gas.gamma * thermal_model.series_drag_per_s(),
+                    &thermal,
+                    dt,
+                )?);
                 let entry = (key, propagators.len() - 2, propagators.len() - 1);
                 bound.push(entry);
                 (entry.1, entry.2)
@@ -795,14 +833,14 @@ impl Walls {
             spare_viscous: vec![0.0; radii.len() * stride],
             spare_thermal: vec![0.0; radii.len() * stride],
             state_stride: stride,
-            reference_pressure,
+            wall_temperature,
             receipt,
         })
     }
 
     fn apply(&mut self, solver: &mut Euler1d, gas: &FrozenGas) -> Result<(), NonlinearDuctError> {
         let stride = self.state_stride;
-        let reference = self.reference_pressure;
+        let reference = self.wall_temperature;
         let Self {
             propagators,
             viscous_of,
@@ -838,9 +876,9 @@ impl Walls {
                 // not a locally frozen gamma. At zero dissipation the old
                 // temperature/pressure remain exact and need no inversion.
                 let heated = if dissipated == 0.0 {
-                    p.pressure
+                    p.temperature
                 } else {
-                    gas.primitive(moved, || false)?.pressure
+                    gas.primitive(moved, || false)?.temperature
                 };
                 let thermal = &propagators[thermal_of[i]];
                 let n = thermal.size;
@@ -852,10 +890,12 @@ impl Walls {
                 if exchanged == heated - reference {
                     return Ok(moved);
                 }
-                // The wall memory prescribes a pressure change at fixed
-                // density. Recover its energy through the same NASA-9 owner
-                // as the field, including its original temperature limits.
-                gas.conserved(q.density, velocity, exchanged + reference)
+                // Store the thermal history in temperature coordinates so
+                // transported density cannot reinterpret it as a heat pulse.
+                // Recover the energy at the CURRENT density through the same
+                // NASA-9 owner, including its original temperature limits.
+                let pressure = q.density * gas.gas_constant() * (exchanged + reference);
+                gas.conserved(q.density, velocity, pressure)
             },
             || false,
         )?;
