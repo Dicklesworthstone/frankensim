@@ -37,6 +37,7 @@ fs-qty = { path = "../fs-qty" }
 fs-scenario = { path = "../fs-scenario" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+fs-time = { path = "../fs-time" }
 
 [dev-dependencies]
 fs-rand = { path = "../fs-rand" }

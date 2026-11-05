@@ -181,3 +181,6 @@ mod vibration;
 
 #[path="membrane/pressure.rs"]
 mod pressure;
+
+#[path="membrane/dynamics.rs"]
+mod dynamics;

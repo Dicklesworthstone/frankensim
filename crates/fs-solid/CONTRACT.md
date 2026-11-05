@@ -1,5 +1,36 @@
 # fs-solid CONTRACT
 
+## Nonlinear source-bound membrane motion
+
+`membrane::dynamics::MembraneMotion` advances the original total-Lagrangian
+membrane energy with `fs-time::verlet_momentum_step`. Reference lumped inertia,
+grain, source laws and finite-strain geometric stiffening retain their existing
+owners. Only free coordinates are integrated; stationary support values are
+eliminated exactly, and inconsistent initial support motion refuses. Cloning
+retains a complete deterministic checkpoint.
+
+The two momentum kicks use the original material gradient. The first reuses
+the accepted gradient of the immutable patch; the endpoint evaluates the full
+nonlinear law once. Geometry, force and integrator work buffers are allocated
+at preparation and reused. Failed state/domain checks or cancellation cannot
+publish displacement, momentum, time, energy or an invalid cached force.
+
+Each step reports stored and kinetic energy, exact held-dead-load work, support
+impulse from the same kicks, and the signed energy/work defect. Stationary
+supports do no work. This second-order symplectic explicit lane introduces no
+physical damping and does not claim exact energy conservation, automatic time
+step stability, real-time throughput, spatial convergence or experimental
+validation. Moving supports, follower pressure, contact and material-history
+evolution are outside this entry. The original native constitutive costs and
+admission domains still apply.
+
+G1/G3 regressions in `tests/membrane/dynamics.rs` compare a four-triangle sheet
+against the independent nonlinear Duffing energy-integral period on three time
+rungs, including pure geometric restoring force at zero prestretch. Additional
+checks cover source stiffness/mass scaling, linear and angular momentum,
+time reversal, held-load work/support impulse, checkpoint replay and refusal
+rollback. These are manufactured mechanics checks, not measured drum sounds.
+
 ## Original interface friction in quasistatic obstacle contact
 
 `contact::ContactProblem::solve_timed_from_with_sources` and
