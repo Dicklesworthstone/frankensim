@@ -15471,7 +15471,7 @@ source, numerical, work-budget or cancellation refusal.
 This is a fixed-reference, constant-coefficient, reversible small-strain
 model. The midpoint method is second order for smooth forcing and adds no
 model damping; an energy balance does not establish time or mesh convergence.
-General circuits, radiation, dielectric/structural loss, nonlinear switching,
+Arbitrary circuit graphs, radiation, dielectric/structural loss, nonlinear switching,
 ceramic thermal updates and experimental validation remain outside this spatial path.
 `piezoelectric_plate` exercises an actual finite-plate voltage ramp followed by
 charge-preserving electrode disconnection and computed open-circuit ringing.
@@ -15524,6 +15524,53 @@ side faces and finite-wavelength accuracy are not inferred. Synthetic
 `tests/piezoelectric/circuit/tensor.rs` cases compare actual current, motion and
 Joule heat to an independent midpoint oracle and check co-rotation. Scalar
 ceramic thermal refresh refuses these reductions explicitly.
+
+### Spatial reactive electrode storage and harmonic response
+
+`transient::load::reactive::ReactivePiezoelectricTransient` retains the original
+spatial body together with source-bound winding flux linkages and external
+capacitor charges. `ResolvedInductor` and `ResolvedCapacitor` own the material
+and geometry reductions. Series winding resistance uses the original
+`ResolvedConductor`; a lossless winding is explicit. Exact midpoint companion
+stamps enter the existing sparse coupled solve, without a separate mechanical
+or electrical trajectory. Capacitor initialization must already satisfy the
+terminal voltage; no conserved coordinate is projected on connection.
+
+Candidates reconstruct branch voltage/current work against capacitor/winding
+storage changes and actual series-conductor heat. The enclosing account adds
+body kinetic/elastic/electric storage, reactive storage, every conductor's heat,
+and external mechanical/electrical work exactly once. All physical histories
+are published atomically. Source conditions and topology stay fixed. General
+internal circuit graphs, mutual inductance, transformers, nonlinear switching
+and reactive-material temperature evolution remain outside this spatial path.
+
+`TetPiezoelectricModel::solve_harmonic` uses the SAME prepared K, M,
+G and K_e with peak phasors under `exp(-i omega t)`. Voltage/current electrodes,
+prescribed moving supports, force/volume-charge sources and the same physical
+R/L/C shunts enter one sparse complex-symmetric pencil, represented as a doubled
+real symmetric system for native MINRES. Scaling uses positive source
+stiffness/inertia magnitudes, not their cancelling dynamic difference. There
+is no dense factorization, fitted gain, diagonal modal reduction or invented
+ceramic damping. Coordinate and iteration budgets remain explicit.
+
+Both quadratures pass original field reconstruction and physical force/charge
+residual checks. Analytic maximum norms over the complete sinusoidal cycle
+enforce the declared strain/field envelope. Independent cycle-average source
+power, including moving supports and volume-charge supply, must equal actual
+external conductor heat; reactive work and ceramic storage are not heat.
+Potential differences retain gauge invariance. The response includes original
+nodal motion, cell constitutive phasors, support reactions, electrode charge
+and source current, branch flows, mean storage and power residuals.
+
+Synthetic G1/G3/G4 cases in `tests/piezoelectric/spatial_transient_load/reactive.rs`
+and `tests/piezoelectric/harmonic.rs` compare LC/RLC dynamics, midpoint phase
+convergence, retained mechanical resonance and complex circuit response to
+independent equations, and exercise source, gauge/orientation/phase, amplitude
+and cancellation boundaries. These are numerical implementation tests, not
+experimental qualification. Harmonic residuals do not certify forward error,
+mesh convergence, startup decay or uniqueness at an unexcited lossless pole.
+`examples/PIEZOELECTRIC_PLATE.md` documents the nominal finite-plate consumer,
+source assumptions, `--harmonic` sweep and remaining model boundaries.
 
 ## Regional material walls in native duct propagation
 

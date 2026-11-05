@@ -1,12 +1,18 @@
 //! Nominal PZT-5A plate: the actual 3D source/tensor/electrode solve.
 //!
 //! Run: cargo run -p fs-couple --example piezoelectric_plate
+//! Frequency response: append `-- --harmonic` for open/resistive/RL shunts.
 //! Data and approximation boundaries: examples/PIEZOELECTRIC_PLATE.md.
 
 use fs_blake3::ContentHash;
 use fs_couple::piezoelectric::spatial::{
     ElectrodeCondition, PiezoelectricElectrode, TetPiezoelectricControls, TetPiezoelectricModel,
+    harmonic::{
+        HarmonicElectrode, HarmonicElectrodeCondition, HarmonicElectrodeLoad,
+        HarmonicPiezoelectricControls,
+    },
     transient::TetPiezoelectricTransient,
+    transient::load::reactive::ReactiveElectrodeLoad,
     transient::load::{ElectrodeDrive, ResistiveElectrodeLoad},
 };
 use fs_evidence::ValidityDomain;
@@ -16,8 +22,12 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
 use fs_material::conductor::{ELECTRICAL_RESISTIVITY_DIMS, resolve_uniform_conductor};
+use fs_material::field_storage::{
+    MAGNETIC_PERMEABILITY_DIMS, MAGNETIC_PERMEABILITY_PROPERTY, ResolvedInductor,
+};
 use fs_material::piezoelectric::tensor::{TensorPiezoelectric, waves::PiezoelectricWaveCondition};
 use fs_material::state_point::MaterialPropertySelection;
+use fs_math::c64::C64;
 use fs_solid::linear3::TetAssemblyBudget;
 
 const SOURCE: &str =
@@ -140,6 +150,159 @@ fn declared_load() -> Result<ResistiveElectrodeLoad, Box<dyn std::error::Error>>
             1e-8,
         )?),
     })
+}
+
+fn declared_winding() -> Result<ResolvedInductor, Box<dyn std::error::Error>> {
+    // Authored ideal uniform-field winding: 1000 turns, 100 mm magnetic path,
+    // 100 mm^2 cross-section and nominal vacuum permeability. This is an
+    // approximation, not a measured coil, core-loss or parasitic model.
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(MAGNETIC_PERMEABILITY_PROPERTY, MAGNETIC_PERMEABILITY_DIMS),
+        value: PropertyValue::Scalar {
+            value: 4.0 * core::f64::consts::PI * 1e-7,
+            dims: MAGNETIC_PERMEABILITY_DIMS,
+        },
+        validity: ValidityDomain::unconstrained(),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: vec![],
+        provenance: Provenance {
+            source:
+                "authored ideal uniform-field vacuum winding for the piezoelectric plate example"
+                    .into(),
+            license: "CC0-1.0".into(),
+            artifact: None,
+        },
+    })?;
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "authored ideal vacuum winding".into(),
+            phase: "uniform magnetic field".into(),
+            process: "fixed permeability and geometry; no parasitic or loss model".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )?;
+    Ok(ResolvedInductor::resolve(
+        &card,
+        &QueryPoint::new(),
+        MaterialPropertySelection::SingleClaimOnly,
+        1e-4,
+        0.1,
+        1000,
+    )?)
+}
+
+/// A balanced mechanical drive powers the actual electrical load. Each row is
+/// an independent steady periodic solve of the same finite plate, not a sweep
+/// of transient samples or a fitted terminal resonance.
+#[allow(clippy::too_many_arguments)]
+fn harmonic_response(
+    model: &TetPiezoelectricModel<'_>,
+    supports: &[(usize, f64)],
+    bottom: &[usize],
+    top: &[usize],
+    nodes: usize,
+    controls: TetPiezoelectricControls,
+    cx: &Cx<'_>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let resistor = declared_load()?;
+    let winding = std::sync::Arc::new(declared_winding()?);
+    let load_cases = [
+        ("open", vec![]),
+        (
+            "resistor",
+            vec![HarmonicElectrodeLoad::Resistive(resistor.clone())],
+        ),
+        (
+            "series_rl",
+            vec![HarmonicElectrodeLoad::Reactive(
+                ReactiveElectrodeLoad::SeriesRl {
+                    electrodes: resistor.electrodes,
+                    inductor: winding.clone(),
+                    conductor: Some(resistor.conductor.clone()),
+                },
+            )],
+        ),
+    ];
+    let prescribed: Vec<_> = supports
+        .iter()
+        .map(|&(i, x)| (i, C64::from_re(x)))
+        .collect();
+    let electrodes = [
+        HarmonicElectrode {
+            nodes: bottom,
+            condition: HarmonicElectrodeCondition::Voltage(C64::ZERO),
+        },
+        HarmonicElectrode {
+            nodes: top,
+            condition: HarmonicElectrodeCondition::Current(C64::ZERO),
+        },
+    ];
+    let mut forces = vec![[C64::ZERO; 3]; nodes];
+    // A 10 mN peak resultant, distributed equally over each face's nodes.
+    // This is a declared nodal-force pattern, not a uniform-traction claim.
+    for (face, sign) in [(top, 1.0), (bottom, -1.0)] {
+        for &node in face {
+            forces[node][2] = C64::from_re(sign * 0.01 / face.len() as f64);
+        }
+    }
+    let charges = vec![C64::ZERO; nodes];
+    let controls = HarmonicPiezoelectricControls {
+        field: controls,
+        power_tolerance_w: 1e-10,
+        maximum_real_coordinates: 8 * nodes,
+    };
+    println!("Nominal PZT-5A: 10 x 10 x 2 mm finite plate; peak phasors use exp(-i omega t).");
+    println!("Source: {SOURCE}");
+    println!(
+        "Authored frozen lossless ceramic approximation; 10 mN balanced nodal force, no measured-device accuracy claim."
+    );
+    println!(
+        "External R={:.6e} ohm; ideal L={:.6e} H; only the external resistor produces heat.",
+        resistor.conductor.resistance_ohm(),
+        winding.inductance_h()
+    );
+    println!(
+        "frequency_hz,load,peak_voltage_v,peak_thickness_motion_m,peak_load_current_a,mean_resistor_heat_w,mean_mechanical_power_w,power_residual_w"
+    );
+    for frequency_hz in [1e3, 2e4, 5e4, 1e5, 2e5] {
+        for (name, loads) in &load_cases {
+            let response = model.solve_harmonic(
+                core::f64::consts::TAU * frequency_hz,
+                &prescribed,
+                &electrodes,
+                loads,
+                &forces,
+                &charges,
+                controls,
+                cx,
+            )?;
+            let mean_motion = |face: &[usize]| {
+                face.iter()
+                    .fold(C64::ZERO, |sum, &i| sum + response.displacement_m[i][2])
+                    .scale(1.0 / face.len() as f64)
+            };
+            let thickness = mean_motion(top) - mean_motion(bottom);
+            let voltage = response.electrodes[1].voltage_v - response.electrodes[0].voltage_v;
+            let load_current = response
+                .loads
+                .first()
+                .map_or(0.0, |load| load.current_a.abs());
+            println!(
+                "{frequency_hz:.6e},{name},{:.9e},{:.9e},{:.9e},{:.9e},{:.9e},{:.3e}",
+                voltage.abs(),
+                thickness.abs(),
+                load_current,
+                response.average_load_heat_w,
+                response.average_mechanical_power_w,
+                response.power_balance_residual_w
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Drive the actual finite plate, then disconnect its driven electrode without
@@ -278,6 +441,11 @@ fn transient_response(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let harmonic = match std::env::args().skip(1).collect::<Vec<_>>().as_slice() {
+        [] => false,
+        [mode] if mode == "--harmonic" => true,
+        _ => return Err("usage: piezoelectric_plate [--harmonic]".into()),
+    };
     let material = nominal_material()?;
     let sources = [material];
     let (mesh, mut nodes) = fs_feec::fixtures::kuhn_cube(2);
@@ -330,6 +498,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let cx=Cx::new(&gate,arena,fs_exec::StreamKey {seed:59,kernel_id:59,tile:0,iteration:0},
             fs_exec::Budget::INFINITE,fs_exec::ExecMode::Deterministic);
         let model=TetPiezoelectricModel::assemble(&nodes,&tets,&sources,FRAME,TetAssemblyBudget::standard(),&cx)?;
+        if harmonic {
+            return harmonic_response(&model,&supports,&bottom,&top,nodes.len(),controls,&cx);
+        }
         let driven=model.solve(&supports,&[
             PiezoelectricElectrode {nodes:&bottom,condition:ElectrodeCondition::Voltage(0.0)},
             PiezoelectricElectrode {nodes:&top,condition:ElectrodeCondition::Voltage(-100.0)}],

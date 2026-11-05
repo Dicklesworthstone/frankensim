@@ -33,6 +33,8 @@ use fs_sparse::{Coo, Csr};
 mod boundary;
 use boundary::{BoundaryMap, prepare_boundary};
 
+/// Coupled frequency response, electrode impedance and physical average power.
+pub mod harmonic;
 /// Resolved electromechanical motion with consistent inertia and charge balance.
 pub mod transient;
 
@@ -739,6 +741,28 @@ fn equilibrated_solve(
         if !positive(*s) {
             return Err(invalid("coupled diagonal scaling is not representable"));
         }
+    }
+    equilibrated_solve_scaled(matrix, rhs, scale, controls, cx)
+}
+
+// The harmonic pencil can have a zero dynamic diagonal at a perfectly regular
+// frequency. Its caller supplies scales from positive stiffness/inertia and
+// dielectric/load magnitudes, rather than from their cancelling difference.
+fn equilibrated_solve_scaled(
+    matrix: Csr,
+    rhs: Vec<f64>,
+    scale: Vec<f64>,
+    controls: TetPiezoelectricControls,
+    cx: &Cx<'_>,
+) -> Result<(Vec<f64>, usize, f64)> {
+    let n = rhs.len();
+    if n == 0 {
+        return Ok((Vec::new(), 0, 0.0));
+    }
+    if scale.len() != n || scale.iter().any(|&value| !positive(value)) {
+        return Err(invalid(
+            "complete positive coupled coordinate scales required",
+        ));
     }
     let mut balanced = Coo::new(n, n);
     for row in 0..n {

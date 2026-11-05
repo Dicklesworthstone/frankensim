@@ -1,8 +1,8 @@
 //! G1/G3/G4: actual electrode currents and source-bound dissipation on the mesh.
-#[path = "spatial_transient_load/thermal.rs"]
-mod thermal;
 #[path = "spatial_transient_load/reactive.rs"]
 pub(super) mod reactive;
+#[path = "spatial_transient_load/thermal.rs"]
+mod thermal;
 
 use super::*;
 use fs_couple::piezoelectric::spatial::transient::{

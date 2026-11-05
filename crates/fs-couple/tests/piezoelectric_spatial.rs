@@ -17,6 +17,8 @@ use fs_material::state_point::MaterialPropertySelection;
 use fs_material::tensor::{mandel_rotation, rotation};
 use fs_solid::linear3::TetAssemblyBudget;
 
+#[path = "piezoelectric/harmonic.rs"]
+mod harmonic;
 #[path = "piezoelectric/spatial_transient.rs"]
 mod transient;
 #[path = "piezoelectric/spatial_transient_load.rs"]
