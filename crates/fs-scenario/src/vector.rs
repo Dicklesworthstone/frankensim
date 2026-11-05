@@ -11,12 +11,12 @@
 
 use crate::frame::{FrameTree, WORLD};
 use crate::payload::{
-    OrientationParity, OutsideDomainPolicy, QuantityContract, ReferenceSemantics,
+    OrientationParity, OutsideDomainPolicy, Payload, QuantityContract, ReferenceSemantics,
     SampleSource, TableInterpolation, VectorPayload,
 };
-use crate::ScenarioError;
+use crate::{BcKind, BcValue, BoundaryCondition, Physics, ScenarioError};
 use fs_ga::{Quat, Vec3};
-use fs_qty::QtyAny;
+use fs_qty::{Dims, QtyAny};
 use std::ops::ControlFlow;
 
 /// Quantity and parity survive rotation; only component coordinates change.
@@ -102,6 +102,71 @@ impl VectorPayload {
         }
         poll(checkpoint)?;
         Ok(WorldVector3 { values, contract: self.meta().contract(), orientation: self.meta().orientation() })
+    }
+}
+
+impl BoundaryCondition {
+    /// Evaluate prescribed fluid velocity in WORLD Cartesian components [m/s].
+    ///
+    /// This consumes the typed-vector form of IncompressibleFlow/Dirichlet.
+    /// Components describe absolute velocity relative to the inertial WORLD,
+    /// expressed in the payload's declared axes. A moving frame rotates those
+    /// components at `time_s`; it does not add a frame-origin or wall velocity.
+    /// Wall-relative velocity requires an explicit kinematic composition by the
+    /// owning solver. No direction is guessed from a legacy scalar Dirichlet.
+    ///
+    /// The original vector owner supplies fixed/StepLeft/Linear sampling,
+    /// outside-domain policies, physical-time frame rotation and cancellation.
+    /// The payload is borrowed without copying or rescanning its history. This
+    /// returns a spatially uniform velocity on the named patch, not an integrated
+    /// mass flow or a boundary-geometry resolution. The solver still owns its
+    /// dimensional scaling, boundary enforcement and stability admission.
+    ///
+    /// # Errors
+    /// Refuses a different boundary role, missing patch, compatibility tag,
+    /// directionless value, inconsistent frame, non-velocity quantity or odd
+    /// parity. The vector owner also refuses unsupported bases, component
+    /// counts, source/reference policies, invalid time/frames and cancellation.
+    pub fn velocity_world_at(
+        &self,
+        frames: &FrameTree,
+        time_s: f64,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<[f64; 3], VectorEvaluationError> {
+        use VectorEvaluationError as E;
+        poll(checkpoint)?;
+        if self.physics != Physics::IncompressibleFlow || self.kind != BcKind::Dirichlet {
+            return Err(E::Unsupported(
+                "prescribed velocity requires IncompressibleFlow/Dirichlet",
+            ));
+        }
+        if self.region.is_empty() || self.compatibility.is_some() {
+            return Err(E::Unsupported("prescribed velocity requires a named patch and no total-mass-flow compatibility tag"));
+        }
+        let Some(BcValue::Typed(Payload::Vector(value))) = &self.value else {
+            return Err(E::Unsupported("prescribed velocity requires a typed vector; scalar values have no implied direction"));
+        };
+        if value.meta().frame().0 != self.frame {
+            return Err(E::Unsupported(
+                "velocity payload and boundary must declare the same component frame",
+            ));
+        }
+        // The sealed QuantityKind catalog has angular velocity but no
+        // translational-velocity kind. Do not reinterpret a future semantic
+        // contract solely because it happens to share m/s dimensions.
+        if value.meta().contract() != QuantityContract::Dimensions(Dims([1, 0, -1, 0, 0, 0])) {
+            return Err(E::Unsupported(
+                "prescribed velocity requires a dimensions-only m/s vector",
+            ));
+        }
+        if value.meta().orientation() != OrientationParity::Even {
+            return Err(E::Unsupported(
+                "prescribed velocity requires ordinary even-parity vector components",
+            ));
+        }
+        value
+            .world_vector_at(frames, time_s, checkpoint)
+            .map(|value| value.values)
     }
 }
 

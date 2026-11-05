@@ -1,9 +1,11 @@
 //! G0/G3: execute the existing typed payload, not an independent sample schema.
 use fs_ga::{Quat, Vec3};
 use fs_qty::{Dims, QtyAny};
-use fs_scenario::{Frame, FrameId, FrameMotion, FrameTree, WORLD};
+use fs_scenario::{BcKind, BcValue, BoundaryCondition, Environment, Frame, FrameId,
+    FrameMotion, FrameTree, Physics, Scenario, WORLD};
+use fs_scenario::ir::{parse_ir, write_ir};
 use fs_scenario::payload::{
-    DistributionFamily, OrientationParity, OutsideDomainPolicy, PayloadId, PayloadMeta,
+    DistributionFamily, OrientationParity, OutsideDomainPolicy, Payload, PayloadId, PayloadMeta,
     QuantityContract, ReferenceSemantics, SampleSource, TableInterpolation, VectorPayload,
 };
 use fs_scenario::vector::VectorEvaluationError;
@@ -144,4 +146,84 @@ fn cancellation_at_each_publication_boundary_and_nonfinite_times_refuse() {
             Err(VectorEvaluationError::InvalidTime));
     }
     assert_eq!(sample(&payload, &frames, 0.0), [1.0; 3]);
+}
+
+const VELOCITY: Dims = Dims([1, 0, -1, 0, 0, 0]);
+fn velocity_values(value: [f64; 3]) -> Vec<QtyAny> {
+    value.map(|x| QtyAny::new(x, VELOCITY)).to_vec()
+}
+fn velocity_condition(source: SampleSource<Vec<QtyAny>>, frame: FrameId) -> BoundaryCondition {
+    let meta = PayloadMeta::new(QuantityContract::Dimensions(VELOCITY),
+        PayloadId::new("basis/frame-cartesian").unwrap(), frame,
+        OrientationParity::Even, ReferenceSemantics::Continuous).unwrap();
+    BoundaryCondition { region: "inlet".into(), physics: Physics::IncompressibleFlow,
+        kind: BcKind::Dirichlet,
+        value: Some(BcValue::Typed(Payload::Vector(VectorPayload::new(meta, source).unwrap()))),
+        compatibility: None, frame: frame.0 }
+}
+fn velocity_sample(row: &BoundaryCondition, frames: &FrameTree, time: f64) -> [f64; 3] {
+    row.velocity_world_at(frames, time, &mut || ControlFlow::Continue(())).unwrap()
+}
+
+#[test]
+fn g3_velocity_boundary_ir_preserves_history_and_physical_component_frame_time() {
+    let mut scenario = Scenario::new("vector-velocity", 7, Environment::earth_lab());
+    scenario.frames.add(Frame { id: FrameId(1), name: "rotating-axes".into(), parent: WORLD,
+        motion: FrameMotion::Rotating { axis: [0.0, 0.0, 1.0],
+            center: Vec3::new(10.0, 20.0, 30.0),
+            rate: QtyAny::new(std::f64::consts::FRAC_PI_2, Dims([0, 0, -1, 0, 0, 0])) } });
+    let source = SampleSource::table(vec![QtyAny::new(0.0, TIME), QtyAny::new(1.0, TIME)],
+        vec![velocity_values([1.0, 0.0, 0.0]), velocity_values([2.0, 0.0, 0.0])],
+        TableInterpolation::Linear, OutsideDomainPolicy::Clamp).unwrap();
+    scenario.base_bcs.push(velocity_condition(source, FrameId(1)));
+    assert!(scenario.validate().is_empty());
+    let decoded = parse_ir(&write_ir(&scenario)).unwrap();
+    let restored = decoded.scenario();
+    assert_eq!(restored, &scenario);
+    let row = &restored.base_bcs[0];
+    near(velocity_sample(row, &restored.frames, 0.0), [1.0, 0.0, 0.0]);
+    let diagonal = 1.5 * std::f64::consts::FRAC_1_SQRT_2;
+    near(velocity_sample(row, &restored.frames, 0.5), [diagonal, diagonal, 0.0]);
+    near(velocity_sample(row, &restored.frames, 1.0), [0.0, 2.0, 0.0]);
+    near(velocity_sample(row, &restored.frames, 2.0), [-2.0, 0.0, 0.0]);
+    // A component frame is not a material surface: zero absolute velocity
+    // remains zero even with rotating axes about an offset origin.
+    let stationary = velocity_condition(SampleSource::fixed(velocity_values([0.0; 3])), FrameId(1));
+    near(velocity_sample(&stationary, &restored.frames, 2.0), [0.0; 3]);
+}
+
+#[test]
+fn g0_velocity_boundary_does_not_infer_direction_or_reinterpret_a_different_role() {
+    let frames = FrameTree::new();
+    let original = velocity_condition(SampleSource::fixed(velocity_values([1.0, -2.0, 3.0])), WORLD);
+    assert_eq!(velocity_sample(&original, &frames, 0.0), [1.0, -2.0, 3.0]);
+    let mut bad = original.clone();
+    bad.frame = 1;
+    assert!(bad.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Continue(())).is_err());
+    bad = original.clone();
+    bad.value = Some(BcValue::Uniform(QtyAny::new(2.0, VELOCITY)));
+    assert!(matches!(bad.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Continue(())),
+        Err(VectorEvaluationError::Unsupported(_))));
+    bad = original.clone();
+    bad.kind = BcKind::Neumann;
+    assert!(bad.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Continue(())).is_err());
+    bad = original.clone();
+    bad.physics = Physics::Elasticity;
+    assert!(bad.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Continue(())).is_err());
+    bad = original.clone();
+    bad.value = Some(BcValue::Typed(Payload::Vector(fixed([1.0; 3], WORLD))));
+    assert!(bad.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Continue(())).is_err());
+    let odd = PayloadMeta::new(QuantityContract::Dimensions(VELOCITY),
+        PayloadId::new("basis/world-cartesian").unwrap(), WORLD,
+        OrientationParity::Odd, ReferenceSemantics::Continuous).unwrap();
+    bad.value = Some(BcValue::Typed(Payload::Vector(VectorPayload::new(odd,
+        SampleSource::fixed(velocity_values([1.0; 3]))).unwrap())));
+    assert!(bad.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Continue(())).is_err());
+    bad = velocity_condition(SampleSource::fixed(vec![QtyAny::new(1.0, VELOCITY); 2]), WORLD);
+    assert!(bad.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Continue(())).is_err());
+    assert_eq!(original.velocity_world_at(&frames, 0.0, &mut || ControlFlow::Break(())),
+        Err(VectorEvaluationError::Cancelled));
+    assert_eq!(original.velocity_world_at(&frames, f64::NAN, &mut || ControlFlow::Continue(())),
+        Err(VectorEvaluationError::InvalidTime));
+    assert_eq!(velocity_sample(&original, &frames, 0.0), [1.0, -2.0, 3.0]);
 }

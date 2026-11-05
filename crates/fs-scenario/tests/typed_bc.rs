@@ -465,10 +465,10 @@ fn g3_gas_boundary_names_never_change_incompressible_compatibility() {
 }
 
 #[test]
-fn g0_legacy_expectation_rows_remain_unchanged() {
+fn g0_velocity_adds_an_explicit_vector_without_reinterpreting_legacy_rows() {
     assert_eq!(
         expectation(Physics::IncompressibleFlow, BcKind::Dirichlet),
-        Expectation::Value(VELOCITY)
+        Expectation::ValueOrVector(VELOCITY)
     );
     assert_eq!(
         expectation(Physics::IncompressibleFlow, BcKind::MassFlowInlet),
@@ -490,6 +490,70 @@ fn g0_legacy_expectation_rows_remain_unchanged() {
         expectation(Physics::Elasticity, BcKind::Traction),
         Expectation::Value(PRESSURE)
     );
+}
+
+#[test]
+fn g0_prescribed_velocity_checks_vector_rank_dimensions_and_frame() {
+    let mut row = typed_bc(
+        Physics::IncompressibleFlow,
+        BcKind::Dirichlet,
+        vector_payload(VELOCITY, 0),
+    );
+    let mut findings = Vec::new();
+    row.check(&mut findings);
+    assert!(findings.is_empty(), "{findings:?}");
+
+    row.value = Some(BcValue::Typed(scalar_payload(VELOCITY, 0)));
+    row.check(&mut findings);
+    assert_eq!(codes(&findings), ["bc-payload-kind"]);
+    findings.clear();
+    row.value = Some(BcValue::Typed(vector_payload(PRESSURE, 0)));
+    row.check(&mut findings);
+    assert_eq!(codes(&findings), ["bc-payload-dims"]);
+    findings.clear();
+    row.value = Some(BcValue::Typed(vector_payload(VELOCITY, 7)));
+    row.check(&mut findings);
+    assert_eq!(codes(&findings), ["bc-payload-frame"]);
+    findings.clear();
+    row.value = Some(BcValue::Typed(Payload::Vector(
+        VectorPayload::new(
+            dimensional_meta(VELOCITY, 0),
+            SampleSource::fixed(vec![QtyAny::new(1.0, VELOCITY); 2]),
+        )
+        .unwrap(),
+    )));
+    row.check(&mut findings);
+    assert_eq!(codes(&findings), ["bc-velocity-components"]);
+
+    // Canonical scalar declarations retain their old meaning; execution must
+    // not turn a speed into an arbitrary Cartesian direction.
+    findings.clear();
+    row.value = Some(BcValue::Uniform(QtyAny::new(2.0, VELOCITY)));
+    row.check(&mut findings);
+    assert!(findings.is_empty(), "{findings:?}");
+}
+
+#[test]
+fn g0_prescribed_velocity_refuses_odd_parity_at_admission() {
+    let meta = PayloadMeta::new(
+        QuantityContract::Dimensions(VELOCITY),
+        id("basis/world-cartesian"),
+        FrameId(0),
+        OrientationParity::Odd,
+        ReferenceSemantics::Continuous,
+    )
+    .unwrap();
+    let row = typed_bc(
+        Physics::IncompressibleFlow,
+        BcKind::Dirichlet,
+        Payload::Vector(
+            VectorPayload::new(meta, SampleSource::fixed(vec![QtyAny::new(1.0, VELOCITY); 3]))
+                .unwrap(),
+        ),
+    );
+    let mut findings = Vec::new();
+    row.check(&mut findings);
+    assert_eq!(codes(&findings), ["bc-velocity-parity"]);
 }
 
 #[test]

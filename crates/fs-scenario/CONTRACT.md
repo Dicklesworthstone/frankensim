@@ -256,7 +256,21 @@ flagships.
   frame }`; `expectation(physics, kind)` is the closed dimensional and carrier
   contract table. Existing rows retain velocity for flow Dirichlet, kg/s for
   mass-flow inlets, Pa for pressure/traction, K / W/m² / W/(m²K) for thermal,
-  m for elastic Dirichlet, and no-value wall kinds. Typed-only rows add magnetic
+  m for elastic Dirichlet, and no-value wall kinds. Flow Dirichlet additionally
+  admits an explicit three-component velocity vector under `ValueOrVector`:
+  dimensions and the payload/boundary frame must agree, and velocity parity
+  must be ordinary/even at admission. Legacy scalar values
+  keep their existing wire meaning and acquire no inferred Cartesian direction.
+  `BoundaryCondition::velocity_world_at` executes the typed form through the
+  original Cartesian vector evaluator, retaining signed components, time-table
+  policies and physical-time frame rotation. The executable velocity is
+  absolute relative to the inertial world, expressed in the declared axes;
+  moving axes do not silently add carrier velocity. Execution requires an
+  ordinary even-parity dimensions-only m/s vector and the existing supported
+  Cartesian bases/source/reference policies. Vector sampling borrows its history
+  and uses logarithmic table lookup. Patch geometry, mass-flow integration, solver
+  boundary enforcement and physical-to-lattice scaling remain with consumers.
+  Typed-only rows add magnetic
   vector potential (vector Wb/m), normal magnetic flux density (scalar T),
   electric potential (scalar V), normal current density (scalar A/m²), species
   amount/mass flux bundles, and heterogeneous incoming/outgoing gas

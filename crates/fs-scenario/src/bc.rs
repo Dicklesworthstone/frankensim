@@ -6,7 +6,7 @@
 //! solve.
 
 use crate::ScenarioError;
-use crate::payload::{Payload, PayloadKind};
+use crate::payload::{OrientationParity, Payload, PayloadKind};
 use crate::scenario::Violation;
 use crate::signal::{ChebProfile, TimeSignal};
 use fs_qty::{Dims, QtyAny};
@@ -143,6 +143,11 @@ impl fmt::Display for BoundaryDiagnosticContext<'_> {
 pub enum Expectation {
     /// A value with exactly these SI exponents.
     Value(Dims),
+    /// A legacy scalar/signal/profile or an explicitly typed Cartesian vector
+    /// with these dimensions. Legacy values retain their wire meaning and do
+    /// not acquire an inferred direction. Executable vector consumers require
+    /// the typed form.
+    ValueOrVector(Dims),
     /// A versioned payload with an exact structural kind and, when present,
     /// exact homogeneous dimensions.
     Typed {
@@ -178,9 +183,9 @@ mod dims {
 /// The dimensional contract of every supported (physics, kind) pair.
 #[must_use]
 pub fn expectation(physics: Physics, kind: BcKind) -> Expectation {
-    use Expectation::{NoValue, Typed, Unsupported, Value};
+    use Expectation::{NoValue, Typed, Unsupported, Value, ValueOrVector};
     match (physics, kind) {
-        (Physics::IncompressibleFlow, BcKind::Dirichlet) => Value(dims::VELOCITY),
+        (Physics::IncompressibleFlow, BcKind::Dirichlet) => ValueOrVector(dims::VELOCITY),
         (Physics::IncompressibleFlow, BcKind::Neumann) => Typed {
             kind: PayloadKind::Vector,
             dims: Some(dims::VELOCITY),
@@ -297,7 +302,7 @@ impl BoundaryCondition {
                     });
                 }
             }
-            Expectation::Value(expected) => match &self.value {
+            Expectation::Value(expected) | Expectation::ValueOrVector(expected) => match &self.value {
                 None => out.push(Violation {
                     code: "bc-value-missing",
                     what: format!("{ctx}: no value supplied"),
@@ -306,6 +311,37 @@ impl BoundaryCondition {
                         expected.0
                     ),
                 }),
+                Some(BcValue::Typed(payload))
+                    if matches!(
+                        expectation(self.physics, self.kind),
+                        Expectation::ValueOrVector(_)
+                    ) =>
+                {
+                    self.check_typed_payload(payload, PayloadKind::Vector, Some(expected), ctx, out);
+                    if let Payload::Vector(vector) = payload {
+                        if vector.components() != 3 {
+                            out.push(Violation {
+                                code: "bc-velocity-components",
+                                what: format!(
+                                    "{ctx}: Cartesian velocity requires three components, found {}",
+                                    vector.components()
+                                ),
+                                fix: "supply all three signed velocity components in the declared Cartesian frame"
+                                    .to_string(),
+                            });
+                        }
+                        if vector.meta().orientation() != OrientationParity::Even {
+                            out.push(Violation {
+                                code: "bc-velocity-parity",
+                                what: format!(
+                                    "{ctx}: prescribed velocity requires ordinary even-parity vector components"
+                                ),
+                                fix: "declare OrientationParity::Even for the physical velocity vector"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                }
                 Some(BcValue::Typed(payload)) => out.push(Violation {
                     code: if self.kind == BcKind::MassFlowInlet {
                         "bc-mass-flow-typed"
@@ -348,40 +384,7 @@ impl BoundaryCondition {
                     ),
                 }),
                 Some(BcValue::Typed(payload)) => {
-                    if payload.kind() != kind {
-                        out.push(Violation {
-                            code: "bc-payload-kind",
-                            what: format!(
-                                "{ctx}: payload kind {:?} does not match required {kind:?}",
-                                payload.kind()
-                            ),
-                            fix: format!("supply a {kind:?} payload for this boundary kind"),
-                        });
-                    }
-                    if payload.homogeneous_dims() != expected_dims {
-                        out.push(Violation {
-                            code: "bc-payload-dims",
-                            what: format!(
-                                "{ctx}: payload dimensions {:?} do not match required {:?}",
-                                payload.homogeneous_dims().map(|dims| dims.0),
-                                expected_dims.map(|dims| dims.0)
-                            ),
-                            fix: "construct the payload with the exact six-base quantity contract required by the expectation row"
-                                .to_string(),
-                        });
-                    }
-                    if payload.meta().frame().0 != self.frame {
-                        out.push(Violation {
-                            code: "bc-payload-frame",
-                            what: format!(
-                                "{ctx}: payload frame {} does not match boundary frame {}",
-                                payload.meta().frame().0,
-                                self.frame
-                            ),
-                            fix: "construct the payload and boundary condition with the same declared frame id"
-                                .to_string(),
-                        });
-                    }
+                    self.check_typed_payload(payload, kind, expected_dims, ctx, out);
                 }
                 Some(_) => out.push(Violation {
                     code: "bc-typed-payload-required",
@@ -420,6 +423,50 @@ impl BoundaryCondition {
             });
         }
         Ok(())
+    }
+
+    fn check_typed_payload(
+        &self,
+        payload: &Payload,
+        kind: PayloadKind,
+        expected_dims: Option<Dims>,
+        ctx: BoundaryDiagnosticContext<'_>,
+        out: &mut Vec<Violation>,
+    ) {
+        if payload.kind() != kind {
+            out.push(Violation {
+                code: "bc-payload-kind",
+                what: format!(
+                    "{ctx}: payload kind {:?} does not match required {kind:?}",
+                    payload.kind()
+                ),
+                fix: format!("supply a {kind:?} payload for this boundary kind"),
+            });
+        }
+        if payload.homogeneous_dims() != expected_dims {
+            out.push(Violation {
+                code: "bc-payload-dims",
+                what: format!(
+                    "{ctx}: payload dimensions {:?} do not match required {:?}",
+                    payload.homogeneous_dims().map(|dims| dims.0),
+                    expected_dims.map(|dims| dims.0)
+                ),
+                fix: "construct the payload with the exact six-base quantity contract required by the expectation row"
+                    .to_string(),
+            });
+        }
+        if payload.meta().frame().0 != self.frame {
+            out.push(Violation {
+                code: "bc-payload-frame",
+                what: format!(
+                    "{ctx}: payload frame {} does not match boundary frame {}",
+                    payload.meta().frame().0,
+                    self.frame
+                ),
+                fix: "construct the payload and boundary condition with the same declared frame id"
+                    .to_string(),
+            });
+        }
     }
 
     /// Signed mass-flow contribution of this condition at time `t`
