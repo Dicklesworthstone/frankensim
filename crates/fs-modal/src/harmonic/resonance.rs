@@ -89,6 +89,16 @@ impl HarmonicTransferSample {
             (self.amplitude.im / a) * (self.angular_derivative.im / d),
         )
     }
+
+    fn finite_maximum_resolved(self, width: f64) -> bool {
+        // A real-axis pole also changes the amplitude slope from + to -.
+        // For H ~ 1/(omega - pole), |Re(H'/H)| * width is at least 2 at
+        // the bracket midpoint; at a finite maximum it tends to zero.
+        // The conservative 1/8 check is independent of response units and
+        // phase rotation. It is not a forward-amplitude error certificate.
+        self.amplitude != C64::ZERO
+            && (self.angular_derivative / self.amplitude).re.abs() * width <= 0.125
+    }
 }
 
 impl HarmonicFrequencyResponse {
@@ -292,7 +302,8 @@ pub struct ResonanceControls {
     /// Resolution is the larger of this times the upper frequency and the
     /// absolute tolerance. Refinement also stops at irreducible floating-point
     /// spacing; the returned bracket makes that resolution visible. Neither
-    /// tolerance certifies source/model accuracy.
+    /// tolerance certifies source/model accuracy. Maxima also require a resolved
+    /// finite log-amplitude slope, so a narrow peak can require further refinement.
     pub relative_angular_tolerance: f64,
     /// Includes endpoints, interior samples and the final returned sample.
     /// A bandwidth query shares this ceiling across both flanks.
@@ -357,8 +368,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ResonanceError<E> {}
 
 /// Refine ONE isolated extremum of the supplied actual complex response.
 /// Strict endpoint slopes are required: a zero-slope endpoint has only
-/// one-sided evidence and refuses. A lossless pole propagates its evaluator's
-/// singularity error; it is never regularized into a finite response peak.
+/// one-sided evidence and refuses. A sampled lossless pole propagates its
+/// evaluator's singularity error; an unresolved divergent slope refuses at
+/// floating-point spacing. Neither becomes a finite response peak.
 pub fn refine_transfer_extremum<E>(
     bracket_rad_s: (f64, f64),
     controls: ResonanceControls,
@@ -378,7 +390,12 @@ pub fn refine_transfer_extremum<E>(
             ));
         }
     };
-    let (point, bracket_rad_s) = query.refine(left, right, HarmonicTransferSample::slope)?;
+    let (point, bracket_rad_s) = query.refine(
+        left,
+        right,
+        HarmonicTransferSample::slope,
+        kind == TransferExtremumKind::Maximum,
+    )?;
     Ok(TransferExtremum {
         kind,
         angular_frequency_rad_s: point.frequency,
@@ -436,8 +453,8 @@ pub fn refine_half_power_bandwidth<E>(
             "each flank must strictly bracket its half-power crossing",
         ));
     }
-    let (lower, lower_bracket_rad_s) = query.refine(l0, l1, level)?;
-    let (upper, upper_bracket_rad_s) = query.refine(u0, u1, level)?;
+    let (lower, lower_bracket_rad_s) = query.refine(l0, l1, level, false)?;
+    let (upper, upper_bracket_rad_s) = query.refine(u0, u1, level, false)?;
     let width = upper.frequency - lower.frequency;
     let quality = peak.angular_frequency_rad_s / width;
     if width <= 0.0 || !quality.is_finite() {
@@ -549,27 +566,32 @@ where
         mut left: Point,
         mut right: Point,
         level: impl Fn(HarmonicTransferSample) -> f64 + Copy,
+        finite_maximum: bool,
     ) -> Result<(Point, (f64, f64)), ResonanceError<E>> {
         loop {
             self.poll()?;
-            let middle = left.frequency + 0.5 * (right.frequency - left.frequency);
-            if middle == left.frequency || middle == right.frequency {
-                return Ok((
-                    if middle == left.frequency {
-                        left
-                    } else {
-                        right
-                    },
-                    (left.frequency, right.frequency),
-                ));
-            }
-            let point = self.sample(middle, level)?;
+            let width = right.frequency - left.frequency;
+            let middle = left.frequency + 0.5 * width;
+            let at_spacing = middle == left.frequency || middle == right.frequency;
+            let point = if middle == left.frequency {
+                left
+            } else if middle == right.frequency {
+                right
+            } else {
+                self.sample(middle, level)?
+            };
+            let finite_response = !finite_maximum || point.sample.finite_maximum_resolved(width);
             let tolerance = self
                 .controls
                 .absolute_angular_tolerance_rad_s
                 .max(self.controls.relative_angular_tolerance * right.frequency);
-            if right.frequency - left.frequency <= tolerance {
+            if (width <= tolerance || at_spacing) && finite_response {
                 return Ok((point, (left.frequency, right.frequency)));
+            }
+            if at_spacing {
+                return Err(ResonanceError::InvalidBracket(
+                    "finite response peak is unresolved at floating-point frequency spacing",
+                ));
             }
             if point.level == 0.0 {
                 // Do not confuse a flat response or stationary inflection with
@@ -582,6 +604,11 @@ where
                     || b_frequency == middle
                     || b_frequency == right.frequency
                 {
+                    if !finite_response {
+                        return Err(ResonanceError::InvalidBracket(
+                            "finite response peak is unresolved at floating-point frequency spacing",
+                        ));
+                    }
                     return Ok((point, (left.frequency, right.frequency)));
                 }
                 let a = self.sample(a_frequency, level)?;

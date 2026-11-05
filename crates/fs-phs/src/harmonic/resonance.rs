@@ -34,6 +34,8 @@ pub enum HarmonicObservation<'a> {
 }
 
 /// Frequency resolution and total solve capacity for one local resonance query.
+/// A peak also requires a resolved finite log-amplitude slope; a narrower
+/// physical resonance can therefore require refinement beyond these widths.
 #[derive(Clone, Copy, Debug)]
 pub struct ResonanceControls {
     /// Absolute numerical bracket width [rad/s], strictly positive.
@@ -104,7 +106,8 @@ pub enum DrivenResonanceError {
         /// Exhausted physical-query allowance.
         maximum: usize,
     },
-    /// Floating-point frequency spacing cannot satisfy the requested tolerance.
+    /// Floating-point frequency spacing cannot resolve the requested finite peak
+    /// or satisfy the requested tolerance.
     FrequencyResolution,
     /// Original system admission, solve, residual or cancellation refusal.
     Harmonic(HarmonicError),
@@ -136,7 +139,8 @@ pub enum ResonanceSearchError<E> {
         /// Exhausted physical-query allowance.
         maximum: usize,
     },
-    /// Floating-point spacing cannot meet the requested frequency resolution.
+    /// Floating-point spacing cannot resolve a finite peak or meet the requested
+    /// frequency resolution.
     FrequencyResolution,
     /// The search's cancellation callback requested a stop.
     Cancelled,
@@ -273,9 +277,11 @@ impl HarmonicModel {
 ///
 /// The interval must have positive then negative logarithmic amplitude slope
 /// and must isolate the desired peak. Requested half-height crossings must lie
-/// inside that original interval. Silent peak samples, unresolved plateaus,
-/// missing brackets and insufficient frequency resolution refuse. This does not
-/// enumerate modes, prove uniqueness, certify a continuum, or equate observable
+/// inside that original interval. A frequency-resolved bracket must also resolve
+/// a finite log-amplitude slope: a pole's jump through infinity is not a maximum.
+/// Silent peak samples, unresolved plateaus, missing brackets and insufficient
+/// frequency resolution refuse. This does not enumerate modes, prove uniqueness,
+/// certify a continuum, or equate observable
 /// half-power Q with a pole's decay rate or an internal material loss.
 pub fn search_resonance<E, C, F>(
     interval_rad_s: (f64, f64),
@@ -320,8 +326,9 @@ where
         ));
     }
     let mut stationary = None;
-    while !search.resolved(left.omega, right.omega) {
-        if let Some(middle) = stationary {
+    let peak_sample = loop {
+        let frequency_resolved = search.resolved(left.omega, right.omega);
+        if !frequency_resolved && let Some(middle) = stationary {
             // Reuse the exactly stationary evaluated response while its
             // two sign endpoints contract; do not refactor its frequency.
             let a = search.sample(interior_midpoint(left.omega, middle)?, true)?;
@@ -335,7 +342,24 @@ where
             right = b;
             continue;
         }
-        let middle = search.sample(interior_midpoint(left.omega, right.omega)?, true)?;
+        let omega = if frequency_resolved {
+            f64::midpoint(left.omega, right.omega)
+        } else {
+            interior_midpoint(left.omega, right.omega)?
+        };
+        let middle = search.sample(omega, true)?;
+        // A pole also changes the sign of d(log |H|)/domega, but its slope
+        // diverges instead of tending to zero. For H ~ 1/(omega - pole),
+        // |slope(midpoint)| * bracket_width >= 2; a finite maximum tends to
+        // zero as its bracket contracts. Require a conservative 1/8 local
+        // variation before accepting it, independently of response units.
+        // This is a resolution check, not a forward-amplitude error bound.
+        if frequency_resolved && middle.slope.abs() * (right.omega - left.omega) <= 0.125 {
+            break middle;
+        }
+        if middle.omega <= left.omega || middle.omega >= right.omega {
+            return Err(ResonanceSearchError::FrequencyResolution);
+        }
         if middle.slope > 0.0 {
             left = middle;
         } else if middle.slope < 0.0 {
@@ -345,8 +369,7 @@ where
             // certificate. Retain an actual smaller sign bracket around it.
             stationary = Some(middle.omega);
         }
-    }
-    let peak_sample = search.sample(f64::midpoint(left.omega, right.omega), true)?;
+    };
     let peak = ResonanceFrequency {
         angular_frequency_rad_s: peak_sample.omega,
         bracket_rad_s: (left.omega, right.omega),

@@ -363,6 +363,11 @@ and bounded sign-bracket bisection. Every trial retains the same complete
 descriptor equations, mutual storage, physical dissipation and material memory.
 The observation weights are never normalized, and their interference is retained.
 A stationary candidate is reused while its actual numerical sign bracket shrinks.
+Frequency resolution alone does not accept a peak: the dimensionless local
+log-amplitude slope times bracket width must also be at most `1/8`. A narrow
+finite response continues refining, while an off-grid lossless pole's divergent
+slope cannot masquerade as a finite maximum. This additional resolution check
+does not certify a forward amplitude error or impose a physical linewidth.
 
 The optional conventional half-power bandwidth resolves both squared-amplitude
 half-height crossings inside the supplied interval and reports peak/width as a
@@ -380,6 +385,9 @@ linewidth, complex excitation/observation scaling, replay and refusals. Numerica
 brackets are not interval-arithmetic certificates. The caller must isolate the
 desired peak; this query does not enumerate all peaks or prove uniqueness in a
 multimode interval, validate a continuum model, or establish nonlinear resonance.
+Source-owned and native survey regressions also reject unsampled lossless poles;
+a finite velocity resonance with Q about `1.2e9` and linewidth 100 times narrower
+than the frequency tolerance retains its gain under `1e-120..1e120` source scales.
 
 `ScatteringModel::driven_resonance` applies the same bounded search to the fully
 closed wave-boundary model. Its fixed real `ScatteringObservation` can select

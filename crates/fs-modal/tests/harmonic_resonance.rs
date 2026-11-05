@@ -161,6 +161,53 @@ fn g1_high_q_peak_and_linewidth_are_resolved_without_a_frequency_grid() {
 }
 
 #[test]
+fn g1_a_peak_narrower_than_frequency_tolerance_retains_its_finite_physical_gain() {
+    with_cx(&CancelGate::new(), |cx| {
+        let (natural, damping) = (1234.56789123_f64, 1e-6_f64);
+        let mut reference_frequency = None;
+        for scale in [1e-200, 1.0, 1e200] {
+            let force = C64::new(scale, -0.3 * scale);
+            let mut calls = 0;
+            let peak = refine_transfer_extremum(
+                (1000.0, 1500.0),
+                ResonanceControls {
+                    // This unit-mass oscillator's velocity linewidth is c,
+                    // 100 times narrower than the requested frequency width.
+                    absolute_angular_tolerance_rad_s: 1e-4,
+                    relative_angular_tolerance: 0.0,
+                    ..search_controls()
+                },
+                cx,
+                |omega| -> Result<_, &'static str> {
+                    calls += 1;
+                    let dynamic = C64::new((natural - omega) * (natural + omega), -damping * omega);
+                    let displacement = force / dynamic;
+                    let dq = -(C64::new(-2.0 * omega, -damping) / dynamic) * displacement;
+                    Ok(HarmonicTransferSample {
+                        amplitude: C64::new(0.0, -omega) * displacement,
+                        angular_derivative: C64::new(0.0, -omega) * dq
+                            + C64::new(0.0, -1.0) * displacement,
+                    })
+                },
+            )
+            .unwrap();
+            let exact = force.scale(1.0 / damping);
+            assert_eq!(peak.kind, TransferExtremumKind::Maximum);
+            close(peak.angular_frequency_rad_s, natural, 1e-8);
+            assert!((peak.sample.amplitude.abs() / exact.abs() - 1.0).abs() < 1e-3);
+            assert!((peak.sample.amplitude - exact).abs() < 0.02 * exact.abs());
+            assert_eq!(peak.evaluations, calls);
+            assert!(peak.evaluations < 64);
+            if let Some(reference) = reference_frequency {
+                assert_eq!(peak.angular_frequency_rad_s, reference);
+            } else {
+                reference_frequency = Some(peak.angular_frequency_rad_s);
+            }
+        }
+    });
+}
+
+#[test]
 fn g1_signed_mode_interference_retains_an_exact_antiresonance() {
     with_cx(&CancelGate::new(), |cx| {
         // The collocated lossless two-mode receptance is
@@ -497,5 +544,40 @@ fn g0_lossless_resonance_is_not_regularized_into_a_finite_peak() {
                 HarmonicResponseError::Singular { .. }
             ))
         ));
+    });
+}
+
+#[test]
+fn g0_off_grid_lossless_resonance_is_not_reported_as_a_finite_peak() {
+    with_cx(&CancelGate::new(), |cx| {
+        let natural = 2.123456789_f64;
+        let result = refine_transfer_extremum(
+            (1.0, 3.0),
+            ResonanceControls {
+                absolute_angular_tolerance_rad_s: 1e-7,
+                relative_angular_tolerance: 0.0,
+                ..search_controls()
+            },
+            cx,
+            |w| {
+                PreparedHarmonicResponse::try_diagonal_modal(&[natural], &[0.0], w, controls(), cx)?
+                    .solve_with_frequency_derivative(
+                        &[C64::ONE],
+                        None,
+                        None,
+                        tangent_controls(),
+                        cx,
+                    )?
+                    .displacement_transfer(&[1.0])
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(ResonanceError::InvalidBracket(_)
+                    | ResonanceError::Evaluation(HarmonicResponseError::Singular { .. }))
+            ),
+            "an off-grid undamped pole became a finite peak: {result:?}"
+        );
     });
 }
