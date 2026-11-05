@@ -66,6 +66,28 @@ pub(crate) fn section_profile_drag(alpha_rad: f64, attached_cd: f64) -> f64 {
     }
 }
 
+/// Quarter-chord pitching moment from the same attached/separated section
+/// model as lift and profile drag. The separated normal force acts at
+/// x_cp/c = 0.25 + 0.25*(1 - cos(alpha)), as in fs-airfoil's flat plate;
+/// using the attached camber couple after separation would leave the force
+/// at the wrong chordwise station. The caller supplies the accepted effective
+/// incidence, including twist and induction exactly once.
+pub(crate) fn section_quarter_chord_moment(alpha_rad: f64, camber: f64) -> f64 {
+    let (weight, regime) = separated_weight(alpha_rad);
+    let attached = -core::f64::consts::PI * camber;
+    if regime == StripRegime::Attached {
+        return attached;
+    }
+    let normal = fs_airfoil::FLAT_PLATE_CD90 * det::sin(alpha_rad);
+    let cp_offset = 0.25 * (1.0 - det::cos(alpha_rad));
+    let separated = -normal * cp_offset;
+    if regime == StripRegime::Separated {
+        separated
+    } else {
+        attached * (1.0 - weight) + separated * weight
+    }
+}
+
 /// Evidence-lineage metadata every dataset carries (E4.1 DONE-WHEN).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SectionLineage {
@@ -245,7 +267,7 @@ pub fn cl_3d(ds: &SectionDataset, alpha_rad: f64, log10_re: f64, ar: f64) -> Res
 
 #[cfg(test)]
 mod drag_tests {
-    use super::{section_lift, section_profile_drag};
+    use super::{section_lift, section_profile_drag, section_quarter_chord_moment};
     use fs_wing::nonlinear::StripRegime;
 
     #[test]
@@ -288,6 +310,52 @@ mod drag_tests {
                 .abs()
                     < 5e-8
             );
+        }
+    }
+
+    #[test]
+    fn g0_separated_section_resultant_acts_at_the_plate_center_of_pressure() {
+        for alpha in [-1.2_f64, -0.7, -0.45, 0.45, 0.7, 1.2] {
+            let (cl, _) = section_lift(alpha, 0.05);
+            let cd = section_profile_drag(alpha, 0.015);
+            let (cn, _) = fs_airfoil::wind_to_body(cl, cd, alpha);
+            let plate = fs_airfoil::flat_plate_separated(alpha, 6.0).unwrap();
+            let cp = 0.25 + 0.25 * (1.0 - alpha.cos());
+            for camber in [0.0, 0.05] {
+                let cm = section_quarter_chord_moment(alpha, camber);
+                assert!((cm - plate.cm_ref).abs() < 1e-14);
+                assert!(fs_airfoil::transfer_moment(cm, cn, 0.25, cp).abs() < 1e-14);
+                assert!(cm * alpha < 0.0, "separated force pitches toward the flow");
+            }
+        }
+        for sign in [-1.0, 1.0] {
+            let cm = section_quarter_chord_moment(sign * core::f64::consts::FRAC_PI_2, 0.0);
+            assert!((cm + sign * fs_airfoil::FLAT_PLATE_CD90 / 4.0).abs() < 1e-14);
+        }
+    }
+
+    #[test]
+    fn g0_section_moment_shares_the_stall_blend_and_attached_baseline() {
+        for camber in [0.0, 0.05] {
+            let attached = -core::f64::consts::PI * camber;
+            for alpha in [-0.30, -0.15, 0.0, 0.15, 0.30] {
+                assert_eq!(
+                    section_quarter_chord_moment(alpha, camber).to_bits(),
+                    attached.to_bits()
+                );
+            }
+            // The midpoint of the existing smoothstep window gives equal
+            // attached/plate pressure contributions in all three channels.
+            for alpha in [-0.375, 0.375] {
+                let separated = fs_airfoil::flat_plate_separated(alpha, 6.0).unwrap().cm_ref;
+                let expected = 0.5 * (attached + separated);
+                assert!((section_quarter_chord_moment(alpha, camber) - expected).abs() < 1e-14);
+            }
+            for boundary in [-0.45, -0.30, 0.30, 0.45] {
+                let below = section_quarter_chord_moment(boundary - 1e-8, camber);
+                let above = section_quarter_chord_moment(boundary + 1e-8, camber);
+                assert!((above - below).abs() < 5e-8);
+            }
         }
     }
 }

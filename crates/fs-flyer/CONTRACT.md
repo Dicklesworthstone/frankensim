@@ -127,7 +127,7 @@ unrepresentable mass properties. The input principal moments remain declared
 data or the documented reference calibration; a rotation does not validate
 that calibration or supply missing geometry, moving masses or deformation.
 
-## Section pressure drag through stall
+## Section pressure forces and moments through stall
 
 The parasite ledger's spatial `wrench_at` evaluates the material-point velocity
 relative to local air and returns force, its moment about the supplied origin,
@@ -158,9 +158,20 @@ moment uses the same physical strip arm. Local relative work is nonpositive in
 both incidence directions. Attached-regime arithmetic is unchanged. G0 tests
 check plate force decomposition, even positive drag and continuous transitions,
 then reconstruct drag and work in an actual separated aircraft load solve.
-The attached coefficient, transition angles, constant quarter-chord moment and
-flat-plate continuation remain Estimated model choices. This change supplies
-the missing drag channel of that model; it does not establish historical
+The quarter-chord section moment now follows that same blend and accepted
+incidence: the attached `-pi*camber` couple transitions to
+`-Cd90*sin(alpha_eff)*0.25*(1-cos(alpha_eff))`, matching the pressure station
+of `fs-airfoil::flat_plate_separated`. Longitudinal flight, built-in native
+propulsion and explicit lifting surfaces share this owner; the free couple
+follows the physical span for canted and vertical surfaces. Attached values
+and force-assembly arithmetic remain bit-identical. Focused checks recover
+zero moment about the separated plate's center of pressure, continuous blend
+boundaries, signed spatial couples, and the complete pitching moment of an
+actual separated aircraft solve.
+
+The attached coefficients, transition angles and flat-plate continuation
+remain Estimated model choices. These changes supply the consistent force
+and moment channels of that model; they do not establish historical
 deep-stall validity, Reynolds-dependent viscous section data or resolved wake
 pressure drag.
 
@@ -1067,10 +1078,11 @@ Complete local air and vector propeller wash reach the framed nonlinear owner
 before section projection. Full velocity and actual bound segments supply
 Kutta–Joukowsky force. Profile drag uses the accepted effective incidence,
 section-plane speed/direction and chord times true bound length; spanwise
-velocity cannot inflate the two-dimensional dynamic pressure. The camber
-pitching free couple follows the local span, including yaw couples for a
-vertical surface. Custom layouts require finite CG speed above 1 m/s and
-native local chordwise/disk-flow admission, without a hidden global body-x
+velocity cannot inflate the two-dimensional dynamic pressure. The section
+pitching free couple, including its separated pressure arm, follows the local
+span, including yaw couples for a vertical surface. Custom layouts require
+finite CG speed above 1 m/s and native local chordwise/disk-flow admission,
+without a hidden global body-x
 velocity or body-xz incidence restriction.
 
 Induced drag remains an explicitly declared classical engineering closure.

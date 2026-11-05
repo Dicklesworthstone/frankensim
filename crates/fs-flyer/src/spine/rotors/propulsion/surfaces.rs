@@ -13,7 +13,8 @@ use std::borrow::Cow;
 /// Per-strip section and control data; no horizontal-wing defaults are inferred.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SectionProperties {
-    /// Camber ratio used by the existing attached/separated lift law and Cm0.
+    /// Camber ratio used by the attached lift and quarter-chord moment; both
+    /// transition to the separated plate at the same accepted incidence.
     pub camber_ratio: f64,
     /// Attached profile Cd; separated pressure drag uses the same accepted alpha.
     pub attached_cd: f64,
@@ -215,11 +216,14 @@ impl<'a> LiftingSurfaces<'a> {
             let profile_force = vec(flow.velocity_mps).scale(-q * area * cd / flow.speed_mps);
             let panel = self.panels[strip.panel_indices[0]];
             let arm = (vec(panel.a) + vec(panel.b)).scale(0.5) - vec(origin);
-            let cm0 = -core::f64::consts::PI * section.camber_ratio;
+            let cm = crate::sections::section_quarter_chord_moment(
+                fields.strip_alpha_eff_rad[s],
+                section.camber_ratio,
+            );
             force = force + profile_force;
             moment = moment
                 + arm.cross(profile_force)
-                + vec(frame.span_direction()).scale(q * area * strip.chord_m * cm0);
+                + vec(frame.span_direction()).scale(q * area * strip.chord_m * cm);
         }
         // The induced-drag closure has a finite, strictly positive CG
         // dynamic-pressure domain. Local strip flow may be admissible while
@@ -293,6 +297,75 @@ impl<'a, const N: usize> GearedPropulsion<'a, N> {
 mod load_admission_tests {
     use super::*;
     use fs_wing::{SurfaceId, flat_surface};
+
+    #[test]
+    fn g0_separated_pitching_couple_uses_accepted_incidence_and_physical_span() {
+        let rho = 1.25;
+        let speed = 12.0;
+        let chord = 1.2;
+        let width = 4.0;
+        let q = 0.5 * rho * speed * speed;
+        // Horizontal, canted and vertical surfaces; the force point is the
+        // wrench origin, so only the section free couple contributes torque.
+        for (cos_cant, sin_cant) in [(1.0, 0.0), (0.8, 0.6), (0.0, 1.0)] {
+            let rotate = |p: [f64; 3]| {
+                [
+                    p[0],
+                    cos_cant * p[1] - sin_cant * p[2],
+                    sin_cant * p[1] + cos_cant * p[2],
+                ]
+            };
+            let mut panels =
+                flat_surface(SurfaceId::WingLower, width, chord, 0.0, 0.0, 1, 1).unwrap();
+            for panel in &mut panels {
+                panel.a = rotate(panel.a);
+                panel.b = rotate(panel.b);
+                panel.ctrl = rotate(panel.ctrl);
+                panel.normal = rotate(panel.normal);
+            }
+            let origin = std::array::from_fn(|axis| 0.5 * (panels[0].a[axis] + panels[0].b[axis]));
+            let strips = [StripSpec {
+                panel_indices: vec![0],
+                chord_m: chord,
+                twist_rad: 0.0,
+            }];
+            let properties = [SectionProperties {
+                camber_ratio: 0.0,
+                attached_cd: 0.01,
+                canard_gain: 0.0,
+                induced_drag_group: 0,
+            }];
+            let groups = [InducedDragGroup {
+                span_m: width,
+                oswald_e: 0.8,
+            }];
+            let surfaces = LiftingSurfaces::new(&panels, &strips, &properties, &groups).unwrap();
+            let velocity = [[speed, 0.0, 0.0]];
+            for incidence in [-0.7_f64, 0.7] {
+                // This differs deliberately from the geometric incident angle:
+                // the accepted section incidence owns twist and induced flow.
+                let alpha = [incidence];
+                let fields = AerodynamicFields {
+                    gamma: &[],
+                    strip_alpha_eff_rad: &alpha,
+                    strip_velocity_mps: Some(&velocity),
+                    thrust_n: [0.0; 2],
+                    torque_nm: [0.0; 2],
+                    oblique: None,
+                };
+                let result = surfaces
+                    .additional_wrench(rho, vec(velocity[0]), origin, &fields, &[Vec3::default()])
+                    .unwrap();
+                // Independent pressure-resultant moment about c/4; symmetric
+                // camber would incorrectly give zero under the attached law.
+                let normal_force = q * width * chord * 1.98 * incidence.sin();
+                let cp_arm = 0.25 * chord * (1.0 - incidence.cos());
+                let expected = Vec3::new(0.0, cos_cant, sin_cant).scale(-normal_force * cp_arm);
+                assert!(expected.norm() > 10.0);
+                assert!((result.torque - expected).norm() < 1e-10);
+            }
+        }
+    }
 
     #[test]
     fn grouped_lift_refuses_invalid_reference_and_incomplete_fields() {

@@ -363,6 +363,8 @@ fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_wor
     let mut profile_power = 0.0;
     let mut kj_power = 0.0;
     let mut kj_force = [0.0; 2];
+    let mut expected_moment = 0.0;
+    let mut separation_moment_change = 0.0;
     let mut separated_count = 0;
     for (s, strip) in strips.iter().enumerate() {
         let a = loads.coupled.strip_alpha_eff_rad[s];
@@ -385,6 +387,15 @@ fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_wor
         let local_speed = (u * u + w * w).sqrt();
         let q = 0.5 * RHO * local_speed * local_speed;
         let drag = q * area * cd;
+        let cm_attached = -core::f64::consts::PI * design.camber_ratio;
+        let cp_arm = 0.25 * strip.chord_m * (1.0 - a.cos());
+        let plate_moment = -q * area * 1.98 * a.sin() * cp_arm;
+        let attached_moment = q * area * strip.chord_m * cm_attached;
+        let section_moment = attached_moment * (1.0 - weight) + plate_moment * weight;
+        let rx = 0.5 * (panel.a[0] + panel.b[0]) - design.cg_m[0];
+        let rz = 0.5 * (panel.a[2] + panel.b[2]) - design.cg_m[2];
+        expected_moment += section_moment + drag * (rx * w - rz * u) / local_speed;
+        separation_moment_change += section_moment - attached_moment;
         expected += drag;
         attached_only += q * area * design.cd0_wing;
         profile_power += drag * (u * cg_velocity[0] + w * cg_velocity[1]) / local_speed;
@@ -394,6 +405,9 @@ fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_wor
         for &j in &strip.panel_indices {
             let panel = panels[j];
             let scale = RHO * loads.coupled.gamma[j] * (panel.b[1] - panel.a[1]);
+            let rx = 0.5 * (panel.a[0] + panel.b[0]) - design.cg_m[0];
+            let rz = 0.5 * (panel.a[2] + panel.b[2]) - design.cg_m[2];
+            expected_moment -= scale * (rz * w + rx * u);
             kj_force[0] -= scale * w;
             kj_force[1] += scale * u;
             kj_power += scale * (-w * cg_velocity[0] + u * cg_velocity[1]);
@@ -430,6 +444,15 @@ fn g0_separated_profile_and_induced_drag_reach_the_actual_aircraft_force_and_wor
     let expected_power = speed * (parasite + loads.induced_drag_n) + profile_power - kj_power;
     assert!(profile_power > 0.0 && dissipated_power > 0.0);
     assert!((dissipated_power - expected_power).abs() < 1e-7);
+    expected_moment += loads.parasite_wrench.moment_nm[1];
+    for (disk, thrust) in design.disks.iter().zip(loads.thrust_n) {
+        expected_moment += (disk.center_m[2] - design.cg_m[2]) * thrust;
+    }
+    assert!(
+        separation_moment_change.abs() > 10.0,
+        "the stall moment correction must be observable"
+    );
+    assert!((loads.moment_y_nm - expected_moment).abs() < 1e-8);
 }
 
 #[test]

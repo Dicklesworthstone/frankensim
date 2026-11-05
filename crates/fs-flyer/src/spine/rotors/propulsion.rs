@@ -692,7 +692,6 @@ impl PropulsionGeometry<'_> {
             // The induced-drag screen uses transverse lift, not its body-z
             // projection; the latter introduces a spurious cos(alpha)^2 factor.
             let lift = wind_axis_lift(force, alpha);
-            let cm0 = -core::f64::consts::PI * camber;
             for (s, strip) in strips.iter().enumerate() {
                 let panel = &panels[strip.panel_indices[0]];
                 let v = local[s];
@@ -700,7 +699,11 @@ impl PropulsionGeometry<'_> {
                 let section_speed = section_speed2.sqrt();
                 let q = 0.5 * rho * section_speed2;
                 let width = (panel.b[1] - panel.a[1]).abs();
-                moment.y += q * strip.chord_m * strip.chord_m * width * cm0;
+                let cm = crate::sections::section_quarter_chord_moment(
+                    fields.strip_alpha_eff_rad[s],
+                    camber,
+                );
+                moment.y += q * strip.chord_m * strip.chord_m * width * cm;
                 let cd = crate::sections::section_profile_drag(
                     fields.strip_alpha_eff_rad[s],
                     design.cd0_wing,

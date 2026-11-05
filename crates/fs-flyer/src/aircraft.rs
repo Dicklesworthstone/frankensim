@@ -11,7 +11,8 @@
 //!   - per-panel Kutta–Joukowsky forces F = ρΓ(V×seg), using local rigid-point
 //!     relative velocity plus prop wash; wing-induced drag is carried as the
 //!     declared classical term CL²/(π·AR·e) — documented, Estimated,
-//!   - per-strip section quarter-chord moments (thin-airfoil cm₀),
+//!   - per-strip section quarter-chord moments (thin-airfoil cm₀ blended
+//!     to the separated plate's center-of-pressure moment),
 //!   - wing profile drag (declared attached cd₀, the same flat-plate
 //!     continuation as the lift law), the parasite LEDGER (E4.6a-i),
 //!   - thrust at the disk lines, gravity at the CG reference.
@@ -767,9 +768,8 @@ impl OpenLoopDesign {
         let lift = -force[2];
         let transverse_lift =
             wind_axis_lift(fs_ga::Vec3::new(force[0], force[1], force[2]), alpha_rad);
-        // Per-strip quarter-chord camber moments (thin airfoil cm0 = −π·camber)
-        // + profile drag at the strip line.
-        let cm0 = -core::f64::consts::PI * self.camber_ratio;
+        // Per-strip quarter-chord moments and profile drag use the same
+        // accepted effective incidence and separation blend as lift.
         let mut d_prof = 0.0;
         for (s, st) in strips.iter().enumerate() {
             let (q, vhat) = match &coupled.strip_velocity_mps {
@@ -784,7 +784,11 @@ impl OpenLoopDesign {
             let p0 = &panels[st.panel_indices[0]];
             let width = (p0.b[1] - p0.a[1]).abs();
             let c = st.chord_m;
-            let cm_term = q * c * c * width * cm0;
+            let cm = crate::sections::section_quarter_chord_moment(
+                coupled.strip_alpha_eff_rad[s],
+                self.camber_ratio,
+            );
+            let cm_term = q * c * c * width * cm;
             m_y += cm_term;
             let cd = crate::sections::section_profile_drag(
                 coupled.strip_alpha_eff_rad[s],
