@@ -213,6 +213,9 @@ backtracking and bounded step halving/growth correct them. No damping,
 equilibrium deflation or diagonal jitter is introduced on this path.
 
 Original AFT buffers and trigonometric tables are reused within each corrector.
+The lazily admitted tangent workspace is retained across the complete branch,
+including corrector retries, and is used only while the current source declares
+the derivative. A cached workspace cannot preserve a stale availability claim.
 When `island_state_jacobian` is declared at the current physical parameter,
 the original `tangent::Workspace` prepares every coefficient derivative from
 the current waveform before any frequency or parameter perturbation. The same
@@ -223,7 +226,8 @@ propagate without fallback. Optional tangent storage, including replacement
 phase tables at refinement, is admitted within the existing payload cap before
 allocation. It does not increase the payload requirement of a family that
 never supplies the callback. The residual limit counts actual HB evaluations;
-tangent samples are bounded by the existing order, quadrature and Newton caps.
+`tangent_preparations` separately reports exact tangent preparations. Tangent
+samples are bounded by the existing order, quadrature and Newton caps.
 Cancellation is checked on both sides of a complete sampled tangent and at
 each coefficient column, preserving the original atomic AFT/linear-algebra
 boundary.
@@ -248,6 +252,13 @@ Its analytical family is lambda=(r^2-1)^2, omega=1+0.2*r^2. These are finite
 numerical regression claims, not existence, primitive-period, branch-identity,
 stability, fold-location or infinite-tail certificates. Extra-neutral
 conservative families and hybrid cycles remain outside this entry's claim.
+
+`tests/autonomous_tangent.rs` adds an independently soluble nonlinear cycle
+with two retained feedback memories and a parameter-dependent port. It compares
+the complete branch against residual probes and independent physical-unit
+changes, checks memory phasors, dynamic tangent availability, original refusal
+and restoration, and lazy payload admission. Source-call reductions are operation
+counts, not timing claims.
 
 ## Invariants
 

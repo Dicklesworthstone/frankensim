@@ -5,7 +5,7 @@
 //! pseudo-arclength plane. No physical equation, damping or memory is removed.
 
 use super::{AftWorkspace, ContinuableProblem, HbOrbit, OrbitError, Packing,
-    MAX_AFT_REFINEMENTS, hb_residual, pack_orbit, HbAnchor};
+    MAX_AFT_REFINEMENTS, hb_residual, pack_orbit, tangent::Workspace, HbAnchor};
 use fs_la::factor::lu;
 use fs_math::det;
 
@@ -44,7 +44,9 @@ pub struct AutonomousContinuationBudget {
     /// Conservative solver/AFT/retained-result payload; excludes caller models
     /// and allocator metadata. Checked before source evaluation or allocation.
     pub maximum_payload_bytes: usize,
-    /// Total original AFT residual calls, including Jacobians and finer grids.
+    /// Total original AFT residual calls, including finite-difference columns
+    /// and finer grids. At most one analytic tangent preparation accompanies
+    /// each counted Newton residual; those preparations are reported separately.
     pub maximum_residual_evaluations: usize,
     pub scales: AutonomousScales,
 }
@@ -68,6 +70,9 @@ pub struct AutonomousContinuationPoint {
 pub struct AutonomousBranch {
     pub points: Vec<AutonomousContinuationPoint>,
     pub residual_evaluations: usize,
+    /// Complete analytic AFT tangent passes, each attached to a counted Newton
+    /// residual. Zero when the source did not declare an exact state Jacobian.
+    pub tangent_preparations: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -223,8 +228,32 @@ struct Evaluation<'a, P, F> {
     evaluations: usize,
     limit: usize,
     physical: Vec<f64>,
+    tangent_workspace: Option<Workspace>,
+    tangent_preparations: usize,
 }
 impl<P: ContinuableProblem, F: FnMut() -> bool> Evaluation<'_, P, F> {
+    // Called only while physical, the family parameter and aft.xs still belong
+    // to the current Newton residual. Frequency/parameter probes overwrite
+    // those buffers, so all analytic columns must be prepared before them.
+    fn prepare_tangent(&mut self, aft: &AftWorkspace) -> Result<bool> {
+        let Some(callback) = self.problem.island_state_jacobian() else {
+            return Ok(false);
+        };
+        poll(self.cancelled)?;
+        if !self.chart.analytic_payload_admitted {
+            return Err(invalid("analytic continuation tangent payload exceeds its allowance"));
+        }
+        if self.tangent_workspace.is_none() {
+            self.tangent_workspace = Some(Workspace::new(&self.chart.pack)?);
+        }
+        let workspace = self.tangent_workspace.as_mut().expect("prepared tangent workspace");
+        self.tangent_preparations += 1;
+        workspace.prepare(self.problem, callback, &self.chart.pack,
+            self.physical[self.chart.pack.coeff_len()], aft)?;
+        poll(self.cancelled)?;
+        Ok(true)
+    }
+
     fn eval(&mut self, z: &[f64], aft: &mut AftWorkspace, out: &mut [f64]) -> Result<()> {
         poll(self.cancelled)?;
         if self.evaluations >= self.limit {
@@ -279,7 +308,6 @@ fn correct<P: ContinuableProblem, F: FnMut() -> bool>(
     let mut plus = vec![0.0; nc];
     let mut minus = vec![0.0; nc];
     let mut jac = vec![0.0; nz * nz];
-    let mut tangent_workspace = None;
     let mut trace = Vec::with_capacity(b.max_newton);
     for _ in 0..b.max_newton {
         eval.eval(&z, &mut aft, &mut raw)?;
@@ -314,27 +342,12 @@ fn correct<P: ContinuableProblem, F: FnMut() -> bool>(
             aft = finer;
             continue;
         }
-        // The base residual has set the physical parameter and synthesized
-        // this iterate's waveform. Prepare before frequency/parameter probes
-        // can change either; a declared refusal is never replaced by probes.
-        let exact = if let Some(callback) = eval.problem.island_state_jacobian() {
-            poll(eval.cancelled)?;
-            if !chart.analytic_payload_admitted {
-                return Err(invalid("analytic continuation tangent payload exceeds its allowance"));
-            }
-            if tangent_workspace.is_none() {
-                tangent_workspace = Some(super::tangent::Workspace::new(&chart.pack)?);
-            }
-            let workspace = tangent_workspace.as_mut().expect("prepared tangent workspace");
-            workspace.prepare(eval.problem, callback, &chart.pack, eval.physical[nc], &aft)?;
-            poll(eval.cancelled)?;
-            Some(&*workspace)
-        } else { None };
+        let exact = eval.prepare_tangent(&aft)?;
         for col in 0..nz {
             poll(eval.cancelled)?;
             jac[nc * nz + col] = phase[col];
             jac[(nc + 1) * nz + col] = plane[col];
-            if let Some(workspace) = exact.filter(|_| col < nc) {
+            if let Some(workspace) = eval.tangent_workspace.as_ref().filter(|_| exact && col < nc) {
                 for row in 0..nc {
                     jac[row * nz + col] =
                         (workspace.coefficient_entry(row, col, &chart.pack) / chart.row_units[row])
@@ -418,6 +431,11 @@ fn tangent(chart: &Chart, old: &[f64], now: &[f64], floor: f64) -> Result<Vec<f6
 /// between residuals, Jacobian columns and steps. Each native AFT/tangent
 /// evaluation and dense LU remains a bounded noninterruptible unit.
 ///
+/// Tangent availability is queried at each current parameter. The lazily
+/// admitted workspace is reused across correctors and counted separately as
+/// `tangent_preparations`; its retained contents never substitute for a current
+/// source declaration or evaluation.
+///
 /// Fixed harmonic truncation and the remaining finite differences are disclosed.
 /// This neither classifies stability nor certifies folds, branch identity,
 /// fundamental period, omitted Fourier tails, hybrid cycles or conservative
@@ -435,7 +453,8 @@ pub fn continue_autonomous_branch<P: ContinuableProblem>(
     let seed1 = chart.seed(seeds[1].0, seeds[1].1)?;
     let nz = chart.state_units.len();
     let mut eval = Evaluation { problem, chart: &chart, cancelled: &mut cancelled,
-        evaluations: 0, limit: budget.maximum_residual_evaluations, physical: vec![0.0; nz] };
+        evaluations: 0, limit: budget.maximum_residual_evaluations, physical: vec![0.0; nz],
+        tangent_workspace: None, tangent_preparations: 0 };
     let mut last_parameter = seeds[0].0;
     let result = (|| {
         let mut fixed = vec![0.0; nz];
@@ -478,7 +497,8 @@ pub fn continue_autonomous_branch<P: ContinuableProblem>(
             step = (step * 1.3).min(budget.step_sizes[2]);
         }
         poll(eval.cancelled)?;
-        Ok(AutonomousBranch { points, residual_evaluations: eval.evaluations })
+        Ok(AutonomousBranch { points, residual_evaluations: eval.evaluations,
+            tangent_preparations: eval.tangent_preparations })
     })();
     eval.problem.set_parameter(last_parameter);
     result
