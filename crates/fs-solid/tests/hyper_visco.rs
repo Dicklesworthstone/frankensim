@@ -2,6 +2,7 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_material::hyper::reference::ReferenceDeformation;
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_material::visco_hyper::{BranchEnergy, FiniteStrainBranch, ViscoHyperelastic};
 use fs_solid::hyper3::visco::{
@@ -99,6 +100,128 @@ fn close(a: f64, b: f64, relative: f64) {
         (a - b).abs() <= relative * a.abs().max(b.abs()).max(1.0),
         "{a:e} versus {b:e}"
     );
+}
+
+#[test]
+fn prescribed_reference_birth_stays_relaxed_through_native_equilibrium() {
+    with_cx(|cx| {
+        // Total stretch exceeds the bare law's limit of four. Admission must
+        // use the elastic deformation F G^-1, which is identity at birth.
+        let g = [5.0, 0.125, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 1.125];
+        let material = law(10_000.0, 30_000.0, 0.15)
+            .with_reference_deformation(ReferenceDeformation::try_new(g).unwrap());
+        let displacement = PATCH.map(|point| affine(&g, point));
+        let initial = FiniteViscoTetSolid::try_new_from(
+            &PATCH,
+            &PATCH_TETS,
+            ViscoelasticLawField::Uniform(&material),
+            &displacement,
+            TetAssemblyBudget::default(),
+            cx,
+        )
+        .unwrap();
+        assert_eq!(initial.displacement_m(), displacement);
+        close(initial.stored_energy_j(), 0.0, 2e-9);
+        assert_eq!(initial.time_s(), 0.0);
+        for state in initial.element_states() {
+            for (actual, expected) in state.deformation_gradient.iter().zip(g) {
+                close(*actual, expected, 2e-14);
+            }
+            assert_eq!(state.dissipated, 0.0);
+        }
+        for stress in initial.element_first_piola_pa().iter().flatten() {
+            close(*stress, 0.0, 2e-8);
+        }
+        // The patch has a free interior node: the original native solver must
+        // preserve the relaxed placement while histories advance in time.
+        let held = initial
+            .advance(
+                0.2,
+                &boundary(&g),
+                &[],
+                [0.0; 3],
+                settings(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        for (actual, expected) in held
+            .solid
+            .displacement_m()
+            .iter()
+            .flatten()
+            .zip(displacement.iter().flatten())
+        {
+            close(*actual, *expected, 2e-12);
+        }
+        close(held.energy.dissipated_j, 0.0, 2e-9);
+        close(held.energy.native_loading_work_j, 0.0, 2e-9);
+        close(held.energy.internal_endpoint_work_j, 0.0, 2e-9);
+        close(held.solid.time_s(), 0.2, 1e-15);
+    });
+}
+
+#[test]
+fn prestressed_birth_relaxes_from_its_actual_initial_storage_and_deformation() {
+    with_cx(|cx| {
+        let g = [1.1, 0.0, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 1.05];
+        let material = law(10_000.0, 30_000.0, 0.15)
+            .with_reference_deformation(ReferenceDeformation::try_new(g).unwrap());
+        let f = [1.25, 0.04, 0.0, 0.0, 0.88, 0.0, 0.0, 0.0, 1.02];
+        let displacement = NODES.map(|point| affine(&f, point));
+        let initial = FiniteViscoTetSolid::try_new_from(
+            &NODES,
+            &TET,
+            ViscoelasticLawField::Uniform(&material),
+            &displacement,
+            TetAssemblyBudget::default(),
+            cx,
+        )
+        .unwrap();
+        let placed = material
+            .step_response(&material.initial_state(), &f, 0.0)
+            .unwrap();
+        assert!(initial.stored_energy_j() > 0.0);
+        close(initial.stored_energy_j(), placed.state.stored / 6.0, 2e-12);
+        close(initial.element_states()[0].work, placed.state.stored, 2e-12);
+        assert_eq!(initial.element_states()[0].dissipated, 0.0);
+        let expected = material.step_response(&placed.state, &f, 0.1).unwrap();
+        let held = initial
+            .advance(
+                0.1,
+                &boundary(&f),
+                &[],
+                [0.0; 3],
+                settings(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        assert!(held.energy.dissipated_j > 0.0);
+        close(
+            held.energy.stored_before_j,
+            initial.stored_energy_j(),
+            2e-12,
+        );
+        close(
+            held.energy.stored_after_j,
+            expected.state.stored / 6.0,
+            2e-10,
+        );
+        close(
+            held.energy.dissipated_j,
+            expected.dissipated_pa / 6.0,
+            2e-10,
+        );
+        close(held.energy.native_loading_work_j, 0.0, 2e-8);
+        close(held.energy.internal_endpoint_work_j, 0.0, 2e-8);
+        for (actual, expected) in held.solid.element_first_piola_pa()[0]
+            .iter()
+            .zip(expected.first_piola_pa)
+        {
+            close(*actual, expected, 2e-10);
+        }
+    });
 }
 
 #[test]

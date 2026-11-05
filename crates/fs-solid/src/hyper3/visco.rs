@@ -32,8 +32,6 @@ pub mod dynamics;
 
 type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy, Vec<f64>);
 
-const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
-
 /// Original immutable laws, without averaging regional relaxation spectra.
 #[derive(Debug, Clone, Copy)]
 pub enum ViscoelasticLawField<'a> {
@@ -177,12 +175,51 @@ fn energy_gate(
 }
 
 impl<'a> FiniteViscoTetSolid<'a> {
-    /// Prepare the undeformed relaxed solid. Geometry is prepared once and
-    /// shared by later candidates; every element retains its own native history.
+    /// Prepare the solid at zero nodal displacement with virgin material history.
+    /// A prescribed material reference deformation can make this initial state
+    /// prestressed. Geometry is prepared once and shared by later candidates.
     pub fn try_new(
         nodes_m: &'a [[f64; 3]],
         tetrahedra: &'a [[usize; 4]],
         material: ViscoelasticLawField<'a>,
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteViscoTetError> {
+        Self::initialize(nodes_m, tetrahedra, material, None, budget, cx)
+    }
+
+    /// Prepare a virgin solid in an explicit initial configuration.
+    ///
+    /// Displacement covers every original node, in metres. The native element
+    /// deformation gradient determines each actual initial stress and storage;
+    /// material stress-free references do not move the mesh implicitly. Initial
+    /// viscous metrics are relaxed in their own material reference. A zero-time
+    /// elastic placement books the initial storage and matching material work,
+    /// with no relaxation loss. Later step balances start from that storage.
+    /// This admits prestressed birth; it does not solve initial force equilibrium.
+    pub fn try_new_from(
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        material: ViscoelasticLawField<'a>,
+        initial_displacement_m: &[[f64; 3]],
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, FiniteViscoTetError> {
+        Self::initialize(
+            nodes_m,
+            tetrahedra,
+            material,
+            Some(initial_displacement_m),
+            budget,
+            cx,
+        )
+    }
+
+    fn initialize(
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        material: ViscoelasticLawField<'a>,
+        initial_displacement_m: Option<&[[f64; 3]]>,
         budget: TetAssemblyBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteViscoTetError> {
@@ -209,8 +246,16 @@ impl<'a> FiniteViscoTetSolid<'a> {
             .len()
             .checked_mul(3)
             .ok_or_else(|| invalid("viscoelastic displacement size overflow"))?;
+        if initial_displacement_m
+            .is_some_and(|u| u.len() != nodes_m.len() || u.iter().flatten().any(|v| !v.is_finite()))
+        {
+            return Err(invalid(
+                "initial displacement must be finite and cover every reference node",
+            ));
+        }
+        let displacement_m =
+            initial_displacement_m.map_or_else(|| vec![[0.0; 3]; nodes_m.len()], <[_]>::to_vec);
         let mut states = Vec::with_capacity(tetrahedra.len());
-        let mut first_piola_pa = Vec::with_capacity(tetrahedra.len());
         for element in 0..tetrahedra.len() {
             checkpoint(cx)?;
             let law = material.at(element);
@@ -219,25 +264,39 @@ impl<'a> FiniteViscoTetSolid<'a> {
                     "viscoelastic branch count exceeds the native material cap",
                 ));
             }
-            let response = law
-                .step_response(&law.initial_state(), &IDENTITY, 0.0)
+            states.push(law.initial_state());
+        }
+        let elements = {
+            let frozen = Self::freeze(material, &states, 0.0, cx)?;
+            let prescribed: Vec<_> = (0..dofs)
+                .map(|dof| (dof, displacement_m.as_flattened()[dof]))
+                .collect();
+            HyperTetProblem {
+                nodes_m,
+                tetrahedra,
+                material: HyperelasticLawField::PerElement(&frozen),
+                prescribed_m: &prescribed,
+                nodal_forces_n: &[],
+                body_force_n_m3: [0.0; 3],
+                budget,
+                settings: HyperTetSettings::default(),
+            }
+            .validate()?
+        };
+        let mut first_piola_pa = Vec::with_capacity(tetrahedra.len());
+        for (element, geometry) in elements.iter().enumerate() {
+            checkpoint(cx)?;
+            let deformation = HyperTetProblem::<FrozenViscoHyperelastic<'_>>::deformation_gradient(
+                geometry,
+                displacement_m.as_flattened(),
+            );
+            let response = material
+                .at(element)
+                .step_response(&states[element], &deformation, 0.0)
                 .map_err(|source| FiniteViscoTetError::Material { element, source })?;
-            states.push(response.state);
+            states[element] = response.state;
             first_piola_pa.push(response.first_piola_pa);
         }
-        let frozen = Self::freeze(material, &states, 0.0, cx)?;
-        let prescribed: Vec<_> = (0..dofs).map(|dof| (dof, 0.0)).collect();
-        let problem = HyperTetProblem {
-            nodes_m,
-            tetrahedra,
-            material: HyperelasticLawField::PerElement(&frozen),
-            prescribed_m: &prescribed,
-            nodal_forces_n: &[],
-            body_force_n_m3: [0.0; 3],
-            budget,
-            settings: HyperTetSettings::default(),
-        };
-        let elements = problem.validate()?;
         let stored_energy_j = elements
             .iter()
             .zip(&states)
@@ -253,7 +312,7 @@ impl<'a> FiniteViscoTetSolid<'a> {
             material,
             elements: Arc::new(elements),
             budget,
-            displacement_m: vec![[0.0; 3]; nodes_m.len()].into(),
+            displacement_m: displacement_m.into(),
             states: states.into(),
             first_piola_pa: first_piola_pa.into(),
             stored_energy_j,

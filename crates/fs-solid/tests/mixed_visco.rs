@@ -2,7 +2,9 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_feec::highorder::simplex::duffy_quadrature;
 use fs_material::hyper::mixed::{MixedFiniteStrainPotential, VolumetricTreatment};
+use fs_material::hyper::reference::ReferenceDeformation;
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_material::visco_hyper::{
     BranchEnergy, FiniteStrainBranch, ViscoHyperelastic, ViscoRemainderState,
@@ -134,6 +136,218 @@ fn near(a: f64, b: f64, tolerance: f64) {
         (a - b).abs() <= tolerance,
         "{a:e} != {b:e}, tolerance {tolerance:e}"
     );
+}
+
+#[test]
+fn expanded_reference_initialization_enforces_elastic_incompressibility() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(1, cx);
+        let g = [1.2, 0.0, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 1.1];
+        let material =
+            law(1e300, 0.2).with_reference_deformation(ReferenceDeformation::try_new(g).unwrap());
+        assert!(matches!(
+            MixedViscoTetSolid::try_new(
+                &nodes,
+                &elements,
+                MixedViscoLawField::Uniform(&material),
+                VolumetricTreatment::ExactIncompressible,
+                TetAssemblyBudget::standard(),
+                4,
+                64,
+                cx,
+            ),
+            Err(MixedViscoTetError::InitialVolumeGate { .. })
+        ));
+        let displacement: Vec<_> = nodes
+            .iter()
+            .map(|x| {
+                [
+                    (g[0] - 1.0) * x[0],
+                    (g[4] - 1.0) * x[1],
+                    (g[8] - 1.0) * x[2],
+                ]
+            })
+            .collect();
+        let initial = MixedViscoTetSolid::try_new_from(
+            &nodes,
+            &elements,
+            MixedViscoLawField::Uniform(&material),
+            VolumetricTreatment::ExactIncompressible,
+            &displacement,
+            &[0.0; 4],
+            2e-12,
+            TetAssemblyBudget::standard(),
+            4,
+            64,
+            cx,
+        )
+        .unwrap();
+        assert_eq!(initial.displacement_m(), displacement);
+        assert_eq!(initial.bulk_energy_j(), 0.0);
+        near(initial.remainder_energy_j(), 0.0, 2e-12);
+        for stress in initial.first_piola_pa().iter().flatten() {
+            near(*stress, 0.0, 2e-11);
+        }
+        // Roller supports admit the diagonal stress-free expansion. Natural
+        // traction surfaces determine pressure while native histories age.
+        let held = initial
+            .advance(
+                0.1,
+                &supports(&nodes, None),
+                &[],
+                [0.0; 3],
+                None,
+                settings(),
+                controls(),
+                cx,
+            )
+            .unwrap();
+        match_point(&held.solid, &material.initial_remainder_state(), 0.0);
+        near(held.energy.dissipated_j, 0.0, 2e-12);
+        assert_eq!(held.energy.bulk_after_j, 0.0);
+    });
+}
+
+#[test]
+fn finite_compliance_birth_retains_pressure_reconstructed_initial_bulk_energy() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(1, cx);
+        let g = [1.2, 0.0, 0.0, 0.0, 0.9, 0.0, 0.0, 0.0, 1.1];
+        let bulk = 25.0;
+        let material =
+            law(bulk, 0.2).with_reference_deformation(ReferenceDeformation::try_new(g).unwrap());
+        let stretch = 1.08_f64;
+        let elastic_volume = stretch.powi(3);
+        let pressure = bulk * (elastic_volume - 1.0);
+        let reference_volume = g[0] * g[4] * g[8];
+        let displacement: Vec<_> = nodes
+            .iter()
+            .map(|x| {
+                [
+                    (stretch * g[0] - 1.0) * x[0],
+                    (stretch * g[4] - 1.0) * x[1],
+                    (stretch * g[8] - 1.0) * x[2],
+                ]
+            })
+            .collect();
+        assert!(matches!(
+            MixedViscoTetSolid::try_new_from(
+                &nodes,
+                &elements,
+                MixedViscoLawField::Uniform(&material),
+                VolumetricTreatment::OriginalMaterial,
+                &displacement,
+                &[0.0; 4],
+                2e-12,
+                TetAssemblyBudget::standard(),
+                4,
+                64,
+                cx,
+            ),
+            Err(MixedViscoTetError::InitialVolumeGate { .. })
+        ));
+        let initial = MixedViscoTetSolid::try_new_from(
+            &nodes,
+            &elements,
+            MixedViscoLawField::Uniform(&material),
+            VolumetricTreatment::OriginalMaterial,
+            &displacement,
+            &[pressure; 4],
+            2e-12,
+            TetAssemblyBudget::standard(),
+            4,
+            64,
+            cx,
+        )
+        .unwrap();
+        let expected_bulk = reference_volume * bulk * (elastic_volume - 1.0).powi(2) / 12.0;
+        assert!(expected_bulk > 0.0);
+        near(initial.bulk_energy_j(), expected_bulk, 2e-12);
+        near(initial.remainder_energy_j(), 0.0, 2e-12);
+        for stress in initial.first_piola_pa() {
+            for i in 0..3 {
+                for j in 0..3 {
+                    let expected = if i == j {
+                        reference_volume * pressure * stretch * stretch / g[4 * i]
+                    } else {
+                        0.0
+                    };
+                    near(stress[3 * i + j], expected, 2e-11);
+                }
+            }
+        }
+        let held: Vec<_> = displacement
+            .as_flattened()
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        let next = initial
+            .advance(0.1, &held, &[], [0.0; 3], None, settings(), controls(), cx)
+            .unwrap();
+        near(next.energy.bulk_before_j, expected_bulk, 2e-12);
+        near(next.energy.bulk_after_j, expected_bulk, 2e-11);
+        near(
+            next.energy.stored_after_j - next.energy.stored_before_j,
+            0.0,
+            2e-11,
+        );
+        near(next.energy.internal_endpoint_work_j, 0.0, 2e-11);
+        near(next.energy.dissipated_j, 0.0, 2e-11);
+    });
+}
+
+#[test]
+fn heterogeneous_reference_birth_admits_weak_volume_compatibility() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(1, cx);
+        // This quadratic has zero integral against every barycentric P1 test
+        // function on the unit tetrahedron. Its pointwise volume defect is
+        // nonzero: exact mixed incompressibility is a weak constraint.
+        let materials: Vec<_> = duffy_quadrature(4)
+            .iter()
+            .map(|(lambda, _)| {
+                let x = lambda[1];
+                let volume = 1.0 + 0.5 * (x * x - 2.0 * x / 3.0 + 1.0 / 15.0);
+                law(1e300, 0.2).with_reference_deformation(
+                    ReferenceDeformation::try_new([volume, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let initial = MixedViscoTetSolid::try_new(
+            &nodes,
+            &elements,
+            MixedViscoLawField::PerQuadrature(&materials),
+            VolumetricTreatment::ExactIncompressible,
+            TetAssemblyBudget::standard(),
+            4,
+            64,
+            cx,
+        )
+        .unwrap();
+        assert!(initial.remainder_energy_j() > 0.0);
+        assert_eq!(initial.bulk_energy_j(), 0.0);
+        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        assert!(
+            materials
+                .iter()
+                .zip(initial.quadrature_states())
+                .any(|(law, state)| {
+                    law.freeze_remainder(state, 0.0)
+                        .unwrap()
+                        .mixed_state(&identity, 0.0, VolumetricTreatment::ExactIncompressible)
+                        .unwrap()
+                        .pressure_residual
+                        .abs()
+                        > 1e-3
+                })
+        );
+        for state in initial.quadrature_states() {
+            assert_eq!(state.deformation_gradient, identity);
+            assert_eq!(state.dissipated, 0.0);
+        }
+    });
 }
 
 fn match_point(solid: &MixedViscoTetSolid<'_>, expected: &ViscoRemainderState, pressure: f64) {

@@ -24,7 +24,7 @@ use fs_material::visco_hyper::{
 use super::element::PreparedMixedMesh;
 use super::{
     MixedLawField, MixedUpError, MixedUpProblem, MixedUpSettings, MixedUpSolution, checkpoint,
-    invalid,
+    invalid, point_deformation,
 };
 use crate::hyper3::visco::FiniteViscoStepControls;
 use crate::linear3::TetAssemblyBudget;
@@ -33,8 +33,6 @@ use crate::linear3::TetAssemblyBudget;
 pub mod dynamics;
 
 type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
-
-const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
 /// Immutable original spectra; histories are always distinct at every point.
 #[derive(Clone, Copy, Debug)]
@@ -91,6 +89,11 @@ pub struct MixedViscoTetEnergy {
 #[derive(Clone, Debug, PartialEq)]
 pub enum MixedViscoTetError {
     Native(MixedUpError),
+    /// The supplied displacement and pressure violate the weak volume equations.
+    InitialVolumeGate {
+        relative_residual: f64,
+        maximum_relative_residual: f64,
+    },
     /// A mass-only impulse cannot enforce the exact pressure constraint.
     ExactIncompressibleImpulse,
     /// Finite-compliance material uses the mass-only impulse entry instead.
@@ -113,6 +116,13 @@ impl core::fmt::Display for MixedViscoTetError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Native(error) => error.fmt(f),
+            Self::InitialVolumeGate {
+                relative_residual,
+                maximum_relative_residual,
+            } => write!(
+                f,
+                "initial mixed volume residual {relative_residual:e} exceeds {maximum_relative_residual:e}; supply compatible initial displacement and pressure"
+            ),
             Self::ExactIncompressibleImpulse => write!(
                 f,
                 "exact-incompressible impulses require a constrained pressure solve"
@@ -187,7 +197,10 @@ pub struct MixedViscoTetStep<'a> {
 }
 
 impl<'a> MixedViscoTetSolid<'a> {
-    /// Prepare the undeformed relaxed solid and its immutable original geometry.
+    /// Prepare zero displacement and zero pressure with virgin material history.
+    /// A material reference deformation can cause initial prestress. The weak
+    /// volume equations must hold to roundoff; use [`Self::try_new_from`] when
+    /// the stress-free reference requires an initial displacement or pressure.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         nodes_m: &'a [[f64; 3]],
@@ -199,6 +212,88 @@ impl<'a> MixedViscoTetSolid<'a> {
         maximum_quadrature_points: usize,
         cx: &Cx<'_>,
     ) -> Result<Self, MixedViscoTetError> {
+        Self::initialize(
+            nodes_m,
+            elements,
+            material,
+            volumetric,
+            None,
+            budget,
+            quadrature_points_per_dir,
+            maximum_quadrature_points,
+            cx,
+        )
+    }
+
+    /// Prepare a virgin mixed solid in an explicit initial configuration.
+    ///
+    /// Displacement covers every original node. Pressure covers sorted original
+    /// corner-node IDs, the same order returned by [`Self::pressure_nodes`].
+    /// The norm `||r_p / reference_volume||₂` must not exceed the positive finite
+    /// `maximum_relative_volume_residual`. This is the native mixed Newton
+    /// volume scaling: compatibility is weak, not pointwise incompressibility.
+    /// It applies to both finite compliance and the exact constraint.
+    ///
+    /// A zero-time elastic placement of virgin viscous metrics records actual
+    /// initial stress and remainder storage, with matching material work and no
+    /// dissipation. Physical bulk storage comes from the supplied pressure and
+    /// original material reference. Subsequent balances start from this initial
+    /// storage. Initial force equilibrium is the caller's responsibility.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_from(
+        nodes_m: &'a [[f64; 3]],
+        elements: &'a [[usize; 10]],
+        material: MixedViscoLawField<'a>,
+        volumetric: VolumetricTreatment,
+        initial_displacement_m: &[[f64; 3]],
+        initial_pressure_pa: &[f64],
+        maximum_relative_volume_residual: f64,
+        budget: TetAssemblyBudget,
+        quadrature_points_per_dir: usize,
+        maximum_quadrature_points: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MixedViscoTetError> {
+        Self::initialize(
+            nodes_m,
+            elements,
+            material,
+            volumetric,
+            Some((
+                initial_displacement_m,
+                initial_pressure_pa,
+                maximum_relative_volume_residual,
+            )),
+            budget,
+            quadrature_points_per_dir,
+            maximum_quadrature_points,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn initialize(
+        nodes_m: &'a [[f64; 3]],
+        elements: &'a [[usize; 10]],
+        material: MixedViscoLawField<'a>,
+        volumetric: VolumetricTreatment,
+        initial: Option<(&[[f64; 3]], &[f64], f64)>,
+        budget: TetAssemblyBudget,
+        quadrature_points_per_dir: usize,
+        maximum_quadrature_points: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MixedViscoTetError> {
+        checkpoint(cx)?;
+        if initial.is_some_and(|(u, p, tolerance)| {
+            u.len() != nodes_m.len()
+                || u.iter().flatten().any(|v| !v.is_finite())
+                || p.iter().any(|v| !v.is_finite())
+                || !tolerance.is_finite()
+                || tolerance <= 0.0
+        }) {
+            return Err(invalid(
+                "initial displacement and pressure must be finite; displacement must cover all nodes and the relative volume allowance must be positive and finite",
+            ).into());
+        }
         let mesh = Arc::new(
             PreparedMixedMesh::new(
                 nodes_m,
@@ -209,6 +304,15 @@ impl<'a> MixedViscoTetSolid<'a> {
                 cx,
             )
             .map_err(MixedUpError::Geometry)?,
+        );
+        if initial.is_some_and(|(_, p, _)| p.len() != mesh.pressure_nodes.len()) {
+            return Err(invalid("initial pressure must cover every sorted corner node").into());
+        }
+        let displacement_m =
+            initial.map_or_else(|| vec![[0.0; 3]; nodes_m.len()], |(u, _, _)| u.to_vec());
+        let pressure_pa = initial.map_or_else(
+            || vec![0.0; mesh.pressure_nodes.len()],
+            |(_, p, _)| p.to_vec(),
         );
         let count = elements.len() * mesh.points_per_element;
         let expected = match material {
@@ -224,6 +328,9 @@ impl<'a> MixedViscoTetSolid<'a> {
         let mut states = Vec::with_capacity(count);
         let mut first_piola_pa = Vec::with_capacity(count);
         let mut remainder_energy_j = 0.0;
+        let mut bulk_energy_j = 0.0;
+        let mut pressure_residual = vec![0.0; mesh.pressure_nodes.len()];
+        let mut pressure_roundoff_scale = vec![0.0; mesh.pressure_nodes.len()];
         for (e, element) in mesh.elements.iter().enumerate() {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
@@ -241,21 +348,56 @@ impl<'a> MixedViscoTetSolid<'a> {
                     .freeze_remainder(&initial, 0.0)
                     .map_err(material_error)?;
                 frozen.validate_mixed().map_err(material_error)?;
+                let deformation = point_deformation(element, point, &displacement_m);
+                let pressure = (0..4)
+                    .map(|a| pressure_pa[element.pressure_indices[a]] * point.pressure_shapes[a])
+                    .sum();
                 let mixed = frozen
-                    .mixed_state(&IDENTITY, 0.0, volumetric)
+                    .mixed_state(&deformation, pressure, volumetric)
                     .map_err(material_error)?;
                 let response = law
-                    .step_remainder_response(&initial, &IDENTITY, 0.0)
+                    .step_remainder_response(&initial, &deformation, 0.0)
                     .map_err(material_error)?;
                 remainder_energy_j += point.weight_m3 * response.state.stored;
+                bulk_energy_j += point.weight_m3 * mixed.bulk_stored_pa;
+                for a in 0..4 {
+                    let weight = point.weight_m3 * point.pressure_shapes[a];
+                    let row = element.pressure_indices[a];
+                    pressure_residual[row] += weight * mixed.pressure_residual;
+                    pressure_roundoff_scale[row] +=
+                        weight.abs() * (mixed.volume_ratio.abs() + mixed.bulk_volume_ratio.abs());
+                }
                 first_piola_pa.push(mixed.first_piola_pa);
                 states.push(response.state);
             }
         }
-        if !remainder_energy_j.is_finite() {
+        if !(remainder_energy_j + bulk_energy_j).is_finite() {
             return Err(invalid("mixed initial physical storage is unrepresentable").into());
         }
-        let pressure_pa = vec![0.0; mesh.pressure_nodes.len()];
+        // Use the same volume normalization and norm as native mixed Newton.
+        // The zero initializer admits only arithmetic cancellation; its bound
+        // follows the actual geometry and both original volume-ratio terms.
+        for (residual, scale) in pressure_residual
+            .iter_mut()
+            .zip(&mut pressure_roundoff_scale)
+        {
+            *residual /= mesh.total_volume_m3;
+            *scale /= mesh.total_volume_m3;
+        }
+        let relative_residual = fs_solver::norm2(&pressure_residual);
+        let maximum_relative_residual = initial.map_or_else(
+            || 128.0 * f64::EPSILON * fs_solver::norm2(&pressure_roundoff_scale),
+            |(_, _, tolerance)| tolerance,
+        );
+        if !maximum_relative_residual.is_finite() || maximum_relative_residual <= 0.0 {
+            return Err(invalid("mixed initial volume allowance is unrepresentable").into());
+        }
+        if !relative_residual.is_finite() || relative_residual > maximum_relative_residual {
+            return Err(MixedViscoTetError::InitialVolumeGate {
+                relative_residual,
+                maximum_relative_residual,
+            });
+        }
         checkpoint(cx)?;
         Ok(Self {
             nodes_m,
@@ -266,12 +408,12 @@ impl<'a> MixedViscoTetSolid<'a> {
             budget,
             quadrature_points_per_dir,
             maximum_quadrature_points,
-            displacement_m: vec![[0.0; 3]; nodes_m.len()].into(),
+            displacement_m: displacement_m.into(),
             pressure_pa: pressure_pa.into(),
             states: states.into(),
             first_piola_pa: first_piola_pa.into(),
             remainder_energy_j,
-            bulk_energy_j: 0.0,
+            bulk_energy_j,
             time_s: 0.0,
             accepted_identity: Arc::new(()),
         })
@@ -440,16 +582,7 @@ impl<'a> MixedViscoTetSolid<'a> {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let index = e * points + q;
-                let mut deformation = IDENTITY;
-                for a in 1..10 {
-                    for i in 0..3 {
-                        for j in 0..3 {
-                            deformation[3 * i + j] += (u[element.connectivity[a]][i]
-                                - u[element.connectivity[0]][i])
-                                * point.gradients[a][j];
-                        }
-                    }
-                }
+                let deformation = point_deformation(element, point, u);
                 let pressure = (0..4)
                     .map(|a| {
                         equilibrium.pressure_pa[element.pressure_indices[a]]
