@@ -1,5 +1,31 @@
 # CONTRACT: fs-cli
 
+## Prescribed temperatures and volume means with live contact — driver 121
+
+Steady `temperature-max-boundary-adjoint`,
+`temperature-max-contact-boundary-adjoint` and
+`temperature-volume-mean-adjoint` now admit source-backed temperature-dependent
+contacts. The first two retain the existing selected-node functional; the mean
+report uses the original regional P1 volume weights, including prescribed nodes.
+The combined and mean reports retain whole contact-law multiplier controls.
+
+Prescribed-temperature rows contract the already computed complete nodal dual
+with the exact retained contact problem's full fixed-column lift. Both contact
+temperature partials, nonlinear conductivity, natural/air feedback, ambient
+secant feedback and reflected-enclosure Robin/flux feedback participate. Fixed
+vertices remain in every wall mean, and direct objective weights on prescribed
+nodes remain present. Requesting these rows does not replace the accepted primal
+or run another adjoint. Shared prescribed vertices still refuse independent
+variation. Driver 121 invalidates cached results from earlier producers.
+
+Focused imported-project regressions compare fresh fixed-temperature and contact
+perturbations for selected and volume-mean goals, a direct prescribed-node goal,
+ambient vacuum cooling and self-reflecting open-cavity exchange. Shared controls
+and primal receipts must agree across report forms. Native CLI execution remains
+required; syntax/source checks do not establish numerical test passes. Transient
+ambient/contact derivatives, steady pointwise radiation, adaptive-goal bounds and
+continuum/gradient-error certificates remain outside this extension.
+
 ## Live contact and ambient-radiation sensitivities — driver 120
 
 Steady `temperature-max-adjoint` and `temperature-max-contact-adjoint` now
@@ -21,8 +47,8 @@ Focused numerical and imported-project regressions compare independent physical
 re-solves, including vacuum and mixed natural/air cooling, curve/Newton and
 source-surface/Picard contacts, and unchanged primal results. Full native
 execution is still required. Transient ambient/live-contact adjoints and steady
-pointwise radiation remain refused; the next boundary-control extension is
-separate from this feature.
+pointwise radiation remain refused. Driver 121 adds the prescribed-temperature
+and volume-mean extension described above.
 
 ## Live contact and enclosure sensitivities — driver 118
 
@@ -45,9 +71,9 @@ Focused native physical re-solves cover closed curve/Newton and open
 source-surface/Picard contact, source power, bath temperature and air inlet.
 Mixed Robin/flux numerical tests additionally check emissivity and stale-field
 refusal. Rust syntax and source review passed; runtime execution remains
-pending. Driver 120 adds steady ambient contact-radiation derivatives; pointwise
-radiation and steady prescribed-temperature controls remain unsupported here.
-Driver 119 adds the enclosure trajectory composition below. No
+pending. Driver 120 adds steady ambient contact-radiation derivatives and driver
+121 adds prescribed-temperature controls and regional volume means. Pointwise
+radiation remains unsupported here. Driver 119 adds the enclosure trajectory composition below. No
 continuum, unique-maximum-at-a-tie or gradient-error certificate is added.
 
 ## Capacity storage in open radiative cavities — driver 117

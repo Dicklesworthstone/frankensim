@@ -310,7 +310,9 @@ pub const SOLVE_RUN_IDENTITY_DOMAIN: &str = "org.frankensim.fs-cli.solve-run.v1"
 /// through the complete material, contact, convection and radiosity dual.
 /// Version 120 differentiates steady live contacts with ambient radiation,
 /// including radiation-only traces and natural/transported-air feedback.
-pub const SOLVE_DRIVER_VERSION: u32 = 120;
+/// Version 121 adds complete prescribed-temperature controls and regional
+/// volume-mean goals to those live-contact adjoints, including radiation.
+pub const SOLVE_DRIVER_VERSION: u32 = 121;
 
 const SOLVE_STAGE_SCHEMA: &str = "frankensim.cli.solve-stage.v1";
 const SOLVE_RUN_RECEIPT_SCHEMA: &str = "frankensim.cli.solve-run-receipt.v1";

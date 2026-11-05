@@ -7,6 +7,8 @@ use fs_qty::QtyAny;
 mod natural;
 #[path = "adjoint/air.rs"]
 mod air;
+#[path = "adjoint/prescribed.rs"]
+mod prescribed;
 
 fn scaled_pack(scale: f64, surface: bool) -> (Vec<u8>, String, String) {
     if !surface {
@@ -211,17 +213,4 @@ fn source_corners_do_not_inherit_the_primal_generalized_tangent_as_an_adjoint() 
     assert_ne!(refused.exit_code, fs_cli::exit::SUCCESS);
     let diagnostic = format!("{}{}", refused.stdout, refused.stderr);
     assert!(diagnostic.contains("derivative") || diagnostic.contains("slope"), "{diagnostic}");
-}
-
-#[test]
-fn source_contact_boundary_lift_reports_stay_explicitly_unsupported() {
-    let f = Fixture::new(false, false);
-    for (ordinal, output) in ["temperature-max-boundary-adjoint", "temperature-max-contact-boundary-adjoint",
-        "temperature-volume-mean-adjoint"].into_iter().enumerate()
-    {
-        let (source, card, ledger) = prepare(&f, 50 + ordinal, Some(output));
-        let refused = run(&f, &source, &card, &ledger);
-        assert_ne!(refused.exit_code, fs_cli::exit::SUCCESS);
-        assert!(format!("{}{}", refused.stdout, refused.stderr).contains("cli-solve-conduction-contact-composition"));
-    }
 }

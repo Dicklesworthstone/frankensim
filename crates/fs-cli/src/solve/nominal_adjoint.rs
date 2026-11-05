@@ -151,9 +151,6 @@ pub(super) fn extract(
     let region = temperature_maximum_region(spec).ok_or_else(|| bad("missing maximum region"))?;
     let region_id = *ids.get(region).ok_or_else(|| bad("maximum region has no mesh label"))?;
     let data = solved.adjoint_data.as_ref().ok_or_else(|| bad("final operator was not retained"))?;
-    if data.temperature_contact.is_some() && boundary_requested {
-        return Err(bad("prescribed-temperature controls need the complete source-backed contact lift; use temperature-max-adjoint or temperature-max-contact-adjoint"));
-    }
     let setup = spec.cooling.as_ref().and_then(|c| c.conduction.as_ref())
         .ok_or_else(|| bad("missing conduction setup"))?;
     if data.radiating_boundary.is_some() != (setup.radiation.is_some() || setup.enclosure_radiation.is_some())

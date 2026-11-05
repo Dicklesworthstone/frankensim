@@ -7,7 +7,7 @@ use super::{Cx, ProjectSpec, RungSolved, SolveRefusal, bad, finite, lower, poll,
 mod law;
 
 pub(super) const OUTPUT: &str = "temperature-max-boundary-adjoint";
-pub(super) const SCOPE: &str = "The boundary-extended request additionally differentiates each independently prescribed uniform temperature in kelvin. It includes the direct selected-node objective term and the complete material/contact lift, natural-convection and radiation coefficient/reference feedback, and upstream air-reference feedback. Prescribed nodes remain in every wall mean. Two fixed boundary declarations sharing a vertex cannot be independently varied and are explicitly unsupported rather than assigned duplicate sensitivities. Geometry, contact laws, flow and transport properties remain fixed; these are local discrete derivatives, not continuum or gradient-error bounds.";
+pub(super) const SCOPE: &str = "The boundary-extended request additionally differentiates each independently prescribed uniform temperature in kelvin. It includes the direct selected-node objective term and the complete material/contact lift, natural-convection and radiation coefficient/reference feedback, and upstream air-reference feedback. Both temperature partials of live contact laws remain in the prescribed columns. Prescribed nodes remain in every wall mean. Two fixed boundary declarations sharing a vertex cannot be independently varied and are explicitly unsupported rather than assigned duplicate sensitivities. Geometry, contact-law parameters, flow and transport properties remain fixed; these are local discrete derivatives, not continuum or gradient-error bounds.";
 
 pub(super) fn requested(spec: &ProjectSpec) -> bool {
     spec.outputs.as_deref().unwrap_or(&[]).iter().any(|r| r.name == OUTPUT)
@@ -39,9 +39,25 @@ pub(super) fn append(
     let names: Vec<_> = bound.names.iter().map(String::as_str).collect();
     let problem = ConductionProblem {mesh:&solved.mesh,boundary:&bound.boundary,
         material:&data.fallback,element_materials:Some(&data.materials),source:&data.source};
-    let bars = RobinResponse::prescribed_temperature_pullback_with_flux_feedback(cx,problem,data.interfaces.as_ref(),
-        &solved.solution.temperature,weights,lambda,&names,&bound.h_slopes,
-        &bound.reference_slopes,&bound.feedback,bound.flux_feedback.as_ref(),max_entries).map_err(lower)?;
+    let bars = if let Some(contacts) = &data.temperature_contact {
+        if data.interfaces.is_some() {
+            return Err(bad("a prescribed-temperature contact lift cannot also retain a frozen interface operator"));
+        }
+        let memory = spec.budgets.as_ref().map_or(0, |b| b.memory_bytes);
+        let max_pairs = usize::try_from(memory / 64).unwrap_or(usize::MAX);
+        // Bind the same original contact laws to the fresh physical boundary.
+        // Reuse the COMPLETE dual already solved above; its fixed-column lift
+        // includes both contact temperature partials and all wall-mean weights.
+        let response = contacts.linearize(cx, problem, &solved.solution.temperature,
+            data.linear, &names, max_pairs)?;
+        response.prescribed_temperature_pullback_with_flux_feedback(cx,
+            weights, lambda, &bound.h_slopes, &bound.reference_slopes,
+            &bound.feedback, bound.flux_feedback.as_ref(), max_entries).map_err(lower)?
+    } else {
+        RobinResponse::prescribed_temperature_pullback_with_flux_feedback(cx,problem,data.interfaces.as_ref(),
+            &solved.solution.temperature,weights,lambda,&names,&bound.h_slopes,
+            &bound.reference_slopes,&bound.feedback,bound.flux_feedback.as_ref(),max_entries).map_err(lower)?
+    };
     let mut seen = BTreeSet::new();
     for (ordinal, declared) in setup.boundaries.iter().enumerate() {
         poll(cx)?;

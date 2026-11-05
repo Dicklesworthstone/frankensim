@@ -20,7 +20,8 @@ pub(super) const SCOPE: &str = concat!(
     "Steady area-mean closed/open enclosures add complete reflected-radiosity feedback, including original prescribed-flux patches. ",
     "Ambient radiation adds its exact mean-temperature secant and weighted-reference feedback, including radiation-only traces with no fictitious convection. ",
     "Original convection, emissivity and independent radiative reservoir controls are remapped from that same complete dual. ",
-    "Pointwise radiation and prescribed-temperature controls remain outside this contact adjoint. ",
+    "Boundary-extended reports contract that same dual with the complete prescribed-temperature lift, including direct objective weights and both contact-temperature columns. ",
+    "Selected-node and regional volume-mean goals share this operator; pointwise radiation remains outside this contact adjoint. ",
     "No perturbed primal, solver-iteration derivative, inverse certificate or gradient-error bound is supplied.",
 );
 pub(super) const CONTROL_SCOPE: &str = "Contact-extended source-backed reports additionally differentiate each named matching interface's whole law R''(T_A,T_B) -> s R''(T_A,T_B) at s=1 through the same complete thermal adjoint. Every actual face resistance and both independent temperature traces participate; different interfaces remain independent even when they share a card. Geometry, pairing, pressure, finish, source selection and all nonthermal context coordinates stay fixed. These are dimensionless whole-law multipliers, not absolute resistance, physical joint-state, material-uncertainty or nonmatching-contact derivatives.";

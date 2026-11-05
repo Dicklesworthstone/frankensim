@@ -271,12 +271,62 @@ fn complete_live_contact_enclosure_adjoints_match_independent_physical_resolves(
 }
 
 #[test]
-fn live_contact_enclosure_prescribed_temperature_controls_remain_unsupported() {
-    for f in [fixture(), open_fixture()] {
-        let (output, _) = run_output(&f, 211,
-            Some("temperature-max-contact-boundary-adjoint"), temperature_pack());
-        assert_ne!(output.exit_code, fs_cli::exit::SUCCESS);
-        assert!(format!("{}{}", output.stdout, output.stderr)
-            .contains("cli-solve-conduction-contact-composition"));
+fn live_contact_fixed_temperature_controls_include_ambient_and_radiosity_feedback() {
+    use fs_project::ThermalBoundaryCondition as B;
+    for enclosure in [false, true] {
+        let mut f = if enclosure { open_fixture() } else { super::fixture(true) };
+        let setup = f.project.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        setup.boundaries[0].condition = B::HeatFlux {
+            outward_flux: QtyAny::new(0.0, dims::HEAT_FLUX),
+        };
+        setup.boundaries[1].condition = B::FixedTemperature {
+            temperature: QtyAny::new(310.0, dims::TEMPERATURE),
+        };
+        if enclosure {
+            // Keep the prescribed hot patch separate from radiation. The cold
+            // concave patch reflects to itself and escapes to the black bath;
+            // its original zero-flux row exercises the mean-flux lift as well.
+            let radiation = setup.enclosure_radiation.as_mut().unwrap();
+            radiation.surfaces.retain(|surface| surface.target == "cold");
+            radiation.view_factors = vec![vec![0.25]];
+            radiation.temperature_tolerance.value = 1e-11;
+            radiation.heat_tolerance.value = 1e-10;
+        }
+        f.project.requirements.as_mut().unwrap()[0].region = "cold".into();
+        let (plain, original) = solve_output(&f, 250, None, surface_pack());
+        let (combined, field) = solve_output(&f, 251,
+            Some("temperature-max-contact-boundary-adjoint"), surface_pack());
+        let (boundary, boundary_field) = solve_output(&f, 252,
+            Some("temperature-max-boundary-adjoint"), surface_pack());
+        assert_eq!(original.get("temperature"), field.get("temperature"));
+        assert_eq!(boundary_field.get("temperature"), field.get("temperature"));
+        for receipt in [&combined, &boundary] {
+            for key in ["energy", "interfaces", "temperature_contact", "radiation", "conjugate"] {
+                assert_eq!(plain.get(key), receipt.get(key), "adjoint changed primal {key}");
+            }
+        }
+        let report = combined.get("nominal_adjoint").unwrap();
+        let boundary = boundary.get("nominal_adjoint").unwrap();
+        let shared: Vec<_> = report.get("parameters").unwrap().as_array().unwrap().iter()
+            .filter(|row| row.str_field("target") != Some(TARGET)).collect();
+        assert_eq!(shared, boundary.get("parameters").unwrap().as_array().unwrap().iter().collect::<Vec<_>>());
+        assert_eq!(report.get("selected_vertex"), boundary.get("selected_vertex"));
+        let selected = number(report, "selected_vertex") as usize;
+        let actual = control_derivative(report, "fixed-temperature", "hot");
+        assert!(actual > 1e-6);
+        assert!(control_derivative(report, TARGET, "cold-hot-joint").abs() > 1e-6);
+        let step = 0.01;
+        let mut values = Vec::new();
+        for (side, sign) in [-1.0, 1.0].into_iter().enumerate() {
+            let mut changed = Fixture { dir: f.dir.clone(), project: f.project.clone() };
+            let B::FixedTemperature { temperature } = &mut changed.project.cooling.as_mut().unwrap()
+                .conduction.as_mut().unwrap().boundaries[1].condition else { panic!("original hot reservoir"); };
+            temperature.value += sign * step;
+            let (_, field) = solve_output(&changed, 253 + side, None, surface_pack());
+            values.push(selected_temperature(&field, selected));
+        }
+        let expected = (values[1] - values[0]) / (2.0 * step);
+        assert!((actual - expected).abs() < 5e-5 * expected.abs().max(1e-3),
+            "enclosure={enclosure}: complete prescribed lift {actual:e} vs resolve {expected:e}");
     }
 }
