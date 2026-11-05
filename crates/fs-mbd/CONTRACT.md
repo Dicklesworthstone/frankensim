@@ -1396,6 +1396,15 @@ any body attitude; both moment evaluation and each subsequent step have
 constant work independent of the number of input points. This is an algorithmic
 complexity statement, not a machine-specific performance measurement.
 
+First moments retain both multiplication and summation tails using the existing
+double-double arithmetic owner. Torque contractions, midpoint load/Jacobian
+evaluation and endpoint force work carry those tails until forming the native
+resultant. Thus nearly radial forces and large opposing point loads retain a
+representable residual couple instead of silently losing its angular impulse.
+Exactly cancelling colocated forces still produce zero force and torque. This
+does not add precision to the stored native state or certify arbitrary dynamic
+range; nonfinite products and reductions retain their original refusals.
+
 `RigidBodyIntegrator::step_spatial` delegates its endpoint momentum half-kicks
 and Hamiltonian free-rotation map to the original `step_verlet_with` owner.
 It applies gravity once at the COM

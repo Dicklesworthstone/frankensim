@@ -13,6 +13,48 @@ fn config() -> SpatialMidpointConfig {
 }
 
 #[test]
+fn opposing_large_loads_drive_the_work_conjugate_midpoint_without_false_rest() {
+    let loads = large_residual_couple();
+    let body = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let initial = RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::ZERO).unwrap();
+    let dt = 0.4;
+    let result = integrator()
+        .step_spatial_midpoint(initial, body, &loads, dt, config(), || false)
+        .unwrap()
+        .motion;
+    let reference = integrator()
+        .step_spatial_midpoint(
+            initial,
+            body,
+            &equivalent_small_couple(),
+            dt,
+            config(),
+            || false,
+        )
+        .unwrap()
+        .motion;
+    let after = result.step.state_after;
+    let spin = after.angular_momentum_body().z;
+    assert!(
+        spin < -0.39,
+        "the finite residual couple must accelerate the body"
+    );
+    // Independent scalar balance for Iz=2: theta = 2 atan(dt Lz / 8),
+    // and Lz = -dt (1 + cos(theta)) / 2. This also fixes the sign of work.
+    let theta = 2.0 * (dt * spin / 8.0).atan();
+    close(spin, -0.5 * dt * (1.0 + theta.cos()), 2e-14);
+    close(result.force_work_j, -theta.sin(), 2e-14);
+    close(spin * spin / 4.0, result.force_work_j, 2e-14);
+    close(result.work_energy_residual_j, 0.0, 2e-14);
+    vector(after.linear_momentum_world(), Vec3::ZERO, 0.0);
+    vector(after.pose().position_world(), Vec3::ZERO, 0.0);
+    vector(result.angular_impulse_world, world_spin(after), 2e-14);
+    vector(result.angular_momentum_residual_world, Vec3::ZERO, 2e-14);
+    assert_eq!(after, reference.step.state_after);
+    close(result.force_work_j, reference.force_work_j, 0.0);
+}
+
+#[test]
 fn translation_and_axial_couple_match_analytic_impulses_work_and_the_declared_chart() {
     let body = MassProperties::new(2.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 3.0)).unwrap();
     let initial = RigidBodyState::new(

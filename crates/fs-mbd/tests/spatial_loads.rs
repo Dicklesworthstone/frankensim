@@ -48,6 +48,133 @@ fn prepare(held: Wrench, world_torque: Vec3, points: &[WorldPointForce]) -> Prep
     PreparedSpatialLoads::new(held, world_torque, points, || false).unwrap()
 }
 
+fn large_residual_couple() -> PreparedSpatialLoads {
+    // Exactly zero resultant, C_xy = (a + 1)(a - 1) - a^2 = -1,
+    // and all other first moments zero. Rounding either product first loses
+    // the complete physical couple, not just a diagnostic's last few bits.
+    let a = 134_217_728.0;
+    prepare(
+        Wrench {
+            force_world: Vec3::new(0.0, 1.0, 0.0),
+            torque_body: Vec3::ZERO,
+        },
+        Vec3::ZERO,
+        &[
+            WorldPointForce {
+                arm_body: Vec3::new(a + 1.0, 0.0, 0.0),
+                force_world: Vec3::new(0.0, a - 1.0, 0.0),
+            },
+            WorldPointForce {
+                arm_body: Vec3::new(a, 0.0, 0.0),
+                force_world: Vec3::new(0.0, -a, 0.0),
+            },
+        ],
+    )
+}
+
+fn equivalent_small_couple() -> PreparedSpatialLoads {
+    prepare(
+        Wrench {
+            force_world: Vec3::new(0.0, 1.0, 0.0),
+            torque_body: Vec3::ZERO,
+        },
+        Vec3::ZERO,
+        &[WorldPointForce {
+            arm_body: Vec3::new(1.0, 0.0, 0.0),
+            force_world: Vec3::new(0.0, -1.0, 0.0),
+        }],
+    )
+}
+
+#[test]
+fn product_tails_preserve_nearly_parallel_and_equal_opposite_point_torques() {
+    let a = 134_217_728.0;
+    let arm = Vec3::new(a + 1.0, a, 0.0);
+    let force = Vec3::new(a, a - 1.0, 0.0);
+    let torque = Vec3::new(0.0, 0.0, -1.0);
+    // This analytic determinant is -1. The prepared owner must retain the
+    // same original lever arms and accuracy as a direct native point force.
+    assert_eq!(arm.cross(force), torque);
+    for sign in [-1.0, 1.0] {
+        let point = WorldPointForce {
+            arm_body: arm,
+            force_world: force.scale(sign),
+        };
+        let one = prepare(Wrench::ZERO, Vec3::ZERO, &[point]);
+        assert_eq!(
+            one.wrench_at(UnitQuaternion::IDENTITY).unwrap().torque_body,
+            torque.scale(sign)
+        );
+
+        // Equal and opposite forces at distinct arms have zero resultant but
+        // a nonzero couple. The second force is radial and has zero moment.
+        let opposite = WorldPointForce {
+            arm_body: Vec3::new(a, a - 1.0, 0.0),
+            force_world: force.scale(-sign),
+        };
+        for points in [[point, opposite], [opposite, point]] {
+            let pair = prepare(Wrench::ZERO, Vec3::ZERO, &points);
+            assert_eq!(pair.force_world(), Vec3::ZERO);
+            assert_eq!(
+                pair.wrench_at(UnitQuaternion::IDENTITY)
+                    .unwrap()
+                    .torque_body,
+                torque.scale(sign)
+            );
+        }
+
+        // Colocated opposite loads really do cancel, including their product
+        // tails. No spurious spin may appear at any later attitude.
+        let cancelled = prepare(
+            Wrench::ZERO,
+            Vec3::ZERO,
+            &[
+                point,
+                WorldPointForce {
+                    arm_body: arm,
+                    force_world: force.scale(-sign),
+                },
+            ],
+        );
+        assert_eq!(cancelled, PreparedSpatialLoads::ZERO);
+        assert_eq!(cancelled.wrench_at(rotation()).unwrap(), Wrench::ZERO);
+    }
+}
+
+#[test]
+fn opposing_large_loads_retain_their_residual_couple_through_verlet() {
+    let loads = large_residual_couple();
+    assert_eq!(loads.force_world(), Vec3::ZERO);
+    close(loads.torque_norm_bound().unwrap(), 1.0, 0.0);
+    let body = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 2.0)).unwrap();
+    let initial = RigidBodyState::new(Pose::identity(), Vec3::ZERO, Vec3::ZERO).unwrap();
+    let dt: f64 = 0.4;
+    let result = integrator()
+        .step_spatial(initial, body, &loads, dt)
+        .unwrap();
+    let reference = integrator()
+        .step_spatial(initial, body, &equivalent_small_couple(), dt)
+        .unwrap();
+    let after = result.step.state_after;
+    // Independent Verlet oracle: first torque -1, free spherical drift at
+    // Lz = -dt/2 and Iz = 2, then endpoint torque -cos(theta).
+    let theta = -dt * dt / 4.0;
+    let momentum = -0.5 * dt * (1.0 + theta.cos());
+    assert!(momentum < -0.39);
+    vector(
+        after.angular_momentum_body(),
+        Vec3::new(0.0, 0.0, momentum),
+        2e-14,
+    );
+    vector(after.linear_momentum_world(), Vec3::ZERO, 0.0);
+    vector(after.pose().position_world(), Vec3::ZERO, 0.0);
+    close(result.force_work_j, -theta.sin(), 2e-14);
+    vector(result.angular_impulse_world, world_spin(after), 2e-14);
+    vector(result.angular_momentum_residual_world, Vec3::ZERO, 2e-14);
+    assert_eq!(after, reference.step.state_after);
+    close(result.force_work_j, reference.force_work_j, 0.0);
+}
+
 #[test]
 fn constant_axis_torque_has_exact_acceleration_phase_and_work() {
     let body = MassProperties::new(2.0, Vec3::ZERO, Vec3::new(2.0, 2.0, 3.0)).unwrap();

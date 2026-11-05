@@ -7,8 +7,9 @@
 //! break both this identity and the native spatial angular-impulse balance.
 
 use super::{
-    DynamicsError, MassProperties, PreparedSpatialLoads, RigidBodyIntegrator, RigidBodyState,
-    SpatialStepReceipt, Vec3, Wrench, basis_world, components, finite_derived, finite_vec,
+    CompensatedVec3, DynamicsError, MassProperties, PreparedSpatialLoads, RigidBodyIntegrator,
+    RigidBodyState, SpatialStepReceipt, Vec3, Wrench, basis_world, components, finite_derived,
+    finite_vec,
 };
 use crate::solve_rotation_3;
 
@@ -126,14 +127,16 @@ impl RigidBodyIntegrator {
         }
         self.diagnostics(state, properties)?;
         let rotation = state.pose.orientation;
+        let initial_axes = basis_world(rotation);
         let system = MidpointSystem {
             properties,
             before: state.angular_momentum_body,
             body_couple: loads.torque_body,
-            world_couple_initial: rotation.rotate_world_to_body(loads.torque_world),
+            world_couple_initial: CompensatedVec3::from_vec(loads.torque_world)
+                .expressed_in(initial_axes),
             moments_initial: loads
                 .point_force_moments_world
-                .map(|v| rotation.rotate_world_to_body(v)),
+                .map(|v| v.expressed_in(initial_axes)),
             inverse_inertia: [
                 properties.angular_velocity_body_checked(Vec3::new(1.0, 0.0, 0.0))?,
                 properties.angular_velocity_body_checked(Vec3::new(0.0, 1.0, 0.0))?,
@@ -201,23 +204,25 @@ impl RigidBodyIntegrator {
         let cayley_world = rotation.rotate_body_to_world(cayley_increment_body);
         let axes0 = basis_world(rotation);
         let axes1 = basis_world(after.pose.orientation);
-        let mut moment_world = loads.torque_world.add(
-            rotation
-                .rotate_body_to_world(loads.torque_body)
-                .scale(0.5)
-                .add(
+        let mut moment_world = CompensatedVec3::from_vec(loads.torque_world)
+            .add(
+                CompensatedVec3::from_vec(rotation.rotate_body_to_world(loads.torque_body))
+                    .scale(0.5),
+            )
+            .add(
+                CompensatedVec3::from_vec(
                     after
                         .pose
                         .orientation
-                        .rotate_body_to_world(loads.torque_body)
-                        .scale(0.5),
-                ),
-        );
+                        .rotate_body_to_world(loads.torque_body),
+                )
+                .scale(0.5),
+            );
         for j in 0..3 {
             moment_world = moment_world.add(
-                axes0[j]
+                CompensatedVec3::from_vec(axes0[j])
+                    .add(CompensatedVec3::from_vec(axes1[j]))
                     .scale(0.5)
-                    .add(axes1[j].scale(0.5))
                     .cross(loads.point_force_moments_world[j]),
             );
         }
@@ -230,7 +235,10 @@ impl RigidBodyIntegrator {
             .add(after.pose.position_world.scale(0.5));
         let angular_impulse = moment_world
             .scale(duration_seconds)
-            .add(position_mid.cross(linear_impulse));
+            .add(CompensatedVec3::from_vec(
+                position_mid.cross(linear_impulse),
+            ))
+            .rounded("spatial_midpoint.angular_impulse")?;
         let linear_residual = after
             .linear_momentum_world
             .sub(state.linear_momentum_world)
@@ -290,8 +298,8 @@ struct MidpointSystem {
     properties: MassProperties,
     before: Vec3,
     body_couple: Vec3,
-    world_couple_initial: Vec3,
-    moments_initial: [Vec3; 3],
+    world_couple_initial: CompensatedVec3,
+    moments_initial: [CompensatedVec3; 3],
     inverse_inertia: [Vec3; 3],
     dt: f64,
     config: SpatialMidpointConfig,
@@ -321,9 +329,11 @@ impl MidpointSystem {
         let axes = BODY_AXES.map(b);
         let mut moment = self.world_couple_initial;
         for j in 0..3 {
-            moment = moment.add(axes[j].cross(self.moments_initial[j]));
+            moment = moment.add(CompensatedVec3::from_vec(axes[j]).cross(self.moments_initial[j]));
         }
-        let torque = self.body_couple.add(moment.sub(half_c.cross(moment)));
+        let torque = CompensatedVec3::from_vec(self.body_couple)
+            .add(moment.sub(CompensatedVec3::from_vec(half_c).cross(moment)))
+            .rounded("spatial_midpoint.torque")?;
         let residual = midpoint
             .sub(self.before)
             .sub(midpoint.cross(omega).add(torque).scale(0.5 * self.dt));
@@ -331,14 +341,17 @@ impl MidpointSystem {
         for (j, axis) in BODY_AXES.into_iter().enumerate() {
             let domega = self.inverse_inertia[j];
             let dc = domega.scale(self.dt);
-            let mut dmoment = Vec3::ZERO;
+            let mut dmoment = CompensatedVec3::ZERO;
             for k in 0..3 {
-                dmoment =
-                    dmoment.add(b(dc.cross(axes[k]).scale(0.5)).cross(self.moments_initial[k]));
+                dmoment = dmoment.add(
+                    CompensatedVec3::from_vec(b(dc.cross(axes[k]).scale(0.5)))
+                        .cross(self.moments_initial[k]),
+                );
             }
             let dtorque = dmoment
-                .sub(half_c.cross(dmoment))
-                .sub(dc.cross(moment).scale(0.5));
+                .sub(CompensatedVec3::from_vec(half_c).cross(dmoment))
+                .sub(CompensatedVec3::from_vec(dc).cross(moment).scale(0.5))
+                .rounded("spatial_midpoint.jacobian")?;
             let column = axis.sub(
                 axis.cross(omega)
                     .add(midpoint.cross(domega))
