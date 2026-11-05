@@ -1,5 +1,40 @@
 # CONTRACT: fs-couple
 
+## Executable certified damping blocks
+
+The explicit plate-viscosity certificate consumer binds the existing
+retained-matrix free-pole decisions to the original modal time owner.
+ModalPlateViscosity::certify_for_time preserves the original energy-quotient
+singleton owner when available; WindowedPlateViscosity::certify_for_time uses
+the existing near entries and far-row bounds. Only complete required Full
+principal blocks are materialized. Their original passive factorization
+retains every signed coefficient without a new fitting or truncation rule.
+
+CertifiedPlateViscosity::prepare_coupled keeps the original coordinate order,
+frequencies, state, clock, pressure transfers and admission budgets.
+Singleton physical rates come directly from the certified pole centers.
+Full clusters carry their entire intrinsic loss through coupled channels
+and receive no parallel scalar damping. Ordinary preparation uses the
+existing exact islands/scalar fast path; Prepared uses the existing bounded
+dense owner. HarmonicOnly, prior scalar damping and mismatched frequencies
+refuse. Frequency equality alone cannot identify a rotated degenerate
+eigenspace: the caller must supply the original basis.
+
+The opt-in approximation removes coupling between certified blocks. The
+certificate bounds free-decay poles of the retained source operator, not
+arbitrary forcing, pressure or heat error, nor poles after adding another
+support, contact, radiation or memory coupling. Runtime work and nonnegative
+physical heat belong to the realized operator; omitted coupling is never
+recorded as dissipation. Compact image storage is linear in mode count plus
+the sum of squared Full-block sizes; windowed compilation creates no global
+dense damping matrix. Original FE and runtime capacity policies remain.
+
+Four authored regressions cover independent rotated scalar dynamics/heat,
+a complete 96-mode dense/windowed source requiring only one coupled pair,
+original singleton rates and exact lossless modes, plus binding/resource/
+cancellation refusal and retry. Independent spectral and exact-state oracles
+were checked; native Rust execution remains unverified in this environment.
+
 ## Oscillating axial wall ports on the original channel field
 
 `ChannelContinuousOperator::solve_harmonic_with_walls` solves the original

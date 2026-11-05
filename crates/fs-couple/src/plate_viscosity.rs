@@ -29,6 +29,8 @@ use fs_material::plane_stress_viscosity::{MaterialPlane, PlaneStressViscosity};
 use fs_blake3::ContentHash;
 use fs_plate::PlateModel;
 
+/// Certified scalar/full damping blocks on the original exact modal runtime.
+pub mod certified;
 /// Source-bound hereditary bending on the same original plate basis.
 pub mod relaxation;
 /// Constant-loss-factor (hysteretic) material loss by modal strain-energy shares.
