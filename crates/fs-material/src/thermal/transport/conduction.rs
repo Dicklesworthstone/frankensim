@@ -5,6 +5,11 @@
 //! through each ORIGINAL caloric inverse, retaining h for Cp and u for Cv.
 //! It neither resamples a caloric chart nor integrates a second thermal state.
 
+/// Source-integrated material surfaces and their original reservoir/ambient film.
+#[path = "conduction/boundary.rs"]
+pub mod boundary;
+pub use boundary::IntegratedCaloricBoundary;
+
 use super::{
     isobaric::conduction::IsobaricConductionLaw, isochoric::conduction::IsochoricConductionLaw,
 };

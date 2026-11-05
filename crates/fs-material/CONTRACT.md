@@ -8531,6 +8531,36 @@ geometry, source-domain and late-cancellation refusal with exact replay. These
 are numerical model checks on synthetic source cards, not measured-material
 validation.
 
+## Source-integrated Cp/Cv exchange with reservoirs and ambient baths
+
+`IntegratedCaloricBoundary` reuses the prepared original Cp/Cv layer and the
+existing `ReservoirLayerGeometry` material-to-bath solver. It integrates k(T)
+through the planar half-cell, resolves the actual material-face temperature and
+one authored film/contact resistance, and supplies the native boundary owner
+with the complete outward power derivative with respect to original h or u.
+Its historical h-labelled native fields do not change the storage basis.
+
+The native reservoir or ambient channel supplies its current bath temperature,
+area and energy/entropy accounts. The selected source-integrated face replaces
+that channel's bulk-frozen coefficient; it does not add another authored htc,
+heat source or face inventory. Fixed geometry and original caloric-object
+identity are checked by the existing attachment path. Successful queries use
+the original bounded scalar solve without source queries or allocation.
+
+Material support applies to the material trace and solved material face. A
+bath outside that support may exchange heat through a finite film while the
+material remains supported; perfect contact refuses an unsupported prescribed
+face. No source extrapolation or temperature clipping creates an endpoint.
+The single-phase, fixed-context and quasi-steady half-cell assumptions of the
+integrated layer remain explicit.
+
+Three focused native regressions pass: independent affine-k film roots and
+Cp/Cv energy derivatives in heating/cooling/equilibrium; a large actual
+reservoir-plus-ambient step with independent caloric and bath entropy/energy
+checks; and source-domain, geometry and late-cancellation refusals with exact
+retry. Together with the integrated links and prior Cp/Cv conduction tests,
+15 native tests pass. This is not full-workspace or experimental validation.
+
 ## Source-exact fixed-density heat capacity in implicit conduction
 
 `thermal::transport::isochoric::conduction::IsochoricConductionLaw` binds the

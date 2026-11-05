@@ -1,6 +1,9 @@
 //! G1/G3/G4: original Cp/Cv storage and independently integrated face fluxes.
 //! The material cards are synthetic numerical fixtures, not measured datasets.
 
+#[path = "tests/boundary.rs"]
+mod boundary;
+
 use super::*;
 use crate::thermal::transport::{
     CONDUCTIVITY, DENSITY, SPECIFIC_HEAT,
