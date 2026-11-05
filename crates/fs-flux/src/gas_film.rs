@@ -1,7 +1,8 @@
 //! Bounded one-dimensional isothermal compressible gas-film Reynolds solver.
 //!
 //! This is deliberately a small, generic continuum foundation: a uniform
-//! Cartesian finite-volume line of unit out-of-plane width.  It solves the
+//! Cartesian finite-volume line of unit out-of-plane width, or a radial
+//! axisymmetric disk/annulus with exact annular storage. It solves the
 //! isothermal ideal-gas Reynolds mass balance, not a liquid cavitation or EHL
 //! model.  Every pressure is absolute [Pa], every gap is explicit [m], and an
 //! excluded contact cell is absent from the gas state rather than receiving an
@@ -10,7 +11,11 @@
 use core::fmt;
 use core::fmt::Write;
 
+mod axisymmetric;
 mod capillary;
+pub use axisymmetric::{
+    AxisymmetricGasFilmReceipt, AxisymmetricGasFilmStep, solve_isothermal_axisymmetric_gas_film_1d,
+};
 use capillary::CapillaryConnection;
 pub use capillary::{CapillaryVent, CapillaryVentReport, GasFilmReservoir, GasFilmReservoirReport};
 
@@ -93,7 +98,8 @@ pub struct GasFilmIdentity {
     pub viscosity_source_id: String,
     /// Thermal-model identity; this implementation accepts isothermal only.
     pub thermal_model_id: String,
-    /// Declared Cartesian frame for the positive line coordinate and wall speeds.
+    /// Declared frame for the positive line coordinate and wall speeds, or the
+    /// symmetry axis and positive radial direction for an axisymmetric film.
     pub frame_id: String,
     /// Deterministic caller seed retained for replay even though this solver samples no RNG.
     pub deterministic_seed: u64,
@@ -130,6 +136,15 @@ pub enum GasFilmBoundaryTopology {
         /// Pressure at the right exterior face [Pa absolute].
         right_absolute_pressure_pa: f64,
     },
+    /// Independently sealed or pressure-open ends. `None` means zero mass flux;
+    /// `Some(p)` supplies an absolute reservoir pressure [Pa]. In radial
+    /// geometry, left is the inner end and right is the outer end.
+    MixedEnds {
+        /// Left/inner pressure bath, or a sealed end.
+        left_absolute_pressure_pa: Option<f64>,
+        /// Right/outer pressure bath, or a sealed end.
+        right_absolute_pressure_pa: Option<f64>,
+    },
     /// Sealed outer ends with one ideal, zero-impedance pressure vent.
     /// The selected cell is held at the bath pressure with unlimited exchange.
     Vented {
@@ -161,6 +176,25 @@ pub enum GasFilmBoundaryTopology {
     },
 }
 
+impl GasFilmBoundaryTopology {
+    fn end_pressures(self) -> [Option<f64>; 2] {
+        match self {
+            Self::Open {
+                left_absolute_pressure_pa,
+                right_absolute_pressure_pa,
+            } => [
+                Some(left_absolute_pressure_pa),
+                Some(right_absolute_pressure_pa),
+            ],
+            Self::MixedEnds {
+                left_absolute_pressure_pa,
+                right_absolute_pressure_pa,
+            } => [left_absolute_pressure_pa, right_absolute_pressure_pa],
+            _ => [None, None],
+        }
+    }
+}
+
 /// Explicit static contact handoff mask. `true` means no gas-film cell exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContactExclusionMask {
@@ -171,7 +205,7 @@ pub struct ContactExclusionMask {
 /// Uniform structured line geometry with an exact per-cell gap [m].
 #[derive(Debug, Clone, PartialEq)]
 pub struct GasFilmGrid1d {
-    /// Total line length [m].
+    /// Total line length [m], or radial span for the axisymmetric entry point.
     pub length_m: f64,
     /// Current positive gap at each geometric cell [m].
     pub gap_m: Vec<f64>,
@@ -500,6 +534,61 @@ fn active_prefix(mask: &[bool]) -> Result<usize, GasFilmError> {
         });
     }
     Ok(active)
+}
+
+#[derive(Clone, Copy)]
+struct FilmFaceMetric {
+    // Unit width for a Cartesian strip, circular circumference for a radial film.
+    width: f64,
+    // Radial faces use the integrated logarithmic resistance, not delta-r.
+    distance_m: f64,
+}
+
+// Geometry is compiled once. The pressure/slip law, mass balance and mechanical
+// quadrature below consume the same measures; there is no second radial solver.
+enum FilmMetrics {
+    Cartesian {
+        spacing_m: f64,
+    },
+    Axisymmetric {
+        inner_radius_m: f64,
+        cell_area_m2: Vec<f64>,
+        faces: Vec<FilmFaceMetric>,
+    },
+}
+
+impl FilmMetrics {
+    fn cell_measure(&self, cell: usize) -> f64 {
+        match self {
+            Self::Cartesian { spacing_m } => *spacing_m,
+            Self::Axisymmetric { cell_area_m2, .. } => cell_area_m2[cell],
+        }
+    }
+
+    fn face(&self, face: usize, active: usize) -> FilmFaceMetric {
+        match self {
+            Self::Cartesian { spacing_m } => FilmFaceMetric {
+                width: 1.0,
+                distance_m: if face == 0 || face == active {
+                    0.5 * spacing_m
+                } else {
+                    *spacing_m
+                },
+            },
+            Self::Axisymmetric { faces, .. } => faces[face],
+        }
+    }
+
+    fn bind_fingerprint(&self, mut fingerprint: String) -> String {
+        if let Self::Axisymmetric { inner_radius_m, .. } = self {
+            let _ = write!(
+                fingerprint,
+                "geometry=axisymmetric-log-resistance-v1;inner_radius={:016x};",
+                inner_radius_m.to_bits()
+            );
+        }
+        fingerprint
+    }
 }
 
 // Compile the wall law once per step. For Maxwell slip, b*p is constant at
@@ -862,6 +951,17 @@ impl GasFilmInput {
                     "boundary.right_absolute_pressure_pa",
                 )?;
             }
+            GasFilmBoundaryTopology::MixedEnds {
+                left_absolute_pressure_pa,
+                right_absolute_pressure_pa,
+            } => {
+                if let Some(pressure) = left_absolute_pressure_pa {
+                    positive(pressure, "boundary.left_absolute_pressure_pa")?;
+                }
+                if let Some(pressure) = right_absolute_pressure_pa {
+                    positive(pressure, "boundary.right_absolute_pressure_pa")?;
+                }
+            }
             GasFilmBoundaryTopology::Vented {
                 cell_index,
                 absolute_pressure_pa,
@@ -911,6 +1011,7 @@ fn initial_state(
     input: &GasFilmInput,
     active: usize,
     checkpoint: Option<&GasFilmCheckpoint>,
+    configuration_fingerprint: &str,
 ) -> Result<(Vec<f64>, Vec<f64>, u64), GasFilmError> {
     match checkpoint {
         None => {
@@ -948,7 +1049,7 @@ fn initial_state(
                     field: "input_authority",
                 });
             }
-            if state.configuration_fingerprint != invariant_configuration_fingerprint(input) {
+            if state.configuration_fingerprint != configuration_fingerprint {
                 return Err(GasFilmError::CheckpointMismatch {
                     field: "configuration_fingerprint",
                 });
@@ -1046,6 +1147,18 @@ fn invariant_configuration_fingerprint(input: &GasFilmInput) -> String {
     match input.boundary {
         GasFilmBoundaryTopology::Sealed => text(&mut output, "boundary_kind", "sealed"),
         GasFilmBoundaryTopology::Open { .. } => text(&mut output, "boundary_kind", "open"),
+        GasFilmBoundaryTopology::MixedEnds {
+            left_absolute_pressure_pa,
+            right_absolute_pressure_pa,
+        } => {
+            text(&mut output, "boundary_kind", "mixed-ends");
+            let _ = write!(
+                output,
+                "left_open={};right_open={};",
+                left_absolute_pressure_pa.is_some(),
+                right_absolute_pressure_pa.is_some()
+            );
+        }
         GasFilmBoundaryTopology::Vented { .. } => text(&mut output, "boundary_kind", "vented"),
         GasFilmBoundaryTopology::CapillaryVented {
             cell_index,
@@ -1251,6 +1364,21 @@ fn accepted_request_fingerprint(input: &GasFilmInput) -> String {
             number(&mut output, "left_reservoir", left_absolute_pressure_pa);
             number(&mut output, "right_reservoir", right_absolute_pressure_pa);
         }
+        GasFilmBoundaryTopology::MixedEnds {
+            left_absolute_pressure_pa,
+            right_absolute_pressure_pa,
+        } => {
+            text(&mut output, "boundary", "mixed-ends");
+            for (name, pressure) in [
+                ("left_reservoir", left_absolute_pressure_pa),
+                ("right_reservoir", right_absolute_pressure_pa),
+            ] {
+                match pressure {
+                    Some(pressure) => number(&mut output, name, pressure),
+                    None => text(&mut output, name, "sealed"),
+                }
+            }
+        }
         GasFilmBoundaryTopology::Vented {
             cell_index,
             absolute_pressure_pa,
@@ -1419,71 +1547,79 @@ fn boundary_fluxes(
     pressure: &[f64],
     gap: &[f64],
     input: &GasFilmInput,
-    spacing: f64,
+    metrics: &FilmMetrics,
     transport: &FilmTransport,
 ) -> Result<(f64, f64), GasFilmError> {
-    match input.boundary {
-        GasFilmBoundaryTopology::Sealed
-        | GasFilmBoundaryTopology::Vented { .. }
-        | GasFilmBoundaryTopology::CapillaryVented { .. }
-        | GasFilmBoundaryTopology::CapillaryReservoir { .. } => Ok((0.0, 0.0)),
-        GasFilmBoundaryTopology::Open {
-            left_absolute_pressure_pa,
-            right_absolute_pressure_pa,
-        } => Ok((
+    let [left, right] = input.boundary.end_pressures();
+    let active = pressure.len();
+    let left_metric = metrics.face(0, active);
+    let right_metric = metrics.face(active, active);
+    Ok((
+        if let Some(reservoir) = left {
             face_flux(
-                left_absolute_pressure_pa,
+                reservoir,
                 pressure[0],
                 gap[0],
                 gap[0],
-                0.5 * spacing,
+                left_metric.distance_m,
                 transport,
-            )?,
+            )? * left_metric.width
+        } else {
+            0.0
+        },
+        if let Some(reservoir) = right {
             face_flux(
-                pressure[pressure.len() - 1],
-                right_absolute_pressure_pa,
-                gap[gap.len() - 1],
-                gap[gap.len() - 1],
-                0.5 * spacing,
+                pressure[active - 1],
+                reservoir,
+                gap[active - 1],
+                gap[active - 1],
+                right_metric.distance_m,
                 transport,
-            )?,
-        )),
-    }
+            )? * right_metric.width
+        } else {
+            0.0
+        },
+    ))
 }
 
 fn face_fluxes(
     pressure: &[f64],
     gap: &[f64],
     input: &GasFilmInput,
-    spacing: f64,
+    metrics: &FilmMetrics,
     transport: &FilmTransport,
 ) -> Result<Vec<f64>, GasFilmError> {
     let mut flux = vec![0.0; pressure.len() + 1];
-    let (left, right) = boundary_fluxes(pressure, gap, input, spacing, transport)?;
-    flux[0] = left;
-    flux[pressure.len()] = right;
+    let (left, right) = boundary_fluxes(pressure, gap, input, metrics, transport)?;
+    flux[0] = derived(left, "left_face_mass_rate")?;
+    flux[pressure.len()] = derived(right, "right_face_mass_rate")?;
     for face in 1..pressure.len() {
-        flux[face] = face_flux(
-            pressure[face - 1],
-            pressure[face],
-            gap[face - 1],
-            gap[face],
-            spacing,
-            transport,
+        let metric = metrics.face(face, pressure.len());
+        flux[face] = derived(
+            face_flux(
+                pressure[face - 1],
+                pressure[face],
+                gap[face - 1],
+                gap[face],
+                metric.distance_m,
+                transport,
+            )? * metric.width,
+            "interior_face_mass_rate",
         )?;
     }
     Ok(flux)
 }
 
 // Integrate pressure-driven mechanics over the same face intervals as the
-// Reynolds flux: full cell spacing internally, half spacing at each boundary.
+// Reynolds flux. Radial resistance uses a logarithmic dual measure, so pressure
+// force work and dissipation close for the very same discrete mass flux.
 // Square gradients BEFORE averaging so opposing/sharp gradients retain heat.
 fn pressure_driven_mechanics(
     pressure: &[f64],
     gap: &[f64],
     flux: &[f64],
     input: &GasFilmInput,
-    spacing: f64,
+    metrics: &FilmMetrics,
     transport: &FilmTransport,
 ) -> Result<(Vec<f64>, f64, f64, f64, f64), GasFilmError> {
     let mean_velocity = transport.mean_wall_velocity_m_per_s;
@@ -1497,27 +1633,21 @@ fn pressure_driven_mechanics(
     let mut heat = 0.0;
     let mut pressure_work = 0.0;
     let mut wall_slip_heat = 0.0;
+    let end_pressures = input.boundary.end_pressures();
     for (face, mass_flux) in flux.iter().copied().enumerate() {
+        let metric = metrics.face(face, active);
+        let distance = metric.distance_m;
         let (face_gap, face_pressure, gradient, distance) = if face > 0 && face < active {
             (
                 0.5 * (gap[face - 1] + gap[face]),
                 0.5 * (pressure[face - 1] + pressure[face]),
-                (pressure[face] - pressure[face - 1]) / spacing,
-                spacing,
+                (pressure[face] - pressure[face - 1]) / distance,
+                distance,
             )
         } else {
             let cell = if face == 0 { 0 } else { active - 1 };
-            let distance = 0.5 * spacing;
-            match input.boundary {
-                GasFilmBoundaryTopology::Open {
-                    left_absolute_pressure_pa,
-                    right_absolute_pressure_pa,
-                } => {
-                    let reservoir = if face == 0 {
-                        left_absolute_pressure_pa
-                    } else {
-                        right_absolute_pressure_pa
-                    };
+            match end_pressures[usize::from(face != 0)] {
+                Some(reservoir) => {
                     let gradient = if face == 0 {
                         (pressure[cell] - reservoir) / distance
                     } else {
@@ -1530,10 +1660,7 @@ fn pressure_driven_mechanics(
                         distance,
                     )
                 }
-                GasFilmBoundaryTopology::Sealed
-                | GasFilmBoundaryTopology::Vented { .. }
-                | GasFilmBoundaryTopology::CapillaryVented { .. }
-                | GasFilmBoundaryTopology::CapillaryReservoir { .. } => {
+                None => {
                     // A sealed face has q = h U_mean - h^3 p_x/(12 mu) = 0.
                     // Moving walls therefore require backpressure, not p_x = 0.
                     let gradient = 12.0 * viscosity * mean_velocity / gap[cell].powi(2);
@@ -1545,14 +1672,13 @@ fn pressure_driven_mechanics(
         let face_pressure = derived(face_pressure, "mechanical_face_pressure_pa")?;
         let slip_length = transport.slip_length_m(face_pressure)?;
         let slip_ratio = derived(slip_length / face_gap, "wall_slip_length_ratio")?;
-        let gradient = if (face == 0 || face == active)
-            && !matches!(input.boundary, GasFilmBoundaryTopology::Open { .. })
-        {
-            // Zero flux uses the same slip-enhanced conductance as an open face.
-            gradient / (1.0 + 6.0 * slip_ratio)
-        } else {
-            gradient
-        };
+        let gradient =
+            if (face == 0 || face == active) && end_pressures[usize::from(face != 0)].is_none() {
+                // Zero flux uses the same slip-enhanced conductance as an open face.
+                gradient / (1.0 + 6.0 * slip_ratio)
+            } else {
+                gradient
+            };
         let gradient = derived(gradient, "face_pressure_gradient_pa_per_m")?;
         // Symmetric Maxwell slip gives u(s) = u_gas_lower + V*s + A*s*(s-1),
         // with V = (U_upper-U_lower)/(1+2*b/h) and s = y/h. The gas-side wall
@@ -1613,11 +1739,11 @@ fn pressure_driven_mechanics(
             "maxwell_slip_volume_conductance",
         )?;
         heat = derived(
-            heat + (conductance + slip_conductance) * gradient * gradient * distance,
+            heat + (conductance + slip_conductance) * gradient * gradient * distance * metric.width,
             "poiseuille_viscous_heat_w_per_m",
         )?;
         wall_slip_heat = derived(
-            wall_slip_heat + slip_conductance * gradient * gradient * distance,
+            wall_slip_heat + slip_conductance * gradient * gradient * distance * metric.width,
             "pressure_wall_slip_dissipation_w_per_m",
         )?;
         let volume_flux = derived(
@@ -1647,9 +1773,27 @@ pub fn solve_isothermal_gas_film_1d(
     input: &GasFilmInput,
     checkpoint: Option<&GasFilmCheckpoint>,
 ) -> Result<GasFilmStep, GasFilmError> {
+    solve_film(input, checkpoint, None)
+}
+
+// The internal integrals use the selected geometry measure. Only the Cartesian
+// entry point publishes this per-width receipt directly; the radial entry point
+// converts it into its distinct total-unit receipt before publication.
+fn solve_film(
+    input: &GasFilmInput,
+    checkpoint: Option<&GasFilmCheckpoint>,
+    radial_inner_radius_m: Option<f64>,
+) -> Result<GasFilmStep, GasFilmError> {
     let (active, spacing, rt, max_slope) = input.validate()?;
+    let metrics = match radial_inner_radius_m {
+        Some(radius) => axisymmetric::compile_metrics(input, active, spacing, radius)?,
+        None => FilmMetrics::Cartesian { spacing_m: spacing },
+    };
+    let configuration_fingerprint =
+        metrics.bind_fingerprint(invariant_configuration_fingerprint(input));
     let transport = FilmTransport::new(input, rt)?;
-    let (old_pressure, old_gap, old_step_index) = initial_state(input, active, checkpoint)?;
+    let (old_pressure, old_gap, old_step_index) =
+        initial_state(input, active, checkpoint, &configuration_fingerprint)?;
     let capillary = CapillaryConnection::from_input(input, rt, checkpoint)?;
     let gap = &input.grid.gap_m[..active];
     // Both the starting state and the imposed reservoirs must belong to the
@@ -1659,20 +1803,18 @@ pub fn solve_isothermal_gas_film_1d(
         input.admit_knudsen(*pressure, *gap)?;
     }
     let mut max_knudsen = match input.boundary {
-        GasFilmBoundaryTopology::Sealed
-        | GasFilmBoundaryTopology::CapillaryVented { .. }
-        | GasFilmBoundaryTopology::CapillaryReservoir { .. } => 0.0,
-        GasFilmBoundaryTopology::Open {
-            left_absolute_pressure_pa,
-            right_absolute_pressure_pa,
-        } => input
-            .admit_knudsen(left_absolute_pressure_pa, gap[0])?
-            .max(input.admit_knudsen(right_absolute_pressure_pa, gap[active - 1])?),
         GasFilmBoundaryTopology::Vented {
             cell_index,
             absolute_pressure_pa,
         } => input.admit_knudsen(absolute_pressure_pa, gap[cell_index])?,
+        _ => 0.0,
     };
+    let end_pressures = input.boundary.end_pressures();
+    for (pressure, end_gap) in end_pressures.into_iter().zip([gap[0], gap[active - 1]]) {
+        if let Some(pressure) = pressure {
+            max_knudsen = max_knudsen.max(input.admit_knudsen(pressure, end_gap)?);
+        }
+    }
     if let Some(vent) = &capillary {
         // A capillary bath is outside the film: its Knudsen scale is the
         // tube radius, not the local film gap. Admit both tube endpoints and
@@ -1687,19 +1829,19 @@ pub fn solve_isothermal_gas_film_1d(
     {
         pressure[cell_index] = absolute_pressure_pa;
     }
-    let mass_old = old_pressure
-        .iter()
-        .zip(&old_gap)
-        .try_fold(0.0, |total, (pressure, gap)| {
+    let mass_old = old_pressure.iter().zip(&old_gap).enumerate().try_fold(
+        0.0,
+        |total, (cell, (pressure, gap))| {
             derived(
-                total + pressure * gap * spacing / rt,
+                total + pressure * gap * metrics.cell_measure(cell) / rt,
                 "initial_gas_mass_kg_per_m",
             )
-        })?;
+        },
+    )?;
     let mut iterations = 0;
     let mut max_residual: f64;
     while iterations < input.budget.maximum_iterations {
-        let flux = face_fluxes(&pressure, gap, input, spacing, &transport)?;
+        let flux = face_fluxes(&pressure, gap, input, &metrics, &transport)?;
         let vent_exchange = capillary
             .as_ref()
             .map(|vent| vent.exchange(pressure[vent.cell]))
@@ -1707,6 +1849,7 @@ pub fn solve_isothermal_gas_film_1d(
         let mut next = pressure.clone();
         max_residual = 0.0;
         for cell in 0..active {
+            let measure = metrics.cell_measure(cell);
             if let GasFilmBoundaryTopology::Vented {
                 cell_index,
                 absolute_pressure_pa,
@@ -1724,49 +1867,45 @@ pub fn solve_isothermal_gas_film_1d(
             )?;
             let mut residual = derived(
                 storage_coefficient * pressure[cell] - rhs
-                    + (flux[cell + 1] - flux[cell]) / spacing,
+                    + (flux[cell + 1] - flux[cell]) / measure,
                 "cell_mass_residual",
             )?;
             let mut diagonal = storage_coefficient;
             if capillary.as_ref().is_some_and(|vent| cell == vent.cell) {
                 let exchange = vent_exchange.expect("capillary was compiled");
                 residual = derived(
-                    residual + exchange.flow_kg_per_m_s / spacing,
+                    residual + exchange.flow_kg_per_m_s / measure,
                     "vent_cell_mass_residual",
                 )?;
                 diagonal = derived(
-                    diagonal + exchange.derivative / spacing,
+                    diagonal + exchange.derivative / measure,
                     "vent_cell_diagonal",
                 )?;
             }
             max_residual = max_residual.max(residual.abs());
             let left = if cell > 0 {
-                Some((pressure[cell - 1], gap[cell - 1], spacing))
-            } else if let GasFilmBoundaryTopology::Open {
-                left_absolute_pressure_pa,
-                ..
-            } = input.boundary
-            {
-                Some((left_absolute_pressure_pa, gap[cell], 0.5 * spacing))
+                Some((pressure[cell - 1], gap[cell - 1], cell))
+            } else if let Some(reservoir) = end_pressures[0] {
+                Some((reservoir, gap[cell], cell))
             } else {
                 None
             };
             let right = if cell + 1 < active {
-                Some((pressure[cell + 1], gap[cell + 1], spacing))
-            } else if let GasFilmBoundaryTopology::Open {
-                right_absolute_pressure_pa,
-                ..
-            } = input.boundary
-            {
-                Some((right_absolute_pressure_pa, gap[cell], 0.5 * spacing))
+                Some((pressure[cell + 1], gap[cell + 1], cell + 1))
+            } else if let Some(reservoir) = end_pressures[1] {
+                Some((reservoir, gap[cell], cell + 1))
             } else {
                 None
             };
-            for (neighbor_pressure, neighbor_gap, distance) in [left, right].into_iter().flatten() {
+            for (neighbor_pressure, neighbor_gap, face) in [left, right].into_iter().flatten() {
+                let metric = metrics.face(face, active);
                 let p_face = 0.5 * (pressure[cell] + neighbor_pressure);
                 let h_face = 0.5 * (gap[cell] + neighbor_gap);
                 let k = transport.mass_conductance(p_face, h_face)?;
-                diagonal = derived(diagonal + k / (distance * spacing), "cell_diagonal")?;
+                diagonal = derived(
+                    diagonal + k * metric.width / (metric.distance_m * measure),
+                    "cell_diagonal",
+                )?;
             }
             positive(diagonal, "cell_diagonal")?;
             let proposal = derived(
@@ -1786,7 +1925,7 @@ pub fn solve_isothermal_gas_film_1d(
             break;
         }
     }
-    let flux = face_fluxes(&pressure, gap, input, spacing, &transport)?;
+    let flux = face_fluxes(&pressure, gap, input, &metrics, &transport)?;
     let capillary_exchange = capillary
         .as_ref()
         .map(|vent| vent.exchange(pressure[vent.cell]))
@@ -1800,7 +1939,7 @@ pub fn solve_isothermal_gas_film_1d(
             "final_storage_residual",
         )?;
         let mut residual = derived(
-            storage + (flux[cell + 1] - flux[cell]) / spacing,
+            storage + (flux[cell + 1] - flux[cell]) / metrics.cell_measure(cell),
             "final_cell_mass_residual",
         )?;
         if capillary.as_ref().is_some_and(|vent| cell == vent.cell) {
@@ -1809,7 +1948,7 @@ pub fn solve_isothermal_gas_film_1d(
                     + capillary_exchange
                         .expect("capillary was compiled")
                         .flow_kg_per_m_s
-                        / spacing,
+                        / metrics.cell_measure(cell),
                 "final_vent_cell_mass_residual",
             )?;
         }
@@ -1822,7 +1961,7 @@ pub fn solve_isothermal_gas_film_1d(
     if let Some(vent) = &capillary {
         let residual =
             vent.reservoir_residual(capillary_exchange.expect("capillary was compiled"))?;
-        max_residual = max_residual.max(residual.abs() / spacing);
+        max_residual = max_residual.max(residual.abs() / metrics.cell_measure(vent.cell));
     }
     if max_residual > input.budget.mass_residual_tolerance_kg_m2_s {
         return Err(GasFilmError::IterationBudgetExceeded {
@@ -1837,12 +1976,17 @@ pub fn solve_isothermal_gas_film_1d(
         .as_ref()
         .map(|vent| vent.observe(pressure[vent.cell], input))
         .transpose()?;
-    let mass_new = pressure
-        .iter()
-        .zip(gap)
-        .try_fold(0.0, |total, (pressure, gap)| {
-            derived(total + pressure * gap * spacing / rt, "gas_mass_kg_per_m")
-        })?;
+    let mass_new =
+        pressure
+            .iter()
+            .zip(gap)
+            .enumerate()
+            .try_fold(0.0, |total, (cell, (pressure, gap))| {
+                derived(
+                    total + pressure * gap * metrics.cell_measure(cell) / rt,
+                    "gas_mass",
+                )
+            })?;
     let storage_rate = derived(
         (mass_new - mass_old) / input.timestep_s,
         "storage_rate_kg_per_m_s",
@@ -1851,7 +1995,7 @@ pub fn solve_isothermal_gas_film_1d(
     let right_outward = flux[active];
     let vent_outward = match input.boundary {
         GasFilmBoundaryTopology::Vented { cell_index, .. } => derived(
-            -cell_residual[cell_index] * spacing,
+            -cell_residual[cell_index] * metrics.cell_measure(cell_index),
             "vent_outward_mass_flux",
         )?,
         GasFilmBoundaryTopology::CapillaryVented { .. }
@@ -1897,7 +2041,7 @@ pub fn solve_isothermal_gas_film_1d(
         pressure_gradient_power,
         max_gas_mach,
         mut wall_slip_power,
-    ) = pressure_driven_mechanics(&pressure, gap, &flux, input, spacing, &transport)?;
+    ) = pressure_driven_mechanics(&pressure, gap, &flux, input, &metrics, &transport)?;
     let mut tangential_wall_power = 0.0;
     let mut normal_gap_power = 0.0;
     let relative_velocity = input.wall_motion.upper_tangential_velocity_m_per_s
@@ -1913,17 +2057,18 @@ pub fn solve_isothermal_gas_film_1d(
             upper_shear.push(None);
             continue;
         }
+        let measure = metrics.cell_measure(index);
         let pressure_value = pressure[index];
         absolute_load = derived(
-            absolute_load + pressure_value * spacing,
+            absolute_load + pressure_value * measure,
             "absolute_pressure_load_n_per_m",
         )?;
         gauge_load = derived(
-            gauge_load + (pressure_value - input.gauge_reference_absolute_pressure_pa) * spacing,
+            gauge_load + (pressure_value - input.gauge_reference_absolute_pressure_pa) * measure,
             "gauge_pressure_load_n_per_m",
         )?;
         normal_gap_power = derived(
-            normal_gap_power - pressure_value * input.gap_rate_m_per_s(index) * spacing,
+            normal_gap_power - pressure_value * input.gap_rate_m_per_s(index) * measure,
             "normal_gap_power_to_gas_w_per_m",
         )?;
         let slip_length = transport.slip_length_m(pressure_value)?;
@@ -1932,8 +2077,8 @@ pub fn solve_isothermal_gas_film_1d(
             input.gas.dynamic_viscosity_pa_s * relative_velocity / couette_gap,
             "couette_wall_shear_pa",
         )?;
-        // The face average gives each cell half of each adjacent interval,
-        // matching the pressure-work/heat quadrature including boundary halves.
+        // A local face-average traction. Radial work/heat is integrated directly
+        // on the dual faces; axisymmetric tangential wall motion is not admitted.
         let pressure_shear = 0.5 * (pressure_shear[index] + pressure_shear[index + 1]);
         let upper_shear_value = derived(couette_shear + pressure_shear, "upper_wall_shear_pa")?;
         let lower_shear_value = derived(-couette_shear + pressure_shear, "lower_wall_shear_pa")?;
@@ -1945,19 +2090,19 @@ pub fn solve_isothermal_gas_film_1d(
         lower_on_gas_tangential.push(Some(lower_shear_value));
         upper_shear.push(Some(upper_shear_value));
         viscous_power = derived(
-            viscous_power + couette_shear * relative_velocity * spacing,
+            viscous_power + couette_shear * relative_velocity * measure,
             "viscous_heat_w_per_m",
         )?;
         wall_slip_power = derived(
             wall_slip_power
-                + (2.0 * slip_length / couette_gap) * couette_shear * relative_velocity * spacing,
+                + (2.0 * slip_length / couette_gap) * couette_shear * relative_velocity * measure,
             "couette_wall_slip_dissipation_w_per_m",
         )?;
         tangential_wall_power = derived(
             tangential_wall_power
                 + (upper_shear_value * input.wall_motion.upper_tangential_velocity_m_per_s
                     + lower_shear_value * input.wall_motion.lower_tangential_velocity_m_per_s)
-                    * spacing,
+                    * measure,
             "tangential_wall_power_to_gas_w_per_m",
         )?;
     }
@@ -2021,8 +2166,9 @@ pub fn solve_isothermal_gas_film_1d(
             case_id: input.identity.case_id.clone(),
             input_authority: input.identity.authority,
             input_uncertainty: input.uncertainty,
-            configuration_fingerprint: invariant_configuration_fingerprint(input),
-            accepted_request_fingerprint: accepted_request_fingerprint(input),
+            configuration_fingerprint,
+            accepted_request_fingerprint: metrics
+                .bind_fingerprint(accepted_request_fingerprint(input)),
             active_absolute_pressure_pa: checkpoint_pressure,
             active_gap_m: gap.to_vec(),
             active_cells: active,

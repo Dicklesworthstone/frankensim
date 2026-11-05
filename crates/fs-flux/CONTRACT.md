@@ -581,8 +581,11 @@ thermostat heat, or a total-energy closure; no gas temperature equation is solve
 Signed boundary/vent enthalpy transport still comes from a caller-declared
 specific enthalpy and is not a thermochemical calculation. Gauge load is relative
 to a separately declared absolute pressure reference, never implicitly the
-initial condition. `Sealed`, two-reservoir `Open`, and one named-cell `Vented`
-topology are admitted. The receipt retains gas storage, every boundary/vent
+initial condition. `Sealed`, two-reservoir `Open`, independently sealed/open
+`MixedEnds`, and one named-cell `Vented` topology are admitted. A mixed end
+uses `None` for zero mass flux and `Some(p)` for an absolute pressure bath;
+its sealed/open kind is fixed across restart while bath pressure may vary.
+The receipt retains gas storage, every boundary/vent
 mass flux, their global closure defect, pressure load, both-wall shear,
 wall/pressure work and dissipation, residual, iteration count, and
 continuum-envelope maxima. A checkpoint binds active pressure and previous gap
@@ -672,6 +675,91 @@ the exact compressible Poiseuille profile with `(p+6*b*p/h)^2` linear in `x`,
 convergent total dissipation, off-centre gas-speed limits in both flow directions,
 and moving wedges with sealed/open/vented boundaries and restart. Invalid
 accommodation, out-of-regime pressure states, and changes of wall law refuse.
+
+#### Axisymmetric disks and annuli
+
+`solve_isothermal_axisymmetric_gas_film_1d(input, inner_radius_m, checkpoint)`
+extends the same pressure iteration, ideal-gas storage, no-slip/Maxwell transport,
+pressure-dependent applicability and restart machinery to a fixed radial domain.
+`input.grid.length_m` is the radial span. A zero inner radius gives a disk;
+a positive inner radius gives an annulus. The frame identity now declares the
+symmetry axis and radial direction for this entry point. No second solver or
+independent radial wall law is introduced.
+
+The no-slip continuum equation is
+`d(p*h)/dt = (1/r)*d[r*h^3*p*(dp/dr)/(12*mu)]/dr`, as in
+[the isothermal disk model, equation (2.8)](https://www.cambridge.org/core/journals/journal-of-fluid-mechanics/article/role-of-fluidstructure-coupling-in-the-generation-of-an-attractive-squeezefilm-force/22F5E6D5F77C61657F102EC733893EDE).
+The code uses exact cell areas
+`A_i = 2*pi*r_i*dr = pi*(r_outer^2-r_inner^2)` and circular face measures
+`W_f = 2*pi*r_f`. Its implicit mass equation is
+`(p_new*h_new-p_old*h_old)/(R*T*dt) + (M_right-M_left)/A_i = 0`.
+The shared local face mass flux is multiplied by `W_f`; load and normal work
+use `A_i`. Static contact exclusion still removes an outer suffix, and the
+pressure/flux boundary lies at the last active circular face.
+
+Each radial face uses resistance distance
+`d_f = r_f*ln(r_right/r_left)` between its neighboring pressure samples (a
+boundary radius and cell center at an open end). The logarithm is evaluated
+with `ln_1p` and the annular area in factored form to avoid subtracting nearly
+equal radii. Metrics are compiled once per step; pressure sweeps perform no
+radial logarithms. This preserves the exact constant-gap steady radial
+potential: with `B = b*p` and `s = 6*B/h`, `(p+s)^2` is affine in `ln(r)` and
+
+```
+M = pi*h^3*((p_inner+s)^2-(p_outer+s)^2)
+    / (12*mu*R*T*ln(r_outer/r_inner)).
+```
+
+No-slip has `s=0`. The pressure-driven heat and pressure-force work use the
+same face gradient and dual measure `W_f*d_f`; their discrete equality is
+preserved. This dual measure is an energy quadrature, distinct from exact
+cell areas. Face pressure/gap and cell radial shear are reconstructed averages;
+the Mach gate bounds the reconstructed transverse velocity profiles, not an
+unresolved continuum field between radial samples. Integrated dissipation
+converges to `M*R*T*ln(p_inner/p_outer)` in the steady constant-gap limit.
+
+The disk center has zero circular measure, regular zero radial flux, and no
+evaluation of `ln(0)`. A pressure bath at `r=0` is refused. A drained disk uses
+
+```rust
+input.boundary = GasFilmBoundaryTopology::MixedEnds {
+    left_absolute_pressure_pa: None,
+    right_absolute_pressure_pa: Some(ambient_absolute_pressure_pa),
+};
+let step = solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, checkpoint)?;
+```
+
+Normal uniform or per-cell squeeze/expansion is supported. An ideal `Vented`
+cell represents pressure pinning and total exchange over that retained
+positive-area annular cell (the central cell is a disk), not a point port at
+the symmetry axis. Per-width `CapillaryVented`/`CapillaryReservoir` connections
+are refused in this radial API; no tube count or reservoir volume is silently
+converted into a circular total. Nonzero in-plane wall speed is also refused:
+radial wall motion, swirl and centrifugal pressure require additional physics.
+
+`AxisymmetricGasFilmReceipt` has distinct total units: mass [kg], mass rate
+[kg/s], load [N], and power/enthalpy transport [W]. Its local radial traction
+is gas-on-wall, equal on the two stationary in-plane walls; wall-on-gas has
+the opposite sign. This radial scalar field does not imply a net Cartesian
+radial force, which cancels on azimuthal integration. The pressure field is
+the upper-wall normal traction, and total wall work is the reported normal
+gap work. Geometry and inner radius bind both checkpoint fingerprints:
+changing radius or replaying a strip checkpoint as a disk/annulus refuses.
+
+Focused G0/G1/G3 tests check sealed disk/annulus squeeze mass, actual pressure
+load and normal work, contact-excluded areas and radius-squared scaling;
+analytic logarithmic annulus flow in both directions with no-slip/Maxwell
+walls and heat refinement; and three-rung radial refinement of a manufactured
+fully compressible open-rim disk squeeze/expansion pressure and load. The disk
+reference comes from differentiating the continuum radial Reynolds equation,
+not from the discrete flux. Mixed Cartesian ends additionally retain sealed
+wall backpressure and mechanical-work closure. Existing strip, capillary and
+reservoir regressions remain applicable to the shared engine.
+
+These are axisymmetric lubrication results, with the existing isothermal,
+thin-film, small-slope and viscous-dominance assumptions. They do not add
+resolved radial inertia/acoustics, edge entrance flow, azimuthal variation,
+moving radial boundaries, structural/contact coupling or a thermal equation.
 
 #### Finite-conductance capillary vents
 
@@ -783,7 +871,7 @@ software/numerical checks of declared equations only.
 No gas-film result establishes thermochemical validity, lubrication-regime
 selection, roughness or accommodation calibration, continuum validity outside the stated
 gates, liquid/mixed/EHL/cavitation behavior, moving-domain topology changes,
-2-D/axisymmetric geometry, energy/entropy closure, coupled contact, or any
+general 2-D/3-D geometry, energy/entropy closure, coupled contact, or any
 device outcome.  The blocked fs-matdb, fs-thermochem, fs-tribo lubrication, and
 fs-couple port-schema prerequisites remain required for those claims.
 

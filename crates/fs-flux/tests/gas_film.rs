@@ -5,8 +5,366 @@ use fs_flux::{
     GasFilmBudget, GasFilmError, GasFilmGrid1d, GasFilmIdentity, GasFilmInput,
     GasFilmInputAuthority, GasFilmReservoir, GasFilmUncertainty, IsothermalIdealGas,
     MovingWallInput, RoughnessPolicy, SlipPolicy, isothermal_compressible_reynolds_model_id,
-    solve_isothermal_gas_film_1d,
+    solve_isothermal_axisymmetric_gas_film_1d, solve_isothermal_gas_film_1d,
 };
+
+#[test]
+fn g1_axisymmetric_sealed_squeeze_integrates_actual_annular_mass_load_and_work() {
+    let mut disk_masses = Vec::new();
+    for inner in [0.0, 0.005] {
+        for span in [0.01, 0.02] {
+            let mut input = fixture(8);
+            input.grid.length_m = span;
+            input.grid.contact_exclusion.excluded[6..].fill(true);
+            input.grid.gap_m[6..].fill(0.0);
+            input.wall_motion.gap_rate_m_per_s = -1.0e-4;
+            input.timestep_s = 1.0e-4;
+            input.budget.mass_residual_tolerance_kg_m2_s = 1.0e-12;
+            let step = solve_isothermal_axisymmetric_gas_film_1d(&input, inner, None).unwrap();
+            assert_eq!(
+                step,
+                solve_isothermal_axisymmetric_gas_film_1d(&input, inner, None).unwrap()
+            );
+            let outer = inner + span * 6.0 / 8.0;
+            let area = std::f64::consts::PI * (outer * outer - inner * inner);
+            let h = input.grid.gap_m[0];
+            let old_h = h - input.wall_motion.gap_rate_m_per_s * input.timestep_s;
+            let p = input.initial_absolute_pressure_pa * old_h / h;
+            let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+            let expected_mass = input.initial_absolute_pressure_pa * old_h * area / rt;
+            let receipt = &step.receipt;
+            assert!((receipt.gas_mass_kg / expected_mass - 1.0).abs() < 1.0e-9);
+            assert!((receipt.absolute_pressure_load_n / (p * area) - 1.0).abs() < 1.0e-9);
+            assert!(
+                (receipt.gauge_pressure_load_n / ((p - input.initial_absolute_pressure_pa) * area)
+                    - 1.0)
+                    .abs()
+                    < 1.0e-6
+            );
+            assert!(
+                (receipt.normal_gap_power_to_gas_w
+                    / (-p * input.wall_motion.gap_rate_m_per_s * area)
+                    - 1.0)
+                    .abs()
+                    < 1.0e-9
+            );
+            assert!(receipt.mass_closure_residual_kg_per_s.abs() < 1.0e-14);
+            assert_eq!(receipt.inner_boundary_outward_mass_flow_kg_per_s, 0.0);
+            assert_eq!(receipt.outer_boundary_outward_mass_flow_kg_per_s, 0.0);
+            assert!(step.absolute_pressure_pa[6..].iter().all(Option::is_none));
+            assert!(step.checkpoint.capillary_reservoir_mass_kg_per_m.is_none());
+            if inner == 0.0 {
+                disk_masses.push(receipt.gas_mass_kg);
+            }
+        }
+    }
+    assert!((disk_masses[1] / disk_masses[0] - 4.0).abs() < 1.0e-9);
+}
+
+#[test]
+fn g1_axisymmetric_annular_log_pressure_flux_and_heat_with_maxwell_slip() {
+    let inner: f64 = 0.005;
+    for slip in [false, true] {
+        for (left, right) in [
+            (120_000.0_f64, 100_000.0_f64),
+            (100_000.0_f64, 120_000.0_f64),
+        ] {
+            let mut heat_errors = Vec::new();
+            for cells in [8, 32] {
+                let mut input = fixture(cells);
+                if slip {
+                    input.slip_policy = SlipPolicy::MaxwellFirstOrder {
+                        source_id: "synthetic-radial-maxwell-v1".into(),
+                        tangential_momentum_accommodation: 0.8,
+                    };
+                }
+                input.boundary = GasFilmBoundaryTopology::Open {
+                    left_absolute_pressure_pa: right,
+                    right_absolute_pressure_pa: right,
+                };
+                let mut state = solve_isothermal_axisymmetric_gas_film_1d(&input, inner, None)
+                    .unwrap()
+                    .checkpoint;
+                input.boundary = GasFilmBoundaryTopology::Open {
+                    left_absolute_pressure_pa: left,
+                    right_absolute_pressure_pa: right,
+                };
+                let h = input.grid.gap_m[0];
+                let mu = input.gas.dynamic_viscosity_pa_s;
+                let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+                let shift = if slip {
+                    6.0 * 1.5
+                        * input.applicability.mean_free_path_m
+                        * input.initial_absolute_pressure_pa
+                        / h
+                } else {
+                    0.0
+                };
+                let log_span = ((inner + input.grid.length_m) / inner).ln();
+                // Exact steady continuum potential: (p+6*b*p/h)^2 is affine
+                // in ln(r), including pressure-dependent Maxwell slip.
+                state.active_absolute_pressure_pa = (0..cells)
+                    .map(|cell| {
+                        let radius =
+                            inner + (cell as f64 + 0.5) * input.grid.length_m / cells as f64;
+                        let x = (radius / inner).ln() / log_span;
+                        ((left + shift).powi(2)
+                            + ((right + shift).powi(2) - (left + shift).powi(2)) * x)
+                            .sqrt()
+                            - shift
+                    })
+                    .collect();
+                let expected_pressure = state.active_absolute_pressure_pa.clone();
+                let step =
+                    solve_isothermal_axisymmetric_gas_film_1d(&input, inner, Some(&state)).unwrap();
+                let flow = std::f64::consts::PI
+                    * h.powi(3)
+                    * (left - right)
+                    * (left + right + 2.0 * shift)
+                    / (12.0 * mu * rt * log_span);
+                let receipt = &step.receipt;
+                assert!(
+                    (receipt.outer_boundary_outward_mass_flow_kg_per_s / flow - 1.0).abs()
+                        < 1.0e-10
+                );
+                assert!(
+                    (-receipt.inner_boundary_outward_mass_flow_kg_per_s / flow - 1.0).abs()
+                        < 1.0e-10
+                );
+                for (actual, expected) in step
+                    .checkpoint
+                    .active_absolute_pressure_pa
+                    .iter()
+                    .zip(expected_pressure)
+                {
+                    assert!((actual / expected - 1.0).abs() < 1.0e-12);
+                }
+                assert!(
+                    receipt
+                        .gas_on_wall_radial_traction_pa
+                        .iter()
+                        .all(|value| value.unwrap() * (left - right) > 0.0)
+                );
+                assert!(
+                    (receipt.pressure_gradient_power_to_gas_w / receipt.viscous_heat_w - 1.0).abs()
+                        < 1.0e-12
+                );
+                assert_eq!(receipt.normal_gap_power_to_gas_w, 0.0);
+                assert!(receipt.mass_closure_residual_kg_per_s.abs() < 1.0e-14);
+                assert_eq!(
+                    receipt.outer_boundary_outward_enthalpy_power_w,
+                    receipt.outer_boundary_outward_mass_flow_kg_per_s
+                        * input.gas.declared_specific_enthalpy_j_kg
+                );
+                if slip {
+                    assert!(receipt.wall_slip_dissipation_w > 0.0);
+                    assert!(receipt.wall_slip_dissipation_w < receipt.viscous_heat_w);
+                } else {
+                    assert_eq!(receipt.wall_slip_dissipation_w, 0.0);
+                }
+                let exact_heat = flow * rt * (left / right).ln();
+                heat_errors.push((receipt.viscous_heat_w / exact_heat - 1.0).abs());
+            }
+            assert!(
+                heat_errors[1] < 1.0e-4 && heat_errors[1] < heat_errors[0] / 8.0,
+                "{heat_errors:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn g1_open_rim_disk_squeeze_and_expansion_refine_to_compressible_reynolds_solution() {
+    for central_gauge_pressure in [1_000.0, -1_000.0] {
+        let mut pressure_errors = Vec::new();
+        let mut load_errors = Vec::new();
+        for cells in [8, 16, 32] {
+            let mut input = fixture(cells);
+            input.timestep_s = 2.0e-3;
+            input.budget.maximum_iterations = 30_000;
+            input.budget.mass_residual_tolerance_kg_m2_s = 1.0e-11;
+            let ambient = input.initial_absolute_pressure_pa;
+            input.boundary = GasFilmBoundaryTopology::MixedEnds {
+                left_absolute_pressure_pa: None,
+                right_absolute_pressure_pa: Some(ambient),
+            };
+            let mut old = solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, None)
+                .unwrap()
+                .checkpoint;
+            let radius = input.grid.length_m;
+            let h = input.grid.gap_m[0];
+            let mu = input.gas.dynamic_viscosity_pa_s;
+            let c = central_gauge_pressure / radius.powi(2);
+            let mut rates = Vec::new();
+            // Manufacture a backward-Euler endpoint from the CONTINUUM radial
+            // equation, without using any numerical face flux. For p=pa+C(R²-r²),
+            // (1/r)d(r*p*p_r)/dr = -4*C*p+4*C²*r². Holding p across the
+            // step therefore requires h_dot=-h³*C/(3*mu)*(1-C*r²/p).
+            for cell in 0..cells {
+                let r = (cell as f64 + 0.5) * radius / cells as f64;
+                let p = ambient + c * (radius.powi(2) - r.powi(2));
+                let rate = -h.powi(3) * c / (3.0 * mu) * (1.0 - c * r.powi(2) / p);
+                old.active_absolute_pressure_pa[cell] = p;
+                old.active_gap_m[cell] = h - rate * input.timestep_s;
+                rates.push(rate);
+            }
+            input.wall_motion.gap_rate_profile_m_per_s = Some(rates);
+            let step = solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, Some(&old)).unwrap();
+            let max_error = step
+                .checkpoint
+                .active_absolute_pressure_pa
+                .iter()
+                .zip(&old.active_absolute_pressure_pa)
+                .map(|(actual, expected)| (actual - expected).abs())
+                .fold(0.0_f64, f64::max);
+            pressure_errors.push(max_error / central_gauge_pressure.abs());
+            let exact_load = 0.5 * std::f64::consts::PI * central_gauge_pressure * radius.powi(2);
+            load_errors.push((step.receipt.gauge_pressure_load_n / exact_load - 1.0).abs());
+            let receipt = &step.receipt;
+            assert_eq!(receipt.inner_boundary_outward_mass_flow_kg_per_s, 0.0);
+            assert!(
+                receipt.outer_boundary_outward_mass_flow_kg_per_s * central_gauge_pressure > 0.0
+            );
+            assert!(receipt.normal_gap_power_to_gas_w * central_gauge_pressure > 0.0);
+            assert!(receipt.mass_closure_residual_kg_per_s.abs() < 1.0e-14);
+            assert!(receipt.viscous_heat_w > 0.0);
+            assert!(
+                (receipt.pressure_gradient_power_to_gas_w / receipt.viscous_heat_w - 1.0).abs()
+                    < 1.0e-12
+            );
+        }
+        assert!(pressure_errors[2] < 0.005, "{pressure_errors:?}");
+        assert!(
+            pressure_errors
+                .windows(2)
+                .all(|pair| pair[1] < pair[0] / 2.5),
+            "{pressure_errors:?}"
+        );
+        assert!(load_errors[2] < 0.002, "{load_errors:?}");
+        assert!(
+            load_errors.windows(2).all(|pair| pair[1] < pair[0] / 3.0),
+            "{load_errors:?}"
+        );
+    }
+}
+
+#[test]
+fn g0_axisymmetric_restart_binds_geometry_and_refuses_unsupported_physics() {
+    let mut input = fixture(8);
+    input.boundary = GasFilmBoundaryTopology::MixedEnds {
+        left_absolute_pressure_pa: None,
+        right_absolute_pressure_pa: Some(input.initial_absolute_pressure_pa),
+    };
+    let first = solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, None).unwrap();
+    for inner in [0.001, -1.0, f64::NAN] {
+        assert!(
+            solve_isothermal_axisymmetric_gas_film_1d(&input, inner, Some(&first.checkpoint))
+                .is_err()
+        );
+    }
+    assert!(matches!(
+        solve_isothermal_gas_film_1d(&input, Some(&first.checkpoint)),
+        Err(GasFilmError::CheckpointMismatch {
+            field: "configuration_fingerprint"
+        })
+    ));
+    let cartesian = solve_isothermal_gas_film_1d(&input, None).unwrap();
+    assert!(
+        solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, Some(&cartesian.checkpoint))
+            .is_err()
+    );
+    input.wall_motion.gap_rate_profile_m_per_s = Some(
+        (0..8)
+            .map(|cell| -1.0e-5 * (1.0 - (cell as f64 + 0.5).powi(2) / 64.0))
+            .collect(),
+    );
+    for (gap, rate) in input
+        .grid
+        .gap_m
+        .iter_mut()
+        .zip(input.wall_motion.gap_rate_profile_m_per_s.as_ref().unwrap())
+    {
+        *gap += rate * input.timestep_s;
+    }
+    let evolved =
+        solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, Some(&first.checkpoint)).unwrap();
+    assert_eq!(
+        evolved,
+        solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, Some(&first.checkpoint)).unwrap()
+    );
+    assert_eq!(evolved.checkpoint.active_gap_m, input.grid.gap_m);
+    input.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: input.initial_absolute_pressure_pa,
+        right_absolute_pressure_pa: input.initial_absolute_pressure_pa,
+    };
+    assert_eq!(
+        solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, None),
+        Err(GasFilmError::Unavailable {
+            reason: "axisymmetric-axis-must-be-sealed"
+        })
+    );
+    input.boundary = GasFilmBoundaryTopology::Sealed;
+    input.wall_motion.upper_tangential_velocity_m_per_s = 0.1;
+    assert_eq!(
+        solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, None),
+        Err(GasFilmError::Unavailable {
+            reason: "axisymmetric-in-plane-wall-motion"
+        })
+    );
+    assert_eq!(
+        solve_isothermal_axisymmetric_gas_film_1d(&capillary_fixture(8, 101_325.0, 1.0), 0.0, None),
+        Err(GasFilmError::Unavailable {
+            reason: "axisymmetric-per-width-capillary-connection"
+        })
+    );
+    assert_eq!(
+        solve_isothermal_axisymmetric_gas_film_1d(
+            &reservoir_fixture(8, 101_325.0, 1.0e-7),
+            0.0,
+            None
+        ),
+        Err(GasFilmError::Unavailable {
+            reason: "axisymmetric-per-width-capillary-connection"
+        })
+    );
+    input = fixture(8);
+    input.boundary = GasFilmBoundaryTopology::MixedEnds {
+        left_absolute_pressure_pa: None,
+        right_absolute_pressure_pa: Some(1_000.0),
+    };
+    assert_eq!(
+        solve_isothermal_axisymmetric_gas_film_1d(&input, 0.0, None),
+        Err(GasFilmError::Unavailable {
+            reason: "rarefied-knudsen-outside-continuum-envelope"
+        })
+    );
+}
+
+#[test]
+fn g1_mixed_cartesian_ends_retain_wall_backpressure_and_mechanical_balance() {
+    for left_open in [false, true] {
+        let mut input = maxwell_fixture(8, 0.8);
+        input.boundary = GasFilmBoundaryTopology::MixedEnds {
+            left_absolute_pressure_pa: left_open.then_some(input.initial_absolute_pressure_pa),
+            right_absolute_pressure_pa: (!left_open).then_some(input.initial_absolute_pressure_pa),
+        };
+        input.wall_motion.lower_tangential_velocity_m_per_s = 0.1;
+        input.wall_motion.upper_tangential_velocity_m_per_s = 0.1;
+        let step = solve_isothermal_gas_film_1d(&input, None).unwrap();
+        if left_open {
+            assert_eq!(
+                step.receipt.right_boundary_outward_mass_flux_kg_per_m_s,
+                0.0
+            );
+            assert!(step.receipt.left_boundary_outward_mass_flux_kg_per_m_s < 0.0);
+        } else {
+            assert_eq!(step.receipt.left_boundary_outward_mass_flux_kg_per_m_s, 0.0);
+            assert!(step.receipt.right_boundary_outward_mass_flux_kg_per_m_s > 0.0);
+        }
+        assert!(step.receipt.mass_closure_residual_kg_per_m_s.abs() < 1.0e-11);
+        assert_mechanical_balance(&input, &step);
+    }
+}
 
 fn capillary_fixture(cells: usize, bath_pressure: f64, count_per_m: f64) -> GasFilmInput {
     let mut input = fixture(cells);
