@@ -169,6 +169,28 @@ equates work loss to integrated `eta*A*|u'|²/2 + kappa*T0*A*|theta'|²/2`, with
 transverse modes, varying area, interfaces and nonlinear evolution remain
 outside this uniform-medium model.
 
+`BulkThermalCylinder::from_regions` and its controlled variant extend the same
+full four-field owner to authored `BulkThermalRegion` segments at one constant
+area, frequency and exact common equilibrium temperature. Each segment retains
+its original independent shear/bulk viscosity, conductivity and thermodynamic
+derivatives. Ideal interior contacts preserve traction, volume flow, `T'` and
+heat power; thermal ends are imposed only after the entire chain is composed.
+Lossless two-channel reference junctions and the original Redheffer owner
+change numerical power coordinates without averaging physical coefficients.
+Both endpoint pressure maps retain their original material references, so
+thermodynamic pressure may jump while total traction remains continuous.
+
+The region cap, numerical condition limit and cancellation remain explicit.
+Mixed temperatures, invalid geometry and unresolved solves refuse without a
+partial chain. Mechanical/phase compatibility of the frozen regions belongs to
+the caller; thermal contact resistance, capillarity, mixing, phase transfer and
+evolving interfaces are not inferred. Independent native tests close regional
+NSF fields and integrated positive heat, retain reference/split/regrouping
+invariance through opaque spans, and recover the closed adiabatic static
+compliance `sum(beta_T V) - T0*sum(alpha V)^2/sum(rho Cp V)`. Opposite-expansion
+regions distinguish internal heat continuity from artificial local adiabatic
+resets, which give the wrong compliance even at zero frequency.
+
 ### Regional shared-fluid pressure and flow
 
 `fluid::regional::{duct_chain,input_impedance_load}` and their `_with_loss`

@@ -1,13 +1,14 @@
-//! Full homogeneous one-dimensional Navier--Stokes--Fourier propagation.
+//! Full one-dimensional Navier--Stokes--Fourier propagation at constant area.
 //!
 //! Both acoustic and thermal diffusion modes are retained, in exp(-i omega t).
 //! The conjugate ports are total compressive traction/volume flow and
-//! normalized temperature theta=T'/T0 paired with heat power. Their rightward energy flux is
-//! `Re(t conj(U) + theta conj(Q))/2`. Thermal end conditions therefore remain
+//! normalized temperature theta=T'/T0 paired with heat power. Their rightward
+//! energy flux is `Re(t conj(U) + theta conj(Q))/2`. Thermal end conditions remain
 //! separate from mechanical loads. No lateral wall layers, transverse modes,
-//! material interfaces, nonlinear thermodynamics or molecular relaxation are
-//! inferred. Radius supplies area only; this is a uniform planar/slip-wall
-//! medium, not a no-slip viscothermal bore model.
+//! nonlinear thermodynamics or molecular relaxation are inferred. Authored
+//! homogeneous regions may share ideal mechanical/thermal contacts through
+//! [`BulkThermalCylinder::from_regions`]. Radius supplies area only: this is
+//! planar/slip-wall propagation, not a no-slip viscothermal bore model.
 
 use super::super::{bad, wave_from_state};
 use super::BulkTractionResponse;
@@ -16,6 +17,9 @@ use crate::{DuctError, Segment};
 use fs_la::eigen_complex::lu_complex;
 use fs_material::fluid_acoustics::thermoviscous::absorption::BulkThermoviscousEquilibrium;
 use fs_math::{c64::C64, det};
+
+mod regional;
+pub use regional::BulkThermalRegion;
 
 /// Homogeneous thermal condition at one axial end, independent of its load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,14 +75,37 @@ impl std::error::Error for BulkThermalError {
 /// The private mechanical two-port always carries traction, never pressure.
 #[derive(Clone, Debug)]
 pub struct BulkThermalCylinder {
-    scattering: [C64; 16],
-    references: [f64; 2],
+    network: ThermalNetwork,
     port: TwoPort,
     thermal_drive: [C64; 4],
     ends: [ThermalEndCondition; 2],
+}
+
+// A complete operator BEFORE thermal termination. Different regional endpoints
+// retain their own constitutive pressure maps and the references used to scale
+// those maps; a numerical wave-reference change never changes the material.
+#[derive(Clone, Debug)]
+struct ThermalNetwork {
+    scattering: [C64; 16],
+    references: [f64; 2],
     temperature_k: f64,
-    pressure_coefficients: [C64; 2],
+    endpoints: [PressureEndpoint; 2],
     condition: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PressureEndpoint {
+    references: [f64; 2],
+    coefficients: [C64; 2],
+}
+impl PressureEndpoint {
+    fn pressure(self, traction: C64, theta: C64) -> C64 {
+        let rm = det::sqrt(self.references[0]);
+        let rt = det::sqrt(self.references[1]);
+        (self.coefficients[0] * traction.scale(1.0 / rm)
+            + self.coefficients[1] * theta.scale(1.0 / rt))
+        .scale(rm)
+    }
 }
 
 /// Endpoint response to unit inlet volume flow. Heat is positive rightward at
@@ -96,18 +123,12 @@ pub struct BulkThermalResponse {
     pub outlet_heat_power_over_inlet_flow_pa: C64,
 }
 
-impl BulkThermalCylinder {
-    /// Prepare from one checked equilibrium, in SI, at positive frequency.
-    /// A power-scaled short-span generator is exponentiated once. At most 48
-    /// native Redheffer doublings retain both modes without a growing
-    /// full-length transfer matrix. `maximum_condition` bounds every local
-    /// inverse and feedback cancellation; nonfinite or unresolved work refuses.
-    pub fn new(
+impl ThermalNetwork {
+    fn new(
         material: &BulkThermoviscousEquilibrium,
         radius_m: f64,
         length_m: f64,
         omega_rad_s: f64,
-        ends: [ThermalEndCondition; 2],
         maximum_condition: f64,
     ) -> Result<Self, BulkThermalError> {
         Segment::Cylinder {
@@ -185,20 +206,58 @@ impl BulkThermalCylinder {
             scattering.copy_from_slice(&next);
             condition = condition.max(estimate);
         }
-        let (port, thermal_drive, terminal_condition) =
-            terminate_thermal(&scattering, references[0], ends, maximum_condition)?;
-        condition = condition.max(terminal_condition);
+        let endpoint = PressureEndpoint {
+            references,
+            // p/sqrt(Rm) = (y0-i*x*coupling*y1)/d. Divide BEFORE
+            // multiplying so large viscosity cannot erase a small pressure.
+            coefficients: [d.recip(), (C64::new(0.0, -x) / d).scale(coupling)],
+        };
         Ok(Self {
             scattering,
             references,
+            temperature_k: material.temperature_k(),
+            endpoints: [endpoint; 2],
+            condition,
+        })
+    }
+}
+
+impl BulkThermalCylinder {
+    /// Prepare from one checked equilibrium, in SI, at positive frequency.
+    /// A power-scaled short-span generator is exponentiated once. At most 48
+    /// native Redheffer doublings retain both modes without a growing
+    /// full-length transfer matrix. `maximum_condition` bounds every local
+    /// inverse and feedback cancellation; nonfinite or unresolved work refuses.
+    pub fn new(
+        material: &BulkThermoviscousEquilibrium,
+        radius_m: f64,
+        length_m: f64,
+        omega_rad_s: f64,
+        ends: [ThermalEndCondition; 2],
+        maximum_condition: f64,
+    ) -> Result<Self, BulkThermalError> {
+        let network =
+            ThermalNetwork::new(material, radius_m, length_m, omega_rad_s, maximum_condition)?;
+        Ok(Self::from_network(network, ends, maximum_condition)?)
+    }
+
+    fn from_network(
+        mut network: ThermalNetwork,
+        ends: [ThermalEndCondition; 2],
+        maximum_condition: f64,
+    ) -> Result<Self, DuctError> {
+        let (port, thermal_drive, terminal_condition) = terminate_thermal(
+            &network.scattering,
+            network.references[0],
+            ends,
+            maximum_condition,
+        )?;
+        network.condition = network.condition.max(terminal_condition);
+        Ok(Self {
+            network,
             port,
             thermal_drive,
             ends,
-            temperature_k: material.temperature_k(),
-            // p/sqrt(Rm) = (y0-i*x*coupling*y1)/d. Divide BEFORE
-            // multiplying so large viscosity cannot erase a small pressure.
-            pressure_coefficients: [d.recip(), (C64::new(0.0, -x) / d).scale(coupling)],
-            condition,
         })
     }
 
@@ -206,13 +265,13 @@ impl BulkThermalCylinder {
     /// right mechanical, right thermal]. At either end e=sqrt(R)(a+b) and
     /// inward j=(a-b)/sqrt(R); the rightward flows reverse at the right end.
     pub const fn scattering(&self) -> [C64; 16] {
-        self.scattering
+        self.network.scattering
     }
 
     /// Positive real references [traction/volume flow (Pa s/m³), theta/heat
     /// power (1/W)]. Thermal effort is T'/T0, not temperature in kelvin.
     pub const fn references(&self) -> [f64; 2] {
-        self.references
+        self.network.references
     }
 
     /// Mechanical traction scattering after the declared thermal ends close.
@@ -229,12 +288,12 @@ impl BulkThermalCylinder {
         traction_load_pa_s_m3: Option<C64>,
         options: ComposeOptions,
     ) -> Result<BulkThermalResponse, DuctError> {
-        if self.condition > options.maximum_condition {
+        if self.network.condition > options.maximum_condition {
             return Err(DuctError::Singular);
         }
         let response = compose_chain(&[self.port], traction_load_pa_s_m3, options)?;
-        let rm = det::sqrt(self.references[0]);
-        let rt = det::sqrt(self.references[1]);
+        let rm = det::sqrt(self.network.references[0]);
+        let rt = det::sqrt(self.network.references[1]);
         let mechanical_incident = [
             (response.z_in.scale(1.0 / rm) + C64::from_re(rm)).scale(0.5),
             (response.p_out_over_u_in.scale(1.0 / rm) - response.u_out_over_u_in.scale(rm))
@@ -249,16 +308,11 @@ impl BulkThermalCylinder {
             theta[i] = incoming.scale((1.0 + r) * rt);
             heat[i] = incoming.scale((1.0 - r) / rt * if i == 0 { 1.0 } else { -1.0 });
         }
-        let pressure = |traction: C64, theta: C64| {
-            (self.pressure_coefficients[0] * traction.scale(1.0 / rm)
-                + self.pressure_coefficients[1] * theta.scale(1.0 / rt))
-            .scale(rm)
-        };
         let pressures = [
-            pressure(response.z_in, theta[0]),
-            pressure(response.p_out_over_u_in, theta[1]),
+            self.network.endpoints[0].pressure(response.z_in, theta[0]),
+            self.network.endpoints[1].pressure(response.p_out_over_u_in, theta[1]),
         ];
-        let temperature = theta.map(|v| v.scale(self.temperature_k));
+        let temperature = theta.map(|v| v.scale(self.network.temperature_k));
         if pressures
             .iter()
             .chain(&temperature)
@@ -274,7 +328,7 @@ impl BulkThermalCylinder {
                 outlet_traction_over_inlet_flow_pa_s_m3: response.p_out_over_u_in,
                 outlet_pressure_over_inlet_flow_pa_s_m3: pressures[1],
                 outlet_over_inlet_flow: response.u_out_over_u_in,
-                condition_estimate: response.condition_estimate.max(self.condition),
+                condition_estimate: response.condition_estimate.max(self.network.condition),
             },
             inlet_temperature_over_inlet_flow_k_s_m3: temperature[0],
             outlet_temperature_over_inlet_flow_k_s_m3: temperature[1],
@@ -644,13 +698,13 @@ mod tests {
             for i in 0..4 {
                 assert!(
                     (0..4)
-                        .map(|j| full.scattering[4 * j + i].norm_sq())
+                        .map(|j| full.scattering()[4 * j + i].norm_sq())
                         .sum::<f64>()
                         <= 1.0 + 2e-11
                 );
                 for j in 0..4 {
                     assert!(
-                        (full.scattering[4 * i + j] - full.scattering[4 * j + i]).abs() < 2e-12
+                        (full.scattering()[4 * i + j] - full.scattering()[4 * j + i]).abs() < 2e-12
                     );
                 }
             }

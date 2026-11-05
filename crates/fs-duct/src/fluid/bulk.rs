@@ -5,8 +5,8 @@
 //! reconstructed separately. [`BulkTractionCylinder`] keeps only the two
 //! traveling acoustic waves and their mechanical power. [`thermal`] also
 //! retains thermal diffusion, physical temperature/heat ports and thermal end
-//! conditions. Neither model adds no-slip wall loss, transverse modes, abrupt
-//! material interfaces or radius changes.
+//! conditions, with ideal thermal/mechanical contacts between authored regions.
+//! Neither model adds no-slip wall loss, transverse modes or radius changes.
 
 use super::{FluidDuctError, bad, wave_from_state};
 use crate::compose::{ComposeOptions, TwoPort, compose_chain};
@@ -16,8 +16,8 @@ use fs_material::fluid_acoustics::thermoviscous::absorption::{
 };
 use fs_math::c64::C64;
 
-/// Full homogeneous acoustic AND thermal diffusion propagation, with physical
-/// temperature/heat ports and independently imposed thermal end conditions.
+/// Full acoustic AND thermal diffusion propagation, with physical temperature/
+/// heat ports, coherent regional contacts and independent thermal end conditions.
 pub mod thermal;
 
 /// Prepared acoustic-mode cylinder. The underlying pressure-named two-port
