@@ -1654,6 +1654,43 @@ motion, rotation covariance, tensor-norm refinement, physical observation clocks
 and work/cancellation refusals. A balanced-half-decay unit regression covers
 representable force gradients after raw evanescent exponential underflow.
 
+## Full-wave compact-source arrays and source coherence
+
+`curle3d::refraction::full_wave::array::PreparedFullWaveCompactSourceObserver`
+prepares the original volume and force transfers for multiple physical source
+locations behind one stationary fluid plane. Each source retains the native
+`CompactSourcePhasor` [Q,Fx,Fy,Fz] and its sixteen Cartesian pressure/velocity
+coefficients. Sources lie strictly in the incident fluid, the observer strictly
+in the receiving fluid. All propagation phase is already in the transfer;
+there is no invented single ray delay for the full-wave spectrum.
+
+`FullWaveCompactSourceLimits` bounds source allocation and total integrand
+evaluations across every Q and F preparation, in addition to each kernel's
+own numerical and work limits. Exact equal-speed kernels consume no spectral
+evaluations. Exhaustion, invalid input or cancellation publishes no partial
+array. An empty array is validated silence. Per-source diagnostics keep Q and
+F units distinct: multiply monopole errors by |Q|, pressure-vector and
+velocity-tensor errors by ||F||, and sum across sources for an absolute field
+estimate. Relative source tolerances do not guarantee relative array error at
+an interference null. All original numerical and physical scope limits remain.
+
+Application reuses the cached 4-by-4 matrices in O(N), without allocation,
+quadrature or transcendental functions, with fixed-order DD sums. Coherent
+evaluation combines all source and Q/F amplitudes before intensity; native
+`HarmonicFieldLine<3>` output feeds the existing finite-window observer.
+Explicit independent sources and bounded low-rank coherence factors reuse
+the original `StatisticsSum` owner for pressure power, full velocity covariance,
+and signed active/reactive intensity. Unknown phase does not imply independence.
+Factors retain peak-source units; one-sided source PSD in a bin of width df
+requires factors of 2 df S. Results are bin/line moments, not PSD/Hz and not
+an assertion of finite-window cross-frequency incoherence.
+
+`tests/full_wave_refraction_array.rs` covers homogeneous density-jump reduction
+with mixed Q/F sources, actual unequal-speed kernels, coherent cancellation,
+independent versus factored source statistics, all p/u moments, native harmonic
+lines, per-source diagnostics, shared work exhaustion, empty arrays and input
+or cancellation refusals.
+
 ## Resolved volume-stress quadrupoles
 
 `curle3d::quadrupole::PreparedQuadrupoleObserver` propagates prescribed symmetric
