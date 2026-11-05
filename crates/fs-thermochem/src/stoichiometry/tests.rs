@@ -57,6 +57,8 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         GypsumPrecipitationWithHydratedLime,
         MalachiteAcidLeach,
         MalachiteCarbonicAcidLeach,
+        KaoliniteAcidLeach,
+        AluminumHydrolysisGibbsite,
         GoldCyanidation,
         GoldCyanidationDissolvedOxygen,
         OxygenDissolution,
@@ -507,6 +509,42 @@ fn carbonic_acid_endpoints_retain_distinct_species_and_water_balance() {
                 .any(|term| term.species == id("CO2(aq)"))
         );
     }
+}
+
+#[test]
+fn kaolinite_and_gibbsite_keep_the_silicic_water_and_two_aluminum_source_basis() {
+    let clay = MineralReaction::KaoliniteAcidLeach.build().unwrap();
+    let hydrolysis = MineralReaction::AluminumHydrolysisGibbsite.build().unwrap();
+    close(amount(&clay, 1.0, "H+(aq)"), 6.0);
+    close(amount(&clay, 1.0, "Al[3+](aq)"), 2.0);
+    close(amount(&clay, 1.0, "H4SiO4(aq)"), 2.0);
+    close(amount(&clay, 1.0, "H2O(l)"), 1.0);
+    close(amount(&hydrolysis, 1.0, "Al[3+](aq)"), 2.0);
+    close(amount(&hydrolysis, 1.0, "H2O(l)"), 6.0);
+    close(amount(&hydrolysis, 1.0, "H+(aq)"), 6.0);
+    close(amount(&hydrolysis, 1.0, "Al2O3.3H2O(s-gibbsite)"), 1.0);
+    // Eliminating the explicitly staged intermediates consumes five waters:
+    // kaolinite + 5 H2O -> one doubled gibbsite unit + 2 H4SiO4.
+    let mut net = std::collections::BTreeMap::new();
+    for term in clay.terms().iter().chain(hydrolysis.terms()) {
+        *net.entry(term.species.as_str()).or_insert(0_i128) += term.coefficient;
+    }
+    assert_eq!(net["H+(aq)"], 0);
+    assert_eq!(net["Al[3+](aq)"], 0);
+    assert_eq!(net["H2O(l)"], -5);
+    assert_eq!(net["H4SiO4(aq)"], 2);
+    assert_eq!(net["Al2O3.3H2O(s-gibbsite)"], 1);
+    let initial = complete_inventory(&hydrolysis, &[("Al[3+](aq)", 1.0), ("H2O(l)", 10.0)]);
+    assert!(
+        hydrolysis
+            .advance_inventory(&initial, Amount::new(1.0))
+            .is_err()
+    );
+    let accepted = hydrolysis
+        .advance_inventory(&initial, Amount::new(0.5))
+        .unwrap();
+    close(inventory_amount(&accepted, "H+(aq)"), 3.0);
+    close(inventory_amount(&accepted, "Al2O3.3H2O(s-gibbsite)"), 0.5);
 }
 
 #[test]

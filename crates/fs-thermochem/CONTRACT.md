@@ -2923,3 +2923,26 @@ The FeS sulfate endpoint's zero direct proton term is not a declaration of zero
 long-term acid generation. Source provenance, standard states, historical
 molar masses and unstated uncertainty are retained in
 `data/matdb/seed-v1/MINING_PYRRHOTITE.md` and its referenced packs.
+
+## Clay-gangue acid demand and staged aluminum hydrolysis
+
+`MineralReaction::{KaoliniteAcidLeach, AluminumHydrolysisGibbsite}` add conserved
+six-proton clay dissolution and the reverse acid-generation endpoint for selected
+crystalline gibbsite. Five matched NBS packs provide 23 point claims for kaolinite,
+free Al3+, the formal H4SiO4 aqueous component, doubled-unit gibbsite and CuO.
+The existing CuO acid-leach endpoint now has a compatible NBS source route.
+Required selectors retain the source's H2SiO3(aq)+H2O(l) component convention and
+its Al2O3·3H2O gibbsite formula unit; phase or formula-basis substitutions refuse.
+All claims stay at 298.15 K and 100000 Pa with unstated source uncertainty.
+
+`mineral_processing --clay-acid-inventory` uses the existing `ReactionNetwork`
+for three explicit stages: competing CuO/clay leaching from one finite acid
+stock, selected aluminum hydrolysis, then later CuO leaching. Every stage
+consumes only its initial inventory; later or simultaneous acid/aluminum
+production cannot fund an earlier consumption. Original source mass, atom,
+charge and standard enthalpy accounts remain visible. Extents are caller inputs,
+not predicted dissolution, precipitation kinetics, pH, stable phases or plant
+doses. Separate CLI modes resolve source formation-H and direct formation-G.
+`mining_clay_acid_sources` compiles all five new packs and checks all 23 facts,
+identity/domain refusals, three H/G sums, finite reactants and staged acid return.
+See `data/matdb/seed-v1/MINING_CLAY_ACID_DEMAND.md` for equations and commands.

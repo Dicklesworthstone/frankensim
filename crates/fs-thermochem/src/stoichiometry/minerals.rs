@@ -193,6 +193,18 @@
 //! constant does not establish commercial purity, dissolution completion,
 //! dissolution rate or a plant dose. Subsequent protonation and shared pH
 //! remain the coupled acid/base owner's responsibility.
+//! Kaolinite acid dissolution and gibbsite hydrolysis retain the equations in
+//! the USGS PHREEQC phase database:
+//! <https://wwwbrr.cr.usgs.gov/projects/GWC_coupled/phreeqc/html/final-90.html>.
+//! The matched NBS Table 29:Al gibbsite row is Al2O3.3H2O, equivalent to TWO
+//! Al(OH)3 units. Its six-proton hydrolysis equation and molar quantities keep
+//! that full source basis. NBS Table 24:Si defines H4SiO4(ao) as the formal
+//! H2SiO3(ao) + H2O(l) component; the extra water stays in every balance.
+//! The separate NBS CuO(cr) evaluation permits same-reference acid competition
+//! with kaolinite. Dissolved extents and the selected gibbsite precipitation
+//! extent are explicit inputs; no room-temperature clay dissolution, pH,
+//! hydrolysis completion, stable phase or leach recovery is inferred.
+//! Acid released by hydrolysis can supply only a subsequent reaction stage.
 
 use super::{ConservedReaction, ReactionBalanceError};
 use crate::{
@@ -368,6 +380,12 @@ pub enum MineralReaction {
     /// CuO(s) + 2 H+(aq) -> Cu2+(aq) + H2O(l).
     /// Tenorite acid-leaching endpoint; two proton equivalents per copper.
     CupricOxideAcidLeach,
+    /// Al2Si2O5(OH)4(kaolinite) + 6 H+ -> 2 Al3+ + 2 H4SiO4 + H2O.
+    /// NBS H4SiO4 retains the H2SiO3(aq) + H2O(l) component convention.
+    KaoliniteAcidLeach,
+    /// 2 Al3+ + 6 H2O -> Al2O3.3H2O(gibbsite) + 6 H+.
+    /// Extent is per doubled NBS gibbsite formula unit, not per Al(OH)3.
+    AluminumHydrolysisGibbsite,
     /// Cu2O(s) + CO(g) -> 2 Cu(s) + CO2(g).
     CuprousOxideCarbonMonoxideReduction,
     /// 4 FeS2(s) + 11 O2(g) -> 2 Fe2O3(s) + 8 SO2(g).
@@ -592,6 +610,27 @@ impl MineralReaction {
                     ("Cu[2+](aq)", &[1, 0, 0, 0], 2, 2),
                     ("H2CO3(aq)", &[0, 1, 2, 3], 0, 1),
                     ("H2O(l)", &[0, 0, 2, 1], 0, 2),
+                ],
+            ),
+            Self::KaoliniteAcidLeach => (
+                "kaolinite-acid-leach",
+                &["Al", "Si", "O", "H"],
+                &[
+                    ("Al2Si2O5(OH)4(s-kaolinite)", &[2, 2, 9, 4], 0, -1),
+                    ("H+(aq)", &[0, 0, 0, 1], 1, -6),
+                    ("Al[3+](aq)", &[1, 0, 0, 0], 3, 2),
+                    ("H4SiO4(aq)", &[0, 1, 4, 4], 0, 2),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, 1),
+                ],
+            ),
+            Self::AluminumHydrolysisGibbsite => (
+                "aluminum-hydrolysis-gibbsite",
+                &["Al", "O", "H"],
+                &[
+                    ("Al[3+](aq)", &[1, 0, 0], 3, -2),
+                    ("H2O(l)", &[0, 1, 2], 0, -6),
+                    ("Al2O3.3H2O(s-gibbsite)", &[2, 6, 6], 0, 1),
+                    ("H+(aq)", &[0, 0, 1], 1, 6),
                 ],
             ),
             Self::GoldCyanidation => (

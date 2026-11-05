@@ -29,6 +29,9 @@
 //! sources for slaking, acid neutralization and the reverse hydrolysis endpoint.
 //! Pyrrhotite modes keep NBS alpha FeS and Fe7S8 distinct, with either finite
 //! dissolved-oxygen oxidation to sulfate or ferric attack to orthorhombic S.
+//! Clay modes retain the NBS silicic-acid component and doubled gibbsite unit.
+//! `--clay-acid-inventory` accounts for shared CuO/kaolinite acid demand,
+//! followed by declared aluminum hydrolysis and later copper leaching.
 //! `--help` lists every supported reaction and required pack order.
 //! Prefix a source-pack invocation with `--equilibrium` to also resolve standard
 //! entropy and derive Gibbs energy and log equilibrium constants from enthalpy
@@ -63,6 +66,9 @@ use fs_thermochem::{
     },
 };
 
+#[path = "mineral_processing/clay.rs"]
+mod clay;
+
 const REFERENCE: &str = "source-elemental-reference-janaf";
 const USGS_REFERENCE: &str = "source-elemental-reference-usgs-b2131";
 const NBS_REFERENCE: &str = "source-elemental-reference-nbs1989";
@@ -76,7 +82,7 @@ struct ReactionCase {
     equation: &'static str,
 }
 
-const REACTIONS: [&str; 54] = [
+const REACTIONS: [&str; 57] = [
     "lime-hydration",
     "hydrated-lime-neutralization",
     "lime-hydration-nbs1989",
@@ -87,6 +93,9 @@ const REACTIONS: [&str; 54] = [
     "cuprous-oxide-oxidation",
     "cupric-oxide-reduction",
     "cupric-oxide-acid-leach",
+    "cupric-oxide-acid-leach-nbs1989",
+    "kaolinite-acid-leach",
+    "aluminum-hydrolysis-gibbsite",
     "cuprous-oxide-reduction",
     "copper-electrowinning",
     "sphalerite-roasting",
@@ -1184,7 +1193,14 @@ fn case(name: &str) -> Result<ReactionCase, Box<dyn Error>> {
             ],
             equation: "Cu5FeS4(bornite) + 12 Fe[3+](aq) -> 5 Cu[2+](aq) + 13 Fe[2+](aq) + 4 S(orthorhombic)",
         },
-        _ => return Err(format!("unknown reaction {name:?}; use --help for source order").into()),
+        _ => match clay::case(name) {
+            Some(selected) => selected,
+            None => {
+                return Err(
+                    format!("unknown reaction {name:?}; use --help for source order").into(),
+                );
+            }
+        },
     })
 }
 
@@ -1250,6 +1266,7 @@ fn reference_point(
             | "hydrogen-peroxide-aqueous-nbs1989"
             | "arsenic-acid-aqueous-nbs1989"
             | "arsenous-acid-aqueous-nbs1989"
+            | "silicic-acid-component-aqueous-nbs1989"
     ) {
         &["source-aqueous-unit-activity-infinite-dilution"]
     } else if phase_axis == "source-phase-aqueous" {
@@ -1368,7 +1385,7 @@ fn reference_point(
             ratio,
         )?;
     }
-    Ok(point)
+    clay::qualify_point(point, pack_id)
 }
 
 fn malachite_inventory(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -1487,6 +1504,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.as_slice() == ["--help"] {
         println!("{USAGE}");
+        println!("{}", clay::USAGE);
         println!("Default without --reaction: lime-hydration. Source pack order:");
         for name in REACTIONS {
             let selected = case(name)?;
@@ -1516,6 +1534,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             "For copper-electrowinning and zinc-electrowinning, --gibbs also reports E = -Delta G/(nF), with two electrons per metal atom and four per written equation. The signed reversible potential is not an operating voltage or an efficiency-scaled voltage."
         );
         return Ok(());
+    }
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--clay-acid-inventory")
+    {
+        return clay::run(&args);
     }
     if args
         .first()

@@ -6,6 +6,13 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+Five matched NBS source packs add **kaolinite, free Al3+, a formal silicic-acid
+component, gibbsite and CuO**. Conserved clay dissolution and aluminum hydrolysis
+now run with copper leaching through a finite, shared-acid inventory. Required
+phase and formula-unit selectors preserve source identity; prescribed extents
+remain separate from kinetics and pH. See [clay acid demand and staged aluminum
+precipitation](MINING_CLAY_ACID_DEMAND.md).
+
 The existing selection-breakage population balance now supports bounded
 **grind-to-spec inversion** from an actual feed PSD. It retains original source-bin
 targets, forward solutions, explicit work budgets and nominal time brackets.
