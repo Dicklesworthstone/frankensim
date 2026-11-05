@@ -210,21 +210,53 @@ impl ReactingEuler3d {
             &mut cancelled,
         )?;
         let boundary_trial = allocated(flow.boundary_impulses.len(), 0.0)?;
-        poll(&mut cancelled)?;
-        Ok(Self {
+        let result = Self {
             accepted: flow,
             trial,
             reactor,
             boundary_impulses,
             boundary_trial,
             last_step: None,
-        })
+        };
+        if result.workspace_bytes() > maximum_workspace_bytes
+            || result.workspace_bytes() > super::MAX_MIXTURE_WORKSPACE_BYTES
+        {
+            return Err(ReactiveError::Invalid("reacting spatial workspace budget"));
+        }
+        poll(&mut cancelled)?;
+        Ok(result)
     }
 
     /// Accepted physical field and clock. Its transport report describes only
     /// the middle wave stage; this owner's report covers the complete interval.
     pub const fn flow(&self) -> &MixtureEuler3d {
         &self.accepted
+    }
+
+    /// Replace prepared inflow profiles on both fields as one control change.
+    ///
+    /// Prepare the spatial profiles before constructing this reacting owner.
+    /// The provider is sampled once per face; original-source admission and
+    /// copying into both prepared payloads finish before either publishes.
+    /// The complete chemistry/transport split holds these traces fixed across
+    /// all retries. This does not advance chemistry, the field, or a gust source.
+    pub fn update_reservoir_profiles(
+        &mut self,
+        sample: impl FnMut(
+            BoundarySide,
+            usize,
+            [f64; 3],
+            &mut [f64],
+        ) -> Result<super::ReservoirFaceState, super::Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(), ReactiveError> {
+        super::reservoir_profiles::update_pair(
+            &mut self.accepted,
+            &mut self.trial,
+            sample,
+            cancelled,
+        )?;
+        Ok(())
     }
 
     /// Source-owned finite-rate mechanism retained without reconstruction.

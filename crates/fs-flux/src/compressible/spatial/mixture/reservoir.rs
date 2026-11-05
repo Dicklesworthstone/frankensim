@@ -1,4 +1,4 @@
-//! Immutable source-admitted exterior composition on physical open sides.
+//! Source-admitted exterior composition held on physical open sides.
 
 use super::*;
 use crate::compressible::AxisBoundaries;
@@ -26,6 +26,7 @@ pub(super) struct Reservoirs {
     slots: [Option<usize>; 6],
     states: Vec<f64>,
     primitive: Vec<Primitive>,
+    pub(super) profiles: Option<reservoir_profiles::Profiles>,
 }
 
 impl Reservoirs {
@@ -51,6 +52,7 @@ impl Reservoirs {
             slots: [None; 6],
             states: allocated(inputs.len() * width, 0.0)?,
             primitive: allocated(inputs.len(), Primitive::default())?,
+            profiles: None,
         };
         let mut conservative = [0.0; WIDTH_LIMIT];
         for (index, input) in inputs.iter().enumerate() {
@@ -96,6 +98,7 @@ impl Reservoirs {
     pub(super) fn workspace_bytes(&self) -> usize {
         self.states.capacity() * size_of::<f64>()
             + self.primitive.capacity() * size_of::<Primitive>()
+            + self.profiles.as_ref().map_or(0, |p| p.workspace_bytes())
     }
 
     pub(super) fn try_clone(&self, cancelled: &mut impl FnMut() -> bool) -> Result<Self, Error> {
@@ -103,11 +106,17 @@ impl Reservoirs {
         copy_values(&self.states, &mut states, cancelled)?;
         let mut primitive = allocated(self.primitive.len(), Primitive::default())?;
         primitive.copy_from_slice(&self.primitive);
+        let profiles = self
+            .profiles
+            .as_ref()
+            .map(|profile| profile.try_clone(cancelled))
+            .transpose()?;
         stepping::poll::<Error>(cancelled)?;
         Ok(Self {
             slots: self.slots,
             states,
             primitive,
+            profiles,
         })
     }
 
@@ -131,12 +140,48 @@ impl Reservoirs {
             .map(|index| &self.states[index * width..(index + 1) * width])
     }
 
-    pub(super) fn normal(
+    pub(super) fn boundary_face(
+        &self,
+        side: BoundarySide,
+        face: usize,
+        species: usize,
+    ) -> Option<ReservoirBoundary<'_>> {
+        if let Some(profile) = &self.profiles
+            && let Some(row) = profile.row(side, face, species)
+        {
+            return Some(ReservoirBoundary {
+                side,
+                partial_densities: &row[..species],
+                velocity: [row[species], row[species + 1], row[species + 2]],
+                pressure_pa: row[species + 3],
+            });
+        }
+        self.boundary(side, species)
+    }
+
+    pub(super) fn primitive_face(&self, side: BoundarySide, face: usize) -> Option<Primitive> {
+        self.profiles
+            .as_ref()
+            .and_then(|profile| profile.primitive(side, face))
+            .or_else(|| {
+                self.slots[side_index(side.axis(), side.sign())]
+                    .map(|index| self.primitive[index])
+            })
+    }
+
+    pub(super) fn normal_face(
         &self,
         axis: usize,
         sign: f64,
+        face: usize,
         species: usize,
     ) -> Option<SpatialPrimitive<'_>> {
+        let side = BoundarySide::ALL[side_index(axis, sign)];
+        if let Some(profile) = &self.profiles
+            && let Some(row) = profile.row(side, face, species)
+        {
+            return Some(normal_primitive(row, species, axis));
+        }
         self.row(axis, sign, species)
             .map(|row| normal_primitive(row, species, axis))
     }
@@ -150,6 +195,7 @@ impl Reservoirs {
                     .sum::<f64>()
             })
             .fold(0.0, f64::max)
+            .max(self.profiles.as_ref().map_or(0.0, |p| p.maximum_rate()))
     }
 }
 

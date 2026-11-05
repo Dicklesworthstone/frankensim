@@ -10,6 +10,7 @@ mod contact_equilibrium;
 mod molecular;
 mod pressure_outlet;
 mod reservoir;
+mod reservoir_profiles;
 
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,

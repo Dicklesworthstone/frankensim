@@ -36,6 +36,9 @@ pub mod forcing;
 pub use forcing::ForcingWorkspace3d;
 mod reservoir;
 pub use reservoir::ReservoirBoundary;
+/// Prepared physical-face reservoir traces for spatially varying inflow.
+pub mod reservoir_profiles;
+pub use reservoir_profiles::ReservoirFaceState;
 
 /// Borrowed accepted cell in the immutable source's canonical species order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -375,7 +378,8 @@ impl MixtureEuler3d {
     pub const fn boundaries(&self) -> Boundaries3d {
         self.boundaries
     }
-    /// Original immutable exterior gas on a selected physical side.
+    /// Original uniform exterior gas on a selected physical side.
+    /// For prepared spatial profiles, use `reservoir_face` instead.
     pub fn reservoir(&self, side: BoundarySide) -> Option<ReservoirBoundary<'_>> {
         self.reservoirs.boundary(side, self.gas.species_count())
     }
@@ -941,7 +945,10 @@ fn spatial_with_contact(
                 sign,
                 condition,
             } => {
-                if let Some(exterior) = reservoirs.normal(axis, sign, n) {
+                let c = grid.coordinates(k);
+                let [a, b] = tangents(axis);
+                let boundary_face = c[a] + grid.shape[a] * c[b];
+                if let Some(exterior) = reservoirs.normal_face(axis, sign, boundary_face, n) {
                     let interior = if first_order {
                         let [a, b] = tangents(axis);
                         SpatialPrimitive {

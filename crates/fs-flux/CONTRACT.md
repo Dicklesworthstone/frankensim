@@ -5102,3 +5102,50 @@ hottest individual face's unsplit CFL; and evolving boundary controls through
 molecular ownership swaps with zero-transport equivalence. These tests have not
 yet executed in this environment; formatting passed. No new DNS, turbulence
 spectrum, temporal convergence or experimental accuracy claim is made.
+
+
+### Face-resolved held inflow for evolving-species three-dimensional gas
+
+`MixtureEuler3d::prepare_reservoir_profiles` admits one complete primitive trace
+per physical face on selected transmissive sides, in `BoundarySide::ALL` and
+`CartesianGrid::face_center` order. The callback fills every canonical species
+partial density and returns Cartesian velocity and absolute pressure. The
+original `MixtureGas` supplies calorics, sensible-energy precision admission,
+referenced energy and sound speed. Uniform reservoirs and pressure-only, wall
+or periodic conditions cannot simultaneously own the same side.
+
+The existing spatial HLLC/SSP path consumes each face's own exterior state.
+Species, shear momentum, pressure work and enthalpy remain in the original
+conservative flux and boundary-impulse account. The largest original-source
+three-axis acoustic/advection rate across all prepared faces participates in
+the initial interval selection; it is cached during profile admission rather
+than rescanned at every step. No species clipping, renormalization or second
+thermodynamic model is introduced.
+
+`update_reservoir_profiles` prepares every candidate before one publication,
+using fixed active/trial rows and primitive caches. Invalid source data, a
+provider refusal or cancellation leaves all active traces, cells, clock and
+loads unchanged. Both retained payloads count against the explicit additional
+profile budget and the existing total numerical ceiling. Updates and native
+face evaluation add no per-face numerical allocations. Uniform bindings retain
+their previous storage and arithmetic.
+
+The reacting owner clones both profile payloads under its complete field budget
+and exposes the same replacement operation through a shared two-owner
+transaction. The provider is evaluated once per face; the candidate is copied
+into the existing trial buffers before either field publishes. Traces are held
+through the full chemistry/transport split and all retries.
+
+Five focused G0/G1/G4 tests cover uniform-path equivalence and canonical face
+order, all-six-side supersonic species/shear/enthalpy fluxes with original
+variable calorics, a single hot face's initial CFL bound, budget/source/topology
+refusal and last-poll rollback, and reacting clone/update/advance. These tests
+require the normal runtime build and were not executed in the constrained
+editing environment.
+
+These are prescribed infinite exterior traces, not finite inventories or
+nonreflecting boundaries. Replacement does not advance a stochastic source or
+interpolate its stages; callers author the sampling cadence and hold one
+coherent realization. A face-averaged primitive is not an exact average of its
+nonlinear Riemann flux. No turbulent-inflow spectrum, wall/DNS accuracy, or
+experimental qualification is implied by the boundary adapter alone.

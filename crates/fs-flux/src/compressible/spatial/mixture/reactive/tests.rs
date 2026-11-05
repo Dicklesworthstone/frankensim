@@ -25,6 +25,7 @@ const WALLS: AxisBoundaries = AxisBoundaries::Ends {
 };
 
 mod molecular;
+mod reservoir_profiles;
 
 fn mechanism(heat: f64, rate: f64, reference: f64) -> (MixtureGas, IdealGasKineticsV1) {
     let gas = make_gas(vec![
