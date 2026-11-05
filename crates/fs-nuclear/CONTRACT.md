@@ -343,8 +343,10 @@ energy model, and an explicit prompt capture-energy partition. The flux is not
 a normalized probability spectrum or a surface current. Grid identity and all
 edges must match, including for zero flux; no silent regrouping or unit conversion
 occurs. Data labels and temperature limits are declarations, not evaluated-data
-validation. Spectrum collapsing, self-shielding and temperature interpolation
-remain with the supplying data/transport owner.
+validation. This original fixed-coefficient constructor does not process data.
+The shared temperature tables and explicitly flat-in-energy processed-ENDF
+collapse described below provide opt-in data paths; self-shielding and spatial
+transport remain with the supplying physics owner.
 
 For each frozen incident spectrum the kernel computes `kf = sum(sigma_f,g phi_g)`
 and `kc = sum(sigma_c,g phi_g)`, then solves `N' = -(kf+kc)N` analytically. Fission
@@ -931,3 +933,55 @@ solution, refine the neutron/temperature/product-worth loop against an independe
 invariant, and verify joint rollback on a final-temperature domain exit. The
 combined native nuclear lane passed 133 tests when this increment was prepared.
 These are manufactured verification problems, not evaluated-data validation.
+
+## Processed ENDF/PENDF fission and capture data
+
+`endf::PointwiseCrossSection::parse` reads caller-supplied text and selects an
+explicit MAT, isotope/isomer, total-fission (MT18) or radiative-capture (MT102)
+reaction and exact positive processed temperature. MF1/MT451 supplies ENDF-6
+incident-neutron identity, library/version/release/revision and temperature;
+selected MF3 identity must agree. LRP=0 or 2 is required. LRP=1 MF3 resonance
+backgrounds are refused rather than admitted as complete reaction curves.
+Natural-element mixtures, primary zero-temperature evaluations and unsupported
+TAB1 laws require an external processor. No network access or built-in isotope
+data is used. The format is specified in the official
+[ENDF-102 (2023) manual, §§0.5–0.6, 1.1 and 3.2–3.3](https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf).
+
+The reader handles fixed-width records, implicit signed exponents, histogram
+and linear-linear interpolation regions, and paired equal-energy points for
+discontinuities. It checks selected-section control records and SEND payloads,
+rejects ambiguous selections, and converts eV to joules and barns to square
+metres. Source Q values remain observable metadata; neither QM nor QI is
+assigned to the prompt deposited-energy channel. Event energy and later
+radioactive-product release retain their existing explicit owners.
+
+`collapse_flat_in_energy` computes each group mean by integrating every
+intersected histogram or linear segment. Its declared weighting is flat flux
+density per unit energy inside each group. Thresholds and discontinuities are
+integrated rather than sampled at group midpoints, and source energy coverage
+must contain the full group grid. `collapse_temperature_table` assembles curves
+with the same isotope, reaction and evaluation revision at strictly increasing
+temperatures into the original shared table. Each source curve retains its own
+identity; the caller identifies the assembled table and its grouping assumption.
+A single forward traversal visits the groups and source segments, while point
+queries use binary search. This is an import-time transformation, outside the
+reaction evaluation and prepared propagation paths.
+
+Byte, record, point, interpolation-region, group, retained-value and segment-visit
+limits bound work and allocation. All temperature rows share the collapse-work
+allowance. Checkpoints are polled during scanning and integration. Conversion,
+interpolation and integration refuse unrepresentable positive quantities instead
+of silently turning a physical coefficient into zero. No energy or temperature
+extrapolation, resonance reconstruction, Doppler broadening, self-shielding,
+spectrum calculation or evaluated-data certification is supplied.
+
+Nine importer regressions exercise identity/temperature selection, malformed
+controls, numeric fields and SI conversion, histogram/linear integration with
+thresholds and discontinuities, work/cancellation refusal, small endpoint tails,
+and imported fission/capture tables driving actual competing burnup and explicit
+prompt calorimetry. The final focused native run compiled the production nuclear
+crate with thermal support and the exact public fission facade, including both
+new module exports. All 147 nuclear tests passed, including the concurrent
+capture-activation and thermal additions. These manufactured fixtures establish
+implementation behavior; full workspace Cargo and empirical validation against
+processed evaluated nuclear data remain separate gates.

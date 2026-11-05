@@ -34,6 +34,9 @@ pub mod irradiation;
 /// Identified, temperature-dependent microscopic neutron reaction data.
 pub mod cross_sections;
 
+/// Bounded processed ENDF/PENDF import and declared spectrum collapse.
+pub mod endf;
+
 /// Product-forming fission, capture and radioactive transmutation networks.
 pub mod burnup;
 
