@@ -5077,6 +5077,48 @@ Integration regressions use real temperature-dependent property curves and
 two-axis density data to exercise heating, cooling, source identity, continued
 transport, strict density/domain refusal and cancellation throughout refresh.
 
+### Adiabatic finite-rate diffusion
+
+`miscibility::thermal` binds the existing field to the exact original
+`BinaryLiquidCaloricModelV1` and ordered pure-liquid Cp sources. The binding
+retains the original conserved species totals, including their compensated
+low words, across all accepted intervals. It does not reconstruct calorics
+from mixture transport Cp or replace the evolving cells by bulk equilibrium.
+
+`adiabatic_candidate` advances one molecular-diffusion interval at the
+preceding temperature, then solves one uniform-temperature energy balance at
+the completed spatial compositions. The energy equation is
+`delta(H_mix) + delta(E_gradient) + sum_s N_s integral Cp_s dT = 0`.
+The original fixed volumes and maintained pressure make the change of pV zero.
+Constant kappa contributes interfacial internal energy and no entropy. This
+is the limit of fast internal thermal equilibration, with no resolved local
+heat conduction, thermal expansion, thermodiffusion, flow work or external heat.
+
+Direct original mixing-enthalpy and mixing-entropy increments retain traces
+and small near-critical changes without subtracting large reference energies.
+Gradient energy also uses direct face increments. Each thermal root trial
+evaluates only the two original pure-Cp integrals; cells are not repeatedly
+flashed or re-resolved. An explicit source-supported temperature bracket,
+temperature/energy tolerances and at most 256 bisections bound the solve.
+Unsupported heat targets refuse instead of clamping to a source limit.
+
+Every accepted candidate independently audits the actual whole-field energy
+residual and `delta(S_mix) + sum_s N_s integral Cp_s/T dT`. The entropy allowance
+applies once. A split step can lower isothermal free energy and close energy
+while losing total entropy; it therefore refuses if the separate entropy gate
+fails. Refining the physical interval is necessary for this first-order thermal
+split, even when the scalar energy root is very accurate. The physical clock
+advances once, and the accepted temperature updates the original chemical
+potentials and mobilities through the same temperature owner above.
+
+The complete diffusion, temperature, sensible/mixing/interfacial energy,
+entropy and scalar-work reports survive publication. Any solver, domain, work,
+energy, entropy or cancellation failure leaves the original field unchanged.
+The six thermal native regressions cover demixing and interface heating,
+exact ideal isothermality, conservation, entropy-loss refusal with successful
+refinement, atomic boundaries and first-order composition/temperature convergence
+against an independent energy-conserving scalar RK4 reference.
+
 ## Same-energy binary interface tension in capillary flow
 
 `capillary::material::miscibility::step_binary_liquid_planar_horizontal`

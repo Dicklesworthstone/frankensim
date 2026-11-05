@@ -2979,6 +2979,21 @@ Five focused native tests cover original-energy derivatives, reversible and
 trace increments, critical higher-order terms, the convex-split energy bound
 for both signs of chi, and endpoint/regularization admission.
 
+The same owner supplies direct `mixing_enthalpy_change_j_per_mol` and
+`mixing_entropy_change_j_per_mol_k` for spatial caloric consumers.
+For `chi=A+B/T`, these use the original `R*B*delta(x_A*x_B)` and original
+ideal/excess entropy with coefficient A. The enthalpy product increment is
+formed before multiplying by B and R; a finite increment need not form an
+overflowing reference enthalpy. Entropy shares the existing reduced-energy
+kernel, retaining trace changes and critical fourth-order terms. Exact endpoint
+reversal and the existing free-energy evaluation order are preserved. These
+are homogeneous composition increments only: pure Cp/CpT, gradient energy,
+heat balance and temporal integration remain with their corresponding owners.
+
+Four additional native regressions cover direct H-minus-T-S closure, pure and
+one-ULP trace changes, quadratic enthalpy/critical quartic entropy, and finite
+increments beside overflowing reference energies.
+
 ## Planar interface tension from original binary coexistence
 
 `solution::gradient::interface` computes the equilibrium planar liquid-liquid

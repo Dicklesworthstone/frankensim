@@ -143,53 +143,113 @@ impl BinarySquareGradientV1 {
         old: [f64; 2],
         new: [f64; 2],
     ) -> Result<f64, BinarySolutionErrorV1> {
-        let old = normalized_fractions(old)?;
-        let new = normalized_fractions(new)?;
-        if old == new {
-            return Ok(0.0);
-        }
-        let (a, b, sign) = if old[0] < new[0] || (old[0] == new[0] && old[1] < new[1]) {
-            (old, new, 1.0)
-        } else {
-            (new, old, -1.0)
-        };
-        // Use the trace coordinate when both states have the same dominant
-        // component. Its real increment survives even if the majority rounds 1.
-        let (a, b) = if a[0] >= 0.5 && b[0] >= 0.5 {
-            ([a[1], a[0]], [b[1], b[0]])
-        } else {
-            (a, b)
-        };
-        let d = b[0] - a[0];
-        let change =
-            if a[0] > 0.0 && a[1] > 0.0 && (d / a[0]).abs() < 0.125 && (d / a[1]).abs() < 0.125 {
-                // Taylor-integrated ideal entropy, with the quadratic interaction
-                // combined BEFORE scaling. This retains the fourth-order energy at
-                // the symmetric critical point instead of cancelling two O(d^2)s.
-                let [x, y] = a;
-                let r = [d / x, -d / y];
-                let mut powers = r;
-                let mut tail = 0.0;
-                for k in 3..=20 {
-                    let coefficient = if k % 2 == 0 { 1.0 } else { -1.0 } / ((k * (k - 1)) as f64);
-                    tail += coefficient * (powers[0] / x + powers[1] / y);
-                    powers[0] *= r[0];
-                    powers[1] *= r[1];
-                }
-                let gamma = (x - y) * (x - y) - 2.0 * ((self.chi - 2.0) * x * y);
-                d * reduced_exchange(a, self.chi) + d * d * (gamma / (2.0 * x * y) + tail)
-            } else {
-                // Well-separated states do not need a cancellation-sensitive local
-                // expansion; original pure-endpoint 0*ln(0) limits are retained.
-                let ideal = ideal_mixing(b) - ideal_mixing(a);
-                let product = d * (0.5 * (a[1] - a[0]) + 0.5 * (b[1] - b[0]));
-                ideal + self.chi * product
-            };
+        let (sign, change) = reduced_mixing_change(old, new, self.chi)?;
         finite(
             sign * self.rt_j_per_mol * change,
             "mixing free-energy increment",
         )
     }
+
+    /// Direct homogeneous mixing-enthalpy increment [J/mol] from the original
+    /// `chi = A + B/T` law: `R B delta(x_A x_B)`. This is independent of
+    /// temperature and excludes pure sensible heat and spatial gradient energy.
+    /// Both fractions are retained; no bulk equilibrium split occurs.
+    ///
+    /// The product increment keeps its quadratic term at x_A=1/2 and real
+    /// trace changes when the majority rounds to one. B is scaled by that
+    /// increment before R, avoiding an overflowing R B reference enthalpy.
+    pub fn mixing_enthalpy_change_j_per_mol(
+        &self,
+        old: [f64; 2],
+        new: [f64; 2],
+    ) -> Result<f64, BinarySolutionErrorV1> {
+        let (a, b, sign) = ordered_compositions(old, new)?;
+        if a == b {
+            return Ok(0.0);
+        }
+        let difference = (b[0] - a[0]) * (0.5 * (a[1] - a[0]) + 0.5 * (b[1] - b[0]));
+        finite(
+            sign * (self.thermodynamics.chi_inverse_temperature_k * difference) * R,
+            "mixing enthalpy increment",
+        )
+    }
+
+    /// Direct homogeneous mixing-entropy increment [J/(mol K)] from the
+    /// original ideal entropy and excess-entropy coefficient A. Temperature
+    /// does not enter this composition increment. Pure Cp/T and any spatial
+    /// entropy contribution belong to their respective caloric/gradient owners.
+    ///
+    /// The same local expansion as the free-energy increment retains traces
+    /// and the fourth-order entropy change when A=2 near x_A=1/2. Reversing
+    /// the endpoints returns the exact opposite operation.
+    pub fn mixing_entropy_change_j_per_mol_k(
+        &self,
+        old: [f64; 2],
+        new: [f64; 2],
+    ) -> Result<f64, BinarySolutionErrorV1> {
+        let (sign, change) = reduced_mixing_change(old, new, self.thermodynamics.chi_constant)?;
+        finite(-sign * R * change, "mixing entropy increment")
+    }
+}
+
+// Canonical endpoint and component order makes reversal use the same arithmetic
+// and preserves a real trace increment even when both majority values round 1.
+fn ordered_compositions(
+    old: [f64; 2],
+    new: [f64; 2],
+) -> Result<([f64; 2], [f64; 2], f64), BinarySolutionErrorV1> {
+    let old = normalized_fractions(old)?;
+    let new = normalized_fractions(new)?;
+    let (a, b, sign) = if old[0] < new[0] || (old[0] == new[0] && old[1] < new[1]) {
+        (old, new, 1.0)
+    } else {
+        (new, old, -1.0)
+    };
+    let (a, b) = if a[0] >= 0.5 && b[0] >= 0.5 {
+        ([a[1], a[0]], [b[1], b[0]])
+    } else {
+        (a, b)
+    };
+    Ok((a, b, sign))
+}
+
+// Keep sign separate so the original free-energy multiplier retains its exact
+// evaluation order. Entropy uses the identical kernel with A instead of chi(T).
+fn reduced_mixing_change(
+    old: [f64; 2],
+    new: [f64; 2],
+    chi: f64,
+) -> Result<(f64, f64), BinarySolutionErrorV1> {
+    let (a, b, sign) = ordered_compositions(old, new)?;
+    if a == b {
+        return Ok((1.0, 0.0));
+    }
+    let d = b[0] - a[0];
+    let change = if a[0] > 0.0 && a[1] > 0.0 && (d / a[0]).abs() < 0.125 && (d / a[1]).abs() < 0.125
+    {
+        // Taylor-integrated ideal entropy, with the quadratic interaction
+        // combined BEFORE scaling. This retains the fourth-order energy at
+        // the symmetric critical point instead of cancelling two O(d^2)s.
+        let [x, y] = a;
+        let r = [d / x, -d / y];
+        let mut powers = r;
+        let mut tail = 0.0;
+        for k in 3..=20 {
+            let coefficient = if k % 2 == 0 { 1.0 } else { -1.0 } / ((k * (k - 1)) as f64);
+            tail += coefficient * (powers[0] / x + powers[1] / y);
+            powers[0] *= r[0];
+            powers[1] *= r[1];
+        }
+        let gamma = (x - y) * (x - y) - 2.0 * ((chi - 2.0) * x * y);
+        d * reduced_exchange(a, chi) + d * d * (gamma / (2.0 * x * y) + tail)
+    } else {
+        // Well-separated states do not need a cancellation-sensitive local
+        // expansion; original pure-endpoint 0*ln(0) limits are retained.
+        let ideal = ideal_mixing(b) - ideal_mixing(a);
+        let product = d * (0.5 * (a[1] - a[0]) + 0.5 * (b[1] - b[0]));
+        ideal + chi * product
+    };
+    Ok((sign, change))
 }
 
 fn interior(fractions: [f64; 2]) -> Result<[f64; 2], BinarySolutionErrorV1> {

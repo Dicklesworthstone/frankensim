@@ -7,9 +7,10 @@
 //! This is zero net molar/volume flux. Unequal molar masses give a nonzero net
 //! mass flux in this frame and changing local density; the barycentric mass
 //! frame therefore differs from the fixed molar/volume frame used here.
-//! Temperature and pressure are held externally. Uniform temperature changes
-//! through [`temperature`] retain the evolving field and its original sources;
-//! they do not solve heat conduction or feedback. Momentum, wetting/contact-line
+//! Pressure is held externally. Uniform prescribed temperature changes through
+//! [`temperature`] retain the evolving field and its original sources. The
+//! [`thermal`] owner additionally closes adiabatic diffusion with one evolving
+//! uniform temperature. Local heat conduction, momentum, wetting/contact-line
 //! motion and nucleation rates are not included. Prescribed incompressible
 //! volume-flow transport is available through [`advection`].
 //!
@@ -38,6 +39,7 @@ mod solve;
 pub mod adaptive;
 pub mod advection;
 pub mod temperature;
+pub mod thermal;
 pub mod transport;
 
 /// Native FEEC volume transport on the same closed miscibility control volumes.
