@@ -252,6 +252,51 @@ impl HelmholtzModalCavity {
         Ok(self)
     }
 
+    /// [`Self::with_orifice_resistance`] for a mouth of several measured holes in one
+    /// plate, each `(area_m2, bore_m)`, such as a violin's two f-holes. Each hole is the
+    /// circle of its own area through its own bore, with [`orifice_viscous_resistance`]
+    /// at `freeze_hz`. The neck's volume flow divides among the holes as their compact
+    /// conductances, `S / (L + 2 delta)` with [`fs_phs::neck_end_correction`] flanged,
+    /// and each hole dissipates its share squared times its own resistance. The neck
+    /// keeps its declared mass and compressibility: the holes set only the loss. The
+    /// paper's evaluated law is for a circle, so a hole of another shape enters as the
+    /// circle of its area; the example README compares a slender slot from the same
+    /// quadrature, eq. 5.15.
+    ///
+    /// # Errors
+    /// Any other loss selection, no holes, a non-positive or non-finite area or bore,
+    /// or a hole's own refusals.
+    pub fn with_orifice_holes(mut self, freeze_hz: f64, holes: &[(f64, f64)])
+        -> Result<Self, AcousticRealizeError>
+    {
+        if self.loss != CavityNeckLoss::ExteriorMouth {
+            return Err(invalid("the orifice resistance belongs to an exterior-mouth neck"));
+        }
+        if holes.is_empty() {
+            return Err(invalid("orifice holes need at least one measured hole"));
+        }
+        let omega = 2.0 * core::f64::consts::PI * freeze_hz;
+        let mut parts = Vec::with_capacity(holes.len());
+        for &(area_m2, bore_m) in holes {
+            if !(area_m2.is_finite() && area_m2 > 0.0 && bore_m.is_finite() && bore_m > 0.0) {
+                return Err(invalid("each orifice hole needs a finite positive area and bore"));
+            }
+            let radius = det::sqrt(area_m2 / core::f64::consts::PI);
+            let end = fs_phs::neck_end_correction(radius, fs_phs::MouthFlange::Flanged)
+                .map_err(|e| AcousticRealizeError::Nonlinear(e.to_string()))?;
+            let conductance = area_m2 / (bore_m + 2.0 * end);
+            parts.push((conductance, orifice_viscous_resistance(&self.gas, radius, bore_m, omega)?));
+        }
+        let total: f64 = parts.iter().map(|part| part.0).sum();
+        let r: f64 = parts.iter().map(|&(k, r)| (k / total) * (k / total) * r).sum();
+        let resistance = self.area * self.area * r;
+        if !(resistance.is_finite() && resistance > 0.0) {
+            return Err(invalid("orifice resistance is not representable on the neck"));
+        }
+        self.resistance = resistance;
+        Ok(self)
+    }
+
     /// Original fixed cavity geometry.
     #[must_use] pub const fn geometry(&self) -> &HelmholtzCavity { &self.geometry }
     /// The same gas used for neck inertia, cavity compliance and selected loss.

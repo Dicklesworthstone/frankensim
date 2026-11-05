@@ -1089,11 +1089,25 @@ impl Spec {
                 let mut cavity = HelmholtzModalCavity::new(description, cavity_gas, loss)?;
                 if kind == "exterior-neck" && row.words.clone().next() == Some("orifice-edge") {
                     row.word()?;
-                    cavity = cavity.with_orifice_resistance(row.positive()?)?;
+                    let freeze_hz = row.positive()?;
+                    if row.words.clone().next() == Some("holes") {
+                        // The measured holes as AREA_M2 BORE_M pairs, to the end of the row.
+                        row.word()?;
+                        let mut holes = Vec::new();
+                        while row.words.clone().next().is_some() {
+                            holes.push((row.positive()?, row.positive()?));
+                        }
+                        if holes.is_empty() {
+                            return Err("orifice-edge holes needs AREA_M2 BORE_M pairs".into());
+                        }
+                        cavity = cavity.with_orifice_holes(freeze_hz, &holes)?;
+                    } else {
+                        cavity = cavity.with_orifice_resistance(freeze_hz)?;
+                    }
                 }
                 Some(MaterialBodyCavity { cavity, modal_budget: modal_budget(), listener_m })
             },
-            _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck|exterior-neck V R L INNER_END OUTER_END LISTENER_M [orifice-edge FREEZE_HZ on exterior-neck]".into()),
+            _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck|exterior-neck V R L INNER_END OUTER_END LISTENER_M [orifice-edge FREEZE_HZ [holes AREA_M2 BORE_M ...] on exterior-neck]".into()),
         };
         row.end()?;
         if let Some(cavity) = &cavity { cavity.cavity.validate_exterior_gas(&gas)?; }

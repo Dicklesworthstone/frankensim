@@ -1441,6 +1441,36 @@ Mech. 2020, eq. 1.8-1.10, which also counts the plate around the edge:
 
 Without the two words, the row's bytes and the render are unchanged.
 
+`orifice-edge FREEZE_HZ holes AREA_M2 BORE_M [AREA_M2 BORE_M ...]` puts the same
+law on the measured holes of the mouth instead of the neck's circle:
+- **Why:** the neck's circle carries the mouth's conductance, not its area. A
+  violin's two f-holes are one circle of radius 31.85 mm on the card (conductance
+  58.24 mm, from the boundary-element solve of both holes), 31.9 cm², but the holes
+  are 5.31 and 4.98 cm². At the same flow the air in the real holes moves 3.1 times
+  faster, and the edge loss goes as the square of that speed over the area.
+- **Each hole:** the circle of its own area through its own bore, eq. 1.8-1.10 at
+  `FREEZE_HZ`.
+- **The split:** the neck's flow divides among the holes as their compact
+  conductances, `S / (L + 2 x 0.8216 r)`. Each hole dissipates its share squared
+  times its own resistance, so two equal holes give half of one.
+- **What stays:** the neck's mass and compressibility, from the declared neck. The
+  holes set only the loss.
+
+The evaluated eq. 1.9-1.10 are for a circle; a slot enters as the circle of its
+area. The paper's general form, eq. 5.15, is a quadrature of the inviscid surface
+speed over the walls and both plate faces. For a thin plate the loss comes from the
+faces beside the sharp edge, so at a given flow it scales with one over the area,
+not with perimeter over area squared. The same quadrature, with the paper's corner
+constant and a locally two-dimensional slit, gives a slender slot of width `w`
+`R = (rho omega delta / sqrt 2) (4 / pi^2) (pi + ln(4 pi w / t)) / A`. On il
+Cannone's raster outlines at 275.5 Hz that's 340-430 Pa s/m^3 for both holes,
+against 535 for the circles of their areas and 163 for the neck's circle. The eyes
+and curved ends aren't treated apart.
+
+```text
+cavity exterior-neck 0.002061545 0.031853375 0.00239309 flanged flanged 1 orifice-edge 275.5 holes 0.00053075 0.00251175 0.00049775 0.00227832
+```
+
 The selection works with the uniform plate, regional plate, curved shell and
 assembled material-body profiles; their original signed volume maps remain
 the common pressure coupling.

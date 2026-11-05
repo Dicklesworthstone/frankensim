@@ -265,6 +265,85 @@ fn orifice_edge_is_opt_in_and_replaces_only_the_exterior_necks_resistance() {
 }
 
 #[test]
+fn orifice_holes_split_the_neck_flow_by_conductance_and_leave_the_row_without_them_unchanged() {
+    const SKIN: &str = "body-radiation skin 0.5 400 65 80 14000000000 36 2 1e-9\n";
+    let card = |neck: &str| source().replace(PHYSICAL, &format!("{SKIN}{neck}"));
+    let cavity = |neck: &str| {
+        input::Spec::parse(card(neck).as_bytes())
+            .unwrap()
+            .cavity
+            .unwrap()
+            .cavity
+    };
+    let (a, l, hz) = (0.043509214, 0.002467782, 95.36);
+    let neck = format!("cavity exterior-neck 0.013035685 {a} {l} flanged flanged 1");
+    let plain = cavity(&neck);
+    let row = cavity(&format!("{neck} orifice-edge {hz}"));
+    // Without `holes` the row is today's: the same bits as the owner's own call.
+    let owner = plain.clone().with_orifice_resistance(hz).unwrap();
+    assert_eq!(
+        row.neck_resistance_n_s_m().to_bits(),
+        owner.neck_resistance_n_s_m().to_bits()
+    );
+    // One hole equal to the neck's circle reproduces the row.
+    let one = cavity(&format!("{neck} orifice-edge {hz} holes {} {l}", PI * a * a));
+    close(one.neck_resistance_n_s_m(), row.neck_resistance_n_s_m());
+    // Two equal holes each carry half the flow, so together they give half of one.
+    let hole = PI * 0.012 * 0.012;
+    let single = cavity(&format!("{neck} orifice-edge {hz} holes {hole} {l}"));
+    let pair = cavity(&format!("{neck} orifice-edge {hz} holes {hole} {l} {hole} {l}"));
+    close(pair.neck_resistance_n_s_m(), 0.5 * single.neck_resistance_n_s_m());
+    // Nothing else moves: the loss selection, the mass and the spring.
+    assert_eq!(pair.loss(), CavityNeckLoss::ExteriorMouth);
+    assert_eq!(pair.neck_mass_kg(), plain.neck_mass_kg());
+    assert_eq!(pair.compression_stiffness_n_m(), plain.compression_stiffness_n_m());
+    // Unequal holes, written out independently of the owner: each hole is the circle
+    // of its area, eq. 1.8 with the larger of eq. 1.9 and eq. 1.10, weighted by the
+    // square of its share of S / (L + 2 x 0.8216 r). These are il Cannone's measured
+    // f-holes (dimensions.tsv) at 275.5 Hz.
+    let measured = [(0.00053075, 0.00251175), (0.00049775, 0.00227832)];
+    let violin = cavity(&format!(
+        "{neck} orifice-edge 275.5 holes {} {} {} {}",
+        measured[0].0, measured[0].1, measured[1].0, measured[1].1
+    ));
+    let gas = plain.gas();
+    let omega = 2.0 * PI * 275.5;
+    let terms: Vec<(f64, f64)> = measured
+        .iter()
+        .map(|&(area, bore)| {
+            let r = (area / PI).sqrt();
+            let h = bore / (2.0 * r);
+            let theta = (4.0 / PI * (h + 0.91)).max(0.5 * ((PI / h).ln() / PI + 1.0));
+            let eps = (gas.dynamic_viscosity / (gas.density * omega)).sqrt() / r;
+            (area / (bore + 2.0 * 0.8216 * r), gas.density * omega / r * eps * theta / 2f64.sqrt())
+        })
+        .collect();
+    let total: f64 = terms.iter().map(|t| t.0).sum();
+    let expected: f64 = terms.iter().map(|&(k, r)| (k / total).powi(2) * r).sum();
+    let acoustic = violin.neck_resistance_n_s_m() / violin.neck_area_m2().powi(2);
+    assert!((acoustic / expected - 1.0).abs() < 1e-4, "{acoustic} {expected}");
+    // About three times the row on the neck's own circle, whose area is 3.1 times theirs.
+    let circle = cavity(&format!("{neck} orifice-edge 275.5"));
+    let on_circle = circle.neck_resistance_n_s_m() / circle.neck_area_m2().powi(2);
+    assert!(acoustic > 2.0 * on_circle, "{acoustic} {on_circle}");
+    for invalid in [
+        // No pairs, a lone area, zero, NaN, a plate thinner than the Stokes layer, and
+        // holes without the row.
+        format!("{neck} orifice-edge {hz} holes"),
+        format!("{neck} orifice-edge {hz} holes {hole}"),
+        format!("{neck} orifice-edge {hz} holes 0 {l}"),
+        format!("{neck} orifice-edge {hz} holes {hole} NaN"),
+        format!("{neck} orifice-edge {hz} holes {hole} 1e-6"),
+        format!("{neck} holes {hole} {l}"),
+    ] {
+        assert!(input::Spec::parse(card(&invalid).as_bytes()).is_err(), "{invalid}");
+    }
+    // The physical neck has no such option, with or without holes.
+    let physical = "cavity physical-neck 0.003 0.01 0.02 flanged unflanged 1 orifice-edge 100 holes 0.0005 0.002";
+    assert!(input::Spec::parse(source().replace(PHYSICAL, physical).as_bytes()).is_err());
+}
+
+#[test]
 fn legacy_resistance_and_flanged_ends_are_unchanged_and_physical_neck_refusals_propagate() {
     for text in [
         String::from_utf8(spec().bytes).unwrap(),
