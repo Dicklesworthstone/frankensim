@@ -584,6 +584,11 @@ pub(crate) struct Prepared {
     /// `1 / mu` for the volume column.
     pub(crate) chol: Vec<f64>,
     pub(crate) with_volume: bool,
+    /// SAV Schur denominator for the current prediction's frozen gradient.
+    /// When present, `ModalAirLoad::b` and `w2` hold `V'D^-1 g` and its
+    /// solve through `chol`. `load_rhs` and `prepare` invalidate all three;
+    /// contact/friction inverse queries within that prediction reuse them.
+    pub(crate) sav_schur: Option<f64>,
 }
 
 /// Mode `(m, n, parity)` retained on a head, with its narrowband load.
@@ -1424,6 +1429,11 @@ impl ModalAirLoad {
     /// The unknown `U B U' wn / (2 k)` is in the prepared system, so the full
     /// force is `-U B U' (wn - wp) / (2 k)`. Leaves `U' wp` in `p_wp` for heat.
     pub(crate) fn load_rhs(&mut self, w: &[f64], wp: &[f64], k: f64) {
+        // Each prediction has a newly evaluated SAV gradient. This function
+        // also reuses b below, so no cached projection may survive it.
+        if let Some(prepared) = &mut self.prepared {
+            prepared.sav_schur = None;
+        }
         let n = self.cols.len();
         for r in 0..n {
             let (pw, pwp) = (crate::dot(&self.cols[r], w), crate::dot(&self.cols[r], wp));
@@ -1509,6 +1519,7 @@ impl ModalAirLoad {
             k,
             chol: q,
             with_volume: volume.is_some(),
+            sav_schur: None,
         });
         Ok(())
     }
@@ -1702,6 +1713,104 @@ mod centered_tests {
                 }
             }
         }
+    }
+
+    fn compare_fresh_port_responses(
+        load: &mut ModalAirLoad,
+        cf: &[[f64; 4]],
+        gradient: &[f64],
+        sav: bool,
+        h2: f64,
+        mu: f64,
+        k: f64,
+    ) {
+        for port in [
+            [0.2, -1.0, 0.5, 3.0],
+            [0.3, -0.7, 1.0, 0.4],
+            [-0.1, 0.8, -0.9, 0.2],
+        ] {
+            // Repreparing the clone forces a fresh SAV projection; its
+            // operator and force are identical to the cached query's.
+            let mut fresh = load.clone();
+            fresh
+                .prepare(
+                    k,
+                    &cf.iter().map(|a| a[0]).collect::<Vec<_>>(),
+                    (mu > 0.0).then_some((h2, mu)),
+                )
+                .unwrap();
+            let (mut actual, mut expected) = (port, port);
+            crate::solve_body_response(cf, gradient, sav, h2, mu, Some(&mut *load), &mut actual, k);
+            crate::solve_body_response(
+                cf,
+                gradient,
+                sav,
+                h2,
+                mu,
+                Some(&mut fresh),
+                &mut expected,
+                k,
+            );
+            assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+        }
+    }
+
+    #[test]
+    fn g5_sav_projection_cache_matches_fresh_queries_across_predictions_and_clocks() {
+        let mut load = manufactured_load(
+            vec![vec![1.0, 0.2, -0.1, 0.7], vec![0.4, 0.9, 0.3, -0.2]],
+            vec![0.3, 0.15],
+            vec![120.0, 75.0],
+        );
+        let h2 = 0.6;
+        let masses = [1.2, 0.7, 1.5, 0.9];
+        let s0 = [0.0, 2.0, 7.0, 3.0];
+        let coefficients = |k: f64| -> Vec<[f64; 4]> {
+            (0..4)
+                .map(|i| [k * k / (masses[i] * (1.0 + s0[i] * k)), 0.0, 0.0, 0.0])
+                .collect()
+        };
+        let k = 0.002;
+        let cf = coefficients(k);
+        let mu = 0.12 / (k * k);
+        load.prepare(
+            k,
+            &cf.iter().map(|a| a[0]).collect::<Vec<_>>(),
+            Some((h2, mu)),
+        )
+        .unwrap();
+        compare_fresh_port_responses(&mut load, &cf, &[120.0, -80.0, 30.0, 50.0], true, h2, mu, k);
+
+        // A new prediction changes the gradient and overwrites b as RHS
+        // scratch. Neither the previous projection nor its denominator survives.
+        load.load_rhs(&[0.01, -0.02, 0.03, 0.04], &[0.005; 4], k);
+        compare_fresh_port_responses(&mut load, &cf, &[-50.0, 20.0, 90.0, -70.0], true, h2, mu, k);
+
+        // Changing the clock changes both the nodal diagonal and the
+        // centered modal factor, and invalidates its SAV projection directly.
+        let k = 0.001;
+        let cf = coefficients(k);
+        let mu = 0.12 / (k * k);
+        load.prepare(
+            k,
+            &cf.iter().map(|a| a[0]).collect::<Vec<_>>(),
+            Some((h2, mu)),
+        )
+        .unwrap();
+        compare_fresh_port_responses(&mut load, &cf, &[30.0, 40.0, -60.0, 80.0], true, h2, mu, k);
+
+        // A non-SAV query cannot leave a cached denominator paired with
+        // overwritten scratch when SAV is subsequently enabled again.
+        compare_fresh_port_responses(&mut load, &cf, &[0.0; 4], false, h2, mu, k);
+        compare_fresh_port_responses(
+            &mut load,
+            &cf,
+            &[100.0, 10.0, -30.0, -20.0],
+            true,
+            h2,
+            mu,
+            k,
+        );
     }
 
     fn one_mode_step(

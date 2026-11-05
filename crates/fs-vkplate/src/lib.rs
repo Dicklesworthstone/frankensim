@@ -1967,23 +1967,30 @@ impl Body {
 /// Its operator is `D + gg'/4 + mu uu' + U (A/k² + B/2k) U'`, omitting
 /// inactive terms, with `D^-1 = cf[][0]` and `u_i = h²`. The SAV gradient
 /// is frozen during prediction/contact/friction; the modal-plus-volume
-/// Woodbury factor is cached at setup. No factorization or allocation occurs
-/// here. Reusing this action is necessary when a local force moves remote
-/// nodes through the air inertia, centered radiation, or nonlinear storage.
+/// Woodbury factor is cached at setup. Its SAV projection is evaluated once
+/// per prediction and reused for subsequent port queries; `load_rhs` clears
+/// it after the next gradient evaluation. No factorization or allocation
+/// occurs here. A local force can move remote nodes through the air inertia,
+/// centered radiation, or nonlinear storage.
 fn solve_body_response(
     cf: &[[f64; 4]], g: &[f64], sav: bool, h2: f64, mu: f64,
     load: Option<&mut radiation::ModalAirLoad>, response: &mut [f64], k: f64,
 ) {
     let n = response.len();
+    let cached_sav = sav && load.as_ref().is_some_and(|load| {
+        load.prepared.as_ref().is_some_and(|p| p.k == k && p.sav_schur.is_some())
+    });
     let (mut gy, mut gzg, mut uy, mut uzu, mut gzu) = (0.0, 0.0, 0.0, 0.0, 0.0);
     for i in 0..n {
         let ia = cf[i][0];
         response[i] *= ia;
         if sav {
-            let z = g[i] * ia;
             gy += g[i] * response[i];
-            gzg += g[i] * z;
-            gzu += h2 * z;
+            if !cached_sav {
+                let z = g[i] * ia;
+                gzg += g[i] * z;
+                gzu += h2 * z;
+            }
         }
         if mu > 0.0 {
             uy += h2 * response[i];
@@ -1994,25 +2001,39 @@ fn solve_body_response(
         // V = [u?, modal shapes], Q = C_V^-1 + V'D^-1V,
         // b = V'D^-1 g, y = V'D^-1 rhs. The remaining SAV correction is
         // c_g = (g'D^-1 rhs - b'Q^-1y)/(4 + g'D^-1g - b'Q^-1b).
-        let prepared = load.prepared.as_ref().filter(|p| p.k == k)
+        let prepared = load.prepared.as_mut().filter(|p| p.k == k)
             .expect("prepared for this step with the update coefficients");
+        if !sav {
+            // A non-SAV query ends this projection's lifetime, including for
+            // callers that switch back without an intervening prediction.
+            prepared.sav_schur = None;
+        }
         let off = usize::from(prepared.with_volume);
         let size = off + load.cols.len();
         if off == 1 {
-            (load.y[0], load.b[0]) = (uy, gzu);
+            load.y[0] = uy;
+            if sav && !cached_sav { load.b[0] = gzu; }
         }
         for (r, col) in load.cols.iter().enumerate() {
             load.y[off + r] = dot(col, response);
-            load.b[off + r] = if sav {
-                col.iter().zip(g).zip(cf).map(|((u, g), a)| u * (g * a[0])).sum()
-            } else { 0.0 };
+            if sav && !cached_sav {
+                load.b[off + r] = col.iter().zip(g).zip(cf)
+                    .map(|((u, g), a)| u * (g * a[0])).sum();
+            }
         }
         radiation::cholesky_solve(&prepared.chol, size, &mut load.y[..size]);
         let cg = if sav {
-            load.w2[..size].copy_from_slice(&load.b[..size]);
-            radiation::cholesky_solve(&prepared.chol, size, &mut load.w2[..size]);
-            let cg = (gy - dot(&load.b[..size], &load.y[..size]))
-                / (4.0 + gzg - dot(&load.b[..size], &load.w2[..size]));
+            let denominator = match prepared.sav_schur {
+                Some(value) => value,
+                None => {
+                    load.w2[..size].copy_from_slice(&load.b[..size]);
+                    radiation::cholesky_solve(&prepared.chol, size, &mut load.w2[..size]);
+                    let value = 4.0 + gzg - dot(&load.b[..size], &load.w2[..size]);
+                    prepared.sav_schur = Some(value);
+                    value
+                }
+            };
+            let cg = (gy - dot(&load.b[..size], &load.y[..size])) / denominator;
             for (y, w2) in load.y[..size].iter_mut().zip(&load.w2[..size]) {
                 *y -= w2 * cg;
             }
