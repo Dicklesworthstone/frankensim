@@ -15,6 +15,8 @@
 //! energy. No thermal store, heat partition, global energy theorem or trajectory
 //! error certificate is inferred. Resolve spatial and relaxation timescales.
 
+#[path = "porous_momentum/free_spherical.rs"]
+pub mod free_spherical;
 #[path = "porous_momentum/rotor.rs"]
 pub mod rotor;
 #[path = "porous_momentum/spherical.rs"]
