@@ -86,9 +86,12 @@ agree to floating-point tolerance; cross-ISA equality is not claimed.
 
 ## Physical scope
 
-The fission source is a reduced prescribed-source model. It does not infer neutron flux,
-cross sections, criticality, reaction rates, temperature reactivity feedback,
-isotopic product yields, activation, poisoning or a nuclide depletion network.
+The base `FissionState` is a prescribed-source model. The irradiation layer
+below additionally computes reaction rates and parent removal from supplied
+multigroup flux and cross sections. Neither fission lane infers neutron flux,
+evaluates microscopic nuclear data, solves criticality, or evolves irradiation
+product yields, activation or poisoning. Radioactive daughter histories have
+the separate decay owner described below.
 It does not solve radiation transport or assign dose. The radiation channel is
 an energy export, not proof of where that radiation subsequently deposits.
 Group fits require independent calibration over the intended cooling times
@@ -329,3 +332,56 @@ All coefficients are explicitly synthetic; this verifies integration and account
 not an empirical isotope model. This direct source run is separate from the
 unavailable full Cargo workspace gate.
 
+
+## Multigroup irradiation and competing parent removal
+
+`irradiation` admits an explicit `NuclideId`, immutable identified energy-group
+edges in joules, microscopic fission/capture cross sections in square metres,
+an absolute group-integrated scalar flux in neutrons per square metre per second,
+a fixed coefficient applicability interval in kelvin, the existing fission
+energy model, and an explicit prompt capture-energy partition. The flux is not
+a normalized probability spectrum or a surface current. Grid identity and all
+edges must match, including for zero flux; no silent regrouping or unit conversion
+occurs. Data labels and temperature limits are declarations, not evaluated-data
+validation. Spectrum collapsing, self-shielding and temperature interpolation
+remain with the supplying data/transport owner.
+
+For each frozen incident spectrum the kernel computes `kf = sum(sigma_f,g phi_g)`
+and `kc = sum(sigma_c,g phi_g)`, then solves `N' = -(kf+kc)N` analytically. Fission
+and capture counts are the corresponding shares of the same integrated parent
+removal. A capture is never counted as a fission or credited the fission Q value.
+Its supplied immediate energy has its own accounting entry. Capture products and
+fission fragments leave the tracked parent inventory but remain bulk material;
+this lane neither invents a daughter chain nor subtracts thermal mass.
+
+The original delayed-energy groups are driven by `F(t)=kf N0 exp(-(kf+kc)t)`.
+A stable divided difference integrates that exponential source against each
+energy group's decay. Coincident depletion/decay constants use the finite
+Bateman limit; short intervals use separately computed heat release, and stiff
+intervals preserve representable surviving tails. Neutron shutdown stops new
+reaction events and retains the accepted delayed-energy reservoirs. The report
+separates fission energy, capture energy, released channels and surviving storage,
+with independent total-yield accounting and noncancelling numerical defects.
+
+`IrradiationState::trial` shares the original immutable fission model and common
+compensated accounts. Work and storage are linear in the admitted neutron and
+decay-group counts. It polls the caller between groups and publishes no partial
+state on domain, work, arithmetic, accuracy or cancellation refusal. Instantaneous
+reaction rates and channel-separated power are available from the same owner.
+This exact frozen-source integration does not bound the error of a changing flux,
+a collapsed spectrum, a cross-section dataset or a subsequently coupled material.
+
+The equation form follows [OpenMC's depletion formulation](https://docs.openmc.org/en/latest/methods/depletion.html);
+source-history convolution follows the [Argonne decay-heat formulation](https://sas-doc.nse.anl.gov/5.8/Part02/Ch04/decay-heat.html).
+The implemented lane retains only independent parent removal and effective
+fission-energy reservoirs from that broader physics. No evaluated isotope
+coefficients, criticality prediction, transport solution or daughter evolution
+are bundled.
+
+Twelve irradiation regressions passed in the follow-up native source build,
+including independent reaction/capture balances, equal-rate convolution, spectral
+identity and temperature refusals, shutdown, replay, sub-ULP depletion, surviving
+stiff tails and resolved slow heat after extreme exposure. The build retained
+the actual production `fs-la::decay` and `fs-thermochem::decay` modules and rebuilt
+the real `fs-math`, `fs-qty` and `fs-blake3` crates. It is focused original-owner
+evidence, not a full workspace Cargo, thermal-feature or DSR gate.

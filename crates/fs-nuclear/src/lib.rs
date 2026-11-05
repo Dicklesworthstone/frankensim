@@ -28,6 +28,9 @@ use std::sync::Arc;
 #[cfg(feature = "thermal")]
 pub mod thermal;
 
+/// Multigroup neutron irradiation with competing fission and capture.
+pub mod irradiation;
+
 /// Disjoint energy destinations, in joules (or joules per fission in a model).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EnergyChannels {
