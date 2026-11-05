@@ -2716,6 +2716,20 @@ three-terminal regression uses independent backward-Euler elimination to check
 temperature-dependent voltage, cell heating, floating potential, polarity,
 energy and the actual two-solves-per-trial budget.
 
+`SpatialConductionDrive::MixedTerminals` prescribes total current on an arbitrary
+proper subset and voltage on the remaining electrodes. Zero-current electrodes
+float as bulk and contact resistance change with the actual thermal endpoint.
+Each trial rebuilds the native mixed terminal block under its own storage/work
+bounds and charges all N-1 basis solves to the original shared budget. Supply is
+independently summed from authored voltage differences times native reactions
+and authored currents times solved voltage differences; common bias is removed
+before arithmetic. The original field, contact partitions and finite-cell heat
+routes remain the only Joule deposition. A manufactured three-electrode fixture
+in `tests/spatial_conduction_enthalpy/contacts/mixed.rs` checks simultaneous
+bulk/contact temperature feedback, floating and injecting middle electrodes,
+local heat, polarity, large common bias, a current-controlled reference,
+source work, solve budgets and late cancellation with unchanged accepted state.
+
 `tests/spatial_conduction_enthalpy/current.rs` constructs an exact two-body
 backward-Euler endpoint for thermally linked, electrically parallel 3D conductors
 with temperature-dependent resistance. It checks unequal current redistribution,
