@@ -12,13 +12,15 @@
 //! minor loops and rotating-field memory. Branchless sourced cells represent a
 //! linear background. Every physical reversal must be resolved in the loading
 //! history. Numerical endpoint dissipation is reported separately from physical
-//! pinning heat. It supplies no eddy current, motion, anisotropy, thermal feedback
-//! or measured-material qualification, and no path-independent coenergy claim.
+//! pinning heat. The static entry points supply no eddy-current or motion law;
+//! the sibling eddy::hysteretic owner adds resolved induction through this same
+//! variational solve. No anisotropic fit, measured-material qualification or
+//! path-independent coenergy claim is implied.
 
 use super::{
     MagneticError, NonlinearMagneticControls, NonlinearMagneticError, NonlinearMagneticReport,
-    PlanarMagnetostatics, VariationalEvaluation, finite, gradients, poll, solve_variational,
-    weighted_error,
+    PlanarMagnetostatics, PositiveQuadratic, VariationalEvaluation, finite, gradients, poll,
+    solve_variational, weighted_error,
 };
 use fs_feec::{
     assembly::incidence_to_csr,
@@ -28,12 +30,14 @@ use fs_feec::{
 use fs_material::field_storage::hysteresis::{
     source::ResolvedVectorHysteresis,
     vector::{
-        VectorHysteresisControls, VectorHysteresisError, VectorHysteresisState, VectorHysteresisStep,
+        VectorHysteresisControls, VectorHysteresisError, VectorHysteresisState,
+        VectorHysteresisStep,
     },
 };
 use fs_qty::Dims;
 use fs_rep_mesh::{Metric2, TriComplex2};
 use fs_sparse::Csr;
+use std::cell::RefCell;
 
 type Result<T> = core::result::Result<T, NonlinearMagneticError>;
 
@@ -115,8 +119,12 @@ pub struct PlanarHystereticStep {
     pub boundary_work_j: f64,
     pub supplied_work_j: f64,
     pub field_work_j: f64,
-    /// Supplied endpoint work minus storage change, pinning heat and numerical
-    /// dissipation. A small algebraic norm alone cannot accept this identity.
+    /// Work absorbed by an optional coupled positive operator. Zero for the
+    /// static entry points. The induction owner independently identifies this
+    /// pairing with its spatial Joule heat; it is not additional pinning heat.
+    pub quadratic_work_j: f64,
+    /// Supplied endpoint work minus storage change, pinning heat, numerical
+    /// dissipation and coupled-operator work. A residual norm alone is insufficient.
     pub energy_residual_j: f64,
     pub nonlinear: NonlinearMagneticReport,
 }
@@ -152,6 +160,7 @@ struct Evaluation {
     flux: Vec<[f64; 2]>,
     residual: Vec<f64>,
     tangent_weights: Vec<CellWeight2>,
+    quadratic_effort: Vec<f64>,
     objective: f64,
 }
 impl VariationalEvaluation for Evaluation {
@@ -178,13 +187,19 @@ impl PlanarHystereticMagnetostatics {
     ) -> Result<Self> {
         poll(cancelled)?;
         if !matches!(mesh.metric(), Metric2::Planar { .. }) {
-            return Err(invalid("planar magnetic history requires the planar A_z metric"));
+            return Err(invalid(
+                "planar magnetic history requires the planar A_z metric",
+            ));
         }
         if materials.len() != mesh.faces().len()
             || mesh.vertices().len() > limits.max_dofs
             || mesh.edges().len() > limits.max_dofs
             || mesh.faces().len() > limits.max_cells
-            || mesh.faces().len().checked_mul(9).is_none_or(|n| n > limits.max_triplets)
+            || mesh
+                .faces()
+                .len()
+                .checked_mul(9)
+                .is_none_or(|n| n > limits.max_triplets)
         {
             return Err(invalid(
                 "one hysteresis source per cell and sufficient assembly limits required",
@@ -199,7 +214,12 @@ impl PlanarHystereticMagnetostatics {
         // Validate the original mesh/Hodge even when later fields have no free
         // coordinates. Actual Newton weights use the full history tangent.
         weighted_mass_matrix_2d(
-            &mesh, 1, &weights, Dims([-1, -1, 2, 0, 2, 0]), limits, cancelled,
+            &mesh,
+            1,
+            &weights,
+            Dims([-1, -1, 2, 0, 2, 0]),
+            limits,
+            cancelled,
         )
         .map_err(weighted_error)?;
         let mut shapes = Vec::with_capacity(materials.len());
@@ -208,11 +228,19 @@ impl PlanarHystereticMagnetostatics {
             poll(cancelled)?;
             shapes.push(gradients(face.map(|v| mesh.vertices()[v as usize]))?);
             volumes_m3.push(
-                mesh.face_measure(triangle).ok_or_else(|| invalid("missing cell measure"))?,
+                mesh.face_measure(triangle)
+                    .ok_or_else(|| invalid("missing cell measure"))?,
             );
         }
         let incidence = incidence_to_csr(&mesh.d0());
-        Ok(Self { mesh, materials, shapes, volumes_m3, incidence, limits })
+        Ok(Self {
+            mesh,
+            materials,
+            shapes,
+            volumes_m3,
+            incidence,
+            limits,
+        })
     }
 
     pub fn mesh(&self) -> &TriComplex2 {
@@ -220,6 +248,31 @@ impl PlanarHystereticMagnetostatics {
     }
     pub fn materials(&self) -> &[ResolvedVectorHysteresis] {
         &self.materials
+    }
+
+    /// Assemble the accepted constitutive effort without re-equilibrating or
+    /// advancing any material memory. Induction uses this for algebraic air
+    /// and floating-region constraints, including initial-state admission.
+    pub(crate) fn magnetic_load(
+        &self,
+        state: &PlanarHystereticState<'_>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<f64>> {
+        if !std::ptr::eq(self, state.problem) {
+            return Err(invalid("original magnetic history is required"));
+        }
+        let mut load = vec![0.0; self.mesh.vertices().len()];
+        for (triangle, face) in self.mesh.faces().iter().enumerate() {
+            poll(cancelled)?;
+            let h = state.cell_states[triangle].field_a_m();
+            for (local, &vertex) in face.iter().enumerate() {
+                let shape = self.shapes[triangle][local];
+                let effort = h[0].mul_add(shape[1], -h[1] * shape[0]);
+                load[vertex as usize] =
+                    finite(self.volumes_m3[triangle].mul_add(effort, load[vertex as usize]))?;
+            }
+        }
+        Ok(load)
     }
 
     /// The virgin zero-field state at an arbitrary finite gauge. Previously
@@ -245,6 +298,7 @@ impl PlanarHystereticMagnetostatics {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn evaluate(
         &self,
         previous: &PlanarHystereticState<'_>,
@@ -252,6 +306,7 @@ impl PlanarHystereticMagnetostatics {
         rhs: &[f64],
         references: &[usize],
         controls: VectorHysteresisControls,
+        quadratic: Option<&dyn PositiveQuadratic>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Evaluation> {
         let mut evaluation = Evaluation {
@@ -259,6 +314,7 @@ impl PlanarHystereticMagnetostatics {
             flux: Vec::with_capacity(self.materials.len()),
             residual: rhs.iter().map(|x| -x).collect(),
             tangent_weights: Vec::with_capacity(self.materials.len()),
+            quadratic_effort: Vec::new(),
             objective: 0.0,
         };
         for (triangle, face) in self.mesh.faces().iter().enumerate() {
@@ -282,7 +338,9 @@ impl PlanarHystereticMagnetostatics {
                 )
                 .map_err(|e| history_error(triangle, e))?;
             let h = step.state.field_a_m();
-            let nu = step.incremental_reluctivity_m_h().map_err(|e| history_error(triangle, e))?;
+            let nu = step
+                .incremental_reluctivity_m_h()
+                .map_err(|e| history_error(triangle, e))?;
             let volume = self.volumes_m3[triangle];
             // Relative to accepted storage; this constant changes neither H
             // nor the minimizer and retains small increments around a bias.
@@ -315,6 +373,21 @@ impl PlanarHystereticMagnetostatics {
             )?;
             evaluation.objective = finite((-load).mul_add(delta, evaluation.objective))?;
         }
+        if let Some(quadratic) = quadratic {
+            let increment = potential
+                .iter()
+                .zip(quadratic.reference())
+                .map(|(value, reference)| finite(value - reference))
+                .collect::<core::result::Result<Vec<_>, _>>()?;
+            let mut effort = vec![0.0; potential.len()];
+            let cancel = RefCell::new(&mut *cancelled);
+            quadratic.apply(&increment, &mut effort, &|| (*cancel.borrow_mut())())?;
+            for (v, (&delta, &value)) in increment.iter().zip(&effort).enumerate() {
+                evaluation.residual[v] = finite(evaluation.residual[v] + value)?;
+                evaluation.objective = finite((0.5 * delta).mul_add(value, evaluation.objective))?;
+            }
+            evaluation.quadratic_effort = effort;
+        }
         Ok(evaluation)
     }
 
@@ -338,7 +411,9 @@ impl PlanarHystereticMagnetostatics {
             return Err(invalid("original magnetic history is required"));
         }
         let prescribed = PlanarMagnetostatics::admit_mesh_boundary(
-            &self.mesh, boundary_potential_wb_m, cancelled,
+            &self.mesh,
+            boundary_potential_wb_m,
+            cancelled,
         )?;
         let mut initial = previous.potential_wb_m.clone();
         let references =
@@ -356,8 +431,12 @@ impl PlanarHystereticMagnetostatics {
             };
         }
         self.candidate_from_initial(
-            previous, current_density_a_m2, boundary_potential_wb_m,
-            &initial, controls, cancelled,
+            previous,
+            current_density_a_m2,
+            boundary_potential_wb_m,
+            &initial,
+            controls,
+            cancelled,
         )
     }
 
@@ -375,21 +454,11 @@ impl PlanarHystereticMagnetostatics {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarHystereticCandidate<'a>> {
         poll(cancelled)?;
-        if !std::ptr::eq(self, previous.problem)
-            || current_density_a_m2.len() != self.materials.len()
+        if current_density_a_m2.len() != self.materials.len()
             || current_density_a_m2.iter().any(|x| !x.is_finite())
-            || !controls.energy_tolerance_j.is_finite()
-            || controls.energy_tolerance_j <= 0.0
         {
-            return Err(invalid(
-                "original magnetic history, complete finite current and positive work budget required",
-            ));
+            return Err(invalid("complete finite impressed current required"));
         }
-        let prescribed = PlanarMagnetostatics::admit_mesh_boundary(
-            &self.mesh, boundary_potential_wb_m, cancelled,
-        )?;
-        let references =
-            PlanarMagnetostatics::mesh_gauge_references(&self.mesh, &prescribed, cancelled)?;
         let mut rhs = vec![0.0; self.mesh.vertices().len()];
         for (triangle, face) in self.mesh.faces().iter().enumerate() {
             poll(cancelled)?;
@@ -398,12 +467,76 @@ impl PlanarHystereticMagnetostatics {
                 rhs[vertex as usize] = finite(rhs[vertex as usize] + load)?;
             }
         }
+        self.candidate_loaded(
+            previous,
+            &rhs,
+            boundary_potential_wb_m,
+            initial_potential_wb_m,
+            None,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Shared field/history solve. A positive coupled operator must reference
+    /// the accepted A, and this initial induction rung holds boundary traces
+    /// fixed. Its work is admitted here and independently closed by its owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn candidate_loaded<'a>(
+        &'a self,
+        previous: &PlanarHystereticState<'a>,
+        rhs: &[f64],
+        boundary_potential_wb_m: &[(usize, f64)],
+        initial_potential_wb_m: &[f64],
+        quadratic: Option<&dyn PositiveQuadratic>,
+        controls: PlanarHystereticControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarHystereticCandidate<'a>> {
+        poll(cancelled)?;
+        if !std::ptr::eq(self, previous.problem)
+            || !controls.energy_tolerance_j.is_finite()
+            || controls.energy_tolerance_j <= 0.0
+            || quadratic.is_some_and(|q| q.reference() != previous.potential_wb_m())
+        {
+            return Err(invalid(
+                "original magnetic history and positive work budget required",
+            ));
+        }
+        let prescribed = PlanarMagnetostatics::admit_mesh_boundary(
+            &self.mesh,
+            boundary_potential_wb_m,
+            cancelled,
+        )?;
+        if quadratic.is_some()
+            && prescribed
+                .iter()
+                .zip(previous.potential_wb_m())
+                .any(|(value, old)| value.is_some_and(|value| value != *old))
+        {
+            return Err(invalid(
+                "coupled induction requires fixed accepted boundary traces",
+            ));
+        }
+        let references =
+            PlanarMagnetostatics::mesh_gauge_references(&self.mesh, &prescribed, cancelled)?;
         let (potential, evaluation, nonlinear) = solve_variational(
-            &self.mesh, &self.incidence, self.limits, &rhs,
-            boundary_potential_wb_m, initial_potential_wb_m, None, controls.nonlinear,
+            &self.mesh,
+            &self.incidence,
+            self.limits,
+            rhs,
+            boundary_potential_wb_m,
+            initial_potential_wb_m,
+            quadratic,
+            controls.nonlinear,
             &mut |potential, _gauge, cancelled| {
                 self.evaluate(
-                    previous, potential, &rhs, &references, controls.material, cancelled,
+                    previous,
+                    potential,
+                    rhs,
+                    &references,
+                    controls.material,
+                    quadratic,
+                    cancelled,
                 )
             },
             cancelled,
@@ -417,6 +550,7 @@ impl PlanarHystereticMagnetostatics {
             boundary_work_j: 0.0,
             supplied_work_j: 0.0,
             field_work_j: 0.0,
+            quadratic_work_j: 0.0,
             energy_residual_j: 0.0,
             nonlinear,
         };
@@ -428,9 +562,8 @@ impl PlanarHystereticMagnetostatics {
             let h = native.state.field_a_m();
             let before = previous.magnetic_flux_density_t[triangle];
             let after = evaluation.flux[triangle];
-            let work = finite(
-                volume * h[0].mul_add(after[0] - before[0], h[1] * (after[1] - before[1])),
-            )?;
+            let work =
+                finite(volume * h[0].mul_add(after[0] - before[0], h[1] * (after[1] - before[1])))?;
             let change = finite(volume * native.energy_change_j_m3)?;
             let heat = finite(volume * native.irreversible_heat_j_m3)?;
             let numerical = finite(volume * native.numerical_dissipation_j_m3)?;
@@ -463,6 +596,9 @@ impl PlanarHystereticMagnetostatics {
             )?;
             step.impressed_current_work_j =
                 finite(rhs[v].mul_add(delta, step.impressed_current_work_j))?;
+            if let Some(&effort) = evaluation.quadratic_effort.get(v) {
+                step.quadratic_work_j = finite(effort.mul_add(delta, step.quadratic_work_j))?;
+            }
             if prescribed[v].is_some() {
                 step.boundary_work_j =
                     finite(evaluation.residual[v].mul_add(delta, step.boundary_work_j))?;
@@ -470,15 +606,21 @@ impl PlanarHystereticMagnetostatics {
         }
         step.supplied_work_j = finite(step.impressed_current_work_j + step.boundary_work_j)?;
         step.energy_residual_j = finite(
-            step.supplied_work_j - step.stored_energy_change_j
-                - step.irreversible_heat_j - step.numerical_dissipation_j,
+            step.supplied_work_j
+                - step.stored_energy_change_j
+                - step.irreversible_heat_j
+                - step.numerical_dissipation_j
+                - step.quadratic_work_j,
         )?;
-        let local_defect = step.cells.iter().try_fold(0.0, |sum, c| {
-            finite(sum + c.energy_residual_j.abs())
-        })?;
+        let local_defect = step
+            .cells
+            .iter()
+            .try_fold(0.0, |sum, c| finite(sum + c.energy_residual_j.abs()))?;
         if step.energy_residual_j.abs() > controls.energy_tolerance_j
             || local_defect > controls.energy_tolerance_j
-            || (step.supplied_work_j - step.field_work_j).abs() > controls.energy_tolerance_j
+            || step.quadratic_work_j < -controls.energy_tolerance_j
+            || (step.supplied_work_j - step.field_work_j - step.quadratic_work_j).abs()
+                > controls.energy_tolerance_j
         {
             return Err(invalid(
                 "spatial hysteresis work, storage, heat and numerical remainder do not close",

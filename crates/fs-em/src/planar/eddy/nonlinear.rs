@@ -110,10 +110,10 @@ impl EddySection for PlanarNonlinearMagnetostatics {
     }
 }
 
-struct BackwardConduction<'a> {
-    accepted: &'a [f64],
-    conduction: &'a Conduction,
-    dt: f64,
+pub(super) struct BackwardConduction<'a> {
+    pub(super) accepted: &'a [f64],
+    pub(super) conduction: &'a Conduction,
+    pub(super) dt: f64,
 }
 impl PositiveQuadratic for BackwardConduction<'_> {
     fn reference(&self) -> &[f64] {
@@ -262,7 +262,7 @@ impl<'m> PlanarNonlinearEddyCandidate<'m> {
     }
 }
 
-fn admit_controls(value: NonlinearEddyControls) -> Result<(), EddyError> {
+pub(super) fn admit_controls(value: NonlinearEddyControls) -> Result<(), EddyError> {
     controls(EddyControls {
         linear: value.nonlinear.linear,
         energy_tolerance_j: value.energy_tolerance_j,

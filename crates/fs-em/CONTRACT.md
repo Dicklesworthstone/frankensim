@@ -1,5 +1,44 @@
 # fs-em contract
 
+## Spatial hysteresis with resolved eddy-current diffusion
+
+The default-off `magnetic-hysteresis` feature also exposes
+`planar::eddy::hysteretic::PlanarHystereticEddy`. It retains the original
+`PlanarHystereticState`, all vector branch polarizations, fixed boundary
+traces, electrical regions and clock. The native isolated-conductor
+`Conduction` projection, algebraic air/floating-region admission, exact P1
+Joule integral and backward-Euler quadratic operator remain their original
+owners. Impressed current needs an explicit balanced return on every mesh
+component; disconnected or relabeled electrical regions refuse.
+
+The shared variational field solve adds `C_sigma delta A/dt` to both residual
+and tangent and half its increment-work pairing to the objective. Every Newton
+trial still starts from the SAME accepted magnetic history. The complete account
+is `delta W + Q_pinning + Q_Joule + D_numerical = W_supplied`. Per-triangle
+pinning heat and exact nodal Ohmic E/J and heat remain distinct. The original
+material endpoint remainder is numerical loss, never deposited as heat.
+The assembled quadratic work must independently agree with the spatial Joule
+integral within the explicit magnetic work budget.
+
+Electrical and magnetic sources retain the same original material card and
+complete coordinate schema, while selecting their own property requirements.
+Conductivity may refresh with the owned temperature; the original constant
+magnetic fit is rechecked across that explicitly source-supported interval.
+Changed fitted coefficients, nonthermal coordinates or source identities refuse.
+Initial algebraic constraints use the accepted constitutive H directly, without
+equilibrating away remanence or introducing an initialization impulse.
+
+Four G1/G3/G4 regressions cover independent scalar-play/P1 relaxation with
+remanence, the exact branchless backward-Euler limit, balanced driven nested
+loops with rate-independent pinning heat and rate-dependent Joule heat, and
+whole-candidate rollback. This remains an estimated, first-order, fixed-geometry
+isotropic MQS model. Reversals and rotation must be resolved/refined in the
+physical loading history; motion, terminal circuits, variable magnetic
+coefficients and experimental material validation are separate extensions.
+Pinned-nightly formatting and bounded source/API/energy review completed.
+Native execution remains blocked by missing constellation sibling manifests
+and shared storage pressure; these regression claims are not execution receipts.
+
 ## Spatial vector hysteresis on the planar field solver
 
 The default-off `magnetic-hysteresis` feature exposes

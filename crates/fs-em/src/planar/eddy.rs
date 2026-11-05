@@ -24,6 +24,9 @@
 mod conduction;
 /// Small-signal AC winding impedance from the original DC field and eddy currents.
 pub mod harmonic;
+/// Vector magnetic memory with resolved transient eddy currents and physical heat.
+#[cfg(feature = "magnetic-hysteresis")]
+pub mod hysteretic;
 /// Prescribed Eulerian conductor motion, induced-field feedback and mechanical work.
 pub mod moving;
 /// Source-defined reversible H(B) induction on the same conduction/heat owners.
