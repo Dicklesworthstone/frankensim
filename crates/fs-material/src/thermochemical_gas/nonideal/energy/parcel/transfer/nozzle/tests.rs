@@ -6,15 +6,15 @@ use crate::thermochemical_gas::energy::{GasEnergySolve, entropy::GasEntropySolve
 use crate::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzle;
 use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 
-fn bound() -> ThermochemicalPengRobinsonModel {
+pub(super) fn bound() -> ThermochemicalPengRobinsonModel {
     bound_with_reference(0.0)
 }
-fn parcel(model: ThermochemicalPengRobinsonModel, pressure: f64, volume: f64) -> IsochoricRealGasParcel {
+pub(super) fn parcel(model: ThermochemicalPengRobinsonModel, pressure: f64, volume: f64) -> IsochoricRealGasParcel {
     IsochoricRealGasParcel::new(
         model, point(300.0, pressure), volume, PengRobinsonPhaseV1::Vapor,
     ).unwrap()
 }
-fn energy() -> GasEnergySolve {
+pub(super) fn energy() -> GasEnergySolve {
     GasEnergySolve {
         minimum_temperature_k: 220.0,
         maximum_temperature_k: 450.0,
@@ -22,7 +22,7 @@ fn energy() -> GasEnergySolve {
         maximum_iterations: 128,
     }
 }
-fn controls() -> RealGasNozzleStepSolve {
+pub(super) fn controls() -> RealGasNozzleStepSolve {
     RealGasNozzleStepSolve {
         entropy: GasEntropySolve {
             minimum_temperature_k: 220.0,
@@ -45,10 +45,10 @@ fn controls() -> RealGasNozzleStepSolve {
         maximum_donor_fraction: 0.1,
     }
 }
-fn nozzle() -> GasNozzle {
+pub(super) fn nozzle() -> GasNozzle {
     GasNozzle { area_m2: 1e-6, discharge_coefficient: 0.8 }
 }
-fn close(a: f64, b: f64, tol: f64) {
+pub(super) fn close(a: f64, b: f64, tol: f64) {
     assert!((a-b).abs() <= tol, "{a:.15e} != {b:.15e}, tol={tol:.3e}");
 }
 

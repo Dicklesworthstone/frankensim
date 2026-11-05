@@ -14707,3 +14707,40 @@ returns no proposed network. Regressions cover dense branches/cycles, joint heat
 independent absolute EOS energy, canonical parallel rows, large species reference
 shifts, balanced throughflow, node-local catalogs, original-inventory depletion,
 work bounds and late transactional failures.
+
+### Pressure-driven real-gas networks with shared enthalpy storage
+
+`nonideal::energy::parcel::transfer::nozzle::network` samples every authored
+converging restriction from one original PR parcel snapshot. Actual pressure
+selects each upstream owner independently of endpoint array order. The original
+`nozzle_flow_to` owner resolves the same density isentrope, finite enthalpy drop,
+back-pressure matching and sonic choking, retaining complete throat source data.
+Distinct path IDs denote distinct physical restrictions, including parallel paths.
+
+Bulk nozzle outflow is expanded into its original species amounts and submitted
+to the single simultaneous real-gas partial-enthalpy network update. Optional
+prescribed selective streams, internal heat and explicit external heat share that
+same endpoint reconstruction. Additional species amounts are integrated kilograms
+and heat records are integrated joules over the interval. The expansion itself is
+bounded by the existing 4096-record limit. No receipt funds another outflow; the
+strictest active nozzle donor-fraction bound applies to all outgoing nozzle and
+selective mass from that original owner, alongside species-specific gross bounds.
+
+The receiving volume stores the original stagnation enthalpy once. No additional
+jet kinetic-energy heat is deposited. Full final pressure, temperature, composition,
+acoustic and transport views come from the original caloric/EOS/material owners.
+An active path whose reconstructed donor pressure falls below its receiver refuses
+the entire trial; transferred mass is not clipped. Closed/equal-pressure paths
+retain explicit zero-flow reports. Source failures, malformed paths, inventory or
+work exhaustion and late cancellation publish no endpoints.
+
+This is a first-order explicit quasi-steady physical interval on admitted
+homogeneous branches. The caller refines the interval and resamples the rates;
+there is no automatic time-error estimate, phase flash, valve momentum, pipe wave,
+shock or arbitrary selective-stream entropy guarantee. Node energy controls own
+the final collective reconstruction; each original nozzle control retains its
+existing flow-query admission. Focused tests compare the original single-nozzle
+oracle and finite-pair result, audit branched/throughflow storage independently,
+combine selective counterflow and heat, verify aggregate donor limits and pressure
+crossing refusal, preserve large-reference invariance, and check source/cancellation
+and lowered-record boundaries.

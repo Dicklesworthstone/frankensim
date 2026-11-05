@@ -14,6 +14,8 @@
 
 /// Finite adiabatic depletion and physical-time real-gas nozzle blowdown.
 pub mod blowdown;
+/// Simultaneous pressure-driven real-gas paths with one enthalpy reconstruction.
+pub mod network;
 
 use super::{
     IsochoricRealGasParcel, RealGasMassTransferCandidate, RealGasMassTransferSolve,
