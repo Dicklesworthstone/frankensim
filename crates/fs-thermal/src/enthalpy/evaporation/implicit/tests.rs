@@ -2,6 +2,9 @@
 #[path = "tests/solve.rs"]
 mod solve;
 
+#[path = "tests/timeline.rs"]
+mod timeline;
+
 use super::*;
 use crate::enthalpy::backward_euler::{BoundaryExchanges, PrescribedBathHeat};
 use crate::enthalpy::{

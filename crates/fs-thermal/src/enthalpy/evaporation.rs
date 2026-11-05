@@ -23,6 +23,9 @@ use crate::evaporation::{
     advance_surface_with_heat,
 };
 
+#[path = "evaporation/account.rs"]
+mod account;
+
 #[path = "evaporation/coupled.rs"]
 mod coupled;
 pub use coupled::CoupledEvaporationAudit;

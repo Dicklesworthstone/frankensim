@@ -590,7 +590,7 @@ impl EnergySum {
         self.sum = next;
         Ok(())
     }
-    pub(super) fn value(self) -> Result<f64, DepositionError> {
+    pub(super) fn value(&self) -> Result<f64, DepositionError> {
         finite(self.sum + self.correction)
     }
 }

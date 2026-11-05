@@ -1693,6 +1693,33 @@ failed work or final cancellation publishes no candidate. The method uses
 numerical derivatives, requires a resolvable difference scale, and remains
 first order in time without automatic time-error estimation.
 
+`DepositionSimulation::advance_implicit_evaporating_to` now drives those solves
+on the original event timeline. Start-time births/contact/boundary changes are
+processed in authored order; the chosen liquid must be active before a
+positive-duration solve. Later births of other cells, covering and separation
+retain their original semantics. Each interval ends at the next maximum-step
+endpoint or event; endpoint events change the following interval's exposure.
+The last returned coefficient payload describes the accepted interval before
+those endpoint events, and no payload is produced for an event-only request.
+
+`EvaporationImplicitTimelineControls` separates maximum physical timestep from
+the numerical solve controls. Newton attempts, uncached physical residual
+evaluations and original thermal substeps are bounded across the entire
+request. Absolute interval energy and represented-mass-rate defects accumulate
+without sign cancellation under unchanged whole-request tolerances. The
+implicit and IMEX timelines share the same compensated physical mass/energy
+account, including birth enthalpy and complete carried vapor energy. A late
+source/event failure or cancellation publishes neither intermediate state nor
+an interval payload.
+
+Five native timeline regressions compare manual interval composition and
+independent source/exposure balances, resolve nonlinear time/mass-dependent
+heating, enforce shared work limits and final rollback, and refine toward the
+analytic variable-mass heat equation. Backward Euler remains first order; the
+maximum timestep still controls physical time error independently of algebraic
+convergence. No automatic time-error controller or evolving gas/geometry is
+inferred.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry

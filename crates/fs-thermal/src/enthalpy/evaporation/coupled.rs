@@ -5,10 +5,9 @@
 //! solve, without a sensible-only intermediate state. This is a first-order
 //! implicit-explicit method, not an implicit solve of the entire heat graph.
 
+use super::account::TimelineAccount;
 use super::*;
-use crate::enthalpy::observe::EnergySum;
 use crate::enthalpy::{finite, nonnegative, positive};
-use std::collections::BTreeMap;
 
 /// Physical open-system accounts on the original native timeline.
 /// Latent energy is a subaccount of vapor energy, never additional heat.
@@ -97,7 +96,7 @@ impl DepositionSimulation<'_> {
             )
             .into());
         }
-        let initial_mass = finite(self.mass_kg())?;
+        finite(self.mass_kg())?;
         finite(self.energy_j())?;
         let mut next = self.clone();
         let mut native = EnergyAudit {
@@ -109,17 +108,7 @@ impl DepositionSimulation<'_> {
             substeps: 0,
             events: 0,
         };
-        let mut births = BTreeMap::new();
-        let mut incoming_mass = EnergySum::default();
-        let mut incoming_energy = EnergySum::default();
-        let mut external_heat = EnergySum::default();
-        let mut mass_transfer = EnergySum::default();
-        let mut latent = EnergySum::default();
-        let mut vapor = EnergySum::default();
-        let mut relative_vapor = EnergySum::default();
-        let mut recession = EnergySum::default();
-        let mut phase_steps = 0usize;
-        let mut last_step = None;
+        let mut account = TimelineAccount::default();
         let mut unrepresented_heat_j = 0.0;
         // Indexed maximum-step endpoints avoid a tiny fictitious final phase
         // interval from repeatedly adding a decimal-sized maximum timestep.
@@ -144,9 +133,7 @@ impl DepositionSimulation<'_> {
                     .checked_add(1)
                     .ok_or(DepositionError::Arithmetic)?;
                 if let Some((cell_id, mass, h)) = birth {
-                    births.insert(cell_id, (mass, h));
-                    incoming_mass.add(mass)?;
-                    incoming_energy.add(finite(mass * h)?)?;
+                    account.birth(cell_id, mass, h)?;
                 }
                 branch.check(&next)?;
                 applied_event = true;
@@ -186,15 +173,9 @@ impl DepositionSimulation<'_> {
                 return Err(DepositionError::Arithmetic.into());
             }
             let end = if dt == stop - start { stop } else { time };
-            external_heat.add(finite(dt * rates.external_w)?)?;
+            account.heat(finite(dt * rates.external_w)?)?;
             let phase_cell = next.cells.contains_key(&id).then_some(id);
             if phase_cell.is_some() {
-                let baseline_h = self
-                    .cells
-                    .get(&id)
-                    .map(|cell| cell.specific_h_j_kg)
-                    .or_else(|| births.get(&id).map(|&(_, h)| h))
-                    .ok_or(DepositionError::Arithmetic)?;
                 let supplied_heat = finite(dt * rates.watts[&id])?;
                 let step = next.evaporate_cell_with_heat(
                     id,
@@ -205,19 +186,7 @@ impl DepositionSimulation<'_> {
                     phase_config,
                     &mut checkpoint,
                 )?;
-                mass_transfer.add(step.transferred_mass_kg)?;
-                latent.add(step.latent_energy_j)?;
-                vapor.add(step.vapor_energy_j)?;
-                relative_vapor.add(finite(
-                    step.transferred_mass_kg
-                        * finite(step.liquid.specific_enthalpy_j_kg - baseline_h)?
-                        + step.latent_energy_j,
-                )?)?;
-                recession.add(step.recession_m)?;
-                phase_steps = phase_steps
-                    .checked_add(1)
-                    .ok_or(DepositionError::Arithmetic)?;
-                last_step = Some(step);
+                account.phase(self, id, step)?;
             }
             next.thermal_step_except_cell(
                 rates,
@@ -240,73 +209,15 @@ impl DepositionSimulation<'_> {
             }
             checkpoint()?;
         }
-        let transferred_mass_kg = mass_transfer.value()?;
-        let external_heat_j = external_heat.value()?;
-        let mut mass_balance = EnergySum::default();
-        let mut storage = EnergySum::default();
-        let mut energy_balance = EnergySum::default();
-        for (index, (&cell_id, cell)) in next.cells.iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint()?;
-            }
-            let original = self.cells.get(&cell_id);
-            let (mass, h) = match original {
-                Some(old) => (old.mass_kg, old.specific_h_j_kg),
-                None => *births.get(&cell_id).ok_or(DepositionError::Arithmetic)?,
-            };
-            let relative_energy = finite(cell.mass_kg * finite(cell.specific_h_j_kg - h)?)?;
-            energy_balance.add(relative_energy)?;
-            storage.add(relative_energy)?;
-            storage.add(if original.is_some() {
-                finite(finite(cell.mass_kg - mass)? * h)?
-            } else {
-                finite(cell.mass_kg * h)?
-            })?;
-            mass_balance.add(finite(cell.mass_kg - mass)?)?;
-        }
-        mass_balance.add(transferred_mass_kg)?;
-        energy_balance.add(relative_vapor.value()?)?;
-        energy_balance.add(-external_heat_j)?;
-        let mass_balance_residual_kg = mass_balance.value()?;
-        let energy_residual_j = energy_balance.value()?;
-        let incoming_mass_kg = incoming_mass.value()?;
-        let scale = initial_mass
-            .abs()
-            .max(finite(next.mass_kg())?.abs())
-            .max(incoming_mass_kg.abs())
-            .max(transferred_mass_kg.abs());
-        let terms = self.cells.len() as f64
-            + next.cells.len() as f64
-            + native.events as f64
-            + phase_steps as f64
-            + 1.0;
-        let mass_tolerance = finite(128.0 * f64::EPSILON * scale * terms)?;
-        if mass_balance_residual_kg.abs() > mass_tolerance {
-            return Err(ThermalEvaporationError::MassBalance {
-                residual_kg: mass_balance_residual_kg,
-                tolerance_kg: mass_tolerance,
-            });
-        }
-        if energy_residual_j.abs() > thermal_config.energy_tolerance_j {
-            return Err(DepositionError::EnergyBalance(energy_residual_j).into());
-        }
-        finite(next.energy_j())?;
-        let audit = CoupledEvaporationAudit {
-            incoming_mass_kg,
-            incoming_energy_j: incoming_energy.value()?,
-            external_heat_j,
-            transferred_mass_kg,
-            latent_energy_j: latent.value()?,
-            vapor_energy_j: vapor.value()?,
-            recession_m: recession.value()?,
-            stored_energy_change_j: storage.value()?,
-            mass_balance_residual_kg,
-            energy_residual_j,
-            substeps: native.substeps,
-            events: native.events,
-            phase_steps,
-            last_step,
-        };
+        let audit = account.finish(
+            self,
+            &next,
+            native.substeps,
+            native.events,
+            thermal_config.energy_tolerance_j,
+            None,
+            &mut checkpoint,
+        )?;
         checkpoint()?;
         Ok((next, audit))
     }

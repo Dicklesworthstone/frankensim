@@ -27,6 +27,10 @@ use std::cell::RefCell;
 /// Bounded automatic nonlinear solves of this original endpoint residual.
 #[path = "implicit/solve.rs"]
 pub mod solve;
+
+#[path = "implicit/timeline.rs"]
+pub mod timeline;
+pub use timeline::{EvaporationImplicitTimelineControls, EvaporationImplicitTimelineReport};
 pub use solve::{EvaporationImplicitControls, EvaporationImplicitError, EvaporationImplicitReport};
 
 /// Physical open-system account for one interval, before endpoint events.
