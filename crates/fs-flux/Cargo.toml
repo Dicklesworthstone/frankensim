@@ -17,6 +17,7 @@ cavitation = ["dep:fs-material", "dep:fs-la"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]
 experimental-miscibility = ["dep:fs-thermochem", "dep:fs-qty"]
+experimental-miscibility-material = ["experimental-miscibility", "dep:fs-material"]
 # Reuse the same authored local closures as LBM and conjugate finite volumes.
 experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-thermochem"]
 
@@ -44,6 +45,16 @@ fs-qty = { path = "../fs-qty" }
 name = "material_capillary"
 path = "tests/material_capillary.rs"
 required-features = ["continuum"]
+
+[[test]]
+name = "miscibility_flow"
+path = "tests/miscibility_flow.rs"
+required-features = ["continuum", "experimental-miscibility"]
+
+[[test]]
+name = "miscibility_material"
+path = "tests/miscibility_material.rs"
+required-features = ["experimental-miscibility-material"]
 
 [[test]]
 name = "ale_gcl"

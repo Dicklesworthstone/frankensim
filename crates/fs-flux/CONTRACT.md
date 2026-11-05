@@ -4496,6 +4496,46 @@ change under forced nonconvex mixing, combined diffusion/advection limits and
 time refinement, the single physical clock, and atomic source/work/cancellation
 refusals. The numerical fixtures are not measured liquid-pair validation.
 
+### Native flow and original material sources
+
+With `continuum`, `prepare_advection_from_bdm` consumes the existing
+`FluxSystem::edge_volume_transport` sign-split normal traces. It requires the
+same triangle volumes, physical depth, interior adjacency and face areas as
+the miscibility graph, while retaining the graph's authored diffusion distances.
+It does not infer an orthogonal diffusion stencil from arbitrary triangles.
+Both physical directions survive orientation changes. Every exterior stream
+must vanish; zero-net exterior counterflow is still an open boundary and refuses.
+Continuity is checked on original mean moments before subtracting large
+opposing streams, and again on the final directional rates. Geometry and
+native extraction are bounded before allocations; cancellation is polled
+around extraction and through the mapping. The frozen prepared flow is reusable.
+
+`experimental-miscibility-material` enables source-bound fields independently
+of the continuum runtime. `resolve_liquid_field` binds every original cell
+inventory to the SAME `BinaryLiquidSquareGradientLaw`; the full original pair,
+temperature, concentration and gradient coefficient must match. The field
+privately retains that borrowed source across subsequent transport steps.
+Density, viscosity, heat capacity and conductivity come from each cell's
+actual homogeneous composition and original selected material claims. Unstable
+cells remain homogeneous; independently flashing them would erase the spatial
+model's chemical and interfacial energy. Source-derived volumes must pass the
+existing equal-partial-molar-volume check at every accepted composition.
+
+The material field's `transport_candidate` refreshes sources only after the
+entire numerical advection/diffusion step. A late source-domain failure,
+incompatible volume or cancellation discards the complete candidate. An
+explicit maximum resolved-cell count bounds source queries and retained
+results; source-receipt allocations are separate from the numerical graph's
+payload budget. These results expose the existing `FluidTransport` and
+`ThermalFluidTransport` consumers. They do not add momentum or heat feedback.
+
+Integration fixtures exercise an actually solved closed Stokes field,
+sign-reversing traces, orientation/depth scaling, original mean continuity,
+source-backed density changes with unequal molar masses, nonlinear viscosity
+and thermal-property refresh, retained claim identity, homogeneous spinodal
+states, source-domain refusal after otherwise admissible diffusion, and atomic
+cancellation. They retain the existing prescribed-flow and source-data limits.
+
 ## Same-energy binary interface tension in capillary flow
 
 `capillary::material::miscibility::step_binary_liquid_planar_horizontal`

@@ -34,9 +34,16 @@ use std::sync::Arc;
 mod solve;
 
 pub mod adaptive;
-
 pub mod advection;
 pub mod transport;
+
+/// Native FEEC volume transport on the same closed miscibility control volumes.
+#[cfg(feature = "continuum")]
+pub mod flow;
+
+/// Original liquid sources refreshed atomically after complete field transport.
+#[cfg(any(feature = "continuum", feature = "experimental-miscibility-material"))]
+pub mod material;
 
 /// Hard admission bounds keep every allocation and face sweep finite.
 pub const MAX_MISCIBILITY_CELLS: usize = 65_536;
