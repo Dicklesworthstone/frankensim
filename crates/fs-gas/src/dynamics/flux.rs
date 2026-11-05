@@ -612,6 +612,13 @@ impl FrozenGas {
                 false,
             );
         }
+        // An exact moving pressure contact transports the upwind trace,
+        // including its tangential kinetic energy. Reconstructing unchanged
+        // star traces can round heat outside the admitted source interval and
+        // spuriously select HLL. Both original traces are already admitted.
+        if pl.velocity == pr.velocity && pl.pressure == pr.pressure {
+            return flux(if pl.velocity > 0.0 { fl } else { fr }, speed, false);
+        }
         if sl >= 0.0 {
             return flux(fl, speed, false);
         }

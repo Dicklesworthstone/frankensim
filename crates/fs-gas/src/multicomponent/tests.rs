@@ -562,3 +562,53 @@ fn exact_stationary_species_and_shear_contacts_transport_only_pressure() {
         assert_eq!(planar, [0.0, 0.0, pl.pressure, 0.0, 0.0]);
     }
 }
+
+#[test]
+fn exact_moving_species_and_shear_contacts_use_the_physical_upwind_flux() {
+    let gas = gas(vec![
+        source("A", R, 3.5, 0.2, 0.0),
+        source("B", 2.0 * R, 5.0, 0.4, -5.0),
+    ]);
+    // These are exact pressure/normal-velocity contacts, despite differing
+    // molecular masses, caloric laws, densities and both tangential velocities.
+    for pressure in [0.7, 1.3, 2.9, 7.1] {
+        for velocity in [-0.31, 0.17] {
+            let left = SpatialPrimitive {
+                partial_densities: &[1.0, 0.0],
+                normal_velocity: velocity,
+                transverse_velocity: [0.43, -0.87],
+                pressure,
+            };
+            let right = SpatialPrimitive {
+                partial_densities: &[0.0, 2.0],
+                transverse_velocity: [-0.91, 0.37],
+                ..left
+            };
+            let mut l = [0.0; 6];
+            let mut r = [0.0; 6];
+            let pl = gas.spatial_conserved_into(left, &mut l).unwrap();
+            let pr = gas.spatial_conserved_into(right, &mut r).unwrap();
+            assert_eq!(pl.pressure, pr.pressure);
+            assert_ne!(pl.sound_speed, pr.sound_speed);
+            let q = if velocity > 0.0 { l } else { r };
+            let expected = [
+                q[0] * velocity,
+                q[1] * velocity,
+                q[2] * velocity + pl.pressure,
+                q[3] * velocity,
+                q[4] * velocity,
+                (q[5] + pl.pressure) * velocity,
+            ];
+            let mut flux = [f64::NAN; 6];
+            let face = gas
+                .hllc_spatial_flux_from_primitive(left, right, &mut flux, || false)
+                .unwrap();
+            assert_eq!(flux, expected);
+            assert_eq!(
+                face.signal_speed,
+                velocity.abs() + pl.sound_speed.max(pr.sound_speed)
+            );
+            assert!(!face.used_hll_fallback);
+        }
+    }
+}

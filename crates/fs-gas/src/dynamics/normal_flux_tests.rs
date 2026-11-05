@@ -89,6 +89,90 @@ fn g0_planar_shear_contact_advects_full_energy_without_pressure_work_duplication
 }
 
 #[test]
+fn g0_exact_moving_pressure_and_shear_contacts_use_the_physical_upwind_flux() {
+    for cp in [0.0, 0.4] {
+        let g = gas(cp, -1e16);
+        for pressure in [0.7, 1.3, 2.9, 7.1] {
+            for velocity in [-0.31, 0.17] {
+                let left = NormalPrimitive {
+                    density: 1.0,
+                    normal_velocity: velocity,
+                    transverse_velocity: 0.43,
+                    pressure,
+                };
+                let right = NormalPrimitive {
+                    density: 2.0,
+                    transverse_velocity: -0.91,
+                    ..left
+                };
+                let upwind = if velocity > 0.0 { left } else { right };
+                let q = g
+                    .normal_conserved(
+                        upwind.density,
+                        upwind.normal_velocity,
+                        upwind.transverse_velocity,
+                        upwind.pressure,
+                    )
+                    .unwrap();
+                let pl = g.from_rho_u_p(left.density, velocity, pressure).unwrap();
+                let pr = g.from_rho_u_p(right.density, velocity, pressure).unwrap();
+                assert_eq!(pl.pressure, pr.pressure);
+                let flux = g
+                    .hllc_normal_flux_from_primitive(left, right, || false)
+                    .unwrap();
+                assert_eq!(flux.mass, q.normal_momentum);
+                assert_eq!(
+                    flux.normal_momentum,
+                    q.normal_momentum * velocity + pl.pressure
+                );
+                assert_eq!(flux.transverse_momentum, q.transverse_momentum * velocity);
+                assert_eq!(flux.energy, (q.energy + pl.pressure) * velocity);
+                assert_eq!(
+                    flux.signal_speed,
+                    velocity.abs() + pl.sound_speed.max(pr.sound_speed)
+                );
+                assert!(!flux.used_hll_fallback);
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_exact_moving_contact_at_the_cold_source_endpoint_needs_no_hll_fallback() {
+    let g = gas(0.0, 0.0);
+    // Both traces are admitted and the denser trace is exactly at Tmin.
+    // Reconstructing its unchanged HLLC star rounds zero sensible heat
+    // negative; the spurious HLL fallback reverses this positive mass flux.
+    let left = NormalPrimitive {
+        density: 500.0,
+        normal_velocity: 0.001,
+        transverse_velocity: 0.0,
+        pressure: 1.0,
+    };
+    let right = NormalPrimitive {
+        density: 1000.0,
+        ..left
+    };
+    let pl = g
+        .from_rho_u_p(left.density, left.normal_velocity, left.pressure)
+        .unwrap();
+    let pr = g
+        .from_rho_u_p(right.density, right.normal_velocity, right.pressure)
+        .unwrap();
+    assert_eq!(pl.pressure, pr.pressure);
+    assert_eq!(pr.temperature, g.domain().minimum_temperature);
+    let q = g
+        .normal_conserved(left.density, left.normal_velocity, 0.0, left.pressure)
+        .unwrap();
+    let flux = g
+        .hllc_normal_flux_from_primitive(left, right, || false)
+        .unwrap();
+    assert!(!flux.used_hll_fallback, "{flux:?}");
+    assert_eq!(flux.mass, q.normal_momentum);
+    assert_eq!(flux.energy, (q.energy + pl.pressure) * pl.velocity);
+}
+
+#[test]
 fn g3_planar_hllc_and_hll_are_covariant_under_transverse_boosts() {
     let g = gas(0.0, 0.0);
     for (left, right, fallback) in [
