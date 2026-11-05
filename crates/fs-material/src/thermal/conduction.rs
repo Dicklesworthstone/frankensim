@@ -6,8 +6,8 @@
 mod layer;
 use fs_thermal::enthalpy::DepositionError;
 pub use layer::{
-    ConductivityCurve, LayerConductionConfig, LayerConductionResponse, MAX_CONDUCTIVITY_KNOTS,
-    TwoLayerConduction,
+    ConductivityCurve, GrayLayerConductionResponse, GrayLayerGap, LayerConductionConfig,
+    LayerConductionResponse, MAX_CONDUCTIVITY_KNOTS, TwoLayerConduction,
 };
 
 mod stack;
@@ -25,7 +25,7 @@ pub use reservoir::{
 
 /// Endpoint coefficients for the original conservative thermal network.
 pub mod network;
-/// Source-qualified preparation on an original pure-phase caloric branch.
-pub mod source;
 /// Source-bound conductivity through sensible branches and latent plateaus.
 pub mod phase;
+/// Source-qualified preparation on an original pure-phase caloric branch.
+pub mod source;

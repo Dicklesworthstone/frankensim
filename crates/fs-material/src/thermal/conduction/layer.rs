@@ -3,10 +3,14 @@
 //! This constitutive flux closure does not integrate thermal storage. The
 //! existing enthalpy owner receives its one signed heat transfer. Each layer
 //! is homogeneous, isotropic and source-free internally, at fixed composition
-//! and phase; radiation, distributed generation and storage inside the layers
+//! and phase. Gray radiation may act between the two solved surface traces;
+//! distributed generation, radiation and storage inside the material layers
 //! require their own resolved equations.
 
 use fs_thermal::enthalpy::{DepositionError, series_contact_conductance_w_k};
+
+mod gray_gap;
+pub use gray_gap::{GrayLayerConductionResponse, GrayLayerGap};
 
 /// Maximum retained temperature/conductivity knots in one constitutive chart.
 pub const MAX_CONDUCTIVITY_KNOTS: usize = 4096;
@@ -250,6 +254,24 @@ pub struct TwoLayerConduction<'a> {
     contact_resistance_m2_k_w: f64,
 }
 
+// Both interface laws use the SAME supported Kirchhoff inverses, heat checks
+// and safeguarded scalar-flux iteration. Only their physical jump relation
+// differs. Fluxes and temperatures below are ordered hot/cold, not A/B.
+struct LayerFluxTrial {
+    flux_w_m2: f64,
+    surface_temperature_k: [f64; 2],
+    layer_flux_w_m2: [f64; 2],
+    iterations: usize,
+}
+
+enum LayerFluxUpdate<R> {
+    Accepted(R),
+    Continue {
+        decreasing_residual: f64,
+        slope_magnitude: f64,
+    },
+}
+
 impl<'a> TwoLayerConduction<'a> {
     pub fn new(
         curves: [&'a ConductivityCurve; 2],
@@ -292,19 +314,7 @@ impl<'a> TwoLayerConduction<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<LayerConductionResponse, DepositionError> {
         checkpoint()?;
-        if config.max_iterations == 0
-            || !config.absolute_heat_tolerance_w.is_finite()
-            || config.absolute_heat_tolerance_w < 0.0
-            || !config.relative_heat_tolerance.is_finite()
-            || config.relative_heat_tolerance < 0.0
-        {
-            return Err(invalid(
-                "invalid layer-conduction heat tolerance or iteration budget",
-            ));
-        }
-        for (curve, t) in self.curves.into_iter().zip(temperatures_k) {
-            curve.conductivity_w_m_k(t)?;
-        }
+        self.admit_evaluation(temperatures_k, config)?;
         let [ta, tb] = temperatures_k;
         if ta == tb {
             let k = [
@@ -336,10 +346,127 @@ impl<'a> TwoLayerConduction<'a> {
         let (kh, kc) = (self.curves[hot], self.curves[cold]);
         let (dh, dc) = (self.distances_m[hot], self.distances_m[cold]);
         let r = self.contact_resistance_m2_k_w;
-        // Positive conductivity makes both Kirchhoff inverses monotone. Bound
-        // flux by the heat each ORIGINAL layer can carry before its own source
-        // runs out. Contact can bridge disjoint temperature supports; it never
-        // requires the intervening temperatures to belong to either material.
+        let maximum_flux = if r > 0.0 {
+            Some(positive((th - tc) / r)?)
+        } else {
+            None
+        };
+        self.solve_interface(
+            temperatures_k,
+            config,
+            maximum_flux,
+            &mut checkpoint,
+            |trial| {
+                let [u, v] = trial.surface_temperature_k;
+                let [jh, jc] = trial.layer_flux_w_m2;
+                let jump = finite(r * jh)?;
+                let qh = finite(self.area_m2 * jh)?;
+                let qc = finite(self.area_m2 * jc)?;
+                let residual = finite(qh - qc)?;
+                let jump_residual = finite((u - v) - jump)?;
+                let jump_roundoff =
+                    finite(8.0 * f64::EPSILON * u.abs().max(v.abs()).max(jump.abs()))?;
+                let contact_residual = if r == 0.0 {
+                    0.0
+                } else {
+                    finite(self.area_m2 * ((u - v) / r - jh))?
+                };
+                let tolerance = finite(
+                    config.absolute_heat_tolerance_w
+                        + config.relative_heat_tolerance * qh.abs().max(qc.abs()),
+                )?;
+                // Dividing a representational Kelvin error by a vanishing contact
+                // resistance would incorrectly reject the perfect-contact limit.
+                // Keep that diagnostic separate; never relax the layer heat gate.
+                let jump_tolerance = finite(jump_roundoff + (tolerance / self.area_m2) * r)?;
+                if residual.abs() <= tolerance && jump_residual.abs() <= jump_tolerance {
+                    let mut interface = [0.0; 2];
+                    interface[hot] = u;
+                    interface[cold] = v;
+                    let ki = [
+                        self.curves[0].conductivity_w_m_k(interface[0])?,
+                        self.curves[1].conductivity_w_m_k(interface[1])?,
+                    ];
+                    let g_interface =
+                        series_contact_conductance_w_k(self.area_m2, self.distances_m, ki, r)?;
+                    let derivatives = [
+                        positive(g_interface * (self.curves[0].conductivity_w_m_k(ta)? / ki[0]))?,
+                        -positive(g_interface * (self.curves[1].conductivity_w_m_k(tb)? / ki[1]))?,
+                    ];
+                    // Differentiating the common-flux/contact equations gives
+                    // dQ/dR'' = -Q/(d_a/k(Tia) + R'' + d_b/k(Tib)). Use the
+                    // already accepted flux density to avoid overflowing Q*G
+                    // before division by area, or forming a second interface solve.
+                    let contact_derivative = -sign * positive(jh * g_interface)?;
+                    // Require a representable nonzero flux even if a loose user
+                    // tolerance would otherwise accept an endpoint of the bracket.
+                    let g = positive(qh / (th - tc))?;
+                    return Ok(LayerFluxUpdate::Accepted(LayerConductionResponse {
+                        power_a_to_b_w: sign * qh,
+                        conductance_w_k: g,
+                        interface_temperature_k: interface,
+                        endpoint_derivative_w_k: derivatives,
+                        contact_resistance_derivative_w2_m2_k: contact_derivative,
+                        layer_heat_residual_w: residual,
+                        contact_heat_residual_w: sign * contact_residual,
+                        contact_temperature_residual_k: sign * jump_residual,
+                        contact_roundoff_allowance_k: jump_roundoff,
+                        iterations: trial.iterations,
+                    }));
+                }
+                let gap = finite((u - v) - finite(r * trial.flux_w_m2)?)?;
+                let differential_resistance = positive(
+                    positive(dh / kh.conductivity_w_m_k(u)?)?
+                        + positive(dc / kc.conductivity_w_m_k(v)?)?
+                        + r,
+                )?;
+                Ok(LayerFluxUpdate::Continue {
+                    decreasing_residual: gap,
+                    slope_magnitude: differential_resistance,
+                })
+            },
+        )
+    }
+
+    fn admit_evaluation(
+        &self,
+        temperatures_k: [f64; 2],
+        config: LayerConductionConfig,
+    ) -> Result<(), DepositionError> {
+        if config.max_iterations == 0
+            || !config.absolute_heat_tolerance_w.is_finite()
+            || config.absolute_heat_tolerance_w < 0.0
+            || !config.relative_heat_tolerance.is_finite()
+            || config.relative_heat_tolerance < 0.0
+        {
+            return Err(invalid(
+                "invalid layer-conduction heat tolerance or iteration budget",
+            ));
+        }
+        for (curve, t) in self.curves.into_iter().zip(temperatures_k) {
+            curve.conductivity_w_m_k(t)?;
+        }
+        Ok(())
+    }
+
+    fn solve_interface<R>(
+        &self,
+        temperatures_k: [f64; 2],
+        config: LayerConductionConfig,
+        maximum_flux_w_m2: Option<f64>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+        mut evaluate: impl FnMut(LayerFluxTrial) -> Result<LayerFluxUpdate<R>, DepositionError>,
+    ) -> Result<R, DepositionError> {
+        let (hot, cold) = if temperatures_k[0] > temperatures_k[1] {
+            (0, 1)
+        } else {
+            (1, 0)
+        };
+        let (th, tc) = (temperatures_k[hot], temperatures_k[cold]);
+        let (kh, kc) = (self.curves[hot], self.curves[cold]);
+        let (dh, dc) = (self.distances_m[hot], self.distances_m[cold]);
+        // Each original source covers only its own physical layer, including
+        // when a resistive/radiative interface bridges disjoint source spans.
         let hot_limit = kh.temperature_range_k()[0].max(tc);
         let cold_limit = kc.temperature_range_k()[1].min(th);
         let hot_integral = kh.integral_w_m(hot_limit, th)?;
@@ -350,18 +477,16 @@ impl<'a> TwoLayerConduction<'a> {
         let hot_flux_limit = positive(hot_integral / dh)?;
         let cold_flux_limit = positive(cold_integral / dc)?;
         let mut hi = hot_flux_limit.min(cold_flux_limit);
-        if r > 0.0 {
-            hi = hi.min(positive((th - tc) / r)?);
+        if let Some(limit) = maximum_flux_w_m2 {
+            hi = hi.min(limit);
         }
         let mut lo = 0.0;
-        // Evaluate the supported upper endpoint first. Its gap sign determines
-        // whether ANY physical root is supported, including an exact source-end
-        // root. Starting at an interior guess would lose that distinction.
+        // The supported upper endpoint distinguishes a supported root from
+        // source exhaustion, including a root exactly at a source boundary.
         let mut flux = hi;
         for iteration in 0..config.max_iterations {
             checkpoint()?;
-            // Preserve exact admitted source endpoints when division followed
-            // by multiplication would round their integral just outside support.
+            // Keep source endpoints exact across division/multiplication.
             let u = if flux == hot_flux_limit {
                 hot_limit
             } else {
@@ -372,68 +497,26 @@ impl<'a> TwoLayerConduction<'a> {
             } else {
                 kc.temperature_after_integral_w_m(tc, finite(flux * dc)?)?
             };
-            let jh = finite(kh.integral_w_m(u, th)? / dh)?;
-            let jc = finite(kc.integral_w_m(tc, v)? / dc)?;
-            let jump = finite(r * jh)?;
-            let qh = finite(self.area_m2 * jh)?;
-            let qc = finite(self.area_m2 * jc)?;
-            let residual = finite(qh - qc)?;
-            let jump_residual = finite((u - v) - jump)?;
-            let jump_roundoff = finite(8.0 * f64::EPSILON * u.abs().max(v.abs()).max(jump.abs()))?;
-            let contact_residual = if r == 0.0 {
-                0.0
-            } else {
-                finite(self.area_m2 * ((u - v) / r - jh))?
+            let update = evaluate(LayerFluxTrial {
+                flux_w_m2: flux,
+                surface_temperature_k: [u, v],
+                layer_flux_w_m2: [
+                    finite(kh.integral_w_m(u, th)? / dh)?,
+                    finite(kc.integral_w_m(tc, v)? / dc)?,
+                ],
+                iterations: iteration + 1,
+            })?;
+            let (gap, slope) = match update {
+                LayerFluxUpdate::Accepted(response) => {
+                    checkpoint()?;
+                    return Ok(response);
+                }
+                LayerFluxUpdate::Continue {
+                    decreasing_residual,
+                    slope_magnitude,
+                } => (finite(decreasing_residual)?, positive(slope_magnitude)?),
             };
-            let tolerance = finite(
-                config.absolute_heat_tolerance_w
-                    + config.relative_heat_tolerance * qh.abs().max(qc.abs()),
-            )?;
-            // Dividing a representational Kelvin error by a vanishing contact
-            // resistance would incorrectly reject the perfect-contact limit.
-            // Keep that diagnostic separate; never relax the layer heat gate.
-            let jump_tolerance = finite(jump_roundoff + (tolerance / self.area_m2) * r)?;
-            if residual.abs() <= tolerance && jump_residual.abs() <= jump_tolerance {
-                let mut interface = [0.0; 2];
-                interface[hot] = u;
-                interface[cold] = v;
-                let ki = [
-                    self.curves[0].conductivity_w_m_k(interface[0])?,
-                    self.curves[1].conductivity_w_m_k(interface[1])?,
-                ];
-                let g_interface =
-                    series_contact_conductance_w_k(self.area_m2, self.distances_m, ki, r)?;
-                let derivatives = [
-                    positive(g_interface * (self.curves[0].conductivity_w_m_k(ta)? / ki[0]))?,
-                    -positive(g_interface * (self.curves[1].conductivity_w_m_k(tb)? / ki[1]))?,
-                ];
-                // Differentiating the common-flux/contact equations gives
-                // dQ/dR'' = -Q/(d_a/k(Tia) + R'' + d_b/k(Tib)). Use the
-                // already accepted flux density to avoid overflowing Q*G
-                // before division by area, or forming a second interface solve.
-                let contact_derivative = -sign * positive(jh * g_interface)?;
-                // Require a representable nonzero flux even if a loose user
-                // tolerance would otherwise accept an endpoint of the bracket.
-                let g = positive(qh / (th - tc))?;
-                checkpoint()?;
-                return Ok(LayerConductionResponse {
-                    power_a_to_b_w: sign * qh,
-                    conductance_w_k: g,
-                    interface_temperature_k: interface,
-                    endpoint_derivative_w_k: derivatives,
-                    contact_resistance_derivative_w2_m2_k: contact_derivative,
-                    layer_heat_residual_w: residual,
-                    contact_heat_residual_w: sign * contact_residual,
-                    contact_temperature_residual_k: sign * jump_residual,
-                    contact_roundoff_allowance_k: jump_roundoff,
-                    iterations: iteration + 1,
-                });
-            }
-            let gap = finite((u - v) - finite(r * flux)?)?;
             if iteration == 0 && gap > 0.0 {
-                // The largest supported flux still leaves an unclosed positive
-                // temperature gap. Reaching a root would leave at least one
-                // original source, regardless of the iteration budget.
                 return Err(DepositionError::MaterialDomain);
             }
             if gap > 0.0 {
@@ -441,12 +524,7 @@ impl<'a> TwoLayerConduction<'a> {
             } else {
                 hi = flux;
             }
-            let differential_resistance = positive(
-                positive(dh / kh.conductivity_w_m_k(u)?)?
-                    + positive(dc / kc.conductivity_w_m_k(v)?)?
-                    + r,
-            )?;
-            let newton = flux + gap / differential_resistance;
+            let newton = flux + gap / slope;
             let width = hi - lo;
             // Periodic bisection guarantees bracket contraction without
             // rejecting a rapidly converging Newton step near one bracket end.

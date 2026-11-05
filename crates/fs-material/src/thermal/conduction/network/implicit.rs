@@ -1,5 +1,6 @@
 //! Source-integrated link tangents for the original implicit thermal owner.
 use super::*;
+use crate::thermal::conduction::GrayLayerGap;
 use fs_thermal::enthalpy::conduction::ConductiveLink;
 use fs_thermal::enthalpy::conduction::implicit::contact::ImplicitContactLaw;
 use fs_thermal::enthalpy::conduction::implicit::link::{ImplicitLinkLaw, ImplicitLinkState};
@@ -16,6 +17,7 @@ pub struct ImplicitLayerLink<'p, 'a, 'm> {
     link: &'p PreparedLink<'a, 'm>,
     config: LayerConductionConfig,
     contact: Option<BoundLayerContact<'p>>,
+    gray_gap: Option<GrayLayerGap>,
 }
 
 struct BoundLayerContact<'a> {
@@ -26,6 +28,32 @@ struct BoundLayerContact<'a> {
 impl<'p, 'a, 'm> ImplicitLayerLink<'p, 'a, 'm> {
     pub fn link_id(&self) -> u64 {
         self.link.binding.link
+    }
+
+    /// Exchange heat across one gray conducting/radiating gap AFTER integrating
+    /// the original k(T) profile through each material half cell.
+    ///
+    /// Equal-area planar opaque faces with full mutual view are explicit model
+    /// assumptions. The prepared source layers retain their pure-phase support;
+    /// fixed emissivities and gap HTC introduce no new material extrapolation.
+    /// Radial paths refuse because their radiation geometry needs a separate
+    /// view-factor/area model. Both original covered areas must equal the link
+    /// area. Authored and source contact resistance must be absent: this gap
+    /// owns the entire interface once. The original graph still owns all
+    /// finite-body storage, paired heat, entropy and nonlinear advancement.
+    pub fn with_gray_gap(mut self, gap: GrayLayerGap) -> Result<Self, LayerSourceError> {
+        if self.gray_gap.is_some()
+            || self.contact.is_some()
+            || self.link.binding.contact_area_resistance_m2_k_w != 0.0
+            || self.link.flux_geometry.radial_coordinates_m().is_some()
+            || self.link.patch.covered_area_m2 != [self.link.patch.link.area_m2; 2]
+        {
+            return Err(LayerSourceError::Invalid(
+                "gray integrated layers require one equal-area planar gap and no separate contact resistance",
+            ));
+        }
+        self.gray_gap = Some(gap);
+        Ok(self)
     }
 
     /// Compose the original state-dependent contact with integrated bulk k(T).
@@ -44,7 +72,10 @@ impl<'p, 'a, 'm> ImplicitLayerLink<'p, 'a, 'm> {
         mut self,
         law: &'p dyn ImplicitContactLaw,
     ) -> Result<Self, LayerSourceError> {
-        if self.contact.is_some() || self.link.binding.contact_area_resistance_m2_k_w != 0.0 {
+        if self.contact.is_some()
+            || self.gray_gap.is_some()
+            || self.link.binding.contact_area_resistance_m2_k_w != 0.0
+        {
             return Err(LayerSourceError::Invalid(
                 "integrated contact needs one source owner and zero authored resistance",
             ));
@@ -94,6 +125,7 @@ impl<'a, 'm> PreparedLayerConduction<'a, 'm> {
             link,
             config,
             contact: None,
+            gray_gap: None,
         })
     }
 }
@@ -162,27 +194,41 @@ impl ImplicitLinkLaw for ImplicitLayerLink<'_, '_, '_> {
         let resistance = contact.map_or(binding.contact_area_resistance_m2_k_w, |state| {
             state.resistance_m2_k_w
         });
-        let response = self
-            .link
-            .flux_geometry
-            .conduction(
-                binding.layers.map(|layer| layer.conductivity_curve()),
-                resistance,
-            )?
-            .evaluate(temperature, self.config, &mut *checkpoint)?;
+        let model = self.link.flux_geometry.conduction(
+            binding.layers.map(|layer| layer.conductivity_curve()),
+            resistance,
+        )?;
+        let (power, conductance, endpoint_derivative, resistance_derivative) =
+            if let Some(gap) = self.gray_gap {
+                let response =
+                    model.evaluate_gray_gap(temperature, gap, self.config, &mut *checkpoint)?;
+                (
+                    response.power_a_to_b_w,
+                    response.conductance_w_k,
+                    response.endpoint_derivative_w_k,
+                    0.0,
+                )
+            } else {
+                let response = model.evaluate(temperature, self.config, &mut *checkpoint)?;
+                (
+                    response.power_a_to_b_w,
+                    response.conductance_w_k,
+                    response.endpoint_derivative_w_k,
+                    response.contact_resistance_derivative_w2_m2_k,
+                )
+            };
         // The native energy owner consumes the secant. Keep its actual applied
         // power within the SAME constitutive tolerance as the existing adapter.
-        let applied = response.conductance_w_k * (temperature[0] - temperature[1]);
+        let applied = conductance * (temperature[0] - temperature[1]);
         let allowance = self.config.absolute_heat_tolerance_w
-            + self.config.relative_heat_tolerance
-                * applied.abs().max(response.power_a_to_b_w.abs());
+            + self.config.relative_heat_tolerance * applied.abs().max(power.abs());
         let derivatives = core::array::from_fn(|side| {
-            let bulk = response.endpoint_derivative_w_k[side] * slope[side];
+            let bulk = endpoint_derivative[side] * slope[side];
             // Differentiate the SAME integrated flux: dQ/dh = dQ/dT*dT/dh
             // + dQ/dR''*dR''/dh. A secant-G derivative would miss the two
             // interface-temperature responses when k varies through a layer.
             contact.map_or(bulk, |state| {
-                response.contact_resistance_derivative_w2_m2_k.mul_add(
+                resistance_derivative.mul_add(
                     state.resistance_enthalpy_derivatives_m2_kg_k_w_j[side],
                     bulk,
                 )
@@ -190,14 +236,14 @@ impl ImplicitLinkLaw for ImplicitLayerLink<'_, '_, '_> {
         });
         if !applied.is_finite()
             || !allowance.is_finite()
-            || (applied - response.power_a_to_b_w).abs() > allowance
+            || (applied - power).abs() > allowance
             || derivatives.iter().any(|value| !value.is_finite())
         {
             return Err(DepositionError::Arithmetic);
         }
         checkpoint()?;
         Ok(ImplicitLinkState {
-            conductance_w_k: response.conductance_w_k,
+            conductance_w_k: conductance,
             power_enthalpy_derivatives_w_kg_j: derivatives,
         })
     }

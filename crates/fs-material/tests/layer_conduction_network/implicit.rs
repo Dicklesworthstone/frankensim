@@ -1,6 +1,8 @@
 use super::*;
 #[path = "boundary.rs"]
 mod boundary;
+#[path = "implicit/gray_gap.rs"]
+mod gray_gap;
 use fs_material::thermal::conduction::phase::PreparedPhaseConductivity;
 use fs_thermal::enthalpy::conduction::{ConductiveLink, ConductivityLaw, ConductionObserver};
 use fs_thermal::enthalpy::conduction::implicit::{
