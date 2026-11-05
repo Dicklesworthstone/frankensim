@@ -32566,3 +32566,45 @@ profile, a finite reservoir or an additional time integrator.
 `tests/scenario_velocity.rs` checks signed rotated/interpolated histories on a
 real forced inlet, all three physical velocity components after native steps,
 full-vector speed admission, unchanged state on refusal and cancellation.
+
+## Causal exterior reaction on complete pressure fields
+
+`cavity_modal::interior::causal::CausalInteriorTime` interconnects the original
+`PreparedExactTime` FE field with an already admitted `PreparedMimoLoad` or
+`PreparedDelayedMimoLoad`. Every free pressure/potential coordinate and every
+native exterior pole/delay history is retained. Dimensionless P1 opening
+profiles use outward velocity [m/s] and conjugate integrated pressure force [N];
+the impedance is N s/m, matching native BEM aperture work coordinates. Signed
+and zero-net modes never divide by net volume gain. Source rows/columns map
+explicitly to original profiles; remaining feed profiles and local resistive
+faces cannot overlap an exterior opening. Original volume injection and exact
+pressure-release admission remain active.
+
+Preparation reuses one complete-field exponential and caches only the small
+`(H + D_mean)` port factor. Each interval matches original interval-mean forces
+with held opposite interior/exterior velocities, retaining mutual reaction and
+native fractional arrivals. Both owners are exact for their held inputs; this
+finite-clock exchange is a discretization of continuous coupling and requires
+an independent time ladder. Warm steps perform no factorization, exponential,
+BEM/material query or exterior-history clone. Native finite-state admission runs
+last, followed by an infallible fluid/history commit; refusals preserve both
+accepted histories and step count.
+
+Prescribed feed work, signed volume-source work, independently integrated FE
+Robin loss and signed exterior exchange work are accounted once. Exterior
+exchange is not inferred heat or radiated energy; returning waves can make it
+negative. Original continuous/sampled passivity reports remain unchanged,
+including GridOnly. Supplied realization geometry, gas, mode normalization,
+causality/fit accuracy and band applicability remain caller obligations. This
+interconnection does not itself bake or qualify an exterior source or establish
+a coupled storage certificate.
+
+Five native regressions specify a continuum-moment tetrahedron with independent
+exact pressure, Robin heat, source work and pole history; a three-rung exchange
+ladder against a separately integrated continuous coupled ODE; full P2 pressure
+with signed zero-net modes and independently integrated delayed mutual
+response; atomic refusal; and source/clock/face/budget admission. Rust parsing
+and formatting were checked; native tests remain unrun under the dependency
+memory and workspace-space blockers. Independent analytical-oracle exchange
+errors were 6.500772e-6, 1.618632e-6 and 4.042733e-7 on 20/40/80 steps over 0.4 s;
+these are oracle results, not native implementation evidence.

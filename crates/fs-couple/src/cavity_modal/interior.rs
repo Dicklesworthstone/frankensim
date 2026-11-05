@@ -7,6 +7,9 @@
 /// Source gas and duct composition for original spatial FE boundary modes.
 pub mod multiport;
 
+/// Full original pressure fields with causal multiport exterior reaction.
+pub mod causal;
+
 /// Complete pressure FE fields loaded by geometry-bound finite-opening BEM.
 pub mod exterior;
 
