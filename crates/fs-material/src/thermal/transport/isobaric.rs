@@ -17,6 +17,10 @@
 #[path = "isobaric/expansion.rs"]
 pub mod expansion;
 
+/// Source-exact Cp(T) and conductivity on native implicit conduction networks.
+#[path = "isobaric/conduction.rs"]
+pub mod conduction;
+
 use super::{
     SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point,
     capacity::{CapacityCurve, CapacityInverse},

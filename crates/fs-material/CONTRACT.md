@@ -8275,6 +8275,32 @@ This is numerical single-phase calorimetry, not an EOS, pressure prediction,
 phase transition, chemical reaction, evolving strain model or experimental
 material validation.
 
+## Source-exact isobaric heat capacity in implicit conduction
+
+`thermal::transport::isobaric::conduction::IsobaricConductionLaw` borrows the
+original `IsobaricHeatCapacityLaw` and binds independently selected scalar
+conductivity on that same card, pressure and complete typed source path. Both
+sources retain every original breakpoint and receipt. Conductivity must remain
+positive throughout the supported interval and explicitly support its pressure.
+
+The adapter supplies the native `ConductivityLaw` and `ImplicitConductionLaw`
+interfaces: original caloric inversion, exact dT/dh = 1/Cp(T), and analytic
+dk/dh = (dk/dT)/Cp(T). Conductivity corners use the right derivative except at
+the upper support endpoint. No resampled enthalpy chart, second time integrator
+or runtime source query is introduced. Prepared knot lookup is logarithmic and
+state evaluation allocates nothing. Native conduction and time-integration
+owners retain their own physical residual, energy, entropy and acceptance gates.
+Adaptive phase-error control remains unavailable because this single-phase
+caloric law declares no phase fraction.
+
+Four regressions specify separate Cp and conductivity knots, analytic tangent
+checks against independent finite differences, source/card/pressure admission,
+and native implicit two-cell exchange against an independently derived nonlinear
+heat root with total-energy and entropy checks. These newly added tests were
+not executed in the authoring session after dependency compilation exhausted
+shared storage and the execution environment disconnected. This is source-bound
+single-phase isobaric transport, not a phase/EOS closure or experimental validation.
+
 ## Source-exact heating with free expansion
 
 `thermal::transport::isobaric::expansion::IsobaricFreeExpansion` combines

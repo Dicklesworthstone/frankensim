@@ -219,7 +219,7 @@ fn g0_fixed_volume_internal_energy_is_refused_as_open_stream_enthalpy() {
     ], 2).unwrap();
     assert!(matches!(initial.advance_observed(&flow, 1.0, config(), || Ok(())),
         Err(DepositionError::InvalidInput(
-            "mass flow requires enthalpy storage, not fixed-volume internal energy"
+            "mass flow requires an explicitly enthalpy-based storage law"
         ))));
     assert_eq!(initial.cells()[&CellId(0)].specific_h_j_kg, 0.0);
     assert_eq!(initial.time_s(), 0.0);
