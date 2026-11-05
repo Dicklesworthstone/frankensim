@@ -1702,6 +1702,33 @@ transmission owner; momentum, reciprocity, rotation, finite reflected self-field
 native observation clocks and bounded refusals. Private regressions exercise
 critical endpoints, raw-exponential underflow and narrow reflection transitions.
 
+### Reflected physical force fields
+
+`PreparedReflectedFullWaveForce` uses analytic source and receiver derivatives
+of that same reflected Green function for an original force ON fluid [N].
+All seven cylindrical pressure/velocity channels share the branch maps,
+reflection coefficient, resolution controls and adaptive nodes. The mixed
+velocity coefficients have opposite signs, and the normal-normal coefficient
+retains the returning-wave minus sign. At equal speeds this is the exact image
+force `R*(F-2*n*(n dot F))`, including transverse/induction motion. The original
+homogeneous force owner supplies the direct contribution in the actual source
+geometry, and direct/reflected amplitudes are added before intensity is formed.
+
+Original `FullWaveForceLimits` separately bound reflected pressure-vector and
+velocity-tensor norm estimates per newton. Degree-one/two tail envelopes retain
+all physical derivatives and the incident-fluid density. The total field
+inherits those absolute estimates but no relative guarantee at an interference
+null. The two cached 4-by-3 Cartesian matrices serve arbitrary complex force
+vectors with fixed-order reductions and no allocation or further integration.
+Reflected and total harmonic methods use the original source clock. Coincident
+source/observer positions retain reflected fields and refuse singular total
+queries; this does not introduce source loading or feedback.
+
+`tests/full_wave_reflected_force.rs` covers all seven coefficients against three
+independent refined spectra, rotated image-force signs, coherent total intensity,
+source derivatives, incident-fluid momentum, transverse motion on axis, finite
+reflected self fields, original clocks and bounded input/work refusals.
+
 ## Full-wave compact-source arrays and source coherence
 
 `curle3d::refraction::full_wave::array::PreparedFullWaveCompactSourceObserver`

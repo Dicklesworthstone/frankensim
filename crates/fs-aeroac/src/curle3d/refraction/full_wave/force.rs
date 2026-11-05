@@ -323,7 +323,7 @@ impl PreparedFullWaveForce {
     }
 }
 
-fn equal_speed(
+pub(super) fn equal_speed(
     omega: f64,
     speed: f64,
     range: f64,

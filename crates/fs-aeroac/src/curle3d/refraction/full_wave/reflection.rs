@@ -31,6 +31,11 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use fs_math::{c64::C64, det};
 
+mod force;
+pub use force::{
+    FULL_WAVE_REFLECTED_FORCE_SCOPE, FULL_WAVE_TOTAL_FORCE_SCOPE, PreparedReflectedFullWaveForce,
+};
+
 /// The returned field excludes the direct source contribution.
 pub const FULL_WAVE_REFLECTED_MONOPOLE_SCOPE: &str = "Prescribed stationary compact 3D volume \
 source; reflected spherical-wave field in the incident fluid at one infinite planar \
