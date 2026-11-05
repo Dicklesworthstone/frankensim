@@ -6,6 +6,7 @@ use crate::solid_enthalpy::gas::convection::endpoint_law;
 use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 use fs_material::phase::EquilibriumPhaseState;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
+use fs_material::thermal::conduction::source::ResolvedConductionLayer;
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use std::sync::Arc;
 
@@ -19,8 +20,9 @@ pub struct CavityContactHeat {
     /// sampled; this can differ from the returned wall endpoint temperature.
     pub last_cell_temperature_k: f64,
     pub last_power_into_solid_w: f64,
-    /// Held-coefficient series diagnostic for convection; actual power is
-    /// authoritative and the explicit timestep uses the separate flux secant.
+    /// Held-cell-k series diagnostic, or the integrated profile's actual flux
+    /// secant. Actual power is authoritative; the explicit timestep retains
+    /// its separate flux secant with an explicit zero at equilibrium.
     pub last_conductance_w_k: f64,
     /// Original conduction budget, or actual convective power divided by
     /// gas/cell contrast [W/K]. A convective equilibrium uses zero, not an
@@ -32,13 +34,14 @@ pub struct CavityContactHeat {
 }
 
 #[derive(Clone)]
-pub(super) struct Film {
+pub(super) struct Film<'m> {
     contact: SolidGasContact,
     element: usize,
+    integrated_solid: Option<Arc<ResolvedConductionLayer<'m>>>,
 }
-impl Film {
-    fn prepared(&self) -> PreparedContact<'_> {
-        PreparedContact::new(&self.contact, self.element)
+impl<'m> Film<'m> {
+    fn prepared(&self) -> PreparedContact<'_, 'm> {
+        PreparedContact::new(&self.contact, self.element, self.integrated_solid.clone())
     }
 }
 
@@ -71,10 +74,10 @@ fn phase<E>(
         .map_err(SolidEnthalpyError::from)?)
 }
 
-pub(super) fn prepare(
-    source: &SolidEnthalpy<'_>, thermal: &DepositionSimulation<'_>, gas: &ClosedGasParcel,
+pub(super) fn prepare<'m>(
+    source: &SolidEnthalpy<'m>, thermal: &DepositionSimulation<'_>, gas: &ClosedGasParcel,
     contacts: &[SolidGasContact], cx: &Cx<'_>,
-) -> Result<Vec<Film>, CavityError> {
+) -> Result<Vec<Film<'m>>, CavityError> {
     let mut ordered = contacts.to_vec();
     ordered.sort_by_key(|contact| contact.id);
     let mut areas = BTreeMap::<CellId, f64>::new();
@@ -104,7 +107,7 @@ pub(super) fn prepare(
             bound.reference_cell.specific_h_j_kg,
         ).map_err(SolidEnthalpyError::from)?;
         let source = binding(&bound.source, bound.reference_cell.specific_h_j_kg);
-        let mut film = Film { contact: contact.clone(), element };
+        let mut film = Film { contact: contact.clone(), element, integrated_solid: None };
         // Pin only the material at its original reference. A convection regime
         // at that irrelevant stress-free temperature is not an admission gate.
         let material = film.prepared().reference_material(&source, gas.state(), reference)?;
@@ -114,6 +117,9 @@ pub(super) fn prepare(
         film.contact.selection = MaterialPropertySelection::PinnedByProperty(vec![
             (contact.conductivity.name().to_owned(), selected),
         ]);
+        film.integrated_solid = film.prepared().prepare_solid_profile(
+            &source, &mut || cx.checkpoint().map_err(|_| DepositionError::Cancelled),
+        )?;
         film.prepared().resolve_with_law(&source, gas.state(), phase(&bound.source, thermal)?,
             None, law.as_ref(), &mut || cx.checkpoint().map_err(|_| DepositionError::Cancelled))?;
         films.push(film);

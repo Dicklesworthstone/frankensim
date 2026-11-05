@@ -25,18 +25,20 @@ use fs_matdb::PropertyKey;
 use fs_material::thermochemical_gas::energy::{
     GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,
 };
+use fs_material::thermal::conduction::source::{LayerSourceError, ResolvedConductionLayer};
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
 use fs_thermal::enthalpy::backward_euler::{BackwardEulerStep, StepCoefficients};
 use std::cell::Cell;
+use std::sync::Arc;
 
 mod transport;
 pub(super) use transport::GasHeatTransport;
 use transport::GasTransportSample;
 pub(super) mod convection;
-pub use convection::{SolidGasConvection, SolidGasConvectionSample};
+pub use convection::{SolidGasConductivityProfile, SolidGasConvection, SolidGasConvectionSample};
 /// Separate finite gases sharing the same spatial material wall and heat solve.
 pub mod network;
 /// Declared chemistry, finite gas heat and the same spatial solid state.
@@ -97,6 +99,7 @@ pub enum SolidGasError {
     Gas(GasEnergyError),
     Reaction(crate::cavity_phs::piston::reactive::GasReactionError),
     Source(ThermalMaterialError),
+    SolidLayer(LayerSourceError),
     Transport(MaterialNetworkError),
     HeatNetwork(HeatNetworkError),
     Convection(crate::air_path::input::convection::GasConvectionError),
@@ -163,6 +166,14 @@ impl From<ThermalMaterialError> for SolidGasError {
         Self::Source(error)
     }
 }
+impl From<LayerSourceError> for SolidGasError {
+    fn from(error: LayerSourceError) -> Self {
+        match error {
+            LayerSourceError::Thermal(DepositionError::Cancelled) => Self::Cancelled,
+            other => Self::SolidLayer(other),
+        }
+    }
+}
 impl From<NewtonError> for SolidGasError {
     fn from(error: NewtonError) -> Self {
         Self::Newton(error)
@@ -197,10 +208,11 @@ pub struct SolidGasContactSample {
     pub cell: CellId,
     /// Cell-centre caloric temperature, not an inferred surface temperature.
     pub solid_temperature_k: f64,
-    /// Original layer conductance, or the diagnostic series conductance using
-    /// the accepted film/solid coefficients. Convection transfers its retained
-    /// film power directly: G*(T_cell-T_gas) may differ within the admitted
-    /// surface power residual. A zero natural equilibrium value is not a tangent.
+    /// Original layer conductance, held-cell-k series diagnostic, or the
+    /// integrated profile's actual film power/(T_cell-T_gas). Convection always
+    /// transfers its retained film power; the held-k diagnostic may differ
+    /// within the admitted surface residual. At equilibrium the integrated
+    /// profile uses the declared film/solid series value, not an inferred tangent.
     pub conductance_w_k: f64,
     /// Positive from this cell into the shared gas; negative heats this cell.
     pub solid_to_gas_heat_j: f64,
@@ -384,10 +396,11 @@ fn merge_cell_heat(
     Ok(actual)
 }
 
-pub(super) struct PreparedContact<'a> {
-    contact: &'a SolidGasContact,
+pub(super) struct PreparedContact<'c, 'm> {
+    contact: &'c SolidGasContact,
     element: usize,
     selection: MaterialPropertySelection,
+    integrated_solid: Option<Arc<ResolvedConductionLayer<'m>>>,
 }
 pub(super) struct ContactSample {
     pub conductance_w_k: f64,
@@ -395,12 +408,17 @@ pub(super) struct ContactSample {
     pub source: ResolvedMaterialStatePoint,
     pub convection: Option<SolidGasConvectionSample>,
 }
-impl<'c> PreparedContact<'c> {
-    pub(super) fn new(contact: &'c SolidGasContact, element: usize) -> Self {
+impl<'c, 'm> PreparedContact<'c, 'm> {
+    pub(super) fn new(
+        contact: &'c SolidGasContact,
+        element: usize,
+        integrated_solid: Option<Arc<ResolvedConductionLayer<'m>>>,
+    ) -> Self {
         Self {
             contact,
             element,
             selection: contact.selection.clone(),
+            integrated_solid,
         }
     }
 
@@ -842,7 +860,7 @@ impl StructuralGasProblem<'_, '_> {
             .collect();
         ordered.sort_by_key(|(_, contact)| contact.id);
         let mut areas = BTreeMap::<CellId, f64>::new();
-        let mut prepared: Vec<(usize, PreparedContact<'_>)> = Vec::with_capacity(patch_count);
+        let mut prepared: Vec<(usize, PreparedContact<'_, '_>)> = Vec::with_capacity(patch_count);
         for (index, (gas_index, contact)) in ordered.into_iter().enumerate() {
             checkpoint()?;
             if index > 0 && prepared[index - 1].1.contact.id == contact.id {
@@ -867,11 +885,7 @@ impl StructuralGasProblem<'_, '_> {
                     "gas patches exceed exposed area or duplicate ambient convection",
                 ));
             }
-            let mut entry = PreparedContact {
-                contact,
-                element,
-                selection: contact.selection.clone(),
-            };
+            let mut entry = PreparedContact::new(contact, element, None);
             let bound = &self.sources[element];
             let gas = gases[gas_index].gas;
             let reference_phase = bound
@@ -891,6 +905,7 @@ impl StructuralGasProblem<'_, '_> {
                 contact.conductivity.name().to_owned(),
                 claim,
             )]);
+            entry.integrated_solid = entry.prepare_solid_profile(bound, &mut || checkpoint())?;
             // The accepted start must still support the same source, even if
             // a supplied initial guess happens to return to an earlier domain.
             entry.resolve(

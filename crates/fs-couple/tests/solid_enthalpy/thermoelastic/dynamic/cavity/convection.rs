@@ -4,7 +4,7 @@ use fs_couple::air_path::input::convection::{
     ForcedGasBoundary, ForcedGasGeometry, GasConvectionBoundary, NaturalConvectionGeometry,
     NaturalGasBoundary,
 };
-use fs_couple::solid_enthalpy::gas::{SolidGasConvection, SolidGasError};
+use fs_couple::solid_enthalpy::gas::{SolidGasConductivityProfile, SolidGasConvection, SolidGasError};
 use fs_couple::solid_enthalpy::thermoelastic::dynamic::cavity::CavityError;
 use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 
@@ -29,6 +29,7 @@ fn patches(natural: bool, distance: f64, tolerance: f64) -> [SolidGasContact; 1]
         contact.geometry.gas_distance_m = 0.0;
         contact.geometry.cell_distance_m = distance;
         contact.convection = Some(SolidGasConvection {
+            solid_profile: SolidGasConductivityProfile::CellPhase,
             boundary: if natural {
                 GasConvectionBoundary::Natural(NaturalGasBoundary {
                     geometry: NaturalConvectionGeometry::Sphere,
@@ -310,6 +311,100 @@ fn nonlinear_film_tracks_applied_substep_surface_and_uses_actual_flux_decay() {
                 row.heat_into_solid_j,
                 1e-10,
             );
+            assert!(next.balance.external_solid_heat_j > 0.09);
+            assert!(next.balance.gas_energy_residual_j.abs() <= config.energy_tolerance_j);
+            assert!(next.balance.combined_residual_j.abs() <= config.energy_tolerance_j);
+            assert_eq!(next.cavity.gas().point().axes().get("lot"), Some(&42.0));
+            cavity = next.cavity;
+            thermal = next.thermal;
+            observer = next.observer;
+        }
+    });
+}
+
+fn nonlinear_wall() -> (MaterialCard, EquilibriumEnthalpyPhaseCurve) {
+    let (original, _) = wall(10000.0, 0.0, 0.0, 6.0, 1.0);
+    let mut claims = ClaimSet::new();
+    for (_, claim) in original.claims().claims_ordered() {
+        let mut claim = claim.clone();
+        if claim.key.name() == "thermal_conductivity" {
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+                knots: vec![(280.0, 0.28), (320.0, 0.32), (500.0, 0.5)],
+                dims: THERMAL_CONDUCTIVITY_DIMS,
+            };
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    let card = MaterialCard::assemble(original.id().clone(), claims, vec![]).unwrap();
+    let curve = EquilibriumEnthalpyPhaseCurve::try_single_phase(
+        card.content_hash(), SolidLiquidPhase::Solid,
+        [280.0, 500.0].map(|temperature_k| EnthalpyPhaseKnot {
+            temperature_k, specific_enthalpy_j_kg: CP * (temperature_k - 280.0),
+            liquid_mass_fraction: 0.0, bulk_density_kg_m3: 6.0,
+        }).to_vec(),
+    ).unwrap();
+    (card, curve)
+}
+
+#[test]
+fn integrated_wall_profile_is_shared_across_motion_trials_and_native_substeps() {
+    with_cx(|cx| {
+        let (card, curve) = nonlinear_wall();
+        let mut thermal = heat(&curve, 6.0, true);
+        let context = context(300.0);
+        let source = SolidEnthalpy::try_new(
+            &thermal, &NODES, &TETS, vec![source(30, &card, &curve, &context)],
+            TetAssemblyBudget::standard(), 0.05, mechanical().mesh_frame, cx,
+        ).unwrap();
+        let distance = 0.5;
+        let mut patches = patches(true, distance, 1e-10);
+        patches[0].convection.as_mut().unwrap().solid_profile =
+            SolidGasConductivityProfile::IntegratedPurePhase {
+                phase: SolidLiquidPhase::Solid, temperature_range_k: [295.0, 335.0],
+            };
+        let mut cavity = launch_film(&source, &thermal, sphere_gas(340.0), 0.02, &patches, cx).unwrap();
+        let mut observer = ReservoirObserver { steps: 0, reservoir_calls: 0, fail_at: None };
+        let mut config = controls();
+        config.thermal.max_dt_s = 0.001;
+        let mut previous_line = None;
+        for step in 1..=2 {
+            let next = cavity.advance(
+                &thermal, &observer, 0.005 * step as f64, 0.002,
+                config, [0.0; 2], cx,
+            ).unwrap();
+            assert!(next.observer.steps >= observer.steps + 5);
+            let row = &next.balance.contacts[0];
+            let film = row.convection.as_ref().unwrap();
+            let cell = row.last_cell_temperature_k;
+            let bulk = next.cavity.gas().state().state().temperature;
+            let a = 0.0005 / distance;
+            let rhs = a * cell * cell + 0.15 * bulk;
+            let surface = 2.0 * rhs / (0.15 + (0.15_f64.powi(2) + 4.0 * a * rhs).sqrt());
+            near(film.film.wall_temperature_k, surface, 2e-8);
+            near(film.solid_layer_power_w,
+                PATCH_AREA / distance * 0.0005 * (cell - surface) * (cell + surface), 1e-10);
+            near(row.last_power_into_solid_w, 0.15 * PATCH_AREA * (bulk - surface), 1e-10);
+            near(row.last_explicit_decay_conductance_w_k,
+                row.last_power_into_solid_w / (bulk - cell), 0.0);
+            near(row.last_conductance_w_k, row.last_explicit_decay_conductance_w_k, 1e-15);
+            assert!(film.surface_balance_residual_w.abs() <= 1e-10);
+            // The film belongs to the actual applied substep, while storage
+            // advances further; a final-wall re-evaluation would be incorrect.
+            assert!(next.thermal.temperature_k(IDS[0]).unwrap() > cell + 1e-6);
+            near(row.source.query().axes()["T"], cell, 0.0);
+            assert_eq!(row.source.card_identity(), card.content_hash());
+            let line = film.solid_conductivity_profile.as_ref().unwrap();
+            assert_eq!(line.knots.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+                vec![295.0, 320.0, 335.0]);
+            assert!(bulk > 335.0);
+            let claim = row.source.property("thermal_conductivity").unwrap().answer().receipt.selected;
+            assert!(line.knots.iter().all(|(_, answer)| answer.receipt.selected == claim));
+            if let Some(previous) = &previous_line {
+                assert!(std::sync::Arc::ptr_eq(previous, line));
+            }
+            previous_line = Some(std::sync::Arc::clone(line));
+            near(next.balance.gas_to_solid_heat_j, row.heat_into_solid_j, 1e-10);
             assert!(next.balance.external_solid_heat_j > 0.09);
             assert!(next.balance.gas_energy_residual_j.abs() <= config.energy_tolerance_j);
             assert!(next.balance.combined_residual_j.abs() <= config.energy_tolerance_j);

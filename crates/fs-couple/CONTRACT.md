@@ -14425,8 +14425,8 @@ receipts and correlation evidence. Their exposed area must equal the contact
 area exactly, and the gas conduction distance must be zero: a film and an
 invented gas layer cannot both account for the same interface resistance.
 
-With positive solid half-distance, each proposed endpoint resolves the pinned
-solid conductivity at its actual cell phase and solves
+In the original `CellPhase` mode, positive solid half-distance resolves the
+pinned solid conductivity at its actual cell phase and solves
 `A*k_cell/d_s*(T_cell-T_surface) = -Q_film(T_surface)`. The film source law is
 rebuilt from that endpoint's actual gas pressure, composition and complete
 material conditions; holding pressure for a local film-property query does
@@ -14436,6 +14436,23 @@ admits an isothermal cell/surface patch. Zero source conductivity represents
 solid insulation; an absent natural-equilibrium coefficient never becomes an
 insulating law for a driven interface or an invented heat derivative.
 
+`SolidGasConvection::solid_profile` selects the original `CellPhase` model or
+explicit `IntegratedPurePhase { phase, temperature_range_k }`. The latter
+compiles the SAME original material/card, caloric object, fixed source context
+and reference-selected claim into `ResolvedConductionLayer` once before trial
+evaluation. Every source knot and receipt is retained behind an `Arc`; moving
+cavities reuse that chart across nonlinear trials, wall substeps and later
+intervals. Only one supported all-solid or all-liquid branch with strictly
+positive k(T) is admitted. A positive half-distance is required. Cells and the
+actual material trace must remain supported; the gas bulk may lie outside the
+material span. The common `fs-material` convective-layer owner balances the exact
+Kirchhoff flux coordinate against the original gas-film callback, preserving
+thin-layer accuracy without rebuilding heat from rounded surface temperatures.
+It adds no storage, latent/front inference or substitute convection law.
+Integrated reports retain the source line and actual film-power/bulk-contrast
+secant; exact equilibrium uses the explicitly declared film/local-solid series
+value.
+
 The surface solve uses a held-coefficient initial trial and safeguarded secant
 steps with midpoint fallback, reusing bracket residuals without numerical
 derivatives or additional interpolation source queries. The bracket contracts
@@ -14443,9 +14460,9 @@ by at least half within two trials. Work is bounded and cancellation is polled
 around every film evaluation. Acceptance requires the actual absolute power
 residual in watts; a small temperature bracket alone cannot admit a surface.
 The accepted film's signed power supplies the one heat removed from its cell
-and added to its finite gas. The reported series conductance is diagnostic:
-its bulk-temperature product can differ from that power within the admitted
-surface residual. Reports retain the actual film/surface queries, source and
+and added to its finite gas. For `CellPhase`, the reported series conductance
+is diagnostic: its bulk-temperature product can differ from that power within
+the admitted surface residual. Reports retain the actual film/surface queries, source and
 correlation evidence, solid-layer power and residual, iteration count, and
 separate instantaneous film and solid-layer entropy production.
 
@@ -14466,15 +14483,20 @@ patch geometry stay prescribed in the reference frame: wall motion does not
 infer a flow speed or resolve enclosed natural convection. The original held
 endpoint-gas/explicit-wall quadrature remains first order and requires interval
 refinement for time accuracy. This remains prescribed external
-flow/geometry against a well-mixed gas, with cell-phase conductivity held
-through the solid half-layer. It does not establish global uniqueness, an
-integrated conductivity profile, resolved boundary-layer or wall-flow
-dynamics, time/spatial refinement, or time-integrated entropy accuracy.
+flow/geometry against a well-mixed gas, with either held cell-phase conductivity
+or an explicitly supported pure-phase integral through the solid half-layer.
+It does not establish global uniqueness, an internal phase front, resolved
+boundary-layer or wall-flow dynamics, time/spatial refinement, or
+time-integrated entropy accuracy.
 Focused native regression specifications cover the sphere's sourced `Nu=2`
 series limit in both heat directions, the isothermal limit, nonlinear material
 and actual gas-pressure feedback, original source identity, reciprocal energy,
 geometry/area admission, and atomic refusal of an unclosed power balance.
-Their native integration execution remains required for numerical validation.
+Source-integrated specifications also cover the exact affine-k surface in
+both heat directions, constant-k reduction, a gas bulk outside solid support,
+atomic unsupported-profile refusal and cached charts across moving-wall
+substeps. Their native integration execution remains required for numerical
+validation.
 
 ### Computed DG radiation and source-bound exterior pressure
 

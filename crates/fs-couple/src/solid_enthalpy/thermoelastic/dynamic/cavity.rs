@@ -154,7 +154,7 @@ pub struct ThermoelasticCavity<'s, 'm> {
     exterior_pressure_pa: f64,
     reference_volume_m3: f64,
     reference_displacement_m: Vec<[f64; 3]>,
-    films: Vec<Film>,
+    films: Vec<Film<'m>>,
 }
 
 /// Physical account of one accepted interval, in original reference geometry.
