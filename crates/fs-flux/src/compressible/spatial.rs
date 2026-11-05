@@ -19,13 +19,13 @@ pub use reservoir::{PressureOutletBoundary, ReservoirBoundary, ReservoirFaceStat
 /// Conservative body impulse and mechanical work on the original time owner.
 pub mod forcing;
 pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d};
+/// Coherent physical Mann velocity traces on original reservoir faces.
+#[cfg(feature = "experimental-mann-inflow")]
+pub mod mann_inflow;
 /// Conservative evolution of every original species in a volumetric field.
 pub mod mixture;
 /// Source-owned molecular stress and heat transport for the volumetric field.
 pub mod molecular;
-/// Coherent physical Mann velocity traces on original reservoir faces.
-#[cfg(feature = "experimental-mann-inflow")]
-pub mod mann_inflow;
 
 /// Conservative averages in coherent SI units and the source's energy gauge.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -610,6 +610,48 @@ impl Euler3d {
         )
     }
 
+    /// Conservative held body forcing with a replayable stage-time exterior.
+    ///
+    /// The original source half-kicks surround native SSP Euler, whose two
+    /// residuals observe the exterior at `t` and `t + dt`. One provider budget
+    /// covers admission and every discarded trial. Source impulse and kinetic
+    /// work remain distinct from boundary transfer; every forced RK state and
+    /// the final kick obey the authored Mach cap. A refusal publishes no cells,
+    /// time, profile, load or report. Zero force uses the exact timed Euler path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing_and_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(f64, BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.states.len(), &mut cancelled)?;
+        workspace.admit(self.states.len())?;
+        if !active {
+            return self.step_with_reservoir_profiles(
+                maximum_duration,
+                controls,
+                maximum_face_evaluations,
+                sample,
+                cancelled,
+            );
+        }
+        let mut source = reservoir::TimedSource::new(&mut sample, maximum_face_evaluations);
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            Some(&mut source),
+            cancelled,
+        )
+    }
+
     fn step_impl(
         &mut self,
         maximum_duration: Time,
@@ -664,8 +706,8 @@ impl Euler3d {
             if !positive(dt) || self.time + dt <= self.time || !(self.time + dt).is_finite() {
                 return Err(Error::Invalid("unrepresentable volumetric time increment"));
             }
-            let trial = if let Some(source) = profiles.as_deref_mut() {
-                if halvings != 0 {
+            if halvings != 0 {
+                if let Some(source) = profiles.as_deref_mut() {
                     source.stage(
                         &mut self.reservoirs.profiles,
                         &self.gas,
@@ -674,52 +716,59 @@ impl Euler3d {
                         &mut cancelled,
                     )?;
                 }
-                evolve::attempt_with_reservoir_profiles(
+            }
+            let trial = match forcing.as_mut() {
+                Some((force, force_controls, workspace)) => forcing::attempt(
                     &self.gas,
                     &self.grid,
                     self.boundaries,
                     &mut self.reservoirs,
                     &self.states,
                     &mut self.work,
-                    source,
-                    self.time,
+                    workspace,
+                    *force,
+                    *force_controls,
                     dt,
                     controls.cfl,
                     reconstruction,
+                    profiles.as_deref_mut(),
+                    self.time,
                     &mut cancelled,
-                )
-                .map(|stats| (stats, ForceChange3d::default()))
-            } else {
-                match forcing.as_mut() {
-                    Some((force, force_controls, workspace)) => forcing::attempt(
-                        &self.gas,
-                        &self.grid,
-                        self.boundaries,
-                        &self.reservoirs,
-                        &self.states,
-                        &mut self.work,
-                        workspace,
-                        *force,
-                        *force_controls,
-                        dt,
-                        controls.cfl,
-                        reconstruction,
-                        &mut cancelled,
-                    ),
-                    None => evolve::attempt(
-                        &self.gas,
-                        &self.grid,
-                        self.boundaries,
-                        &self.reservoirs,
-                        &self.states,
-                        &mut self.work,
-                        dt,
-                        controls.cfl,
-                        reconstruction,
-                        None,
-                        &mut cancelled,
-                    )
-                    .map(|stats| (stats, ForceChange3d::default())),
+                ),
+                None => {
+                    if let Some(source) = profiles.as_deref_mut() {
+                        evolve::attempt_with_reservoir_profiles(
+                            &self.gas,
+                            &self.grid,
+                            self.boundaries,
+                            &mut self.reservoirs,
+                            &self.states,
+                            &mut self.work,
+                            source,
+                            self.time,
+                            dt,
+                            controls.cfl,
+                            reconstruction,
+                            None,
+                            &mut cancelled,
+                        )
+                        .map(|stats| (stats, ForceChange3d::default()))
+                    } else {
+                        evolve::attempt(
+                            &self.gas,
+                            &self.grid,
+                            self.boundaries,
+                            &self.reservoirs,
+                            &self.states,
+                            &mut self.work,
+                            dt,
+                            controls.cfl,
+                            reconstruction,
+                            None,
+                            &mut cancelled,
+                        )
+                        .map(|stats| (stats, ForceChange3d::default()))
+                    }
                 }
             };
             match trial {

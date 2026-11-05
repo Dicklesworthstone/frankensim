@@ -67,7 +67,7 @@ pub(super) fn attempt(
     gas: &FrozenGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: &mut reservoir::Reservoirs,
     states: &[State],
     work: &mut Workspace,
     forcing_work: &mut ForcingWorkspace3d,
@@ -76,6 +76,8 @@ pub(super) fn attempt(
     dt: f64,
     cfl: f64,
     reconstruction: Reconstruction,
+    profiles: Option<&mut reservoir::TimedSource<'_>>,
+    time: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(StageStats, ForceChange3d), Error> {
     for (cell, (source, target)) in states.iter().zip(&mut forcing_work.original).enumerate() {
@@ -95,19 +97,36 @@ pub(super) fn attempt(
         cancelled,
     )?;
     // Original primitive recovery admits every kicked cell and every RK state.
-    let mut stats = evolve::attempt(
-        gas,
-        grid,
-        boundaries,
-        reservoirs,
-        &forcing_work.original,
-        work,
-        dt,
-        cfl,
-        reconstruction,
-        Some(controls),
-        cancelled,
-    )?;
+    let mut stats = match profiles {
+        Some(source) => evolve::attempt_with_reservoir_profiles(
+            gas,
+            grid,
+            boundaries,
+            reservoirs,
+            &forcing_work.original,
+            work,
+            source,
+            time,
+            dt,
+            cfl,
+            reconstruction,
+            Some(controls),
+            cancelled,
+        )?,
+        None => evolve::attempt(
+            gas,
+            grid,
+            boundaries,
+            reservoirs,
+            &forcing_work.original,
+            work,
+            dt,
+            cfl,
+            reconstruction,
+            Some(controls),
+            cancelled,
+        )?,
+    };
     let (second, endpoint_rate) = kick_field(
         gas,
         grid,

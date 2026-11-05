@@ -1,6 +1,8 @@
 use super::*;
 use crate::compressible::tests::{close, gas};
 
+mod timed;
+
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,
     y: AxisBoundaries::Periodic,

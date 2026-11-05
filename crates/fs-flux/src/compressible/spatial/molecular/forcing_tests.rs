@@ -1,6 +1,9 @@
 use super::*;
 use crate::compressible::spatial::{BodyForce3d, ForceControl3d};
 
+#[path = "forcing_timed_tests.rs"]
+mod timed;
+
 #[cfg(feature = "experimental-sgs")]
 #[test]
 fn g1_forced_channel_sgs_uses_fresh_halves_and_closes_source_wall_energy() {

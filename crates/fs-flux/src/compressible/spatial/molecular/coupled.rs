@@ -64,7 +64,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     /// Complete source-admitted uniform or face-resolved Euler reservoirs
     /// supply the held bath traces. Unbound open sides retain zero molecular
     /// flux. This selection survives accepted/trial swaps and forced or
-    /// stabilized steps; it does not resample a timed inlet during the split.
+    /// stabilized steps; timed step APIs supply the physical stage resampling.
     /// Changing the selection invalidates the prior complete-step report.
     pub fn with_reservoir_exchange(mut self) -> Self {
         if !self.molecular.reservoir_exchange_enabled() {
@@ -440,6 +440,50 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         )
     }
 
+    /// Drive the original viscous split with held forcing and a timed exterior.
+    ///
+    /// The physical stage clocks and one cumulative provider budget follow
+    /// [`Self::step_with_reservoir_profiles`]. Central Euler retains its original
+    /// conservative force half-kicks, kinetic work and authored Mach admission.
+    /// Any shortened central interval replays both molecular halves and source
+    /// kicks from the accepted field. Publication includes the endpoint profile
+    /// and all source/boundary accounts only after the complete split succeeds.
+    /// Zero forcing follows the exact unforced timed path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing_and_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(f64, BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, MolecularError> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.accepted.states.len(), &mut cancelled)?;
+        workspace.admit(self.accepted.states.len())?;
+        if !active {
+            return self.step_with_reservoir_profiles(
+                maximum_duration,
+                controls,
+                maximum_face_evaluations,
+                sample,
+                cancelled,
+            );
+        }
+        let mut source = timed::TimedSource::new(&mut sample, maximum_face_evaluations);
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            None,
+            Some(&mut source),
+            cancelled,
+        )
+    }
+
     /// Compose RKL2 molecular halves around the original volumetric Euler step.
     ///
     /// One cumulative evaluation budget covers both halves and discarded whole
@@ -530,6 +574,56 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             Some((force, force_controls, workspace)),
             Some(&mut work),
             None,
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    /// RKL2 molecular halves with conservative forcing and stage-time profiles.
+    ///
+    /// Both cumulative budgets span all phases and discarded whole splits.
+    /// Native Legendre weights, bath/wall/SGS fluxes, force work, Mach and CFL
+    /// checks are retained. Provider failure or exhausted work publishes no
+    /// accepted state, clock, endpoint profile, load or report.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_stabilized_with_forcing_and_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        stabilization: MolecularStabilization,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(f64, BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, MolecularError> {
+        force_controls.admit::<Error>()?;
+        let active = force.admit::<Error>(self.accepted.states.len(), &mut cancelled)?;
+        workspace.admit(self.accepted.states.len())?;
+        if !active {
+            return self.step_stabilized_with_reservoir_profiles(
+                maximum_duration,
+                controls,
+                stabilization,
+                maximum_face_evaluations,
+                sample,
+                cancelled,
+            );
+        }
+        let mut source = timed::TimedSource::new(&mut sample, maximum_face_evaluations);
+        let mut work = StepWork::new(stabilization);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            Some(&mut source),
             cancelled,
         )?;
         Ok(StabilizedMolecularStepReport3d {
@@ -678,7 +772,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                         Time::new(dt),
                         controls.advection,
                         Some((*force, *force_controls, &mut **workspace)),
-                        None,
+                        profiles.as_deref_mut(),
                         &mut cancelled,
                     )?,
                     None => self.trial.step_impl(

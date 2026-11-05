@@ -61,6 +61,7 @@ pub(super) fn attempt_with_reservoir_profiles(
     dt: f64,
     cfl: f64,
     reconstruction: Reconstruction,
+    force_controls: Option<forcing::ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
     let first_rate = reservoirs
@@ -78,7 +79,7 @@ pub(super) fn attempt_with_reservoir_profiles(
         cfl,
         false,
         reconstruction,
-        None,
+        force_controls,
         cancelled,
     )?;
     source.stage(&mut reservoirs.profiles, gas, grid, time + dt, cancelled)?;
@@ -100,7 +101,7 @@ pub(super) fn attempt_with_reservoir_profiles(
         cfl,
         true,
         reconstruction,
-        None,
+        force_controls,
         cancelled,
     )?;
     let mut stats = combine(first, second);

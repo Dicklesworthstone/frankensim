@@ -6111,3 +6111,13 @@ stochastic path is the admitted finite-mode Gaussian OU model. Existing
 independently keyed interval-average observations are not jointly coupled to
 this path. Timed reacting, body-force and finite-wall-inertia compositions
 remain outside these entry points.
+
+### Held forcing with stage-time Cartesian exterior profiles
+
+`Euler3d::step_with_forcing_and_reservoir_profiles` composes the original conservative source half-kicks around native SSP Euler, observing a replayable prepared exterior at the actual accepted start and endpoint of each trial. Uniform/per-cell acceleration and force density retain their distinct units and original density-dependent impulse and represented midpoint kinetic work. Source impulse/work and boundary transfer remain separate terms in the original conservation balance. Timed RK input, predictor and accepted candidate states, the final force kick, and endpoint CFL retain authored native admission.
+
+`MolecularEuler3d::step_with_forcing_and_reservoir_profiles` and `step_stabilized_with_forcing_and_reservoir_profiles` connect the same forcing to original SSP or RKL2 molecular halves. First-half, central Euler and second-half physical intervals remain `[t,t+dt/2]`, `[t,t+dt]` and `[t+dt/2,t+dt]`, using the original canonical origin/offset clock. A shortened central interval replays the complete molecular/force composition from accepted cells. Original Newtonian stress/work, Fourier heat, configured wall/bath and optional exploratory SGS owners remain active.
+
+One provider-face budget covers initial exterior admission, all phases and discarded numerical trials; stabilized operator work remains separately cumulative. Providers must be replayable under repeated and nonmonotone observations. Provider/budget failure terminates without numerical retry; original bounded numerical retries remain intact. Cells, time, endpoint profiles, face loads and reports publish only after complete acceptance. Failed timed calls preserve subsequent held-force recovery, and a zero force delegates to the existing timed path exactly. Existing caller-budgeted forcing scratch and reservoir caches are reused without per-stage allocation. Body forcing remains authored and held over the accepted interval; this adds no stochastic volume forcing, well-balanced gravity scheme or turbulence-accuracy certificate.
+
+Focused native coverage reconstructs force/advection/force independently from kinetic energy, reconstructs both original molecular halves and central forced Euler (including active RKL stage acceleration), checks conservative source/boundary work and exact zero-force parity, and exercises Mach-driven whole replay, cumulative provider exhaustion, late source/cancellation rollback and held recovery.
