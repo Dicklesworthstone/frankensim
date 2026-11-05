@@ -15,7 +15,9 @@ use fs_matdb::{
 use fs_material::fiber::MenegottoPintoSteel;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::{Density, Dims, Pressure, QtyAny};
-use fs_scenario::ensemble::{RealizationBudget, SpectrumModel, StochasticEnsemble};
+use fs_scenario::ensemble::{
+    RealizationBudget, SpectralDiscretization, SpectrumModel, StochasticEnsemble,
+};
 use fs_scenario::signal::{Interp, TimeSignal};
 use fs_solid::fiber::material::{
     ConcreteFiberProperties, FiberMaterial, RcSection, RcSectionGeometry,
@@ -501,5 +503,155 @@ fn all_record_shapes_are_preflighted_before_any_candidate_history() {
             controls(),
             cx,
         ).is_err());
+    });
+}
+
+#[test]
+fn explicit_spectrum_keeps_the_physical_source_through_catalog_risk() {
+    let ensemble = ensemble();
+    let spectrum = SpectralDiscretization {
+        omega_max_rad_s: 40.0,
+        frequency_lines: 7,
+    };
+    let catalog = vec![building(spec(1.0), 2400.0), building(spec(1.3), 1800.0)];
+    let records: Vec<_> = (0..ensemble.members)
+        .map(|member| {
+            let motion = ensemble
+                .realize_with_spectrum(member, spectrum, controls().realization_budget)
+                .unwrap();
+            TimeSignal::Table {
+                times: motion.times,
+                values: motion.values,
+                dims: Dims([1, 0, -2, 0, 0, 0]),
+                interp: Interp::Linear,
+            }
+        })
+        .collect();
+    // A direct native history checks the original initial sample and timestep,
+    // independently of either catalog-study source adapter.
+    let expected: Vec<Vec<f64>> = catalog
+        .iter()
+        .map(|frame| {
+            records
+                .iter()
+                .map(|record| {
+                    let TimeSignal::Table { values, .. } = record else {
+                        unreachable!()
+                    };
+                    frame.clone().run(values, ensemble.dt.value).unwrap().peak_drift_ratio
+                })
+                .collect()
+        })
+        .collect();
+    let generated = with_cx(false, |cx| {
+        building_cvar_from_motions(
+            BuildingMotionSource::SpectralEnsemble {
+                ensemble: &ensemble,
+                spectrum,
+            },
+            &catalog,
+            controls(),
+            cx,
+        )
+        .unwrap()
+    });
+    let recorded = with_cx(false, |cx| {
+        building_cvar_from_motions(
+            BuildingMotionSource::Records(&records),
+            &catalog,
+            controls(),
+            cx,
+        )
+        .unwrap()
+    });
+    assert_eq!(generated.selected_index, recorded.selected_index);
+    assert_eq!(generated.evaluations, recorded.evaluations);
+    for (evaluation, direct) in generated.evaluations.iter().zip(&expected) {
+        assert_eq!(&evaluation.peak_drifts, direct);
+        assert_eq!(
+            evaluation.tail,
+            fs_robust::empirical_cvar(direct, controls().beta).unwrap(),
+        );
+    }
+    match generated.motions {
+        BuildingMotionSource::SpectralEnsemble {
+            ensemble: retained,
+            spectrum: grid,
+        } => {
+            assert!(std::ptr::eq(retained, &ensemble));
+            assert_eq!(grid, spectrum);
+        }
+        _ => panic!("explicit frequency grid was replaced"),
+    }
+    // A candidate retains its initial gravity/material state after the study.
+    let TimeSignal::Table { values, .. } = &records[0] else {
+        unreachable!()
+    };
+    for (frame, direct) in catalog.iter().zip(&expected) {
+        assert_eq!(
+            frame.clone().run(values, ensemble.dt.value).unwrap().peak_drift_ratio,
+            direct[0],
+        );
+    }
+}
+
+#[test]
+fn explicit_spectrum_refuses_aliasing_and_uses_the_original_synthesis_budget() {
+    let ensemble = ensemble();
+    let catalog = vec![building(spec(1.0), 2400.0)];
+    let grid = SpectralDiscretization {
+        omega_max_rad_s: 40.0,
+        frequency_lines: 7,
+    };
+    with_cx(false, |cx| {
+        for spectrum in [
+            SpectralDiscretization {
+                omega_max_rad_s: 200.0,
+                ..grid
+            },
+            SpectralDiscretization {
+                frequency_lines: 0,
+                ..grid
+            },
+            // Eight timestamps + fourteen coefficients + 8*14 products
+            // exceed the existing 128-unit per-member synthesis allowance.
+            SpectralDiscretization {
+                frequency_lines: 14,
+                ..grid
+            },
+        ] {
+            assert!(matches!(
+                building_cvar_from_motions(
+                    BuildingMotionSource::SpectralEnsemble {
+                        ensemble: &ensemble,
+                        spectrum,
+                    },
+                    &catalog,
+                    controls(),
+                    cx,
+                ),
+                Err(BuildingCvarError::Realization { member: 0, .. })
+            ));
+        }
+    });
+    let mut wind = ensemble.clone();
+    wind.model = SpectrumModel::Dryden {
+        sigma: QtyAny::new(1.0, Dims([1, 0, -1, 0, 0, 0])),
+        length_scale: QtyAny::new(10.0, Dims([1, 0, 0, 0, 0, 0])),
+        mean_speed: QtyAny::new(20.0, Dims([1, 0, -1, 0, 0, 0])),
+    };
+    with_cx(false, |cx| {
+        assert!(matches!(
+            building_cvar_from_motions(
+                BuildingMotionSource::SpectralEnsemble {
+                    ensemble: &wind,
+                    spectrum: grid,
+                },
+                &catalog,
+                controls(),
+                cx,
+            ),
+            Err(BuildingCvarError::InvalidInput(_))
+        ));
     });
 }

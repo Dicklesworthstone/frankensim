@@ -11,7 +11,9 @@ use crate::building::BuildingFrame;
 use fs_exec::Cx;
 use fs_robust::{EmpiricalCvarReport, RobustError, empirical_cvar};
 use fs_scenario::ScenarioError;
-use fs_scenario::ensemble::{RealizationBudget, SpectrumModel, StochasticEnsemble};
+use fs_scenario::ensemble::{
+    RealizationBudget, SpectralDiscretization, SpectrumModel, StochasticEnsemble,
+};
 use fs_scenario::signal::{Interp, TimeSignal};
 use fs_solid::SolidError;
 use std::borrow::Cow;
@@ -19,8 +21,20 @@ use std::borrow::Cow;
 /// Original typed forcing retained by a building risk/design study.
 #[derive(Debug, Clone, Copy)]
 pub enum BuildingMotionSource<'a> {
-    /// Seeded Kanai-Tajimi motions, synthesized once per member.
+    /// Seeded Kanai-Tajimi motions on the original record-periodic frequency grid.
     Ensemble(&'a StochasticEnsemble),
+    /// Seeded Kanai-Tajimi motions with an explicit physical frequency grid.
+    ///
+    /// The same model, grid, seed and member retain the same excitation when
+    /// the observation clock or duration changes. The original scenario owner
+    /// checks the cutoff against this clock's Nyquist limit. No omitted spectral
+    /// tail is aliased or redistributed into the retained band.
+    SpectralEnsemble {
+        /// Original stochastic model, member identities and observation clock.
+        ensemble: &'a StochasticEnsemble,
+        /// Physical angular-frequency cutoff and midpoint quadrature resolution.
+        spectrum: SpectralDiscretization,
+    },
     /// Equally weighted recorded acceleration tables, each with its own grid.
     ///
     /// Only linear, uniform SI acceleration tables beginning at zero are
@@ -274,6 +288,9 @@ pub fn building_cvar_mass_min<'a>(
 /// loading/history assumptions.
 ///
 /// Generated motions are synthesized once under the native work budget.
+/// SpectralEnsemble retains its explicitly chosen frequency grid in the result;
+/// structural timestep refinement does not silently redraw the physical motion.
+/// Bandwidth and frequency-quadrature convergence remain separate obligations.
 /// Recorded tables are all admitted before any history runs, then their
 /// original value slices are used without resampling or dropping the initial
 /// sample. Each record has its own timestep and contributes one equally
@@ -307,7 +324,8 @@ pub fn building_cvar_from_motions<'a>(
 ) -> Result<BuildingCvarDesign<'a>, BuildingCvarError> {
     checkpoint(cx)?;
     let member_count = match motions {
-        BuildingMotionSource::Ensemble(ensemble) => {
+        BuildingMotionSource::Ensemble(ensemble)
+        | BuildingMotionSource::SpectralEnsemble { ensemble, .. } => {
             if !matches!(ensemble.model, SpectrumModel::KanaiTajimi { .. }) {
                 return Err(BuildingCvarError::InvalidInput(
                     "ensemble must describe Kanai-Tajimi ground acceleration",
@@ -392,6 +410,12 @@ pub fn building_cvar_from_motions<'a>(
         let (values, dt): (Cow<'_, [f64]>, f64) = match motions {
             BuildingMotionSource::Ensemble(ensemble) => {
                 let motion = ensemble.realize_with_budget(member, controls.realization_budget)
+                    .map_err(|source| BuildingCvarError::Realization { member, source })?;
+                (Cow::Owned(motion.values), ensemble.dt.value)
+            }
+            BuildingMotionSource::SpectralEnsemble { ensemble, spectrum } => {
+                let motion = ensemble
+                    .realize_with_spectrum(member, spectrum, controls.realization_budget)
                     .map_err(|source| BuildingCvarError::Realization { member, source })?;
                 (Cow::Owned(motion.values), ensemble.dt.value)
             }

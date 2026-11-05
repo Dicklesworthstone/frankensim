@@ -153,6 +153,22 @@ sample/work budget; independent candidate clones retain their own material
 sources, gravity preload, inertia and constitutive history. Candidate and
 member caps bound the number of complete nonlinear histories.
 
+`BuildingMotionSource::SpectralEnsemble` binds the same catalog study to an
+explicit `fs-scenario::SpectralDiscretization`. The native scenario owner
+evaluates the original Kanai-Tajimi model on fixed midpoint frequency lines;
+the physical cutoff and line count are independent of record duration and
+timestep. The same model/grid/seed/member therefore supplies the same
+continuous excitation across sampling refinements. The returned design retains
+both the borrowed original ensemble and the exact grid. Its cutoff must fit
+the observation clock's Nyquist limit, and the original sample/work budget
+applies before synthesis. No high-frequency tail is folded or redistributed.
+Bandwidth and frequency-quadrature convergence are distinct from structural
+timestep convergence; this remains an empirical finite-band model study.
+The existing Ensemble variant keeps its original record-periodic semantics.
+`tests/building_cvar.rs` compares explicit-spectrum studies with direct native
+histories and the identical retained recording suite, including refusal of
+aliased spectra and exceeded synthesis budgets.
+
 Recorded suites reuse `fs-scenario::TimeSignal::Table`: acceleration dimensions,
 linear interpolation, at least two finite samples, initial time zero and a
 uniform grid are required. The entire suite passes its original signal owner's
