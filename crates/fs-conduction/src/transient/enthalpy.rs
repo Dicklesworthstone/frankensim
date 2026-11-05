@@ -47,6 +47,8 @@ pub mod interference;
 
 /// Implicit endpoint derivatives through the accepted physical balance.
 pub mod adjoint;
+/// Discrete entropy and optional admission on the native thermal operator.
+pub mod entropy;
 /// Error-controlled time integration of the same nonlinear enthalpy transport.
 pub mod adaptive;
 /// Second-order SDIRK stages on the same nonlinear enthalpy residual.
@@ -1386,6 +1388,19 @@ impl StepContext<'_, '_, '_, '_> {
         newton: NewtonReport,
         tolerance_j: f64,
     ) -> Result<EnthalpyStepSolution, EnthalpyError> {
+        self.finish_and_entropy(h, newton, tolerance_j, false)
+            .map(|(solution, _)| solution)
+    }
+
+    // The optional entropy account consumes this same final physical operator;
+    // the original Newton and energy acceptance paths remain unchanged.
+    fn finish_and_entropy(
+        &self,
+        h: Vec<f64>,
+        newton: NewtonReport,
+        tolerance_j: f64,
+        with_entropy: bool,
+    ) -> Result<(EnthalpyStepSolution, Option<entropy::EnthalpyEntropyBalance>), EnthalpyError> {
         self.check_prescribed_values(&h)?;
         let temperature = self.temperatures(&h)?;
         let phase_scales = self.phase_scales(&h)?;
@@ -1443,7 +1458,12 @@ impl StepContext<'_, '_, '_, '_> {
         poll(self.cx, h.len())?;
         let (pointwise_radiation, pointwise_enclosure_radiation) = pointwise_radiation
             .map_or((None, None), pointwise::PointwiseBoundaryReport::into_reports);
-        Ok(EnthalpyStepSolution {
+        let entropy = if with_entropy {
+            Some(entropy::evaluate(self, &h, &system, &temperature, &dofs)?)
+        } else {
+            None
+        };
+        Ok((EnthalpyStepSolution {
             specific_enthalpy_j_kg: h,
             temperature,
             liquid_mass_fraction,
@@ -1458,7 +1478,7 @@ impl StepContext<'_, '_, '_, '_> {
             robin_fluxes,
             contact_fluxes,
             newton,
-        })
+        }, entropy))
     }
 }
 

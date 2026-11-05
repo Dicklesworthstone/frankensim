@@ -4516,3 +4516,41 @@ closed/open heat, both prescribed-bath jump directions and refusal/retry.
 The interface retains fixed reference mass/geometry and the prepared owner's
 emissivities/view factors. It adds neither a surface-contact tangent nor a
 convergence guarantee for arbitrary resistance surfaces.
+
+
+## Entropy admission of the original nonlinear P1 enthalpy step
+
+Uniform and assigned heterogeneous storage expose `advance_with_entropy`
+and `evaluate_endpoint_with_entropy`. The first performs the original
+backward-Euler Newton solve, physical energy checks and an additional caller-
+toleranced entropy admission before returning a state. The second measures a
+supplied endpoint without accepting it. Both retain the original full physical
+operator before prescribed-row elimination; the Newton tangent is not a heat
+transport operator.
+
+The account integrates each original caloric chart's dh/T against frozen
+reference nodal mass. Sensible films contribute their original caloric entropy
+at the same host temperature; latent heat is already contained in the host
+chart and is never deposited again. Dirichlet reactions include fixed-node
+storage at the actual endpoint bath temperature. Each active Robin triangle
+must name one positive actual bath temperature, with independent temperatures
+allowed on different triangles. Heat-flux and volumetric inputs remain explicitly
+unclassified; dividing their watts by receiving nodal temperature does not
+invent a reservoir or convert work into heat.
+
+Bulk, sheet and contact production use the same sparse transport entries as
+energy. The original consistent Robin matrix contributes its actual heat and
+signed entropy separately. Positive constitutive tensors alone do not imply
+nonnegative nodal finite-element entropy production. Admission refuses negative
+bulk/contact or Robin production, negative thermal storage minus inputs, or
+unclosed entropy beyond the caller's absolute J/K allowance. It never clips
+matrix entries, lumps Robin faces, or repairs heat from the discrepancy.
+
+Exact state entropy, physical transport, time-discretization defect, free-row
+algebraic residual and remaining reduction closure are separate quantities.
+The account adds one linear pass over vertices, sparse entries and boundary
+faces, plus the original caloric queries; Newton iterations perform no entropy
+work. Spatially varying Robin-bath entropy and photon entropy require their
+own integration and are not inferred by this interface. Acceptance is a check
+of this admitted discrete state, not a whole-system second-law certificate or
+a continuum, mesh-monotonicity or time-accuracy theorem.

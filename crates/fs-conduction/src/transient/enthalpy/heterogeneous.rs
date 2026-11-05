@@ -856,6 +856,33 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             .advance(cx, problem, interfaces, old_specific_h, dt_s, config)
     }
 
+    /// Advance with the original per-vertex caloric charts and an additional
+    /// discrete entropy admission. This shares the uniform owner's operator,
+    /// storage and transaction; no homogenized material or entropy is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_entropy(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old_specific_h: &[f64],
+        dt_s: f64, config: EnthalpyStepConfig, entropy_tolerance_j_k: f64,
+    ) -> Result<(EnthalpyStepSolution, super::entropy::EnthalpyEntropyBalance),
+        super::entropy::EnthalpyEntropyError> {
+        self.inner.advance_with_entropy(cx, problem, interfaces, old_specific_h,
+            dt_s, config, entropy_tolerance_j_k)
+    }
+
+    /// Measure a supplied nonradiative endpoint using each original chart.
+    /// Signed discrete generation and residuals remain available without a gate.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_entropy(
+        &self, cx: &Cx<'_>, problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>, old_specific_h: &[f64],
+        candidate_specific_h: &[f64], dt_s: f64, config: EnthalpyStepConfig,
+    ) -> Result<(super::EnthalpyEndpointEvaluation, super::entropy::EnthalpyEntropyBalance),
+        EnthalpyError> {
+        self.inner.evaluate_endpoint_with_entropy(cx, problem, interfaces,
+            old_specific_h, candidate_specific_h, dt_s, config)
+    }
+
     pub(crate) fn advance_with_temperature_contacts(
         &self,
         cx: &Cx<'_>,

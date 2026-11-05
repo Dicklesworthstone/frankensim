@@ -94,6 +94,17 @@ impl<'s> SurfaceHeatStorage<'s> {
             CaloricStorage::Tabulated(storage) => storage.energy_change_j(old, new),
         }
     }
+
+    pub(super) fn sensible_entropy_change_j_k(
+        self,
+        old: f64,
+        new: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        match self.law {
+            CaloricStorage::Prepared(storage) => storage.sensible_entropy_change_j_k(old, new),
+            CaloricStorage::Tabulated(storage) => storage.sensible_entropy_change_j_k(old, new),
+        }
+    }
 }
 
 #[derive(Debug, Default)]

@@ -207,7 +207,35 @@ impl EnthalpyBackwardEuler<'_, '_> {
         patches: Option<&[AmbientRadiationPatch]>,
         pointwise_radiation: Option<PointwiseBoundary<'_>>,
     ) -> Result<EnthalpyEndpointEvaluation, EnthalpyError> {
+        self.evaluate_endpoint_and_entropy(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, patches, pointwise_radiation, false,
+        ).map(|(endpoint, _)| endpoint)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn evaluate_endpoint_and_entropy(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        patches: Option<&[AmbientRadiationPatch]>,
+        pointwise_radiation: Option<PointwiseBoundary<'_>>,
+        with_entropy: bool,
+    ) -> Result<(EnthalpyEndpointEvaluation, Option<super::entropy::EnthalpyEntropyBalance>), EnthalpyError> {
+        if with_entropy && (patches.is_some() || pointwise_radiation.is_some()) {
+            return Err(EnthalpyError::InvalidInput(
+                "conductive entropy does not assign photon entropy to radiation",
+            ));
+        }
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
+        if with_entropy {
+            super::entropy::admit_boundary(cx, problem)?;
+        }
         config.newton.validate().map_err(EnthalpyError::Newton)?;
         let n = self.masses.len();
         if candidate_specific_h.len() != n {
@@ -337,7 +365,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             finite(source_w + dirichlet_in_w - neumann_out_w - convective_out_w - radiation_out_w)?;
         let energy_residual_j = finite(stored_energy_change_j - dt_s * net_input_w)?;
         poll(cx, n)?;
-        Ok(EnthalpyEndpointEvaluation {
+        let endpoint = EnthalpyEndpointEvaluation {
             temperature,
             residual_j: residual,
             residual_norm_j,
@@ -350,7 +378,15 @@ impl EnthalpyBackwardEuler<'_, '_> {
             radiation_out_w,
             energy_residual_j,
             convective_robin_fluxes,
-        })
+        };
+        let entropy = if with_entropy {
+            Some(super::entropy::evaluate(
+                &physical, candidate_specific_h, &system, &endpoint.temperature, &dofs,
+            )?)
+        } else {
+            None
+        };
+        Ok((endpoint, entropy))
     }
 }
 

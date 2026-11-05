@@ -201,6 +201,42 @@ impl EnthalpyBackwardEuler<'_, '_> {
         Ok((old_temperature, temperature))
     }
 
+    /// Exact sensible entropy of the same bonded film inventories used by
+    /// storage_change_j. Each nonlinear face retains its original caloric
+    /// integral and the same one-third nodal inventory; no C(T) is frozen.
+    pub(super) fn film_entropy_change_j_k(
+        &self,
+        vertex: usize,
+        old_h: f64,
+        temperature: f64,
+    ) -> Result<f64, EnthalpyError> {
+        if !self.has_film_storage(vertex) {
+            return Ok(0.0);
+        }
+        let (old_temperature, temperature) =
+            self.film_temperature_change(vertex, old_h, temperature)?;
+        let film = self.surface_capacity.as_ref().expect("active film storage");
+        let capacity = film.nodal_j_per_k[vertex];
+        let mut change = 0.0;
+        if capacity > 0.0 {
+            let relative = (temperature - old_temperature) / old_temperature;
+            let logarithm = if relative.is_finite() && relative > -1.0 {
+                relative.ln_1p()
+            } else {
+                temperature.ln() - old_temperature.ln()
+            };
+            change = finite(capacity * logarithm)?;
+        }
+        if let Some(laws) = &film.nonlinear {
+            for law in laws.at_vertex(vertex) {
+                let entropy = law.sensible_entropy_change_j_k(old_temperature, temperature)
+                    .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
+                change = finite(change + entropy / 3.0)?;
+            }
+        }
+        Ok(change)
+    }
+
     pub(super) fn storage_change_j(
         &self,
         vertex: usize,
