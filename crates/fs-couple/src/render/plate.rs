@@ -1,7 +1,8 @@
 //! Force-driven plate images in the existing sample-accurate renderer.
 //!
 //! `thin_plate` owns geometry/material reduction, exact-ZOH mechanics and the
-//! baffled compact-monopole observation. This module only hosts those bodies.
+//! baffled compact-monopole observation. This module hosts those bodies and can
+//! pass their original modal velocities to the existing spatial Rayleigh owner.
 //! A force is the total force on the reduction's declared footprint; its signed
 //! participation and radiation area are distinct conjugate/output projections.
 //! Zero force releases the input, never the stored vibration. No reaction load,
@@ -15,7 +16,10 @@
 //! step rather than interpolated between samples. Compact radiation remains an
 //! approximation. An explicitly attached shared atmosphere filter adds its
 //! original absorption/dispersion and compensates the receiver delay once;
-//! no directivity or whole-fluid energy claim is added.
+//! no whole-fluid energy claim is added. The explicit surface constructor
+//! retains signed mode shapes, spatial interference and each quadrature point's
+//! own propagation time; its numerical reconstruction delay is reported apart
+//! from those physical travel times.
 
 use super::RenderError;
 use crate::acoustic_realize::AcousticRealizeError;
@@ -37,14 +41,14 @@ pub struct PlateVoiceConfig {
     pub max_modes: usize,
     /// Fraction of Nyquist allowed for every retained natural frequency.
     pub nyquist_guard_fraction: f64,
-    /// Exterior gas: its density scales the compact pressure law and its
-    /// sound speed sets the propagation delay to the listener.
+    /// Exterior gas: its density scales pressure and its sound speed sets each
+    /// physical propagation delay to the listener.
     pub gas: GasState,
-    /// Fixed observation distance [m].
+    /// Compact observation distance [m]; a reference range for a spatial observer.
     pub listener_m: f64,
     /// Maximum absolute total footprint force [N].
     pub maximum_abs_force_n: f64,
-    /// Maximum absolute sum of compact modal pressures [Pa].
+    /// Maximum absolute observer pressure [Pa].
     pub maximum_abs_pressure_pa: f64,
 }
 
@@ -90,6 +94,8 @@ pub struct CompactPlateVoice {
     history: Vec<HeldStep>,
     /// Original atmosphere law, with its own retained pressure history.
     observer: Option<ObserverFilter>,
+    /// Signed finite-wavelength surface observation, when explicitly requested.
+    spatial: Option<spatial::SpatialPlateObserver>,
 }
 
 impl CompactPlateVoice {
@@ -129,24 +135,7 @@ impl CompactPlateVoice {
         initial_force_n: f64,
         config: PlateVoiceConfig,
     ) -> Result<Self, RenderError> {
-        config.validate()?;
-        if bodies.is_empty() || bodies.len() > config.max_modes {
-            return Err(invalid("plate body count must be nonzero and within max_modes"));
-        }
-        let maximum_omega = core::f64::consts::PI * f64::from(config.sample_rate_hz)
-            * config.nyquist_guard_fraction;
-        for body in &bodies {
-            body.validate_radiation_load(&config.gas, config.sample_rate_hz)
-                .map_err(RenderError::Voice)?;
-            if !body.mass_kg.is_finite() || body.mass_kg <= 0.0
-                || !body.omega.is_finite() || body.omega <= 0.0 || body.omega > maximum_omega
-                || !body.zeta.is_finite() || body.zeta < 0.0
-                || !body.area_m2.is_finite() || !body.drive_participation.is_finite()
-                || !body.volume_velocity().is_finite()
-            {
-                return Err(invalid("plate bodies need finite physical coefficients and frequencies below the Nyquist guard"));
-            }
-        }
+        admit_radiators(&bodies, config)?;
         // Output n is the pressure at t = (n+1) dt. Its source time is
         // (n+1) dt - r/c = t_{n-m} + (1-f) dt for a delay of m + f samples.
         let delay = config.propagation_delay_samples();
@@ -158,7 +147,7 @@ impl CompactPlateVoice {
         let retarded_elapsed_s = (1.0 - (delay - delay.floor())) * f64::from(config.sample_rate_hz).recip();
         let history = vec![HeldStep::REST; (delay_whole as usize + 1) * bodies.len()];
         let voice = Self { bodies, config, force_n: initial_force_n, sample_index: 0, poisoned: false,
-            delay_whole, retarded_elapsed_s, history, observer: None };
+            delay_whole, retarded_elapsed_s, history, observer: None, spatial: None };
         voice.validate_force(initial_force_n)?;
         Ok(voice)
     }
@@ -174,11 +163,16 @@ impl CompactPlateVoice {
     /// extra mechanical loss or a finite ambient heat account.
     /// Attachment must precede the first sample and cannot reset an existing
     /// atmosphere history. Original body, force and radiation-load state stay.
+    /// A spatial image refuses this single-range law: its separate paths require
+    /// separate propagation filters before their signed pressures are summed.
     pub fn with_observer_law(
         self,
         law: GasAbsorptionModel,
         relaxation: Option<&fs_material::relaxation::RelaxationState>,
     ) -> Result<Self, RenderError> {
+        if self.spatial.is_some() {
+            return Err(invalid("a spatial plate requires atmosphere on each original path; a single-range filter cannot attach"));
+        }
         let filter = ObserverFilter::for_law(law, &self.config.gas, relaxation,
             self.config.listener_m, self.config.sample_rate_hz).map_err(RenderError::Voice)?;
         self.with_observer_filter(filter)
@@ -187,6 +181,9 @@ impl CompactPlateVoice {
     // Only this module and its source-file child supply filters, always built
     // for the original gas. A public foreign filter could conceal another gas.
     fn with_observer_filter(mut self, filter: ObserverFilter) -> Result<Self, RenderError> {
+        if self.spatial.is_some() {
+            return Err(invalid("a spatial plate requires atmosphere on each original path; a single-range filter cannot attach"));
+        }
         if self.poisoned || self.sample_index != 0 || self.observer.is_some() {
             return Err(invalid("plate atmosphere must attach once before its first sample"));
         }
@@ -236,11 +233,28 @@ impl CompactPlateVoice {
         bodies: Vec<CompactBody>, initial_force_n: f64, config: PlateVoiceConfig,
     ) -> Result<Self, RenderError> {
         let mut voice = Self::from_radiators(bodies, initial_force_n, config)?;
-        for body in &mut voice.bodies {
-            body.attach_piston_load(&config.gas, config.sample_rate_hz)
+        voice.attach_piston_loads()?;
+        Ok(voice)
+    }
+
+    /// Attach the existing per-mode baffled-piston reaction before rendering,
+    /// using this voice's exact gas, sample clock and physical face areas. This
+    /// optional mechanical approximation also applies to a spatial observer;
+    /// that observer does not supply a mutual radiation load by itself.
+    ///
+    /// An identical retained load preserves its state. A conflicting load or
+    /// fit refusal leaves every original body unchanged.
+    pub fn attach_piston_loads(&mut self) -> Result<(), RenderError> {
+        if self.poisoned || self.sample_index != 0 {
+            return Err(invalid("plate piston loads must attach before its first sample"));
+        }
+        let mut loaded = self.bodies.clone();
+        for body in &mut loaded {
+            body.attach_piston_load(&self.config.gas, self.config.sample_rate_hz)
                 .map_err(RenderError::Voice)?;
         }
-        Ok(voice)
+        self.bodies = loaded;
+        Ok(())
     }
 
     /// Read the retained geometric reduction without mutating runtime state.
@@ -269,8 +283,11 @@ impl CompactPlateVoice {
     // RenderContext validates the whole batch before calling this mutation.
     pub(super) fn set_force_admitted(&mut self, force_n: f64) { self.force_n = force_n; }
 
-    /// Advance existing body mechanics, sum the retarded compact pressures in
-    /// body order, and retain every state. The unfiltered observation hears
+    /// Advance existing body mechanics and retain every state. The compact
+    /// image sums retarded modal pressures in body order; a spatial image feeds
+    /// the original modal velocities to its signed surface receiver, preserving
+    /// that owner's physical path delays and reported reconstruction latency.
+    /// The unfiltered compact observation hears
     /// resting past until r/c. An attached atmosphere uses its compensated
     /// receiver delay and original impulse response, with total DC delay r/c.
     /// Refusals leave a partial callback and poison this voice. Clock/empty-input
@@ -282,6 +299,7 @@ impl CompactPlateVoice {
         if out.is_empty() { return Err(RenderError::EmptyBlock); }
         let count = u64::try_from(out.len()).map_err(|_| invalid("plate sample count overflow"))?;
         self.sample_index.checked_add(count).ok_or_else(|| invalid("plate sample clock overflow"))?;
+        if self.spatial.is_some() { return self.step_spatial_block(out); }
         let dt = self.sample_period_s();
         let width = self.bodies.len();
         let rows = self.delay_whole + 1;
@@ -336,7 +354,34 @@ impl CompactPlateVoice {
 
 fn invalid(what: &'static str) -> RenderError { RenderError::Control { what } }
 
+// Both observations consume the same admitted mechanical bodies. Keeping this
+// cold admission separate lets the spatial path avoid allocating compact r/c
+// history that its own distributed receiver must never use.
+fn admit_radiators(bodies: &[CompactBody], config: PlateVoiceConfig) -> Result<(), RenderError> {
+    config.validate()?;
+    if bodies.is_empty() || bodies.len() > config.max_modes {
+        return Err(invalid("plate body count must be nonzero and within max_modes"));
+    }
+    let maximum_omega = core::f64::consts::PI * f64::from(config.sample_rate_hz)
+        * config.nyquist_guard_fraction;
+    for body in bodies {
+        body.validate_radiation_load(&config.gas, config.sample_rate_hz)
+            .map_err(RenderError::Voice)?;
+        if !body.mass_kg.is_finite() || body.mass_kg <= 0.0
+            || !body.omega.is_finite() || body.omega <= 0.0 || body.omega > maximum_omega
+            || !body.zeta.is_finite() || body.zeta < 0.0
+            || !body.area_m2.is_finite() || !body.drive_participation.is_finite()
+            || !body.modal_velocity_m_s().is_finite() || !body.volume_velocity().is_finite()
+        {
+            return Err(invalid("plate bodies need finite physical coefficients and frequencies below the Nyquist guard"));
+        }
+    }
+    Ok(())
+}
+
 /// Bounded geometry/material/force-file input for the existing plate reduction.
 pub mod file;
 /// Nonlinear shell/film impact with physical striker and hysteretic felt storage.
 pub mod impact;
+/// Finite-wavelength baffled-surface observation of the original modal motion.
+pub mod spatial;

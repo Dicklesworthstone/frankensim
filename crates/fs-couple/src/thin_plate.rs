@@ -466,6 +466,15 @@ impl CompactBody {
         self.area_m2 * self.v
     }
 
+    /// Velocity in this body's original modal coordinate [m/s]. A retained
+    /// surface mode maps this value to physical normal velocity point by point.
+    /// It remains defined when the signed monopole area is zero; never recover
+    /// it by dividing volume velocity by that potentially cancelling area.
+    #[must_use]
+    pub const fn modal_velocity_m_s(&self) -> f64 {
+        self.v
+    }
+
     /// Drive and radiate in one accepted step. The observation is admitted
     /// before either mechanical or radiation-filter history advances.
     ///
@@ -535,6 +544,10 @@ mod bank;
 mod piston;
 mod prepared;
 mod radiation;
+mod surface;
+pub use surface::{
+    MAX_PLATE_SURFACE_SAMPLES, PlateSurfaceRadiators, certified_chart_surface_radiators,
+};
 pub use bank::{PlateBank, PlateBankImage, PlateBankObservation, PlateBankStep};
 pub use piston::{BaffledPistonRadiation, PistonRadiationFit};
 pub use cavity::{VkCavityInitial, VkCavityLoad, VkCavityObservation};
@@ -1192,17 +1205,7 @@ pub fn certified_chart_radiators_with_mass(
     options: &PlateChartRadiation,
     mass: PlateMassModel,
 ) -> Result<Vec<CompactBody>, AcousticRealizeError> {
-    let model = match mass {
-        PlateMassModel::Lumped => chart.assemble(&[], &options.assembly),
-        PlateMassModel::ConsistentDkt => chart.assemble_with_kinetic_mass(
-            &[],
-            &options.assembly,
-            fs_plate::TransverseMass::Linear,
-            fs_plate::RotaryMass::Dkt,
-            fs_plate::StiffenerMass::Lumped,
-        ),
-    }
-    .map_err(map_plate)?;
+    let model = assemble_chart_model(chart, options, mass)?;
     let projection = PlateProjection::with_force_weights(&chart.mesh, &options.unit_force_weights)?;
     harvest_radiators(
         &model,
@@ -1214,6 +1217,24 @@ pub fn certified_chart_radiators_with_mass(
     )
 }
 
+fn assemble_chart_model(
+    chart: &PlateChart,
+    options: &PlateChartRadiation,
+    mass: PlateMassModel,
+) -> Result<PlateModel, AcousticRealizeError> {
+    match mass {
+        PlateMassModel::Lumped => chart.assemble(&[], &options.assembly),
+        PlateMassModel::ConsistentDkt => chart.assemble_with_kinetic_mass(
+            &[],
+            &options.assembly,
+            fs_plate::TransverseMass::Linear,
+            fs_plate::RotaryMass::Dkt,
+            fs_plate::StiffenerMass::Lumped,
+        ),
+    }
+    .map_err(map_plate)
+}
+
 fn harvest_radiators(
     model: &PlateModel,
     projection: &PlateProjection,
@@ -1221,6 +1242,22 @@ fn harvest_radiators(
     n_modes: usize,
     damping_ratio: f64,
     bending_loss: Option<&dyn ModalBendingLoss>,
+) -> Result<Vec<CompactBody>, AcousticRealizeError> {
+    harvest_radiators_with_modes(model, projection, window, n_modes, damping_ratio,
+        bending_loss, |_| Ok(()))
+}
+
+// Visit each retained original eigenvector during the SAME harvest. The compact
+// path adds no storage, while a spatial observer preserves signs, normalization,
+// ordering and degenerate eigenspaces without solving a second eigenproblem.
+fn harvest_radiators_with_modes(
+    model: &PlateModel,
+    projection: &PlateProjection,
+    window: (f64, f64),
+    n_modes: usize,
+    damping_ratio: f64,
+    bending_loss: Option<&dyn ModalBendingLoss>,
+    mut visit_mode: impl FnMut(&[f64]) -> Result<(), AcousticRealizeError>,
 ) -> Result<Vec<CompactBody>, AcousticRealizeError> {
     if n_modes == 0
         || !damping_ratio.is_finite()
@@ -1253,6 +1290,7 @@ fn harvest_radiators(
             Some(loss) => loss.modal_zeta(model, &pair.phi, omega)?,
             None => 0.0,
         });
+        visit_mode(&pair.phi)?;
     }
     if out.len() >= 2 {
         let w0 = out[0].omega;
