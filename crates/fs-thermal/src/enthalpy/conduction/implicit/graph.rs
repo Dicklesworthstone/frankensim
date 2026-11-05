@@ -190,7 +190,7 @@ impl<'a> ImplicitConductionGraph<'a> {
     }
 
     /// Second-order L-stable conduction on the original branched/cyclic graph.
-    /// The chain entry point documents the fixed-cell, constant-source/bath
+    /// The chain entry point documents the fixed-cell, source-scheduled, constant-bath
     /// scope and the original domain/entropy/residual gates. Both stages and
     /// rejected intervals share this graph's bounded sparse linear owner.
     pub fn advance_sdirk2_to<'m>(
@@ -248,7 +248,7 @@ impl<'a> ImplicitConductionGraph<'a> {
 
     /// Native SDIRK2 with the shared h/T/phase error controller and sparse
     /// linear work budget. The entire window must satisfy the chain method's
-    /// constant-source, fixed-cell, constant-bath scope before any event processing.
+    /// source-scheduled, fixed-cell, constant-bath scope before any event processing.
     pub fn advance_sdirk2_adaptive_to<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,

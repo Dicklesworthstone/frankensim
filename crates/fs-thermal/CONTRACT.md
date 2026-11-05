@@ -1238,13 +1238,23 @@ two positive stage weights; exact caloric entropy storage is measured from the
 original initial state and the temporal entropy defect remains explicit.
 
 This entry point admits fixed-mass chains/graphs, including their existing
-nonlinear bulk, contact and integrated interface laws, with constant authored
-cell source/sink powers and ambient/reservoir temperatures. Sources enter both
+nonlinear bulk, contact and integrated interface laws, with piecewise-constant
+authored cell source/sink powers and constant ambient/reservoir temperatures. Sources enter both
 native stages with the same positive weights as conduction; each joule is
 counted once in the external energy account. Their entropy remains explicitly
 unclassified at-cell heat, not an inferred reservoir entropy or dissipation law.
-Attached implicit advection and pending events at or before the requested target refuse explicitly;
-no observer or mass-advection hook is exposed. Complete-interval halving in
+Source-only `Event::Boundary` changes split each interval at the exact event
+time. Both stages integrate the left-limit power before processing the event
+through the original timeline/observer. Simultaneous changes retain authored
+order; target-time events change the returned source without delivering heat
+at the new power. Prepared material, geometry and boundary bindings remain
+unchanged. One whole-window preflight, with bounded cancellation polling,
+rejects changes to ambient, film or reservoir declarations, unknown cells and
+all topology/birth events before stage work. The same whole-call step and
+nonlinear work budgets cover every source interval; events never renew them.
+The nonadaptive constant-source path avoids event processing/cloning at steps
+where no event is due. No external observer or mass-advection hook is exposed;
+attached implicit advection still refuses. Complete-interval halving in
 `advance_sdirk2_to` handles nonlinear failure; it does not estimate temporal
 accuracy. Second-order time accuracy
 requires a smooth admitted solution and independent timestep refinement;
@@ -1261,6 +1271,12 @@ stated admission boundary. Constant heating/cooling regressions cover unequal
 capacities with independent two-stage temperatures and entropy, driven bath
 relaxation with a three-rung second-order ladder and adaptive accuracy, and
 latent-plateau storage with a large caloric reference datum.
+Scheduled-source regressions independently integrate heater/sink joules across
+non-grid-aligned and simultaneous events, target-time changes and continuation
+on all chain/graph and fixed/adaptive entry points. A piecewise exponential
+bath solution retains second-order temporal refinement. Late unsupported
+events, whole-call step budgets and cancellation during a long source-schedule
+preflight refuse without publishing a prefix.
 
 #### Adaptive second-order network diffusion
 
@@ -1282,9 +1298,11 @@ within the existing controller limits avoids platform cube-root/transcendental
 arithmetic and overflow from multiplying a large normalized error.
 
 The complete requested window is checked before the generic controller can
-process an event or compute a comparison. Attached implicit advection and
-pending events through the target remain outside SDIRK2's admitted
-scope even if an initial comparison would end sooner. The new adapter shares
+process an event or compute a comparison. The generic controller already clips
+both coarse and fine trajectories at source events and processes them only
+after accepting the preceding interval. Attached implicit advection and all
+other events through the target remain outside SDIRK2's admitted scope even if
+an initial comparison would end sooner. The new adapter shares
 the original material observables and change-based, caloric-datum-invariant
 error scales. It adds no phase proxy, source splitting or global accuracy bound;
 constitutive corners and spatial error still require independent refinement.

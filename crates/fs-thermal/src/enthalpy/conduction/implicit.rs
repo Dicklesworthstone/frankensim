@@ -18,7 +18,8 @@
 //! `ImplicitConductionGraph` admits branched, cyclic and disconnected networks
 //! through the same nonlinear/time owner with a bounded sparse Krylov solve.
 //! The opt-in `advance_sdirk2_to` path shares this residual and Newton owner,
-//! with second-order L-stable quadrature for fixed networks with constant sources.
+//! with second-order L-stable quadrature for fixed networks and piecewise
+//! constant source schedules.
 
 use super::*;
 use crate::enthalpy::backward_euler::{
@@ -32,7 +33,7 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 #[path = "implicit/adaptive.rs"]
 pub mod adaptive;
 
-/// Second-order native stage quadrature for fixed networks with constant sources.
+/// Second-order native stages for fixed networks and scheduled source powers.
 #[path = "implicit/sdirk.rs"]
 mod sdirk;
 

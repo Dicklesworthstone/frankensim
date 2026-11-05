@@ -1,5 +1,8 @@
 use super::*;
 
+#[path = "source_schedule_tests.rs"]
+mod source_schedule;
+
 struct Law {
     cp: f64,
     k: f64,

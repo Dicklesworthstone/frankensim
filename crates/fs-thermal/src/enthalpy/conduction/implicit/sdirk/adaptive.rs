@@ -65,9 +65,11 @@ impl ImplicitConductionChain<'_> {
     /// Advance native SDIRK2 with the existing h/T/phase local-error controller.
     ///
     /// The entire requested window must satisfy [`Self::advance_sdirk2_to`]'s
-    /// fixed-mass, constant-source/bath scope before the generic controller
-    /// can process any events. Attached implicit advection and pending events
-    /// through the target refuse even if the first comparison would end sooner.
+    /// fixed-mass, source-scheduled, constant-bath scope before the generic
+    /// controller can process any events. Both comparison trajectories end at
+    /// each source event before its new power applies. Attached implicit
+    /// advection and other pending events through the target refuse even if
+    /// the first comparison would end sooner.
     ///
     /// Each comparison computes one full and two half SDIRK2 intervals; all six
     /// stages, rejected comparisons and entropy evaluations consume the same
@@ -93,7 +95,7 @@ impl ImplicitConductionChain<'_> {
         AdaptiveImplicitConductionError,
     > {
         checkpoint()?;
-        self.admit_sdirk2_window(thermal, target_s)?;
+        self.admit_sdirk2_window(thermal, target_s, &mut checkpoint)?;
         AdaptiveConductionStepper::advance_adaptive_to(
             &Sdirk2Stepper { solver: self },
             thermal,

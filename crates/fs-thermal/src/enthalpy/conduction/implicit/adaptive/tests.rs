@@ -610,7 +610,7 @@ fn sdirk2_adaptive_preflights_entire_window_before_events_or_stage_work() {
     let (thermal, observer) = setup(&law, &[400.0], Some(300.0), vec![TimedEvent {
         time_s: 0.5,
         event: Event::Boundary(CellId(0), Boundary {
-            ambient_k: 300.0, htc_w_m2_k: 0.0, source_w: 1.0,
+            ambient_k: 300.0, htc_w_m2_k: 1.0, source_w: 1.0,
             reservoir: Some(Reservoir {
                 area_m2: 1.0, conductance_w_k: 0.0, temperature_k: 300.0,
             }),
