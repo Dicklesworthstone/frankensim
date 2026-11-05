@@ -111,6 +111,63 @@ fn near(a: f64, b: f64) {
 }
 
 #[test]
+fn explicit_isotropic_vector_extension_retains_source_and_magnetic_memory() {
+    use fs_material::field_storage::hysteresis::vector::VectorHysteresisControls;
+    let scalar = resolve(card(|_| {}));
+    let vector = ResolvedVectorHysteresis::from_isotropic_source(scalar.clone()).unwrap();
+    assert_eq!(vector.material(), scalar.material());
+    assert_eq!(vector.sources(), scalar.sources());
+    let controls = VectorHysteresisControls {
+        relative_tolerance: 1e-12,
+        absolute_field_tolerance_a_m: 1e-12,
+        absolute_flux_tolerance_t: 1e-12,
+        work_tolerance_j_m3: 2e-11,
+        maximum_branch_iterations: 100,
+        maximum_inverse_iterations: 60,
+        maximum_backtracks: 40,
+    };
+    let mut scalar_state = scalar.law().initial_state();
+    let mut vector_state = vector.law().initial_state();
+    for field in [4.0, 0.0, -12.0, 3.0, 0.0] {
+        let a = scalar.law().candidate_field(&scalar_state, field).unwrap();
+        let b = vector
+            .law()
+            .candidate_field(&vector_state, [field, 0.0, 0.0], controls, &mut || false)
+            .unwrap();
+        near(a.state.flux_density_t(), b.state.flux_density_t()[0]);
+        near(a.irreversible_heat_j_m3, b.irreversible_heat_j_m3);
+        scalar_state = a.state;
+        vector_state = b.state;
+    }
+    let warm = vector.at_query_point(&point(500.0)).unwrap();
+    vector.admit_temperature_interval("T", [250.0, 600.0]).unwrap();
+    let next = |source: &ResolvedVectorHysteresis| {
+        source
+            .law()
+            .candidate_field(&vector_state, [3.0, 8.0, 1.0], controls, &mut || false)
+            .unwrap()
+    };
+    assert_eq!(next(&vector), next(&warm));
+    assert_eq!(warm.material().card_identity(), vector.material().card_identity());
+    assert_eq!(warm.material().query(), point(500.0));
+    assert!(vector.at_query_point(&point(600.1)).is_err());
+    assert!(vector.admit_temperature_interval("T", [249.0, 600.0]).is_err());
+    let altered = ResolvedVectorHysteresis::from_isotropic_source(resolve(card(|claim| {
+        if claim.key.name() == "branch_0_pinning" {
+            claim.value = PropertyValue::Scalar {
+                value: 3.0,
+                dims: claim.key.dims(),
+            };
+        }
+    })))
+    .unwrap();
+    assert!(altered
+        .law()
+        .candidate_field(&vector_state, [3.0, 8.0, 1.0], controls, &mut || false)
+        .is_err());
+}
+
+#[test]
 fn source_branches_drive_native_memory_work_and_geometry_without_name_dispatch() {
     let fit = resolve(card(|_| {}));
     let law = fit.law();

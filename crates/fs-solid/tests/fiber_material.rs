@@ -236,6 +236,44 @@ fn steel_source_requires_every_cyclic_parameter() {
 }
 
 #[test]
+fn steel_sections_preserve_reflected_axial_and_bending_histories() {
+    use fs_solid::fiber::{Fiber, Section};
+
+    let material = steel();
+    let fibers: Vec<_> = [-0.2, -0.05, 0.08, 0.22]
+        .into_iter()
+        .map(|y| Fiber {
+            y,
+            area: 0.001,
+            law: material.law().clone(),
+        })
+        .collect();
+    let mut forward = Section::new(fibers.clone());
+    let mut reflected = Section::new(fibers);
+    for (eps0, kappa) in [
+        (0.0, 0.0),
+        (0.002, 0.012),
+        (0.004, -0.007),
+        (-0.003, 0.015),
+        (-0.002, 0.011),
+        (-0.004, -0.01),
+        (0.001, 0.005),
+    ] {
+        let a = forward.try_respond(eps0, kappa).unwrap();
+        let b = reflected.try_respond(-eps0, -kappa).unwrap();
+        close(a.n, -b.n);
+        close(a.m, -b.m);
+        for i in 0..2 {
+            for j in 0..2 {
+                close(a.tangent[i][j], b.tangent[i][j]);
+            }
+        }
+        forward.commit(eps0, kappa);
+        reflected.commit(-eps0, -kappa);
+    }
+}
+
+#[test]
 fn invalid_geometry_and_unowned_state_dependence_refuse() {
     let concrete = resolved_concrete(&concrete_card(2400.0, 30e9, false));
     for g in [

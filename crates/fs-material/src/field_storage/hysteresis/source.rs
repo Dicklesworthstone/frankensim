@@ -12,6 +12,7 @@
 //! needs its own free-energy/entropy and history-transfer law and refuses here.
 
 use super::{FieldStorageError, HysteresisBranch, ScalarHysteresis, UniformHystereticCore};
+use super::vector::{VectorHysteresis, VectorHysteresisError};
 use crate::field_storage::{
     MAGNETIC_PERMEABILITY_DIMS,
     permanent::{FIELD_STRENGTH_DIMS, FLUX_DENSITY_DIMS},
@@ -56,6 +57,62 @@ pub struct ResolvedScalarHysteresis {
     material: ResolvedMaterialStatePoint,
     roles: HysteresisSources,
     law: ScalarHysteresis,
+}
+
+/// Original fitted source with an explicitly selected isotropic vector return
+/// map. A uniaxial coupon does not establish rotational material validity: the
+/// caller owns that model choice. Source evidence is retained unchanged and is
+/// never promoted by the dimensional extension. Each branch has one vector
+/// polarization and a Euclidean pinning norm, not three scalar memories.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedVectorHysteresis {
+    source: ResolvedScalarHysteresis,
+    law: VectorHysteresis,
+}
+
+impl ResolvedVectorHysteresis {
+    /// Select isotropy for an already resolved complete fitted-law source.
+    /// No coefficients are reselected, renamed, normalized or re-fitted.
+    pub fn from_isotropic_source(
+        source: ResolvedScalarHysteresis,
+    ) -> Result<Self, VectorHysteresisError> {
+        let law = VectorHysteresis::from_isotropic_scalar(source.law())?;
+        Ok(Self { source, law })
+    }
+
+    /// Original source identity, quantities, query and evidence receipts.
+    pub const fn material(&self) -> &ResolvedMaterialStatePoint {
+        self.source.material()
+    }
+
+    /// Original fitted coefficient roles and branch order.
+    pub const fn sources(&self) -> &HysteresisSources {
+        self.source.sources()
+    }
+
+    /// Shared variational constitutive owner with full vector history.
+    pub const fn law(&self) -> &VectorHysteresis {
+        &self.law
+    }
+
+    /// Recheck the original constant fit at a complete physical query without
+    /// resetting accepted vector memory. Variable fitted coefficients retain
+    /// the scalar source owner's refusal and need a distinct thermal law.
+    pub fn at_query_point(&self, point: &QueryPoint) -> Result<Self, FieldStorageError> {
+        Ok(Self {
+            source: self.source.at_query_point(point)?,
+            law: self.law.clone(),
+        })
+    }
+
+    /// Reuse the original fit's explicit constant-temperature admission.
+    pub fn admit_temperature_interval(
+        &self,
+        axis: &str,
+        interval_k: [f64; 2],
+    ) -> Result<(), FieldStorageError> {
+        self.source.admit_temperature_interval(axis, interval_k)
+    }
 }
 
 fn invalid(reason: &'static str) -> FieldStorageError {
@@ -172,6 +229,13 @@ impl ResolvedScalarHysteresis {
     /// The existing history owner, also usable for actual preparation cycles.
     pub const fn law(&self) -> &ScalarHysteresis {
         &self.law
+    }
+
+    /// Explicitly choose the isotropic vector extension of this original fit.
+    /// Rotational validity is a caller model assumption; a scalar coupon does
+    /// not supply it. Every coefficient and branch retains its original meaning.
+    pub fn isotropic_vector_law(&self) -> Result<VectorHysteresis, VectorHysteresisError> {
+        VectorHysteresis::from_isotropic_scalar(&self.law)
     }
 
     /// Recheck the SAME constant fit at a new complete physical context. No

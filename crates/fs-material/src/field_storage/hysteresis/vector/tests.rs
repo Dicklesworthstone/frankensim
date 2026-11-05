@@ -35,6 +35,56 @@ fn step(law: &VectorHysteresis, state: &VectorHysteresisState, h: Vector) -> Vec
 }
 
 #[test]
+fn incremental_potential_gradient_and_reluctivity_follow_frozen_rotating_history() {
+    let material = law();
+    let old = step(&material, &material.initial_state(), [5.0, 0.0, 0.0]).state;
+    let saved = old.clone();
+    // Pinned, sliding, and saturated return maps, all separated from kinks.
+    for field in [[3.0, 0.0, 0.0], [3.0, 3.0, 0.5], [3.0, 8.0, 0.5]] {
+        let endpoint = step(&material, &old, field);
+        let b = endpoint.state.flux_density_t();
+        let inverse = endpoint.incremental_reluctivity_m_h().unwrap();
+        let potential = endpoint.incremental_potential_j_m3().unwrap();
+        near(
+            endpoint.incremental_potential_change_j_m3().unwrap()
+                + old.stored_energy_j_m3(),
+            potential,
+            2e-14,
+        );
+        for column in 0..3 {
+            for row in 0..3 {
+                let product: f64 = (0..3)
+                    .map(|k| endpoint.incremental_permeability_h_m[row][k] * inverse[k][column])
+                    .sum();
+                near(product, if row == column { 1.0 } else { 0.0 }, 2e-13);
+                assert_eq!(inverse[row][column], inverse[column][row]);
+            }
+            let delta = 1e-5;
+            let mut plus = b;
+            let mut minus = b;
+            plus[column] += delta;
+            minus[column] -= delta;
+            let high = material
+                .candidate_flux_density(&old, plus, controls(), &mut || false)
+                .unwrap();
+            let low = material
+                .candidate_flux_density(&old, minus, controls(), &mut || false)
+                .unwrap();
+            let gradient = (high.incremental_potential_j_m3().unwrap()
+                - low.incremental_potential_j_m3().unwrap())
+                / (2.0 * delta);
+            near(gradient, field[column], 2e-7);
+            for row in 0..3 {
+                let derivative = (high.state.field_a_m()[row] - low.state.field_a_m()[row])
+                    / (2.0 * delta);
+                near(derivative, inverse[row][column], 2e-6);
+            }
+        }
+    }
+    assert_eq!(old, saved); // Neither line-search nor derivative trials commit.
+}
+
+#[test]
 fn collinear_history_reduces_to_original_scalar_states_and_physical_heat() {
     let branches = vec![
         branch(0.2, 2.0, 1.0),

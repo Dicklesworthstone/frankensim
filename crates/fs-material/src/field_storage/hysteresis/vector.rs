@@ -114,6 +114,52 @@ pub struct VectorHysteresisStep {
     pub inverse_residual_t: f64,
 }
 
+impl VectorHysteresisStep {
+    /// Frozen-history incremental potential `W(B,z_new) + Q(z_new-z_old)`.
+    /// Its B-gradient is the endpoint H and its Hessian is the incremental
+    /// reluctivity. A field Newton solve must minimize this potential rather
+    /// than reversible storage alone. This is an incremental variational
+    /// functional; it is not path-independent physical stored energy.
+    pub fn incremental_potential_j_m3(&self) -> Result<f64> {
+        finite(self.state.stored_energy_j_m3 + self.irreversible_heat_j_m3)
+    }
+
+    /// Same frozen-history potential relative to the accepted stored energy.
+    /// This stable form avoids subtracting two large state energies when
+    /// globalizing a small increment about a magnetized operating point.
+    pub fn incremental_potential_change_j_m3(&self) -> Result<f64> {
+        finite(self.energy_change_j_m3 + self.irreversible_heat_j_m3)
+    }
+
+    /// Consistent frozen-history `dH/dB` [m/H] for a B-driven field solver.
+    /// The positive background supplies invertibility even while branches are
+    /// pinned or saturated. Kinks retain the original selected active set.
+    pub fn incremental_reluctivity_m_h(&self) -> Result<Matrix> {
+        let flat: [f64; 9] =
+            std::array::from_fn(|k| self.incremental_permeability_h_m[k / 3][k % 3]);
+        let factor = cholesky(&flat, 3)
+            .map_err(|_| invalid("vector incremental permeability is not representably SPD"))?;
+        let mut inverse = [[0.0; 3]; 3];
+        for column in 0..3 {
+            let mut unit = [0.0; 3];
+            unit[column] = 1.0;
+            factor.solve(&mut unit);
+            for row in 0..3 {
+                inverse[row][column] = finite(unit[row])?;
+            }
+        }
+        // The exact Hessian is symmetric; erase only triangular-solve roundoff.
+        for row in 0..3 {
+            for column in 0..row {
+                let value = f64::midpoint(inverse[row][column], inverse[column][row]);
+                inverse[row][column] = value;
+                inverse[column][row] = value;
+            }
+        }
+        Ok(inverse)
+    }
+}
+
 fn invalid(s: &'static str) -> VectorHysteresisError {
     VectorHysteresisError::Invalid(s)
 }
@@ -368,6 +414,12 @@ struct Response {
 }
 
 impl VectorHysteresis {
+    /// Original positive reversible background [H/m], excluding all branch
+    /// slopes. This is a coercivity lower bound, not the full permeability.
+    pub fn background_permeability_h_m(&self) -> f64 {
+        self.parameters.background_permeability_h_m
+    }
+
     /// Reuse the scalar owner's parameter meanings and at-most-1024-branch
     /// admission. All three spatial components share each branch and norm.
     pub fn new(
@@ -376,6 +428,12 @@ impl VectorHysteresis {
         branches: Vec<HysteresisBranch>,
     ) -> Result<Self> {
         let law = ScalarHysteresis::new(background_permeability_h_m, field_limit_a_m, branches)?;
+        Self::from_isotropic_scalar(&law)
+    }
+
+    // The source adapter explicitly selects isotropy. Sharing the original
+    // immutable parameters preserves exact coefficient and state identity.
+    pub(super) fn from_isotropic_scalar(law: &ScalarHysteresis) -> Result<Self> {
         if law
             .parameters
             .branches
@@ -387,7 +445,7 @@ impl VectorHysteresis {
             ));
         }
         Ok(Self {
-            parameters: law.parameters,
+            parameters: Arc::clone(&law.parameters),
         })
     }
     pub fn initial_state(&self) -> VectorHysteresisState {

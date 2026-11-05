@@ -3535,6 +3535,14 @@ homogenization, the P2 milestone.
   asymptote intersection) and `ManderConcrete` (confined envelope
   `f = f′cc·x·r/(r−1+xʳ)`, elastic unload/reload lines with residual
   strain, zero tension).
+  Menegotto–Pinto's virgin state has direction zero. Its first nonzero
+  excursion selects the signed yield asymptote while retaining `R0` and zero
+  reversal history; starting in compression is not a prior plastic cycle.
+  Zero-strain commits preserve that virgin state. Focused G0/G3 conformance
+  tests check the analytic yield ordinate, zero/subnormal first increments,
+  mirrored cyclic stresses and consistent tangents. The shared steel-section
+  regression checks reflected axial and bending histories. This adds neither
+  a stored-energy potential, fatigue law nor material calibration.
 - `calibrate_bilinear`: segmented least squares recovering (E, σ_y, H)
   from monotonic data with standard-error envelopes and RMS residual.
 - `evidence_stress`: wraps any law's stress in `Evidence` with the card
@@ -6702,6 +6710,24 @@ remain passing. This is an explicit fitted, fixed-temperature/stress
 quadratic-potential specialization of Prigozhin et al. (2016), not experimental
 material validation, texture anisotropy, dynamic/eddy/excess loss,
 demagnetization damage or automatic field/circuit/thermal integration.
+
+The B-driven spatial interface exposes the frozen-history incremental
+potential `W_new + Q` and its consistent reluctivity `dH/dB`, computed from
+the same accepted return map. The potential's derivative is the endpoint H;
+reversible storage alone is not the Newton merit functional. A stable relative
+form uses `delta W + Q` about the original accepted energy. Focused G0/G3
+regressions differentiate the potential and H with fixed previous memory in
+pinned, sliding and saturated rotating states and check inverse-tangent
+reciprocity. These potential values are variational objectives, never new
+physical storage or additional heat accounts.
+
+`ResolvedScalarHysteresis::isotropic_vector_law` and
+`source::ResolvedVectorHysteresis::from_isotropic_source` explicitly select
+isotropy using the original fitted card, coefficient roles and branch order.
+The wrapper retains the original source evidence and complete query. Its
+constant-fit context refresh preserves magnetic memory and refuses unsupported
+conditions or changed coefficients through the existing source owner. Scalar
+coupon evidence is not promoted to experimental rotating-field validation.
 
 ### Compressible porous leakage and selective membrane permeation
 
