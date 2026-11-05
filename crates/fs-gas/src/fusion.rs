@@ -22,11 +22,15 @@
 //!
 //! The local error estimate is not a global error certificate. This owner does
 //! not solve confinement, spatial transport, fast-particle distributions,
-//! electron/ion collisional equilibration, radiation or magnetic fields. Its
+//! radiation transport or magnetic fields. Optional original-source Coulomb
+//! exchange and optically thin bremsstrahlung participate in the same thermal
+//! feedback and energy account. Its
 //! returned common state can enter existing thermal owners in a separately
 //! declared coupling schedule, subject to each owner's physical domain.
 
 use fs_qty::{Amount, Energy, Power, Temperature, Time};
+use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+use fs_thermochem::coulomb::{CoulombErrorV1, CoulombModelV1};
 use fs_thermochem::equilibrium::composition::{
     FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
 };
@@ -34,7 +38,7 @@ use fs_thermochem::fusion::plasma::{
     DtFusionPlasmaErrorV1, DtFusionPlasmaLimitsV1, DtFusionPlasmaV1,
 };
 use fs_thermochem::fusion::{FusionErrorV1, FusionReactionV1};
-use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+use fs_thermochem::plasma_radiation::{BremsstrahlungErrorV1, ElectronIonBremsstrahlungV1};
 
 mod solve;
 
@@ -53,6 +57,22 @@ pub struct DtFusionHeating {
     pub electron_power: Power,
     /// Constant external heavy-particle heating [W]; negative means cooling.
     pub heavy_power: Power,
+}
+
+/// Optional thermal operators sharing the burn's original species bank.
+///
+/// Coulomb energy is transferred reciprocally between the two thermal pools.
+/// Bremsstrahlung removes electron energy and records it as escaping photons:
+/// selecting it explicitly assumes an optically thin parcel. Its prescribed
+/// Gaunt factor and the Coulomb screening/cutoff remain part of these sources.
+/// Every evaluation refreshes the actual fuel/ash densities and temperatures.
+/// An absent operator contributes exactly zero; it is not inferred from names.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DtFusionTransport {
+    /// Original reciprocal Maxwellian electron/ion thermal-exchange law.
+    pub coulomb: Option<CoulombModelV1>,
+    /// Original electron-ion free-free emission law, with all photons escaping.
+    pub bremsstrahlung: Option<ElectronIonBremsstrahlungV1>,
 }
 
 /// Declared physical domain and bounded numerical work for one burn interval.
@@ -156,6 +176,10 @@ pub enum DtFusionError {
     Reaction(FusionErrorV1),
     /// Original plasma source or physical-domain refusal.
     Plasma(DtFusionPlasmaErrorV1),
+    /// Original Coulomb source or physical-domain refusal.
+    Coulomb(CoulombErrorV1),
+    /// Original radiation source or physical-domain refusal.
+    Radiation(BremsstrahlungErrorV1),
     /// Final common ionized-gas state could not be published.
     State(FrozenIonizedGasStateErrorV1),
     /// The selected source/temperature/positivity domain was exhausted.
@@ -190,6 +214,11 @@ pub struct DtFusionBalance {
     pub reacting_ion_energy_removed_j: f64,
     /// Escaped neutron kinetic energy, including its thermal part [J].
     pub neutron_energy_escaped_j: f64,
+    /// Signed collisional energy transferred from electrons to ions [J].
+    /// Positive heats ions; negative heats electrons. This is not external heat.
+    pub electron_to_heavy_coulomb_energy_j: f64,
+    /// Electron-ion bremsstrahlung energy carried away by photons [J].
+    pub photon_energy_escaped_j: f64,
     /// Constant externally supplied electron energy [J].
     pub external_electron_energy_j: f64,
     /// Constant externally supplied heavy-particle energy [J].
@@ -198,7 +227,7 @@ pub struct DtFusionBalance {
     pub electron_energy_residual_j: f64,
     /// Final source heavy energy minus its independently accumulated budget [J].
     pub heavy_energy_residual_j: f64,
-    /// Delta thermal U + escaping neutron energy - nuclear Q - external heat [J].
+    /// Delta thermal U + escaping neutron/photon energy - Q - external heat [J].
     pub total_energy_residual_j: f64,
     /// Relative baryon inventory drift, including escaped neutrons.
     pub relative_baryon_residual: f64,
@@ -219,6 +248,7 @@ pub struct DtFusionResult {
     state: FrozenIonizedGasStateV1,
     plasma: DtFusionPlasmaV1,
     heating: DtFusionHeating,
+    transport: DtFusionTransport,
     controls: DtFusionSolve,
     elapsed: Time,
     balance: DtFusionBalance,
@@ -226,19 +256,37 @@ pub struct DtFusionResult {
 
 impl DtFusionResult {
     /// Original species bank with the accepted changed populations and temperatures.
-    pub const fn state(&self) -> &FrozenIonizedGasStateV1 { &self.state }
+    pub const fn state(&self) -> &FrozenIonizedGasStateV1 {
+        &self.state
+    }
     /// Initial source-bound state; no source or population was modified in place.
-    pub const fn initial_state(&self) -> &FrozenIonizedGasStateV1 { &self.initial }
+    pub const fn initial_state(&self) -> &FrozenIonizedGasStateV1 {
+        &self.initial
+    }
     /// Original nuclear-to-plasma species and caloric binding.
-    pub const fn plasma(&self) -> &DtFusionPlasmaV1 { &self.plasma }
+    pub const fn plasma(&self) -> &DtFusionPlasmaV1 {
+        &self.plasma
+    }
     /// Actual elapsed physical time.
-    pub const fn elapsed_time(&self) -> Time { self.elapsed }
+    pub const fn elapsed_time(&self) -> Time {
+        self.elapsed
+    }
     /// Retained thermalization and external-power assumptions.
-    pub const fn heating(&self) -> DtFusionHeating { self.heating }
+    pub const fn heating(&self) -> DtFusionHeating {
+        self.heating
+    }
+    /// Retained original thermal-exchange and emission sources.
+    pub const fn transport(&self) -> &DtFusionTransport {
+        &self.transport
+    }
     /// Retained physical and numerical limits.
-    pub const fn controls(&self) -> DtFusionSolve { self.controls }
+    pub const fn controls(&self) -> DtFusionSolve {
+        self.controls
+    }
     /// Complete independently checked interval accounts.
-    pub const fn balance(&self) -> DtFusionBalance { self.balance }
+    pub const fn balance(&self) -> DtFusionBalance {
+        self.balance
+    }
     /// Escaped neutron amount, outside the material/chemical species bank.
     pub const fn neutron_amount(&self) -> Amount {
         Amount::new(self.balance.reaction_extent_mol)
@@ -247,9 +295,13 @@ impl DtFusionResult {
     pub const fn escaped_neutron_energy(&self) -> Energy {
         Energy::new(self.balance.neutron_energy_escaped_j)
     }
+    /// Radiated energy leaving this explicitly optically thin parcel.
+    pub const fn escaped_photon_energy(&self) -> Energy {
+        Energy::new(self.balance.photon_energy_escaped_j)
+    }
 }
 
-/// Advance finite D/T fuel and its thermal feedback in a rigid parcel.
+/// Advance finite D/T fuel and prescribed heating in a rigid parcel.
 ///
 /// Every emitted neutron leaves this accounting boundary; every alpha remains
 /// and thermalizes immediately. The selected channel is D+T only: rates for
@@ -257,37 +309,90 @@ impl DtFusionResult {
 /// External powers are held over this explicitly declared interval. Reusing
 /// the result in another physics owner requires that owner's source/domain
 /// admission; this function does not extend weakly ionized EM laws to fusion.
+/// Use [`advance_dt_fusion_with_transport`] to include collisional exchange
+/// and optically thin photon losses in the same evolving energy account.
 pub fn advance_dt_fusion(
     initial: &FrozenIonizedGasStateV1,
     plasma: &DtFusionPlasmaV1,
     heating: DtFusionHeating,
     duration: Time,
     controls: DtFusionSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<DtFusionResult, DtFusionError> {
+    advance_dt_fusion_with_transport(
+        initial,
+        plasma,
+        heating,
+        &DtFusionTransport::default(),
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+/// Advance finite burn with explicitly selected collisional exchange and losses.
+///
+/// The same adaptive solve resolves fuel, ash, two-temperature feedback and
+/// outgoing photon/neutron energy. Frozen reciprocal exchange is integrated
+/// exponentially and fixed-Gaunt free-free cooling analytically; symmetric
+/// composition and midpoint source refresh are second order for smooth admitted
+/// evolution. A cutoff crossover need not have a smooth local-error expansion.
+/// Domain/cancellation refusal publishes no partial state. The step-doubling
+/// estimate is not a global error or physical-accuracy certificate.
+pub fn advance_dt_fusion_with_transport(
+    initial: &FrozenIonizedGasStateV1,
+    plasma: &DtFusionPlasmaV1,
+    heating: DtFusionHeating,
+    transport: &DtFusionTransport,
+    duration: Time,
+    controls: DtFusionSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<DtFusionResult, DtFusionError> {
     controls.validate()?;
     poll(&mut cancelled)?;
-    if !duration.value().is_finite() || duration.value() < 0.0
+    if !duration.value().is_finite()
+        || duration.value() < 0.0
         || !heating.alpha_electron_fraction.is_finite()
         || !(0.0..=1.0).contains(&heating.alpha_electron_fraction)
         || !heating.electron_power.value().is_finite()
         || !heating.heavy_power.value().is_finite()
     {
-        return Err(DtFusionError::Invalid("finite duration, powers and alpha split in [0,1] required"));
+        return Err(DtFusionError::Invalid(
+            "finite duration, powers and alpha split in [0,1] required",
+        ));
     }
-    let problem = solve::Problem::new(initial, plasma, heating, controls, &mut cancelled)?;
+    let problem = solve::Problem::new(
+        initial,
+        plasma,
+        heating,
+        transport,
+        controls,
+        &mut cancelled,
+    )?;
     let (point, mut balance) = problem.integrate(duration.value(), &mut cancelled)?;
     let state = problem.publish(point, &mut balance, &mut cancelled)?;
     poll(&mut cancelled)?;
     Ok(DtFusionResult {
-        initial: initial.clone(), state, plasma: plasma.clone(), heating,
-        controls, elapsed: duration, balance,
+        initial: initial.clone(),
+        state,
+        plasma: plasma.clone(),
+        heating,
+        transport: transport.clone(),
+        controls,
+        elapsed: duration,
+        balance,
     })
 }
 
-fn positive(x: f64) -> bool { x.is_finite() && x > 0.0 }
+fn positive(x: f64) -> bool {
+    x.is_finite() && x > 0.0
+}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), DtFusionError> {
-    if cancelled() { Err(DtFusionError::Cancelled) } else { Ok(()) }
+    if cancelled() {
+        Err(DtFusionError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

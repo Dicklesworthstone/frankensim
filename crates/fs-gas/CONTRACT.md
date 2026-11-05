@@ -1,5 +1,39 @@
 # fs-gas contract
 
+## Coupled fusion, Coulomb equilibration and escaping photons
+
+`fusion::advance_dt_fusion_with_transport` adds explicitly selected
+`DtFusionTransport` sources to the same finite-fuel, two-temperature burn.
+Its original-bank Coulomb model refreshes actual fuel and ash populations;
+its electron-ion bremsstrahlung model refreshes the charge-square density sum.
+Selecting radiation explicitly assumes every emitted photon escapes this
+optically thin parcel. The result retains both source models and reports
+signed electron-to-heavy Coulomb transfer separately from outgoing photons.
+
+Frozen reciprocal exchange integrates the temperature difference exponentially,
+with reduced heat capacity `Ch*Ce/(Ch+Ce)`; it does not overshoot equilibrium
+for a fixed coefficient. Frozen constant-Gaunt cooling integrates
+`d(sqrt(Te))/dt = -A/(2Ce)` analytically. Symmetric source composition surrounds
+the exact finite-fuel/external-power step, and a predictor refreshes coefficients
+at the interval midpoint. Capacities come from each stage's actual composition.
+The method is second order for smooth admitted evolution, as checked by fixed
+step refinement; the cutoff crossover need not have a smooth local-error
+expansion. Step doubling remains an estimate, not a global error certificate.
+
+The publication account is
+`delta(Uh+Ue) + En + Ephotons - Q - Eexternal = 0`.
+Collisional exchange cancels internally, photon losses debit electrons once,
+and neutron thermal energy remains included. Fixed-size trials and compensated
+transfer sums retain allocation-free evolution and cancellation/refusal atomicity.
+A restart reuses the retained operators on the actual new populations.
+
+All sixteen focused native fusion tests pass, including six coupled checks:
+analytic no-fuel radiative cooling, reciprocal relaxation, two independently
+converged RK4 burn references, second-order refinement, volume scaling/restart,
+and source-domain/cancellation refusal. Ten existing thermal-energy tests and
+thirteen ionization tests also pass. The `dt_fusion` example runs both isolated
+and coupled cases with explicit Gaunt/cutoff/thermalization assumptions.
+
 ## Finite D-T burn and two-temperature energy feedback
 
 `fusion::advance_dt_fusion` evolves the existing
@@ -48,10 +82,10 @@ extend classical transport to arbitrary hot fusion electrons.
 Run the constructed source example with
 `cargo run -p fs-gas --example dt_fusion`.
 Its ideal monatomic source cards are explicit analytic inputs, not measured
-caloric calibration. Spatial confinement and transport, MHD, radiation,
-fast-particle slowing distributions, relativistic product corrections,
-quantum-corrected hot-electron Coulomb transport, competing burn networks,
-and neutron transport/deposition remain separate missing physics.
+caloric calibration. Spatial confinement and transport, MHD, opacity and
+radiation transport, fast-particle slowing distributions, relativistic product
+corrections, velocity-resolved quantum collision integrals, competing burn
+networks, and neutron transport/deposition remain separate missing physics.
 
 ## Distributed mechanical work on native 1-D fields
 
