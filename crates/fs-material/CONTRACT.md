@@ -204,6 +204,22 @@ The original `FatigueScope` retains material, process, surface/geometry,
 environment, load basis, temperature and caller-declared source reference.
 These declarations do not confer material-database or measured-data authority.
 
+`crack_growth::source::resolve_paris` resolves four original material-card
+claims: squared reference full Delta-K, growth in metres per full cycle,
+the Delta-K exponent, and squared exclusive maximum-K validity cutoff.
+Squared intensities use Pa² m (`Dims([-1, 2, -4, 0, 0, 0])`), with an explicit
+square-root conversion at the adapter; K is never mislabeled as pressure.
+All four claims retain one provenance, observation population and identical
+complete typed support domain, including semantic absolute temperature,
+load ratio and squared Delta-K. Original scalars and temperature-only
+interpolation are admitted; range/ratio-dependent fits and 2D surface boxes
+cannot supply unsupported joint support. Original claims, uncertainty,
+selections, answers and receipts remain in the immutable law. Native consumers
+bind the actual original material card/state and every fixed physical query
+coordinate; only calibration R and squared Delta-K are excluded from operating
+context matching. No missing growth data, toughness, threshold or measured
+authority is inferred from unrelated material properties.
+
 For a caller-declared constant geometry factor, `K=Y*sigma*sqrt(pi*a)`.
 Constant-amplitude blocks integrate evolving crack length analytically for
 all positive exponents, including the exponential m=2 limit. Work and storage

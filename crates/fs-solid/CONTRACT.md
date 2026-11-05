@@ -1046,9 +1046,15 @@ must be tensile; the norm of tangential plane traction must stay within the
 explicit Mode-I numerical allowance at every sample. The current crack's Kmax
 is checked on every sample, including static holds and unclosed excursions.
 The fixed material identity and actual retained temperature must match the
-Paris calibration scope. An optional original material bundle also binds its
-identity, chemistry, process and `T` coordinate; this does not source-resolve
-or experimentally validate the caller-declared Paris coefficients.
+Paris calibration scope. Caller-declared laws may carry an original material
+bundle, which binds identity, chemistry, process and `T` without experimentally
+validating those coefficients. A source-resolved Paris law requires the actual
+immutable material bundle used by the native elastic owner. The shared static
+and transient observer verifies the source card, named material state and
+every fixed typed query coordinate. Only calibration R and squared Delta-K
+coordinates are excluded; the runtime law enforces their source domains.
+Custom source temperature axes remain intact. These checks retain original
+calibration evidence without establishing validated component life.
 
 A cycle starts at a resolved physical extremum and contains one monotone
 outward segment and one monotone return segment, with plateaus admitted.

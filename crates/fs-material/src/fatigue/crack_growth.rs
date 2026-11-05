@@ -35,6 +35,9 @@ use fs_math::det;
 
 use super::FatigueScope;
 
+/// Original material-card Paris calibration and retained query evidence.
+pub mod source;
+
 /// A normalized Paris fit; lengths are metres and N counts full cycles.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParisParameters {
@@ -69,6 +72,7 @@ pub struct ParisLaw {
     scope: FatigueScope,
     parameters: ParisParameters,
     domain: ParisDomain,
+    source: Option<Arc<source::ParisCalibrationSource>>,
 }
 
 /// Declared constant-Y geometry and the interval where it may be used.
@@ -228,6 +232,7 @@ impl ParisLaw {
             scope,
             parameters,
             domain,
+            source: None,
         })
     }
 
@@ -239,6 +244,11 @@ impl ParisLaw {
     }
     pub fn domain(&self) -> ParisDomain {
         self.domain
+    }
+
+    /// Original immutable calibration, when resolved from a material card.
+    pub fn source(&self) -> Option<&source::ParisCalibrationSource> {
+        self.source.as_deref()
     }
 
     /// da/dN in metres per full cycle, evaluated only in the declared support.

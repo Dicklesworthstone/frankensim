@@ -5,16 +5,29 @@ use std::sync::Arc;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::ContentHash;
+use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+use fs_matdb::{
+    ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
+};
 use fs_material::fatigue::FatigueScope;
+use fs_material::fatigue::crack_growth::source::{
+    ParisProperty, ParisSourceRequest, STRESS_INTENSITY_SQUARED_DIMS, resolve_paris,
+};
 use fs_material::fatigue::crack_growth::{
     ConstantGeometryCrack, CrackGrowthError, CrackGrowthLimits, ParisDomain, ParisLaw,
     ParisParameters,
 };
+use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
+use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::{Density, Dims, Pressure, QuantitySpec};
+use fs_solid::fatigue::TetFatigueError;
 use fs_solid::fatigue::crack_growth::{
     CrackStressTolerance, TetCrackGrowthConfig, TetCrackGrowthError, TetCrackGrowthGauge,
     TetCrackGrowthPath,
 };
+use fs_solid::linear3::source::SolidStiffnessModel;
 use fs_solid::linear3::{
     TetAssemblyBudget, TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
     TetThermalStrainField, TetThermalStrainState,
@@ -808,5 +821,326 @@ fn g0_invalid_repetition_counts_refuse_atomically_without_consuming_the_cycle() 
         assert_eq!(steps[0].after, after[0]);
         assert_eq!(path.observed_samples(), 3);
         assert_eq!(path.last_time_s(), Some(2.0));
+    });
+}
+
+struct ParisSourceFixture {
+    card: MaterialCard,
+    fit_point: QueryPoint,
+    bundle: Arc<ResolvedMaterialStatePoint>,
+    material: TetElasticMaterial,
+    thermal: TetThermalStrainState,
+    law: Arc<ParisLaw>,
+}
+
+fn paris_source_request() -> ParisSourceRequest {
+    ParisSourceRequest {
+        temperature_axis: "absolute_temperature".into(),
+        stress_ratio_axis: "calibration_load_ratio".into(),
+        delta_k_squared_axis: "calibration_delta_k_squared".into(),
+        surface_and_geometry: "synthetic constant-Y nominal-stress coupon".into(),
+        environment: "synthetic fixed humidity context".into(),
+        load_basis: "tensile full-range Mode-I Paris fit; metres per full cycle".into(),
+    }
+}
+
+fn paris_source_fixture(revision: u32) -> ParisSourceFixture {
+    let temperature = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature,
+        ValueForm::Static,
+    ));
+    let request = paris_source_request();
+    let external_domain = ValidityDomain::unconstrained()
+        .with_quantity(&request.temperature_axis, temperature, 290.0, 330.0)
+        .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0);
+    let native_point = QueryPoint::new()
+        .with_quantity(&request.temperature_axis, temperature, 300.0)
+        .unwrap()
+        .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.2)
+        .unwrap();
+    let fit_domain = external_domain
+        .clone()
+        .with_quantity(
+            &request.stress_ratio_axis,
+            QuantitySpec::dimensional(Dims::NONE),
+            0.0,
+            0.95,
+        )
+        .with_quantity(
+            &request.delta_k_squared_axis,
+            QuantitySpec::dimensional(STRESS_INTENSITY_SQUARED_DIMS),
+            1.0,
+            1e16,
+        );
+    let fit_point = native_point
+        .clone()
+        .with_quantity(
+            &request.stress_ratio_axis,
+            QuantitySpec::dimensional(Dims::NONE),
+            0.25,
+        )
+        .unwrap()
+        .with_quantity(
+            &request.delta_k_squared_axis,
+            QuantitySpec::dimensional(STRESS_INTENSITY_SQUARED_DIMS),
+            1e12,
+        )
+        .unwrap();
+    let mut claims = ClaimSet::new();
+    for (key, value, validity) in [
+        (
+            PropertyKey::new("density", Density::DIMS),
+            7800.0,
+            external_domain.clone(),
+        ),
+        (
+            PropertyKey::new("young_modulus", Pressure::DIMS),
+            200e9,
+            external_domain.clone(),
+        ),
+        (
+            PropertyKey::new("poisson_ratio", Dims::NONE),
+            0.0,
+            external_domain,
+        ),
+        (
+            ParisProperty::ReferenceDeltaKSquared.property_key(),
+            1e12,
+            fit_domain.clone(),
+        ),
+        (
+            ParisProperty::ReferenceGrowthRate.property_key(),
+            1e-4,
+            fit_domain.clone(),
+        ),
+        (
+            ParisProperty::Exponent.property_key(),
+            2.0,
+            fit_domain.clone(),
+        ),
+        (
+            ParisProperty::MaximumKSquared.property_key(),
+            1e18,
+            fit_domain,
+        ),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                value: PropertyValue::Scalar {
+                    value,
+                    dims: key.dims(),
+                },
+                key,
+                validity,
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic native Paris source fixture; not measured".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let mut card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic native Paris material".into(),
+            phase: "solid".into(),
+            process: "synthetic coupon process".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    for _ in 0..revision {
+        card = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+    }
+    let bundle = Arc::new(
+        SolidStiffnessModel::Isotropic
+            .resolve_reference(
+                &card,
+                &native_point,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+    );
+    let material = SolidStiffnessModel::Isotropic
+        .material(
+            &bundle,
+            bundle.property("density").unwrap().value_si(),
+            bundle.identity(),
+            0.01,
+        )
+        .unwrap();
+    let thermal = TetThermalStrainState::try_new(
+        300.0,
+        300.0,
+        [0.0; 6],
+        bundle.identity().0,
+        ContentHash([106; 32]),
+        0.01,
+    )
+    .unwrap();
+    let law = Arc::new(
+        resolve_paris(
+            &card,
+            &fit_point,
+            &request,
+            [ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly); 4],
+        )
+        .unwrap(),
+    );
+    ParisSourceFixture {
+        card,
+        fit_point,
+        bundle,
+        material,
+        thermal,
+        law,
+    }
+}
+
+#[test]
+fn g0_sourced_native_paris_retains_original_card_and_refuses_foreign_operating_context() {
+    with_cx(false, |cx| {
+        let source = paris_source_fixture(0);
+        let foreign = paris_source_fixture(1);
+        let fixed = fixed();
+        let problem = problem(&source.material, &fixed);
+        let geometry = geometry(cx);
+        let mut bound = gauge();
+        bound.material_state_identity = source.bundle.identity().0;
+        bound.material_source = Some(source.bundle.clone());
+        bound.law = source.law.clone();
+        assert_eq!(source.bundle.state_coordinate("T"), None);
+        // Native material queries contain external conditions, not calibration
+        // R/Delta-K coordinates. The original custom temperature axis is kept.
+        assert_eq!(
+            source.bundle.state_coordinate("absolute_temperature"),
+            Some(300.0)
+        );
+        assert_eq!(
+            source.bundle.state_coordinate("calibration_load_ratio"),
+            None
+        );
+        let mut static_path = path(&problem, &source.thermal, vec![bound.clone()], cx);
+        assert!(std::ptr::eq(
+            static_path.material_source(0).unwrap(),
+            source.bundle.as_ref()
+        ));
+        let retained = static_path.law(0).unwrap().source().unwrap();
+        assert_eq!(retained.card_identity(), source.card.content_hash());
+        assert_eq!(retained.query(), &source.fit_point);
+        assert_eq!(
+            retained
+                .property(ParisProperty::ReferenceDeltaKSquared)
+                .evidence
+                .value
+                .value,
+            1e12
+        );
+        for (index, stress) in [2e6, 8e6, 2e6].into_iter().enumerate() {
+            static_path
+                .advance(index as f64, &load(&geometry, stress, cx), cx)
+                .unwrap();
+        }
+        static_path.close_cycle(cx).unwrap();
+        close(
+            static_path.states()[0].crack_length_m,
+            analytical_length(INITIAL_A, 6e6),
+            2e-16,
+        );
+
+        let forcing = load(&geometry, 5e6, cx);
+        let mut initial = ZERO;
+        initial[1][0] = 2e6 / 200e9;
+        let native = forcing
+            .begin_transient(
+                &problem,
+                Some(TetThermalStrainField::Uniform(&source.thermal)),
+                0.0,
+                &initial,
+                &ZERO,
+                TransientConfig3::default(),
+                cx,
+            )
+            .unwrap();
+        let mut observed = native
+            .clone()
+            .with_crack_growth(FRAME, vec![bound.clone()], config(), cx)
+            .unwrap();
+        assert!(std::ptr::eq(
+            observed.material_source(0).unwrap(),
+            source.bundle.as_ref()
+        ));
+        assert_eq!(
+            observed.law(0).unwrap().source().unwrap().card_identity(),
+            source.card.content_hash()
+        );
+        let h = 2.0 * (std::f64::consts::PI / 32.0).tan() / (10.0_f64 * 200e9 / 7800.0).sqrt();
+        for step in 1..=32 {
+            if step == 32 {
+                observed.advance_and_close_cycle(&forcing, h, cx).unwrap();
+            } else {
+                observed.advance(&forcing, h, cx).unwrap();
+            }
+        }
+        close(
+            observed.states()[0].crack_length_m,
+            static_path.states()[0].crack_length_m,
+            2e-16,
+        );
+        assert_eq!(
+            observed.law(0).unwrap().source().unwrap().query(),
+            &source.fit_point
+        );
+
+        let mut missing_bundle = bound.clone();
+        missing_bundle.material_source = None;
+        let mut foreign_bundle = bound.clone();
+        foreign_bundle.material_source = Some(foreign.bundle);
+        let mut foreign_fit = bound.clone();
+        foreign_fit.law = foreign.law;
+        let other_context = source
+            .fit_point
+            .clone()
+            .with_quantity("humidity", QuantitySpec::dimensional(Dims::NONE), 0.8)
+            .unwrap();
+        let mut foreign_context = bound;
+        foreign_context.law = Arc::new(
+            resolve_paris(
+                &source.card,
+                &other_context,
+                &paris_source_request(),
+                [ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly); 4],
+            )
+            .unwrap(),
+        );
+        for bad in [missing_bundle, foreign_bundle, foreign_fit, foreign_context] {
+            assert!(matches!(
+                TetCrackGrowthPath::new(
+                    &problem,
+                    TetThermalStrainField::Uniform(&source.thermal),
+                    FRAME,
+                    vec![bad.clone()],
+                    Default::default(),
+                    config(),
+                    cx,
+                ),
+                Err(TetCrackGrowthError::Binding(
+                    TetFatigueError::SourceMismatch { .. }
+                ))
+            ));
+            assert!(matches!(
+                native
+                    .clone()
+                    .with_crack_growth(FRAME, vec![bad], config(), cx),
+                Err(TetCrackGrowthError::Binding(
+                    TetFatigueError::SourceMismatch { .. }
+                ))
+            ));
+        }
     });
 }

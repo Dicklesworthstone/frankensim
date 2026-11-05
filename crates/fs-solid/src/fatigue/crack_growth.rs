@@ -18,10 +18,10 @@
 //! repeating the native solves. No rainflow completion order, repeated spectrum,
 //! crack-closure correction or fatigue-threshold extrapolation is inferred.
 //!
-//! Mesh, material, support and thermal fields stay fixed. Calibration data may
-//! be caller-declared, or accompanied by the original immutable material bundle;
-//! the latter additionally binds chemistry, process and its `T` coordinate.
-//! Both are empirical estimates and establish no validated component lifetime.
+//! Mesh, material, support and thermal fields stay fixed. Caller-declared
+//! calibration remains supported. A source-backed Paris law requires the
+//! original immutable material bundle and matches its card, named state and
+//! typed operating query. Neither establishes a validated component lifetime.
 
 use std::sync::Arc;
 
@@ -80,8 +80,10 @@ pub struct TetCrackGrowthGauge {
     pub element: usize,
     pub normal_in_mesh_frame: [f64; 3],
     pub material_state_identity: [u8; 32],
-    /// Optional original bundle. A supplied bundle must be the actual native
-    /// material identity and agree with the Paris scope's chemistry/process/T.
+    /// Original bundle, required for a source-backed law. Its immutable card,
+    /// named material and typed operating context must match the calibration.
+    /// Caller-declared laws may omit it; when supplied, their legacy explicit
+    /// chemistry/process/`T` binding remains required.
     pub material_source: Option<Arc<ResolvedMaterialStatePoint>>,
     pub law: Arc<ParisLaw>,
     pub geometry: ConstantGeometryCrack,
@@ -389,16 +391,44 @@ impl TetCrackGrowthObserver {
                 gauge.material_state_identity,
                 scope.temperature_k,
             )?;
-            if let Some(source) = gauge.material_source.as_deref() {
-                if source.identity().0 != gauge.material_state_identity
-                    || source.material().chemistry != scope.material
-                    || source.material().process != scope.process
-                    || source.state_coordinate("T") != Some(scope.temperature_k)
+            if let Some(material) = gauge.material_source.as_deref() {
+                if material.identity().0 != gauge.material_state_identity {
+                    return Err(TetCrackGrowthError::Binding(
+                        TetFatigueError::SourceMismatch {
+                            gauge: index,
+                            what: "Paris material receipt is not the actual elastic state identity",
+                        },
+                    ));
+                }
+            }
+            if let Some(source) = gauge.law.source() {
+                let material = gauge.material_source.as_deref().ok_or(
+                    TetCrackGrowthError::Binding(TetFatigueError::SourceMismatch {
+                        gauge: index,
+                        what: "source-backed Paris requires the original immutable elastic material bundle",
+                    }),
+                )?;
+                if !source.matches_material_state(
+                    material.card_identity(),
+                    material.material(),
+                    &material.query(),
+                ) {
+                    return Err(TetCrackGrowthError::Binding(
+                        TetFatigueError::SourceMismatch {
+                            gauge: index,
+                            what: "Paris source card, named material or typed query differs from the actual elastic bundle",
+                        },
+                    ));
+                }
+            } else if let Some(material) = gauge.material_source.as_deref() {
+                if material.material().chemistry != scope.material
+                    || material.material().process != scope.process
+                    || material.state_coordinate("T") != Some(scope.temperature_k)
                 {
                     return Err(TetCrackGrowthError::Binding(
                         TetFatigueError::SourceMismatch {
                             gauge: index,
-                            what: "Paris scope/bundle differs from actual elastic identity, material, process or T",
+                            what: "caller-declared Paris scope differs from the bundle's material, process or T",
                         },
                     ));
                 }
