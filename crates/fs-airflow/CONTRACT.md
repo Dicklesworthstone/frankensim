@@ -3649,13 +3649,14 @@ prepared conductivity chart retains the original source line and identical
 wall caloric object; no conductivity copy, additional solid storage, or
 separate fluid temperature is introduced.
 
-This adapter admits bulk-property circular/rectangular fully developed
-laminar CWT/CHF, Dittus-Boelter, and Gnielinski laws only. The existing native
+The original `new`/`resolve` fast path admits bulk-property circular/rectangular
+fully developed laminar CWT/CHF, Dittus-Boelter, and Gnielinski laws only. The existing native
 graph owner still checks the actual initial/final/average flow and
 source/correlation limits. Film-property, sphere, plate, natural, mixed, and
-developing laws refuse here because their surface feedback or section model
-needs its own closure. The caller retains the selected correlation's
-developed-flow and wall-uniformity assumptions.
+developing laws refuse through that fast path. Surface-dependent native laws
+use the explicit closure below; developing section bindings retain their
+separate owner. The caller retains the selected correlation's developed-flow
+and wall-uniformity assumptions.
 
 At each nonlinear endpoint the existing material owner solves the surface
 temperature and integrated k(T) heat. The adapter lowers its accepted signed
@@ -3674,6 +3675,39 @@ momentum/advection/material-wall endpoint feedback. Ten tests passed in a
 bounded build of the original material layer/reservoir kernel, including two
 fixture-specific flux/domain checks. The new graph adapter and its integration
 tests were syntax/API reviewed but not compiled in the full Cargo graph.
+
+### Original source films at conducting-wall surfaces
+
+`PreparedGraphConjugateLinks::new_with_surface_feedback` binds the same exact
+wall caloric object, original conductivity source and contact geometry. Liquid
+and gas graph owners expose `evaluate_conjugate_links` and
+`evaluate_quasi_steady_conjugate_links` to solve the shared material integral
+against their original film at each actual surface trial. This admits existing
+film-property forced ducts, external plate sections, Whitaker spheres, natural
+and aiding mixed laws without replacing any correlation or adding another
+thermal cell. Mean-film properties use the solved surface and actual bulk
+temperature; Whitaker retains its primary bulk tuple and separately resolves
+only its original surface-viscosity state. Original geometry, source support,
+signed native flow envelope, density, local-work and gas Mach limits remain
+authoritative.
+
+The shared material kernel returns the actual accepted film power, source
+payload and solid/film residual. The graph publishes one Q/(Twall-Tfluid)
+coefficient, preserving the explicit equilibrium limit; bare film coefficients
+remain diagnostic and cannot be applied as another heat owner. Bracket/source
+failure, exhausted power-residual budget, cancellation and competing overrides
+refuse atomically. This is a quasi-steady homogeneous normal path with the
+selected original correlation's uniform-wall and external-flow assumptions;
+it does not resolve wall spreading, boundary-layer history or developing-duct
+section conjugacy.
+
+Focused `source_graph::conjugate::surface` tests compare independent film
+equations for a variable-k wall, duct/sphere/plate source states, natural/mixed
+heating and cooling, equilibrium, native inertial/quasi-steady consistency,
+reciprocal heat and refusal behavior. The existing full coupled
+momentum/advection test now exercises the solved surface film. These graph
+tests were syntax/API reviewed; full Cargo execution remains blocked by absent
+constellation checkouts. Shared-kernel execution is reported separately.
 
 ## Reversible total-pressure hydraulic nodes and physical static tractions
 

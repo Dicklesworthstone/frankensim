@@ -1,8 +1,11 @@
 //! One solid trace, its actual surface, and the original finite fluid cell.
 //!
-//! Bulk-property forced-duct coefficients do not depend on surface temperature.
-//! Their film resistance can therefore enter the existing exact k(T) layer
-//! closure without another root, material query, thermal cell or heat owner.
+//! Bulk-property forced ducts use the original fixed-film layer closure.
+//! Surface-dependent laws use the same source and geometry through the shared
+//! nonlinear material/film balance, without another cell or heat owner.
+
+mod surface;
+pub use surface::{GraphConjugateSurfaceSample, ResolvedGraphSurfaceConjugateHeat};
 
 use super::{GraphConvectionError, GraphConvectionLaw, GraphConvectiveLink, GraphSourceHeat};
 use crate::graph::thermal::medium::convection::deposition::source::{
@@ -40,10 +43,15 @@ pub enum GraphConjugateError {
     Convection(GraphConvectionError),
     Layer(LayerSourceError),
     Thermal(DepositionError),
+    SurfaceBalance {
+        link: u64,
+        residual_w: f64,
+        iterations: usize,
+    },
 }
 impl core::fmt::Display for GraphConjugateError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "native conjugate duct convection: {self:?}")
+        write!(f, "native conjugate convection: {self:?}")
     }
 }
 impl std::error::Error for GraphConjugateError {}
@@ -67,9 +75,10 @@ struct PreparedLink<'a, 'm> {
 }
 
 /// Prepared geometry and source identities, never a frozen coefficient.
-/// Only circular/rectangular fully developed laminar CWT/CHF, Dittus-Boelter
-/// and Gnielinski with bulk properties are supported here. Film-property,
-/// sphere, plate, natural and mixed laws require surface feedback and refuse.
+/// `new`/`resolve` select the bulk-property forced-duct fast path. The explicit
+/// `new_with_surface_feedback` preparation also admits original film-property,
+/// sphere, plate, natural and mixed laws through the native source graph's
+/// `evaluate_conjugate_links` and quasi-steady counterpart.
 /// The original convection owner still admits every actual flow endpoint and
 /// the interval average, all source limits, and the selected duct assumptions.
 pub struct PreparedGraphConjugateLinks<'a, 'm> {
@@ -125,28 +134,59 @@ impl<M> ResolvedGraphConjugateHeat<M> {
     pub fn apply_to(
         &self,
         destination: &mut BTreeMap<u64, f64>,
-        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), GraphConjugateError> {
-        checkpoint()?;
-        for link in self.conductances_w_k.keys() {
-            checkpoint()?;
-            if destination.contains_key(link) {
-                return Err(GraphConjugateError::Invalid(
-                    "conjugate link already has a heat owner",
-                ));
-            }
-        }
-        checkpoint()?;
-        destination.extend(self.conductances_w_k.iter().map(|(&id, &g)| (id, g)));
-        Ok(())
+        apply_conductances(&self.conductances_w_k, destination, checkpoint)
     }
+}
+
+fn apply_conductances(
+    conductances: &BTreeMap<u64, f64>,
+    destination: &mut BTreeMap<u64, f64>,
+    mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+) -> Result<(), GraphConjugateError> {
+    checkpoint()?;
+    for link in conductances.keys() {
+        checkpoint()?;
+        if destination.contains_key(link) {
+            return Err(GraphConjugateError::Invalid(
+                "conjugate link already has a heat owner",
+            ));
+        }
+    }
+    checkpoint()?;
+    destination.extend(conductances.iter().map(|(&id, &g)| (id, g)));
+    Ok(())
 }
 
 impl<'a, 'm> PreparedGraphConjugateLinks<'a, 'm> {
     pub fn new(
         thermal: &DepositionSimulation<'_>,
+        bindings: Vec<GraphConjugateLinkBinding<'a, 'm>>,
+        maximum_links: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, GraphConjugateError> {
+        Self::prepare(thermal, bindings, maximum_links, true, checkpoint)
+    }
+
+    /// Prepare exact solid/contact identities for a nonlinear source film.
+    /// The original liquid/gas graph owner admits correlation, signed flow,
+    /// property convention and source support at every actual trial surface.
+    /// No new enclosed-flow or nonisothermal boundary-layer model is inferred.
+    pub fn new_with_surface_feedback(
+        thermal: &DepositionSimulation<'_>,
+        bindings: Vec<GraphConjugateLinkBinding<'a, 'm>>,
+        maximum_links: usize,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, GraphConjugateError> {
+        Self::prepare(thermal, bindings, maximum_links, false, checkpoint)
+    }
+
+    fn prepare(
+        thermal: &DepositionSimulation<'_>,
         mut bindings: Vec<GraphConjugateLinkBinding<'a, 'm>>,
         maximum_links: usize,
+        bulk_only: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, GraphConjugateError> {
         checkpoint()?;
@@ -163,7 +203,9 @@ impl<'a, 'm> PreparedGraphConjugateLinks<'a, 'm> {
         let mut convection = Vec::with_capacity(bindings.len());
         for binding in bindings {
             checkpoint()?;
-            admit_law(binding.convection)?;
+            if bulk_only {
+                admit_law(binding.convection)?;
+            }
             if links
                 .last()
                 .is_some_and(|p| p.binding.convection.link == binding.convection.link)
@@ -227,6 +269,7 @@ impl<'a, 'm> PreparedGraphConjugateLinks<'a, 'm> {
         // Refuse changed wall/contact ownership before any fluid-source work.
         for link in &self.links {
             checkpoint()?;
+            admit_law(link.binding.convection)?;
             link.temperatures(thermal)?;
         }
         let GraphSourceHeat {

@@ -27,6 +27,8 @@ pub struct ConvectiveLinkSample<F> {
     pub link: u64,
     pub wall_cell: CellId,
     pub fluid_cell: CellId,
+    /// Actual fluid-facing temperature. Ordinary finite links use their wall
+    /// cell temperature; a conjugate layer retains its separate cell trace.
     pub wall_temperature_k: f64,
     pub fluid_temperature_k: f64,
     pub property_temperature_k: f64,
@@ -125,36 +127,9 @@ pub fn evaluate_source_link_convection<F: ThermalFluidTransport, E>(
     let mut ordered = Vec::with_capacity(bindings.len());
     for binding in bindings {
         check(&mut cancelled)?;
-        binding
-            .law
-            .admit_property_temperature(binding.property_temperature)?;
-        binding.law.admit_geometry(binding.characteristic_length)?;
-        let link = thermal
-            .links()
-            .get(&binding.link)
-            .ok_or(ConvectionSourceError::Invalid("inactive convective link"))?;
+        admit_link(thermal, binding)?;
         if !ids.insert(binding.link) {
             return Err(ConvectionSourceError::Invalid("duplicate convective link").into());
-        }
-        if binding.fluid_cell != link.a && binding.fluid_cell != link.b {
-            return Err(ConvectionSourceError::Invalid(
-                "convective fluid must be an original link endpoint",
-            )
-            .into());
-        }
-        if link.conductance_w_k != 0.0 {
-            return Err(ConvectionSourceError::Invalid(
-                "convective links require zero authored conductance",
-            )
-            .into());
-        }
-        if !binding.characteristic_length.value().is_finite()
-            || binding.characteristic_length.value() <= 0.0
-        {
-            return Err(ConvectionSourceError::Invalid(
-                "convective links require positive finite characteristic length",
-            )
-            .into());
         }
         ordered.push(binding);
     }
@@ -167,67 +142,171 @@ pub fn evaluate_source_link_convection<F: ThermalFluidTransport, E>(
         let fluid_cell = binding.fluid_cell;
         let wall_cell = if fluid_cell == link.a { link.b } else { link.a };
         let wall_temperature_k = thermal.temperature_k(wall_cell)?;
-        let fluid_temperature_k = thermal.temperature_k(fluid_cell)?;
-        let property_temperature_k = match binding.property_temperature {
-            ConvectionPropertyTemperature::Reservoir => fluid_temperature_k,
-            ConvectionPropertyTemperature::FilmMean => {
-                0.5 * wall_temperature_k + 0.5 * fluid_temperature_k
-            }
-        };
-        let primary = material_at(fluid_cell, property_temperature_k, || {
-            resolve(binding, thermal, Temperature::new(property_temperature_k))
-        })?;
-        let surface = if matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
-            check(&mut cancelled)?;
-            Some(material_at(fluid_cell, wall_temperature_k, || {
-                resolve(binding, thermal, Temperature::new(wall_temperature_k))
-            })?)
-        } else { None };
-        let law = binding.law.resolve(&primary.thermal,
-            surface.as_ref().map(|sample| &sample.thermal))?;
-        law.admit_area(link.area_m2, binding.characteristic_length)?;
-        let evaluation = evaluate_convection_state(
-            &primary.thermal.transport(),
+        let sample = evaluate_admitted_surface(
+            thermal,
+            binding,
             wall_temperature_k,
-            Temperature::new(fluid_temperature_k),
-            binding.characteristic_length,
-            law,
-        )
-        .map_err(ConvectionSourceError::Material)?;
-        let conductance_w_k = match &evaluation {
-            Some(sample) => finite(link.area_m2 * sample.coefficient.value.value())?,
-            None => 0.0,
-        };
-        let difference = finite(wall_temperature_k - fluid_temperature_k)?;
-        let heat_into_fluid_w = finite(conductance_w_k * difference)?;
-        if (evaluation.is_some() && link.area_m2 > 0.0 && conductance_w_k == 0.0)
-            || (conductance_w_k != 0.0 && difference != 0.0 && heat_into_fluid_w == 0.0)
-        {
-            return Err(ConvectionSourceError::Invalid(
-                "convective link transfer underflowed to zero",
-            )
-            .into());
-        }
-        conductances_w_k.insert(binding.link, conductance_w_k);
-        samples.push(ConvectiveLinkSample {
-            link: binding.link,
-            wall_cell,
-            fluid_cell,
-            wall_temperature_k,
-            fluid_temperature_k,
-            property_temperature_k,
-            area_m2: link.area_m2,
-            conductance_w_k,
-            heat_into_fluid_w,
-            material: primary.material,
-            thermal: primary.thermal,
-            surface,
-            evaluation,
-        });
+            &mut resolve,
+            &mut cancelled,
+        )?;
+        conductances_w_k.insert(binding.link, sample.conductance_w_k);
+        samples.push(sample);
     }
     check(&mut cancelled)?;
     Ok(ResolvedLinkConvection {
         conductances_w_k,
         samples,
+    })
+}
+
+fn admit_link(
+    thermal: &DepositionSimulation<'_>,
+    binding: &SourceConvectiveLink,
+) -> Result<(), ConvectionSourceError> {
+    binding
+        .law
+        .admit_property_temperature(binding.property_temperature)?;
+    binding.law.admit_geometry(binding.characteristic_length)?;
+    let link = thermal
+        .links()
+        .get(&binding.link)
+        .ok_or(ConvectionSourceError::Invalid("inactive convective link"))?;
+    if binding.fluid_cell != link.a && binding.fluid_cell != link.b {
+        return Err(ConvectionSourceError::Invalid(
+            "convective fluid must be an original link endpoint",
+        ));
+    }
+    if link.conductance_w_k != 0.0 {
+        return Err(ConvectionSourceError::Invalid(
+            "convective links require zero authored conductance",
+        ));
+    }
+    if !binding.characteristic_length.value().is_finite()
+        || binding.characteristic_length.value() <= 0.0
+    {
+        return Err(ConvectionSourceError::Invalid(
+            "convective links require positive finite characteristic length",
+        ));
+    }
+    Ok(())
+}
+
+// The source-backed solid-layer owner supplies an actual trial surface without
+// changing either caloric cell. This returns evidence only: bare hA must never
+// become an additional native link alongside the combined layer conductance.
+pub(crate) fn evaluate_source_link_at_surface<F: ThermalFluidTransport, E>(
+    thermal: &DepositionSimulation<'_>,
+    binding: &SourceConvectiveLink,
+    surface_temperature_k: f64,
+    mut resolve: impl FnMut(
+        &SourceConvectiveLink,
+        &DepositionSimulation<'_>,
+        Temperature,
+    ) -> Result<F, E>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<ConvectiveLinkSample<F>, SourceCellConvectionError<E>> {
+    check(&mut cancelled)?;
+    admit_link(thermal, binding)?;
+    let link = &thermal.links()[&binding.link];
+    let wall = if binding.fluid_cell == link.a {
+        link.b
+    } else {
+        link.a
+    };
+    let cell = thermal.temperature_k(wall)?;
+    let bulk = thermal.temperature_k(binding.fluid_cell)?;
+    if !surface_temperature_k.is_finite()
+        || surface_temperature_k <= 0.0
+        || surface_temperature_k < cell.min(bulk)
+        || surface_temperature_k > cell.max(bulk)
+    {
+        return Err(ConvectionSourceError::Invalid(
+            "passive conjugate surface must lie between its actual caloric endpoints",
+        )
+        .into());
+    }
+    let sample = evaluate_admitted_surface(
+        thermal,
+        binding,
+        surface_temperature_k,
+        &mut resolve,
+        &mut cancelled,
+    )?;
+    check(&mut cancelled)?;
+    Ok(sample)
+}
+
+fn evaluate_admitted_surface<F: ThermalFluidTransport, E>(
+    thermal: &DepositionSimulation<'_>,
+    binding: &SourceConvectiveLink,
+    wall_temperature_k: f64,
+    resolve: &mut impl FnMut(
+        &SourceConvectiveLink,
+        &DepositionSimulation<'_>,
+        Temperature,
+    ) -> Result<F, E>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ConvectiveLinkSample<F>, SourceCellConvectionError<E>> {
+    let link = &thermal.links()[&binding.link];
+    let fluid_cell = binding.fluid_cell;
+    let wall_cell = if fluid_cell == link.a { link.b } else { link.a };
+    let fluid_temperature_k = thermal.temperature_k(fluid_cell)?;
+    let property_temperature_k = match binding.property_temperature {
+        ConvectionPropertyTemperature::Reservoir => fluid_temperature_k,
+        ConvectionPropertyTemperature::FilmMean => {
+            0.5 * wall_temperature_k + 0.5 * fluid_temperature_k
+        }
+    };
+    let primary = material_at(fluid_cell, property_temperature_k, || {
+        resolve(binding, thermal, Temperature::new(property_temperature_k))
+    })?;
+    let surface = if matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+        check(cancelled)?;
+        Some(material_at(fluid_cell, wall_temperature_k, || {
+            resolve(binding, thermal, Temperature::new(wall_temperature_k))
+        })?)
+    } else {
+        None
+    };
+    let law = binding.law.resolve(
+        &primary.thermal,
+        surface.as_ref().map(|sample| &sample.thermal),
+    )?;
+    law.admit_area(link.area_m2, binding.characteristic_length)?;
+    let evaluation = evaluate_convection_state(
+        &primary.thermal.transport(),
+        wall_temperature_k,
+        Temperature::new(fluid_temperature_k),
+        binding.characteristic_length,
+        law,
+    )
+    .map_err(ConvectionSourceError::Material)?;
+    let conductance_w_k = match &evaluation {
+        Some(sample) => finite(link.area_m2 * sample.coefficient.value.value())?,
+        None => 0.0,
+    };
+    let difference = finite(wall_temperature_k - fluid_temperature_k)?;
+    let heat_into_fluid_w = finite(conductance_w_k * difference)?;
+    if (evaluation.is_some() && link.area_m2 > 0.0 && conductance_w_k == 0.0)
+        || (conductance_w_k != 0.0 && difference != 0.0 && heat_into_fluid_w == 0.0)
+    {
+        return Err(
+            ConvectionSourceError::Invalid("convective link transfer underflowed to zero").into(),
+        );
+    }
+    Ok(ConvectiveLinkSample {
+        link: binding.link,
+        wall_cell,
+        fluid_cell,
+        wall_temperature_k,
+        fluid_temperature_k,
+        property_temperature_k,
+        area_m2: link.area_m2,
+        conductance_w_k,
+        heat_into_fluid_w,
+        material: primary.material,
+        thermal: primary.thermal,
+        surface,
+        evaluation,
     })
 }

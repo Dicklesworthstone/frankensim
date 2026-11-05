@@ -26,6 +26,8 @@ use std::sync::Arc;
 
 const AREA: f64 = 0.002;
 const DISTANCE: f64 = 0.05;
+#[path = "conjugate/surface.rs"]
+mod surface;
 fn config() -> LayerConductionConfig {
     LayerConductionConfig {
         max_iterations: 96,
@@ -478,7 +480,7 @@ fn foreign_wall_area_film_stale_callback_source_domain_and_cancellation_refuse_a
 }
 
 #[test]
-fn native_coupled_momentum_advection_and_material_wall_use_one_endpoint_heat() {
+fn native_coupled_momentum_advection_and_surface_film_use_one_endpoint_heat() {
     context(|cx| {
         let fluid_card = fluid_card();
         let (law, caloric) = source_pair(&fluid_card);
@@ -504,9 +506,15 @@ fn native_coupled_momentum_advection_and_material_wall_use_one_endpoint_heat() {
             caps(),
         )
         .unwrap();
-        let prepared =
-            PreparedGraphConjugateLinks::new(&initial, vec![binding(&layer)], 16, || Ok(()))
-                .unwrap();
+        let mut surface_binding = binding(&layer);
+        surface_binding.convection.property_temperature = ConvectionPropertyTemperature::FilmMean;
+        let prepared = PreparedGraphConjugateLinks::new_with_surface_feedback(
+            &initial,
+            vec![surface_binding],
+            16,
+            || Ok(()),
+        )
+        .unwrap();
         let initial_flows = [1e-5, 0.0, 1e-5];
         let first = owner.resolve(cx, &initial, &initial_flows).unwrap();
         let held_flow = native_report(
@@ -518,14 +526,14 @@ fn native_coupled_momentum_advection_and_material_wall_use_one_endpoint_heat() {
             initial_flows,
             1.0,
         );
-        let held = prepared
-            .resolve(
+        let held = owner
+            .evaluate_conjugate_links(
+                cx,
                 &initial,
+                &first.sources,
+                &held_flow,
+                &prepared,
                 config(),
-                |candidate, links| {
-                    owner.evaluate_links(cx, candidate, &first.sources, &held_flow, links, 16)
-                },
-                || Ok(()),
             )
             .unwrap();
         let branches: Vec<_> = inventory
@@ -597,13 +605,13 @@ fn native_coupled_momentum_advection_and_material_wall_use_one_endpoint_heat() {
                 })
             },
             |cx, candidate, sources, hydraulics| {
-                let heat = prepared.resolve(
+                let heat = owner.evaluate_conjugate_links(
+                    cx,
                     candidate,
+                    sources,
+                    hydraulics,
+                    &prepared,
                     config(),
-                    |endpoint, links| {
-                        owner.evaluate_links(cx, endpoint, sources, hydraulics, links, 16)
-                    },
-                    || cx.checkpoint().map_err(|_| DepositionError::Cancelled),
                 )?;
                 let mut conductances = BTreeMap::new();
                 heat.apply_to(&mut conductances, || {
@@ -624,19 +632,21 @@ fn native_coupled_momentum_advection_and_material_wall_use_one_endpoint_heat() {
         near(next.time_s(), 1.0);
         near(next_momentum.accepted_time_s(), 1.0);
         let sample = &report.heat.samples()[0];
-        let film = &report.heat.fluid_samples()[0];
+        let film = &sample.layer.film;
         let tf = next.temperature_k(CellId(2)).unwrap();
         let tw = next.temperature_k(CellId(6)).unwrap();
         assert!(tf > 300.0 && tw < 400.0);
-        assert!(
-            sample.layer.material_face_temperature_k > tf
-                && sample.layer.material_face_temperature_k < tw
-        );
+        assert!(sample.layer.surface_temperature_k > tf && sample.layer.surface_temperature_k < tw);
         near(sample.fluid_temperature_k, tf);
         near(sample.wall_temperature_k, tw);
-        near(film.property_temperature_k, tf);
-        assert!((sample.conductance_w_k - held.samples()[0].conductance_w_k).abs() > 1e-9);
-        assert!(film.conductance_w_k > held.fluid_samples()[0].conductance_w_k);
+        near(
+            film.property_temperature_k,
+            0.5 * (sample.layer.surface_temperature_k + tf),
+        );
+        assert!(
+            (sample.layer.conductance_w_k - held.samples()[0].layer.conductance_w_k).abs() > 1e-9
+        );
+        assert!((film.conductance_w_k - held.samples()[0].layer.film.conductance_w_k).abs() > 1e-9);
         let wall_change = next.cells()[&CellId(6)].mass_kg
             * (next.cells()[&CellId(6)].specific_h_j_kg
                 - initial.cells()[&CellId(6)].specific_h_j_kg);

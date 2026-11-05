@@ -14,7 +14,7 @@ mod laws;
 pub mod reservoir;
 /// Section-integrated entrance heat on original finite walls and reservoirs.
 pub mod developing;
-/// Source-integrated solid resistance on native forced-duct wall links.
+/// Source-integrated solid paths and actual native wall/fluid surface films.
 pub mod conjugate;
 
 use super::*;
@@ -26,7 +26,8 @@ use crate::graph::thermal::medium::convection::{
         source::{
             ConvectionPropertyTemperature, SourceCellConvectionError, SourceCellConvectionLaw,
             links::{
-                ResolvedLinkConvection, SourceConvectiveLink, evaluate_source_link_convection,
+                ConvectiveLinkSample, ResolvedLinkConvection, SourceConvectiveLink,
+                evaluate_source_link_at_surface, evaluate_source_link_convection,
             },
         },
     },
@@ -161,37 +162,13 @@ pub(super) fn evaluate_links<M: ThermalFluidTransport>(
     let mut native = Vec::with_capacity(bindings.len());
     for binding in bindings {
         poll(cx).map_err(source_error)?;
-        let law = laws::resolve(
-            core, thermal, flow, binding.fluid_cell, binding.law, gravity,
-        ).map_err(|error| link_law_error(binding.link, error))?;
-        native.push(SourceConvectiveLink {
-            link: binding.link,
-            fluid_cell: binding.fluid_cell,
-            characteristic_length: binding.characteristic_length,
-            property_temperature: binding.property_temperature,
-            law,
-        });
+        native.push(native_link(core, thermal, flow, binding, gravity)?);
     }
     let result = evaluate_source_link_convection(
         thermal,
         &native,
         maximum_links,
-        |binding, _, temperature| {
-            poll(cx)?;
-            let material = resolve(temperature)?;
-            if !matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
-                core.admit_density(
-                    binding.fluid_cell,
-                    material
-                        .transport_state()
-                        .map_err(SourceGraphError::Material)?,
-                )?;
-            }
-            // A sphere's second source supplies only wall viscosity. Its
-            // density is not a second stored fluid state; admit the retained
-            // primary bulk snapshot below instead.
-            Ok(material)
-        },
+        |binding, _, temperature| link_material(core, cx, binding, temperature, &mut resolve),
         || cx.checkpoint().is_err(),
     )
     .map_err(GraphConvectionError::Convection)?;
@@ -204,33 +181,118 @@ pub(super) fn evaluate_links<M: ThermalFluidTransport>(
         )));
     }
     for (binding, sample) in ordered.into_iter().zip(result.samples()) {
-        if binding.link != sample.link {
-            return Err(source_error(SourceGraphError::Invalid(
-                "native convection sample and binding identities differ",
-            )));
-        }
-        poll(cx).map_err(source_error)?;
-        if matches!(binding.law, GraphConvectionLaw::ForcedSphere { .. }) {
-            core.admit_density(binding.fluid_cell, sample.thermal.transport())
-                .map_err(source_error)?;
-        }
-        laws::admit_envelope(
-            core,
-            thermal,
-            flow,
-            laws::FlowConvectionPoint {
-                fluid_cell: binding.fluid_cell,
-                characteristic_length: binding.characteristic_length,
-                law: binding.law,
-                wall_temperature_k: sample.wall_temperature_k,
-                fluid_temperature_k: sample.fluid_temperature_k,
-                material: &sample.material,
-                thermal: &sample.thermal,
-                surface: sample.surface.as_ref().map(|surface| &surface.thermal),
-            },
-        ).map_err(|error| link_law_error(binding.link, error))?;
+        admit_link_sample(core, cx, thermal, flow, binding, sample)?;
     }
     Ok(result)
+}
+
+fn native_link(
+    core: &BoundGraphCore<'_>,
+    thermal: &DepositionSimulation<'_>,
+    flow: GraphFlow<'_>,
+    binding: &GraphConvectiveLink,
+    gravity: f64,
+) -> Result<SourceConvectiveLink, GraphConvectionError> {
+    let law = laws::resolve(
+        core,
+        thermal,
+        flow,
+        binding.fluid_cell,
+        binding.law,
+        gravity,
+    )
+    .map_err(|error| link_law_error(binding.link, error))?;
+    Ok(SourceConvectiveLink {
+        link: binding.link,
+        fluid_cell: binding.fluid_cell,
+        characteristic_length: binding.characteristic_length,
+        property_temperature: binding.property_temperature,
+        law,
+    })
+}
+
+fn link_material<M: ThermalFluidTransport>(
+    core: &BoundGraphCore<'_>,
+    cx: &Cx<'_>,
+    binding: &SourceConvectiveLink,
+    temperature: Temperature,
+    resolve: &mut impl FnMut(Temperature) -> Result<M, SourceGraphError>,
+) -> Result<M, SourceGraphError> {
+    poll(cx)?;
+    let material = resolve(temperature)?;
+    if !matches!(binding.law, SourceCellConvectionLaw::ForcedSphere { .. }) {
+        core.admit_density(
+            binding.fluid_cell,
+            material
+                .transport_state()
+                .map_err(SourceGraphError::Material)?,
+        )?;
+    }
+    // A sphere's additional query supplies only surface viscosity. Its density
+    // is not another stored fluid state; admit the primary bulk snapshot below.
+    Ok(material)
+}
+
+fn admit_link_sample<M: ThermalFluidTransport>(
+    core: &BoundGraphCore<'_>,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'_>,
+    flow: GraphFlow<'_>,
+    binding: &GraphConvectiveLink,
+    sample: &ConvectiveLinkSample<M>,
+) -> Result<(), GraphConvectionError> {
+    if binding.link != sample.link {
+        return Err(GraphConvectionError::Source(SourceGraphError::Invalid(
+            "native convection sample and binding identities differ",
+        )));
+    }
+    poll(cx).map_err(GraphConvectionError::Source)?;
+    if matches!(binding.law, GraphConvectionLaw::ForcedSphere { .. }) {
+        core.admit_density(binding.fluid_cell, sample.thermal.transport())
+            .map_err(GraphConvectionError::Source)?;
+    }
+    laws::admit_envelope(
+        core,
+        thermal,
+        flow,
+        laws::FlowConvectionPoint {
+            fluid_cell: binding.fluid_cell,
+            characteristic_length: binding.characteristic_length,
+            law: binding.law,
+            wall_temperature_k: sample.wall_temperature_k,
+            fluid_temperature_k: sample.fluid_temperature_k,
+            material: &sample.material,
+            thermal: &sample.thermal,
+            surface: sample.surface.as_ref().map(|surface| &surface.thermal),
+        },
+    )
+    .map_err(|error| link_law_error(binding.link, error))
+}
+
+// A real material surface uses the SAME fluid source and flow-envelope owner.
+// The result is one diagnostic sample; only the surface solver publishes the
+// combined reciprocal coefficient to the original thermal link.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_link_surface<M: ThermalFluidTransport>(
+    core: &BoundGraphCore<'_>,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'_>,
+    flow: GraphFlow<'_>,
+    binding: &GraphConvectiveLink,
+    native: &SourceConvectiveLink,
+    surface_temperature_k: f64,
+    resolve: &mut impl FnMut(Temperature) -> Result<M, SourceGraphError>,
+) -> Result<ConvectiveLinkSample<M>, GraphConvectionError> {
+    let sample = evaluate_source_link_at_surface(
+        thermal,
+        native,
+        surface_temperature_k,
+        |binding, _, temperature| link_material(core, cx, binding, temperature, resolve),
+        || cx.checkpoint().is_err(),
+    )
+    .map_err(GraphConvectionError::Convection)?;
+    admit_link_sample(core, cx, thermal, flow, binding, &sample)?;
+    Ok(sample)
 }
 
 fn link_law_error(link: u64, error: laws::FlowConvectionError) -> GraphConvectionError {

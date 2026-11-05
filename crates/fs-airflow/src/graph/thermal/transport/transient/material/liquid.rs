@@ -2,6 +2,9 @@
 
 use super::conduction::{GraphConductionError, GraphConductiveLink, ResolvedGraphConduction};
 use super::convection::{GraphConvectionError, GraphConvectiveLink, GraphSourceHeat};
+use super::convection::conjugate::{
+    GraphConjugateError, PreparedGraphConjugateLinks, ResolvedGraphSurfaceConjugateHeat,
+};
 use super::heating::{GraphHeatingError, LiquidGraphHeating};
 use super::convection::reservoir::{GraphConvectiveReservoir, GraphReservoirConvectionError, GraphReservoirHeat};
 use super::convection::developing::{GraphDevelopingConvectionError, GraphDevelopingHeat, GraphDevelopingSection};
@@ -10,6 +13,7 @@ use crate::graph::thermal::medium::series::enthalpy::admit_liquid_caloric_source
 use fs_material::liquid::ResolvedLiquidState;
 use fs_material::liquid_temperature::LiquidTemperatureLaw;
 use fs_material::phase::ResolvedHeatCapacityCurve;
+use fs_material::thermal::conduction::LayerConductionConfig;
 
 /// Prepared original source and exact registered caloric object. The original
 /// temperature law retains material-card selection, pressure and every
@@ -210,6 +214,76 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
             convection,
         })
     }
+    /// Solve the original solid path and source-dependent film at one actual
+    /// fluid-facing surface. Native flow-envelope and source admission precede
+    /// the surface solve; only its combined reciprocal link is applied.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_conjugate_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        report: &InertialGraphReport,
+        prepared: &PreparedGraphConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphSurfaceConjugateHeat<ResolvedLiquidState>, GraphConjugateError> {
+        self.evaluate_conjugate_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::Inertial(report),
+            prepared,
+            config,
+        )
+    }
+
+    /// Surface-dependent conjugate exchange at the actual quasi-steady
+    /// endpoint. The original interval duration still bounds local work.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_quasi_steady_conjugate_links(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        hydraulics: &GraphSolution,
+        duration_s: f64,
+        prepared: &PreparedGraphConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphSurfaceConjugateHeat<ResolvedLiquidState>, GraphConjugateError> {
+        self.evaluate_conjugate_flow(
+            cx,
+            thermal,
+            sources,
+            GraphFlow::QuasiSteady {
+                hydraulics,
+                duration_s,
+            },
+            prepared,
+            config,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_conjugate_flow(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        sources: &GraphSourceState<ResolvedLiquidState>,
+        flow: GraphFlow<'_>,
+        prepared: &PreparedGraphConjugateLinks<'_, '_>,
+        config: LayerConductionConfig,
+    ) -> Result<ResolvedGraphSurfaceConjugateHeat<ResolvedLiquidState>, GraphConjugateError> {
+        let admission = self
+            .core
+            .admit_flow(cx, thermal, sources, flow)
+            .map_err(|error| {
+                GraphConjugateError::Convection(GraphConvectionError::Source(error))
+            })?;
+        prepared.resolve_surface(&self.core, cx, thermal, flow, admission, config, |t| {
+            self.law.at_temperature(t).map_err(SourceGraphError::Liquid)
+        })
+    }
+
     /// Convective heat from already-declared prescribed wall reservoirs at the
     /// actual native inertial endpoint. The original wall temperatures, areas,
     /// fluid source, caloric identity and physical flow limits remain authoritative.

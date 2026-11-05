@@ -43,6 +43,8 @@ fs-math = { path = "../fs-math" }
 fs-phs = { path = "../fs-phs" }
 # One resolved medium supplies hydraulics, convection and transported heat.
 fs-material = { path = "../fs-material" }
+# Source-integrated wall layers retain their original conductivity line.
+fs-matdb = { path = "../fs-matdb" }
 fs-qty = { path = "../fs-qty" }
 fs-regime = { path = "../fs-regime" }
 # Reuse checked matrix-free CG for implicit hydraulic derivatives.
