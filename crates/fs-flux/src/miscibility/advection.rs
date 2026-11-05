@@ -35,9 +35,9 @@ pub struct BinaryMiscibilityAdvectionFace {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BinaryMiscibilityAdvection {
     network: BinaryMiscibilityNetwork,
-    face_rates: Vec<BinaryMiscibilityAdvectionFace>,
+    face_rates: Arc<[BinaryMiscibilityAdvectionFace]>,
     // Outgoing donor fractions per second, avoiding divisions during substeps.
-    donor_rates_s: Vec<[f64; 2]>,
+    donor_rates_s: Arc<[[f64; 2]]>,
     maximum_outgoing_rate_s: f64,
     maximum_relative_volume_divergence: f64,
 }
@@ -196,10 +196,53 @@ impl BinaryMiscibilityNetwork {
         poll(&mut cancelled)?;
         Ok(BinaryMiscibilityAdvection {
             network: self.clone(),
-            face_rates,
-            donor_rates_s,
+            face_rates: face_rates.into(),
+            donor_rates_s: donor_rates_s.into(),
             maximum_outgoing_rate_s,
             maximum_relative_volume_divergence: maximum_divergence,
+        })
+    }
+
+    /// Reuse an admitted prescribed flow after a uniform temperature change.
+    /// Only temperature may differ: the original pair, c, kappa, cells and all
+    /// physical face coefficients must match exactly. Rate and donor caches are
+    /// shared; no continuity tolerance is relaxed and no velocity is projected.
+    /// The old flow remains bound to its old model until explicitly rebound.
+    pub fn rebind_advection(
+        &self,
+        flow: &BinaryMiscibilityAdvection,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<BinaryMiscibilityAdvection> {
+        poll(&mut cancelled)?;
+        let previous = &flow.network;
+        if self.model().thermodynamics() != previous.model().thermodynamics()
+            || self.model().molar_concentration_mol_m3()
+                != previous.model().molar_concentration_mol_m3()
+            || self.model().gradient_coefficient_j_m()
+                != previous.model().gradient_coefficient_j_m()
+            || self.owner.cells != previous.owner.cells
+            || self.owner.capacities_mol != previous.owner.capacities_mol
+            || self.owner.faces.len() != previous.owner.faces.len()
+        {
+            return Err(Error::Invalid(
+                "flow rebinding may change only the original uniform temperature",
+            ));
+        }
+        for (current, old) in self.owner.faces.iter().zip(previous.owner.faces.iter()) {
+            poll(&mut cancelled)?;
+            if current.physical != old.physical || current.gradient_j != old.gradient_j {
+                return Err(Error::Invalid(
+                    "flow rebinding requires the same original physical faces",
+                ));
+            }
+        }
+        poll(&mut cancelled)?;
+        Ok(BinaryMiscibilityAdvection {
+            network: self.clone(),
+            face_rates: Arc::clone(&flow.face_rates),
+            donor_rates_s: Arc::clone(&flow.donor_rates_s),
+            maximum_outgoing_rate_s: flow.maximum_outgoing_rate_s,
+            maximum_relative_volume_divergence: flow.maximum_relative_volume_divergence,
         })
     }
 
@@ -273,8 +316,12 @@ impl BinaryMiscibilityNetwork {
             }
             maximum_courant = maximum_courant.max(courant);
             changes.fill([Sum::default(); 2]);
-            for (index, (face, donor)) in
-                self.owner.faces.iter().zip(&flow.donor_rates_s).enumerate()
+            for (index, (face, donor)) in self
+                .owner
+                .faces
+                .iter()
+                .zip(flow.donor_rates_s.iter())
+                .enumerate()
             {
                 poll(&mut cancelled)?;
                 let [i, j] = face.physical.cells;

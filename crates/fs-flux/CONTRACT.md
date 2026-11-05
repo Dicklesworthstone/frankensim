@@ -4818,7 +4818,8 @@ For cell capacities `N_i=c*V_i` and face weights
 Each face moves A and B in equal opposite molar amounts. This is a
 molar/volume reference frame with equal fixed partial molar volumes; unequal
 molar masses do not imply zero barycentric mass flux. Local density can change
-with composition. Temperature, pressure and geometry are externally fixed.
+with composition. Pressure and geometry remain externally fixed; uniform
+temperature can be changed atomically through the temperature owner below.
 The molecular lane does not advance heat, momentum, gravity, wetting or
 nucleation rates. Prescribed volume-flow advection is a separate operator below.
 
@@ -4947,6 +4948,46 @@ source-backed density changes with unequal molar masses, nonlinear viscosity
 and thermal-property refresh, retained claim identity, homogeneous spinodal
 states, source-domain refusal after otherwise admissible diffusion, and atomic
 cancellation. They retain the existing prescribed-flow and source-data limits.
+
+### Uniform temperature changes and original calorics
+
+`miscibility::temperature` changes the prescribed uniform temperature of an
+existing spatial field without resetting composition, interfaces, compensated
+inventory remainders or elapsed time. The original pair law determines the new
+chi and the same validated square-gradient constructor rejects unsupported
+temperatures or a zero-kappa quench into a spinodal regime. Cooling can therefore
+activate finite-rate demixing; no cell is independently flashed or phase seeded.
+
+The returned candidate contains the new network and its admitted state.
+Unchanged cells, capacities and CSR/gradient geometry share immutable arrays.
+Face mobilities are recomputed from original concentration, authored diffusivity
+and geometry with the new RT, avoiding accumulated temperature-ratio error.
+Diffusivity itself remains the caller's explicit coefficient; this API does not
+infer a temperature-dependent diffusivity or thermal expansion. Prepared volume
+flow is explicitly reusable through `rebind_advection`, which requires the same
+pair, concentration, kappa and every physical cell/face and shares the admitted
+rate caches. An old flow or state cannot silently enter a different thermal owner.
+
+For the original `chi=A+B/T` law and fixed composition, mixing entropy is
+temperature independent and gradient energy is unchanged. The direct external
+field free-energy increment is `-delta(T)*S_mix`, retaining small changes beside
+large interface energies. Either sign is admissible. This parameter-change
+account is neither supplied heat nor dissipation.
+
+`BinaryMiscibilityTemperatureCandidate::caloric_change` optionally uses the
+same full pair and explicitly qualified ordered pure-liquid Cp sources.
+Direct original Cp and Cp/T integrals, evaluated once per species, supply the
+separate sensible heat and system entropy increments using both words of every
+paired inventory. No bulk equilibrium solve, thermal root, reference-energy
+subtraction or replacement of unstable spatial cells occurs. Pure-liquid
+qualification and the fixed-volume/maintained-pressure approximation remain
+explicit caller responsibilities. These APIs do not advance heat conduction,
+adiabatic feedback or reservoir entropy.
+
+Focused native regressions exercise quench-induced spinodal growth, ideal
+diffusion's temperature cancellation, retained traces/history/clock, exact
+thermal-owner round trips, direct small energy increments, flow rebinding,
+analytic piecewise Cp/CpT calorics and atomic domain/cancellation refusals.
 
 ## Same-energy binary interface tension in capillary flow
 

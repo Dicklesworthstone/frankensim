@@ -7,9 +7,11 @@
 //! This is zero net molar/volume flux. Unequal molar masses give a nonzero net
 //! mass flux in this frame and changing local density; the barycentric mass
 //! frame therefore differs from the fixed molar/volume frame used here.
-//! Temperature and pressure are held externally; this is not caloric evolution,
-//! momentum, wetting/contact-line motion or a nucleation-rate model. Prescribed
-//! incompressible volume-flow transport is available through [`advection`].
+//! Temperature and pressure are held externally. Uniform temperature changes
+//! through [`temperature`] retain the evolving field and its original sources;
+//! they do not solve heat conduction or feedback. Momentum, wetting/contact-line
+//! motion and nucleation rates are not included. Prescribed incompressible
+//! volume-flow transport is available through [`advection`].
 //!
 //! Each physical face advances through one implicit convex-split exchange.
 //! Logarithmic ideal terms, convex interactions and the FULL graph's gradient
@@ -35,6 +37,7 @@ mod solve;
 
 pub mod adaptive;
 pub mod advection;
+pub mod temperature;
 pub mod transport;
 
 /// Native FEEC volume transport on the same closed miscibility control volumes.
@@ -158,12 +161,12 @@ struct Face {
 #[derive(Clone, Debug, PartialEq)]
 struct Owner {
     model: BinarySquareGradientV1,
-    cells: Vec<BinaryMiscibilityCell>,
-    capacities_mol: Vec<f64>,
-    faces: Vec<Face>,
-    adjacent_offsets: Vec<usize>,
-    adjacent_faces: Vec<usize>,
-    gradient_diagonal_j: Vec<f64>,
+    cells: Arc<[BinaryMiscibilityCell]>,
+    capacities_mol: Arc<[f64]>,
+    faces: Arc<[Face]>,
+    adjacent_offsets: Arc<[usize]>,
+    adjacent_faces: Arc<[usize]>,
+    gradient_diagonal_j: Arc<[f64]>,
     workspace_bytes: usize,
 }
 
@@ -255,14 +258,8 @@ impl BinaryMiscibilityNetwork {
                 model.gradient_coefficient_j_m() * geometry,
                 "gradient face weight",
             )?;
-            let mobility_mol2_j_s = finite(
-                (model.molar_concentration_mol_m3() * physical.diffusivity_m2_s)
-                    * (geometry / model.rt_j_per_mol()),
-                "face mobility",
-            )?;
-            if (geometry > 0.0 && model.gradient_coefficient_j_m() > 0.0 && gradient_j == 0.0)
-                || (geometry > 0.0 && physical.diffusivity_m2_s > 0.0 && mobility_mol2_j_s == 0.0)
-            {
+            let mobility_mol2_j_s = face_mobility(&model, geometry, physical.diffusivity_m2_s)?;
+            if geometry > 0.0 && model.gradient_coefficient_j_m() > 0.0 && gradient_j == 0.0 {
                 return Err(BinaryMiscibilityError::Arithmetic(
                     "positive face coefficient underflows",
                 ));
@@ -298,12 +295,12 @@ impl BinaryMiscibilityNetwork {
         Ok(Self {
             owner: Arc::new(Owner {
                 model,
-                cells,
-                capacities_mol,
-                faces: prepared,
-                adjacent_offsets,
-                adjacent_faces,
-                gradient_diagonal_j,
+                cells: cells.into(),
+                capacities_mol: capacities_mol.into(),
+                faces: prepared.into(),
+                adjacent_offsets: adjacent_offsets.into(),
+                adjacent_faces: adjacent_faces.into(),
+                gradient_diagonal_j: gradient_diagonal_j.into(),
                 workspace_bytes,
             }),
         })
@@ -338,7 +335,7 @@ impl BinaryMiscibilityNetwork {
             ));
         }
         let mut amounts = Vec::with_capacity(fractions.len());
-        for (fraction, &capacity) in fractions.into_iter().zip(&self.owner.capacities_mol) {
+        for (fraction, &capacity) in fractions.into_iter().zip(self.owner.capacities_mol.iter()) {
             poll(&mut cancelled)?;
             let x = self
                 .model()
@@ -373,7 +370,7 @@ impl BinaryMiscibilityNetwork {
             ));
         }
         let mut fractions = Vec::with_capacity(amounts.len());
-        for (pair, &capacity) in amounts.iter().zip(&self.owner.capacities_mol) {
+        for (pair, &capacity) in amounts.iter().zip(self.owner.capacities_mol.iter()) {
             poll(&mut cancelled)?;
             if pair.iter().any(|&n| !nonnegative(n)) {
                 return Err(BinaryMiscibilityError::Invalid(
@@ -400,7 +397,7 @@ impl BinaryMiscibilityNetwork {
     ) -> Result<f64> {
         self.admit(state)?;
         let mut sum = Sum::default();
-        for (&fraction, &capacity) in state.fractions.iter().zip(&self.owner.capacities_mol) {
+        for (&fraction, &capacity) in state.fractions.iter().zip(self.owner.capacities_mol.iter()) {
             poll(&mut cancelled)?;
             sum.add(finite(
                 capacity
@@ -411,7 +408,7 @@ impl BinaryMiscibilityNetwork {
                 "bulk free energy",
             )?)?;
         }
-        for face in &self.owner.faces {
+        for face in self.owner.faces.iter() {
             poll(&mut cancelled)?;
             let [i, j] = face.physical.cells;
             let d = state.fractions[i][0] - state.fractions[j][0];
@@ -495,7 +492,7 @@ impl BinaryMiscibilityNetwork {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<Sum>> {
         let mut result = vec![Sum::default(); fractions.len()];
-        for face in &self.owner.faces {
+        for face in self.owner.faces.iter() {
             poll(cancelled)?;
             let [i, j] = face.physical.cells;
             let contribution = finite(
@@ -524,7 +521,7 @@ impl BinaryMiscibilityNetwork {
                 "bulk energy increment",
             )?)?;
         }
-        for face in &self.owner.faces {
+        for face in self.owner.faces.iter() {
             poll(cancelled)?;
             let [i, j] = face.physical.cells;
             let a = old.fractions[i][0] - old.fractions[j][0];
@@ -536,6 +533,21 @@ impl BinaryMiscibilityNetwork {
         }
         sum.value()
     }
+}
+
+// Recompute from original source coefficients at each temperature. Repeated
+// cooling/heating must not accumulate a rounded ratio of old mobilities.
+fn face_mobility(model: &BinarySquareGradientV1, geometry: f64, diffusivity: f64) -> Result<f64> {
+    let mobility = finite(
+        (model.molar_concentration_mol_m3() * diffusivity) * (geometry / model.rt_j_per_mol()),
+        "face mobility",
+    )?;
+    if geometry > 0.0 && diffusivity > 0.0 && mobility == 0.0 {
+        return Err(BinaryMiscibilityError::Arithmetic(
+            "positive face mobility underflows",
+        ));
+    }
+    Ok(mobility)
 }
 
 /// Conserved finite-volume inventories with exact original constitutive owner.
