@@ -48,7 +48,12 @@ pub use shooting::{
 };
 mod variational_feedback;
 pub use variational_feedback::{
-    PhsFeedbackStateJacobian, solve_autonomous_feedback_shooting_variational,
+    PhsFeedbackStateJacobian,
+    solve_autonomous_feedback_harmonic_balance_adaptive_scaled_seeded,
+    solve_autonomous_feedback_harmonic_balance_analytic_adaptive_scaled_seeded,
+    solve_autonomous_feedback_harmonic_balance_analytic_scaled_seeded,
+    solve_autonomous_feedback_harmonic_balance_scaled_seeded,
+    solve_autonomous_feedback_shooting_variational,
     solve_autonomous_feedback_shooting_variational_analytic,
 };
 mod autonomous;

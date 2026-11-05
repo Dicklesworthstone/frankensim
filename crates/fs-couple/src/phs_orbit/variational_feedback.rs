@@ -1,4 +1,4 @@
-//! Exact continuous feedback tangents on the shared autonomous shooting owner.
+//! Complete continuous feedback tangents on the shared autonomous orbit owners.
 
 use super::{
     AutonomousPortFeedback, InputKind, PhsOrbitError, PhsOrbitProblem, PhsStorageHessianAction,
@@ -6,8 +6,10 @@ use super::{
 };
 use core::cell::RefCell;
 use fs_orbit::{
-    OrbitProblem, ShootBudget, TimeDomainRhs, TimeDomainStateJacobian, VariationalShootControls,
-    VariationalShootError, VariationalShootOrbit, solve_shooting_variational,
+    AdaptiveHbOrbit, HbBudget, HbRefinementBudget, HbScales, IslandStateJacobian, OrbitProblem,
+    ScaledHbOrbit, ShootBudget, TimeDomainRhs, TimeDomainStateJacobian, VariationalShootControls,
+    VariationalShootError, VariationalShootOrbit, solve_hb_autonomous_adaptive_scaled_seeded,
+    solve_hb_autonomous_scaled_seeded, solve_shooting_variational,
 };
 use fs_phs::PortHamiltonian;
 
@@ -40,6 +42,12 @@ impl OrbitProblem for FeedbackVariationalProblem<'_> {
     }
     fn island(&self, time: f64, state: &[f64], out: &mut [f64]) {
         self.original.island(time, state, out);
+    }
+    fn island_state_jacobian(&self) -> Option<IslandStateJacobian<Self>> {
+        self.original
+            .tangent
+            .available()
+            .then_some(Self::state_jacobian)
     }
     fn time_domain_rhs(&self) -> Option<TimeDomainRhs<Self>> {
         Some(Self::island)
@@ -100,6 +108,200 @@ impl FeedbackVariationalProblem<'_> {
         }
         out.iter().all(|v| v.is_finite())
     }
+}
+
+fn feedback_tangent_problem<'a>(
+    system: &'a PortHamiltonian,
+    feedback: &'a dyn AutonomousPortFeedback,
+    feedback_jacobian: &'a PhsFeedbackStateJacobian<'a>,
+    hessian: Option<&'a PhsStorageHessianAction<'a>>,
+) -> Result<FeedbackVariationalProblem<'a>, PhsOrbitError> {
+    let n = system.state_dim();
+    let derivative_count = n
+        .checked_mul(system.port_dim())
+        .ok_or_else(|| bad("complete feedback derivative extent overflows"))?;
+    let mut original = feedback_problem(system, feedback)?;
+    original.tangent = match hessian {
+        Some(hessian) => StorageTangent::hessian(n, hessian),
+        None => StorageTangent::from_storage(system),
+    };
+    Ok(FeedbackVariationalProblem {
+        original,
+        feedback_jacobian,
+        derivative: RefCell::new(vec![0.0; derivative_count]),
+    })
+}
+
+/// Resolve a self-excited harmonic waveform from a complete physical seed.
+///
+/// The original pHS flow `(J-R)*grad H + G*u(x,G^T*grad H)` supplies every
+/// residual. Its complete analytic derivative `(J-R)*H'' + G*du_total/dx`
+/// supplies the shared AFT Newton matrix, once per physical sample rather than
+/// by perturbing every Fourier coefficient. Exact quadratic storage metadata or
+/// the storage's own continuous tangent supplies H''; a merely quadratic part
+/// of nonlinear storage is insufficient. The feedback derivative is TOTAL as
+/// specified by [`PhsFeedbackStateJacobian`].
+///
+/// The packed seed uses [`fs_orbit::HbOrbit::packed_seed`] with an autonomous
+/// anchor: all original DC and complex harmonics, then omega in rad/s. No
+/// coordinate is removed or permuted. A full-waveform Parseval phase condition
+/// uses this seed and the physical state scales, so a static first coordinate
+/// or a first coordinate with no fundamental does not suppress the cycle.
+/// All state/equation scales, coefficients, material-memory coordinates and
+/// source work retain their original physical meaning. Passive R loss remains
+/// separate from active supply; no negative material resistance is inserted.
+///
+/// This is a fixed-order independently sampled balance, not a stability,
+/// primitive-period, omitted-tail or excitation-physics certificate. Sources
+/// must be deterministic/read-only. No partial orbit escapes a refusal.
+///
+/// # Errors
+/// Invalid original ports, unavailable complete storage tangent, malformed
+/// physical seed/scales, source or declared tangent refusal, or native HB
+/// numerical failure. Declared tangents never fall back to finite differences;
+/// an already converged independently checked seed need not evaluate them.
+pub fn solve_autonomous_feedback_harmonic_balance_scaled_seeded(
+    system: &PortHamiltonian,
+    feedback: &dyn AutonomousPortFeedback,
+    feedback_jacobian: &PhsFeedbackStateJacobian<'_>,
+    seed: Vec<f64>,
+    budget: &HbBudget,
+    scales: &HbScales,
+) -> Result<ScaledHbOrbit, PhsOrbitError> {
+    solve_harmonic(
+        system,
+        feedback,
+        feedback_jacobian,
+        seed,
+        budget,
+        scales,
+        None,
+    )
+}
+
+/// The same full-state scaled feedback solve with an authored complete original
+/// storage Hessian action. Its contract is [`PhsStorageHessianAction`]; all
+/// original memory cross derivatives and nonlinear stiffness remain present.
+/// The TOTAL feedback derivative already includes this same flow/Hessian chain.
+pub fn solve_autonomous_feedback_harmonic_balance_analytic_scaled_seeded(
+    system: &PortHamiltonian,
+    feedback: &dyn AutonomousPortFeedback,
+    feedback_jacobian: &PhsFeedbackStateJacobian<'_>,
+    seed: Vec<f64>,
+    budget: &HbBudget,
+    scales: &HbScales,
+    hessian: &PhsStorageHessianAction<'_>,
+) -> Result<ScaledHbOrbit, PhsOrbitError> {
+    solve_harmonic(
+        system,
+        feedback,
+        feedback_jacobian,
+        seed,
+        budget,
+        scales,
+        Some(hessian),
+    )
+}
+
+/// Refine the same complete feedback waveform with independently checked
+/// retained and omitted equation harmonics. The original seed's full-state
+/// phase reference survives every order extension; no harmonic is discarded
+/// merely because the first coordinate is static. Acceptance requires the
+/// shared solver's waveform, frequency, sampling and finite-band residual gates.
+/// This measured refinement does not bound an infinite tail or certify stability.
+pub fn solve_autonomous_feedback_harmonic_balance_adaptive_scaled_seeded(
+    system: &PortHamiltonian,
+    feedback: &dyn AutonomousPortFeedback,
+    feedback_jacobian: &PhsFeedbackStateJacobian<'_>,
+    seed: Vec<f64>,
+    budget: &HbBudget,
+    refinement: &HbRefinementBudget,
+    scales: &HbScales,
+) -> Result<AdaptiveHbOrbit, PhsOrbitError> {
+    solve_harmonic_adaptive(
+        system,
+        feedback,
+        feedback_jacobian,
+        seed,
+        budget,
+        refinement,
+        scales,
+        None,
+    )
+}
+
+/// Adaptive full-state feedback HB using an explicitly authored original
+/// Hessian. Both exact derivatives and the unchanged original vector field are
+/// evaluated at every admitted order; all refusals and physical units retain
+/// the fixed-order analytic entry's semantics.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_autonomous_feedback_harmonic_balance_analytic_adaptive_scaled_seeded(
+    system: &PortHamiltonian,
+    feedback: &dyn AutonomousPortFeedback,
+    feedback_jacobian: &PhsFeedbackStateJacobian<'_>,
+    seed: Vec<f64>,
+    budget: &HbBudget,
+    refinement: &HbRefinementBudget,
+    scales: &HbScales,
+    hessian: &PhsStorageHessianAction<'_>,
+) -> Result<AdaptiveHbOrbit, PhsOrbitError> {
+    solve_harmonic_adaptive(
+        system,
+        feedback,
+        feedback_jacobian,
+        seed,
+        budget,
+        refinement,
+        scales,
+        Some(hessian),
+    )
+}
+
+fn solve_harmonic(
+    system: &PortHamiltonian,
+    feedback: &dyn AutonomousPortFeedback,
+    feedback_jacobian: &PhsFeedbackStateJacobian<'_>,
+    seed: Vec<f64>,
+    budget: &HbBudget,
+    scales: &HbScales,
+    hessian: Option<&PhsStorageHessianAction<'_>>,
+) -> Result<ScaledHbOrbit, PhsOrbitError> {
+    let problem = feedback_tangent_problem(system, feedback, feedback_jacobian, hessian)?;
+    if !problem.original.tangent.available() {
+        return Err(bad(
+            "complete original storage tangent required for analytic feedback HB",
+        ));
+    }
+    let result = solve_hb_autonomous_scaled_seeded(&problem, seed, budget, scales);
+    if problem.original.source_refused() {
+        return Err(PhsOrbitError::SourceRefused);
+    }
+    result.map_err(PhsOrbitError::Orbit)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_harmonic_adaptive(
+    system: &PortHamiltonian,
+    feedback: &dyn AutonomousPortFeedback,
+    feedback_jacobian: &PhsFeedbackStateJacobian<'_>,
+    seed: Vec<f64>,
+    budget: &HbBudget,
+    refinement: &HbRefinementBudget,
+    scales: &HbScales,
+    hessian: Option<&PhsStorageHessianAction<'_>>,
+) -> Result<AdaptiveHbOrbit, PhsOrbitError> {
+    let problem = feedback_tangent_problem(system, feedback, feedback_jacobian, hessian)?;
+    if !problem.original.tangent.available() {
+        return Err(bad(
+            "complete original storage tangent required for analytic feedback HB",
+        ));
+    }
+    let result =
+        solve_hb_autonomous_adaptive_scaled_seeded(&problem, seed, budget, refinement, scales);
+    if problem.original.source_refused() {
+        return Err(PhsOrbitError::SourceRefused);
+    }
+    result.map_err(PhsOrbitError::Orbit)
 }
 
 /// Resolve a self-excited cycle of the COMPLETE original pHS and feedback law.
@@ -263,16 +465,7 @@ fn solve(
     let mut admitted = controls.clone();
     admitted.maximum_payload_bytes -= bytes as usize;
     admitted.maximum_work -= work as u64;
-    let mut original = feedback_problem(system, feedback)?;
-    original.tangent = match hessian {
-        Some(hessian) => StorageTangent::hessian(n, hessian),
-        None => StorageTangent::from_storage(system),
-    };
-    let problem = FeedbackVariationalProblem {
-        original,
-        feedback_jacobian,
-        derivative: RefCell::new(vec![0.0; n * m]),
-    };
+    let problem = feedback_tangent_problem(system, feedback, feedback_jacobian, hessian)?;
     let result = solve_shooting_variational(
         &problem,
         seed,
