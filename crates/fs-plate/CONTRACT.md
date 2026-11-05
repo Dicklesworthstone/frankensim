@@ -993,11 +993,17 @@ independent world resultants, work/power, subdivision and late-point rollback.
 MITC membrane, bending and transverse-shear loss admit positive-semidefinite
 tensors through the shared material resultant owner, preserving physically
 undamped strain directions without regularization. `project_viscosity`
-evaluates each 18-by-18 element action once per retained mode and then
-projects every cross term. Its conservative per-facet work expression is
-`1_000_000 + 324*n + 18*n*n`, plus input coverage; this is an operation-count
-improvement, not a measured runtime claim. Native affine membrane-energy
-checks verify active directions, null modes and complete modal congruence.
+expands the elastic bubble coordinates, evaluates each original quadrature
+strain map once, and applies the original constitutive square factors to each
+mode's strain before forming the modal Gram matrix. This retains resolved weak
+loss that dense nodal assembly followed by projection can erase through
+cancellation. Every modal cross term remains; exactly zero factor columns are
+skipped without a magnitude cutoff. Temporary channel storage is linear in the
+mode count, and projection remains quadratic in that count. The conservative
+per-facet work expression is `1_000_000 + 4096*n + 84*n*n`, plus input coverage,
+including all seven quadrature points and twelve factor slots. Affine
+membrane-energy checks verify active directions, exact null modes, full modal
+congruence and relative accuracy of representable weak material loss.
 
 ## Shared DKT curvature quadrature
 
