@@ -1,5 +1,31 @@
 # fs-solid CONTRACT
 
+## Source-bound transverse shear in native frames
+
+`Frame2d::add_material_shear_element` explicitly enables an elastic Timoshenko
+member using the original `ConcentricShearSection`, including its authored
+shear correction and every original layer/source. The original force-based
+state determination adds the complementary shear flexibility
+`(GA L)^-1 [0,1,1] [0,1,1]^T`, with GA the corrected stiffness. Accepted
+shear resultant, effective engineering strain and reversible energy are
+observed through that same law. Existing Euler–Bernoulli members retain their
+original behavior.
+
+Consistent reference inertia integrates the static Timoshenko translation and
+independent section-rotation fields with exact positive four-point quadrature.
+The same native stiffness and inertia feed static equilibrium, modes, Newmark
+and harmonic/pole preparation. This is a convergent beam approximation;
+neither exact continuum dynamics nor resolved three-dimensional shear stress,
+shear failure, shear viscosity or thermal feedback is claimed. Legacy
+Euler–Bernoulli strain-trace consumers, including longitudinal Maxwell/thermal
+adapters, refuse shear-enabled members rather than silently misinterpreting
+their curvature. Frozen source-temperature and small-strain limits still apply.
+
+The focused `frame2d_shear` target supplies analytic cantilever work/compliance,
+load reversal, pure bending, rigid-motion inertia, a shared modal/harmonic/
+Newmark oscillator, the Euler–Bernoulli limit, a three-rung simply-supported
+Timoshenko frequency ladder, and source-refusal rollback checks.
+
 ## Nonlinear source-bound membrane motion
 
 `membrane::dynamics::MembraneMotion` advances the original total-Lagrangian

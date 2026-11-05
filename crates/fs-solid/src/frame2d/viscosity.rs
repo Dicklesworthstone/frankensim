@@ -182,6 +182,8 @@ impl Frame2d {
     /// memory consumers must supply their own admitted section integrals once.
     /// No source is evaluated, allocation made or accepted state changed.
     /// Corotational geometry needs current-configuration maps and is refused.
+    /// Shear-deformable members also refuse: their section rotation and
+    /// curvature are not these Euler–Bernoulli traces.
     pub fn reference_strain_traces(
         &self,
         element: usize,
@@ -191,6 +193,11 @@ impl Frame2d {
         }
         let element = self.elements.get(element)
             .ok_or_else(|| invalid("strain trace member does not exist"))?;
+        if element.transverse_shear.is_some() {
+            return Err(invalid(
+                "Euler-Bernoulli strain traces do not admit transverse shear",
+            ));
+        }
         let (l, c, s) = (element.l0, element.cos0, element.sin0);
         if !l.is_finite() || l <= 0.0 || !c.is_finite() || !s.is_finite() {
             return Err(invalid("strain trace geometry is not finite"));

@@ -16,7 +16,9 @@
 //! `Δd = f_s (b q − D_r(d))` until compatibility AND section equilibrium
 //! hold; the element tangent is `K_b = F⁻¹`,
 //! `F = ∫ bᵀ f_s b dx`. For an elastic prismatic member this reproduces the
-//! exact Euler–Bernoulli flexibility in one pass.
+//! exact Euler–Bernoulli flexibility in one pass. Source-bound transverse shear
+//! adds `F_s = (GA L)⁻¹ [0,1,1] [0,1,1]ᵀ` through the same state determination,
+//! with GA the section's explicitly corrected shear stiffness.
 //!
 //! ## Geometry
 //!
@@ -36,8 +38,9 @@
 //! Determinism: fixed traversal order, dense LU with partial pivoting, no
 //! threads — bit-identical for the same input on the same build/ISA.
 //!
-//! No-claim: planar Euler–Bernoulli members (no shear deformation, no
-//! warping/torsion, no out-of-plane buckling); reference-configuration inertia;
+//! Members use Euler–Bernoulli kinematics unless explicitly constructed with
+//! [`Frame2d::add_material_shear_element`], which includes Timoshenko shear.
+//! No-claim: no warping/torsion or out-of-plane buckling; reference-configuration inertia;
 //! no element-level shear failure, bond-slip, or joint panel flexibility;
 //! the corotational strains are small (large rotation, small strain).
 
@@ -67,6 +70,8 @@ pub mod relaxation;
 
 mod mass;
 pub use mass::{FrameInertiaProfile, FrameMassFormulation};
+mod shear;
+pub use shear::FrameShearResponse;
 mod impulse;
 pub use impulse::FrameImpulse;
 mod normal_impact;
@@ -206,6 +211,7 @@ pub struct FrameElement {
     rotary_inertia_per_length: f64,
     reference_inertia_profile: Option<FrameInertiaProfile>,
     material_section: Option<ConcentricElasticSection>,
+    transverse_shear: Option<shear::ShearElement>,
     viscous_section: Option<FrameViscousSection>,
     sections: Vec<SectionModel>,
     xi: Vec<f64>,
@@ -327,6 +333,11 @@ impl FrameElement {
                 v[a] += wl * (b[0][a] * e0 + b[1][a] * k0);
             }
         }
+        if let Some(shear) = &self.transverse_shear {
+            let rotation = shear.flexibility * (self.commit.q[1] + self.commit.q[2]);
+            v[1] += rotation;
+            v[2] += rotation;
+        }
         v
     }
 
@@ -366,6 +377,15 @@ impl FrameElement {
                     }
                 }
                 resp.push((s, fs));
+            }
+            if let Some(shear) = &self.transverse_shear {
+                let rotation = shear.flexibility * (q[1] + q[2]);
+                for a in 1..3 {
+                    vr[a] += rotation;
+                    for c in 1..3 {
+                        f[a][c] += shear.flexibility;
+                    }
+                }
             }
             let kb = inv3(f).ok_or_else(|| SolidError::InternalInvariant {
                 what: "singular element flexibility".into(),
@@ -819,6 +839,7 @@ impl Frame2d {
             rotary_inertia_per_length,
             reference_inertia_profile,
             material_section: None,
+            transverse_shear: None,
             viscous_section: None,
             sections: (0..np).map(|_| make_section()).collect(),
             commit: ElementCommit {

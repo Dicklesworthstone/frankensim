@@ -327,7 +327,9 @@ impl Frame2d {
             }
             let l = e.l0;
             let mut local = [[0.0; 6]; 6];
-            if let Some(profile) = e.reference_inertia_profile {
+            if let Some(shear) = &e.transverse_shear {
+                local = shear.consistent_mass(l, e.mass_per_length, e.rotary_inertia_per_length);
+            } else if let Some(profile) = e.reference_inertia_profile {
                 local = profile.consistent_local(l);
             } else {
                 let member_mass = e.mass_per_length * l;
