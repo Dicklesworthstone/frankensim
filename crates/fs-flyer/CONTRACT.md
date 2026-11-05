@@ -430,6 +430,20 @@ and system caps are covered. The normal law retains its existing
 singular-active-row refusal; contact detection, persistent contact and
 hydrodynamic interaction between trees are separate capabilities.
 
+### Relative velocity readback at articulated impacts
+
+The shared normal/Coulomb impact mechanics read actual endpoint row velocities
+through the checked native `contact_geometry::relative_point_speed` helper.
+Signed body/support translation cancels before independently stored rotational
+motion is combined with it, retaining relative slip under common translation.
+Initial geometry and returned endpoint velocities use the same arithmetic.
+
+The existing endpoint residual tolerance still scales with absolute motion
+products. This improves relative-velocity readback without tightening that
+acceptance rule, changing the impact solve, or recovering increments already
+lost when storing native endpoint states. It does not establish strict
+boost-independent rejection of unrepresentable endpoints.
+
 ### Coupled Coulomb impacts with complete articulated fluid inertia
 
 `partitioned::articulated::impact::friction::resolve` applies one simultaneous

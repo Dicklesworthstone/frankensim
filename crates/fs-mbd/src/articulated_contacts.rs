@@ -269,13 +269,7 @@ impl Prepared {
         core::iter::once(self.first).chain(self.second)
     }
     fn velocity(&self, kinematics: &[Kinematics]) -> f64 {
-        self.terms()
-            .map(|term| {
-                term.direction
-                    .pairing(kinematics[term.point.system_index].body_twist[term.point.link_index])
-            })
-            .sum::<f64>()
-            - self.plane_speed
+        contact_geometry::relative_row_speed(self.first, self.second, self.plane_speed, kinematics)
     }
 }
 

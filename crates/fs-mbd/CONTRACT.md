@@ -1,5 +1,27 @@
 # CONTRACT: fs-mbd
 
+## Relative contact velocity
+
+The shared articulated normal, tangential and bilateral velocity rows accumulate
+their original signed wrench/twist scalar products with `fs_math::dd::Dd`,
+reducing translation separately from rotation so the counterpart and prescribed
+support contributions cancel before spin is added. Both
+geometry preparation and the actual native endpoint query use this reduction.
+Small rotational slip retained in the native twists therefore survives a much
+larger common translation. Each row has fixed work and no allocation; original
+frames, material witnesses and inverse-mass actions still determine the motion.
+
+Focused G0/G1/G3 tests in `tests/articulated_contact_geometry.rs` check independent
+rigid-point normal/tangent velocities, body and prescribed-plane counterparts,
+ordinary boosts and world rotations, and an analytic off-center impact through
+the native solver. An extreme exactly represented boost exercises cancellation:
+if its required impulse endpoint is unrepresentable, the event refuses rather
+than being misclassified as stationary. The reduction cannot reconstruct motion
+already rounded out of an input twist or support projection, and does not alter
+the existing endpoint admission tolerances. The public `relative_point_speed`
+entry point validates consumed row/twist scalars and indices before delegating
+to this same reducer; it does not certify geometry or pose correspondence.
+
 ## Physical torque products
 
 The native `Vec3::cross` compensates both floating-point product tails before

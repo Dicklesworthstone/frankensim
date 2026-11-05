@@ -5,6 +5,7 @@
 
 use super::Kinematics;
 use fs_ga::{GaError, Vec3, Wrench};
+use fs_math::dd::Dd;
 use std::borrow::Borrow;
 
 /// A material point on one link of one supplied system.
@@ -228,15 +229,7 @@ fn prepare_normal_geometry(
             return Err(ContactGeometryError::NonCollinearContact { index });
         }
     }
-    let speed = core::iter::once(first)
-        .chain(second)
-        .map(|term| {
-            term.direction.pairing(
-                kinematics[term.point.system_index].borrow().body_twist[term.point.link_index],
-            )
-        })
-        .sum::<f64>()
-        - plane_speed;
+    let speed = relative_row_speed(first, second, plane_speed, kinematics);
     Ok(NormalContactGeometry {
         first,
         second,
@@ -285,13 +278,7 @@ pub fn prepare_contact_frame(
                 (None, finite(axis.dot(velocity_world))?)
             }
         };
-        let speed = first.direction.pairing(
-            kinematics[first.point.system_index].borrow().body_twist[first.point.link_index],
-        ) + second.map_or(0.0, |term| {
-            term.direction.pairing(
-                kinematics[term.point.system_index].borrow().body_twist[term.point.link_index],
-            )
-        }) - plane_speed;
+        let speed = relative_row_speed(first, second, plane_speed, kinematics);
         rows[i + 1] = NormalContactGeometry {
             first,
             second,
@@ -315,6 +302,89 @@ pub fn prepare_contact_frame(
         rows,
         counterpart_point_world,
     })
+}
+
+/// Evaluate a previously prepared point row using supplied native twists.
+///
+/// The row keeps its original signed body-coordinate force and moment; the
+/// support speed is along the same axis and is zero for a dynamic counterpart.
+/// This checks the referenced twist indices and the finite force, torque,
+/// velocity and support values actually consumed by the reduction. It does not
+/// validate witnesses, poses, contact geometry or correspondence to those poses.
+/// The caller must keep the row's geometry fixed while evaluating new twists.
+pub fn relative_point_speed(
+    first: PointDirection,
+    second: Option<PointDirection>,
+    plane_speed: f64,
+    kinematics: &[impl Borrow<Kinematics>],
+) -> Result<f64, ContactGeometryError> {
+    finite(plane_speed)?;
+    for term in core::iter::once(first).chain(second) {
+        let system = kinematics
+            .get(term.point.system_index)
+            .ok_or(ContactGeometryError::Invalid(
+                "contact system index is out of range",
+            ))?
+            .borrow();
+        let twist =
+            system
+                .body_twist
+                .get(term.point.link_index)
+                .ok_or(ContactGeometryError::Invalid(
+                    "contact link index is out of range",
+                ))?;
+        vector(term.direction.force)?;
+        vector(term.direction.torque)?;
+        vector(twist.linear)?;
+        vector(twist.angular)?;
+    }
+    finite(relative_row_speed(first, second, plane_speed, kinematics))
+}
+
+/// Evaluate an admitted velocity row before rounding away the relative motion.
+///
+/// Rounding each body's complete pairing first can erase a small rotational
+/// contribution under a common translation. Keep the original native covectors
+/// and twists. Reduce translation and rotation separately with the existing
+/// double-double owner, cancelling common translation before adding spin.
+/// This also serves bilateral rows and the independent endpoint check; it does
+/// not recover information already lost in the supplied twists or projections.
+pub(crate) fn relative_row_speed(
+    first: PointDirection,
+    second: Option<PointDirection>,
+    plane_speed: f64,
+    kinematics: &[impl Borrow<Kinematics>],
+) -> f64 {
+    let mut translation = Dd::from_f64(-plane_speed);
+    let mut rotation = Dd::ZERO;
+    for term in core::iter::once(first).chain(second) {
+        let twist = kinematics[term.point.system_index].borrow().body_twist[term.point.link_index];
+        let direction = term.direction;
+        for (force, linear, torque, angular) in [
+            (
+                direction.force.x,
+                twist.linear.x,
+                direction.torque.x,
+                twist.angular.x,
+            ),
+            (
+                direction.force.y,
+                twist.linear.y,
+                direction.torque.y,
+                twist.angular.y,
+            ),
+            (
+                direction.force.z,
+                twist.linear.z,
+                direction.torque.z,
+                twist.angular.z,
+            ),
+        ] {
+            translation = translation + Dd::from_f64(force) * Dd::from_f64(linear);
+            rotation = rotation + Dd::from_f64(torque) * Dd::from_f64(angular);
+        }
+    }
+    (translation + rotation).to_f64()
 }
 
 fn magnitude(value: Vec3) -> f64 {

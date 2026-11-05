@@ -7,7 +7,9 @@ use crate::addedmass::joint::native_index;
 use crate::addedmass::{AeroGeneralizedLoads, MAX_CONTROL_COORDS, PreparedArticulatedMass};
 use crate::partitioned::MAX_CERT_STATES;
 use fs_ga::{Se3, Twist, Vec3, Wrench};
-use fs_mbd::articulated::contact_geometry::{NormalContactGeometry, PointDirection};
+use fs_mbd::articulated::contact_geometry::{
+    NormalContactGeometry, PointDirection, relative_point_speed,
+};
 use fs_mbd::articulated::generalized::{GeneralizedKinematics, free_floating_terms};
 use fs_mbd::articulated::{ArticulatedModel, BaseState, Kinematics, forward_kinematics};
 
@@ -455,12 +457,17 @@ impl<'a> ImpactWorkspace<'a> {
         let mut endpoint_velocity_residual: f64 = 0.0;
         for (row, &predicted) in rows.rows.iter().zip(predicted_speeds) {
             poll(cancelled)?;
-            let mut speed = -row.geometry.plane_speed;
+            let speed = relative_point_speed(
+                row.geometry.first,
+                row.geometry.second,
+                row.geometry.plane_speed,
+                &after_maps,
+            )
+            .map_err(|error| refusal("articulated-impact-invalid", error))?;
             let mut scale =
                 row.geometry.plane_speed.abs() + row.geometry.relative_speed_before.abs();
             for term in core::iter::once(row.geometry.first).chain(row.geometry.second) {
                 let twist = after_maps[term.point.system_index].body_twist[term.point.link_index];
-                speed = finite(speed + term.direction.pairing(twist))?;
                 let wrench = term.direction.to_array();
                 let twist = twist.to_array();
                 for (a, b) in wrench.iter().zip(twist) {

@@ -10,7 +10,7 @@ use super::bilateral::{
     MAX_IMPACT_BILATERAL_ROWS,
 };
 use crate::articulated::contact_geometry::{
-    LinkContactPoint, PointDirection, prepare_point, unit_normal,
+    LinkContactPoint, PointDirection, prepare_point, relative_row_speed, unit_normal,
 };
 use crate::articulated::{Kinematics, solve_floating_base_system};
 use crate::articulated_contacts::{
@@ -166,16 +166,7 @@ fn row_rate(
     second: PointDirection,
     kinematics: &[impl Borrow<Kinematics>],
 ) -> Result<f64, ArticulatedContactError> {
-    finite(
-        [first, second]
-            .iter()
-            .map(|term| {
-                term.direction.pairing(
-                    kinematics[term.point.system_index].borrow().body_twist[term.point.link_index],
-                )
-            })
-            .sum(),
-    )
+    finite(relative_row_speed(first, Some(second), 0.0, kinematics))
 }
 
 const BASIS: [Vec3; 3] = [
