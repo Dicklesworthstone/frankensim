@@ -1,5 +1,23 @@
 # CONTRACT: fs-conduction
 
+## Retained pointwise-radiation and contact enthalpy endpoints
+
+`linearize_temperature_contact_endpoint_with_radiation` binds the supplied
+pointwise `EnthalpyRadiation` owner and original live contacts to a real accepted
+`EnthalpyStepSolution`. Ambient, closed/open enclosure and native material-
+emissivity variants delegate to their existing typed endpoint binders before
+the complete contact-source feedback attaches. Mean-patch and absent-radiation
+variants require their own entry points and are refused here.
+
+The result retains the original physical target, chart/material smoothness,
+workspace caps and source receipts. A fixed-emissivity owner cannot consume an
+endpoint produced by state-dependent material emissivity; the material owners
+retain their actual source and phase derivatives. Both contact traces, original
+prescribed columns, local emission and reflected irradiation remain in one
+physical transpose. Existing nodal-load and radiation parameter contractions
+account for the timestep once, and the black environment remains outside solid
+storage. The adapter creates no synthetic source-state receipt or new solve.
+
 ## Retained live-contact total-enthalpy endpoints
 
 `HeterogeneousEnthalpyBackwardEuler::linearize_temperature_contact_endpoint`
