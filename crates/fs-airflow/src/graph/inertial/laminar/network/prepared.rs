@@ -1,5 +1,6 @@
 //! One native coupled trajectory and original per-pipe source heat.
 use super::*;
+mod harmonic;
 use fs_phs::PreparedStepError;
 use fs_phs::linear_exact::{
     DenseExponentialBudget, LinearSplitBudget, PreparedExactZoh, PreparedSourceLoss,
