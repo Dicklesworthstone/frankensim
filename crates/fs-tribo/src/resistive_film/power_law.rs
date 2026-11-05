@@ -290,6 +290,44 @@ impl PowerLawFilm {
         &self.film
     }
 
+    // Native mass-conserving films share this constitutive leaf; pressure-only
+    // flow remains separate from transported liquid content and mean motion.
+    pub(super) fn passage_pressure_response(
+        &self,
+        index: usize,
+        gap: f64,
+        core_conductance: f64,
+        pressure_drop: f64,
+        relative_wall_speed: f64,
+        check: &mut impl FnMut() -> Result<(), FilmError>,
+    ) -> Result<(f64, f64), FilmError> {
+        let channel = if relative_wall_speed == 0.0 {
+            self.channel(index, gap, core_conductance, pressure_drop)?
+        } else {
+            if gap <= 0.0 {
+                return fail("moving power-law passage needs a positive gap");
+            }
+            shear::channel::evaluate(
+                self,
+                index,
+                gap,
+                core_conductance,
+                pressure_drop,
+                shear::Motion {
+                    mean: 0.0,
+                    relative: relative_wall_speed,
+                    entrainment: 0.0,
+                },
+                check,
+            )?
+        };
+        Ok((channel.flow, channel.differential))
+    }
+
+    pub(super) const fn is_newtonian(&self) -> bool {
+        self.all_newtonian
+    }
+
     /// Evaluate the complete nonlinear pressure resistance at one configuration.
     pub fn evaluate_into(
         &self,

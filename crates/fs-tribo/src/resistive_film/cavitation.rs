@@ -31,9 +31,13 @@
 //! For the Barus/Elrod--Adams equations see Durany, Garcia and Vazquez (1996),
 //! equations (2.5)--(2.8), DOI 10.1017/S0013091500022860.
 
-use super::{FilmError, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, dot, fail};
+use super::{FilmError, FlowBalance, MAX_CELLS, MAX_CHANNELS, MAX_PORTS, ResistiveFilm, dot, fail};
 use fs_math::det;
 use std::sync::Arc;
+
+/// Generalized-Newtonian pressure transport with the same retained inventory.
+pub mod power_law;
+pub use power_law::CavitatingPowerLawFilm;
 
 /// Explicit liquid and reservoir data, frozen within each step, in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -551,7 +555,15 @@ impl CavitatingFilm {
         dt_s: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CavitationStep, FilmError> {
-        self.advance_kernel(self, state, q_next, entrainment_m3_s, dt_s, &mut cancelled)
+        self.advance_kernel(
+            self,
+            state,
+            q_next,
+            entrainment_m3_s,
+            dt_s,
+            None,
+            &mut cancelled,
+        )
     }
 
     /// Advance the ORIGINAL inventory using explicit endpoint liquid data.
@@ -603,14 +615,25 @@ impl CavitatingFilm {
         if liquid == self.liquid {
             film.owner = Arc::clone(&self.owner);
         }
-        let step =
-            film.advance_kernel(self, state, q_next, entrainment_m3_s, dt_s, &mut cancelled)?;
+        let step = film.advance_kernel(
+            self,
+            state,
+            q_next,
+            entrainment_m3_s,
+            dt_s,
+            None,
+            &mut cancelled,
+        )?;
         Ok(CavitationContinuation { film, step })
     }
 
     // Keep one numerical kernel for all caller cancellation closures. Dynamic
     // dispatch occurs only at bounded solver boundaries, never per matrix entry.
-    #[allow(clippy::too_many_lines, clippy::large_stack_arrays)]
+    #[allow(
+        clippy::too_many_lines,
+        clippy::large_stack_arrays,
+        clippy::too_many_arguments
+    )]
     fn advance_kernel(
         &self,
         previous: &Self,
@@ -618,6 +641,7 @@ impl CavitatingFilm {
         q_next: &[f64],
         entrainment_m3_s: &[f64],
         dt_s: f64,
+        nonlinear: Option<power_law::Transport<'_>>,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<CavitationStep, FilmError> {
         poll(cancelled)?;
@@ -695,7 +719,9 @@ impl CavitatingFilm {
                 b[i * n + donor] += e;
                 b[j * n + donor] -= e;
             } else {
-                rhs[i] += ag * self.boundary_potential(k);
+                if nonlinear.is_none() {
+                    rhs[i] += ag * self.boundary_potential(k);
+                }
                 if e >= 0.0 {
                     b[i * n + i] += e;
                 } else {
@@ -710,6 +736,23 @@ impl CavitatingFilm {
             .any(|x| !x.is_finite())
         {
             return fail("cavitating-film transport assembly overflow");
+        }
+        if let Some(transport) = nonlinear {
+            return power_law::advance(
+                self,
+                state,
+                q_next,
+                entrainment_m3_s,
+                dt_s,
+                previous_density,
+                &volume,
+                &old_liquid_volume,
+                &conductance,
+                &b,
+                &full,
+                transport,
+                cancelled,
+            );
         }
         let mut potential = [0.0; MAX_CELLS];
         let mut theta = [0.0; MAX_CELLS];
@@ -768,7 +811,7 @@ impl CavitatingFilm {
             if negative_mass {
                 return fail("cavitating-film solve produced negative liquid mass");
             }
-            return self.finish(
+            return self.finish::<false>(
                 q_next,
                 entrainment_m3_s,
                 dt_s,
@@ -776,7 +819,7 @@ impl CavitatingFilm {
                 previous_density,
                 &volume,
                 &old_liquid_volume,
-                &conductance,
+                |k, dp, _| Ok(conductance[k] * dp),
                 &theta,
                 &mut potential,
                 cancelled,
@@ -786,7 +829,7 @@ impl CavitatingFilm {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn finish(
+    fn finish<const SPLIT_FLUX: bool>(
         &self,
         q_next: &[f64],
         entrainment: &[f64],
@@ -795,7 +838,7 @@ impl CavitatingFilm {
         previous_density: f64,
         volume: &[f64; MAX_CELLS],
         old_volume: &[f64; MAX_CELLS],
-        conductance: &[f64; MAX_CHANNELS],
+        mut pressure_flux: impl FnMut(usize, f64, &mut dyn FnMut() -> bool) -> Result<f64, FilmError>,
         theta: &[f64; MAX_CELLS],
         potential: &mut [f64; MAX_CELLS],
         cancelled: &mut dyn FnMut() -> bool,
@@ -804,6 +847,8 @@ impl CavitatingFilm {
         let rho = self.liquid.density_kg_m3;
         let density_changed = previous_density != rho;
         let mut residual = [0.0; MAX_CELLS];
+        let mut balanced = [FlowBalance::default(); MAX_CELLS];
+        let mut boundary_balance = FlowBalance::default();
         let mut scales = [0.0; MAX_CELLS];
         let mut forces = [0.0; MAX_PORTS];
         let mut flows = [0.0; MAX_CHANNELS];
@@ -823,6 +868,9 @@ impl CavitatingFilm {
             }
             before += old_volume[i];
             after += volume[i] * theta[i];
+            if SPLIT_FLUX {
+                balanced[i].add(residual[i]);
+            }
         }
         let boundary_excess = self.liquid.ambient_pressure_pa - self.liquid.cavitation_pressure_pa;
         for (k, edge) in self.geometry.channels.iter().enumerate() {
@@ -846,9 +894,13 @@ impl CavitatingFilm {
                     }
                 }
             }
-            let flux = conductance[k]
-                * (potential[edge.from] - edge.to.map_or(boundary_potential, |j| potential[j]))
-                + entrainment[k] * donor;
+            let pressure_flow = pressure_flux(
+                k,
+                potential[edge.from] - edge.to.map_or(boundary_potential, |j| potential[j]),
+                cancelled,
+            )?;
+            let transported = entrainment[k] * donor;
+            let flux = pressure_flow + transported;
             flows[k] = flux;
             let amount = dt * flux;
             let balance_amount = if density_changed {
@@ -856,15 +908,39 @@ impl CavitatingFilm {
             } else {
                 amount
             };
-            residual[edge.from] += balance_amount;
+            if SPLIT_FLUX {
+                // Do not erase small pressure transport or stored liquid by
+                // rounding it inside a much larger counterflowing entrainment.
+                for part in [dt * pressure_flow, dt * transported] {
+                    let mass = if density_changed { rho * part } else { part };
+                    balanced[edge.from].add(mass);
+                    if let Some(j) = edge.to {
+                        balanced[j].add(-mass);
+                    } else {
+                        boundary_balance.add(part);
+                    }
+                }
+            } else {
+                residual[edge.from] += balance_amount;
+            }
             scales[edge.from] += balance_amount.abs();
             if let Some(j) = edge.to {
-                residual[j] -= balance_amount;
+                if !SPLIT_FLUX {
+                    residual[j] -= balance_amount;
+                }
                 scales[j] += balance_amount.abs();
             } else {
-                boundary += amount;
+                if !SPLIT_FLUX {
+                    boundary += amount;
+                }
                 boundary_scale += amount.abs();
             }
+        }
+        if SPLIT_FLUX {
+            for i in 0..n {
+                residual[i] = balanced[i].value();
+            }
+            boundary = boundary_balance.value();
         }
         // Fluxes have consumed the potential; reuse its storage for actual
         // pressure excess. Force, domain checks and retained pressure use p.

@@ -1237,6 +1237,56 @@ and check topology, pressure/content domain, barrier and cancellation refusal.
 These are prescribed reservoirs with mass accounting, not finite reservoir
 storage or a claim of time-integrated thermal/mechanical energy closure.
 
+`resistive_film::cavitation::CavitatingPowerLawFilm` composes this retained
+inventory owner with the existing regularized-power-law constitutive owner.
+Each original passage uses the exact combined Couette--Poiseuille pressure
+response at its authored relative wall speed, plus upwinded mean entrainment:
+`Q = Q_pressure(delta_p, U_upper-U_lower) + Q_entrained*theta_upwind`.
+The independently authored mean volume flux and relative wall velocity use
+the original channel orientation. The local stress profile, finite Newtonian
+core and positive differential pressure conductance are reused without an
+effective-viscosity approximation or a second constitutive implementation.
+
+One bounded pressure/content coordinate per original cell enforces the
+same `p >= p_c`, `0 <= theta <= 1` complementarity. The nonlinear Jacobian
+selects either the true pressure differential or the original implicit
+storage/upwind column. A full/rupture corner first selects the phase entered
+by its direction and relinearizes without changing physical state; these pivots
+consume the same bounded active-set budget. Damped corrections preserve the
+physical domain, and the last accepted correction may use the complete budget.
+The existing dense elimination still checks saturated connectivity before
+publication, including already balanced states. Two reusable bounded candidate
+workspaces hold nonlinear trials; no per-iteration allocation is added.
+
+Pressure and entrainment contributions remain separate through compensated
+incidence assembly and the independent original cell/global mass audit.
+Gross divergence-free translation cannot erase a small pressure flux or
+squeeze source, nor enlarge the nonlinear admission tolerance. Each internal
+face still contributes the same amount with opposite signs. The original
+pressure/volume limits, signed reservoir mass receipt, endpoint normal-force
+projection, state ownership and final cancellation check retain authority.
+All-Newtonian laws dispatch directly to the original cavitation step, retaining
+its trajectory and reports exactly. Law and reservoir refresh preserve accepted
+inventory and compatible state identity; a foreign film cannot reinterpret it.
+
+This combination retains a fixed homogeneous liquid density and rupture
+pressure. It does not supply cavitated tangential traction, viscous heat
+partition, latent heat, thermal/material time evolution, pressure-dependent
+viscosity or compressibility of trapped full liquid. Relative wall motion is
+refused through a closed passage. Original native normal force is the only
+mechanical effort in the returned cavitation step.
+
+Nine focused G1/G3/G4 regressions cover thinning/thickening rupture and refill
+against independent momentum-profile integrals; fully filled recovery of the
+native combined sliding/pressure solve; a reversing multicell reformation
+front and separate face mass balances; branching-graph reformation from a
+full/rupture corner; refill-time refinement; exact Newtonian
+trajectories; inventory-preserving viscosity refresh; large-entrainment
+conditioning; and sealed, exhausted-budget or late-cancellation atomic refusal.
+All 132 original-source resistive-film tests pass through the established narrow
+Rust facade with real `fs-math` and `fs-rand` dependencies. This focused run does
+not claim a full constellation build or cross-ISA execution.
+
 A common Barus law now uses `chi=(1-exp(-alpha*(p-p_c)))/alpha`, with channel
 conductances multiplied by `exp(alpha*(p_ambient-p_c))`; supplied viscosities
 remain referenced to the reservoir pressure. Zero potential is exactly rupture,
