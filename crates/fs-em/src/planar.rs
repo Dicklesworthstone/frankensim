@@ -569,7 +569,21 @@ impl PlanarMagnetostatics {
         prescribed: &[Option<f64>],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), MagneticError> {
+        Self::mesh_gauge_references(mesh, prescribed, cancelled).map(|_| ())
+    }
+
+    // One deterministic prescribed reference per connected component. History
+    // owners lift gauge changes without inventing an interior field and pair
+    // current/boundary work at the same local reference.
+    pub(crate) fn mesh_gauge_references(
+        mesh: &TriComplex2,
+        prescribed: &[Option<f64>],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<usize>, MagneticError> {
         let n = prescribed.len();
+        if n != mesh.vertices().len() {
+            return Err(MagneticError::Invalid("one trace slot per mesh vertex required"));
+        }
         let mut neighbors = vec![Vec::new(); n];
         for &[a, b] in mesh.edges() {
             poll(cancelled)?;
@@ -577,17 +591,23 @@ impl PlanarMagnetostatics {
             neighbors[b as usize].push(a as usize);
         }
         let mut visited = vec![false; n];
+        let mut references = vec![usize::MAX; n];
         let mut stack = Vec::new();
+        let mut component = Vec::new();
         for start in 0..n {
             if visited[start] {
                 continue;
             }
             visited[start] = true;
             stack.push(start);
-            let mut anchored = false;
+            component.clear();
+            let mut anchor = usize::MAX;
             while let Some(v) = stack.pop() {
                 poll(cancelled)?;
-                anchored |= prescribed[v].is_some();
+                component.push(v);
+                if prescribed[v].is_some() {
+                    anchor = anchor.min(v);
+                }
                 for &w in &neighbors[v] {
                     if !visited[w] {
                         visited[w] = true;
@@ -595,13 +615,16 @@ impl PlanarMagnetostatics {
                     }
                 }
             }
-            if !anchored {
+            if anchor == usize::MAX {
                 return Err(MagneticError::Invalid(
                     "every connected component needs a prescribed exterior edge",
                 ));
             }
+            for &v in &component {
+                references[v] = anchor;
+            }
         }
-        Ok(())
+        Ok(references)
     }
 }
 

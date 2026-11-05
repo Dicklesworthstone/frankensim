@@ -7,6 +7,10 @@
 //! This is fixed-state magnetostatics: no hysteresis, heat, induction history,
 //! motion or dynamic parameter-work interpretation is attached to this solve.
 
+/// Opt-in spatial magnetic history using the same variational field solver.
+#[cfg(feature = "magnetic-hysteresis")]
+pub mod hysteretic;
+
 use super::{
     MagneticError, PlanarMagnetostatics, finite, gradients,
     permanent::{MagneticEnergyReference, PlanarRecoilMaterial},
@@ -117,6 +121,12 @@ pub struct NonlinearMagneticReport {
 pub enum NonlinearMagneticError {
     /// Original source, geometry, checked linear solver or cancellation error.
     Magnetic(MagneticError),
+    /// A cell's original vector history or its bounded inverse refused.
+    #[cfg(feature = "magnetic-hysteresis")]
+    History {
+        triangle: usize,
+        error: fs_material::field_storage::hysteresis::vector::VectorHysteresisError,
+    },
     /// The initial field or a trial left one source's declared field envelope.
     FieldRange {
         /// Original mesh triangle.
@@ -174,6 +184,26 @@ struct Evaluation {
     energy: f64,
     coenergy: f64,
     objective: f64,
+}
+
+// Reversible storage and frozen-history incremental potentials use the same
+// field equation, Hodge assembly and globalization. Only the constitutive
+// evaluation differs; numerical trial states never become physical history.
+trait VariationalEvaluation {
+    fn residual(&self) -> &[f64];
+    fn tangent_weights(&self) -> &[CellWeight2];
+    fn objective(&self) -> f64;
+}
+impl VariationalEvaluation for Evaluation {
+    fn residual(&self) -> &[f64] {
+        &self.residual
+    }
+    fn tangent_weights(&self) -> &[CellWeight2] {
+        &self.tangent_weights
+    }
+    fn objective(&self) -> f64 {
+        self.objective
+    }
 }
 
 // A positive quadratic contribution supplied by another physical owner, e.g.
@@ -456,16 +486,7 @@ impl PlanarNonlinearMagnetostatics {
         weights: &[CellWeight2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Csr, NonlinearMagneticError> {
-        let mass = weighted_mass_matrix_2d(
-            &self.mesh,
-            1,
-            weights,
-            Dims([-1, -1, 2, 0, 2, 0]),
-            self.limits,
-            cancelled,
-        )
-        .map_err(weighted_error)?;
-        Ok(stiffness(&self.incidence, mass.matrix()))
+        assemble_tangent(&self.mesh, &self.incidence, self.limits, weights, cancelled)
     }
 
     // The moving-conductor Newton solve adds a genuinely nonsymmetric
@@ -565,191 +586,243 @@ impl PlanarNonlinearMagnetostatics {
         controls: NonlinearMagneticControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarNonlinearField<'_>, NonlinearMagneticError> {
-        poll(cancelled)?;
-        let n = self.mesh.vertices().len();
-        if rhs.len() != n
-            || rhs.iter().any(|v| !v.is_finite())
-            || initial_potential_wb_m.len() != n
-            || initial_potential_wb_m.iter().any(|v| !v.is_finite())
-            || quadratic.is_some_and(|q| {
-                q.reference().len() != n || q.reference().iter().any(|v| !v.is_finite())
-            })
-            || !controls.absolute_residual_tolerance_a_m.is_finite()
-            || controls.absolute_residual_tolerance_a_m <= 0.0
-            || !controls.relative_residual_tolerance.is_finite()
-            || !(0.0..1.0).contains(&controls.relative_residual_tolerance)
-            || !controls.linear.tolerance.is_finite()
-            || !(0.0..1.0).contains(&controls.linear.tolerance)
-            || controls.linear.tolerance == 0.0
-        {
-            return Err(MagneticError::Invalid(
-                "nonlinear field, current or residual controls are invalid",
-            )
-            .into());
-        }
-        let prescribed = PlanarMagnetostatics::admit_mesh_boundary(
+        let (potential, evaluation, report) = solve_variational(
             &self.mesh,
+            &self.incidence,
+            self.limits,
+            rhs,
             boundary_potential_wb_m,
+            initial_potential_wb_m,
+            quadratic,
+            controls,
+            &mut |potential, gauge, cancelled| {
+                self.evaluate(potential, rhs, gauge, quadratic, cancelled)
+            },
             cancelled,
         )?;
-        if prescribed
-            .iter()
-            .zip(initial_potential_wb_m)
-            .any(|(p, value)| p.is_some_and(|p| p != *value))
-        {
-            return Err(MagneticError::Invalid(
-                "initial field must match every prescribed potential",
-            )
-            .into());
-        }
-        let gauge = prescribed.iter().flatten().next().copied().unwrap_or(0.0);
-        let free: Vec<_> = (0..n).filter(|&v| prescribed[v].is_none()).collect();
-        let mut index = vec![usize::MAX; n];
-        for (i, &v) in free.iter().enumerate() {
-            index[v] = i;
-        }
-        let mut potential = initial_potential_wb_m.to_vec();
-        let mut evaluation = self.evaluate(&potential, rhs, gauge, quadratic, cancelled)?;
-        let initial_norm = norm(free.iter().map(|&v| evaluation.residual[v]));
-        let reference_norm = initial_norm.max(norm(free.iter().map(|&v| rhs[v])));
-        let target = controls.absolute_residual_tolerance_a_m.max(finite(
-            controls.relative_residual_tolerance * reference_norm,
-        )?);
-        let mut report = NonlinearMagneticReport {
-            newton_iterations: 0,
-            linear_iterations: 0,
-            backtracks: 0,
-            residual_norm_a_m: initial_norm,
-            residual_target_a_m: target,
-        };
-        loop {
-            poll(cancelled)?;
-            report.residual_norm_a_m = finite(norm(free.iter().map(|&v| evaluation.residual[v])))?;
-            if report.residual_norm_a_m <= target {
-                return Ok(PlanarNonlinearField {
-                    problem: self,
-                    potential_wb_m: potential,
-                    magnetic_flux_density_t: evaluation.b,
-                    magnetic_field_a_m: evaluation.h,
-                    cell_energy_j: evaluation.energies,
-                    cell_coenergy_j: evaluation.coenergies,
-                    recoil_operating_points: evaluation.recoil_operating_points,
-                    energy_j: evaluation.energy,
-                    coenergy_j: evaluation.coenergy,
-                    report,
-                });
-            }
-            if report.newton_iterations == controls.max_newton_iterations {
-                return Err(NonlinearMagneticError::Nonconvergence(report));
-            }
-            let tangent = self.assemble_tangent(&evaluation.tangent_weights, cancelled)?;
-            let mut row_ptr = vec![0];
-            let mut columns = Vec::new();
-            let mut values = Vec::new();
-            for &v in &free {
-                poll(cancelled)?;
-                let (cols, vals) = tangent.row(v);
-                for (&w, &value) in cols.iter().zip(vals) {
-                    if index[w] != usize::MAX {
-                        columns.push(index[w]);
-                        values.push(finite(value)?);
-                    }
-                }
-                row_ptr.push(columns.len());
-            }
-            let matrix = Csr::from_parts(free.len(), free.len(), row_ptr, columns, values);
-            let direction_rhs: Vec<_> = free.iter().map(|&v| -evaluation.residual[v]).collect();
-            let direction = {
-                let cancel = RefCell::new(&mut *cancelled);
-                let interrupted = Cell::new(false);
-                let check = || {
-                    if interrupted.get() || (*cancel.borrow_mut())() {
-                        interrupted.set(true);
-                        true
-                    } else {
-                        false
-                    }
-                };
-                let failure = RefCell::new(None);
-                let tangent = Tangent {
-                    magnetic: CsrOp::symmetric(matrix),
-                    quadratic,
-                    free: &free,
-                    full_len: n,
-                    cancelled: &check,
-                    failure: &failure,
-                };
-                let result = checked_cg(
-                    &tangent,
-                    &IdentityPrecond,
-                    &direction_rhs,
-                    controls.linear,
-                    |_| {
-                        if check() {
-                            Err(MagneticError::Cancelled)
-                        } else {
-                            Ok(())
-                        }
-                    },
-                );
-                if let Some(error) = failure.into_inner() {
-                    return Err(error.into());
-                }
-                result.map_err(|error| match error {
-                    CheckedCgError::InvalidInput(why) => MagneticError::Invalid(why),
-                    CheckedCgError::Interrupted(error) => error,
-                })?
-            };
-            if !direction.report.converged_euclidean() {
-                return Err(MagneticError::Nonconvergence(direction.report).into());
-            }
-            report.linear_iterations += direction.report.iters;
-            let mut descent = 0.0;
-            for (&v, &delta) in free.iter().zip(&direction.x) {
-                descent = finite(evaluation.residual[v].mul_add(delta, descent))?;
-            }
-            if descent >= 0.0 {
-                return Err(NonlinearMagneticError::Nonconvergence(report));
-            }
-            let mut alpha = 1.0_f64;
-            let mut accepted = None;
-            for backtrack in 0..=controls.max_backtracks {
-                poll(cancelled)?;
-                if backtrack > 0 {
-                    report.backtracks += 1;
-                }
-                let mut trial = potential.clone();
-                for (&v, &delta) in free.iter().zip(&direction.x) {
-                    trial[v] = finite(alpha.mul_add(delta, potential[v]))?;
-                }
-                match self.evaluate(&trial, rhs, gauge, quadratic, cancelled) {
-                    Ok(next) => {
-                        let residual = norm(free.iter().map(|&v| next.residual[v]));
-                        if residual <= target
-                            || next.objective
-                                <= (1e-4 * alpha).mul_add(descent, evaluation.objective)
-                        {
-                            accepted = Some((trial, next));
-                            break;
-                        }
-                    }
-                    Err(
-                        NonlinearMagneticError::FieldRange { .. }
-                        | NonlinearMagneticError::RecoilRange { .. },
-                    ) => {}
-                    Err(error) => return Err(error),
-                }
-                alpha *= 0.5;
-            }
-            let Some((next_potential, next_evaluation)) = accepted else {
-                return Err(NonlinearMagneticError::Nonconvergence(report));
-            };
-            potential = next_potential;
-            evaluation = next_evaluation;
-            report.newton_iterations += 1;
-        }
+        Ok(PlanarNonlinearField {
+            problem: self,
+            potential_wb_m: potential,
+            magnetic_flux_density_t: evaluation.b,
+            magnetic_field_a_m: evaluation.h,
+            cell_energy_j: evaluation.energies,
+            cell_coenergy_j: evaluation.coenergies,
+            recoil_operating_points: evaluation.recoil_operating_points,
+            energy_j: evaluation.energy,
+            coenergy_j: evaluation.coenergy,
+            report,
+        })
     }
 }
+
+fn assemble_tangent(
+    mesh: &TriComplex2,
+    incidence: &Csr,
+    limits: WeightedAssemblyLimits,
+    weights: &[CellWeight2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Csr, NonlinearMagneticError> {
+    let mass = weighted_mass_matrix_2d(
+        mesh,
+        1,
+        weights,
+        Dims([-1, -1, 2, 0, 2, 0]),
+        limits,
+        cancelled,
+    )
+    .map_err(weighted_error)?;
+    Ok(stiffness(incidence, mass.matrix()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_variational<C: FnMut() -> bool, E: VariationalEvaluation>(
+    mesh: &TriComplex2,
+    incidence: &Csr,
+    limits: WeightedAssemblyLimits,
+    rhs: &[f64],
+    boundary_potential_wb_m: &[(usize, f64)],
+    initial_potential_wb_m: &[f64],
+    quadratic: Option<&dyn PositiveQuadratic>,
+    controls: NonlinearMagneticControls,
+    evaluate: &mut impl FnMut(&[f64], f64, &mut C) -> Result<E, NonlinearMagneticError>,
+    cancelled: &mut C,
+) -> Result<(Vec<f64>, E, NonlinearMagneticReport), NonlinearMagneticError> {
+    poll(cancelled)?;
+    let n = mesh.vertices().len();
+    if rhs.len() != n
+        || rhs.iter().any(|v| !v.is_finite())
+        || initial_potential_wb_m.len() != n
+        || initial_potential_wb_m.iter().any(|v| !v.is_finite())
+        || quadratic.is_some_and(|q| {
+            q.reference().len() != n || q.reference().iter().any(|v| !v.is_finite())
+        })
+        || !controls.absolute_residual_tolerance_a_m.is_finite()
+        || controls.absolute_residual_tolerance_a_m <= 0.0
+        || !controls.relative_residual_tolerance.is_finite()
+        || !(0.0..1.0).contains(&controls.relative_residual_tolerance)
+        || !controls.linear.tolerance.is_finite()
+        || !(0.0..1.0).contains(&controls.linear.tolerance)
+        || controls.linear.tolerance == 0.0
+    {
+        return Err(MagneticError::Invalid(
+            "nonlinear field, current or residual controls are invalid",
+        )
+        .into());
+    }
+    let prescribed = PlanarMagnetostatics::admit_mesh_boundary(
+        mesh,
+        boundary_potential_wb_m,
+        cancelled,
+    )?;
+    if prescribed
+        .iter()
+        .zip(initial_potential_wb_m)
+        .any(|(p, value)| p.is_some_and(|p| p != *value))
+    {
+        return Err(MagneticError::Invalid(
+            "initial field must match every prescribed potential",
+        )
+        .into());
+    }
+    let gauge = prescribed.iter().flatten().next().copied().unwrap_or(0.0);
+    let free: Vec<_> = (0..n).filter(|&v| prescribed[v].is_none()).collect();
+    let mut index = vec![usize::MAX; n];
+    for (i, &v) in free.iter().enumerate() {
+        index[v] = i;
+    }
+    let mut potential = initial_potential_wb_m.to_vec();
+    let mut evaluation = evaluate(&potential, gauge, cancelled)?;
+    let initial_norm = norm(free.iter().map(|&v| evaluation.residual()[v]));
+    let reference_norm = initial_norm.max(norm(free.iter().map(|&v| rhs[v])));
+    let target = controls.absolute_residual_tolerance_a_m.max(finite(
+        controls.relative_residual_tolerance * reference_norm,
+    )?);
+    let mut report = NonlinearMagneticReport {
+        newton_iterations: 0,
+        linear_iterations: 0,
+        backtracks: 0,
+        residual_norm_a_m: initial_norm,
+        residual_target_a_m: target,
+    };
+    loop {
+        poll(cancelled)?;
+        report.residual_norm_a_m = finite(norm(free.iter().map(|&v| evaluation.residual()[v])))?;
+        if report.residual_norm_a_m <= target {
+            return Ok((potential, evaluation, report));
+        }
+        if report.newton_iterations == controls.max_newton_iterations {
+            return Err(NonlinearMagneticError::Nonconvergence(report));
+        }
+        let tangent = assemble_tangent(mesh, incidence, limits, evaluation.tangent_weights(), cancelled)?;
+        let mut row_ptr = vec![0];
+        let mut columns = Vec::new();
+        let mut values = Vec::new();
+        for &v in &free {
+            poll(cancelled)?;
+            let (cols, vals) = tangent.row(v);
+            for (&w, &value) in cols.iter().zip(vals) {
+                if index[w] != usize::MAX {
+                    columns.push(index[w]);
+                    values.push(finite(value)?);
+                }
+            }
+            row_ptr.push(columns.len());
+        }
+        let matrix = Csr::from_parts(free.len(), free.len(), row_ptr, columns, values);
+        let direction_rhs: Vec<_> = free.iter().map(|&v| -evaluation.residual()[v]).collect();
+        let direction = {
+            let cancel = RefCell::new(&mut *cancelled);
+            let interrupted = Cell::new(false);
+            let check = || {
+                if interrupted.get() || (*cancel.borrow_mut())() {
+                    interrupted.set(true);
+                    true
+                } else {
+                    false
+                }
+            };
+            let failure = RefCell::new(None);
+            let tangent = Tangent {
+                magnetic: CsrOp::symmetric(matrix),
+                quadratic,
+                free: &free,
+                full_len: n,
+                cancelled: &check,
+                failure: &failure,
+            };
+            let result = checked_cg(
+                &tangent,
+                &IdentityPrecond,
+                &direction_rhs,
+                controls.linear,
+                |_| {
+                    if check() {
+                        Err(MagneticError::Cancelled)
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            if let Some(error) = failure.into_inner() {
+                return Err(error.into());
+            }
+            result.map_err(|error| match error {
+                CheckedCgError::InvalidInput(why) => MagneticError::Invalid(why),
+                CheckedCgError::Interrupted(error) => error,
+            })?
+        };
+        if !direction.report.converged_euclidean() {
+            return Err(MagneticError::Nonconvergence(direction.report).into());
+        }
+        report.linear_iterations += direction.report.iters;
+        let mut descent = 0.0;
+        for (&v, &delta) in free.iter().zip(&direction.x) {
+            descent = finite(evaluation.residual()[v].mul_add(delta, descent))?;
+        }
+        if descent >= 0.0 {
+            return Err(NonlinearMagneticError::Nonconvergence(report));
+        }
+        let mut alpha = 1.0_f64;
+        let mut accepted = None;
+        for backtrack in 0..=controls.max_backtracks {
+            poll(cancelled)?;
+            if backtrack > 0 {
+                report.backtracks += 1;
+            }
+            let mut trial = potential.clone();
+            for (&v, &delta) in free.iter().zip(&direction.x) {
+                trial[v] = finite(alpha.mul_add(delta, potential[v]))?;
+            }
+            match evaluate(&trial, gauge, cancelled) {
+                Ok(next) => {
+                    let residual = norm(free.iter().map(|&v| next.residual()[v]));
+                    if residual <= target
+                        || next.objective()
+                            <= (1e-4 * alpha).mul_add(descent, evaluation.objective())
+                    {
+                        accepted = Some((trial, next));
+                        break;
+                    }
+                }
+                Err(
+                    NonlinearMagneticError::FieldRange { .. }
+                    | NonlinearMagneticError::RecoilRange { .. },
+                ) => {}
+                #[cfg(feature = "magnetic-hysteresis")]
+                Err(NonlinearMagneticError::History { .. }) => {}
+                Err(error) => return Err(error),
+            }
+            alpha *= 0.5;
+        }
+        let Some((next_potential, next_evaluation)) = accepted else {
+            return Err(NonlinearMagneticError::Nonconvergence(report));
+        };
+        potential = next_potential;
+        evaluation = next_evaluation;
+        report.newton_iterations += 1;
+    }
+}
+
 
 /// Actual nonlinear field, bound to the source cards and geometry that produced it.
 pub struct PlanarNonlinearField<'a> {

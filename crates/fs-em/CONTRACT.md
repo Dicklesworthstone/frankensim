@@ -1,5 +1,55 @@
 # fs-em contract
 
+## Spatial vector hysteresis on the planar field solver
+
+The default-off `magnetic-hysteresis` feature exposes
+`planar::nonlinear::hysteretic::PlanarHystereticMagnetostatics`. Every original
+triangle retains a `ResolvedVectorHysteresis` source and independent accepted
+polarization memory. Branchless source laws supply linear background cells;
+the caller explicitly selects the isotropic extension of the fitted coefficients.
+Material names, permeability alone and scalar coupon evidence do not establish
+a vector hysteresis law.
+
+The original planar P1/FEEC Newton solver is shared with reversible magnetics.
+For every global trial it evaluates the native B-driven vector return map from
+the SAME accepted history, uses its consistent inverse permeability rotated
+into the gradient frame, and minimizes the incremental potential
+`delta W + Q`. Minimizing stored energy alone would omit pinning and select
+the wrong field. Shape gradients, physical cell volumes and immutable source
+preparation are retained outside the Newton loop.
+
+Immutable candidates contain actual `curl(A)`, all native material states,
+per-cell stored-energy changes and physical pinning heat, and a separately
+identified nonnegative endpoint numerical remainder. Impressed-current work
+and prescribed-boundary reaction work are both included. Acceptance independently
+checks the full field residual, local constitutive flux residuals, the sum of
+absolute cell energy defects, assembled work balance and cancellation. A failed
+trial or discarded candidate cannot alter accepted magnetization.
+
+Gauge lifting and work pairings use a separate prescribed reference for each
+connected component. `candidate_from_initial` accepts a distinct numerical
+initial field while retaining the original physical history, so a feasible
+equilibrium can be reached even when a stale-interior boundary lift would leave
+the fitted field domain. Previously magnetized specimens are prepared through
+their actual load history; zero-flux initialization never guesses remanence.
+
+Seven G1/G3/G4 regressions cover independent one-free-coordinate play cycles,
+remanence and nested minor loops, exact saturated-loop physical heat with
+decreasing numerical loss under history refinement, heterogeneous linear-limit
+parity, rotating prescribed fields and boundary work, transactional refusals,
+admissible initialization near source limits, and disconnected gauge changes.
+The implementation is a fixed-geometry, fixed-condition, isotropic estimated
+rung. It does not add eddy currents, mechanical motion, thermal feedback,
+anisotropic fits, path-independent coenergy, or experimental material authority.
+Continuous-path claims require reversal/rotation resolution and refinement.
+
+Verification status for this addition: source/energy review and the available
+format/diff checks completed; native regression execution remains pending.
+The execution environment ran out of shared storage and then disconnected
+before any Cargo test could run. The fallback Rust 1.91.1 compiler smoke test
+is not a substitute for the repository's pinned nightly/DSR gates.
+
+
 ## Frequency-resolved collisional plasma half-spaces
 
 `plane_wave::IonizedGasWaveResponse` binds the original prepared

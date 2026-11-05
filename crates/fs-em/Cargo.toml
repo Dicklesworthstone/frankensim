@@ -11,6 +11,8 @@ description = "Material-resolved planar magnetostatics on the shared FEEC and so
 layer = "L3"
 
 [features]
+# Estimated fixed-condition vector play history on the original planar solver.
+magnetic-hysteresis = []
 # Fixed-geometry total-current continuity with source-backed Ohmic leakage.
 resolved-leaky-dielectric = []
 plane-wave = ["dep:fs-fft", "dep:fs-matdb"]
