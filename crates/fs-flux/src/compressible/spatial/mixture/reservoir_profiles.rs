@@ -4,7 +4,8 @@
 //! as `CartesianGrid::face_center`. The original `MixtureGas` admits every
 //! composition, pressure and velocity; no caloric table or species gauge is
 //! duplicated here. The native HLLC flux determines inflow, outflow and reversal.
-//! Profiles are held through all stages and retries until explicitly replaced.
+//! Ordinary steps hold profiles through all stages and retries. Explicit
+//! `step_with_reservoir_profiles` evaluates prescribed traces at RK stage times.
 //! They are not finite baths, characteristic outlets, or nonreflecting data.
 
 use super::*;
@@ -245,20 +246,31 @@ impl Profiles {
     }
 
     pub(super) fn row(&self, side: BoundarySide, face: usize, species: usize) -> Option<&[f64]> {
+        self.row_at(side, face, species, false)
+    }
+
+    pub(super) fn row_at(
+        &self,
+        side: BoundarySide,
+        face: usize,
+        species: usize,
+        trial: bool,
+    ) -> Option<&[f64]> {
         let width = species + 4;
+        let rows = if trial { &self.trial_rows } else { &self.rows };
         self.index(side, face)
-            .map(|index| &self.rows[index * width..(index + 1) * width])
+            .map(|index| &rows[index * width..(index + 1) * width])
     }
 
     pub(super) fn primitive(&self, side: BoundarySide, face: usize) -> Option<Primitive> {
         self.index(side, face).map(|index| self.primitive[index])
     }
 
-    pub(super) fn maximum_rate(&self) -> f64 {
-        self.rate
+    pub(super) fn maximum_rate(&self, trial: bool) -> f64 {
+        if trial { self.trial_rate } else { self.rate }
     }
 
-    fn stage(
+    pub(super) fn stage(
         &mut self,
         gas: &MixtureGas,
         grid: &CartesianGrid,
@@ -319,7 +331,7 @@ impl Profiles {
         Ok(())
     }
 
-    fn commit(&mut self) {
+    pub(super) fn commit(&mut self) {
         std::mem::swap(&mut self.rows, &mut self.trial_rows);
         std::mem::swap(&mut self.primitive, &mut self.trial_primitive);
         std::mem::swap(&mut self.rate, &mut self.trial_rate);

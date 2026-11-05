@@ -5488,3 +5488,43 @@ mismatch and sampling budgets. Three exact production geometry-kernel tests
 passed natively (frame/phase mapping, rectangular integration, overflow-safe
 advective speed); the four full consumer fixtures remain unexecuted in this
 environment, where DSR/RCH and the complete constellation build are unavailable.
+
+
+## Stage-time prescribed mixture inflow in three dimensions
+
+`spatial::mixture::MixtureEuler3d::step_with_reservoir_profiles` supplies complete
+canonical-species exterior traces at the native SSP RK2 times. With boundary
+trace `b(t)`, the original finite-volume residual advances
+`U* = U^n + dt L(U^n,b(t_n))` and
+`U^(n+1) = [U^n + U* + dt L(U*,b(t_n+dt))]/2`.
+Physical face impulses retain `A dt (F_n + F_*)/2` for every species, all
+momentum components and source-referenced total energy. The original mixture
+EOS, sensible-energy admission, pressure/domain limiter and HLLC/HLL owner
+remain responsible for thermodynamics and transport.
+
+The initial prescribed trace bounds the interval; each stage's exterior
+three-axis acoustic/advection rate and actual Riemann signals pass the native
+CFL gates. A shortened retry resamples the start and its own endpoint. The
+explicit `maximum_face_evaluations` counts every provider call across all
+attempts, including the initial sample used for interval selection. Provider
+refusal, exterior-source admission failure and exhausted sampling are terminal;
+numerical trial failures retain the native halving/reconstruction policy.
+
+The provider must be pure and replayable at absolute time in seconds. No source
+clock, stochastic realization or exterior inventory is advanced. Existing
+admitted active/trial profile capacities are reused between residuals, with no
+new numerical arrays or per-face allocation. Endpoint profiles publish only
+with accepted cells, clock, boundary impulses and report after the final
+cancellation poll. Any refusal preserves all those accepted values. Ordinary
+held stepping and composed molecular/reacting owners keep their existing
+semantics; this entry does not silently enable forcing or contact-energy
+correction.
+
+Five focused G0/G1/G4 suites cover held-path parity, canonical absolute-time
+sampling, six-side time-varying species/shear/pressure/enthalpy, original variable
+calorics, analytic second-order incoming species integration, shortened CFL
+retries and cumulative sampling, source refusal, and last-poll rollback/replay.
+Rustfmt passed; these full-owner tests have not executed in this environment.
+Second-order temporal behavior is scoped to smooth prescribed data; no
+nonreflecting boundary, evolving OU interpolation, DNS, turbulent-spectrum or
+experimental validation is asserted.

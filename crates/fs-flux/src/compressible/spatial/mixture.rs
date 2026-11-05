@@ -27,18 +27,19 @@ use fs_qty::Time;
 
 const WIDTH_LIMIT: usize = MAX_SPECIES + 4;
 
+/// Conservative mechanical forcing within the original accepted-step owner.
+pub mod forcing;
 /// Original species diffusion, Fourier heat and full three-dimensional stress.
 pub mod molecular;
 /// Original finite-rate chemistry coupled atomically to this volumetric field.
 pub mod reactive;
-/// Conservative mechanical forcing within the original accepted-step owner.
-pub mod forcing;
 pub use forcing::ForcingWorkspace3d;
 mod reservoir;
 pub use reservoir::ReservoirBoundary;
 /// Prepared physical-face reservoir traces for spatially varying inflow.
 pub mod reservoir_profiles;
 pub use reservoir_profiles::ReservoirFaceState;
+mod reservoir_stages;
 
 /// Borrowed accepted cell in the immutable source's canonical species order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -172,7 +173,8 @@ pub struct BoundaryImpulse<'a> {
 pub struct StepReport {
     /// Actual accepted duration [s].
     pub elapsed: Time,
-    /// Largest combined x/y/z face CFL; forced steps also include kicked-cell acoustic rates.
+    /// Largest combined wave CFL, including prescribed exterior acoustic bounds
+    /// in stage-time steps and kicked-cell acoustic bounds in forced steps.
     pub maximum_cfl: f64,
     /// Rejected and halved attempts.
     pub halvings: usize,
@@ -281,7 +283,9 @@ impl MixtureEuler3d {
     ) -> Result<usize, Error> {
         Self::required_workspace_bytes(gas, grid)?
             .checked_add(reservoir::Reservoirs::required_bytes(gas, reservoir_count)?)
-            .ok_or(Error::Invalid("volumetric reservoir workspace size overflow"))
+            .ok_or(Error::Invalid(
+                "volumetric reservoir workspace size overflow",
+            ))
     }
 
     /// Supply complete gas states on selected transmissive physical sides.
@@ -470,6 +474,7 @@ impl MixtureEuler3d {
             controls,
             None,
             Some((contact_control, &mut *workspace)),
+            None,
             cancelled,
         )?;
         let correction = workspace.receipt();
@@ -540,7 +545,7 @@ impl MixtureEuler3d {
         forcing: Option<forcing::Context<'_, '_>>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
-        self.step_impl_with_contact(maximum_duration, controls, forcing, None, cancelled)
+        self.step_impl_with_contact(maximum_duration, controls, forcing, None, None, cancelled)
     }
 
     fn step_impl_with_contact(
@@ -549,12 +554,24 @@ impl MixtureEuler3d {
         controls: StepControl,
         mut forcing: Option<forcing::Context<'_, '_>>,
         mut contact: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
+        mut profiles: Option<reservoir_stages::Context<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         stepping::poll::<Error>(&mut cancelled)?;
         let n = self.gas.species_count();
         let width = n + 4;
-        let mut rate = self.reservoirs.maximum_rate(&self.grid);
+        if let Some(context) = profiles.as_mut() {
+            context.prepare_start(
+                self.time,
+                &self.gas,
+                &self.grid,
+                &mut self.reservoirs,
+                &mut cancelled,
+            )?;
+        }
+        let mut rate = self
+            .reservoirs
+            .maximum_rate_at(&self.grid, profiles.is_some());
         for (q, p) in self
             .states
             .chunks_exact(width)
@@ -580,41 +597,90 @@ impl MixtureEuler3d {
             controls,
             &mut cancelled,
             |dt, reconstruction, cancelled| {
-                if let Some((control, workspace)) = contact.as_mut() {
-                    workspace.begin_attempt(*control)?;
-                }
-                if let Some((force, control, workspace)) = forcing.as_mut() {
-                    copy_values(&self.states, &mut workspace.kicked, cancelled)?;
-                    let mut source = forcing::Accumulator::default();
-                    forcing::kick_field(
-                        &self.gas, &self.grid, &mut workspace.kicked,
-                        *force, *control, 0.5 * dt, &mut source, false, cancelled,
-                    )?;
-                    // The original spatial primitive sweep admits the first
-                    // kicked state without a duplicate caloric recovery.
-                    let mut stats = attempt(
-                        &self.gas, &self.grid, self.boundaries, &self.reservoirs, &workspace.kicked,
-                        &mut self.work, dt, controls.cfl, reconstruction, Some(*control),
+                if let Some(context) = profiles.as_mut() {
+                    return context.attempt(
+                        self.time,
+                        &self.gas,
+                        &self.grid,
+                        self.boundaries,
+                        &mut self.reservoirs,
+                        &self.states,
+                        &mut self.work,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
                         cancelled,
-                    )?;
-                    let final_rate = forcing::kick_field(
-                        &self.gas, &self.grid, &mut self.work.candidate,
-                        *force, *control, 0.5 * dt, &mut source, true, cancelled,
-                    )?;
-                    stepping::check_cfl::<Error>(final_rate * dt, controls.cfl)?;
-                    stats.rate = stats.rate.max(final_rate);
-                    source_change = source.finish()?;
-                    Ok(stats)
-                } else {
-                    attempt_with_contact(
-                        &self.gas, &self.grid, self.boundaries, &self.reservoirs, &self.states,
-                        &mut self.work, dt, controls.cfl, reconstruction, None,
-                        contact.as_mut().map(|(_, workspace)| &mut **workspace),
-                        cancelled,
-                    )
+                    );
                 }
+                let mut run = || -> Result<stepping::StageStats, Error> {
+                    if let Some((control, workspace)) = contact.as_mut() {
+                        workspace.begin_attempt(*control)?;
+                    }
+                    if let Some((force, control, workspace)) = forcing.as_mut() {
+                        copy_values(&self.states, &mut workspace.kicked, cancelled)?;
+                        let mut source = forcing::Accumulator::default();
+                        forcing::kick_field(
+                            &self.gas,
+                            &self.grid,
+                            &mut workspace.kicked,
+                            *force,
+                            *control,
+                            0.5 * dt,
+                            &mut source,
+                            false,
+                            cancelled,
+                        )?;
+                        // The original spatial primitive sweep admits the first
+                        // kicked state without a duplicate caloric recovery.
+                        let mut stats = attempt(
+                            &self.gas,
+                            &self.grid,
+                            self.boundaries,
+                            &self.reservoirs,
+                            &workspace.kicked,
+                            &mut self.work,
+                            dt,
+                            controls.cfl,
+                            reconstruction,
+                            Some(*control),
+                            cancelled,
+                        )?;
+                        let final_rate = forcing::kick_field(
+                            &self.gas,
+                            &self.grid,
+                            &mut self.work.candidate,
+                            *force,
+                            *control,
+                            0.5 * dt,
+                            &mut source,
+                            true,
+                            cancelled,
+                        )?;
+                        stepping::check_cfl::<Error>(final_rate * dt, controls.cfl)?;
+                        stats.rate = stats.rate.max(final_rate);
+                        source_change = source.finish()?;
+                        Ok(stats)
+                    } else {
+                        attempt_with_contact(
+                            &self.gas,
+                            &self.grid,
+                            self.boundaries,
+                            &self.reservoirs,
+                            &self.states,
+                            &mut self.work,
+                            dt,
+                            controls.cfl,
+                            reconstruction,
+                            None,
+                            contact.as_mut().map(|(_, workspace)| &mut **workspace),
+                            cancelled,
+                        )
+                    }
+                };
+                run().map_err(reservoir_stages::AttemptError::retryable)
             },
-        )?;
+        )
+        .map_err(|failure| failure.error)?;
         let after = checked_totals(&self.work.candidate, &self.grid, n, &mut cancelled)?;
         let outward = sum_rows(&self.work.boundary_trial, width, 1.0, &mut cancelled)?;
         let boundary_change = Totals::from_row(&outward.map(|v| -v), n);
@@ -622,11 +688,12 @@ impl MixtureEuler3d {
             if d < width {
                 let delta = after.component(d) - before.component(d) - boundary_change.component(d);
                 if forcing.is_some() && d >= n {
-                    delta - if d < n + 3 {
-                        source_change.impulse[d - n]
-                    } else {
-                        source_change.work
-                    }
+                    delta
+                        - if d < n + 3 {
+                            source_change.impulse[d - n]
+                        } else {
+                            source_change.work
+                        }
                 } else {
                     delta
                 }
@@ -662,6 +729,13 @@ impl MixtureEuler3d {
             }
         }
         stepping::poll::<Error>(&mut cancelled)?;
+        if profiles.is_some() {
+            self.reservoirs
+                .profiles
+                .as_mut()
+                .expect("prepared stage profiles")
+                .commit();
+        }
         std::mem::swap(&mut self.states, &mut self.work.candidate);
         self.boundary_impulses
             .copy_from_slice(&self.work.boundary_trial);
@@ -717,72 +791,109 @@ fn attempt_with_contact(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<stepping::StageStats, Error> {
     stepping::rk2(cancelled, |final_stage, cancelled| {
-        let mut stats = spatial_with_contact(
+        rk_stage(
             gas,
             grid,
             boundaries,
             reservoirs,
-            if final_stage { &work.stage } else { original },
-            &mut work.primitive,
-            &mut work.slopes,
-            &mut work.flux,
-            &mut work.metadata,
+            false,
+            original,
+            work,
+            dt,
+            cfl,
             reconstruction,
             force_control,
-            contact
-                .as_deref_mut()
-                .map(|workspace| (workspace, !final_stage)),
-            cancelled,
-        )?;
-        stepping::check_cfl::<Error>(stats.rate * dt, cfl)?;
-        let stage_rate = if final_stage {
-            update_with_contact(
-                gas,
-                grid,
-                original,
-                &work.stage,
-                &work.flux,
-                &mut work.candidate,
-                dt,
-                true,
-                force_control,
-                contact.as_deref_mut(),
-                cancelled,
-            )?
-        } else {
-            update_with_contact(
-                gas,
-                grid,
-                original,
-                original,
-                &work.flux,
-                &mut work.stage,
-                dt,
-                false,
-                force_control,
-                contact.as_deref_mut(),
-                cancelled,
-            )?
-        };
-        if force_control.is_some() {
-            stepping::check_cfl::<Error>(stage_rate * dt, cfl)?;
-            stats.rate = stats.rate.max(stage_rate);
-        }
-        let width = gas.species_count() + 4;
-        cartesian::capture::<Error>(
-            grid,
-            width,
-            0.5 * dt,
+            contact.as_deref_mut(),
             final_stage,
-            |axis, face, d| work.flux[axis][face * width + d],
-            |boundary, d, delta, add| {
-                let out = &mut work.boundary_trial[boundary * width + d];
-                *out = (if add { *out } else { 0.0 }) + delta;
-            },
             cancelled,
-        )?;
-        Ok(stats)
+        )
     })
+}
+
+/// One original SSP stage; only the borrowed exterior profile buffer varies.
+#[allow(clippy::too_many_arguments)]
+fn rk_stage(
+    gas: &MixtureGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    reservoirs: &reservoir::Reservoirs,
+    trial_profiles: bool,
+    original: &[f64],
+    work: &mut Workspace,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    force_control: Option<ForceControl3d>,
+    mut contact: Option<&mut ContactWorkspace>,
+    final_stage: bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<stepping::StageStats, Error> {
+    let mut stats = spatial_with_contact(
+        gas,
+        grid,
+        boundaries,
+        reservoirs,
+        trial_profiles,
+        if final_stage { &work.stage } else { original },
+        &mut work.primitive,
+        &mut work.slopes,
+        &mut work.flux,
+        &mut work.metadata,
+        reconstruction,
+        force_control,
+        contact
+            .as_deref_mut()
+            .map(|workspace| (workspace, !final_stage)),
+        cancelled,
+    )?;
+    stepping::check_cfl::<Error>(stats.rate * dt, cfl)?;
+    let stage_rate = if final_stage {
+        update_with_contact(
+            gas,
+            grid,
+            original,
+            &work.stage,
+            &work.flux,
+            &mut work.candidate,
+            dt,
+            true,
+            force_control,
+            contact.as_deref_mut(),
+            cancelled,
+        )?
+    } else {
+        update_with_contact(
+            gas,
+            grid,
+            original,
+            original,
+            &work.flux,
+            &mut work.stage,
+            dt,
+            false,
+            force_control,
+            contact.as_deref_mut(),
+            cancelled,
+        )?
+    };
+    if force_control.is_some() {
+        stepping::check_cfl::<Error>(stage_rate * dt, cfl)?;
+        stats.rate = stats.rate.max(stage_rate);
+    }
+    let width = gas.species_count() + 4;
+    cartesian::capture::<Error>(
+        grid,
+        width,
+        0.5 * dt,
+        final_stage,
+        |axis, face, d| work.flux[axis][face * width + d],
+        |boundary, d, delta, add| {
+            let out = &mut work.boundary_trial[boundary * width + d];
+            *out = (if add { *out } else { 0.0 }) + delta;
+        },
+        cancelled,
+    )?;
+    Ok(stats)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -805,6 +916,7 @@ fn spatial(
         grid,
         boundaries,
         reservoirs,
+        false,
         states,
         primitive,
         slopes,
@@ -823,6 +935,7 @@ fn spatial_with_contact(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
     reservoirs: &reservoir::Reservoirs,
+    trial_profiles: bool,
     states: &[f64],
     primitive: &mut [Primitive],
     slopes: &mut [f64],
@@ -948,7 +1061,9 @@ fn spatial_with_contact(
                 let c = grid.coordinates(k);
                 let [a, b] = tangents(axis);
                 let boundary_face = c[a] + grid.shape[a] * c[b];
-                if let Some(exterior) = reservoirs.normal_face(axis, sign, boundary_face, n) {
+                if let Some(exterior) =
+                    reservoirs.normal_face_at(axis, sign, boundary_face, n, trial_profiles)
+                {
                     let interior = if first_order {
                         let [a, b] = tangents(axis);
                         SpatialPrimitive {
@@ -983,12 +1098,19 @@ fn spatial_with_contact(
                             &mut result[..width],
                             &mut *cancelled,
                         )?,
-                        (true, BoundaryCondition::Transmissive) => {
-                            gas.hllc_spatial_flux(q(k), q(k), &mut result[..width], &mut *cancelled)?
-                        }
+                        (true, BoundaryCondition::Transmissive) => gas.hllc_spatial_flux(
+                            q(k),
+                            q(k),
+                            &mut result[..width],
+                            &mut *cancelled,
+                        )?,
                         (true, BoundaryCondition::PressureOutlet { pressure_pa }) => gas
                             .pressure_outlet_spatial_flux(
-                                q(k), sign, pressure_pa, &mut result[..width], &mut *cancelled,
+                                q(k),
+                                sign,
+                                pressure_pa,
+                                &mut result[..width],
+                                &mut *cancelled,
                             )?,
                         (false, BoundaryCondition::Reflecting) => {
                             face_trace(k, 0.5 * sign, &mut left[..width]);

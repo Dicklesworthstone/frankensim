@@ -32,11 +32,15 @@ pub(super) struct Reservoirs {
 impl Reservoirs {
     pub(super) fn required_bytes(gas: &MixtureGas, count: usize) -> Result<usize, Error> {
         if count > 6 {
-            return Err(Error::Invalid("at most six volumetric mixture reservoir sides"));
+            return Err(Error::Invalid(
+                "at most six volumetric mixture reservoir sides",
+            ));
         }
         count
             .checked_mul((gas.species_count() + 4) * size_of::<f64>() + size_of::<Primitive>())
-            .ok_or(Error::Invalid("volumetric reservoir workspace size overflow"))
+            .ok_or(Error::Invalid(
+                "volumetric reservoir workspace size overflow",
+            ))
     }
 
     pub(super) fn new(
@@ -78,10 +82,8 @@ impl Reservoirs {
             row[..n].copy_from_slice(input.partial_densities);
             row[n..n + 3].copy_from_slice(&input.velocity);
             row[n + 3] = input.pressure_pa;
-            let original = gas.spatial_conserved_into(
-                normal_primitive(row, n, 0),
-                &mut conservative[..width],
-            )?;
+            let original = gas
+                .spatial_conserved_into(normal_primitive(row, n, 0), &mut conservative[..width])?;
             result.primitive[index] = Primitive {
                 density: original.density,
                 velocity: input.velocity,
@@ -164,8 +166,7 @@ impl Reservoirs {
             .as_ref()
             .and_then(|profile| profile.primitive(side, face))
             .or_else(|| {
-                self.slots[side_index(side.axis(), side.sign())]
-                    .map(|index| self.primitive[index])
+                self.slots[side_index(side.axis(), side.sign())].map(|index| self.primitive[index])
             })
     }
 
@@ -176,9 +177,20 @@ impl Reservoirs {
         face: usize,
         species: usize,
     ) -> Option<SpatialPrimitive<'_>> {
+        self.normal_face_at(axis, sign, face, species, false)
+    }
+
+    pub(super) fn normal_face_at(
+        &self,
+        axis: usize,
+        sign: f64,
+        face: usize,
+        species: usize,
+        trial_profiles: bool,
+    ) -> Option<SpatialPrimitive<'_>> {
         let side = BoundarySide::ALL[side_index(axis, sign)];
         if let Some(profile) = &self.profiles
-            && let Some(row) = profile.row(side, face, species)
+            && let Some(row) = profile.row_at(side, face, species, trial_profiles)
         {
             return Some(normal_primitive(row, species, axis));
         }
@@ -187,6 +199,10 @@ impl Reservoirs {
     }
 
     pub(super) fn maximum_rate(&self, grid: &CartesianGrid) -> f64 {
+        self.maximum_rate_at(grid, false)
+    }
+
+    pub(super) fn maximum_rate_at(&self, grid: &CartesianGrid, trial_profiles: bool) -> f64 {
         self.primitive
             .iter()
             .map(|p| {
@@ -195,7 +211,11 @@ impl Reservoirs {
                     .sum::<f64>()
             })
             .fold(0.0, f64::max)
-            .max(self.profiles.as_ref().map_or(0.0, |p| p.maximum_rate()))
+            .max(
+                self.profiles
+                    .as_ref()
+                    .map_or(0.0, |p| p.maximum_rate(trial_profiles)),
+            )
     }
 }
 
