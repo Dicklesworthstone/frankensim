@@ -34,6 +34,18 @@ The terminal load is explicit in Pa s/m3 and may come from the material-driven
 BEM owner or a supported tabulated load. `None` closes the end; zero releases
 pressure. A rigid cap retains its physical pressure transfer and zero flow.
 
+`fluid::{input_reflection_load,input_reflection_load_with_loss}` returns the
+same material chain's direct input wave reflection, in its positive real inlet
+reference. `input_reflection_boundary` shares one original thermoviscous
+snapshot with the selected radiation, porous or other native terminal owner.
+No complete-duct impedance is formed, so a lossless pressure antinode remains
+a finite reflection even when its input pressure/flow ratio is singular.
+`InputReflection::referenced_to` changes the real numerical reference without
+passing through that pole. This does not change the original complex fluid or
+wall impedance. The existing condition and work limits still apply, and
+`compose_chain_reflection_controlled` polls cancellation during composition
+and the load-to-input recurrence.
+
 The original material error is retained as `FluidDuctError::Material`; native
 geometry, wall, conditioning and work refusals remain `FluidDuctError::Duct`.
 Cancellation is checked before material admission and at each segment/slice
@@ -114,6 +126,13 @@ physical impedances, so the original composer enforces pressure/volume-flow
 continuity and interface reflection without averaging materials or synthesizing
 a GasState. A single work cap covers every region, slice and profile step;
 cancellation and original source failures publish no partial chain.
+`input_reflection_load` and its `_with_loss` counterpart retain that same
+regional solve directly in reflection coordinates, including at input
+impedance poles. Their reference belongs to the first region; each terminal
+load still belongs to the actual outlet material. The focused
+`fluid_acoustics::reflection` regressions cover gas and liquid pressure
+antinodes, interface phase and transmitted power, thermoviscous/mechanical
+wall response, coherent terminal material evaluation and sweep cancellation.
 
 Sources may be heterogeneous trait-object references. Interfaces coincide with
 authored segment ends. These are prescribed frozen backgrounds whose mechanical

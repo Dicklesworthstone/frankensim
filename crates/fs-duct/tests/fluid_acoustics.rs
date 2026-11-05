@@ -65,6 +65,9 @@ mod equilibrium;
 #[path = "fluid_acoustics/flanged.rs"]
 mod flanged;
 
+#[path = "fluid_acoustics/reflection.rs"]
+mod reflection;
+
 fn options() -> ComposeOptions {
     ComposeOptions {
         preserve_well_conditioned_bits: false,
