@@ -272,6 +272,7 @@ impl<'scene> Vertex<'scene> {
             }
             Material::Lambertian { .. }
             | Material::SpectralDiffuse { .. }
+            | Material::CoatedDiffuse { .. }
             | Material::GrayDiffuseThermal { .. }
             | Material::SpectralDiffuseThermal { .. }
             | Material::Ggx { .. }
@@ -319,6 +320,7 @@ impl<'scene> Vertex<'scene> {
                     Material::Conductor { surface, .. } => !surface.is_delta(),
                     Material::Lambertian { .. }
                     | Material::SpectralDiffuse { .. }
+                    | Material::CoatedDiffuse { .. }
                     | Material::GrayDiffuseThermal { .. }
                     | Material::SpectralDiffuseThermal { .. }
                     | Material::Ggx { .. }
@@ -532,6 +534,7 @@ fn surface_scattering(
     match material {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::CoatedDiffuse { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. } => {
             let medium = vertex
@@ -610,6 +613,7 @@ fn surface_pdf_solid_angle(
     match material {
         Material::Lambertian { .. }
         | Material::SpectralDiffuse { .. }
+        | Material::CoatedDiffuse { .. }
         | Material::Ggx { .. }
         | Material::Conductor { .. } => Ok(bsdf_pdf(
             material,
@@ -673,6 +677,27 @@ fn sample_surface(
         }
         Material::GrayDiffuseThermal { .. } | Material::SpectralDiffuseThermal { .. } => {
             Err(TracerError::ThermalSurfaceUnsupported)
+        }
+        Material::CoatedDiffuse { coating, reflectance } => {
+            let incident = vertex.medium_toward(wo).map(|entry| *entry.glass);
+            coated_diffuse::admit_medium(*coating, incident, wavelength_nm)?;
+            let rho = reflectance.at(wavelength_nm).map_err(|_| TracerError::InvalidInput)?;
+            let Some(sample) = coated_diffuse::sample(
+                *coating, normal, wo, random[0], random[1],
+            )? else {
+                return Ok(None);
+            };
+            let weight = sample.weight(*coating, rho)?;
+            // Both directions remain in one exterior medium. The reciprocal
+            // diffuse law and mirror carry the same radiance/importance weight.
+            Ok((weight.is_finite() && weight > 0.0).then_some(ScatterSample {
+                direction: sample.direction,
+                weight,
+                pdf_fwd_solid_angle: sample.pdf_fwd,
+                pdf_rev_solid_angle: sample.pdf_rev,
+                delta: sample.delta,
+                event: None,
+            }))
         }
         Material::Conductor { optics, surface } if surface.is_delta() => {
             let direction = smooth_conductor_direction(normal, wo)?;
@@ -3134,6 +3159,76 @@ mod tests {
                     surface_pdf_solid_angle(&scene, &vertex, sample.direction, wo, 550.0).unwrap();
                 assert_eq!(sample.pdf_rev_solid_angle, reverse);
                 assert!(!sample.delta);
+            }
+        }
+    }
+
+    #[test]
+    fn coated_diffuse_bdpt_preserves_host_and_both_proposal_measures() {
+        use crate::coated_diffuse::SmoothDiffuseCoating;
+        use crate::dielectric::GlassProvenance;
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = Vec3::new((1.0_f64 - 0.4 * 0.4).sqrt(), 0.0, 0.4);
+        let reflectance = crate::spectral::SpectralReflectance::table(
+            &[(380.0, 0.2), (780.0, 0.8)],
+        ).unwrap();
+        let (mut scene, _, _) = direct_emitter_scene(true);
+        scene.primitives[0].emission = None;
+        scene.lights.clear();
+        for eta in [1.0, 1.4] {
+            let coating = SmoothDiffuseCoating::try_new(eta, 1.5 * eta).unwrap();
+            scene.primitives[0].material = Material::CoatedDiffuse { coating, reflectance };
+            let glass = DielectricGlass::new(CauchyIor::try_constant(eta).unwrap(),
+                BeerLambertAbsorption::CLEAR, GlassProvenance::Custom);
+            let medium = Some(MediumEntry { boundary_primitive: 0, glass: &glass });
+            let vertex = Vertex {
+                kind: VertexKind::Surface { primitive_index: 0 },
+                point: Point3::new(0.0, 0.0, 0.0),
+                geometric_normal: Some(normal), mesh_boundary_origin: None, brushed_frame: None,
+                wo: Some(wo), beta: 1.0, pdf_fwd: 1.0, pdf_rev: 0.0, delta: false,
+                positive_medium: medium, negative_medium: medium,
+            };
+            assert!(vertex.is_connectible(&scene));
+            let mass = coating.branch_probabilities(normal.dot(wo)).unwrap();
+            let mirror_draw = if mass[0] <= mass[1] {
+                0.5 * mass[0]
+            } else { mass[1] + 0.5 * mass[0] };
+            let diffuse_draw = if mass[0] <= mass[1] {
+                mass[0] + 0.5 * mass[1]
+            } else { 0.5 * mass[1] };
+            for mode in [TransportMode::Radiance, TransportMode::Importance] {
+                for (draw, delta) in [(mirror_draw, true), (diffuse_draw, false)] {
+                    let sample = sample_surface(&scene, &vertex, 550.0, mode, [draw, 0.37, 0.1, 0.2])
+                        .unwrap().unwrap();
+                    assert_eq!(sample.delta, delta);
+                    assert_eq!(sample.event, None);
+                    assert!(normal.dot(sample.direction) > 0.0);
+                    if delta {
+                        let native = fresnel_dielectric(normal.dot(wo), eta, 1.5 * eta).unwrap();
+                        assert!((sample.weight * mass[0] - native.reflectance).abs() < 2e-14);
+                        assert_eq!(sample.pdf_fwd_solid_angle, 0.0);
+                        assert_eq!(sample.pdf_rev_solid_angle, 0.0);
+                    } else {
+                        let value = surface_scattering(
+                            &scene, &vertex, wo, sample.direction, 550.0, mode,
+                        ).unwrap();
+                        let expected = coating.diffuse_brdf(
+                            normal.dot(wo), normal.dot(sample.direction), reflectance.at(550.0).unwrap(),
+                        ).unwrap();
+                        assert!((value - expected).abs() < 2e-13);
+                        assert!((sample.weight * sample.pdf_fwd_solid_angle
+                            - value * normal.dot(sample.direction)).abs() < 2e-13);
+                        assert_eq!(sample.pdf_rev_solid_angle, surface_pdf_solid_angle(
+                            &scene, &vertex, sample.direction, wo, 550.0,
+                        ).unwrap());
+                    }
+                }
+            }
+            if eta != 1.0 {
+                let wrong_medium = Vertex { positive_medium: None, negative_medium: None, ..vertex };
+                assert!(sample_surface(
+                    &scene, &wrong_medium, 550.0, TransportMode::Radiance, [diffuse_draw, 0.3, 0.1, 0.2],
+                ).is_err());
             }
         }
     }

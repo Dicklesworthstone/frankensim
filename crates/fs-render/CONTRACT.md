@@ -7419,3 +7419,50 @@ Each joint element uses one original barycentric admission and the same coordina
 The existing IF97/IAPWS jets retain compressibility, thermal expansion and the full mixed optical Hessian. Continuous original nodal pressure and temperature preserve phase index across an internal face, so the shared crossing-time/saltation transport applies without a Fresnel event. A pressure-gradient jump now participates in the native unresolved-face bundle-endpoint refusal even when the temperature gradient is unchanged. Glass and fixed-pressure water retain their existing predicate. Original phase/group paths, Beer loss, face/step/query budgets and cancellation remain under the shared transport owners; the joint route adds no per-ray workspace allocation.
 
 Five focused controls cover liquid/vapor many-cell propagation with nonparallel source gradients in both tetrahedron orientations, pressure-only gradient-jump bundles against neighboring primal rays, exact same-side departure-collar field pairing, the native pressure-only unresolved-face guard, and source/contact/phase/work refusals. Exterior and duplicated-contact faces still terminate; a true pressure jump does not become a continuous face transition. This frozen-snapshot route supplies neither a fluid closure nor a pressure solve, moving-fluid optics, cross-phase continuation, global point locator or optical law for discontinuous contacts.
+
+## Smooth dielectric coats over diffuse substrates
+
+`SmoothDiffuseCoating` declares constant dimensionless indices
+`1 <= n_exterior <= n_coating` for a smooth, lossless, geometrically collapsed
+dielectric above the original wavelength-resolved, depolarizing Lambertian
+substrate. Its actual surrounding phase index must agree. Both reflection
+branches remain in that medium; this material never changes the bulk-medium
+stack or invents a thermal-emission law.
+
+The original native Fresnel owner supplies entry and exit transmission.
+Construction caches internal escape
+`E = (n_exterior/n_coating)^2 * 2*integral(mu*T(mu), mu=0..1)`
+using bounded Gauss-Legendre refinement on the external hemisphere. Repeated
+internal returns use the cancellation-resistant
+`D = (1-rho) + rho*E`, giving continuous reciprocal reflection
+`rho*(n_exterior/n_coating)^2*T_in*T_out/(pi*D)`, alongside native mirror
+Fresnel. This is the physical nonlinear smooth-plastic model described in
+[Mitsuba's material reference](https://mitsuba.readthedocs.io/en/latest/src/generated/plugins_bsdfs.html#smooth-plastic-material-plastic).
+The cached quadrature is a convergence check, not a certified enclosure or
+measured-material claim. Ray queries perform no angular integration or allocation.
+
+Native polarized scene/camera transport retains full entry s/p response,
+substrate depolarization and polarization on escape. Scalar
+`Material::CoatedDiffuse`, spectral path continuation and BDPT share the same
+law, with a discrete mirror branch and unconditional continuous density
+`diffuse_mass*cos(theta)/pi`. Forward/reverse densities, emitting-surface
+addition, material identity, actual-medium admission and existing receiver
+lighting remain explicit. The smaller sampling branch lies next to zero, so
+a mirror mass rounded to one cannot erase weak diffuse support. The polarized
+sampler normalizes small-probability transmission before applying it to Stokes
+power, retaining finite grazing and subnormal conditional power.
+
+After spectral splitting, only active coated material responses are queried;
+the original complete packet still determines every medium/source query,
+free-flight proposal and MIS escape density. Calibrated jobs refuse active
+point fixtures with a nonzero coating mirror because specular point-source
+connections are absent. Exactly matched-index coats reduce to the original
+diffuse law. Intermediate analytic bundle mirror plans still refuse this mixed
+material; ordinary sampled continuation and continuous bundle receivers apply.
+
+Independent numerical controls cover flux integrals, white-furnace conservation,
+internal returns, reciprocity, matched/black limits, full Stokes frames,
+conditional grazing/subnormal power and mixed forward/reverse PDFs. Native
+scene, scalar Material and BDPT integration regressions are also present.
+The model supplies no finite thickness, coherent interference, roughness,
+bulk absorption or lateral displacement.

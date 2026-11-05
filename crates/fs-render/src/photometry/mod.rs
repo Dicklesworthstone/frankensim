@@ -578,6 +578,11 @@ impl<'a> PhotometricScene<'a> {
                     Some("legacy emission has no luminous calibration")
                 }
                 _ => match primitive.material {
+                    Material::CoatedDiffuse { coating, .. }
+                        if !coating.is_matched() && has_point_emission =>
+                    {
+                        Some("active point fixtures with coated mirrors require specular point-source connections")
+                    }
                     Material::Dielectric { .. } if !native_paths => {
                         Some("refractive connections are not yet supported")
                     }

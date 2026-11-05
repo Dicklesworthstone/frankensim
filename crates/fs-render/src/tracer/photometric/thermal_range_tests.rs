@@ -90,6 +90,7 @@ fn reflected_thermal_nee_obeys_calibrated_physical_range() {
                     incident_glass: None,
                 },
                 &[450.0, 550.0, 650.0, 750.0],
+                None,
                 &rng,
                 fixtures,
             )

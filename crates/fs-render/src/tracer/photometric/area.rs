@@ -500,8 +500,12 @@ impl<'a> AreaLighting<'a> {
         point: Point3,
         receiver: Receiver<'_>,
         wavelengths: &[f64; PACKET],
+        coated_active_lane: Option<usize>,
         rng: &PathRng,
     ) -> Result<[f64; PACKET], TracerError> {
+        if coated_active_lane.is_some_and(|lane| lane >= PACKET) {
+            return Err(TracerError::InvalidInput);
+        }
         let mut result = [0.0; PACKET];
         if !self.active
             || settings.strategy == DirectStrategy::BsdfOnly
@@ -620,6 +624,11 @@ impl<'a> AreaLighting<'a> {
         let terminal =
             !matches!(receiver, Receiver::Probe { .. }) && depth + 1 == settings.max_depth;
         for (lane, &wavelength) in wavelengths.iter().enumerate() {
+            // Suppress only inactive coated responses. The original full packet
+            // above still owns transport and the shared free-flight survival PDF.
+            if coated_active_lane.is_some_and(|active| active != lane) {
+                continue;
+            }
             // At a dispersive boundary the native continuation fans out by
             // wavelength. Its actual lane PDF, including event probability,
             // is the competitor rather than a hero-wavelength approximation.
