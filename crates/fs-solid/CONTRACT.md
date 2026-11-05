@@ -98,9 +98,43 @@ mass profiles with different native supported modes; off-diagonal modal
 inertia and pressure work; partition/permutation invariance; original uniform
 bits through modes and nonlinear motion; and typed input/cancellation refusal.
 
+## Consistent reference inertia in nonlinear membrane motion
+
+`MembraneMotion::new_with_consistent_inertia` uses the original nonlinear
+momentum-Verlet map with the exact density-weighted P1 reference mass.
+Each Cartesian component prepares its scalar free-node block through the
+existing cancellable `fs-la` Cholesky owner. Positive reference row sums
+scale solver coordinates before factorization; all off-diagonal physical
+mass terms remain present. Equal support patterns share one immutable
+factor. The explicit `ConsistentMassBudget` and hard 512-node per-axis leaf
+cap bound dense preparation and triangular solves. Large-mesh sparse inversion
+and automatic stability bounds are not claimed.
+
+Initial velocities become physical nodal momentum through the same original
+consistent matrix, then are recovered with the prepared inverse; factorization
+roundoff can change their last bits. Kinetic energy and its polarized increment
+use that inverse consistently. The original lumped constructor retains its
+arithmetic and avoids the consistent image's extra work buffers.
+
+Stationary supports retain their original values, but their reaction includes
+`M_sf * delta_v` as well as the original force kicks. The summed supported-row
+weights are prepared once; delta_v is recovered from accepted delta momentum
+so a resolved weak impulse does not disappear under a large velocity datum.
+The same integrator workspace is reused. Density moments, factors and source
+laws are never resampled during motion; the new inverse path adds no warm
+allocation. Failure and cancellation publish no candidate state or cached force.
+
+Four further G1/G3 regressions in `tests/membrane/density.rs` cover the
+independent nonlinear graded-mass period with second-order time refinement,
+physical support impulse/kinetic balances, free linear/angular momentum and
+time reversal, checkpoint/cancellation and work limits, and finite kinetic
+energy for light/heavy sheet inventories across 560 orders of mass ratio.
+No measured-material, real-time throughput or continuum-error qualification
+is inferred from these manufactured cases.
+
 ## Nonlinear source-bound membrane motion
 
-`membrane::dynamics::MembraneMotion` advances the original total-Lagrangian
+`membrane::dynamics::MembraneMotion::new` advances the original total-Lagrangian
 membrane energy with `fs-time::verlet_momentum_step_with_displacement`. Reference lumped inertia,
 grain, source laws and finite-strain geometric stiffening retain their existing
 owners. Only free coordinates are integrated; stationary support values are

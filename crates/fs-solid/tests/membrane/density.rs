@@ -1,6 +1,6 @@
 //! G1/G3 reference-density placement, exact inertia, and native membrane modes.
 use super::*;
-use fs_solid::membrane::dynamics::MembraneMotion;
+use fs_solid::membrane::dynamics::{ConsistentMassBudget, MembraneMotion};
 use fs_solid::membrane::inertia::MembraneMassImage;
 use fs_solid::membrane::vibration::VibrationSettings;
 
@@ -395,4 +395,356 @@ fn bad_density_and_cancelled_observations_leave_the_reference_owner_intact() {
     ));
     assert_eq!(original.reference_corner_areal_density_kg_m2(), &[[0.2; 3]]);
     assert_eq!(p.reference_corner_areal_density_kg_m2(), &[[2.0, 5.0, 7.0]]);
+}
+
+fn consistent_budget() -> ConsistentMassBudget {
+    ConsistentMassBudget {
+        max_nodes_per_axis: 16,
+    }
+}
+
+// Independent energy first integral of m*q'' + k*q + beta*q^3 = 0.
+fn graded_period(mass: f64, stretch: f64, amplitude: f64) -> f64 {
+    let stiffness = 2.0 * 8000.0 * (stretch * stretch - 1.0);
+    let beta = 4.0 * 8000.0 / 0.1_f64.powi(2);
+    let count = 4096;
+    let h = std::f64::consts::FRAC_PI_2 / count as f64;
+    let sum: f64 = (0..=count)
+        .map(|i| {
+            let theta = i as f64 * h;
+            let weight = if i == 0 || i == count {
+                1.0
+            } else if i % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            weight
+                / (stiffness + 0.5 * beta * amplitude * amplitude * (1.0 + theta.sin().powi(2)))
+                    .sqrt()
+        })
+        .sum();
+    4.0 * mass.sqrt() * h * sum / 3.0
+}
+
+#[test]
+fn consistent_graded_motion_has_the_exact_nonlinear_inertial_time_scale() {
+    let p = patch(8000.0, 8000.0, 4000.0, 0.2, 0.0)
+        .with_reference_areal_density(vec![[0.4, 0.1, 0.1]; 4], || false)
+        .unwrap();
+    let mass = 0.028 / 30.0; // exact four-triangle integral rho*N_center²
+    let stretch = 1.02;
+    let amplitude = 0.006;
+    let fixed = prescribed(stretch);
+    let zero = [[0.0; 3]; 5];
+    let mut initial = zero;
+    for &(dof, value) in &fixed {
+        initial[dof / 3][dof % 3] = value;
+    }
+    initial[0][2] = amplitude;
+    let period = graded_period(mass, stretch, amplitude);
+    let mut errors = Vec::new();
+    for subdivisions in [80, 160, 320] {
+        let dt = period / subdivisions as f64;
+        let mut motion = MembraneMotion::new_with_consistent_inertia(
+            &p,
+            &fixed,
+            &initial,
+            &zero,
+            0.0,
+            consistent_budget(),
+            || false,
+        )
+        .unwrap();
+        assert_eq!(motion.inertia_image(), MembraneMassImage::Consistent);
+        let mut observed = None;
+        for _ in 0..subdivisions {
+            let before = motion.displacement_m()[0][2];
+            let time = motion.time_s();
+            let step = motion.step(dt, &zero, || false).unwrap();
+            close(
+                step.kinetic_energy_j,
+                0.5 * mass * motion.velocity_m_s()[0][2].powi(2),
+                1e-16,
+                1e-12,
+            );
+            assert_eq!(
+                motion.patch().reference_corner_areal_density_kg_m2(),
+                &[[0.4, 0.1, 0.1]; 4]
+            );
+            let after = motion.displacement_m()[0][2];
+            if after <= 0.0 {
+                observed = Some(4.0 * (time + dt * before / (before - after)));
+                break;
+            }
+        }
+        errors.push((observed.unwrap() / period - 1.0).abs());
+    }
+    assert!(
+        errors[0] / errors[1] > 3.5 && errors[1] / errors[2] > 3.5,
+        "{errors:?}"
+    );
+    assert!(errors[2] < 1e-4, "{errors:?}");
+}
+
+#[test]
+fn consistent_motion_retains_supported_row_inertia_in_impulse_balance() {
+    let p = triangle()
+        .with_reference_areal_density(vec![[2.0, 5.0, 7.0]], || false)
+        .unwrap();
+    let fixed = [
+        (0, 0.0),
+        (1, 0.0),
+        (2, 0.0),
+        (3, 0.0),
+        (4, 0.0),
+        (6, 0.0),
+        (7, 0.0),
+    ];
+    let zero = [[0.0; 3]; 3];
+    let load = [[0.1, -0.2, 0.25], [0.0, 0.0, 3.0], [0.0, 0.0, -1.0]];
+    let dt = 1e-3;
+    let mut motion = MembraneMotion::new_with_consistent_inertia(
+        &p,
+        &fixed,
+        &zero,
+        &zero,
+        0.0,
+        consistent_budget(),
+        || false,
+    )
+    .unwrap();
+    let step = motion.step(dt, &load, || false).unwrap();
+    let v = motion.velocity_m_s();
+    // The full physical momentum includes the SUPPORTED test row as well:
+    // sum_i M_ij = [2/3,19/24,7/8], even though v0 remains exactly zero.
+    let physical_momentum = 19.0 / 24.0 * v[1][2] + 7.0 / 8.0 * v[2][2];
+    close(
+        physical_momentum,
+        dt * 2.25 + step.support_impulse_n_s[2],
+        1e-16,
+        2e-13,
+    );
+    close(step.support_impulse_n_s[0], -dt * 0.1, 1e-16, 2e-13);
+    close(step.support_impulse_n_s[1], dt * 0.2, 1e-16, 2e-13);
+    let endpoint_gradient = p
+        .evaluate(motion.displacement_m(), || false)
+        .unwrap()
+        .internal_gradient_n;
+    let static_part = dt * (0.5 * endpoint_gradient[0][2] - load[0][2]);
+    let inertia = 7.0 / 40.0 * v[1][2] + 23.0 / 120.0 * v[2][2];
+    assert!(inertia.abs() > 1e-5);
+    close(
+        step.support_impulse_n_s[2],
+        static_part + inertia,
+        1e-16,
+        2e-13,
+    );
+    assert!(v[0].iter().all(|&value| value == 0.0));
+    close(
+        step.kinetic_energy_j,
+        kinetic(&p, MembraneMassImage::Consistent, v),
+        1e-17,
+        2e-13,
+    );
+}
+
+fn physical_momenta(motion: &MembraneMotion<'_>) -> ([f64; 3], [f64; 3]) {
+    let nodal = motion
+        .patch()
+        .reference_mass_apply(MembraneMassImage::Consistent, motion.velocity_m_s(), || {
+            false
+        })
+        .unwrap();
+    let mut linear = [0.0; 3];
+    let mut angular = [0.0; 3];
+    for (node, p) in nodal.iter().enumerate() {
+        let reference = motion.patch().mesh().nodes[node];
+        let u = motion.displacement_m()[node];
+        let x = [reference[0] + u[0], reference[1] + u[1], u[2]];
+        for axis in 0..3 {
+            linear[axis] += p[axis];
+        }
+        angular[0] += x[1] * p[2] - x[2] * p[1];
+        angular[1] += x[2] * p[0] - x[0] * p[2];
+        angular[2] += x[0] * p[1] - x[1] * p[0];
+    }
+    (linear, angular)
+}
+
+#[test]
+fn consistent_motion_preserves_momentum_reversibility_and_atomic_checkpoints() {
+    let p = triangle()
+        .with_reference_areal_density(vec![[2.0, 5.0, 7.0]], || false)
+        .unwrap();
+    let u = [
+        [0.0, 0.0, 0.002],
+        [0.001, -0.001, 0.001],
+        [-0.001, 0.002, -0.001],
+    ];
+    let v = [
+        [0.01, -0.02, 0.03],
+        [0.02, 0.01, -0.01],
+        [0.01, -0.01, 0.02],
+    ];
+    let zero = [[0.0; 3]; 3];
+    let mut motion = MembraneMotion::new_with_consistent_inertia(
+        &p,
+        &[],
+        &u,
+        &v,
+        0.0,
+        consistent_budget(),
+        || false,
+    )
+    .unwrap();
+    let initial = physical_momenta(&motion);
+    let dt = 1e-4;
+    for _ in 0..50 {
+        let report = motion.step(dt, &zero, || false).unwrap();
+        assert_eq!(report.support_impulse_n_s, [0.0; 3]);
+    }
+    let final_momenta = physical_momenta(&motion);
+    for (a, b) in initial
+        .0
+        .into_iter()
+        .chain(initial.1)
+        .zip(final_momenta.0.into_iter().chain(final_momenta.1))
+    {
+        close(a, b, 2e-14, 2e-12);
+    }
+    for _ in 0..50 {
+        motion.step(-dt, &zero, || false).unwrap();
+    }
+    for (actual, expected) in motion
+        .displacement_m()
+        .iter()
+        .flatten()
+        .zip(u.iter().flatten())
+    {
+        close(*actual, *expected, 2e-14, 2e-12);
+    }
+    for (actual, expected) in motion
+        .velocity_m_s()
+        .iter()
+        .flatten()
+        .zip(v.iter().flatten())
+    {
+        close(*actual, *expected, 2e-12, 2e-11);
+    }
+    let before = motion.clone();
+    let mut probe = motion.clone();
+    let mut polls = 0;
+    let expected = probe
+        .step(dt, &zero, || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut seen = 0;
+    assert!(matches!(
+        motion.step(dt, &zero, || {
+            seen += 1;
+            seen == polls
+        }),
+        Err(MembraneError::Cancelled)
+    ));
+    assert_eq!(motion.displacement_m(), before.displacement_m());
+    assert_eq!(motion.velocity_m_s(), before.velocity_m_s());
+    assert_eq!(motion.time_s(), before.time_s());
+    assert_eq!(motion.kinetic_energy_j(), before.kinetic_energy_j());
+    let accepted = motion.step(dt, &zero, || false).unwrap();
+    assert_eq!(accepted, expected);
+    assert_eq!(motion.displacement_m(), probe.displacement_m());
+    assert_eq!(motion.velocity_m_s(), probe.velocity_m_s());
+
+    assert!(matches!(
+        MembraneMotion::new_with_consistent_inertia(
+            &p,
+            &[],
+            &u,
+            &v,
+            0.0,
+            ConsistentMassBudget {
+                max_nodes_per_axis: 2
+            },
+            || false,
+        ),
+        Err(MembraneError::Budget(_))
+    ));
+    assert!(matches!(
+        MembraneMotion::new_with_consistent_inertia(
+            &p,
+            &[],
+            &u,
+            &v,
+            0.0,
+            consistent_budget(),
+            || true,
+        ),
+        Err(MembraneError::Cancelled)
+    ));
+}
+
+#[test]
+fn scaled_consistent_inverse_retains_light_and_heavy_sheet_kinetic_energy() {
+    let p = on_mesh(Mesh2 {
+        nodes: vec![
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+            [2.0, 1.0],
+        ],
+        elems: vec![vec![0, 1, 2], vec![3, 4, 5]],
+        patches: vec![],
+    })
+    .with_reference_areal_density(
+        vec![[2e-280, 5e-280, 7e-280], [2e280, 5e280, 7e280]],
+        || false,
+    )
+    .unwrap();
+    // Both disconnected rigid translations carry 49/3 joules despite their
+    // 560-order mass ratio. Scaling changes only solver coordinates; neither
+    // inventory may be discarded in the original consistent kinetic form.
+    let v = [
+        [1e140, -2e140, 3e140],
+        [1e140, -2e140, 3e140],
+        [1e140, -2e140, 3e140],
+        [1e-140, -2e-140, 3e-140],
+        [1e-140, -2e-140, 3e-140],
+        [1e-140, -2e-140, 3e-140],
+    ];
+    let zero = [[0.0; 3]; 6];
+    let mut motion = MembraneMotion::new_with_consistent_inertia(
+        &p,
+        &[],
+        &zero,
+        &v,
+        0.0,
+        consistent_budget(),
+        || false,
+    )
+    .unwrap();
+    close(motion.kinetic_energy_j(), 98.0 / 3.0, 1e-13, 2e-13);
+    for (actual, supplied) in motion
+        .velocity_m_s()
+        .iter()
+        .flatten()
+        .zip(v.iter().flatten())
+    {
+        close(*actual, *supplied, 0.0, 2e-13);
+    }
+    let dt = 1e-145;
+    let step = motion.step(dt, &zero, || false).unwrap();
+    close(step.kinetic_energy_j, 98.0 / 3.0, 1e-13, 2e-13);
+    for (actual, supplied) in motion
+        .displacement_m()
+        .iter()
+        .flatten()
+        .zip(v.iter().flatten())
+    {
+        close(*actual, dt * supplied, 0.0, 2e-12);
+    }
 }
