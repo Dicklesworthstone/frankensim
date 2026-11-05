@@ -1,11 +1,13 @@
 //! Finite-window work from the original retained boundary fields.
 //!
-//! The wall's frequency-dependent admittance supplies its actual inward
-//! velocity. Finite-window pressure work includes reversible wall storage;
+//! The wall's frequency-dependent constitutive law supplies its inward
+//! velocity, including finite flow at a resonant pressure node.
+//! Finite-window pressure work includes reversible wall storage;
 //! it must not be mislabeled irreversible heat or cycle-averaged absorption.
 
 use super::*;
 use crate::observation_transfers::HarmonicExposureFactorStatistics;
+use crate::observation_transfers::wall::boundary::WallWorkCoordinates;
 use fs_fft::harmonic_window::HarmonicWindow;
 use fs_math::dd::Dd;
 
@@ -52,7 +54,7 @@ pub struct WindowedBoundaryWork {
     pub input_power_w: f64,
     /// Integral of p * actual outward normal velocity from the retained solve.
     pub outward_power_w: f64,
-    /// Work into the local wall: p * (Y_wall p), including its reactive storage.
+    /// Work into the local wall: p * v_inward, including its reactive storage.
     /// Only a complete cycle/stationary average yields absorbed wall power.
     pub wall_power_w: f64,
     /// Input minus outward minus wall work; measured, never forced to zero.
@@ -144,7 +146,7 @@ impl<'a> PreparedBoundaryWorkExposure<'a> {
             .and_then(|n| n.checked_add(largest.checked_mul(core::mem::size_of::<usize>())?))
             // The local law owner retains both law and panel coefficients;
             // every law is used, so two panel-sized buffers bound both.
-            .and_then(|n| n.checked_add(panels.checked_mul(2 * core::mem::size_of::<C64>())?))
+            .and_then(|n| n.checked_add(panels.checked_mul(2 * core::mem::size_of::<WallWorkCoordinates>())?))
             .ok_or_else(overflow)?;
         admit(workspace_bytes, limits.maximum_workspace_bytes)?;
         // Check the complete supplied bank before any field/material allocation.
@@ -294,24 +296,33 @@ fn prepare_bank(
         }
     }
     // Evaluate each bank's distinct frequencies once, after coherent grouping.
-    // This original local law is not replaced by drive-minus-solved-velocity.
+    // Evaluate the original constitutive pair even at a pressure node. Both
+    // retained traces recover its bounded amplitude; the wall flow is then
+    // evaluated from that law, not assigned the input/outward work residual.
     if let Some(reference) = input.first() {
         let observation = &reference.response.observer.observation;
         let rho_c = reference.response.medium().density * reference.response.medium().sound_speed;
         for line in &mut lines {
-            let beta = observation
+            let coordinates = observation
                 .boundary
-                .normalized_admittance(line.omega, || gate.is_requested())?;
+                .work_coordinates(line.omega, || gate.is_requested())?;
             for (panel, field) in line.fields.iter_mut().enumerate() {
                 if panel % 64 == 0 {
                     poll(gate)?;
                 }
-                let br = Dd::from_f64(beta[panel].re) / Dd::from_f64(rho_c);
-                let bi = Dd::from_f64(beta[panel].im) / Dd::from_f64(rho_c);
-                field[3] = [
-                    field[0][0] * br - field[0][1] * bi,
-                    field[0][0] * bi + field[0][1] * br,
-                ];
+                field[3] = match coordinates[panel] {
+                    WallWorkCoordinates::Pressure(beta) => {
+                        let br = Dd::from_f64(beta.re) / Dd::from_f64(rho_c);
+                        let bi = Dd::from_f64(beta.im) / Dd::from_f64(rho_c);
+                        [
+                            field[0][0] * br - field[0][1] * bi,
+                            field[0][0] * bi + field[0][1] * br,
+                        ]
+                    }
+                    WallWorkCoordinates::Reflection { reflection, .. } => {
+                        reflected_wall_velocity(field[0], field[1], field[2], rho_c, reflection)
+                    }
+                };
             }
         }
     }
@@ -327,6 +338,35 @@ fn prepare_bank(
         ));
     }
     Ok(Bank { lines, statistics })
+}
+
+fn reflected_wall_velocity(
+    pressure: [Dd; 2],
+    velocity: [Dd; 2],
+    drive: [Dd; 2],
+    rho_c: f64,
+    reflection: C64,
+) -> [Dd; 2] {
+    let a = (C64::ONE + reflection).scale(0.5);
+    let b = (C64::ONE - reflection).scale(0.5);
+    let norm = Dd::from_f64(a.norm_sq() + b.norm_sq());
+    let ambient = Dd::from_f64(rho_c);
+    let inward = [
+        (drive[0] - velocity[0]) * ambient,
+        (drive[1] - velocity[1]) * ambient,
+    ];
+    let p = multiply(pressure, a.conj());
+    let v = multiply(inward, b.conj());
+    let amplitude = [(p[0] + v[0]) / norm, (p[1] + v[1]) / norm];
+    let wall = multiply(amplitude, b);
+    [wall[0] / ambient, wall[1] / ambient]
+}
+
+fn multiply(value: [Dd; 2], coefficient: C64) -> [Dd; 2] {
+    let real = Dd::from_f64(coefficient.re);
+    let imaginary = Dd::from_f64(coefficient.im);
+    [value[0] * real - value[1] * imaginary,
+        value[0] * imaginary + value[1] * real]
 }
 
 fn add_product(target: &mut [Dd; 2], a: C64, b: C64) {

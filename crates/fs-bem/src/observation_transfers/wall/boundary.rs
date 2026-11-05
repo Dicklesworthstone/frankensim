@@ -80,9 +80,27 @@ pub enum LocalWall {
     },
 }
 
+/// Coordinates for evaluating the original local wall work. Near a pressure
+/// node, x obeys p = (1+r)*x/2 and rho*c*v_in = (1-r)*x/2. Its bounded inverse
+/// uses both retained traces, without dividing by the vanishing pressure.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum WallWorkCoordinates {
+    Pressure(C64),
+    Reflection { reflection: C64, conductance: f64 },
+}
+
+impl WallWorkCoordinates {
+    pub(super) fn accepted_conductance(self) -> f64 {
+        match self {
+            Self::Pressure(beta) => beta.re,
+            Self::Reflection { conductance, .. } => conductance,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct WallPowerCoefficients {
-    pub(super) admittance: C64,
+    pub(super) coordinates: WallWorkCoordinates,
     pub(super) irreversible_conductance: f64,
     pub(super) transmitted_conductance: f64,
 }
@@ -397,35 +415,40 @@ impl LocalBoundary {
             if cancelled() {
                 return Err(TransferError::Cancelled);
             }
-            let reflection = match law {
-                LocalWall::Rigid => C64::ONE,
-                LocalWall::Mechanical(pin) => {
-                    let z = fs_phs::wall_specific_impedance(pin, omega)?;
-                    if !finite(z) {
-                        return Err(TransferError::Invalid("wall impedance is unrepresentable"));
-                    }
-                    let scale = z.re.abs().max(z.im.abs()).max(rho_c);
-                    let z = C64::new(z.re / scale, z.im / scale);
-                    let ambient = C64::from_re(rho_c / scale);
-                    (z - ambient) / (z + ambient)
-                }
-                LocalWall::PorousRigid { law, fluid, thickness_m } => {
-                    RigidBackedLayers::new(
-                        fluid, omega, &[Layer::Porous { law, thickness_m: *thickness_m }],
-                    )?.reflection(1.0)?.pressure_reflection.conj()
-                }
-                LocalWall::LayeredRigid { fluid, layers } => {
-                    prepare_layers(fluid, layers, omega)?.reflection(1.0)?.pressure_reflection.conj()
-                }
-                LocalWall::LayeredTransmitting { fluid, receiving_fluid, layers } => {
-                    prepare_transmitting(fluid, receiving_fluid, layers, omega)?
-                        .scattering(1.0)?.pressure_reflection.conj()
-                }
-            };
-            if !finite(reflection) || reflection.abs() > 1.0 + 64.0 * f64::EPSILON {
-                return Err(TransferError::Invalid("local wall reflection is nonfinite or active"));
-            }
+            let (reflection, _) = law.reflected_work(rho_c, omega)?;
             coefficients.push(reflection);
+        }
+        let mut panels = Vec::with_capacity(self.panel_laws.len());
+        for (panel, &index) in self.panel_laws.iter().enumerate() {
+            if panel % 256 == 0 && cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            panels.push(coefficients[index]);
+        }
+        Ok(panels)
+    }
+
+    /// Retain ordinary admittance arithmetic where well scaled, and the
+    /// original bounded wall law through mechanical/layered pressure nodes.
+    /// Distinct material laws are queried once before scattering to panels.
+    pub(super) fn work_coordinates(
+        &self,
+        omega: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<WallWorkCoordinates>, TransferError> {
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        if !omega.is_finite() || omega <= 0.0 {
+            return Err(TransferError::Invalid("local wall frequency must be positive and finite"));
+        }
+        let rho_c = self.medium.density * self.medium.sound_speed;
+        let mut coefficients = Vec::with_capacity(self.laws.len());
+        for law in &self.laws {
+            if cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            coefficients.push(law.work_coordinates(rho_c, omega)?);
         }
         let mut panels = Vec::with_capacity(self.panel_laws.len());
         for (panel, &index) in self.panel_laws.iter().enumerate() {
@@ -475,17 +498,40 @@ impl LocalBoundary {
                 let power = prepared.normal_surface_power(
                     LayerAbsorptionBudget { max_layers: layers.len() },
                     &mut cancelled,
-                ).map_err(absorption_error)?;
-                WallPowerCoefficients {
-                    admittance: power.normalized_admittance.conj(),
-                    irreversible_conductance: power.absorbed_conductance,
-                    transmitted_conductance: power.transmitted_conductance,
+                );
+                match power {
+                    Ok(power) if well_scaled_admittance(power.normalized_admittance) => {
+                        WallPowerCoefficients {
+                            coordinates: WallWorkCoordinates::Pressure(power.normalized_admittance.conj()),
+                            irreversible_conductance: power.absorbed_conductance,
+                            transmitted_conductance: power.transmitted_conductance,
+                        }
+                    }
+                    Err(LayerAbsorptionError::Cancelled) => return Err(TransferError::Cancelled),
+                    _ => {
+                        // Native positive layer integrals in the incident-wave
+                        // basis stay finite at a total-pressure node. x = 2*A,
+                        // hence each unit-incident-power fraction contributes
+                        // fraction/4 to |x|^2/(2*rho*c). Never infer weak heat
+                        // from 1-|r|^2-T or from the BEM work residual.
+                        let (reflection, conductance) = law.reflected_work(rho_c, omega)?;
+                        let power = prepared.layer_absorption(
+                            1.0, 1.0,
+                            LayerAbsorptionBudget { max_layers: layers.len() },
+                            &mut cancelled,
+                        ).map_err(absorption_error)?;
+                        WallPowerCoefficients {
+                            coordinates: WallWorkCoordinates::Reflection { reflection, conductance },
+                            irreversible_conductance: 0.25 * power.absorbed_fraction,
+                            transmitted_conductance: 0.25 * power.transmitted_fraction,
+                        }
+                    }
                 }
             } else {
-                let admittance = law.admittance(rho_c, omega)?;
+                let coordinates = law.work_coordinates(rho_c, omega)?;
                 WallPowerCoefficients {
-                    admittance,
-                    irreversible_conductance: admittance.re,
+                    coordinates,
+                    irreversible_conductance: coordinates.accepted_conductance(),
                     transmitted_conductance: 0.0,
                 }
             };
@@ -630,6 +676,58 @@ fn prepare_layers<'a>(
 }
 
 impl LocalWall {
+    fn work_coordinates(&self, rho_c: f64, omega: f64) -> Result<WallWorkCoordinates, TransferError> {
+        if let Ok(beta) = self.admittance(rho_c, omega)
+            && well_scaled_admittance(beta)
+        {
+            return Ok(WallWorkCoordinates::Pressure(beta));
+        }
+        // The original source still admits the frequency and computes the
+        // reflection. A failed admittance is not replaced by a rigid boundary.
+        let (reflection, conductance) = self.reflected_work(rho_c, omega)?;
+        Ok(WallWorkCoordinates::Reflection { reflection, conductance })
+    }
+
+    fn reflected_work(&self, rho_c: f64, omega: f64) -> Result<(C64, f64), TransferError> {
+        let (reflection, conductance) = match self {
+            Self::Rigid => (C64::ONE, 0.0),
+            Self::Mechanical(pin) => {
+                let z = fs_phs::wall_specific_impedance(pin, omega)?;
+                if !finite(z) {
+                    return Err(TransferError::Invalid("wall impedance is unrepresentable"));
+                }
+                let scale = z.re.abs().max(z.im.abs()).max(rho_c);
+                let z = C64::new(z.re / scale, z.im / scale);
+                let ambient = C64::from_re(rho_c / scale);
+                let denominator = z + ambient;
+                // Original resistance retains weak heat even when |r| rounds
+                // to one. A lossless mechanical resonance is exactly zero heat.
+                ((z - ambient) / denominator, z.re * ambient.re / denominator.norm_sq())
+            }
+            Self::PorousRigid { law, fluid, thickness_m } => {
+                let response = RigidBackedLayers::new(
+                    fluid, omega, &[Layer::Porous { law, thickness_m: *thickness_m }],
+                )?.reflection(1.0)?;
+                (response.pressure_reflection.conj(), 0.25 * response.absorbed_fraction)
+            }
+            Self::LayeredRigid { fluid, layers } => {
+                let response = prepare_layers(fluid, layers, omega)?.reflection(1.0)?;
+                (response.pressure_reflection.conj(), 0.25 * response.absorbed_fraction)
+            }
+            Self::LayeredTransmitting { fluid, receiving_fluid, layers } => {
+                let response = prepare_transmitting(fluid, receiving_fluid, layers, omega)?.scattering(1.0)?;
+                (response.pressure_reflection.conj(),
+                    0.25 * (response.absorbed_fraction + response.transmitted_fraction))
+            }
+        };
+        if !finite(reflection) || reflection.abs() > 1.0 + 64.0 * f64::EPSILON
+            || !conductance.is_finite()
+        {
+            return Err(TransferError::Invalid("local wall reflection is nonfinite or active"));
+        }
+        Ok((reflection, conductance))
+    }
+
     fn admittance(&self, rho_c: f64, omega: f64) -> Result<C64, TransferError> {
         let beta = match self {
             LocalWall::Rigid => C64::ZERO,
@@ -664,6 +762,10 @@ impl LocalWall {
         }
         Ok(beta)
     }
+}
+
+fn well_scaled_admittance(beta: C64) -> bool {
+    finite(beta) && beta.abs() < 1.0 / det::sqrt(f64::EPSILON)
 }
 
 fn layer_sources(layers: &[LocalWallLayer]) -> Result<[Layer<'_>; MAX_LAYERS], TransferError> {

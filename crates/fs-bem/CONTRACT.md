@@ -1864,8 +1864,15 @@ finite-source fields directly, without another solve or a source-pair matrix.
 Original signed pressure, actual normal velocity and prescribed source velocity
 are superposed before the quadratic work. The result separates source input,
 signed outward boundary work and accepted work of the original local wall laws,
-including all coherent cross terms. Accepted work uses the original frequency-bound
-`Re(beta)*|p|^2/(2*rho*c)`; actual velocity comes from the retained solve, making
+including all coherent cross terms. Accepted work retains the original frequency-bound
+`Re(beta)*|p|^2/(2*rho*c)` where admittance is well scaled. At mechanical
+resonances and layered pressure nodes it instead uses the native bounded pair
+`p=a*x`, `rho*c*v_in=b*x`, with `a=(1+r)/2`, `b=(1-r)/2`. Both retained traces
+recover `x=(conj(a)*p+conj(b)*rho*c*(v_drive-v_actual))/(|a|^2+|b|^2)`;
+the original material supplies its independent work conductance. No division
+by a vanishing pressure or invented damping is required. Native mechanical
+resistance and layer surface work retain weak acceptance even when reflected
+power rounds to unity. Actual velocity comes from the retained solve, making
 the returned balance a measured identity rather than an imposed closure.
 An apparent-work scale normalizes the balance even when signed active powers
 cancel. Binary-scaled fields and compensated sums preserve tiny/large drives and
@@ -1881,9 +1888,12 @@ discrete work diagnostics do not bound BEM/FMM or continuum error.
 The explicit `coherent_boundary_power_partition` additionally evaluates native
 positive layer-loss integrals once per distinct transmitting wall law, with a
 caller budget for the summed declared layers. The same coherently combined
-total panel pressures supply accepted work, irreversible loss and outgoing
-receiving-fluid flux. Separate compensated sums retain source cross terms and
-small losses; neither channel is inferred from a residual or normalized to force
+total panel fields supply accepted work, irreversible loss and outgoing
+receiving-fluid flux. Near a pressure node, native positive layer-loss integrals
+use the incident amplitude `A=x/2`; their incident-power fractions therefore
+multiply `|x|^2/(8*rho*c)`. Ordinary total-pressure conductances remain unchanged.
+Separate compensated sums retain source cross terms and small losses;
+neither channel is inferred from a residual or normalized to force
 closure. Legacy report field `absorbed_power_w` remains total accepted work,
 also named by `accepted_power_w()`, and includes outgoing transmission.
 `IterativeBoundaryPowerPartition` exposes that total, its independent two-way
@@ -2973,8 +2983,13 @@ source fields before products and retains deterministic, real-coordinate and
 proper-complex cross-frequency interference through the existing shared
 harmonic-window kernels. The original pressure, actual outward velocity and
 prescribed source traces supply input/outward work. Original local material
-admittances supply inward wall velocity directly, preserving weak wall work
-beside large input and outward powers. The raw closure residual remains visible.
+admittances supply inward wall velocity directly where well scaled, preserving
+weak wall work beside large input and outward powers. At a pressure node,
+the original bounded reflection pair recovers its amplitude from both retained
+traces, then evaluates inward wall velocity from that constitutive law. A
+resonant line with zero pressure can still have nonzero velocity and exchange
+finite-window beat work with another frequency; that line is retained. The raw
+closure residual remains visible.
 
 The reported watts are normalized-window pressure work. Reactive walls may
 return stored energy during a finite interval; their signed work is not
