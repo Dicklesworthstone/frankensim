@@ -384,3 +384,78 @@ fn joint_midpoint_receives_predicted_wakes_and_late_density_refusal_is_atomic() 
     assert_ne!(samples[1].1.motion.momentum, before.motion.momentum);
     assert_eq!(before, state(&assembly));
 }
+
+
+#[test]
+fn g3_dynamic_wake_and_unsteady_lift_share_one_atomic_midpoint_state() {
+    use fs_airfoil::unsteady::UNSTEADY_SECTION_V1;
+    use fs_flyer::spine::rotors::propulsion::dynamic::unsteady::DynamicUnsteadyPropulsion;
+
+    let mut design = wright_openloop_v1();
+    design.coupling.tol = 1e-10;
+    design.coupling.cap = 64;
+    let assembly = assembly(design.gross_mass_kg, false);
+    let base = GearedPropulsion::new_spatial(&design, &assembly, mounts(false)).unwrap();
+    let dynamic = DynamicPropulsion::new(&base, RHO).unwrap();
+    let model = DynamicUnsteadyPropulsion::new(&dynamic, UNSTEADY_SECTION_V1).unwrap();
+    let gust = vec![0.0; model.section_count()];
+
+    let mut accepted = model
+        .trimmed_state(state(&assembly), inputs(0.0), &|_| Ok(ZERO), &gust)
+        .unwrap();
+    accepted.dynamic.motion.rigid.vel_mps = [11.8, 0.1, 2.0];
+    let caller_owned = accepted.clone();
+
+    let transient = model
+        .evaluate(&accepted, inputs(0.0), &|_| Ok(ZERO), &gust)
+        .unwrap();
+    let developed_state = model
+        .trimmed_state(accepted.dynamic, inputs(0.0), &|_| Ok(ZERO), &gust)
+        .unwrap();
+    let developed = model
+        .evaluate(&developed_state, inputs(0.0), &|_| Ok(ZERO), &gust)
+        .unwrap();
+    assert!(
+        (v(transient.aerodynamic_force_body_n) - v(developed.aerodynamic_force_body_n)).norm()
+            > 0.1
+    );
+    assert_eq!(
+        transient.aerodynamics.dynamic.induced_mps,
+        accepted.dynamic.induced_mps
+    );
+    assert_eq!(accepted, caller_owned);
+
+    let mut input_calls = 0;
+    let mut gust_calls = 0;
+    let step = model
+        .step(
+            &accepted,
+            0.0,
+            0.002,
+            ZERO,
+            |time, _| {
+                input_calls += 1;
+                Ok(inputs(time))
+            },
+            |_, point| Ok([0.02 * point[1], 0.0, 0.0]),
+            |_, _, _| {
+                gust_calls += 1;
+                Ok(0.0)
+            },
+        )
+        .unwrap();
+
+    assert_eq!(input_calls, 2);
+    assert_eq!(gust_calls, 2 * model.section_count());
+    assert_ne!(step.state.sections, accepted.sections);
+    assert_ne!(step.state.dynamic.induced_mps, accepted.dynamic.induced_mps);
+    assert_ne!(step.state.dynamic.motion, accepted.dynamic.motion);
+    assert_eq!(step.state.dynamic.motion, step.motion.state);
+    assert!(v(step.motion.linear_momentum_residual).norm() < 2e-10);
+    assert!(v(step.motion.angular_momentum_residual).norm() < 2e-9);
+    for flow in step.inflow {
+        assert!(flow.momentum_residual_ns.abs() < 2e-13);
+        assert!(flow.energy_residual_j.abs() < 2e-12);
+    }
+    assert_eq!(accepted, caller_owned);
+}
