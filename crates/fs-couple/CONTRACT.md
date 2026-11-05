@@ -27230,6 +27230,30 @@ model. Ideal microphone velocity sensitivity retains the source's equilibrium
 relaxation polynomial, outward intensity decay, signed unequal propagation paths,
 spatial finite differences, and the original causal material-pressure observer.
 
+`Prepared::{new_thermoviscous,new_thermoviscous_aperture}` additionally accept
+the original `ClassicalBulkAbsorption` state of a liquid or real gas. Its
+`thermoviscous_wave` owns both the complex wavenumber and thermodynamic-pressure
+impedance `Z_p`; no second absorption model or ideal-gas EOS is introduced.
+For the prescribed-flow potential `phi=-Q exp(i k R)/(2 pi R)`, the shared
+quadrature now retains `u=grad(phi)`, `p=i k Z_p phi` and
+`grad(p)=i k Z_p u`. Replacing `k Z_p` by `rho omega` would confuse pressure
+with longitudinal traction in a viscous medium. Lossless and effective molecular
+paths retain their prior arithmetic. The common `FirstOrder` receiver still
+weights velocity by real equilibrium `rho*c`; strong loss does not retain the
+lossless plane-wave cardioid normalization. Point and finite-area evaluation
+share the same budgets, cancellation and atomic output publication.
+
+Five new focused native tests cover independent Cp=Cv pressure/velocity limits
+from dimensionless viscous loss 1e-8 through 1e12, original viscous momentum and
+spatial derivative refinement, a four-rung disk ladder against closed complex
+area integrals, lossless convergence, singleton identity and transactional
+refusal. Six original harmonic regression tests also pass through the same
+source numerics. This focused native closure is not a full Cargo workspace gate.
+The result is the homogeneous longitudinal acoustic branch on the ideal baffle;
+independent thermal/shear modes, no-slip/thermal boundary layers, material
+frequency support, finite-baffle scattering and backreaction remain separate.
+It does not add a causal material-directional receiver or close M2.6-W1.
+
 ### Finite-area coherent microphone capsules
 
 `pcm_wav::baffled::aperture::Aperture` describes positive sensing-area

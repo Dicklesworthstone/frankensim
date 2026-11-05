@@ -1,6 +1,6 @@
 //! Harmonic vector fields of the existing prescribed-flow Rayleigh surface.
 //!
-//! With exp(-i omega t), a surface volume-velocity element Q gives
+//! With exp(-i omega t), a lossless surface volume-velocity element Q gives
 //! p = -i rho omega Q exp(ikR)/(2 pi R),
 //! grad(p) = p (ik - 1/R) r_hat, and u = grad(p)/(i rho omega).
 //! The velocity therefore retains the reactive 1/R² term. Coherent signed
@@ -16,12 +16,18 @@
 //! including its absorption/dispersion in the spatial gradient. This is the
 //! same effective propagation law as the causal pressure observer, not a full
 //! thermoviscous boundary-layer or microphone-body solution.
+//! The thermoviscous fluid path instead uses the original acoustic branch's
+//! thermodynamic-pressure impedance Z_p: replace rho*omega by k*Z_p in pressure
+//! and its velocity/gradient relation. Viscous traction is not pressure. This
+//! branch retains the same potential-flow baffle geometry; independent thermal
+//! and transverse modes and their boundary conditions remain unresolved.
 //! The source convention is the conjugate of the Rayleigh formula in
 //! <https://euphonics.org/4-3-2-the-rayleigh-integral-and-the-baffled-piston/>.
 
 use super::{MAX_RAYLEIGH_INPUTS, RayleighMedium, SurfaceSample};
 use fs_bem::helmholtz::Medium;
 use fs_bem::near_field::FirstOrder;
+use fs_material::fluid_acoustics::thermoviscous::absorption::ClassicalBulkAbsorption;
 use fs_material::relaxation::RelaxationState;
 use fs_math::{c64::C64, dd::Dd, det};
 use std::f64::consts::TAU;
@@ -53,7 +59,7 @@ impl Default for Options {
 /// Co-located SI fields with the common exp(-i omega t) convention.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Field {
-    /// Acoustic pressure [Pa].
+    /// Thermodynamic acoustic pressure [Pa], distinct from viscous traction.
     pub pressure_pa: C64,
     /// Spatial derivative with respect to the receiver coordinates [Pa/m].
     pub pressure_gradient_pa_m: [C64; 3],
@@ -68,13 +74,20 @@ struct Column {
 }
 
 impl Column {
-    fn field(self, omega_rho: f64) -> Field {
+    fn field(self, gradient_per_velocity: C64) -> Field {
         Field {
             pressure_pa: self.pressure,
-            pressure_gradient_pa_m: self.velocity.map(|u| u * C64::new(0.0, omega_rho)),
+            pressure_gradient_pa_m: self.velocity.map(|u| u * gradient_per_velocity),
             particle_velocity_m_s: self.velocity,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Propagation<'a> {
+    Lossless,
+    Relaxing(&'a RelaxationState),
+    Thermoviscous(ClassicalBulkAbsorption),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -125,10 +138,11 @@ pub struct Prepared {
     inputs: usize,
     receivers: usize,
     frequency_hz: f64,
-    omega_rho: f64,
+    gradient_per_velocity: C64,
     medium: RayleighMedium,
     wavenumber_per_m: C64,
     relaxation: Option<RelaxationState>,
+    thermoviscous: Option<ClassicalBulkAbsorption>,
 }
 
 impl Prepared {
@@ -155,7 +169,7 @@ impl Prepared {
             positions_m,
             frequency_hz,
             medium,
-            None,
+            Propagation::Lossless,
             options,
             cancelled,
         )
@@ -170,7 +184,7 @@ impl Prepared {
     /// With `exp(-i omega t)`, the outgoing kernel is `exp(i k R)/R`, and its
     /// derivative retains BOTH complex `i k` and geometric `-1/R`. Multiplying
     /// a lossless vector field by an absorption filter would miss that term.
-    /// The source is evaluated once per preparation, not per surface point.
+    /// The source is evaluated once per receiver tile, not per surface point.
     /// Evaluation and microphone projection remain allocation-free.
     ///
     /// As in the existing time-domain gas observer, this is an effective
@@ -198,7 +212,56 @@ impl Prepared {
             positions_m,
             frequency_hz,
             RayleighMedium::from(relaxation.gas()),
-            Some(relaxation),
+            Propagation::Relaxing(relaxation),
+            options,
+            cancelled,
+        )
+    }
+
+    /// Observe one homogeneous thermoviscous acoustic branch of the original
+    /// liquid or real-gas state, retaining both material dispersion and the
+    /// distinction between thermodynamic pressure and viscous normal traction.
+    ///
+    /// The source-owned `thermoviscous_wave` supplies `k` and pressure impedance
+    /// `Z_p` once per receiver tile, never per surface path. For the potential
+    /// `phi = -Q exp(i k R)/(2 pi R)`, `u = grad(phi)`, `p = i k Z_p phi`
+    /// and `grad(p) = i k Z_p u`. Using `rho*omega` here would confuse pressure
+    /// with total longitudinal traction and fail in strongly viscous fluids.
+    /// No bulk-attenuation coefficient is applied a second time.
+    ///
+    /// This is the bulk longitudinal branch with prescribed normal velocity
+    /// on the infinite flat baffle. Independent thermal/shear modes, no-slip
+    /// and thermal boundary layers, source backreaction and molecular spectra
+    /// are not resolved. The material's continuum/frequency support remains
+    /// the caller's responsibility; no finite wavefront is claimed.
+    /// `FirstOrder` retains its real equilibrium `rho*c` reference weighting;
+    /// strong loss therefore does not preserve a lossless plane-wave cardioid.
+    ///
+    /// # Errors
+    /// Original geometry, work and cancellation refusals, a refused material
+    /// branch, or unrepresentable pressure/vector transfer coefficients.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_thermoviscous(
+        surface: &[SurfaceSample],
+        inputs: usize,
+        positions_m: &[[f64; 3]],
+        frequency_hz: f64,
+        absorption: ClassicalBulkAbsorption,
+        options: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        let acoustic = absorption.state().acoustic();
+        let medium = RayleighMedium {
+            density: acoustic.density_kg_m3(),
+            sound_speed: acoustic.sound_speed_m_s(),
+        };
+        Self::prepare(
+            surface,
+            inputs,
+            positions_m,
+            frequency_hz,
+            medium,
+            Propagation::Thermoviscous(absorption),
             options,
             cancelled,
         )
@@ -216,12 +279,24 @@ impl Prepared {
     /// and its work/storage are independent of the number of capsule points.
     #[allow(clippy::too_many_arguments)]
     pub fn new_aperture(
-        surface: &[SurfaceSample], inputs: usize, aperture: &super::aperture::Aperture,
-        frequency_hz: f64, medium: RayleighMedium, options: Options,
+        surface: &[SurfaceSample],
+        inputs: usize,
+        aperture: &super::aperture::Aperture,
+        frequency_hz: f64,
+        medium: RayleighMedium,
+        options: Options,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, String> {
-        Self::prepare_aperture(surface, inputs, aperture, frequency_hz, medium,
-            None, options, cancelled)
+        Self::prepare_aperture(
+            surface,
+            inputs,
+            aperture,
+            frequency_hz,
+            medium,
+            Propagation::Lossless,
+            options,
+            cancelled,
+        )
     }
 
     /// The same finite sensing area through the source-owned molecular
@@ -229,66 +304,151 @@ impl Prepared {
     /// wavenumber, distance and reactive velocity; absorption is counted once.
     #[allow(clippy::too_many_arguments)]
     pub fn new_relaxing_aperture(
-        surface: &[SurfaceSample], inputs: usize, aperture: &super::aperture::Aperture,
-        frequency_hz: f64, relaxation: &RelaxationState, options: Options,
+        surface: &[SurfaceSample],
+        inputs: usize,
+        aperture: &super::aperture::Aperture,
+        frequency_hz: f64,
+        relaxation: &RelaxationState,
+        options: Options,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, String> {
-        Self::prepare_aperture(surface, inputs, aperture, frequency_hz,
-            RayleighMedium::from(relaxation.gas()), Some(relaxation), options, cancelled)
+        Self::prepare_aperture(
+            surface,
+            inputs,
+            aperture,
+            frequency_hz,
+            RayleighMedium::from(relaxation.gas()),
+            Propagation::Relaxing(relaxation),
+            options,
+            cancelled,
+        )
+    }
+
+    /// Coherent finite-area sensing of the same original thermoviscous branch.
+    /// Every physical path retains its complex propagation and reactive
+    /// velocity before area reduction; material and boundary limits are those
+    /// of [`Self::new_thermoviscous`]. Warm work is independent of aperture size.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_thermoviscous_aperture(
+        surface: &[SurfaceSample],
+        inputs: usize,
+        aperture: &super::aperture::Aperture,
+        frequency_hz: f64,
+        absorption: ClassicalBulkAbsorption,
+        options: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, String> {
+        let acoustic = absorption.state().acoustic();
+        let medium = RayleighMedium {
+            density: acoustic.density_kg_m3(),
+            sound_speed: acoustic.sound_speed_m_s(),
+        };
+        Self::prepare_aperture(
+            surface,
+            inputs,
+            aperture,
+            frequency_hz,
+            medium,
+            Propagation::Thermoviscous(absorption),
+            options,
+            cancelled,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn prepare_aperture(
-        surface: &[SurfaceSample], inputs: usize, aperture: &super::aperture::Aperture,
-        frequency_hz: f64, medium: RayleighMedium, relaxation: Option<&RelaxationState>,
-        options: Options, mut cancelled: impl FnMut() -> bool,
+        surface: &[SurfaceSample],
+        inputs: usize,
+        aperture: &super::aperture::Aperture,
+        frequency_hz: f64,
+        medium: RayleighMedium,
+        propagation: Propagation<'_>,
+        options: Options,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, String> {
-        let terms = surface.len().checked_mul(inputs)
+        let terms = surface
+            .len()
+            .checked_mul(inputs)
             .and_then(|n| n.checked_mul(aperture.samples().len()));
-        if !(1..=MAX_RAYLEIGH_INPUTS).contains(&inputs) || surface.is_empty()
+        if !(1..=MAX_RAYLEIGH_INPUTS).contains(&inputs)
+            || surface.is_empty()
             || !(1..=MAX_KERNEL_TERMS).contains(&options.maximum_kernel_terms)
             || terms.is_none_or(|n| n > options.maximum_kernel_terms)
         {
-            return Err("harmonic capsule complete source/receiver kernel-work budget exceeded".into());
+            return Err(
+                "harmonic capsule complete source/receiver kernel-work budget exceeded".into(),
+            );
         }
         let positions: Vec<_> = aperture.samples().iter().map(|s| s.position_m).collect();
         if positions.len() == 1 {
-            return Self::prepare(surface, inputs, &positions, frequency_hz, medium,
-                relaxation, options, cancelled);
+            return Self::prepare(
+                surface,
+                inputs,
+                &positions,
+                frequency_hz,
+                medium,
+                propagation,
+                options,
+                cancelled,
+            );
         }
         let mut sums = vec![[[Dd::ZERO; 2]; 4]; inputs];
         let mut first = None;
         for (tile, positions) in positions.chunks(MAX_RECEIVERS).enumerate() {
-            let prepared = Self::prepare(surface, inputs, positions, frequency_hz,
-                medium, relaxation, options, &mut cancelled)?;
+            let prepared = Self::prepare(
+                surface,
+                inputs,
+                positions,
+                frequency_hz,
+                medium,
+                propagation,
+                options,
+                &mut cancelled,
+            )?;
             for (receiver, row) in prepared.columns.chunks_exact(inputs).enumerate() {
-                if cancelled() { return Err("harmonic aperture preparation cancelled".into()); }
+                if cancelled() {
+                    return Err("harmonic aperture preparation cancelled".into());
+                }
                 let weight = aperture.weights()[tile * MAX_RECEIVERS + receiver];
                 for (sum, column) in sums.iter_mut().zip(row) {
                     for (value, field) in sum.iter_mut().zip([
-                        column.pressure, column.velocity[0], column.velocity[1], column.velocity[2],
+                        column.pressure,
+                        column.velocity[0],
+                        column.velocity[1],
+                        column.velocity[2],
                     ]) {
                         value[0] = value[0] + weight * Dd::from_f64(field.re);
                         value[1] = value[1] + weight * Dd::from_f64(field.im);
                     }
                 }
             }
-            if first.is_none() { first = Some(prepared); }
+            if first.is_none() {
+                first = Some(prepared);
+            }
         }
         let mut prepared = first.ok_or("empty harmonic capsule quadrature")?;
         let mut columns = Vec::with_capacity(inputs);
         for sum in sums {
-            if sum.iter().flatten().any(|x| !x.hi.is_finite() || !x.lo.is_finite()) {
+            if sum
+                .iter()
+                .flatten()
+                .any(|x| !x.hi.is_finite() || !x.lo.is_finite())
+            {
                 return Err("harmonic aperture field overflow".into());
             }
             let field = sum.map(|x| C64::new(x[0].to_f64(), x[1].to_f64()));
-            let column = Column { pressure: field[0], velocity: [field[1], field[2], field[3]] };
-            if !finite_field(&column.field(prepared.omega_rho)) {
+            let column = Column {
+                pressure: field[0],
+                velocity: [field[1], field[2], field[3]],
+            };
+            if !finite_field(&column.field(prepared.gradient_per_velocity)) {
                 return Err("harmonic aperture field overflow".into());
             }
             columns.push(column);
         }
-        if cancelled() { return Err("harmonic aperture preparation cancelled".into()); }
+        if cancelled() {
+            return Err("harmonic aperture preparation cancelled".into());
+        }
         prepared.columns = columns;
         prepared.receivers = 1;
         Ok(prepared)
@@ -301,7 +461,7 @@ impl Prepared {
         positions_m: &[[f64; 3]],
         frequency_hz: f64,
         medium: RayleighMedium,
-        relaxation: Option<&RelaxationState>,
+        propagation: Propagation<'_>,
         options: Options,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, String> {
@@ -341,15 +501,43 @@ impl Prepared {
         {
             return Err("harmonic Rayleigh needs a finite positive medium/frequency and admitted baffle clearance".into());
         }
-        let k = if let Some(source) = relaxation {
-            if cancelled() {
-                return Err("harmonic Rayleigh preparation cancelled".into());
+        let (k, gradient_per_velocity) = match propagation {
+            Propagation::Lossless => (C64::from_re(reference_k), C64::new(0.0, omega_rho)),
+            Propagation::Relaxing(source) => {
+                if cancelled() {
+                    return Err("harmonic Rayleigh preparation cancelled".into());
+                }
+                let k = source
+                    .causal_wavenumber(omega)
+                    .map_err(|error| format!("harmonic Rayleigh propagation gas: {error}"))?;
+                (k, C64::new(0.0, omega_rho))
             }
-            source
-                .causal_wavenumber(omega)
-                .map_err(|error| format!("harmonic Rayleigh propagation gas: {error}"))?
+            Propagation::Thermoviscous(source) => {
+                if cancelled() {
+                    return Err("harmonic Rayleigh preparation cancelled".into());
+                }
+                let wave = source
+                    .thermoviscous_wave(omega)
+                    .map_err(|error| format!("harmonic Rayleigh thermoviscous fluid: {error}"))?;
+                let k = wave.wavenumber_rad_m();
+                let k_zp = k * wave.pressure_impedance_pa_s_m();
+                (k, C64::new(-k_zp.im, k_zp.re))
+            }
+        };
+        if !finite(k)
+            || k.re <= 0.0
+            || k.im < 0.0
+            || !finite(gradient_per_velocity)
+            || gradient_per_velocity.abs() == 0.0
+        {
+            return Err("harmonic Rayleigh pressure/velocity response is unrepresentable".into());
+        }
+        // Preserve the original lossless/relaxing arithmetic, including the
+        // sign of zero, while admitting the fluid's complex momentum response.
+        let pressure_factor = if matches!(propagation, Propagation::Thermoviscous(_)) {
+            -gradient_per_velocity
         } else {
-            C64::from_re(reference_k)
+            C64::new(0.0, -omega_rho)
         };
         for (index, sample) in surface.iter().enumerate() {
             if index % 64 == 0 && cancelled() {
@@ -397,7 +585,7 @@ impl Prepared {
                 if optical_depth > 0.0 {
                     green = green.scale(det::exp(-optical_depth));
                 }
-                let pressure = green * C64::new(0.0, -omega_rho);
+                let pressure = green * pressure_factor;
                 // Evaluate u directly: division by omega would lose the regular
                 // low-frequency volume-flow limit and its 1/R² reactive term.
                 let radial_velocity = green * C64::new(1.0 / radius + k.im, -k.re);
@@ -414,7 +602,7 @@ impl Prepared {
                     pressure: sum[0].total(),
                     velocity: std::array::from_fn(|c| sum[c + 1].total()),
                 };
-                if !finite_field(&column.field(omega_rho)) {
+                if !finite_field(&column.field(gradient_per_velocity)) {
                     return Err("harmonic Rayleigh transfer overflow".into());
                 }
                 columns.push(column);
@@ -425,10 +613,19 @@ impl Prepared {
             inputs,
             receivers: positions_m.len(),
             frequency_hz,
-            omega_rho,
+            gradient_per_velocity,
             medium,
             wavenumber_per_m: k,
-            relaxation: relaxation.cloned(),
+            relaxation: if let Propagation::Relaxing(source) = propagation {
+                Some(source.clone())
+            } else {
+                None
+            },
+            thermoviscous: if let Propagation::Thermoviscous(source) = propagation {
+                Some(source)
+            } else {
+                None
+            },
         })
     }
 
@@ -453,9 +650,13 @@ impl Prepared {
     pub fn wavenumber_per_m(&self) -> C64 {
         self.wavenumber_per_m
     }
-    /// Retained material source, or `None` for the explicit lossless image.
+    /// Retained molecular source, when molecular propagation was selected.
     pub fn relaxation(&self) -> Option<&RelaxationState> {
         self.relaxation.as_ref()
+    }
+    /// Retained original fluid and explicit bulk viscosity, when selected.
+    pub fn thermoviscous(&self) -> Option<&ClassicalBulkAbsorption> {
+        self.thermoviscous.as_ref()
     }
 
     /// Field per unit input coordinate, suitable for frequency-transfer sampling.
@@ -463,7 +664,7 @@ impl Prepared {
         if receiver >= self.receivers || input >= self.inputs {
             return None;
         }
-        Some(self.columns[receiver * self.inputs + input].field(self.omega_rho))
+        Some(self.columns[receiver * self.inputs + input].field(self.gradient_per_velocity))
     }
 
     /// Apply all coherent source phasors to all receivers without allocation.
@@ -498,7 +699,7 @@ impl Prepared {
                 pressure: sums[0].total(),
                 velocity: std::array::from_fn(|c| sums[c + 1].total()),
             }
-            .field(self.omega_rho);
+            .field(self.gradient_per_velocity);
             if !finite_field(&pending[receiver]) {
                 return Err("harmonic Rayleigh field overflow".into());
             }
@@ -542,3 +743,7 @@ impl Prepared {
 #[cfg(test)]
 #[path = "baffled_pressure_harmonic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "baffled_pressure_harmonic_fluid_tests.rs"]
+mod fluid_tests;
