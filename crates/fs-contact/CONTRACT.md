@@ -2871,3 +2871,42 @@ plastic work. Recession parameter work is delta(U)+delta(W_plastic)-normal_work.
 The original held-approach operations retain zero normal work. Signed parameter
 work is not assigned to heat or debris; it remains an explicit account of the
 prescribed geometry change. Finite geometry paths still require refinement.
+
+## Source-bound force control and adaptive surface wear
+
+Original-source normal load control retains the selected material claims,
+indentation tests, complete source owner, and physical applicability envelope.
+The approach search cannot exceed that envelope. The final pressure field,
+residual indentation and contact footprint must pass the same admission checks
+as an approach-controlled advance.
+
+The Archard wear owner can maintain a normal force while the sampled surface
+recedes. Both bodies retain their own hardness, coefficient, recession profile
+and removed-volume inventory. All pressure trials use the original accepted
+history plus the new relative recession; restoring force does not follow a
+fictitious held-approach indentation step. Ordinary load changes preserve wear
+and use the remaining homogeneous-depth check.
+
+Adaptive sliding integration follows a prescribed nonnegative local slip field
+along a fixed normalized path, with fixed original sources and either fixed
+approach or maintained normal force. One full increment is compared with two
+half increments, and only the refined physical history may be accepted.
+Irreversible depths are never Richardson-extrapolated. Depth and pressure
+error estimates, positive progress, finite attempted-step limits and
+cancellation govern the subdivision. This is an estimated local error
+controller around the existing first-order law, not a certified global error
+bound or a new second-order constitutive model.
+
+Only accepted substeps contribute removed volumes, pressure-weighted sliding,
+plastic work and the separate normal/recession work accounts. Rejected trials
+are discarded without changing the caller's state. The original source and
+remaining-depth bounds apply to all accepted history. Tangential slip remains
+a caller-owned physical input; the driver does not infer slip from reversible
+tangential motion, move the material registration, evolve temperature, or
+introduce a debris/heat model.
+
+Focused G1/G3 fixtures specify one-cell force/compliance, preserved dents,
+constant-load Archard volume and approach, separate boundary/parameter work,
+exponential pressure decay at fixed approach, pressure redistribution,
+refinement, retained source identity, and immutable refusal. These are synthetic
+model and implementation checks; experimental validation remains separate.

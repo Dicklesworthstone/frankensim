@@ -3,6 +3,9 @@
 #[path = "source_plastic_contact/temperature.rs"]
 mod temperature;
 
+#[path = "source_plastic_contact/load.rs"]
+mod load;
+
 #[path = "source_point/common.rs"]
 mod common;
 

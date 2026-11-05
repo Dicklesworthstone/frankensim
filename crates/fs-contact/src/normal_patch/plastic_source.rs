@@ -10,6 +10,8 @@
 //! Material state and external conditions are fixed for each owner. Explicit
 //! thermal and wear continuations retain the original irreversible history.
 
+/// Prescribed normal force with original material and applicability bounds.
+pub mod load;
 /// Original temperature-dependent material properties with retained history.
 pub mod temperature;
 /// Local Archard recession and its effect on the original contact pressure.

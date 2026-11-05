@@ -3,6 +3,12 @@
 #[path = "source_point/common.rs"]
 mod common;
 
+#[path = "source_plastic_wear/load.rs"]
+mod load;
+
+#[path = "source_plastic_wear/integration.rs"]
+mod integration;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_domain;
 use fs_contact::interface_binding::{

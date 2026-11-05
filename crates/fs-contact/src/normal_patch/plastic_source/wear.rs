@@ -7,6 +7,11 @@
 //! pressure appreciably. This bounded surface law does not transport debris or
 //! infer local sliding from macroscopic displacement, and it assigns no heat.
 
+/// Adaptive integration of pressure-dependent local surface recession.
+pub mod integration;
+/// Prescribed-load wear without intermediate indentation histories.
+pub mod load;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_matdb::{MaterialCard, PropertyKey};
@@ -15,11 +20,12 @@ use fs_material::state_point::{MaterialStatePointError, ResolvedInterfaceStatePo
 use fs_qty::{Dims, QuantitySpec};
 use fs_tribo::{ArchardLaw, TriboError, WearAdvance, WearState};
 
+use super::load::SourcePlasticLoadError;
 use super::temperature::SourcePlasticTemperatureError;
 use super::{SourcePlasticContact, SourcePlasticContactError, SourcePlasticContactState};
 use crate::normal_patch::{
-    FiniteGapContactError, FiniteGapPlasticContinuationReceipt, FiniteGapPlasticError,
-    FiniteGapPlasticReceipt,
+    FiniteGapContactError, FiniteGapPlasticContinuation, FiniteGapPlasticContinuationReceipt,
+    FiniteGapPlasticError, FiniteGapPlasticReceipt,
 };
 
 /// Refusal leaves contact history, removed volumes, and recession unchanged.
@@ -29,6 +35,8 @@ pub enum SourcePlasticWearError {
     Invalid(&'static str),
     /// Original normal-contact applicability or numerical refusal.
     Contact(SourcePlasticContactError),
+    /// The prescribed normal load or original source load envelope refused.
+    Load(SourcePlasticLoadError),
     /// Native Archard arithmetic or provenance refusal.
     Tribology(TriboError),
     /// Original normal and pressure-cap sources refused temperature continuation.
@@ -39,6 +47,11 @@ pub enum SourcePlasticWearError {
 impl From<SourcePlasticContactError> for SourcePlasticWearError {
     fn from(error: SourcePlasticContactError) -> Self {
         Self::Contact(error)
+    }
+}
+impl From<SourcePlasticLoadError> for SourcePlasticWearError {
+    fn from(error: SourcePlasticLoadError) -> Self {
+        Self::Load(error)
     }
 }
 impl From<TriboError> for SourcePlasticWearError {
@@ -304,8 +317,10 @@ impl SourcePlasticArchardWear {
         self.admit_receded_profile(&next.candidate, &before.recession_m, cx)?;
         Ok(SourcePlasticWearNormalAdvance {
             candidate: SourcePlasticWearState {
+                owner: self.identity,
                 contact: next.candidate,
-                ..before.clone()
+                volumes: before.volumes,
+                recession_m: before.recession_m.clone(),
             },
             receipt: next.receipt,
         })
@@ -325,6 +340,30 @@ impl SourcePlasticArchardWear {
         local_unsigned_slip_m: &[f64],
         cx: &Cx<'_>,
     ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError> {
+        self.advance_wear_with_recession(before, local_unsigned_slip_m, cx, |increment| {
+            let geometry = self
+                .contact
+                .model()
+                .recede(&before.contact.contact, increment, cx)
+                .map_err(SourcePlasticContactError::from)?;
+            Ok((geometry, ()))
+        })
+        .map(|(advance, ())| advance)
+    }
+
+    // The native boundary condition changes the equilibrium solve, not the
+    // Archard law, source ownership, volume/profile accounting, or admissibility.
+    // A trial geometry is accepted only with the complete per-body inventory.
+    fn advance_wear_with_recession<T>(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        cx: &Cx<'_>,
+        equilibrate: impl FnOnce(
+            &[f64],
+        )
+            -> Result<(FiniteGapPlasticContinuation, T), SourcePlasticWearError>,
+    ) -> Result<(SourcePlasticWearAdvance, T), SourcePlasticWearError> {
         self.admit(before)?;
         checkpoint(cx)?;
         let pressure = before.contact.contact_state().pressure_pa();
@@ -457,17 +496,13 @@ impl SourcePlasticArchardWear {
                 ));
             }
         }
-        let geometry = self
-            .contact
-            .model()
-            .recede(&before.contact.contact, &relative_increment, cx)
-            .map_err(SourcePlasticContactError::from)?;
+        let (geometry, boundary_response) = equilibrate(&relative_increment)?;
         let contact = SourcePlasticContactState {
             owner: self.contact.identity(),
             contact: geometry.candidate,
         };
         self.admit_receded_profile(&contact, &recession, cx)?;
-        Ok(SourcePlasticWearAdvance {
+        let advance = SourcePlasticWearAdvance {
             source_identity: self.identity,
             candidate: SourcePlasticWearState {
                 owner: self.identity,
@@ -479,7 +514,8 @@ impl SourcePlasticArchardWear {
             recession_increment_m: increment,
             pressure_weighted_sliding_j: measure,
             receipt: geometry.receipt,
-        })
+        };
+        Ok((advance, boundary_response))
     }
 
     /// Continue prescribed temperatures without resetting either body's wear.
