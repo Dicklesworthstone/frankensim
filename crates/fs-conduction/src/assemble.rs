@@ -625,6 +625,34 @@ fn assemble_boundary(
         }
         start = end;
     }
+    // Coating triangles connect vertices already joined by their owning tet;
+    // the CSR graph is unchanged, but COO staging gains nine entries per face.
+    let coatings = boundary.surface_heat_conduction();
+    if !coatings.is_empty() {
+        coatings
+            .len()
+            .checked_mul(9)
+            .and_then(|extra| coo.staged().checked_add(extra))
+            .and_then(|count| {
+                count.checked_mul(2 * std::mem::size_of::<usize>() + std::mem::size_of::<f64>())
+            })
+            .filter(|&bytes| bytes <= isize::MAX as usize)
+            .ok_or_else(|| ConductionError::Config {
+                parameter: "surface conduction staging",
+                what: "coating triplet storage exceeds addressable allocation".into(),
+            })?;
+        for (index, &surface) in coatings.iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 {
+                checkpoint(cx, "assemble-surface-conduction", index)?;
+            }
+            let (vertices, block) = surface.matrix(mesh)?;
+            for a in 0..3 {
+                for b in 0..3 {
+                    coo.push(vertices[a], vertices[b], block[a][b]);
+                }
+            }
+        }
+    }
     Ok(())
 }
 

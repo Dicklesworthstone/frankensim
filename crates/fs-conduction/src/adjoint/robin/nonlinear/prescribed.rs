@@ -83,7 +83,9 @@ impl RobinResponse {
         let n = problem.mesh.vertex_count();
         let m = regions.len();
         let work = problem.mesh.element_count().checked_mul(32)
-            .and_then(|v| problem.mesh.boundary().len().checked_mul(27).and_then(|b| v.checked_add(b)));
+            .and_then(|v| problem.mesh.boundary().len().checked_mul(27).and_then(|b| v.checked_add(b)))
+            .and_then(|v| problem.boundary.surface_heat_conduction().len().checked_mul(9)
+                .and_then(|coatings| v.checked_add(coatings)));
         if n > max_entries || m > 64 || m.checked_mul(m).is_none_or(|v| v > max_entries)
             || work.is_none_or(|v| v > max_entries) {
             return Err(invalid("prescribed-temperature pullback exceeds its operator/trace work allowance"));

@@ -144,11 +144,12 @@ impl<'m> ThermalBoundaryHistory<'m> {
                 fix: "keep the original mesh and its lowered boundary together".into(),
             });
         }
-        let partition = ThermalBoundaryBuilder {
+        let mut partition = ThermalBoundaryBuilder {
             mesh, names: boundary.names.clone(), conditions: boundary.conditions.clone(),
             face_region: boundary.face_region.clone(),
             adiabatic_remainder: boundary.adiabatic_remainder != 0,
         }.finish()?;
+        partition.surface_conduction = boundary.surface_conduction.clone();
         Self::bind(cx, mesh, partition, environment, histories, initial_time_s)
     }
 
@@ -208,11 +209,12 @@ impl<'m> ThermalBoundaryHistory<'m> {
         poll(cx, self.rows.len())?;
         // The existing finish owns shared-vertex precedence. Reuse it rather
         // than updating only the condition array and leaving a stale lift.
-        let boundary = ThermalBoundaryBuilder {
+        let mut boundary = ThermalBoundaryBuilder {
             mesh: self.mesh, names: self.partition.names.clone(), conditions,
             face_region: self.partition.face_region.clone(),
             adiabatic_remainder: self.partition.adiabatic_remainder != 0,
         }.finish()?;
+        boundary.surface_conduction = self.partition.surface_conduction.clone();
         poll(cx, self.rows.len())?;
         Ok(boundary)
     }

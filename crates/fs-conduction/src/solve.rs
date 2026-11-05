@@ -407,7 +407,8 @@ pub struct ConductionReport {
     pub linear: Vec<LinearSolveEvidence>,
     /// The energy-balance closure.
     pub energy: EnergyBalance,
-    /// Whether every conductivity number carried an `fs-matdb` receipt.
+    /// Whether every bulk conductivity number carried an `fs-matdb` receipt.
+    /// Declared boundary sheet conductances have no implied material provenance.
     pub material_provenance: ProvenanceClass,
     /// How many `fs-matdb` receipts travel with this solve.
     pub material_receipts: usize,

@@ -30,6 +30,9 @@
 /// Time-dependent scenario rows on an immutable, mesh-bound partition.
 pub mod history;
 
+mod surface;
+pub use surface::SurfaceHeatConduction;
+
 use fs_scenario::bc::{BcKind, BcValue, BoundaryCondition, Expectation, Physics, expectation};
 use fs_scenario::scenario::Environment;
 
@@ -290,6 +293,7 @@ pub struct ThermalBoundary {
     /// Prescribed vertices, ascending by vertex id.
     dirichlet: Vec<(usize, f64)>,
     adiabatic_remainder: usize,
+    surface_conduction: Vec<SurfaceHeatConduction>,
 }
 
 impl ThermalBoundary {
@@ -661,6 +665,7 @@ impl<'m> ThermalBoundaryBuilder<'m> {
             face_region: self.face_region,
             dirichlet,
             adiabatic_remainder: untagged.len(),
+            surface_conduction: Vec::new(),
         })
     }
 }

@@ -194,10 +194,11 @@ pub(super) fn boundary_before(cx: &Cx<'_>, history: &ThermalBoundaryHistory<'_>,
             kind: row.kind, value, compatibility: row.compatibility, frame: row.frame };
         conditions[*index] = ThermalBc::from_scenario_row_at(&sampled, &history.environment, reference, time)?;
     }
-    let boundary = ThermalBoundaryBuilder { mesh: history.mesh(),
+    let mut boundary = ThermalBoundaryBuilder { mesh: history.mesh(),
         names: history.partition.names.clone(), conditions,
         face_region: history.partition.face_region.clone(),
         adiabatic_remainder: history.partition.adiabatic_remainder != 0 }.finish()?;
+    boundary.surface_conduction = history.partition.surface_conduction.clone();
     poll(cx, history.rows.len())?;
     Ok(boundary)
 }

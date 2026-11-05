@@ -95,7 +95,7 @@ pub use assemble::{
     assemble_jacobian_with_element_materials, assemble_jacobian_with_interfaces, assemble_operator,
     assemble_operator_with_element_materials, assemble_operator_with_interfaces,
 };
-pub use bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
+pub use bc::{SurfaceHeatConduction, ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 pub use field::ScalarField;
 pub use interface::{
     AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,

@@ -1,5 +1,43 @@
 # CONTRACT: fs-conduction
 
+## Tangential heat conduction in bonded thin coatings
+
+`SurfaceHeatConduction` declares finite, nonnegative isotropic sheet conductance
+`k*t` in W/K on original boundary triangles. Uniform and P1 nodal coefficients
+use the original face vertex order; a declared thickness or conductivity is not
+inferred from the bulk material. `ThermalBoundary::with_surface_heat_conduction`
+binds those laws to the original mesh and thermal partition. Perfect bonding
+and negligible through-thickness gradients give the film the solid's trace
+temperature, without additional temperature degrees of freedom.
+
+The shared boundary assembly adds the exact P1 tangential Fourier block
+`A * mean(k*t) * grad_s(N_i).grad_s(N_j)`. Its symmetric internal transfers
+preserve a constant-temperature null mode and add no reservoir load. Existing
+Dirichlet reactions therefore include coating heat spreading; Neumann, Robin,
+contact and radiation accounts keep their original physical meanings.
+`mean_heat_flux_w_per_m` exposes the exact face-average tangential flux, in W/m
+rather than the bulk flux density in W/m². Empty and zero laws leave the original
+operator unchanged. Duplicate active faces refuse, including repeated additions;
+coincident films require an explicit sum of their sheet conductances.
+
+Steady, ordinary-capacity, enthalpy and their existing assembled adjoints share
+this operator. Enthalpy tangents column-scale the same film block by `dT/dh`,
+including zero slopes on a latent plateau. Both endpoint and event-left-limit
+boundary histories preserve the declared coating. Each active triangle adds
+nine COO entries between vertices already connected by its owning tetrahedron,
+so the CSR graph is unchanged; staging-size arithmetic is checked. This is not
+a peak-memory guarantee. The roundoff estimate counts the extra contributions.
+
+Film storage remains an independent `SurfaceHeatCapacity` input to its existing
+owner, and a separately meshed layer must not be counted again. This declared
+linear sheet law adds no material-source authority, temperature dependence,
+anisotropy, finite through-thickness resistance or film-property derivative.
+Continuum mean verification explicitly refuses active coatings until its flux
+model represents tangential transport. Regressions in
+`tests/surface_heat_capacity.rs` check exact uniform/varying coated-slab heat and
+flux, the regular-tetrahedron decay mode with combined storage, enthalpy scaling,
+nonlinear bulk tangents, event histories and zero/input-refusal behavior.
+
 ## Retained pointwise-radiation and contact enthalpy endpoints
 
 `linearize_temperature_contact_endpoint_with_radiation` binds the supplied
@@ -1604,8 +1642,9 @@ step duration. Empty and zero additions preserve the original operator exactly.
 The surface shares the solid boundary temperature: perfect thermal bonding
 and negligible through-thickness gradients are explicit model assumptions.
 This is frozen linear storage, with no separate film temperature, added
-contact resistance, tangential film conduction, moving geometry or latent
-heat. Storage in a separately meshed coating must not be added again.
+contact resistance, moving geometry or latent heat. Tangential transport is
+declared independently through `ThermalBoundary::with_surface_heat_conduction`.
+Storage in a separately meshed coating must not be added again.
 `SurfaceHeatCapacity::from_material` binds three declared nonnegative reference
 thicknesses to an already admitted constant `MaterialHeatCapacity`; it retains
 the original density/Cp source and intersects temperature support at every face

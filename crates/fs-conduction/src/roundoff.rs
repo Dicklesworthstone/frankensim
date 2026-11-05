@@ -12,8 +12,8 @@
 //! `λ = A⁻ᵀ e_v`, so `|δT_v| ≤ γ_k Σ_i |λ_i| (|b_i| + (|A||T|)_i)`.
 //!
 //! `k` counts the row's non-zeros plus a per-element operation allowance for
-//! every tetrahedron that contributes to the row. The bound uses the
-//! ASSEMBLED magnitudes. Element contributions that cancel inside one entry
+//! every tetrahedron or conducting coating triangle contributing to the row.
+//! The bound uses the ASSEMBLED magnitudes. Contributions that cancel inside one entry
 //! are not tracked individually, so this is an Estimated componentwise
 //! bound, not an interval certificate. The solver's own stopping error is a
 //! separate term (solver-algebraic) and is not included here.
@@ -24,7 +24,7 @@ use fs_solver::{CgState, CsrOp, norm2};
 use crate::assemble::{DofMap, assemble_operator_scaled_with_interfaces, reduce_matrix_and_lift};
 use crate::{ConductionError, ConductionProblem, LinearConfig, ThermalInterfaces};
 
-/// Floating-point operations allowed per tetrahedron contribution to one
+/// Floating-point operations allowed per tetrahedron or coating contribution to one
 /// assembled entry (gradients, the 3×3 tensor product, the volume scale and
 /// the Robin/source quadrature), generously rounded up.
 pub const OPERATIONS_PER_ELEMENT_CONTRIBUTION: usize = 64;
@@ -90,6 +90,22 @@ pub fn nodal_roundoff_bound(
     let mut elements_at = vec![0usize; n];
     for tet in &problem.mesh.complex().tets {
         for &v in tet {
+            elements_at[v as usize] += 1;
+        }
+    }
+    for (index, surface) in problem
+        .boundary
+        .surface_heat_conduction()
+        .iter()
+        .enumerate()
+    {
+        if index % crate::assemble::ASSEMBLY_TILE == 0 {
+            cx.checkpoint().map_err(|_| ConductionError::Cancelled {
+                stage: "roundoff-coatings",
+                at: index,
+            })?;
+        }
+        for &v in &problem.mesh.boundary()[surface.boundary_face()].vertices {
             elements_at[v as usize] += 1;
         }
     }

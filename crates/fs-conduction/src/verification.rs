@@ -110,6 +110,11 @@ impl Admitted {
 
 fn admit(cx: &Cx<'_>, problem: ConductionProblem<'_>, budget: FluxBudget) -> Result<Admitted> {
     poll(cx)?;
+    if !problem.boundary.surface_heat_conduction().is_empty() {
+        return Err(unsupported(
+            "tangential coating conduction needs its own continuum flux-bound model",
+        ));
+    }
     let mesh = problem.mesh;
     let n = mesh.vertex_count();
     let ne = mesh.element_count();
