@@ -8450,6 +8450,44 @@ not executed in the authoring session after dependency compilation exhausted
 shared storage and the execution environment disconnected. This is source-bound
 single-phase isobaric transport, not a phase/EOS closure or experimental validation.
 
+## Source-exact heat capacity in finite-rate crystallization
+
+`thermal::transport::isobaric::crystallization::IsobaricCrystallizationPair`
+binds two original phase Cp laws and a selected positive parent-minus-crystal
+enthalpy datum at one fixed pressure. All sources retain one material card and
+the same complete non-temperature typed context. Both Cp sources must support
+the kinetic interval and reference temperature; the calorimetry reference may
+lie outside that interval. The selected enthalpy gap must explicitly support
+its reference temperature and pressure.
+
+The common chart is h_parent(T) = integral_ref^T Cp_parent dT and
+h_crystal(T) = integral_ref^T Cp_crystal dT - L_ref. Consequently the latent
+enthalpy varies as L(T) = L_ref + integral_ref^T (Cp_parent - Cp_crystal) dT.
+Preparation checks its positive represented value at every source breakpoint
+and every interior quadratic minimum. Endpoint checks alone are insufficient
+when the phase heat capacities differ. These are floating-point checks, not
+an interval stability certificate.
+
+The original finite-rate `CrystallizationLaw` and thermal crystallization
+timeline own kinetics, mass-weighted total enthalpy, recalescence and acceptance.
+No additional latent-heat source or numerical time integrator is introduced.
+Each rebased branch implements `ThermalLaw` and `CrystallizationCaloric`; callers
+must register the rebased parent itself on the timeline. Prepared source indexes
+provide logarithmic forward and inverse caloric lookup, with direct-integral
+fallback and exact clipped branch endpoints. Runtime caloric queries allocate
+nothing and neither query nor resample the original sources.
+
+Five G0/G1 regressions specify unequal-Cp latent enthalpy, arbitrary original
+datum invariance, a negative interior gap despite positive endpoints, source
+context/support refusals, indexed multi-knot branch round trips, and native
+adiabatic recalescence with conserved total enthalpy and original-law binding.
+The focused test and reduced-memory metadata builds were killed by the shared
+memory limit in the genuine pinned asupersync dependency before fs-material;
+these new tests have not been executed or compiler-validated in this session.
+Cp and one enthalpy difference do not establish relative phase entropy, Gibbs
+stability, density, pressure work, composition equivalence or a melting limit.
+Those source/applicability declarations remain explicit on the original owners.
+
 ## Source-exact heating with free expansion
 
 `thermal::transport::isobaric::expansion::IsobaricFreeExpansion` combines

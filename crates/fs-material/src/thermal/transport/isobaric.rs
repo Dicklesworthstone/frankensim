@@ -21,6 +21,10 @@ pub mod expansion;
 #[path = "isobaric/conduction.rs"]
 pub mod conduction;
 
+/// Exact original phase heat capacities on the finite-rate crystallization owner.
+#[path = "isobaric/crystallization.rs"]
+pub mod crystallization;
+
 use super::{
     SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point,
     capacity::{CapacityCurve, CapacityInverse},
