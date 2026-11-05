@@ -102,6 +102,34 @@ source-impedance/load interconnection. Admission, zero-duration and cancellation
 checks retain original flux/charge and retry semantics. These are authored
 checks, not a full switching-device or drive-stack qualification.
 
+### Finite voltage-source resistance and physical load power
+
+`AveragedBuckBoost::prepare_voltage_driven_controlled` closes both original
+bus terminals through finite positive resistances to held ideal voltages.
+The terminal current is `(Vsource - Vbus(t))/R`; zero source voltage is a
+passive resistor load, and reverse current can return work to an ideal source.
+`PreparedMultiportScatteringZoh` supplies the same simultaneous loaded flow,
+with incident voltage `Vsource/2`. All original flux/charge storage and the
+five converter conduction paths remain in their original owner.
+
+`VoltageDrivenStep` distinguishes converter-boundary work, ideal-source work,
+the five internal heat entries, and both terminal-resistor heats. The latter
+independently integrate the positive source squares
+`(Vsource - Vbus(t))^2/R` through `PreparedSourceLoss` with source feedthrough.
+Neither Norton-equivalent `Vbus^2/R`, squared mean current, nor subtraction of
+large source/storage energies supplies physical series-resistor heat. Each
+terminal closes `source work = resistor heat + converter-boundary work`;
+the full storage/heat/work balance must also pass before publication.
+
+Warm calls reuse native factors and fixed-size scratch without allocation or
+matrix exponentiation. Cancellation or arithmetic refusal preserves both caller
+outputs. The original fixed averaged duty, linear L/C and channel-resistance
+limits remain: this path adds no ideal zero-resistance clamp, controller,
+temperature feedback, switching transitions, or new device validity claim.
+Focused analytical coverage includes buck/boost/reverse equilibria, independent
+RC/source work and near-matched positive resistor heat, coupled startup and
+changed-source power ODEs, and cancellation/retry at every exposed checkpoint.
+
 ## Physical acoustic terminal flow
 
 `acoustic_outlet::acoustic_chain_with_outlet_flow` returns the original loaded
@@ -1967,6 +1995,17 @@ with caller-owned `2*n` scratch and no warm allocation. Source-row meaning and
 complete domain energy admission remain the caller's responsibility; no passivity
 claim for arbitrary A is inferred.
 
+`new_with_feedthrough_controlled` extends the same owner to physical squares
+`||S*x+D*u||²`, including source-resistor voltage differences and directly driven
+boundary losses. The original held-input generator and 2n observation dimension
+remain unchanged: `y'=S*v`, `v'=A*v` start from `y=S*x+D*u`, `v=A*x+B*u`.
+Every cross term follows that trajectory, including sources with S=0. Finite
+row-aligned D storage is included in admission. Compensated state/source linear
+forms preserve weak differences about a large driven equilibrium; an identically
+zero D retains the original arithmetic. The existing caller-owned scratch path
+remains allocation-free. This is a held-input interval model, not quadrature for
+an arbitrary changing source waveform or an additional physical heat debit.
+
 `PreparedQuadraticFlow::new_extended_input_controlled` retains the original
 physical storage transform and exact generator/Gramian kernels while accepting
 an explicit complete input map for extended coordinates. This permits a force
@@ -1977,11 +2016,12 @@ held-port preparation keeps its existing input assembly and arithmetic. Public
 `evaluate_into` exposes the unchanged candidate-only contractions with supplied
 scratch; callers retain physical admission and transactional publication.
 
-All three `tests/source_loss.rs` cases pass against the complete actual fs-phs
+All six `tests/source_loss.rs` cases pass against the complete actual fs-phs
 source in bounded native execution: analytic forced and silent modes,
-independent nonnormal-trajectory quadrature, and budget/nonfinite/cancellation
-refusals. All eight `tests/stiff_energy.rs` cases also pass after this extension.
-This is numerical-owner validation, not a full workspace Cargo execution.
+independent nonnormal-trajectory quadrature, source-resistor voltage differences
+near a large equilibrium, multirow state/input cross terms, pure feedthrough,
+zero-map bit equality, and budget/nonfinite/cancellation refusals. This is
+numerical-owner validation, not a full workspace Cargo execution.
 
 
 ## Shared complete common-flow constraint algebra

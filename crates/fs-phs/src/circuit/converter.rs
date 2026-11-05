@@ -27,6 +27,8 @@ use crate::{PhsError, PortHamiltonian, PreparedStepError, PreparedStepRecord, Qu
 
 /// Explicit complementary gate intervals on these SAME storage coordinates.
 pub mod switching;
+/// Finite source resistances and resistive loads on these SAME bus terminals.
+pub mod terminals;
 
 /// Five distinct heat owners, in the same order as [`ConductionHeat::joules`].
 pub const CONDUCTION_CHANNELS: usize = 5;
