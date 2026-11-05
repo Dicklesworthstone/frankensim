@@ -33,7 +33,8 @@ use fs_fft::{C64 as FftComplex, Fft};
 use fs_material::field_storage::{linear_electric_permittivity, linear_magnetic_permeability};
 use fs_math::{c64::C64, dd::Dd, det};
 use modes::{
-    basis, cartesian, fields, fields_from_tangential, finite, normal_flux, polarized, propagation,
+    basis, cartesian, fields, fields_from_tangential, finite, incident_cosine, normal_flux,
+    polarized, propagation,
 };
 
 mod absorption;
@@ -456,15 +457,13 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                     return Err(bad("transverse wave number is unrepresentable"));
                 }
                 let incident_e = [complex(ex[index]), complex(ey[index])];
-                let sine = det::hypot(kx / k, ky / k);
-                let cosine = det::sqrt((1.0 - sine) * (1.0 + sine));
-                if !cosine.is_finite() || cosine <= 0.0 {
+                let Some(cosine) = incident_cosine(k, kx, ky) else {
                     if incident_e == [C64::ZERO; 2] {
                         modes.push(Mode::dormant(kx, ky));
                         continue;
                     }
                     return Err(AngularSpectrumError::IncidentLightCone { column, row });
-                }
+                };
                 let te = source.response(cosine, Polarization::Te)?;
                 let tm = source.response(cosine, Polarization::Tm)?;
                 let exit_kz = te.exit_normal_wavenumber_rad_m;

@@ -14,6 +14,83 @@ fn grid() -> AngularSpectrumGrid {
 }
 
 #[test]
+fn adjacent_light_cone_carriers_keep_their_axial_wavelength_and_poynting_flux() {
+    let medium = material(1.0, 1.0);
+    // G1/G3: independent high-precision axial cosines for the exact authored floats.
+    for (x, y, cosine) in [
+        (0.8, 0.6_f64.next_down(), 9.424_321_830_774_483e-9),
+        (0.6, 0.8_f64.next_down(), 1.154_238_982_858_484e-8),
+    ] {
+        for exponent in [-400, 0, 400] {
+            let scale = 2.0_f64.powi(exponent);
+            let stack = PlanarDielectricLayers::try_new(
+                &medium,
+                DielectricResponse::Lossless(&medium),
+                scale,
+                &[],
+            )
+            .unwrap();
+            let grid = AngularSpectrumGrid {
+                width: 1,
+                height: 1,
+                spacing_m: [scale.recip(); 2],
+            };
+            let input = [[C64::ONE, C64::ZERO]];
+            let beam = PlanarAngularSpectrum::prepare_with_carrier(
+                &stack,
+                grid,
+                [x * scale, y * scale],
+                &input,
+                limits(),
+                || false,
+            )
+            .unwrap();
+            // Maxwell: Ez=-kx/kz and Hy=(kz+kx²/kz)/(omega*mu).
+            let expected_ez = -x / cosine;
+            let expected_power =
+                0.5 * grid.spacing_m[0] * grid.spacing_m[1] * (cosine + x * x / cosine);
+            let check_power = |actual: f64| {
+                assert!((actual / expected_power - 1.0).abs() < 2e-14);
+            };
+            check_power(beam.power().incident_w);
+            check_power(beam.power().transmitted_w);
+            assert_eq!(beam.power().reflected_w, 0.0);
+            let wavelength_z_m = core::f64::consts::TAU / (scale * cosine);
+            for (fraction, gain) in [(0.5, -1.0), (1.0, 1.0)] {
+                let field = beam
+                    .field(Side::Transmitted, fraction * wavelength_z_m, || false)
+                    .unwrap();
+                for c in 0..2 {
+                    complex_near(
+                        field.electric_v_per_m()[0][c],
+                        input[0][c].scale(gain),
+                        2e-14,
+                    );
+                }
+                complex_near(
+                    field.electric_v_per_m()[0][2],
+                    C64::from_re(gain * expected_ez),
+                    2e-14 * expected_ez.abs(),
+                );
+                check_power(field.normal_power_w());
+            }
+            // One adjacent authored direction lies outside the physical cone.
+            assert!(matches!(
+                PlanarAngularSpectrum::prepare_with_carrier(
+                    &stack,
+                    grid,
+                    [0.8 * scale, 0.6 * scale],
+                    &input,
+                    limits(),
+                    || false,
+                ),
+                Err(AngularSpectrumError::IncidentLightCone { column: 0, row: 0 })
+            ));
+        }
+    }
+}
+
+#[test]
 fn arbitrary_carrier_refracts_with_exact_vector_fields_and_fresnel_power() {
     let air = material(1.0, 1.0);
     let glass = material(2.25, 1.0);

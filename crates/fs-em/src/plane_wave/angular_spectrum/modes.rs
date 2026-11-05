@@ -5,6 +5,37 @@ pub(super) fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
 }
 
+/// Positive incident cosine from the original transverse wave numbers.
+/// A rounded hypot can turn a propagating mode into exact grazing before its
+/// small longitudinal wave number is formed. Preserve the squared-distance
+/// residual instead. Binary scaling keeps the products finite at every wave
+/// number scale, and subtracting the larger transverse component first keeps
+/// the cancellation in the compensated products. No light-cone tolerance or
+/// clipping admits grazing/evanescent input.
+pub(super) fn incident_cosine(k: f64, kx: f64, ky: f64) -> Option<f64> {
+    let (a, b) = if kx.abs() >= ky.abs() {
+        (kx.abs(), ky.abs())
+    } else {
+        (ky.abs(), kx.abs())
+    };
+    if !k.is_finite() || k <= 0.0 || !a.is_finite() || !b.is_finite() || a >= k {
+        return None;
+    }
+    // The exponent field is an exact power of two. Subnormal k uses the
+    // smallest normal divisor, leaving k² normal even for the smallest input.
+    let scale = f64::from_bits(k.to_bits() & 0x7ff0_0000_0000_0000).max(f64::MIN_POSITIVE);
+    let scaled_k = k / scale;
+    let k = Dd::from_f64(scaled_k);
+    let a = Dd::from_f64(a / scale);
+    let b = Dd::from_f64(b / scale);
+    let square = (k * k - a * a - b * b).to_f64();
+    if square <= 0.0 {
+        return None;
+    }
+    let cosine = det::sqrt(square) / scaled_k;
+    (cosine.is_finite() && cosine > 0.0 && cosine <= 1.0).then_some(cosine)
+}
+
 /// Fixed tangential TM axis p=(kx,ky)/kt, and TE axis s=(-py,px).
 /// At normal incidence the otherwise arbitrary basis is p=x, s=y.
 pub(super) fn basis(kx: f64, ky: f64) -> [f64; 2] {
@@ -105,6 +136,36 @@ mod tests {
             (a - b).abs() < 4e-14 * (1.0 + a.abs() + b.abs()),
             "{a:?} != {b:?}"
         );
+    }
+
+    #[test]
+    fn light_cone_keeps_adjacent_propagating_directions_and_exact_grazing() {
+        // G1/G3: independent 90-digit evaluation of sqrt(1-x*x-y*y), using the
+        // exact binary64 operands. The first hypot rounds to one; the second
+        // rounded-hypot path gives an axial wave number about 29% too large.
+        let cases = [
+            (0.8, 0.6_f64.next_down(), 9.424_321_830_774_483e-9),
+            (0.6, 0.8_f64.next_down(), 1.154_238_982_858_484e-8),
+        ];
+        for exponent in [-800, -400, 0, 400, 800] {
+            let scale = 2.0_f64.powi(exponent);
+            for (x, y, expected) in cases {
+                let actual = incident_cosine(scale, x * scale, y * scale).unwrap();
+                assert!(
+                    (actual / expected - 1.0).abs() < 5e-16,
+                    "{actual} != {expected}"
+                );
+                assert_eq!(incident_cosine(scale, -y * scale, x * scale), Some(actual));
+            }
+            assert!(incident_cosine(scale, 0.8 * scale, 0.6 * scale).is_none());
+            assert!(incident_cosine(scale, scale, 0.0).is_none());
+            // An exactly represented Pythagorean triple remains on the cone;
+            // division rounding must not introduce a false positive cosine.
+            assert!(incident_cosine(5.0 * scale, 3.0 * scale, 4.0 * scale).is_none());
+            assert!(incident_cosine(5.0 * scale, 3.0 * scale, (4.0 * scale).next_up()).is_none());
+            assert_eq!(incident_cosine(scale, 0.0, 0.0), Some(1.0));
+        }
+        assert_eq!(incident_cosine(f64::from_bits(1), 0.0, 0.0), Some(1.0));
     }
 
     #[test]
