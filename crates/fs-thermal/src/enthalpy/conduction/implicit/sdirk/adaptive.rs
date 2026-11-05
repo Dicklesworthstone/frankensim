@@ -67,9 +67,10 @@ impl ImplicitConductionChain<'_> {
     /// The entire requested window must satisfy [`Self::advance_sdirk2_to`]'s
     /// fixed-mass, source-scheduled, constant-bath scope before the generic
     /// controller can process any events. Both comparison trajectories end at
-    /// each source event before its new power applies. Attached implicit
-    /// advection and other pending events through the target refuse even if
-    /// the first comparison would end sooner.
+    /// each source event before its new power applies. Prescribed fixed-mass
+    /// implicit advection and its optional graph reconstruction participate in
+    /// every stage of both trajectories. Other pending events through the
+    /// target refuse even if the first comparison would end sooner.
     ///
     /// Each comparison computes one full and two half SDIRK2 intervals; all six
     /// stages, rejected comparisons and entropy evaluations consume the same

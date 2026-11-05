@@ -66,9 +66,10 @@ impl ImplicitConductionChain<'_> {
     /// entropy generation or pressure work. The supplied observer's history is
     /// unchanged, including on success.
     ///
-    /// No explicit flow CFL is imposed on this backward-Euler term. First-order
-    /// time error and upwind spatial diffusion still require refinement; the
-    /// existing adaptive h/T/phase controller can refine these same endpoints.
+    /// No explicit flow CFL is imposed on this implicit term. The selected
+    /// backward-Euler or SDIRK2 time error and upwind spatial diffusion still
+    /// require refinement; the existing adaptive h/T/phase controllers can
+    /// refine these same endpoints. SDIRK2 re-evaluates transport at both stages.
     /// Other observed sources retain all their original timestep restrictions.
     pub fn with_implicit_advection(
         mut self,

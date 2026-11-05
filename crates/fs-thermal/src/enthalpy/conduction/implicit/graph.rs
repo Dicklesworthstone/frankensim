@@ -74,9 +74,11 @@ impl<'a> ImplicitConductionGraph<'a> {
     ///
     /// Empty plans preserve the upwind path. The original reconstruction's
     /// source, topology, fixed-mass, geometry and unsupported-carrier refusals
-    /// remain active. Backward Euler is still first-order in time; neither a
-    /// large accepted step nor a small energy residual certifies transport
-    /// accuracy or a maximum principle for arbitrary coupled sources.
+    /// remain active. Select backward Euler or native SDIRK2 for first- or
+    /// second-order time integration, with their existing adaptive controllers.
+    /// Limiter switches can reduce observed order; neither a large accepted step
+    /// nor a small energy residual certifies transport accuracy or a maximum
+    /// principle for arbitrary coupled sources.
     pub fn with_implicit_advection_reconstruction(
         self,
         thermal: &DepositionSimulation<'_>,
@@ -189,10 +191,12 @@ impl<'a> ImplicitConductionGraph<'a> {
             .advance_to(thermal, target_s, controls, workspace, checkpoint)
     }
 
-    /// Second-order L-stable conduction on the original branched/cyclic graph.
-    /// The chain entry point documents the fixed-cell, source-scheduled, constant-bath
-    /// scope and the original domain/entropy/residual gates. Both stages and
-    /// rejected intervals share this graph's bounded sparse linear owner.
+    /// Second-order L-stable convection/conduction on the original graph.
+    /// The chain entry point documents the fixed-cell, source-scheduled,
+    /// constant-bath scope and the original domain/entropy/residual gates.
+    /// Attached prescribed advection, including limited reconstruction, uses
+    /// each actual stage. Both stages and rejected intervals share this graph's
+    /// bounded sparse linear owner.
     pub fn advance_sdirk2_to<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
@@ -247,8 +251,9 @@ impl<'a> ImplicitConductionGraph<'a> {
     }
 
     /// Native SDIRK2 with the shared h/T/phase error controller and sparse
-    /// linear work budget. The entire window must satisfy the chain method's
-    /// source-scheduled, fixed-cell, constant-bath scope before any event processing.
+    /// linear work budget, including attached prescribed convection. The entire
+    /// window must satisfy the chain method's source-scheduled, fixed-cell,
+    /// constant-bath scope before any event processing.
     pub fn advance_sdirk2_adaptive_to<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,

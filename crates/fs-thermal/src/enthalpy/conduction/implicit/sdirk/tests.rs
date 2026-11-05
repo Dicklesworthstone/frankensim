@@ -1,4 +1,7 @@
+use super::super::adaptive::{AdaptiveImplicitConductionControls, AdaptiveImplicitConductionError};
 use super::*;
+use crate::enthalpy::advection::reconstruction::{AxialCellStencil, LimitedEnthalpyReconstruction};
+use crate::enthalpy::advection::{Advected, MassBoundary, MassFlow};
 
 #[path = "source_schedule_tests.rs"]
 mod source_schedule;
@@ -228,6 +231,40 @@ fn amplification(decay_dt: f64) -> f64 {
     (1.0 - (1.0 - 2.0 * GAMMA) * decay_dt) / (1.0 + GAMMA * decay_dt).powi(2)
 }
 
+fn throughflow(cells: usize, kg_s: f64, incoming_h: f64) -> Advected<()> {
+    Advected::new(
+        (),
+        (0..cells - 1)
+            .map(|i| MassFlow {
+                id: i as u64,
+                a: id(i),
+                b: id(i + 1),
+                kg_s,
+            })
+            .collect(),
+        cells,
+    )
+    .unwrap()
+    .with_boundaries(
+        vec![
+            MassBoundary::Inlet {
+                id: cells as u64,
+                cell: id(0),
+                kg_s,
+                material_id: MaterialId(0),
+                specific_h_j_kg: incoming_h,
+            },
+            MassBoundary::Outlet {
+                id: cells as u64 + 1,
+                cell: id(cells - 1),
+                kg_s,
+            },
+        ],
+        cells + 1,
+    )
+    .unwrap()
+}
+
 #[test]
 fn unequal_capacities_conserve_native_heat_and_match_two_stage_relaxation() {
     let law = Law::constant(3.0, 1.0);
@@ -384,7 +421,7 @@ fn nonlinear_material_diffusion_has_second_order_time_refinement() {
 }
 
 #[test]
-fn cyclic_graph_fourier_decay_refines_at_second_order_and_preserves_mean() {
+fn cyclic_convection_diffusion_refines_at_second_order_and_preserves_mean() {
     let law = Law::constant(1.0, 0.1);
     let n = 12;
     let dx = 1.0 / n as f64;
@@ -394,6 +431,20 @@ fn cyclic_graph_fourier_decay_refines_at_second_order_and_preserves_mean() {
     let temperature: Vec<_> = shape.iter().map(|&v| 400.0 + 50.0 * v).collect();
     let edges: Vec<_> = (0..n).map(|i| (i, (i + 1) % n, dx)).collect();
     let (thermal, observer) = network(&law, &temperature, &vec![dx; n], &edges, None, vec![]);
+    let rate = 0.6;
+    let flow = Advected::new(
+        (),
+        (0..n)
+            .map(|i| MassFlow {
+                id: i as u64,
+                a: id(i),
+                b: id((i + 1) % n),
+                kg_s: rate,
+            })
+            .collect(),
+        n,
+    )
+    .unwrap();
     let solver = ImplicitConductionGraph::new(
         &thermal,
         &observer,
@@ -401,12 +452,18 @@ fn cyclic_graph_fourier_decay_refines_at_second_order_and_preserves_mean() {
         ImplicitConductionLinearControls::default(),
         || Ok(()),
     )
+    .unwrap()
+    .with_implicit_advection(&thermal, &flow, || Ok(()))
     .unwrap();
     let mut workspace = ImplicitConductionWorkspace::new(n).unwrap();
     let duration = 0.25;
-    // Exact eigenvalue of this finite-volume periodic Laplacian isolates time
-    // error from spatial truncation; no reference numerical integrator is used.
-    let lambda = 4.0 * law.k * (core::f64::consts::PI / n as f64).sin().powi(2) / dx.powi(2);
+    // Exact complex eigenvalue of the periodic upwind/conduction operator
+    // isolates time error from spatial diffusion and phase error. The directed
+    // part translates the Fourier mode; a symmetric-conductance surrogate fails.
+    let theta = core::f64::consts::TAU / n as f64;
+    let lambda =
+        4.0 * law.k * (0.5 * theta).sin().powi(2) / dx.powi(2) + rate * (1.0 - theta.cos()) / dx;
+    let frequency = rate * theta.sin() / dx;
     let mut errors = Vec::new();
     for steps in [4, 8, 16] {
         let (next, report) = solver
@@ -420,9 +477,13 @@ fn cyclic_graph_fourier_decay_refines_at_second_order_and_preserves_mean() {
             .unwrap();
         let mut error = 0.0_f64;
         let mut mean = 0.0;
-        for (i, &mode) in shape.iter().enumerate() {
+        for i in 0..n {
             let actual = next.temperature_k(id(i)).unwrap();
-            error = error.max((actual - (400.0 + 50.0 * mode * (-lambda * duration).exp())).abs());
+            let exact = 400.0
+                + 50.0
+                    * (-lambda * duration).exp()
+                    * (theta * (i as f64 + 0.5) - frequency * duration).cos();
+            error = error.max((actual - exact).abs());
             mean += actual / n as f64;
         }
         errors.push(error);
@@ -430,6 +491,7 @@ fn cyclic_graph_fourier_decay_refines_at_second_order_and_preserves_mean() {
         near(report.energy.external_heat_j, 0.0, 0.0);
         assert!(report.energy.residual_j.abs() <= 1e-8);
         assert!(report.linear_iterations > 0);
+        assert!(report.entropy.has_unclassified_sources);
         assert_eq!(report.energy.substeps, steps);
     }
     for pair in errors.windows(2) {
@@ -768,8 +830,7 @@ fn scheduled_boundary_changes_refuse_explicitly() {
 }
 
 #[test]
-fn attached_implicit_advection_keeps_backward_euler_and_refuses_sdirk2() {
-    use crate::enthalpy::advection::{Advected, MassFlow};
+fn attached_convection_uses_both_stages_without_conductive_entropy_relabeling() {
     let law = Law::constant(1.0, 1.0);
     let (thermal, observer) = network(
         &law,
@@ -798,22 +859,422 @@ fn attached_implicit_advection_keeps_backward_euler_and_refuses_sdirk2() {
         2,
     )
     .unwrap();
+    let direct = chain(&thermal, &observer, &law)
+        .with_implicit_advection(&thermal, &flow, || Ok(()))
+        .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &observer,
+        &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_implicit_advection(&thermal, &flow, || Ok(()))
+    .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    // The balanced upwind loop doubles the contrast decay rate to 4/s, but its
+    // signed Q/T remains transport, separate from Fourier entropy production.
+    let first = [
+        350.0 + 50.0 / (1.0 + 4.0 * GAMMA),
+        350.0 - 50.0 / (1.0 + 4.0 * GAMMA),
+    ];
+    let expected = [
+        350.0 + 50.0 * amplification(4.0),
+        350.0 - 50.0 * amplification(4.0),
+    ];
+    let production = |t: [f64; 2]| (t[0] - t[1]).powi(2) / (t[0] * t[1]);
+    let weighted = (1.0 - GAMMA) * production(first) + GAMMA * production(expected);
+    for sparse in [false, true] {
+        let (next, report) = if sparse {
+            graph.advance_sdirk2_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(()))
+        } else {
+            direct.advance_sdirk2_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(()))
+        }
+        .unwrap();
+        for (i, value) in expected.into_iter().enumerate() {
+            near(next.temperature_k(id(i)).unwrap(), value, 1e-9);
+        }
+        near(report.energy.external_heat_j, 0.0, 0.0);
+        near(report.energy.residual_j, 0.0, 1e-9);
+        near(report.entropy.reservoir_entropy_input_j_k, 0.0, 0.0);
+        near(report.entropy.conduction_generation_j_k, weighted, 1e-12);
+        near(
+            report.entropy.unclassified_source_at_cell_j_k,
+            weighted,
+            1e-12,
+        );
+        assert!(report.entropy.has_unclassified_sources);
+        assert_eq!(report.energy.substeps, 1);
+    }
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(flow.audit().substeps, 0);
+}
+
+#[test]
+fn open_convection_weights_stream_source_and_bath_energy_in_original_coordinates() {
+    for datum in [0.0, 1e9] {
+        let law = Law {
+            datum,
+            ..Law::constant(3.0, 1.0)
+        };
+        let (mut thermal, observer) = network(&law, &[600.0], &[2.0], &[], Some(300.0), vec![]);
+        thermal.cells.get_mut(&id(0)).unwrap().boundary.source_w = 75.0;
+        let flow = throughflow(1, 0.7, datum + law.cp * 350.0);
+        let solver = chain(&thermal, &observer, &law)
+            .with_implicit_advection(&thermal, &flow, || Ok(()))
+            .unwrap();
+        let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+        let dt = 1.25;
+        // 6*T' = 2.1*(350-T) + (300-T) + 75. Neither the absolute
+        // enthalpy datum nor an internal reference subtraction is physical heat.
+        let equilibrium = (2.1 * 350.0 + 300.0 + 75.0) / 3.1;
+        let first = equilibrium + (600.0 - equilibrium) / (1.0 + GAMMA * dt * 3.1 / 6.0);
+        let expected = equilibrium + (600.0 - equilibrium) * amplification(dt * 3.1 / 6.0);
+        let stream_and_source = |t: f64| 2.1 * (350.0 - t) + 75.0;
+        let weighted = |a: f64, b: f64| dt * ((1.0 - GAMMA) * a + GAMMA * b);
+        let external = weighted(
+            stream_and_source(first) + 300.0 - first,
+            stream_and_source(expected) + 300.0 - expected,
+        );
+        let (next, report) = solver
+            .advance_sdirk2_to(
+                &thermal,
+                dt,
+                ImplicitConductionControls {
+                    cell_tolerance_j: 2e-6,
+                    total_tolerance_j: 5e-6,
+                    ..controls(dt)
+                },
+                &mut workspace,
+                || Ok(()),
+            )
+            .unwrap();
+        near(next.temperature_k(id(0)).unwrap(), expected, 1e-6);
+        near(report.energy.external_heat_j, external, 5e-6);
+        near(
+            report.energy.stored_energy_change_j,
+            6.0 * (expected - 600.0),
+            5e-6,
+        );
+        near(
+            report.entropy.unclassified_source_at_cell_j_k,
+            weighted(
+                stream_and_source(first) / first,
+                stream_and_source(expected) / expected,
+            ),
+            1e-8,
+        );
+        near(
+            report.entropy.reservoir_entropy_input_j_k,
+            weighted((300.0 - first) / 300.0, (300.0 - expected) / 300.0),
+            1e-8,
+        );
+        near(
+            report.entropy.conduction_generation_j_k,
+            weighted(
+                (first - 300.0).powi(2) / (300.0 * first),
+                (expected - 300.0).powi(2) / (300.0 * expected),
+            ),
+            1e-8,
+        );
+        near(
+            report.entropy.thermal_storage_change_j_k,
+            6.0 * (expected / 600.0).ln(),
+            1e-8,
+        );
+        assert!(report.entropy.has_unclassified_sources);
+        assert_eq!(report.energy.substeps, 1);
+        assert_eq!(
+            next.cells()[&id(0)].boundary,
+            thermal.cells()[&id(0)].boundary
+        );
+        assert_eq!(flow.audit().substeps, 0);
+    }
+}
+
+#[test]
+fn limited_latent_convection_reconstructs_each_stage_and_refines_time_error() {
+    let law = Law {
+        latent: true,
+        ..Law::constant(1.0, 1.0)
+    };
+    let (thermal, observer) = network(&law, &[320.0, 360.0, 440.0], &[1.0; 3], &[], None, vec![]);
+    let flow = throughflow(3, 1.0, 300.0);
+    let reconstruction = LimitedEnthalpyReconstruction::try_new(
+        &thermal,
+        &[AxialCellStencil {
+            previous: id(0),
+            cell: id(1),
+            next: id(2),
+        }],
+        1,
+        || Ok(()),
+    )
+    .unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &observer,
+        &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_implicit_advection_reconstruction(&thermal, &flow, &reconstruction, || Ok(()))
+    .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(3).unwrap();
+    // In excess-enthalpy coordinates x=h-300, the left minmod slope is active
+    // throughout: x' = [-x0, 1.5*(x0-x1), 1.5*x1-0.5*x0-x2]. These scalar
+    // stage solves are independent of the native transport residual/Jacobian.
+    let stage = |rhs: [f64; 3], weight: f64| {
+        let a = rhs[0] / (1.0 + weight);
+        let b = (rhs[1] + 1.5 * weight * a) / (1.0 + 1.5 * weight);
+        let c = (rhs[2] + weight * (1.5 * b - 0.5 * a)) / (1.0 + weight);
+        [a, b, c]
+    };
+    let initial = [20.0, 60.0, 140.0];
+    let first = stage(initial, GAMMA);
+    let rates = [
+        -first[0],
+        1.5 * (first[0] - first[1]),
+        1.5 * first[1] - 0.5 * first[0] - first[2],
+    ];
+    let expected = stage(
+        core::array::from_fn(|i| initial[i] + (1.0 - GAMMA) * rates[i]),
+        GAMMA,
+    );
+    for x in [first, expected] {
+        assert!(0.0 < x[1] - x[0] && x[1] - x[0] < x[2] - x[1]);
+    }
+    let (next, report) = graph
+        .advance_sdirk2_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(()))
+        .unwrap();
+    for (i, value) in expected.into_iter().enumerate() {
+        near(next.cells()[&id(i)].specific_h_j_kg, 300.0 + value, 1e-9);
+        near(next.temperature_k(id(i)).unwrap(), 300.0, 0.0);
+    }
+    let external = -((1.0 - GAMMA) * first[2] + GAMMA * expected[2]);
+    near(report.energy.external_heat_j, external, 1e-9);
+    near(report.energy.stored_energy_change_j, external, 1e-9);
+    near(report.entropy.conduction_generation_j_k, 0.0, 0.0);
+    near(
+        report.entropy.unclassified_source_at_cell_j_k,
+        external / 300.0,
+        1e-12,
+    );
+    near(report.entropy.temporal_defect_j_k, 0.0, 1e-12);
+    assert_eq!(report.energy.substeps, 1);
+
+    // Exact semi-discrete solution at t=1: all cells remain on the latent
+    // plateau, while h and its reconstructed face trace evolve continuously.
+    let exact = [20.0, 60.0, 220.0].map(|x| 300.0 + x * (-1.0_f64).exp());
+    let error = |state: &DepositionSimulation<'_>| {
+        (0..3)
+            .map(|i| (state.cells()[&id(i)].specific_h_j_kg - exact[i]).abs())
+            .fold(0.0_f64, f64::max)
+    };
+    let mut errors = Vec::new();
+    for steps in [4, 8, 16] {
+        let (next, report) = graph
+            .advance_sdirk2_to(
+                &thermal,
+                1.0,
+                controls(1.0 / steps as f64),
+                &mut workspace,
+                || Ok(()),
+            )
+            .unwrap();
+        errors.push(error(&next));
+        near(report.energy.residual_j, 0.0, 1e-8);
+        assert_eq!(report.energy.substeps, steps);
+    }
+    for pair in errors.windows(2) {
+        assert!(
+            (3.7..4.5).contains(&(pair[0] / pair[1])),
+            "limited time errors: {errors:?}"
+        );
+    }
+    let mut adaptive_errors = Vec::new();
+    let mut comparisons = Vec::new();
+    for tolerance in [1e-3, 1e-5] {
+        let (next, report) = graph
+            .advance_sdirk2_adaptive_to(
+                &thermal,
+                1.0,
+                AdaptiveImplicitConductionControls {
+                    step: controls(1.0),
+                    initial_dt_s: 1.0,
+                    enthalpy_absolute_tolerance_j_kg: tolerance,
+                    temperature_absolute_tolerance_k: 1e-8,
+                    relative_tolerance: 0.0,
+                    ..Default::default()
+                },
+                &mut workspace,
+                || Ok(()),
+            )
+            .unwrap();
+        adaptive_errors.push(error(&next));
+        comparisons.push(report.accepted_comparisons);
+        assert!(report.accuracy_rejections > 0);
+        assert!(report.maximum_accepted_normalized_error <= 1.0);
+        near(
+            report.last_error.unwrap().maximum_temperature_difference_k,
+            0.0,
+            0.0,
+        );
+        near(
+            report.solve.energy.external_heat_j,
+            (0..3)
+                .map(|i| {
+                    next.cells()[&id(i)].specific_h_j_kg - thermal.cells()[&id(i)].specific_h_j_kg
+                })
+                .sum(),
+            1e-8,
+        );
+        assert_eq!(
+            report.solve.energy.substeps,
+            2 * report.accepted_comparisons
+        );
+    }
+    assert!(
+        adaptive_errors[1] < 0.1 * adaptive_errors[0],
+        "{adaptive_errors:?}"
+    );
+    assert!(comparisons[1] > comparisons[0]);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(flow.audit().substeps, 0);
+}
+
+#[test]
+fn convecting_source_events_keep_stage_timing_and_late_cancellation_atomic() {
+    let law = Law::constant(1.0, 1.0);
+    let source = |time_s, source_w| TimedEvent {
+        time_s,
+        event: Event::Boundary(
+            id(0),
+            Boundary {
+                source_w,
+                ..boundary(None)
+            },
+        ),
+    };
+    let (thermal, observer) = network(
+        &law,
+        &[400.0],
+        &[1.0],
+        &[],
+        None,
+        vec![source(0.35, 20.0), source(0.8, -10.0), source(1.2, 50.0)],
+    );
+    let before = thermal.cells().clone();
+    let flow = throughflow(1, 1.0, 300.0);
     let solver = chain(&thermal, &observer, &law)
         .with_implicit_advection(&thermal, &flow, || Ok(()))
         .unwrap();
-    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let mut expected = 400.0;
+    let mut exact = 400.0;
+    for (span, equilibrium) in [(0.35, 300.0), (0.45, 320.0), (0.4, 290.0)] {
+        expected = equilibrium + (expected - equilibrium) * amplification(span);
+        exact = equilibrium + (exact - equilibrium) * (-span).exp();
+    }
+    let mut checks = 0;
+    let (next, report) = solver
+        .advance_sdirk2_to(&thermal, 1.2, controls(1.0), &mut workspace, || {
+            checks += 1;
+            Ok(())
+        })
+        .unwrap();
+    near(next.temperature_k(id(0)).unwrap(), expected, 1e-9);
+    near(report.energy.external_heat_j, expected - 400.0, 1e-9);
+    assert_eq!(report.energy.substeps, 3);
+    assert_eq!(report.energy.events, 3);
+    assert_eq!(next.cells()[&id(0)].boundary.source_w, 50.0);
+    let mut cancel_checks = 0;
     assert!(matches!(
-        solver.advance_sdirk2_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(())),
+        solver.advance_sdirk2_to(&thermal, 1.2, controls(1.0), &mut workspace, || {
+            cancel_checks += 1;
+            if cancel_checks == checks - 1 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }),
+        Err(ImplicitConductionError::Thermal(DepositionError::Cancelled))
+    ));
+
+    let (next, report) = solver
+        .advance_sdirk2_adaptive_to(
+            &thermal,
+            1.2,
+            AdaptiveImplicitConductionControls {
+                step: controls(1.0),
+                initial_dt_s: 1.0,
+                enthalpy_absolute_tolerance_j_kg: 1e-5,
+                temperature_absolute_tolerance_k: 1e-5,
+                relative_tolerance: 0.0,
+                ..Default::default()
+            },
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    near(next.temperature_k(id(0)).unwrap(), exact, 1e-3);
+    near(
+        report.solve.energy.external_heat_j,
+        next.temperature_k(id(0)).unwrap() - 400.0,
+        1e-8,
+    );
+    assert_eq!(report.solve.energy.events, 3);
+    assert_eq!(next.cells()[&id(0)].boundary.source_w, 50.0);
+    assert_eq!(thermal.cells(), &before);
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(flow.audit().substeps, 0);
+
+    // A later bath change is still a whole-window refusal even with admitted
+    // flow. It must win over the deliberately insufficient first-stage budget.
+    let (thermal, observer) = network(
+        &law,
+        &[400.0],
+        &[1.0],
+        &[],
+        None,
+        vec![TimedEvent {
+            time_s: 0.9,
+            event: Event::Boundary(
+                id(0),
+                Boundary {
+                    ambient_k: 250.0,
+                    ..boundary(None)
+                },
+            ),
+        }],
+    );
+    let solver = chain(&thermal, &observer, &law)
+        .with_implicit_advection(&thermal, &flow, || Ok(()))
+        .unwrap();
+    let step = ImplicitConductionControls {
+        maximum_residual_evaluations: 1,
+        ..controls(0.1)
+    };
+    assert!(matches!(
+        solver.advance_sdirk2_to(&thermal, 1.0, step, &mut workspace, || Ok(())),
         Err(ImplicitConductionError::Invalid(_))
     ));
-    let (next, report) = solver
-        .advance_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(()))
-        .unwrap();
-    // The balanced upwind loop adds 1 W/K to the original 1 W/K conductive
-    // link. Backward Euler must retain that upstream transport and its tangent.
-    near(next.temperature_k(id(0)).unwrap(), 360.0, 1e-9);
-    near(next.temperature_k(id(1)).unwrap(), 340.0, 1e-9);
-    near(report.energy.external_heat_j, 0.0, 0.0);
-    near(report.energy.residual_j, 0.0, 1e-9);
-    assert_eq!(thermal.time_s(), 0.0);
+    assert!(matches!(
+        solver.advance_sdirk2_adaptive_to(
+            &thermal,
+            1.0,
+            AdaptiveImplicitConductionControls {
+                step,
+                initial_dt_s: 0.1,
+                ..Default::default()
+            },
+            &mut workspace,
+            || Ok(())
+        ),
+        Err(AdaptiveImplicitConductionError::Implicit(
+            ImplicitConductionError::Invalid(_)
+        ))
+    ));
 }

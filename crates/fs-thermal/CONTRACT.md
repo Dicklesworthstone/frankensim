@@ -1260,7 +1260,7 @@ regressions check original heat and actual-bath entropy plus refusal/rollback.
 The full pinned-main native thermal source passes 191 tests, with one existing
 ignored test; required workspace/DSR gates remain a separate unavailable check.
 
-### Second-order implicit network diffusion
+### Second-order implicit network convection and diffusion
 
 `ImplicitConductionChain::advance_sdirk2_to` and the graph equivalent add
 two-stage L-stable SDIRK2 with `gamma = 1 - 1/sqrt(2)`. Both stages solve the
@@ -1297,14 +1297,29 @@ rejects changes to ambient, film or reservoir declarations, unknown cells and
 all topology/birth events before stage work. The same whole-call step and
 nonlinear work budgets cover every source interval; events never renew them.
 The nonadaptive constant-source path avoids event processing/cloning at steps
-where no event is due. No external observer or mass-advection hook is exposed;
-attached implicit advection still refuses. Complete-interval halving in
+where no event is due. External source observers and moving mass remain outside
+this entry point. Complete-interval halving in
 `advance_sdirk2_to` handles nonlinear failure; it does not estimate temporal
 accuracy. Second-order time accuracy
 requires a smooth admitted solution and independent timestep refinement;
-constitutive/phase corners may lower it. L-stability is not unconditional
+constitutive/phase/limiter corners may lower it. L-stability is not unconditional
 positivity, monotonicity or a maximum-principle guarantee: every stage retains
 the original material-domain checks, without temperature/heat clipping.
+
+An attached `with_implicit_advection` binding now participates in both stages,
+including `with_implicit_advection_reconstruction` on the graph. Its prescribed
+mass rates, inlet enthalpies, original caloric references and fixed inventory
+remain unchanged. Every Newton trial queries the original transport owner at
+that stage's actual enthalpy; a limited face and its generalized tangent are
+never frozen at the initial state or first stage. The native stage heat vector
+retains equal opposite internal-transfer rates, and the external energy account
+integrates inlet-minus-outlet enthalpy with the same two positive weights as
+authored power and bath heat. Internal circulation is not external heat.
+Signed transport Q/T stays unclassified at-cell entropy with those same weights;
+neither stream entropy nor mixing production is inferred. Existing unsupported
+carrier, flow-entropy, species and selective-stream refusals remain authoritative.
+No explicit flow CFL is imposed; finite-volume spatial error still requires
+independent refinement and the supplied flow observer's history is not advanced.
 
 Focused regressions compare unequal-capacity equilibration and bath cooling
 against independent analytic stage solutions, including physical weighted
@@ -1321,8 +1336,18 @@ on all chain/graph and fixed/adaptive entry points. A piecewise exponential
 bath solution retains second-order temporal refinement. Late unsupported
 events, whole-call step budgets and cancellation during a long source-schedule
 preflight refuse without publishing a prefix.
+Convection regressions independently check both-stage paired-transfer entropy,
+directed Fourier convection-diffusion phase/decay with second-order time
+refinement, and open-stream/source/bath joules and entropy under a large enthalpy
+datum shift. A limited latent channel has independent scalar stage solutions
+and an exact semi-discrete transient: its enthalpy converges at second order
+while all temperatures remain fixed. Tightening adaptive enthalpy tolerance
+improves that solution. Source-event timing, late cancellation and unsupported
+bath-event preflight are also exercised with attached flow. These numerical
+checks do not assert spatial second order at limiter switches, unconditional
+TVD/positivity, a stream-entropy closure or experimental validation.
 
-#### Adaptive second-order network diffusion
+#### Adaptive second-order network convection and diffusion
 
 `advance_sdirk2_adaptive_to` on the same chain and graph owners adds local
 h/T/phase error control through the existing `AdaptiveConductionStepper`.
@@ -1344,9 +1369,10 @@ arithmetic and overflow from multiplying a large normalized error.
 The complete requested window is checked before the generic controller can
 process an event or compute a comparison. The generic controller already clips
 both coarse and fine trajectories at source events and processes them only
-after accepting the preceding interval. Attached implicit advection and all
-other events through the target remain outside SDIRK2's admitted scope even if
-an initial comparison would end sooner. The new adapter shares
+after accepting the preceding interval. Attached prescribed implicit advection
+and optional limited reconstruction participate in every stage of both
+trajectories. All other events through the target remain outside SDIRK2's
+admitted scope even if an initial comparison would end sooner. The adapter shares
 the original material observables and change-based, caloric-datum-invariant
 error scales. It adds no phase proxy, source splitting or global accuracy bound;
 constitutive corners and spatial error still require independent refinement.
@@ -1742,16 +1768,18 @@ The analytic directed tangent is compiled once in joule coordinates, including
 the original component-reference derivative under admitted continuity roundoff.
 Tridiagonal transport retains the direct chain solver; other topologies use the
 existing nonsymmetric sparse FGMRES owner. No dense matrix or numerical caloric
-derivative is introduced. The selected backward-Euler term has no explicit flow
-CFL restriction; the same endpoints also reach the existing adaptive h/T/phase
-controller. Other observed sources retain their own timestep restrictions.
+derivative is introduced. The selected backward-Euler or native SDIRK2 term has
+no explicit flow CFL restriction; the same endpoints also reach their existing
+adaptive h/T/phase controllers. Other observed sources retain their own timestep
+restrictions.
 
 This binding is an immutable snapshot of ordinary bulk enthalpy transport.
 Liquid carriers, stationary species, selective streams and flow-entropy
 histories refuse until their own endpoint closures exist. Thermal entropy marks
 these transfers unclassified. No phase mobility, moving inventory, pressure
-work, momentum feedback or entropy-generation model is inferred. First-order
-time error and upwind spatial diffusion still require independent refinement.
+work, momentum feedback or entropy-generation model is inferred. The selected
+method's time error and upwind spatial diffusion still require independent
+refinement.
 
 Focused G1/G3/G4 regressions cover exact high-Courant chain/graph balances,
 large enthalpy-reference shifts, unequal-mass latent throughflow, nonlinear
@@ -1789,7 +1817,9 @@ resolve a reversed/datum-shifted latent channel at Courant four against an
 independent affine endpoint balance, and refine a circulating cell-average
 sine wave against its exact translation and the upwind result. Late cancellation
 retains the original thermal history. Backward Euler remains first-order in
-time; these bounded checks do not establish a global TVD, arbitrary-source
+time; native SDIRK2 and its adaptive controller use both stages' actual limited
+fluxes, with the smooth-solution qualifications above. These bounded checks do
+not establish a global TVD, arbitrary-source
 maximum-principle, experimental-validation or throughput claim.
 
 

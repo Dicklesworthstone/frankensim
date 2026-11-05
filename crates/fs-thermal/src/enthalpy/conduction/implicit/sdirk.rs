@@ -25,11 +25,10 @@ impl ImplicitConductionChain<'_> {
         target_s: f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), ImplicitConductionError> {
-        if self.advection.is_some() {
-            return Err(ImplicitConductionError::Invalid(
-                "SDIRK2 requires fixed cells without implicit advection",
-            ));
-        }
+        // A prepared implicit flow has fixed mass rates and inlet enthalpies.
+        // Its original endpoint owner admits continuity/calorics at EACH stage,
+        // and StageHeat retains its paired transfers and external stream power
+        // with the same quadrature as conduction. No flow history is advanced.
         for (index, event) in thermal.schedule[thermal.cursor..]
             .iter()
             .take_while(|event| event.time_s <= target_s)
@@ -80,8 +79,10 @@ impl ImplicitConductionChain<'_> {
             return Err(DepositionError::Arithmetic.into());
         }
         // An empty override map preserves each cell's authored, constant power.
-        // Native StageHeat carries it with the same quadrature as conduction,
-        // including its external energy and unclassified at-cell entropy.
+        // Native StageHeat carries it and any attached endpoint advection with
+        // the same quadrature as conduction, including external stream energy
+        // and unclassified at-cell entropy. Reconstructed faces and their
+        // tangents are evaluated at each trial, never frozen at the first stage.
         let sources = BTreeMap::new();
         let first = self.solve_stage(
             thermal,
@@ -124,7 +125,7 @@ impl ImplicitConductionChain<'_> {
         Ok((next, energy, entropy, first_maximum.max(maximum)))
     }
 
-    /// Advance fixed-mass conduction with second-order, L-stable SDIRK2.
+    /// Advance fixed-mass convection/conduction with second-order, L-stable SDIRK2.
     ///
     /// All geometric, nonlinear material, contact and integrated boundary laws
     /// of this prepared solver remain active. Ambient and reservoir temperatures
@@ -134,21 +135,29 @@ impl ImplicitConductionChain<'_> {
     /// Events at the target are applied without aging under their new power.
     /// Both stages integrate powers in the original energy residual;
     /// source entropy retains its original unclassified at-cell convention.
-    /// Attached implicit advection, observers, moving mass and all other scheduled
-    /// events through the target refuse before stage work. Source events retain
+    /// Attached prescribed implicit advection remains active, including limited
+    /// reconstruction on the graph path. Both stages transport their actual
+    /// endpoint enthalpy with the original flow, continuity and caloric admission;
+    /// mass rates and inlet enthalpies remain fixed throughout the call.
+    /// External observers, moving mass and all other scheduled events through
+    /// the target refuse before stage work. Source events retain
     /// authored order and the same whole-call nonlinear and accepted-step budgets.
     ///
     /// Both stages use the SAME original enthalpy storage. Internal first-stage
-    /// heat cancels from the external account; bath heat, bath entropy and
-    /// conductive production use the two positive Runge--Kutta weights. Exact
-    /// caloric entropy storage and the signed temporal defect remain separate.
+    /// heat and advective pairs cancel from the external account. Bath heat,
+    /// inlet/outlet enthalpy, bath entropy, conductive production and signed
+    /// unclassified transport Q/T use the two positive Runge--Kutta weights.
+    /// Exact caloric entropy storage and the signed temporal defect remain
+    /// separate; no stream entropy or mixing-production law is inferred.
     ///
     /// Each accepted physical interval counts once in `energy.substeps`; all
     /// stage/retry work consumes the existing residual and linear budgets.
     /// Failed intervals may be halved for nonlinear convergence, without
     /// publishing either stage. This is not adaptive time-error control.
     /// Second-order accuracy requires a smooth admitted solution and independent
-    /// time refinement; phase/source corners can reduce the observed order.
+    /// time refinement; phase/source/limiter corners can reduce the observed order.
+    /// No explicit flow CFL is imposed; spatial transport error still needs
+    /// independent refinement and the supplied flow's history remains unchanged.
     /// L-stability does not guarantee positivity or a maximum principle for
     /// arbitrarily large intervals. Original constitutive domains are enforced
     /// at every stage; temperatures and heat are never clipped.
