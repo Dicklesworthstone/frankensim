@@ -251,6 +251,35 @@ impl MindlinDeresiewiczPoint {
         state: &MindlinState,
         input: &TangentialStepInput,
     ) -> Result<MindlinTrialResponse, TriboError> {
+        let response = self.trial_prescribed_for_solve(state, input)?;
+        if response.average_force_n.abs() > input.solve.maximum_force_n {
+            return Err(TriboError::OutsideApplicability {
+                field: "maximum_force_n",
+                value: response.average_force_n.abs(),
+                minimum: 0.0,
+                maximum: input.solve.maximum_force_n,
+            });
+        }
+        Ok(response)
+    }
+
+    /// Evaluate a coupled solver's candidate without applying its force ceiling.
+    ///
+    /// A free-displacement trial can exceed `maximum_force_n` even when body
+    /// compliance brings the accepted effort below that ceiling. Like the
+    /// original compliant solver's internal response evaluation, this method
+    /// defers only that effort check. It preserves every other input admission,
+    /// requires zero scalar compliance, and never advances or copies history.
+    ///
+    /// This response is not an accepted contact step. The caller must check its
+    /// actually applied effort against the original ceiling and call
+    /// [`TangentialLaw::advance`] with the original input budgets at the final
+    /// displacement before publishing any body or constitutive state.
+    pub fn trial_prescribed_for_solve(
+        &self,
+        state: &MindlinState,
+        input: &TangentialStepInput,
+    ) -> Result<MindlinTrialResponse, TriboError> {
         self.admit_step(state, input)?;
         if input.compliance_m_per_n != 0.0 {
             return Err(TriboError::InvalidInput {
@@ -260,14 +289,6 @@ impl MindlinDeresiewiczPoint {
         let increment = input.slip_increment_m[0];
         checked_add(state.slip_m, increment, "mindlin_accumulated_slip_m")?;
         let response = self.response(state, increment, None)?;
-        if response.average_n.abs() > input.solve.maximum_force_n {
-            return Err(TriboError::OutsideApplicability {
-                field: "maximum_force_n",
-                value: response.average_n.abs(),
-                minimum: 0.0,
-                maximum: input.solve.maximum_force_n,
-            });
-        }
         let work = checked_mul(response.average_n, increment, "mindlin_work_j")?;
         let closure_residual_j = response.stored_change_j + response.heat_j - work;
         finite(closure_residual_j, "mindlin_closure_residual_j")?;

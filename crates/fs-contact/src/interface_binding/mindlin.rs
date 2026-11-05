@@ -264,6 +264,27 @@ impl SourceMindlinContact {
         Ok(self.law.trial_prescribed(&state.constitutive, input)?)
     }
 
+    /// Evaluate a coupled solver candidate with deferred effort admission.
+    ///
+    /// This preserves the original source identities, temperature, fixed load,
+    /// first tangent and normal envelope, with zero scalar compliance. Only
+    /// the `maximum_force_n` comparison is deferred so an intermediate free
+    /// response cannot reject an admissible compliant root. History is neither
+    /// copied nor advanced. Before publication the caller must check its actual
+    /// applied effort and call `advance` at the final displacement with the
+    /// original budgets; that call still enforces the constitutive force and
+    /// retained-history ceilings.
+    pub fn trial_prescribed_for_solve(
+        &self,
+        state: &SourceMindlinState,
+        input: &TangentialStepInput,
+    ) -> Result<MindlinTrialResponse, SourceMindlinError> {
+        self.admit_step(state, input)?;
+        Ok(self
+            .law
+            .trial_prescribed_for_solve(&state.constitutive, input)?)
+    }
+
     /// Observe radial pressure, signed shear traction and relative elastic
     /// surface displacement from the original source-bound checkpoint.
     ///

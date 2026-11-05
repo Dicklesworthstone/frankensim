@@ -134,6 +134,7 @@ fn g0_prescribed_trial_keeps_force_and_domain_refusals_without_changing_history(
         },
     ] {
         assert!(law.trial_prescribed(&state, &bad).is_err());
+        assert!(law.trial_prescribed_for_solve(&state, &bad).is_err());
         assert_eq!(state, saved);
     }
     let foreign = MindlinDeresiewiczPoint::new(MindlinPointParameters {
@@ -145,8 +146,62 @@ fn g0_prescribed_trial_keeps_force_and_domain_refusals_without_changing_history(
         law.trial_prescribed(&foreign.initial_state(), &request)
             .is_err()
     );
+    assert!(
+        law.trial_prescribed_for_solve(&foreign.initial_state(), &request)
+            .is_err()
+    );
     assert_eq!(state, saved);
     assert_eq!(law.trial_prescribed(&state, &request).unwrap(), expected);
+}
+
+#[test]
+fn g1_coupled_trials_defer_only_the_force_ceiling_until_the_actual_root() {
+    let law = model();
+    let state = law.initial_state();
+    let saved = state.clone();
+    let d = law.gross_slip_displacement_m();
+    let capacity = law.gross_slip_capacity_n();
+    let mut free = input(&law, d, 0.0);
+    free.solve.maximum_force_n = 0.2 * capacity;
+    let response = law.trial_prescribed_for_solve(&state, &free).unwrap();
+    close(response.average_force_n, 0.6 * capacity, 2e-14 * capacity);
+    assert!(response.average_force_n > free.solve.maximum_force_n);
+    assert!(matches!(
+        law.trial_prescribed(&state, &free),
+        Err(TriboError::OutsideApplicability {
+            field: "maximum_force_n",
+            ..
+        })
+    ));
+    assert!(matches!(
+        law.advance(&state, &free),
+        Err(TriboError::OutsideApplicability {
+            field: "maximum_force_n",
+            ..
+        })
+    ));
+
+    // This is the original owner's compliant solution, not a replacement root
+    // solver. Its free trial exceeds the ceiling, but the actual effort does not.
+    let compliant = TangentialStepInput {
+        compliance_m_per_n: 5.0 * d / capacity,
+        ..free
+    };
+    let accepted = law.advance(&state, &compliant).unwrap();
+    assert!(accepted.traction_n[0] > 0.0);
+    assert!(accepted.traction_n[0] < free.solve.maximum_force_n);
+    let actual = TangentialStepInput {
+        slip_increment_m: accepted.slip_increment_m,
+        ..free
+    };
+    let checked = law.trial_prescribed(&state, &actual).unwrap();
+    assert_eq!(checked.average_force_n, accepted.traction_n[0]);
+    assert_eq!(
+        checked,
+        law.trial_prescribed_for_solve(&state, &actual).unwrap()
+    );
+    assert_eq!(law.advance(&state, &actual).unwrap().state, accepted.state);
+    assert_eq!(state, saved);
 }
 
 #[test]

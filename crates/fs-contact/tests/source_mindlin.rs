@@ -142,6 +142,52 @@ fn step(law: &SourceMindlinContact, slip: f64) -> TangentialStepInput {
 }
 
 #[test]
+fn coupled_trial_defers_force_ceiling_without_relaxing_the_accepted_source_step() {
+    let source = resolve(normal(1e7, Some(0.6), Dims::NONE, false)).unwrap();
+    let state = source.initial_state();
+    let saved = state.clone();
+    let d = source.law().gross_slip_displacement_m();
+    let capacity = source.law().gross_slip_capacity_n();
+    let mut free = step(&source, d);
+    free.solve.maximum_force_n = 0.2 * capacity;
+    let response = source.trial_prescribed_for_solve(&state, &free).unwrap();
+    assert_eq!(
+        response,
+        source
+            .law()
+            .trial_prescribed_for_solve(state.constitutive_state(), &free)
+            .unwrap()
+    );
+    common::close(response.average_force_n, 0.6 * capacity);
+    assert!(response.average_force_n > free.solve.maximum_force_n);
+    assert!(source.trial_prescribed(&state, &free).is_err());
+    assert!(source.advance(&state, &free).is_err());
+
+    let compliant = TangentialStepInput {
+        compliance_m_per_n: 5.0 * d / capacity,
+        ..free
+    };
+    let accepted = source.advance(&state, &compliant).unwrap();
+    assert!(accepted.traction_n[0] > 0.0);
+    assert!(accepted.traction_n[0] < free.solve.maximum_force_n);
+    let actual = TangentialStepInput {
+        slip_increment_m: accepted.slip_increment_m,
+        ..free
+    };
+    let checked = source.trial_prescribed(&state, &actual).unwrap();
+    assert_eq!(checked.average_force_n, accepted.traction_n[0]);
+    assert_eq!(
+        checked,
+        source.trial_prescribed_for_solve(&state, &actual).unwrap()
+    );
+    assert_eq!(
+        source.advance(&state, &actual).unwrap().state,
+        accepted.state
+    );
+    assert_eq!(state, saved);
+}
+
+#[test]
 fn original_bulk_interface_and_hertz_patch_determine_the_tangential_response() {
     let original = normal(1e7, Some(0.6), Dims::NONE, false);
     let source = resolve(original.clone()).unwrap();
@@ -289,6 +335,11 @@ fn equal_coefficients_do_not_transfer_history_between_distinct_interface_sources
     let expected = original.advance(&saved, &step(&original, release)).unwrap();
     assert!(other.stored_energy_j(&saved).is_nan());
     assert!(other.advance(&saved, &step(&other, release)).is_err());
+    assert!(
+        other
+            .trial_prescribed_for_solve(&saved, &step(&other, release))
+            .is_err()
+    );
     assert_eq!(loaded.state, saved);
     assert_eq!(
         original
@@ -394,6 +445,7 @@ fn frozen_temperature_load_direction_and_normal_envelope_refuse_without_losing_h
     ] {
         assert!(law.advance(&loaded.state, &bad).is_err());
         assert!(law.trial_prescribed(&loaded.state, &bad).is_err());
+        assert!(law.trial_prescribed_for_solve(&loaded.state, &bad).is_err());
         assert_eq!(loaded.state, saved);
     }
     assert_eq!(law.advance(&loaded.state, &input).unwrap(), expected);
