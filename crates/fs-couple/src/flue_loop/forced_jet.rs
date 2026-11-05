@@ -349,6 +349,7 @@ fn refusal(error: AeroacError) -> &'static str {
             "force harmonic fit refused its numerical input or conditioning"
         }
         AeroacError::Fft(_) => "exact-length transform refused its storage, buffers or data",
+        AeroacError::Welch(_) => "recorded-source spectrum refused its input or numerical budget",
     }
 }
 
