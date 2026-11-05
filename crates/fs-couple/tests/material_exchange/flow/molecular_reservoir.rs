@@ -1,4 +1,7 @@
 //! Original held baths, molecular cross effects and complete live feedback.
+#[path = "molecular_reservoir_gas_law.rs"]
+mod gas_law_tests;
+
 use super::*;
 use fs_gas::material::transport::parcel::reservoir::{MolecularReservoir, ReservoirMolecularLink};
 

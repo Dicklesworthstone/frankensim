@@ -52,7 +52,10 @@ pub struct MolecularReservoirBalance {
     pub chambers: Vec<MolecularReservoirChamberBalance>,
 }
 
-type Error = MaterialFlowError;
+type Error = FlowBalanceError;
+fn checkpoint(cx: &Cx<'_>) -> Result<(), Error> {
+    cx.checkpoint().map_err(|_| Error::Cancelled)
+}
 fn finite(value: f64) -> Result<f64, Error> {
     if value.is_finite() {
         Ok(value)
@@ -119,13 +122,13 @@ fn inventory(gas: &ClosedGasParcel) -> Result<BTreeMap<SpeciesId, f64>, Error> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn finish(
+pub(super) fn finish<I>(
     initial: &MaterialExchangeState<'_>,
     staged: &BTreeMap<u64, GasPiston>,
     next: &mut MaterialExchangeState<'_>,
     cx: &Cx<'_>,
     flow: &ReservoirMolecularStep,
-    feedback: &MaterialExchangeAdvance,
+    feedback: &MaterialExchangeAdvance<I>,
     reactions: &[ChamberReaction<'_>],
     molecular_controls: ParcelMolecularSolve,
     controls: NetworkSolve,

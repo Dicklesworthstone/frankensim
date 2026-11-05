@@ -14,14 +14,19 @@ use fs_gas::material::transport::parcel::reservoir::{
 
 #[path = "molecular_reservoir_balance.rs"]
 mod balance;
+/// Held-bath molecular transport with caller-selected gas/body heat laws.
+#[path = "molecular_reservoir_gas_law.rs"]
+pub mod gas_law;
+#[path = "molecular_reservoir_stage.rs"]
+mod stage;
 pub use balance::{
     MolecularReservoirBalance, MolecularReservoirChamberBalance, MolecularReservoirSpeciesBalance,
 };
 
 /// Original open transport and feedback receipts, plus their shared physical budget.
-pub struct MolecularReservoirAdvance {
+pub struct MolecularReservoirAdvance<I = ResolvedMaterialStatePoint> {
     pub flow: ReservoirMolecularStep,
-    pub exchange: MaterialExchangeAdvance,
+    pub exchange: MaterialExchangeAdvance<I>,
     pub balance: MolecularReservoirBalance,
 }
 
@@ -67,31 +72,16 @@ impl<'m> MaterialExchangeState<'m> {
         controls: NetworkSolve,
         guess_j: &[f64],
     ) -> Result<(Self, MolecularReservoirAdvance), MaterialFlowError> {
-        let inputs = super::stage::inputs(self, cx, target_s, drives, controls)?;
-        let (parcels, flow) = molecular
-            .network_candidate(
-                &inputs.parcels,
-                internal_links,
-                reservoirs,
-                inputs.duration_s,
-                &inputs.endpoints,
-                molecular_controls,
-                || cx.checkpoint().is_err(),
-            )?
-            .into_parts();
-        let mut staged = BTreeMap::new();
-        for (id, parcel) in parcels {
-            checkpoint(cx)?;
-            let mut chamber = self
-                .chambers
-                .get(&id)
-                .ok_or(MaterialFlowError::Invalid(
-                    "reservoir transport returned an unknown chamber",
-                ))?
-                .clone();
-            chamber.gas = parcel;
-            staged.insert(id, chamber);
-        }
+        let (staged, flow) = self.molecular_reservoir_stage(
+            cx,
+            target_s,
+            drives,
+            molecular,
+            internal_links,
+            reservoirs,
+            molecular_controls,
+            controls,
+        )?;
         let (mut next, exchange) = self.step_from_chambers(
             &staged,
             prepared,
@@ -115,22 +105,7 @@ impl<'m> MaterialExchangeState<'m> {
             molecular_controls,
             controls,
         )?;
-        let connected: BTreeSet<_> = flow
-            .internal_links
-            .iter()
-            .flat_map(|link| link.parcels)
-            .chain(flow.links.iter().map(|link| link.parcel))
-            .collect();
-        for id in connected {
-            checkpoint(cx)?;
-            let gas = next.chambers.get(&id).ok_or(MaterialFlowError::Invalid(
-                "missing final reservoir-connected molecular owner",
-            ))?;
-            molecular.qualify_parcel(gas.gas(), molecular_controls.face, || {
-                cx.checkpoint().is_err()
-            })?;
-        }
-        checkpoint(cx)?;
+        next.admit_molecular_reservoir_endpoint(cx, molecular, &flow, molecular_controls)?;
         Ok((
             next,
             MolecularReservoirAdvance {
