@@ -32,6 +32,10 @@ use crate::linear3::TetAssemblyBudget;
 /// Native mixed motion with independent physical and numerical loss accounts.
 pub mod dynamics;
 
+/// Reference changes at held deformation with admitted mixed pressure states.
+pub mod reference_change;
+pub use reference_change::{MixedViscoReferenceChangeControls, MixedViscoTetReferenceChange};
+
 type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
 
 /// Immutable original spectra; histories are always distinct at every point.
@@ -89,7 +93,7 @@ pub struct MixedViscoTetEnergy {
 #[derive(Clone, Debug, PartialEq)]
 pub enum MixedViscoTetError {
     Native(MixedUpError),
-    /// The supplied displacement and pressure violate the weak volume equations.
+    /// An initial or newly referenced configuration violates the weak volume equations.
     InitialVolumeGate {
         relative_residual: f64,
         maximum_relative_residual: f64,
@@ -121,7 +125,7 @@ impl core::fmt::Display for MixedViscoTetError {
                 maximum_relative_residual,
             } => write!(
                 f,
-                "initial mixed volume residual {relative_residual:e} exceeds {maximum_relative_residual:e}; supply compatible initial displacement and pressure"
+                "mixed configuration volume residual {relative_residual:e} exceeds {maximum_relative_residual:e}; supply compatible displacement and pressure"
             ),
             Self::ExactIncompressibleImpulse => write!(
                 f,

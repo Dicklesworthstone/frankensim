@@ -10,7 +10,9 @@ use fs_material::visco_hyper::{
     BranchEnergy, FiniteStrainBranch, ViscoHyperelastic, ViscoRemainderState,
 };
 use fs_solid::hyper3::mixed::MixedUpSettings;
-use fs_solid::hyper3::mixed::visco::{MixedViscoLawField, MixedViscoTetError, MixedViscoTetSolid};
+use fs_solid::hyper3::mixed::visco::{
+    MixedViscoLawField, MixedViscoReferenceChangeControls, MixedViscoTetError, MixedViscoTetSolid,
+};
 use fs_solid::hyper3::visco::FiniteViscoStepControls;
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::linear3::tet10::{TET10_EDGES, promote_p1_to_p2};
@@ -73,6 +75,13 @@ fn controls() -> FiniteViscoStepControls {
     FiniteViscoStepControls {
         equilibrium_work_tolerance_j: 2e-9,
         maximum_endpoint_work_defect_j: 0.5,
+    }
+}
+
+fn reference_controls() -> MixedViscoReferenceChangeControls {
+    MixedViscoReferenceChangeControls {
+        maximum_relative_volume_residual: 2e-11,
+        maximum_pressure_constraint_work_j: 2e-9,
     }
 }
 
@@ -347,6 +356,298 @@ fn heterogeneous_reference_birth_admits_weak_volume_compatibility() {
             assert_eq!(state.deformation_gradient, identity);
             assert_eq!(state.dissipated, 0.0);
         }
+    });
+}
+
+#[test]
+fn mixed_reference_change_preserves_aged_memory_and_accounts_for_bulk_exchange() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(1, cx);
+        let original = law(25.0, 0.2);
+        let f = deformation(1.12);
+        let displacement: Vec<_> = nodes
+            .iter()
+            .map(|x| {
+                [
+                    (f[0] - 1.0) * x[0],
+                    (f[4] - 1.0) * x[1],
+                    (f[8] - 1.0) * x[2],
+                ]
+            })
+            .collect();
+        let initial = MixedViscoTetSolid::try_new_from(
+            &nodes,
+            &elements,
+            MixedViscoLawField::Uniform(&original),
+            VolumetricTreatment::OriginalMaterial,
+            &displacement,
+            &[0.0; 4],
+            2e-11,
+            TetAssemblyBudget::standard(),
+            4,
+            64,
+            cx,
+        )
+        .unwrap();
+        let fixed: Vec<_> = displacement
+            .as_flattened()
+            .iter()
+            .copied()
+            .enumerate()
+            .collect();
+        let aged = initial
+            .advance(
+                0.06,
+                &fixed,
+                &[],
+                [0.0; 3],
+                None,
+                settings(),
+                controls(),
+                cx,
+            )
+            .unwrap()
+            .solid;
+        let old_states = aged.quadrature_states().to_vec();
+        let old_pressure = aged.pressure_pa().to_vec();
+        let old_energy = aged.stored_energy_j();
+        assert!(old_states[0].dissipated > 0.0);
+        let stretch = 1.04_f64;
+        let target = law(25.0, 0.07).with_reference_deformation(
+            ReferenceDeformation::try_new([
+                stretch, 0.0, 0.0, 0.0, stretch, 0.0, 0.0, 0.0, stretch,
+            ])
+            .unwrap(),
+        );
+        let target_pressure = 25.0 * (stretch.powi(-3) - 1.0);
+        let changed = aged
+            .change_reference(
+                MixedViscoLawField::Uniform(&target),
+                &[target_pressure; 4],
+                reference_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(aged.quadrature_states(), old_states);
+        assert_eq!(changed.solid.time_s(), aged.time_s());
+        assert_eq!(
+            changed.solid.displacement_m().as_ptr(),
+            aged.displacement_m().as_ptr()
+        );
+        for ((before, after), stress) in old_states
+            .iter()
+            .zip(changed.solid.quadrature_states())
+            .zip(changed.solid.first_piola_pa())
+        {
+            assert_eq!(after.deformation_gradient, before.deformation_gradient);
+            assert_eq!(
+                after.inverse_viscous_cauchy_green,
+                before.inverse_viscous_cauchy_green
+            );
+            assert_eq!(after.work, before.work);
+            assert_eq!(after.dissipated, before.dissipated);
+            let expected = target
+                .freeze_remainder(after, 0.0)
+                .unwrap()
+                .mixed_state(
+                    &after.deformation_gradient,
+                    target_pressure,
+                    VolumetricTreatment::OriginalMaterial,
+                )
+                .unwrap();
+            for (actual, expected) in stress.iter().zip(expected.first_piola_pa) {
+                near(*actual, expected, 2e-11);
+            }
+        }
+        let expected_bulk = stretch.powi(3) * target_pressure.powi(2) / (2.0 * 25.0 * 6.0);
+        near(changed.solid.bulk_energy_j(), expected_bulk, 2e-11);
+        near(
+            changed.bulk_reference_work_j,
+            expected_bulk - aged.bulk_energy_j(),
+            2e-11,
+        );
+        near(
+            changed.stored_after_j - changed.stored_before_j,
+            changed.reference_work_j - changed.pressure_constraint_defect_j,
+            2e-11,
+        );
+        assert!(changed.relative_volume_residual < 2e-11);
+        let restored = changed
+            .solid
+            .change_reference(
+                MixedViscoLawField::Uniform(&original),
+                &old_pressure,
+                reference_controls(),
+                cx,
+            )
+            .unwrap();
+        near(
+            restored.reference_work_j + changed.reference_work_j,
+            0.0,
+            2e-11,
+        );
+        near(restored.solid.stored_energy_j(), old_energy, 2e-11);
+        // A successor retains its own buffers and material binding.
+        drop(aged);
+        drop(changed);
+        near(restored.solid.time_s(), 0.06, 1e-15);
+    });
+}
+
+#[test]
+fn mixed_reference_change_separates_and_gates_pressure_constraint_work() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(1, cx);
+        let original = law(25.0, 0.2);
+        let initial = MixedViscoTetSolid::try_new(
+            &nodes,
+            &elements,
+            MixedViscoLawField::Uniform(&original),
+            VolumetricTreatment::OriginalMaterial,
+            TetAssemblyBudget::standard(),
+            4,
+            64,
+            cx,
+        )
+        .unwrap();
+        let loose = MixedViscoReferenceChangeControls {
+            maximum_relative_volume_residual: 1e-3,
+            maximum_pressure_constraint_work_j: 1e-3,
+        };
+        // Pressure is an algebraic state, not an independent source of work.
+        assert!(
+            initial
+                .change_reference(
+                    MixedViscoLawField::Uniform(&original),
+                    &[0.01; 4],
+                    loose,
+                    cx,
+                )
+                .is_err()
+        );
+        let faster = law(25.0, 0.03);
+        let kinetic = initial
+            .change_reference(
+                MixedViscoLawField::Uniform(&faster),
+                initial.pressure_pa(),
+                reference_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(kinetic.reference_work_j, 0.0);
+        assert_eq!(kinetic.pressure_constraint_defect_j, 0.0);
+        assert_eq!(
+            kinetic.solid.quadrature_states().as_ptr(),
+            initial.quadrature_states().as_ptr()
+        );
+        assert_eq!(
+            kinetic.solid.pressure_pa().as_ptr(),
+            initial.pressure_pa().as_ptr()
+        );
+        let stretch = 1.03_f64;
+        let target = original.clone().with_reference_deformation(
+            ReferenceDeformation::try_new([
+                stretch, 0.0, 0.0, 0.0, stretch, 0.0, 0.0, 0.0, stretch,
+            ])
+            .unwrap(),
+        );
+        let pressure = 25.0 * (stretch.powi(-3) - 1.0) + 0.01;
+        let strict_work = MixedViscoReferenceChangeControls {
+            maximum_pressure_constraint_work_j: 1e-10,
+            ..loose
+        };
+        assert!(matches!(
+            initial.change_reference(
+                MixedViscoLawField::Uniform(&target),
+                &[pressure; 4],
+                strict_work,
+                cx,
+            ),
+            Err(MixedViscoTetError::EnergyGate {
+                quantity: "target pressure constraint work",
+                ..
+            })
+        ));
+        let admitted = initial
+            .change_reference(
+                MixedViscoLawField::Uniform(&target),
+                &[pressure; 4],
+                loose,
+                cx,
+            )
+            .unwrap();
+        assert!(admitted.pressure_constraint_defect_j.abs() > 1e-6);
+        near(
+            admitted.stored_after_j - admitted.stored_before_j,
+            admitted.reference_work_j - admitted.pressure_constraint_defect_j,
+            2e-12,
+        );
+        assert!(
+            admitted
+                .solid
+                .quadrature_states()
+                .iter()
+                .all(|s| s.dissipated == 0.0)
+        );
+        assert_eq!(initial.stored_energy_j(), 0.0);
+        assert_eq!(initial.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn exact_reference_changes_enforce_weak_volume_without_pointwise_overconstraint() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(1, cx);
+        let original = law(1e300, 0.2);
+        let initial = MixedViscoTetSolid::try_new(
+            &nodes,
+            &elements,
+            MixedViscoLawField::Uniform(&original),
+            VolumetricTreatment::ExactIncompressible,
+            TetAssemblyBudget::standard(),
+            4,
+            64,
+            cx,
+        )
+        .unwrap();
+        let expanded = original.clone().with_reference_deformation(
+            ReferenceDeformation::try_new([1.03, 0.0, 0.0, 0.0, 1.03, 0.0, 0.0, 0.0, 1.03])
+                .unwrap(),
+        );
+        assert!(matches!(
+            initial.change_reference(
+                MixedViscoLawField::Uniform(&expanded),
+                &[0.0; 4],
+                reference_controls(),
+                cx,
+            ),
+            Err(MixedViscoTetError::InitialVolumeGate { .. })
+        ));
+        let targets: Vec<_> = duffy_quadrature(4)
+            .iter()
+            .map(|(lambda, _)| {
+                let x = lambda[1];
+                let volume = 1.0 + 0.5 * (x * x - 2.0 * x / 3.0 + 1.0 / 15.0);
+                original.clone().with_reference_deformation(
+                    ReferenceDeformation::try_new([volume, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let changed = initial
+            .change_reference(
+                MixedViscoLawField::PerQuadrature(&targets),
+                &[0.0; 4],
+                reference_controls(),
+                cx,
+            )
+            .unwrap();
+        assert!(changed.reference_work_j > 0.0);
+        assert_eq!(changed.bulk_reference_work_j, 0.0);
+        assert_eq!(changed.pressure_constraint_defect_j, 0.0);
+        near(changed.stored_after_j, changed.reference_work_j, 2e-12);
+        assert!(changed.relative_volume_residual < 2e-11);
+        assert_eq!(initial.stored_energy_j(), 0.0);
     });
 }
 
