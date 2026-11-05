@@ -1,11 +1,14 @@
 //! Physical Stokes strain heat reaches the same finite thermal state atomically.
 
-use fs_couple::stokes_motion::heating::{GuidedStokesHeatError, StokesThermalCells};
+use fs_couple::stokes_motion::heating::{
+    GuidedStokesHeatError, StokesSlipHeatRoute, StokesThermalCells,
+};
 use fs_couple::stokes_motion::{
     GuidedStokesConfig, GuidedStokesControls, GuidedStokesError, GuidedStokesMotion,
 };
 use fs_flux::{FluxSystem, MaterialFluxNumerics, MaterialStokesBoundary, TriMesh};
-use fs_material::fluid_transport::FluidTransportState;
+use fs_material::MaterialError;
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_mbd::{MassProperties, Pose, RigidBodyState, Vec3};
 use fs_solid::Mesh2;
 use fs_thermal::enthalpy::{
@@ -91,14 +94,14 @@ fn exterior<'a>(mesh: &TriMesh, body: &[usize]) -> Vec<MaterialStokesBoundary<'a
         })
         .collect()
 }
-fn motion<'s, 'm, 'a>(
+fn motion<'s, 'm, 'a, F: FluidTransport + ?Sized>(
     system: &'s FluxSystem<'m>,
-    fluid: &'a FluidTransportState,
+    fluid: &'a F,
     edges: &[usize],
     cfg: GuidedStokesConfig,
     field: impl Fn([f64; 2]) -> [f64; 2],
     speed: f64,
-) -> GuidedStokesMotion<'s, 'm, 'a, FluidTransportState> {
+) -> GuidedStokesMotion<'s, 'm, 'a, F> {
     let mass = MassProperties::new(0.7, Vec3::ZERO, Vec3::new(0.1, 0.1, 0.1)).unwrap();
     let body = RigidBodyState::new(
         Pose::identity(),
@@ -131,7 +134,16 @@ fn initial_thermal<'a>(
     mesh: &TriMesh,
     law: &'a dyn ThermalLaw,
     linked: bool,
+    edit: impl FnMut(usize, &mut DepositedCell),
+) -> (DepositionSimulation<'a>, Vec<CellId>) {
+    initial_thermal_with_events(mesh, law, linked, edit, Vec::new())
+}
+fn initial_thermal_with_events<'a>(
+    mesh: &TriMesh,
+    law: &'a dyn ThermalLaw,
+    linked: bool,
     mut edit: impl FnMut(usize, &mut DepositedCell),
+    extra_events: Vec<TimedEvent>,
 ) -> (DepositionSimulation<'a>, Vec<CellId>) {
     let ids: Vec<_> = (0..mesh.tris.len())
         .map(|i| CellId(100 + i as u64))
@@ -194,6 +206,8 @@ fn initial_thermal<'a>(
             ),
         });
     }
+    events.extend(extra_events);
+    events.sort_by(|a, b| a.time_s.total_cmp(&b.time_s));
     let thermal = DepositionSimulation::new(
         events,
         &[(MaterialId(9), law)],
@@ -245,6 +259,7 @@ fn couette_wall_work_heats_original_finite_cells_at_both_mesh_resolutions() {
         let expected_heat = 0.05 * DEPTH * MU * SPEED * SPEED;
         near(step.motion.speed_m_s, SPEED, 2e-8);
         near(step.deposited_viscous_heat_j, expected_heat, 2e-10);
+        assert_eq!(step.deposited_slip_heat_j, 0.0);
         near(
             step.deposited_viscous_heat_j,
             -step.motion.interface_work_j,
@@ -524,4 +539,344 @@ fn mismatched_or_ambiguous_receivers_refuse_before_flow_work() {
         assert_eq!(motion.state(), &original);
         assert_eq!(thermal.cells(), &before);
     }
+}
+
+const WALL: CellId = CellId(900);
+
+fn wall_cell(depth: f64) -> DepositedCell {
+    DepositedCell {
+        id: WALL,
+        segment_id: 900,
+        body_id: 8,
+        material_id: MaterialId(9),
+        mass_kg: 3.0 * 0.1 * depth,
+        specific_h_j_kg: 0.0,
+        geometry: CellGeometry {
+            start_m: [0.5, -0.05, Z],
+            end_m: [0.5, -0.05, Z + depth],
+            volume_m3: 0.1 * depth,
+            surface_area_m2: 0.2 + 2.2 * depth,
+        },
+        boundary: Boundary {
+            ambient_k: 300.0,
+            htc_w_m2_k: 0.0,
+            reservoir: None,
+            source_w: 0.0,
+        },
+    }
+}
+
+fn slip_exterior<'a>(
+    mesh: &TriMesh,
+    body: &[usize],
+    beta: f64,
+    wall: &'a dyn Fn([f64; 2]) -> [f64; 2],
+    traction: &'a dyn Fn([f64; 2], [f64; 2]) -> [f64; 2],
+) -> Vec<MaterialStokesBoundary<'a>> {
+    (0..mesh.edges.len())
+        .filter(|e| mesh.is_boundary(*e) && !body.contains(e))
+        .map(|edge| {
+            if mesh.edges[edge].normal[1] < -0.5 {
+                MaterialStokesBoundary::NavierSlip {
+                    edge,
+                    value: wall,
+                    tangential_resistance_pa_s_per_m: beta,
+                }
+            } else {
+                MaterialStokesBoundary::TotalTraction {
+                    edge,
+                    value: traction,
+                }
+            }
+        })
+        .collect()
+}
+
+fn slip_routes(exterior: &[MaterialStokesBoundary<'_>], fraction: f64) -> Vec<StokesSlipHeatRoute> {
+    exterior
+        .iter()
+        .filter_map(|boundary| match *boundary {
+            MaterialStokesBoundary::NavierSlip { edge, .. } => Some(StokesSlipHeatRoute {
+                edge,
+                wall_cell: WALL,
+                fluid_heat_fraction: fraction,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+struct SingleRead(std::cell::Cell<usize>);
+impl FluidTransport for SingleRead {
+    fn transport_state(&self) -> Result<FluidTransportState, MaterialError> {
+        assert_eq!(self.0.replace(self.0.get() + 1), 0, "source requeried");
+        Ok(fluid())
+    }
+}
+
+#[test]
+fn navier_slip_wall_work_reaches_fluid_and_wall_with_explicit_partition() {
+    let law = Caloric { maximum_h: 100.0 };
+    // Partition endpoints, shared wall receiver, depth scaling, uniform frame
+    // translation and perfect slip each retain the same independent solution.
+    for (n, beta, fraction, boost, depth) in [
+        (1, 0.4, 0.0, 0.0, 0.3),
+        (1, 0.4, 0.25, 0.0, 0.3),
+        (1, 0.4, 1.0, 0.0, 0.3),
+        (2, 0.4, 0.25, 0.3, 0.6),
+        (2, 0.0, 0.25, 0.3, 0.6),
+    ] {
+        let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, n, n));
+        let system = FluxSystem::new(&mesh);
+        let source = SingleRead(std::cell::Cell::new(0));
+        let edges = top_edges(&mesh);
+        let gamma = SPEED * beta / (MU + beta);
+        let slip = SPEED - gamma;
+        let stress = MU * gamma;
+        let wall_velocity = |_| [boost, 0.0];
+        let traction = |_: [f64; 2], n: [f64; 2]| [stress * n[1], stress * n[0]];
+        let exterior = slip_exterior(&mesh, &edges, beta, &wall_velocity, &traction);
+        let routes = slip_routes(&exterior, fraction);
+        let cfg = GuidedStokesConfig {
+            depth_m: depth,
+            ..config()
+        };
+        let mut motion = motion(
+            &system,
+            &source,
+            &edges,
+            cfg,
+            |x| [boost + slip + gamma * x[1], 0.0],
+            boost + SPEED,
+        );
+        let mut wall = wall_cell(depth);
+        wall.boundary.source_w = 0.002;
+        let (mut thermal, ids) = initial_thermal_with_events(
+            &mesh,
+            &law,
+            false,
+            |i, c| {
+                c.mass_kg *= depth / DEPTH;
+                c.geometry.volume_m3 *= depth / DEPTH;
+                c.geometry.end_m[2] = Z + depth;
+                let perimeter: f64 = mesh.tri_edges[i]
+                    .iter()
+                    .map(|&(e, _)| mesh.edges[e].len)
+                    .sum();
+                c.geometry.surface_area_m2 = 2.0 * mesh.areas[i] + perimeter * depth;
+                if i == 0 {
+                    c.boundary.source_w = 0.003;
+                }
+            },
+            vec![
+                TimedEvent {
+                    time_s: 0.0,
+                    event: Event::Birth(wall.clone()),
+                },
+                TimedEvent {
+                    time_s: 0.02,
+                    event: Event::Boundary(
+                        WALL,
+                        Boundary {
+                            source_w: 0.004,
+                            ..wall.boundary
+                        },
+                    ),
+                },
+            ],
+        );
+        let dt = 0.05;
+        let step = motion
+            .step_with_slip_heating(
+                &mut thermal,
+                binding(&ids),
+                &routes,
+                dt,
+                &zero,
+                &exterior,
+                &[None],
+                depth * stress,
+                GuidedStokesControls::default(),
+                thermal_config(),
+                || false,
+            )
+            .unwrap();
+        let bulk_heat = dt * depth * MU * gamma * gamma;
+        let slip_heat = dt * depth * beta * slip * slip;
+        near(step.motion.speed_m_s, boost + SPEED, 2e-8);
+        near(step.deposited_viscous_heat_j, bulk_heat, 2e-10);
+        near(step.deposited_slip_heat_j, slip_heat, 2e-10);
+        let bottom: Vec<_> = routes.iter().map(|route| route.edge).collect();
+        let load = step
+            .motion
+            .flow
+            .boundary_loads(&bottom, [0.0; 2], &[None])
+            .unwrap();
+        near(
+            -step.motion.interface_work_j - dt * depth * boost * load.stress.force_n_per_m[0],
+            bulk_heat + slip_heat,
+            2e-10,
+        );
+        let authored_wall = 0.02 * 0.002 + 0.03 * 0.004;
+        let total_heat = bulk_heat + slip_heat + dt * 0.003 + authored_wall;
+        near(step.thermal.stored_energy_change_j, total_heat, 2e-10);
+        near(step.thermal.external_heat_j, total_heat, 2e-10);
+        near(step.thermal.residual_j, 0.0, 1e-12);
+        for (i, id) in ids.iter().enumerate() {
+            let edge_length: f64 = routes
+                .iter()
+                .filter(|route| mesh.edges[route.edge].tris.0 == i)
+                .map(|route| mesh.edges[route.edge].len)
+                .sum();
+            let cell_heat = bulk_heat * mesh.areas[i]
+                + slip_heat * fraction * edge_length
+                + if i == 0 { dt * 0.003 } else { 0.0 };
+            near(
+                thermal.cells()[id].specific_h_j_kg,
+                cell_heat / thermal.cells()[id].mass_kg,
+                2e-9,
+            );
+        }
+        near(
+            thermal.cells()[&WALL].specific_h_j_kg,
+            (slip_heat * (1.0 - fraction) + authored_wall) / wall.mass_kg,
+            2e-9,
+        );
+        assert_eq!(thermal.cells()[&WALL].boundary.source_w, 0.004);
+        assert_eq!(thermal.cells()[&ids[0]].boundary.source_w, 0.003);
+        assert_eq!(step.thermal.events, 1);
+        assert_eq!(thermal.time_s(), motion.state().time_s());
+        assert_eq!(source.0.get(), 1);
+    }
+}
+
+#[test]
+fn slip_routes_refuse_before_callbacks_and_late_cancellation_rolls_back_every_receiver() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 1, 1));
+    let system = FluxSystem::new(&mesh);
+    let fluid = fluid();
+    let law = Caloric { maximum_h: 100.0 };
+    let edges = top_edges(&mesh);
+    let gamma = SPEED / 2.0;
+    let field = |x: [f64; 2]| [gamma * (1.0 + x[1]), 0.0];
+    let traction = |_: [f64; 2], n: [f64; 2]| [MU * gamma * n[1], MU * gamma * n[0]];
+    let exterior = slip_exterior(&mesh, &edges, MU, &zero, &traction);
+    let routes = slip_routes(&exterior, 0.25);
+    let (original, ids) = initial_thermal_with_events(
+        &mesh,
+        &law,
+        false,
+        |_, _| {},
+        vec![TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(wall_cell(DEPTH)),
+        }],
+    );
+    let mut owner = motion(&system, &fluid, &edges, config(), field, SPEED);
+    let original_motion = owner.state().clone();
+    for case in 0..9 {
+        let mut invalid = routes.clone();
+        match case {
+            0 => invalid.clear(),
+            1 => invalid.push(invalid[0]),
+            2 => invalid[0].edge = edges[0],
+            3 => invalid[0].wall_cell = ids[0],
+            4 => invalid[0].wall_cell = CellId(999),
+            5 => invalid[0].fluid_heat_fraction = f64::NAN,
+            6 => invalid[0].fluid_heat_fraction = -0.1,
+            7 => invalid[0].fluid_heat_fraction = 1.1,
+            _ => invalid[0].edge = usize::MAX,
+        }
+        let mut thermal = original.clone();
+        let queries = std::cell::Cell::new(0);
+        let force = |_| {
+            queries.set(queries.get() + 1);
+            [0.0; 2]
+        };
+        let result = owner.step_with_slip_heating(
+            &mut thermal,
+            binding(&ids),
+            &invalid,
+            0.05,
+            &force,
+            &exterior,
+            &[None],
+            DEPTH * MU * gamma,
+            GuidedStokesControls::default(),
+            thermal_config(),
+            || false,
+        );
+        assert!(
+            matches!(result, Err(GuidedStokesHeatError::Binding(_))),
+            "case {case}"
+        );
+        assert_eq!(queries.get(), 0);
+        assert_eq!(owner.state(), &original_motion);
+        assert_eq!(thermal.cells(), original.cells());
+        assert_eq!(thermal.time_s(), 0.0);
+    }
+    let mut control_thermal = original.clone();
+    let mut polls = 0;
+    owner
+        .step_with_slip_heating(
+            &mut control_thermal,
+            binding(&ids),
+            &routes,
+            0.05,
+            &zero,
+            &exterior,
+            &[None],
+            DEPTH * MU * gamma,
+            GuidedStokesControls::default(),
+            thermal_config(),
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert!(control_thermal.cells()[&WALL].specific_h_j_kg > 0.0);
+    let mut retry = motion(&system, &fluid, &edges, config(), field, SPEED);
+    let mut retry_thermal = original.clone();
+    let mut attempts = 0;
+    let result = retry.step_with_slip_heating(
+        &mut retry_thermal,
+        binding(&ids),
+        &routes,
+        0.05,
+        &zero,
+        &exterior,
+        &[None],
+        DEPTH * MU * gamma,
+        GuidedStokesControls::default(),
+        thermal_config(),
+        || {
+            attempts += 1;
+            attempts == polls
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(GuidedStokesHeatError::Motion(GuidedStokesError::Cancelled))
+    ));
+    assert_eq!(retry.state(), &original_motion);
+    assert_eq!(retry_thermal.cells(), original.cells());
+    assert_eq!(retry_thermal.time_s(), 0.0);
+    retry
+        .step_with_slip_heating(
+            &mut retry_thermal,
+            binding(&ids),
+            &routes,
+            0.05,
+            &zero,
+            &exterior,
+            &[None],
+            DEPTH * MU * gamma,
+            GuidedStokesControls::default(),
+            thermal_config(),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(retry.state(), owner.state());
+    assert_eq!(retry_thermal.cells(), control_thermal.cells());
 }

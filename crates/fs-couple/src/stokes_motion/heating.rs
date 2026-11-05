@@ -5,9 +5,10 @@
 //! subcycles its authored sources, contacts, reservoirs and events. This is a
 //! first-order, one-way split with frozen transport. It adds no advection,
 //! pressure work, temperature-dependent viscosity or global passivity claim.
-//! Numerical flow damping, body dashpots and wall-slip losses are not deposited.
+//! An explicit wall route also deposits the accepted Navier-slip dissipation.
+//! Numerical flow damping and body dashpots are not deposited.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fs_material::fluid_transport::FluidTransport;
 use fs_thermal::enthalpy::{
@@ -29,6 +30,23 @@ pub struct StokesThermalCells<'a> {
     pub triangle_cells: &'a [CellId],
     /// Extrusion start plane [m]; the end plane is this plus the motion depth.
     pub plane_z_m: f64,
+}
+
+/// Thermal ownership of one original Navier-slip boundary edge.
+///
+/// The fluid receiver is the mapped triangle adjacent to this edge. The wall
+/// receiver must be an active cell outside the fluid map; multiple edges may
+/// heat the same wall cell. Its geometry, caloric law and relationship to this
+/// physical wall remain caller-authored. This route adds no conductive link.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StokesSlipHeatRoute {
+    /// Original mesh boundary edge carrying `MaterialStokesBoundary::NavierSlip`.
+    pub edge: usize,
+    /// Original finite wall cell receiving the complementary heat fraction.
+    pub wall_cell: CellId,
+    /// Authored fraction of interfacial heat entering the fluid, in [0, 1].
+    /// This is physical input, not inferred from the cells' masses or temperatures.
+    pub fluid_heat_fraction: f64,
 }
 
 /// A refused coupled step changes neither accepted owner.
@@ -68,6 +86,9 @@ pub struct GuidedStokesHeatStep {
     /// Physical bulk heat actually supplied during native thermal substeps [J].
     /// Already included in `thermal.external_heat_j`; never add it twice.
     pub deposited_viscous_heat_j: f64,
+    /// Physical interfacial Navier-slip heat supplied to fluid and wall cells [J].
+    /// Zero for `step_with_heating`. Already included in `thermal.external_heat_j`.
+    pub deposited_slip_heat_j: f64,
 }
 
 impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
@@ -102,10 +123,95 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         external_force_n: f64,
         controls: GuidedStokesControls,
         thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GuidedStokesHeatStep, GuidedStokesHeatError> {
+        self.step_heating(
+            thermal,
+            cells,
+            None,
+            timestep_s,
+            force_density,
+            exterior,
+            pressure_offsets_pa,
+            external_force_n,
+            controls,
+            thermal_config,
+            cancelled,
+        )
+    }
+
+    /// Advance with both bulk strain heat and physical Navier-slip heating.
+    ///
+    /// Supply exactly one route for EVERY exterior `NavierSlip` edge, including
+    /// perfect-slip edges (whose dissipation is zero). Other boundary kinds and
+    /// the no-slip moving body cannot be routed. The declared fluid/wall split
+    /// is held over this interval; no flash-temperature or partition model is
+    /// inferred. Ordinary thermal contacts still exchange heat independently.
+    ///
+    /// Heat is `depth * integral(beta * |(u-wall)_t|^2)` from the SAME accepted
+    /// endpoint reaction that supplies physical wall effort. Neither material
+    /// nor boundary callbacks are queried again. No-slip numerical penalties,
+    /// body work and convective transport are not interfacial heat sources.
+    /// The fixed-reference, frozen-transport and time-refinement requirements
+    /// of [`Self::step_with_heating`] also apply.
+    ///
+    /// # Errors
+    /// Incomplete/duplicate routes, inactive or fluid-owned wall receivers,
+    /// invalid partitions, and original solver/thermal/cancellation failures
+    /// preserve both owners. All route admission precedes the native flow solves.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_slip_heating(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        cells: StokesThermalCells<'_>,
+        routes: &[StokesSlipHeatRoute],
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: f64,
+        controls: GuidedStokesControls,
+        thermal_config: StepConfig,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<GuidedStokesHeatStep, GuidedStokesHeatError> {
+        self.step_heating(
+            thermal,
+            cells,
+            Some(routes),
+            timestep_s,
+            force_density,
+            exterior,
+            pressure_offsets_pa,
+            external_force_n,
+            controls,
+            thermal_config,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_heating(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        cells: StokesThermalCells<'_>,
+        routes: Option<&[StokesSlipHeatRoute]>,
+        timestep_s: f64,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        exterior: &[MaterialStokesBoundary<'_>],
+        pressure_offsets_pa: &[Option<f64>],
+        external_force_n: f64,
+        controls: GuidedStokesControls,
+        thermal_config: StepConfig,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<GuidedStokesHeatStep, GuidedStokesHeatError> {
         poll(&mut cancelled)?;
         self.check_thermal_cells(thermal, cells, &mut cancelled)?;
+        let routes = match routes {
+            Some(routes) => {
+                self.check_slip_heat_routes(thermal, cells, exterior, routes, &mut cancelled)?
+            }
+            None => BTreeMap::new(),
+        };
         let (state, motion) = self.propose_step(
             timestep_s,
             force_density,
@@ -117,7 +223,8 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         )?;
         let mut source = ViscousHeat {
             watts: BTreeMap::new(),
-            heat_j: 0.0,
+            heat_j: [0.0; 2],
+            supplied_heat_j: 0.0,
         };
         let heating = motion.flow.viscous_dissipation().cell_heating_w_m3();
         if heating.len() != cells.triangle_cells.len() {
@@ -133,7 +240,49 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             if !nonnegative(watts) {
                 return Err(DepositionError::Arithmetic.into());
             }
-            source.watts.insert(id, watts);
+            source.watts.insert(id, [watts, 0.0]);
+        }
+        let mut slip_power_w = 0.0;
+        for (index, (&edge, route)) in routes.iter().enumerate() {
+            if index % 256 == 0 {
+                poll(&mut cancelled)?;
+            }
+            let loss = motion
+                .flow
+                .boundary_loads(&[edge], [0.0; 2], pressure_offsets_pa)
+                .map_err(GuidedStokesError::Flow)?
+                .slip_dissipation_w_per_m;
+            let watts = loss * self.config.depth_m;
+            if !nonnegative(watts) || (loss > 0.0 && watts == 0.0) {
+                return Err(DepositionError::Arithmetic.into());
+            }
+            // Compute the smaller share directly, retaining it even when the
+            // complementary share rounds to the entire interface power.
+            let fraction = route.fluid_heat_fraction;
+            let (fluid_w, wall_w) = if fraction <= 0.5 {
+                let fluid_w = watts * fraction;
+                (fluid_w, watts - fluid_w)
+            } else {
+                let wall_w = watts * (1.0 - fraction);
+                (watts - wall_w, wall_w)
+            };
+            if watts > 0.0
+                && ((fraction > 0.0 && fluid_w == 0.0) || (fraction < 1.0 && wall_w == 0.0))
+            {
+                return Err(DepositionError::Arithmetic.into());
+            }
+            let fluid_cell = cells.triangle_cells[self.system.mesh.edges[edge].tris.0];
+            source.add_slip(fluid_cell, fluid_w)?;
+            source.add_slip(route.wall_cell, wall_w)?;
+            slip_power_w += watts;
+        }
+        let slip_heat_j = timestep_s * slip_power_w;
+        let expected_heat_j = motion.bulk_viscous_dissipation_j + slip_heat_j;
+        if !nonnegative(slip_heat_j)
+            || !nonnegative(expected_heat_j)
+            || (slip_power_w > 0.0 && slip_heat_j == 0.0)
+        {
+            return Err(DepositionError::Arithmetic.into());
         }
         let (candidate, source, audit) =
             thermal.advance_observed(&source, state.time_s, thermal_config, || {
@@ -145,14 +294,17 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
             })?;
         // This checks conversion and substep integration, not a new fluid
         // energy theorem. Thermal storage has its own original energy gate.
-        if candidate.time_s() != state.time_s
-            || (source.heat_j - motion.bulk_viscous_dissipation_j).abs()
-                > thermal_config.energy_tolerance_j
+        let residual = [
+            source.heat_j[0] - motion.bulk_viscous_dissipation_j,
+            source.heat_j[1] - slip_heat_j,
+            source.supplied_heat_j - expected_heat_j,
+        ]
+        .into_iter()
+        .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+        .unwrap_or(0.0);
+        if candidate.time_s() != state.time_s || residual.abs() > thermal_config.energy_tolerance_j
         {
-            return Err(DepositionError::EnergyBalance(
-                source.heat_j - motion.bulk_viscous_dissipation_j,
-            )
-            .into());
+            return Err(DepositionError::EnergyBalance(residual).into());
         }
         poll(&mut cancelled)?;
         self.state = state;
@@ -160,8 +312,60 @@ impl<F: FluidTransport + ?Sized> GuidedStokesMotion<'_, '_, '_, F> {
         Ok(GuidedStokesHeatStep {
             motion,
             thermal: audit,
-            deposited_viscous_heat_j: source.heat_j,
+            deposited_viscous_heat_j: source.heat_j[0],
+            deposited_slip_heat_j: source.heat_j[1],
         })
+    }
+
+    fn check_slip_heat_routes(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        cells: StokesThermalCells<'_>,
+        exterior: &[MaterialStokesBoundary<'_>],
+        routes: &[StokesSlipHeatRoute],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<BTreeMap<usize, StokesSlipHeatRoute>, GuidedStokesHeatError> {
+        let mut slip_edges = BTreeSet::new();
+        for (index, boundary) in exterior.iter().enumerate() {
+            if index % 256 == 0 {
+                poll(cancelled)?;
+            }
+            if let MaterialStokesBoundary::NavierSlip { edge, .. } = boundary
+                && !slip_edges.insert(*edge)
+            {
+                return Err(GuidedStokesHeatError::Binding(
+                    "duplicate Navier-slip boundary",
+                ));
+            }
+        }
+        let fluid_cells: BTreeSet<_> = cells.triangle_cells.iter().copied().collect();
+        let body_edges: BTreeSet<_> = self.edges.iter().copied().collect();
+        let mut admitted = BTreeMap::new();
+        for (index, route) in routes.iter().enumerate() {
+            if index % 256 == 0 {
+                poll(cancelled)?;
+            }
+            if !slip_edges.remove(&route.edge)
+                || route.edge >= self.system.mesh.edges.len()
+                || !self.system.mesh.is_boundary(route.edge)
+                || body_edges.contains(&route.edge)
+                || !route.fluid_heat_fraction.is_finite()
+                || !(0.0..=1.0).contains(&route.fluid_heat_fraction)
+                || !thermal.cells().contains_key(&route.wall_cell)
+                || fluid_cells.contains(&route.wall_cell)
+            {
+                return Err(GuidedStokesHeatError::Binding(
+                    "unique Navier-slip edge, active distinct wall receiver and fraction in [0,1] required",
+                ));
+            }
+            admitted.insert(route.edge, *route);
+        }
+        if !slip_edges.is_empty() {
+            return Err(GuidedStokesHeatError::Binding(
+                "every Navier-slip edge needs a heat route",
+            ));
+        }
+        Ok(admitted)
     }
 
     fn check_thermal_cells(
@@ -234,8 +438,21 @@ fn same(a: f64, b: f64) -> bool {
 
 #[derive(Clone)]
 struct ViscousHeat {
-    watts: BTreeMap<CellId, f64>,
-    heat_j: f64,
+    // Separate bulk and interfacial powers, summed only at the thermal source.
+    watts: BTreeMap<CellId, [f64; 2]>,
+    heat_j: [f64; 2],
+    supplied_heat_j: f64,
+}
+
+impl ViscousHeat {
+    fn add_slip(&mut self, id: CellId, watts: f64) -> Result<(), DepositionError> {
+        let entry = self.watts.entry(id).or_default();
+        entry[1] += watts;
+        if !nonnegative(entry[1]) {
+            return Err(DepositionError::Arithmetic);
+        }
+        Ok(())
+    }
 }
 
 impl DepositionObserver for ViscousHeat {
@@ -246,8 +463,18 @@ impl DepositionObserver for ViscousHeat {
         _: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        checkpoint()?;
-        Ok(self.watts.clone())
+        let mut sources = BTreeMap::new();
+        for (index, (&id, watts)) in self.watts.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint()?;
+            }
+            let total = watts[0] + watts[1];
+            if !nonnegative(total) {
+                return Err(DepositionError::Arithmetic);
+            }
+            sources.insert(id, total);
+        }
+        Ok(sources)
     }
 
     fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
@@ -268,8 +495,12 @@ impl DepositionObserver for ViscousHeat {
             if index % 256 == 0 {
                 checkpoint()?;
             }
-            self.heat_j += dt * watts;
-            if !self.heat_j.is_finite() {
+            for (heat, power) in self.heat_j.iter_mut().zip(watts) {
+                *heat += dt * power;
+            }
+            self.supplied_heat_j += dt * (watts[0] + watts[1]);
+            if !self.heat_j.iter().all(|heat| heat.is_finite()) || !self.supplied_heat_j.is_finite()
+            {
                 return Err(DepositionError::Arithmetic);
             }
         }

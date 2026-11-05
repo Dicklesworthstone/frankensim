@@ -2241,6 +2241,23 @@ This first-order one-way split retains frozen fluid transport and fixed geometry
 it adds no advection, thermoviscosity or global energy/passivity theorem. Caloric
 identity remains caller-authored because a transport snapshot cannot supply it.
 
+`GuidedStokesMotion::step_with_slip_heating` additionally deposits the accepted
+native Navier-slip dissipation `depth * integral(beta * |(u-wall)_t|^2)` into
+the same thermal transaction. Every exterior Navier-slip edge has one explicit
+`StokesSlipHeatRoute`, including perfect-slip edges with zero dissipation. The
+adjacent mapped fluid triangle receives the authored fluid fraction; an active
+wall cell outside the fluid map receives the remainder. Multiple edges may heat
+one wall cell. Partitions, wall caloric identity and physical wall correspondence
+are caller-authored; this path infers no flash-temperature model or conductive
+link. Duplicate/missing routes and other boundary kinds refuse before flow work.
+Retained endpoint reactions supply heat without repeating material or boundary
+callbacks. Separate deposited bulk and slip energy, and their combined source
+integral, are checked against the original physical depth and motion interval.
+Authored thermal sources and events remain additive. The original bulk-only
+method retains its behavior. Analytic slip-Couette regressions cover fluid/wall
+partition endpoints, shared wall receivers, frame and depth changes, zero
+perfect-slip loss, source retention, invalid routing and atomic cancellation.
+
 The existing motion regressions now independently check zero strain heat in
 an accelerating uniform translation, analytic Couette heating under rigid
 spin/Galilean boosts, shear-dependent endpoint viscosity, and the steady
