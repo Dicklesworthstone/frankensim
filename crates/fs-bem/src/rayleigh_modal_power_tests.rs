@@ -333,6 +333,53 @@ fn g1_direct_power_preserves_multipoles_combined_from_separate_modal_coordinates
 }
 
 #[test]
+fn g2_dark_modal_pair_preserves_the_analytic_single_cell_residual() {
+    // Both modes move the whole surface almost identically. Opposite source
+    // phasors cancel every cell except a known, weak point-area monopole.
+    // This tests the area products AND the cached spatial projection: keeping
+    // DD only in the final modal sum cannot recover their rounded-away bits.
+    let phase = C64::new(1.0, 0.75);
+    for residual in [2.0_f64.powi(-30), 2.0_f64.powi(-44)] {
+        let cells = vec![
+            AreaSample { position_m: [-0.037, 0.011], area_m2: 0.00013,
+                mode_shape: vec![1.0, 1.0 + residual] },
+            AreaSample { position_m: [0.023, -0.019], area_m2: 0.00017,
+                mode_shape: vec![0.7, 0.7] },
+            AreaSample { position_m: [0.051, 0.029], area_m2: 0.00011,
+                mode_shape: vec![-1.2, -1.2] },
+        ];
+        let prepared = PreparedSurface::new(&cells).unwrap();
+        for kd in [0.001, 0.1, 0.5, 0.500_001, 1.0] {
+            let omega = kd / prepared.maximum_distance_m() * air().sound_speed;
+            let observed = prepared.coherent_radiated_power(
+                omega, air(), &[phase, phase.scale(-1.0)], || false).unwrap();
+            let volume = cells[0].area_m2 * residual;
+            let expected = air().density * omega * omega / (2.0 * TAU * air().sound_speed)
+                * volume * volume * phase.norm_sq();
+            assert!(observed.power_w > 0.0
+                && (observed.power_w / expected - 1.0).abs() < 2e-10,
+                "residual {residual}, kD {kd}: {} vs {expected}", observed.power_w);
+        }
+    }
+}
+
+#[test]
+fn g2_single_cell_keeps_area_product_residuals_until_modal_superposition() {
+    let residual = 2.0_f64.powi(-44);
+    let cell = AreaSample { position_m: [0.0, 0.0], area_m2: 0.00013,
+        mode_shape: vec![1.0, 1.0 + residual] };
+    let prepared = PreparedSurface::new(&[cell.clone()]).unwrap();
+    let omega = TAU * 100.0;
+    let observed = prepared.coherent_radiated_power(
+        omega, air(), &[C64::from_re(1.0), C64::from_re(-1.0)], || false).unwrap();
+    let volume = cell.area_m2 * residual;
+    let expected = air().density * omega * omega / (2.0 * TAU * air().sound_speed)
+        * volume * volume;
+    assert!((observed.power_w / expected - 1.0).abs() < 2e-14,
+        "{} vs {expected}", observed.power_w);
+}
+
+#[test]
 fn g1_complex_quadrature_sources_require_both_opposite_azimuths() {
     let area = 1e-6;
     let cells = [

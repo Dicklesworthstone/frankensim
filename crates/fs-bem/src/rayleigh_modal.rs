@@ -13,7 +13,7 @@
 //! retains the equivalent-disc self integral; this is NOT a complete causal
 //! passivity certificate or a finite-cell Galerkin quadrature-error bound.
 use super::{HelmholtzError, Medium, MIN_PANELS_PER_WAVELENGTH, green};
-use fs_math::{c64::C64, det};
+use fs_math::{c64::C64, dd::Dd, det};
 use core::f64::consts::PI;
 use std::sync::OnceLock;
 
@@ -83,12 +83,15 @@ pub struct PreparedSurface {
     modes: usize,
     areas: Vec<f64>,
     radii: Vec<f64>,
-    weighted_shape: Vec<f64>,
+    // Keep the area product's low component until physical source coordinates
+    // have been combined. Rounding each nearly identical mode first would
+    // manufacture radiation when those modes interfere destructively.
+    weighted_shape: Vec<Dd>,
     positions: Vec<[f64; 2]>,
     /// Signed source moments are projected once into direction/degree
     /// coefficients for reuse across low-frequency sweeps. Every modal
     /// coordinate is retained; this only changes evaluation of the sinc kernel.
-    resistance_coefficients: OnceLock<Result<Vec<f64>, HelmholtzError>>,
+    resistance_coefficients: OnceLock<Result<Vec<Dd>, HelmholtzError>>,
     /// Strict upper triangle, in row order: about 1.07 GB at the cell cap.
     distances: Vec<f64>,
     maximum_radius_m: f64,
@@ -146,8 +149,9 @@ impl PreparedSurface {
             positions.push(cell.position_m);
             maximum_radius_m = maximum_radius_m.max(radius);
             for &shape in &cell.mode_shape {
-                let weighted = cell.area_m2 * shape;
-                if !weighted.is_finite() || (shape != 0.0 && weighted == 0.0) {
+                let weighted = Dd::from_f64(cell.area_m2) * Dd::from_f64(shape);
+                if !weighted.hi.is_finite() || !weighted.lo.is_finite()
+                    || (shape != 0.0 && weighted.to_f64() == 0.0) {
                     return Err(invalid("Rayleigh area-weighted shape exceeds finite numerical range"));
                 }
                 weighted_shape.push(weighted);
@@ -304,7 +308,7 @@ impl PreparedSurface {
             if power_consistent { self_kernel.re = resistance_scale; }
             if low_frequency_resistance.is_some() { self_kernel.re = 0.0; }
             for mode in 0..self.modes {
-                pressure[i * self.modes + mode] = self_kernel.scale(self.weighted_shape[i * self.modes + mode]);
+                pressure[i * self.modes + mode] = self_kernel.scale(self.weighted_shape[i * self.modes + mode].to_f64());
             }
         }
         let mut pair = 0;
@@ -324,8 +328,8 @@ impl PreparedSurface {
                 for mode in 0..self.modes {
                     let a = i * self.modes + mode;
                     let b = j * self.modes + mode;
-                    pressure[a] = pressure[a] + kernel.scale(self.weighted_shape[b]);
-                    pressure[b] = pressure[b] + kernel.scale(self.weighted_shape[a]);
+                    pressure[a] = pressure[a] + kernel.scale(self.weighted_shape[b].to_f64());
+                    pressure[b] = pressure[b] + kernel.scale(self.weighted_shape[a].to_f64());
                 }
             }
         }
@@ -335,7 +339,7 @@ impl PreparedSurface {
             for column in row..self.modes {
                 let mut value = C64::ZERO;
                 for cell in 0..self.count {
-                    value = value + pressure[cell * self.modes + column].scale(self.weighted_shape[cell * self.modes + row]);
+                    value = value + pressure[cell * self.modes + column].scale(self.weighted_shape[cell * self.modes + row].to_f64());
                 }
                 if let Some(resistance) = &low_frequency_resistance {
                     value.re = resistance[row * self.modes + column];

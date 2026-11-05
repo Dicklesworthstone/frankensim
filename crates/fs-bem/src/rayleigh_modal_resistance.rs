@@ -20,12 +20,10 @@ fn add(sum: &mut f64, correction: &mut f64, term: f64) {
     *correction += error;
 }
 
-fn moments(surface: &PreparedSurface) -> Result<Vec<f64>, HelmholtzError> {
+fn moments(surface: &PreparedSurface) -> Result<Vec<Dd>, HelmholtzError> {
     let n = surface.modes;
     let mut sum = reserved(MOMENTS * n, "Rayleigh signed source moments")?;
-    sum.resize(MOMENTS * n, 0.0);
-    let mut correction = reserved(sum.len(), "Rayleigh source-moment corrections")?;
-    correction.resize(sum.len(), 0.0);
+    sum.resize(MOMENTS * n, Dd::ZERO);
     let mut lo = surface.positions[0];
     let mut hi = lo;
     for point in &surface.positions {
@@ -38,9 +36,10 @@ fn moments(surface: &PreparedSurface) -> Result<Vec<f64>, HelmholtzError> {
     // expansion scale. Every normalized point lies within the source diameter.
     let origin = [lo[0].midpoint(hi[0]), lo[1].midpoint(hi[1])];
     for (cell, point) in surface.positions.iter().enumerate() {
-        let x = (point[0] - origin[0]) / surface.maximum_distance_m;
-        let y = (point[1] - origin[1]) / surface.maximum_distance_m;
-        let mut xp = [1.0; DEGREE + 1];
+        let diameter = Dd::from_f64(surface.maximum_distance_m);
+        let x = (Dd::from_f64(point[0]) - Dd::from_f64(origin[0])) / diameter;
+        let y = (Dd::from_f64(point[1]) - Dd::from_f64(origin[1])) / diameter;
+        let mut xp = [Dd::ONE; DEGREE + 1];
         let mut yp = xp;
         for order in 1..=DEGREE {
             xp[order] = xp[order - 1] * x;
@@ -51,18 +50,14 @@ fn moments(surface: &PreparedSurface) -> Result<Vec<f64>, HelmholtzError> {
                 let offset = (order * (order + 1) / 2 + q) * n;
                 let monomial = xp[order - q] * yp[q];
                 for mode in 0..n {
-                    add(
-                        &mut sum[offset + mode],
-                        &mut correction[offset + mode],
-                        monomial * surface.weighted_shape[cell * n + mode],
-                    );
+                    sum[offset + mode] =
+                        sum[offset + mode] + monomial * surface.weighted_shape[cell * n + mode];
                 }
             }
         }
     }
-    for (value, error) in sum.iter_mut().zip(correction) {
-        *value += error;
-        if !value.is_finite() {
+    for value in &sum {
+        if !value.hi.is_finite() || !value.lo.is_finite() {
             return Err(invalid(
                 "Rayleigh source moment exceeds finite numerical range",
             ));
@@ -106,20 +101,20 @@ fn directions() -> &'static [Direction] {
     })
 }
 
-fn coefficients(surface: &PreparedSurface) -> Result<Vec<f64>, HelmholtzError> {
+fn coefficients(surface: &PreparedSurface) -> Result<Vec<Dd>, HelmholtzError> {
     let moments = moments(surface)?;
     let n = surface.modes;
     let mut coefficients = reserved(
         DIRECTIONS * ORDERS * n,
         "Rayleigh directional Taylor coefficients",
     )?;
-    coefficients.resize(DIRECTIONS * ORDERS * n, 0.0);
+    coefficients.resize(DIRECTIONS * ORDERS * n, Dd::ZERO);
     for (index, direction) in directions().iter().enumerate() {
-        let mut xp = [1.0; ORDERS];
+        let mut xp = [Dd::ONE; ORDERS];
         let mut yp = xp;
         for order in 1..ORDERS {
-            xp[order] = xp[order - 1] * direction.x / order as f64;
-            yp[order] = yp[order - 1] * direction.y / order as f64;
+            xp[order] = xp[order - 1] * Dd::from_f64(direction.x) / Dd::from_f64(order as f64);
+            yp[order] = yp[order - 1] * Dd::from_f64(direction.y) / Dd::from_f64(order as f64);
         }
         for order in 0..ORDERS {
             let sign = if matches!(order % 4, 0 | 3) {
@@ -128,22 +123,17 @@ fn coefficients(surface: &PreparedSurface) -> Result<Vec<f64>, HelmholtzError> {
                 -1.0
             };
             let output = (index * ORDERS + order) * n;
-            let mut correction = [0.0; MAX_MODAL_RAYLEIGH_FIELDS];
             for q in 0..=order {
-                let coefficient = sign * xp[order - q] * yp[q];
+                let coefficient = Dd::from_f64(sign) * xp[order - q] * yp[q];
                 let input = (order * (order + 1) / 2 + q) * n;
                 for mode in 0..n {
-                    add(
-                        &mut coefficients[output + mode],
-                        &mut correction[mode],
-                        coefficient * moments[input + mode],
-                    );
+                    coefficients[output + mode] =
+                        coefficients[output + mode] + coefficient * moments[input + mode];
                 }
             }
             for mode in 0..n {
                 let value = &mut coefficients[output + mode];
-                *value += correction[mode];
-                if !value.is_finite() {
+                if !value.hi.is_finite() || !value.lo.is_finite() {
                     return Err(invalid(
                         "Rayleigh directional coefficient exceeds finite numerical range",
                     ));
@@ -164,7 +154,9 @@ pub(super) fn matrix(
     // Conservatively include both geometry projections on every admission,
     // even when the cache exists. Ordinary reactance work also remains;
     // no field is dropped to fit. At the field cap the coefficient cache
-    // occupies 153 * 17 * 128 doubles, about 2.54 MiB.
+    // occupies 153 * 17 * 128 double-doubles, about 5.08 MiB. Keeping the
+    // low components makes cached modal superposition equivalent to combining
+    // the original signed cell velocities before spatial projection.
     admit_modal_work(
         cells * fields * (cells + fields)
             + MOMENTS as u128 * cells * fields
@@ -197,7 +189,7 @@ pub(super) fn matrix(
         for (order, power) in powers.iter().enumerate() {
             let offset = (index * ORDERS + order) * n;
             for mode in 0..n {
-                let term = power * coefficients[offset + mode];
+                let term = power * coefficients[offset + mode].to_f64();
                 if order % 2 == 0 {
                     add(&mut re[mode], &mut cr[mode], term);
                 } else {
@@ -276,7 +268,7 @@ fn compact_power(
             let offset = (index * ORDERS + degree) * surface.modes;
             let mut amplitude = [Dd::ZERO; 2];
             for (mode, v) in velocity.iter().enumerate() {
-                let coefficient = Dd::from_f64(coefficients[offset + mode]);
+                let coefficient = coefficients[offset + mode];
                 amplitude[0] = amplitude[0] + coefficient * Dd::from_f64(v.re);
                 amplitude[1] = amplitude[1] + coefficient * Dd::from_f64(v.im);
             }
@@ -329,7 +321,7 @@ fn resolved_power(
         }
         let mut value = [Dd::ZERO; 2];
         for (mode, v) in velocity.iter().enumerate() {
-            let weight = Dd::from_f64(surface.weighted_shape[cell * surface.modes + mode]);
+            let weight = surface.weighted_shape[cell * surface.modes + mode];
             value[0] = value[0] + weight * Dd::from_f64(v.re);
             value[1] = value[1] + weight * Dd::from_f64(v.im);
         }
@@ -412,7 +404,7 @@ pub(super) fn coherent_power(
         }
         for (mode, &magnitude) in magnitudes[..surface.modes].iter().enumerate() {
             absolute_amplitude = absolute_amplitude
-                + Dd::from_f64(surface.weighted_shape[cell * surface.modes + mode].abs())
+                + surface.weighted_shape[cell * surface.modes + mode].abs()
                     * Dd::from_f64(magnitude);
         }
     }
@@ -424,7 +416,7 @@ pub(super) fn coherent_power(
     let (value, remainder, directions, quadrature_factor) = if surface.count == 1 {
         let mut value = [Dd::ZERO; 2];
         for (mode, v) in velocity.iter().enumerate() {
-            let weight = Dd::from_f64(surface.weighted_shape[mode]);
+            let weight = surface.weighted_shape[mode];
             value[0] = value[0] + weight * Dd::from_f64(v.re);
             value[1] = value[1] + weight * Dd::from_f64(v.im);
         }

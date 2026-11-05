@@ -756,16 +756,16 @@ budget for the full frequency sweep and a provenance hash. The bake declaration
 hash includes geometry, all traces, route, medium, frequencies and budget.
 
 For `k * source_diameter <= 0.5`, power-consistent Rayleigh resistance uses
-compensated Cartesian source moments and a positive angular Gram rule. This is
+double-double Cartesian source moments and a positive angular Gram rule. This is
 the same point-area sinc operator, evaluated without subtracting almost equal
 monopole powers for a weak dipole, quadrupole or higher cancelling field.
 Degree-16 outgoing amplitudes have an absolute exponential remainder below
 `2.2e-20 * sum(abs(area * shape))`; the 17-point polar / 34-point azimuth rule
 integrates their degree-32 products exactly in exact arithmetic. Cartesian
-moments are projected once into compensated direction/degree coefficients;
+moments are projected once into double-double direction/degree coefficients;
 each further frequency contracts 17 coefficients instead of 153 monomials per
-direction and field. This geometry cache uses `153 * 17 * fields` doubles
-(2.54 MiB at the 128-field cap), replacing the Cartesian moment cache. Angular
+direction and field. This geometry cache uses `153 * 17 * fields` double-doubles
+(5.08 MiB at the 128-field cap), replacing the Cartesian moment cache. Angular
 nodes are also reused. Both geometry projections and recurring frequency work
 are included in the existing modal ceiling. The equivalent-disc reactance
 remains bit-identical.
@@ -783,6 +783,15 @@ at each cell and integrate the resulting field with positive angular weights.
 The opposite azimuths are paired as `|even|² + |odd|²`; simply halving the angular
 domain would be wrong for complex velocities. Double-double contractions retain
 weak residuals, without negative-power clipping or an artificial loss floor.
+Area/shape products, Cartesian moments and directional coefficients retain
+their low components until that coherent contraction. Rounding those upstream
+quantities independently would introduce a spurious radiation floor for
+nearly identical, opposite-phase modal motions. The legacy impedance/reactance
+path still consumes each area's original rounded high component. Two analytic
+G2 tests cancel all cells except one weak monopole, including non-dyadic areas,
+relative modal differences down to `2^-44`, and both sides of the compact-rule
+boundary. The prepared area/shape storage uses two doubles per cell/mode;
+source and work caps are unchanged, and the cache remains reusable per sweep.
 
 The noncompact rule selects polar order n and 2n azimuth points from
 `epsilon = (kD)^n/n! <= 1e-18`, capped at n=128, and refuses if unresolved or over
