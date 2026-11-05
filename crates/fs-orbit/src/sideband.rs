@@ -24,6 +24,8 @@ use crate::{AftSum, HbOrbit, IslandStateJacobian, OrbitProblem, TAU, normalized_
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_blocked_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
 
+pub mod refinement;
+
 /// Independent original state and equation units; numerical conditioning only.
 #[derive(Clone, Debug)]
 pub struct SidebandScales {
@@ -126,6 +128,11 @@ pub enum SidebandError {
         measured: f64,
         /// Authored upper limit.
         limit: f64,
+    },
+    /// No accepted response within the authored spectral refinement limit.
+    HarmonicsUnresolved {
+        /// Last independently assessed solve; no partial response is returned.
+        last: refinement::SidebandRefinementCheck,
     },
     /// Cancellation observed before publication.
     Cancelled,
@@ -404,6 +411,19 @@ impl PreparedSidebandResponse<'_> {
     pub fn solve(
         &self,
         forcing: &[C64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SidebandResponse> {
+        self.solve_candidate(forcing, true, cancelled)
+    }
+
+    // Adaptive callers must inspect unresolved candidates to decide whether
+    // more sidebands are needed. Only their omitted-band acceptance gate is
+    // deferred; singularity, retained backward error and all source checks
+    // still refuse immediately.
+    fn solve_candidate(
+        &self,
+        forcing: &[C64],
+        require_omitted_resolution: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SidebandResponse> {
         poll(&mut cancelled)?;
@@ -497,7 +517,8 @@ impl PreparedSidebandResponse<'_> {
             }
         }
         if !omitted_residual.is_finite()
-            || omitted_residual > self.controls.maximum_omitted_residual
+            || (require_omitted_resolution
+                && omitted_residual > self.controls.maximum_omitted_residual)
         {
             return Err(SidebandError::OmittedSidebands {
                 measured: omitted_residual,
@@ -554,6 +575,19 @@ fn admit(d: usize, orbit: &HbOrbit, c: SidebandControls, s: &SidebandScales) -> 
     let dimension = d as u128;
     let n = dimension * (2 * c.harmonics + 1) as u128;
     bound("complex unknowns", n, c.maximum_unknowns.min(1024) as u128)?;
+    let (payload, work) = resource_costs(d, width, c);
+    bound(
+        "numerical payload bytes",
+        payload,
+        c.maximum_payload_bytes as u128,
+    )?;
+    bound("numerical work", work, c.maximum_work as u128)
+}
+
+// Shared by fixed-order and adaptive admission, after shape/count validation.
+fn resource_costs(d: usize, width: usize, c: SidebandControls) -> (u128, u128) {
+    let dimension = d as u128;
+    let n = dimension * (2 * c.harmonics + 1) as u128;
     let entries = dimension * dimension * (3 * c.harmonics + 3) as u128;
     let base = dimension * width as u128;
     // Includes both Fourier grids, their compensated sums, original callbacks,
@@ -565,16 +599,11 @@ fn admit(d: usize, orbit: &HbOrbit, c: SidebandControls, s: &SidebandScales) -> 
         + 96 * n * n
         + 576 * n
         + 32 * width.max(3 * c.harmonics + 3) as u128;
-    bound(
-        "numerical payload bytes",
-        payload,
-        c.maximum_payload_bytes as u128,
-    )?;
     let samples = (3 * c.samples_per_period + 1) as u128;
     let work = samples * (16 * entries + 32 * base + 32 * dimension * dimension)
         + 16 * n * n * n
         + 2048 * n * n;
-    bound("numerical work", work, c.maximum_work as u128)
+    (payload, work)
 }
 
 fn check_port(port: &[C64], d: usize) -> Result<()> {

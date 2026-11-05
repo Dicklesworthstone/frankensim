@@ -587,6 +587,37 @@ zero threshold changes an equation or removes a response band.
 Independent state/equation scales, numerical payload/work admission and
 cancellation apply before publication. No physical source is mutated.
 
+`sideband::refinement::solve_sideband_adaptive` adds bounded automatic retained
+order resolution. Its input declares the complete initial signed forcing
+support, which is preserved by zero-padding as orders grow `N -> 2*N+1` up to
+the authored cap. Intermediate finite omitted-band defects request refinement;
+singularities, retained backward-error failures and unavailable/refused exact
+tangents still refuse. Acceptance requires two actually solved orders to agree
+in each original state's physical complex-envelope L2 tolerance.
+
+Low-order agreement alone is insufficient: an exact tangent containing a ninth
+harmonic can produce distant sidebands that neither of two low orders retains
+or checks. Every adaptive candidate therefore evaluates the FULL ORIGINAL
+linearized equation envelope on independent shifted grids of `2*M+1` and
+`4*M+3` samples. Original complete port matrices at every signed retained
+frequency and exact tangent callbacks at the original base waveform participate;
+no time-domain realization is inferred from a dispersive port. Each original
+equation has its own physical envelope tolerance, independent of conditioning
+scales. Full sampled defects, grid differences, finite omitted-band defects and
+actual response changes are returned in a refinement trace. Complex-envelope
+norms give each signed coefficient weight one, not the real-waveform AC factor
+two; physical frequency coincidences remain the consumer's coherent sum.
+
+Adaptive quadrature grows with retained order. The fixed owner's work allowance
+is charged cumulatively across the actually attempted solves AND independent
+assessments, before source evaluation for each step. Its payload allowance also
+includes the previous solution and all live refinement scratch. Assessments
+stream samples; they do not retain a samples-by-state history. Neither a partial
+response nor an accepted response is published on exhaustion or cancellation.
+These measurements detect generated energy outside finite Fourier guard bands,
+but do not certify absence of arbitrary aliases beyond both sample grids or
+replace independent base-waveform refinement.
+
 `tests/sideband_response.rs` checks a phase-shifted nonlinear cascade against
 analytic converted sidebands, a parametrically driven oscillator against
 independent real-time integration and order refinement, and full coupled
@@ -594,6 +625,10 @@ mass/damping/stiffness/gyroscopic/Maxwell ports against closed two-coordinate
 responses. Stale base waveforms, aliases, exact singular resonance, unavailable
 or refused derivatives, cancelled reuse and explicit resource refusals are
 also exercised. These are focused numerical checks, not experimental evidence.
+`tests/sideband_refinement.rs` additionally checks distant-band false convergence
+against an independently soluble triangular periodic system, preservation of
+signed complex forcing and disparate physical units, actual inter-order
+agreement, and resource/source/cancellation refusal.
 
 The source and tangent must actually repeat at the authored period. Finite
 quadrature, finite checked omitted bands and small backward error establish
