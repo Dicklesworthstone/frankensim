@@ -2227,13 +2227,46 @@ complex transfer coefficients, apply physical Q without allocations, and feed
 native harmonic observations on the original source clock without another delay.
 
 Original stationary, lossless, infinite-plane and nontrapping-layer admission
-remains. There is no source loading, force-source interior extension, absorption,
-flow, finite edge or guided-pole solver. Quadrature estimates and analytic
+remains. There is no source loading, absorption, flow, finite edge or guided-pole
+solver. Quadrature estimates and analytic
 spectral-tail bounds are not interval certificates or experimental accuracy.
 Focused G1/G3 tests cover original spherical limits, independent two-family
 spherical images, both-face pressure/normal-velocity continuity, receiving-fluid
 momentum, reciprocal pressure, rotation, near-face evanescent survival, native
 clock identity and transactional domain/work/cancellation refusals.
+
+### Exterior physical forces observed inside the layer
+
+`interior::PreparedInteriorFullWaveForce` applies prescribed original forces ON
+the incident fluid, in newtons, to strict interior observations. It shares the
+existing monopole's outgoing Green spectrum, all internal returns, scaled
+pressure and normal-velocity numerators, critical branches and resonance guards.
+The original `+i/(omega rho_incident) grad_source` derivative supplies both
+pressure coefficients and all five cylindrical velocity-tensor coefficients.
+The mixed normal/tangential entries retain different standing-wave factors;
+they need not coincide or have opposite signs. Transverse and reactive motion,
+including velocity at a pressure null, remain present in the Cartesian field.
+
+All seven channels use the same adaptive samples. Separate derivative-aware
+all-evanescent bounds at clearance `a+s` retain the actual incident and layer
+densities and bound the pressure-vector and velocity-tensor norms per newton.
+The original work/depth controls and cancellation remain authoritative. A
+cached 4-by-3 transfer applies arbitrary complex forces with fixed double-double
+accumulation, without allocation, quadrature or another propagation delay.
+An invisible second face delegates the original single-interface force owner.
+Original face distances remain double-double through oscillatory phase and
+attenuation in the shared kernel, for both interior receivers and reciprocal
+interior volume sources. The existing large-evanescence half-space limit is
+preserved. Forces originating inside the layer are outside this force API.
+
+`tests/full_wave_layer_interior_force.rs` covers all seven coefficients against
+independent 35/50-digit direct-q references, a rotated two-family image-force
+series with the original density gain and reflected normal force, and all
+three original source derivatives. Exact limits, axial transverse motion,
+native clocks, finite forces, strict domains, work exhaustion and cancellation
+are also covered. A private phase regression retains a second-face distance
+smaller than one ulp of its leading component. Numerical diagnostics remain
+estimates plus analytic spectral-tail bounds, not interval certificates.
 
 ## Causal transient Lighthill volume-stress observation
 

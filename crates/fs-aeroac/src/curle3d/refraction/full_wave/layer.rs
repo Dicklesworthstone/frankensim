@@ -533,10 +533,11 @@ impl LayerKernel {
     // Return exp(-Im(delta))*cos(delta), exp(-Im(delta))*h*sinc(delta).
     // Both are real for this lossless layer. No growing hyperbolic quantity is formed.
     fn layer_functions(&self, vertical: C64) -> (f64, f64) {
-        Self::layer_functions_at(vertical, self.layer.thickness_m)
+        Self::layer_functions_at(vertical, Dd::from_f64(self.layer.thickness_m))
     }
 
-    fn layer_functions_at(vertical: C64, h: f64) -> (f64, f64) {
+    fn layer_functions_at(vertical: C64, distance: Dd) -> (f64, f64) {
+        let h = distance.to_f64();
         if vertical.im > 0.0 {
             let eta = vertical.im * h;
             // The physical scaled sinh(alpha*h)/alpha remains finite even
@@ -553,7 +554,7 @@ impl LayerKernel {
             };
             (0.5 * (1.0 + decay), h * ratio)
         } else {
-            let delta = Dd::from_f64(vertical.re) * Dd::from_f64(h);
+            let delta = Dd::from_f64(vertical.re) * distance;
             let (sin, cos) = det::sin_cos_dd(delta);
             let phase = delta.to_f64();
             let sinc = if phase.abs() < 1e-3 {
@@ -585,7 +586,7 @@ impl LayerKernel {
     }
 
     fn sample_weight(&self, region: usize, x: f64) -> Result<LayerSpectralWeight, AeroacError> {
-        self.sample_weight_at_depth(region, x, self.layer.thickness_m)
+        self.sample_weight_at_depth(region, x, Dd::from_f64(self.layer.thickness_m))
     }
 
     // Interior numerators use the same scaled full-layer denominator but
@@ -595,7 +596,7 @@ impl LayerKernel {
         &self,
         region: usize,
         x: f64,
-        depth_m: f64,
+        depth_m: Dd,
     ) -> Result<LayerSpectralWeight, AeroacError> {
         let point = self.point(region, x);
         let wave_scale = point.q.max(self.critical[self.critical_count - 1]);
@@ -621,7 +622,7 @@ impl LayerKernel {
             + self.coordinates.b * Dd::from_f64(point.zeta[2].re);
         let attenuation = (self.coordinates.a * Dd::from_f64(point.zeta[0].im)
             + self.coordinates.b * Dd::from_f64(point.zeta[2].im)
-            + Dd::from_f64(depth_m) * Dd::from_f64(point.zeta[1].im))
+            + depth_m * Dd::from_f64(point.zeta[1].im))
         .to_f64();
         if !phase.hi.is_finite()
             || !phase.lo.is_finite()
@@ -900,7 +901,8 @@ mod tests {
         assert!((scaled_sine_over_zeta * alpha - 0.5).abs() < 1e-15);
         for (alpha, thickness) in [(2.0, f64::MAX), (1e100, 1e250)] {
             assert!((alpha * thickness).is_infinite());
-            let (cosine, sine) = LayerKernel::layer_functions_at(C64::new(0.0, alpha), thickness);
+            let (cosine, sine) =
+                LayerKernel::layer_functions_at(C64::new(0.0, alpha), Dd::from_f64(thickness));
             assert_eq!(cosine, 0.5);
             assert_eq!(sine, 0.5 / alpha);
             assert!(sine > 0.0);
@@ -910,6 +912,18 @@ mod tests {
         let denominator = kernel.denominator(point, point.q);
         assert!(finite(denominator) && denominator.abs() > 0.0);
         assert_eq!(denominator.re, 0.0);
+    }
+
+    #[test]
+    fn original_interior_distance_retains_its_sub_ulp_phase() {
+        let distance = Dd::from_f64(1e16) + Dd::from_f64(1.0);
+        assert_eq!(distance.to_f64(), 1e16);
+        let (actual, _) = LayerKernel::layer_functions_at(C64::ONE, distance);
+        let (base_sin, base_cos) = det::sin_cos_dd(Dd::from_f64(1e16));
+        let (shift_sin, shift_cos) = det::sin_cos_dd(Dd::ONE);
+        let expected = (base_cos * shift_cos - base_sin * shift_sin).to_f64();
+        assert!((actual - expected).abs() < 2e-15);
+        assert!((actual - base_cos.to_f64()).abs() > 0.1);
     }
 
     #[test]

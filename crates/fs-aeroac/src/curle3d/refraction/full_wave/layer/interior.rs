@@ -21,6 +21,13 @@ use fs_math::{c64::C64, det};
 /// Original volume sources inside the layer radiating into its incident exterior.
 pub mod source;
 
+mod force;
+pub use force::{FULL_WAVE_LAYER_INTERIOR_FORCE_SCOPE, PreparedInteriorFullWaveForce};
+
+pub(super) fn reduces_to_interface(layer: PlanarFluidLayer) -> bool {
+    layer.layer_state() == layer.receiving_state()
+}
+
 /// Applicability of an exterior physical volume source observed in the layer.
 pub const FULL_WAVE_LAYER_INTERIOR_MONOPOLE_SCOPE: &str = "Prescribed stationary \
 compact 3D volume source in the incident exterior; full spherical-wave pressure \
@@ -159,7 +166,7 @@ fn interior_coordinates(
     frequency_hz: f64,
     source: [f64; 3],
     observer: [f64; 3],
-) -> Result<(LayerCoordinates, f64, f64), AeroacError> {
+) -> Result<(LayerCoordinates, Dd, Dd), AeroacError> {
     let omega = TAU * frequency_hz;
     if !positive(omega) {
         return Err(invalid("interior full-wave frequency"));
@@ -198,8 +205,8 @@ fn interior_coordinates(
             range,
             tangent,
         },
-        depth.to_f64(),
-        remaining.to_f64(),
+        depth,
+        remaining,
     ))
 }
 
@@ -243,8 +250,9 @@ struct InteriorWeight {
 
 struct InteriorKernel {
     common: LayerKernel,
-    depth_m: f64,
-    remaining_m: f64,
+    // Preserve original face clearances through oscillatory phase and decay.
+    depth_m: Dd,
+    remaining_m: Dd,
 }
 
 impl InteriorKernel {
@@ -310,8 +318,8 @@ impl InteriorKernel {
         // depth controls the remaining exponential variation. Keep the full
         // phase and denominator-variation checks, and retain the original
         // conservative depth before this common saturation point.
-        let decay_depth = if alpha * self.remaining_m > 350.0 {
-            self.depth_m
+        let decay_depth = if alpha * self.remaining_m.to_f64() > 350.0 {
+            self.depth_m.to_f64()
         } else {
             self.common.layer.thickness_m()
         };
@@ -334,7 +342,7 @@ impl InteriorKernel {
         // Only radial momentum changes with the actual receiving density.
         // With t=sqrt(q²-kmax²), alpha_j>=t,
         // q*dq=t*dt and q<=t+kmax, the integrated envelopes below follow.
-        let h = (self.common.coordinates.a + Dd::from_f64(self.depth_m)).to_f64();
+        let h = (self.common.coordinates.a + self.depth_m).to_f64();
         let hk = h * self.common.critical[self.common.critical_count - 1];
         if !positive(h) || !hk.is_finite() {
             return Err(nonfinite("interior acoustic tail clearance"));
