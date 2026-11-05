@@ -282,7 +282,7 @@ impl StressSlab<3, 7> for ThermalLbm3 {
             self.grid.collision_model_at(cell),
         )
     }
-    fn independent_bulk(&self) -> bool { self.grid.central_moment_bulk_rates().is_some() }
+    fn independent_bulk(&self) -> bool { self.grid.has_independent_bulk_collision() }
 }
 
 #[allow(clippy::too_many_arguments)]

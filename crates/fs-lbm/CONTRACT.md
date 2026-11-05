@@ -12874,11 +12874,50 @@ residuals supply no heat. The earlier heated API refuses independent bulk unless
 this explicit physical binding is provided; BGK/TRT paths retain their behavior.
 
 This remains explicit low-Mach, fixed-density/Cp sensible-heat transport. It
-does not assert compressible total-energy conservation, an implicit heating
-solve or local temperature/shear-dependent bulk viscosity. Positive bulk
+does not assert compressible total-energy conservation or an implicit heating
+solve. This entry point holds bulk viscosity uniform for a step; the source-local
+extension below supplies temperature/strain-dependent bulk viscosity. Positive bulk
 viscosity must remain representable with `0<bulk_rate<2`; zero and underresolved
 bulk coefficients refuse rather than acquiring an artificial positive floor.
 The native `material_bulk_viscous_heating` tests compare forced pure-shear,
 pure-dilation and mixed-strain tensor power against actual thermal transport,
 exercise successive temperature/material queries and changes in physical zeta,
 and verify endpoint/cancellation refusal without publishing state or selectors.
+
+## Source-local shear and bulk viscosity on 3-D thermal plates
+
+`BulkViscousMaterial<F>` retains one original `FluidTransport` response and an
+explicit positive physical `zeta` in Pa s from the same material query. It reads
+the original transport owner once; no bulk/shear ratio or numerical damping law
+is inferred. `MaterialSlab3::step_with_local_bulk_rheology_and_viscous_heating`
+queries this owner at each cell's actual temperature and full strain invariant
+`gamma=sqrt(2 D:D)`. Shear viscosity, conductivity and bulk viscosity may all
+vary by cell and through successive accepted temperature/strain queries.
+
+For Guo-corrected stress numerators `Adev` and `Abulk`, the local root solves
+`gamma=hypot(Adev/tau_s,Abulk/tau_b)/dt`. Its single bounded constitutive
+coordinate is `tau_eff=1/hypot(wdev/tau_s,wbulk/tau_b)`, where the weights are
+the normalized stress numerators. Both physical viscosities participate even
+in pure compression with constant shear viscosity. The reported relaxation
+defect belongs to this effective coordinate; it is never used for collision.
+Collision and heat instead use the separate physical `tau_s` and `tau_b` from
+the retained source query. Their reconstructed strain agrees with the queried
+invariant to the admitted root tolerance, and heat remains
+`q=2mu D_dev:D_dev+zeta(div u)^2` without counting isotropic shear twice.
+
+`PlatesGrid3::set_central_moment_bulk_field` validates and retains a complete
+bulk-rate field with a uniform higher-order rate. Checked thermal snapshots
+and local shear retuning preserve this field. The heated material step publishes
+its applied bulk rates, populations and sensible heat atomically; endpoint source
+responses are retained for diagnostics and admission, not applied a second time.
+Source-domain, convergence, conversion, heat-balance and cancellation refusals
+leave the accepted slab and collision field unchanged. The legacy heated API
+refuses both uniform and spatial independent-bulk selections without a physical
+binding. A constant field preserves the uniform selector's population arithmetic.
+
+This uses the existing fixed reference density/Cp and explicit thermal update.
+Zero or unrepresentable bulk viscosity still refuses; no floor, molecular
+relaxation memory or compressible total-energy claim is introduced. Native tests
+cover forced pure shear, pure dilation and mixed strain against independent
+tensor power and the original thermal solver, spatial/temperature feedback,
+constant-field bit parity, and source/cancellation rollback.

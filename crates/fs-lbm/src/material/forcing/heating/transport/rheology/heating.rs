@@ -22,6 +22,21 @@ use super::{
 };
 use fs_exec::CancelGate;
 
+/// Coherent local shear/bulk material laws on the same thermal transaction.
+pub mod bulk;
+pub use bulk::BulkViscousMaterial;
+
+fn physical_bulk_tau(mapping: &MaterialSlab<ThermalLbm3>, bulk_viscosity_pa_s: f64) -> Result<f64, &'static str> {
+    let units = mapping.force_units;
+    let bulk_lattice = ((bulk_viscosity_pa_s / units.transport.density_kg_m3())
+        / units.velocity_scale) / units.cell_size_m;
+    let tau = 0.5 + 4.5 * bulk_lattice;
+    if !bulk_viscosity_pa_s.is_finite() || bulk_viscosity_pa_s <= 0.0 || !tau.is_finite() || tau <= 0.5 {
+        return Err("physical bulk viscosity or relaxation is unrepresentable");
+    }
+    Ok(tau)
+}
+
 /// Explicit source partition for an accepted physical viscous-heating step.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViscousHeating {
@@ -60,7 +75,7 @@ fn source_inputs<S, F, const D: usize>(
     limits: HeatSourceLimits,
     original: Inputs<D>,
     applied: &[TransportSample<RheologyMaterial<F>>],
-    bulk_viscosity_pa_s: Option<f64>,
+    bulk_viscosity_pa_s: impl Fn(&RheologyMaterial<F>) -> Option<f64>,
     gate: &CancelGate,
 ) -> Result<(Inputs<D>, ViscousHeating), MaterialTransportError> {
     let units = mapping.force_units;
@@ -74,7 +89,7 @@ fn source_inputs<S, F, const D: usize>(
         let viscosity = value.transport.dynamic_viscosity_pa_s();
         // This multiplication order avoids overflowing rate^2 before a small
         // viscosity can scale it. Both values come from the cached query.
-        let power = match (bulk_viscosity_pa_s, value.material.strain_components_per_s) {
+        let power = match (bulk_viscosity_pa_s(&value.material), value.material.strain_components_per_s) {
             (None, None) => (viscosity * rate) * rate,
             (Some(bulk), Some([deviatoric, dilation])) => {
                 let shear_power = (viscosity * deviatoric) * deviatoric;
@@ -168,7 +183,7 @@ fn advance<S: StressSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usiz
             },
             |mapping, original, applied| {
                 source_inputs(
-                    mapping, power, forces, depth_m, limits, original, applied, None, gate,
+                    mapping, power, forces, depth_m, limits, original, applied, |_| None, gate,
                 )
             },
         )?;
@@ -225,7 +240,7 @@ fn advance_boussinesq<
         },
         |mapping, original, applied| {
             source_inputs(
-                mapping, power, forces, depth_m, limits, original, applied, None, gate,
+                mapping, power, forces, depth_m, limits, original, applied, |_| None, gate,
             )
         },
         |mapping, input, applied| {
@@ -369,16 +384,12 @@ impl MaterialSlab<ThermalLbm3> {
         poll(gate)?;
         solve.validate()?;
         let units = self.force_units;
-        let bulk_lattice = ((bulk_viscosity_pa_s / units.transport.density_kg_m3())
-            / units.velocity_scale) / units.cell_size_m;
-        let bulk_tau = 0.5 + 4.5 * bulk_lattice;
+        let bulk_tau = physical_bulk_tau(self, bulk_viscosity_pa_s).map_err(MaterialTransportError::Invalid)?;
         let bulk_rate = 1.0 / bulk_tau;
         let model = crate::d3q19::CollisionModel3::CentralMomentBulk {
             shear_rate: 1.0, bulk_rate, higher_order_rate,
         };
-        if !bulk_viscosity_pa_s.is_finite() || bulk_viscosity_pa_s <= 0.0
-            || !bulk_tau.is_finite() || bulk_tau <= 0.5 || model.validate().is_err()
-        {
+        if model.validate().is_err() {
             return Err(MaterialTransportError::Invalid("physical bulk viscosity or relaxation is unrepresentable"));
         }
         let depth_m = units.cell_size_m;
@@ -400,13 +411,13 @@ impl MaterialSlab<ThermalLbm3> {
             },
             |mapping, original, applied| source_inputs(
                 mapping, power_w_m3, forces_n_m3, depth_m, limits, original,
-                applied, Some(bulk_viscosity_pa_s), gate,
+                applied, |_| Some(bulk_viscosity_pa_s), gate,
             ),
             |mapping, input, applied| candidate_with_prepared_input::<ThermalLbm3, _, 3, 7>(
                 mapping, input, applied, gate,
                 |trial| {
                     trial.grid.trt_magic = None;
-                    trial.grid.central_moment_bulk = Some([bulk_rate, higher_order_rate]);
+                    trial.grid.central_moment_bulk = Some(crate::d3q19::BulkRelaxation3::Uniform([bulk_rate, higher_order_rate]));
                 },
             ),
         )?;

@@ -5,6 +5,7 @@
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{CollisionModel3, E3, W3, equilibrium3, update_tau3};
 use fs_lbm::material::transport::MaterialTransportError;
+use fs_lbm::material::transport::rheology::heating::BulkViscousMaterial;
 use fs_lbm::material::transport::rheology::{RheologyPoint, RheologySolve};
 use fs_lbm::material::{MaterialSlab3, MaterialThermalSlab3, plan_scaling_from_material};
 use fs_lbm::rheology::Rheology;
@@ -92,12 +93,22 @@ fn manufacture(
     zeta: f64,
     rho: f64,
 ) -> (f64, f64, [[f64; 3]; CELLS]) {
+    manufacture_with_viscosity(slab, strain, zeta, rho, viscosity)
+}
+
+fn manufacture_with_viscosity(
+    slab: &mut MaterialSlab3,
+    strain: [[f64; 3]; 3],
+    zeta: f64,
+    rho: f64,
+    mu_at: impl FnOnce(f64, f64) -> f64,
+) -> (f64, f64, [[f64; 3]; CELLS]) {
     let temperature = slab
         .temperature_si(slab.lattice.gpop[CELL].iter().sum())
         .unwrap();
     let trace: f64 = (0..3).map(|a| strain[a][a]).sum();
     let gamma = (2.0 * strain.iter().flatten().map(|d| d * d).sum::<f64>()).sqrt();
-    let mu = viscosity(temperature, gamma);
+    let mu = mu_at(temperature, gamma);
     let tau = 0.5 + 3.0 * (mu / 1000.0) * DT / (DX * DX);
     let deviatoric: [[f64; 3]; 3] = core::array::from_fn(|a| {
         core::array::from_fn(|b| strain[a][b] - if a == b { trace / 3.0 } else { 0.0 })
@@ -137,6 +148,361 @@ fn manufacture(
     let mut physical_forces = [[0.0; 3]; CELLS];
     physical_forces[CELL] = force.map(|f| f * 1000.0 * DX / (DT * DT));
     (gamma, power, physical_forces)
+}
+
+fn local_bulk(cell: usize, temperature: f64, rate: f64) -> f64 {
+    // Independently declared spatial, temperature and strain dependence.
+    (0.2 + 0.01 * cell as f64) * (310.0 / temperature) * (1.0 + 0.5 * rate * rate)
+}
+
+fn local_material(
+    point: RheologyPoint,
+    _: &FluidTransportState,
+) -> Result<BulkViscousMaterial<FluidTransportState>, MaterialError> {
+    BulkViscousMaterial::try_new(
+        fluid(viscosity(point.temperature_k, point.shear_rate_per_s)),
+        local_bulk(point.cell, point.temperature_k, point.shear_rate_per_s),
+    )
+}
+
+#[test]
+fn local_shear_and_bulk_sources_recover_pure_limits_and_mixed_tensor_power() {
+    for constant_mu in [true, false] {
+        let mu = |temperature, rate| {
+            if constant_mu {
+                0.7
+            } else {
+                viscosity(temperature, rate)
+            }
+        };
+        for strain in [
+            [[0.0, 0.8, 0.0], [0.8, 0.0, -0.3], [0.0, -0.3, 0.0]],
+            [[0.6, 0.0, 0.0], [0.0, 0.6, 0.0], [0.0, 0.0, 0.6]],
+            [[1.2, 0.3, -0.2], [0.3, -0.3, 0.1], [-0.2, 0.1, 0.6]],
+        ] {
+            let mut actual = slab();
+            let mut reference = slab();
+            let gamma = (2.0 * strain.iter().flatten().map(|s| s * s).sum::<f64>()).sqrt();
+            let temperature = actual
+                .temperature_si(actual.lattice.gpop[CELL].iter().sum())
+                .unwrap();
+            let zeta = local_bulk(CELL, temperature, gamma);
+            let (_, power, forces) = manufacture_with_viscosity(&mut actual, strain, zeta, 1.1, mu);
+            manufacture_with_viscosity(&mut reference, strain, zeta, 1.1, mu);
+            let report = actual
+                .step_with_local_bulk_rheology_and_viscous_heating(
+                    &[0.0; CELLS],
+                    &forces,
+                    1.25,
+                    limits(),
+                    controls(),
+                    &CancelGate::new(),
+                    |point, _| {
+                        BulkViscousMaterial::try_new(
+                            fluid(mu(point.temperature_k, point.shear_rate_per_s)),
+                            local_bulk(point.cell, point.temperature_k, point.shear_rate_per_s),
+                        )
+                    },
+                )
+                .unwrap();
+            let value = report
+                .transport
+                .applied
+                .iter()
+                .find(|s| s.cell == CELL)
+                .unwrap();
+            near(value.material.point().shear_rate_per_s, gamma, 2e-12);
+            near(value.material.source().bulk_viscosity_pa_s(), zeta, 2e-12);
+            near(report.viscous.power_w_m3[CELL], power, 3e-11);
+            near(
+                report.viscous.viscous_heat_j,
+                power * DX.powi(3) * DT,
+                3e-19,
+            );
+            // In the pure-dilation/constant-mu case only zeta can drive the
+            // constitutive solve; a shear-only convergence test is insufficient.
+            let mut bulk_rates = [1.0; CELLS];
+            for cell in 2..CELLS - 2 {
+                let t = reference
+                    .temperature_si(reference.lattice.gpop[cell].iter().sum())
+                    .unwrap();
+                bulk_rates[cell] =
+                    1.0 / bulk_tau(local_bulk(cell, t, if cell == CELL { gamma } else { 0.0 }));
+            }
+            reference
+                .lattice
+                .grid
+                .set_central_moment_bulk_field(&bulk_rates, 1.25)
+                .unwrap();
+            let mut heat = [0.0; CELLS];
+            heat[CELL] = power;
+            reference
+                .step_with_material_rheology(
+                    &heat,
+                    &forces,
+                    limits(),
+                    controls(),
+                    &CancelGate::new(),
+                    |point, _| Ok(fluid(mu(point.temperature_k, point.shear_rate_per_s))),
+                )
+                .unwrap();
+            for (a, b) in actual
+                .lattice
+                .grid
+                .f
+                .iter()
+                .flatten()
+                .zip(reference.lattice.grid.f.iter().flatten())
+            {
+                near(*a, *b, 2e-14);
+            }
+            for (a, b) in actual
+                .lattice
+                .gpop
+                .iter()
+                .flatten()
+                .zip(reference.lattice.gpop.iter().flatten())
+            {
+                near(*a, *b, 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
+fn local_bulk_feedback_retains_each_applied_field_and_original_source() {
+    let mut slab = slab();
+    slab.lattice
+        .set_buoyancy_quadrature(fs_lbm::thermal::BuoyancyQuadrature::EndpointAverage);
+    let (_, _, forces) = manufacture(
+        &mut slab,
+        [[0.4, 0.8, 0.0], [0.8, -0.2, 0.0], [0.0, 0.0, 0.1]],
+        0.7,
+        1.0,
+    );
+    let mut previous_temperature = None;
+    for _ in 0..4 {
+        let report = slab
+            .step_with_local_bulk_rheology_and_viscous_heating(
+                &[0.0; CELLS],
+                &forces,
+                1.1,
+                limits(),
+                controls(),
+                &CancelGate::new(),
+                local_material,
+            )
+            .unwrap();
+        let first = report
+            .transport
+            .applied
+            .iter()
+            .find(|v| v.cell == CELL)
+            .unwrap();
+        if let Some(t) = previous_temperature {
+            assert_eq!(first.temperature_k, t);
+        }
+        for value in report
+            .transport
+            .applied
+            .iter()
+            .chain(&report.transport.endpoint)
+        {
+            let point = value.material.point();
+            let source = value.material.source();
+            assert_eq!(source.source(), &value.transport);
+            assert_eq!(
+                source.bulk_viscosity_pa_s(),
+                local_bulk(point.cell, point.temperature_k, point.shear_rate_per_s)
+            );
+            assert_eq!(
+                value.transport.dynamic_viscosity_pa_s(),
+                viscosity(point.temperature_k, point.shear_rate_per_s)
+            );
+        }
+        for value in &report.transport.applied {
+            near(
+                slab.lattice
+                    .grid
+                    .collision_model_at(value.cell)
+                    .kinematic_bulk_viscosity(),
+                value.material.source().bulk_viscosity_pa_s() / 1000.0 * DT / (DX * DX),
+                3e-16,
+            );
+        }
+        previous_temperature = Some(
+            report
+                .transport
+                .endpoint
+                .iter()
+                .find(|v| v.cell == CELL)
+                .unwrap()
+                .temperature_k,
+        );
+        assert!(slab.lattice.grid.has_independent_bulk_collision());
+        assert_eq!(slab.lattice.grid.central_moment_bulk_rates(), None);
+        assert_eq!(
+            slab.lattice.buoyancy_quadrature(),
+            fs_lbm::thermal::BuoyancyQuadrature::EndpointAverage
+        );
+        assert!(report.viscous.viscous_heat_j > 0.0);
+    }
+}
+
+#[test]
+fn constant_bulk_field_preserves_uniform_bits_and_bad_fields_refuse() {
+    let mut uniform = slab();
+    let mut field = slab();
+    let rate = 1.0 / bulk_tau(0.7);
+    for slab in [&mut uniform, &mut field] {
+        manufacture(
+            slab,
+            [[0.4, 0.8, 0.0], [0.8, -0.2, 0.0], [0.0, 0.0, 0.1]],
+            0.7,
+            1.0,
+        );
+    }
+    uniform
+        .lattice
+        .grid
+        .set_central_moment_bulk_collision(rate, 1.2)
+        .unwrap();
+    field
+        .lattice
+        .grid
+        .set_central_moment_bulk_field(&[rate; CELLS], 1.2)
+        .unwrap();
+    let source_limits = fs_lbm::thermal::sources::ThermalSourceLimits {
+        max_cells: CELLS,
+        temperature_range: [-1.0, 2.0],
+        balance_tolerance: 1e-10,
+    };
+    uniform
+        .lattice
+        .step_with_sources(&[0.0; CELLS], &[[0.0; 3]; CELLS], source_limits)
+        .unwrap();
+    field
+        .lattice
+        .step_with_sources(&[0.0; CELLS], &[[0.0; 3]; CELLS], source_limits)
+        .unwrap();
+    assert_eq!(accepted_bits(&uniform), accepted_bits(&field));
+    let before = accepted_bits(&field);
+    let selected: Vec<_> = (0..CELLS)
+        .map(|cell| field.lattice.grid.collision_model_at(cell))
+        .collect();
+    for mut rates in [vec![rate; CELLS - 1], vec![rate; CELLS]] {
+        if rates.len() == CELLS {
+            rates[CELLS - 3] = 2.0;
+        }
+        assert!(
+            field
+                .lattice
+                .grid
+                .set_central_moment_bulk_field(&rates, 1.2)
+                .is_err()
+        );
+        assert_eq!(accepted_bits(&field), before);
+        assert_eq!(
+            (0..CELLS)
+                .map(|cell| field.lattice.grid.collision_model_at(cell))
+                .collect::<Vec<_>>(),
+            selected
+        );
+    }
+}
+
+#[test]
+fn local_bulk_endpoint_failure_cancellation_and_legacy_heat_preserve_the_field() {
+    let mut slab = slab();
+    let (_, _, forces) = manufacture(
+        &mut slab,
+        [[0.8, 0.2, 0.0], [0.2, 0.2, 0.0], [0.0, 0.0, 0.2]],
+        0.7,
+        1.0,
+    );
+    slab.step_with_local_bulk_rheology_and_viscous_heating(
+        &[0.0; CELLS],
+        &forces,
+        1.2,
+        limits(),
+        controls(),
+        &CancelGate::new(),
+        local_material,
+    )
+    .unwrap();
+    let before = accepted_bits(&slab);
+    let selected: Vec<_> = (0..CELLS)
+        .map(|cell| slab.lattice.grid.collision_model_at(cell))
+        .collect();
+    for endpoint in [false, true] {
+        let mut at_last = false;
+        let result = slab.step_with_local_bulk_rheology_and_viscous_heating(
+            &[0.0; CELLS],
+            &forces,
+            1.4,
+            limits(),
+            controls(),
+            &CancelGate::new(),
+            |point, retained| {
+                if point.cell == CELLS - 3 {
+                    at_last = true;
+                }
+                if (!endpoint && point.cell == CELLS - 3)
+                    || (endpoint && at_last && point.cell == 2)
+                {
+                    return BulkViscousMaterial::try_new(*retained, 0.0);
+                }
+                local_material(point, retained)
+            },
+        );
+        assert!(matches!(result, Err(MaterialTransportError::State { .. })));
+        assert_eq!(accepted_bits(&slab), before);
+        assert_eq!(
+            (0..CELLS)
+                .map(|cell| slab.lattice.grid.collision_model_at(cell))
+                .collect::<Vec<_>>(),
+            selected
+        );
+    }
+    let gate = CancelGate::new();
+    assert!(matches!(
+        slab.step_with_local_bulk_rheology_and_viscous_heating(
+            &[0.0; CELLS],
+            &forces,
+            1.4,
+            limits(),
+            controls(),
+            &gate,
+            |point, retained| {
+                if point.cell == CELLS - 3 {
+                    gate.request();
+                }
+                local_material(point, retained)
+            },
+        ),
+        Err(MaterialTransportError::Cancelled)
+    ));
+    assert_eq!(accepted_bits(&slab), before);
+    assert!(matches!(
+        slab.step_with_material_rheology_and_viscous_heating(
+            &[0.0; CELLS],
+            &forces,
+            limits(),
+            controls(),
+            &CancelGate::new(),
+            resolve,
+        ),
+        Err(MaterialTransportError::Invalid(
+            "independent bulk relaxation requires explicitly sourced bulk heating"
+        ))
+    ));
+    assert_eq!(accepted_bits(&slab), before);
+    assert_eq!(
+        (0..CELLS)
+            .map(|cell| slab.lattice.grid.collision_model_at(cell))
+            .collect::<Vec<_>>(),
+        selected
+    );
 }
 
 #[test]

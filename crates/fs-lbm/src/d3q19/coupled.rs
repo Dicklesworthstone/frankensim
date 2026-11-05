@@ -72,10 +72,24 @@ pub struct PlatesGrid3 {
     // even/odd product belongs to this selector; no reference viscosity is copied.
     pub(crate) trt_magic: Option<f64>,
     // Independent trace and higher-order rates. Shear remains in local tau.
-    pub(crate) central_moment_bulk: Option<[f64; 2]>,
+    pub(crate) central_moment_bulk: Option<BulkRelaxation3>,
     post: Vec<[f64; Q3]>,
     plate_motion: Option<moving_walls::PlateMotion3>,
     plate_exchange: Option<[super::WallMomentumExchange3; 2]>,
+}
+
+#[derive(Clone)]
+pub(crate) enum BulkRelaxation3 {
+    Uniform([f64; 2]),
+    Field { rates: Vec<f64>, higher_order_rate: f64 },
+}
+impl BulkRelaxation3 {
+    fn at(&self, cell: usize) -> [f64; 2] {
+        match self {
+            Self::Uniform(rates) => *rates,
+            Self::Field { rates, higher_order_rate } => [rates[cell], *higher_order_rate],
+        }
+    }
 }
 
 /// A collision selection or plate-grid step was refused without publishing.
@@ -198,14 +212,52 @@ impl PlatesGrid3 {
         let rates = [bulk_rate, higher_order_rate];
         self.admit_collision(None, Some(rates))?;
         self.trt_magic = None;
-        self.central_moment_bulk = Some(rates);
+        self.central_moment_bulk = Some(BulkRelaxation3::Uniform(rates));
         Ok(())
     }
 
-    /// Independently authored `[bulk, higher-order]` rates, when selected.
+    /// Select spatial bulk relaxation while retaining local shear viscosity.
+    /// Supply one finite rate in `(0, 2)` per cell, including unused walls;
+    /// the higher-order rate is uniform and also lies in `(0, 2)`.
+    /// All storage and fluid-cell collision parameters are admitted before
+    /// the field replaces the previous selector. No populations or heat change.
+    pub fn set_central_moment_bulk_field(
+        &mut self,
+        bulk_rates: &[f64],
+        higher_order_rate: f64,
+    ) -> Result<(), PlateStepError3> {
+        let (plane, count) = self.checked_layout()?;
+        if bulk_rates.len() != count { return Err(PlateStepError3::Layout); }
+        for (cell, &rate) in bulk_rates.iter().enumerate() {
+            let tau = if (plane..count - plane).contains(&cell) { self.tau[cell] } else { 1.0 };
+            plate_collision(tau, None, Some([rate, higher_order_rate])).validate()
+                .map_err(|source| PlateStepError3::Collision { cell, source })?;
+        }
+        self.trt_magic = None;
+        self.central_moment_bulk = Some(BulkRelaxation3::Field {
+            rates: bulk_rates.to_vec(), higher_order_rate,
+        });
+        Ok(())
+    }
+
+    /// Uniform independently authored `[bulk, higher-order]` rates. Returns
+    /// `None` for a spatial field; inspect that field through `collision_model_at`.
     #[must_use]
     pub fn central_moment_bulk_rates(&self) -> Option<[f64; 2]> {
-        self.central_moment_bulk
+        match &self.central_moment_bulk {
+            Some(BulkRelaxation3::Uniform(rates)) => Some(*rates),
+            _ => None,
+        }
+    }
+
+    /// Whether bulk is independently relaxed, uniformly or spatially.
+    #[must_use]
+    pub fn has_independent_bulk_collision(&self) -> bool {
+        self.central_moment_bulk.is_some()
+    }
+
+    pub(crate) fn bulk_field_length_valid(&self, cells: usize) -> bool {
+        !matches!(&self.central_moment_bulk, Some(BulkRelaxation3::Field { rates, .. }) if rates.len() != cells)
     }
 
     /// Authored TRT product, or `None` for BGK or central-moment collision.
@@ -218,11 +270,11 @@ impl PlatesGrid3 {
     /// As with [`Self::moments3`], an index outside the storage panics.
     #[must_use]
     pub fn collision_model_at(&self, cell: usize) -> CollisionModel3 {
-        self.collision_with_tau(self.tau[cell])
+        self.collision_with_tau_at(cell, self.tau[cell])
     }
 
-    pub(crate) fn collision_with_tau(&self, tau: f64) -> CollisionModel3 {
-        plate_collision(tau, self.trt_magic, self.central_moment_bulk)
+    pub(crate) fn collision_with_tau_at(&self, cell: usize, tau: f64) -> CollisionModel3 {
+        plate_collision(tau, self.trt_magic, self.central_moment_bulk.as_ref().map(|bulk| bulk.at(cell)))
     }
 
     fn checked_layout(&self) -> Result<(usize, usize), PlateStepError3> {
@@ -232,7 +284,7 @@ impl PlatesGrid3 {
             return Err(PlateStepError3::Layout);
         };
         if [self.f.len(), self.tau.len(), self.fext.len(), self.post.len()]
-            .iter().any(|&length| length != count)
+            .iter().any(|&length| length != count) || !self.bulk_field_length_valid(count)
         {
             return Err(PlateStepError3::Layout);
         }

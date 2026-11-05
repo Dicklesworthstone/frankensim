@@ -29,6 +29,7 @@ mod simd;
 pub mod sparse;
 
 pub(crate) use fma::collision_kernel3;
+pub(crate) use coupled::BulkRelaxation3;
 
 pub use boundary::{
     BoundaryDynamicSgsConfig3, BoundaryDynamicSgsError3, BoundaryDynamicSgsReport3,
