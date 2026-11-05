@@ -3620,6 +3620,16 @@ equation, pressure dependence, both heat directions, natural/mixed evidence,
 equilibrium and source/orientation refusal. They were syntax/API reviewed;
 native compilation and execution remain pending constellation dependencies.
 
+`PlanarFreeSurfaceConvection` also implements the stationary material/phase-flow
+`FiniteGasConvection` trait. Its explicitly authored contact normal, solved
+surface and original bulk/film gas pass directly to the same plate evaluator,
+without fabricating a moving-liquid or finite-solid patch. Forced, natural and
+aiding mixed laws retain original source, regime and orientation support. Two
+provider specifications cover an independent forced-plate equation and pressure
+scaling, actual film temperature, natural/mixed evidence, normal reversal,
+opposing flow and equilibrium. Syntax/API review passed; native execution
+remains pending an admitted constellation build.
+
 The single-plate provider explicitly admits uniform boundary evolution: its
 authored plate frame, dimensions and flow do not depend on old patch indices.
 Coefficients still depend on the actual trial temperatures and original film

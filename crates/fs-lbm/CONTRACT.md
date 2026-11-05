@@ -7482,6 +7482,42 @@ native flow faces, late pressure-domain/cancellation rollback and small-reservoi
 capacity limits. Coefficients are synthetic. MR25/MR29 remain open for their
 broader moving solid/liquid integration.
 
+### Source convection on stationary material/phase contacts
+
+`environment::advance_finite_gas_with_material_convection` reuses the same
+finite-gas/material-flow observer and original thermal timeline.
+`FiniteGasConvectionContact` adds an explicitly authored physical unit normal
+to the existing exposed cell, area and half-cell geometry. Active area and
+material distance are positive; gas thickness is zero because convection
+replaces the prescribed film. Unit normals admit only normalization roundoff;
+no voxel face or flow projection is invented.
+
+Each source epoch retains the original current scalar conductivity and existing
+phase correction across the condensed half-cell. A constant-k representation
+of that explicit finite-volume approximation feeds the shared material surface
+root. Every actual surface trial queries the same gas at mean surface/bulk
+temperature and current EOS pressure, retains its selected source claims and
+calls `FiniteGasConvection` for original h evidence. Driven h is positive;
+`None` denotes exact equilibrium. Declared zero conductivity remains insulating.
+This held-cell-phase path does not resolve an internal phase front or a
+source-integrated k(T) profile.
+
+Actual signed gas heat enters condensed enthalpy and the opposite finite-gas
+energy once. Native latent fraction, exact solid/mushy face occupancy, retained
+momentum, advection, molecular heating, combined capacity bounds and rollback
+remain with their original owners. Reported secant conductance is a frozen
+heat-rate representation, not a nonlinear derivative. Surface temperature,
+material power, continuity residual, iteration count and coefficient evidence
+remain in `FiniteGasContactSample::convection`. Provider failures retain their
+original cell/material error; exhausted root work yields the typed
+`FiniteGasFlowError::SurfaceBalance`.
+
+Four focused native specifications cover independent half-cell/film and NASA
+internal-energy equations in both heat directions, latent heat, actual phase
+face/momentum response, equilibrium and transactional refusals. Syntax and
+whitespace checks passed; native compilation/execution remain pending an
+admitted constellation build.
+
 ## Material MHD drives native momentum and enthalpy reciprocally
 
 `conjugate::enthalpy::advection::feedback::mhd::advance_mhd_enthalpy_with_material_flow`

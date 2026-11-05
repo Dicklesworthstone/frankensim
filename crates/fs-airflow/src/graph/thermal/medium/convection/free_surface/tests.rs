@@ -16,6 +16,8 @@ mod orientation;
 mod sections;
 #[path = "body_tests.rs"]
 mod bodies;
+#[path = "material_flow_tests.rs"]
+mod material_flow;
 
 fn query<'a>(
     wall: f64,

@@ -10,6 +10,9 @@ const R: f64 = 8.314_462_618_153_24;
 #[path = "../../../nsf3_thermochemical/source.rs"]
 mod gas_source;
 
+#[path = "environment/convection.rs"]
+mod convection;
+
 fn gas_controls() -> GasEnergySolve {
     GasEnergySolve {
         minimum_temperature_k: 200.0,

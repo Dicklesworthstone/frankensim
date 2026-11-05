@@ -2,7 +2,7 @@
 //!
 //! Condensed cells retain their original total enthalpy (including latent heat).
 //! The closed fixed-volume gas retains NASA-9 INTERNAL energy, not cp*T or h.
-//! A prescribed stationary film exchanges equal/opposite joules between them.
+//! A stationary film or source convection exchanges equal/opposite joules.
 //! The resulting gas temperature and EOS pressure re-evaluate the same source
 //! transport, while condensed h controls phase, conductivity and native momentum.
 
@@ -10,6 +10,15 @@ use super::*;
 use fs_conduction::transient::deposition::{EnergyAudit, StepConfig};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve, IsochoricGasParcel};
+
+/// Source convection at the actual stationary material/gas surface.
+pub mod convection;
+pub use convection::{
+    FiniteGasConvection, FiniteGasConvectionContact, FiniteGasConvectionQuery,
+    FiniteGasConvectionSample, FiniteGasHeatTransferCoefficient,
+    advance_finite_gas_with_material_convection,
+};
+use convection::ConvectionBinding;
 
 /// Caller-resolved stationary exposed patch. One entry per receiving cell.
 /// Area cannot exceed that cell's exposed area after existing contacts/bed.
@@ -19,6 +28,7 @@ pub struct FiniteGasContact {
     pub area_m2: f64,
     /// Condensed centroid-to-interface distance and gas-film thickness [m].
     /// These are physical inputs, never inferred from a material or gas name.
+    /// `FiniteGasConvectionContact` requires zero gas thickness instead.
     pub distances_m: [f64; 2],
 }
 
@@ -30,11 +40,14 @@ pub struct FiniteGasContactSample {
     pub condensed_temperature_k: f64,
     pub condensed_conductivity_w_m_k: f64,
     pub gas_temperature_k: f64,
-    /// Mean-temperature film at the finite parcel's actual EOS pressure.
+    /// Actual surface/bulk mean film at the finite parcel's EOS pressure.
+    /// The prescribed-film path uses the condensed cell as its surface.
     pub film: ResolvedThermochemicalGasState,
     pub conductance_w_k: f64,
     /// Signed watts entering the condensed cell and leaving the gas.
     pub heat_into_condensed_w: f64,
+    /// Present only when the gas law resolves a conducting surface.
+    pub convection: Option<FiniteGasConvectionSample>,
 }
 
 /// Accepted exchange ledger. Gas storage belongs to a separate internal-energy
@@ -62,6 +75,12 @@ pub struct FiniteGasExchangeReport {
 pub enum FiniteGasFlowError<E> {
     Flow(MaterialFlowError<E>),
     Gas(GasEnergyError),
+    /// The shared surface root exhausted its explicitly supplied power budget.
+    SurfaceBalance {
+        cell: CellId,
+        residual_w: f64,
+        iterations: usize,
+    },
 }
 impl<E> From<DepositionError> for FiniteGasFlowError<E> {
     fn from(error: DepositionError) -> Self {
@@ -83,6 +102,8 @@ impl<E: core::fmt::Display> core::fmt::Display for FiniteGasFlowError<E> {
         match self {
             Self::Flow(error) => write!(f, "finite gas material flow: {error}"),
             Self::Gas(error) => write!(f, "finite gas material flow: {error}"),
+            Self::SurfaceBalance { cell, residual_w, iterations } => write!(f,
+                "finite gas cell {cell:?} surface did not close in {iterations} trials (heat residual {residual_w} W)"),
         }
     }
 }
@@ -113,6 +134,7 @@ struct GasFlow<'a, 'f, F, R, O, T> {
     flow: MaterialFlowFeedback<'f, F, R, O, T>,
     gas: IsochoricGasParcel,
     contacts: &'a [FiniteGasContact],
+    convection: Option<ConvectionBinding<'a>>,
     controls: GasEnergySolve,
     gas_temperature_slope: f64,
     reference: Vec<FiniteGasContactSample>,
@@ -158,6 +180,19 @@ where
                 return Err(invalid("finite gas needs the actual exposed source epoch without duplicate ambient convection").into());
             }
             let k = self.flow.effective_conductivity(sample)?;
+            if let Some(convection) = self.convection {
+                let boundary = convection.sample(
+                    index, &self.gas, cell.specific_h_j_kg, sample.temperature_k, k,
+                    &mut || check_gate(self.flow.gate, check),
+                )?;
+                if self.reference.get(index)
+                    .is_some_and(|start| !same_sources(&start.film, &boundary.film))
+                {
+                    return Err(invalid("finite gas convection left its original transport source claims").into());
+                }
+                result.push(boundary);
+                continue;
+            }
             let film_t = 0.5 * gas_t + 0.5 * sample.temperature_k;
             let point = self
                 .gas
@@ -194,6 +229,7 @@ where
                 film,
                 conductance_w_k,
                 heat_into_condensed_w,
+                convection: None,
             });
         }
         Ok(result)
@@ -438,6 +474,32 @@ where
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
     O: DepositionObserver,
 {
+    advance_finite_gas(
+        thermal, target_s, config, flow, gas, contacts, controls, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn advance_finite_gas<'t, 'f, F, R, O, T>(
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    config: StepConfig,
+    flow: &MaterialFlowFeedback<'f, F, R, O, T>,
+    gas: &IsochoricGasParcel,
+    contacts: &[FiniteGasContact],
+    controls: GasEnergySolve,
+    convection: Option<ConvectionBinding<'_>>,
+) -> Result<
+    (DepositionSimulation<'t>, MaterialFlowFeedback<'f, F, R, O, T>,
+        IsochoricGasParcel, FiniteGasExchangeReport),
+    FiniteGasFlowError<O::Error>,
+>
+where
+    F: Clone,
+    T: FlowTransportSnapshot,
+    R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
+    O: DepositionObserver,
+{
     check_gate(flow.gate, &mut || Ok(()))?;
     flow.check_map(thermal, &mut || Ok(()))?;
     if contacts.is_empty() || contacts.len() > flow.input.max_connections {
@@ -449,13 +511,17 @@ where
         if !seen.insert(contact.cell)
             || !contact.area_m2.is_finite()
             || contact.area_m2 < 0.0
-            || contact
-                .distances_m
-                .iter()
-                .any(|d| !d.is_finite() || *d <= 0.0)
+            || !contact.distances_m[0].is_finite()
+            || contact.distances_m[0] <= 0.0
+            || !contact.distances_m[1].is_finite()
+            || if convection.is_some() {
+                contact.area_m2 <= 0.0 || contact.distances_m[1] != 0.0
+            } else {
+                contact.distances_m[1] <= 0.0
+            }
         {
             return Err(invalid(
-                "finite gas needs unique cells, finite area and positive film distances",
+                "finite gas needs unique cells, positive material distance and gas geometry matching its selected heat law",
             )
             .into());
         }
@@ -465,6 +531,7 @@ where
         flow: flow.clone(),
         gas: gas.clone(),
         contacts,
+        convection,
         controls,
         gas_temperature_slope: slope,
         reference: Vec::new(),

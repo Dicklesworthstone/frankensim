@@ -411,5 +411,26 @@ impl fs_lbm::material::free_surface::enthalpy::conduction::FreeSurfaceBodyGasCon
     }
 }
 
+impl fs_lbm::conjugate::enthalpy::advection::feedback::environment::FiniteGasConvection
+    for PlanarFreeSurfaceConvection
+{
+    fn coefficient(
+        &self,
+        query: fs_lbm::conjugate::enthalpy::advection::feedback::environment::FiniteGasConvectionQuery<'_>,
+    ) -> Result<
+        Option<Evidence<fs_lbm::conjugate::enthalpy::advection::feedback::environment::FiniteGasHeatTransferCoefficient>>,
+        fs_material::MaterialError,
+    > {
+        // The stationary phase/flow contact authors its own physical normal.
+        // No liquid patch or finite-solid geometry is invented for this owner.
+        self.coefficient_at(PlateQuery {
+            outward_normal: query.contact.outward_normal,
+            surface_temperature_k: query.surface_temperature_k,
+            bulk: query.bulk,
+            film: query.film,
+        }).map_err(|error| fs_material::MaterialError::State { what: error.to_string() })
+    }
+}
+
 #[cfg(test)]
 mod tests;
