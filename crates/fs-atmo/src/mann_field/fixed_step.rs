@@ -18,6 +18,11 @@ use std::sync::Arc;
 
 mod average;
 pub use average::{FIXED_STEP_MANN_AVERAGE_KERNEL, MannStepAverage, TranslatingMannStepAverage};
+mod bridge;
+pub use bridge::{
+    MANN_OU_BRIDGE_KERNEL, MAX_MANN_OU_BRIDGE_DEPTH, MannOuBridge, MannOuBridgeFrame,
+    MannOuBridgeSampleReport,
+};
 
 /// Separate innovation namespace; no existing 120 Hz stream is changed.
 pub const FIXED_STEP_MANN_KERNEL: u32 = 0x4d46_5354;

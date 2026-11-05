@@ -322,3 +322,64 @@ nonzero innovation variance at long correlation times. Ordinary-path arithmetic
 and its existing golden remain unchanged. At decay below f64 resolution, `rho`
 can still round to one; this correction preserves the representable short-step
 diffusion and does not claim to resolve mean reversion over that enormous time.
+
+## Replayable conditional OU observations between fixed steps
+
+`fixed_step::MannOuBridge` prepares the accepted state of a `FixedStepMannField`
+and that owner's exact next endpoint without advancing it. The right endpoint
+uses the original fixed-step counter and multiply/add order, so observing either
+endpoint reproduces the ordinary owner bit for bit. Arbitrary admitted f64
+physical times are observed through a canonical recursively bisected Gaussian
+OU bridge. Shared ancestors provide the correct conditional cross-time covariance;
+reordering observations, rejected CFD stages and smaller-step retries do not
+change the represented path. There is no endpoint interpolation and no independent
+per-query noise.
+
+For left and right OU durations `dl, dr` and correlation time `tau`, define
+`a = exp(-dl/tau)`, `b = exp(-dr/tau)`, `qL = -expm1(-2dl/tau)`,
+`qR = -expm1(-2dr/tau)` and `qT = -expm1(-2(dl+dr)/tau)`. The conditional
+midpoint mean has weights `a*qR/qT` and `b*qL/qT`, and its variance is
+`(qL/qT)*qR`. Dividing before multiplication avoids premature variance underflow;
+small positive innovations survive even when an interior decay rounds to one.
+Rounded physical endpoint spacing is mapped affinely onto the original nominal
+fixed dt. Spatial synthesis retains the requested physical time exactly. Claims
+of temporal exactness concern this declared finite-mode Gaussian model and its
+nominal clock, subject to floating-point rounding.
+
+The independent `0x4d425247` kernel addresses each canonical midpoint using its
+finite f64 magnitude bits, sign, mode and quadrature, with the retained interval
+step mixed injectively into the bridge seed. Every normal consumes a disjoint
+pair of counters within one interval. Existing endpoint and interval-average
+streams remain unchanged. A source checkpoint plus the bridge seed and depth
+admission reproduces subsequent interval observations; frames are observations,
+not additional accepted source owners.
+
+Preparation costs `4 * mode_count` normal draws. Each interior observation costs
+exactly `4 * mode_count * tree_depth`; endpoint observations require none.
+`required_normal_draws` permits the caller to charge stages and retries against a
+single outer budget. The explicit maximum depth is at most 128. Out-of-interval,
+nonfinite, nonrepresentable and deeper queries are refused without snapping.
+One bounded ancestry and one coefficient table are reused across all modes;
+consecutive equal correlation times reuse coefficients. Successful frame updates
+and point, box, harmonic slip-plane and wall/box samples allocate no numerical
+storage and use the original complete Mann tensor and analytic spatial gradients.
+
+The immutable interval and reusable frame each admit nominal numerical storage
+of 88 bytes per mode and validate actual capacities. This conservatively counts
+the shared original temporal arrays once per owner, excludes immutable spectral
+geometry and fixed metadata, and separately uses at most 128 stack ancestry nodes
+and 128 coefficient triples. Frame updates validate the original definition and
+bridge seed, poll cancellation within 64 normal draws and 16 coefficient nodes,
+and publish amplitudes and time together only after the final poll. A refused or
+cancelled update preserves its previously accepted frame and the original source.
+Frames can be reused across successive intervals of the same source and seed.
+
+Verification includes original endpoint and filtered-synthesis bit equality,
+non-dyadic query-order/retry replay, interval reuse, an independent Gaussian
+Schur-complement oracle for conditional means, variances and cross-time covariance
+over 65,536 scalar realizations, slow/fast and rounded-clock limits, signed-time
+addressing, depth/work/storage refusal and mid-operation/final cancellation.
+These observations do not validate atmospheric intermittency, nonlinear energy
+transfer or unresolved stresses, and OU forcing remains temporally unbounded in
+frequency. The pre-existing interval-average API retains its independently keyed
+integral bridge; this API does not establish a joint realization with those means.
