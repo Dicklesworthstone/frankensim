@@ -2,7 +2,7 @@
 
 use super::{
     Accumulator, BranchEnd, Conserved, Error, Euler1d, GasNetwork1d, NetworkTotals, Plenum,
-    PlenumConnection, poll,
+    PlenumBoundaryWork, PlenumConnection, poll,
 };
 
 /// Specific gravitational potentials [J/kg] in the retained topology order.
@@ -12,6 +12,8 @@ use super::{
 /// Each compact plenum is at its declared single potential, not a hydrostatic
 /// column: its incident faces must agree with that value. A common additive
 /// shift changes the energy datum and cannot change the evolving gas state.
+/// Prescribed chamber compression changes volume at this fixed potential; it
+/// does not specify translation or a resolved gravitational profile inside it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NetworkGravity {
     /// One offset for each branch's original local zero [J/kg].
@@ -36,7 +38,8 @@ pub struct NetworkGravityReport {
     /// Actual gravitational work on the resolved branch gas [J].
     pub gravity_work: f64,
     /// Gas-plus-centered-potential change minus its external transport and
-    /// explicitly reported wall heat [J]. The thermal report adds the wall
+    /// explicitly reported wall heat and mechanical boundary work [J]. The
+    /// thermal report adds the wall
     /// storage and external reservoir heat for the complete thermal balance.
     /// This conditioned residual retains small gravitational work even under
     /// a large arbitrary common datum. Internal port transfer cancels.
@@ -142,7 +145,7 @@ impl NetworkGravity {
         &self,
         branches: &[Euler1d],
         plenums: &[Plenum],
-        candidate_plenums: Option<&[Conserved]>,
+        candidate_plenums: Option<(&[Conserved], &[PlenumBoundaryWork])>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkTotals, Error> {
         let mut sum = Accumulator::default();
@@ -169,8 +172,11 @@ impl NetworkGravity {
         }
         for (i, plenum) in plenums.iter().enumerate() {
             poll(cancelled)?;
-            let state = candidate_plenums.map_or(plenum.state, |states| states[i]);
-            let mass = state.density * plenum.volume_m3;
+            let (state, volume) = candidate_plenums.map_or(
+                (plenum.state, plenum.volume_m3),
+                |(states, motion)| (states[i], motion[i].final_volume_m3),
+            );
+            let mass = state.density * volume;
             sum.add(
                 mass,
                 mass * (self.plenum_potentials_j_kg[i] - self.reference()),
@@ -201,7 +207,10 @@ impl GasNetwork1d {
         gravity.storage(
             &self.branches,
             &self.plenums,
-            candidates.then_some(self.work.plenum_candidate.as_slice()),
+            candidates.then_some((
+                self.work.plenum_candidate.as_slice(),
+                self.work.plenum_work_candidate.as_slice(),
+            )),
             cancelled,
         )
     }

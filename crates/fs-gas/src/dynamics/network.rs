@@ -1,10 +1,12 @@
-//! Shock-carrying passages coupled through finite, rigid, perfectly mixed plenums.
+//! Shock-carrying passages coupled through finite, perfectly mixed plenums.
 //!
 //! Every port uses one source-owned characteristic gas flux for both owners.
 //! Branches resolve axial momentum and total energy; a compact plenum stores
 //! mass and internal energy and has no resolved bulk momentum. Incoming kinetic
 //! energy remains in its energy balance. The stationary plenum support receives
 //! the reported port impulse without doing mechanical work.
+//! Prescribed chamber volume motion separately supplies the source-owned
+//! pressure work, with extensive gas storage evolved on the same RK stages.
 //!
 //! All branches and plenums advance in one transactional SSP RK2 step. This is
 //! an inviscid, frozen-composition engineering model: a finite plenum is not a
@@ -18,6 +20,9 @@ use super::{
     StepReport, Totals, allocated, poll, positive,
 };
 use fs_qty::Time;
+
+// Frozen and evolving-composition chambers report the same physical exchange.
+pub use crate::multicomponent::network::PlenumBoundaryWork;
 
 mod gravity;
 mod step;
@@ -72,7 +77,7 @@ pub struct PlenumConnection {
     pub plenum: usize,
 }
 
-/// Finite, stationary, adiabatic, well-mixed gas volume.
+/// Finite, acoustically compact, well-mixed gas volume.
 ///
 /// The state uses the network's common frozen mixture and energy reference.
 /// Its momentum is exactly zero; `state.energy` is referenced internal-energy
@@ -103,7 +108,7 @@ impl Plenum {
         }
         Ok(Self { volume_m3, state })
     }
-    /// Original rigid volume [m³].
+    /// Current accepted physical volume [m³].
     pub const fn volume_m3(&self) -> f64 {
         self.volume_m3
     }
@@ -146,7 +151,7 @@ pub struct PortExchange {
 pub struct NetworkStepReport {
     /// Actual common elapsed duration, no greater than the requested maximum.
     pub elapsed: Time,
-    /// Largest branch or plenum face-speed CFL over both accepted stages.
+    /// Largest acoustic or compact-volume fractional-change CFL over both stages.
     pub maximum_cfl: f64,
     /// Number of rejected, halved trials before acceptance.
     pub halvings: usize,
@@ -162,8 +167,12 @@ pub struct NetworkStepReport {
     pub after: NetworkTotals,
     /// Accepted inflow through external branch ends only. Connected ports are internal.
     pub boundary_change: NetworkTotals,
-    /// Gas `after - before - boundary_change - gravity_work - heat_to_gas`, in the common
-    /// formation-energy gauge. Momentum remains a per-branch quantity.
+    /// Mechanical pressure work done ON all plenums [J], separate from heat,
+    /// transported enthalpy, gravity and prescribed sliding-wall work.
+    pub boundary_work_on_gas_j: f64,
+    /// Gas storage change minus external transport, gravity work, heat, sliding-
+    /// wall work and plenum boundary work, in the common formation-energy gauge.
+    /// Momentum remains a per-branch quantity.
     pub conservation_residual: NetworkTotals,
     /// Separate gas-plus-potential balance when a shared potential is declared.
     pub gravity: Option<NetworkGravityReport>,
@@ -184,9 +193,10 @@ struct NetworkWorkspace {
     branch_before: Vec<Totals>,
     branch_report_candidate: Vec<StepReport>,
     port_exchange_candidate: Vec<PortExchange>,
+    plenum_work_candidate: Vec<PlenumBoundaryWork>,
 }
 
-/// A shared-clock network of existing Euler branches and finite rigid plenums.
+/// A shared-clock network of existing Euler branches and finite compact plenums.
 ///
 /// Original source identity, composition, caloric interval and energy gauge must
 /// match exactly across branches. Accepted branch clocks must also match. Each
@@ -202,6 +212,7 @@ pub struct GasNetwork1d {
     work: NetworkWorkspace,
     port_exchanges: Vec<PortExchange>,
     branch_reports: Vec<StepReport>,
+    plenum_work: Vec<PlenumBoundaryWork>,
     last_report: Option<NetworkStepReport>,
 }
 impl GasNetwork1d {
@@ -209,8 +220,9 @@ impl GasNetwork1d {
     ///
     /// The sum of branch cells and plenums is bounded by `MAX_EULER_CELLS`.
     /// Periodic branches may remain isolated but cannot have connected endpoints.
-    /// An unconnected plenum retains its initial state. Every plenum state belongs
-    /// to the common frozen source and is admitted before construction succeeds.
+    /// An unconnected plenum exchanges no mass; prescribed motion and thermal
+    /// sources may still change its state. Every plenum state belongs to the
+    /// common frozen source and is admitted before construction succeeds.
     pub fn new(
         branches: Vec<Euler1d>,
         plenums: Vec<Plenum>,
@@ -324,9 +336,11 @@ impl GasNetwork1d {
             branch_before: allocated(branches.len(), Totals::default())?,
             branch_report_candidate: allocated(branches.len(), empty_report())?,
             port_exchange_candidate: allocated(connections.len(), PortExchange::default())?,
+            plenum_work_candidate: allocated(plenums.len(), PlenumBoundaryWork::default())?,
         };
         let port_exchanges = allocated(connections.len(), PortExchange::default())?;
         let branch_reports = allocated(branches.len(), empty_report())?;
+        let plenum_work = allocated(plenums.len(), PlenumBoundaryWork::default())?;
         poll(&mut cancelled)?;
         Ok(Self {
             branches,
@@ -337,6 +351,7 @@ impl GasNetwork1d {
             work,
             port_exchanges,
             branch_reports,
+            plenum_work,
             last_report: None,
         })
     }
@@ -377,6 +392,11 @@ impl GasNetwork1d {
     /// A branch's boundary change includes its connected and external ends.
     pub fn accepted_branch_reports(&self) -> Option<&[StepReport]> {
         self.last_report.map(|_| self.branch_reports.as_slice())
+    }
+    /// Physical volume endpoints and mechanical pressure work in plenum order.
+    /// Failed and cancelled steps retain the preceding accepted exchanges.
+    pub fn accepted_plenum_boundary_work(&self) -> Option<&[PlenumBoundaryWork]> {
+        self.last_report.map(|_| self.plenum_work.as_slice())
     }
 }
 
@@ -444,5 +464,8 @@ fn empty_report() -> StepReport {
 #[cfg(test)]
 #[path = "network/physics_tests.rs"]
 mod physics_tests;
+#[cfg(test)]
+#[path = "network/moving_tests.rs"]
+mod moving_tests;
 #[cfg(test)]
 mod tests;

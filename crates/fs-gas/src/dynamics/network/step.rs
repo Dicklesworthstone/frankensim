@@ -4,7 +4,8 @@ use super::super::{
 };
 use super::{
     Accumulator, BranchEnd, GasNetwork1d, NetworkGravityReport, NetworkStepReport,
-    NetworkThermalReport, NetworkTotals, NetworkWallOperator, PlenumThermalOperator, PortExchange,
+    NetworkThermalReport, NetworkTotals, NetworkWallOperator, PlenumBoundaryWork,
+    PlenumThermalOperator, PortExchange,
 };
 use super::thermal::BranchSource;
 use crate::multicomponent::network::wall_exchange::NetworkWallReport;
@@ -47,7 +48,36 @@ impl GasNetwork1d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
-        self.step_inner(maximum_duration, controls, None, cancelled)
+        self.step_inner(maximum_duration, controls, None, None, cancelled)
+    }
+
+    /// Advance prescribed chamber motion and port transport on the same SSP RK2
+    /// stages. Rates are signed dV/dt [m³/s], one per retained plenum, and are
+    /// constant over the accepted interval. Negative rates compress the gas.
+    ///
+    /// Mass and internal energy advance extensively on the represented volumes.
+    /// The original variable-Cp source supplies pressure and compression heating;
+    /// `-p dV/dt` is mechanical work, not an added heat source. Accepted volume
+    /// endpoints and work are returned by [`Self::accepted_plenum_boundary_work`].
+    /// Acoustic and volume-change CFL limits may shorten the requested duration.
+    /// Failure publishes no state, geometry, clock or receipt. All-zero rates
+    /// use the original rigid arithmetic. Compact chambers remain perfectly
+    /// mixed: this does not resolve their internal piston shocks or inertia.
+    pub fn step_with_volume_rates(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        volume_rates_m3_s: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        let moving = self.admit_volume_rates(volume_rates_m3_s, &mut cancelled)?;
+        self.step_inner(
+            maximum_duration,
+            controls,
+            moving.then_some(volume_rates_m3_s),
+            None,
+            cancelled,
+        )
     }
 
     /// Advance transport, then original wall sources on plenums and any
@@ -68,6 +98,7 @@ impl GasNetwork1d {
         self.step_inner(
             maximum_duration,
             controls,
+            None,
             Some((thermal, thermal_controls)),
             cancelled,
         )
@@ -88,15 +119,65 @@ impl GasNetwork1d {
         self.step_inner(
             maximum_duration,
             controls,
+            None,
             Some((walls, wall_controls)),
             cancelled,
         )
+    }
+
+    /// Compose chamber compression/expansion with the original finite wall
+    /// inventories, shared walls and branch losses in one atomic interval.
+    ///
+    /// Transport and pressure work use SSP RK2; the existing implicit wall
+    /// source follows at the actual accepted endpoint volume and duration.
+    /// This composition remains first order in thermal/transport splitting.
+    /// Accepted wall geometry is rebound only after the whole step succeeds.
+    /// Authored conductances, wall masses and port areas remain explicit inputs:
+    /// a volume rate alone does not determine their geometric evolution.
+    pub fn step_with_walls_and_volume_rates(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        volume_rates_m3_s: &[f64],
+        walls: &mut NetworkWallOperator<'_>,
+        wall_controls: WallControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        let moving = self.admit_volume_rates(volume_rates_m3_s, &mut cancelled)?;
+        self.step_inner(
+            maximum_duration,
+            controls,
+            moving.then_some(volume_rates_m3_s),
+            Some((walls, wall_controls)),
+            cancelled,
+        )
+    }
+
+    fn admit_volume_rates(
+        &self,
+        volume_rates_m3_s: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<bool, Error> {
+        poll(cancelled)?;
+        if volume_rates_m3_s.len() != self.plenums.len() {
+            return Err(Error::Invalid("one volume rate is required for every plenum"));
+        }
+        let mut moving = false;
+        for &rate in volume_rates_m3_s {
+            poll(cancelled)?;
+            if !rate.is_finite() {
+                return Err(Error::Invalid("plenum volume rates must be finite"));
+            }
+            moving |= rate != 0.0;
+        }
+        Ok(moving)
     }
 
     fn step_inner(
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        volume_rates: Option<&[f64]>,
         mut thermal: Option<(&mut PlenumThermalOperator<'_>, WallControl)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
@@ -154,6 +235,13 @@ impl GasNetwork1d {
                 plenum.volume_m3 * plenum.state.density,
                 plenum.volume_m3 * plenum.state.energy,
             )?;
+            if let Some(rates) = volume_rates {
+                let local = rates[i].abs() / plenum.volume_m3;
+                if !local.is_finite() {
+                    return Err(Error::Invalid("unrepresentable initial plenum volume rate"));
+                }
+                rate = rate.max(local);
+            }
         }
         for connection in &self.connections {
             poll(&mut cancelled)?;
@@ -196,12 +284,13 @@ impl GasNetwork1d {
                 controls.reconstruction
             };
             let trial = self
-                .attempt(dt, controls.cfl, reconstruction, &mut cancelled)
+                .attempt(dt, controls.cfl, reconstruction, volume_rates, &mut cancelled)
                 .and_then(|maximum_rate| {
                     let heat = match &mut thermal {
                         Some((operator, controls)) => Some(operator.prepare(
                             &mut self.branches,
                             &mut self.work.plenum_candidate,
+                            &self.work.plenum_work_candidate,
                             Time::new(dt),
                             *controls,
                             &mut cancelled,
@@ -233,10 +322,9 @@ impl GasNetwork1d {
                         core::mem::swap(&mut branch.states, &mut branch.work.candidate);
                         branch.time = new_time;
                     }
-                    for (plenum, &candidate) in
-                        self.plenums.iter_mut().zip(&self.work.plenum_candidate)
-                    {
-                        plenum.state = candidate;
+                    for (i, plenum) in self.plenums.iter_mut().enumerate() {
+                        plenum.state = self.work.plenum_candidate[i];
+                        plenum.volume_m3 = self.work.plenum_work_candidate[i].final_volume_m3;
                     }
                     core::mem::swap(
                         &mut self.port_exchanges,
@@ -247,8 +335,9 @@ impl GasNetwork1d {
                         &mut self.work.branch_report_candidate,
                     );
                     if let (Some((operator, _)), Some(heat)) = (&mut thermal, heat) {
-                        operator.commit(heat);
+                        operator.commit(heat, &self.work.plenum_work_candidate);
                     }
+                    core::mem::swap(&mut self.plenum_work, &mut self.work.plenum_work_candidate);
                     self.last_report = Some(report);
                     return Ok(report);
                 }
@@ -273,14 +362,36 @@ impl GasNetwork1d {
         dt: f64,
         cfl: f64,
         reconstruction: Reconstruction,
+        volume_rates: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
-        let a = self.evaluate(false, reconstruction, cancelled)?;
+        // Every retry starts from accepted geometry. A nonzero rate must move
+        // the represented volume rather than spend work on a rounded-away step.
+        for (i, plenum) in self.plenums.iter().enumerate() {
+            poll(cancelled)?;
+            let rate = volume_rates.map_or(0.0, |rates| rates[i]);
+            let volume = plenum.volume_m3 + dt * rate;
+            if !positive(volume)
+                || (rate != 0.0 && volume == plenum.volume_m3)
+                || (rate != 0.0
+                    && (volume - plenum.volume_m3).is_sign_positive() != rate.is_sign_positive())
+            {
+                return Err(Error::Invalid(
+                    "plenum motion has no positive representable endpoint volume",
+                ));
+            }
+            self.work.plenum_work_candidate[i] = PlenumBoundaryWork {
+                initial_volume_m3: plenum.volume_m3,
+                final_volume_m3: volume,
+                work_on_gas_j: 0.0,
+            };
+        }
+        let a = self.evaluate(false, reconstruction, volume_rates, cancelled)?;
         admit_cfl(a, dt, cfl)?;
-        self.forward_stage(false, dt, cancelled)?;
-        let b = self.evaluate(true, reconstruction, cancelled)?;
+        self.forward_stage(false, dt, volume_rates, cancelled)?;
+        let b = self.evaluate(true, reconstruction, volume_rates, cancelled)?;
         admit_cfl(b, dt, cfl)?;
-        self.forward_stage(true, dt, cancelled)?;
+        self.forward_stage(true, dt, volume_rates, cancelled)?;
         Ok(a.max(b))
     }
 
@@ -288,6 +399,7 @@ impl GasNetwork1d {
         &mut self,
         second: bool,
         reconstruction: Reconstruction,
+        volume_rates: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         self.work.endpoint_fluxes.fill([None; 2]);
@@ -305,6 +417,18 @@ impl GasNetwork1d {
                 Some(self.work.plenum_primitive[i].temperature),
                 cancelled,
             )?;
+            if let Some(rates) = volume_rates {
+                let volume = if second {
+                    self.work.plenum_work_candidate[i].final_volume_m3
+                } else {
+                    self.plenums[i].volume_m3
+                };
+                let local = rates[i].abs() / volume;
+                if !local.is_finite() {
+                    return Err(Error::Invalid("unrepresentable plenum stage volume rate"));
+                }
+                self.work.plenum_signal_rates[i] = local;
+            }
         }
         for connection in &self.connections {
             poll(cancelled)?;
@@ -375,7 +499,12 @@ impl GasNetwork1d {
                     (next - self.work.plenum_rhs[connection.plenum][k]) - y;
                 self.work.plenum_rhs[connection.plenum][k] = next;
             }
-            let rate = 0.5 * area * (flux.signal_speed / self.plenums[connection.plenum].volume_m3);
+            let volume = if second {
+                self.work.plenum_work_candidate[connection.plenum].final_volume_m3
+            } else {
+                self.plenums[connection.plenum].volume_m3
+            };
+            let rate = 0.5 * area * (flux.signal_speed / volume);
             if !positive(rate) {
                 return Err(Error::Invalid("unrepresentable plenum face CFL"));
             }
@@ -426,6 +555,7 @@ impl GasNetwork1d {
         &mut self,
         second: bool,
         dt: f64,
+        volume_rates: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         for branch in &mut self.branches {
@@ -478,6 +608,52 @@ impl GasNetwork1d {
             } else {
                 plenum.state
             };
+            let volume_rate = volume_rates.map_or(0.0, |rates| rates[i]);
+            if volume_rate != 0.0 {
+                // RK averages extensive storage, never densities on different
+                // volumes. Both stages use the same source-owned pressure work
+                // recorded below; formation references cancel at fixed mass.
+                let initial_volume = plenum.volume_m3;
+                let final_volume = self.work.plenum_work_candidate[i].final_volume_m3;
+                let stage_volume = if second { final_volume } else { initial_volume };
+                let pressure_power = -self.work.plenum_primitive[i].pressure * volume_rate;
+                if !pressure_power.is_finite() {
+                    return Err(Error::Invalid("unrepresentable mechanical plenum power"));
+                }
+                let mass = stage_volume * q.density + dt * self.work.plenum_rhs[i][0];
+                let energy = stage_volume * q.energy
+                    + dt * (self.work.plenum_rhs[i][1] + pressure_power);
+                let next = Conserved {
+                    density: if second {
+                        (0.5 * initial_volume * plenum.state.density + 0.5 * mass) / final_volume
+                    } else {
+                        mass / final_volume
+                    },
+                    momentum: 0.0,
+                    energy: if second {
+                        (0.5 * initial_volume * plenum.state.energy + 0.5 * energy) / final_volume
+                    } else {
+                        energy / final_volume
+                    },
+                };
+                self.branches[0].gas.decode(
+                    next,
+                    Some(self.work.plenum_primitive[i].temperature),
+                    cancelled,
+                )?;
+                let work = self.work.plenum_work_candidate[i].work_on_gas_j
+                    + (0.5 * dt) * pressure_power;
+                if !work.is_finite() {
+                    return Err(Error::Invalid("unrepresentable mechanical plenum work"));
+                }
+                self.work.plenum_work_candidate[i].work_on_gas_j = work;
+                if second {
+                    self.work.plenum_candidate[i] = next;
+                } else {
+                    self.work.plenum_stage[i] = next;
+                }
+                continue;
+            }
             let ratio = dt / plenum.volume_m3;
             let advanced = Conserved {
                 density: q.density + ratio * self.work.plenum_rhs[i][0],
@@ -635,9 +811,10 @@ impl GasNetwork1d {
             fallbacks += a.fallbacks + b.fallbacks;
             limited += a.limited + b.limited;
         }
-        for (plenum, q) in self.plenums.iter().zip(&self.work.plenum_candidate) {
+        for (i, q) in self.work.plenum_candidate.iter().enumerate() {
             poll(cancelled)?;
-            after.add(plenum.volume_m3 * q.density, plenum.volume_m3 * q.energy)?;
+            let volume = self.work.plenum_work_candidate[i].final_volume_m3;
+            after.add(volume * q.density, volume * q.energy)?;
         }
         for (port, connection) in self.connections.iter().enumerate() {
             poll(cancelled)?;
@@ -669,6 +846,12 @@ impl GasNetwork1d {
         let gravity_work = gravity_work_sum.totals().energy;
         let heat_to_gas = heat.map_or(0.0, |report| report.heat_to_gas_j);
         let wall_work = heat.map_or(0.0, |report| report.mechanical_work_to_gas_j);
+        let mut boundary_work = Accumulator::default();
+        for motion in &self.work.plenum_work_candidate {
+            poll(cancelled)?;
+            boundary_work.add(0.0, motion.work_on_gas_j)?;
+        }
+        let boundary_work_on_gas_j = boundary_work.totals().energy;
         let conservation_residual = NetworkTotals {
             mass: after.mass - before.mass - boundary_change.mass,
             energy: after.energy
@@ -676,7 +859,8 @@ impl GasNetwork1d {
                 - boundary_change.energy
                 - gravity_work
                 - heat_to_gas
-                - wall_work,
+                - wall_work
+                - boundary_work_on_gas_j,
         };
         if !conservation_residual.mass.is_finite() || !conservation_residual.energy.is_finite() {
             return Err(Error::Invalid("non-finite complete network balance"));
@@ -689,7 +873,8 @@ impl GasNetwork1d {
             // reference. Merely differencing absolute potential storage would
             // discard small resolved gravity work under a large common datum.
             let total_residual =
-                (after.energy - before.energy - boundary_change.energy - heat_to_gas - wall_work)
+                (after.energy - before.energy - boundary_change.energy - heat_to_gas - wall_work
+                    - boundary_work_on_gas_j)
                     + (after_centered_potential_energy
                         - potential_before
                         - boundary_centered_potential_energy_change);
@@ -747,6 +932,7 @@ impl GasNetwork1d {
             before,
             after,
             boundary_change,
+            boundary_work_on_gas_j,
             conservation_residual,
             gravity,
             thermal,

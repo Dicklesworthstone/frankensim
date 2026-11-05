@@ -36,8 +36,9 @@ impl<'law> NetworkWallOperator<'law> {
     /// using one wall-energy increment unknown and the original gas solver.
     /// Transport/source composition remains first order. Optional finite wall
     /// links compose afterward through [`Self::with_shared_wall_links`].
-    /// Geometric spatial conduction, changing geometry and multiple shared
-    /// walls on one gas cell are not inferred by this uniform-cell reduction.
+    /// Prescribed chamber volumes update the gas storage in each source solve.
+    /// Spatial conduction, changing port areas and multiple shared walls on one
+    /// gas cell are not inferred by this uniform-cell reduction.
     pub fn with_shared_walls(
         mut self,
         network: &GasNetwork1d,
@@ -224,6 +225,7 @@ impl SharedWalls<'_> {
         gas: &FrozenGas,
         branches: &mut [Euler1d],
         plenums: &mut [Conserved],
+        motion: &[PlenumBoundaryWork],
         branch_sources: &mut [BranchSource],
         duration: Time,
         control: WallControl,
@@ -244,6 +246,12 @@ impl SharedWalls<'_> {
             for (i, port) in group.accepted.ports.iter().enumerate() {
                 let state = gas_state(port.gas, branches, plenums);
                 group.initial[i] = [state.momentum, state.energy];
+                // Group volumes are solver workspace, unlike the enclosing
+                // accepted geometry binding. Reset them on every trial so a
+                // failed or shortened compression cannot leave stale storage.
+                if let SharedWallGas::Plenum(p) = port.gas {
+                    group.volumes[i] = motion[p].final_volume_m3;
+                }
             }
             let original = |location, temperature| {
                 let density = match location {

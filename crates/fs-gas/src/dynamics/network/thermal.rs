@@ -1,7 +1,7 @@
 //! Original wall loss and implicit storage on unpublished gas candidates.
 
 use super::{
-    Conserved, Error, Euler1d, FrozenGas, GasNetwork1d, allocated, poll, positive,
+    Conserved, Error, Euler1d, FrozenGas, GasNetwork1d, PlenumBoundaryWork, allocated, poll, positive,
 };
 use crate::dynamics::{CaloricDomain, Mesh1d};
 use crate::multicomponent::network::wall_exchange::NetworkWallReport;
@@ -32,7 +32,8 @@ pub struct NetworkThermalReport {
     /// Original implicit wall equation and represented gas/wall transfers.
     pub source: NetworkWallReport,
     /// Gas plus finite-wall change minus external gas/heat transport, sliding
-    /// wall work and gravity work, in the original formation-energy gauge [J].
+    /// wall work, plenum pressure work and gravity work, in the original
+    /// formation-energy gauge [J].
     pub gas_wall_conservation_residual_j: f64,
     /// Gas plus finite-wall and centered-potential balance [J], when gravity
     /// is declared. External potential transport is counted exactly once.
@@ -51,6 +52,8 @@ pub struct NetworkThermalReport {
 /// The source is applied after transport, over its ACTUAL accepted duration:
 /// this is first-order thermal/transport splitting, not a second-order IMEX
 /// method. Stiff heat exchange is backward Euler with bounded source inversion.
+/// Moving chambers use their candidate endpoint volumes during heat exchange;
+/// accepted volume bindings change only with the complete network commit.
 pub struct NetworkWallOperator<'law> {
     gas: FrozenGas,
     plenum_count: usize,
@@ -171,6 +174,7 @@ impl<'law> NetworkWallOperator<'law> {
         &mut self,
         branches: &mut [Euler1d],
         candidates: &mut [Conserved],
+        motion: &[PlenumBoundaryWork],
         duration: Time,
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
@@ -179,7 +183,9 @@ impl<'law> NetworkWallOperator<'law> {
         self.branch_source_candidate.fill(BranchSource::default());
         for (i, state) in candidates.iter_mut().enumerate() {
             poll(cancelled)?;
-            let report = self.prepare_cell(i, state, duration, controls, cancelled)?;
+            let report = self.prepare_cell(
+                i, state, motion[i].final_volume_m3, duration, controls, cancelled,
+            )?;
             if state.momentum != 0.0 {
                 return Err(Error::Invalid(
                     "plenum heat produced an inadmissible conservative state",
@@ -196,7 +202,9 @@ impl<'law> NetworkWallOperator<'law> {
             let mut correction = [0.0; 3];
             for (i, state) in branch.work.candidate.iter_mut().enumerate() {
                 poll(cancelled)?;
-                let report = self.prepare_cell(start + i, state, duration, controls, cancelled)?;
+                let report = self.prepare_cell(
+                    start + i, state, self.volumes[start + i], duration, controls, cancelled,
+                )?;
                 // One branch axis only. Different support impulses are never
                 // summed into a fictitious scalar network momentum.
                 accumulate(
@@ -218,6 +226,7 @@ impl<'law> NetworkWallOperator<'law> {
                 &self.gas,
                 branches,
                 candidates,
+                motion,
                 &mut self.branch_source_candidate,
                 duration,
                 controls,
@@ -232,6 +241,7 @@ impl<'law> NetworkWallOperator<'law> {
         &mut self,
         index: usize,
         state: &mut Conserved,
+        volume_m3: f64,
         duration: Time,
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
@@ -257,7 +267,7 @@ impl<'law> NetworkWallOperator<'law> {
                 &gas,
                 state.momentum,
                 state.energy,
-                self.volumes[index],
+                volume_m3,
                 duration,
                 contact,
                 source,
@@ -270,7 +280,7 @@ impl<'law> NetworkWallOperator<'law> {
                 &gas,
                 state.momentum,
                 state.energy,
-                self.volumes[index],
+                volume_m3,
                 duration,
                 contact,
                 controls,
@@ -288,7 +298,10 @@ impl<'law> NetworkWallOperator<'law> {
         Ok(update.report)
     }
 
-    pub(super) fn commit(&mut self, report: NetworkWallReport) {
+    pub(super) fn commit(&mut self, report: NetworkWallReport, motion: &[PlenumBoundaryWork]) {
+        for (volume, endpoint) in self.volumes.iter_mut().zip(motion) {
+            *volume = endpoint.final_volume_m3;
+        }
         core::mem::swap(&mut self.contacts, &mut self.candidate_contacts);
         if let Some(shared) = &mut self.shared {
             shared.commit();

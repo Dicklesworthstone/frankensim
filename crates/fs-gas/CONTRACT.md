@@ -3416,6 +3416,36 @@ The compact perfectly mixed chamber approximation remains. Rates are constant
 over each accepted step. Spatial piston shocks, branch-wall motion and piston
 inertia require other physical owners; this is not a spatial ALE solver.
 
+### Frozen-composition chambers with wall and gravity coupling
+
+`dynamics::network::GasNetwork1d::step_with_volume_rates` supplies the same
+prescribed compression/expansion to the original frozen-composition owner.
+Its SSP RK2 stages evolve extensive mass and source-referenced internal energy
+on the changing physical volume, with `-p dV/dt` supplied by the original
+variable-Cp caloric source. `accepted_plenum_boundary_work` uses the same
+`PlenumBoundaryWork` receipt as the evolving-mixture network. Construction
+allocates the stage/report buffers once; all-zero rates preserve rigid-step
+arithmetic. Positive represented volumes and stage acoustic/volume-change CFL
+limits precede atomic state, volume, clock and report publication.
+
+`step_with_walls_and_volume_rates` composes the existing implicit finite-wall,
+shared-wall and branch-loss sources at the actual accepted endpoint volumes.
+Wall geometry bindings update only on complete acceptance; retries rebuild
+thermal candidates from the accepted wall inventory and shortened geometry.
+Heat/work stay separate in gas, finite-wall and gravity balances. Compact
+gravitational storage uses the candidate volume and unchanged single-potential
+location, so compression cannot create gravitational mass. Authored wall
+conductance, area and thermal inventory are not inferred from a volume rate.
+Transport/thermal splitting remains first order despite second-order transport.
+
+Focused G0/G1/G3/G4 tests cover constant and linear-Cp compression/expansion
+against independent entropy integrals, connected pressure-wave discharge and
+work conservation, analytic finite-wall/shared-wall endpoints, gravity-datum
+invariance, formation-gauge and rigid-path identity, volume CFL, and early/late
+cancellation and source refusal without partial publication. These numerical
+conformance tests do not validate real engine geometry or a fully discrete
+entropy theorem.
+
 ### Moving chambers with reacting source operators
 
 `ReactingNetwork1d` composes prescribed plenum volume rates with finite-rate
