@@ -743,6 +743,17 @@
    "refs": [
     "frankensim-irp-v5-instrument-realism-pexfp.262"
    ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "ruling",
+   "title": "Bowed shell bodies: the plate is gone from the cello, and the viola's body carries more wood loss",
+   "decided": "Cello A3 now drives the computed cello shell body the D3 page plays, at 512 modes, in place of a 16-mode steel laboratory plate. On viola G3 and C3 the shell body's wood loss is raised 3.25 times on those notes only, because its bridge-coupled mode near 395 Hz reads Q 75 on this body against 15 to 27 printed for a viola (Coffey 2016, self-published). Viola C3 moves from the one-oscillator reduced body onto the shell.",
+   "why": "A cello page should not play a steel plate: the plate held fixed lines at 41, 149 and 283 Hz that no grader row measures. The owner's doctrine keeps reduced engines off the site wherever a full-engine render is gradable, and the extra loss is what makes the shell C3 gradable as the named note.",
+   "effect": "Cello A3 scores 8 of 14 against the plate's 11 and is too dark (centroid 295 Hz against 868). Viola G3 holds 7 of 14 with its second harmonic 5.5 dB lower and no brighter; viola C3 scores 5 of 14, equal to the reduced page, with four rows worse and four better, all named on its page.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.306"
+   ]
   }
  ]
 }
