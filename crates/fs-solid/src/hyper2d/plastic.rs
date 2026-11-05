@@ -31,7 +31,8 @@ use crate::mesh2::{Mesh2, quad_points, shapes_at};
 use crate::plastic3::increment::{self, IncrementControls, IncrementOperator};
 use crate::plastic3::{IncrementRecord, IncrementSettings, SmallStrainTetError};
 
-/// Source-bound, frozen-temperature forming with native thermal work accounts.
+/// Temperature-dependent forming, viscoplastic relaxation and creep using the
+/// same prepared sheet geometry and native equilibrium operator.
 pub mod thermal;
 
 /// Explicit size and reference-element quality envelope.
@@ -91,19 +92,19 @@ pub struct FinitePlasticSheetEnergy {
     pub endpoint_work_defect_j: f64,
 }
 
-impl FinitePlasticSheetEnergy {
-    /// Physical irreversible work; the kinetic potential is not material heat.
-    pub fn inelastic_dissipation_j(&self) -> f64 {
-        self.plastic_dissipation_j + self.creep_dissipation_j
-    }
-}
-
 /// One frozen-history force evaluation, with an optional consistent tangent.
 #[derive(Debug)]
 pub struct FinitePlasticSheetEvaluation {
     pub internal_force_n: Vec<[f64; 2]>,
     pub tangent_n_m: Option<Csr>,
     pub incremental_potential_j: f64,
+}
+
+impl FinitePlasticSheetEnergy {
+    /// Physical irreversible work; the kinetic potential is not material heat.
+    pub fn inelastic_dissipation_j(&self) -> f64 {
+        self.plastic_dissipation_j + self.creep_dissipation_j
+    }
 }
 
 #[derive(Debug)]
@@ -204,40 +205,10 @@ fn energy_gate(
     Ok(())
 }
 
-fn shared_duration_s<L: FinitePlaneStressMaterial>(
-    laws: FinitePlasticLawField<'_, L>,
-    cx: &Cx<'_>,
-) -> Result<Option<f64>, SmallStrainTetError> {
-    let mut duration = None;
-    let mut inspect = |law: &L| {
-        checkpoint(cx)?;
-        if let Some(dt) = law.duration_s() {
-            if !dt.is_finite() || dt <= 0.0 {
-                return Err(invalid(
-                    "sheet material duration must be finite and positive",
-                ));
-            }
-            if duration.is_some_and(|accepted| accepted != dt) {
-                return Err(invalid(
-                    "sheet kinetic laws must share one physical duration",
-                ));
-            }
-            duration = Some(dt);
-        }
-        Ok(())
-    };
-    match laws {
-        FinitePlasticLawField::Uniform(law) => inspect(law)?,
-        FinitePlasticLawField::PerElement(laws) => {
-            for law in laws {
-                inspect(law)?;
-            }
-        }
-    }
-    Ok(duration)
-}
-
-fn prepare_elements(
+// Geometry and integration weights belong to the sheet, independently of the
+// selected constitutive family. Static and thermal endpoints share this exact
+// preparation and the same force/tangent assembly below.
+fn prepare_geometry(
     mesh: &Mesh2,
     thickness_m: &[f64],
     budget: SheetAssemblyBudget,
@@ -261,8 +232,8 @@ fn prepare_elements(
         ));
     }
     let mut elements = Vec::with_capacity(mesh.elems.len());
+    let mut offset = 0;
     let mut reference_volume_m3 = 0.0;
-    let mut point_count = 0;
     let mut used = vec![false; mesh.nodes.len()];
     let mut seen = BTreeSet::new();
     for (e, conn) in mesh.elems.iter().enumerate() {
@@ -286,7 +257,7 @@ fn prepare_elements(
             arity,
             reference: [[0.0; 2]; 4],
             points: Vec::new(),
-            offset: point_count,
+            offset,
         };
         element.nodes[..arity].copy_from_slice(conn);
         for (a, &node) in conn.iter().enumerate() {
@@ -305,8 +276,8 @@ fn prepare_elements(
                 "sheet element {e} has inadmissible corner scaled Jacobian {scaled:e}"
             )));
         }
-        // Constant P1 F is exactly integrated at one centroid. Q1 retains
-        // independent histories at all four native Gauss points.
+        // P1 has one exact constant-gradient point; Q1 retains all four native
+        // points, each with its own history and (when selected) temperature.
         let rule = if arity == 3 {
             vec![(1.0 / 3.0, 1.0 / 3.0, 0.5)]
         } else {
@@ -331,27 +302,28 @@ fn prepare_elements(
             point.gradients[..arity].copy_from_slice(&gradients);
             element.points.push(point);
             reference_volume_m3 += volume_m3;
-            point_count += 1;
         }
+        offset += element.points.len();
         elements.push(element);
     }
     if used.iter().any(|used| !used) || !reference_volume_m3.is_finite() {
         return Err(invalid(
-            "sheet contains an unused node or unrepresentable volume",
+            "sheet contains an unused node or unrepresentable reference volume",
         ));
     }
     checkpoint(cx)?;
     Ok(Arc::new(elements))
 }
 
-fn validate_step_inputs(
-    dofs: usize,
+fn endpoint_forces(
+    mesh: &Mesh2,
     budget: SheetAssemblyBudget,
     prescribed_m: &[(usize, f64)],
     nodal_forces_n: &[(usize, f64)],
     settings: IncrementSettings,
     controls: FinitePlasticStepControls,
 ) -> Result<Vec<f64>, SmallStrainTetError> {
+    let dofs = 2 * mesh.nodes.len();
     if settings.max_newton_iterations == 0
         || settings.max_linear_iterations == 0
         || !settings.relative_tolerance.is_finite()
@@ -395,6 +367,39 @@ fn validate_step_inputs(
     Ok(external)
 }
 
+fn shared_duration_s<L: FinitePlaneStressMaterial>(
+    laws: FinitePlasticLawField<'_, L>,
+    cx: &Cx<'_>,
+) -> Result<Option<f64>, SmallStrainTetError> {
+    let mut duration = None;
+    let mut inspect = |law: &L| {
+        checkpoint(cx)?;
+        if let Some(dt) = law.duration_s() {
+            if !dt.is_finite() || dt <= 0.0 {
+                return Err(invalid(
+                    "sheet material duration must be finite and positive",
+                ));
+            }
+            if duration.is_some_and(|accepted| accepted != dt) {
+                return Err(invalid(
+                    "sheet kinetic laws must share one physical duration",
+                ));
+            }
+            duration = Some(dt);
+        }
+        Ok(())
+    };
+    match laws {
+        FinitePlasticLawField::Uniform(law) => inspect(law)?,
+        FinitePlasticLawField::PerElement(laws) => {
+            for law in laws {
+                inspect(law)?;
+            }
+        }
+    }
+    Ok(duration)
+}
+
 impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
     /// Admit a virgin P1/Q1 reference sheet. Thickness has one positive value
     /// per element; a graded sheet retains those original volume weights.
@@ -408,7 +413,8 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
         budget: SheetAssemblyBudget,
         cx: &Cx<'_>,
     ) -> Result<Self, FinitePlasticSheetError> {
-        let elements = prepare_elements(mesh, thickness_m, budget, cx)?;
+        checkpoint(cx)?;
+        let elements = prepare_geometry(mesh, thickness_m, budget, cx)?;
         if let FinitePlasticLawField::PerElement(materials) = laws
             && materials.len() != mesh.elems.len()
         {
@@ -456,7 +462,7 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
             }
         }
         if !stored_energy_j.is_finite() {
-            return Err(invalid("sheet initial energy is not representable").into());
+            return Err(invalid("sheet has unrepresentable initial energy").into());
         }
         checkpoint(cx)?;
         Ok(Self {
@@ -539,6 +545,29 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
         )
     }
 
+    fn operator(
+        &self,
+    ) -> SheetOperator<
+        '_,
+        impl Fn(
+            usize,
+            usize,
+            &[f64],
+            &[FiniteJ2State],
+        ) -> Result<FinitePlaneStressResponse, SmallStrainTetError>
+        + '_,
+    > {
+        SheetOperator {
+            mesh: self.mesh,
+            elements: &self.elements,
+            states: &self.states,
+            response: |e: usize, q: usize, u: &[f64], states: &[FiniteJ2State]| {
+                self.response(e, q, u, states)
+                    .map_err(|error| invalid(format!("sheet element {e} point {q}: {error}")))
+            },
+        }
+    }
+
     /// Evaluate an arbitrary trial from this accepted history without advancing
     /// it. The tangent includes the full local traction-free condensation.
     pub fn evaluate_trial(
@@ -547,7 +576,8 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
         need_tangent: bool,
         cx: &Cx<'_>,
     ) -> Result<FinitePlasticSheetEvaluation, FinitePlasticSheetError> {
-        let result = SheetOperator { sheet: self }
+        let result = self
+            .operator()
             .assemble(
                 &self.states,
                 displacement_m.as_flattened(),
@@ -578,8 +608,8 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
     ) -> Result<FinitePlasticSheetStep<'a, L>, FinitePlasticSheetError> {
         checkpoint(cx)?;
         let dofs = 2 * self.mesh.nodes.len();
-        let external = validate_step_inputs(
-            dofs,
+        let external = endpoint_forces(
+            self.mesh,
             self.budget,
             prescribed_m,
             nodal_forces_n,
@@ -626,7 +656,7 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
             old_storage - self.stored_energy_j,
             controls.equilibrium_work_tolerance_j,
         )?;
-        let operator = SheetOperator { sheet: self };
+        let operator = self.operator();
         let solved = increment::solve(
             &operator,
             IncrementControls {
@@ -690,6 +720,7 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
                     point.volume_m3 * (stored - response.material.stored_energy_j_m3),
                     controls.equilibrium_work_tolerance_j,
                 )?;
+                energy.stored_after_j += point.volume_m3 * stored;
                 if [
                     response.material.plastic_dissipation_j_m3,
                     response.material.creep_dissipation_j_m3,
@@ -702,7 +733,6 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
                     ))
                     .into());
                 }
-                energy.stored_after_j += point.volume_m3 * stored;
                 energy.plastic_dissipation_j +=
                     point.volume_m3 * response.material.plastic_dissipation_j_m3;
                 energy.creep_dissipation_j +=
@@ -778,46 +808,14 @@ impl<'a, L: FinitePlaneStressMaterial> FinitePlasticSheet<'a, L> {
     }
 }
 
-// Both fixed-temperature and thermal owners use this same geometry, assembly
-// and Newton adapter. The thermal owner retains its native error and work audit.
-trait SheetPointResponse {
-    type Error: core::fmt::Display;
-    fn node_count(&self) -> usize;
-    fn elements(&self) -> &[Element];
-    fn states(&self) -> &[FiniteJ2State];
-    fn response(
-        &self,
-        element: usize,
-        point: usize,
-        displacement: &[f64],
-        states: &[FiniteJ2State],
-    ) -> Result<FinitePlaneStressResponse, Self::Error>;
-}
-
-impl<L: FinitePlaneStressMaterial> SheetPointResponse for FinitePlasticSheet<'_, L> {
-    type Error = FiniteJ2Error;
-    fn node_count(&self) -> usize {
-        self.mesh.nodes.len()
-    }
-    fn elements(&self) -> &[Element] {
-        &self.elements
-    }
-    fn states(&self) -> &[FiniteJ2State] {
-        &self.states
-    }
-    fn response(
-        &self,
-        element: usize,
-        point: usize,
-        displacement: &[f64],
-        states: &[FiniteJ2State],
-    ) -> Result<FinitePlaneStressResponse, Self::Error> {
-        FinitePlasticSheet::response(self, element, point, displacement, states)
-    }
-}
-
-struct SheetOperator<'s, S: SheetPointResponse> {
-    sheet: &'s S,
+// The callback freezes the constitutive family and physical interval, while
+// this single operator owns geometry, force assembly and tangent assembly for
+// both static and thermoplastic sheets. Monomorphization avoids virtual calls.
+struct SheetOperator<'s, F> {
+    mesh: &'s Mesh2,
+    elements: &'s [Element],
+    states: &'s [FiniteJ2State],
+    response: F,
 }
 struct Assembled {
     force: Vec<f64>,
@@ -825,7 +823,15 @@ struct Assembled {
     potential: f64,
 }
 
-impl<S: SheetPointResponse> SheetOperator<'_, S> {
+impl<F> SheetOperator<'_, F>
+where
+    F: Fn(
+        usize,
+        usize,
+        &[f64],
+        &[FiniteJ2State],
+    ) -> Result<FinitePlaneStressResponse, SmallStrainTetError>,
+{
     fn assemble(
         &self,
         states: &[FiniteJ2State],
@@ -835,11 +841,8 @@ impl<S: SheetPointResponse> SheetOperator<'_, S> {
         cx: &Cx<'_>,
     ) -> Result<(Assembled, f64), SmallStrainTetError> {
         checkpoint(cx)?;
-        let sheet = self.sheet;
-        let dofs = 2 * sheet.node_count();
-        if u.len() != dofs
-            || states.len() != sheet.states().len()
-            || u.iter().any(|x| !x.is_finite())
+        let dofs = 2 * self.mesh.nodes.len();
+        if u.len() != dofs || states.len() != self.states.len() || u.iter().any(|x| !x.is_finite())
         {
             return Err(invalid(
                 "sheet trial needs complete finite displacements and point history",
@@ -849,7 +852,7 @@ impl<S: SheetPointResponse> SheetOperator<'_, S> {
         let mut matrix = need_tangent.then(|| Coo::new(dofs, dofs));
         let mut potential = 0.0;
         let mut force_cap = 0.0;
-        for (e, element) in sheet.elements().iter().enumerate() {
+        for (e, element) in self.elements.iter().enumerate() {
             let orientation = element.minimum_corner_cross(Some(u));
             if !orientation.is_finite() || orientation <= 0.0 {
                 return Err(invalid(format!(
@@ -860,9 +863,7 @@ impl<S: SheetPointResponse> SheetOperator<'_, S> {
             let mut local_tangent = [[0.0; 8]; 8];
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
-                let response = sheet
-                    .response(e, q, u, states)
-                    .map_err(|error| invalid(format!("sheet element {e} point {q}: {error}")))?;
+                let response = (self.response)(e, q, u, states)?;
                 potential += point.volume_m3 * response.material.incremental_potential_j_m3;
                 for a in 0..element.arity {
                     for i in 0..2 {
@@ -929,10 +930,18 @@ impl<S: SheetPointResponse> SheetOperator<'_, S> {
     }
 }
 
-impl<S: SheetPointResponse> IncrementOperator for SheetOperator<'_, S> {
+impl<F> IncrementOperator for SheetOperator<'_, F>
+where
+    F: Fn(
+        usize,
+        usize,
+        &[f64],
+        &[FiniteJ2State],
+    ) -> Result<FinitePlaneStressResponse, SmallStrainTetError>,
+{
     type State = FiniteJ2State;
     fn initial_states(&self) -> Vec<Self::State> {
-        self.sheet.states().to_vec()
+        self.states.to_vec()
     }
     fn components_per_node(&self) -> usize {
         2
@@ -970,15 +979,12 @@ impl<S: SheetPointResponse> IncrementOperator for SheetOperator<'_, S> {
         cx: &Cx<'_>,
     ) -> Result<usize, SmallStrainTetError> {
         let mut changed = 0;
-        for (e, element) in self.sheet.elements().iter().enumerate() {
+        for (e, element) in self.elements.iter().enumerate() {
             let mut evolving = false;
             for q in 0..element.points.len() {
                 checkpoint(cx)?;
                 let index = element.offset + q;
-                let response = self
-                    .sheet
-                    .response(e, q, u, states)
-                    .map_err(|error| invalid(format!("sheet element {e} point {q}: {error}")))?;
+                let response = (self.response)(e, q, u, states)?;
                 evolving |= response.material.state != states[index];
                 states[index] = response.material.state;
             }

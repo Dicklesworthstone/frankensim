@@ -243,7 +243,7 @@ fn saturation_admission_covers_the_whole_thermal_span_and_refuses_pure_creep() {
             shear_modulus_pa: p.reference.shear_modulus_pa,
             bulk_modulus_pa: p.reference.bulk_modulus_pa,
             shear_modulus_slope_pa_k: p.slopes.shear_modulus_pa_k,
-            bulk_modulus_slope_pa_k: p.slopes.bulk_modulus_slope_pa_k,
+            bulk_modulus_slope_pa_k: p.slopes.bulk_modulus_pa_k,
             logarithmic_expansion_per_k: p.logarithmic_expansion_per_k,
             logarithmic_expansion_slope_per_k2: p.logarithmic_expansion_slope_per_k2,
         }, limits(), kinetics(),

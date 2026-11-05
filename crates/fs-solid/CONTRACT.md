@@ -1227,6 +1227,32 @@ and transactional domain, duration and cancellation refusals. Coefficients
 are synthetic and carry the same in-plane continuum limitations as the
 fixed-temperature sheet.
 
+### Temperatures at native sheet quadrature points
+
+The element-temperature API remains available. The explicit
+`try_new_with_quadrature_temperatures`,
+`advance_with_quadrature_temperatures` and `evaluate_trial_for_step` paths
+retain an independent temperature at every P1 centroid or Q1 Gauss point.
+Every constitutive trial and accepted two-temperature audit uses that point's
+own original family, temperature, deformation and plastic/creep history.
+No element average enters the mechanical response. Equal temperatures within
+an element reuse its frozen material value; the common prepared geometry,
+assembly, condensed tangent and Newton solver are shared with static sheets.
+
+`quadrature_temperatures_k` exposes the actual accepted point temperatures.
+The established `temperatures_k` accessor retains one value per element;
+after a pointwise endpoint it reports an original-volume weighted diagnostic
+mean. The physical clock advances only after the complete endpoint is accepted.
+The accepted response, physical plastic/creep heat, native incremental
+potential, assembled work, free/internal storage and reversible heat are
+audited separately before any state is published.
+
+`tests/finite_thermoplastic_sheet_points.rs` adds independent scalar
+Hencky/Voce/Perzyna and simultaneous Norton/J2 oracles for free-sided forming,
+relaxation and heated dead-load creep. These tests solve free lateral and
+interior displacements and compare full deformation, thickness, retained
+history and thermal work accounts; their coefficients are synthetic.
+
 ## Exactly incompressible finite-strain plane stress
 
 `HyperProblem::solve_incompressible_plane_stress(PlaneStressSettings, &Cx)`
