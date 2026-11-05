@@ -25,7 +25,10 @@ mod coupled;
 mod driving;
 mod inertia;
 mod stabilized;
-pub use coupled::{MolecularEuler3d, MolecularStepControl, MolecularStepReport3d};
+pub use coupled::{
+    MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, StabilizedMolecularStepControl,
+    StabilizedMolecularStepReport3d,
+};
 pub use driving::WallAcceleration3d;
 pub(super) use driving::WallDrive3d;
 use inertia::WallInertia;

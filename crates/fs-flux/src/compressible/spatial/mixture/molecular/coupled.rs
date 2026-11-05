@@ -2,7 +2,10 @@ use super::super::{
     BodyForce3d, Error, ForceChange3d, ForceControl3d, ForcingWorkspace3d, StepReport, forcing,
 };
 use super::*;
-pub use crate::compressible::mixture::molecular::MolecularStepControl;
+use crate::compressible::mixture::molecular::stabilized::{IntervalFailure, StepWork};
+pub use crate::compressible::mixture::molecular::{
+    MolecularStepControl, StabilizedMolecularStepControl,
+};
 
 /// Complete accepted volumetric multicomponent molecular/advection interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -29,6 +32,19 @@ pub struct MolecularStepReport3d {
     pub conservation_residual: Totals,
     /// Physical chemical-plus-kinetic energy residual from conservative differences.
     pub absolute_energy_residual_j: f64,
+}
+
+/// Complete spatial mixture split and actual RKL2 integration work.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StabilizedMolecularStepReport3d {
+    /// Original physical balances and reports for the accepted complete split.
+    pub transport: MolecularStepReport3d,
+    /// Both molecular halves and all discarded complete-interval probes.
+    pub operator_evaluations: usize,
+    /// Largest stage count in the final accepted pair of molecular halves.
+    pub maximum_stages_used: usize,
+    /// Largest scaled parabolic number in the final accepted molecular halves.
+    pub maximum_scaled_parabolic_number: f64,
 }
 
 /// Atomic nonreacting multicomponent viscous, thermal and advective flow.
@@ -75,6 +91,19 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             })
             .ok_or(DissipationError::Invalid(
                 "coupled spatial mixture workspace size overflow",
+            ))
+    }
+
+    /// Complete coupled storage plus unallocated RKL2 face/boundary scratch.
+    /// Add supplied forcing workspace to this allowance before calling `new`.
+    pub fn required_stabilized_workspace_bytes(
+        flow: &MixtureEuler3d,
+        molecular: &MolecularTransport3d<L>,
+    ) -> Result<usize, DissipationError> {
+        Self::required_workspace_bytes(flow, molecular)?
+            .checked_add(molecular.additional_stabilized_workspace_bytes()?)
+            .ok_or(DissipationError::Invalid(
+                "coupled stabilized spatial mixture workspace size overflow",
             ))
     }
 
@@ -177,7 +206,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         controls: MolecularStepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
-        self.step_impl(maximum_duration, controls, None, &[], cancelled)
+        self.step_impl(maximum_duration, controls, None, None, &[], cancelled)
     }
 
     /// Drive the same original three-dimensional split with held acceleration or
@@ -196,6 +225,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             maximum_duration,
             controls,
             Some((force, force_controls, workspace)),
+            None,
             &[],
             cancelled,
         )
@@ -211,7 +241,14 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         accelerations: &[WallAcceleration3d],
         cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
-        self.step_impl(maximum_duration, controls, None, accelerations, cancelled)
+        self.step_impl(
+            maximum_duration,
+            controls,
+            None,
+            None,
+            accelerations,
+            cancelled,
+        )
     }
 
     /// Compose held body forcing with accelerating walls. Boundary impulse and
@@ -231,20 +268,133 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             maximum_duration,
             controls,
             Some((force, force_controls, workspace)),
+            None,
             accelerations,
             cancelled,
         )
     }
 
+    /// Apply original RKL2 molecular halves around one conservative spatial
+    /// Euler interval. Maxwell--Stefan, Soret/Dufour, enthalpy, heat, full stress
+    /// and optional SGS keep their original face operators and signed loads.
+    /// One actual-evaluation budget covers both halves and discarded retries.
+    ///
+    /// This path requires prescribed constant wall velocities. Finite inertia
+    /// is refused before source work; accelerating walls retain the original
+    /// stage-resolved SSP entry points. The physical macrostep cap remains an
+    /// accuracy choice, and the linear stability extension does not establish
+    /// nonlinear positivity or entropy decay. All owners publish atomically.
+    pub fn step_stabilized(
+        &mut self,
+        maximum_duration: Time,
+        controls: StabilizedMolecularStepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, DissipationError> {
+        let mut work = StepWork::new(controls.molecular);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls.split(),
+            None,
+            Some(&mut work),
+            &[],
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    /// Retain original body impulse/work and final Mach/acoustic admission
+    /// between stabilized halves. Supplied forcing scratch counts in full even
+    /// when the authored force is zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_stabilized_with_forcing(
+        &mut self,
+        maximum_duration: Time,
+        controls: StabilizedMolecularStepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, DissipationError> {
+        let mut work = StepWork::new(controls.molecular);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls.split(),
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            &[],
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn molecular_half(
+        &mut self,
+        duration: Time,
+        controls: DissipationControl,
+        stabilization: Option<&mut StepWork>,
+        drive: Option<(&WallDrive3d, f64)>,
+        previous: Option<&WallInertiaReport3d>,
+        wall_work: &WallWork,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MolecularReport, DissipationError> {
+        match stabilization {
+            None => self.molecular.advance_driven_unpublished(
+                &mut self.trial,
+                duration,
+                controls,
+                self.maximum_workspace_bytes,
+                drive,
+                previous,
+                wall_work,
+                cancelled,
+            ),
+            Some(work) => {
+                let report = self.molecular.advance_stabilized_unpublished(
+                    &mut self.trial,
+                    duration,
+                    work.controls,
+                    self.maximum_workspace_bytes,
+                    &mut work.evaluations,
+                    cancelled,
+                )?;
+                work.record(
+                    report.maximum_stages_used,
+                    report.maximum_scaled_parabolic_number,
+                );
+                Ok(report.transport)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn step_impl(
         &mut self,
         maximum_duration: Time,
         controls: MolecularStepControl,
         mut forcing: Option<forcing::Context<'_, '_>>,
+        mut stabilization: Option<&mut StepWork>,
         accelerations: &[WallAcceleration3d],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, DissipationError> {
         poll(&mut cancelled)?;
+        if stabilization.is_some()
+            && (self.molecular.inertia.is_some() || !accelerations.is_empty())
+        {
+            return Err(DissipationError::Invalid(
+                "stabilized molecular transport requires prescribed walls without finite inertia or acceleration",
+            ));
+        }
         let drive = self
             .molecular
             .prepare_wall_drive(accelerations, &mut cancelled)?;
@@ -279,6 +429,25 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 "coupled spatial mixture duration or controls",
             ));
         }
+        if let Some(work) = stabilization.as_ref() {
+            work.controls.validate()?;
+            // The original operator admits its own field and scratch. Preserve
+            // the accepted field, complete load buffers and all supplied force
+            // scratch in the same complete-owner budget before lazy allocation.
+            let outside = bytes
+                .checked_sub(self.trial.workspace_bytes())
+                .and_then(|value| value.checked_sub(self.molecular.workspace_bytes()))
+                .ok_or(DissipationError::Invalid(
+                    "coupled stabilized spatial mixture workspace size overflow",
+                ))?;
+            let allowance = self.maximum_workspace_bytes.checked_sub(outside).ok_or(
+                DissipationError::Invalid(
+                    "coupled stabilized spatial mixture total workspace budget",
+                ),
+            )?;
+            self.molecular
+                .prepare_stabilized(&self.trial, true, allowance)?;
+        }
         let n = self.accepted.gas.species_count();
         let width = n + 4;
         let before = checked_totals(
@@ -305,6 +474,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         let wall_work = WallWork::default();
         for retry in 0..=controls.maximum_coupling_retries {
             poll(&mut cancelled)?;
+            if let Some(work) = stabilization.as_deref_mut() {
+                work.reset_extrema();
+            }
             if !positive(0.5 * dt)
                 || !(self.accepted.time + dt).is_finite()
                 || self.accepted.time + dt <= self.accepted.time
@@ -318,11 +490,10 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             let mut endpoint_walls = None;
             let attempt = (|| -> Result<MolecularStepReport3d, DissipationError> {
                 endpoint_walls = drive.as_ref().map(|d| d.at(dt)).transpose()?;
-                let first = self.molecular.advance_driven_unpublished(
-                    &mut self.trial,
+                let first = self.molecular_half(
                     Time::new(0.5 * dt),
                     controls.molecular,
-                    self.maximum_workspace_bytes,
+                    stabilization.as_deref_mut(),
                     drive.as_ref().map(|d| (d, 0.0)),
                     None,
                     &wall_work,
@@ -357,11 +528,10 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     &mut self.boundary_trial,
                     &mut cancelled,
                 )?;
-                let second = self.molecular.advance_driven_unpublished(
-                    &mut self.trial,
+                let second = self.molecular_half(
                     Time::new(0.5 * dt),
                     controls.molecular,
-                    self.maximum_workspace_bytes,
+                    stabilization.as_deref_mut(),
                     // The molecular clock covers [0,h/2] then [h/2,h].
                     // Advection uses the same fixed geometry and no wall work.
                     drive.as_ref().map(|d| (d, 0.5 * dt)),
@@ -430,6 +600,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     return Ok(report);
                 }
                 Err(DissipationError::Cancelled) => return Err(DissipationError::Cancelled),
+                Err(error) if stabilization.is_some() && error.is_terminal() => {
+                    return Err(error.step_failure(0.0, dt));
+                }
                 Err(error) => {
                     last = error;
                     last_dt = dt;

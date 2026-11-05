@@ -187,7 +187,15 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         })
     }
 
-    fn prepare_stabilized(
+    pub(super) fn additional_stabilized_workspace_bytes(&self) -> Result<usize, DissipationError> {
+        if self.stabilized.is_none() {
+            Workspace::required_bytes(&self.grid, self.gas().species_count() + 4)
+        } else {
+            Ok(0)
+        }
+    }
+
+    pub(super) fn prepare_stabilized(
         &mut self,
         flow: &MixtureEuler3d,
         needed: bool,
@@ -200,8 +208,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 "volumetric stabilized workspace size overflow",
             ))?;
         let width = self.gas().species_count() + 4;
-        let extra = if needed && self.stabilized.is_none() {
-            Workspace::required_bytes(&self.grid, width)?
+        let extra = if needed {
+            self.additional_stabilized_workspace_bytes()?
         } else {
             0
         };
