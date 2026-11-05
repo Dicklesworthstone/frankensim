@@ -9,6 +9,8 @@ mod cells;
 pub use cells::MaterialGasScatteringCellGrid;
 mod refraction;
 pub use refraction::{GasDensityJet, GasDensitySecondOrderField};
+/// Original thermal reconstructions driving single-component ideal-gas optics.
+pub mod isobaric;
 mod composition;
 pub use composition::{
     AxialGasCompositionError, AxialGasCompositionField,

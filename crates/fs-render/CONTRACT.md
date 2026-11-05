@@ -7749,3 +7749,25 @@ infrared photon-weighted detector response with replay and temperature changes,
 and source/domain/material/work refusals. Native Rust execution remains
 unavailable in the implementation environment; scoped formatting and source
 review are separate from those authored regressions.
+
+## Thermal gas fields driving native refraction
+
+`material_state::gas_scattering::isobaric::IsobaricGasField` borrows an original
+single-component molecular gas model and an immutable temperature reconstruction.
+It evaluates the original gas EOS at each actual temperature and fixed absolute
+pressure. Exact density gradients and Hessians include both the thermal Hessian
+and the gradient outer product; mixed spatial derivatives are retained. The
+existing molecular Lorentz--Lorenz owner then supplies wavelength-dependent
+phase/group indices and their nonlinear density derivatives to native rays and
+angular bundles. Preparation binds the original source coefficients, explicit
+reference state and accepted snapshot. Admitted stage queries allocate nothing.
+
+The explicit reference temperature prepares optical coefficients; it never
+replaces a spatial temperature. The original source T/p domain, water label and
+thermal-provider cancellation/refusals remain authoritative. The adapter admits
+one component or declared pseudocomponent, fixed composition and fixed pressure;
+it does not supply flow, pressure/composition gradients, gas-phase existence,
+condensation, thermal-contact traversal or true absorption. Focused G1/G3 tests
+connect an original generated conduction solution to rotated density jets,
+independent Lorentz--Lorenz derivatives, analytic divergent-lens footprints,
+curved-ray Snell invariants, phase/group paths and source-domain refusals.

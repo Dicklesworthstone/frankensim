@@ -162,6 +162,14 @@ pub struct MolecularRayleighMixture {
 }
 
 impl MolecularRayleighMixture {
+    /// Exact original thermodynamic component specifications, in the same
+    /// order as composition and molecular optical sources. Borrowing these
+    /// inputs does not infer a species identity or broaden their model domain.
+    #[must_use]
+    pub fn component_specs(&self) -> &[GasSpec] {
+        &self.specs
+    }
+
     /// Retain the exact shared gas input; no species, composition or missing
     /// optical datum is inferred. Thermodynamic admission occurs at evaluation.
     pub fn try_new(
