@@ -178,9 +178,10 @@ pub fn apply_linear_visco_rigid_impact<'p, 'a>(
         .sub(nodal(proposal.velocity_mps(), node))
         .dot(normal);
 
-    // Reduce actual full nodal momentum changes, removing only the original
-    // support reactions. The complete mass coupling is included even though
-    // the applied point impulse has only three nonzero entries.
+    // The native full-mass residual is M delta-v - applied - returned support,
+    // evaluated before rounding endpoint differences or the mass action.
+    // Reconstruct net momentum as applied + residual: subtracting supports
+    // from the rounded momentum report would lose those compensated terms.
     let mut linear = [Dd::ZERO; 3];
     let mut angular = [Dd::ZERO; 3];
     let mut absolute_linear = 0.0;
@@ -192,8 +193,8 @@ pub fn apply_linear_visco_rigid_impact<'p, 'a>(
         let arm = position(solid, i)?.sub(origin);
         let r = array(arm).map(Dd::from_f64);
         let p: [Dd; 3] = core::array::from_fn(|d| {
-            Dd::from_f64(solid_impulse.momentum_change_kg_m_s[3 * i + d])
-                - Dd::from_f64(solid_impulse.support_impulse_kg_m_s[3 * i + d])
+            Dd::from_f64(nodal_impulse[3 * i + d])
+                + Dd::from_f64(solid_impulse.impulse_residual_kg_m_s[3 * i + d])
         });
         for d in 0..3 {
             linear[d] = linear[d] + p[d];
@@ -209,22 +210,26 @@ pub fn apply_linear_visco_rigid_impact<'p, 'a>(
     // Keep orbital products and spin separate until the compensated world
     // reduction; large opposing terms must not round away a contact moment.
     let r = array(rigid_arm).map(Dd::from_f64);
-    let p = array(rigid_impulse.linear_increment_world).map(Dd::from_f64);
+    // Use the rigid's represented endpoints as well; rounded receipt deltas
+    // can omit old momentum absorbed by a much larger impulse.
+    let old_p = array(rigid_impulse.state_before.linear_momentum_world());
+    let new_p = array(rigid_impulse.state_after.linear_momentum_world());
+    let p: [Dd; 3] = core::array::from_fn(|d| Dd::from_f64(new_p[d]) - Dd::from_f64(old_p[d]));
     let rigid_orbital = [
         r[1] * p[2] - r[2] * p[1],
         r[2] * p[0] - r[0] * p[2],
         r[0] * p[1] - r[1] * p[0],
     ];
-    let rigid_spin = array(
-        rigid
-            .pose()
-            .orientation()
-            .rotate_body_to_world(rigid_impulse.angular_increment_body),
-    )
-    .map(Dd::from_f64);
-    let linear_residual = vector(core::array::from_fn(|d| {
-        (linear[d] + Dd::from_f64(array(rigid_impulse.linear_increment_world)[d])).to_f64()
-    }));
+    let old_spin = array(rigid_impulse.state_before.angular_momentum_body());
+    let new_spin = array(rigid_impulse.state_after.angular_momentum_body());
+    let spin: [Dd; 3] =
+        core::array::from_fn(|d| Dd::from_f64(new_spin[d]) - Dd::from_f64(old_spin[d]));
+    let orientation = rigid.pose().orientation();
+    let high = array(orientation.rotate_body_to_world(vector(spin.map(|x| x.hi))));
+    let low = array(orientation.rotate_body_to_world(vector(spin.map(|x| x.lo))));
+    let rigid_spin: [Dd; 3] =
+        core::array::from_fn(|d| Dd::from_f64(high[d]) + Dd::from_f64(low[d]));
+    let linear_residual = vector(core::array::from_fn(|d| (linear[d] + p[d]).to_f64()));
     let angular_residual = vector(core::array::from_fn(|d| {
         (angular[d] + rigid_orbital[d] + rigid_spin[d]).to_f64()
     }));

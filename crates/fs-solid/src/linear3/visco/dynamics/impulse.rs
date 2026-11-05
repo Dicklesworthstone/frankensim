@@ -11,6 +11,7 @@ pub struct ViscoDynamicImpulse {
     pub time_s: f64,
     pub iterations: usize,
     /// Original full consistent mass times the actual represented delta-v.
+    /// Rounded for reporting; the residual retains compensated endpoint differences.
     pub momentum_change_kg_m_s: Vec<f64>,
     /// Impulse ON the solid from supports; zero on free coordinates.
     pub support_impulse_kg_m_s: Vec<f64>,
@@ -76,6 +77,13 @@ impl LinearOp for BorrowedMass<'_> {
     }
 }
 
+fn finite_dd(value: Dd) -> Result<Dd, ViscoElementError> {
+    finite(value.hi)?;
+    finite(value.lo)?;
+    finite(value.to_f64())?;
+    Ok(value)
+}
+
 fn work(before: &[f64], after: &[f64], impulse: &[f64]) -> Result<f64, ViscoElementError> {
     // Retain a midpoint between adjacent f64 velocities before pairing it with
     // impulse. Rounding that midpoint first can erase quadratic kinetic work.
@@ -88,9 +96,7 @@ fn work(before: &[f64], after: &[f64], impulse: &[f64]) -> Result<f64, ViscoElem
                 let mean = Dd::from_f64(0.5 * old) + Dd::from_f64(0.5 * new);
                 sum + mean * Dd::from_f64(applied)
             });
-    finite(sum.hi)?;
-    finite(sum.lo)?;
-    finite(sum.to_f64())
+    Ok(finite_dd(sum)?.to_f64())
 }
 
 impl<'p, 'a> ViscoDynamicState<'p, 'a> {
@@ -204,7 +210,7 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         let system = self.prepared.system;
         let n = system.full_dofs;
         let mut velocity = self.velocity_mps.clone();
-        let mut delta = vec![0.0; n];
+        let mut delta = vec![Dd::ZERO; n];
         for d in 0..n {
             if d % 256 == 0 {
                 checkpoint(cx)?;
@@ -212,45 +218,69 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
             if response[d] != 0.0 {
                 velocity[d] = finite(velocity[d] + response[d])?;
             }
-            delta[d] = finite(velocity[d] - self.velocity_mps[d])?;
+            // A large accepted velocity can absorb the old velocity in f64
+            // subtraction. Audit the two represented endpoints before rounding.
+            delta[d] = finite_dd(Dd::from_f64(velocity[d]) - Dd::from_f64(self.velocity_mps[d]))?;
         }
-        let momentum_change_kg_m_s = mass_action(system, &delta);
+        let mass = system
+            .full_reference_mass()
+            .ok_or_else(|| invalid("impulses require retained full reference mass"))?;
+        let mut momentum_change_kg_m_s = vec![0.0; n];
         let mut support_impulse_kg_m_s = vec![0.0; n];
         let mut impulse_residual_kg_m_s = vec![0.0; n];
-        let mut maximum = 0.0_f64;
+        let mut maximum = Dd::ZERO;
+        let mut kinetic_change = Dd::ZERO;
+        let mut balance_residual = Dd::ZERO;
         for d in 0..n {
             if d % 256 == 0 {
                 checkpoint(cx)?;
             }
-            let difference = Dd::from_f64(finite(momentum_change_kg_m_s[d])?)
-                - Dd::from_f64(nodal_impulse_kg_m_s[d]);
+            let (columns, values) = mass.row(d);
+            let momentum = finite_dd(
+                columns
+                    .iter()
+                    .zip(values)
+                    .fold(Dd::ZERO, |sum, (&column, &value)| {
+                        sum + Dd::from_f64(value) * delta[column]
+                    }),
+            )?;
+            momentum_change_kg_m_s[d] = momentum.to_f64();
+            let difference = finite_dd(momentum - Dd::from_f64(nodal_impulse_kg_m_s[d]))?;
             if self.prepared.reduced[d].is_none() {
                 support_impulse_kg_m_s[d] = finite(difference.to_f64())?;
             }
             // Check the returned reaction too: rounding a large opposing
             // support impulse must not erase a smaller physical M delta-v.
-            let residual = finite((difference - Dd::from_f64(support_impulse_kg_m_s[d])).to_f64())?;
-            impulse_residual_kg_m_s[d] = residual;
-            maximum = maximum.max(residual.abs());
+            let residual = finite_dd(difference - Dd::from_f64(support_impulse_kg_m_s[d]))?;
+            impulse_residual_kg_m_s[d] = residual.to_f64();
+            if maximum.lt(residual.abs()) {
+                maximum = residual.abs();
+            }
+            // Pair the compensated mass action/residual with the endpoint
+            // midpoint before rounding either quantity to the public report.
+            let mean = Dd::from_f64(0.5 * self.velocity_mps[d]) + Dd::from_f64(0.5 * velocity[d]);
+            kinetic_change = kinetic_change + mean * momentum;
+            balance_residual = balance_residual + mean * residual;
         }
-        if maximum > maximum_impulse_error_kg_m_s {
+        if Dd::from_f64(maximum_impulse_error_kg_m_s).lt(maximum) {
             return Err(ViscoElementError::ImpulseMomentum {
-                residual_kg_m_s: maximum,
+                residual_kg_m_s: maximum.to_f64(),
                 allowance_kg_m_s: maximum_impulse_error_kg_m_s,
             });
         }
         let kinetic_after_j = kinetic(system, &velocity)?;
-        let kinetic_change_j = work(&self.velocity_mps, &velocity, &momentum_change_kg_m_s)?;
+        let kinetic_change_j = finite_dd(kinetic_change)?.to_f64();
         let external_work_j = work(&self.velocity_mps, &velocity, nodal_impulse_kg_m_s)?;
         let support_work_j = work(&self.velocity_mps, &velocity, &support_impulse_kg_m_s)?;
-        let balance_residual_j = work(&self.velocity_mps, &velocity, &impulse_residual_kg_m_s)?;
+        let balance_residual = finite_dd(balance_residual)?;
+        let balance_residual_j = balance_residual.to_f64();
         let config = self.prepared.config;
         let allowance_j = finite(
             config.absolute_energy_tolerance_j
                 + config.relative_energy_tolerance
                     * (external_work_j.abs() + support_work_j.abs() + kinetic_change_j.abs()),
         )?;
-        if balance_residual_j.abs() > allowance_j {
+        if Dd::from_f64(allowance_j).lt(balance_residual.abs()) {
             return Err(ViscoElementError::DynamicEnergy {
                 residual_j: balance_residual_j,
                 allowance_j,
@@ -264,7 +294,7 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
             momentum_change_kg_m_s,
             support_impulse_kg_m_s,
             impulse_residual_kg_m_s,
-            maximum_impulse_residual_kg_m_s: maximum,
+            maximum_impulse_residual_kg_m_s: maximum.to_f64(),
             kinetic_before_j: self.kinetic_j,
             kinetic_after_j,
             kinetic_change_j,

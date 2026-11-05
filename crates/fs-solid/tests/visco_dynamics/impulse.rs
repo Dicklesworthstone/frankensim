@@ -342,3 +342,66 @@ fn prepared_impulse_discards_or_publishes_without_restarting_the_original_trajec
         assert_eq!(state.steps(), before_steps);
     });
 }
+
+#[test]
+fn huge_impulse_audits_represented_endpoints_and_returned_support_rounding() {
+    with_cx(|cx, _| {
+        let mut law = coupled();
+        law.density_kg_m3 = 60.0;
+        let solid = full_system(&law, &[3], cx);
+        let prepared = solid.dynamic_operator(0.002, config(), cx).unwrap();
+        let mut velocity = [0.0; 12];
+        velocity[3] = 1.0;
+        let mut state = prepared
+            .start(solid.state(cx).unwrap(), &velocity, cx)
+            .unwrap();
+        let before = state.clone();
+        let mut impulse = [0.0; 12];
+        impulse[3] = 1e20;
+        // The unit tet has M_33=1 kg and M_i3=0.5 kg at the three
+        // supported x coordinates. Its one free solve is exactly delta-v=J.
+        let response = state.momentum_response(&impulse, cx).unwrap();
+        assert_eq!(response[3], impulse[3]);
+        // Negative control: first rounding the endpoint subtraction silently
+        // reports zero residual, even though the old 1 m/s disappeared.
+        let rounded_delta = (velocity[3] + response[3]) - velocity[3];
+        assert_eq!(rounded_delta - impulse[3], 0.0);
+        assert!(matches!(
+            state.prepare_momentum_impulse(&impulse, 0.25, cx),
+            Err(ViscoElementError::ImpulseMomentum {
+                residual_kg_m_s: 1.0,
+                allowance_kg_m_s: 0.25,
+            })
+        ));
+        assert_eq!(state.velocity_mps(), before.velocity_mps());
+        assert_eq!(state.kinetic_energy_j(), before.kinetic_energy_j());
+        assert_eq!(state.external_work_j(), before.external_work_j());
+        assert_eq!(state.support_work_j(), before.support_work_j());
+        assert_eq!(
+            state.material_history().displacement_m(),
+            before.material_history().displacement_m()
+        );
+        assert_eq!(
+            state.material_history().energy(),
+            before.material_history().energy()
+        );
+        assert_eq!(state.time_s(), before.time_s());
+        assert_eq!(state.steps(), before.steps());
+
+        // With an explicit allowance, reports must retain the free loss of
+        // 1 kg m/s and the additional -0.5 kg m/s from EACH returned support
+        // reaction rounding 0.5*(1e20-1) to 5e19.
+        let report = state.apply_momentum_impulse(&impulse, 1.0, cx).unwrap();
+        assert_eq!(state.velocity_mps()[3], 1e20);
+        assert_eq!(report.impulse_residual_kg_m_s[3], -1.0);
+        for d in [0, 6, 9] {
+            assert_eq!(report.support_impulse_kg_m_s[d], 5e19);
+            assert_eq!(report.impulse_residual_kg_m_s[d], -0.5);
+        }
+        assert_eq!(report.maximum_impulse_residual_kg_m_s, 1.0);
+        // Only the free midpoint does work: (1e20+1)/2 times -1.
+        // Rounded large kinetic/work totals would hide this discrepancy.
+        assert_eq!(report.balance_residual_j, -5e19);
+        assert_eq!(report.kinetic_change_j - report.external_work_j, 0.0);
+    });
+}
