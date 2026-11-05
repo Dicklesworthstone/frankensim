@@ -35,6 +35,10 @@ pub mod water_cell;
 /// Finite solvent heat and the original two-film dissolved-gas kinetics.
 pub mod dissolved_gas;
 
+/// Source-temperature shifts of nonlinear film transport on retained liquid mass.
+pub mod power_law;
+pub use power_law::{MaterialCavitatingPowerLawContinuation, MaterialCavitatingPowerLawFilm};
+
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState, ResolvedCavitationState};
 use fs_tribo::resistive_film::cavitation::{CavitatingFilm, CavitationLiquid};

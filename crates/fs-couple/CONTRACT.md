@@ -3879,8 +3879,52 @@ Focused integration regressions cover source-backed drained heating/cooling
 with dynamic and kinematic viscosity, cavity refill at refreshed saturation
 pressure, constant-coefficient native identity, original card/claim/context and
 vapor-density refusal, and late-cancellation retry. Native film continuation
-passed all 80 tests in the actual film-module harness, including its six new
-regressions; coupled regression execution remains unverified.
+passes all 136 tests in the actual film-module harness. These four source
+continuation regressions now run with the nonlinear source lane below.
+
+### Temperature-dependent nonlinear cavitating films
+
+`MaterialCavitatingFilm::with_power_law` binds explicit reference channel laws
+to the SAME native inventory, geometry, pressure supplies and mass controls.
+`cavitation::power_law::MaterialCavitatingPowerLawFilm` retains the original
+reference material values and caller-authored `K_ref`, `n` and core shear rate.
+At an admitted source-temperature endpoint it uses the explicit separable
+approximation `K(T) = K_ref*mu_source(T)/mu_source(T_ref)` with fixed `n` and
+core rate. Reference viscosity is not substituted for consistency, and a
+Newtonian viscosity source does not establish the independent rheological
+shape. The caller must admit this separable approximation over its actual
+temperature and shear range. Every refresh uses the original reference values,
+so repeated thermal cycles cannot accumulate consistency rescaling.
+
+The existing pinned-source continuation check retains the same card, claims,
+requirements, temperature axis and all nonthermal query coordinates. Density,
+dynamic viscosity and saturation pressure refresh together; kinematic-source
+viscosity uses the new density before forming its ratio. The original dilute
+vapor cap still applies. The new native conservative continuation carries
+`rho_old*V_old*theta_old` into the endpoint pressure/content solve without
+reinitializing cavities. Nonlinear moving-wall transport remains the original
+combined Couette--Poiseuille profile. Independently prescribed reservoirs retain
+their original pressures and contents and refuse if a new rupture pressure
+overtakes them. A native Barus law cannot silently become a power-law film.
+
+The returned `MaterialCavitatingPowerLawContinuation` publishes the matching
+source binding and native candidate together. All source, constitutive, mass,
+domain and cancellation refusals preserve the accepted pair. The endpoint
+normal force remains distinct from integrated mechanical work. This first-order
+endpoint material split supplies no caloric clock, phase heat, cavitated
+tangential heat partition, pressure-dependent rheology or trapped-liquid
+compressibility; temperature, energy and temporal refinement stay caller-owned.
+
+Nine focused original-source tests pass: the four existing temperature/source
+tests and five new G1/G3/G4 groups. New tests compare the nonlinear thermal
+expansion pressure with an independent dimensional n=1/2 closed form; exercise
+dynamic and kinematic source conversion, reference-consistency cycling, starved
+sliding, retained supplies, exact native Newtonian source parity and atomic
+lineage/cancellation refusal. The shared foreign-card fixture now uses the real
+`MaterialCard::supersede` API. This scoped run retains the actual material-state
+resolver, cavitation material functions, full matdb/thermochem dependencies and
+native film solver. Unrelated adapters are excluded; missing `asupersync`
+prevents a full workspace run, and no full-constellation result is claimed.
 
 When saturated vapor density is supplied, its ratio to liquid density must fit
 the explicitly declared dilute-vapor cap; a dense vapor state is refused.

@@ -1,5 +1,8 @@
 //! G1/G3/G4 original-source temperature continuation of retained film mass.
 //! These manufactured curves test coupling, not measured fluid accuracy.
+#[path = "power_law.rs"]
+mod power_law;
+
 use super::{AMBIENT_PA, AREA_M2, CHANNEL_GAP_M, INITIAL_GAP_M, film, near, try_film};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -130,18 +133,22 @@ fn source(basis: LiquidViscosityBasis, constant: bool, revision: u32) -> Source 
             other_viscosity = Some(claims.insert_claim(claim).unwrap());
         }
     }
+    let mut card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "manufactured film liquid".into(),
+            phase: "liquid with equilibrium vapor data".into(),
+            process: "numerical fixture".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    for _ in 0..revision {
+        card = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+    }
     Source {
-        card: MaterialCard::assemble(
-            MaterialStateId {
-                chemistry: "manufactured film liquid".into(),
-                phase: "liquid with equilibrium vapor data".into(),
-                process: "numerical fixture".into(),
-                revision,
-            },
-            claims,
-            vec![],
-        )
-        .unwrap(),
+        card,
         requirements: CavitationPropertyRequirements::canonical(basis, true).unwrap(),
         pins,
         other_viscosity: other_viscosity.unwrap(),
