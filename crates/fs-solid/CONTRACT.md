@@ -970,6 +970,22 @@ not snap stress, discard drift or declare an arbitrary waveform periodic.
 No rainflow completion order is used as load order and no endpoint half cycle
 or repeated spectrum is invented. Retained cycle storage is constant per gauge.
 
+For an explicitly declared identical quasistatic loading block,
+`TetCrackGrowthPath::close_repeated_cycle(full_cycles, &Cx)` closes one sampled
+representative cycle and analytically integrates that many full cycles,
+including the representative cycle. Work and retained storage per gauge are
+independent of the repeat count; the original native solves are not repeated.
+The entire block must remain inside the same material, stress-intensity,
+geometry and exposure bounds. Counts must be whole cycles in `1..=2^53` for
+exact conversion to the material owner's cycle coordinate. The caller declares
+repetition under unchanged elastic, thermal and support fields; physical sample
+time and sample count stay unchanged. No transient periodicity, thermal history,
+plastic stabilization or crack-induced stiffness change is inferred. A refused
+block preserves every crack and the representative window for a bounded retry.
+The inertial wrapper intentionally has no repeated-cycle operation. The runnable
+`fatigue_crack_growth --demo CYCLES` example uses three native solves and clearly
+synthetic coefficients, and prints an independent analytical m=2 comparison.
+
 An endpoint and requested closure publish together only after original
 mechanics, every projection and every crack-growth update accept. A late gauge
 failure or cancellation preserves native motion, physical time, all open

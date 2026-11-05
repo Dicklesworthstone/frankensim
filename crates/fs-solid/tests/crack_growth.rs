@@ -675,3 +675,122 @@ fn g1_moving_support_cycles_preserve_original_inertia_work_and_stress() {
         assert_eq!(observed.observed_samples(), 3);
     });
 }
+
+#[test]
+fn g1_declared_repeated_native_cycle_matches_analytical_growth_with_three_samples() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed = fixed();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let mut path = path(&problem, &thermal, vec![gauge()], cx);
+        for (index, stress) in [2e6, 8e6, 2e6].into_iter().enumerate() {
+            path.advance(index as f64, &load(&geometry, stress, cx), cx)
+                .unwrap();
+        }
+        let before = path.states();
+        assert_eq!(before[0].crack_length_m, INITIAL_A);
+        assert_eq!(before[0].cycles, 0.0);
+        let steps = path.close_repeated_cycle(100, cx).unwrap();
+        // Independently integrated m=2 law over the declared 100 repetitions:
+        // a(N) = a(0) exp((1e-4/1e12) pi (delta_sigma)^2 N).
+        let expected = INITIAL_A * (1e-16 * std::f64::consts::PI * 6e6 * 6e6 * 100.0).exp();
+        let after = path.states();
+        close(after[0].crack_length_m, expected, 2e-16);
+        assert_eq!(after[0].cycles, 100.0);
+        assert_eq!(after[0].blocks, 1);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].before, before[0]);
+        assert_eq!(steps[0].after, after[0]);
+        assert_eq!(path.observed_samples(), 3);
+        assert_eq!(path.last_time_s(), Some(2.0));
+        assert_eq!(path.finish(cx).unwrap(), after);
+    });
+}
+
+#[test]
+fn g4_repeated_cycle_late_gauge_budget_refusal_keeps_every_window_reusable() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed = fixed();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let mut limited = gauge();
+        limited.limits.maximum_cycles = 10.0;
+        let mut path = path(&problem, &thermal, vec![gauge(), limited], cx);
+        for (index, stress) in [2e6, 8e6, 2e6].into_iter().enumerate() {
+            path.advance(index as f64, &load(&geometry, stress, cx), cx)
+                .unwrap();
+        }
+        let before = path.states();
+        assert!(matches!(
+            path.close_repeated_cycle(100, cx),
+            Err(TetCrackGrowthError::Gauge {
+                gauge: 1,
+                error: CrackGrowthError::Budget,
+            })
+        ));
+        assert_eq!(path.states(), before);
+        assert_eq!(path.observed_samples(), 3);
+        assert_eq!(path.last_time_s(), Some(2.0));
+        // Retry directly: neither the first gauge's growth nor either window
+        // may have been consumed by the second gauge's late refusal.
+        let steps = path.close_repeated_cycle(10, cx).unwrap();
+        let expected = INITIAL_A * (1e-16 * std::f64::consts::PI * 6e6 * 6e6 * 10.0).exp();
+        for (index, state) in path.states().into_iter().enumerate() {
+            close(state.crack_length_m, expected, 2e-16);
+            assert_eq!(state.cycles, 10.0);
+            assert_eq!(state.blocks, 1);
+            assert_eq!(steps[index].before, before[index]);
+            assert_eq!(steps[index].after, state);
+        }
+        assert_eq!(path.observed_samples(), 3);
+        assert_eq!(path.last_time_s(), Some(2.0));
+    });
+}
+
+#[test]
+fn g0_invalid_repetition_counts_refuse_atomically_without_consuming_the_cycle() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed = fixed();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let mut wide_budget = gauge();
+        wide_budget.limits.maximum_cycles = (1_u64 << 53) as f64;
+        let mut path = path(&problem, &thermal, vec![wide_budget], cx);
+        for (index, stress) in [2e6, 8e6, 2e6].into_iter().enumerate() {
+            path.advance(index as f64, &load(&geometry, stress, cx), cx)
+                .unwrap();
+        }
+        let before = path.states();
+        // The first unrepresentable integer must not be rounded to 2^53.
+        // Invalid input must be distinguished from later physical-domain or
+        // exposure-budget refusals of an otherwise admitted count.
+        for count in [0, (1_u64 << 53) + 1] {
+            assert!(matches!(
+                path.close_repeated_cycle(count, cx),
+                Err(TetCrackGrowthError::Invalid(_))
+            ));
+            assert_eq!(path.states(), before);
+            assert_eq!(path.observed_samples(), 3);
+            assert_eq!(path.last_time_s(), Some(2.0));
+        }
+        let steps = path.close_repeated_cycle(1, cx).unwrap();
+        let after = path.states();
+        close(
+            after[0].crack_length_m,
+            analytical_length(INITIAL_A, 6e6),
+            2e-16,
+        );
+        assert_eq!(after[0].cycles, 1.0);
+        assert_eq!(after[0].blocks, 1);
+        assert_eq!(steps[0].before, before[0]);
+        assert_eq!(steps[0].after, after[0]);
+        assert_eq!(path.observed_samples(), 3);
+        assert_eq!(path.last_time_s(), Some(2.0));
+    });
+}

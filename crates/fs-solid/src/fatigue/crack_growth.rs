@@ -11,9 +11,11 @@
 //! A window begins at a physical stress extremum, contains one monotone outward
 //! and one monotone return segment, and is closed EXPLICITLY. Plateaus are
 //! accepted; additional reversals refuse. Every physical extremum must be
-//! resolved by the supplied load samples. Closing a window advances exactly one
+//! resolved by the supplied load samples. Closing a window normally advances one
 //! full cycle at the currently accepted crack length and starts the next window
-//! at the same actual endpoint. No rainflow completion order, repeated spectrum,
+//! at the same actual endpoint. The quasistatic owner also accepts an explicit
+//! count of identical repeated full cycles, integrated analytically without
+//! repeating the native solves. No rainflow completion order, repeated spectrum,
 //! crack-closure correction or fatigue-threshold extrapolation is inferred.
 //!
 //! Mesh, material, support and thermal fields stay fixed. Calibration data may
@@ -276,6 +278,30 @@ impl<'p, 'm> TetCrackGrowthPath<'p, 'm> {
         self.observation.close_cycle(cx)
     }
 
+    /// Close the sampled representative cycle and apply `full_cycles` identical
+    /// repetitions, including that representative cycle, as one analytical block.
+    ///
+    /// This is an explicit loading declaration under the same frozen elastic,
+    /// thermal and support fields. The caller must establish that every repeated
+    /// cycle has the observed nominal stress extrema. The crack remains absent
+    /// from the stiffness, so its growth cannot change these nominal stresses.
+    /// Work is constant per gauge, independent of the repeat count; every fitted
+    /// stress-intensity, crack-length and exposure limit still applies to the
+    /// entire block. Failure preserves every crack and the reusable open window.
+    ///
+    /// `full_cycles` must be in `1..=2^53`, so its conversion to the material
+    /// owner's cycle coordinate is exact. This changes cycle exposure only:
+    /// sampled physical time and the native sample count do not advance. No
+    /// mechanical history is synthesized, and transient runs intentionally do
+    /// not expose this operation because their dynamics may not repeat.
+    pub fn close_repeated_cycle(
+        &mut self,
+        full_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<CrackGrowthStep>, TetCrackGrowthError> {
+        self.observation.close_repeated_cycle(full_cycles, cx)
+    }
+
     /// Require all sampled excursions to have been explicitly closed. A lone
     /// initial/last-closure endpoint contributes no invented partial cycle.
     pub fn finish(&mut self, cx: &Cx<'_>) -> Result<Vec<CrackGrowthState>, TetCrackGrowthError> {
@@ -497,7 +523,7 @@ impl TetCrackGrowthObserver {
             values.push(normal_stress);
         }
         let completed = if close_cycle {
-            Some(close_gauges(&mut candidate, cx)?)
+            Some(close_gauges(&mut candidate, 1.0, cx)?)
         } else {
             None
         };
@@ -512,12 +538,25 @@ impl TetCrackGrowthObserver {
         &mut self,
         cx: &Cx<'_>,
     ) -> Result<Vec<CrackGrowthStep>, TetCrackGrowthError> {
+        self.close_repeated_cycle(1, cx)
+    }
+
+    fn close_repeated_cycle(
+        &mut self,
+        full_cycles: u64,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<CrackGrowthStep>, TetCrackGrowthError> {
         poll(cx)?;
         if self.finished {
             return Err(TetCrackGrowthError::Finished);
         }
+        if full_cycles == 0 || full_cycles > (1_u64 << 53) {
+            return Err(TetCrackGrowthError::Invalid(
+                "declare a whole-cycle repetition count in 1..=2^53",
+            ));
+        }
         let mut candidate = self.gauges.clone();
-        let steps = close_gauges(&mut candidate, cx)?;
+        let steps = close_gauges(&mut candidate, full_cycles as f64, cx)?;
         poll(cx)?;
         self.gauges = candidate;
         Ok(steps)
@@ -635,6 +674,7 @@ impl CycleWindow {
 
 fn close_gauges(
     gauges: &mut [GaugeState],
+    full_cycles: f64,
     cx: &Cx<'_>,
 ) -> Result<Vec<CrackGrowthStep>, TetCrackGrowthError> {
     let mut steps = Vec::with_capacity(gauges.len());
@@ -644,7 +684,8 @@ fn close_gauges(
             gauge: index,
             what: "no native stress has been observed",
         })?;
-        let cycle = window.cycle(gauge.closure, index)?;
+        let mut cycle = window.cycle(gauge.closure, index)?;
+        cycle.cycles = full_cycles;
         let step = gauge
             .growth
             .advance_with_cancel(cycle, &mut || cx.checkpoint().is_err())
