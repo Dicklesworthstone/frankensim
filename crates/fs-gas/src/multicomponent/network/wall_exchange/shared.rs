@@ -1,6 +1,8 @@
 //! Shared finite inventories on the existing mixture-network transaction.
 
 use super::*;
+use super::shared_recoil::SharedBranchSupports;
+use crate::multicomponent::wall_exchange::WallCaloricConstraint;
 use crate::multicomponent::wall_exchange::shared::{Group, Work, mixture};
 pub use crate::multicomponent::wall_exchange::shared::{
     SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport,
@@ -241,6 +243,67 @@ impl<'law> NetworkWallOperator<'law> {
 }
 
 impl SharedWalls<'_> {
+    /// Each frictional destination is an existing inventory belonging to one
+    /// mechanical support. Other gas ports may exchange heat with that body,
+    /// but two independently moving supports cannot claim the same wall mass.
+    pub(super) fn admit_support_partitions(
+        &self,
+        fractions: &[Vec<f64>],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), WallExchangeError> {
+        let expected = fractions.iter().flatten().filter(|&&f| f < 1.0).count();
+        let mut found = 0;
+        for bound in &self.groups {
+            poll(cancelled)?;
+            let mut support_branch = None;
+            for port in &bound.storage.accepted.ports {
+                poll(cancelled)?;
+                let SharedWallGas::Branch { branch, cell } = port.gas else {
+                    continue;
+                };
+                let fraction = fractions
+                    .get(branch)
+                    .and_then(|cells| cells.get(cell))
+                    .ok_or(WallExchangeError::Invalid("shared support heat shape"))?;
+                if *fraction == 1.0 {
+                    continue;
+                }
+                if support_branch.is_some_and(|owner| owner != branch) {
+                    return Err(WallExchangeError::Invalid(
+                        "one shared friction wall cannot belong to different supports",
+                    ));
+                }
+                support_branch = Some(branch);
+                found += 1;
+            }
+            if support_branch.is_some()
+                && bound
+                    .storage
+                    .accepted
+                    .storage
+                    .heat_storage
+                    .as_ref()
+                    .is_some_and(|source| {
+                        !matches!(
+                            source.constraint(),
+                            WallCaloricConstraint::IsochoricInternalEnergy
+                                | WallCaloricConstraint::StationarySolidNegligibleExpansion
+                        )
+                    })
+            {
+                return Err(WallExchangeError::Invalid(
+                    "shared support heating requires internal energy or explicit negligible expansion",
+                ));
+            }
+        }
+        if found != expected {
+            return Err(WallExchangeError::Invalid(
+                "shared support heat requires an original shared wall at every selected cell",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) fn begin_trial(
         &mut self,
         cancelled: &mut impl FnMut() -> bool,
@@ -262,6 +325,7 @@ impl SharedWalls<'_> {
         &mut self,
         network: &MixtureNetwork1d,
         candidate_states: &mut [[f64; 2]],
+        supports: Option<&SharedBranchSupports>,
         duration: Time,
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
@@ -272,6 +336,8 @@ impl SharedWalls<'_> {
         for bound in &mut self.groups {
             poll(cancelled)?;
             let group = &mut bound.storage;
+            let mut friction_heat = 0.0;
+            let mut friction_correction = 0.0;
             for (i, (port, &index)) in group.accepted.ports.iter().zip(&bound.indices).enumerate() {
                 poll(cancelled)?;
                 group.initial[i] = candidate_states[index];
@@ -279,6 +345,14 @@ impl SharedWalls<'_> {
                 // plenum volume; its current volume enters this same heat solve.
                 if let SharedWallGas::Plenum(p) = port.gas {
                     group.volumes[i] = network.plenums[p].volume_m3;
+                } else if let (SharedWallGas::Branch { branch, cell }, Some(supports)) =
+                    (port.gas, supports)
+                {
+                    accumulate(
+                        &mut friction_heat,
+                        &mut friction_correction,
+                        supports.wall_slip_heat(branch, cell),
+                    )?;
                 }
             }
             let original = |location, _temperature| {
@@ -293,10 +367,78 @@ impl SharedWalls<'_> {
                 };
                 mixture(network.gas(), densities)
             };
-            let initial = group.candidate;
-            let report = group.solve(
+            let before_friction = group.candidate;
+            // Mechanics already debited each gas's assigned wall fraction.
+            // Deposit their compensated sum ONCE through this original store,
+            // before its usual simultaneous heat and conduction solve.
+            let initial = if friction_heat == 0.0 {
+                before_friction
+            } else {
+                let deposited = group.after_state(before_friction, friction_heat, &self.work)?;
+                let residual = deposited.change - friction_heat;
+                if !residual.is_finite() || residual.abs() > controls.tolerance(friction_heat) {
+                    return Err(WallExchangeError::Balance {
+                        energy_residual_j: residual,
+                        thermal_residual_j: 0.0,
+                    });
+                }
+                deposited.thermal
+            };
+            let mut report = group.solve(
                 &original, duration, controls, &self.work, initial, cancelled,
             )?;
+            if friction_heat != 0.0 {
+                // Use the complete represented wall endpoints, including a
+                // latent coordinate. Assigned shares already appear once in
+                // the cell reports; only the remainder belongs to this stage.
+                let complete_change = if let Some(source) = &group.accepted.storage.heat_storage {
+                    self.work.charge()?;
+                    source.energy_change_j(
+                        WallContact {
+                            drag: WallDrag::None,
+                            thermal: before_friction,
+                        },
+                        WallContact {
+                            drag: WallDrag::None,
+                            thermal: group.candidate,
+                        },
+                    )?
+                } else {
+                    let (
+                        WallThermal::Lumped {
+                            temperature_k: before,
+                            heat_capacity_j_per_k,
+                            ..
+                        },
+                        WallThermal::Lumped {
+                            temperature_k: after,
+                            ..
+                        },
+                    ) = (before_friction, group.candidate)
+                    else {
+                        return Err(WallExchangeError::Invalid(
+                            "shared friction wall lost its storage",
+                        ));
+                    };
+                    heat_capacity_j_per_k * (after - before)
+                };
+                report.wall_energy_change_j = complete_change - friction_heat;
+                report.energy_residual_j = report.heat_to_gas_j + report.wall_energy_change_j;
+                let scale = complete_change
+                    .abs()
+                    .max(friction_heat)
+                    .max(sum(group.heat.iter().map(|heat| heat.abs())));
+                if !complete_change.is_finite()
+                    || !scale.is_finite()
+                    || !report.energy_residual_j.is_finite()
+                    || report.energy_residual_j.abs() > controls.tolerance(scale)
+                {
+                    return Err(WallExchangeError::Balance {
+                        energy_residual_j: report.energy_residual_j,
+                        thermal_residual_j: report.thermal_residual_j,
+                    });
+                }
+            }
             total.add(report)?;
             maximum_wall = maximum_wall.max(report.energy_residual_j.abs());
             iterations = iterations

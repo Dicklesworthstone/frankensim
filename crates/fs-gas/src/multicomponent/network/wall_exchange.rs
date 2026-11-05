@@ -525,6 +525,7 @@ impl<'law> NetworkWallOperator<'law> {
             let shared_report = shared.prepare(
                 network,
                 &mut self.candidate_states,
+                self.shared_supports.as_ref(),
                 duration,
                 controls,
                 cancelled,

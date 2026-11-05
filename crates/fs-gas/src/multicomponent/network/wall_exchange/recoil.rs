@@ -30,13 +30,16 @@ pub struct SupportExchange {
     pub kinetic_energy_change_j: f64,
     /// Relative-slip energy thermalized once across gas and finite wall [J].
     pub drag_heating_j: f64,
-    /// Actual wall storage gained during friction stages, before subsequent
-    /// thermal exchange [J]. This is an internal transfer out of gas storage.
+    /// Wall heating during friction stages, before subsequent thermal exchange
+    /// [J]. Local walls report actual storage gain; shared supports report the
+    /// assigned transfer, whose original shared inventory separately audits
+    /// deposition and complete endpoints. This is an internal gas debit.
     pub wall_slip_heating_j: f64,
     /// Actual gas impulse plus support endpoint momentum change [N s].
     pub momentum_residual_ns: f64,
-    /// Friction-stage gas, wall storage and actual support kinetic changes [J].
-    /// Original subsequent thermal storage/flux residuals remain separate.
+    /// Friction-stage gas, wall heating and actual support kinetic changes [J].
+    /// Shared inventory representation and subsequent thermal residuals remain
+    /// in the original network/shared-wall reports.
     pub energy_residual_j: f64,
 }
 
@@ -421,7 +424,10 @@ pub(super) fn finish(
                     ..
                 },
             ) => heat_capacity_j_per_k * (final_temperature - initial),
-            _ => thermal.report.wall_energy_change_j,
+            // An adiabatic local contact may deliver its frictional wall
+            // fraction to one separately owned shared inventory. Its exact
+            // deposition and complete endpoint are audited by that owner.
+            _ => thermal.report.wall_energy_change_j + motion.report.wall_energy_change_j,
         },
     };
     thermal.report.energy_residual_j = (thermal.energy - initial_energy) * volume

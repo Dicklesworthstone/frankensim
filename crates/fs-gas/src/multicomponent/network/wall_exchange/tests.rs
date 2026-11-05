@@ -375,6 +375,7 @@ mod coupled;
 mod moving_wall;
 mod recoil;
 mod recoil_partition;
+mod shared_partition;
 mod shared_recoil;
 mod transport;
 #[cfg(feature = "material")]

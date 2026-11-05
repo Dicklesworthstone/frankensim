@@ -1,8 +1,9 @@
 //! One axial mechanical support shared by every cell of a selected branch.
 //!
 //! Mechanical inertia and thermal storage have separate identities. The shared
-//! friction solve runs before the original caloric/thermal owner and deposits
-//! slip loss exactly once through total energy minus the new kinetic energy.
+//! friction solve runs before the original caloric/thermal owner. Slip loss
+//! heats gas and its assigned finite wall exactly once; the thermal owner
+//! deposits the combined wall share into each original inventory.
 
 use super::{
     Cell, MixtureGas, MixtureNetwork1d, NetworkWallOperator, SupportExchange, WallCellReport,
@@ -19,6 +20,7 @@ pub(super) struct SharedBranchSupports {
     branches: Vec<Option<BranchSupport>>,
     control: SharedRecoilControl,
     momentum_tolerance_ns: f64,
+    heat_partition_bound: bool,
 }
 
 struct BranchSupport {
@@ -29,6 +31,7 @@ struct BranchSupport {
     workspace: SharedRecoilWorkspace,
     inputs: Vec<SharedRecoilCell>,
     motions: Vec<WallUpdate>,
+    gas_heat_fractions: Vec<f64>,
 }
 
 impl NetworkWallOperator<'_> {
@@ -44,8 +47,10 @@ impl NetworkWallOperator<'_> {
     /// Coefficients are frozen at each source half's entering state. Authored
     /// friction or original circular transport supplies those coefficients;
     /// actual support-relative endpoints retain the original material checks.
-    /// All frictional slip heat stays in gas, then the original local, caloric,
-    /// conduction or shared thermal owner performs heat exchange.
+    /// By default all frictional slip heat stays in gas.
+    /// [`Self::with_shared_branch_heat_partition`] can assign a share to the
+    /// original shared wall inventory. The original local, caloric, conduction
+    /// or shared thermal owner then performs heat exchange.
     ///
     /// Supports follow both original source halves and publish with gas and
     /// walls. Allocation occurs only at binding. Different branch axes never
@@ -107,6 +112,7 @@ impl NetworkWallOperator<'_> {
                 },
             )?;
             let motions = allocated(count, empty_motion())?;
+            let gas_heat_fractions = allocated(count, 1.0)?;
             let workspace = SharedRecoilWorkspace::new(count, &mut cancelled)?;
             for contact in &mut self.contacts[shape.start..shape.start + count] {
                 poll(&mut cancelled)?;
@@ -120,6 +126,7 @@ impl NetworkWallOperator<'_> {
                 workspace,
                 inputs,
                 motions,
+                gas_heat_fractions,
             }));
         }
         poll(&mut cancelled)?;
@@ -127,7 +134,101 @@ impl NetworkWallOperator<'_> {
             branches: prepared,
             control,
             momentum_tolerance_ns,
+            heat_partition_bound: false,
         });
+        Ok(self)
+    }
+
+    /// Partition each shared support's frictional slip heat between its gas
+    /// cells and their original shared thermal inventories.
+    ///
+    /// Rows and entries follow the original branch/cell order. Every value is
+    /// the gas fraction in `[0, 1]`; a branch without a shared support must
+    /// retain `1`. Bind once after supports and shared walls, before evolution.
+    /// An all-gas partition requires no shared thermal storage.
+    ///
+    /// A fraction below one needs an original finite shared wall with internal
+    /// energy or an explicit negligible-expansion assumption. Each heated
+    /// inventory belongs to one mechanical support; its thermal amount is
+    /// already included in that support's inertia. Other gas ports may exchange
+    /// heat with the same inventory without creating additional wall mass.
+    ///
+    /// Mechanics assigns each wall share before admitting returned gas energy. The
+    /// existing shared thermal owner deposits the sum once, then performs the
+    /// original simultaneous heat solve and complete storage audit. No new
+    /// caloric curve, thermal solver, or per-step allocation is introduced.
+    pub fn with_shared_branch_heat_partition(
+        mut self,
+        branches: Vec<Vec<f64>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, WallExchangeError> {
+        poll(&mut cancelled)?;
+        if self.last_report.is_some() || self.trial_active || branches.len() != self.branches.len()
+        {
+            return Err(WallExchangeError::Invalid(
+                "shared support heat partition must bind before evolution",
+            ));
+        }
+        let supports = self
+            .shared_supports
+            .as_ref()
+            .ok_or(WallExchangeError::Invalid(
+                "heat partition requires shared branch supports",
+            ))?;
+        if supports.heat_partition_bound {
+            return Err(WallExchangeError::Invalid(
+                "shared support heat partition must bind once",
+            ));
+        }
+        let mut needs_wall = false;
+        for ((shape, input), support) in self.branches.iter().zip(&branches).zip(&supports.branches)
+        {
+            if input.len() != shape.mesh.cell_count() {
+                return Err(WallExchangeError::Invalid(
+                    "shared support heat partition cell axis",
+                ));
+            }
+            for &fraction in input {
+                poll(&mut cancelled)?;
+                if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                    return Err(WallExchangeError::Invalid(
+                        "shared support gas heat fraction",
+                    ));
+                }
+                if fraction < 1.0 {
+                    if support.is_none() {
+                        return Err(WallExchangeError::Invalid(
+                            "wall slip heat requires a shared branch support",
+                        ));
+                    }
+                    needs_wall = true;
+                }
+            }
+        }
+        if needs_wall {
+            self.shared
+                .as_ref()
+                .ok_or(WallExchangeError::Invalid(
+                    "shared support wall heat requires original shared storage",
+                ))?
+                .admit_support_partitions(&branches, &mut cancelled)?;
+        }
+        let supports = self
+            .shared_supports
+            .as_mut()
+            .ok_or(WallExchangeError::Invalid(
+                "shared support owner disappeared",
+            ))?;
+        for (input, support) in branches.into_iter().zip(&mut supports.branches) {
+            if let Some(support) = support {
+                for (stored, fraction) in support.gas_heat_fractions.iter_mut().zip(input) {
+                    poll(&mut cancelled)?;
+                    *stored = fraction;
+                }
+            }
+        }
+        poll(&mut cancelled)?;
+        supports.heat_partition_bound = true;
         Ok(self)
     }
 
@@ -147,7 +248,9 @@ impl NetworkWallOperator<'_> {
     ///
     /// Gas energy and impulse are summed over its cells and all source halves;
     /// support momentum and kinetic energy use the actual complete endpoints.
-    /// Original thermal exchange remains in `NetworkWallReport`.
+    /// Wall heating is the assigned transfer into the original shared storage.
+    /// Its actual caloric deposition and subsequent heat exchange are audited
+    /// by the shared thermal owner and retained in `NetworkWallReport`.
     pub fn accepted_branch_shared_support_exchange(
         &self,
         branch: usize,
@@ -273,6 +376,13 @@ impl SharedBranchSupports {
             .copied()
     }
 
+    /// Assigned heat for the current source half; one original shared thermal
+    /// inventory consumes the sum over its ports exactly once.
+    pub(super) fn wall_slip_heat(&self, branch: usize, cell: usize) -> f64 {
+        self.motion(branch, cell)
+            .map_or(0.0, |motion| motion.report.wall_energy_change_j)
+    }
+
     pub(super) fn commit(&mut self) {
         for branch in self.branches.iter_mut().flatten() {
             branch.accepted = branch.trial;
@@ -321,20 +431,28 @@ impl BranchSupport {
             balance,
             &mut *cancelled,
         )?;
-        let mut totals = [0.0; 4];
-        let mut corrections = [0.0; 4];
+        let mut totals = [0.0; 5];
+        let mut corrections = [0.0; 5];
         for (i, (values, cell)) in states.chunks_exact(width).zip(motion.cells).enumerate() {
             poll(cancelled)?;
-            let energy = values[n + 1] + cell.work_to_gas_j / volumes[i];
+            let wall_heat =
+                cell.slip_dissipation_j - self.gas_heat_fractions[i] * cell.slip_dissipation_j;
+            let change = cell.work_to_gas_j - wall_heat;
+            let energy = values[n + 1] + change / volumes[i];
             let gas_energy = (energy - values[n + 1]) * volumes[i];
             let impulse = (cell.momentum - values[n]) * volumes[i];
-            let residual = gas_energy - cell.work_to_gas_j;
+            let residual = gas_energy - change;
             if !energy.is_finite()
+                || !wall_heat.is_finite()
+                || wall_heat < 0.0
                 || !residual.is_finite()
                 || residual.abs()
-                    > balance
-                        .wall
-                        .tolerance(cell.work_to_gas_j.abs().max(cell.slip_dissipation_j))
+                    > balance.wall.tolerance(
+                        change
+                            .abs()
+                            .max(cell.work_to_gas_j.abs())
+                            .max(cell.slip_dissipation_j),
+                    )
             {
                 return Err(WallExchangeError::Balance {
                     energy_residual_j: residual,
@@ -352,6 +470,8 @@ impl BranchSupport {
                     wall_impulse_ns: -impulse,
                     mechanical_work_to_gas_j: cell.work_to_gas_j,
                     drag_heating_j: cell.slip_dissipation_j,
+                    heat_to_gas_j: if wall_heat == 0.0 { 0.0 } else { -wall_heat },
+                    wall_energy_change_j: wall_heat,
                     energy_residual_j: residual,
                     ..empty_motion().report
                 },
@@ -361,6 +481,7 @@ impl BranchSupport {
                 cell.work_to_gas_j,
                 gas_energy,
                 cell.slip_dissipation_j,
+                wall_heat,
             ]
             .into_iter()
             .enumerate()
@@ -373,6 +494,7 @@ impl BranchSupport {
         let work = sum([previous.work_to_gas_j, totals[1]]);
         let gas_energy = sum([previous.gas_energy_change_j, totals[2]]);
         let heating = sum([previous.drag_heating_j, totals[3]]);
+        let wall_heating = sum([previous.wall_slip_heating_j, totals[4]]);
         let impulse =
             self.accepted.mass_kg * (motion.support.velocity_m_s - self.accepted.velocity_m_s);
         let kinetic =
@@ -384,15 +506,20 @@ impl BranchSupport {
             gas_energy_change_j: gas_energy,
             kinetic_energy_change_j: kinetic,
             drag_heating_j: heating,
-            wall_slip_heating_j: 0.0,
+            wall_slip_heating_j: wall_heating,
             momentum_residual_ns: gas_impulse + impulse,
-            energy_residual_j: gas_energy + kinetic,
+            energy_residual_j: if wall_heating == 0.0 {
+                gas_energy + kinetic
+            } else {
+                sum([gas_energy, kinetic, wall_heating])
+            },
         };
         if ![
             gas_impulse,
             work,
             gas_energy,
             heating,
+            wall_heating,
             impulse,
             kinetic,
             report.momentum_residual_ns,
@@ -401,13 +528,20 @@ impl BranchSupport {
         .into_iter()
         .all(f64::is_finite)
             || heating < 0.0
+            || wall_heating < 0.0
             || report.momentum_residual_ns.abs() > balance.momentum_tolerance_ns
         {
             return Err(WallExchangeError::Invalid(
                 "complete shared support momentum balance",
             ));
         }
-        if report.energy_residual_j.abs() > balance.wall.tolerance(work.abs().max(heating)) {
+        let scale = work.abs().max(heating);
+        let scale = if wall_heating == 0.0 {
+            scale
+        } else {
+            scale.max(gas_energy.abs())
+        };
+        if report.energy_residual_j.abs() > balance.wall.tolerance(scale) {
             return Err(WallExchangeError::Balance {
                 energy_residual_j: report.energy_residual_j,
                 thermal_residual_j: 0.0,

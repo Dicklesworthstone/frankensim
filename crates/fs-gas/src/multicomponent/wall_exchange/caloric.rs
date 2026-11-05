@@ -292,10 +292,31 @@ impl<'law> MaterialWallCaloric<'law> {
             Storage::Energy(source) => {
                 let _ = gas_temperature;
                 let (energy, _) = source.state(contact)?;
-                Ok([
-                    source.initial.mass_kg * (energy - source.range_j_kg[1]),
-                    source.initial.mass_kg * (energy - source.range_j_kg[0]),
-                ])
+                let limit = |endpoint: f64| {
+                    let mut heat = source.initial.mass_kg * (energy - endpoint);
+                    // Form only bracket proposals here. Multiplication by
+                    // mass and reconstruction through division/addition can
+                    // round a nominal endpoint outside its native h/u domain.
+                    // Contract extensive heat toward zero until that SAME
+                    // represented state is supported; never clip stored h/u.
+                    for _ in 0..8 {
+                        let candidate = energy + (-heat) / source.initial.mass_kg;
+                        if !heat.is_finite()
+                            || (source.range_j_kg[0]..=source.range_j_kg[1]).contains(&candidate)
+                        {
+                            return Ok(heat);
+                        }
+                        heat = if heat > 0.0 {
+                            heat.next_down()
+                        } else {
+                            heat.next_up()
+                        };
+                    }
+                    Err(WallExchangeError::Invalid(
+                        "unrepresentable caloric wall heat bound",
+                    ))
+                };
+                Ok([limit(source.range_j_kg[1])?, limit(source.range_j_kg[0])?])
             }
             #[cfg(feature = "material")]
             Storage::Capacity(source) => {

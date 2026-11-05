@@ -2882,6 +2882,10 @@ Original source domains, energy references, conservative states and caller EOS
 controls are unchanged. The wall's own iteration limit bounds refinement;
 shared exchanges charge these queries to their existing nested source budget.
 Zero conductance and exact caloric states need no additional inversion.
+Native h/u heat bounds account for the represented mass conversion before a
+trial source query: only the proposed extensive bracket contracts toward zero
+until its reconstructed state lies in the declared source interval. Accepted
+stored energy is neither clipped nor reprojected.
 
 `network::wall_exchange::NetworkWallOperator` binds one distinct contact to
 every branch cell and finite plenum. It stages all momentum/energy and wall
@@ -4525,11 +4529,29 @@ branch axes are never summed or treated as one spatial body.
 Each original source half resolves all selected coefficients at its actual
 entering common support velocity. Shared mechanics then supplies per-cell
 momentum and mechanical work before the original thermal owner runs with
-drag disabled. Slip loss thermalizes once through total energy minus kinetic
-energy. Local wall capacity, original material calorics/conduction, and shared
+drag disabled. By default slip loss thermalizes once through total energy minus
+kinetic energy. Local wall capacity, original material calorics/conduction, and shared
 thermal storage retain their existing ownership. Original transport admission
 checks actual relative-slip endpoints, including after shared thermal exchange.
 No thermal inventory, mass, mesh volume or flow clock is added.
+
+`with_shared_branch_heat_partition` binds a gas fraction per original branch
+cell after common support and shared thermal binding. The remainder of each
+cell's slip loss is debited from gas before its caloric admission. The existing
+shared thermal owner deposits the compensated sum once through the original
+material energy coordinate, then runs its simultaneous gas heat solve and
+existing wall links. Nonlinear capacity and latent plateaus retain their native
+source and inventory. Each heated wall belongs to one mechanical support;
+other gas ports can exchange heat with that body without claiming its inertia.
+Internal energy or explicit negligible expansion is required for material
+friction heating. All-gas partition retains the original default path.
+
+The support receipt identifies the assigned frictional transfer. The shared
+owner checks its actual deposition and computes wall storage from the complete
+pre-friction and post-thermal endpoints. The network combines that physical
+change with each gas debit once; represented storage differences remain visible
+in residuals instead of being repaired by modifying energy. Source work, both
+source halves, wall-link ordering and rollback use the existing transaction.
 
 Accepted support states and `SupportExchange` receipts publish in the same
 transaction as gas and thermal walls. Both source halves accumulate actual
@@ -4540,16 +4562,14 @@ gas, support, thermal states and reports. Preparation allocates the work arrays;
 stepping does not allocate. The fixed-axis/frozen-geometry and local estimated
 mechanical accuracy limits of the shared solver remain explicit.
 
-Six focused selected-source native tests passed with the final solver and
-network source: nonuniform two-species volumes/masses with linear, Darcy and
-combined friction plus original local heat; an independent two-rate shared
-continuum with individual heat; both source halves and endpoint receipts;
-prior-state cancellation/replay and work refusal; disjoint independent
-supports, overlap rejection and None-path identity; and support-relative
-transport/Galilean endpoint admission. The native run used the actual network
-wall owner, heat, friction, transport and mesh source with explicit constant-Cv
-gas/network/transport fixtures. Material and shared-thermal paths were trapped,
-not exercised. Full Cargo/material/advection verification remains separate.
+Seven existing shared-support network regressions use the original mixture,
+transport, mechanics and thermal implementations. Four further G1/G4 test
+groups exercise nonlinear Cv and wall calorimetry against independent integral
+equations, unequal heat fractions and films, latent storage through both source
+halves of continuing molecular/wave flow, prior accepted-state refusal/replay,
+and physical ownership admission. Two regional material inventories connected
+by the existing wall-link owner share one support without duplicating its mass.
+Full Cargo and optional material-feature verification remain separate.
 
 ## Two reacting molecular chambers driving one shared piston
 
