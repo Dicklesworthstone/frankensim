@@ -7640,3 +7640,25 @@ still require their existing exact supported thermal curve. Regressions compare
 native straight/curved power and depolarization to the original polynomial, and
 connected fixture/camera radiance to independent cosine/Beer/inverse-square
 values at multiple wavelengths while retaining the same continuation path.
+
+## Original lifted emission in native reciprocal camera transport
+
+`RadianceSpectrum::try_lifted` retains the original `LiftedSpectrum` coefficients
+and an explicit local radiance scale in W/(m² sr nm). Its support is exactly
+380–780 nm; no knots are fitted or allocated. `lifted_source()` reports that
+original pair and `knots()` is empty for the analytic representation. Existing
+tabulated spectra retain their original knots, support and interpolation
+arithmetic. Nonfinite coefficients or invalid calibration refuse at admission;
+out-of-band queries and unrepresentable evaluated radiance refuse at observation.
+Zero scale is exact black within its declared source band.
+
+The existing `SurfaceEmitter` owns this representation, so camera-hit emission,
+native mesh/chart area proposals, complementary light-sampling MIS and molecular
+camera consumers query the same source at the actual physical wavelength. The
+original emitting side, local-medium calibration, emission-before-scattering,
+reciprocal index conversion and Beer attenuation remain unchanged. A lifted
+RGB spectrum remains authored source data; calibration does not recover a
+measured spectrum or impose a thermal emission law. Regressions retain exact
+interior-wavelength evaluation and compare native camera radiance and original
+area-source irradiance against independent area/distance²/Beer values, including
+exact-black source behavior and explicit source-domain refusals.

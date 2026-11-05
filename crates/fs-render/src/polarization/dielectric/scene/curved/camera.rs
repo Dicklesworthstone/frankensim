@@ -58,7 +58,7 @@ use crate::lighting::EnvironmentMap;
 use crate::polarization::Stokes;
 use crate::polarization::dielectric::scene::{Interaction, PathTermination};
 use crate::polarization::dielectric::transport::{BeamMedium, PolarizationFrame, PolarizedBeam};
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
+use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum};
 use fs_exec::Cx;
 use fs_geom::Vec3;
 
@@ -87,12 +87,23 @@ pub mod point_lights;
 /// Maximum knots in one immutable source spectrum, admitted before storage.
 pub const MAX_RADIANCE_KNOTS: usize = 1024;
 
-/// Authored local emitted radiance in W/(m² sr nm), with linear interpolation
-/// between retained vacuum-wavelength knots. No extrapolation, RGB lift, source
-/// normalization or material accuracy is inferred from these samples.
+/// Authored local emitted radiance in W/(m² sr nm). Tabulated sources linearly
+/// interpolate retained vacuum-wavelength knots; lifted sources evaluate their
+/// original visible polynomial and explicit SI scale without fitting knots.
+/// No extrapolation, source normalization or measured spectral accuracy is
+/// inferred from either representation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RadianceSpectrum {
-    knots: Vec<(f64, f64)>,
+    source: RadianceSource,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum RadianceSource {
+    Tabulated(Vec<(f64, f64)>),
+    Lifted {
+        spectrum: LiftedSpectrum,
+        scale_w_m2_sr_nm: f64,
+    },
 }
 
 impl RadianceSpectrum {
@@ -120,7 +131,7 @@ impl RadianceSpectrum {
         {
             return Err(CameraRadianceError::InvalidSpectrum);
         }
-        Ok(Self { knots })
+        Ok(Self { source: RadianceSource::Tabulated(knots) })
     }
 
     pub fn try_constant(radiance_w_m2_sr_nm: f64) -> Result<Self, CameraRadianceError> {
@@ -130,14 +141,49 @@ impl RadianceSpectrum {
         ])
     }
 
+    /// Retain an original lifted visible spectrum with explicit local radiance
+    /// calibration. This constructor allocates nothing. The original polynomial
+    /// is evaluated at every actual wavelength; there is no sampled surrogate.
+    /// Its support is exactly the native 380–780 nm band, including for black
+    /// sources. Finite coefficients are admitted here; unrepresentable evaluated
+    /// radiance refuses when queried. A lifted RGB source is authored, not a
+    /// recovered measured spectrum or a thermal source.
+    pub fn try_lifted(
+        spectrum: LiftedSpectrum,
+        scale_w_m2_sr_nm: f64,
+    ) -> Result<Self, CameraRadianceError> {
+        if spectrum.c.iter().any(|value| !value.is_finite())
+            || !scale_w_m2_sr_nm.is_finite() || scale_w_m2_sr_nm < 0.0
+        {
+            return Err(CameraRadianceError::InvalidSpectrum);
+        }
+        Ok(Self { source: RadianceSource::Lifted { spectrum, scale_w_m2_sr_nm } })
+    }
+
+    /// Original tabulated knots. An analytic lifted source has no knots and
+    /// returns an empty slice; inspect [`Self::lifted_source`] for that source.
     pub fn knots(&self) -> &[(f64, f64)] {
-        &self.knots
+        match &self.source {
+            RadianceSource::Tabulated(knots) => knots,
+            RadianceSource::Lifted { .. } => &[],
+        }
+    }
+
+    /// Original lifted coefficients and SI calibration, if this is analytic.
+    pub const fn lifted_source(&self) -> Option<(LiftedSpectrum, f64)> {
+        match &self.source {
+            RadianceSource::Lifted { spectrum, scale_w_m2_sr_nm } => Some((*spectrum, *scale_w_m2_sr_nm)),
+            RadianceSource::Tabulated(_) => None,
+        }
     }
 
     /// Inclusive source support in vacuum nanometres.
     #[must_use]
     pub fn wavelength_bounds_nm(&self) -> (f64, f64) {
-        (self.knots[0].0, self.knots[self.knots.len() - 1].0)
+        match &self.source {
+            RadianceSource::Tabulated(knots) => (knots[0].0, knots[knots.len() - 1].0),
+            RadianceSource::Lifted { .. } => (LAMBDA_MIN, LAMBDA_MAX),
+        }
     }
 
     pub fn evaluate(&self, wavelength_nm: f64) -> Result<f64, CameraRadianceError> {
@@ -147,14 +193,22 @@ impl RadianceSpectrum {
                 DielectricError::InvalidWavelength,
             ));
         }
-        let upper = self.knots.partition_point(|&(w, _)| w < wavelength_nm);
-        if upper == 0 || self.knots[upper].0 == wavelength_nm {
-            return Ok(self.knots[upper].1);
+        match &self.source {
+            RadianceSource::Tabulated(knots) => {
+                let upper = knots.partition_point(|&(w, _)| w < wavelength_nm);
+                if upper == 0 || knots[upper].0 == wavelength_nm {
+                    return Ok(knots[upper].1);
+                }
+                let (lo, a) = knots[upper - 1];
+                let (hi, b) = knots[upper];
+                let fraction = (wavelength_nm - lo) / (hi - lo);
+                finite_nonnegative((1.0 - fraction) * a + fraction * b)
+            }
+            RadianceSource::Lifted { spectrum, scale_w_m2_sr_nm } => {
+                if *scale_w_m2_sr_nm == 0.0 { return Ok(0.0); }
+                finite_nonnegative(spectrum.eval(wavelength_nm) * scale_w_m2_sr_nm)
+            }
         }
-        let (lo, a) = self.knots[upper - 1];
-        let (hi, b) = self.knots[upper];
-        let fraction = (wavelength_nm - lo) / (hi - lo);
-        finite_nonnegative((1.0 - fraction) * a + fraction * b)
     }
 }
 

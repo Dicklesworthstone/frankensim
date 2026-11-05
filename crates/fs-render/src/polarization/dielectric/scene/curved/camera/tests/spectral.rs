@@ -75,6 +75,153 @@ fn g0_rgb_environment_does_not_invent_nonvisible_source_radiance() {
     }
 }
 
+#[test]
+fn g0_lifted_source_retains_original_coefficients_calibration_and_visible_support() {
+    let original = LiftedSpectrum {
+        c: [3.0, -2.0, -0.25],
+    };
+    let source = RadianceSpectrum::try_lifted(original, 7.0).unwrap();
+    assert_eq!(source.lifted_source(), Some((original, 7.0)));
+    assert!(source.knots().is_empty());
+    assert_eq!(source.wavelength_bounds_nm(), (380.0, 780.0));
+    for wavelength in [380.0, 401.25, 444.125, 550.0, 611.75, 699.125, 780.0] {
+        // Arbitrary interior wavelengths retain the original function, rather
+        // than a piecewise-linear surrogate between selected sample knots.
+        assert_eq!(
+            source.evaluate(wavelength).unwrap().to_bits(),
+            (7.0 * original.eval(wavelength)).to_bits()
+        );
+    }
+    near(source.evaluate(780.0).unwrap(), 5.6, 2e-15);
+    let black = RadianceSpectrum::try_lifted(original, 0.0).unwrap();
+    assert_eq!(black.evaluate(611.75).unwrap(), 0.0);
+    for outside in [379.0, 781.0, 1550.0, f64::NAN, f64::INFINITY] {
+        for spectrum in [&source, &black] {
+            assert!(matches!(
+                spectrum.evaluate(outside),
+                Err(CameraRadianceError::Optics(
+                    DielectricError::InvalidWavelength
+                ))
+            ));
+        }
+    }
+    for scale in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(matches!(
+            RadianceSpectrum::try_lifted(original, scale),
+            Err(CameraRadianceError::InvalidSpectrum)
+        ));
+    }
+    assert!(matches!(
+        RadianceSpectrum::try_lifted(
+            LiftedSpectrum {
+                c: [0.0, f64::NAN, 1.0]
+            },
+            1.0
+        ),
+        Err(CameraRadianceError::InvalidSpectrum)
+    ));
+    let unresolved =
+        RadianceSpectrum::try_lifted(LiftedSpectrum { c: [f64::MAX; 3] }, 1.0).unwrap();
+    assert!(matches!(
+        unresolved.evaluate(780.0),
+        Err(CameraRadianceError::NumericalRange)
+    ));
+}
+
+#[test]
+fn g1_lifted_camera_and_area_sources_share_original_radiance_area_and_beer_law() {
+    use super::super::area_lights::CurvedAreaEmitter;
+    use crate::gradient_index::event::BoundarySide;
+    use crate::polarization::dielectric::scene::curved::bundle::connection::images::{
+        BundleImageOptions, BundleImageSeed, BundleImageWorkspace,
+    };
+    use crate::polarization::dielectric::scene::curved::bundle::connection::{
+        BundleBranchPolicy, BundleConnectionOptions, BundleConnectionTarget,
+    };
+
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(9, 1.0, 0.0, 1.0)]).unwrap();
+        let host = glass(1.3, 0.2);
+        let media = [SceneMedium::Homogeneous(&host)];
+        let native =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![opaque(9)], 100_000).unwrap();
+        let original = LiftedSpectrum {
+            c: [3.0, -2.0, -0.25],
+        };
+        for scale in [0.0, 7.0] {
+            let emitters = [SurfaceEmitter::new(
+                9,
+                RadianceSpectrum::try_lifted(original, scale).unwrap(),
+                EmissionSides::Front,
+            )];
+            let camera = CurvedCameraScene::try_new(cx, &native, &emitters, None).unwrap();
+            let area = CurvedAreaEmitter::from_camera(cx, &camera, 9, 1).unwrap();
+            assert!(core::ptr::eq(area.source_emitter().unwrap(), &emitters[0]));
+            assert_eq!(area.total_area_m2(), 2.0);
+            let point = area.sample_area([4.0 / 9.0, 0.5]).unwrap().position_m();
+            let receiver = point.offset(Vec3::new(0.0, 0.0, 2.0));
+            let target = BundleConnectionTarget::try_volume_receiver(
+                0,
+                receiver,
+                Vec3::new(0.0, 0.0, -1.0),
+                2e-7,
+            )
+            .unwrap();
+            let seeds = [BundleImageSeed {
+                initial_direction: Vec3::new(0.0, 0.0, 1.0),
+                policy: BundleBranchPolicy::Sequence(&[]),
+            }];
+            let mut connection = BundleConnectionOptions::default();
+            connection.scene.trace = settings();
+            let mut workspace = BundleImageWorkspace::try_new(1, 1).unwrap();
+            for wavelength in [401.25, 550.0, 699.125] {
+                let radiance = camera
+                    .sample_ray_with_samples(
+                        cx,
+                        Ray {
+                            origin: receiver,
+                            dir: Vec3::new(0.0, 0.0, -1.0),
+                        },
+                        wavelength,
+                        0,
+                        settings(),
+                        |_| panic!("opaque source draws no scatter"),
+                    )
+                    .unwrap();
+                let irradiance = area
+                    .incident_irradiance(
+                        cx,
+                        area.sample_area([4.0 / 9.0, 0.5]).unwrap(),
+                        BoundarySide::Positive,
+                        0,
+                        Vec3::new(0.0, 1.0, 0.0),
+                        wavelength,
+                        target,
+                        connection,
+                        &seeds,
+                        BundleImageOptions {
+                            max_images: 1,
+                            ..BundleImageOptions::default()
+                        },
+                        &mut workspace,
+                    )
+                    .unwrap();
+                let expected = original.eval(wavelength) * scale * (-0.4_f64).exp();
+                near(radiance.radiance_w_m2_sr_nm(), expected, 2e-6);
+                // Le * source cosine * original area / distance² * Beer.
+                // The original n=1.3 host contributes no extra n² multiplier.
+                near(
+                    irradiance.spectral_irradiance_w_m2_nm(),
+                    expected * 2.0 / 4.0,
+                    2e-6,
+                );
+                assert_eq!(radiance.path().surface_events(), 1);
+                assert_eq!(irradiance.image_count(), 1);
+            }
+        }
+    });
+}
+
 fn infrared_glass(
     index: impl Fn(f64) -> f64,
     absorption: BeerLambertAbsorption,
