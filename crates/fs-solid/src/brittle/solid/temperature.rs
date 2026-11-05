@@ -77,6 +77,15 @@ impl From<BrittleTetError> for BrittleTetTemperatureError {
     }
 }
 
+/// Private source/history transfer awaiting a complete mechanical endpoint.
+/// Neither static nor inertial callers expose this possibly unequilibrated state.
+#[derive(Debug)]
+pub(crate) struct PreparedBrittleTetTemperature<'a> {
+    pub(crate) solid: BrittleTetSolid<'a>,
+    pub(crate) element_transfer: Vec<BrittleTetTemperatureElementEnergy>,
+    pub(crate) transfer: BrittleTetTemperatureEnergy,
+}
+
 impl<'a> BrittleTetSolid<'a> {
     /// Transfer the original histories to checked successor source states,
     /// then solve one actual mechanical endpoint at those new coefficients.
@@ -101,6 +110,43 @@ impl<'a> BrittleTetSolid<'a> {
         controls: BrittleTetControls,
         cx: &Cx<'_>,
     ) -> Result<BrittleTetTemperatureStep<'next>, BrittleTetTemperatureError>
+    where
+        'a: 'next,
+    {
+        let PreparedBrittleTetTemperature {
+            solid: candidate,
+            element_transfer,
+            transfer,
+        } = self.prepare_temperature(next_materials, temperature_axis, controls, cx)?;
+        let mechanical = candidate.advance(prescribed_m, nodal_forces_n, settings, controls, cx)?;
+        let total_balance_error_j = ((transfer.parameter_work_j
+            + mechanical.energy.material_work_j)
+            - (mechanical.solid.stored_energy_j() - transfer.stored_before_j))
+            - (transfer.fracture_dissipation_j + mechanical.energy.fracture_dissipation_j);
+        energy_gate(
+            "combined temperature/mechanical work",
+            total_balance_error_j,
+            controls.material_energy_tolerance_j,
+        )?;
+        checkpoint(cx)?;
+        Ok(BrittleTetTemperatureStep {
+            mechanical,
+            element_transfer,
+            transfer,
+            total_balance_error_j,
+        })
+    }
+
+    /// Reuse the original source/history transfer without publishing an
+    /// unequilibrated solid. The caller must complete its native mechanical
+    /// endpoint and combined work gates before exposing any successor.
+    pub(crate) fn prepare_temperature<'next>(
+        &self,
+        next_materials: &'next [ResolvedBrittleCrackBand],
+        temperature_axis: &str,
+        controls: BrittleTetControls,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedBrittleTetTemperature<'next>, BrittleTetTemperatureError>
     where
         'a: 'next,
     {
@@ -229,22 +275,11 @@ impl<'a> BrittleTetSolid<'a> {
             stored_energy_j: transfer.stored_after_j,
             fracture_dissipation_j: cumulative_loss,
         };
-        let mechanical = candidate.advance(prescribed_m, nodal_forces_n, settings, controls, cx)?;
-        let total_balance_error_j = ((transfer.parameter_work_j
-            + mechanical.energy.material_work_j)
-            - (mechanical.solid.stored_energy_j() - transfer.stored_before_j))
-            - (transfer.fracture_dissipation_j + mechanical.energy.fracture_dissipation_j);
-        energy_gate(
-            "combined temperature/mechanical work",
-            total_balance_error_j,
-            controls.material_energy_tolerance_j,
-        )?;
         checkpoint(cx)?;
-        Ok(BrittleTetTemperatureStep {
-            mechanical,
+        Ok(PreparedBrittleTetTemperature {
+            solid: candidate,
             element_transfer,
             transfer,
-            total_balance_error_j,
         })
     }
 }

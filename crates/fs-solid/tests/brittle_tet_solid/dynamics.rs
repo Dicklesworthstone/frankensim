@@ -530,3 +530,6 @@ fn dynamic_admission_late_energy_refusal_and_cancellation_preserve_the_accepted_
         assert_eq!(old.solid().solution(), &snapshot);
     });
 }
+
+#[path = "dynamics/temperature.rs"]
+mod temperature;

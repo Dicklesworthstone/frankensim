@@ -13,6 +13,9 @@
 //! small-strain limitations remain; the caller resolves physical timesteps.
 //! This adds no crack topology, fragment contact or finite-strain mass mapping.
 
+/// Temperature-dependent strength with unchanged reference mass and retained motion.
+pub mod temperature;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;
