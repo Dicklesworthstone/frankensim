@@ -1,5 +1,7 @@
 //! All declared gas transport laws feed ONE inventory before the original coupled step.
 //! No accepted gas, circuit, thermal or mechanical history changes during a trial.
+/// Adaptive local error control over the complete original assembly.
+pub mod coupled;
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     snapshot::MAX_SNAPSHOT_PARCELS,

@@ -1,5 +1,7 @@
 //! G1/G3/G4: source diffusion changes the original complete physical assembly.
 //! Manufactured properties; no measured engine or diffusion validation claim.
+#[path = "diffusion/coupled.rs"]
+mod coupled_tests;
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::{
     network::SpeciesNetworkSolve,

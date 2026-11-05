@@ -11681,6 +11681,79 @@ Manufactured regressions cover a window refused by one explicit withdrawal,
 binary and three-cell analytic relaxation, downstream arrival, pressure-driven
 counterdiffusion, complete owner parity and atomic late refusal.
 
+### Adaptive combined gas paths through the complete material assembly
+
+`MaterialExchangeState::{coupled_transport_paths_candidate,
+advance_with_coupled_transport_paths}` applies the complete-assembly error
+controller below to the original `GasTransportPaths`. Nozzle, molecular,
+Darcy, selective membrane, homogeneous/layered dusty-gas and finite effusion
+connections all resample the current gas at each accepted physical half step.
+Every mechanism feeds the same species/enthalpy owner before chemistry and
+joint heat/electrical/piston feedback. A dusty-gas path already contains its
+molecular, Knudsen and viscous contributions; separately authored paths must
+represent distinct physical exposures.
+
+`CoupledTransportReport` retains each original `GasTransportStep`, including
+layer-resolved sources, alongside the shared whole-window accounts. Its time
+controls, all eight error-coordinate groups, acceptance loop and balances are
+the same implementation used for molecular diffusion. Typed withdrawal,
+endpoint-energy solve, entropy and pressure-equilibrium refusals can refine;
+source and domain refusals remain fatal. Coarse and rejected paths cannot spend
+accepted inventory or publish gas, thermal, electrical or mechanical state.
+
+This is local accuracy control of the original first-order assembly with fixed
+authored geometry and held external loads. External reservoirs/vacuum outlets
+need their own finite owners and are not inferred here. Regressions cover native
+two-half-step parity, shared layered/nozzle withdrawal refinement and rollback,
+original selected heat-law parity, physical layer resistance reaching live
+heat/charge/motion/sound, and whole-window species/energy accounting.
+
+### Error control over the complete diffusing material assembly
+
+`MaterialExchangeState::{coupled_diffusion_candidate,
+advance_with_coupled_diffusion}` compares one complete diffusion/reaction/
+thermal/electrical/piston step with two complete half steps from the same
+accepted start. Only the fine original physical owners and their source
+receipts are accepted. Every later face sees the actual updated gas inventory,
+temperature, pressure and volume, including prior chemistry, wall heat and
+compression. Molecular connector areas/distances remain explicitly authored.
+The caller selects either original molar composition diffusion or mass-frame
+composition/pressure diffusion.
+
+The local estimate includes every chamber/species mass, gas temperature and
+pressure, piston volume and velocity, each thermal cell's extensive energy,
+every capacitor charge and every inductor flux linkage. Independent positive
+SI absolute scales are augmented by relative scales of the changes from the
+accepted start; large storage datums cannot enlarge the temporal allowance.
+This controls the existing first-order split without extrapolated states,
+Strang-order claims or a guaranteed global time-error bound. All full candidate
+attempts, including failed/coarse/rejected probes, share one explicit cap and
+the original thermal substep ceiling. Each attempt retains native inner work
+limits. Only typed finite-withdrawal/consumption/entropy and nonlinear failures
+may refine; material, source and admission failures remain fatal.
+
+The complete-window audit independently compares original and final species,
+mass, thermal/electrical/gas/kinetic storage and momentum against accepted
+transport, stoichiometric, heat, supply and impulse ledgers. Electrical storage
+uses the original constitutive increment, including nonlinear and reciprocal
+storage; fixed-cell enthalpy increments are reduced before large datums enter
+the arithmetic. Constant mechanical loads use actual endpoint displacement.
+Gross species transfers and reaction extents retain direction and channel ID.
+Original absolute conservation allowances are never multiplied by step count.
+Accepted native maximum cell residuals are summed with compensation and gated
+by the original single cell-energy allowance, even if opposing cell errors cancel.
+One macro port window retains open-stream status after any accepted transfer.
+
+Electrical inputs, exterior pressures and applied forces are held. Prescribed
+gas heat is apportioned at constant power with cumulative endpoint remainders.
+Fixed cell/circuit topology and cell masses are required; pending events at or
+before target refuse. This entry does not infer time-varying drives, moving
+connectors or additional external stream owners. Accuracy/work exhaustion,
+late feedback failure or cancellation publishes no partial owner or clock.
+Focused manufactured regressions isolate all eight error-coordinate groups,
+check native fine-step and chemical-ledger parity, binary refinement, pressure
+feedback, gross accepted transfers and atomic refusal.
+
 ### Combined species transport with selected material heat laws
 
 `MaterialExchangeState::{transport_step_with_gas_law_candidate,

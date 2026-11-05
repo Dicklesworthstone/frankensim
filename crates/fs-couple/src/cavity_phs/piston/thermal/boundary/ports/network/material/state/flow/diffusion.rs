@@ -2,6 +2,9 @@
 //! assembly before its joint feedback solve. Every explicit substep samples one
 //! accepted gas snapshot; the original owner transports partial enthalpy.
 
+/// Error control over diffusion AND the complete reacting/thermal/moving assembly.
+pub mod coupled;
+
 use super::*;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
     snapshot::MAX_SNAPSHOT_PARCELS,
@@ -83,9 +86,26 @@ impl<'m> MaterialExchangeState<'m> {
         gas_patches: &[MaterialContact], links: &[DiffusionNetworkLink<'_>],
         diffusion_controls: DiffusionNetworkSolve, controls: NetworkSolve, guess_j: &[f64],
     ) -> Result<(Self, MaterialFlowAdvance<DiffusionNetworkStep>), MaterialFlowError> {
+        self.diffusion_step_with_driving_candidate(prepared, cx, target_s, ports, drives,
+            reactions, gas_patches, links, diffusion_controls, GasDiffusionDriving::IsobaricMolar,
+            controls, guess_j)
+    }
+
+    /// The same complete physical step with an explicit molecular force/frame.
+    /// Pressure-driven mass-frame diffusion uses actual live chamber pressures;
+    /// connector geometry, source domains and the first-order split are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn diffusion_step_with_driving_candidate(
+        &self, prepared: &PreparedMaterialExchangeNetwork<'_, '_>, cx: &Cx<'_>, target_s: f64,
+        ports: &[f64], drives: &[ChamberDrive], reactions: &[ChamberReaction<'_>],
+        gas_patches: &[MaterialContact], links: &[DiffusionNetworkLink<'_>],
+        diffusion_controls: DiffusionNetworkSolve, driving: GasDiffusionDriving,
+        controls: NetworkSolve, guess_j: &[f64],
+    ) -> Result<(Self, MaterialFlowAdvance<DiffusionNetworkStep>), MaterialFlowError> {
         let snapshot = self.diffusion_snapshot(cx, target_s, drives, controls)?;
-        let (parcels, flow) = transport::step_candidate(&snapshot.parcels, links, snapshot.duration_s,
-            &snapshot.endpoints, diffusion_controls, || cx.checkpoint().is_err())?.into_parts();
+        let (parcels, flow) = transport::step_candidate_with_driving(&snapshot.parcels, links,
+            snapshot.duration_s, &snapshot.endpoints, diffusion_controls, driving,
+            || cx.checkpoint().is_err())?.into_parts();
         let moved = flow.exchange.parcels.iter()
             .filter(|p| p.incoming_mass_kg > 0.0 || p.outgoing_mass_kg > 0.0)
             .map(|p| p.id).collect();

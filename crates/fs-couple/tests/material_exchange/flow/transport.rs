@@ -1,4 +1,7 @@
 //! Existing complete-assembly fixtures; no replacement thermal/electrical solver.
+#[path = "transport/coupled.rs"]
+mod coupled_tests;
+
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::exchange::gas_law::GasSurface;
 use fs_material::thermochemical_gas::energy::parcel::transfer::{
