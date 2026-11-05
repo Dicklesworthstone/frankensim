@@ -1,5 +1,18 @@
 # fs-solid CONTRACT
 
+## Partial brittle crack fronts and retained reference trace order
+
+Matching P1 cohesive traces admit one or two shared crack-front vertices. Their
+identical paired shape columns cancel before sparse assembly, so tied-front
+motion contributes no jump, cohesive work or spurious force. A completely tied
+face has no opening mode and refuses; nonmatching trace admission is unchanged.
+`TetFractureTopology` therefore admits partial explicit seams without cutting
+unselected faces. Ordered matching constructors preserve the supplied physical
+A-side vertex order, quadrature identities and local axes through global node
+renumbering. Callers retaining interface histories must preserve that reference
+order and their original material/source bindings; constructing geometry does
+not initialize or transfer loaded cohesive histories.
+
 ## Nonuniform source-bound Cosserat reference intervals
 
 `SpatialMaterialRod::try_nonuniform_straight` and

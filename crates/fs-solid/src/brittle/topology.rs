@@ -1,11 +1,11 @@
-//! Explicit tetrahedral through-seams and conservative physical-state transfer.
+//! Explicit tetrahedral seams and conservative physical-state transfer.
 //!
 //! Selected internal faces become paired exterior traces. Node duplication
 //! follows connected tetrahedral stars, so every unselected face keeps its
-//! original continuity. A selected face that remains tied at a crack-front
-//! vertex refuses: the existing matching P1 cohesive owner requires distinct
-//! degrees of freedom on both traces. This is a through-seam preparation path,
-//! not automatic crack discovery, remeshing, or a bulk-damage-to-surface-law
+//! original continuity. Partial fronts retain one or two shared vertices;
+//! the matching P1 owner cancels their identical paired jump contributions.
+//! A completely tied face has no opening modes and refuses. This is an explicit
+//! seam preparation path, not automatic crack discovery, remeshing, or a bulk-damage-to-surface-law
 //! conversion. In particular, inserting a fresh cohesive law into an already
 //! loaded solid needs a separate traction/history/energy transfer admission.
 //!
@@ -77,6 +77,8 @@ impl SplitFace {
     /// Use the existing matching-trace quadrature and cohesive mechanics owner.
     /// The caller's explicit A-side and interface identity survive splitting.
     /// This only binds geometry; it does not create or reset material history.
+    /// Use `P1Interfaces::new_ordered` (or its controlled form) to retain this
+    /// ORIGINAL vertex order for quadrature and local axes through later cuts.
     #[must_use]
     pub fn face_pair<'a>(&self, law: &'a BilinearCohesive) -> FacePair<'a> {
         FacePair {

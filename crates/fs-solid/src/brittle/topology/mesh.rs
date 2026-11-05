@@ -32,10 +32,9 @@ pub enum FractureTopologyError {
     DisconnectedNodeStar {
         node: usize,
     },
-    /// The current P1 interface owner does not admit tied crack-front vertices.
-    TiedCrackFront {
+    /// Every face vertex remains tied, so P1 kinematics cannot open this seam.
+    UnopenedSeam {
         seam: u64,
-        node: usize,
     },
     Conservation,
     Cancelled,
@@ -286,13 +285,8 @@ impl<'g> TetFractureTopology<'g> {
             };
             let side_a = original_nodes.map(|node| output_tets[a][corner(tetrahedra, a, node) % 4]);
             let side_b = original_nodes.map(|node| output_tets[b][corner(tetrahedra, b, node) % 4]);
-            for i in 0..3 {
-                if side_a[i] == side_b[i] {
-                    return Err(FractureTopologyError::TiedCrackFront {
-                        seam: seam.id,
-                        node: original_nodes[i],
-                    });
-                }
+            if side_a == side_b {
+                return Err(FractureTopologyError::UnopenedSeam { seam: seam.id });
             }
             split_faces.push(SplitFace {
                 id: seam.id,
@@ -923,7 +917,7 @@ mod tests {
     }
 
     #[test]
-    fn tied_crack_front_and_original_point_connections_refuse_instead_of_adding_cuts() {
+    fn partial_crack_front_keeps_shared_edge_without_adding_cuts() {
         let nodes = [
             [0.0, 0.0, -1.0],
             [0.0, 0.0, 1.0],
@@ -938,10 +932,26 @@ mod tests {
             nodes: [0, 1, 3],
             side_a_element: 0,
         };
-        assert!(matches!(
-            TetFractureTopology::prepare(&nodes, &tets, &volumes, &[seam], budget(), &mut || false),
-            Err(FractureTopologyError::TiedCrackFront { seam: 3, node: 0 })
-        ));
+        let partial = TetFractureTopology::prepare(
+            &nodes, &tets, &volumes, &[seam], budget(), &mut || false,
+        ).unwrap();
+        let face = partial.seams()[0];
+        assert_eq!(partial.nodes_m().len(), nodes.len() + 1);
+        assert_eq!(partial.element_fragments(), &[0, 0, 0]);
+        assert_eq!(&face.side_a[..2], &face.side_b[..2]);
+        assert_ne!(face.side_a[2], face.side_b[2]);
+        for (a, b, face) in [(0, 2, [0, 1, 2]), (1, 2, [0, 1, 4])] {
+            for node in face {
+                assert_eq!(partial.tetrahedra()[a][corner(&tets, a, node) % 4],
+                    partial.tetrahedra()[b][corner(&tets, b, node) % 4]);
+            }
+        }
+        let displacement: Vec<_> = (0..15).map(|i| 0.001 * (i as f64).sin()).collect();
+        let velocity: Vec<_> = (0..15).map(|i| 0.2 * (i as f64).cos()).collect();
+        let transfer = partial.transfer_motion_controlled(
+            &displacement, &velocity, &[2.0; 3], &mut || false,
+        ).unwrap();
+        assert_eq!(transfer.before, transfer.after);
         let all = [
             seam,
             InteriorSeam {
@@ -979,6 +989,24 @@ mod tests {
                 &mut || false
             ),
             Err(FractureTopologyError::DisconnectedNodeStar { node: 0 })
+        ));
+    }
+
+    #[test]
+    fn fully_tied_internal_seam_refuses_without_fabricating_opening_modes() {
+        // Eight tetrahedra fill an octahedron around its center. Removing one
+        // face adjacency leaves each of its three node stars connected.
+        let nodes = [[0., 0., 0.], [1., 0., 0.], [-1., 0., 0.],
+            [0., 1., 0.], [0., -1., 0.], [0., 0., 1.], [0., 0., -1.]];
+        let mut tets = Vec::new();
+        for x in [1, 2] { for y in [3, 4] { for z in [5, 6] {
+            tets.push([0, x, y, z]);
+        } } }
+        let volumes = [1.0 / 6.0; 8];
+        let seam = InteriorSeam { id: 7, nodes: [0, 1, 3], side_a_element: 0 };
+        assert!(matches!(
+            TetFractureTopology::prepare(&nodes, &tets, &volumes, &[seam], budget(), &mut || false),
+            Err(FractureTopologyError::UnopenedSeam { seam: 7 })
         ));
     }
 
