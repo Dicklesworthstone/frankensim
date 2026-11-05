@@ -191,6 +191,18 @@ impl TrussMaterial {
     }
 }
 
+/// Physical quantity minimized by the axial layout before Euler/catalog sizing.
+/// For unlike source densities, minimum volume and minimum mass generally select
+/// different load paths. This does not optimize the subsequent discrete catalog.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MaterialLayoutObjective {
+    /// Minimize `sum length * (q_tension / limit_tension + q_compression / limit_compression)` [m³].
+    #[default]
+    Volume,
+    /// Minimize that same per-member volume multiplied by its source density [kg].
+    Mass,
+}
+
 /// A material assignment and its admitted layout operator. Borrowing immutable
 /// geometry and source states prevents later sizing from accidentally using a
 /// different member order, temperature, modulus or signed axial limits.
@@ -202,9 +214,11 @@ pub struct MaterialLayout<'a> {
     limits: LayoutLimits,
     lp: LayoutLp,
     strength_scale_pa: f64,
+    density_scale_kg_m3: f64,
+    objective: MaterialLayoutObjective,
 }
 
-/// Layout iterates and their physical volume. The numerical report uses the
+/// Layout iterates and their physical volume and mass. The numerical report uses the
 /// normalized objective; its certificates, if separately requested, also do.
 #[derive(Debug)]
 pub struct MaterialLayoutSolution {
@@ -212,19 +226,38 @@ pub struct MaterialLayoutSolution {
     pub forces: Vec<f64>,
     /// Dual iterate in the normalized objective convention.
     pub dual: Vec<f64>,
-    /// Existing PDHG diagnostics; `volume` is `strength_scale_pa * volume_m3`.
+    /// Existing PDHG diagnostics. Its legacy `volume` field is the normalized
+    /// selected objective: `strength_scale_pa * volume_m3` for Volume, or
+    /// `strength_scale_pa * mass_kg / density_scale_kg_m3` for Mass.
     pub numerical: PdhgReport,
     /// Approximate returned-iterate material volume [m³], before catalog sizing.
     pub volume_m3: f64,
+    /// Approximate returned-iterate mass [kg], before Euler/catalog sizing.
+    pub mass_kg: f64,
+    /// Physical objective actually used to select the returned force path.
+    pub objective: MaterialLayoutObjective,
 }
 
-/// Failure of the common solve or its conversion back to physical volume.
+impl MaterialLayoutSolution {
+    /// Selected physical objective [m³ for Volume, kg for Mass].
+    #[must_use]
+    pub const fn objective_value_si(&self) -> f64 {
+        match self.objective {
+            MaterialLayoutObjective::Volume => self.volume_m3,
+            MaterialLayoutObjective::Mass => self.mass_kg,
+        }
+    }
+}
+
+/// Failure of the common solve or its conversion back to physical material totals.
 #[derive(Debug)]
 pub enum MaterialLayoutSolveError {
     /// The underlying numerical owner refused its inputs or iterates.
     Solver(PdhgError),
     /// Positive normalized volume overflowed or underflowed in SI units.
     UnrepresentableVolume,
+    /// Source-density mass overflowed or underflowed in SI units.
+    UnrepresentableMass,
 }
 impl core::fmt::Display for MaterialLayoutSolveError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -232,6 +265,9 @@ impl core::fmt::Display for MaterialLayoutSolveError {
             Self::Solver(error) => write!(f, "material layout: {error}"),
             Self::UnrepresentableVolume => {
                 f.write_str("material layout volume is unrepresentable in m3")
+            }
+            Self::UnrepresentableMass => {
+                f.write_str("material layout mass is unrepresentable in kg")
             }
         }
     }
@@ -271,6 +307,35 @@ impl<'a> MaterialLayout<'a> {
         limits: LayoutLimits,
         cx: &Cx<'_>,
     ) -> Result<Self, TrussConstructionError> {
+        Self::try_new_with_objective(
+            ground,
+            case,
+            materials,
+            assignments,
+            MaterialLayoutObjective::Volume,
+            limits,
+            cx,
+        )
+    }
+
+    /// Assemble an explicitly selected volume or mass objective on the SAME
+    /// equilibrium and signed-strength problem. For mass, each normalized
+    /// volume cost is multiplied by `member_density / reference_density`.
+    /// The common density scale preserves conditioning and does not change the
+    /// optimum; density is never substituted for the actual sizing strength.
+    /// A uniform density field therefore gives the original volume operator.
+    ///
+    /// # Errors
+    /// Inherits assignment, source-ratio, resource and cancellation refusals.
+    pub fn try_new_with_objective(
+        ground: &'a GroundStructure,
+        case: &LayoutCase,
+        materials: &'a [TrussMaterial],
+        assignments: &'a [usize],
+        objective: MaterialLayoutObjective,
+        limits: LayoutLimits,
+        cx: &Cx<'_>,
+    ) -> Result<Self, TrussConstructionError> {
         checkpoint(cx)?;
         if assignments.len() != ground.members().len() {
             return Err(TrussConstructionError::VectorLength {
@@ -297,6 +362,7 @@ impl<'a> MaterialLayout<'a> {
             }
         }
         let strength_scale_pa = materials[assignments[0]].tensile_limit;
+        let density_scale_kg_m3 = materials[assignments[0]].density;
         let lp = LayoutLp::assemble_member_limits(
             ground,
             case,
@@ -306,6 +372,12 @@ impl<'a> MaterialLayout<'a> {
                     state.tensile_limit / strength_scale_pa,
                     state.compressive_limit / strength_scale_pa,
                 )
+            },
+            |member| match objective {
+                MaterialLayoutObjective::Volume => 1.0,
+                MaterialLayoutObjective::Mass => {
+                    materials[assignments[member]].density / density_scale_kg_m3
+                }
             },
             limits,
             cx,
@@ -319,11 +391,15 @@ impl<'a> MaterialLayout<'a> {
             limits,
             lp,
             strength_scale_pa,
+            density_scale_kg_m3,
+            objective,
         })
     }
 
     /// Common equilibrium/PDHG/certificate API. Its objective is uniformly
-    /// scaled; divide objective values by [`Self::strength_scale_pa`] for m³.
+    /// scaled: divide by [`Self::strength_scale_pa`] for Volume [m³]. For Mass,
+    /// additionally multiply by [`Self::density_scale_kg_m3`] to recover kg.
+    /// Certificates remain bounds on that explicitly normalized objective.
     #[must_use]
     pub const fn lp(&self) -> &LayoutLp {
         &self.lp
@@ -342,6 +418,18 @@ impl<'a> MaterialLayout<'a> {
         self.strength_scale_pa
     }
 
+    /// Reference source density [kg/m³] used only to normalize a mass objective.
+    #[must_use]
+    pub const fn density_scale_kg_m3(&self) -> f64 {
+        self.density_scale_kg_m3
+    }
+
+    /// Selected quantity minimized by the original LP and any body-load reloads.
+    #[must_use]
+    pub const fn objective(&self) -> MaterialLayoutObjective {
+        self.objective
+    }
+
     /// Original state used for an assigned member, or `None` for an absent member.
     #[must_use]
     pub fn material(&self, member: usize) -> Option<&TrussMaterial> {
@@ -350,7 +438,7 @@ impl<'a> MaterialLayout<'a> {
             .map(|&index| &self.materials[index])
     }
 
-    /// Solve through the existing PDHG owner, retaining physical volume units.
+    /// Solve through the existing PDHG owner, retaining both physical totals.
     /// This inherits that solver's iteration bound and synchronous cancellation
     /// limitation; assembly and material publication remain cancellation-polled.
     ///
@@ -364,16 +452,34 @@ impl<'a> MaterialLayout<'a> {
             .lp
             .solve(None, None, settings)
             .map_err(MaterialLayoutSolveError::Solver)?;
-        let volume_m3 = numerical.volume / self.strength_scale_pa;
-        if !volume_m3.is_finite() || volume_m3 < 0.0 || (numerical.volume > 0.0 && volume_m3 == 0.0)
-        {
-            return Err(MaterialLayoutSolveError::UnrepresentableVolume);
+        let mut volume_m3 = 0.0;
+        let mut mass_kg = 0.0;
+        let member_count = self.assignments.len();
+        for member in 0..member_count {
+            let state = &self.materials[self.assignments[member]];
+            let volume = self.ground.lengths()[member]
+                * (forces[member] / state.tensile_limit
+                    + forces[member + member_count] / state.compressive_limit);
+            volume_m3 += volume;
+            if !volume_m3.is_finite()
+                || volume < 0.0
+                || (volume == 0.0 && (forces[member] > 0.0 || forces[member + member_count] > 0.0))
+            {
+                return Err(MaterialLayoutSolveError::UnrepresentableVolume);
+            }
+            let mass = volume * state.density;
+            mass_kg += mass;
+            if !mass_kg.is_finite() || (volume > 0.0 && mass == 0.0) {
+                return Err(MaterialLayoutSolveError::UnrepresentableMass);
+            }
         }
         Ok(MaterialLayoutSolution {
             forces,
             dual,
             numerical,
             volume_m3,
+            mass_kg,
+            objective: self.objective,
         })
     }
 

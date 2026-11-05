@@ -256,11 +256,12 @@ impl MaterialLayout<'_> {
                 loads,
                 self.case.node_count(),
             )?;
-            let loaded = MaterialLayout::try_new(
+            let loaded = MaterialLayout::try_new_with_objective(
                 self.ground,
                 &load_case,
                 self.materials,
                 self.assignments,
+                self.objective,
                 self.limits,
                 cx,
             )?;

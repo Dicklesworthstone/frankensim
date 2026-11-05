@@ -196,6 +196,7 @@ fn density_swap_changes_actual_self_weight_load_and_catalog_section_once() {
         let original = case.clone();
         let catalog = [0.011, 0.014, 0.018, 0.024];
         let policy = MaterialLayoutControls {
+            objective: fs_truss::material::MaterialLayoutObjective::Mass,
             body_loads: Some(BodyLoadControls {
                 acceleration_m_s2: [0.0, -9.81],
                 maximum_iterations: 8,
@@ -207,6 +208,10 @@ fn density_swap_changes_actual_self_weight_load_and_catalog_section_once() {
             let report =
                 layout_and_size(&ground, &case, &materials, &[0], &catalog, policy, cx).unwrap();
             let design = &report.design;
+            assert_eq!(
+                design.solution.objective,
+                fs_truss::material::MaterialLayoutObjective::Mass
+            );
             let mass = density * area;
             let half_weight = 0.5 * mass * 9.81;
             assert_eq!(design.areas_m2, [area]);

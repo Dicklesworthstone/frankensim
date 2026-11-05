@@ -1,13 +1,13 @@
 //! Shared-material layout and sizing for an explicitly supplied frame ground.
 //!
-//! This is the native pin-jointed, axial truss model: the objective is material
-//! volume, not mass. Density supplies catalog mass and, when requested, the
-//! body's equivalent nodal load. Bending frames and seismic histories remain
+//! This is the native pin-jointed, axial truss model with an explicit material
+//! volume or mass objective. Density supplies mass costs, catalog mass and,
+//! when requested, the body's equivalent nodal load. Bending frames and seismic histories remain
 //! separate consumers; no source-backed status is inferred for them here.
 
 use fs_exec::Cx;
 use fs_truss::material::body_load::{BodyLoadDesignError, MaterialBodyLoadDesign};
-use fs_truss::material::{MaterialLayout, TrussMaterial};
+use fs_truss::material::{MaterialLayout, MaterialLayoutObjective, TrussMaterial};
 use fs_truss::{GroundStructure, LayoutCase, LayoutLimits, PdhgSettings, TrussConstructionError};
 
 /// Explicit body acceleration and work bound for consistent catalog self-weight.
@@ -22,6 +22,8 @@ pub struct BodyLoadControls {
 /// Existing solver/assembly controls and the caller's physical loading policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialLayoutControls {
+    /// Quantity minimized before Euler/catalog sizing. Volume is the default.
+    pub objective: MaterialLayoutObjective,
     /// Native ground-to-LP resource limits.
     pub limits: LayoutLimits,
     /// Native PDHG convergence controls. Exhaustion never publishes a design.
@@ -35,6 +37,7 @@ pub struct MaterialLayoutControls {
 impl Default for MaterialLayoutControls {
     fn default() -> Self {
         Self {
+            objective: MaterialLayoutObjective::Volume,
             limits: LayoutLimits::default(),
             solver: PdhgSettings::default(),
             prune_fraction: 1e-3,
@@ -77,8 +80,8 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), BodyLoadDesignError> {
 /// case, and publication requires unchanged complete catalog sections. Without
 /// body loads, a single native solve and sizing pass is sufficient.
 ///
-/// Returned LP diagnostics describe a volume-minimization problem at its actual
-/// applied loads. They are not certified optimum bounds, a mass optimum, or a
+/// Returned LP diagnostics describe the selected volume or mass problem at its
+/// actual applied loads. They are not certified optimum bounds or a
 /// global optimum of the coupled self-weight problem. The original symmetric
 /// yield, solid-square, pin-jointed model and nodal body-load approximation apply.
 ///
@@ -108,8 +111,15 @@ pub fn layout_and_size<'a>(
         }
         .into());
     }
-    let layout =
-        MaterialLayout::try_new(ground, case, materials, assignments, controls.limits, cx)?;
+    let layout = MaterialLayout::try_new_with_objective(
+        ground,
+        case,
+        materials,
+        assignments,
+        controls.objective,
+        controls.limits,
+        cx,
+    )?;
     let design = if let Some(body) = controls.body_loads {
         layout.solve_with_body_loads(
             body.acceleration_m_s2,

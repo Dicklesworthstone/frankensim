@@ -245,8 +245,12 @@ gravity. Both paths use the same convergence, sizing and member-order checks.
 Unconverged solves, invalid sizing, incomplete assignments and cancellation
 publish no report.
 
-The objective remains volume at the actual applied loads. Returned mass is
-not a mass optimum; numerical LP diagnostics are not certified optimum bounds.
+`MaterialLayoutControls::objective` selects volume (default) or source-density
+mass costs in the same native LP. Both physical totals and the selected objective
+remain visible in the solution, including after every self-weight reload.
+This minimizes the selected continuous axial objective at the actual applied
+loads; the catalog mass is not thereby globally minimal. Numerical LP
+diagnostics are not certified optimum bounds.
 A settled self-weight design is not a globally optimal self-weight solution.
 The original axial, symmetric-yield, solid-square, pin-jointed model and
 equivalent nodal body-load approximation apply.

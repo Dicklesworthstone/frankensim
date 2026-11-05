@@ -117,8 +117,16 @@ buckling, and density changes the mass of the actual snapped member geometry.
 No material names, default steel properties or guessed strengths select physics.
 
 The LP costs use one common positive reference-strength scaling for numerical
-conditioning. `lp()` and its optional certificates describe that normalized
-problem; `MaterialLayoutSolution::volume_m3` reports physical approximate volume.
+conditioning. `try_new` selects volume; `try_new_with_objective` can select
+`MaterialLayoutObjective::Mass`, multiplying each signed member cost by its
+source density divided by one common reference density. Density therefore
+changes the actual optimum load path for unlike materials. Uniform density
+recovers the original volume operator exactly. The equilibrium matrix, source
+strengths, Euler checks and catalog sizing stay on their original owners.
+`lp()` and its optional certificates describe that normalized problem;
+`MaterialLayoutSolution` reports physical approximate `volume_m3` and `mass_kg`
+with the selected objective. For mass, divide a normalized bound by the
+reference strength and multiply by the reference density to obtain kg.
 `strength_scale_pa()` is the common divisor back to physical volume. Sizing
 chooses the tensile or compressive limit from the force AFTER equilibrium
 refitting, including when refitting reverses an input iterate's sign. The
@@ -131,8 +139,10 @@ prevent using a different ordering or temperature state during sizing.
 
 This is a frozen-state pin-jointed, solid-square force-equilibrium sizing model,
 not elastic-compatible force distribution, rotating anisotropic failure,
-post-failure redistribution, creep, thermally restrained strain or a mass-optimal
-layout objective. A named ultimate strength is a caller-admitted axial limit,
+post-failure redistribution, creep or thermally restrained strain. The continuous
+axial mass objective does not imply globally optimal Euler/catalog sections or
+a globally optimal self-weight design. Body-load iterations preserve the chosen
+objective when rebuilding the LP at each actual load state. A named ultimate strength is a caller-admitted axial limit,
 not evidence of a plastic mechanism or a validated brittle-failure prediction.
 Body acceleration remains an explicit physical input. The existing synchronous
 PDHG/refit/rod kernels retain their cancellation limitations; material admission

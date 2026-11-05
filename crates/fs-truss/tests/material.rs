@@ -12,7 +12,7 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, YIELD_STRESS_PROPERTY, YOUNG_MODULUS_PROPERTY,
 };
 use fs_qty::{Density, Pressure, Temperature};
-use fs_truss::material::{MaterialLayout, TrussMaterial};
+use fs_truss::material::{MaterialLayout, MaterialLayoutObjective, TrussMaterial};
 use fs_truss::{
     GroundLimits, GroundStructure, LayoutCase, LayoutCertificateLimits, LayoutCertificateStatus,
     LayoutLimits, PdhgSettings,
@@ -228,11 +228,19 @@ fn explicit_equal_yield_limits_retain_the_symmetric_material() {
 fn asymmetric_limits_reach_objective_refitted_sizing_mass_and_certificate() {
     with_cx(|cx, _| {
         let source = axial_card([100.0, 50.0], [400.0, 200.0]);
-        let states = [axial_material(&source, 300.0), axial_material(&source, 600.0)];
+        let states = [
+            axial_material(&source, 300.0),
+            axial_material(&source, 600.0),
+        ];
         for force in [1.0, -1.0] {
             let (ground, case) = two_members(cx, force);
             let layout = MaterialLayout::try_new(
-                &ground, &case, &states, &[0, 1], LayoutLimits::default(), cx,
+                &ground,
+                &case,
+                &states,
+                &[0, 1],
+                LayoutLimits::default(),
+                cx,
             )
             .unwrap();
             assert_eq!(layout.lp().c(), &[1.0, 2.0, 0.25, 0.5]);
@@ -262,11 +270,24 @@ fn asymmetric_limits_reach_objective_refitted_sizing_mass_and_certificate() {
                 assert_eq!(member.area_catalog, catalog_areas[i]);
                 assert_eq!(member.area_buckling > 0.0, force < 0.0);
             }
-            relative(sized.mass_kg.unwrap(), 2.0 * catalog_areas[0] + 8.0 * catalog_areas[1], 1e-12);
-            let LayoutCertificateStatus::Certified(certificate) = layout.lp()
-                .certify_optimum(&solution.forces, &solution.dual, settings,
-                    LayoutCertificateLimits::default(), cx).unwrap()
-            else { panic!("the well-conditioned two-member oracle must certify") };
+            relative(
+                sized.mass_kg.unwrap(),
+                2.0 * catalog_areas[0] + 8.0 * catalog_areas[1],
+                1e-12,
+            );
+            let LayoutCertificateStatus::Certified(certificate) = layout
+                .lp()
+                .certify_optimum(
+                    &solution.forces,
+                    &solution.dual,
+                    settings,
+                    LayoutCertificateLimits::default(),
+                    cx,
+                )
+                .unwrap()
+            else {
+                panic!("the well-conditioned two-member oracle must certify")
+            };
             let oracle = volume * layout.strength_scale_pa();
             let bounds = certificate.bounds();
             assert!(bounds.lower() <= oracle && oracle <= bounds.upper());
@@ -275,8 +296,18 @@ fn asymmetric_limits_reach_objective_refitted_sizing_mass_and_certificate() {
         }
         assert_eq!(states[0].tension_property(), TENSILE);
         assert_eq!(states[1].compression_property(), COMPRESSIVE);
-        assert_eq!(states[0].resolved().property(TENSILE).unwrap().value_si(), 100.0);
-        assert_eq!(states[1].resolved().property(COMPRESSIVE).unwrap().value_si(), 200.0);
+        assert_eq!(
+            states[0].resolved().property(TENSILE).unwrap().value_si(),
+            100.0
+        );
+        assert_eq!(
+            states[1]
+                .resolved()
+                .property(COMPRESSIVE)
+                .unwrap()
+                .value_si(),
+            200.0
+        );
     });
 }
 
@@ -287,18 +318,31 @@ fn reversal_changes_the_optimal_load_path_with_the_same_material_assignments() {
             &[[0.0, -1.0], [0.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
             &[(0, 3), (1, 3), (2, 3)],
             &[2.0_f64.sqrt(), 1.0, 2.0_f64.sqrt()],
-            GroundLimits::default(), cx,
-        ).unwrap();
+            GroundLimits::default(),
+            cx,
+        )
+        .unwrap();
         let source = axial_card([1000.0, 100.0], [100.0, 1000.0]);
-        let states = [axial_material(&source, 300.0), axial_material(&source, 600.0)];
+        let states = [
+            axial_material(&source, 300.0),
+            axial_material(&source, 600.0),
+        ];
         for force in [1.0, -1.0] {
             let case = LayoutCase::try_new(
                 vec![[true, true], [true, true], [true, true], [false, false]],
-                vec![[0.0; 2], [0.0; 2], [0.0; 2], [force, 0.0]], 4,
-            ).unwrap();
+                vec![[0.0; 2], [0.0; 2], [0.0; 2], [force, 0.0]],
+                4,
+            )
+            .unwrap();
             let layout = MaterialLayout::try_new(
-                &ground, &case, &states, &[1, 0, 1], LayoutLimits::default(), cx,
-            ).unwrap();
+                &ground,
+                &case,
+                &states,
+                &[1, 0, 1],
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap();
             let solution = layout.solve(PdhgSettings::default()).unwrap();
             if force > 0.0 {
                 assert!(solution.forces[1] > 0.99);
@@ -320,21 +364,39 @@ fn asymmetric_limits_persist_through_self_weight_rebuilds() {
         for force in [1.0, -1.0] {
             let (ground, case) = two_members(cx, force);
             let layout = MaterialLayout::try_new(
-                &ground, &case, &states, &[0, 0], LayoutLimits::default(), cx,
-            ).unwrap();
+                &ground,
+                &case,
+                &states,
+                &[0, 0],
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap();
             let acceleration = [10.0 * force, 0.0];
-            let design = layout.solve_with_body_loads(
-                acceleration, &[0.002, 0.006, 0.014, 0.02, 0.04], 1e-3,
-                PdhgSettings { max_iters: 50_000, gap_tol: 1e-9, check_every: 50 },
-                8, cx,
-            ).unwrap();
+            let design = layout
+                .solve_with_body_loads(
+                    acceleration,
+                    &[0.002, 0.006, 0.014, 0.02, 0.04],
+                    1e-3,
+                    PdhgSettings {
+                        max_iters: 50_000,
+                        gap_tol: 1e-9,
+                        check_every: 50,
+                    },
+                    8,
+                    cx,
+                )
+                .unwrap();
             let (areas, limit) = if force > 0.0 {
                 (vec![0.02, 0.014], 100.0)
             } else {
                 (vec![0.002; 2], 1000.0)
             };
             assert_eq!(design.areas_m2, areas);
-            assert_eq!(design.body_loads, layout.body_loads(&areas, acceleration, cx).unwrap());
+            assert_eq!(
+                design.body_loads,
+                layout.body_loads(&areas, acceleration, cx).unwrap()
+            );
             for member in &design.design.audit.members {
                 assert_eq!(member.force > 0.0, force > 0.0);
                 relative(member.area_yield, member.force.abs() / limit, 1e-12);
@@ -348,33 +410,55 @@ fn asymmetric_limits_persist_through_self_weight_rebuilds() {
 fn named_axial_limits_require_both_static_positive_pressure_sources() {
     let resolve = |source: &MaterialCard, point: &QueryPoint| {
         TrussMaterial::resolve_axial_limits(
-            source, point, TENSILE, COMPRESSIVE, MaterialPropertySelection::SingleClaimOnly,
+            source,
+            point,
+            TENSILE,
+            COMPRESSIVE,
+            MaterialPropertySelection::SingleClaimOnly,
         )
     };
     let point = QueryPoint::new().with("T", 300.0).unwrap();
-    let incomplete = property_card(&[
-        (DENSITY_PROPERTY, Density::DIMS, [2.0; 2]),
-        (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, [1e12; 2]),
-        (TENSILE, Pressure::DIMS, [100.0; 2]),
-    ], "T", Temperature::DIMS);
+    let incomplete = property_card(
+        &[
+            (DENSITY_PROPERTY, Density::DIMS, [2.0; 2]),
+            (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, [1e12; 2]),
+            (TENSILE, Pressure::DIMS, [100.0; 2]),
+        ],
+        "T",
+        Temperature::DIMS,
+    );
     assert!(resolve(&incomplete, &point).is_err());
-    let mistyped = property_card(&[
-        (DENSITY_PROPERTY, Density::DIMS, [2.0; 2]),
-        (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, [1e12; 2]),
-        (TENSILE, Pressure::DIMS, [100.0; 2]),
-        (COMPRESSIVE, Temperature::DIMS, [1000.0; 2]),
-    ], "T", Temperature::DIMS);
+    let mistyped = property_card(
+        &[
+            (DENSITY_PROPERTY, Density::DIMS, [2.0; 2]),
+            (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, [1e12; 2]),
+            (TENSILE, Pressure::DIMS, [100.0; 2]),
+            (COMPRESSIVE, Temperature::DIMS, [1000.0; 2]),
+        ],
+        "T",
+        Temperature::DIMS,
+    );
     assert!(resolve(&mistyped, &point).is_err());
     for (tensile, compressive) in [(0.0, 1000.0), (100.0, 0.0), (100.0, -1.0)] {
         assert!(resolve(&axial_card([tensile; 2], [compressive; 2]), &point).is_err());
     }
-    let dynamic = property_card(&[
-        (DENSITY_PROPERTY, Density::DIMS, [2.0; 2]),
-        (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, [1e12; 2]),
-        (TENSILE, Pressure::DIMS, [100.0; 2]),
-        (COMPRESSIVE, Pressure::DIMS, [1000.0; 2]),
-    ], "strain_rate", fs_qty::Frequency::DIMS);
-    assert!(resolve(&dynamic, &QueryPoint::new().with("strain_rate", 300.0).unwrap()).is_err());
+    let dynamic = property_card(
+        &[
+            (DENSITY_PROPERTY, Density::DIMS, [2.0; 2]),
+            (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, [1e12; 2]),
+            (TENSILE, Pressure::DIMS, [100.0; 2]),
+            (COMPRESSIVE, Pressure::DIMS, [1000.0; 2]),
+        ],
+        "strain_rate",
+        fs_qty::Frequency::DIMS,
+    );
+    assert!(
+        resolve(
+            &dynamic,
+            &QueryPoint::new().with("strain_rate", 300.0).unwrap()
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -496,6 +580,154 @@ fn swapping_member_assignments_changes_actual_optimum_load_path() {
         assert!(inclined.forces[1] < 1e-4);
         relative(direct.volume_m3, 1e-9, 1e-4);
         relative(inclined.volume_m3, 2e-9, 1e-4);
+    });
+}
+
+#[test]
+fn mass_objective_changes_the_load_path_using_source_density_alone() {
+    with_cx(|cx, _| {
+        let ground = GroundStructure::try_from_parts(
+            &[[0.0, -1.0], [0.0, 0.0], [0.0, 1.0], [1.0, 0.0]],
+            &[(0, 3), (1, 3), (2, 3)],
+            &[2.0_f64.sqrt(), 1.0, 2.0_f64.sqrt()],
+            GroundLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let case = LayoutCase::try_new(
+            vec![[true, true], [true, true], [true, true], [false, false]],
+            vec![[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [1.0, 0.0]],
+            4,
+        )
+        .unwrap();
+        let source = card([1.0, 8.0], [1e6; 2], [1000.0; 2]);
+        let states = [material(&source, 300.0), material(&source, 600.0)];
+        let assignments = [0, 1, 0];
+        let solve = |objective| {
+            MaterialLayout::try_new_with_objective(
+                &ground,
+                &case,
+                &states,
+                &assignments,
+                objective,
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap()
+            .solve(PdhgSettings::default())
+            .unwrap()
+        };
+        let volume = solve(MaterialLayoutObjective::Volume);
+        let mass = solve(MaterialLayoutObjective::Mass);
+        // Unit horizontal load: the direct tie uses V=1/1000, m=8/1000;
+        // the inclined pair uses twice that volume but only m=2/1000.
+        assert!(volume.forces[1] > 0.999);
+        assert!(mass.forces[1] < 1e-5);
+        relative(mass.forces[0], 0.5_f64.sqrt(), 1e-4);
+        relative(mass.forces[2], 0.5_f64.sqrt(), 1e-4);
+        relative(volume.volume_m3, 0.001, 1e-4);
+        relative(volume.mass_kg, 0.008, 1e-4);
+        relative(mass.volume_m3, 0.002, 1e-4);
+        relative(mass.objective_value_si(), 0.002, 1e-4);
+        assert!(mass.mass_kg < volume.mass_kg * 0.251);
+        assert_eq!(mass.objective, MaterialLayoutObjective::Mass);
+    });
+}
+
+#[test]
+fn mass_costs_keep_signed_limits_and_the_original_optimum_certificate() {
+    with_cx(|cx, _| {
+        let source = axial_card([100.0, 200.0], [250.0, 50.0]);
+        let states = [
+            axial_material(&source, 300.0),
+            axial_material(&source, 600.0),
+        ];
+        for force in [1.0, -1.0] {
+            let (ground, case) = two_members(cx, force);
+            let layout = MaterialLayout::try_new_with_objective(
+                &ground,
+                &case,
+                &states,
+                &[0, 1],
+                MaterialLayoutObjective::Mass,
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap();
+            assert_eq!(layout.lp().c(), &[1.0, 2.0, 0.4, 8.0]);
+            let settings = PdhgSettings::default();
+            let solution = layout.solve(settings).unwrap();
+            let (volume, mass) = if force > 0.0 {
+                (0.015, 0.06)
+            } else {
+                (0.024, 0.168)
+            };
+            relative(solution.volume_m3, volume, 1e-4);
+            relative(solution.mass_kg, mass, 1e-4);
+            relative(
+                solution.numerical.volume,
+                solution.mass_kg * layout.strength_scale_pa() / layout.density_scale_kg_m3(),
+                1e-12,
+            );
+            let LayoutCertificateStatus::Certified(certificate) = layout
+                .lp()
+                .certify_optimum(
+                    &solution.forces,
+                    &solution.dual,
+                    settings,
+                    LayoutCertificateLimits::default(),
+                    cx,
+                )
+                .unwrap()
+            else {
+                panic!("the density-weighted two-member problem must certify")
+            };
+            let oracle = mass * layout.strength_scale_pa() / layout.density_scale_kg_m3();
+            let bounds = certificate.bounds();
+            assert!(bounds.lower() <= oracle && oracle <= bounds.upper());
+            assert!(bounds.upper() < oracle * (1.0 + 1e-10));
+        }
+    });
+}
+
+#[test]
+fn common_density_scaling_preserves_the_operator_and_scales_only_mass() {
+    with_cx(|cx, _| {
+        let source = card([1000.0, 8000.0], [1e6; 2], [1000.0; 2]);
+        let states = [material(&source, 300.0), material(&source, 600.0)];
+        let (ground, case) = two_members(cx, 1.0);
+        let volume = MaterialLayout::try_new(
+            &ground,
+            &case,
+            &states,
+            &[0, 0],
+            LayoutLimits::default(),
+            cx,
+        )
+        .unwrap();
+        let mut prior_mass = None;
+        for assignments in [[0, 0], [1, 1]] {
+            let mass = MaterialLayout::try_new_with_objective(
+                &ground,
+                &case,
+                &states,
+                &assignments,
+                MaterialLayoutObjective::Mass,
+                LayoutLimits::default(),
+                cx,
+            )
+            .unwrap();
+            assert_eq!(mass.lp().c(), volume.lp().c());
+            let solution = mass.solve(PdhgSettings::default()).unwrap();
+            assert_eq!(
+                solution.forces,
+                volume.solve(PdhgSettings::default()).unwrap().forces
+            );
+            if let Some(previous) = prior_mass {
+                relative(solution.mass_kg, 8.0 * previous, 1e-12);
+            }
+            prior_mass = Some(solution.mass_kg);
+        }
     });
 }
 

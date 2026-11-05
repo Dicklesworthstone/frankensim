@@ -1046,18 +1046,21 @@ impl LayoutLp {
                 requirement: "must be finite and positive",
             });
         }
-        Self::assemble_member_limits(gs, case, |_| (sigma_y, sigma_y), limits, cx)
+        Self::assemble_member_limits(gs, case, |_| (sigma_y, sigma_y), |_| 1.0, limits, cx)
     }
 
     /// Shared assembly for uniform and material-assigned members. Axial limits
     /// may be uniformly nondimensionalized by the material-driven caller; no
     /// material name or second equilibrium operator enters the solver. The
     /// returned pair is (tension, compression magnitude), both strictly positive.
+    /// Positive per-member objective weights permit source-density mass costs;
+    /// they do not change the equilibrium operator or physical sizing limits.
     #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     pub(crate) fn assemble_member_limits(
         gs: &GroundStructure,
         case: &LayoutCase,
         axial_limits: impl Fn(usize) -> (f64, f64),
+        objective_weight: impl Fn(usize) -> f64,
         limits: LayoutLimits,
         cx: &Cx<'_>,
     ) -> Result<LayoutLp, TrussConstructionError> {
@@ -1354,7 +1357,14 @@ impl LayoutLp {
                         requirement: "tensile and compressive limits must be finite and positive",
                     });
                 }
-                let cost = length / strength;
+                let weight = objective_weight(index);
+                if !weight.is_finite() || weight <= 0.0 {
+                    return Err(TrussConstructionError::InvalidInput {
+                        field: "member objective weight",
+                        requirement: "must be finite and positive",
+                    });
+                }
+                let cost = (length / strength) * weight;
                 if !cost.is_finite() || cost <= 0.0 {
                     return Err(TrussConstructionError::InvalidInput {
                         field: "layout objective costs",
