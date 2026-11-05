@@ -161,6 +161,53 @@ fn g3_complex_engineering_spectra_scale_with_modulus_units() {
 }
 
 #[test]
+fn kelvin_lowering_preserves_loss_from_megapascal_to_terapascal_stiffness() {
+    let target_at_scale = |scale| {
+        let basis =
+            core::array::from_fn(|i| core::array::from_fn(|j| if i == j { 1.0 } else { 0.0 }));
+        let modes = core::array::from_fn(|k| {
+            let e0 = scale * (1.0 + 0.2 * k as f64);
+            zener_with_peak_eta(e0, 0.4, 1e-3, 1e-3)
+        });
+        KelvinFractional::new(basis, modes).unwrap()
+    };
+    let tol = TensorLoweringTolerance {
+        storage_rel: 0.01,
+        loss_rel: 0.05,
+    };
+    let reference = lower_tensor_to_prony(&target_at_scale(1e6), 20.0, 20_000.0, 16, tol)
+        .expect("megapascal material lowers");
+    for scale in [1e9, 1e12] {
+        let target = target_at_scale(scale);
+        let lowered = lower_tensor_to_prony(&target, 20.0, 20_000.0, 16, tol)
+            .expect("the same normalized material spectrum lowers at every stiffness scale");
+        for frequency in [27.0, 91.0, 337.0, 1_103.0, 3_913.0, 14_387.0] {
+            let omega = core::f64::consts::TAU * frequency;
+            let (reference_storage, reference_loss) = reference.law.complex_modulus(omega).unwrap();
+            let (storage, loss) = lowered.law.complex_modulus(omega).unwrap();
+            for k in 0..6 {
+                // Sinusoidal strain dissipates pi * E'' * amplitude^2 per cycle.
+                // Scaling all moduli must scale this heat by exactly the same factor.
+                let scale_ratio = scale / 1e6;
+                assert!(
+                    (loss[k][k] / scale_ratio / reference_loss[k][k] - 1.0).abs() < 1e-8,
+                    "cycle loss depends on modulus scale: scale={scale:e}, f={frequency}, mode={k}"
+                );
+                assert!((storage[k][k] / scale_ratio / reference_storage[k][k] - 1.0).abs() < 1e-8);
+                // Independently evaluate the analytic fractional standard-solid
+                // response at frequencies outside the fit's logarithmic grid.
+                let mode = target.modes[k];
+                let x = det::pow(omega * mode.tau, mode.alpha);
+                let angle = core::f64::consts::FRAC_PI_2 * mode.alpha;
+                let expected_loss = (mode.e_inf - mode.e0) * x * det::sin(angle)
+                    / (1.0 + 2.0 * x * det::cos(angle) + x * x);
+                assert!((loss[k][k] / expected_loss - 1.0).abs() < 5e-4);
+            }
+        }
+    }
+}
+
+#[test]
 fn g0_complex_engineering_still_refuses_singular_and_indefinite_compliance() {
     for modulus in [1.0, 100.0e9] {
         let young = FractionalZener::new(modulus, 1.1 * modulus, 0.4, 1e-3).unwrap();

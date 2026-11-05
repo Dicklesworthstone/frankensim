@@ -743,7 +743,7 @@ pub fn lower_tensor_to_prony_with_max_iters(
             let fz = &kelvin.modes[k];
             let e_floor = 0.5 * fz.e0;
             let (delta_e0, coeffs) =
-                solve_scalar_mode_nnls(&omegas, &taus, e_floor, |w| fz.modulus(w), tol);
+                solve_scalar_mode_nnls(&omegas, &taus, e_floor, |w| fz.modulus(w), tol)?;
             let e_eq_k = e_floor + delta_e0;
             let pk = kelvin.projector(k);
             for i in 0..6 {
@@ -833,7 +833,7 @@ fn solve_scalar_mode_nnls(
     e0_base: f64,
     eval_modulus: impl Fn(f64) -> (f64, f64),
     tol: TensorLoweringTolerance,
-) -> (f64, Vec<f64>) {
+) -> Result<(f64, Vec<f64>), ViscoError> {
     let m = omegas.len();
     let n = taus.len();
     let cols = n + 1; // col 0 = delta_e0 >= 0, cols 1..=n = branch moduli e_j >= 0
@@ -858,8 +858,43 @@ fn solve_scalar_mode_nnls(
             a[(m + i) * cols + (j + 1)] = (wt / den) * w_im;
         }
     }
-    let sol = nnls(&a, &b, rows, cols);
-    (sol[0], sol[1..].to_vec())
+    // NNLS stops on an absolute gradient threshold. Normalize every column,
+    // including the equilibrium shift, so stiffness units cannot decide which
+    // relaxation branches enter the fit or truncate a weak material loss.
+    let mut norms = vec![0.0; cols];
+    for j in 0..cols {
+        let scale = (0..rows)
+            .map(|i| a[i * cols + j].abs())
+            .fold(0.0_f64, f64::max);
+        let norm = scale
+            * det::sqrt(
+                (0..rows)
+                    .map(|i| {
+                        let value = a[i * cols + j] / scale;
+                        value * value
+                    })
+                    .sum(),
+            );
+        if !(norm.is_finite() && norm > 0.0) {
+            return Err(ViscoError::Parameters {
+                what: "Kelvin lowering matrix has a nonrepresentable column norm",
+            });
+        }
+        norms[j] = norm;
+        for i in 0..rows {
+            a[i * cols + j] /= norm;
+        }
+    }
+    let mut sol = nnls(&a, &b, rows, cols);
+    for (coefficient, norm) in sol.iter_mut().zip(norms) {
+        *coefficient /= norm;
+        if !coefficient.is_finite() || *coefficient < 0.0 {
+            return Err(ViscoError::Parameters {
+                what: "Kelvin lowering returned a nonfinite or negative modulus",
+            });
+        }
+    }
+    Ok((sol[0], sol[1..].to_vec()))
 }
 
 /// General non-commuting PSD-constrained weighted least squares via ADMM in a
