@@ -11,7 +11,7 @@ pub mod tensor;
 pub mod boundary;
 pub(crate) mod advection;
 pub(crate) mod forcing;
-pub use forcing::ThermalForcingError;
+pub use forcing::{BuoyancyQuadrature, ThermalForcingError};
 use boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
 
 use crate::core2::{Cell, Grid};
@@ -44,6 +44,7 @@ pub struct ThermalLbm {
     /// Reference temperature.
     pub t_ref: f64,
     pub(crate) buoyancy_direction: [f64; 2],
+    pub(crate) buoyancy_quadrature: BuoyancyQuadrature,
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
     advection_history: advection::FluxHistory<2>,
@@ -95,6 +96,7 @@ impl ThermalLbm {
             gbeta,
             t_ref: 0.5,
             buoyancy_direction: [0.0, 1.0],
+            buoyancy_quadrature: BuoyancyQuadrature::OpeningTemperature,
             wall_boundaries: None,
             wall_exchange: None,
             advection_history: advection::FluxHistory::default(),
@@ -132,6 +134,25 @@ impl ThermalLbm {
     #[must_use]
     pub fn buoyancy_direction(&self) -> [f64; 2] {
         self.buoyancy_direction
+    }
+
+    /// Select native buoyancy quadrature without changing populations, force
+    /// frames or thermal history. Endpoint averaging transports heat exactly
+    /// once at the input physical velocity, then applies its mean old/new
+    /// temperature through the existing Guo force operator. It reuses flow
+    /// scratch and persists through checked source/local/tensor advances.
+    ///
+    /// Only `gbeta * (T - t_ref)` is centered. Density-resolved material loads
+    /// supplied as external forces retain their original sampling and remain
+    /// held over the step. This is not a full implicit heat/momentum midpoint.
+    pub fn set_buoyancy_quadrature(&mut self, quadrature: BuoyancyQuadrature) {
+        self.buoyancy_quadrature = quadrature;
+    }
+
+    /// Selected native buoyancy quadrature, initially opening temperature.
+    #[must_use]
+    pub fn buoyancy_quadrature(&self) -> BuoyancyQuadrature {
+        self.buoyancy_quadrature
     }
 
     /// Set bottom/top thermal laws without changing populations, buoyancy or
@@ -223,11 +244,13 @@ impl ThermalLbm {
         self.reset_advection_history();
     }
 
-    /// One coupled step: freeze buoyancy from T, collide/stream temperature
-    /// at the input physical velocity, then advance flow under the frozen
-    /// force. The selected wall laws share the original halfway reflection.
+    /// One coupled step: transport temperature at the input physical velocity,
+    /// then advance flow under the selected buoyancy quadrature. The default
+    /// holds opening-temperature buoyancy. Wall laws share the original
+    /// halfway reflection; heat and flow each advance exactly once.
     pub fn step(&mut self) {
-        self.step_with_forces_inner(None, None, None);
+        self.step_with_forces_inner(None, None, None)
+            .expect("thermal slab state must admit the selected buoyancy quadrature");
     }
 
     /// Advance with a separate external force-density field in lattice units.
@@ -237,12 +260,14 @@ impl ThermalLbm {
     /// Each total force is held over this interval. Changing it first rebinds
     /// the Guo half-source frame at fixed physical velocity and stress; switching
     /// on, reversing or removing a magnetic load supplies no extra half impulse.
-    /// Invalid fields or nonfinite sums with buoyancy are refused before any
-    /// mutation; ordinary solver-state and stability requirements still apply.
+    /// Invalid fields or nonfinite opening-force sums are refused before any
+    /// mutation. Endpoint averaging also checks the transported force before
+    /// flow collision; that later refusal can leave a transported thermal
+    /// state. Checked source/material APIs provide complete rollback. Ordinary
+    /// solver-state and stability requirements still apply.
     pub fn step_with_external_forces(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> {
         forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
-        self.step_with_forces_inner(Some(forces), None, None);
-        Ok(())
+        self.step_with_forces_inner(Some(forces), None, None)
     }
 
     // The shared transactional source owner admits the complete rate field.
@@ -250,16 +275,14 @@ impl ThermalLbm {
         &mut self, forces: &[[f64; 2]], thermal_tau: &[f64],
     ) -> Result<(), ThermalForcingError> {
         forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
-        self.step_with_forces_inner(Some(forces), Some(thermal_tau), None);
-        Ok(())
+        self.step_with_forces_inner(Some(forces), Some(thermal_tau), None)
     }
 
     pub(crate) fn step_with_tensor_diffusion(
         &mut self, forces: &[[f64; 2]], diffusion: tensor::DiffusivityField<'_, 2>,
     ) -> Result<(), ThermalForcingError> {
         forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
-        self.step_with_forces_inner(Some(forces), None, Some(diffusion));
-        Ok(())
+        self.step_with_forces_inner(Some(forces), None, Some(diffusion))
     }
 
     fn step_with_forces_inner(
@@ -267,25 +290,28 @@ impl ThermalLbm {
         external: Option<&[[f64; 2]]>,
         thermal_tau: Option<&[f64]>,
         diffusion: Option<tensor::DiffusivityField<'_, 2>>,
-    ) {
+    ) -> Result<(), ThermalForcingError> {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
+        let average = self.buoyancy_quadrature == BuoyancyQuadrature::EndpointAverage;
         // Boussinesq: per-cell force via the external-force field.
-        for y in 1..ny - 1 {
-            for x in 0..nx {
-                let i = self.grid.idx(x, y);
-                let t: f64 = self.gpop[i].iter().sum();
-                let magnitude = self.gbeta * (t - self.t_ref);
-                let mut total = self.buoyancy_direction.map(|component| magnitude * component);
-                if let Some(forces) = external {
-                    for (total, &load) in total.iter_mut().zip(&forces[i]) {
-                        *total += load;
+        if !average {
+            for y in 1..ny - 1 {
+                for x in 0..nx {
+                    let i = self.grid.idx(x, y);
+                    let t: f64 = self.gpop[i].iter().sum();
+                    let magnitude = self.gbeta * (t - self.t_ref);
+                    let mut total = self.buoyancy_direction.map(|component| magnitude * component);
+                    if let Some(forces) = external {
+                        for (total, &load) in total.iter_mut().zip(&forces[i]) {
+                            *total += load;
+                        }
                     }
-                }
-                let previous = self.grid.fext[i];
-                if previous != total {
-                    let velocity = self.grid.moments(i).u;
-                    forcing::reframe2(&mut self.grid.f[i], velocity, previous, total);
-                    self.grid.fext[i] = total;
+                    let previous = self.grid.fext[i];
+                    if previous != total {
+                        let velocity = self.grid.moments(i).u;
+                        forcing::reframe2(&mut self.grid.f[i], velocity, previous, total);
+                        self.grid.fext[i] = total;
+                    }
                 }
             }
         }
@@ -293,6 +319,17 @@ impl ThermalLbm {
         // Reuse the original flow scratch; its next collision overwrites it.
         let cells = self.gpop.len();
         self.scratch.resize(cells, [0.0; Q]);
+        // Scalar collision/streaming touches only the first 5*cells entries.
+        // The next cells entries fit inside the original 9*cells flow scratch
+        // and retain old T until force binding, before flow overwrites them.
+        let old_temperature_start = W5.len() * cells;
+        if average {
+            let old = &mut self.scratch.as_flattened_mut()
+                [old_temperature_start..old_temperature_start + cells];
+            for cell in nx..cells - nx {
+                old[cell] = self.gpop[cell].iter().sum();
+            }
+        }
         let grid = &self.grid;
         if let Some(field) = diffusion {
             advection::D2Q5.collide_tensor(
@@ -318,7 +355,23 @@ impl ThermalLbm {
             [nx, ny],
             Some(walls),
         ));
+        if average {
+            for cell in nx..cells - nx {
+                let before = self.scratch.as_flattened()[old_temperature_start + cell];
+                let total = forcing::endpoint_average_force(
+                    before, self.gpop[cell].iter().sum(), self.gbeta, self.t_ref,
+                    self.buoyancy_direction, external.map(|field| field[cell]), cell,
+                )?;
+                let previous = self.grid.fext[cell];
+                if previous != total {
+                    let velocity = self.grid.moments(cell).u;
+                    forcing::reframe2(&mut self.grid.f[cell], velocity, previous, total);
+                    self.grid.fext[cell] = total;
+                }
+            }
+        }
         self.grid.step(&mut self.scratch);
+        Ok(())
     }
 
     /// Total kinetic energy of the fluid.

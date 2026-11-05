@@ -1,5 +1,23 @@
 //! Shared admission and Guo source frames for held thermal/physical forces.
 
+/// Temperature sampling for the native linear Boussinesq force.
+///
+/// This selects buoyancy quadrature only. Thermal advection still uses the
+/// input physical velocity; neither choice establishes the time order of the
+/// complete partitioned heat/flow solver. Caller-supplied external forces,
+/// including density-resolved material loads, retain their held-field meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuoyancyQuadrature {
+    /// Hold buoyancy at the temperature before scalar transport (the default).
+    #[default]
+    OpeningTemperature,
+    /// Use the mean temperature before and after the one scalar transport.
+    /// With symmetric prescribed-source half-kicks, this is also the mean of
+    /// the full step's old/new temperatures. Guo force-frame rebinding keeps
+    /// this quadrature separate from an instantaneous mechanical impulse.
+    EndpointAverage,
+}
+
 // Guo, Zheng & Shi, Phys. Rev. E 65, 046308 (2002),
 // doi:10.1103/PhysRevE.65.046308. Stored populations are f_phys - S(u,F)/2.
 // Replacing F without replacing that half source adds an unphysical
@@ -99,6 +117,33 @@ pub(crate) fn normalize_direction<const D: usize>(
     let scaled = direction.map(|value| value / scale);
     let norm = fs_math::det::sqrt(scaled.iter().map(|value| value * value).sum());
     Ok(scaled.map(|value| value / norm))
+}
+
+/// The scalar endpoint is known only after streaming. Admit its new total
+/// force before collision; checked source owners discard a refused candidate.
+pub(crate) fn endpoint_average_force<const D: usize>(
+    before: f64,
+    after: f64,
+    gbeta: f64,
+    reference_temperature: f64,
+    direction: [f64; D],
+    external: Option<[f64; D]>,
+    cell: usize,
+) -> Result<[f64; D], ThermalForcingError> {
+    let temperature = 0.5 * before + 0.5 * after;
+    let magnitude = gbeta * (temperature - reference_temperature);
+    let mut total = direction.map(|component| magnitude * component);
+    if let Some(load) = external {
+        for (component, load) in total.iter_mut().zip(load) {
+            *component += load;
+        }
+    }
+    for (component, value) in total.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(ThermalForcingError::NonFinite { cell, component });
+        }
+    }
+    Ok(total)
 }
 
 pub(crate) fn validate_external_forces<const D: usize, const Q: usize>(

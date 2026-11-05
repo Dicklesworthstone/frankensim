@@ -977,6 +977,26 @@ Rayleigh–Bénard onset bracket is not an inclined-channel stability criterion.
 analytic cubic viscous profile, grid refinement, rotated/reversed force
 directions and exact per-step impulse through checked source advances.
 
+`ThermalLbm` and `ThermalLbm3` expose opt-in
+`BuoyancyQuadrature::EndpointAverage`; `OpeningTemperature` retains the original
+default. The shared scalar operator advances once at the input physical
+velocity. Flow then receives `gbeta * ((T_before + T_after)/2 - t_ref)` in the
+authored direction through the original Guo rebind and collision. Symmetric
+prescribed-source half-kicks make this mean equal the full interval's endpoint
+mean. Old temperatures reuse nonoverlapping spare flow scratch, without an
+additional per-step allocation or a second heat/flow solve.
+
+Checked source, local-transport and tensor candidates retain the selection and
+refuse a nonfinite transported total force before publication. Low-level direct
+steps remain nontransactional after scalar transport. Only native linear beta
+buoyancy is centered: external loads, including density-resolved material
+buoyancy whose adapter disables native `gbeta`, retain their existing held
+sampling. This does not establish the time order of the complete partitioned
+solver or a total mechanical/thermal energy closure. `buoyancy_quadrature`
+tests use actual wall/source thermal ramps, independent fluid plus reflected-wall
+momentum, time refinement, rotating loads, retained thermal history and
+late-refusal rollback.
+
 `BoundaryGrid3::rebind_shear_relaxation` extends uniform transport refresh to
 the original tiled boundary/moving-body solver. It delegates to the existing
 `ViscousLattice3` rate owner, preserving the collision family, higher-order
@@ -4216,8 +4236,9 @@ streaming operator. Linear equilibrium retains the zero-mass correction
 [Chopard, Falcone and Latt (2009), equation (14)](https://doi.org/10.1140/epjst/e2009-01035-5).
 The actual local thermal relaxation sets both BGK relaxation and its correction;
 the diffusivities remain `(tau_g-1/2)/3` and `(tau_g-1/2)/4`, respectively.
-Temperature collision samples the input physical velocity after force rebinding
-and before flow advances under the frozen buoyancy/external load.
+Temperature collision samples the input physical velocity; force-frame
+rebinding preserves that velocity, and flow advances afterward under the
+selected held buoyancy/external load.
 
 Each retained state stores one previous advective-flux vector per cell.
 Transactional source snapshots copy that history. Fresh history, an explicit

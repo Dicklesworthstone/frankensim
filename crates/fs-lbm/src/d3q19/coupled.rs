@@ -32,7 +32,7 @@ use super::{CollisionError3, CollisionModel3, E3, OPP3, Q3, collision_kernel3, e
 use crate::rheology::{
     PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
 };
-use crate::thermal::{ThermalForcingError, advection, forcing::validate_external_forces};
+use crate::thermal::{BuoyancyQuadrature, ThermalForcingError, advection, forcing::validate_external_forces};
 use crate::thermal::boundary::{ThermalWall, ThermalWallError, ThermalWallExchange};
 
 mod moving_walls;
@@ -653,6 +653,7 @@ pub struct ThermalLbm3 {
     /// Reference temperature.
     pub t_ref: f64,
     pub(crate) buoyancy_direction: [f64; 3],
+    pub(crate) buoyancy_quadrature: BuoyancyQuadrature,
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
     pub(crate) advection_history: advection::FluxHistory<3>,
@@ -707,6 +708,7 @@ impl ThermalLbm3 {
             gbeta,
             t_ref: 0.5,
             buoyancy_direction: [0.0, 0.0, 1.0],
+            buoyancy_quadrature: BuoyancyQuadrature::OpeningTemperature,
             wall_boundaries: None,
             wall_exchange: None,
             advection_history: advection::FluxHistory::default(),
@@ -743,6 +745,25 @@ impl ThermalLbm3 {
     #[must_use]
     pub fn buoyancy_direction(&self) -> [f64; 3] {
         self.buoyancy_direction
+    }
+
+    /// Select native buoyancy quadrature without changing populations, force
+    /// frames or thermal history. Endpoint averaging transports heat exactly
+    /// once at the input physical velocity, then applies its mean old/new
+    /// temperature through the existing Guo force operator. It reuses flow
+    /// scratch and persists through checked source/local/tensor advances.
+    ///
+    /// Only `gbeta * (T - t_ref)` is centered. Density-resolved material loads
+    /// supplied as external forces retain their original sampling and remain
+    /// held over the step. This is not a full implicit heat/momentum midpoint.
+    pub fn set_buoyancy_quadrature(&mut self, quadrature: BuoyancyQuadrature) {
+        self.buoyancy_quadrature = quadrature;
+    }
+
+    /// Selected native buoyancy quadrature, initially opening temperature.
+    #[must_use]
+    pub fn buoyancy_quadrature(&self) -> BuoyancyQuadrature {
+        self.buoyancy_quadrature
     }
 
     /// Set bottom/top thermal laws without changing populations, buoyancy or
@@ -828,9 +849,10 @@ impl ThermalLbm3 {
         self.reset_advection_history();
     }
 
-    /// Freeze buoyancy from T, collide/stream temperature at the input
-    /// physical velocity, then advance flow under the frozen force.
-    /// Temperature uses the selected halfway wall laws and periodic x/y streaming.
+    /// Transport temperature at the input physical velocity, then advance
+    /// flow under the selected buoyancy quadrature. The default holds
+    /// opening-temperature buoyancy. Heat and flow each advance exactly once;
+    /// temperature uses the halfway wall laws and periodic x/y streaming.
     pub fn step(&mut self) {
         self.step_with_forces_inner(None, None, None)
             .expect("thermal plate state must admit native collision and wall transport");
@@ -839,9 +861,11 @@ impl ThermalLbm3 {
     /// Advance with external lattice force densities added to thermal buoyancy.
     /// The borrowed field has one vector per cell including the two wall
     /// planes, whose loads are ignored. It contains EXTERNAL forces only, not
-    /// the previous step's total `fext`. Force admission precedes mutation.
-    /// Complete thermal/flow rollback on a later native refusal is supplied by
-    /// the checked source/material APIs; this low-level method is not transactional.
+    /// the previous step's total `fext`. Opening-force admission precedes
+    /// mutation. Endpoint averaging additionally checks the transported force
+    /// before flow collision. Complete thermal/flow rollback on a later native
+    /// refusal is supplied by the checked source/material APIs; this low-level
+    /// method is not transactional.
     /// Total forces are held over this interval. Source-frame changes preserve
     /// physical velocity and force-corrected stress before the actual step, so
     /// changing a magnetic load cannot add a second half-force impulse.
@@ -890,28 +914,31 @@ impl ThermalLbm3 {
         diffusion: Option<crate::thermal::tensor::DiffusivityField<'_, 3>>,
     ) -> Result<(), ThermalForcingError> {
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
-        for z in 1..nz - 1 {
-            for y in 0..ny {
-                for x in 0..nx {
-                    let i = self.grid.idx(x, y, z);
-                    let t: f64 = self.gpop[i].iter().sum();
-                    let magnitude = self.gbeta * (t - self.t_ref);
-                    let mut total = self.buoyancy_direction.map(|component| magnitude * component);
-                    if let Some(forces) = external {
-                        for (total, &load) in total.iter_mut().zip(&forces[i]) {
-                            *total += load;
+        let average = self.buoyancy_quadrature == BuoyancyQuadrature::EndpointAverage;
+        if !average {
+            for z in 1..nz - 1 {
+                for y in 0..ny {
+                    for x in 0..nx {
+                        let i = self.grid.idx(x, y, z);
+                        let t: f64 = self.gpop[i].iter().sum();
+                        let magnitude = self.gbeta * (t - self.t_ref);
+                        let mut total = self.buoyancy_direction.map(|component| magnitude * component);
+                        if let Some(forces) = external {
+                            for (total, &load) in total.iter_mut().zip(&forces[i]) {
+                                *total += load;
+                            }
                         }
-                    }
-                    let previous = self.grid.fext[i];
-                    if previous != total {
-                        let velocity = self.grid.moments3(i).1;
-                        crate::thermal::forcing::reframe3(
-                            &mut self.grid.f[i],
-                            velocity,
-                            previous,
-                            total,
-                        );
-                        self.grid.fext[i] = total;
+                        let previous = self.grid.fext[i];
+                        if previous != total {
+                            let velocity = self.grid.moments3(i).1;
+                            crate::thermal::forcing::reframe3(
+                                &mut self.grid.f[i],
+                                velocity,
+                                previous,
+                                total,
+                            );
+                            self.grid.fext[i] = total;
+                        }
                     }
                 }
             }
@@ -921,6 +948,17 @@ impl ThermalLbm3 {
         let mut post = core::mem::take(&mut self.grid.post);
         let cells = self.gpop.len();
         let plane = nx * ny;
+        // Scalar collision/streaming uses only the first 7*cells entries.
+        // Preserve old T in the next cells entries of the original 19*cells
+        // flow scratch until force binding, before flow overwrites them.
+        let old_temperature_start = 7 * cells;
+        if average {
+            let old = &mut post.as_flattened_mut()
+                [old_temperature_start..old_temperature_start + cells];
+            for cell in plane..cells - plane {
+                old[cell] = self.gpop[cell].iter().sum();
+            }
+        }
         let grid = &self.grid;
         if let Some(field) = diffusion {
             advection::D3Q7.collide_tensor(
@@ -947,6 +985,23 @@ impl ThermalLbm3 {
             Some(walls),
         ));
         self.grid.post = post;
+        if average {
+            for cell in plane..cells - plane {
+                let before = self.grid.post.as_flattened()[old_temperature_start + cell];
+                let total = crate::thermal::forcing::endpoint_average_force(
+                    before, self.gpop[cell].iter().sum(), self.gbeta, self.t_ref,
+                    self.buoyancy_direction, external.map(|field| field[cell]), cell,
+                )?;
+                let previous = self.grid.fext[cell];
+                if previous != total {
+                    let velocity = self.grid.moments3(cell).1;
+                    crate::thermal::forcing::reframe3(
+                        &mut self.grid.f[cell], velocity, previous, total,
+                    );
+                    self.grid.fext[cell] = total;
+                }
+            }
+        }
         self.grid.try_step().map_err(ThermalForcingError::Flow3)
     }
 
