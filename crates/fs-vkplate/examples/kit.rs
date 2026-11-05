@@ -89,7 +89,13 @@ fn main() {
     let v = |d: f64| speed.unwrap_or(d);
     // FS_KIT_TUNE scales a drum's head tensions (tuning experiments)
     let tune: f64 = std::env::var("FS_KIT_TUNE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
-    let drum = |s: kit::DrumSpec, kick: bool, v: f64| drum_cards::drum(&kit::DrumSpec { head_dipole, ..s }, tune, &[(0.005, v)], kick, preset_heads);
+    // FS_KIT_STROKE_TIMES lists a drum's strokes in seconds, comma separated, each at the same speed (a roll); unset, the one stroke at 5 ms
+    let stroke_times: Vec<f64> = std::env::var("FS_KIT_STROKE_TIMES")
+        .map_or_else(|_| vec![0.005], |s| s.split(',').map(|t| t.parse().expect("stroke time")).collect());
+    let drum = |s: kit::DrumSpec, kick: bool, v: f64| {
+        let hits: Vec<(f64, f64)> = stroke_times.iter().map(|&t| (t, v)).collect();
+        drum_cards::drum(&kit::DrumSpec { head_dipole, ..s }, tune, &hits, kick, preset_heads)
+    };
     // FS_KIT_GRID scales a cymbal's grid spacing (refinement studies; 1 is the kit's own grid)
     let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let cy = |s: kit::CymbalSpec| kit::CymbalSpec { grid: s.grid * grid, ..s };
