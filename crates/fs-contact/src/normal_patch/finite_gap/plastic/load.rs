@@ -4,6 +4,8 @@
 //! its prescribed approach changes; trial plastic states are discarded. A
 //! recession-at-load solve supplies the new recession directly to those trials,
 //! so no fictitious held-approach plastic intermediate is committed.
+//! Material refresh likewise applies new compliance and pressure caps directly
+//! to the original history while keeping the applied resultant fixed.
 //!
 //! Total force is monotone for the convex pressure box problem. A safeguarded
 //! secant/bisection search retains tested approach bounds and reports actual
@@ -73,12 +75,21 @@ pub struct FiniteGapPlasticLoadRecessionAdvance {
     pub load: FiniteGapPlasticLoadReceipt,
 }
 
+/// Material continuation at maintained load, retaining the original history.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiniteGapPlasticLoadRefreshAdvance {
+    /// Original-to-successor material response and separate normal/parameter work.
+    pub continuation: FiniteGapPlasticContinuation,
+    /// Load-control evidence for this same successor equilibrium.
+    pub load: FiniteGapPlasticLoadReceipt,
+}
+
 /// Numerical evidence for one bounded force-control operation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteGapPlasticLoadReceipt {
     /// Content identity of the request, bounds, and complete physical response.
     pub identity: ContentHash,
-    /// Original immutable physical model.
+    /// Immutable physical model used for the successor equilibrium.
     pub model_identity: ContentHash,
     /// Accepted history shared by every trial.
     pub predecessor_state_identity: ContentHash,
@@ -137,7 +148,7 @@ pub enum FiniteGapPlasticLoadError {
         approach_bracket_m: [f64; 2],
         best_force_residual_n: Option<f64>,
     },
-    /// Recession-at-load requires the accepted state already to carry that load.
+    /// A maintained-load continuation requires the predecessor to carry that load.
     PredecessorLoadMismatch {
         target_force_n: f64,
         predecessor_force_n: f64,
@@ -241,7 +252,55 @@ impl FiniteGapPlasticModel {
         controls: FiniteGapPlasticLoadControls,
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticLoadAdvance, FiniteGapPlasticLoadError> {
-        self.load_at_recession(before, &before.recession_m, target_force_n, controls, cx)
+        self.load_at_recession(
+            self,
+            before,
+            &before.recession_m,
+            target_force_n,
+            controls,
+            cx,
+        )
+    }
+
+    /// Change modulus and/or hardness while maintaining the accepted resultant.
+    ///
+    /// `previous_model` must own `before`; original grid, gap, datum, and
+    /// numerical controls must be identical. Every search trial uses the NEW
+    /// compliance and pressure caps with ORIGINAL plastic depth, recession, and
+    /// cumulative plastic work. There is no held-approach refresh followed by
+    /// an unload/reload, which would retain an unphysical intermediate dent.
+    ///
+    /// The predecessor must already carry `target_force_n` within the supplied
+    /// tolerance. Normal work is `target_force_n * delta(approach)`. The signed
+    /// material supply is `delta(U) + plastic_work - normal_work`, using both
+    /// models' compliances. This endpoint return mapping is not a thermal law
+    /// or an integration of an unresolved temperature/material path.
+    pub fn refresh_from_at_load(
+        &self,
+        previous_model: &Self,
+        before: &FiniteGapPlasticState,
+        target_force_n: f64,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticLoadRefreshAdvance, FiniteGapPlasticLoadError> {
+        checkpoint(cx)?;
+        previous_model.check_state_owner(before)?;
+        previous_model.admit_maintained_load(before, target_force_n, controls)?;
+        let result = self.load_at_recession(
+            previous_model,
+            before,
+            &before.recession_m,
+            target_force_n,
+            controls,
+            cx,
+        )?;
+        let continuation =
+            self.finish_load_refresh(previous_model, before, result.contact, target_force_n, cx)?;
+        checkpoint(cx)?;
+        Ok(FiniteGapPlasticLoadRefreshAdvance {
+            continuation,
+            load: result.load,
+        })
     }
 
     /// Apply recession while maintaining the predecessor's compressive load.
@@ -262,15 +321,7 @@ impl FiniteGapPlasticModel {
     ) -> Result<FiniteGapPlasticLoadRecessionAdvance, FiniteGapPlasticLoadError> {
         checkpoint(cx)?;
         self.check_state_owner(before)?;
-        let tolerance = validate_controls(target_force_n, controls)?;
-        let predecessor_force_n = self.accepted_force(before)?;
-        if (predecessor_force_n - target_force_n).abs() > tolerance {
-            return Err(FiniteGapPlasticLoadError::PredecessorLoadMismatch {
-                target_force_n,
-                predecessor_force_n,
-                force_tolerance_n: tolerance,
-            });
-        }
+        self.admit_maintained_load(before, target_force_n, controls)?;
         if recession_increment_m.len() != self.gap_m.len()
             || recession_increment_m
                 .iter()
@@ -290,7 +341,8 @@ impl FiniteGapPlasticModel {
                 return Err(invalid_load("representable recession increment"));
             }
         }
-        let result = self.load_at_recession(before, &recession, target_force_n, controls, cx)?;
+        let result =
+            self.load_at_recession(self, before, &recession, target_force_n, controls, cx)?;
         let continuation = self.finish_load_recession(
             before,
             result.contact,
@@ -307,6 +359,7 @@ impl FiniteGapPlasticModel {
 
     fn load_at_recession(
         &self,
+        previous_model: &Self,
         before: &FiniteGapPlasticState,
         recession_m: &[f64],
         target_force_n: f64,
@@ -314,7 +367,10 @@ impl FiniteGapPlasticModel {
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticLoadAdvance, FiniteGapPlasticLoadError> {
         checkpoint(cx)?;
-        self.check_state_owner(before)?;
+        previous_model.check_state_owner(before)?;
+        if self.identity != previous_model.identity {
+            self.check_refresh_geometry(previous_model)?;
+        }
         let force_tolerance_n = validate_controls(target_force_n, controls)?;
         let capacity_upper_bound_n = self.interior_force_capacity_bound();
         if target_force_n > capacity_upper_bound_n {
@@ -333,7 +389,8 @@ impl FiniteGapPlasticModel {
             zero_pressure: vec![0.0; self.gap_m.len()],
         };
         let previous_force = self.accepted_force(before)?;
-        if recession_m == before.recession_m.as_slice()
+        if self.identity == previous_model.identity
+            && recession_m == before.recession_m.as_slice()
             && before.approach_m >= controls.minimum_approach_m
             && before.approach_m <= controls.maximum_approach_m
             && (previous_force - target_force_n).abs() <= force_tolerance_n
@@ -643,6 +700,24 @@ impl FiniteGapPlasticModel {
         Ok(force)
     }
 
+    fn admit_maintained_load(
+        &self,
+        before: &FiniteGapPlasticState,
+        target_force_n: f64,
+        controls: FiniteGapPlasticLoadControls,
+    ) -> Result<(), FiniteGapPlasticLoadError> {
+        let tolerance = validate_controls(target_force_n, controls)?;
+        let predecessor_force_n = self.accepted_force(before)?;
+        if (predecessor_force_n - target_force_n).abs() > tolerance {
+            return Err(FiniteGapPlasticLoadError::PredecessorLoadMismatch {
+                target_force_n,
+                predecessor_force_n,
+                force_tolerance_n: tolerance,
+            });
+        }
+        Ok(())
+    }
+
     fn interior_force_capacity_bound(&self) -> f64 {
         let grid = self.config.grid;
         let ring = self.config.boundary_clearance_cells;
@@ -726,7 +801,7 @@ impl FiniteGapPlasticModel {
     }
 }
 
-fn validate_controls(
+pub(super) fn validate_controls(
     force_n: f64,
     controls: FiniteGapPlasticLoadControls,
 ) -> Result<f64, FiniteGapPlasticLoadError> {

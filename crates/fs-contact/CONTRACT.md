@@ -2910,3 +2910,40 @@ constant-load Archard volume and approach, separate boundary/parameter work,
 exponential pressure decay at fixed approach, pressure redistribution,
 refinement, retained source identity, and immutable refusal. These are synthetic
 model and implementation checks; experimental validation remains separate.
+
+
+## Material changes at maintained load and a finite loading-device stiffness
+
+`FiniteGapPlasticModel::refresh_from_at_load` changes the original contact
+modulus and/or pressure-hardness field while maintaining an already accepted
+normal resultant. New compliance and pressure caps act directly on the original
+plastic depth, recession and prior work. A held-approach thermal return map is
+never inserted before restoring load, because its irreversible dent would belong
+to a different boundary condition. Original geometry, gap datum and numerical
+controls must match. Unattainable force, unresolved plastic plateaus and original
+physical/numerical refusals remain explicit and transactional.
+
+The native `FiniteGapPlasticDrive` supplies a finite positive stiffness K and an
+unloaded device position u in the original approach chart. Its equilibrium is
+F_contact(delta) = K*(u-delta). Positive K determines displacement on a fully
+plastic contact-force plateau; it does not change material hardness or introduce
+strain hardening. A separated equilibrium has zero spring compression at delta=u.
+The bounded solver shares the original native contact law, reuses one feasible
+pressure guess, and starts every trial from accepted irreversible history. Force
+balance, finite approach bounds, explicit evaluation budgets and cancellation
+remain required. The reported residual is not a rigorous position enclosure.
+
+At maintained force, normal work is F*delta(approach). At a held device position,
+recession transfers minus the change in spring storage to contact; the stationary
+actuator does no work. The continuation separates this normal boundary work from
+contact storage, plastic work and parameter work:
+parameter_work = delta(U_contact) + plastic_work - normal_work.
+Spring storage is reported separately. A change of prescribed force or device
+position supplies an endpoint, not an invented work integral along its unknown
+loading path. No account is automatically classified as heat.
+
+The five maintained-load material regressions and eight native drive regressions
+cover analytical series compliance, cap softening and redistribution, no spurious
+intermediate dent, plastic plateau travel, unloading, retained histories, work
+closure and transactional refusals. These are synthetic G1/G3 model checks, not
+experimental validation, a loading-machine dynamic model, or bulk plasticity.

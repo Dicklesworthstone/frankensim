@@ -3,8 +3,9 @@
 //! Recession increases the relative undeformed separation and remains separate
 //! from residual plastic indentation. Every continuation preserves the original
 //! gap datum. Recession and material refresh normally hold the approach fixed;
-//! load-controlled recession instead accounts for constant-resultant normal
-//! work. Signed parameter work is the endpoint estimate
+//! load-controlled continuation instead accounts for constant-resultant normal
+//! work. A finite-stiffness drive supplies its own normal-work integral.
+//! Signed parameter work is the endpoint estimate
 //! `delta(elastic energy) + incremental plastic work - normal work`.
 //! Condition/geometry paths require refinement when intermediate equilibria
 //! matter. No part of this bookkeeping is automatically converted to heat.
@@ -28,6 +29,10 @@ pub enum FiniteGapPlasticContinuationKind {
     MaterialRefresh = 1,
     /// Relative surface recession with the original compressive resultant maintained.
     SurfaceRecessionAtLoad = 2,
+    /// New material parameters with the original compressive resultant maintained.
+    MaterialRefreshAtLoad = 3,
+    /// Relative surface recession at a fixed finite-stiffness drive position.
+    SurfaceRecessionWithDrive = 4,
 }
 
 /// Complete candidate from an explicitly authorized physical continuation.
@@ -60,9 +65,11 @@ pub struct FiniteGapPlasticContinuationReceipt {
     pub approach_m: f64,
     /// Work of the controlled normal resultant during this continuation [J].
     ///
-    /// Zero for held-approach operations. For maintained-load recession this is
+    /// Zero for held-approach operations. For maintained-load changes this is
     /// the prescribed constant force times the rigid approach change; the
     /// separate load receipt retains equilibrium force tolerances/residuals.
+    /// At a held loading-device position, this is energy released by its
+    /// spring. The stationary actuator performs no external work.
     pub normal_work_j: f64,
     /// Elastic energy before changing geometry or material parameters [J].
     pub previous_elastic_energy_j: f64,
@@ -218,7 +225,10 @@ impl FiniteGapPlasticModel {
         )
     }
 
-    fn check_refresh_geometry(&self, previous: &Self) -> Result<(), FiniteGapPlasticError> {
+    pub(super) fn check_refresh_geometry(
+        &self,
+        previous: &Self,
+    ) -> Result<(), FiniteGapPlasticError> {
         let a = &self.config;
         let b = &previous.config;
         if a.grid != b.grid
@@ -339,6 +349,66 @@ impl FiniteGapPlasticModel {
             advance,
             ContinuationAccounting {
                 kind: FiniteGapPlasticContinuationKind::SurfaceRecessionAtLoad,
+                previous_elastic_energy_j,
+                previous_opening_m: Some(opening),
+                normal_work_j,
+                recession_increment_m: actual_recession_increment_m,
+            },
+            cx,
+        )
+    }
+
+    pub(super) fn finish_load_refresh(
+        &self,
+        previous_model: &Self,
+        before: &FiniteGapPlasticState,
+        advance: FiniteGapPlasticAdvance,
+        maintained_force_n: f64,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticContinuation, FiniteGapPlasticError> {
+        // The shared load oracle already admitted the original geometry and
+        // both owners before constructing this successor response.
+        previous_model.check_state_owner(before)?;
+        let (previous_elastic_energy_j, opening) =
+            previous_model.stored_energy_and_opening(before, cx)?;
+        let normal_work_j = maintained_force_n * (advance.candidate.approach_m - before.approach_m);
+        if !normal_work_j.is_finite() {
+            return Err(invalid("finite maintained-load normal work"));
+        }
+        self.finish_continuation(
+            previous_model,
+            before,
+            advance,
+            ContinuationAccounting {
+                kind: FiniteGapPlasticContinuationKind::MaterialRefreshAtLoad,
+                previous_elastic_energy_j,
+                previous_opening_m: Some(opening),
+                normal_work_j,
+                recession_increment_m: vec![0.0; self.gap_m.len()],
+            },
+            cx,
+        )
+    }
+
+    pub(super) fn finish_boundary_recession(
+        &self,
+        before: &FiniteGapPlasticState,
+        advance: FiniteGapPlasticAdvance,
+        actual_recession_increment_m: Vec<f64>,
+        normal_work_j: f64,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticContinuation, FiniteGapPlasticError> {
+        self.check_state_owner(before)?;
+        if !normal_work_j.is_finite() {
+            return Err(invalid("finite drive normal work"));
+        }
+        let (previous_elastic_energy_j, opening) = self.stored_energy_and_opening(before, cx)?;
+        self.finish_continuation(
+            self,
+            before,
+            advance,
+            ContinuationAccounting {
+                kind: FiniteGapPlasticContinuationKind::SurfaceRecessionWithDrive,
                 previous_elastic_energy_j,
                 previous_opening_m: Some(opening),
                 normal_work_j,
