@@ -205,6 +205,18 @@
 //! extent are explicit inputs; no room-temperature clay dissolution, pH,
 //! hydrolysis completion, stable phase or leach recovery is inferred.
 //! Acid released by hydrolysis can supply only a subsequent reaction stage.
+//!
+//! Silver-sulfide cyanidation selects the thiosulfate product observed by
+//! Luna and Lapidus (2000), <https://doi.org/10.1016/S0304-386X(00)00072-4>.
+//! The Ag2S source retains NBS's historical alpha, orthorhombic description;
+//! it is not silently renamed as another mineral phase. Thiosulfate and
+//! elemental-sulfur transfer to cyanide form thiocyanate, as discussed by
+//! Luthy and Bruce, DOE FE-2496-32, <https://www.osti.gov/servlets/purl/6166154>.
+//! Elemental sulfur uses the existing S(s) identity and source amount basis
+//! per mole S, not per S8 molecule. These are selected aggregate endpoints;
+//! no sulfur-product selection, reaction rate or silver recovery is inferred.
+//! ReactionNetwork's gross initial-stock policy makes stage ordering explicit;
+//! it is not a claim that products cannot react in a simultaneous physical system.
 
 use super::{ConservedReaction, ReactionBalanceError};
 use crate::{
@@ -266,6 +278,15 @@ pub enum MineralReaction {
     /// 4 Ag(s) + 8 CN- + O2(aq) + 2 H2O(l) -> 4 Ag(CN)2- + 4 OH-.
     /// Dissolved oxygen is consumed from the explicit aqueous inventory.
     SilverCyanidationDissolvedOxygen,
+    /// 2 Ag2S(s, NBS alpha orthorhombic) + 8 CN- + 2 O2(aq) + H2O(l)
+    /// -> 4 Ag(CN)2- + S2O3(2-) + 2 OH-. Selected sulfur-product endpoint.
+    SilverSulfideCyanidationThiosulfate,
+    /// S2O3(2-)(aq) + CN-(aq) -> SCN-(aq) + SO3(2-)(aq).
+    /// One cyanide unit enters thiocyanate, not a metal-cyanide complex.
+    ThiosulfateCyanideSulfurTransfer,
+    /// S(s) + CN-(aq) -> SCN-(aq), per mole S in the elemental source basis.
+    /// The available S(s) stock and reaction extent are explicit inputs.
+    ElementalSulfurCyanideConsumption,
     /// 2 Au(CN)2-(aq) + Zn(s) -> 2 Au(s) + Zn(CN)4(2-)(aq).
     /// Productive zinc-cementation endpoint; extent is an explicit input.
     GoldCyanideCementationWithZinc,
@@ -684,6 +705,38 @@ impl MineralReaction {
                     ("H2O(l)", &[0, 0, 0, 1, 2], 0, -2),
                     ("Ag(CN)2[-](aq)", &[1, 2, 2, 0, 0], -1, 4),
                     ("OH[-](aq)", &[0, 0, 0, 1, 1], -1, 4),
+                ],
+            ),
+            Self::SilverSulfideCyanidationThiosulfate => (
+                "silver-sulfide-cyanidation-thiosulfate",
+                &["Ag", "S", "C", "N", "O", "H"],
+                &[
+                    ("Ag2S(s-nbs-alpha-orthorhombic)", &[2, 1, 0, 0, 0, 0], 0, -2),
+                    ("CN[-](aq)", &[0, 0, 1, 1, 0, 0], -1, -8),
+                    ("O2(aq)", &[0, 0, 0, 0, 2, 0], 0, -2),
+                    ("H2O(l)", &[0, 0, 0, 0, 1, 2], 0, -1),
+                    ("Ag(CN)2[-](aq)", &[1, 0, 2, 2, 0, 0], -1, 4),
+                    ("S2O3[2-](aq)", &[0, 2, 0, 0, 3, 0], -2, 1),
+                    ("OH[-](aq)", &[0, 0, 0, 0, 1, 1], -1, 2),
+                ],
+            ),
+            Self::ThiosulfateCyanideSulfurTransfer => (
+                "thiosulfate-cyanide-sulfur-transfer",
+                &["S", "C", "N", "O"],
+                &[
+                    ("S2O3[2-](aq)", &[2, 0, 0, 3], -2, -1),
+                    ("CN[-](aq)", &[0, 1, 1, 0], -1, -1),
+                    ("SCN[-](aq)", &[1, 1, 1, 0], -1, 1),
+                    ("SO3[2-](aq)", &[1, 0, 0, 3], -2, 1),
+                ],
+            ),
+            Self::ElementalSulfurCyanideConsumption => (
+                "elemental-sulfur-cyanide-consumption",
+                &["S", "C", "N"],
+                &[
+                    ("S(s)", &[1, 0, 0], 0, -1),
+                    ("CN[-](aq)", &[0, 1, 1], -1, -1),
+                    ("SCN[-](aq)", &[1, 1, 1], -1, 1),
                 ],
             ),
             Self::GoldCyanideCementationWithZinc => (

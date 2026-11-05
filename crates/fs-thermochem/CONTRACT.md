@@ -1,5 +1,30 @@
 # CONTRACT: fs-thermochem
 
+## Silver-sulfide leaching and sulfur cyanide demand
+
+Three matched NBS packs add fourteen literal reference facts for historical
+alpha-orthorhombic Ag2S, aqueous thiosulfate and thiocyanate. Conserved
+silver-sulfide-to-thiosulfate, thiosulfate-to-thiocyanate and elemental-sulfur-to-
+thiocyanate endpoints share the existing gold reaction's finite cyanide and
+dissolved-oxygen inventory. Species identities join the earlier pyrrhotite,
+sulfite and native-gold owners without a second atom/charge implementation.
+
+The standalone `sulfur_cyanide_demand` example uses explicit stages, preserves
+free versus metal-bound versus thiocyanate CN, and prints source masses and
+both direct-G and H-minus-T-times-S diagnostics. All stages and source queries
+must succeed before a result is printed. Shared reagent overdraw refuses.
+Stage ordering is the declared gross-inventory accounting policy; no kinetic
+ordering, product distribution, recovery or pH is inferred.
+
+The thiosulfate erratum marker and negative conventional ionic SCN Cp remain
+in their original provenance and property family. All claims require 298.15 K
+and 100000 Pa with unstated uncertainty. Reference Cp points are not temperature
+laws or bulk-solution heat capacities. `mining_sulfur_cyanide_sources` checks
+literal data, phase/reference admission, independent H/G/mass calculations,
+both stages, all tracked atoms/charge and finite CN/O2 refusal through the
+original pack compiler and reaction owners. See
+`data/matdb/seed-v1/MINING_SULFUR_CYANIDE.md` for sources, equations and usage.
+
 ## Finite neutral-solute saturation
 
 `solution::solubility::IdealSolubilityV1` binds explicit solvent and neutral

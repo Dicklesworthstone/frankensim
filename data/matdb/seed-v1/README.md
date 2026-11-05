@@ -6,6 +6,13 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+Three matched NBS packs add **silver sulfide, thiosulfate and thiocyanate**,
+with fourteen literal reference facts. The finite-inventory consumer now shares
+cyanide and dissolved oxygen between gold and silver leaching and explicitly
+accounts for sulfur converting free cyanide into thiocyanate. Source phases,
+reaction extents and stage ordering remain explicit. See
+[silver-sulfide leaching and sulfur cyanide demand](MINING_SULFUR_CYANIDE.md).
+
 Five matched NBS source packs add **kaolinite, free Al3+, a formal silicic-acid
 component, gibbsite and CuO**. Conserved clay dissolution and aluminum hydrolysis
 now run with copper leaching through a finite, shared-acid inventory. Required

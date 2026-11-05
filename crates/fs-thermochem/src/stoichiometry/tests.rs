@@ -64,6 +64,9 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         OxygenDissolution,
         SilverCyanidation,
         SilverCyanidationDissolvedOxygen,
+        SilverSulfideCyanidationThiosulfate,
+        ThiosulfateCyanideSulfurTransfer,
+        ElementalSulfurCyanideConsumption,
         GoldCyanideCementationWithZinc,
         SilverCyanideCementationWithZinc,
         CyanidePeroxideOxidation,
@@ -142,6 +145,59 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
                 .all(|a| a.amount.value() == 0.0)
         );
     }
+}
+
+#[test]
+fn silver_sulfide_and_sulfur_transfer_keep_their_formula_units_and_shared_species() {
+    use MineralReaction::*;
+    let silver = SilverSulfideCyanidationThiosulfate.build().unwrap();
+    let transfer = ThiosulfateCyanideSulfurTransfer.build().unwrap();
+    let sulfur = ElementalSulfurCyanideConsumption.build().unwrap();
+    for (species, expected) in [
+        ("Ag2S(s-nbs-alpha-orthorhombic)", 2.0),
+        ("CN[-](aq)", 8.0),
+        ("O2(aq)", 2.0),
+        ("H2O(l)", 1.0),
+        ("Ag(CN)2[-](aq)", 4.0),
+        ("S2O3[2-](aq)", 1.0),
+        ("OH[-](aq)", 2.0),
+    ] {
+        close(amount(&silver, 1.0, species), expected);
+    }
+    let mut net = std::collections::BTreeMap::new();
+    for reaction in [&silver, &transfer] {
+        for term in reaction.terms() {
+            *net.entry(term.species.as_str()).or_insert(0_i128) += term.coefficient;
+        }
+    }
+    net.retain(|_, n| *n != 0);
+    assert_eq!(
+        net,
+        std::collections::BTreeMap::from([
+            ("Ag2S(s-nbs-alpha-orthorhombic)", -2),
+            ("CN[-](aq)", -9),
+            ("O2(aq)", -2),
+            ("H2O(l)", -1),
+            ("Ag(CN)2[-](aq)", 4),
+            ("OH[-](aq)", 2),
+            ("SCN[-](aq)", 1),
+            ("SO3[2-](aq)", 1),
+        ])
+    );
+    close(amount(&sulfur, 8.0, "S(s)"), 8.0);
+    close(amount(&sulfur, 8.0, "CN[-](aq)"), 8.0);
+    close(amount(&sulfur, 8.0, "SCN[-](aq)"), 8.0);
+    // Joining the earlier pyrrhotite endpoint proves that S(s), free CN and
+    // each sulfur ion keep the same exact composition/charge crosslinks.
+    network::ReactionNetwork::new(vec![
+        FerricIronRichPyrrhotiteLeach.build().unwrap(),
+        GoldCyanidationDissolvedOxygen.build().unwrap(),
+        silver,
+        transfer,
+        sulfur,
+        SulfiteOxygenOxidation.build().unwrap(),
+    ])
+    .unwrap();
 }
 
 #[test]

@@ -1,0 +1,64 @@
+frankensim.matdb-source.v1
+observation	identity	Thiocyanate SCN-, individual aqueous ion	NBS Table 23:C, SCN-, thiocyanate ion, state ao	The source molar mass is 58.0819 g/mol, with one S, one C, one N and charge -1. This is not free cyanide CN-, cyanate OCN-, thiocyanic acid HSCN, a metal-thiocyanate complex or a bulk thiocyanate reagent. Transfer of one CN unit into SCN- removes that unit from the modeled free-cyanide stock.
+observation	standard	Literal NBS 298.15 K thermodynamic row	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	The source gives formation enthalpy 76.44 kJ/mol, independent formation Gibbs energy 92.71 kJ/mol, conventional ionic entropy 144.3 J/(mol K), and conventional ionic partial molar isobaric heat capacity -40.2 J/(mol K). The negative heat capacity is preserved under its explicitly conventional property key. It is neither a negative bulk solution heat capacity nor an instability claim. The ao state is a hypothetical ideal solution at unit molality referenced to infinite dilution, with individual-ion H+(aq)-zero conventions. No confidence distribution or covariance is supplied.
+observation	scope	One ionic reference state for sulfur cyanide demand	NBS sections 5.5-5.8; https://doi.org/10.18434/M32124	All five claims require 298.15 K and 100000 Pa. Point heat capacity does not define a temperature law. The data support prescribed sulfur-transfer reaction extents and standard chemical energies, not rates, gold/silver recovery, sulfur accessibility, solution speciation, toxicity thresholds, effluent discharge permission, or a cyanide treatment performance guarantee. No automatic thiocyanate destruction or return of its bound CN unit to free cyanide is inferred.
+scalar	molar-mass	identity,scope	mass	58.0819	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	76.44	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	92.71	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	144.3	J/mol/K	tabulated
+scalar	heat-capacity	identity,standard,scope	cp	-40.2	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	heat-capacity	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	heat-capacity	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	heat-capacity	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	heat-capacity	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	heat-capacity	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	heat-capacity	phase	1	1	1
+validity	molar-mass	aqueous	1	1	1
+validity	formation-enthalpy	aqueous	1	1	1
+validity	formation-gibbs-energy	aqueous	1	1	1
+validity	standard-entropy	aqueous	1	1	1
+validity	heat-capacity	aqueous	1	1	1
+validity	molar-mass	ionic	1	1	1
+validity	formation-enthalpy	ionic	1	1	1
+validity	formation-gibbs-energy	ionic	1	1	1
+validity	standard-entropy	ionic	1	1	1
+validity	heat-capacity	ionic	1	1	1
+validity	molar-mass	identity	1	1	1
+validity	formation-enthalpy	identity	1	1	1
+validity	formation-gibbs-energy	identity	1	1	1
+validity	standard-entropy	identity	1	1	1
+validity	heat-capacity	identity	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	heat-capacity	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	heat-capacity	specimen	0	0	1
