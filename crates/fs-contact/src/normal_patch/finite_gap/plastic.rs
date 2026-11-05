@@ -1,7 +1,7 @@
 //! Hardness-capped pressure saturation for finite-gap half-space contact.
 //!
 //! The pressure-saturation approximation solves the convex box problem
-//! `min 0.5 pᵀ C p - (approach - gap - old_plastic_depth)ᵀ p`, with
+//! `min 0.5 pᵀ C p - (approach - gap - old_plastic_depth - recession)ᵀ p`, with
 //! `0 <= p[i] <= hardness[i]`. `C` is the same exact rectangular Boussinesq
 //! compliance used by the elastic finite-gap model. Unaccommodated closure at
 //! a saturated cell becomes irreversible residual indentation. The original
@@ -13,6 +13,9 @@
 //! its conversion to heat is a caller-owned material question. See the model
 //! description in <https://doi.org/10.1038/s41467-018-02981-y> and the contrast
 //! with full plasticity in <https://doi.org/10.1007/s11249-023-01819-z>.
+
+mod continuation;
+pub use continuation::*;
 
 use core::fmt;
 
@@ -92,6 +95,7 @@ pub struct FiniteGapPlasticState {
     identity: ContentHash,
     approach_m: f64,
     plastic_depth_m: Vec<f64>,
+    recession_m: Vec<f64>,
     pressure_pa: Vec<f64>,
     cumulative_plastic_work_j: f64,
 }
@@ -115,6 +119,13 @@ impl FiniteGapPlasticState {
     /// Cumulative residual indentation at each original grid location [m].
     pub fn plastic_depth_m(&self) -> &[f64] {
         &self.plastic_depth_m
+    }
+
+    /// Accumulated relative surface recession, separate from plastic indentation [m].
+    ///
+    /// Recession increases the original relative gap without moving its datum.
+    pub fn recession_m(&self) -> &[f64] {
+        &self.recession_m
     }
 
     /// Last equilibrated compressive pressure field [Pa].
@@ -193,7 +204,9 @@ impl fmt::Display for FiniteGapPlasticError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Contact(error) => write!(f, "{error}"),
-            Self::ForeignState => f.write_str("finite-gap plastic history belongs to another model"),
+            Self::ForeignState => {
+                f.write_str("finite-gap plastic history belongs to another model")
+            }
             Self::FreeSetTooLarge {
                 free_cells,
                 maximum,
@@ -214,12 +227,18 @@ enum Bound {
     Upper,
 }
 
+struct PlasticStepMetrics {
+    iterations: usize,
+    physical_residual_m: f64,
+    kkt_residual_m: f64,
+    plastic_increment_m: Vec<f64>,
+    plastic_work_j: f64,
+    yielded_cells: usize,
+}
+
 impl FiniteGapPlasticModel {
     /// Validate physical inputs and compile the shared Boussinesq compliance.
-    pub fn new(
-        config: FiniteGapPlasticConfig,
-        cx: &Cx<'_>,
-    ) -> Result<Self, FiniteGapPlasticError> {
+    pub fn new(config: FiniteGapPlasticConfig, cx: &Cx<'_>) -> Result<Self, FiniteGapPlasticError> {
         checkpoint(cx)?;
         let count = config.grid.cell_count()?;
         if config.undeformed_gap_m.len() != count
@@ -308,6 +327,7 @@ impl FiniteGapPlasticModel {
             0.0,
             vec![0.0; self.gap_m.len()],
             vec![0.0; self.gap_m.len()],
+            vec![0.0; self.gap_m.len()],
             0.0,
         )
     }
@@ -324,9 +344,38 @@ impl FiniteGapPlasticModel {
         cx: &Cx<'_>,
     ) -> Result<FiniteGapPlasticAdvance, FiniteGapPlasticError> {
         checkpoint(cx)?;
+        self.check_state_owner(state)?;
+        self.advance_with_history(
+            state,
+            approach_m,
+            &state.recession_m,
+            &state.pressure_pa,
+            cx,
+        )
+    }
+
+    fn check_state_owner(
+        &self,
+        state: &FiniteGapPlasticState,
+    ) -> Result<(), FiniteGapPlasticError> {
         if state.owner_identity != self.identity {
             return Err(FiniteGapPlasticError::ForeignState);
         }
+        Ok(())
+    }
+
+    // Only checked public entry points may transfer accepted history here.
+    // In particular, material refresh must verify the predecessor owner and
+    // exact original geometry/controls before rebinding to the successor.
+    fn advance_with_history(
+        &self,
+        state: &FiniteGapPlasticState,
+        approach_m: f64,
+        recession_m: &[f64],
+        pressure_guess: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticAdvance, FiniteGapPlasticError> {
+        checkpoint(cx)?;
         if !approach_m.is_finite() {
             return Err(invalid("finite approach"));
         }
@@ -334,13 +383,14 @@ impl FiniteGapPlasticModel {
             .gap_m
             .iter()
             .zip(&state.plastic_depth_m)
-            .map(|(g, z)| approach_m - g - z)
+            .zip(recession_m)
+            .map(|((g, z), r)| approach_m - g - z - r)
             .collect();
         if target.iter().any(|b| !b.is_finite()) {
             return Err(invalid("finite trial closure"));
         }
         let (pressure, opening, iterations, kkt_residual_m) =
-            self.solve_box(&target, &state.pressure_pa, cx)?;
+            self.solve_box(&target, pressure_guess, cx)?;
         let active: Vec<usize> = pressure
             .iter()
             .enumerate()
@@ -390,28 +440,50 @@ impl FiniteGapPlasticModel {
             }
             .into());
         }
+        let candidate = self.make_state(
+            approach_m,
+            plastic_depth,
+            recession_m.to_vec(),
+            pressure,
+            cumulative_plastic_work_j,
+        );
+        let metrics = PlasticStepMetrics {
+            iterations,
+            physical_residual_m: physical_residual,
+            kkt_residual_m,
+            plastic_increment_m,
+            plastic_work_j,
+            yielded_cells,
+        };
+        let receipt =
+            self.receipt_for_candidate(state.identity, &candidate, opening, metrics, cx)?;
+        Ok(FiniteGapPlasticAdvance { candidate, receipt })
+    }
+
+    fn receipt_for_candidate(
+        &self,
+        predecessor_identity: ContentHash,
+        candidate: &FiniteGapPlasticState,
+        opening: Vec<f64>,
+        metrics: PlasticStepMetrics,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticReceipt, FiniteGapPlasticError> {
         let request = FiniteGapContactRequest {
             grid: self.config.grid,
             undeformed_gap_m: self.config.undeformed_gap_m.clone(),
-            approach_m,
+            approach_m: candidate.approach_m,
             reduced_modulus_pa: self.config.reduced_modulus_pa,
             maximum_active_set_iterations: self.config.maximum_active_set_iterations,
             complementarity_tolerance_m: self.config.complementarity_tolerance_m,
             boundary_clearance_cells: self.config.boundary_clearance_cells,
         };
-        let candidate = self.make_state(
-            approach_m,
-            plastic_depth,
-            pressure.clone(),
-            cumulative_plastic_work_j,
-        );
         let mut normal = build_receipt(
             &request,
             self.gap_datum_m,
-            pressure,
+            candidate.pressure_pa.clone(),
             opening,
-            iterations,
-            physical_residual,
+            metrics.iterations,
+            metrics.physical_residual_m,
         )?;
         if !normal.normal_force_n.is_finite()
             || !normal.reversible_energy_j.is_finite()
@@ -423,33 +495,31 @@ impl FiniteGapPlasticModel {
         {
             return Err(invalid("finite pressure integrals"));
         }
-        let mut bytes = Vec::with_capacity(128);
+        let mut bytes = Vec::with_capacity(144);
         bytes.extend_from_slice(&self.identity.0);
-        bytes.extend_from_slice(&state.identity.0);
+        bytes.extend_from_slice(&predecessor_identity.0);
         bytes.extend_from_slice(&candidate.identity.0);
         bytes.extend_from_slice(&normal.identity.0);
-        bytes.extend_from_slice(&plastic_work_j.to_bits().to_le_bytes());
-        bytes.extend_from_slice(&kkt_residual_m.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&metrics.plastic_work_j.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&metrics.kkt_residual_m.to_bits().to_le_bytes());
         let identity = hash_domain(
-            "org.frankensim.fs-contact.finite-gap-plastic-response.v1",
+            "org.frankensim.fs-contact.finite-gap-plastic-response.v2",
             &bytes,
         );
         normal.identity = identity;
+        let area = self.config.grid.cell_width_m * self.config.grid.cell_depth_m;
         let contact_area_m2 = normal.active_cells as f64 * area;
         checkpoint(cx)?;
-        Ok(FiniteGapPlasticAdvance {
-            candidate,
-            receipt: FiniteGapPlasticReceipt {
-                identity,
-                predecessor_identity: state.identity,
-                normal,
-                plastic_increment_m,
-                plastic_work_j,
-                cumulative_plastic_work_j,
-                contact_area_m2,
-                yielded_cells,
-                kkt_residual_m,
-            },
+        Ok(FiniteGapPlasticReceipt {
+            identity,
+            predecessor_identity,
+            normal,
+            plastic_increment_m: metrics.plastic_increment_m,
+            plastic_work_j: metrics.plastic_work_j,
+            cumulative_plastic_work_j: candidate.cumulative_plastic_work_j,
+            contact_area_m2,
+            yielded_cells: metrics.yielded_cells,
+            kkt_residual_m: metrics.kkt_residual_m,
         })
     }
 
@@ -457,22 +527,31 @@ impl FiniteGapPlasticModel {
         &self,
         approach_m: f64,
         plastic_depth_m: Vec<f64>,
+        recession_m: Vec<f64>,
         pressure_pa: Vec<f64>,
         cumulative_plastic_work_j: f64,
     ) -> FiniteGapPlasticState {
-        let mut bytes = Vec::with_capacity(48 + 16 * pressure_pa.len());
+        let mut bytes = Vec::with_capacity(48 + 24 * pressure_pa.len());
         bytes.extend_from_slice(&self.identity.0);
         bytes.extend_from_slice(&approach_m.to_bits().to_le_bytes());
         bytes.extend_from_slice(&cumulative_plastic_work_j.to_bits().to_le_bytes());
-        for value in plastic_depth_m.iter().chain(&pressure_pa) {
+        for value in plastic_depth_m
+            .iter()
+            .chain(&recession_m)
+            .chain(&pressure_pa)
+        {
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());
         }
-        let identity = hash_domain("org.frankensim.fs-contact.finite-gap-plastic-state.v1", &bytes);
+        let identity = hash_domain(
+            "org.frankensim.fs-contact.finite-gap-plastic-state.v2",
+            &bytes,
+        );
         FiniteGapPlasticState {
             owner_identity: self.identity,
             identity,
             approach_m,
             plastic_depth_m,
+            recession_m,
             pressure_pa,
             cumulative_plastic_work_j,
         }
@@ -573,8 +652,7 @@ impl FiniteGapPlasticModel {
                         Some((pressure[i] / (pressure[i] - proposed), Bound::Lower))
                     } else if proposed > self.config.hardness_pa[i] {
                         Some((
-                            (self.config.hardness_pa[i] - pressure[i])
-                                / (proposed - pressure[i]),
+                            (self.config.hardness_pa[i] - pressure[i]) / (proposed - pressure[i]),
                             Bound::Upper,
                         ))
                     } else {
@@ -599,9 +677,11 @@ impl FiniteGapPlasticModel {
                             .clamp(0.0, self.config.hardness_pa[i])
                     };
                 }
-                if pressure.iter().enumerate().any(|(i, p)| {
-                    !p.is_finite() || *p < 0.0 || *p > self.config.hardness_pa[i]
-                }) {
+                if pressure
+                    .iter()
+                    .enumerate()
+                    .any(|(i, p)| !p.is_finite() || *p < 0.0 || *p > self.config.hardness_pa[i])
+                {
                     return Err(invalid("finite feasible pressure iterate"));
                 }
                 if let Some((i, side)) = blocker {

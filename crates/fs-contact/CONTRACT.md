@@ -2701,7 +2701,7 @@ when another source has numerically identical coefficients.
 
 This is an explicit quasistatic surface pressure-saturation approximation.
 It is not bulk J2 plasticity, strain hardening, pile-up, a residual subsurface
-stress model, dynamic impact, geometry erosion or a thermal feedback law.
+stress model, dynamic impact, debris transport or an autonomous thermal law.
 Changing temperature or material state requires a physical history-transfer
 operation; rebuilding an owner does not grant permission to reset old dents.
 No universal hardness/yield ratio or empirical hardness-scale conversion is
@@ -2747,3 +2747,46 @@ certificate or experimental calibration is added by the spatial transfer.
 Maugis pressure and full-load recovery across adhesion ranges, partition and
 virtual-work invariance, narrow rings, noncontact solid-area exclusion,
 original binding admission and atomic source/partition refusals (G1/G3).
+
+## Continued indentation under surface recession and material changes
+
+The finite-gap pressure-saturation state separately retains residual plastic
+indentation and accumulated relative surface recession. Equilibrium uses the
+original gap plus both histories; the original gap datum remains fixed.
+A normal reload therefore sees the actual worn profile and the old dent.
+
+`FiniteGapPlasticModel::recede` adds a finite nonnegative recession field at
+held rigid approach, then re-equilibrates the coupled pressure. Removing one
+loaded region can redistribute pressure and cause plastic flow elsewhere.
+A zero increment preserves the complete physical state. Positive increments
+that cannot change the stored recession are refused. This operation changes
+the sampled contact surface; it does not transport debris or update a body's
+bulk mass/inertia.
+
+`FiniteGapPlasticModel::refresh_from` explicitly transfers an accepted
+predecessor to a successor with new reduced modulus and/or indentation
+hardness. Original grid, gap samples, datum and numerical controls must match.
+Both irreversible histories and cumulative prior plastic work survive.
+A reduced hardness can cause additional indentation; a later hardness increase
+does not heal it. A clipped pressure is only a feasible numerical warm start,
+never an accepted intermediate. Ordinary advance still rejects foreign states.
+Identical physical inputs preserve the accepted state exactly.
+
+Both operations return the original native pressure/plastic response plus
+previous and successor elastic storage and signed parameter work
+delta(U_elastic) + delta(W_plastic). Negative supply denotes energy released
+from the modeled contact under the prescribed change. It is not automatically
+wear heat or thermal heat, and supplies no caloric law or entropy theorem.
+Energy changes use a compensated symmetric difference of endpoint products,
+so a small change is not discarded by subtracting large storage totals.
+This is endpoint bookkeeping for an unresolved parameter/geometry path;
+finite changes require path refinement when intermediate equilibria matter.
+All source, domain, convergence, resource and cancellation failures remain
+transactional. Version-2 state identities include the independent recession
+field; continuation receipts bind the original and successor owners.
+
+Focused synthetic G1/G3 checks exercise one-cell recession, complete opening
+and reload, softening-induced indentation, increased hardness without healing,
+changed elasticity, retained recession during material refresh, no-op history,
+independent work accounts, small parameter work, two-cell pressure redistribution
+and additional yielding, and incompatible-geometry/source refusal.
