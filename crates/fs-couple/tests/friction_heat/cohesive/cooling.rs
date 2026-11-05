@@ -7,6 +7,9 @@ use fs_conduction::transient::enthalpy::deposition::fracture::{
 use fs_couple::friction_heat::cohesive::cooling::*;
 use fs_material::cohesive::CohesivePoint;
 
+#[path = "cooling/temperature.rs"]
+mod temperature;
+
 fn cooling_controls() -> CohesiveCoolingControls {
     CohesiveCoolingControls {
         thermal: StepConfig {

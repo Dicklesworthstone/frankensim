@@ -6,6 +6,9 @@
 //! enter the original caloric cells once. This is a staggered split, not an
 //! event-localized or simultaneous temperature-dependent constitutive solve.
 
+/// Actual-cell temperature feedback to both original bond/history owners.
+pub mod temperature;
+
 use fs_conduction::transient::enthalpy::deposition::fracture::{
     CohesiveHeatPartition, Error as FractureCoolingError, FractureCooling, FractureHeatReport,
 };
@@ -27,7 +30,15 @@ pub enum CohesiveCoolingError {
     Invalid(&'static str),
     Mechanical(DynamicsError),
     Cooling(FractureCoolingError),
-    Energy { residual_j: f64, tolerance_j: f64 },
+    Temperature(fs_conduction::transient::enthalpy::deposition::fracture::temperature::Error),
+    Source {
+        patch: u64,
+        error: fs_material::state_point::MaterialStatePointError,
+    },
+    Energy {
+        residual_j: f64,
+        tolerance_j: f64,
+    },
 }
 impl From<DynamicsError> for CohesiveCoolingError {
     fn from(error: DynamicsError) -> Self {
@@ -42,6 +53,15 @@ impl From<FractureCoolingError> for CohesiveCoolingError {
 impl From<DepositionError> for CohesiveCoolingError {
     fn from(error: DepositionError) -> Self {
         Self::Cooling(error.into())
+    }
+}
+impl From<fs_conduction::transient::enthalpy::deposition::fracture::temperature::Error>
+    for CohesiveCoolingError
+{
+    fn from(
+        error: fs_conduction::transient::enthalpy::deposition::fracture::temperature::Error,
+    ) -> Self {
+        Self::Temperature(error)
     }
 }
 impl core::fmt::Display for CohesiveCoolingError {
@@ -107,16 +127,12 @@ pub fn propose_deformable_cohesive_cooling<'s, 'a, 't>(
             Ok(())
         }
     };
-    check()?;
+    require_synchronized_owners(motion, cooling, gate)?;
     let dt_s = target_time_s - motion.time_s();
     let patches = motion.state().system().patches();
-    if motion.time_s() != cooling.thermal().time_s()
-        || motion.time_s() != cooling.last_synchronized_time_s()
-        || !target_time_s.is_finite()
+    if !target_time_s.is_finite()
         || !dt_s.is_finite()
         || dt_s <= 0.0
-        || patches.is_empty()
-        || patches.len() != cooling.interfaces().len()
         || !controls.thermal.max_dt_s.is_finite()
         || controls.thermal.max_dt_s <= 0.0
         || [
@@ -130,24 +146,6 @@ pub fn propose_deformable_cohesive_cooling<'s, 'a, 't>(
         return Err(CohesiveCoolingError::Invalid(
             "complete synchronized original owners and finite positive interval required",
         ));
-    }
-    for (patch, point) in patches.iter().zip(motion.state().points()) {
-        check()?;
-        let interface =
-            cooling
-                .interfaces()
-                .get(&patch.id())
-                .ok_or(CohesiveCoolingError::Invalid(
-                    "unknown original fracture-cooling patch",
-                ))?;
-        if interface.reference.area_m2 != patch.area_m2()
-            || interface.point != *point
-            || !core::ptr::eq(interface.point.law(), point.law())
-        {
-            return Err(CohesiveCoolingError::Invalid(
-                "fracture cooling must retain the original patch area, law and complete history",
-            ));
-        }
     }
     let mechanical = motion.advance_to_time_controlled(
         mean_force_n,
@@ -226,6 +224,47 @@ pub fn propose_deformable_cohesive_cooling<'s, 'a, 't>(
         combined_energy_residual_j: combined,
         summed_energy_residual_j: summed,
     })
+}
+
+fn require_synchronized_owners(
+    motion: &CohesiveMotion<'_, '_>,
+    cooling: &FractureCooling<'_, '_>,
+    gate: &CancelGate,
+) -> Result<(), CohesiveCoolingError> {
+    if gate.is_requested() {
+        return Err(DepositionError::Cancelled.into());
+    }
+    let patches = motion.state().system().patches();
+    if motion.time_s() != cooling.thermal().time_s()
+        || motion.time_s() != cooling.last_synchronized_time_s()
+        || patches.is_empty()
+        || patches.len() != cooling.interfaces().len()
+    {
+        return Err(CohesiveCoolingError::Invalid(
+            "complete synchronized original owners required",
+        ));
+    }
+    for (patch, point) in patches.iter().zip(motion.state().points()) {
+        if gate.is_requested() {
+            return Err(DepositionError::Cancelled.into());
+        }
+        let interface =
+            cooling
+                .interfaces()
+                .get(&patch.id())
+                .ok_or(CohesiveCoolingError::Invalid(
+                    "unknown original fracture-cooling patch",
+                ))?;
+        if interface.reference.area_m2 != patch.area_m2()
+            || interface.point != *point
+            || !core::ptr::eq(interface.point.law(), point.law())
+        {
+            return Err(CohesiveCoolingError::Invalid(
+                "fracture cooling must retain the original patch area, law and complete history",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn require_energy(residual_j: f64, tolerance_j: f64) -> Result<(), CohesiveCoolingError> {

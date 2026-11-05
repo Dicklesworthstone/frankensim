@@ -19152,6 +19152,43 @@ foreign law/history/area/clock and unowned-friction refusal; and late caloric
 domain/cancellation rollback with exact retry. These are manufactured analytical
 references, not specimen calibration.
 
+`friction_heat::cohesive::cooling::temperature` closes the explicit source
+feedback between those two original owners. Preparation samples each patch's
+actual caloric-cell temperature with an explicitly declared A/B weight and
+refreshes its original immutable card through `at_temperature`. Each changed
+patch performs one source query; an unchanged temperature validates and retains
+the exact source clone. Inputs and returned sources follow original mechanical
+patch order, checked by IDs. No new interface, body temperature average, claim
+selection, nonthermal coordinate, model envelope or material limit is invented.
+
+The caller prepares the existing native `CohesiveSystem` from those sources.
+`propose_deformable_cohesive_temperature` then privately transfers the same
+accepted fixed-jump history through BOTH native temperature owners. Current
+thermal, mechanical and synchronized-history clocks must agree; source/card,
+original area, law and complete old point must match before either transfer.
+The original mass, bulk elastic operator, displacements, velocities, trajectory
+count and mechanical controls remain with the native motion owner. The cooling
+owner independently verifies the new source temperature against its actual
+caloric cells and changes the same bonded/failed thermal-contact topology.
+Complete resulting point histories and both native work/storage/fracture reports
+must agree before either result is returned.
+
+An independent compensated sum of original-area changes in represented bond
+storage and cumulative fracture, minus signed parameter work, obeys the shared
+joule gate and agrees with both native residuals. The two native reports are
+observations of ONE physical transition, never two additive losses. Parameter
+work needs the caller's declared physical supply/receiver, and new thermal
+damage remains nonthermal; no heat, time, displacement work, thermal expansion
+or strong implicit thermodynamic closure is inferred. Thermal weakening can
+open a contact at fixed gap; cooling cannot heal it. The next ordinary coupled
+cooling step consumes the changed traction, viscosity, damage and conductance.
+Four focused native regressions cover an actual heating/weakening/cooling cycle
+followed by independently calculated inertial motion, mixed/viscous source and
+mode history, exact no-op preparation, stale/foreign/expired bindings, changed
+mechanics, and late cancellation with a physical retry. These integration
+regressions are authored; full execution remains blocked by the dependency-build
+resource limits in this environment.
+
 
 ### Prepared articulated contacts and same-step finite-cell thermal feedback
 

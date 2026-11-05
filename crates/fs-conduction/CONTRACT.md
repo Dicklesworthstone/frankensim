@@ -1281,8 +1281,11 @@ cell temperatures to source-defined common- or mixed-mode bond weakening. Each
 complete update retains the original ordered interface card, selected claims,
 nonthermal coordinates, area, jump and irreversible history. The successor's
 temperature must equal the explicitly weighted two-cell temperature returned by
-`interface_temperature_k`; a stale or substituted source refuses. The original
-cohesive temperature law supplies fixed-jump parameter work, storage change and
+`interface_temperature_k`; a stale or substituted source refuses. Difference-first
+weighted interpolation is exact for equal temperatures and
+receiving-side endpoint weights, so a uniform field at a source-domain boundary
+cannot drift outside it through weighted-sum roundoff.
+The original cohesive temperature law supplies fixed-jump parameter work, storage change and
 new damage loss, integrated on original area with a declared joule gate.
 Thermal failure immediately opens the existing thermal contact or selects its
 separately declared closed-failed conductance. Cooling cannot heal or rebond it.
