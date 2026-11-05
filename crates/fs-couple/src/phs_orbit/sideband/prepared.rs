@@ -21,7 +21,9 @@ use fs_orbit::{
     },
 };
 
+mod resonance;
 mod sensitivity;
+pub use resonance::{PhsPortResonanceRequest, PhsPortResonanceResponse};
 pub use sensitivity::PhsPortSidebandCarrierDerivativeResponse;
 
 /// A complete physical response with independently measured sideband convergence.

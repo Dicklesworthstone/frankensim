@@ -20,6 +20,8 @@ use fs_phs::{
 mod autonomous;
 #[path = "phs_sideband/driven_feedback.rs"]
 mod driven_feedback;
+#[path = "phs_sideband/resonance.rs"]
+mod resonance;
 
 fn controls(
     states: usize,
