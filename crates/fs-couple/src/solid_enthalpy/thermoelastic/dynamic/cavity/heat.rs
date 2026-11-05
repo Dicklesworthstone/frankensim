@@ -1,10 +1,13 @@
-//! Original material-layer films on the native explicit spatial heat history.
+//! Original source-owned conduction/convection on the native explicit heat history.
 use super::*;
-use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
 use crate::solid_enthalpy::{SolidEnthalpy, TetCellMaterial};
+use crate::solid_enthalpy::gas::{PreparedContact, SolidGasConvectionSample, StructuralSource};
+use crate::solid_enthalpy::gas::convection::endpoint_law;
+use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 use fs_material::phase::EquilibriumPhaseState;
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use std::sync::Arc;
 
 /// One source film's accepted integral and last applied native substep sample.
 #[derive(Clone, Debug)]
@@ -12,9 +15,20 @@ pub struct CavityContactHeat {
     pub id: u64,
     pub cell: CellId,
     pub heat_into_solid_j: f64,
+    /// Actual cell temperature when the last explicit substep's power was
+    /// sampled; this can differ from the returned wall endpoint temperature.
+    pub last_cell_temperature_k: f64,
     pub last_power_into_solid_w: f64,
+    /// Held-coefficient series diagnostic for convection; actual power is
+    /// authoritative and the explicit timestep uses the separate flux secant.
     pub last_conductance_w_k: f64,
+    /// Original conduction budget, or actual convective power divided by
+    /// gas/cell contrast [W/K]. A convective equilibrium uses zero, not an
+    /// inferred natural-convection tangent.
+    pub last_explicit_decay_conductance_w_k: f64,
     pub source: ResolvedMaterialStatePoint,
+    /// Last applied substep's actual surface, source queries and power residual.
+    pub convection: Option<SolidGasConvectionSample>,
 }
 
 #[derive(Clone)]
@@ -23,19 +37,29 @@ pub(super) struct Film {
     element: usize,
 }
 impl Film {
-    fn layers<'a>(&'a self, source: &'a TetCellMaterial<'_>) -> MaterialConductionLayers<'a> {
-        MaterialConductionLayers {
-            material: source.point.material,
-            context: source.point.context,
-            temperature_axis: source.point.temperature_axis,
-            liquid_fraction_axis: source.point.liquid_fraction_axis,
-            conductivity: &self.contact.conductivity,
-            selection: self.contact.selection.clone(),
-            area_m2: self.contact.geometry.area_m2,
-            gas_distance_m: self.contact.geometry.gas_distance_m,
-            body_distance_m: self.contact.geometry.cell_distance_m,
-        }
+    fn prepared(&self) -> PreparedContact<'_> {
+        PreparedContact::new(&self.contact, self.element)
     }
+}
+
+fn binding<'a>(source: &TetCellMaterial<'a>, reference_h_j_kg: f64) -> StructuralSource<'a> {
+    StructuralSource { cell: source.cell, curve: source.curve,
+        point: source.point, reference_h_j_kg }
+}
+
+// This is the current explicit flux coefficient, not a derivative or a
+// time-error estimate. Holding it for the native Euler substep preserves the
+// original nonnegative-decay budget even when the surface balance is tolerant.
+fn flux_decay<E>(power_w: f64, difference_k: f64) -> Result<f64, CavityError<E>> {
+    if difference_k == 0.0 {
+        return if power_w == 0.0 { Ok(0.0) }
+            else { Err(CavityError::Invalid("equilibrium gas film must carry zero heat")) };
+    }
+    let conductance = number(power_w / difference_k)?;
+    if conductance < 0.0 || (power_w != 0.0 && conductance == 0.0) {
+        return Err(CavityError::Invalid("actual gas-film decay is negative or underflows"));
+    }
+    Ok(conductance)
 }
 
 fn phase<E>(
@@ -55,13 +79,11 @@ pub(super) fn prepare(
     ordered.sort_by_key(|contact| contact.id);
     let mut areas = BTreeMap::<CellId, f64>::new();
     let mut films = Vec::with_capacity(ordered.len());
+    let law = if ordered.iter().any(|contact| contact.convection.is_some()) {
+        Some(endpoint_law(gas.model(), gas.point(), gas.state())?)
+    } else { None };
     for (i, contact) in ordered.iter().enumerate() {
         poll(cx)?;
-        if contact.convection.is_some() {
-            return Err(CavityError::Invalid(
-                "dynamic cavity films require conduction layers; source convection belongs to the finite-gas endpoint solver",
-            ));
-        }
         if i > 0 && ordered[i - 1].id == contact.id {
             return Err(CavityError::Invalid("unique gas-film patch IDs required"));
         }
@@ -81,15 +103,19 @@ pub(super) fn prepare(
         let reference = bound.source.curve.state_at_specific_enthalpy(
             bound.reference_cell.specific_h_j_kg,
         ).map_err(SolidEnthalpyError::from)?;
+        let source = binding(&bound.source, bound.reference_cell.specific_h_j_kg);
         let mut film = Film { contact: contact.clone(), element };
-        let sample = film.layers(&bound.source).resolve(gas.state(), reference)?;
-        let selected = sample.source.property_by_key(&contact.conductivity)
+        // Pin only the material at its original reference. A convection regime
+        // at that irrelevant stress-free temperature is not an admission gate.
+        let material = film.prepared().reference_material(&source, gas.state(), reference)?;
+        let selected = material.property_by_key(&contact.conductivity)
             .ok_or(CavityError::Invalid("gas film lacks its selected conductivity"))?
             .answer().receipt.selected;
         film.contact.selection = MaterialPropertySelection::PinnedByProperty(vec![
             (contact.conductivity.name().to_owned(), selected),
         ]);
-        film.layers(&bound.source).resolve(gas.state(), phase(&bound.source, thermal)?)?;
+        film.prepared().resolve_with_law(&source, gas.state(), phase(&bound.source, thermal)?,
+            None, law.as_ref(), &mut || cx.checkpoint().map_err(|_| DepositionError::Cancelled))?;
         films.push(film);
     }
     poll(cx)?;
@@ -100,6 +126,9 @@ pub(super) fn prepare(
 pub(super) struct FilmObserver<'a, 's, 'm, O> {
     cavity: &'a ThermoelasticCavity<'s, 'm>,
     gas: &'a ResolvedThermochemicalGasState,
+    // One full source law per physical gas endpoint. Cloned observers share
+    // it while their own thermal substep histories remain independent.
+    law: Option<Arc<IsobaricGasLaw>>,
     pub(super) inner: O,
     applied_w: BTreeMap<CellId, f64>,
     conductances_w_k: BTreeMap<CellId, f64>,
@@ -107,11 +136,14 @@ pub(super) struct FilmObserver<'a, 's, 'm, O> {
     pub(super) heat_j: f64,
 }
 impl<'a, 's, 'm, O> FilmObserver<'a, 's, 'm, O> {
-    pub(super) fn new(
-        cavity: &'a ThermoelasticCavity<'s, 'm>, gas: &'a ResolvedThermochemicalGasState, inner: O,
-    ) -> Self {
-        Self { cavity, gas, inner, applied_w: BTreeMap::new(),
-            conductances_w_k: BTreeMap::new(), samples: Vec::new(), heat_j: 0.0 }
+    pub(super) fn new<E>(
+        cavity: &'a ThermoelasticCavity<'s, 'm>, gas: &'a ClosedGasParcel, inner: O,
+    ) -> Result<Self, CavityError<E>> {
+        let law = if cavity.films.iter().any(|film| film.contact.convection.is_some()) {
+            Some(Arc::new(endpoint_law(gas.model(), gas.point(), gas.state())?))
+        } else { None };
+        Ok(Self { cavity, gas: gas.state(), law, inner, applied_w: BTreeMap::new(),
+            conductances_w_k: BTreeMap::new(), samples: Vec::new(), heat_j: 0.0 })
     }
 }
 impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
@@ -145,17 +177,25 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
                 return Err(CavityError::Invalid("accepted gas-film coverage changed or duplicates ambient convection"));
             }
             let local = phase(&bound.source, thermal)?;
-            let sample = film.layers(&bound.source).resolve(self.gas, local)?;
-            let power = number(sample.conductance_w_k * (self.gas.state().temperature - local.temperature_k()))?;
+            let source = binding(&bound.source, bound.reference_cell.specific_h_j_kg);
+            let sample = film.prepared().resolve_with_law(&source, self.gas, local,
+                None, self.law.as_deref(), &mut || checkpoint())?;
+            let power = number(-sample.power_to_gas_w)?;
+            let decay = if sample.convection.is_some() {
+                flux_decay(power, self.gas.state().temperature - local.temperature_k())?
+            } else { sample.conductance_w_k };
             let old = watts.entry(film.contact.cell).or_insert(0.0);
             *old = number(*old + power)?;
             let g = conductances.entry(film.contact.cell).or_insert(0.0);
-            *g = number(*g + sample.conductance_w_k)?;
+            *g = number(*g + decay)?;
             samples.push(CavityContactHeat {
                 id: film.contact.id, cell: film.contact.cell,
                 heat_into_solid_j: self.samples.get(i).map_or(0.0, |row| row.heat_into_solid_j),
+                last_cell_temperature_k: local.temperature_k(),
                 last_power_into_solid_w: power, last_conductance_w_k: sample.conductance_w_k,
+                last_explicit_decay_conductance_w_k: decay,
                 source: sample.source,
+                convection: sample.convection,
             });
         }
         let mut applied = BTreeMap::new();

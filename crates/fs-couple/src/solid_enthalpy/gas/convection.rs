@@ -20,6 +20,23 @@ use fs_qty::{
 };
 use std::sync::Arc;
 
+/// Reproduce and pin the original bulk before varying only film temperature.
+/// Shared by fixed-volume and moving-gas owners; a bare snapshot is insufficient.
+pub(in crate::solid_enthalpy) fn endpoint_law(
+    model: &fs_material::thermochemical_gas::ThermochemicalGasModel,
+    point: &fs_matdb::QueryPoint,
+    state: &fs_material::thermochemical_gas::ResolvedThermochemicalGasState,
+) -> Result<IsobaricGasLaw, SolidGasError> {
+    let law = IsobaricGasLaw::try_from_model(model.clone(), point.clone())
+        .map_err(GasConvectionError::Material)?;
+    if !matches!(law.reference(), GasRecord::Thermochemical(reference) if reference == state) {
+        return Err(SolidGasError::Invalid(
+            "film source law must reproduce the exact finite-gas endpoint",
+        ));
+    }
+    Ok(law)
+}
+
 /// Prescribed exterior convection on one finite gas/solid patch.
 ///
 /// Geometry/regime/speed/gravity stay prescribed; pressure, composition and
@@ -147,7 +164,7 @@ impl PreparedContact<'_> {
     pub(super) fn resolve_convection(
         &self,
         source: &StructuralSource<'_>,
-        gas: &IsochoricGasParcel,
+        law: &IsobaricGasLaw,
         phase: EquilibriumPhaseState,
         transport: Option<&MaterialNetworkSample>,
         model: SolidGasConvection,
@@ -162,21 +179,11 @@ impl PreparedContact<'_> {
                 "convective solid conductivity is absent",
             ))?
             .value_si();
-        // This native constructor pins the reproduced bulk's selected sources.
-        // Its pressure is local to THIS endpoint, not frozen across the step.
-        let law = IsobaricGasLaw::try_from_model(gas.model().clone(), gas.point().clone())
-            .map_err(GasConvectionError::Material)?;
-        if !matches!(law.reference(), GasRecord::Thermochemical(reference) if reference == gas.state())
-        {
-            return Err(SolidGasError::Invalid(
-                "film source law must reproduce the exact finite-gas endpoint",
-            ));
-        }
         let cell_temperature = phase.temperature_k();
-        let gas_temperature = gas.state().state().temperature;
+        let gas_temperature = law.reference().state().temperature;
         let mut evaluate = |temperature| -> Result<GasConvectionSample, SolidGasError> {
             checkpoint()?;
-            let film = model.boundary.evaluate(&law, temperature)?;
+            let film = model.boundary.evaluate(law, temperature)?;
             checkpoint()?;
             Ok(film)
         };

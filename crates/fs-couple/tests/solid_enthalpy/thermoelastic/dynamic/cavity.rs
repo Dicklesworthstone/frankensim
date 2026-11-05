@@ -14,6 +14,9 @@ use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 #[path = "../../../material_exchange/gas.rs"]
 mod gas_fixture;
 
+#[path = "cavity/convection.rs"]
+mod convection;
+
 const GAS_VOLUME: f64 = 0.05;
 const PRESSURE: f64 = 2000.0;
 const PATCH_AREA: f64 = 0.01;
@@ -126,12 +129,16 @@ fn launch<'s, 'm>(
 // Neither the native material solver nor its pressure/volume helpers enter here.
 fn reference(speed: f64, reference_force: f64, young: f64, rho: f64, kb: f64,
     initial_gas_t: f64, dt: f64, external_heat: f64) -> [f64; 5] {
+    let g = PATCH_AREA / (0.001 / 0.03 + 0.02 / kb);
+    reference_for_conductance(speed, reference_force, young, rho, g, initial_gas_t, dt, external_heat)
+}
+fn reference_for_conductance(speed: f64, reference_force: f64, young: f64, rho: f64, g: f64,
+    initial_gas_t: f64, dt: f64, external_heat: f64) -> [f64; 5] {
     let b = -1.0 / 6.0;
     let mass = rho * VOLUME / 10.0;
     let k = young * VOLUME;
     let u0 = reference_force / k;
     let capacity_g = 2.5 * PRESSURE * GAS_VOLUME / initial_gas_t;
-    let g = PATCH_AREA / (0.001 / 0.03 + 0.02 / kb);
     let a = 2.0 * mass / dt.powi(2) + 0.5 * k;
     let rhs = (2.0 * mass / dt.powi(2) - 0.5 * k) * u0
         + 2.0 * mass / dt * speed + reference_force;

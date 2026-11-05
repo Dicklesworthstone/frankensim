@@ -13,6 +13,10 @@
 //! Gas composition/mass, reference faces and film geometry remain fixed. The
 //! gas is well mixed. Its coupled ENDPOINT temperature is held during the
 //! original explicit wall substeps; that thermal quadrature is first order.
+//! Optional source convection resolves the actual wall surface at each thermal
+//! substep using the endpoint gas pressure/composition. Relative flow and patch
+//! geometry remain prescribed in the reference frame; wall motion does not
+//! invent a flow speed or a resolved enclosure-convection model.
 //! Pressure uses native endpoint work, not the energy-midpoint gas law. Refine
 //! the complete interval for time accuracy. Small-deformation/fully-solid source
 //! restrictions are those of the original wall owner; no follower-load,
@@ -42,6 +46,7 @@ pub enum CavityError<E = Infallible> {
     Solid(ThermoelasticFeedbackError),
     Thermal(DepositionError),
     Layer(ThermalMaterialError),
+    Contact(crate::solid_enthalpy::gas::SolidGasError),
     Observer(E),
     Newton(NewtonError),
     Interrupted(SolverRunProgress),
@@ -66,6 +71,18 @@ impl<E> From<SolidEnthalpyError> for CavityError<E> {
 }
 impl<E> From<ThermalMaterialError> for CavityError<E> {
     fn from(value: ThermalMaterialError) -> Self { Self::Layer(value) }
+}
+impl<E> From<crate::solid_enthalpy::gas::SolidGasError> for CavityError<E> {
+    fn from(value: crate::solid_enthalpy::gas::SolidGasError) -> Self {
+        use crate::solid_enthalpy::gas::SolidGasError as G;
+        match value {
+            G::Cancelled => Self::Cancelled,
+            G::Invalid(message) => Self::Invalid(message),
+            G::Thermal(error) => Self::Thermal(error),
+            G::Source(error) => Self::Layer(error),
+            other => Self::Contact(other),
+        }
+    }
 }
 
 fn poll<E>(cx: &Cx<'_>) -> Result<(), CavityError<E>> {
@@ -309,7 +326,7 @@ impl<'s, 'm> ThermoelasticCavity<'s, 'm> {
                 &[SurfaceLoad3::Pressure { faces: &self.faces, pascals: p1 - self.exterior_pressure_pa }],
                 VolumeLoad3::None, &self.reference_loads_n, cx,
             ).map_err(SolidEnthalpyError::from)?;
-            let film = FilmObserver::new(self, gas.state(), observer.clone());
+            let film = FilmObserver::new(self, &gas, observer.clone())?;
             let candidate = self.solid.advance(
                 thermal, &film, target_s, &loads, controls.thermal, controls.solid, cx,
             ).map_err(feedback)?;

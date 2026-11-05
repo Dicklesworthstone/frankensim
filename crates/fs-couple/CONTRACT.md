@@ -14342,9 +14342,23 @@ surface residual. Reports retain the actual film/surface queries, source and
 correlation evidence, solid-layer power and residual, iteration count, and
 separate instantaneous film and solid-layer entropy production.
 
-The shared owner also serves the existing multi-gas, reactive and
-thermoplastic endpoints. The separate snapshot-only dynamic-cavity heat path
-explicitly refuses the new source-film mode. This remains prescribed external
+The shared owner also serves the existing multi-gas, reactive, thermoplastic,
+and moving dynamic-cavity endpoints. `ThermoelasticCavity` retains one original
+source-pinned gas law per actual closed-gas trial endpoint and shares it across
+the native explicit wall substeps. Each patch reuses the same reference-pinned
+material admission and bounded surface balance. The actual applied film power
+enters the existing cell sources and the reciprocal gas-energy residual;
+native Newmark pressure work, volume closure and thermal quadrature remain
+unchanged. The explicit decay budget uses actual convective power divided by
+the current gas/cell contrast, with zero heat at exact equilibrium and finite,
+nonnegative representability gates. It does not substitute the diagnostic
+held-coefficient series conductance for that flux. `CavityContactHeat` retains
+the last applied wall-substep cell/surface temperatures and source evidence;
+that sample need not equal the returned wall temperature. Relative flow and
+patch geometry stay prescribed in the reference frame: wall motion does not
+infer a flow speed or resolve enclosed natural convection. The original held
+endpoint-gas/explicit-wall quadrature remains first order and requires interval
+refinement for time accuracy. This remains prescribed external
 flow/geometry against a well-mixed gas, with cell-phase conductivity held
 through the solid half-layer. It does not establish global uniqueness, an
 integrated conductivity profile, resolved boundary-layer or wall-flow

@@ -35,7 +35,7 @@ use std::cell::Cell;
 mod transport;
 pub(super) use transport::GasHeatTransport;
 use transport::GasTransportSample;
-mod convection;
+pub(super) mod convection;
 pub use convection::{SolidGasConvection, SolidGasConvectionSample};
 /// Separate finite gases sharing the same spatial material wall and heat solve.
 pub mod network;
@@ -384,18 +384,26 @@ fn merge_cell_heat(
     Ok(actual)
 }
 
-struct PreparedContact<'a> {
+pub(super) struct PreparedContact<'a> {
     contact: &'a SolidGasContact,
     element: usize,
     selection: MaterialPropertySelection,
 }
-struct ContactSample {
-    conductance_w_k: f64,
-    power_to_gas_w: f64,
-    source: ResolvedMaterialStatePoint,
-    convection: Option<SolidGasConvectionSample>,
+pub(super) struct ContactSample {
+    pub conductance_w_k: f64,
+    pub power_to_gas_w: f64,
+    pub source: ResolvedMaterialStatePoint,
+    pub convection: Option<SolidGasConvectionSample>,
 }
-impl PreparedContact<'_> {
+impl<'c> PreparedContact<'c> {
+    pub(super) fn new(contact: &'c SolidGasContact, element: usize) -> Self {
+        Self {
+            contact,
+            element,
+            selection: contact.selection.clone(),
+        }
+    }
+
     fn layers<'a>(&'a self, source: &'a StructuralSource<'_>) -> MaterialConductionLayers<'a> {
         MaterialConductionLayers {
             material: source.point.material,
@@ -418,22 +426,65 @@ impl PreparedContact<'_> {
         transport: Option<&MaterialNetworkSample>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<ContactSample, SolidGasError> {
+        let law = self
+            .contact
+            .convection
+            .map(|_| convection::endpoint_law(gas.model(), gas.point(), gas.state()))
+            .transpose()?;
+        self.resolve_with_law(
+            source,
+            gas.state(),
+            phase,
+            transport,
+            law.as_ref(),
+            checkpoint,
+        )
+    }
+
+    // A moving-gas owner may retain one exact source law across all native wall
+    // substeps. The film solve and material/source admission remain shared.
+    pub(super) fn resolve_with_law(
+        &self,
+        source: &StructuralSource<'_>,
+        gas: &fs_material::thermochemical_gas::ResolvedThermochemicalGasState,
+        phase: EquilibriumPhaseState,
+        transport: Option<&MaterialNetworkSample>,
+        law: Option<&fs_material::gas_species::input::temperature::IsobaricGasLaw>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ContactSample, SolidGasError> {
         if let Some(film) = self.contact.convection {
-            return self.resolve_convection(source, gas, phase, transport, film, checkpoint);
+            let law = law.ok_or(SolidGasError::Invalid(
+                "source convection needs its endpoint gas law",
+            ))?;
+            return self.resolve_convection(source, law, phase, transport, film, checkpoint);
         }
         let layers = self.layers(source);
         let sample = match transport::cell_material(transport, self.contact.cell)? {
-            Some(material) => layers.resolve_from_material(gas.state(), phase, material.clone())?,
-            None => layers.resolve(gas.state(), phase)?,
+            Some(material) => layers.resolve_from_material(gas, phase, material.clone())?,
+            None => layers.resolve(gas, phase)?,
         };
         Ok(ContactSample {
             conductance_w_k: sample.conductance_w_k,
             power_to_gas_w: finite(
-                sample.conductance_w_k * (phase.temperature_k() - gas.state().state().temperature),
+                sample.conductance_w_k * (phase.temperature_k() - gas.state().temperature),
             )?,
             source: sample.source,
             convection: None,
         })
+    }
+
+    pub(super) fn reference_material(
+        &self,
+        source: &StructuralSource<'_>,
+        gas: &fs_material::thermochemical_gas::ResolvedThermochemicalGasState,
+        phase: EquilibriumPhaseState,
+    ) -> Result<ResolvedMaterialStatePoint, SolidGasError> {
+        if let Some(film) = self.contact.convection {
+            film.validate(self.contact.geometry)?;
+            self.convection_material(source, phase, None)
+        } else {
+            Ok(self.layers(source).resolve(gas, phase)?.source)
+        }
     }
 }
 
@@ -827,15 +878,7 @@ impl StructuralGasProblem<'_, '_> {
                 .curve
                 .state_at_specific_enthalpy(bound.reference_h_j_kg)
                 .map_err(SolidEnthalpyError::from)?;
-            let material = if let Some(film) = contact.convection {
-                film.validate(contact.geometry)?;
-                entry.convection_material(bound, reference_phase, None)?
-            } else {
-                entry
-                    .layers(bound)
-                    .resolve(gas.state(), reference_phase)?
-                    .source
-            };
+            let material = entry.reference_material(bound, gas.state(), reference_phase)?;
             let claim = material
                 .property_by_key(&contact.conductivity)
                 .ok_or(SolidGasError::Invalid(
