@@ -1,6 +1,6 @@
 //! Discrete adjoints of the accepted reference-mass enthalpy balance.
 //!
-//! For E_i(h)=m_i*h+Cfilm_i*T_i(h) and
+//! For E_i(h)=m_i*h+Cfilm_i*T_i(h) plus original nonlinear film integrals and
 //! `R=E(h)-E(h_old)+dt*(A(T(h),f(h))*T(h)-b(q))`, solve
 //! `J_h^T lambda=h_bar`, then return `E'(h_old)*lambda` for history and
 //! `dt*M_source^T*lambda` for nodal volumetric source density. Here
@@ -87,6 +87,14 @@ pub enum EnthalpyAdjointError {
         /// Specific enthalpy at the chart endpoint, J/kg.
         specific_enthalpy_j_kg: f64,
     },
+    /// An active sensible film has no two-sided temperature neighborhood.
+    /// An interior latent plateau remains admissible because its T is fixed.
+    FilmStorageEndpoint {
+        /// Host vertex at its film's original support edge.
+        vertex: usize,
+        /// Absolute film temperature, K.
+        temperature_k: f64,
+    },
     /// A sampled conductivity law has a slope corner or validity endpoint.
     MaterialKink,
     /// The bounded transpose solve failed its independently recomputed gate.
@@ -127,6 +135,9 @@ impl fmt::Display for EnthalpyAdjointError {
             } => write!(
                 f,
                 "enthalpy derivative at vertex {vertex}, h={specific_enthalpy_j_kg}, lies at a chart validity endpoint"
+            ),
+            Self::FilmStorageEndpoint { vertex, temperature_k } => write!(
+                f, "enthalpy film at vertex {vertex}: {temperature_k} K is a storage support endpoint"
             ),
             Self::MaterialKink => {
                 write!(f, "conductivity derivative has no unique two-sided slope")
@@ -956,7 +967,7 @@ fn storage_history_derivatives(
     let mut derivatives = storage.masses.clone();
     for (vertex, &value) in h.iter().enumerate() {
         if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
-        if storage.film_capacity(vertex) == 0.0 { continue; }
+        if !storage.has_film_storage(vertex) { continue; }
         let curve = storage.curve_for_vertex(vertex);
         let slope = |h| curve.temperature_derivative_at_specific_enthalpy(h)
             .map_err(|source| EnthalpyError::Phase { vertex, source });
@@ -976,7 +987,10 @@ fn storage_history_derivatives(
                 });
             }
         }
-        derivatives[vertex] = storage.storage_derivative(vertex, derivative)?;
+        let temperature = curve.values_at_specific_enthalpy(value)
+            .map_err(|source| EnthalpyError::Phase { vertex, source })?.temperature_k;
+        check_film_endpoint(storage, vertex, temperature, derivative)?;
+        derivatives[vertex] = storage.storage_derivative(vertex, temperature, derivative)?;
     }
     poll(cx, h.len())?;
     Ok(derivatives)
@@ -1042,8 +1056,25 @@ fn check_chart(
                 });
             }
         }
+        if storage.has_film_storage(vertex) {
+            let temperature = curve.values_at_specific_enthalpy(value)
+                .map_err(|source| EnthalpyError::Phase { vertex, source })?.temperature_k;
+            let slope = curve.temperature_derivative_at_specific_enthalpy(value)
+                .map_err(|source| EnthalpyError::Phase { vertex, source })?;
+            check_film_endpoint(storage, vertex, temperature, slope)?;
+        }
     }
     Ok(())
+}
+
+fn check_film_endpoint(
+    storage: &EnthalpyBackwardEuler<'_, '_>, vertex: usize, temperature: f64, slope: f64,
+) -> Result<(), EnthalpyAdjointError> {
+    if slope > 0.0 && storage.film_temperature_endpoint(vertex, temperature) {
+        Err(EnthalpyAdjointError::FilmStorageEndpoint { vertex, temperature_k: temperature })
+    } else {
+        Ok(())
+    }
 }
 
 fn vector(cx: &Cx<'_>, values: &[f64], n: usize) -> Result<(), EnthalpyAdjointError> {

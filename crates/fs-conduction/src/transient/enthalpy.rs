@@ -23,6 +23,9 @@
 //! An optional sensible thin film adds C_i*(T_new-T_old) to the same row
 //! storage, with tangent C_i*dT/dh. Its original P1 areal moments do not
 //! alter host reference mass or add latent heat while temperature is fixed.
+//! Nonlinear films retain their original total face inventories and integrate
+//! C(T) between row temperatures, with one-third face weights. Their tangent
+//! uses the original C(T) at each old, stage or endpoint temperature.
 //!
 //! The source-bound melting adapter instead supplies phase-specific nodal
 //! conductivity and its enthalpy derivative. P1 interpolation gives the exact
@@ -64,6 +67,7 @@ pub use endpoint::EnthalpyEndpointEvaluation;
 mod contact;
 mod pointwise;
 mod surface_capacity;
+pub use surface_capacity::SurfaceHeatStorage;
 pub(super) mod reference_mass;
 use pointwise::{PointwiseBoundary, PointwiseBoundaryAssembly};
 
@@ -157,6 +161,13 @@ pub enum EnthalpyError {
         /// Original constitutive refusal.
         source: PhaseStateError,
     },
+    /// An original nonlinear sensible film could not resolve its storage.
+    FilmStorage {
+        /// Host vertex receiving the film's original P1 row moment.
+        vertex: usize,
+        /// Original caloric integration or representability refusal.
+        source: fs_material::thermal::transport::ThermalTransportError,
+    },
     /// A finite nodal enthalpy leaves the original conductivity source support.
     /// Newton trial proposals may backtrack; initial/direct states are refused.
     SourceEnthalpyOutsideDomain {
@@ -221,6 +232,9 @@ impl fmt::Display for EnthalpyError {
             Self::Conduction(error) => error.fmt(formatter),
             Self::Phase { vertex, source } => {
                 write!(formatter, "enthalpy vertex {vertex}: {source}")
+            }
+            Self::FilmStorage { vertex, source } => {
+                write!(formatter, "enthalpy film at vertex {vertex}: {source}")
             }
             Self::SourceEnthalpyOutsideDomain {
                 vertex, specific_enthalpy_j_kg, lower_j_kg, upper_j_kg,
@@ -315,7 +329,7 @@ pub struct EnthalpyBackwardEuler<'m, 'c> {
     // public uniform API, including phase_curve(), keeps its original meaning.
     nodal_curves: Option<Vec<&'c EquilibriumEnthalpyPhaseCurve>>,
     masses: Vec<f64>,
-    surface_capacity: Option<surface_capacity::SurfaceStorage>,
+    surface_capacity: Option<surface_capacity::SurfaceStorage<'c>>,
     phase_conductivity: Option<PhaseConductivity>,
     // A source-bound melting adapter supplies nodal k(h), using the existing
     // element-scale assembly with its retained unit tensor as numerical basis.
@@ -789,7 +803,7 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         if self.surface_capacity.is_some() {
             for (vertex, &h) in old_specific_h.iter().enumerate() {
                 if vertex % ASSEMBLY_TILE == 0 { poll(cx, vertex)?; }
-                if self.film_capacity(vertex) > 0.0 {
+                if self.has_film_storage(vertex) {
                     let temperature = self.curve_for_vertex(vertex)
                         .values_at_specific_enthalpy(h)
                         .map_err(|source| EnthalpyError::Phase { vertex, source })?
@@ -1240,7 +1254,7 @@ impl StepContext<'_, '_, '_, '_> {
                 .curve_for_vertex(vertex)
                 .temperature_derivative_at_specific_enthalpy(value)
                 .map_err(|source| EnthalpyError::Phase { vertex, source })?;
-            let capacity = self.storage.storage_derivative(vertex, derivative)?;
+            let capacity = self.storage.storage_derivative(vertex, temperature[vertex], derivative)?;
             let diagonal = if self.is_prescribed(vertex) {
                 self.storage.masses[vertex]
             } else {

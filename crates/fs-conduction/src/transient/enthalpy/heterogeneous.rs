@@ -164,7 +164,23 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
         Ok(self)
     }
 
-    /// Added film row capacities in original mesh vertex order, J/K.
+    /// Add original nonlinear face inventories to the same heterogeneous host
+    /// storage, without averaging charts or changing reference masses.
+    pub fn with_surface_heat_storage(
+        mut self, cx: &Cx<'_>, surfaces: &[super::SurfaceHeatStorage<'c>],
+    ) -> Result<Self, EnthalpyError> {
+        self.inner = self.inner.with_surface_heat_storage(cx, surfaces)?;
+        Ok(self)
+    }
+
+    /// Original nonlinear face inventories, preserving source/table identity.
+    #[must_use]
+    pub fn surface_heat_storage(&self) -> &[super::SurfaceHeatStorage<'c>] {
+        self.inner.surface_heat_storage()
+    }
+
+    /// Constant film row capacities in original mesh vertex order, J/K.
+    /// Nonlinear `surface_heat_storage` inventories contribute additionally.
     #[must_use]
     pub fn surface_nodal_heat_capacity_j_per_k(&self) -> Option<&[f64]> {
         self.inner.surface_nodal_heat_capacity_j_per_k()

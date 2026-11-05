@@ -5,10 +5,13 @@ use fs_blake3::ContentHash;
 use fs_conduction::transient::enthalpy::heterogeneous::EnthalpyRadiation;
 use fs_conduction::transient::enthalpy::sdirk::{EnthalpySdirk2Input, SDIRK2_GAMMA as G};
 use fs_conduction::transient::enthalpy::{
-    EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyStepConfig,
+    EnthalpyBackwardEuler, EnthalpyBudget, EnthalpyError, EnthalpyStepConfig, SurfaceHeatStorage,
 };
 use fs_exec::Cx;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
+use fs_material::thermal::transport::storage::{
+    HeatStorageAmount, HeatStorageComponentQuery, PreparedHeatStorage, TabulatedHeatStorage,
+};
 use fs_solver::NewtonKrylovConfig;
 
 const VOLUME: f64 = 8.0 / 3.0;
@@ -311,5 +314,431 @@ fn prescribed_baths_pay_for_the_same_film_storage_once_in_each_integrator() {
         assert_eq!(step.first_stage.temperature, [295.0; 4]);
         assert_eq!(step.second_stage.temperature, [310.0; 4]);
         assert_eq!(old, [20.0; 4]);
+    });
+}
+
+fn bare_engine<'m, 'c>(
+    cx: &Cx<'_>,
+    mesh: &'m ConductionMesh,
+    chart: &'c EquilibriumEnthalpyPhaseCurve,
+) -> EnthalpyBackwardEuler<'m, 'c> {
+    EnthalpyBackwardEuler::uniform(
+        cx,
+        mesh,
+        chart,
+        DENSITY,
+        EnthalpyBudget {
+            max_vertices: 4,
+            max_elements: 1,
+        },
+    )
+    .unwrap()
+}
+
+fn nonlinear_engine<'m, 'c>(
+    cx: &Cx<'_>,
+    mesh: &'m ConductionMesh,
+    chart: &'c EquilibriumEnthalpyPhaseCurve,
+    law: &'c TabulatedHeatStorage,
+) -> EnthalpyBackwardEuler<'m, 'c> {
+    let films: Vec<_> = (0..mesh.boundary().len())
+        .map(|face| SurfaceHeatStorage::tabulated(face, law))
+        .collect();
+    bare_engine(cx, mesh, chart)
+        .with_surface_heat_storage(cx, &films)
+        .unwrap()
+}
+
+fn nonlinear_table() -> TabulatedHeatStorage {
+    // Each face's complete inventory: C(T)=1+0.02*(T-300) J/K.
+    TabulatedHeatStorage::try_new(&[[280.0, 0.6], [300.0, 1.0], [340.0, 1.8]]).unwrap()
+}
+
+// Independent closed-form integration of the four physical face inventories.
+fn nonlinear_film_energy(old_t: f64, new_t: f64) -> f64 {
+    (new_t - old_t) * (4.0 + 0.04 * (new_t + old_t - 600.0))
+}
+
+#[test]
+fn nonlinear_films_integrate_calorics_through_host_melting_in_both_integrators() {
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let boundary = coated_tetrahedron_boundary(cx, &mesh);
+        let chart = chart();
+        let law = nonlinear_table();
+        let engine = nonlinear_engine(cx, &mesh, &chart, &law);
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(3.75); // 10 W into one kilogram.
+        let p = problem(&mesh, &boundary, &material, &source);
+        assert!(std::ptr::eq(
+            engine.surface_heat_storage()[0]
+                .tabulated_storage()
+                .unwrap(),
+            &law
+        ));
+        for sdirk in [false, true] {
+            let mut old = vec![20.0; 4];
+            let mut previous_t = 290.0;
+            let mut previous_time = 0.0;
+            for (time, expected_h, expected_t) in [
+                (2.7, 30.0, 295.0),
+                (5.8, 40.0, 300.0),
+                (8.8, 70.0, 300.0),
+                (11.8, 100.0, 300.0),
+                (19.0, 130.0, 310.0),
+                (31.6, 175.0, 325.0),
+            ] {
+                let dt = time - previous_time;
+                let (next, stored, defect) = if sdirk {
+                    let step = engine
+                        .advance_sdirk2(cx, [input(p); 2], &old, dt, controls())
+                        .unwrap();
+                    (
+                        step.second_stage,
+                        step.stored_energy_change_j,
+                        step.energy_residual_j,
+                    )
+                } else {
+                    let step = engine.advance(cx, p, None, &old, dt, controls()).unwrap();
+                    let (stored, defect) = (step.stored_energy_change_j, step.energy_residual_j);
+                    (step, stored, defect)
+                };
+                for (&h, &t) in next.specific_enthalpy_j_kg.iter().zip(&next.temperature) {
+                    close(h, expected_h, 3e-8);
+                    close(t, expected_t, 2e-8);
+                }
+                close(
+                    stored,
+                    expected_h - old[0] + nonlinear_film_energy(previous_t, expected_t),
+                    5e-8,
+                );
+                close(stored, dt * 10.0, 5e-8);
+                close(defect, 0.0, controls().energy_tolerance_j);
+                old = next.specific_enthalpy_j_kg;
+                previous_t = expected_t;
+                previous_time = time;
+            }
+        }
+    });
+}
+
+#[test]
+fn nonlinear_film_adjoints_use_separate_old_stage_and_endpoint_capacities() {
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let boundary = coated_tetrahedron_boundary(cx, &mesh);
+        let chart = chart();
+        let law = nonlinear_table();
+        let engine = nonlinear_engine(cx, &mesh, &chart, &law);
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(3.75);
+        let p = problem(&mesh, &boundary, &material, &source);
+        let linear = LinearConfig {
+            tolerance: 1e-11,
+            max_iterations: 64,
+            restart: 4,
+        };
+        // Final T=310: total dE/dT = Cp_liquid + 4*C_face(310) = 7.8.
+        // Old dE/dh is 2.6 on the solid branch, or 1 on the latent plateau.
+        for (old_h, dt, old_slope) in [(20.0, 19.0, 2.6), (70.0, 10.4, 1.0)] {
+            let old = [old_h; 4];
+            let accepted = engine.advance(cx, p, None, &old, dt, controls()).unwrap();
+            let response = engine
+                .linearize_accepted(cx, p, None, &old, dt, controls(), accepted)
+                .unwrap();
+            let seed = response.temperature_pullback(cx, &[0.25; 4]).unwrap();
+            let gradient = response.pullback(cx, &seed, linear).unwrap();
+            for i in 0..4 {
+                close(response.primal().temperature[i], 310.0, 2e-8);
+                close(
+                    gradient.previous_specific_enthalpy[i],
+                    old_slope / (4.0 * 7.8),
+                    2e-9,
+                );
+            }
+            close(
+                gradient.source_density.iter().sum(),
+                dt * VOLUME / 7.8,
+                2e-8,
+            );
+            let epsilon = 1e-3;
+            let lower = engine
+                .advance(cx, p, None, &[old_h - epsilon; 4], dt, controls())
+                .unwrap();
+            let upper = engine
+                .advance(cx, p, None, &[old_h + epsilon; 4], dt, controls())
+                .unwrap();
+            close(
+                (upper.temperature[0] - lower.temperature[0]) / (2.0 * epsilon),
+                old_slope / 7.8,
+                2e-7,
+            );
+
+            let response = engine
+                .linearize_sdirk2(cx, [input(p); 2], &old, dt, controls(), 0)
+                .unwrap();
+            let seeds = response
+                .temperature_pullback(cx, [&[0.0; 4], &[0.25; 4]])
+                .unwrap();
+            let gradient = response
+                .pullback_stages(cx, [&seeds[0], &seeds[1]], linear)
+                .unwrap();
+            for i in 0..4 {
+                close(response.primal().second_stage.temperature[i], 310.0, 2e-8);
+                close(
+                    gradient.previous_specific_enthalpy[i],
+                    old_slope / (4.0 * 7.8),
+                    2e-9,
+                );
+            }
+            for (stage, weight) in [1.0 - G, G].into_iter().enumerate() {
+                close(
+                    gradient.source_density[stage].iter().sum(),
+                    weight * dt * VOLUME / 7.8,
+                    2e-8,
+                );
+            }
+        }
+    });
+}
+
+fn prepared_film() -> PreparedHeatStorage {
+    let capacity = PropertyKey::new("film-specific-capacity", SPECIFIC_HEAT_CAPACITY_DIMS);
+    let temperature = fs_qty::QuantitySpec::dimensional(fs_qty::Temperature::DIMS);
+    let mut claims = ClaimSet::new();
+    claims
+        .insert_claim(PropertyClaim {
+            key: capacity.clone(),
+            value: PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: vec![(285.0, 1.4), (315.0, 2.6)],
+                dims: SPECIFIC_HEAT_CAPACITY_DIMS,
+            },
+            validity: ValidityDomain::unconstrained().with_quantity("T", temperature, 285.0, 315.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::LinearInside,
+            observations: Vec::new(),
+            provenance: Provenance {
+                source: "manufactured film; not measured material data".into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "synthetic film".into(),
+            phase: "solid".into(),
+            process: "fixed mass".into(),
+            revision: 0,
+        },
+        claims,
+        Vec::new(),
+    )
+    .unwrap();
+    let point = |t| {
+        QueryPoint::new()
+            .with_quantity("T", temperature, t)
+            .unwrap()
+    };
+    PreparedHeatStorage::try_new(&[HeatStorageComponentQuery {
+        id: 7,
+        card: &card,
+        capacity: &capacity,
+        amount: HeatStorageAmount::MassKg(0.5),
+        temperature_axis: "T",
+        lower: &point(285.0),
+        upper: &point(315.0),
+        selection: fs_matdb::ClaimSelection::Policy(fs_matdb::SelectionPolicy::SingleClaimOnly),
+    }])
+    .unwrap()
+}
+
+#[test]
+fn original_film_sources_bound_histories_candidates_and_prescribed_bath_heat() {
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let chart = chart();
+        let law = prepared_film();
+        let faces: Vec<_> = (0..4)
+            .map(|face| SurfaceHeatStorage::prepared(face, &law))
+            .collect();
+        let engine = bare_engine(cx, &mesh, &chart)
+            .with_surface_heat_storage(cx, &faces)
+            .unwrap();
+        assert!(std::ptr::eq(
+            engine.surface_heat_storage()[0].prepared_storage().unwrap(),
+            &law
+        ));
+        assert_eq!(law.components()[0].amount(), HeatStorageAmount::MassKg(0.5));
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(3.75);
+        let baths = [295.0, 310.0, 320.0].map(|t| {
+            ThermalBoundaryBuilder::new(&mesh)
+                .region("bath", |_| true, ThermalBc::dirichlet(t).unwrap())
+                .unwrap()
+                .finish()
+                .unwrap()
+        });
+        let old = [20.0; 4];
+        let dt = 0.4;
+        let step = engine
+            .advance(
+                cx,
+                problem(&mesh, &baths[1], &material, &source),
+                None,
+                &old,
+                dt,
+                controls(),
+            )
+            .unwrap();
+        close(step.stored_energy_change_j, 190.0, 1e-9);
+        close(dt * step.dirichlet_in_w, 190.0 - dt * 10.0, 1e-9);
+        let stages = [0, 1].map(|i| input(problem(&mesh, &baths[i], &material, &source)));
+        let step = engine
+            .advance_sdirk2(cx, stages, &old, dt, controls())
+            .unwrap();
+        close(step.stored_energy_change_j, 190.0, 1e-9);
+        close(step.dirichlet_in_j, 190.0 - dt * 10.0, 1e-9);
+        close(step.energy_residual_j, 0.0, 1e-9);
+        for (history, bath) in [([0.0; 4], 1), (old, 2)] {
+            assert!(matches!(
+                engine.advance(
+                    cx,
+                    problem(&mesh, &baths[bath], &material, &source),
+                    None,
+                    &history,
+                    dt,
+                    controls()
+                ),
+                Err(EnthalpyError::Conduction(
+                    ConductionError::OutsideTemperatureSpan { .. }
+                ))
+            ));
+        }
+        assert_eq!(old, [20.0; 4]);
+        assert_eq!(law.components()[0].amount(), HeatStorageAmount::MassKg(0.5));
+    });
+}
+
+#[test]
+fn constant_nonlinear_films_match_the_existing_path_and_heterogeneous_owner() {
+    use fs_conduction::transient::enthalpy::heterogeneous::{
+        HeterogeneousEnthalpyBackwardEuler, ReferenceEnthalpyMaterial,
+    };
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let chart = chart();
+        let boundary = coated_tetrahedron_boundary(cx, &mesh);
+        let law = TabulatedHeatStorage::try_new(&[[280.0, 1.0], [340.0, 1.0]]).unwrap();
+        let original = engine(cx, &mesh, &chart);
+        let nonlinear = nonlinear_engine(cx, &mesh, &chart, &law);
+        let faces: Vec<_> = (0..4)
+            .map(|face| SurfaceHeatStorage::tabulated(face, &law))
+            .collect();
+        let heterogeneous = HeterogeneousEnthalpyBackwardEuler::new(
+            cx,
+            &mesh,
+            &[ReferenceEnthalpyMaterial {
+                curve: &chart,
+                reference_density_kg_m3: DENSITY,
+            }],
+            &[0],
+            EnthalpyBudget {
+                max_vertices: 4,
+                max_elements: 1,
+            },
+        )
+        .unwrap()
+        .with_surface_heat_storage(cx, &faces)
+        .unwrap();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let p = problem(&mesh, &boundary, &material, &source);
+        let old = [21.0, 25.0, 29.0, 33.0];
+        let reference = original
+            .advance(cx, p, None, &old, 0.2, controls())
+            .unwrap();
+        for result in [
+            nonlinear
+                .advance(cx, p, None, &old, 0.2, controls())
+                .unwrap(),
+            heterogeneous
+                .advance(cx, p, None, &old, 0.2, controls())
+                .unwrap(),
+        ] {
+            for (actual, expected) in result
+                .specific_enthalpy_j_kg
+                .iter()
+                .zip(&reference.specific_enthalpy_j_kg)
+            {
+                close(*actual, *expected, 1e-8);
+            }
+            close(result.stored_energy_change_j, 0.0, 1e-8);
+        }
+        assert!(std::ptr::eq(
+            heterogeneous.surface_heat_storage()[0]
+                .tabulated_storage()
+                .unwrap(),
+            &law
+        ));
+    });
+}
+
+#[test]
+fn nonlinear_film_admission_and_two_sided_storage_derivatives_refuse_at_support_edges() {
+    use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
+    with_cx(|cx| {
+        let mesh = regular_tetrahedron();
+        let chart = chart();
+        let law = TabulatedHeatStorage::try_new(&[[290.0, 0.8], [310.0, 1.2]]).unwrap();
+        let face = SurfaceHeatStorage::tabulated(0, &law);
+        assert!(
+            bare_engine(cx, &mesh, &chart)
+                .with_surface_heat_storage(cx, &[face, face])
+                .is_err()
+        );
+        assert!(
+            bare_engine(cx, &mesh, &chart)
+                .with_surface_heat_storage(cx, &[SurfaceHeatStorage::tabulated(4, &law)])
+                .is_err()
+        );
+        let outside = TabulatedHeatStorage::try_new(&[[350.0, 1.0], [360.0, 1.0]]).unwrap();
+        assert!(
+            bare_engine(cx, &mesh, &chart)
+                .with_surface_heat_storage(cx, &[SurfaceHeatStorage::tabulated(0, &outside)])
+                .is_err()
+        );
+        with_cancelled_cx(|cancelled| {
+            assert!(
+                bare_engine(cx, &mesh, &chart)
+                    .with_surface_heat_storage(cancelled, &[face])
+                    .is_err()
+            );
+        });
+        let engine = nonlinear_engine(cx, &mesh, &chart, &law);
+        let boundary = coated_tetrahedron_boundary(cx, &mesh);
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(3.75);
+        let p = problem(&mesh, &boundary, &material, &source);
+        let old = [20.0; 4]; // Valid primal history, but T=290 is the film support edge.
+        let step = engine.advance(cx, p, None, &old, 1.0, controls()).unwrap();
+        assert!(matches!(
+            engine.linearize_accepted(cx, p, None, &old, 1.0, controls(), step),
+            Err(EnthalpyAdjointError::FilmStorageEndpoint { .. })
+        ));
+        let plateau = TabulatedHeatStorage::try_new(&[[300.0, 1.0], [310.0, 1.2]]).unwrap();
+        let engine = nonlinear_engine(cx, &mesh, &chart, &plateau);
+        let old = [70.0; 4];
+        let step = engine.advance(cx, p, None, &old, 1.0, controls()).unwrap();
+        let response = engine
+            .linearize_accepted(cx, p, None, &old, 1.0, controls(), step)
+            .unwrap();
+        assert_eq!(
+            response.temperature_pullback(cx, &[0.25; 4]).unwrap(),
+            vec![0.0; 4]
+        );
+        assert_eq!(old, [70.0; 4]);
     });
 }

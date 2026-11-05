@@ -1,7 +1,8 @@
 //! Sensible, perfectly bonded film storage on the original host enthalpy.
 //!
-//! Each row stores E_i(h_i)=m_i*h_i+C_i*T_i(h_i), up to an immaterial
-//! constant datum. C_i is the exact original P1 surface-capacity row moment.
+//! Each row stores E_i(h_i)=m_i*h_i+C_i*T_i(h_i), plus each nonlinear film's
+//! original integral of C(T) through that row's temperature. Constant C_i is
+//! the exact original P1 surface-capacity row moment.
 //! The host chart still owns all latent heat. A fixed host temperature stores
 //! no additional sensible film heat, even while the host phase fraction moves.
 //! This is not a film latent-heat law or a separately meshed material inventory.
@@ -14,11 +15,26 @@ use super::*;
 use crate::material::TemperatureSpan;
 use crate::transient::{MaterialHeatCapacity, backward_euler::SurfaceHeatCapacity};
 
+mod nonlinear;
+pub use nonlinear::SurfaceHeatStorage;
+
 #[derive(Debug)]
-pub(super) struct SurfaceStorage {
+pub(super) struct SurfaceStorage<'c> {
     nodal_j_per_k: Vec<f64>,
     temperature_spans: Vec<TemperatureSpan>,
     materials: Vec<MaterialHeatCapacity>,
+    nonlinear: Option<nonlinear::NonlinearSurfaceStorage<'c>>,
+}
+
+impl SurfaceStorage<'_> {
+    fn new(vertices: usize) -> Self {
+        Self {
+            nodal_j_per_k: vec![0.0; vertices],
+            temperature_spans: vec![TemperatureSpan::Unbounded; vertices],
+            materials: Vec::new(),
+            nonlinear: None,
+        }
+    }
 }
 
 impl EnthalpyBackwardEuler<'_, '_> {
@@ -71,11 +87,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     high: knots[knots.len() - 1].temperature_k,
                 }
             });
-            let prepared = self.surface_capacity.get_or_insert_with(|| SurfaceStorage {
-                nodal_j_per_k: vec![0.0; n],
-                temperature_spans: vec![TemperatureSpan::Unbounded; n],
-                materials: Vec::new(),
-            });
+            let prepared = self.surface_capacity.get_or_insert_with(|| SurfaceStorage::new(n));
             for (local, &vertex) in vertices.iter().enumerate() {
                 prepared.nodal_j_per_k[vertex] =
                     finite(prepared.nodal_j_per_k[vertex] + moments[local])?;
@@ -101,7 +113,8 @@ impl EnthalpyBackwardEuler<'_, '_> {
         Ok(self)
     }
 
-    /// Added sensible film capacities in original vertex order, J/K.
+    /// Constant film capacities in original vertex order, J/K. Nonlinear
+    /// inventories returned by `surface_heat_storage` are additional storage.
     /// None means no active film and preserves the original storage path.
     #[must_use]
     pub fn surface_nodal_heat_capacity_j_per_k(&self) -> Option<&[f64]> {
@@ -119,10 +132,20 @@ impl EnthalpyBackwardEuler<'_, '_> {
             .map_or(&[], |film| film.materials.as_slice())
     }
 
-    pub(super) fn film_capacity(&self, vertex: usize) -> f64 {
-        self.surface_capacity
-            .as_ref()
-            .map_or(0.0, |film| film.nodal_j_per_k[vertex])
+    pub(super) fn has_film_storage(&self, vertex: usize) -> bool {
+        self.surface_capacity.as_ref().is_some_and(|film| {
+            film.nodal_j_per_k[vertex] > 0.0
+                || film.nonlinear.as_ref().is_some_and(|laws| laws.at_vertex(vertex).next().is_some())
+        })
+    }
+
+    // A support edge is exact; a tolerance would erase a valid neighborhood.
+    #[allow(clippy::float_cmp)]
+    pub(super) fn film_temperature_endpoint(&self, vertex: usize, temperature: f64) -> bool {
+        self.surface_capacity.as_ref().is_some_and(|film| {
+            matches!(film.temperature_spans[vertex], TemperatureSpan::Sampled { low, high }
+                if temperature == low || temperature == high)
+        })
     }
 
     pub(super) fn check_film_temperature(
@@ -139,13 +162,27 @@ impl EnthalpyBackwardEuler<'_, '_> {
     pub(super) fn storage_derivative(
         &self,
         vertex: usize,
+        temperature: f64,
         temperature_derivative: f64,
     ) -> Result<f64, EnthalpyError> {
-        let capacity = self.film_capacity(vertex);
-        if capacity == 0.0 {
+        if !self.has_film_storage(vertex) {
             return Ok(self.masses[vertex]);
         }
-        finite(self.masses[vertex] + finite(capacity * temperature_derivative)?)
+        self.check_film_temperature(vertex, temperature)?;
+        // An interior host plateau has exactly zero sensible response. The
+        // source temperature is still checked, but no capacity can add latent heat.
+        if temperature_derivative == 0.0 { return Ok(self.masses[vertex]); }
+        let film = self.surface_capacity.as_ref().expect("active film storage");
+        let mut derivative = finite(self.masses[vertex]
+            + finite(film.nodal_j_per_k[vertex] * temperature_derivative)?)?;
+        if let Some(laws) = &film.nonlinear {
+            for law in laws.at_vertex(vertex) {
+                let capacity = law.heat_capacity_j_k(temperature)
+                    .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
+                derivative = finite(derivative + finite((capacity / 3.0) * temperature_derivative)?)?;
+            }
+        }
+        Ok(derivative)
     }
 
     fn film_temperature_change(
@@ -172,13 +209,22 @@ impl EnthalpyBackwardEuler<'_, '_> {
         temperature: f64,
     ) -> Result<f64, EnthalpyError> {
         let bulk = finite(self.masses[vertex] * (new_h - old_h))?;
-        let capacity = self.film_capacity(vertex);
-        if capacity == 0.0 {
+        if !self.has_film_storage(vertex) {
             return Ok(bulk);
         }
         let (old_temperature, temperature) =
             self.film_temperature_change(vertex, old_h, temperature)?;
-        finite(bulk + finite(capacity * (temperature - old_temperature))?)
+        let film = self.surface_capacity.as_ref().expect("active film storage");
+        let mut change = finite(bulk + finite(film.nodal_j_per_k[vertex]
+            * (temperature - old_temperature))?)?;
+        if let Some(laws) = &film.nonlinear {
+            for law in laws.at_vertex(vertex) {
+                let energy = law.energy_change_j(old_temperature, temperature)
+                    .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
+                change = finite(change + energy / 3.0)?;
+            }
+        }
+        Ok(change)
     }
 
     // The genuine SDIRK carry and spectral-source accounts retain their
@@ -195,16 +241,25 @@ impl EnthalpyBackwardEuler<'_, '_> {
             Dd::from_f64(self.masses[vertex]),
             checked_dd(Dd::from_f64(new_h) - Dd::from_f64(old_h))?,
         )?;
-        let capacity = self.film_capacity(vertex);
-        if capacity == 0.0 {
+        if !self.has_film_storage(vertex) {
             return Ok(bulk);
         }
         let (old_temperature, temperature) =
             self.film_temperature_change(vertex, old_h, temperature)?;
-        let film = product(
-            Dd::from_f64(capacity),
+        let film = self.surface_capacity.as_ref().expect("active film storage");
+        let mut change = checked_dd(bulk + product(
+            Dd::from_f64(film.nodal_j_per_k[vertex]),
             checked_dd(Dd::from_f64(temperature) - Dd::from_f64(old_temperature))?,
-        )?;
-        checked_dd(bulk + film)
+        )?)?;
+        if let Some(laws) = &film.nonlinear {
+            for law in laws.at_vertex(vertex) {
+                // The native relative integral avoids subtracting large stored
+                // primitives; retain its result in the existing stage accumulator.
+                let energy = law.energy_change_j(old_temperature, temperature)
+                    .map_err(|source| EnthalpyError::FilmStorage { vertex, source })?;
+                change = checked_dd(change + Dd::from_f64(energy) / Dd::from_f64(3.0))?;
+            }
+        }
+        Ok(change)
     }
 }
