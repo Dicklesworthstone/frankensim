@@ -72,8 +72,21 @@ Node count alone does not establish audio-band fidelity.
   plug's interior end correction, retaining its throat and exterior correction, so the interior
   air mass is counted once. Unresolved near-aperture inertia requires cutoff convergence;
   attachment is allowed once per vent, before stepping. This retains the existing
-  linear lumped-port, full-head structural and truncated rigid-cylinder basis approximations;
-  it does not resolve the membrane cutout, port-edge flow or nonlinear jet losses.
+  lumped-port, full-head structural and truncated rigid-cylinder basis approximations;
+  it does not resolve the membrane cutout or port-edge flow.
+  The optional `DrumSpec::port_flow_loss` supplies a finite nonnegative coefficient `K` for
+  `dp = rho K (Q/A)|Q/A|/2`. It defaults to zero; edge geometry alone does not determine it.
+  Supply a measured or resolved coefficient for the declared opening and flow regime.
+  This is a compact, low-Mach, quasi-steady closure, not a resolved edge-zone acceptance
+  model: it includes no vortex memory, choking, varying jet inertance or generated jet noise.
+  The model boundary follows [Hersh & Rogers, NASA CR-2682](https://ntrs.nasa.gov/citations/19760016859).
+  Linear and quadratic vent losses use centered flow in one closed-form scalar solve, with
+  no iterations or step allocations. `Port::dissipated_j` accumulates their removed work,
+  including any linear radiation resistance; it is not all local heat. The loss is applied
+  only in the vent momentum equation, beside the reciprocal cavity pressure load.
+  No explicit drag CFL is needed, but time refinement remains necessary: implicit midpoint
+  is passive, not L-stable, and a severely underresolved drag can alternate half-step flow.
+  The elastic cavity/head timestep bound still applies.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
   A baffled microphone hears only surfaces facing it. Over a rigid floor (any plane,
   `floor_z`, `floor_y`) it also hears, by the floor's image, the surfaces facing that image.
@@ -828,6 +841,12 @@ cargo test --release
 Live pieces: `kick snare snare-off tom-12 tom-14 hihat hihat-closed hihat-open crash ride`.
 The offline `kit` and `perform` examples use the fixed hi-hat names; `kit` also renders `splash`
 and `crash-shaft`, which has no default speed (give SPEED_M_S).
+
+For a ported drum, `kit ... --port RADIUS_M` declares the opening at the builder's
+off-center position. Add `--port-flow-loss K` to select the coefficient described above;
+it requires `--port` and has no inferred default. `--cavity-modes F_MAX_HZ` also couples
+that opening to the spatial pressure modes. Ported runs use the Rayleigh observer;
+the closed-body `--observer` tables do not contain an opening and are refused.
 
 Their drums (`kick snare snare-off tom-12 tom-14`) are built from the sourced cards by default
 (`examples/drum_cards/mod.rs`):

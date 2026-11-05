@@ -37,6 +37,10 @@ use std::f64::consts::PI;
 mod annular_membrane;
 pub use annular_membrane::MembraneTerm;
 
+/// Lumped vent inertia and passive pressure/flow loss.
+pub mod port;
+pub use port::Port;
+
 pub use fs_material::gas::GasState;
 pub use fs_material::plane_stress_viscosity::PlaneStressViscosity;
 
@@ -2305,36 +2309,6 @@ impl AirLayers {
     }
 }
 
-/// A hole in a head (a kick drum's front port): the air plug in it is an inertance
-/// rho L_eff / A driven by the cavity pressure; it vents the cavity and radiates as a monopole.
-#[derive(Clone)]
-pub struct Port {
-    pub area: f64,
-    /// Throat length plus the end corrections still represented by this plug [m].
-    pub length: f64,
-    /// Included interior end correction [m]. Explicit cavity modes replace it
-    /// with resolved air inertia; the exterior correction remains in `length`.
-    pub interior_end_correction: f64,
-    /// Radiation (and flow) resistance on the volume velocity [Pa s / m^3].
-    pub resistance: f64,
-    /// Opening position and outward normal sign along z (for microphones).
-    pub pos: [f64; 3],
-    pub facing: f64,
-    pub x: f64,
-    pub u: f64,
-    pub du: f64,
-}
-
-impl Port {
-    pub fn new(radius: f64, head_thickness: f64, pos: [f64; 3], facing: f64) -> Port {
-        let area = PI * radius * radius;
-        // two flanged end corrections of 0.85 r each
-        let interior_end_correction = 0.85 * radius;
-        let length = head_thickness + 2.0 * interior_end_correction;
-        Port { area, length, interior_end_correction, resistance: 0.0, pos, facing, x: 0.0, u: 0.0, du: 0.0 }
-    }
-}
-
 /// Small-ka monopole radiation resistance on the NET outward volume velocity of a group of
 /// surfaces (both heads of one drum, which sit far closer together than a wavelength), at
 /// frequency `f_ref`. Two heads moving the same way in space cancel and are barely damped.
@@ -3585,9 +3559,8 @@ impl Instrument {
                 .map_or(0.0, |port| port.area / (self.gas.density * port.length));
             gas_rate2 += self.gas.density * self.gas.sound_speed.powi(2) / cavity.volume
                 * (inverse_volume_mass(&cavity.heads) + inverse_port_mass);
-            if let Some(port) = &cavity.port {
-                gas_rate2 += 2.0 * rate * port.resistance * inverse_port_mass;
-            }
+            // The port's linear and quadratic losses use centered flow and
+            // dissipate energy implicitly; they impose no explicit drag CFL.
         }
         for radiation in &self.rads {
             gas_rate2 += 2.0 * rate * radiation.resistance
@@ -3864,10 +3837,7 @@ impl Instrument {
             if let Some(q) = &mut c.port {
                 // u lives at the half steps, x at the same integer times as
                 // heads and air modes. All reciprocal forces use that time.
-                let du = k * (q.du - q.resistance * q.u) * q.area / (self.gas.density * q.length);
-                q.u += du;
-                q.du = du / k;
-                q.x += k * q.u;
+                q.advance_pressure(k, q.du, self.gas.density);
             }
         }
         for r in &self.rads {

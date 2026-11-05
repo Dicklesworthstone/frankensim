@@ -1,6 +1,6 @@
 //! Render one drum-kit piece to a 48 kHz float WAV.
 //!
-//! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv]
+//! usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K]]
 //! PIECE: kick | snare | snare-off | tom-12 | tom-14 | hihat-closed | hihat-open | splash | crash | crash-shaft | ride
 //!
 //! `--observer` hears a drum's overhead as one closed body on its floor (pexfp.378), from a table
@@ -9,6 +9,8 @@
 //!
 //! `--head-dipole`, with `--observer`, adds the heads' compact dipole radiation (`RadDipole`), its
 //! length read from that table. It is an estimate; it is refused for a ported drum and on `--preset-heads`.
+//! `--port RADIUS_M` declares a front-head opening; optional `--port-flow-loss K`
+//! supplies its quasi-steady pressure-loss coefficient (no value is inferred).
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -30,10 +32,25 @@ const WIRE_CONTACT_FLAG: &str = "--wire-contact";
 const CAVITY_WALL_LOSS_FLAG: &str = "--cavity-wall-loss";
 /// ALL-IN, opt-in with --observer: the heads' compact dipole radiation, its length from that table.
 const HEAD_DIPOLE_FLAG: &str = "--head-dipole";
+const PORT_FLAG: &str = "--port";
+const PORT_FLOW_LOSS_FLAG: &str = "--port-flow-loss";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
     let all: Vec<String> = std::env::args().collect();
+    let port_value = |flag: &str| all.iter().position(|a| a == flag).map(|i| {
+        all.get(i + 1).and_then(|s| s.parse::<f64>().ok()).filter(|x| x.is_finite()).unwrap_or_else(|| {
+            eprintln!("usage: {flag} FINITE_VALUE");
+            std::process::exit(2)
+        })
+    });
+    let port_radius = port_value(PORT_FLAG);
+    let port_flow_loss = port_value(PORT_FLOW_LOSS_FLAG);
+    if port_radius.is_some_and(|r| r <= 0.0) || port_flow_loss.is_some_and(|k| k < 0.0)
+        || (port_flow_loss.is_some() && port_radius.is_none()) {
+        eprintln!("refused: give {PORT_FLAG} RADIUS_M > 0 and optional {PORT_FLOW_LOSS_FLAG} K >= 0");
+        std::process::exit(1)
+    }
     let observer = all.iter().position(|a| a == OBSERVER_FLAG).map(|i| {
         all.get(i + 1).cloned().unwrap_or_else(|| {
             eprintln!("usage: {OBSERVER_FLAG} TABLE.tsv");
@@ -71,18 +88,22 @@ fn main() {
                 std::process::exit(1)
             })
     });
-    let valued = |i: usize| i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG);
+    let valued = |i: usize| i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K]]");
         std::process::exit(2);
+    }
+    if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
+        eprintln!("refused: {PORT_FLAG} needs a drum and the vent-capable Rayleigh observer; closed-body tables contain no opening");
+        std::process::exit(1)
     }
     let speed = a.get(3).map(|s| s.parse::<f64>().expect("speed")).filter(|v| *v > 0.0);
     let secs = a.get(4).map(|s| s.parse::<f64>().expect("seconds"));
@@ -92,9 +113,15 @@ fn main() {
     // FS_KIT_STROKE_TIMES lists a drum's strokes in seconds, comma separated, each at the same speed (a roll); unset, the one stroke at 5 ms
     let stroke_times: Vec<f64> = std::env::var("FS_KIT_STROKE_TIMES")
         .map_or_else(|_| vec![0.005], |s| s.split(',').map(|t| t.parse().expect("stroke time")).collect());
+    let configure_drum = |s: kit::DrumSpec| kit::DrumSpec {
+        head_dipole,
+        port: port_radius.or(s.port),
+        port_flow_loss: port_flow_loss.unwrap_or(s.port_flow_loss),
+        ..s
+    };
     let drum = |s: kit::DrumSpec, kick: bool, v: f64| {
         let hits: Vec<(f64, f64)> = stroke_times.iter().map(|&t| (t, v)).collect();
-        drum_cards::drum(&kit::DrumSpec { head_dipole, ..s }, tune, &hits, kick, preset_heads)
+        drum_cards::drum(&configure_drum(s), tune, &hits, kick, preset_heads)
     };
     // FS_KIT_GRID scales a cymbal's grid spacing (refinement studies; 1 is the kit's own grid)
     let grid: f64 = std::env::var("FS_KIT_GRID").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
@@ -155,7 +182,7 @@ fn main() {
                 std::process::exit(1)
             }
         };
-        match kit::attach_cavity_modes_with(&mut p, &spec, f_max, wall_loss) {
+        match kit::attach_cavity_modes_with(&mut p, &configure_drum(spec), f_max, wall_loss) {
             Ok(receipt) => p.notes.push(receipt),
             Err(e) => {
                 eprintln!("refused: {e}");
@@ -215,6 +242,12 @@ fn main() {
     }
     if let Some(dipole) = &p.instrument.rad_dipole {
         eprintln!("head dipole radiated {:.4e} J", dipole.radiated_j);
+    }
+    for (index, cavity) in p.instrument.cavities.iter().enumerate() {
+        if let Some(port) = &cavity.port {
+            eprintln!("vent {index}: {:.4e} J removed by linear and separated-flow pressure loss (K={})",
+                port.dissipated_j, port.flow_loss_coefficient());
+        }
     }
     eprintln!("{dur} s rendered in {wall:.1} s ({:.1}x real time); peak {peak:.3} Pa", wall / dur);
     assert!(peak.is_finite(), "non-finite output");

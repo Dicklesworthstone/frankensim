@@ -85,6 +85,9 @@ pub struct DrumSpec {
     pub wires: Option<Wires>,
     /// Front-head port radius (kick drums), m.
     pub port: Option<f64>,
+    /// Declared dimensionless K in dp = rho K (Q/A)|Q/A|/2. Zero disables
+    /// quasi-steady separated-flow loss; no value is inferred from geometry.
+    pub port_flow_loss: f64,
     pub mic: [f64; 3],
     /// The floor, in the drum's frame (the batter head at the origin; None: free field).
     pub floor: Option<Floor>,
@@ -297,6 +300,12 @@ pub fn kick_pillow_note(s: &DrumSpec) -> String {
 }
 
 fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Option<&KitMaterials>, preset_striker: bool) -> Result<Piece, String> {
+    if !s.port_flow_loss.is_finite() || s.port_flow_loss < 0.0 || (s.port.is_none() && s.port_flow_loss != 0.0) {
+        return Err("drum vent loss needs a vent and a finite nonnegative coefficient K".into());
+    }
+    if s.port.is_some_and(|radius| !radius.is_finite() || radius <= 0.0 || radius > 0.4 * s.radius) {
+        return Err("drum vent radius must be positive and fit at the declared off-center opening".into());
+    }
     let (batter_loss, reso_loss) = match materials {
         None => (FilmLoss::FittedT60, FilmLoss::FittedT60),
         Some(m) => match (m.primary_bending_loss(), m.secondary_bending_loss()) {
@@ -388,15 +397,19 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
     }
     let bi = ins.add(batter);
     let ri = ins.add(reso);
-    let port = s.port.map(|pr| {
+    let port = s.port.map(|pr| -> Result<Port, String> {
         let mut q = Port::new(pr, s.reso.thickness, [0.0, -0.6 * s.radius, -s.depth], -1.0);
         // small-ka radiation resistance at the Helmholtz frequency of cavity plus port
         let v = PI * s.radius * s.radius * s.depth;
         let fh = gas.sound_speed / (2.0 * PI) * (q.area / (v * q.length)).sqrt();
         q.resistance = gas.density * (2.0 * PI * fh).powi(2) / (2.0 * PI * gas.sound_speed);
+        q.set_flow_loss_coefficient(s.port_flow_loss)?;
         notes.push(format!("port {:.0} mm: Helmholtz {fh:.0} Hz with the cavity alone", 2e3 * pr));
-        q
-    });
+        if s.port_flow_loss > 0.0 {
+            notes.push(format!("vent separated-flow loss: declared K={}, dp=rho K (Q/A)|Q/A|/2; quasi-steady compact low-Mach closure, no resolved edge flow or jet-noise source; centered pressure work is accumulated in port.dissipated_j", s.port_flow_loss));
+        }
+        Ok(q)
+    }).transpose()?;
     ins.cavities.push(Cavity { heads: vec![bi, ri], volume: PI * s.radius * s.radius * s.depth, port });
     ins.rads.push(RadDamp::monopole(vec![bi, ri], f01(s.radius, s.batter, primary.2), &gas));
     if let Some((d, f_ref, resistance)) = head_dipole {
@@ -525,6 +538,7 @@ pub fn snare() -> DrumSpec {
         muffle: None,
         wires: Some(Wires::estimated()),
         port: None,
+        port_flow_loss: 0.0,
         mic: [0.35, 0.25, 0.9], // an overhead about 1 m away, 25 degrees off the drum's axis
         floor: Some(floor_z(-0.65)),
         provenance: FITTED_DRUM_RECEIPT,
@@ -554,6 +568,7 @@ pub fn kick() -> DrumSpec {
         muffle: Some((0.0, -0.16, 0.07, 22.0)),
         wires: None,
         port: None,
+        port_flow_loss: 0.0,
         // the drum lies on its side, y up: a declared overhead 1 m above the shell's top edge,
         // 0.1 m toward the drummer so that the batter (z = 0, facing +z) passes the baffled
         // microphone's facing test, and the floor under the hoops (ruling 8318)
@@ -593,6 +608,7 @@ pub fn tom(size_in: f64) -> DrumSpec {
         muffle: None,
         wires: None,
         port: None,
+        port_flow_loss: 0.0,
         mic: [0.35, 0.25, 0.9],
         floor: Some(floor_z(if size_in <= 12.5 { -0.75 } else { -0.55 })),
         provenance: FITTED_DRUM_RECEIPT,
@@ -1846,12 +1862,13 @@ mod air_mode_tests {
         // by uniform pressure alone would have exactly zero first acceleration.
         let rate = 96_000.0;
         let dt = 1.0 / rate;
-        for resistance in [0.0, 1500.0] {
+        for (resistance, coefficient) in [(0.0, 0.0), (1500.0, 0.0), (0.0, 1.7), (1500.0, 1.7)] {
             let mut ins = Instrument::new(rate);
             let head = ins.add(Body::point("head", 0.02));
             ins.bodies[head].h = 0.03;
             let mut port = Port::new(0.025, 0.0003, [0.0, 0.0, -0.15], -1.0);
             port.resistance = resistance;
+            port.set_flow_loss_coefficient(coefficient).unwrap();
             let inertance = ins.gas.density * port.length / port.area;
             ins.cavities.push(Cavity { heads: vec![head], volume: 0.02, port: Some(port) });
             let g = [0.0012, -0.0007];
@@ -1873,8 +1890,7 @@ mod air_mode_tests {
                 let old_volume = b.h * b.h * b.wp[0] + previous;
                 let mut e = 0.5 * b.mass[0] * ((b.w[0] - b.wp[0]) / dt).powi(2)
                     + 0.5 * inertance * port.u.powi(2)
-                    + 0.5 * ins.gas.density * ins.gas.sound_speed.powi(2) / 0.02 * volume * old_volume
-                    - 0.25 * dt * resistance * port.u.powi(2);
+                    + 0.5 * ins.gas.density * ins.gas.sound_speed.powi(2) / 0.02 * volume * old_volume;
                 for m in 0..2 {
                     let stretch = g[m] * b.w[0] + gp[m] * port.x - air.x[m];
                     let old_stretch = g[m] * b.wp[0] + gp[m] * previous - air.xp[m];
@@ -1888,15 +1904,19 @@ mod air_mode_tests {
             for step in 0..8000 {
                 ins.step(&mut []);
                 let port = ins.cavities[0].port.as_ref().unwrap();
+                let mean_flow = 0.5 * (previous_u + port.u);
+                let velocity = mean_flow / port.area;
+                let loss_pressure = resistance * mean_flow + 0.5 * ins.gas.density * coefficient * velocity * velocity.abs();
                 if step == 0 {
-                    let acceleration = (0..2).map(|m| gp[m] * kappa[m] * x0[m]).sum::<f64>() / inertance;
-                    assert!((port.du / acceleration - 1.0).abs() < 1e-14);
+                    let pressure = (0..2).map(|m| gp[m] * kappa[m] * x0[m]).sum::<f64>();
+                    assert!(((inertance * port.du + loss_pressure) / pressure - 1.0).abs() < 1e-14);
                 }
-                dissipated += dt * resistance * (0.5 * (previous_u + port.u)).powi(2);
+                dissipated += dt * mean_flow * loss_pressure;
                 previous_u = port.u;
                 drift = drift.max((energy(&ins) + dissipated - e0).abs() / e0);
+                assert!((port.dissipated_j - dissipated).abs() < 1e-12 * e0);
             }
-            assert!(drift < 2e-9, "R={resistance}: relative pressure-work drift {drift}");
+            assert!(drift < 2e-9, "R={resistance} K={coefficient}: relative pressure-work drift {drift}");
             if resistance > 0.0 { assert!(dissipated > 0.01 * e0); }
         }
     }
@@ -1916,6 +1936,12 @@ mod air_mode_tests {
         let term = ins.gas_admission_rate2(ins.rate) - before;
         let expected = 1e7 + 1e8 * 0.7_f64.powi(2) * inverse_mass;
         assert!((term / expected - 1.0).abs() < 1e-14);
+        let bound = ins.gas_admission_rate2(ins.rate);
+        let port = ins.cavities[0].port.as_mut().unwrap();
+        port.resistance = 1e12;
+        port.set_flow_loss_coefficient(1e8).unwrap();
+        assert_eq!(ins.gas_admission_rate2(ins.rate), bound,
+            "centered passive drag must not impose an explicit damping clock");
     }
 
     #[test]
@@ -1923,6 +1949,7 @@ mod air_mode_tests {
         let mut spec = snare();
         spec.wires = None;
         spec.port = Some(0.025);
+        spec.port_flow_loss = 1.7;
         spec.grid = 0.02;
         let mut piece = drum(&spec, &[]).unwrap();
         let original = piece.instrument.cavities[0].port.as_ref().unwrap().length;
@@ -1931,6 +1958,7 @@ mod air_mode_tests {
         assert_eq!(air.ports.len(), 1);
         let (index, projection) = &air.ports[0];
         let port = piece.instrument.cavities[*index].port.as_ref().unwrap();
+        assert_eq!(port.flow_loss_coefficient(), 1.7);
         assert_eq!(port.interior_end_correction, 0.0);
         assert!((port.length - (original - 0.85 * 0.025)).abs() < 1e-15);
         let modes = cylinder_air_modes(spec.radius, spec.depth, piece.instrument.gas.sound_speed, 2500.0);
@@ -1942,6 +1970,10 @@ mod air_mode_tests {
         piece.instrument.cavities[0].port.as_mut().unwrap().pos[0] = spec.radius;
         assert!(attach_cavity_modes(&mut piece, &spec, 2500.0).is_err());
         assert_eq!(piece.instrument.air_modes.len(), 1, "rejected attachment must be atomic");
+        spec.port = None;
+        assert!(drum(&spec, &[]).is_err(), "a loss coefficient without a vent must refuse");
+        spec.port = Some(spec.radius);
+        assert!(drum(&spec, &[]).is_err(), "an outside opening must refuse before construction");
     }
 
     #[test]
