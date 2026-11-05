@@ -3,6 +3,8 @@
 
 #[path = "tests/boundary.rs"]
 mod boundary;
+#[path = "tests/contact.rs"]
+mod contact;
 
 use super::*;
 use crate::thermal::transport::{

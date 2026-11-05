@@ -20,6 +20,7 @@ use fs_matdb::PropertyLineSlice;
 use fs_thermal::enthalpy::conduction::ConductiveLink;
 use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionLaw, ImplicitConductionState,
+    contact::ImplicitContactLaw,
     link::{ImplicitLinkLaw, ImplicitLinkState},
 };
 use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, ThermalLaw};
@@ -35,7 +36,8 @@ enum OriginalConduction<'a, 'm> {
 /// Preparation copies only its original k(T) knots into the existing bounded
 /// conductivity-integral owner. It retains the exact Cp or Cv object and source
 /// receipts. Many faces can borrow this same prepared layer; face construction
-/// and successful trial evaluation allocate nothing and query no material card.
+/// never copies its tables. Bulk trial evaluation allocates nothing and queries
+/// no material card; a separately bound contact retains its own evaluation costs.
 /// The separate integral-knot bound never narrows the original point law.
 #[derive(Debug)]
 pub struct CaloricConductionLayer<'a, 'm> {
@@ -120,6 +122,50 @@ pub struct IntegratedCaloricLink<'l, 'a, 'm> {
     geometry: LayerGeometry,
     resistance_m2_k_w: f64,
     config: LayerConductionConfig,
+    contact: Option<BoundCaloricContact<'l>>,
+}
+
+struct BoundCaloricContact<'a> {
+    law: &'a dyn ImplicitContactLaw,
+    bounds_j_kg: [[f64; 2]; 2],
+}
+
+impl core::fmt::Debug for BoundCaloricContact<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BoundCaloricContact")
+            .field("bounds_j_kg", &self.bounds_j_kg)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a> BoundCaloricContact<'a> {
+    fn new(
+        law: &'a dyn ImplicitContactLaw,
+        layers: [&CaloricConductionLayer<'_, '_>; 2],
+    ) -> Result<Self, DepositionError> {
+        let caloric = law.caloric_laws();
+        let bounds_j_kg = law.enthalpy_bounds_j_kg();
+        for side in 0..2 {
+            let [lo, hi] = bounds_j_kg[side];
+            let original = layers[side].caloric_law();
+            let [source_lo, source_hi] = layers[side].energy_bounds_j_kg();
+            if !lo.is_finite()
+                || !hi.is_finite()
+                || lo >= hi
+                || lo < source_lo
+                || hi > source_hi
+                || !core::ptr::addr_eq(
+                    original as *const dyn ThermalLaw,
+                    caloric[side] as *const dyn ThermalLaw,
+                )
+            {
+                return Err(DepositionError::InvalidInput(
+                    "integrated contact requires original ordered calorics and supported energy bounds",
+                ));
+            }
+        }
+        Ok(Self { law, bounds_j_kg })
+    }
 }
 
 impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
@@ -141,6 +187,70 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
         contact_resistance_m2_k_w: f64,
         config: LayerConductionConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        Self::prepare(
+            thermal,
+            link_id,
+            layers,
+            geometry,
+            contact_resistance_m2_k_w,
+            config,
+            None,
+            &mut checkpoint,
+        )
+    }
+
+    /// Bind one original state-dependent contact to the integrated material legs.
+    ///
+    /// The contact must retain the same ordered caloric objects and declare
+    /// finite h/u bounds inside their original support. Its resistance replaces
+    /// the contact once; `native_geometry()` therefore declares zero fixed
+    /// resistance. Attach this complete link with `with_link_laws`, without a
+    /// separate contact attachment or additional authored resistance.
+    ///
+    /// Every trial queries the actual resistance and its derivatives, then
+    /// applies dQ/de = (dQ/dT)(dT/de) + (dQ/dR'')(dR''/de) on each side.
+    /// Temperature-dependent contact can reverse a local differential slope
+    /// while its nonnegative resistance still gives passive signed heat flow.
+    /// The original contact owns its external conditions and evaluation costs.
+    ///
+    /// Initial admission uses this actual contact immediately. Disjoint source
+    /// temperature spans can be joined by a finite supported contact jump;
+    /// construction never first demands an unsupported perfect-contact state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_contact(
+        thermal: &DepositionSimulation<'_>,
+        link_id: u64,
+        layers: [&'l CaloricConductionLayer<'a, 'm>; 2],
+        geometry: LayerGeometry,
+        contact: &'l dyn ImplicitContactLaw,
+        config: LayerConductionConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        let contact = BoundCaloricContact::new(contact, layers)?;
+        Self::prepare(
+            thermal,
+            link_id,
+            layers,
+            geometry,
+            0.0,
+            config,
+            Some(contact),
+            &mut checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        thermal: &DepositionSimulation<'_>,
+        link_id: u64,
+        layers: [&'l CaloricConductionLayer<'a, 'm>; 2],
+        geometry: LayerGeometry,
+        contact_resistance_m2_k_w: f64,
+        config: LayerConductionConfig,
+        contact: Option<BoundCaloricContact<'l>>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
         checkpoint()?;
         let patch = thermal
@@ -177,8 +287,9 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
             geometry,
             resistance_m2_k_w: contact_resistance_m2_k_w,
             config,
+            contact,
         };
-        link.evaluate(energies, &mut checkpoint)?;
+        link.evaluate(energies, &mut *checkpoint)?;
         checkpoint()?;
         Ok(link)
     }
@@ -200,7 +311,8 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
         self.layers
     }
 
-    /// Exact geometry supplied to the native `ConductionObserver`.
+    /// Exact geometry supplied to the native `ConductionObserver`. A bound
+    /// contact source owns its resistance once, so the fixed entry stays zero.
     #[must_use]
     pub fn native_geometry(&self) -> ConductiveLink {
         ConductiveLink {
@@ -212,6 +324,8 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
 
     /// Full original layer/contact response at supported specific h/u endpoints.
     /// Positive power leaves A and enters B; no thermal history is changed.
+    /// Response derivatives hold contact resistance fixed. The `ImplicitLinkLaw`
+    /// response additionally includes the original contact's dR''/de chain rule.
     pub fn evaluate(
         &self,
         energies_j_kg: [f64; 2],
@@ -229,11 +343,26 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
         checkpoint()?;
         let a = self.layers[0].state_at_specific_energy(energies_j_kg[0])?;
         let b = self.layers[1].state_at_specific_energy(energies_j_kg[1])?;
+        let contact = if let Some(bound) = &self.contact {
+            for (energy, [lo, hi]) in energies_j_kg.into_iter().zip(bound.bounds_j_kg) {
+                if !(lo..=hi).contains(&energy) {
+                    return Err(DepositionError::MaterialDomain);
+                }
+            }
+            checkpoint()?;
+            let state = bound.law.state_at_specific_enthalpies(energies_j_kg)?;
+            state.admit()?;
+            checkpoint()?;
+            Some(state)
+        } else {
+            None
+        };
+        let resistance = contact.map_or(self.resistance_m2_k_w, |state| state.resistance_m2_k_w);
         let response = self
             .geometry
             .conduction(
                 self.layers.map(CaloricConductionLayer::conductivity_curve),
-                self.resistance_m2_k_w,
+                resistance,
             )?
             .evaluate(
                 [a.temperature_k, b.temperature_k],
@@ -246,15 +375,24 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
         let allowance = self.config.absolute_heat_tolerance_w
             + self.config.relative_heat_tolerance
                 * applied.abs().max(response.power_a_to_b_w.abs());
-        let derivatives = [
+        let mut derivatives = [
             response.endpoint_derivative_w_k[0] * a.temperature_slope_kg_k_j,
             response.endpoint_derivative_w_k[1] * b.temperature_slope_kg_k_j,
         ];
+        if let Some(state) = contact {
+            for side in 0..2 {
+                derivatives[side] = response.contact_resistance_derivative_w2_m2_k.mul_add(
+                    state.resistance_enthalpy_derivatives_m2_kg_k_w_j[side],
+                    derivatives[side],
+                );
+            }
+        }
         if !applied.is_finite()
             || !allowance.is_finite()
             || (applied - response.power_a_to_b_w).abs() > allowance
-            || !super::positive(derivatives[0])
-            || !super::positive(-derivatives[1])
+            || derivatives.iter().any(|value| !value.is_finite())
+            || (contact.is_none()
+                && (!super::positive(derivatives[0]) || !super::positive(-derivatives[1])))
         {
             return Err(DepositionError::Arithmetic);
         }
