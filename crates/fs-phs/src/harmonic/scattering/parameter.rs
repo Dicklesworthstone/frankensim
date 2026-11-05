@@ -11,7 +11,7 @@ use super::{
     finite, invalid, poll,
 };
 use crate::harmonic::{HarmonicParameterDirection, parameter};
-use parameter::{accumulate, at};
+use parameter::at;
 
 /// One selected boundary differentiated per unit of the caller's real parameter.
 /// The reference derivative follows the same authored order as wave_ports().
@@ -176,6 +176,8 @@ impl ScatteringFactor<'_> {
             wave_power_residual_w,
         } = response;
         let physical = parameter::finish_response(
+            model,
+            direction.ports,
             physical,
             observed,
             &physical_inputs,
@@ -183,7 +185,11 @@ impl ScatteringFactor<'_> {
             &mut cancelled,
         )?;
         let mut wave_derivatives = Vec::with_capacity(k);
-        let mut wave_supply = 0.0;
+        let mut wave_supply = crate::harmonic::physical_power_tangent_sum(
+            model, &physical_inputs, Some(&physical_input_derivative),
+            &physical.response.effort, &physical.effort_derivative, direction.ports,
+            |p| !self.model.selected[p], &mut cancelled,
+        )?;
         for (index, wave) in waves.iter().enumerate() {
             poll(&mut cancelled)?;
             let p = wave.original_port;
@@ -212,7 +218,9 @@ impl ScatteringFactor<'_> {
                     "parameter wave or independent boundary power overflows",
                 ));
             }
-            wave_supply += incident_power_w - outgoing_power_w;
+            wave_supply.product(incident_power_w, 1.0)
+                .and_then(|()| wave_supply.product(-outgoing_power_w, 1.0))
+                .ok_or_else(|| invalid("physical wave-supply tangent is not representable"))?;
             wave_derivatives.push(ScatteringWaveParameterDerivative {
                 original_port: p,
                 reference_derivative: dz,
@@ -224,11 +232,8 @@ impl ScatteringFactor<'_> {
                 power_residual_w,
             });
         }
-        for (p, &work) in physical.port_power_derivative.iter().enumerate() {
-            if !self.model.selected[p] {
-                wave_supply += work;
-            }
-        }
+        let wave_supply = wave_supply.value()
+            .ok_or_else(|| invalid("physical wave-supply tangent is not representable"))?;
         let wave_power_residual_derivative = physical.dissipated_power_derivative - wave_supply;
         if !wave_supply.is_finite() || !wave_power_residual_derivative.is_finite() {
             return Err(invalid("loaded parameter wave balance overflows"));
@@ -367,15 +372,9 @@ pub(super) fn add_parameter_source(
     let mut direct_output = vec![C64::ZERO; m];
     for p in 0..m {
         poll(cancelled)?;
-        let mut correction = C64::ZERO;
-        for i in 0..n {
-            accumulate(
-                &mut direct_output[p],
-                &mut correction,
-                effort[i].scale(at(direction.ports, i * m + p))
-                    + storage_action[i].scale(model.g[i * m + p]),
-            );
-        }
+        direct_output[p] = crate::harmonic::port_output_tangent(
+            &model.g, m, p, storage_action, direction.ports, effort,
+        )?;
     }
     let mut source = input_derivative.map_or_else(|| vec![C64::ZERO; m], <[C64]>::to_vec);
     for (index, &(p, z)) in owner.ports.iter().enumerate() {
@@ -391,12 +390,16 @@ pub(super) fn add_parameter_source(
     }
     for i in 0..n {
         poll(cancelled)?;
-        let mut correction = C64::ZERO;
-        for p in 0..m {
-            let map = physical_input[p].scale(at(direction.ports, i * m + p));
-            let source = source[p].scale(model.g[i * m + p]);
-            accumulate(&mut rhs[i], &mut correction, map + source);
-            if let Some(bound) = envelope.as_deref_mut() {
+        let range = i*m..(i+1)*m;
+        let terms = crate::harmonic::input_tangent_sums(
+            &model.g[range.clone()], direction.ports.map(|dg| &dg[range]),
+            physical_input, Some(&source), |_| true,
+        )?;
+        rhs[i] = crate::harmonic::input_value(terms, rhs[i])?;
+        if let Some(bound) = envelope.as_deref_mut() {
+            for p in 0..m {
+                let map = physical_input[p].scale(at(direction.ports, i * m + p));
+                let source = source[p].scale(model.g[i * m + p]);
                 bound[i] += map.abs() + source.abs();
             }
         }

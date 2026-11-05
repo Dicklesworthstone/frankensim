@@ -347,19 +347,20 @@ impl ScatteringFactor<'_> {
             physical.port_power_w[p] = power.active_w;
             physical.port_power_components[p] = power;
         }
-        physical.supplied_power_w = physical.port_power_w.iter().sum();
+        physical.supplied_power_w = super::physical_power(
+            &self.model.closed, &physical_inputs, &physical.effort, cancelled,
+        )?;
         physical.power_residual_w = physical.dissipated_power_w - physical.supplied_power_w;
-        let mut wave_supply: f64 = waves
-            .iter()
-            .map(|wave| wave.incident_power_w - wave.outgoing_power_w)
-            .sum();
-        for (p, &power) in physical.port_power_w.iter().enumerate() {
+        let mut wave_supply = super::physical_power_sum(&self.model.closed,
+            &physical_inputs, &physical.effort, |p| !self.model.selected[p], cancelled)?;
+        for wave in &waves {
             poll(cancelled)?;
-            if !self.model.selected[p] {
-                wave_supply += power;
-            }
+            wave_supply.product(wave.incident_power_w, 1.0)
+                .and_then(|()| wave_supply.product(-wave.outgoing_power_w, 1.0))
+                .ok_or_else(|| invalid("physical wave supply is not representable"))?;
         }
-        let wave_power_residual_w = physical.dissipated_power_w - wave_supply;
+        let wave_power_residual_w = physical.dissipated_power_w
+            - wave_supply.value().ok_or_else(|| invalid("physical wave supply is not representable"))?;
         if physical.port_power_w.iter().any(|v| !v.is_finite())
             || [
                 physical.supplied_power_w,

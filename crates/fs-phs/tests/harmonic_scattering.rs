@@ -1,7 +1,7 @@
 //! G1 independent physical oracles for original-state wave feedback.
 use fs_math::c64::C64;
 use fs_phs::harmonic::scattering::{ScatteringBudget, ScatteringModel};
-use fs_phs::harmonic::{HarmonicBudget, HarmonicError, HarmonicModel};
+use fs_phs::harmonic::{HarmonicBudget, HarmonicError, HarmonicModel, HarmonicParameterDirection};
 use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch};
 
 fn budget() -> HarmonicBudget {
@@ -47,6 +47,40 @@ fn power(r: &fs_phs::harmonic::scattering::ScatteringResponse) {
     for p in &r.waves {
         assert!(p.power_residual_w.abs() < 2e-10 * scale);
     }
+}
+
+#[test]
+fn quiet_wave_boundary_retains_coherent_ordinary_drive_and_both_work_accounts() {
+    let system = PortHamiltonian::new(
+        1, 4, vec![0.0], vec![1.0], vec![1.0, 1.0, 1.0, 0.0],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+    ).unwrap();
+    let model = prepare(&system, &[(3, 1.0)]);
+    let factor = model.factor(1.0, || false).unwrap();
+    let large = C64::from_re(2.0_f64.powi(54));
+    let coherent = [large, C64::ONE, -large, C64::ZERO];
+    let response = factor.response(&coherent, || false).unwrap();
+    close(response.physical.state[0], C64::new(0.5, 0.5), 1.0);
+    assert!((response.physical.supplied_power_w - 0.25).abs() < 3e-15);
+    assert!((response.physical.dissipated_power_w - 0.25).abs() < 3e-15);
+    power(&response);
+    let input = [C64::ZERO, C64::ONE, C64::ZERO, C64::ZERO];
+    let frequency = factor.response_with_frequency_derivative(
+        &input, Some(&coherent), || false,
+    ).unwrap();
+    close(frequency.state_derivative[0], C64::new(0.0, 0.5), 1.0);
+    assert!((frequency.supplied_power_derivative - 0.25).abs() < 3e-15);
+    assert!((frequency.dissipated_power_derivative - 0.25).abs() < 3e-15);
+    assert!(frequency.power_residual_derivative.abs() < 3e-15);
+    assert!(frequency.wave_power_residual_derivative.abs() < 3e-15);
+    let parameter = factor.response_with_parameter_derivative(
+        &input, HarmonicParameterDirection::default(), Some(&coherent), None, || false,
+    ).unwrap();
+    close(parameter.state_derivative[0], C64::new(0.5, 0.5), 1.0);
+    assert!((parameter.supplied_power_derivative - 0.5).abs() < 3e-15);
+    assert!((parameter.dissipated_power_derivative - 0.5).abs() < 3e-15);
+    assert!(parameter.power_residual_derivative.abs() < 3e-15);
+    assert!(parameter.wave_power_residual_derivative.abs() < 3e-15);
 }
 
 #[test]

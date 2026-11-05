@@ -54,6 +54,52 @@ fn damped_resonance_has_analytic_amplitude_phase_and_independent_power() {
 }
 
 #[test]
+fn coherent_drives_retain_weak_motion_and_original_physical_work() {
+    let system = PortHamiltonian::new(
+        1, 3, vec![0.0], vec![1.0], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let factor = model.factor(1.0, || false).unwrap();
+    let large = C64::from_re(2.0_f64.powi(54));
+    for weak in [C64::ONE, C64::new(0.75, 0.25)] {
+        for input in [[large, weak, -large], [-large, weak, large]] {
+            let response = factor.response(&input, || false).unwrap();
+            let state = weak / C64::new(1.0, -1.0);
+            near(response.state[0], state, 3e-15);
+            let heat = 0.5 * state.norm_sq();
+            assert!((response.supplied_power_w - heat).abs() < 3e-15 * heat);
+            assert!((response.dissipated_power_w - heat).abs() < 3e-15 * heat);
+            assert!(response.power_residual_w.abs() < 3e-15 * heat);
+            assert!(response.relative_residual < 1e-14);
+        }
+    }
+}
+
+#[test]
+fn physical_work_survives_rounding_of_individual_port_observations() {
+    // The first state is lossless, the second has unit loss. With this input
+    // x=[L,1], so the physical mean loss is 1/2. Both separately reported
+    // outputs round to L; summing their rounded port powers would return zero.
+    let system = PortHamiltonian::new(
+        2, 2, vec![0.0; 4], vec![0.0, 0.0, 0.0, 1.0],
+        vec![1.0, 1.0, 1.0, 0.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let large = 2.0_f64.powi(54);
+    let response = model.factor(1.0, || false).unwrap()
+        .response(&[C64::new(1.0, -1.0), C64::new(-1.0, -large)], || false).unwrap();
+    near(response.state[0], C64::from_re(large), 3e-15);
+    near(response.state[1], C64::ONE, 3e-15);
+    assert_eq!(response.output, [C64::from_re(large); 2]);
+    assert_eq!(response.port_power_w.iter().sum::<f64>(), 0.0);
+    assert!((response.supplied_power_w - 0.5).abs() < 3e-15);
+    assert!((response.dissipated_power_w - 0.5).abs() < 3e-15);
+    assert!(response.power_residual_w.abs() < 3e-15);
+}
+
+#[test]
 fn coherent_port_sum_preserves_a_weak_phasor_between_opposite_strong_responses() {
     // Three independent unit relaxation states have x_i = u_i / (1-i*w).
     // The fourth port observes their signed sum with no applied input.
@@ -279,6 +325,19 @@ fn reactive_power_keeps_zero_power_factor_and_representable_extreme_scales() {
     assert_eq!(large.power_factor(), Some(1.0));
     let rescaled = HarmonicPortPower::from_peak(C64::from_re(1e-308), C64::from_re(1e308)).unwrap();
     assert!((rescaled.active_w - 0.5).abs() < 2e-16);
+    // Halving an entire complex phasor would erase its subnormal quadrature
+    // before the large conjugate makes its active work representable.
+    let scale = 2.0_f64.powi(500);
+    let weak = HarmonicPortPower::from_peak(
+        C64::new(scale, f64::from_bits(1)), C64::new(0.0, scale),
+    ).unwrap();
+    assert_eq!(weak.active_w, 2.0_f64.powi(-575));
+    assert_eq!(weak.quadrature_w, 2.0_f64.powi(999));
+    let delta = 2.0_f64.powi(-27);
+    let remainder = HarmonicPortPower::from_peak(
+        C64::new(1.0 + delta, 1.0), C64::new(1.0 - delta, -1.0),
+    ).unwrap();
+    assert_eq!(remainder.active_w, -2.0_f64.powi(-55));
     assert!(HarmonicPortPower::from_peak(C64::from_re(f64::NAN), C64::ZERO).is_err());
     assert!(HarmonicPortPower::from_peak(C64::from_re(f64::MAX), C64::from_re(4.0)).is_err());
 }

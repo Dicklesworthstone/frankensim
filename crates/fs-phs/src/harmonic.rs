@@ -14,6 +14,7 @@
 //! An AC solution does not imply that free transients decay to it.
 
 use crate::{DescriptorPortHamiltonian, PortHamiltonian, Storage};
+use crate::interconnection::accumulation::Sum;
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::c64::C64;
 
@@ -191,15 +192,19 @@ impl HarmonicPortPower {
         if !finite(input) || !finite(output) {
             return Err(invalid("finite peak conjugate port amplitudes required"));
         }
-        // Apply the peak-to-mean factor before the product, to retain finite
-        // half-products near f64::MAX. Halve the larger operand so a tiny
-        // phasor is not flushed before multiplication by a large conjugate.
-        let exchange = if input.re.abs().max(input.im.abs()) >= output.re.abs().max(output.im.abs())
-        {
-            input.scale(0.5).conj() * output
-        } else {
-            input.conj() * output.scale(0.5)
-        };
+        // Retain product remainders and apply the peak factor to each scalar
+        // pair. Scaling an entire phasor can erase its tiny other quadrature.
+        let mut active = Sum::default();
+        let mut quadrature = Sum::default();
+        active.half_product(input.re, output.re)
+            .and_then(|()| active.half_product(input.im, output.im))
+            .and_then(|()| quadrature.half_product(input.re, output.im))
+            .and_then(|()| quadrature.half_product(-input.im, output.re))
+            .ok_or_else(|| invalid("conjugate port power is not representable"))?;
+        let exchange = C64::new(
+            active.value().ok_or_else(|| invalid("conjugate port power is not representable"))?,
+            quadrature.value().ok_or_else(|| invalid("conjugate port power is not representable"))?,
+        );
         let apparent_w = exchange.abs();
         if !finite(exchange) || !apparent_w.is_finite() {
             return Err(invalid("conjugate port power is not representable"));
@@ -238,7 +243,9 @@ pub struct HarmonicResponse {
     /// Complete scalar power components in the same original port order.
     /// These use actual boundary inputs, including physical wave feedback.
     pub port_power_components: Vec<HarmonicPortPower>,
-    /// Sum of supplied powers, signed into the system [W].
+    /// Aggregate original port exchange, signed into the system [W]. Carries
+    /// the original G*u contraction through the effort before final rounding;
+    /// work smaller than individual output/power rounding remains observable.
     pub supplied_power_w: f64,
     /// Independently evaluated Re(e* R e + e* T x)/2 [W]. T is present only
     /// for explicit nonlinear equilibrium models. Then this is signed
@@ -471,9 +478,7 @@ impl HarmonicFactor<'_> {
         let mut rhs = vec![C64::ZERO; n];
         for i in 0..n {
             poll(&mut cancelled)?;
-            for p in 0..m {
-                rhs[i] = rhs[i] + input[p].scale(model.g[i * m + p]);
-            }
+            rhs[i] = input_value(input_row_sums(&model.g[i*m..(i+1)*m], |p| input[p])?, C64::ZERO)?;
         }
         let (state, relative) = self.solve_rhs(&rhs, &mut cancelled)?;
         let mut effort = state.clone();
@@ -511,7 +516,7 @@ impl HarmonicFactor<'_> {
             port_power.push(power.active_w);
             port_power_components.push(power);
         }
-        let supply: f64 = port_power.iter().sum();
+        let supply = physical_power(model, input, &effort, &mut cancelled)?;
         let balance = loss - supply;
         if effort.iter().chain(&output).any(|&v| !finite(v))
             || port_power.iter().any(|v| !v.is_finite())
@@ -647,7 +652,6 @@ fn port_output_tangent(
     g: &[f64], ports: usize, port: usize, effort_derivative: &[C64],
     port_derivative: Option<&[f64]>, effort: &[C64],
 ) -> Result<C64, HarmonicError> {
-    use crate::interconnection::accumulation::Sum;
     let contract = || -> Option<C64> {
         let mut re = Sum::default();
         let mut im = Sum::default();
@@ -671,4 +675,120 @@ fn port_output_tangent(
         Some(C64::new(re.value()?, im.value()?))
     };
     contract().ok_or_else(|| invalid("physical port output tangent is not representable"))
+}
+
+// Retain each physical input row's two words until its final consumer. In
+// particular, power and tangent rows must not consume an already-rounded G*u.
+fn input_row_sums(row: &[f64], input: impl Fn(usize) -> C64) -> Result<[Sum; 2], HarmonicError> {
+    Ok([
+        crate::port_input_row(row, |p| input(p).re)
+            .ok_or_else(|| invalid("physical input contraction is not representable"))?,
+        crate::port_input_row(row, |p| input(p).im)
+            .ok_or_else(|| invalid("physical input contraction is not representable"))?,
+    ])
+}
+
+fn input_tangent_sums(
+    row: &[f64], direction: Option<&[f64]>, input: &[C64], derivative: Option<&[C64]>,
+    keep: impl Fn(usize) -> bool,
+) -> Result<[Sum; 2], HarmonicError> {
+    let mut sums = if let Some(du) = derivative {
+        input_row_sums(row, |p| if keep(p) { du[p] } else { C64::ZERO })?
+    } else {
+        [Sum::default(); 2]
+    };
+    if let Some(dg) = direction {
+        let terms = input_row_sums(dg, |p| if keep(p) { input[p] } else { C64::ZERO })?;
+        for k in 0..2 {
+            sums[k].add_scaled(terms[k], 1.0)
+                .ok_or_else(|| invalid("physical input tangent is not representable"))?;
+        }
+    }
+    Ok(sums)
+}
+
+// The existing generator action or i*E*x joins the unrounded input terms.
+// Adding it after input_value would lose weak motion when these terms cancel.
+fn input_value([mut re, mut im]: [Sum; 2], initial: C64) -> Result<C64, HarmonicError> {
+    re.product(initial.re, 1.0)
+        .and_then(|()| im.product(initial.im, 1.0))
+        .ok_or_else(|| invalid("physical input row is not representable"))?;
+    Ok(C64::new(
+        re.value().ok_or_else(|| invalid("physical input row is not representable"))?,
+        im.value().ok_or_else(|| invalid("physical input row is not representable"))?,
+    ))
+}
+
+fn physical_power(
+    model: &HarmonicModel, input: &[C64], effort: &[C64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, HarmonicError> {
+    physical_power_sum(model, input, effort, |_| true, cancelled)?.value()
+        .ok_or_else(|| invalid("physical supplied power is not representable"))
+}
+
+// A wave account selects only its ordinary ports, then appends its independent
+// incident/outgoing fluxes to this same retained sum before final rounding.
+fn physical_power_sum(
+    model: &HarmonicModel, input: &[C64], effort: &[C64], keep: impl Fn(usize) -> bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Sum, HarmonicError> {
+    let mut power = Sum::default();
+    for (i, e) in effort.iter().enumerate() {
+        poll(cancelled)?;
+        let [re, im] = input_row_sums(&model.g[i*model.m..(i+1)*model.m],
+            |p| if keep(p) { input[p] } else { C64::ZERO })?;
+        power.add_half_scaled(re, e.re)
+            .and_then(|()| power.add_half_scaled(im, e.im))
+            .ok_or_else(|| invalid("physical supplied power is not representable"))?;
+    }
+    Ok(power)
+}
+
+fn physical_power_tangent(
+    model: &HarmonicModel, input: &[C64], input_derivative: Option<&[C64]>,
+    effort: &[C64], effort_derivative: &[C64], port_derivative: Option<&[f64]>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, HarmonicError> {
+    physical_power_tangent_sum(model, input, input_derivative, effort,
+        effort_derivative, port_derivative, |_| true, cancelled)?.value()
+        .ok_or_else(|| invalid("physical supplied-power tangent is not representable"))
+}
+
+#[allow(clippy::too_many_arguments)] // retain original efforts, source directions and port selection
+fn physical_power_tangent_sum(
+    model: &HarmonicModel, input: &[C64], input_derivative: Option<&[C64]>,
+    effort: &[C64], effort_derivative: &[C64], port_derivative: Option<&[f64]>,
+    keep: impl Fn(usize) -> bool, cancelled: &mut impl FnMut() -> bool,
+) -> Result<Sum, HarmonicError> {
+    let mut power = Sum::default();
+    for (i, (e, de)) in effort.iter().zip(effort_derivative).enumerate() {
+        poll(cancelled)?;
+        let range = i*model.m..(i+1)*model.m;
+        let original = input_row_sums(&model.g[range.clone()],
+            |p| if keep(p) { input[p] } else { C64::ZERO })?;
+        let derivative = input_tangent_sums(&model.g[range.clone()],
+            port_derivative.map(|dg| &dg[range]), input, input_derivative, &keep)?;
+        for (k, (e, de)) in [(e.re, de.re), (e.im, de.im)].into_iter().enumerate() {
+            power.add_half_scaled(original[k], de)
+                .and_then(|()| power.add_half_scaled(derivative[k], e))
+                .ok_or_else(|| invalid("physical supplied-power tangent is not representable"))?;
+        }
+    }
+    Ok(power)
+}
+
+fn peak_power_tangent(
+    input: C64, output: C64, input_derivative: Option<C64>, output_derivative: C64,
+) -> Result<f64, HarmonicError> {
+    let mut power = Sum::default();
+    if let Some(du) = input_derivative {
+        power.half_product(du.re, output.re)
+            .and_then(|()| power.half_product(du.im, output.im))
+            .ok_or_else(|| invalid("conjugate port-power tangent is not representable"))?;
+    }
+    power.half_product(input.re, output_derivative.re)
+        .and_then(|()| power.half_product(input.im, output_derivative.im))
+        .ok_or_else(|| invalid("conjugate port-power tangent is not representable"))?;
+    power.value().ok_or_else(|| invalid("conjugate port-power tangent is not representable"))
 }

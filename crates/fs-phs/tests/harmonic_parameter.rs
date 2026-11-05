@@ -38,6 +38,37 @@ fn near_real(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn coherent_parameter_sources_and_port_map_preserve_weak_motion_and_work() {
+    let system = PortHamiltonian::new(
+        1, 3, vec![0.0], vec![1.0], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let factor = model.factor(1.0, || false).unwrap();
+    let large = C64::from_re(2.0_f64.powi(54));
+    let coherent = [large, C64::ONE, -large];
+    let result = factor.response_with_parameter_derivative(
+        &[C64::ZERO, C64::ONE, C64::ZERO], Direction::default(),
+        Some(&coherent), || false,
+    ).unwrap();
+    near(result.state_derivative[0], C64::new(0.5, 0.5), 3e-15);
+    near_real(result.supplied_power_derivative, 0.5, 3e-15);
+    near_real(result.dissipated_power_derivative, 0.5, 3e-15);
+    near_real(result.power_residual_derivative, 0.0, 3e-15);
+    // Scaling G and the original coherent excitation together gives dx=2x.
+    // Each of dG*u and G*du must retain the weak source independently.
+    let result = factor.response_with_parameter_derivative(
+        &coherent, Direction { ports: Some(&[1.0; 3]), ..Direction::default() },
+        Some(&coherent), || false,
+    ).unwrap();
+    near(result.state_derivative[0], C64::new(1.0, 1.0), 3e-15);
+    near_real(result.supplied_power_derivative, 1.0, 3e-15);
+    near_real(result.dissipated_power_derivative, 1.0, 3e-15);
+    near_real(result.power_residual_derivative, 0.0, 3e-15);
+    assert!(result.relative_derivative_residual < 1e-14);
+}
+
+#[test]
 fn mass_stiffness_and_loss_tangents_match_the_driven_high_q_oscillator() {
     let (mass, stiffness) = (2.0, 8.0);
     let (force, du) = (C64::new(0.7, -0.3), C64::new(0.03, -0.02));

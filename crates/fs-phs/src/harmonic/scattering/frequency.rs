@@ -111,13 +111,17 @@ impl ScatteringFactor<'_> {
         let mut port_power_derivative = Vec::with_capacity(input.len());
         for p in 0..input.len() {
             poll(&mut cancelled)?;
-            port_power_derivative.push(
-                half_pair(physical_input_derivative[p], response.physical.output[p])?
-                    + half_pair(response.physical_inputs[p], raw.output_derivative[p])?,
-            );
+            port_power_derivative.push(crate::harmonic::peak_power_tangent(
+                response.physical_inputs[p], response.physical.output[p],
+                Some(physical_input_derivative[p]), raw.output_derivative[p],
+            )?);
         }
         let mut wave_derivatives = Vec::with_capacity(self.model.ports.len());
-        let mut wave_supply_derivative = 0.0;
+        let mut wave_supply_derivative = crate::harmonic::physical_power_tangent_sum(
+            &self.model.closed, &response.physical_inputs, Some(&physical_input_derivative),
+            &response.physical.effort, &raw.effort_derivative, None,
+            |p| !self.model.selected[p], &mut cancelled,
+        )?;
         for wave in &response.waves {
             poll(&mut cancelled)?;
             let p = wave.original_port;
@@ -143,7 +147,9 @@ impl ScatteringFactor<'_> {
                     "wave amplitude or power derivative is not representable",
                 ));
             }
-            wave_supply_derivative += incident_power_w - outgoing_power_w;
+            wave_supply_derivative.product(incident_power_w, 1.0)
+                .and_then(|()| wave_supply_derivative.product(-outgoing_power_w, 1.0))
+                .ok_or_else(|| invalid("physical wave-supply tangent is not representable"))?;
             wave_derivatives.push(ScatteringWaveDerivative {
                 original_port: p,
                 incident,
@@ -154,16 +160,15 @@ impl ScatteringFactor<'_> {
                 power_residual_w,
             });
         }
-        for (p, &power) in port_power_derivative.iter().enumerate() {
-            poll(&mut cancelled)?;
-            if !self.model.selected[p] {
-                wave_supply_derivative += power;
-            }
-        }
-        let supplied_power_derivative: f64 = port_power_derivative.iter().sum();
+        let supplied_power_derivative = crate::harmonic::physical_power_tangent(
+            &self.model.closed, &response.physical_inputs, Some(&physical_input_derivative),
+            &response.physical.effort, &raw.effort_derivative, None, &mut cancelled,
+        )?;
         let dissipated_power_derivative = raw.dissipated_power_derivative;
         let power_residual_derivative = dissipated_power_derivative - supplied_power_derivative;
-        let wave_power_residual_derivative = dissipated_power_derivative - wave_supply_derivative;
+        let wave_power_residual_derivative = dissipated_power_derivative
+            - wave_supply_derivative.value()
+                .ok_or_else(|| invalid("physical wave-supply tangent is not representable"))?;
         if port_power_derivative.iter().any(|x| !x.is_finite())
             || [
                 supplied_power_derivative,

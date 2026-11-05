@@ -30,7 +30,8 @@ pub struct HarmonicFrequencyResponse {
     pub mean_stored_energy_derivative: f64,
     /// Per-port supplied mean-power derivatives [W per rad/s].
     pub port_power_derivative: Vec<f64>,
-    /// Sum of the original port-power derivatives [W per rad/s].
+    /// Derivative of aggregate original port exchange [W per rad/s], with
+    /// coupling remainders retained through the effort contraction.
     pub supplied_power_derivative: f64,
     /// Independent derivative of `Re(e* R e + e* T x)/2` [W per rad/s].
     /// Nonlinear equilibrium images retain signed incremental work; this is
@@ -121,14 +122,13 @@ impl HarmonicFactor<'_> {
         let mut rhs = vec![C64::ZERO; n];
         for i in 0..n {
             poll(&mut cancelled)?;
-            if let Some(derivative) = input_derivative {
-                for p in 0..m {
-                    rhs[i] = rhs[i] + derivative[p].scale(model.g[i * m + p]);
-                }
-            }
-            if i < model.n_diff {
-                rhs[i] = rhs[i] + C64::new(-response.state[i].im, response.state[i].re);
-            }
+            let initial = if i < model.n_diff {
+                C64::new(-response.state[i].im, response.state[i].re)
+            } else { C64::ZERO };
+            let terms = super::input_tangent_sums(
+                &model.g[i*m..(i+1)*m], None, input, input_derivative, |_| true,
+            )?;
+            rhs[i] = super::input_value(terms, initial)?;
         }
         let (state_derivative, relative_derivative_residual) =
             self.solve_rhs(&rhs, &mut cancelled)?;
@@ -170,14 +170,12 @@ impl HarmonicFactor<'_> {
         let mut port_power_derivative = Vec::with_capacity(m);
         for p in 0..m {
             poll(&mut cancelled)?;
-            let derivative = if let Some(values) = input_derivative {
-                half_pair(values[p], response.output[p])?
-            } else {
-                0.0
-            } + half_pair(input[p], output_derivative[p])?;
+            let derivative = super::peak_power_tangent(input[p], response.output[p],
+                input_derivative.map(|values| values[p]), output_derivative[p])?;
             port_power_derivative.push(derivative);
         }
-        let supply_derivative: f64 = port_power_derivative.iter().sum();
+        let supply_derivative = super::physical_power_tangent(model, input, input_derivative,
+            &response.effort, &effort_derivative, None, &mut cancelled)?;
         let balance_derivative = loss_derivative - supply_derivative;
         if effort_derivative
             .iter()

@@ -33,6 +33,41 @@ fn near_real(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn coherent_frequency_sources_and_storage_action_share_the_original_row() {
+    let system = PortHamiltonian::new(
+        1, 3, vec![0.0], vec![1.0], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let factor = model.factor(1.0, || false).unwrap();
+    let large = 2.0_f64.powi(54);
+    let result = factor.response_with_frequency_derivative(
+        &[C64::ZERO, C64::ONE, C64::ZERO],
+        Some(&[C64::from_re(large), C64::ONE, C64::from_re(-large)]), || false,
+    ).unwrap();
+    near(result.state_derivative[0], C64::new(0.0, 0.5), 3e-15);
+    near_real(result.supplied_power_derivative, 0.25, 3e-15);
+    near_real(result.dissipated_power_derivative, 0.25, 3e-15);
+    near_real(result.power_residual_derivative, 0.0, 3e-15);
+    // A lossless state gives x=iL exactly. G*du=L+1 and i*x=-L must
+    // share the retained row before rounding, leaving x'=i at unit frequency.
+    let lossless = PortHamiltonian::new(
+        1, 3, vec![0.0], vec![0.0], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap()),
+    ).unwrap();
+    let lossless = HarmonicModel::from_ode(&lossless, budget(), || false).unwrap();
+    let factor = lossless.factor(1.0, || false).unwrap();
+    let result = factor.response_with_frequency_derivative(
+        &[C64::from_re(large), C64::ZERO, C64::ZERO],
+        Some(&[C64::from_re(large), C64::ONE, C64::ZERO]), || false,
+    ).unwrap();
+    near(result.state_derivative[0], C64::new(0.0, 1.0), 3e-15);
+    near_real(result.supplied_power_derivative, 0.0, 3e-15);
+    near_real(result.dissipated_power_derivative, 0.0, 3e-15);
+    assert!(result.relative_derivative_residual < 1e-14);
+}
+
+#[test]
 fn oscillator_derivatives_resolve_high_q_amplitude_phase_and_physical_energy() {
     let (mass, stiffness) = (2.0, 8.0);
     for damping in [0.6, 1e-7] {

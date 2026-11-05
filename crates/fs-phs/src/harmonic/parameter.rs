@@ -303,21 +303,10 @@ impl HarmonicFactor<'_> {
         let mut rhs = action.generator.clone();
         for i in 0..n {
             poll(&mut cancelled)?;
-            let mut correction = C64::ZERO;
-            for p in 0..m {
-                accumulate(
-                    &mut rhs[i],
-                    &mut correction,
-                    input[p].scale(at(direction.ports, i * m + p)),
-                );
-                if let Some(du) = input_derivative {
-                    accumulate(
-                        &mut rhs[i],
-                        &mut correction,
-                        du[p].scale(model.g[i * m + p]),
-                    );
-                }
-            }
+            let range = i*m..(i+1)*m;
+            let terms = super::input_tangent_sums(&model.g[range.clone()],
+                direction.ports.map(|dg| &dg[range]), input, input_derivative, |_| true)?;
+            rhs[i] = super::input_value(terms, rhs[i])?;
         }
         let (state_derivative, relative_derivative_residual) =
             self.solve_rhs(&rhs, &mut cancelled)?;
@@ -330,7 +319,7 @@ impl HarmonicFactor<'_> {
             relative_derivative_residual,
             &mut cancelled,
         )?;
-        finish_response(response, observed, input, input_derivative, &mut cancelled)
+        finish_response(model, direction.ports, response, observed, input, input_derivative, &mut cancelled)
     }
 }
 
@@ -434,6 +423,8 @@ pub(super) fn observe_state(
 
 /// Close the original physical account using actual inputs and their tangents.
 pub(super) fn finish_response(
+    model: &HarmonicModel,
+    port_derivative: Option<&[f64]>,
     response: HarmonicResponse,
     observed: ParameterStateDerivative,
     input: &[C64],
@@ -452,14 +443,12 @@ pub(super) fn finish_response(
     let mut port_power_derivative = Vec::with_capacity(m);
     for p in 0..m {
         poll(&mut cancelled)?;
-        let derivative = if let Some(du) = input_derivative {
-            half_pair(du[p], response.output[p])?
-        } else {
-            0.0
-        } + half_pair(input[p], output_derivative[p])?;
+        let derivative = super::peak_power_tangent(input[p], response.output[p],
+            input_derivative.map(|du| du[p]), output_derivative[p])?;
         port_power_derivative.push(derivative);
     }
-    let supply_derivative: f64 = port_power_derivative.iter().sum();
+    let supply_derivative = super::physical_power_tangent(model, input, input_derivative,
+        &response.effort, &effort_derivative, port_derivative, &mut cancelled)?;
     let balance_derivative = loss_derivative - supply_derivative;
     if effort_derivative
         .iter()
