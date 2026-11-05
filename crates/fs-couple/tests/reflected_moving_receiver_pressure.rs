@@ -1,6 +1,7 @@
 //! G1/G3 reflected source histories sampled on the original moving microphone.
 
 use fs_aeroac::AeroacError;
+use fs_aeroac::curle3d::moving::flow::UniformFlowFrame;
 use fs_aeroac::curle3d::moving::trajectory::{
     MovingReceiverBudget, MovingReceiverConfig, MovingReflectionObserver,
     PreparedKinematicTrajectory, PreparedReflectedMovingReceiverSource, ReflectedTrajectoryBudget,
@@ -20,6 +21,13 @@ type Track<'a> = CompactSourceHistory<'a, &'a PreparedReflectedMovingReceiverSou
 type Renderer<'a> = MovingCompactRenderer<'a, &'a PreparedReflectedMovingReceiverSource<'a>>;
 
 fn path(times: &[f64], motion: impl Fn(f64) -> SourceKinematics) -> PreparedKinematicTrajectory {
+    path_with_flow(times, motion, None)
+}
+fn path_with_flow(
+    times: &[f64],
+    motion: impl Fn(f64) -> SourceKinematics,
+    frame: Option<UniformFlowFrame>,
+) -> PreparedKinematicTrajectory {
     let samples: Vec<_> = times
         .iter()
         .map(|&source_time_s| TimedSourceKinematics {
@@ -27,19 +35,25 @@ fn path(times: &[f64], motion: impl Fn(f64) -> SourceKinematics) -> PreparedKine
             kinematics: motion(source_time_s),
         })
         .collect();
-    PreparedKinematicTrajectory::new(
-        FluidAcousticState::try_new(1.2, 300.0).unwrap(),
-        &samples,
-        0.8,
-        TrajectoryBudget {
-            maximum_segments: 8,
-            maximum_payload_bytes: 131_072,
-            maximum_bound_nodes: 4096,
-            maximum_subdivision_depth: 20,
-            maximum_root_iterations: 96,
-        },
-        &mut || false,
-    )
+    let medium = FluidAcousticState::try_new(1.2, 300.0).unwrap();
+    let budget = TrajectoryBudget {
+        maximum_segments: 8,
+        maximum_payload_bytes: 131_072,
+        maximum_bound_nodes: 4096,
+        maximum_subdivision_depth: 20,
+        maximum_root_iterations: 96,
+    };
+    match frame {
+        Some(frame) => PreparedKinematicTrajectory::in_uniform_flow(
+            medium,
+            &samples,
+            frame,
+            0.8,
+            budget,
+            &mut || false,
+        ),
+        None => PreparedKinematicTrajectory::new(medium, &samples, 0.8, budget, &mut || false),
+    }
     .unwrap()
 }
 fn source(t: f64) -> SourceKinematics {
@@ -181,6 +195,9 @@ fn norm(a: [f64; 3]) -> f64 {
     dot(a, a).sqrt()
 }
 fn reference_pressure(time: f64) -> f64 {
+    reference_pressure_in_flow(time, [0.0; 3])
+}
+fn reference_pressure_in_flow(time: f64, wind: [f64; 3]) -> f64 {
     let x = microphone(time).position_m;
     (0..4)
         .map(|mask| {
@@ -191,7 +208,9 @@ fn reference_pressure(time: f64) -> f64 {
             for _ in 0..90 {
                 let tau = lo.midpoint(hi);
                 let y = image(source(tau).position_m, mask);
-                let distance = norm(core::array::from_fn(|i| x[i] - y[i]));
+                let distance = norm(core::array::from_fn(|i| {
+                    x[i] - y[i] - wind[i] * (time - tau)
+                }));
                 if tau + distance / 300.0 < time {
                     lo = tau;
                 } else {
@@ -201,12 +220,13 @@ fn reference_pressure(time: f64) -> f64 {
             let tau = lo.midpoint(hi);
             let state = source(tau);
             let y = image(state.position_m, mask);
-            let v = image(state.velocity_m_s, mask);
+            let lab_velocity = image(state.velocity_m_s, mask);
+            let v: [f64; 3] = core::array::from_fn(|i| lab_velocity[i] - wind[i]);
             let acceleration = image(state.acceleration_m_s2, mask);
             let s = strength(tau, 1.0);
             let force = image(s.force_on_fluid_n, mask);
             let force_rate = image(s.force_rate_on_fluid_n_s, mask);
-            let displacement = core::array::from_fn(|i| x[i] - y[i]);
+            let displacement = core::array::from_fn(|i| x[i] - y[i] - wind[i] * (time - tau));
             let r = norm(displacement);
             let n = displacement.map(|v| v / r);
             let m = v.map(|v| v / 300.0);
@@ -224,6 +244,49 @@ fn reference_pressure(time: f64) -> f64 {
             (if mask & 2 == 0 { 1.0 } else { -1.0 }) * (q + f) / (4.0 * PI)
         })
         .sum()
+}
+
+#[test]
+fn convected_reflections_reach_the_original_moving_microphone_pressure_sink() {
+    let wind = [0.0, 0.0, 60.0];
+    let frame = UniformFlowFrame::new(wind, 0.5, [100.0, -40.0, 30.0]).unwrap();
+    let a = path_with_flow(&[-0.3, -0.04, 0.11, 0.4], source, Some(frame));
+    let b = path_with_flow(&[0.0, 0.07, 0.2], microphone, Some(frame));
+    let observer = MovingReflectionObserver::in_uniform_flow(
+        &b,
+        &[
+            IdealAcousticPlane::new([0.0; 3], [1.0, 0.0, 0.0], IdealPlaneBoundary::Rigid).unwrap(),
+            IdealAcousticPlane::new(
+                [0.0; 3],
+                [0.0, 1.0, 0.0],
+                IdealPlaneBoundary::PressureRelease,
+            )
+            .unwrap(),
+        ],
+        4,
+        bounds(),
+        &mut || false,
+    )
+    .unwrap();
+    let motion = reflected(&a, &observer);
+    let samples = history(1.0);
+    let tracks = [track(&motion, &samples)];
+    let mut renderer = build(&tracks, config());
+    let sink: &mut dyn PressureRenderer = &mut renderer;
+    let mut output = [0.0; 101];
+    sink.block(&mut output).unwrap();
+    for (index, value) in output.into_iter().enumerate() {
+        let time = renderer.receiver_time_at(index as u64).unwrap();
+        let expected = reference_pressure_in_flow(time, wind);
+        assert!(
+            (value - expected).abs() <= 3e-9 * expected.abs().max(1e-10),
+            "{index} {value:e} != {expected:e}"
+        );
+        assert_eq!(
+            renderer.observer_at(time).unwrap().observer_position_m(),
+            b.kinematics_at(time).unwrap().position_m
+        );
+    }
 }
 
 #[test]

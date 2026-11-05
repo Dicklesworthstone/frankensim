@@ -1392,7 +1392,22 @@ Shape/work/clock and all physical frequencies are admitted before output writes.
 
 The existing continuous relative-velocity Doppler bound now transforms each receiver image's velocity hull, together with a conservative bound on the stored reflection operator's norm. Direct paths preserve their existing arithmetic. Original source and microphone paths receive whole-span half-space admission; the source remains strictly inside and exactly represented tangential receiver motion can lie on an ideal wall. The original causal Bernstein pair bounds admit every image's clearance. Pair and node limits are aggregate across all images, root caps remain per path, finite source coverage is required at both receiver endpoints, and cancellation publishes no partial owner or pressure sum.
 
-The bounded image owner borrows histories without copying or recompiling them, and queries allocate nothing. Ten original physics/audio regressions cover independent accelerating image-source Green potentials, both moving clocks, reflected Doppler bandwidth, exact release-wall pressure cancellation, the fixed-microphone limit, coordinate covariance, complete histories, work limits and transactional rendering. Together with 30 existing controls their prior focused original-source build passed. That prior run retained narrow material/FFT/error-wiring facades and was not full-workspace or encoder integration validation. The model remains prescribed compact-source pressure in a homogeneous quiescent lossless fluid with stationary ideal walls; uniform-flow paths, moving walls, finite impedance, arbitrary wedge angles, enclosed rooms, absorption and source feedback are not added.
+The bounded image owner borrows histories without copying or recompiling them, and queries allocate nothing. Ten original physics/audio regressions cover independent accelerating image-source Green potentials, both moving clocks, reflected Doppler bandwidth, exact release-wall pressure cancellation, the fixed-microphone limit, coordinate covariance, complete histories, work limits and transactional rendering. Together with 30 existing controls their prior focused original-source build passed. That prior run retained narrow material/FFT/error-wiring facades and was not full-workspace or encoder integration validation. The model remains prescribed compact-source pressure in a homogeneous lossless fluid with stationary ideal walls; moving walls, finite impedance, arbitrary wedge angles, enclosed rooms, absorption and source feedback are not added.
+
+`MovingReflectionObserver::in_uniform_flow` and `wedge_in_uniform_flow` also
+admit stationary laboratory walls when the declared uniform mean flow is tangent
+to every wall. The laboratory wall points are translated to the original
+trajectory frame once, preserving stored normals and complete image groups.
+Tangency is checked against normalized flow direction, so a small nonzero
+normal flow cannot masquerade as a stationary fluid-frame boundary. Original
+source and microphone paths must share the exact same `UniformFlowFrame`.
+Retarded roots, whole-path clearance, reflected Doppler bounds and source
+strength histories use the existing fluid-frame owners without recompilation
+or extra query allocations. Pressure is the convected Eulerian field sampled at
+the moving microphone. Tests compare accelerating orthogonal and wedge images,
+monopoles and dipoles against independently differentiated laboratory convected
+Green potentials, verify observed clock rates, and refuse incompatible frames,
+normal flow and incomplete work. This adds no sheared flow or moving-wall model.
 
 `IdealReflectionObserver::new_wedge` and `MovingReflectionObserver::new_wedge`
 now share the harmonic owner's ideal pi/m dihedral admission, m in 2..=128.

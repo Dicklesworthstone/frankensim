@@ -15,7 +15,7 @@ use crate::AeroacError;
 use crate::curle3d::IdealAcousticPlane;
 use crate::curle3d::array::wedge::{WedgeImages, WedgeReceiverImage};
 use crate::curle3d::moving::{
-    CompactSourceStrength, MovingCompactObserver, PreparedMovingCompactSample,
+    CompactSourceStrength, MovingCompactObserver, PreparedMovingCompactSample, dot, norm,
 };
 use fs_ivl::Interval;
 use fs_math::dd::Dd;
@@ -24,8 +24,8 @@ use fs_math::dd::Dd;
 /// ideal-wall group. Every source in a coherent render borrows this same owner.
 ///
 /// The walls are stationary in the homogeneous lossless fluid-rest frame.
-/// Uniform-flow paths refuse: their laboratory walls require a separately
-/// admitted frame transform. The receiver may reach a wall when its complete
+/// Uniform-flow constructors admit laboratory walls only when the original
+/// mean flow is tangent to every wall. The receiver may reach a wall when its complete
 /// interpolant can be proved inside; an inconclusive rounded hull refuses.
 #[derive(Debug)]
 pub struct MovingReflectionObserver<'a> {
@@ -55,6 +55,42 @@ impl<'a> MovingReflectionObserver<'a> {
                 "moving wall images require paths in the stationary fluid frame",
             ));
         }
+        Self::orthogonal(receiver, planes, path_count, budget, cancelled)
+    }
+
+    /// Reflect accepted laboratory motion in a homogeneous tangential flow.
+    ///
+    /// `planes` are stationary LABORATORY walls. They are translated into the
+    /// original trajectory's fluid frame once, at preparation. For n.U = 0,
+    /// n.(x-a) = n.(x'-a'), so the same stationary image group applies at every
+    /// time. A normal flow component refuses instead of freezing a moving wall.
+    /// Source and microphone must retain the exact same `UniformFlowFrame`.
+    pub fn in_uniform_flow(
+        receiver: &'a PreparedKinematicTrajectory,
+        planes: &[IdealAcousticPlane],
+        maximum_source_paths: usize,
+        budget: ReflectedTrajectoryBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(cancelled)?;
+        let path_count = admit_planes(planes, maximum_source_paths)?;
+        let transformed = fluid_frame_planes(receiver, planes)?;
+        Self::orthogonal(
+            receiver,
+            &transformed[..planes.len()],
+            path_count,
+            budget,
+            cancelled,
+        )
+    }
+
+    fn orthogonal(
+        receiver: &'a PreparedKinematicTrajectory,
+        planes: &[IdealAcousticPlane],
+        path_count: usize,
+        budget: ReflectedTrajectoryBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
         admit_halfspaces(receiver, planes, false, budget, cancelled)?;
         let mut retained = [planes[0]; 3];
         retained[..planes.len()].copy_from_slice(planes);
@@ -104,6 +140,38 @@ impl<'a> MovingReflectionObserver<'a> {
                 "moving wall images require paths in the stationary fluid frame",
             ));
         }
+        Self::wedge(receiver, planes, images, order, budget, cancelled)
+    }
+
+    /// Complete pi/m wedge images in a flow parallel to the wedge edge.
+    /// Walls are authored in laboratory coordinates; all original source and
+    /// receiver histories, budgets and per-image retarded times are reused.
+    pub fn wedge_in_uniform_flow(
+        receiver: &'a PreparedKinematicTrajectory,
+        planes: [IdealAcousticPlane; 2],
+        order: usize,
+        maximum_source_paths: usize,
+        budget: ReflectedTrajectoryBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
+        poll(cancelled)?;
+        let transformed = fluid_frame_planes(receiver, &planes)?;
+        let planes = [transformed[0], transformed[1]];
+        let images = WedgeImages::new(planes, order)?;
+        if images.path_count() > maximum_source_paths {
+            return Err(invalid("moving wedge exceeds its complete path budget"));
+        }
+        Self::wedge(receiver, planes, images, order, budget, cancelled)
+    }
+
+    fn wedge(
+        receiver: &'a PreparedKinematicTrajectory,
+        planes: [IdealAcousticPlane; 2],
+        images: WedgeImages,
+        order: usize,
+        budget: ReflectedTrajectoryBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, AeroacError> {
         admit_halfspaces(receiver, &planes, false, budget, cancelled)?;
         let mut signs = Vec::new();
         let mut wedge_images = Vec::new();
@@ -134,6 +202,7 @@ impl<'a> MovingReflectionObserver<'a> {
     pub const fn receiver(&self) -> &'a PreparedKinematicTrajectory {
         self.receiver
     }
+    /// Admitted walls in the original trajectories' FLUID frame.
     pub fn planes(&self) -> &[IdealAcousticPlane] {
         &self.planes[..self.plane_count]
     }
@@ -145,6 +214,48 @@ impl<'a> MovingReflectionObserver<'a> {
     pub const fn wedge_order(&self) -> Option<usize> {
         self.wedge_order
     }
+}
+
+// A plane's tangential displacement under x' = x - origin - U*(t-epoch)
+// does not change its locus. Retain the exact stored normal; normalizing it a
+// second time could change a wall's rounded geometry or wedge admission.
+fn fluid_frame_planes(
+    receiver: &PreparedKinematicTrajectory,
+    planes: &[IdealAcousticPlane],
+) -> Result<[IdealAcousticPlane; 3], AeroacError> {
+    let frame = receiver
+        .flow_frame()
+        .ok_or_else(|| invalid("uniform-flow reflections need a declared trajectory frame"))?;
+    if !(1..=3).contains(&planes.len()) {
+        return Err(invalid("uniform-flow reflection plane count"));
+    }
+    let velocity = frame.velocity_m_s();
+    let scale = velocity.iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+    let direction = if scale == 0.0 {
+        [0.0; 3]
+    } else {
+        let scaled = velocity.map(|v| v / scale);
+        let length = norm(scaled);
+        scaled.map(|v| v / length)
+    };
+    let mut transformed = [planes[0]; 3];
+    for (target, original) in transformed.iter_mut().zip(planes) {
+        if dot(direction, original.inward_normal()).abs() > 64.0 * f64::EPSILON {
+            return Err(invalid(
+                "uniform flow must be tangent to every reflecting wall",
+            ));
+        }
+        let point = frame.to_fluid_frame(
+            frame.reference_time_s(),
+            crate::curle3d::moving::SourceKinematics {
+                position_m: original.point_m(),
+                ..crate::curle3d::moving::SourceKinematics::default()
+            },
+        )?;
+        // Reuse the exact normal via a translated copy owned by its plane type.
+        *target = original.translated_to(point.position_m)?;
+    }
+    Ok(transformed)
 }
 
 /// All ideal-wall paths from one original source to one moving microphone.
@@ -174,9 +285,9 @@ impl<'a> PreparedReflectedMovingReceiverSource<'a> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, AeroacError> {
         poll(cancelled)?;
-        if source.flow_frame().is_some() {
+        if source.flow_frame() != observer.receiver.flow_frame() {
             return Err(invalid(
-                "reflected moving sources require the stationary fluid frame",
+                "reflected source and microphone must share their original fluid frame",
             ));
         }
         admit_halfspaces(source, observer.planes(), true, source_bounds, cancelled)?;

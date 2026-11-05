@@ -97,6 +97,14 @@ impl IdealAcousticPlane {
         self.boundary
     }
 
+    /// Translate an admitted plane without renormalizing its stored normal.
+    pub(crate) fn translated_to(&self, point_m: [f64; 3]) -> Result<Self, AeroacError> {
+        if point_m.iter().any(|v| !v.is_finite()) {
+            return Err(nonfinite("translated acoustic reflection plane"));
+        }
+        Ok(Self { point_m, ..*self })
+    }
+
     pub(crate) fn distance(&self, position: [f64; 3]) -> Result<Dd, AeroacError> {
         let mut distance = Dd::ZERO;
         for axis in 0..3 {
