@@ -21,8 +21,9 @@
 //! mass; temperature and energy remain with the caller's original thermal
 //! owner. `theta` is retained lubricant content, not vapor mass. Bubble inertia,
 //! finite vapor density, latent heat, dissolved-gas transport and elastic
-//! deformation need their own owners. A fully filled sealed pocket cannot be
-//! compressed, including by prescribed thermal expansion.
+//! deformation need their own owners. This incompressible image refuses a
+//! compressed sealed pocket; [`compressible`] supplies explicitly authored
+//! barotropic storage and mass transport on the same geometric graph.
 //!
 //! Reference: H. G. Elrod, "A Cavitation Algorithm", Journal of Lubrication
 //! Technology 103 (1981), 350--354, DOI 10.1115/1.3251669. This implementation
@@ -38,11 +39,16 @@ use std::sync::Arc;
 /// Generalized-Newtonian pressure transport with the same retained inventory.
 pub mod power_law;
 pub use power_law::{CavitatingPowerLawContinuation, CavitatingPowerLawFilm};
+/// Finite bulk modulus, compressive storage and pressure-dependent mass flux.
+pub mod compressible;
+pub use compressible::{CompressibleCavitatingFilm, CompressibleCavitationStep};
 
 /// Explicit liquid and reservoir data, frozen within each step, in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CavitationLiquid {
-    /// Uniform, pressure-independent density [kg m^-3]. Void mass is neglected.
+    /// Uniform density [kg m^-3] in the incompressible owner; density at the
+    /// ambient reference pressure in `CompressibleCavitatingFilm`. Void mass is
+    /// neglected by both owners.
     pub density_kg_m3: f64,
     /// Absolute rupture/reformation pressure [Pa], supplied by a material law.
     pub cavitation_pressure_pa: f64,
@@ -129,7 +135,7 @@ pub struct CavitationReport {
     pub minimum_liquid_fraction: f64,
     /// Largest candidate absolute cell pressure [Pa].
     pub maximum_pressure_pa: f64,
-    /// Number of active-set linear solves used by this candidate.
+    /// Active-set solves, or Newton/phase corrections in the compressible owner.
     pub iterations: usize,
 }
 

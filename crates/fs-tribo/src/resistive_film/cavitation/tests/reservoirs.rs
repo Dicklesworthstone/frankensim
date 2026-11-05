@@ -9,7 +9,7 @@ fn supply(pressure_pa: f64, liquid_fraction: f64) -> Option<CavitationReservoir>
     })
 }
 
-fn supplied_film(alpha: f64) -> CavitatingFilm {
+pub(super) fn supplied_film(alpha: f64) -> CavitatingFilm {
     let geometry = ResistiveFilm::new(
         vec![FilmCell {
             area_m2: 0.001,

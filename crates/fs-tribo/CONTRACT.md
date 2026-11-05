@@ -1373,6 +1373,55 @@ Barus refill, unchanged-history identity and transactional refusals. The origina
 before-mass receipt remains exactly the preceding accepted after-mass receipt.
 No experimental accuracy or cross-ISA execution claim follows from these tests.
 
+### Barotropic storage and viscosity in compressed liquid films
+
+`cavitation::CompressibleCavitatingFilm` binds the same native graph, viscosity
+field, common Barus law, prescribed supplies and solve budget to an authored
+positive constant isothermal bulk modulus `B`. The native liquid density is now
+explicitly its density at the ambient reference pressure. The constitutive
+law is `rho(p)=rho_ref*exp((p-p_ref)/B)`, with rupture density `rho_c` evaluated
+from that same law. This enables physically compressed sealed liquid pockets
+without artificial leakage, pressure clipping or a softened numerical modulus.
+
+The conserved coordinate `u=rho(p)*theta/rho_c` has fractional filling below
+one and full compressed liquid above one, where `p=p_c+B*ln(u)`. Storage and
+upwind mean-wall transport are linear in `u`. Pressure transport integrates
+`rho(p)/mu(p)` over each original constant-gap passage using the native Barus
+coefficient and channel viscosity; no averaged density replaces the mass flux.
+For `x=u-1 >= 0`, the normalized primitive is
+`B*expm1((1-alpha*B)*ln(1+x))/(1-alpha*B)`. The implementation evaluates its
+endpoint difference directly with compensated `log1p`/`expm1` ratios, including
+the removable `alpha*B=1` limit. With zero Barus coefficient this pressure
+operator is exactly linear in `x`. Compression and partial filling remain
+separate during iteration so a small `p/B` is not rounded away in `1+x`.
+
+One deterministic semismooth Newton system reuses the native nonsymmetric
+elimination and compensated face-incidence sums. Positive physical storage
+provides the pressure response of sealed saturated islands. The original
+iteration cap includes phase pivots; each correction admits at most 32 bounded
+backtracks. Iterations allocate no memory. Candidate publication follows a
+separate cell/global mass reconstruction and the final cancellation check.
+The result exposes actual channel mass flows in kg/s and endpoint normal
+pressure forces, with no ambiguous single channel volume-flow convention.
+
+Construction creates a distinct inventory identity because incompressible
+states cannot retain their mass under a different pressure-density law. Explicit
+compressed initial pressures are available, subject to the original pressure/
+content complementarity. Clones and viscosity/supply refresh preserve accepted
+state identity. The five G1/G3/G4 regression groups check sealed compression,
+release and reformation analytically; connected-cell cavity refill against
+independent dimensional quadrature of `rho/mu`; bidirectional supplied flow and
+viscosity refresh; the incompressible limit and starved transport; and domain,
+budget, foreign-state and late-cancellation refusal. The primary constant-bulk
+formulation is described in Brewe and Jacobson, NASA TM-88826, eqs. (1)--(5).
+
+This is a Newtonian, isothermal, negligible-void-mass lubrication image with
+caller-admitted constant bulk modulus and pressure-viscosity validity. It does
+not infer arbitrary real-fluid compressibility, non-Newtonian rheology, thermal
+evolution, latent heat, finite vapor mass, trapped gas, fluid inertia or EHL.
+Compressive storage is included in MASS accounting; endpoint force is not a
+caloric, viscous-heat or time-integrated coupled-work receipt.
+
 ## Error model
 
 `TriboError` is a total refusal surface for missing identity, non-dry media,
