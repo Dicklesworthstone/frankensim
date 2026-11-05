@@ -2,6 +2,9 @@
 
 //! L3 evolving gas systems over the original L1 thermochemical source owners.
 //!
+//! The `fusion` owner evolves a bounded rigid D-T plasma parcel in the common
+//! ionized-gas state, with explicit alpha thermalization and escaping neutrons.
+//!
 //! The `experimental-euler` feature admits estimated, inviscid one-dimensional
 //! frozen and multicomponent Euler flow, including finite-rate reaction coupling.
 //! These are conservative shock-capturing engineering solvers, not fully discrete
@@ -11,6 +14,9 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod chemistry;
+
+/// Finite D-T fuel, helium ash and two-temperature nuclear energy accounting.
+pub mod fusion;
 
 /// Conservative distributed mechanical forcing of the original 1-D gas fields.
 #[cfg(feature = "experimental-euler")]

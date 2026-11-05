@@ -1,5 +1,58 @@
 # fs-gas contract
 
+## Finite D-T burn and two-temperature energy feedback
+
+`fusion::advance_dt_fusion` evolves the existing
+`FrozenIonizedGasStateV1` through the explicit L1
+`DtFusionPlasmaV1` source binding. Its finite D+ and T+ inventories create
+He4++ ash and an equal molar amount of escaped neutrons. Electrons retain their
+amount. The original monatomic source bank evaluates the changed temperatures,
+internal energy, pressure and heat capacities. Nuclear baryons and electric
+charge replace chemical element/mass invariants for this owner only.
+
+The declared closure is a homogeneous, rigid, quasineutral, weakly coupled,
+nondegenerate, nonrelativistic Maxwellian parcel with separate ion and electron
+temperatures. Every alpha is retained and thermalizes immediately, with a
+caller-supplied electron/heavy deposition fraction; every neutron escapes.
+Constant external powers are explicit. D-D and D-He3 reactivities exist in L1
+but are not silently included in this D-T-only evolution.
+
+Per-event ion removal is reaction weighted:
+`E_rel = kT_i [3/2 + d ln(rate)/d ln(T_i)]`, plus `3kT_i/2` of
+center-of-mass kinetic energy. Leading nonrelativistic two-body kinematics
+partitions Q plus that energy between alpha and neutron. Thus escaping
+neutrons carry their thermal contribution as well as their Q share. Nuclear
+Q appears once, outside the source calorics' zero formation energy.
+The final account independently checks source ion/electron energy, total
+thermal change plus escaped neutron energy, baryons including neutrons, and
+charge. These are numerical balances, not source-uncertainty certificates.
+
+Each frozen-temperature reaction map solves the finite two-fuel depletion
+analytically, including unequal fuel and surviving traces. An exponential
+midpoint predictor with two-half-step error estimation resolves thermal
+feedback. Fixed-size trials, compensated accumulated transfers, deterministic
+math, bounded attempts and caller cancellation avoid per-trial allocation or
+unbounded work. No negative population is clipped, trace seed inserted, or
+equilibrium projection applied. Errors and cancellation publish no partial
+state. Local tolerance does not certify global integration error.
+
+The returned common state can enter another physical owner under an explicit
+coupling schedule, subject to that owner's existing domain. The focused
+regression suite includes independent RK4 burn endpoints, analytic depletion,
+energy/charge/baryon/rest-mass accounts, volume scaling, temperature ownership,
+zero-fuel and zero-time behavior, refusal/cancellation, repeatability/restart,
+and an admitted handoff to the Coulomb thermal owner. That handoff uses cold
+electrons to stay within the original classical Coulomb cutoff; it does not
+extend classical transport to arbitrary hot fusion electrons.
+
+Run the constructed source example with
+`cargo run -p fs-gas --example dt_fusion`.
+Its ideal monatomic source cards are explicit analytic inputs, not measured
+caloric calibration. Spatial confinement and transport, MHD, radiation,
+fast-particle slowing distributions, relativistic product corrections,
+quantum-corrected hot-electron Coulomb transport, competing burn networks,
+and neutron transport/deposition remain separate missing physics.
+
 ## Distributed mechanical work on native 1-D fields
 
 With `experimental-euler`, `body_force::{BodyForce,ForceControl,ForceChange}`
