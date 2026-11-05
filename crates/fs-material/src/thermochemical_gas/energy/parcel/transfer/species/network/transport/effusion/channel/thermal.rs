@@ -12,6 +12,9 @@
 //! phase change, wall conduction, adsorption and wall mass exchange are absent.
 //! An unsupported or overlarge step refuses atomically; refine the duration.
 
+/// Adaptive gas-plus-material-wall trajectories with fixed window audits.
+pub mod trajectory;
+
 use super::{DiffuseChannelLinkStep, DiffuseChannelNetworkLink};
 use crate::thermal::transport::{
     ThermalTransportError, volumetric::timeline::FixedVolumeThermalLaw,
