@@ -7625,3 +7625,21 @@ heterogeneous materials and deterministic governing samples. These are local
 stress/limit observations, without equilibrium, continuum-peak or fracture-
 evolution authority. Caller-selected engineering strength is never silently
 converted into a finite-strain rupture law.
+
+## Retained source-bound brittle P1 solids
+
+`brittle::solid::BrittleTetSolid` retains the original admitted
+`TetLoadGeometry3`, each resolved brittle source/law and its native history.
+Each fixed plane selects the projected footprint, and the law's band width must
+match V/A within 64 relative machine epsilons. `advance` executes one native
+`SmallStrainTetProblem::solve_from` endpoint with frozen accepted histories,
+then checks the original constitutive trial, stress, irreversibility and work.
+It integrates reference-volume storage and fracture loss while separately
+reporting/gating material balance, cumulative loss, support/dead-load equilibrium
+work and signed endpoint integration error. Only a complete accepted candidate
+is returned; failure and cancellation preserve the original solid. Native
+small-strain P1, fixed-plane and fixed-coefficient limits remain. This does not
+create cracks or separated topology, infer contact, or convert numerical error
+into heat. The manufactured cases in `tests/brittle_tet_solid.rs` cover softening,
+unloading, complete Gc-times-area loss, compressive reclosure, independent source
+strengths/widths, force/support work and rejected-candidate rollback.

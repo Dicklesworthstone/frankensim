@@ -15,6 +15,9 @@
 //! mesh-objective crack paths, automatic crack initiation, separated topology,
 //! or contact between newly created surfaces.
 
+/// Retained source-bound brittle solids on the native P1 equilibrium path.
+pub mod solid;
+
 use crate::loads3::TetLoadGeometry3;
 use fs_material::brittle::BrittleCrackBandSettings;
 
