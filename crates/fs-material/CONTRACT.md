@@ -2176,6 +2176,20 @@ are not supplied. Focused regressions include homogeneous 5Gh/6, an independent
 exact-rational off-axis cross-energy result, frame/reference invariance and
 actual MITC shell work for positive and negative mixed shear.
 
+`LaminateShearRecovery` retains the exact section through `Arc` and caches the
+same kernel's normalized quadratic traction maps once per original ply. Local
+queries recover continuous bonded-interface shear traction, zero exterior-face
+traction to roundoff, and each ply's actual engineering strain through its
+uncorrected transverse compliance. Full off-axis cross terms remain present.
+Integrated local complementary energy equals the original coupled H energy;
+the section shear coordinate is not mislabeled as a constant physical ply
+strain. Preparation is O(layers); a point query allocates nothing and is O(1).
+Directional Whitney sections refuse this distinct recovery model. Reference
+and material/probe rotations retain their existing meaning. No strength limit,
+delamination, transverse normal stress or general free-edge solution is added.
+`tests/laminate_shear_recovery.rs` checks the homogeneous parabola, layered
+resultants/work, interface continuity, compliance jumps and frame invariance.
+
 ### Nonlocal thermal derivatives of native laminate shear
 
 `laminate::thermal::shear::ResolvedLaminateShearThermoelastic` differentiates

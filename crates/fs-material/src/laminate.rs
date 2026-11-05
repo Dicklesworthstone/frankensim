@@ -35,6 +35,7 @@ use fs_math::c64::C64;
 pub mod thermal;
 
 mod shear;
+pub use shear::recovery::{LaminateShearRecovery, LayerShearResponse};
 
 /// Declared closure used for the section's cached transverse shear stiffness.
 #[derive(Clone, Copy, Debug, PartialEq)]

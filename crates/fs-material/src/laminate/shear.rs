@@ -19,6 +19,8 @@ use super::{
 };
 use fs_ad::Real;
 
+pub(super) mod recovery;
+
 fn invalid(quantity: &'static str) -> LaminateError {
     LaminateError::Invalid { quantity }
 }
@@ -86,6 +88,12 @@ pub(super) struct EquilibratedLayer<T> {
 }
 
 fn prepare(section: &LaminateSection, angle: f64) -> Result<([f64; 4], [f64; 2]), LaminateError> {
+    equilibrated(&original_layers(section)?, angle, invalid, &mut || Ok(()))
+}
+
+fn original_layers(
+    section: &LaminateSection,
+) -> Result<Vec<EquilibratedLayer<f64>>, LaminateError> {
     let mut layers = Vec::with_capacity(section.layers.len());
     for (i, (layer, geometry)) in section.layers.iter().zip(&section.integrals).enumerate() {
         let (_, principal) = principal_stiffness(&layer.law, i)?;
@@ -95,7 +103,7 @@ fn prepare(section: &LaminateSection, angle: f64) -> Result<([f64; 4], [f64; 2])
             g: rotate_transverse(principal, layer.orientation_rad),
         });
     }
-    equilibrated(&layers, angle, invalid, &mut || Ok(()))
+    Ok(layers)
 }
 
 /// Columns are the shear resultants/tractions of the two physical probes.
@@ -124,6 +132,19 @@ pub(super) fn equilibrated<T: Real, E>(
     angle: f64,
     invalid: impl Fn(&'static str) -> E,
     check: &mut impl FnMut() -> Result<(), E>,
+) -> Result<([T; 4], [T; 2]), E> {
+    equilibrated_with_profiles(layers, angle, invalid, check, &mut |_| Ok(()))
+}
+
+// The optional cold-path observer retains exactly the normalized traction
+// used below for complementary energy. The ordinary stiffness/AD path keeps
+// no profile storage; runtime stress recovery never repeats this integration.
+fn equilibrated_with_profiles<T: Real, E>(
+    layers: &[EquilibratedLayer<T>],
+    angle: f64,
+    invalid: impl Fn(&'static str) -> E,
+    check: &mut impl FnMut() -> Result<(), E>,
+    capture: &mut impl FnMut([[T; 4]; 3]) -> Result<(), E>,
 ) -> Result<([T; 4], [T; 2]), E> {
     check()?;
     // Dimensionless thickness and moduli avoid powers of SI scales and any
@@ -220,6 +241,21 @@ pub(super) fn equilibrated<T: Real, E>(
                 sum + q[3 * (ij / 3) + k] * neutral[3 * k + ij % 3]
             })
         });
+        // Polynomial in the physical fraction s through THIS ply, with
+        // tau(s) = (C0 + s C1 + s² C2) Q / h. The full two-column probe
+        // normalization preserves mixed xz/yz work, including off-axis plies.
+        let primitives = [
+            primitive,
+            core::array::from_fn(|k| (q[k] * T::from_f64(z0) - qn[k]) * T::from_f64(dz)),
+            q.map(|x| x * T::from_f64(0.5 * dz * dz)),
+        ];
+        capture(primitives.map(|p| {
+            let traction = divergence(&p, axes).map(|x| -x);
+            core::array::from_fn(|ij| {
+                traction[2 * (ij / 2)] * inverse[ij % 2]
+                    + traction[2 * (ij / 2) + 1] * inverse[2 + ij % 2]
+            })
+        }))?;
         let integral = |delta: f64| -> [T; 9] {
             core::array::from_fn(|k| {
                 primitive[k] + T::from_f64(delta) * (q[k] * T::from_f64(z0 + 0.5 * delta) - qn[k])
