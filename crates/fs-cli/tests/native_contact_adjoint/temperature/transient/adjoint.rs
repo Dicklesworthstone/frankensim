@@ -6,6 +6,8 @@ use fs_project::{TransientBoundarySchedule, TransientBoundaryStep, TransientBoun
 mod ambient;
 #[path = "adjoint/material.rs"]
 mod material;
+#[path = "adjoint/cooling.rs"]
+mod cooling;
 
 const FINAL: &str = "temperature-final-adjoint";
 const PEAK: &str = "temperature-sampled-peak-adjoint";

@@ -194,13 +194,9 @@ pub(in crate::solve::transient) fn finish(
     {
         return Err(bad("capacity adjoint lost its exact bound enclosure model"));
     }
-    if temperature_contacts.is_some()
-        && (interfaces.is_some()
-            || natural.is_some()
-            || airflow.is_some())
-    {
+    if temperature_contacts.is_some() && interfaces.is_some() {
         return Err(bad(
-            "capacity contact adjoints require original live sources with prescribed or scheduled boundaries and optional area-mean ambient or enclosure radiation; derived-convection compositions are unsupported",
+            "capacity contact adjoints require the original live sources without a duplicate frozen interface owner",
         ));
     }
     let coupled = temperature_contacts.is_some()
@@ -399,7 +395,11 @@ pub(in crate::solve::transient) fn finish(
         // A whole-body heat balance cannot detect cancelling nodal defects.
         // This single audit keeps original convection, gray radiation, and
         // actual transported air heat distinct; no primal solve is repeated.
+        // Live contacts with derived cooling also need the freshly bound
+        // physical boundary and separate marched-air gate, including when
+        // radiation is absent or uses an enclosure rather than ambient patches.
         let physical = if coupled && (temperature_contacts.is_none()
+            || natural.is_some() || airflow.is_some()
             || radiation.is_some_and(|lowering| !lowering.is_enclosure())) {
             let audit = if let Some(contacts) = temperature_contacts {
                 // Query physical resistance values only for this residual
