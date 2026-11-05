@@ -1086,10 +1086,14 @@ impl Spec {
                 } else {
                     CavityNeckLoss::RadiationAtResonance
                 };
-                Some(MaterialBodyCavity { cavity: HelmholtzModalCavity::new(description, cavity_gas, loss)?,
-                    modal_budget: modal_budget(), listener_m })
+                let mut cavity = HelmholtzModalCavity::new(description, cavity_gas, loss)?;
+                if kind == "exterior-neck" && row.words.clone().next() == Some("orifice-edge") {
+                    row.word()?;
+                    cavity = cavity.with_orifice_resistance(row.positive()?)?;
+                }
+                Some(MaterialBodyCavity { cavity, modal_budget: modal_budget(), listener_m })
             },
-            _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck|exterior-neck V R L INNER_END OUTER_END LISTENER_M".into()),
+            _ => return Err("cavity must be none, neck V R L RESISTANCE LISTENER_M, or physical-neck|exterior-neck V R L INNER_END OUTER_END LISTENER_M [orifice-edge FREEZE_HZ on exterior-neck]".into()),
         };
         row.end()?;
         if let Some(cavity) = &cavity { cavity.cavity.validate_exterior_gas(&gas)?; }

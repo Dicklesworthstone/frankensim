@@ -1426,6 +1426,21 @@ computed exterior load:
 - Without that load the neck has no outer mass. So `exterior-neck` refuses
   without `body-radiation skin`, and a compact `neck` or `physical-neck`
   refuses beside it, because its outer end would be counted twice.
+
+`cavity exterior-neck ... LISTENER_M orifice-edge FREEZE_HZ` is an opt-in on that
+row. It replaces the neck's Bessel wall resistance by the viscous resistance of a
+sharp-edged cylindrical orifice in a rigid plate, Brandao and Schnitzer, J. Fluid
+Mech. 2020, eq. 1.8-1.10, which also counts the plate around the edge:
+- **Frequency:** frozen at `FREEZE_HZ`, because the modal network's damper is
+  constant and the resistance goes as the square root of frequency. Declare the
+  card's own lowest air mode, not a value chosen for a decay.
+- **What it leaves out:** eq. 1.8's equal reactance, about 0.6 % of a guitar neck's
+  mass, because that mass enters the skin load's aperture shape. Vortex shedding at
+  the edge, a rosette and a rounded edge aren't in the formula either.
+- **Limit:** a hole outside thin Stokes layers (`eps < 1`, `h > eps`) refuses.
+
+Without the two words, the row's bytes and the render are unchanged.
+
 The selection works with the uniform plate, regional plate, curved shell and
 assembled material-body profiles; their original signed volume maps remain
 the common pressure coupling.
