@@ -1,5 +1,25 @@
 # CONTRACT: fs-couple
 
+## Native rigid JKR motion and event-timed snap heat
+
+`friction_heat::adhesive::snap::native` composes the original loaded finite-body
+JKR phase with the original finite-cell thermal timeline. The heat owner retains
+the accepted full source/mass/policy/time/step token, so later native phases
+continue their actual event chronology. Changed mobility, stale heat stamps or
+inconsistent refreshed marker geometry/rates refuse without resetting history.
+Only sealed original snap release enters the declared surface/outside shares;
+native conduction and authored thermal events run at their original times.
+
+Actual body endpoints, source history and caloric state publish as one candidate.
+The combined balance eliminates internal snap transfer and retains actual body-
+wrench work, thermal boundary/source heat and incoming material energy. A separate
+sum-of-absolute-defects gate prevents mechanical and thermal errors cancelling.
+The native phase keeps its frictionless normal, held-pose/Jacobian assumptions;
+the surrounding pose owner consumes travel before refreshing geometry. This
+does not add tangential traction or temperature-dependent normal feedback.
+The original timed-heat target includes loaded multi-phase attachment/pull-off,
+native history mismatches and rollback after late caloric/cancellation refusal.
+
 ## Native sparse solid material heat into finite enthalpy cells
 
 `tensor_material::solid::thermal::spatial::step_thermal_candidate` advances the

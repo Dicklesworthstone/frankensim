@@ -2,6 +2,9 @@
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_jkr_timed_heat/native.rs"]
+mod native;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{motion::*, *};
 use fs_couple::friction_heat::adhesive::snap::{timed::*, *};

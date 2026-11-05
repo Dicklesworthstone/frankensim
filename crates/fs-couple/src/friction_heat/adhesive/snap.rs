@@ -23,6 +23,8 @@ use fs_tribo::{DissipationStep, HeatPartition, TriboError, WorkLedger};
 use std::collections::BTreeMap;
 
 mod normal_motion;
+/// Native rigid-body motion and event-timed snap heat in one accepted candidate.
+pub mod native;
 /// Original thermal transport between the sealed normal trajectory's events.
 pub mod timed;
 /// Explicit viscous-support losses on their original smooth mechanical intervals.
