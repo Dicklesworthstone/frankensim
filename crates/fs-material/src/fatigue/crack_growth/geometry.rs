@@ -19,6 +19,9 @@ use super::{
     positive_log_ratio, power_cycles, power_cycles_to_boundary, power_length,
 };
 
+mod centre_crack;
+pub use centre_crack::FiniteWidthCentreCrack;
+
 /// One original geometry-factor sample. Length and Y must be strictly positive.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CrackGeometryPoint {

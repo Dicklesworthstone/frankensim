@@ -261,6 +261,19 @@ accepted state with shared immutable geometry. This memoryless Paris law
 supplies no overload/retardation sequence interaction.
 It must not consume rainflow completion order as a chronological spectrum.
 
+`FiniteWidthCentreCrack` supplies the elastic secant geometry
+`Y=1/sqrt(cos(pi*a/W))` for a centred through crack under remote uniform
+gross-section tension. W is the full plate width and a is the physical
+half-crack length. The supported formula range is `0<a<=0.4W`, following
+AFGROW DTD Handbook Table 11.3.8 and NASA TN D-5140 p. 6; this geometry does not
+calibrate the Paris law or establish plate aspect-ratio/grip applicability.
+The helper retains width, references and stress/length conventions in tables
+sampled at exactly the caller's ordered lengths. Deterministic direct factor
+evaluation, bounded construction and cancellation share the existing owner.
+No knots are inserted, and table resolution remains explicit: refinement tests
+compare life against independent integration of the unsampled secant formula.
+There is no finite-height, bending, plastic-zone or 3D crack-front correction.
+
 Positive-range cycles require the supplied tensile R interval and Paris-region
 range bounds. Every sample can be checked against the current K limit before
 cycle closure. Growth checks every crossed interval's endpoints, including

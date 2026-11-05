@@ -1129,6 +1129,10 @@ The inertial wrapper intentionally has no repeated-cycle operation. The runnable
 synthetic coefficients, and prints an independent analytical m=2 comparison.
 Its optional `--varying-geometry` mode exercises a declared Y proportional to
 the square root of crack length and compares the independent rational solution.
+The `--finite-width` mode uses the bounded elastic centre-crack secant helper,
+retaining full plate width, physical half-crack length and remote gross-stress
+conventions. Its material coefficients remain explicitly synthetic, and its
+sampled geometry does not establish component or material validation.
 
 Both native owners expose a read-only `cycles_to_length` forecast for a gauge
 whose representative cycle is fully sampled but not yet explicitly consumed.

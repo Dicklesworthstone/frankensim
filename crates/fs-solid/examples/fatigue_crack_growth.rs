@@ -1,12 +1,17 @@
 //! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000
 //! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000 --varying-geometry
+//! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000 --finite-width
 //!
 //! SYNTHETIC Paris-law demonstration; coefficients are not measured material data.
 //! Three native solves resolve one tensile 2 -> 8 -> 2 MPa cycle. The caller then
 //! explicitly declares identical quasistatic cycles with fixed material, thermal
-//! state, supports and uncracked mechanics. Geometry is either constant Y=1 or
-//! an explicitly synthetic Y(a)=sqrt(a/a0) table. Both have independent analytic
-//! reference solutions. Here a is crack half-length; growth leaves stiffness fixed.
+//! state, supports and uncracked mechanics. Constant Y=1 and the explicitly
+//! synthetic Y(a)=sqrt(a/a0) table retain independent analytic reference solutions.
+//! The finite-width mode declares a long elastic plate of full width 0.02 m under
+//! remote uniform gross-section tension, sampling the centre-crack secant helper
+//! at 129 logarithmically spaced half-lengths. The native uncracked coupon supplies
+//! nominal stress; plate/crack geometry is declared separately. Here a is physical
+//! half-crack length, full crack length is 2a, and growth leaves stiffness fixed.
 
 use std::sync::Arc;
 
@@ -16,7 +21,8 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::fatigue::FatigueScope;
 use fs_material::fatigue::crack_growth::{
     ConstantGeometryCrack, CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext,
-    CrackGrowthLimits, ParisDomain, ParisLaw, ParisParameters, TabulatedCrackGeometry,
+    CrackGrowthLimits, FiniteWidthCentreCrack, ParisDomain, ParisLaw, ParisParameters,
+    TabulatedCrackGeometry,
 };
 use fs_solid::fatigue::crack_growth::{
     CrackStressTolerance, TetCrackGrowthConfig, TetCrackGrowthGauge, TetCrackGrowthPath,
@@ -32,18 +38,28 @@ const REFERENCE_DELTA_K: f64 = 1e6;
 const REFERENCE_RATE: f64 = 1e-10;
 const MINIMUM_STRESS_PA: f64 = 2e6;
 const MAXIMUM_STRESS_PA: f64 = 8e6;
+const FULL_PLATE_WIDTH_M: f64 = 0.02;
+const FINITE_WIDTH_TABLE_POINTS: usize = 129;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if !(2..=3).contains(&args.len())
         || args[0] != "--demo"
-        || args.get(2).is_some_and(|flag| flag != "--varying-geometry")
+        || args
+            .get(2)
+            .is_some_and(|flag| flag != "--varying-geometry" && flag != "--finite-width")
     {
         return Err(
-            "usage: fatigue_crack_growth --demo CYCLES [--varying-geometry] (1..=1000000); synthetic data only".into(),
+            "usage: fatigue_crack_growth --demo CYCLES [--varying-geometry | --finite-width] (1..=1000000); synthetic data only".into(),
         );
     }
-    let varying_geometry = args.len() == 3;
+    let varying_geometry = args.get(2).is_some_and(|flag| flag == "--varying-geometry");
+    let finite_width = args.get(2).is_some_and(|flag| flag == "--finite-width");
+    let finite_plate = if finite_width {
+        Some(FiniteWidthCentreCrack::new(FULL_PLATE_WIDTH_M)?)
+    } else {
+        None
+    };
     let cycles: u64 = args[1].parse()?;
     if !(1..=1_000_000).contains(&cycles) {
         return Err("CYCLES must lie in 1..=1000000".into());
@@ -73,7 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source_reference: "SYNTHETIC m=2 arithmetic fixture; not measured".into(),
             material: "synthetic elastic demonstration".into(),
             process: "synthetic".into(),
-            surface_and_geometry: if varying_geometry {
+            surface_and_geometry: if finite_width {
+                "centred through crack in a long elastic plate; full W=0.02 m; physical half-length a".into()
+            } else if varying_geometry {
                 "synthetic Y(a)=sqrt(a/a0) table; a is crack half-length".into()
             } else {
                 "declared constant Y=1; a is crack half-length".into()
@@ -99,7 +117,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         absolute_stress_pa: 1e-5,
         relative: 1e-9,
     };
-    let crack_geometry = if varying_geometry {
+    let crack_geometry = if let Some(plate) = finite_plate {
+        let minimum = 0.5 * INITIAL_LENGTH_M;
+        let maximum = plate.maximum_half_length_m();
+        let log_span = (maximum / minimum).ln();
+        let half_lengths = (0..FINITE_WIDTH_TABLE_POINTS)
+            .map(|index| {
+                // Retain exact interval endpoints so rounding cannot leave support.
+                if index == 0 {
+                    minimum
+                } else if index + 1 == FINITE_WIDTH_TABLE_POINTS {
+                    maximum
+                } else {
+                    minimum
+                        * (log_span * index as f64 / (FINITE_WIDTH_TABLE_POINTS - 1) as f64).exp()
+                }
+            })
+            .collect();
+        CrackGeometry::Tabulated(Arc::new(
+            plate.tabulate(half_lengths, FINITE_WIDTH_TABLE_POINTS)?,
+        ))
+    } else if varying_geometry {
         CrackGeometry::Tabulated(Arc::new(TabulatedCrackGeometry::new(
             CrackGeometryTableContext {
                 source_reference: "SYNTHETIC power profile; not a calibrated component geometry"
@@ -171,14 +209,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Y(a)=sqrt(a/a0) gives da/dN=k*a^2/a0.
         let normalized_range = (MAXIMUM_STRESS_PA - MINIMUM_STRESS_PA) / REFERENCE_DELTA_K;
         let exposure = REFERENCE_RATE * normalized_range.powi(2) * std::f64::consts::PI * cycles as f64;
-        let expected = if varying_geometry {
-            INITIAL_LENGTH_M / (1.0 - exposure)
+        let expected = if finite_width {
+            None
+        } else if varying_geometry {
+            Some(INITIAL_LENGTH_M / (1.0 - exposure))
         } else {
-            INITIAL_LENGTH_M * exposure.exp()
+            Some(INITIAL_LENGTH_M * exposure.exp())
         };
         println!("SYNTHETIC demonstration, not validated component life");
         println!("Declared identical quasistatic cycles; uncracked mechanics stay fixed.");
-        println!("geometry={}", if varying_geometry {
+        println!("geometry={}", if finite_width {
+            "finite-width centred through crack; elastic secant factor in a log-log table"
+        } else if varying_geometry {
             "declared log-log table Y(a)=sqrt(a/a0), evaluated as the crack grows"
         } else {
             "declared constant Y=1"
@@ -189,8 +231,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             step.before.crack_length_m, step.after.crack_length_m);
         println!("initial_delta_k_pa_sqrt_m={:.12e} final_delta_k_pa_sqrt_m={:.12e}",
             step.initial_delta_k_pa_sqrt_m, step.final_delta_k_pa_sqrt_m);
-        println!("analytic_m2_length_m={expected:.12e} relative_error={:.6e}",
-            (step.after.crack_length_m - expected).abs() / expected);
+        if let Some(expected) = expected {
+            println!("analytic_m2_length_m={expected:.12e} relative_error={:.6e}",
+                (step.after.crack_length_m - expected).abs() / expected);
+        }
+        if let Some(plate) = finite_plate {
+            println!("remote_uniform_gross_section_tension; physical half-length a; full crack length=2a");
+            println!("full_plate_width_m={:.6e} initial_full_crack_length_m={:.12e} final_full_crack_length_m={:.12e}",
+                plate.plate_width_m(), 2.0 * step.before.crack_length_m, 2.0 * step.after.crack_length_m);
+            println!("maximum_supported_half_length_m={:.6e} final_full_crack_to_width_ratio={:.6e} supported_ratio_max=0.8",
+                plate.maximum_half_length_m(), 2.0 * step.after.crack_length_m / plate.plate_width_m());
+            if let Some(CrackGeometry::Tabulated(table)) = path.geometry(0) {
+                let (minimum, maximum) = table.length_bounds();
+                println!("geometry_table_points={} spacing=logarithmic half_length_min_m={minimum:.6e} half_length_max_m={maximum:.6e}",
+                    table.points().len());
+                println!("initial_tabulated_y={:.12e} final_tabulated_y={:.12e} final_direct_secant_y={:.12e}",
+                    table.factor_at(step.before.crack_length_m)?,
+                    table.factor_at(step.after.crack_length_m)?,
+                    plate.factor_at(step.after.crack_length_m)?);
+                // The secant factor increases across this supported interval.
+                // Its table extrema bound da/dN=k*Y(a)^2*a, giving independent
+                // exponential growth bounds, not an interpolation-error estimate.
+                let minimum_y = table.points()[0].geometry_factor;
+                let maximum_y = table.points()[table.points().len() - 1].geometry_factor;
+                let lower = INITIAL_LENGTH_M * (exposure * minimum_y.powi(2)).exp();
+                let upper = INITIAL_LENGTH_M * (exposure * maximum_y.powi(2)).exp();
+                println!("bounded_m2_length_min_m={lower:.12e} bounded_m2_length_max_m={upper:.12e} within_growth_bounds={}",
+                    (lower..=upper).contains(&step.after.crack_length_m));
+                println!("crack_length_increased={} within_geometry_table={}",
+                    step.after.crack_length_m > step.before.crack_length_m,
+                    (minimum..=maximum).contains(&step.after.crack_length_m));
+                println!("Table resolution is declared; no interpolation-error certificate or material-life calibration is inferred.");
+            }
+        }
         Ok(())
     })
 }

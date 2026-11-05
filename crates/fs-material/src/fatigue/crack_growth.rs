@@ -41,7 +41,8 @@ pub mod source;
 
 mod geometry;
 pub use geometry::{
-    CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext, TabulatedCrackGeometry,
+    CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext, FiniteWidthCentreCrack,
+    TabulatedCrackGeometry,
 };
 
 /// A normalized Paris fit; lengths are metres and N counts full cycles.
