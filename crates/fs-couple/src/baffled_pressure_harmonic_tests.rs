@@ -417,9 +417,12 @@ fn destructive_source_interference_preserves_the_quiet_vector_field() {
     .unwrap();
     let quiet = C64::new(0.25, -0.75);
     let large = C64::from_re(2.0_f64.powi(60));
+    // FirstOrder requires a unit axis. Preserve this oblique direction while
+    // satisfying its physical contract; the cancellation tolerances below stay unchanged.
+    let front = [1.0, -2.0, 3.0].map(|component| component / 14.0_f64.sqrt());
     let patterns = [
         FirstOrder::default(),
-        FirstOrder::new(0.0, [1.0, -2.0, 3.0]).unwrap(),
+        FirstOrder::new(0.0, front).unwrap(),
     ];
     let mut reference = [Field::default(); 2];
     let mut reference_mics = [C64::ZERO; 2];
