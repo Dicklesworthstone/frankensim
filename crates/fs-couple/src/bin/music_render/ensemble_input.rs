@@ -295,13 +295,17 @@ fn load_with_gas_sources(
             let p = PlatePerformance::from_bytes_with_all_sources(&bytes, block, sources,
                 super::plate_input::section_pack_loader(parent)).map_err(|e| e.to_string())?;
             let i = p.info();
-            let gas_json=format!("{}{}", super::thermochemical::provenance(std::slice::from_ref(p.gas_record())),
-                super::plate_input::section_sources_json(p.section_provenance()));
+            let gas_json=format!("{}{}{}", super::thermochemical::provenance(std::slice::from_ref(p.gas_record())),
+                super::plate_input::section_sources_json(p.section_provenance()),
+                super::plate_input::spatial_observer_json(i));
+            // Align only the receiver's numerical reconstruction latency. The
+            // Rayleigh trace keeps every surface point's physical travel time.
+            let source_filter_delay_samples = i.spatial_observer.map_or(0.0, |r| r.filter_delay_samples);
             let listener = Listener::Gas(ListenerMedium::of(p.gas_record().state()));
             boxed(p.into_renderer(), SourceInfo {
                 kind: input.kind, schema: PLATE_PERFORMANCE_SCHEMA, hash: i.input_hash,
                 rate: i.sample_rate_hz, samples: i.samples, source_full_scale_pa: i.full_scale_pa,
-                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples: 0.0,
+                mechanics_rate: f64::from(i.sample_rate_hz), mechanics_samples: i.samples, source_filter_delay_samples,
                 components: 1, modes: i.retained_modes, controls: 0, exterior_json: gas_json, listener,
             })
         }

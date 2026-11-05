@@ -79,6 +79,7 @@ fn source_triangle_sections_and_force_footprint_are_the_real_operator_inputs() {
     assert_eq!(parsed.gas_record, GasRecord::Legacy(source_air()));
     assert_eq!(parsed.config.listener_m, 1.0);
     assert_eq!(parsed.kinetic_mass, PlateMassModel::Lumped);
+    assert!(parsed.spatial_observer.is_none());
 }
 
 #[test]
@@ -98,6 +99,7 @@ fn public_loader_renders_geometry_derived_modes_like_direct_chart_mechanics() {
         assert_eq!(info.propagation_delay_s, 1.0 / source_air().sound_speed);
         assert!(!info.baffled_piston_loading);
         assert_eq!(info.kinetic_mass, PlateMassModel::Lumped);
+        assert!(info.spatial_observer.is_none());
         assert!(info.retained_modes > 0 && info.retained_modes <= 3);
         let mut renderer = performance.into_renderer();
         let mut actual = vec![0.0; 4801];
@@ -143,6 +145,57 @@ fn kinetic_model_is_explicit_and_malformed_or_duplicate_selections_refuse() {
         "kinetic-mass lumped\nkinetic-mass consistent-dkt"] {
         let source = text.replace("sections 2\n", &format!("{row}\nsections 2\n"));
         assert!(Parsed::read(source.as_bytes(), 64, None).is_err(), "{row}");
+    }
+}
+
+#[test]
+fn spatial_observer_record_reaches_the_shared_receiver_with_exact_block_replay() {
+    let text = std::str::from_utf8(SOURCE).unwrap().replace("observer 1.0",
+        "observer rayleigh 0.6 0.15 0.4 2 700.0");
+    let (chart, options) = independent_chart();
+    let config = Parsed::read(text.as_bytes(), 4801, None).unwrap().config;
+    let reduced = certified_chart_surface_radiators(&chart, &options, PlateMassModel::Lumped, 2).unwrap();
+    let mut direct = CompactPlateVoice::from_surface_radiators(reduced, 1.0, config,
+        [0.6, 0.15, 0.4], 700.0).unwrap();
+    let mut expected = vec![0.0; 4801];
+    for (range, force) in [(0..37, 1.0), (37..1701, 0.0), (1701..1738, -0.4), (1738..4801, 0.0)] {
+        direct.set_force_admitted(force);
+        direct.step_block(&mut expected[range]).unwrap();
+    }
+    assert!(expected.iter().any(|p| p.abs() > 1e-9));
+    for block in [37, 571] {
+        let performance = PlatePerformance::from_bytes(text.as_bytes(), block).unwrap();
+        let info = performance.info();
+        let spatial = info.spatial_observer.unwrap();
+        assert_eq!(spatial.position_m, [0.6, 0.15, 0.4]);
+        assert_eq!(spatial.surface_samples, 40 * 3 * 16);
+        assert_eq!(spatial.maximum_frequency_hz, 700.0);
+        assert!(spatial.propagation_delay_s[0] < spatial.propagation_delay_s[1]);
+        assert!(spatial.filter_delay_samples > 0.0);
+        assert!(spatial.multiply_adds_per_sample > 0);
+        assert_eq!(info.gas, source_air());
+        assert!(info.observer_filter.is_none());
+        let mut renderer = performance.into_renderer();
+        let mut actual = vec![0.0; 4801];
+        for chunk in actual.chunks_mut(block) { renderer.block(chunk).unwrap(); }
+        assert_eq!(actual, expected, "block {block}");
+    }
+}
+
+#[test]
+fn spatial_observer_refuses_invalid_geometry_band_and_compact_atmosphere() {
+    let text = std::str::from_utf8(SOURCE).unwrap();
+    for row in [
+        "observer rayleigh 0.6 0.15 0.4 2",
+        "observer rayleigh 0.6 0.15 0.04 2 700",
+        "observer rayleigh 0.6 0.15 0.4 7 700",
+        "observer rayleigh 0.6 0.15 0.4 2 0",
+        "observer rayleigh 0.6 0.15 0.4 2 21601",
+        "observer rayleigh NaN 0.15 0.4 2 700",
+        "observer rayleigh 0.6 0.15 0.4 2 700 extra",
+        "observer rayleigh 0.6 0.15 0.4 2 700\nobserver_law none",
+    ] {
+        assert!(Parsed::read(text.replace("observer 1.0", row).as_bytes(), 64, None).is_err(), "{row}");
     }
 }
 

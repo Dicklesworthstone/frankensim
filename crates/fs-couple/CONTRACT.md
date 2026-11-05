@@ -5670,6 +5670,25 @@ through real contact, support reversal, accepted work and callback invariance.
 
 ### Material gas loading in the file-driven plate renderer
 
+`observer rayleigh X_M Y_M Z_M REFINEMENT_LEVELS MAX_HZ` selects distributed
+surface observation in native plate performances. One original eigensolve
+retains the complete signed P1 displacement trace alongside its unchanged
+modal mass, damping and nodal force projection. Positive triangle subdivision
+feeds `pcm_wav::baffled::BaffledPressure`; all original modal velocities,
+including zero-net-area modes, reach its existing bandlimited derivative and
+path-dependent Rayleigh kernels. No new wave kernel or frequency retuning is
+introduced. The fixed baffle-frame microphone, declared gas, acoustic phase
+and clearance controls, bounded surface count and retained natural-frequency
+band are admitted before receiver allocation. Cold preparation and bounded
+convolution preserve callback partition independence. Ensembles align this
+receiver's extra numerical latency while retaining the original physical paths.
+Physical path delays and numerical filter latency are reported separately; no compact r/c delay
+or compact atmospheric filter is added to this observation. Existing optional
+piston reaction remains an independent mechanical choice. The approximation
+is a stationary P1 surface in an infinite baffle with lossless exterior gas;
+source bandwidth, structural/modal convergence, acoustic quadrature, absent
+scattering and noncompact loading retain their own physical limits.
+
 The optional `kinetic-mass lumped|consistent-dkt` record after `mechanics`
 selects the actual assembled kinetic operator. Omission retains legacy
 arithmetic. `consistent-dkt` uses the exact P1 transverse integral and the
@@ -29283,6 +29302,19 @@ bundle is refreshed through the existing same-card query owner, including
 permeability; the combined Debye/Ohmic law uses one identical refreshed bundle.
 Fixed source conditions and typed absolute-temperature conventions must agree
 with retained thermal source receipts. No constitutive data are fitted or inferred.
+
+Both this owner and `QuasiSteadySpatialInterferenceHeating` expose
+`try_new_with_carrier` for one authored transverse wavevector in rad/m.
+Both face arrays, every frequency and every statistical factor describe periodic
+tangential-electric envelopes with the same `exp(-i k_carrier.x)` removed.
+The shared angular-spectrum solver preserves that wavevector through each
+frequency solve and material-temperature rebuild. Incidence angle therefore
+follows the original exterior wavelength; this is not fixed-angle broadband
+illumination or an independent carrier for each line. Existing constructors
+retain zero carrier. Continuous cell/rectangle heat keeps the actual spatial
+sum/difference interference; sampled heat quadrature still requires its own
+spatial resolution. The original two-port light cones, causal reservoir heat,
+thermal energy and absolute DD clock remain authoritative.
 
 The thermal receiver is the original LumpedEnthalpyBody. Its complete chart
 must be fully solid with fixed density; its material card must match the film.

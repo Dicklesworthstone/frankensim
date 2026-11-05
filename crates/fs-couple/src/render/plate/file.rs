@@ -31,6 +31,11 @@
 //! selects the assembled inertia. `consistent-dkt` integrates P1 transverse
 //! motion and the original quadratic DKT rotations, with the same P1 pressure
 //! observation. Omission retains the original lumped model.
+//!
+//! `observer rayleigh X_M Y_M Z_M REFINEMENT_LEVELS MAX_HZ` instead retains the
+//! complete signed P1 modal surface and prepares the shared distributed
+//! Rayleigh receiver. Its path-dependent travel times and numerical latency
+//! are reported separately. The legacy `observer DISTANCE_M` remains compact.
 
 use std::collections::BTreeSet;
 use std::str::{FromStr, Lines, SplitAsciiWhitespace};
@@ -46,8 +51,10 @@ use crate::acoustic_realize::AcousticRealizeError;
 use crate::air_path::{ObserverFilterReceipt, input::{ObserverLawInput, observer_filter}};
 use crate::render::{ControlDelta, RenderContext, RenderError, RenderVoice};
 use crate::render::schedule::{ScheduledControl, ScheduledRenderer};
-use crate::thin_plate::{PlateChartRadiation, PlateMassModel, certified_chart_radiators_with_mass};
+use crate::thin_plate::{PlateChartRadiation, PlateMassModel, certified_chart_radiators_with_mass,
+    certified_chart_surface_radiators};
 use super::{CompactPlateVoice, PlateVoiceConfig};
+use super::spatial::PlateSpatialObserverReceipt;
 
 /// Versioned grammar for the source geometry, mechanics and force history.
 pub const PLATE_PERFORMANCE_SCHEMA: &str = "frankensim-plate-performance-v2";
@@ -117,13 +124,16 @@ pub struct PlatePerformanceInfo {
     pub full_scale_pa: f64,
     /// Resolved exterior gas the observer uses.
     pub gas: GasState,
-    /// Observation distance [m].
+    /// Compact distance, or spatial receiver distance from the chart origin [m].
     pub listener_m: f64,
-    /// Time of flight to the listener, r/c [s].
+    /// Reference time of flight from that origin, r/c [s]. Spatial receivers
+    /// retain their actual range of surface-path delays in `spatial_observer`.
     pub propagation_delay_s: f64,
     /// Applied causal atmosphere law, with receiver/filter delay split.
     /// `None` retains the original unfiltered compact pressure approximation.
     pub observer_filter: Option<ObserverFilterReceipt>,
+    /// Distributed Rayleigh observation and its physical/numerical delay split.
+    pub spatial_observer: Option<PlateSpatialObserverReceipt>,
     /// Whether the input explicitly requested the compact piston reaction.
     pub baffled_piston_loading: bool,
     /// Kinetic discretization actually consumed by the plate eigensolve.
@@ -194,15 +204,24 @@ impl PlatePerformance {
         mut load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     ) -> Result<Self, PlatePerformanceError> {
         let input = Parsed::read_with_materials(bytes, max_block, sources, &mut load_material)?;
-        let bodies = certified_chart_radiators_with_mass(&input.chart, &input.options, input.kinetic_mass)
-            .map_err(PlatePerformanceError::Reduction)?;
-        let retained_modes = bodies.len();
-        let voice = if input.baffled_piston_loading {
-            CompactPlateVoice::from_radiators_with_piston_loads(bodies, input.initial_force_n, input.config)
-        } else {
-            CompactPlateVoice::from_radiators(bodies, input.initial_force_n, input.config)
+        let mut voice = match input.spatial_observer {
+            Some(spatial) => {
+                let reduced = certified_chart_surface_radiators(&input.chart, &input.options,
+                    input.kinetic_mass, spatial.subdivisions)
+                    .map_err(PlatePerformanceError::Reduction)?;
+                CompactPlateVoice::from_surface_radiators(reduced, input.initial_force_n,
+                    input.config, spatial.position_m, spatial.maximum_frequency_hz)
+            }
+            None => {
+                let bodies = certified_chart_radiators_with_mass(&input.chart, &input.options,
+                    input.kinetic_mass).map_err(PlatePerformanceError::Reduction)?;
+                CompactPlateVoice::from_radiators(bodies, input.initial_force_n, input.config)
+            }
+        }.map_err(PlatePerformanceError::Render)?;
+        if input.baffled_piston_loading {
+            voice.attach_piston_loads().map_err(PlatePerformanceError::Render)?;
         }
-            .map_err(PlatePerformanceError::Render)?;
+        let retained_modes = voice.bodies().len();
         let voice = match input.observer_law.as_ref() {
             Some(law) => {
                 let filter = observer_filter(Some(law), &input.config.gas,
@@ -219,6 +238,7 @@ impl PlatePerformance {
             listener_m: input.config.listener_m,
             propagation_delay_s: input.config.listener_m / input.config.gas.sound_speed,
             observer_filter: voice.observer_receipt().copied(),
+            spatial_observer: voice.spatial_observer_receipt().copied(),
             baffled_piston_loading: input.baffled_piston_loading,
             kinetic_mass: input.kinetic_mass,
             nodes: input.chart.mesh.nodes.len(),
@@ -251,6 +271,13 @@ impl PlatePerformance {
     pub fn into_renderer(self) -> ScheduledRenderer { self.renderer }
 }
 
+#[derive(Clone, Copy)]
+struct SpatialObserverInput {
+    position_m: [f64; 3],
+    subdivisions: usize,
+    maximum_frequency_hz: f64,
+}
+
 struct Parsed {
     gas_record: GasRecord,
     chart: PlateChart,
@@ -259,6 +286,7 @@ struct Parsed {
     baffled_piston_loading: bool,
     kinetic_mass: PlateMassModel,
     observer_law: Option<ObserverLawInput>,
+    spatial_observer: Option<SpatialObserverInput>,
     samples: u64,
     full_scale_pa: f64,
     initial_force_n: f64,
@@ -304,7 +332,22 @@ impl Parsed {
         })?;
         ambient.finish()?;
         let gas = *gas_record.state();
-        let listener_m: f64 = r.one("observer")?;
+        let mut observer = r.row("observer")?;
+        let spatial_observer = if observer.fields.clone().next() == Some("rayleigh") {
+            observer.word()?;
+            let position_m = [observer.scalar()?, observer.scalar()?, observer.scalar()?];
+            let subdivisions = observer.count(6)?;
+            let maximum_frequency_hz = observer.scalar()?;
+            if position_m[2] < 0.05 || maximum_frequency_hz <= 0.0
+                || maximum_frequency_hz > 0.45 * f64::from(sample_rate_hz)
+            { return Err(bad(observer.line, "Rayleigh observer needs z >= 0.05 m, 0..6 refinement levels and a positive band <= 0.45 of the sample rate")); }
+            Some(SpatialObserverInput { position_m, subdivisions, maximum_frequency_hz })
+        } else { None };
+        let listener_m = match spatial_observer {
+            Some(spatial) => spatial.position_m[0].hypot(spatial.position_m[1]).hypot(spatial.position_m[2]),
+            None => observer.scalar()?,
+        };
+        observer.finish()?;
         let baffled_piston_loading = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("radiation-load")
         {
@@ -324,6 +367,9 @@ impl Parsed {
             let line = row.line;
             Some(ObserverLawInput::parse(&row.rest()).map_err(|what| bad(line, what))?)
         } else { None };
+        if spatial_observer.is_some() && observer_law.is_some() {
+            return Err(bad(r.line, "Rayleigh observation requires path-resolved atmosphere; a compact observer_law cannot be reused"));
+        }
         let mut limits = r.row("limits")?;
         let max_modes = limits.count(MAX_MODES)?;
         let nyquist_guard_fraction = limits.scalar()?;
@@ -480,7 +526,7 @@ impl Parsed {
         if r.lines.next().is_some() { return Err(bad(r.line + 1, "unexpected trailing record")); }
         let options = PlateChartRadiation { assembly: AssemblyOptions { pretension, support },
             eigenvalue_window, n_modes, damping_ratio, unit_force_weights };
-        Ok(Self { gas_record, chart, options, config, baffled_piston_loading, kinetic_mass, observer_law,
+        Ok(Self { gas_record, chart, options, config, baffled_piston_loading, kinetic_mass, observer_law, spatial_observer,
             samples, full_scale_pa, initial_force_n,
             sections: sections_count, section_provenance, events, max_events })
     }

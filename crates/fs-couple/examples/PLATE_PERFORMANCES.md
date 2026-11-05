@@ -44,6 +44,44 @@ events COUNT
 force SAMPLE_INDEX FORCE_N
 ```
 
+For a spatial microphone, replace `observer DISTANCE_M` with:
+
+```text
+observer rayleigh X_M Y_M Z_M REFINEMENT_LEVELS MAX_HZ
+```
+
+`plate-spatial.performance` is a complete example using this receiver and
+consistent DKT inertia. Render it with the same command above, changing the
+input filename. The coordinates are metres in the mesh's fixed frame, with
+the flat plate at z=0 and the microphone at least 0.05 m into z>0.
+The shared Rayleigh receiver integrates each retained mode's signed P1 surface
+motion, including cancellation, different source-to-microphone distances and
+travel times. Modes with zero net area can now radiate off axis. The same
+geometry-derived mechanical coordinates and force history drive the receiver.
+
+`REFINEMENT_LEVELS` is 0..6: each level quarters every acoustic triangle while
+retaining the original structural P1 field. Three positive integration points
+per subtriangle give `3 * TRIANGLES * 4^LEVELS` surface samples, capped at 16384.
+This refines acoustic integration; it does not refine the mechanical mesh.
+At `MAX_HZ`, the largest subtriangle edge must satisfy `k*h <= pi/4`, and
+`h <= Z_M/4` controls near-field variation. The band must contain every retained
+natural frequency and be at most 0.45 of the output rate. These admission
+controls require a subsequent spatial/modal refinement check for continuum
+accuracy; they do not prove that a transient source has no higher frequencies.
+
+The existing bandlimited derivative and propagation filter are prepared once.
+The sidecar separates each surface path's physical travel-time range from
+`filter_delay_samples` (80 samples at this single-rate clock). Numerical latency
+is retained in the WAV and is not hidden by trimming or altering the force
+schedule. `listener_m` and its scalar delay are the chart-origin reference;
+`spatial_observer` records the actual receiver coordinates, path range and band.
+This is a stationary planar radiator in an infinite rigid baffle. The existing
+optional compact piston reaction may still load the mechanics independently;
+the spatial observation does not add a second reaction load. A compact
+`observer_law` refuses with this choice because atmosphere must be resolved on
+each distinct path. The new native path currently uses the declared gas's
+lossless density and sound speed, with no room or lid scattering.
+
 `GAS_RECORD` is the shared gas declaration read by
 `fs_material::gas_species::input::read_gas_record`, as in the bowed, lip and
 voice files: `T_K P_PA RH` (moist air), `mixture T_K P_PA mole|mass COUNT

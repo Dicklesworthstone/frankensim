@@ -49,6 +49,19 @@ fn observer_json(info: PlatePerformanceInfo) -> String {
         filter.absorption.law == GasAbsorptionModel::Lossless, omission.is_some())
 }
 
+pub(super) fn spatial_observer_json(info: PlatePerformanceInfo) -> String {
+    let Some(r) = info.spatial_observer else {
+        return ",\"spatial_observer\":null".into();
+    };
+    format!(",\"spatial_observer\":{{\"law\":\"rayleigh\",\"position_m\":[{:e},{:e},{:e}],\
+        \"surface_samples\":{},\"maximum_cell_diameter_m\":{:e},\"maximum_frequency_hz\":{:e},\
+        \"surface_propagation_delay_s\":[{:e},{:e}],\"filter_delay_samples\":{:e},\
+        \"multiply_adds_per_sample\":{},\"range_reference\":\"listener_m is distance from the chart origin; each surface path uses its own distance\"}}",
+        r.position_m[0], r.position_m[1], r.position_m[2], r.surface_samples,
+        r.maximum_cell_diameter_m, r.maximum_frequency_hz, r.propagation_delay_s[0], r.propagation_delay_s[1],
+        r.filter_delay_samples, r.multiply_adds_per_sample)
+}
+
 fn options(args: &[String]) -> Result<(&str, &str, usize), String> {
     let mut paths = Vec::new();
     let mut block = None;
@@ -94,6 +107,12 @@ pub(super) fn run_with_gas_sources(
     let gas_sources = super::thermochemical::provenance(core::slice::from_ref(performance.gas_record()));
     let info = performance.info();
     let observer = observer_json(info);
+    let spatial_observer = spatial_observer_json(info);
+    let observer_scope = if info.spatial_observer.is_some() {
+        "distributed P1 Rayleigh surface in an infinite rigid baffle; path-dependent propagation with separately reported bandlimited reconstruction latency"
+    } else {
+        "compact baffled observer; declared causal atmosphere and compensated receiver together count low-frequency r/c once"
+    };
     if info.sample_rate_hz != RATE {
         return Err("music_render requires an explicitly declared 48000 Hz input; no implicit resampling".into());
     }
@@ -118,8 +137,8 @@ pub(super) fn run_with_gas_sources(
          \"retained_modes\":{},\"force_events\":{},\"kinetic_mass\":\"{kinetic_mass}\",\
          \"ambient_gas\":{{\"temperature_k\":{:e},\"pressure_pa\":{:e},\"density_kg_m3\":{:e},\
          \"sound_speed_m_s\":{:e},\"water_mole_fraction\":{:e}}},\
-         \"listener_m\":{:e},\"propagation_delay_s\":{:e},\"radiation_load\":\"{radiation_load}\"{section_sources}{observer},\
-         \"model_scope\":\"linear flat DKT plate; sections from their named packs or fixture labels; compact baffled observer; declared causal atmosphere and compensated receiver together count low-frequency r/c once; optional per-mode piston reaction uses the same gas and clock; no mutual-radiation, continuum-convergence or physical-validation claim\"}}{gas_sources}}}",
+         \"listener_m\":{:e},\"propagation_delay_s\":{:e},\"radiation_load\":\"{radiation_load}\"{section_sources}{observer}{spatial_observer},\
+         \"model_scope\":\"linear flat DKT plate; sections from their named packs or fixture labels; {observer_scope}; optional per-mode piston reaction uses the same gas and clock; no mutual-radiation, continuum-convergence or physical-validation claim\"}}{gas_sources}}}",
         info.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.nodes, info.triangles, info.sections, info.requested_modes, info.retained_modes,
         info.force_events, info.gas.temperature, info.gas.pressure, info.gas.density,

@@ -9,6 +9,7 @@ use fs_couple::render::plate::file::PlatePerformance;
 mod atmosphere;
 
 const SOURCE: &[u8] = include_bytes!("../examples/plate-mesh.performance");
+const SPATIAL_SOURCE: &[u8] = include_bytes!("../examples/plate-spatial.performance");
 static NEXT: AtomicU64 = AtomicU64::new(0);
 fn scratch() -> PathBuf {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -99,6 +100,33 @@ fn consistent_dkt_mass_changes_the_rendered_sound_and_is_recorded() {
     assert_ne!(&expected[44..], &lumped[44..], "kinetic selection must reach the WAV samples");
     let sidecar = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
     assert!(sidecar.contains("\"kinetic_mass\":\"consistent-dkt\""));
+}
+
+#[test]
+fn distributed_plate_source_reaches_wav_and_keeps_physical_and_numerical_delays_distinct() {
+    let root = scratch();
+    let input = root.join("spatial.performance");
+    let output = root.join("spatial.wav");
+    std::fs::write(&input, SPATIAL_SOURCE).unwrap();
+    let performance = PlatePerformance::from_bytes(SPATIAL_SOURCE, 4801).unwrap();
+    let spatial = performance.info().spatial_observer.unwrap();
+    let mut pressure = vec![0.0; 4801];
+    performance.into_renderer().block(&mut pressure).unwrap();
+    let (expected, _) = encode_pcm16_wav(&pressure, 48_000, 1.0).unwrap();
+    assert!(expected[44..].iter().any(|&b| b != 0));
+    assert_eq!(rendered(&input, &output, 37), expected);
+    assert_eq!(rendered(&input, &root.join("other-block.wav"), 571), expected);
+    let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    for key in ["\"spatial_observer\":{\"law\":\"rayleigh\"", "\"surface_samples\":1920",
+        "\"surface_propagation_delay_s\":[", "\"kinetic_mass\":\"consistent-dkt\""] {
+        assert!(metadata.contains(key), "missing {key}");
+    }
+    assert!(metadata.contains(&format!("\"filter_delay_samples\":{:e}", spatial.filter_delay_samples)));
+    let moved = std::str::from_utf8(SPATIAL_SOURCE).unwrap().replace(
+        "observer rayleigh 0.6 0.15 0.4", "observer rayleigh 0.2 0.15 0.4");
+    std::fs::write(&input, moved).unwrap();
+    let other = rendered(&input, &root.join("other-position.wav"), 37);
+    assert_ne!(&expected[44..], &other[44..], "receiver position must reach the acoustic field");
 }
 
 #[test]

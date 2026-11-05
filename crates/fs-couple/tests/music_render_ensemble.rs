@@ -212,6 +212,58 @@ fn a_baffled_reed_reports_its_outlet_grid_latency_and_a_dry_part_waits_for_it() 
 }
 
 #[test]
+fn spatial_plate_latency_aligns_with_compact_plate_without_removing_surface_travel_times() {
+    let dir = directory();
+    let compact_path = dir.join("compact.performance");
+    let spatial_path = dir.join("spatial.performance");
+    let observer = "observer 1.0\n";
+    assert_eq!(PLATE.matches(observer).count(), 1);
+    let spatial_text = PLATE.replace(observer, "observer rayleigh 0.6 0.15 0.4 2 700.0\n");
+    std::fs::write(&compact_path, PLATE).unwrap();
+    std::fs::write(&spatial_path, &spatial_text).unwrap();
+    let compact = PlatePerformance::from_bytes(PLATE.as_bytes(), 37).unwrap();
+    let spatial = PlatePerformance::from_bytes(spatial_text.as_bytes(), 37).unwrap();
+    let samples = spatial.info().samples as usize;
+    assert_eq!(compact.info().samples as usize, samples);
+    let spatial_receipt = spatial.info().spatial_observer.unwrap();
+    let latency = spatial_receipt.filter_delay_samples as usize;
+    assert_eq!(spatial_receipt.filter_delay_samples, latency as f64);
+    assert!(latency > 0 && latency < samples, "latency {latency} of {samples}");
+    let mut compact_pressure = vec![0.0; samples];
+    let mut compact_renderer = compact.into_renderer();
+    for block in compact_pressure.chunks_mut(37) { compact_renderer.block(block).unwrap(); }
+    let mut spatial_pressure = vec![0.0; samples];
+    let mut spatial_renderer = spatial.into_renderer();
+    for block in spatial_pressure.chunks_mut(37) { spatial_renderer.block(block).unwrap(); }
+    // Both source traces already contain their physical propagation delays.
+    // Only the compact trace waits for the spatial receiver's numerical delay.
+    let mut aligned = spatial_pressure.clone();
+    for (p, q) in aligned.iter_mut().skip(latency).zip(&compact_pressure) { *p += q; }
+    let mut unaligned = spatial_pressure;
+    for (p, q) in unaligned.iter_mut().zip(&compact_pressure) { *p += q; }
+    let expected = encode_pcm16_wav(&aligned, 48_000, 1.0).unwrap().0;
+    assert_ne!(expected, encode_pcm16_wav(&unaligned, 48_000, 1.0).unwrap().0,
+        "the spatial receiver's numerical delay must reach this mix");
+    for block in [37, 571] {
+        let out = dir.join(format!("spatial-compact-{block}.wav"));
+        succeeded(run(&out, &[("--plate", &spatial_path), ("--plate", &compact_path)], block, false));
+        assert_eq!(std::fs::read(&out).unwrap(), expected);
+        let receipt = std::fs::read_to_string(out.with_extension("provenance.json")).unwrap();
+        for field in [
+            format!("\"alignment_delay_samples\":0,\"source_filter_delay_output_samples\":{latency},\"total_filter_delay_output_samples\":{latency},"),
+            format!("\"alignment_delay_samples\":{latency},\"source_filter_delay_output_samples\":0,\"total_filter_delay_output_samples\":0,"),
+            format!("\"common_delay_output_samples\":{latency},"),
+            format!("\"surface_propagation_delay_s\":[{:e},{:e}]",
+                spatial_receipt.propagation_delay_s[0], spatial_receipt.propagation_delay_s[1]),
+        ] {
+            assert!(receipt.contains(&field), "{field}: {receipt}");
+        }
+        assert!(receipt.contains("\"spatial_observer\":{\"law\":\"rayleigh\""), "{receipt}");
+        assert!(receipt.contains("\"spatial_observer\":null"), "{receipt}");
+    }
+}
+
+#[test]
 fn the_receipt_names_the_one_listener_gas_and_each_unconstrained_part() {
     let dir = directory(); let striker = dir.join("striker.performance");
     let dry = dir.join("dry.performance"); let thin = dir.join("thin.performance");
