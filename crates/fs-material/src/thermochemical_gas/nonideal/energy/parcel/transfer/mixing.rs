@@ -8,6 +8,7 @@ use crate::thermochemical_gas::nonideal::{
     PengRobinsonSpeciesBinding, ThermochemicalPengRobinsonModel,
 };
 use fs_qty::Temperature;
+use crate::thermochemical_gas::ThermochemicalGasModel;
 use fs_thermochem::SpeciesId;
 use fs_thermochem::eos::peng_robinson::PengRobinsonComponentV1;
 use std::collections::BTreeMap;
@@ -32,9 +33,18 @@ pub(super) fn receiver_model(
         ],
         receiver_mass_kg,
     )?;
+    model_for_source(&[receiver.model(), donor.model()], source)
+}
+
+/// Bind a source-compatible target inventory to the original critical/pair
+/// catalogs. The caller uses the shared ideal catalog join before this step.
+pub(super) fn model_for_source(
+    originals: &[&ThermochemicalPengRobinsonModel],
+    source: ThermochemicalGasModel,
+) -> Result<ThermochemicalPengRobinsonModel, GasEnergyError> {
     let mut critical: BTreeMap<SpeciesId, PengRobinsonComponentV1> = BTreeMap::new();
     let mut pairs = BTreeMap::new();
-    for model in [receiver.model(), donor.model()] {
+    for model in originals {
         let species = model.source().thermodynamics().components();
         let mechanics = model.mechanics();
         for (i, (species_i, component)) in species.iter().zip(mechanics.components()).enumerate() {

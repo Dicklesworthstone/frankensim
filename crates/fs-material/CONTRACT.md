@@ -14481,3 +14481,56 @@ secondary-breakage tests check crossing brackets and conservation; the genuine
 source compiler integration independently checks all three original Austin
 calibrations against `ln(2)/S_0`. The reference example accepts optional
 `--net-power-w DECLARED_WATTS`; see `MINING_AUSTIN_GRINDING.md` for scope.
+
+### Partial-enthalpy species exchange between real-gas volumes
+
+`ThermochemicalPengRobinsonModel::partial_calorics_at_density` combines each
+original NASA species enthalpy with its original mixture-dependent fixed-T,p PR
+partial departure and converts using that species' molar mass. The borrowed
+result retains the exact material and EOS source identities, canonical species
+order and fixed-capacity storage. Its query allocates nothing. The original
+homogeneous mechanical, NASA-support and complete-Cv admission checks apply;
+actual endpoint resolution separately checks all original transport sources.
+
+`IsochoricRealGasParcel::exchange_species_with` advances simultaneous signed
+species streams from one immutable pair snapshot. Positive rows move left to
+right, negative rows move right to left. Each stream carries its actual upstream
+partial enthalpy, including flow work once. Opposing species may exchange energy
+and composition with exactly zero net mass. Final volumes and extra source axes
+remain fixed; unchanged total mass retains the original accepted density bits.
+The returned candidate publishes both reconstructed endpoints or neither.
+
+The consumer reuses the original ideal-source catalog/inventory join and the
+original real-gas critical/pair binding owner. Shared NASA, transport, pack,
+critical and known interaction data must agree exactly. Every new PR species
+pair must be supplied by an original source; absent cross-catalog data is never
+filled with zero. Rows are canonicalized by SpeciesId, duplicate/unknown rows
+refuse, and each withdrawal is bounded against its original species inventory.
+Intended and actual local/global species masses retain absolute roundoff budgets.
+
+For each side, its final composition and density at its old temperature own the
+caloric anchor. Before arithmetic, ideal formation datums cancel by conserved
+species inventory. The remaining extensive target is
+`m0*uR0 - m1*uRanchor + sum(delta_n_i *
+[Delta_h_ideal_i(T0,Tup) + hbarR_i(up) + R*T0])`.
+Molar counterflows are summed before multiplying by RT. The existing finite PR
+caloric owner then reconstructs temperature and the complete pressure, acoustic
+and transport state on that final-composition homogeneous branch. Local and
+paired energy residuals use these small original-law increments; they never
+subtract enormous displayed formation-energy totals. The unchanged temperature
+is admitted for a sub-ULP caloric target only when it is the closest represented
+original-law endpoint within the unchanged caller tolerance, with the complete
+unmodified residual still reported and checked.
+
+This is a first-order prescribed stream primitive. It supplies no rate law,
+membrane/separation work, diffusion coefficients, phase flash or entropy claim
+for arbitrary authored fluxes. Those remain responsibilities of the physical
+transport owner. Source-domain, representation, work-budget, conservation and
+cancellation failures publish neither endpoint.
+
+Focused regressions check dense zero-net-mass counterflow against original
+absolute EOS energy, Euler partial-enthalpy closure, recovery of the existing
+bulk transfer for proportional species streams, independent species energy
+reference shifts of order 1e24, source/catalog refusals, permutation/reversal,
+identity, exact retained density, and late failure/cancellation. The existing
+bulk-transfer and caloric regressions remain active.

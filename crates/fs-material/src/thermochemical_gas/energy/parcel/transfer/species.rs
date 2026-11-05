@@ -41,7 +41,7 @@ pub struct GasSpeciesExchangeSolve {
     pub energy_tolerance_j: f64,
 }
 impl GasSpeciesExchangeSolve {
-    fn validate(self) -> Result<(), GasEnergyError> {
+    pub(in crate::thermochemical_gas) fn validate(self) -> Result<(), GasEnergyError> {
         GasMassTransferSolve { donor: self.gas[0], receiver: self.gas[1],
             mass_tolerance_kg: self.mass_tolerance_kg, energy_tolerance_j: self.energy_tolerance_j }.validate()?;
         if !positive(self.maximum_species_fraction) || self.maximum_species_fraction >= 1.0 {

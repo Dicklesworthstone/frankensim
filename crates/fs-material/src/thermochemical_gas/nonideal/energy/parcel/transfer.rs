@@ -14,6 +14,8 @@
 
 /// Quasi-steady pressure-driven flow using the same source-backed PR branch.
 pub mod nozzle;
+/// Simultaneous selective streams carrying original partial species enthalpy.
+pub mod species;
 mod mixing;
 
 use super::IsochoricRealGasParcel;

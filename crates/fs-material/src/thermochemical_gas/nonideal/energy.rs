@@ -12,6 +12,8 @@
 pub mod parcel;
 /// Entropy changes and reversible adiabatic density reconstruction.
 pub mod entropy;
+/// Source-bound partial molar calorics for species-selective real-gas transport.
+pub mod partial;
 
 use fs_matdb::QueryPoint;
 use fs_qty::{Density, Temperature};
