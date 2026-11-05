@@ -2150,10 +2150,10 @@ fn implicit_rotation_step(
     if spherical || single_axis {
         // No gyroscopic term. The default retains exact constant-axis spin;
         // geometric work owners explicitly select the conjugate Cayley chart.
-        let after = before.add(impulse);
-        let mid = before.scale(0.5).add(after.scale(0.5));
-        let rotation = properties.angular_velocity_body_checked(mid)?.scale(h);
         if use_cayley_everywhere {
+            let after = before.add(impulse);
+            let mid = before.scale(0.5).add(after.scale(0.5));
+            let rotation = properties.angular_velocity_body_checked(mid)?.scale(h);
             let half = rotation.scale(0.5);
             let increment = UnitQuaternion::new(1.0, half.x, half.y, half.z)?;
             let product = orientation.multiply(increment);
@@ -2162,7 +2162,17 @@ fn implicit_rotation_step(
                 UnitQuaternion::new(product.w, product.x, product.y, product.z)?,
             ));
         }
-        return Ok((after, orientation.right_exp(rotation)?));
+        let before = verlet::lifted(before);
+        let after = verlet::rounded(
+            verlet::add_impulse(before, torque, h),
+            "rotational.angular_momentum_after",
+        )?;
+        let mid = verlet::add_half_impulse(before, torque, h);
+        // This admitted branch has zero gyroscopic transport. The common
+        // free owner evaluates its same midpoint exponential while retaining
+        // the impulse and inertia-quotient tails through the attitude phase.
+        let (next, _) = free_rotation_step_compensated(orientation, mid, properties, h)?;
+        return Ok((after, next));
     }
 
     let magnitude = |v: Vec3| v.x.abs().max(v.y.abs()).max(v.z.abs());

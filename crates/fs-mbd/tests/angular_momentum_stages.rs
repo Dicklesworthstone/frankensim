@@ -115,9 +115,13 @@ fn spherical_stages_retain_the_kick_in_attitude_and_signed_endpoint_impulses() {
             assert_eq!(after.linear_momentum_world(), Vec3::ZERO);
         }
 
-        // Both held-load public paths must use the same complete angular
-        // kick/drift treatment. Constant axial torque has an exact phase here.
+        // The default exact-axis branch and both held-load splitting paths
+        // must retain the same phase for this constant axial torque.
         let expected_momentum = axis.scale(sign * (LARGE + 2.0));
+        let midpoint = engine()
+            .step(initial, properties, first, 1.0)
+            .unwrap()
+            .state_after;
         let symplectic = engine()
             .step_symplectic(initial, properties, first, 1.0)
             .unwrap()
@@ -128,7 +132,7 @@ fn spherical_stages_retain_the_kick_in_attitude_and_signed_endpoint_impulses() {
             .unwrap()
             .step
             .state_after;
-        for after in [symplectic, spatial] {
+        for after in [midpoint, symplectic, spatial] {
             assert_eq!(after.angular_momentum_body(), expected_momentum);
             rotation_close(after.pose().orientation(), expected_rotation, 4e-14);
         }
@@ -140,12 +144,19 @@ fn rotated_full_inertia_retains_the_exact_principal_axis_phase() {
     // This tensor has a nonzero yz entry, while x remains an exact principal
     // axis. It exercises the cached basis and increment conjugation without
     // rounding an authored large spin into a different physical direction.
-    let basis = UnitQuaternion::from_axis_angle(AXES[0], 0.37).unwrap();
+    let basis = UnitQuaternion::from_canonical_components([0.8, 0.6, 0.0, 0.0]).unwrap();
     let properties =
         MassProperties::from_principal_frame(1.0, Vec3::ZERO, Vec3::new(1.0, 1.5, 2.0), basis)
             .unwrap();
     assert!(properties.inertia_tensor_body().m[5].abs() > 0.05);
     for sign in [-1.0, 1.0] {
+        // The default owner's existing scalar basis roundtrip must preserve
+        // these authored axis values before testing its new midpoint phase.
+        for magnitude in [2.0, LARGE, LARGE + 2.0] {
+            let value = AXES[0].scale(sign * magnitude);
+            assert_eq!(basis.rotate_body_to_world(value), value);
+            assert_eq!(basis.rotate_world_to_body(value), value);
+        }
         let initial = spinning(UnitQuaternion::IDENTITY, AXES[0].scale(sign * LARGE));
         let held = torque(AXES[0].scale(sign * 2.0));
         let (step, ()) = engine()
@@ -153,15 +164,21 @@ fn rotated_full_inertia_retains_the_exact_principal_axis_phase() {
                 Ok::<_, DynamicsError>((held, ()))
             })
             .unwrap();
-        assert_eq!(
-            step.state_after.angular_momentum_body(),
-            AXES[0].scale(sign * (LARGE + 2.0))
-        );
-        rotation_close(
-            step.state_after.pose().orientation(),
-            kicked_axial_orientation(AXES[0], sign),
-            6e-14,
-        );
+        let midpoint = engine()
+            .step(initial, properties, held, 1.0)
+            .unwrap()
+            .state_after;
+        for after in [step.state_after, midpoint] {
+            assert_eq!(
+                after.angular_momentum_body(),
+                AXES[0].scale(sign * (LARGE + 2.0))
+            );
+            rotation_close(
+                after.pose().orientation(),
+                kicked_axial_orientation(AXES[0], sign),
+                6e-14,
+            );
+        }
     }
 }
 

@@ -864,6 +864,10 @@ including minimum subnormal impulses whose individual halves cannot be stored;
 overflowing full products retain the original staged evaluation.
 Translation in `step` and `step_cayley` also uses the shared retained half-kick
 and position contraction alongside their existing implicit angular midpoint.
+The default `step` also retains the angular midpoint through its exponential
+shortcut for exactly spherical or single-principal-axis motion. This uses the
+same common free owner where the gyroscopic term vanishes; the Cayley chart
+and general asymmetric nonlinear solve retain their existing equations.
 `tests/angular_momentum_stages.rs` supplies independent large-phase, full-inertia,
 endpoint-impulse, reversal, full-kick quotient, subnormal-duration and cancelling
 linear drift regressions across the public rigid steppers. These are numerical
