@@ -5,6 +5,7 @@ use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod contact_equilibrium;
 mod suspension;
+mod thermal;
 
 const AREA: f64 = 0.7;
 const CLOSED: Boundaries = Boundaries::Ends {

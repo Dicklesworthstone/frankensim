@@ -3,6 +3,12 @@
 use super::*;
 use crate::multicomponent::{Totals, sum};
 
+mod thermal;
+pub use thermal::{
+    SharedPistonHeatReport, SharedPistonThermal, SharedPistonThermalError,
+    SharedPistonThermalStepReport,
+};
+
 /// Original extensive reports on either side of one impermeable piston.
 ///
 /// Each side retains its own species order, caloric source and energy datum.

@@ -20,6 +20,7 @@ pub use recoil::{
     exchange_cell_with_recoil,
 };
 pub(crate) mod shared;
+pub use shared::{SharedWallControl, SharedWallStorage};
 use gas::MixtureCaloric;
 pub(crate) use gas::{WallGasCaloric, WallGasState};
 

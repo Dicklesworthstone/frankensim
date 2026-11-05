@@ -4852,3 +4852,63 @@ budgets with opposing signed defects, and cancellation/refusal of either side
 without partial publication. This remains the bounded constant-area sealed
 two-chamber Euler model. Thermal/molecular/reacting contact correction, shocks,
 fully discrete entropy and general FSI stability remain outside this extension.
+
+## One finite thermal inventory conducting through a shared piston
+
+`SharedPistonThermal` binds the two original chamber end cells to one finite
+wall store. `MixtureEuler1d::step_with_shared_piston_and_heat` composes its
+actual shared caloric solve with the existing two-field pressure/inertia
+operator. `step_with_shared_piston_heat_and_contact_equilibrium` additionally
+retains each chamber's independently admitted material contacts and explicit
+numerical energy budget. Each face has its own authored complete conductance
+`G = h A` [W/K]; the mechanical cross section is not multiplied into it again.
+Species do not cross the partition. Thermal mass is counted once and adds no
+second mechanical mass to the separately supplied total piston inertia.
+
+The source stages are H(dt/2), A(dt), H(dt/2). Each H uses the original common
+`wall_exchange::shared::Group` root to solve both gas heat equations against
+ONE wall endpoint. Its calorics borrow each gas's current partial densities,
+original NASA source and physical end-cell volume. The first heat stage uses
+old volumes, and the second uses the actual moved volumes after pressure work.
+The finite wall's source is either an authored constant capacity or its
+original material internal-energy chart; an explicit negligible-expansion
+solid binding is also admitted. Arbitrary source enthalpy refuses because
+this rigid translating wall represents no deformation/pressure-volume work.
+Source validity and the original nested caloric work budget remain enforced.
+The source-work budget covers both heat halves of each complete attempt and
+resets on bounded duration retries; accepted counts exclude discarded attempts.
+
+The first heat stage is independent of the proposed midpoint velocity and is
+computed once per duration attempt. Its heated gas fields feed the original
+joint pressure root, so heat changes actual piston forces, velocity and work.
+Contact targets come from those heated fields, and physical heat gradients
+remain unprojected. If pressure transport shortens its duration, both heat
+stages and both fields restart from accepted state at that common duration.
+Two private flow workspaces and the original heat/RK/geometry scratch are
+reused; no full field or caloric table is cloned per velocity proposal.
+
+`SharedPistonThermalStepReport` exposes complete before/after gas totals,
+the native middle pressure/work reports, per-chamber heat and the one wall
+storage change. Before publication, the enclosing account independently checks
+`Delta E_left + Delta E_right + Delta U_wall + Delta K_piston - W_drive
+ - Delta E_numerical_left - Delta E_numerical_right`.
+The conservative entry has zero numerical defects. Heat never enters the
+pressure-work arrays, and the wall's actual represented storage is recomputed
+from its accepted and candidate source states. Both gases, complete meshes,
+clocks, piston, wall inventory and heat report publish after one final poll.
+Refusal or cancellation preserves all accepted physical state and permits retry.
+
+Focused regressions exercise independent three-body backward-Euler equations,
+old/moved-volume heat balances, pressure-driven motion from hot and cold walls,
+the exact insulated native limit, stiff implicit heat, original nonlinear wall
+storage and energy datums, full replay after acoustic shortening, late
+cancellation/retry and source-work refusal. Advecting caloric contacts retain
+their own pressure while real heating changes pressure at the piston.
+A fixed-spatial-discretization time-refinement check follows heat-driven
+piston velocity and gas pressure against a finer continuation.
+The wall is spatially uniform with constant authored face conductances, and
+both outer gas walls are adiabatic. Backward-Euler heat halves establish neither
+second order nor a simultaneous conjugate thermomechanical solve. Molecular
+transport, chemistry, suspension heat, leakage, thermal expansion, through-wall
+temperature gradients, entropy stability and general FSI stability require
+their separate owners and are not enabled by these entry points.
