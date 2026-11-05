@@ -14901,6 +14901,41 @@ All six and eight existing reservoir tests passed in a bounded build of the
 original material modules with the native thermal error and series helpers.
 This does not establish full Cargo or graph/cavity integration execution.
 
+### Two passive baths on one conducting surface
+
+`ReservoirLayerGeometry::evaluate_material_to_two_baths` closes one supported
+conductivity integral against two distinct boundary laws on the same surface.
+It reuses the original safeguarded power iteration with a signed material-power
+bracket. Each callback supplies actual surface-to-bath heat, its nonnegative
+secant and retained source payload. Zero coefficient and power explicitly
+insulate a bath. Opposing powers and exact zero net material heat remain
+distinct, including heat relayed between baths when material and one bath have
+equal temperatures. There is no substitute weighted ambient temperature.
+
+The physical material/bath temperature hull is intersected with the conductivity
+chart and an explicit original boundary-source surface interval. Only the
+actual material path and boundary trials require source support; a bath never
+becomes a substitute material or gas query. Acceptance uses the declared power
+residual, scaled by the largest individual material/bath power. Original
+callback errors, source-domain refusal, cancellation and exhausted work remain
+typed. At most two bracket callbacks supplement the bounded interior trials.
+
+Returned powers remain authoritative for separate energy accounts. Three
+nonnegative pair conductances describe the frozen surface elimination and
+capacity rows, including the bath-to-bath path. They use the material integral
+mean conductivity and normalized products, preserving thin-wall power and
+avoiding avoidable overflow. They are not derivatives of changing source
+coefficients. This adds no heat storage, second root, uniqueness certificate or
+new physical model-error allowance.
+
+Five direct regressions cover independent three-reservoir rates, opposing
+drives and exact neutral relay, insulation and one-bath parity, nonlinear
+convection/radiation with affine k(T), source-limited surfaces, thin-metal
+accuracy, source errors, cancellation and work-budget refusal. All five plus
+the previous eighteen material/rectangular controls passed in the existing
+bounded original-source build (23 total). Full source ownership and native
+graph/LBM compilation are outside that numerical lane.
+
 ## Source-integrated implicit reservoir and ambient fluxes
 
 `thermal::conduction::network::ImplicitLayerBoundary` borrows an original

@@ -2,6 +2,9 @@
 
 use super::{ConductivityCurve, DepositionError, LayerConductionConfig, ReservoirLayerGeometry};
 
+mod coupled;
+pub use coupled::CoupledLayerResponse;
+
 /// Preserve the original thermal/source failure, or the actual unclosed power.
 #[derive(Debug)]
 pub enum ConvectiveLayerError<E> {
@@ -82,13 +85,95 @@ fn closed<E>(
     film: f64,
     config: LayerConductionConfig,
 ) -> Result<bool, ConvectiveLayerError<E>> {
-    let residual = solid - film;
-    let tolerance = config.absolute_heat_tolerance_w
-        + config.relative_heat_tolerance * solid.abs().max(film.abs());
+    residual_closed(solid - film, solid.abs().max(film.abs()), config)
+}
+
+fn residual_closed<E>(
+    residual: f64,
+    scale: f64,
+    config: LayerConductionConfig,
+) -> Result<bool, ConvectiveLayerError<E>> {
+    let tolerance = config.absolute_heat_tolerance_w + config.relative_heat_tolerance * scale;
     if !residual.is_finite() || !tolerance.is_finite() {
         return Err(DepositionError::Arithmetic.into());
     }
     Ok(residual.abs() <= tolerance)
+}
+
+struct PowerTrial<F> {
+    residual_w: f64,
+    scale_w: f64,
+    admissible: bool,
+    state: F,
+}
+
+// The one- and two-bath owners use the SAME safeguarded power iteration.
+// Their original source callbacks/inverse supply each trial and cancellation
+// checks; no source is queried or rounded temperature flux reconstructed here.
+#[allow(clippy::too_many_arguments)]
+fn power_root<F, E>(
+    [mut low, mut high]: [f64; 2],
+    [mut low_residual, mut high_residual]: [f64; 2],
+    guess: f64,
+    orientation: f64,
+    config: LayerConductionConfig,
+    mut evaluate_trial: impl FnMut(f64) -> Result<PowerTrial<F>, ConvectiveLayerError<E>>,
+) -> Result<(f64, F, usize), ConvectiveLayerError<E>> {
+    let mut power = if guess.is_finite() && guess > low && guess < high {
+        guess
+    } else {
+        low + 0.5 * (high - low)
+    };
+    let mut interpolated_width = None;
+    let mut residual = orientation * high_residual;
+    for iteration in 1..=config.max_iterations {
+        let trial = evaluate_trial(power)?;
+        residual = trial.residual_w;
+        if trial.admissible && residual_closed(residual, trial.scale_w, config)? {
+            return Ok((power, trial.state, iteration));
+        }
+        if orientation * residual > 0.0 {
+            high = power;
+            high_residual = orientation * residual;
+        } else {
+            low = power;
+            low_residual = orientation * residual;
+        }
+        let width = high - low;
+        let midpoint = low + 0.5 * width;
+        let next = if interpolated_width.is_none_or(|previous| width <= 0.5 * previous) {
+            let a = low_residual.abs();
+            let b = high_residual.abs();
+            let weight = if a >= b {
+                1.0 / (1.0 + b / a)
+            } else {
+                let ratio = a / b;
+                ratio / (1.0 + ratio)
+            };
+            let secant = low + width * weight;
+            if secant > low && secant < high {
+                interpolated_width = Some(width);
+                secant
+            } else {
+                interpolated_width = None;
+                midpoint
+            }
+        } else {
+            interpolated_width = None;
+            midpoint
+        };
+        if next <= low || next >= high || next == power {
+            return Err(ConvectiveLayerError::SurfaceBalance {
+                residual_w: residual,
+                iterations: iteration,
+            });
+        }
+        power = next;
+    }
+    Err(ConvectiveLayerError::SurfaceBalance {
+        residual_w: residual,
+        iterations: config.max_iterations,
+    })
 }
 
 fn finish<F, E>(
@@ -188,13 +273,13 @@ impl ReservoirLayerGeometry {
         if !maximum.is_finite() || maximum <= 0.0 {
             return Err(DepositionError::Arithmetic.into());
         }
-        let mut low_residual = -sign * first.power;
+        let low_residual = -sign * first.power;
         let guess = self.slope(conductivity, 1.0 / first.conductance)? * difference.abs();
         drop(first);
         // Use the exact source-limit face, avoiding a multiply/divide round trip
         // that could place an otherwise valid boundary query outside the chart.
         let end = evaluate(limit, bulk, &mut evaluate_film, &mut checkpoint)?;
-        let mut high_residual = maximum - sign * end.power;
+        let high_residual = maximum - sign * end.power;
         if !high_residual.is_finite() {
             return Err(DepositionError::Arithmetic.into());
         }
@@ -205,68 +290,29 @@ impl ReservoirLayerGeometry {
             return finish(limit, sign * maximum, difference, end, 0);
         }
         drop(end);
-        let (mut low, mut high) = (0.0, maximum);
-        let mut power = if guess.is_finite() && guess > low && guess < high {
-            guess
-        } else {
-            low + 0.5 * (high - low)
-        };
-        let mut interpolated_width = None;
-        let mut residual = sign * high_residual;
-        for iteration in 1..=config.max_iterations {
-            checkpoint()?;
-            let surface =
-                curve.temperature_after_integral_w_m(cell, -sign * (power / self.multiplier_m))?;
-            if !surface.is_finite() || surface < cell.min(limit) || surface > cell.max(limit) {
-                return Err(DepositionError::Arithmetic.into());
-            }
-            let film = evaluate(surface, bulk, &mut evaluate_film, &mut checkpoint)?;
-            residual = sign * power - film.power;
-            if film.power != 0.0 && closed(sign * power, film.power, config)? {
-                return finish(surface, sign * power, difference, film, iteration);
-            }
-            if sign * residual > 0.0 {
-                high = power;
-                high_residual = sign * residual;
-            } else {
-                low = power;
-                low_residual = sign * residual;
-            }
-            let width = high - low;
-            let midpoint = low + 0.5 * width;
-            let next = if interpolated_width.is_none_or(|previous| width <= 0.5 * previous) {
-                let a = low_residual.abs();
-                let b = high_residual.abs();
-                let weight = if a >= b {
-                    1.0 / (1.0 + b / a)
-                } else {
-                    let ratio = a / b;
-                    ratio / (1.0 + ratio)
-                };
-                let secant = low + width * weight;
-                if secant > low && secant < high {
-                    interpolated_width = Some(width);
-                    secant
-                } else {
-                    interpolated_width = None;
-                    midpoint
+        let (power, (surface, film), iterations) = power_root(
+            [0.0, maximum],
+            [low_residual, high_residual],
+            guess,
+            sign,
+            config,
+            |power| {
+                checkpoint()?;
+                let surface = curve
+                    .temperature_after_integral_w_m(cell, -sign * (power / self.multiplier_m))?;
+                if !surface.is_finite() || surface < cell.min(limit) || surface > cell.max(limit) {
+                    return Err(DepositionError::Arithmetic.into());
                 }
-            } else {
-                interpolated_width = None;
-                midpoint
-            };
-            if next <= low || next >= high || next == power {
-                return Err(ConvectiveLayerError::SurfaceBalance {
-                    residual_w: residual,
-                    iterations: iteration,
-                });
-            }
-            power = next;
-        }
-        Err(ConvectiveLayerError::SurfaceBalance {
-            residual_w: residual,
-            iterations: config.max_iterations,
-        })
+                let film = evaluate(surface, bulk, &mut evaluate_film, &mut checkpoint)?;
+                Ok(PowerTrial {
+                    residual_w: sign * power - film.power,
+                    scale_w: power.abs().max(film.power.abs()),
+                    admissible: film.power != 0.0,
+                    state: (surface, film),
+                })
+            },
+        )?;
+        finish(surface, sign * power, difference, film, iterations)
     }
 }
 

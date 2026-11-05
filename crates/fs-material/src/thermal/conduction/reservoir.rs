@@ -8,7 +8,7 @@ use super::{ConductivityCurve, LayerConductionConfig};
 use fs_thermal::enthalpy::DepositionError;
 
 mod surface;
-pub use surface::{ConvectiveLayerError, ConvectiveLayerResponse};
+pub use surface::{ConvectiveLayerError, ConvectiveLayerResponse, CoupledLayerResponse};
 
 /// Positive geometric multiplier C in Q = C integral(k(T) dT), in metres.
 /// This contains no material coefficient or heat-transfer calibration.
