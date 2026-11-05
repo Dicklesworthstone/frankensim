@@ -559,6 +559,43 @@ backbones with and without deflation, and refuse false or incomplete tangent
 callbacks before any substitute perturbation. These are focused G1/G3 numerical
 claims; source-call counts are not wall-clock performance measurements.
 
+## Driven sidebands about a complete periodic orbit
+
+`sideband::PreparedPeriodicLinearization` prepares the exact original state
+tangent along a supplied `HbOrbit`. For carrier `nu` and base frequency `omega`,
+it solves the complete coupled equations
+`sum_l [delta_kl P(i*(nu+k*omega)) - A_(k-l)] X_l = F_k`.
+All original coordinates, full port matrix entries and both signs of every
+retained sideband participate. Coefficients are peak complex perturbations in
+`Re sum_k X_k exp(i*(nu+k*omega)*t)`, unlike the base orbit's Fourier half
+coefficients. Coincident signed physical frequencies must be combined coherently
+by consumers; the owner does not fold frequencies or add a damping floor.
+
+Preparation independently checks the complete sampled base equations and
+normalized tangent Fourier coefficients on two grids. It requires an exact
+declared tangent and refuses unavailable, partial or nonfinite derivatives.
+The cached tangent serves multiple carriers; `factor` uses the shared complex
+LU owner once per carrier and each factor serves multiple original-equation
+forcing vectors without further source/tangent callbacks. Independent row
+contractions report retained backward error, and original-equation defects
+are checked in the finite omitted bands `N < |k| <= 2*N+2`.
+Independent state/equation scales, numerical payload/work admission and
+cancellation apply before publication. No physical source is mutated.
+
+`tests/sideband_response.rs` checks a phase-shifted nonlinear cascade against
+analytic converted sidebands, a parametrically driven oscillator against
+independent real-time integration and order refinement, and full coupled
+mass/damping/stiffness/gyroscopic/Maxwell ports against closed two-coordinate
+responses. Stale base waveforms, aliases, exact singular resonance, unavailable
+or refused derivatives, cancelled reuse and explicit resource refusals are
+also exercised. These are focused numerical checks, not experimental evidence.
+
+The source and tangent must actually repeat at the authored period. Finite
+quadrature, finite checked omitted bands and small backward error establish
+neither an infinite-tail bound nor a conditioning-dependent forward-error bound.
+This is an infinitesimal particular response about the authored operating orbit;
+it does not establish Floquet stability, startup decay or finite-probe accuracy.
+
 ## No-claim boundaries
 
 - Quasi-periodic orbits (tori) are a NAMED refusal, not a claim.

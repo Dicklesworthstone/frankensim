@@ -36,6 +36,9 @@ use fs_math::det;
 /// Full-state autonomous pseudo-arclength continuation.
 pub mod autonomous;
 
+/// Driven sideband response about a complete periodic operating waveform.
+pub mod sideband;
+
 mod adaptive;
 pub use adaptive::{
     AdaptiveHbOrbit, HbRefinementBudget, HbRefinementCheck, solve_hb_adaptive,
