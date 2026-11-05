@@ -6,6 +6,9 @@
 //! fixed-Jacobian COM/marker travel, including trajectories with a reversal or
 //! snap. A snap changes only contact storage; its release remains an explicit
 //! outgoing energy account, never an invented impulse or automatically heat.
+//! Declared constant COM forces and body torques drive that same original
+//! trajectory through their actual normal acceleration. Their work uses native
+//! COM/angular travel, including the contact force's first time moment.
 //!
 //! This frictionless normal model supplies no tangential force or free spin
 //! couple; the full inertial cross response remains unconstrained.
@@ -15,18 +18,23 @@
 //! and refresh geometry before continuation. No finite-rotation trajectory,
 //! contact discovery, tangential law, support or additional event law is inferred.
 
-use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3};
+use crate::{DynamicsError, MassProperties, PointKinematics, RigidBodyState, Vec3, Wrench};
 use fs_contact::normal_patch::adhesive::{
     JkrState, SourceJkrSphereContact,
-    motion::{JkrNormalMotion, JkrNormalMotionBudget, JkrNormalMotionError, JkrNormalMotionStep},
+    motion::{
+        JkrNormalMotion, JkrNormalMotionBudget, JkrNormalMotionError, JkrNormalMotionState,
+        JkrNormalMotionStep,
+    },
 };
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
 use fs_tribo::partial_slip::TangentFrame;
 
-use super::super::hertz::{
-    RigidHertzError, points, prepare_pair_wrench, relative_point, scaled_response,
+use super::super::hertz::{RigidHertzError, points, relative_point, scaled_response};
+use super::super::{
+    ResultantImpulse, RigidContactBinding, RigidFrictionError, add_components, magnitude, poll,
+    rounded_components, vector,
 };
-use super::super::{RigidContactBinding, RigidFrictionError, magnitude, poll, vector};
 
 /// Original normal source and physical pair with COM-relative geometry markers.
 #[derive(Clone, Copy, Debug)]
@@ -75,9 +83,9 @@ pub struct RigidJkrAudit {
     pub marker_velocity_residual_m_s: f64,
     /// Native kinetic change minus native impulse work [J].
     pub work_energy_residual_j: f64,
-    /// Native kinetic change plus original integrated contact work [J].
+    /// Native kinetic change + original contact work - actual external work [J].
     pub normal_work_residual_j: f64,
-    /// Native kinetic + contact storage change + explicit snap release [J].
+    /// Native kinetic + contact storage + snap release - external work [J].
     pub total_energy_residual_j: f64,
     /// Actual minus commanded impulse, in original A/B order [N s].
     pub body_linear_momentum_residual_ns: [Vec3; 2],
@@ -87,13 +95,18 @@ pub struct RigidJkrAudit {
     pub linear_momentum_change_ns: Vec3,
     /// Complete pair orbital-plus-spin change at the held geometry [N m s].
     pub angular_momentum_change_nms: Vec3,
+    /// Pair momentum change minus the actual external force impulses [N s].
+    pub linear_momentum_residual_ns: Vec3,
+    /// Pair orbital-plus-spin change minus actual external wrench impulse [N m s].
+    pub angular_momentum_residual_nms: Vec3,
 }
 
 /// Original events and physical travel for the surrounding native pose owner.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RigidJkrReport {
     /// Source trajectory, including branch events and unpartitioned snap release.
-    /// Its clock starts at zero for this captured native phase.
+    /// Fresh `advance` phases start at zero; `continue_motion` retains the
+    /// original accepted source/mass/policy/time/step history.
     pub motion: JkrNormalMotionStep,
     /// Actual normal `J M^-1 J^T`, retaining both full inertia tensors [1/kg].
     pub mobility_per_kg: f64,
@@ -101,6 +114,11 @@ pub struct RigidJkrReport {
     pub force_impulse_on_a_world_ns: Vec3,
     /// Integral t times the force on A, with time local to this phase [N s²].
     pub force_time_moment_on_a_world_ns2: Vec3,
+    /// Held world-frame COM forces and body-frame COM torques, in A/B order.
+    pub external_wrenches: [Wrench; 2],
+    /// Held scalar force derived from actual native normal acceleration and
+    /// mobility; positive closes the gap [N]. It is not an imposed body load.
+    pub applied_normal_force_n: f64,
     /// Actual initial/final A-minus-B normal rates [m/s].
     pub relative_normal_velocity_m_s: [f64; 2],
     /// Actual normal travel reconstructed from the impulse first moment [m].
@@ -116,8 +134,11 @@ pub struct RigidJkrReport {
     pub reaction_displacement_world_m: [Vec3; 2],
     /// Compensated kinetic change of the original two finite bodies [J].
     pub kinetic_energy_change_j: f64,
-    /// Actual impulse contracted with actual midpoint point velocity [J].
+    /// Combined impulses contracted with actual midpoint COM/angular rates [J].
     pub impulse_work_j: f64,
+    /// Actual force·COM travel + body torque·angular travel [J]. Contact timing
+    /// enters through its first time moment, including reversals and snaps.
+    pub external_work_j: f64,
     /// Original endpoint elastic-plus-surface potential change [J].
     pub normal_storage_change_j: f64,
     /// Independent dimensional checks, without source-authority promotion.
@@ -301,18 +322,89 @@ impl<'a> PreparedRigidJkrPair<'a> {
         self.reaction_arms
     }
 
+    /// Initialize a resumable original trajectory from the actual captured
+    /// native geometry and normal rate. This creates no motion or branch event.
+    /// Retain each accepted `report.motion.state()` for later continuation.
+    pub fn initialize_motion(
+        &self,
+        previous: JkrState,
+    ) -> Result<JkrNormalMotionState, RigidJkrError> {
+        let geometry_residual = finite(previous.indentation_m() - self.approach_m)?;
+        if geometry_residual.abs() > self.controls.geometry_tolerance_m {
+            return Err(RigidJkrError::GeometryMismatch {
+                residual_m: geometry_residual,
+            });
+        }
+        let velocity = finite(relative_point(self.reaction_before).dot(self.normal))?;
+        Ok(self.motion.initialize(previous, velocity)?)
+    }
+
+    /// Continue the original accepted clock and event history after the pose
+    /// owner consumes travel and captures the refreshed native geometry.
+    /// Actual approach/rate must agree within the original dimensional gates.
+    /// Source, effective mass and numerical policy must match exactly; changed
+    /// mobility is a refusal, not an implicit velocity/history reinitialization.
+    pub fn continue_motion(
+        &self,
+        previous: JkrNormalMotionState,
+        dt_s: f64,
+        gate: &CancelGate,
+    ) -> Result<RigidJkrCandidate, RigidJkrError> {
+        self.continue_motion_with_wrenches(previous, [Wrench::ZERO; 2], dt_s, gate)
+    }
+
+    /// Continue the same original trajectory with the new phase's held body
+    /// wrenches. Loads may change between phases without changing the accepted
+    /// source/mass/policy/time token or replaying a previous attachment/release.
+    pub fn continue_motion_with_wrenches(
+        &self,
+        previous: JkrNormalMotionState,
+        wrenches: [Wrench; 2],
+        dt_s: f64,
+        gate: &CancelGate,
+    ) -> Result<RigidJkrCandidate, RigidJkrError> {
+        self.advance_state(previous, wrenches, dt_s, gate)
+    }
+
     /// Advance the explicit original branch at the ACTUAL initial body rate.
     /// Source tokens retain attachment history; body kinematics, not a cached
     /// effective mass or external scalar velocity, initialize every phase.
-    #[allow(clippy::too_many_lines)]
     pub fn advance(
         &self,
         previous: JkrState,
         dt_s: f64,
         gate: &CancelGate,
     ) -> Result<RigidJkrCandidate, RigidJkrError> {
+        self.advance_with_wrenches(previous, [Wrench::ZERO; 2], dt_s, gate)
+    }
+
+    /// Advance with held forces at the actual COMs and held body-frame torques,
+    /// in original A/B order. Full native inertia determines their normal
+    /// acceleration; unconstrained tangential and angular response is retained.
+    /// Contact and external impulses are accumulated before either body changes.
+    pub fn advance_with_wrenches(
+        &self,
+        previous: JkrState,
+        wrenches: [Wrench; 2],
+        dt_s: f64,
+        gate: &CancelGate,
+    ) -> Result<RigidJkrCandidate, RigidJkrError> {
         poll(gate)?;
-        let geometry_residual = finite(previous.indentation_m() - self.approach_m)?;
+        let state = self.initialize_motion(previous)?;
+        self.advance_state(state, wrenches, dt_s, gate)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn advance_state(
+        &self,
+        state: JkrNormalMotionState,
+        wrenches: [Wrench; 2],
+        dt_s: f64,
+        gate: &CancelGate,
+    ) -> Result<RigidJkrCandidate, RigidJkrError> {
+        poll(gate)?;
+        let before_response = self.motion.response(state)?;
+        let geometry_residual = finite(state.contact_state().indentation_m() - self.approach_m)?;
         if geometry_residual.abs() > self.controls.geometry_tolerance_m {
             return Err(RigidJkrError::GeometryMismatch {
                 residual_m: geometry_residual,
@@ -320,20 +412,90 @@ impl<'a> PreparedRigidJkrPair<'a> {
         }
         let initial = relative_point(self.reaction_before);
         let velocity_before = finite(initial.dot(self.normal))?;
-        let state = self.motion.initialize(previous, velocity_before)?;
-        let before_response = self.motion.response(state)?;
-        let step = self.motion.advance(state, 0.0, dt_s, gate)?;
+        if (state.velocity_m_s() - velocity_before).abs() > self.controls.velocity_tolerance_m_s {
+            return Err(RigidJkrError::Invalid(
+                "original motion rate disagrees with actual native normal rate",
+            ));
+        }
+        let mut free_acceleration = [Vec3::ZERO; 2];
+        for i in 0..2 {
+            wrenches[i].validate()?;
+            let angular_acceleration =
+                self.properties[i].angular_velocity_body_checked(wrenches[i].torque_body)?;
+            free_acceleration[i] = wrenches[i]
+                .force_world
+                .scale(self.properties[i].mass().recip())
+                .add(
+                    self.before[i]
+                        .pose()
+                        .orientation()
+                        .rotate_body_to_world(angular_acceleration.cross(self.reaction_arms[i])),
+                );
+        }
+        let applied_normal_force = finite(
+            free_acceleration[0]
+                .sub(free_acceleration[1])
+                .dot(self.normal)
+                / self.mobility,
+        )?;
+        let step = self
+            .motion
+            .advance(state, applied_normal_force, dt_s, gate)?;
         let impulse = self.normal.scale(-step.normal_impulse_n_s);
         let time_moment = self.normal.scale(-step.normal_time_moment_n_s2);
-        let phase = prepare_pair_wrench(
-            self.before,
-            self.properties,
-            self.reaction_arms,
-            impulse,
-            Vec3::ZERO,
-            gate,
-        )?;
-        let after = phase.bodies_after;
+        let mut after = self.before;
+        let mut kinetic_change = Dd::from_f64(0.0);
+        let mut work = Dd::from_f64(0.0);
+        let mut linear_change = [Dd::from_f64(0.0); 3];
+        let mut angular_change = [Dd::from_f64(0.0); 3];
+        let mut external_linear = [Dd::from_f64(0.0); 3];
+        let mut external_angular = [Dd::from_f64(0.0); 3];
+        let mut linear_residual = [Vec3::ZERO; 2];
+        let mut angular_residual = [Vec3::ZERO; 2];
+        for (i, sign) in [(0, 1.0), (1, -1.0)] {
+            poll(gate)?;
+            let body = self.before[i];
+            let orientation = body.pose().orientation();
+            let external_impulse = wrenches[i].force_world.scale(dt_s);
+            let external_torque = wrenches[i].torque_body.scale(dt_s);
+            let mut resultant = ResultantImpulse::default();
+            resultant.add(body, self.reaction_arms[i], impulse.scale(sign), Vec3::ZERO);
+            add_components(&mut resultant.linear, external_impulse);
+            // The real wrench torque is already in its declared body frame.
+            add_components(&mut resultant.angular, external_torque);
+            let receipt = body.apply_momentum_impulse(
+                self.properties[i],
+                rounded_components(resultant.linear),
+                rounded_components(resultant.angular),
+            )?;
+            after[i] = receipt.state_after;
+            linear_residual[i] = receipt.linear_residual_world;
+            angular_residual[i] = receipt.angular_residual_body;
+            kinetic_change = kinetic_change + Dd::from_f64(receipt.work.kinetic_energy_change_j);
+            work = work + Dd::from_f64(receipt.work.impulse_work_j);
+            add_components(&mut linear_change, receipt.linear_increment_world);
+            add_components(&mut external_linear, external_impulse);
+            add_components(
+                &mut angular_change,
+                body.pose()
+                    .position_world()
+                    .cross(receipt.linear_increment_world),
+            );
+            add_components(
+                &mut angular_change,
+                orientation.rotate_body_to_world(receipt.angular_increment_body),
+            );
+            add_components(
+                &mut external_angular,
+                body.pose().position_world().cross(external_impulse),
+            );
+            add_components(
+                &mut external_angular,
+                orientation.rotate_body_to_world(external_torque),
+            );
+        }
+        let kinetic_change = finite(kinetic_change.to_f64())?;
+        let work = finite(work.to_f64())?;
         let reaction_after = points(after, self.properties, self.reaction_arms)?;
         let marker_arms = [
             self.contact.binding.arm_a_body,
@@ -349,28 +511,21 @@ impl<'a> PreparedRigidJkrPair<'a> {
         let mut angular_travel = [Vec3::ZERO; 2];
         let mut marker_travel = [Vec3::ZERO; 2];
         let mut reaction_travel = [Vec3::ZERO; 2];
-        let mut linear_residual = [Vec3::ZERO; 2];
-        let mut angular_residual = [Vec3::ZERO; 2];
+        let mut external_work = Dd::from_f64(0.0);
         for (i, sign) in [(0, 1.0), (1, -1.0)] {
             poll(gate)?;
             let orientation = self.before[i].pose().orientation();
-            let expected = impulse.scale(sign);
-            linear_residual[i] = after[i]
-                .linear_momentum_world()
-                .sub(self.before[i].linear_momentum_world())
-                .sub(expected);
-            angular_residual[i] = after[i]
-                .angular_momentum_body()
-                .sub(self.before[i].angular_momentum_body())
-                .sub(self.reaction_arms[i].cross(orientation.rotate_world_to_body(expected)));
-            let integrated_force = displacement_impulse.scale(sign);
+            let integrated_contact = displacement_impulse.scale(sign);
+            let integrated_force =
+                integrated_contact.add(wrenches[i].force_world.scale(dt_s).scale(0.5 * dt_s));
             body_travel[i] = self.reaction_before[i]
                 .center_of_mass_velocity_world
                 .scale(dt_s)
                 .add(integrated_force.scale(self.properties[i].mass().recip()));
             // Apply the same full inverse inertia to the torque time integral.
-            let integrated_torque =
-                self.reaction_arms[i].cross(orientation.rotate_world_to_body(integrated_force));
+            let integrated_torque = self.reaction_arms[i]
+                .cross(orientation.rotate_world_to_body(integrated_contact))
+                .add(wrenches[i].torque_body.scale(dt_s).scale(0.5 * dt_s));
             angular_travel[i] = self.reaction_before[i]
                 .angular_velocity_body
                 .scale(dt_s)
@@ -380,30 +535,40 @@ impl<'a> PreparedRigidJkrPair<'a> {
             reaction_travel[i] = body_travel[i].add(
                 orientation.rotate_body_to_world(angular_travel[i].cross(self.reaction_arms[i])),
             );
+            external_work = external_work
+                + Dd::from_f64(wrenches[i].force_world.dot(body_travel[i]))
+                + Dd::from_f64(wrenches[i].torque_body.dot(angular_travel[i]));
         }
+        let external_work = finite(external_work.to_f64())?;
         let travel = finite(reaction_travel[0].sub(reaction_travel[1]).dot(self.normal))?;
         let marker_travel_normal = finite(marker_travel[0].sub(marker_travel[1]).dot(self.normal))?;
         let marker_velocity_residual = (relative_point(self.markers_before).dot(self.normal)
             - velocity_before)
             .abs()
             .max((relative_point(markers_after).dot(self.normal) - velocity_after).abs());
-        let work = finite(impulse.dot(initial.scale(0.5).add(endpoint.scale(0.5))))?;
         let storage_change =
             finite(step.contact.reversible_energy_j - before_response.reversible_energy_j)?;
+        let linear_balance = rounded_components(core::array::from_fn(|i| {
+            linear_change[i] - external_linear[i]
+        }));
+        let angular_balance = rounded_components(core::array::from_fn(|i| {
+            angular_change[i] - external_angular[i]
+        }));
         let audit = RigidJkrAudit {
             normal_displacement_residual_m: travel - step.normal_increment_m,
             marker_displacement_residual_m: marker_travel_normal - travel,
             normal_velocity_residual_m_s: velocity_after - step.state().velocity_m_s(),
             marker_velocity_residual_m_s: marker_velocity_residual,
-            work_energy_residual_j: phase.kinetic_change_j - work,
-            normal_work_residual_j: phase.kinetic_change_j + step.normal_work_j,
-            total_energy_residual_j: phase.kinetic_change_j
-                + storage_change
-                + step.released_energy_j,
+            work_energy_residual_j: kinetic_change - work,
+            normal_work_residual_j: kinetic_change + step.normal_work_j - external_work,
+            total_energy_residual_j: kinetic_change + storage_change + step.released_energy_j
+                - external_work,
             body_linear_momentum_residual_ns: linear_residual,
             body_angular_momentum_residual_nms: angular_residual,
-            linear_momentum_change_ns: phase.linear_change_ns,
-            angular_momentum_change_nms: phase.angular_change_nms,
+            linear_momentum_change_ns: rounded_components(linear_change),
+            angular_momentum_change_nms: rounded_components(angular_change),
+            linear_momentum_residual_ns: linear_balance,
+            angular_momentum_residual_nms: angular_balance,
         };
         let c = self.controls;
         if [
@@ -424,11 +589,11 @@ impl<'a> PreparedRigidJkrPair<'a> {
             .any(|v| !v.is_finite() || v.abs() > c.energy_tolerance_j)
             || linear_residual
                 .into_iter()
-                .chain([phase.linear_change_ns])
+                .chain([linear_balance])
                 .any(|v| !v.is_finite() || magnitude(v) > c.linear_momentum_tolerance_ns)
             || angular_residual
                 .into_iter()
-                .chain([phase.angular_change_nms])
+                .chain([angular_balance])
                 .any(|v| !v.is_finite() || magnitude(v) > c.angular_momentum_tolerance_nms)
             || body_travel
                 .into_iter()
@@ -448,14 +613,17 @@ impl<'a> PreparedRigidJkrPair<'a> {
                 mobility_per_kg: self.mobility,
                 force_impulse_on_a_world_ns: impulse,
                 force_time_moment_on_a_world_ns2: time_moment,
+                external_wrenches: wrenches,
+                applied_normal_force_n: applied_normal_force,
                 relative_normal_velocity_m_s: [velocity_before, velocity_after],
                 relative_normal_displacement_m: travel,
                 body_displacement_world_m: body_travel,
                 angular_displacement_body_rad: angular_travel,
                 marker_displacement_world_m: marker_travel,
                 reaction_displacement_world_m: reaction_travel,
-                kinetic_energy_change_j: phase.kinetic_change_j,
+                kinetic_energy_change_j: kinetic_change,
                 impulse_work_j: work,
+                external_work_j: external_work,
                 normal_storage_change_j: storage_change,
                 audit,
             },
@@ -478,6 +646,22 @@ pub fn prepare_rigid_jkr_contact(
         .advance(previous, dt_s, gate)
 }
 
+/// Stage a trajectory under held actual body wrenches in original A/B order.
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_rigid_jkr_contact_with_wrenches(
+    bodies: &[RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidJkrContact<'_>,
+    previous: JkrState,
+    wrenches: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidJkrControls,
+    gate: &CancelGate,
+) -> Result<RigidJkrCandidate, RigidJkrError> {
+    PreparedRigidJkrPair::new(bodies, properties, contact, controls, gate)?
+        .advance_with_wrenches(previous, wrenches, dt_s, gate)
+}
+
 /// Publish both momenta and the original normal history only after admission.
 /// Poses remain unchanged; the returned travel belongs to the surrounding pose
 /// owner. An advanced source against stale marker geometry refuses continuation.
@@ -491,8 +675,34 @@ pub fn apply_rigid_jkr_contact(
     controls: RigidJkrControls,
     gate: &CancelGate,
 ) -> Result<RigidJkrReport, RigidJkrError> {
-    let candidate =
-        prepare_rigid_jkr_contact(bodies, properties, contact, *history, dt_s, controls, gate)?;
+    apply_rigid_jkr_contact_with_wrenches(
+        bodies,
+        properties,
+        contact,
+        history,
+        [Wrench::ZERO; 2],
+        dt_s,
+        controls,
+        gate,
+    )
+}
+
+/// Atomically publish loaded body momenta and source history after every check.
+/// Wrenches act at the actual COMs, in original A/B order; poses remain held.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_rigid_jkr_contact_with_wrenches(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    contact: RigidJkrContact<'_>,
+    history: &mut JkrState,
+    wrenches: [Wrench; 2],
+    dt_s: f64,
+    controls: RigidJkrControls,
+    gate: &CancelGate,
+) -> Result<RigidJkrReport, RigidJkrError> {
+    let candidate = prepare_rigid_jkr_contact_with_wrenches(
+        bodies, properties, contact, *history, wrenches, dt_s, controls, gate,
+    )?;
     poll(gate)?;
     bodies[contact.binding.body_a] = candidate.bodies_after[0];
     bodies[contact.binding.body_b] = candidate.bodies_after[1];

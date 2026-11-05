@@ -2,6 +2,11 @@
 #[path = "../../fs-contact/tests/source_point/common.rs"]
 mod common;
 
+#[path = "adhesive_jkr_normal_motion/continuation.rs"]
+mod continuation;
+#[path = "adhesive_jkr_normal_motion/loading.rs"]
+mod loading;
+
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{
     JkrBranch, JkrEnvelope, SourceJkrSphereContact,

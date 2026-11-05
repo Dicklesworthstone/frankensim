@@ -4819,16 +4819,27 @@ moment restore native momenta and COM, angular and marker travel through smooth
 motion, capture, reversal and pull-off. A whole-interval midpoint impulse does
 not replace that event-resolved travel.
 
+`advance_with_wrenches` and the matching prepare/apply APIs accept the actual
+held COM force and body-frame COM torque for each original body. Their full
+inertial response supplies the scalar trajectory's held load, while tangential
+and rotational motion remains unconstrained. Contact and external impulses are
+summed before each native momentum is rounded once. The external work is force
+times actual COM travel plus torque times actual angular travel; it includes
+the contact first time moment and the external acceleration's half-step-squared
+travel. Endpoint midpoint velocities do not replace that work. The original
+zero-load APIs use the same execution path with zero wrenches.
+
 Independent checks close native kinetic work, integrated original contact work,
-normal storage plus explicit snap release, individual impulses and total pair
-linear/angular momentum at the held geometry. Snap release supplies no impulse
+normal storage plus explicit snap release minus external work, individual
+combined impulses and total pair linear/angular momentum against the actual
+external wrenches at the held geometry. Snap release supplies no impulse
 and is not automatically assigned to heat. Successful preparation is stack-only;
 original scalar substep/root/event budgets bound the trajectory. Cancellation or
 late refusal publishes no body or history update; application publishes both
 body momenta and the source branch together.
 
-This remains frictionless JKR with one fixed normal Jacobian. No tangential force
-or free spin couple is supplied. The pose owner must consume travel and refresh
+This remains frictionless JKR with one fixed normal Jacobian. The contact supplies
+no tangential force or free spin couple. The pose owner must consume travel and refresh
 geometry before continuation; stale geometry refuses. No finite-rotation pose
 integration, contact discovery, hidden support, junction shear or measured
 specimen calibration is claimed. The six G1/G3/G4 groups in
@@ -4836,6 +4847,18 @@ specimen calibration is claimed. The six G1/G3/G4 groups in
 initial attraction and snap/rebound energy, full off-axis inertia, first-moment
 travel, world-frame/body-index covariance, geometry-owned continuation and
 source/budget/cancellation refusal with deterministic retry.
+Four loading groups in `tests/adhesive_jkr_normal_motion/loading.rs` add exact
+zero-load API equivalence, common gravity, tensile preload and original pull-off,
+off-axis full-inertia force/torque response, first-moment external work, body-index
+covariance, and atomic load/domain/cancellation refusal followed by valid retry.
+
+`initialize_motion` and `continue_motion[_with_wrenches]` retain the original
+sealed source/mass/policy/time/step token across native phases. New phase loads
+may change; actual refreshed geometry and normal rate must agree with accepted
+history, and changed effective mass or numerical policy refuses. No clock reset
+or event replay makes a mismatched continuation pass. Two continuation groups
+compare a split native attachment/rebound exactly with the original scalar
+trajectory and reject unconsumed geometry, altered velocity and changed policy.
 
 ## Prepared thermal trials of adhesive transients
 
