@@ -24,9 +24,19 @@ fn approx(actual: f64, expected: f64, relative: f64) {
 // Independent dimensional Simpson integration of rho(p)/mu(p). The native
 // pressure-flow code never uses this quadrature or the standard-library exp.
 fn pressure_mass_flow(p: f64, q: f64, bulk: f64, alpha: f64) -> f64 {
+    material_mass_flow(p, q, bulk, alpha, liquid(), 0.01)
+}
+
+fn material_mass_flow(
+    p: f64,
+    q: f64,
+    bulk: f64,
+    alpha: f64,
+    medium: CavitationLiquid,
+    reference_viscosity: f64,
+) -> f64 {
     let count = 1024;
     let dx = (p - q) / count as f64;
-    let medium = liquid();
     let density_fluidity = |pressure: f64| {
         let gauge = pressure - medium.ambient_pressure_pa;
         let rho = medium.density_kg_m3 * (gauge / bulk).exp();
@@ -36,7 +46,7 @@ fn pressure_mass_flow(p: f64, q: f64, bulk: f64, alpha: f64) -> f64 {
     for i in 1..count {
         integral += if i % 2 == 0 { 2.0 } else { 4.0 } * density_fluidity(q + i as f64 * dx);
     }
-    1e-10 * dx * integral / 3.0
+    (1e-10 * (0.01 / reference_viscosity)) * dx * integral / 3.0
 }
 
 #[test]
@@ -340,4 +350,257 @@ fn g0_g4_domain_budget_identity_and_late_cancellation_are_atomic() {
             .advance(&old, &[0.0002], &[0.0], 0.01, || false)
             .is_err()
     );
+}
+
+#[test]
+fn g1_sealed_material_expansion_preserves_preexisting_compression_and_mass() {
+    let bulk = 2e9;
+    let film = model(true, bulk, 1e-8);
+    let initial_pressure = 7e6;
+    let old = film
+        .initialize_with_pressure(&[0.0], &[1.0], &[initial_pressure])
+        .unwrap();
+    let original = old.clone();
+    let next_liquid = CavitationLiquid {
+        density_kg_m3: 950.0,
+        cavitation_pressure_pa: 3500.0,
+        ambient_pressure_pa: 250_000.0,
+        ..liquid()
+    };
+    let result = film
+        .advance_with_liquid(&old, &[0.0], &[0.0], 0.01, next_liquid, &[0.02], || false)
+        .unwrap();
+    let expected_pressure = next_liquid.ambient_pressure_pa + initial_pressure
+        - liquid().ambient_pressure_pa
+        + bulk * (liquid().density_kg_m3 / next_liquid.density_kg_m3).ln();
+    let old_mass = liquid().density_kg_m3
+        * ((initial_pressure - liquid().ambient_pressure_pa) / bulk).exp()
+        * 1e-6;
+    approx(result.step.state.pressure_pa()[0], expected_pressure, 2e-12);
+    approx(result.step.report.liquid_mass_before_kg, old_mass, 2e-12);
+    approx(result.step.report.liquid_mass_after_kg, old_mass, 2e-12);
+    assert_eq!(result.step.channel_mass_flow_kg_s, vec![0.0]);
+    assert_eq!(result.step.state.liquid_fraction(), &[1.0]);
+    assert_eq!(result.film.bulk_modulus_pa(), bulk);
+    assert_eq!(result.film.liquid(), next_liquid);
+    assert!(
+        result
+            .film
+            .advance(&old, &[0.0], &[0.0], 0.01, || false)
+            .is_err()
+    );
+    assert!(
+        film.advance(&result.step.state, &[0.0], &[0.0], 0.01, || false)
+            .is_err()
+    );
+    assert_eq!(old, original);
+}
+
+#[test]
+fn g3_sealed_cooling_heating_cycles_move_between_void_and_compressed_liquid() {
+    let bulk = 2e9;
+    let mut film = model(true, bulk, 1e-7);
+    let mut state = film.initial_state(&[0.0]).unwrap();
+    let cold = CavitationLiquid {
+        density_kg_m3: 1100.0,
+        cavitation_pressure_pa: 5000.0,
+        ambient_pressure_pa: 150_000.0,
+        ..liquid()
+    };
+    let hot = CavitationLiquid {
+        density_kg_m3: 900.0,
+        cavitation_pressure_pa: 3000.0,
+        ambient_pressure_pa: 110_000.0,
+        ..liquid()
+    };
+    for _ in 0..8 {
+        for (endpoint, mu) in [(cold, 0.02), (hot, 0.005), (liquid(), 0.01)] {
+            let old_mass = 0.001;
+            let next = film
+                .advance_with_liquid(&state, &[0.0], &[0.0], 0.01, endpoint, &[mu], || false)
+                .unwrap();
+            approx(next.step.report.liquid_mass_before_kg, old_mass, 2e-11);
+            approx(next.step.report.liquid_mass_after_kg, old_mass, 2e-11);
+            let saturated_density = endpoint.density_kg_m3
+                * ((endpoint.cavitation_pressure_pa - endpoint.ambient_pressure_pa) / bulk).exp();
+            if endpoint == cold {
+                assert_eq!(
+                    next.step.state.pressure_pa(),
+                    &[endpoint.cavitation_pressure_pa]
+                );
+                approx(
+                    next.step.state.liquid_fraction()[0],
+                    old_mass / (saturated_density * 1e-6),
+                    2e-11,
+                );
+            } else {
+                assert_eq!(next.step.state.liquid_fraction(), &[1.0]);
+                let pressure =
+                    endpoint.ambient_pressure_pa + bulk * (1000.0 / endpoint.density_kg_m3).ln();
+                approx(next.step.state.pressure_pa()[0], pressure, 2e-9);
+            }
+            film = next.film;
+            state = next.step.state;
+        }
+    }
+}
+
+#[test]
+fn g1_endpoint_material_uses_new_density_viscosity_and_retained_absolute_supplies() {
+    let alpha = 1e-6;
+    let bulk = 2e9;
+    let supplies = [
+        Some(CavitationReservoir {
+            pressure_pa: 350_000.0,
+            liquid_fraction: 1.0,
+        }),
+        Some(CavitationReservoir {
+            pressure_pa: 50_000.0,
+            liquid_fraction: 1.0,
+        }),
+    ];
+    let film = CompressibleCavitatingFilm::new(
+        super::reservoirs::supplied_film(alpha)
+            .with_reservoirs(&supplies)
+            .unwrap(),
+        bulk,
+    )
+    .unwrap();
+    let old = film.initial_state(&[0.0]).unwrap();
+    let endpoint = CavitationLiquid {
+        density_kg_m3: 960.0,
+        cavitation_pressure_pa: 20_000.0,
+        ambient_pressure_pa: 150_000.0,
+        ..liquid()
+    };
+    let mu = [0.02, 0.03];
+    let dt = 0.02;
+    let next = film
+        .advance_with_liquid(&old, &[0.0], &[0.0; 2], dt, endpoint, &mu, || false)
+        .unwrap();
+    let mut low = endpoint.cavitation_pressure_pa;
+    let mut high = 800_000.0;
+    for _ in 0..100 {
+        let p = 0.5 * (low + high);
+        let stored =
+            endpoint.density_kg_m3 * ((p - endpoint.ambient_pressure_pa) / bulk).exp() * 1e-6;
+        let out = material_mass_flow(p, 350_000.0, bulk, alpha, endpoint, mu[0])
+            + material_mass_flow(p, 50_000.0, bulk, alpha, endpoint, mu[1]);
+        if stored + dt * out > 0.001 {
+            high = p;
+        } else {
+            low = p;
+        }
+    }
+    let pressure = 0.5 * (low + high);
+    approx(next.step.state.pressure_pa()[0], pressure, 2e-9);
+    approx(
+        next.step.generalized_force[0],
+        0.001 * (pressure - endpoint.ambient_pressure_pa),
+        2e-9,
+    );
+    for k in 0..2 {
+        let expected = material_mass_flow(
+            pressure,
+            supplies[k].unwrap().pressure_pa,
+            bulk,
+            alpha,
+            endpoint,
+            mu[k],
+        );
+        approx(next.step.channel_mass_flow_kg_s[k], expected, 2e-9);
+    }
+    assert_eq!(
+        next.film.reservoir_conditions().collect::<Vec<_>>(),
+        supplies
+    );
+    assert!(next.step.report.mass_residual_kg.abs() < 1e-14);
+    assert!(
+        film.advance_with_liquid(
+            &old,
+            &[0.0],
+            &[0.0; 2],
+            dt,
+            CavitationLiquid {
+                cavitation_pressure_pa: 60_000.0,
+                ..endpoint
+            },
+            &mu,
+            || false
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn g3_g4_unchanged_material_is_exact_and_late_continuation_refusal_is_atomic() {
+    let film = model(false, 2e9, 1e-7);
+    let state = film.initial_state(&[0.0]).unwrap();
+    let original = state.clone();
+    let direct = film
+        .advance(&state, &[0.0001], &[2e-6], 0.01, || false)
+        .unwrap();
+    let unchanged = film
+        .advance_with_liquid(
+            &state,
+            &[0.0001],
+            &[2e-6],
+            0.01,
+            film.liquid(),
+            &[0.01],
+            || false,
+        )
+        .unwrap();
+    assert_eq!(unchanged.step, direct);
+    let refreshed = film
+        .with_viscosity(0.03)
+        .unwrap()
+        .advance(&state, &[0.0001], &[2e-6], 0.01, || false)
+        .unwrap();
+    let continued = film
+        .advance_with_liquid(
+            &state,
+            &[0.0001],
+            &[2e-6],
+            0.01,
+            film.liquid(),
+            &[0.03],
+            || false,
+        )
+        .unwrap();
+    assert_eq!(continued.step, refreshed);
+    let changed = CavitationLiquid {
+        density_kg_m3: 990.0,
+        ..film.liquid()
+    };
+    let mut polls = 0;
+    film.advance_with_liquid(&state, &[0.0001], &[2e-6], 0.01, changed, &[0.02], || {
+        polls += 1;
+        false
+    })
+    .unwrap();
+    let mut actual = 0;
+    assert!(
+        film.advance_with_liquid(&state, &[0.0001], &[2e-6], 0.01, changed, &[0.02], || {
+            actual += 1;
+            actual == polls
+        })
+        .is_err()
+    );
+    assert!(
+        film.advance_with_liquid(
+            &state,
+            &[0.0],
+            &[0.0],
+            0.01,
+            CavitationLiquid {
+                density_kg_m3: 0.0,
+                ..changed
+            },
+            &[0.02],
+            || false
+        )
+        .is_err()
+    );
+    assert_eq!(state, original);
 }

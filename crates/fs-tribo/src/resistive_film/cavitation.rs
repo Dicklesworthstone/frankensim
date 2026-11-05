@@ -41,7 +41,9 @@ pub mod power_law;
 pub use power_law::{CavitatingPowerLawContinuation, CavitatingPowerLawFilm};
 /// Finite bulk modulus, compressive storage and pressure-dependent mass flux.
 pub mod compressible;
-pub use compressible::{CompressibleCavitatingFilm, CompressibleCavitationStep};
+pub use compressible::{
+    CompressibleCavitatingFilm, CompressibleCavitationContinuation, CompressibleCavitationStep,
+};
 
 /// Explicit liquid and reservoir data, frozen within each step, in SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]

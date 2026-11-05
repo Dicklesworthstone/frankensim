@@ -1422,6 +1422,30 @@ evolution, latent heat, finite vapor mass, trapped gas, fluid inertia or EHL.
 Compressive storage is included in MASS accounting; endpoint force is not a
 caloric, viscous-heat or time-integrated coupled-work receipt.
 
+`CompressibleCavitatingFilm::advance_with_liquid` now continues that same
+pressure-dependent inventory through explicit endpoint material data. The old
+pressure and fraction are decoded with the OLD reference density/reference
+pressure/rupture pressure. Only the resulting original mass is normalized by
+the endpoint rupture density for the solve. The independent final audit uses
+each epoch's own density for its before/after totals. In a sealed full cell at
+fixed volume, the pressure change is therefore
+`p_new-p_old = p_ref,new-p_ref,old + B*ln(rho_ref,old/rho_ref,new)`.
+Heating represented by reduced reference density can raise pressure without
+creating mass; cooling can create a cavity before later reformation.
+
+The original native `prepare_liquid` supplies coefficient and reservoir
+admission. Explicit supplies retain their absolute pressure and incoming
+filling, with refusal when the new rupture/reference domain is incompatible.
+The independently authored `B`, geometry and Barus coefficient remain fixed.
+`CompressibleCavitationContinuation` returns the new owner and its candidate
+together. Changed liquid data receive a distinct inventory identity; no-change
+and viscosity-only transitions retain compatibility and reproduce the direct
+step exactly. This is a first-order prescribed endpoint constitutive split,
+not a temperature/energy integrator or an inferred temperature law for `B`.
+Four additional G1/G3/G4 groups check initially compressed sealed expansion,
+cavitated/compressed material cycles, pressure-fed transition against independent
+dimensional quadrature, exact unchanged behavior and late-cancellation refusal.
+
 ## Error model
 
 `TriboError` is a total refusal surface for missing identity, non-dry media,

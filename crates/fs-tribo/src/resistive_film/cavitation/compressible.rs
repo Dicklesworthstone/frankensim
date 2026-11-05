@@ -56,6 +56,14 @@ pub struct CompressibleCavitationStep {
     pub report: CavitationReport,
 }
 
+/// Endpoint material owner and its matching conservative inventory. Accept both
+/// together after the surrounding thermal/mechanical proposal succeeds.
+#[derive(Clone, Debug)]
+pub struct CompressibleCavitationContinuation {
+    pub film: CompressibleCavitatingFilm,
+    pub step: CompressibleCavitationStep,
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Point {
     theta: f64,
@@ -71,7 +79,15 @@ impl CompressibleCavitatingFilm {
     /// A distinct state identity prevents an incompressible owner from treating
     /// this pressure-dependent inventory as constant-density liquid. Initialize
     /// through this owner; cloning or viscosity/supply refresh retains identity.
-    pub fn new(mut inventory: CavitatingFilm, bulk_modulus_pa: f64) -> Result<Self, FilmError> {
+    pub fn new(inventory: CavitatingFilm, bulk_modulus_pa: f64) -> Result<Self, FilmError> {
+        let mut film = Self::compile(inventory, bulk_modulus_pa)?;
+        film.inventory.owner = Arc::new(());
+        Ok(film)
+    }
+
+    // The native material-transition owner already assigns the correct new or
+    // retained inventory identity. Compile coefficients without resetting it.
+    fn compile(inventory: CavitatingFilm, bulk_modulus_pa: f64) -> Result<Self, FilmError> {
         if !bulk_modulus_pa.is_finite() || bulk_modulus_pa <= 0.0 {
             return fail("compressible cavitating film needs a positive finite bulk modulus");
         }
@@ -87,7 +103,6 @@ impl CompressibleCavitatingFilm {
         {
             return fail("unrepresentable compressible cavitating-film reference density or law");
         }
-        inventory.owner = Arc::new(());
         let mut film = Self {
             inventory,
             bulk_modulus_pa,
@@ -240,7 +255,6 @@ impl CompressibleCavitatingFilm {
     /// Physical bulk modulus is never softened to make the solve easier.
     /// The native iteration cap bounds Newton/phase corrections; each correction
     /// has at most 32 domain-preserving backtracks. Iterations allocate nothing.
-    #[allow(clippy::large_stack_arrays, clippy::too_many_lines)]
     pub fn advance(
         &self,
         state: &CavitatingFilmState,
@@ -249,8 +263,66 @@ impl CompressibleCavitatingFilm {
         dt_s: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<CompressibleCavitationStep, FilmError> {
+        self.advance_kernel(self, state, q_next, entrainment_m3_s, dt_s, &mut cancelled)
+    }
+
+    /// Continue the ORIGINAL pressure-dependent mass with endpoint liquid data.
+    ///
+    /// The old density is reconstructed at the OLD reference and rupture
+    /// pressures; new density, saturation pressure and channel viscosities enter
+    /// the endpoint balance. New density is referenced to the NEW ambient
+    /// pressure. B remains the independently authored isothermal bulk modulus.
+    /// A decrease in reference density can therefore compress sealed full
+    /// liquid instead of manufacturing or rejecting its original mass.
+    ///
+    /// Geometry, the Barus coefficient and explicit absolute supplies stay
+    /// fixed. Native material admission rebuilds their pressure transforms and
+    /// refuses supplies incompatible with the new rupture/reference domain.
+    /// Changed liquid data receive a new inventory identity; unchanged liquid
+    /// and viscosity-only changes retain compatible state identity. The new
+    /// film and its candidate must be accepted together.
+    ///
+    /// This is a first-order prescribed endpoint constitutive split. The caller
+    /// owns temperature, source validity and temporal refinement. No energy,
+    /// thermal expansion law, phase heat or temperature-dependent B is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_liquid(
+        &self,
+        state: &CavitatingFilmState,
+        q_next: &[f64],
+        entrainment_m3_s: &[f64],
+        dt_s: f64,
+        liquid: CavitationLiquid,
+        channel_viscosities_pa_s: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<CompressibleCavitationContinuation, FilmError> {
         poll(&mut cancelled)?;
         self.inventory.validate_state(state)?;
+        let inventory = self
+            .inventory
+            .prepare_liquid(liquid, channel_viscosities_pa_s)?;
+        let film = Self::compile(inventory, self.bulk_modulus_pa)?;
+        let step =
+            film.advance_kernel(self, state, q_next, entrainment_m3_s, dt_s, &mut cancelled)?;
+        Ok(CompressibleCavitationContinuation { film, step })
+    }
+
+    #[allow(
+        clippy::large_stack_arrays,
+        clippy::too_many_lines,
+        clippy::too_many_arguments
+    )]
+    fn advance_kernel(
+        &self,
+        previous: &Self,
+        state: &CavitatingFilmState,
+        q_next: &[f64],
+        entrainment_m3_s: &[f64],
+        dt_s: f64,
+        mut cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<CompressibleCavitationStep, FilmError> {
+        poll(&mut cancelled)?;
+        previous.inventory.validate_state(state)?;
         self.geometry().validate_configuration(q_next)?;
         if !dt_s.is_finite()
             || dt_s <= 0.0
@@ -268,6 +340,8 @@ impl CompressibleCavitatingFilm {
             volume: [0.0; MAX_CELLS],
             old_volume: [0.0; MAX_CELLS],
             old: [Point::default(); MAX_CELLS],
+            previous_density: previous.density_at_cavitation_kg_m3,
+            old_content: [[0.0; 2]; MAX_CELLS],
             conductance: [0.0; MAX_CHANNELS],
         };
         let mut candidate = Candidate::new();
@@ -275,14 +349,35 @@ impl CompressibleCavitatingFilm {
             step.volume[i] = cell.area_m2 * (cell.gap.reference_m - dot(&cell.gap.closure, q_next));
             step.old_volume[i] = cell.area_m2
                 * (cell.gap.reference_m - dot(&cell.gap.closure, state.configuration()));
-            step.old[i] = self.from_pressure(state.pressure_pa[i], state.liquid_fraction[i])?;
-            candidate.points[i] = step.old[i];
+            step.old[i] = previous.from_pressure(state.pressure_pa[i], state.liquid_fraction[i])?;
+            candidate.points[i] = if self.liquid() == previous.liquid() {
+                step.old[i]
+            } else {
+                // Warm-start in the new material's admitted pressure domain.
+                // The original state below supplies mass, not new pressure.
+                self.from_pressure(self.liquid().ambient_pressure_pa, state.liquid_fraction[i])?
+            };
             if !step.volume[i].is_finite()
                 || step.volume[i] <= 0.0
                 || !step.old_volume[i].is_finite()
                 || step.old_volume[i] <= 0.0
             {
                 return fail("unrepresentable compressible cavitating-film volume");
+            }
+            for (part, value) in [step.old[i].theta, step.old[i].compression]
+                .into_iter()
+                .enumerate()
+            {
+                let content = step.old_volume[i] * value;
+                let normalized = if step.previous_density == self.density_at_cavitation_kg_m3 {
+                    content
+                } else {
+                    (step.previous_density * content) / self.density_at_cavitation_kg_m3
+                };
+                if !normalized.is_finite() || (content > 0.0 && normalized == 0.0) {
+                    return fail("unrepresentable compressible-film material mass transfer");
+                }
+                step.old_content[i][part] = normalized;
             }
         }
         for (k, edge) in self.geometry().channels.iter().enumerate() {
@@ -424,6 +519,8 @@ struct Step<'a> {
     volume: [f64; MAX_CELLS],
     old_volume: [f64; MAX_CELLS],
     old: [Point; MAX_CELLS],
+    previous_density: f64,
+    old_content: [[f64; 2]; MAX_CELLS],
     conductance: [f64; MAX_CHANNELS],
 }
 
@@ -513,11 +610,14 @@ impl Step<'_> {
         for i in 0..n {
             let p = state.points[i];
             let stored = self.volume[i] * (p.theta + p.compression);
-            let old = self.old_volume[i] * (self.old[i].theta + self.old[i].compression);
+            let old = if self.previous_density == self.film.density_at_cavitation_kg_m3 {
+                self.old_volume[i] * (self.old[i].theta + self.old[i].compression)
+            } else {
+                self.old_content[i][0] + self.old_content[i][1]
+            };
             let mut residual = pressure[i];
-            residual.add(self.volume[i] * p.theta - self.old_volume[i] * self.old[i].theta);
-            residual
-                .add(self.volume[i] * p.compression - self.old_volume[i] * self.old[i].compression);
+            residual.add(self.volume[i] * p.theta - self.old_content[i][0]);
+            residual.add(self.volume[i] * p.compression - self.old_content[i][1]);
             residual.add(advected[i].value());
             state.residual[i] = residual.value();
             state.maximum_residual = state.maximum_residual.max(state.residual[i].abs());
@@ -559,7 +659,7 @@ impl Step<'_> {
                 (state.points[i].theta, self.old[i].theta),
                 (state.points[i].compression, self.old[i].compression),
             ] {
-                let old = rho * (self.old_volume[i] * b);
+                let old = self.previous_density * (self.old_volume[i] * b);
                 let new = rho * (self.volume[i] * a);
                 before.add(old);
                 after.add(new);
@@ -608,7 +708,9 @@ impl Step<'_> {
             let residual = balance.value();
             let stored =
                 rho * self.volume[i] * (state.points[i].theta + state.points[i].compression);
-            let old = rho * self.old_volume[i] * (self.old[i].theta + self.old[i].compression);
+            let old = self.previous_density
+                * self.old_volume[i]
+                * (self.old[i].theta + self.old[i].compression);
             let allowance = self.film.inventory.solve.absolute_mass_tolerance_kg
                 + self.film.inventory.solve.relative_mass_tolerance * (stored + old);
             if !residual.is_finite() || residual.abs() > allowance {
