@@ -34,12 +34,18 @@ use fs_math::{c64::C64, det};
 
 mod annular;
 mod circular;
+mod coherent;
 #[cfg(feature = "tracer")]
 mod dispersive;
 mod layered;
 mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
+pub use coherent::{
+    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionSample,
+    CoherentPupilIllumination, CoherentPupilWave, MAX_COHERENT_PUPIL_TANGENT,
+    PreparedCoherentDiffraction, PupilCoherenceFactor,
+};
 #[cfg(feature = "tracer")]
 pub use dispersive::{DispersiveThinLens, ThinLensElement};
 #[cfg(feature = "tracer")]

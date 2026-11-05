@@ -194,3 +194,11 @@ required-features = ["chart-backends"]
 [[test]]
 name = "instances"
 required-features = ["chart-backends"]
+
+[[test]]
+name = "coherent_diffraction"
+required-features = ["chart-backends"]
+
+[[example]]
+name = "coherent_pupil"
+required-features = ["chart-backends"]

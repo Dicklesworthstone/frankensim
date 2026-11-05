@@ -5,7 +5,9 @@
 //! Opt-in circular, annular and bladed pupil diffraction covers incoherent, paraxial,
 //! focused, declared-plane and separated multi-plane defocused imaging. With
 //! `tracer`, native material laws can explicitly drive longitudinal thin-lens
-//! dispersion. Lens distortion, other aberrations, rolling shutter, and
+//! dispersion. Explicit pupil-wave queries also preserve coherent and partially
+//! coherent illumination on one authored pupil-plane phase reference. Lens
+//! distortion, other aberrations, rolling shutter, and
 //! autofocus heuristics are outside this contract.
 
 use core::fmt;
@@ -21,8 +23,10 @@ mod diffraction;
 #[cfg(feature = "tracer")]
 pub(crate) use diffraction::ProjectedPupilFootprint;
 pub use diffraction::{
-    DefocusedDiffraction, FocusedDiffraction, LayeredCameraRay, LayeredDiffraction,
-    SpectralCameraRay,
+    CoherentDiffractionError, CoherentDiffractionLimits, CoherentDiffractionSample,
+    CoherentPupilIllumination, CoherentPupilWave, DefocusedDiffraction, FocusedDiffraction,
+    LayeredCameraRay, LayeredDiffraction, MAX_COHERENT_PUPIL_TANGENT, PreparedCoherentDiffraction,
+    PupilCoherenceFactor, SpectralCameraRay,
 };
 #[cfg(feature = "tracer")]
 pub use diffraction::{DispersiveThinLens, ThinLensElement};

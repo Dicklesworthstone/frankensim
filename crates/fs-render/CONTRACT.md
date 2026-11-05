@@ -3587,6 +3587,44 @@ stationary/exterior transition, endpoint asymptotics, annular axial phase,
 small odd moments, density parity, conjugation, physical medium wavelength and
 original material-band refusal.
 
+### Coherent and partially coherent pupil illumination
+
+`PhysicalCamera::prepare_coherent_diffraction` composes the original normalized
+complex pupil transfer with authored `CoherentPupilWave` fields. Every wave
+shares one entrance-pupil phase reference, scalar polarization, vacuum
+wavelength and declared source-plane curvature. A pupil tilt
+`a_j exp(+i k theta_j.u)` contributes `a_j h(theta-theta_j)` at the observation;
+there is no separately shifted sensor chirp or inferred object-to-pupil phase.
+Coefficients are sqrt(W), normalized so their squared magnitudes are isolated
+transmitted powers through the original pupil. Results are power per tangent
+coordinate area, not detector irradiance per square metre.
+
+The deterministic mean and each explicit covariance factor are reduced as
+complex fields before squaring. Their powers then add as
+`|H mean|² + sum_r |H factor_r|²`, with no cross-factor coherence and no final
+power renormalization. Factor weights belong in amplitudes as square roots.
+This positive factorization permits partial coherence without constructing a
+dense source-pair matrix. DD complex products and sums preserve weak residuals
+under destructive interference within the supported floating-point range.
+
+Preparation borrows immutable source banks and caches the original pupil and
+wavelength admission. Each point query has O(total authored waves) work,
+constant scratch and no allocation. Explicit wave/factor limits apply before
+preparation; cancellation is checked for every wave and factor and before
+returning a complete sample. Source and observation tangent magnitudes must
+not exceed 0.1. This is a scalar paraxial model boundary, not an error bound.
+The original clear-pupil, material-domain, physical-medium and finite-defocus
+limits remain. Layered source planes, scene-derived coherence, vector/polarized
+imaging, finite pixels and finite-shutter beat integration are outside this
+query; the existing radiance renderer retains its original semantics.
+
+`tests/coherent_diffraction.rs` checks the physical four/two/zero interference
+limits, signed Airy lobes, weak cancellation residuals, common-phase and
+covariance-basis invariance, independent complex pupil integration, bounded
+admission, cancellation/reuse and numerical overflow. The runnable
+`examples/coherent_pupil.rs` emits a CSV comparison of coherent, partially
+coherent and incoherent illumination with the same pupil and isolated powers.
+
 ### Source-depth-resolved diffraction across separated planes
 
 `PhysicalCamera::with_layered_diffraction(LayeredDiffraction)` admits one to
