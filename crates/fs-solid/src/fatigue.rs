@@ -39,6 +39,9 @@ use crate::linear3::{
 use crate::loads3::transient::TransientError3;
 use crate::loads3::{LoadError3, TetLoadCase3, TetLoadSolution3};
 
+/// Chronological Mode-I crack growth from the original elastic stress solves.
+pub mod crack_growth;
+
 /// An explicitly calibrated fixed-plane observation at one original element.
 #[derive(Debug, Clone)]
 pub struct TetFatigueGauge {

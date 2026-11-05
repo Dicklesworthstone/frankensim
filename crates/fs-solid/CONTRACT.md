@@ -939,6 +939,60 @@ continuation, complete rollback and source/history refusals. All fatigue data
 in those tests is explicitly synthetic; the regressions are implementation
 checks, not experimental material calibration.
 
+## Ordered Mode-I crack growth from native elastic cycles
+
+`fatigue::crack_growth::TetCrackGrowthPath` recovers the original quasistatic
+P1 stress, and `TetTransientRun3::with_crack_growth` attaches the same observer
+to the actual initial and accepted sparse Newmark responses. The inertial owner
+retains original mass, damping, thermal eigenstrain, prescribed-support motion,
+reactions and work. Read-only response recovery adds no observation; there is no
+mutable mechanical escape or external stress injection into either history.
+
+Each gauge declares an uncracked nominal-stress location, fixed crack-plane
+normal, constant geometry factor and admitted crack-length interval. Physical
+tensor shear is converted by the existing tensor-basis owner. Normal traction
+must be tensile; the norm of tangential plane traction must stay within the
+explicit Mode-I numerical allowance at every sample. The current crack's Kmax
+is checked on every sample, including static holds and unclosed excursions.
+The fixed material identity and actual retained temperature must match the
+Paris calibration scope. An optional original material bundle also binds its
+identity, chemistry, process and `T` coordinate; this does not source-resolve
+or experimentally validate the caller-declared Paris coefficients.
+
+A cycle starts at a resolved physical extremum and contains one monotone
+outward segment and one monotone return segment, with plateaus admitted.
+Explicit closure advances exactly one full cycle through the shared analytical
+`fs-material` Paris owner at the current accepted crack length. Peak-started
+and valley-started cycles are both supported. Additional reversals, a return
+past the starting extremum beyond the declared closure tolerance, or incomplete
+closure refuse. The last actual endpoint anchors the next cycle; tolerances do
+not snap stress, discard drift or declare an arbitrary waveform periodic.
+No rainflow completion order is used as load order and no endpoint half cycle
+or repeated spectrum is invented. Retained cycle storage is constant per gauge.
+
+An endpoint and requested closure publish together only after original
+mechanics, every projection and every crack-growth update accept. A late gauge
+failure or cancellation preserves native motion, physical time, all open
+windows and crack lengths. Inertial checkpoint clones retain both histories.
+A separate closure of an already accepted window changes growth only; a failed
+closure leaves that accepted endpoint intact. Global gauge/sample bounds and
+per-gauge cycle/block bounds remain in force. Finalization refuses incomplete
+excursions and then prevents further samples. Static holds produce no crack
+extension; positive ranges below the calibrated Paris regime refuse rather
+than becoming an invented fatigue-arrest threshold.
+
+This is fixed-temperature, small-strain, tensile Mode-I, constant-Y LEFM
+postprocessing. Small-scale yielding, geometric applicability and adequate
+spatial/time resolution of stress extrema remain explicit caller obligations.
+The mesh has no advancing crack surface, and growth does not change stiffness,
+thermal energy, constitutive state or topology. There is no mixed-mode growth,
+plastic-zone correction, closure/retardation model, thermal history transfer,
+crack initiation inference or validated component-life claim. Synthetic
+regressions in `tests/crack_growth.rs` compare independent analytical growth,
+actual inertial/support-driven stress and original mechanical responses, and
+exercise chronological closure, finite drift, domain refusals, cancellation,
+resource bounds and complete checkpoint rollback.
+
 ## Finite-strain traction-free plane stress
 
 `HyperProblem::solve_plane_stress(PlaneStressSettings, &Cx)` runs the original

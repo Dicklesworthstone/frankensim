@@ -26,6 +26,8 @@ use std::sync::Arc;
 pub mod response;
 /// Source-bound fatigue observation of every accepted inertial endpoint.
 pub mod fatigue;
+/// Ordered Mode-I crack growth from actual native inertial stress cycles.
+pub mod crack_growth;
 /// Finite load jumps and bounded material reconfiguration at accepted times.
 pub mod events;
 /// Discrete state and load pullbacks through the original inertial equations.
