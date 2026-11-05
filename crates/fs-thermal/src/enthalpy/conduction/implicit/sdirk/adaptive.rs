@@ -5,7 +5,7 @@ use super::super::adaptive::{
 };
 use super::*;
 
-// Private so callers cannot bypass the whole-window source/event preflight.
+// Private so callers cannot bypass the whole-window event preflight.
 struct Sdirk2Stepper<'s, 'law> {
     solver: &'s ImplicitConductionChain<'law>,
 }
@@ -65,7 +65,7 @@ impl ImplicitConductionChain<'_> {
     /// Advance native SDIRK2 with the existing h/T/phase local-error controller.
     ///
     /// The entire requested window must satisfy [`Self::advance_sdirk2_to`]'s
-    /// fixed-mass, source-free, constant-bath scope before the generic controller
+    /// fixed-mass, constant-source/bath scope before the generic controller
     /// can process any events. Attached implicit advection and pending events
     /// through the target refuse even if the first comparison would end sooner.
     ///

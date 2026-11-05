@@ -18,7 +18,7 @@ mod time_control;
 impl ImplicitConductionChain<'_> {
     // Check the complete requested window BEFORE an adaptive controller can
     // process events. A short first comparison must not admit a later source,
-    // boundary or topology transition outside this source-free method's scope.
+    // boundary or topology transition outside this constant-forcing method's scope.
     fn admit_sdirk2_window(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -26,16 +26,12 @@ impl ImplicitConductionChain<'_> {
     ) -> Result<(), ImplicitConductionError> {
         if self.advection.is_some()
             || thermal
-                .cells
-                .values()
-                .any(|cell| cell.boundary.source_w != 0.0)
-            || thermal
                 .schedule
                 .get(thermal.cursor)
                 .is_some_and(|event| event.time_s <= target_s)
         {
             return Err(ImplicitConductionError::Invalid(
-                "SDIRK2 requires source-free fixed cells and constant baths without advection or pending events",
+                "SDIRK2 requires fixed cells and constant sources/baths without advection or pending events",
             ));
         }
         Ok(())
@@ -57,6 +53,9 @@ impl ImplicitConductionChain<'_> {
         if !positive(implicit_dt_s) || stage_time_s <= thermal.time_s || stage_time_s >= target_s {
             return Err(DepositionError::Arithmetic.into());
         }
+        // An empty override map preserves each cell's authored, constant power.
+        // Native StageHeat carries it with the same quadrature as conduction,
+        // including its external energy and unclassified at-cell entropy.
         let sources = BTreeMap::new();
         let first = self.solve_stage(
             thermal,
@@ -103,10 +102,12 @@ impl ImplicitConductionChain<'_> {
     ///
     /// All geometric, nonlinear material, contact and integrated boundary laws
     /// of this prepared solver remain active. Ambient and reservoir temperatures
-    /// must remain constant throughout the call. Attached implicit advection,
-    /// nonzero authored heat sources, observers, moving mass and pending events
-    /// at or before the target are outside this entry point; sources/events
-    /// refuse rather than silently receiving a first-order splitting. Process
+    /// and authored cell source/sink powers must remain constant throughout the
+    /// call. Both stages integrate those powers in the original energy residual;
+    /// source entropy retains its original unclassified at-cell convention.
+    /// Attached implicit advection, observers, moving mass and pending events
+    /// at or before the target are outside this entry point; events refuse
+    /// rather than silently receiving a first-order splitting. Process
     /// births/boundary events with the original timeline before preparing a
     /// fixed interval.
     ///

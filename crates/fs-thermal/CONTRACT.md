@@ -1237,10 +1237,13 @@ joule gates remain active. Bath heat/entropy and conductive generation use the
 two positive stage weights; exact caloric entropy storage is measured from the
 original initial state and the temporal entropy defect remains explicit.
 
-This entry point admits fixed-mass source-free chains/graphs, including their
-existing nonlinear bulk, contact and integrated interface laws, with constant
-ambient/reservoir temperatures. Attached implicit advection, nonzero authored
-sources and pending events at or before the requested target refuse explicitly;
+This entry point admits fixed-mass chains/graphs, including their existing
+nonlinear bulk, contact and integrated interface laws, with constant authored
+cell source/sink powers and ambient/reservoir temperatures. Sources enter both
+native stages with the same positive weights as conduction; each joule is
+counted once in the external energy account. Their entropy remains explicitly
+unclassified at-cell heat, not an inferred reservoir entropy or dissipation law.
+Attached implicit advection and pending events at or before the requested target refuse explicitly;
 no observer or mass-advection hook is exposed. Complete-interval halving in
 `advance_sdirk2_to` handles nonlinear failure; it does not estimate temporal
 accuracy. Second-order time accuracy
@@ -1253,8 +1256,11 @@ Focused regressions compare unequal-capacity equilibration and bath cooling
 against independent analytic stage solutions, including physical weighted
 entropy. Periodic graph Fourier decay and nonlinear `k(T)` cooling demonstrate
 second-order temporal refinement. Stiff modal damping, latent-plateau storage,
-second-stage domain/work rollback and unsupported source/event refusal exercise
-the stated admission boundary.
+second-stage domain/work rollback and unsupported event refusal exercise the
+stated admission boundary. Constant heating/cooling regressions cover unequal
+capacities with independent two-stage temperatures and entropy, driven bath
+relaxation with a three-rung second-order ladder and adaptive accuracy, and
+latent-plateau storage with a large caloric reference datum.
 
 #### Adaptive second-order network diffusion
 
@@ -1276,8 +1282,8 @@ within the existing controller limits avoids platform cube-root/transcendental
 arithmetic and overflow from multiplying a large normalized error.
 
 The complete requested window is checked before the generic controller can
-process an event or compute a comparison. Attached implicit advection, authored
-sources and pending events through the target remain outside SDIRK2's admitted
+process an event or compute a comparison. Attached implicit advection and
+pending events through the target remain outside SDIRK2's admitted
 scope even if an initial comparison would end sooner. The new adapter shares
 the original material observables and change-based, caloric-datum-invariant
 error scales. It adds no phase proxy, source splitting or global accuracy bound;

@@ -560,16 +560,183 @@ fn stage_two_domain_and_work_refusals_do_not_publish_first_stage() {
 }
 
 #[test]
-fn authored_sources_and_scheduled_boundary_changes_refuse_explicitly() {
+fn constant_sources_preserve_two_cell_energy_and_native_entropy_quadrature() {
+    let law = Law::constant(3.0, 1.0);
+    let masses = [2.0, 5.0];
+    let powers = [30.0, -5.0];
+    let (mut thermal, observer) =
+        network(&law, &[300.0, 450.0], &masses, &[(0, 1, 1.0)], None, vec![]);
+    for (i, &power) in powers.iter().enumerate() {
+        thermal.cells.get_mut(&id(i)).unwrap().boundary.source_w = power;
+    }
+    let direct = chain(&thermal, &observer, &law);
+    let graph = ImplicitConductionGraph::new(
+        &thermal,
+        &observer,
+        &[(MaterialId(0), &law)],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let capacity = [law.cp * masses[0], law.cp * masses[1]];
+    let total_capacity = capacity[0] + capacity[1];
+    let total_power = powers[0] + powers[1];
+    let initial_mean = (capacity[0] * 300.0 + capacity[1] * 450.0) / total_capacity;
+    let decay = 1.0 / capacity[0] + 1.0 / capacity[1];
+    let equilibrium_difference = (powers[0] / capacity[0] - powers[1] / capacity[1]) / decay;
+    let dt = 4.0;
+    let temperatures = |mean: f64, difference: f64| {
+        [
+            mean + capacity[1] / total_capacity * difference,
+            mean - capacity[0] / total_capacity * difference,
+        ]
+    };
+    let first = temperatures(
+        initial_mean + GAMMA * dt * total_power / total_capacity,
+        equilibrium_difference + (-150.0 - equilibrium_difference) / (1.0 + GAMMA * dt * decay),
+    );
+    let expected = temperatures(
+        initial_mean + dt * total_power / total_capacity,
+        equilibrium_difference + (-150.0 - equilibrium_difference) * amplification(dt * decay),
+    );
+    let source_entropy = |t: [f64; 2]| powers[0] / t[0] + powers[1] / t[1];
+    let production = |t: [f64; 2]| (t[0] - t[1]).powi(2) / (t[0] * t[1]);
+    for sparse in [false, true] {
+        let (next, report) = if sparse {
+            graph.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        } else {
+            direct.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        }
+        .unwrap();
+        for (i, &temperature) in expected.iter().enumerate() {
+            near(next.temperature_k(id(i)).unwrap(), temperature, 2e-10);
+            near(next.cells()[&id(i)].boundary.source_w, powers[i], 0.0);
+        }
+        near(report.energy.external_heat_j, total_power * dt, 1e-12);
+        near(
+            report.energy.stored_energy_change_j,
+            total_power * dt,
+            2e-10,
+        );
+        near(
+            report.entropy.unclassified_source_at_cell_j_k,
+            dt * ((1.0 - GAMMA) * source_entropy(first) + GAMMA * source_entropy(expected)),
+            1e-11,
+        );
+        near(
+            report.entropy.conduction_generation_j_k,
+            dt * ((1.0 - GAMMA) * production(first) + GAMMA * production(expected)),
+            1e-11,
+        );
+        assert!(report.entropy.has_unclassified_sources);
+        assert_eq!(report.energy.substeps, 1);
+    }
+}
+
+#[test]
+fn steady_heating_to_a_bath_has_second_order_and_adaptive_temperature_accuracy() {
+    use super::super::adaptive::AdaptiveImplicitConductionControls;
     let law = Law::constant(1.0, 1.0);
     let (mut thermal, observer) = network(&law, &[400.0], &[1.0], &[], Some(300.0), vec![]);
-    thermal.cells.get_mut(&id(0)).unwrap().boundary.source_w = 1.0;
+    thermal.cells.get_mut(&id(0)).unwrap().boundary.source_w = 50.0;
     let solver = chain(&thermal, &observer, &law);
     let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
-    assert!(matches!(
-        solver.advance_sdirk2_to(&thermal, 1.0, controls(1.0), &mut workspace, || Ok(())),
-        Err(ImplicitConductionError::Invalid(_))
-    ));
+    // C dT/dt = P - G(T - Tb), with C=G=1, P=50, Tb=300.
+    let exact = 350.0 + 50.0 * (-1.0_f64).exp();
+    let mut errors = Vec::new();
+    for steps in [4, 8, 16] {
+        let (next, report) = solver
+            .advance_sdirk2_to(
+                &thermal,
+                1.0,
+                controls(1.0 / steps as f64),
+                &mut workspace,
+                || Ok(()),
+            )
+            .unwrap();
+        errors.push((next.temperature_k(id(0)).unwrap() - exact).abs());
+        near(
+            report.energy.external_heat_j,
+            next.temperature_k(id(0)).unwrap() - 400.0,
+            1e-9,
+        );
+        assert!(report.entropy.has_unclassified_sources);
+        assert_eq!(report.energy.substeps, steps);
+    }
+    for pair in errors.windows(2) {
+        assert!(
+            (3.7..4.4).contains(&(pair[0] / pair[1])),
+            "heated errors: {errors:?}"
+        );
+    }
+    let (next, report) = solver
+        .advance_sdirk2_adaptive_to(
+            &thermal,
+            1.0,
+            AdaptiveImplicitConductionControls {
+                step: controls(1.0),
+                initial_dt_s: 1.0,
+                enthalpy_absolute_tolerance_j_kg: 1e-5,
+                temperature_absolute_tolerance_k: 1e-5,
+                relative_tolerance: 0.0,
+                ..Default::default()
+            },
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    near(next.temperature_k(id(0)).unwrap(), exact, 4e-4);
+    near(
+        report.solve.energy.external_heat_j,
+        next.temperature_k(id(0)).unwrap() - 400.0,
+        1e-8,
+    );
+    assert!(report.accuracy_rejections > 0);
+    assert!(report.solve.entropy.has_unclassified_sources);
+    assert!(report.maximum_accepted_normalized_error <= 1.0);
+}
+
+#[test]
+fn constant_heating_on_a_latent_plateau_stores_every_joule_once() {
+    let law = Law {
+        latent: true,
+        datum: 1_000_000.0,
+        ..Law::constant(1.0, 1.0)
+    };
+    let (mut thermal, observer) = network(&law, &[350.0], &[2.0], &[], None, vec![]);
+    thermal.cells.get_mut(&id(0)).unwrap().boundary.source_w = 40.0;
+    let solver = chain(&thermal, &observer, &law);
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
+    let (next, report) = solver
+        .advance_sdirk2_to(&thermal, 2.0, controls(2.0), &mut workspace, || Ok(()))
+        .unwrap();
+    near(
+        next.cells()[&id(0)].specific_h_j_kg,
+        law.datum + 390.0,
+        1e-9,
+    );
+    near(next.temperature_k(id(0)).unwrap(), 300.0, 0.0);
+    near(report.energy.external_heat_j, 80.0, 1e-12);
+    near(report.energy.stored_energy_change_j, 80.0, 1e-9);
+    near(
+        report.entropy.unclassified_source_at_cell_j_k,
+        80.0 / 300.0,
+        1e-12,
+    );
+    near(
+        report.entropy.thermal_storage_change_j_k,
+        80.0 / 300.0,
+        1e-12,
+    );
+    near(report.entropy.temporal_defect_j_k, 0.0, 1e-12);
+    assert!(report.entropy.has_unclassified_sources);
+}
+
+#[test]
+fn scheduled_boundary_changes_refuse_explicitly() {
+    let law = Law::constant(1.0, 1.0);
+    let mut workspace = ImplicitConductionWorkspace::new(1).unwrap();
     let (thermal, observer) = network(
         &law,
         &[400.0],
