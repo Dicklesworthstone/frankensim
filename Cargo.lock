@@ -1697,6 +1697,7 @@ dependencies = [
 name = "fs-flux"
 version = "0.0.1"
 dependencies = [
+ "fs-atmo",
  "fs-evidence",
  "fs-gas",
  "fs-la",

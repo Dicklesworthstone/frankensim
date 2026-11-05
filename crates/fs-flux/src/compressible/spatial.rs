@@ -23,6 +23,9 @@ pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d
 pub mod mixture;
 /// Source-owned molecular stress and heat transport for the volumetric field.
 pub mod molecular;
+/// Coherent physical Mann velocity traces on original reservoir faces.
+#[cfg(feature = "experimental-mann-inflow")]
+pub mod mann_inflow;
 
 /// Conservative averages in coherent SI units and the source's energy gauge.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

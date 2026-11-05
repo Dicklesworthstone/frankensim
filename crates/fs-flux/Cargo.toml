@@ -16,12 +16,15 @@ continuum = ["cavitation", "dep:fs-la", "dep:fs-material", "dep:fs-math", "dep:f
 cavitation = ["dep:fs-material", "dep:fs-la"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty", "dep:fs-solver"]
+# Observe the original coherent atmosphere on source-owned physical gas faces.
+experimental-mann-inflow = ["experimental-compressible", "dep:fs-atmo", "dep:fs-math"]
 experimental-miscibility = ["dep:fs-thermochem", "dep:fs-qty"]
 experimental-miscibility-material = ["experimental-miscibility", "dep:fs-material"]
 # Reuse the same authored local closures as LBM and conjugate finite volumes.
 experimental-sgs = ["experimental-compressible", "dep:fs-lbm", "dep:fs-thermochem"]
 
 [dependencies]
+fs-atmo = { path = "../fs-atmo", optional = true }
 fs-tribo = { path = "../fs-tribo" }
 fs-la = { path = "../fs-la", optional = true }
 fs-material = { path = "../fs-material", optional = true }

@@ -5283,3 +5283,49 @@ full-owner tests were not executed in the resource-constrained editing
 environment; no native integration or turbulence calibration result is claimed.
 The boundary is a prescribed infinite bath, not a nonreflecting inlet,
 characteristic wave-injection method or validated turbulent entry length.
+
+
+## Coherent atmospheric turbulence at compressible reservoir faces
+
+Feature `experimental-mann-inflow` exposes
+`spatial::mann_inflow::MannReservoirInflow3` for the original frozen and
+evolving-composition gas owners. It observes the original full-tensor
+`fs-atmo` Mann realization at native physical face centres, with an explicit
+proper field/grid rotation and a grid-corner position in metres. A frozen
+snapshot can be convected to the actual fluid time; a fixed-step OU source
+must already be at that exact accepted time. Applying a trace draws no noise
+and advances neither source nor fluid. Caller-owned baseline callbacks supply
+density or every canonical species density, absolute pressure and mean velocity;
+only velocity receives the shared fluctuation. Each resulting complete state
+passes the original gas source's caloric admission before publication.
+
+Point observation allocates no gains. Optional rectangular face averaging uses
+the original exact `MannBoxFilter`; opposite faces share one filter per normal
+axis, and the combined actual capacities obey the declared byte limit. The
+filter also remains available for original full-tensor covariance queries.
+There is no RMS restoration, independent per-face noise, species normalization,
+mean-flux correction or replacement thermodynamic law. Native active/trial
+profile buffers supply atomic preparation and refresh. Every original face
+remains distinct in the existing Riemann solve, CFL and conservation accounting.
+The immutable `MannReservoirTrace3` can also feed composed molecular owners'
+profile callbacks without duplicating the atmosphere or its phase state.
+
+All three cell widths admit the represented wavenumber cutoff against spatial
+Nyquist; transverse periodic axes refuse because arbitrary retained Mann modes
+are not periodic on the CFD section. A checked face-count times mode-count
+budget bounds one complete application. The declared maximum hold duration
+bounds advected spatial phase; it is not a temporal bandlimit for OU noise.
+The caller must refresh the control within that duration. Profiles remain held
+through all SSP stages and retries, so varying boundary data are first order
+in time. Face averaging is a linear velocity observation, not an exact average
+of nonlinear mass, momentum or energy flux. These complete-state exterior
+Riemann traces provide no nonreflecting-inlet, wall-layer, turbulent mixing,
+resolved-DNS, measured-spectrum or instrument-acceptance qualification.
+
+Focused fixtures cover original-source face states and conservative native
+stepping, rotated noncubic face averages against direct spatial quadrature,
+canonical species preservation, transactional late refusal, source clock/model
+mismatch and sampling budgets. Three exact production geometry-kernel tests
+passed natively (frame/phase mapping, rectangular integration, overflow-safe
+advective speed); the four full consumer fixtures remain unexecuted in this
+environment, where DSR/RCH and the complete constellation build are unavailable.
