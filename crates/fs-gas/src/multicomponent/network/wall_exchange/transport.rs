@@ -6,8 +6,9 @@ use crate::multicomponent::dissipation::evolve::fractions;
 use crate::multicomponent::{Cell, MAX_SPECIES, Mesh1d, MixtureGas, allocated, positive};
 use fs_qty::{Length, Pressure, Temperature};
 
+mod churchill;
 mod turbulent;
-pub use turbulent::{CircularGnielinskiWall, CircularTurbulentWall};
+pub use turbulent::{CircularChurchillWall, CircularGnielinskiWall, CircularTurbulentWall};
 
 /// Explicit circular, developed-laminar approximation for one complete branch.
 ///
@@ -58,7 +59,8 @@ impl CircularLaminarWall {
 /// An explicitly selected developed-flow model on one circular branch.
 ///
 /// Laminar and turbulent branches can share one original transport owner.
-/// No automatic interpolation through the transitional regime is inferred.
+/// Regimes are never selected automatically. Churchill explicitly selects a
+/// continuous engineering relation; the other models retain their own domains.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CircularWallModel {
     /// Circular Poiseuille drag and an authored Nusselt number.
@@ -67,6 +69,8 @@ pub enum CircularWallModel {
     Turbulent(CircularTurbulentWall),
     /// Smooth-pipe drag and heat transfer from actual Reynolds and Prandtl numbers.
     Gnielinski(CircularGnielinskiWall),
+    /// Explicit all-regime pipe friction and an independently authored Nusselt number.
+    Churchill(CircularChurchillWall),
 }
 
 impl CircularWallModel {
@@ -74,6 +78,10 @@ impl CircularWallModel {
         match self {
             Self::Laminar(model) => model.admit_mesh(mesh),
             Self::Turbulent(model) => {
+                model.validate()?;
+                admit_circular_mesh(model.diameter, mesh)
+            }
+            Self::Churchill(model) => {
                 model.validate()?;
                 admit_circular_mesh(model.diameter, mesh)
             }
@@ -105,6 +113,11 @@ impl CircularWallModel {
                 model.maximum_mach_number,
             ),
             Self::Gnielinski(model) => (
+                model.diameter,
+                model.reynolds_number,
+                model.maximum_mach_number,
+            ),
+            Self::Churchill(model) => (
                 model.diameter,
                 model.reynolds_number,
                 model.maximum_mach_number,
@@ -284,6 +297,7 @@ impl CircularWallTransport {
         admit("Mach number", mach, 0.0, maximum_mach_number)?;
         let (friction_factor, nusselt_number) = match model {
             CircularWallModel::Laminar(laminar) => (None, laminar.nusselt_number),
+            CircularWallModel::Churchill(churchill) => (None, churchill.nusselt_number),
             CircularWallModel::Turbulent(turbulent) => (
                 Some(turbulent.darcy_factor(reynolds)?),
                 turbulent.nusselt_number,
@@ -302,6 +316,35 @@ impl CircularWallTransport {
             }
         };
         contact.drag = match model {
+            CircularWallModel::Churchill(churchill) => {
+                let WallDrag::Linear { rate_per_s } = WallDrag::circular_laminar(
+                    coefficients.dynamic_viscosity,
+                    primitive.density,
+                    diameter,
+                )?
+                else {
+                    unreachable!("Poiseuille resistance is linear")
+                };
+                let excess = churchill.excess(reynolds)?;
+                // Retain the exact laminar term. The nonnegative remainder
+                // satisfies a*u + b*u*|u| = f_D(Re)*u*|u|/(2D) at this state,
+                // while remaining finite and exactly linear at rest.
+                let quadratic_per_m = if reynolds == 0.0 {
+                    0.0
+                } else {
+                    32.0 * (excess / reynolds) / diameter.value()
+                };
+                if !quadratic_per_m.is_finite() {
+                    return Err(WallExchangeError::Invalid(
+                        "unrepresentable Churchill resistance",
+                    ));
+                }
+                WallDrag::LinearQuadratic {
+                    linear_rate_per_s: rate_per_s,
+                    quadratic_per_m,
+                    wall_velocity_m_s: motion.unwrap_or(0.0),
+                }
+            }
             CircularWallModel::Laminar(_) => {
                 let drag = WallDrag::circular_laminar(
                     coefficients.dynamic_viscosity,

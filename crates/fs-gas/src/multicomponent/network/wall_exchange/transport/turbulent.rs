@@ -1,7 +1,90 @@
 //! Developed turbulent circular-pipe friction on the original gas-wall owner.
 
-use super::{Length, WallExchangeError, admit, positive};
+use super::{Length, WallExchangeError, admit, churchill, positive};
 use fs_math::det;
+
+/// Explicit quasi-steady circular-pipe resistance through all flow regimes.
+///
+/// Churchill's continuous engineering correlation supports starting, stopping
+/// and crossing transition without replacing the original gas-wall transaction.
+/// Transition is physically disturbance-dependent; this curve does not predict
+/// intermittency, hysteresis, entrance development or unsteady boundary layers.
+/// The original mixture supplies current viscosity, density and relative speed.
+/// The same authored Nusselt number applies throughout the declared interval;
+/// no turbulent or transition heat-transfer relation is inferred from friction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CircularChurchillWall {
+    /// Positive diameter of the original constant-area circular branch [m].
+    pub diameter: Length,
+    /// Nonnegative effective sand-grain roughness [m], not an RMS height.
+    pub equivalent_sand_roughness: Length,
+    /// Independent nonnegative `h D / k`; zero disables radial heat exchange.
+    pub nusselt_number: f64,
+    /// Inclusive declared Reynolds interval, contained in [0, 1e8].
+    pub reynolds_number: [f64; 2],
+    /// Positive upper wall-relative Mach bound, no greater than 0.3.
+    pub maximum_mach_number: f64,
+}
+
+impl CircularChurchillWall {
+    pub(super) fn validate(self) -> Result<(), WallExchangeError> {
+        let [minimum, maximum] = self.reynolds_number;
+        if !positive(self.diameter.value())
+            || !self.equivalent_sand_roughness.value().is_finite()
+            || self.equivalent_sand_roughness.value() < 0.0
+            || !self.nusselt_number.is_finite()
+            || self.nusselt_number < 0.0
+            || !minimum.is_finite()
+            || minimum < 0.0
+            || !positive(maximum)
+            || minimum > maximum
+            || maximum > 1e8
+            || !positive(self.maximum_mach_number)
+            || self.maximum_mach_number > 0.3
+        {
+            return Err(WallExchangeError::Invalid(
+                "Churchill circular wall geometry or applicability",
+            ));
+        }
+        if self.equivalent_sand_roughness.value() > 0.05 * self.diameter.value() {
+            return Err(WallExchangeError::TransportDomain {
+                quantity: "equivalent sand roughness / diameter",
+                value: self.equivalent_sand_roughness.value() / self.diameter.value(),
+                minimum: 0.0,
+                maximum: 0.05,
+            });
+        }
+        Ok(())
+    }
+
+    /// Return the finite drag product `f_D * Re`, including its rest limit 64.
+    ///
+    /// Reference: Churchill (1977), *Chemical Engineering*, November 7,
+    /// "Friction-factor equation spans all fluid-flow regimes", equations 5/18.
+    /// The original paper's factor is one eighth of the Darcy factor.
+    /// Its transitional values are an uncertain engineering approximation.
+    pub fn darcy_reynolds(self, reynolds: f64) -> Result<f64, WallExchangeError> {
+        Ok(64.0 * (1.0 + self.excess(reynolds)?))
+    }
+
+    pub(super) fn excess(self, reynolds: f64) -> Result<f64, WallExchangeError> {
+        self.validate()?;
+        admit(
+            "Reynolds number",
+            reynolds,
+            self.reynolds_number[0],
+            self.reynolds_number[1],
+        )?;
+        let excess = churchill::excess_over_laminar(
+            reynolds,
+            self.equivalent_sand_roughness.value() / self.diameter.value(),
+        );
+        if !excess.is_finite() || excess < 0.0 {
+            return Err(WallExchangeError::Invalid("unrepresentable Churchill drag"));
+        }
+        Ok(excess)
+    }
+}
 
 /// Coupled smooth-pipe friction and Gnielinski turbulent heat transfer.
 ///

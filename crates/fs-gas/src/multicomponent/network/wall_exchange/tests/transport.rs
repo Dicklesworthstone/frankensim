@@ -3,7 +3,8 @@ use super::*;
 use crate::multicomponent::dissipation::{ConstantTransport, TransportDomain};
 use crate::multicomponent::network::dissipation::tests::law;
 use crate::multicomponent::network::wall_exchange::{
-    CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall, CircularWallModel,
+    CircularChurchillWall, CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall,
+    CircularWallModel,
 };
 
 fn geometry() -> CircularLaminarWall {
@@ -731,4 +732,299 @@ fn gnielinski_g4_reynolds_or_prandtl_endpoint_exit_rolls_back_every_cell_and_rep
         assert_eq!(wall.accepted_branch_impulses().unwrap(), impulses);
         assert_eq!(n.time(), Time::new(0.0));
     }
+}
+
+fn churchill_geometry(roughness: f64) -> CircularChurchillWall {
+    CircularChurchillWall {
+        diameter: Length::new(0.02),
+        equivalent_sand_roughness: Length::new(roughness * 0.02),
+        nusselt_number: 3.66,
+        reynolds_number: [0.0, 1e8],
+        maximum_mach_number: 0.3,
+    }
+}
+
+// Independent original Darcy equation; only used at nonzero, moderate Re.
+fn reference_churchill(re: f64, roughness: f64) -> f64 {
+    let a = (-2.457 * ((7.0 / re).powf(0.9) + 0.27 * roughness).ln()).powi(16);
+    let b = (37_530.0 / re).powi(16);
+    8.0 * ((8.0 / re).powi(12) + (a + b).powf(-1.5)).powf(1.0 / 12.0)
+}
+
+#[test]
+fn churchill_g1_native_braking_crosses_transition_and_refines_to_continuous_law() {
+    let g = gas(1, false, 0.0);
+    let (mu, duration, diameter) = (1e-6, 40.0, 0.02);
+    let rhs = |u: f64| -reference_churchill(u * diameter / mu, 0.001) * u * u / (2.0 * diameter);
+    let mut reference = 0.4;
+    let h = duration / 8192.0;
+    for _ in 0..8192 {
+        let k1 = rhs(reference);
+        let k2 = rhs(reference + h * k1 / 2.0);
+        let k3 = rhs(reference + h * k2 / 2.0);
+        let k4 = rhs(reference + h * k3);
+        reference += h * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0;
+    }
+    let mut errors = Vec::new();
+    for steps in [32, 64, 128] {
+        let mut n = thermal_pipe(&g, &[1.0], [0.4; 2]);
+        let before = fields(&n);
+        let volume = n.branches()[0].mesh().volumes()[0];
+        let mut wall = uniform_operator(
+            &n,
+            WallContact {
+                drag: WallDrag::None,
+                thermal: WallThermal::Adiabatic,
+            },
+        )
+        .with_circular_transport(
+            law(&g, mu, 0.0, 0.0, 0.0),
+            vec![Some(CircularWallModel::Churchill(churchill_geometry(
+                0.001,
+            )))],
+            || false,
+        )
+        .unwrap();
+        let (mut heat, mut impulse) = (0.0, 0.0);
+        let mut regimes = [false; 3];
+        for _ in 0..steps {
+            let u = g
+                .primitive(n.branches()[0].cell(0).unwrap(), || false)
+                .unwrap()
+                .velocity;
+            let re = u * diameter / mu;
+            regimes[if re >= 4000.0 {
+                0
+            } else if re >= 2100.0 {
+                1
+            } else {
+                2
+            }] = true;
+            let report = wall
+                .advance_for(
+                    &mut n,
+                    Time::new(duration / f64::from(steps)),
+                    controls(),
+                    || false,
+                )
+                .unwrap();
+            heat += report.drag_heating_j;
+            impulse += wall.accepted_branch_impulses().unwrap()[0];
+            assert_eq!(report.heat_to_gas_j, 0.0);
+            assert_eq!(report.mechanical_work_to_gas_j, 0.0);
+        }
+        assert!(regimes.into_iter().all(|visited| visited));
+        let cell = n.branches()[0].cell(0).unwrap();
+        let actual = g.primitive(cell, || false).unwrap().velocity;
+        assert!(actual * diameter / mu < 1000.0);
+        assert_eq!(cell.energy, before.0[0][0].energy);
+        assert_eq!(cell.partial_densities, before.0[0][0].partial_densities);
+        close(heat, volume * (0.4_f64.powi(2) - actual * actual), 2e-14);
+        close(impulse, 2.0 * volume * (0.4 - actual), 2e-14);
+        errors.push((actual - reference).abs());
+    }
+    assert!(errors[2] < 7.1e-5, "{errors:?}");
+    for pair in errors.windows(2) {
+        assert!((1.9..2.1).contains(&(pair[0] / pair[1])), "{errors:?}");
+    }
+}
+
+#[test]
+fn churchill_g3_live_material_roughness_and_slip_keep_one_energy_transaction() {
+    let g = gas(1, false, 0.0);
+    let (dt, conductivity, diameter) = (0.4, 7e-7, 0.02);
+    for (density, mu, roughness, boost, slip) in [
+        (1.0, 1e-6, 0.0, 0.0, 0.4),
+        (1.0, 2e-6, 0.0, 0.0, 0.4),
+        (2.0, 1e-6, 0.0, 0.0, 0.4),
+        (1.0, 1e-6, 0.01, 0.0, 0.4),
+        (1.0, 1e-6, 0.01, 20.0, 0.4),
+        (1.0, 1e-6, 0.01, 20.0, -0.4),
+    ] {
+        let mut n = thermal_pipe(&g, &[density], [boost + slip; 2]);
+        let before = fields(&n);
+        let volume = n.branches()[0].mesh().volumes()[0];
+        let model = churchill_geometry(roughness);
+        let mut wall = uniform_operator(
+            &n,
+            WallContact {
+                drag: WallDrag::MovingLinear {
+                    rate_per_s: 999.0,
+                    wall_velocity_m_s: boost,
+                },
+                ..thermal_contact()
+            },
+        )
+        .with_circular_transport(
+            law(&g, mu, 0.0, conductivity, 0.0),
+            vec![Some(CircularWallModel::Churchill(model))],
+            || false,
+        )
+        .unwrap();
+        let re = density * slip.abs() * diameter / mu;
+        let a = 32.0 * mu / (density * diameter * diameter);
+        let b = (reference_churchill(re, roughness) - 64.0 / re) / (2.0 * diameter);
+        let end_slip = slip * (-a * dt).exp() / (1.0 + b * slip.abs() * -(-a * dt).exp_m1() / a);
+        let heated = 2.0 + (slip * slip - end_slip * end_slip) / 5.0;
+        let gas_capacity = 2.5 * density * volume;
+        let conductance = model.nusselt_number * conductivity * 4.0 * volume / diameter.powi(2);
+        let q = dt * conductance * (2.2 - heated)
+            / (1.0 + dt * conductance * (1.0 / gas_capacity + 1.0 / 5e-4));
+        let report = wall
+            .advance_for(&mut n, Time::new(dt), controls(), || false)
+            .unwrap();
+        for i in 0..2 {
+            let cell = n.branches()[0].cell(i).unwrap();
+            let primitive = g.primitive(cell, || false).unwrap();
+            close(primitive.velocity, boost + end_slip, 3e-12);
+            close(primitive.temperature, heated + q / gas_capacity, 2e-8);
+            assert_eq!(cell.partial_densities, before.0[0][i].partial_densities);
+            let contact = wall.branch_contacts(0).unwrap()[i];
+            let WallDrag::LinearQuadratic {
+                linear_rate_per_s,
+                quadratic_per_m,
+                wall_velocity_m_s,
+            } = contact.drag
+            else {
+                panic!("Churchill discarded linear-quadratic wall mechanics")
+            };
+            close(linear_rate_per_s, a, 2e-13);
+            close(quadratic_per_m, b, 2e-12);
+            assert_eq!(wall_velocity_m_s, boost);
+            close(wall_temperature(contact), 2.2 - q / 5e-4, 2e-8);
+            close(
+                (cell.energy - before.0[0][i].energy) * volume,
+                q + density * volume * boost * (end_slip - slip),
+                3e-12,
+            );
+        }
+        close(report.heat_to_gas_j, 2.0 * q, 3e-12);
+        close(report.wall_energy_change_j, -2.0 * q, 3e-12);
+        close(
+            report.drag_heating_j,
+            density * volume * (slip * slip - end_slip * end_slip),
+            3e-12,
+        );
+        close(
+            report.mechanical_work_to_gas_j,
+            2.0 * density * volume * boost * (end_slip - slip),
+            3e-12,
+        );
+        close(report.energy_residual_j, 0.0, 3e-12);
+        assert_eq!(report.external_heat_to_gas_j, 0.0);
+    }
+}
+
+#[test]
+fn churchill_g0_native_rest_laminar_limit_and_explicit_applicability() {
+    let model = churchill_geometry(0.001);
+    for re in [-1.0, 1e8 + 1.0, f64::NAN, f64::INFINITY] {
+        assert!(model.darcy_reynolds(re).is_err());
+    }
+    for invalid in [
+        CircularChurchillWall {
+            diameter: Length::new(0.0),
+            ..model
+        },
+        CircularChurchillWall {
+            equivalent_sand_roughness: Length::new(0.051 * 0.02),
+            ..model
+        },
+        CircularChurchillWall {
+            nusselt_number: -1.0,
+            ..model
+        },
+        CircularChurchillWall {
+            reynolds_number: [4000.0, 1e8],
+            ..model
+        },
+        CircularChurchillWall {
+            maximum_mach_number: 0.31,
+            ..model
+        },
+    ] {
+        assert!(invalid.darcy_reynolds(0.0).is_err());
+    }
+    assert_eq!(model.darcy_reynolds(0.0).unwrap(), 64.0);
+    let g = gas(1, false, 0.0);
+    let mut n = thermal_pipe(&g, &[1.0], [0.0, 1e-7]);
+    let before = fields(&n);
+    let mut wall = uniform_operator(
+        &n,
+        WallContact {
+            drag: WallDrag::None,
+            thermal: WallThermal::Adiabatic,
+        },
+    )
+    .with_circular_transport(
+        law(&g, 1e-6, 0.0, 0.0, 0.0),
+        vec![Some(CircularWallModel::Churchill(model))],
+        || false,
+    )
+    .unwrap();
+    wall.advance_for(&mut n, Time::new(40.0), controls(), || false)
+        .unwrap();
+    assert_eq!(fields(&n).0[0][0], before.0[0][0]);
+    let velocity = g
+        .primitive(n.branches()[0].cell(1).unwrap(), || false)
+        .unwrap()
+        .velocity;
+    close(velocity, 1e-7 * (-3.2_f64).exp(), 1e-20);
+}
+
+#[test]
+fn churchill_g4_late_material_refusal_preserves_all_cells_walls_and_reports() {
+    let g = gas(1, false, 0.0);
+    let mut n = thermal_pipe(&g, &[1.0], [0.2; 2]);
+    let original = law(&g, 1e-6, 0.0, 1.0, 0.0);
+    let limited = ConstantTransport::new(
+        g.source().clone(),
+        "bounded-Churchill-properties",
+        1,
+        TransportDomain {
+            minimum_temperature_k: 0.001,
+            maximum_temperature_k: 2.05,
+            minimum_pressure_pa: 1e-8,
+            maximum_pressure_pa: 1e8,
+        },
+        original.coefficients(),
+        vec![0.0],
+    )
+    .unwrap();
+    let mut wall = NetworkWallOperator::new(
+        &n,
+        vec![vec![
+            WallContact {
+                drag: WallDrag::None,
+                thermal: WallThermal::Adiabatic,
+            },
+            thermal_contact(),
+        ]],
+        Vec::new(),
+        || false,
+    )
+    .unwrap()
+    .with_circular_transport(
+        limited,
+        vec![Some(CircularWallModel::Churchill(churchill_geometry(
+            0.001,
+        )))],
+        || false,
+    )
+    .unwrap();
+    wall.advance_for(&mut n, Time::new(0.0), controls(), || false)
+        .unwrap();
+    let before = fields(&n);
+    let contacts = wall.branch_contacts(0).unwrap().to_vec();
+    let report = wall.last_report();
+    let impulses = wall.accepted_branch_impulses().unwrap().to_vec();
+    assert!(matches!(
+        wall.advance_for(&mut n, Time::new(0.4), controls(), || false),
+        Err(WallExchangeError::Transport(_))
+    ));
+    assert_eq!(fields(&n), before);
+    assert_eq!(wall.branch_contacts(0).unwrap(), contacts);
+    assert_eq!(wall.last_report(), report);
+    assert_eq!(wall.accepted_branch_impulses().unwrap(), impulses);
+    assert_eq!(n.time(), Time::new(0.0));
 }

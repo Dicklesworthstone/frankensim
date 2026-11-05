@@ -38,7 +38,8 @@ pub use shared::{
 mod transport;
 use transport::CircularWallTransport;
 pub use transport::{
-    CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall, CircularWallModel,
+    CircularChurchillWall, CircularGnielinskiWall, CircularLaminarWall, CircularTurbulentWall,
+    CircularWallModel,
 };
 
 #[cfg(feature = "material")]

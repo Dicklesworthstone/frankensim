@@ -2851,7 +2851,7 @@ wall work, opposite support impulse, slip heating and wall heat retain their
 original separate energy accounts. The factor refreshes at every source
 interval; entering and leaving material/flow states must both be admissible.
 A domain exit, source refusal or cancellation publishes no partial gas or wall
-state. No interpolation through transitional flow is supplied.
+state. The Colebrook option supplies no interpolation through transitional flow.
 
 This is an Estimated developed-flow correlation with first-order constitutive
 lag, not resolved turbulence, an unsteady boundary-layer model or a
@@ -2893,6 +2893,33 @@ energy exchange, moving-frame consistency and complete rollback on domain
 exit. The constitutive coefficients retain the source owner's first-order
 interval lag. These are numerical checks of an Estimated correlation, not
 experimental gas-pipe validation or a resolved-turbulence claim.
+
+### Explicit pipe friction through startup, transition and stopping
+
+`CircularWallModel::Churchill(CircularChurchillWall)` opts a branch into
+Churchill's continuous engineering friction relation. Its current original
+mixture density, viscosity and wall-relative speed set Reynolds number; the
+caller supplies effective sand roughness and an independent Nusselt number.
+Authored Re must lie within 0..1e8, roughness/diameter within 0..0.05, and the
+Mach ceiling must not exceed 0.3. Original circular geometry is checked.
+The restricted laminar, Colebrook and Gnielinski models retain their domains.
+
+Reference: Churchill (1977), *Friction-factor equation spans all fluid-flow
+regimes*, equations 5 and 18. The paper's factor is `f_D/8`. The allocation-free
+deterministic kernel evaluates the finite product `f_D Re`, with rest limit 64,
+and retains small excesses above Poiseuille resistance without cancellation.
+The existing exact linear-quadratic source keeps `32 mu/(rho D²)` as its linear
+term and freezes only its coefficients over each interval. It uses the original
+conservative wall mechanics, heat, finite-support and rollback owners.
+
+This is an Estimated quasi-steady developed-pipe approximation with first-order
+constitutive lag. Transition values are uncertain and do not resolve disturbance
+dependence, intermittency, hysteresis or unsteady boundary-layer memory. Friction
+does not supply a heat-transfer blend: the authored Nusselt number and its
+applicability remain independent. Focused regressions exercise the published
+equation, rest and rough limits, native braking across all three regimes with
+time refinement, live properties, moving-wall energy, and late source refusal.
+These checks do not establish experimental pipe-flow validation.
 
 ### Existing source composition
 
