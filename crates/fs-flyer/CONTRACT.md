@@ -2470,3 +2470,50 @@ typed data/domain refusals. Longitudinal, material-atmosphere and native
 six-DOF regression cases additionally vary viscosity at fixed density and
 check that only the selected parasite loads change. The empty-selection
 regression retains the original material/density-only force equivalence.
+
+## Native unsteady wing lift and pitching moment
+
+`spine::rotors::propulsion::unsteady::UnsteadyPropulsion` is an explicit
+Estimated model choice over the original native geared aircraft. Its accepted
+`UnsteadyState` contains the mechanical state and one motion/gust/separation
+history per strip. Each trial in the two-way nonlinear wing/BEMT solve rebases
+a COPY of the same stage history; iterations never advance physical memory.
+The same section response supplies lift and quarter-chord pitching moment,
+including couples along the physical span of vertical or canted surfaces.
+
+`trimmed_state` initializes developed memory from a real steady coupled solve
+of the SELECTED section polar, including twist, wing induction and prop wash.
+The caller provides total world material-air velocity and, separately, the
+per-strip gust upwash angle already present in that field. Motion receives
+instantaneous geometric effective incidence minus this explicit gust component;
+the gust channel receives it once. Zero gust selects motion response for all
+incidence. No decomposition is guessed or additional gust velocity injected.
+Camber supplies a constant zero-lift-angle offset and baseline moment; it does
+not drive separation or create a startup transient.
+
+A physical step performs exactly two real force solves through the native
+geared midpoint integrator. The held-start history predictor uses start
+chordwise washed speed. Full advancement uses midpoint chordwise speed on
+`ds = 2*U_chord*dt/chord`; source-owned Duhamel poles integrate the ramp to
+`u_mid + (u_mid-u_start)`. Separation relaxes toward the accepted midpoint's
+memory-effective geometric incidence after both channels, before camber.
+The reconstructed endpoint is only a history reference, not a third solved
+force. The next actual stage rebases it before force sampling. Custom surfaces
+use their admitted forward chord, excluding spanwise flow from the clock.
+Smooth-input accuracy requires resolving physical variation; callers should
+split steps at prescribed wind/control discontinuities.
+
+Both instantaneous and memory-effective geometric incidence magnitudes must
+remain at most 0.45 rad at actual force samples. Stored extrapolated endpoint
+references are checked for finite valid history, then rebased before applying
+the physical angle bounds. This Kirchhoff tier covers attached flow and stall
+onset, without deep-stall/vortex, resolved 3-D wake, added-mass or historical
+calibration claims. Profile/induced/parasite drag and axial equilibrium
+propeller wakes retain their existing owners. Every state update is atomic;
+late force, history, clock or mechanical refusals publish no partial accepted
+state. Caller callback side effects remain outside the transaction.
+
+Regression cases cover developed nonzero-gust trim, repeated evaluation
+without aging, real force and trajectory changes, exactly two stage callbacks,
+explicit gust response in the same total wind, an independent midpoint
+separation exponential, dynamic physical-span couples and refused updates.

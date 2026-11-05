@@ -26,6 +26,9 @@ use std::borrow::Cow;
 #[path = "propulsion/dynamic.rs"]
 pub mod dynamic;
 
+#[path = "propulsion/unsteady.rs"]
+pub mod unsteady;
+
 #[path = "propulsion/incident.rs"]
 mod incident;
 use incident::StageIncidentAir;
@@ -147,6 +150,10 @@ struct AerodynamicFields<'a> {
 
 trait AerodynamicSolution {
     fn load_fields(&self) -> AerodynamicFields<'_>;
+
+    fn section_channels(&self) -> Option<&[fs_airfoil::unsteady::SectionChannels]> {
+        None
+    }
 }
 
 impl<P> AerodynamicSolution for CoupledStep<P> {
@@ -650,6 +657,26 @@ impl PropulsionGeometry<'_> {
             disk_wind_world_mps: disk_air.map(|air| air.wind_world_mps),
         })?;
         let fields = aerodynamics.load_fields();
+        let section_channels = aerodynamics.section_channels();
+        if section_channels.is_some_and(|channels| {
+            channels.len() != strips.len()
+                || channels.iter().any(|channel| {
+                    ![
+                        channel.cl,
+                        channel.cm_quarter,
+                        channel.alpha_eff_rad,
+                        channel.f,
+                    ]
+                    .iter()
+                    .all(|value| value.is_finite())
+                        || !(0.0..=1.0).contains(&channel.f)
+                })
+        }) {
+            return Err(reject(
+                "propulsion-state-invalid",
+                "one finite lift/moment/separation channel per strip is required",
+            ));
+        }
         let local = fields.strip_velocity_mps.ok_or_else(|| {
             reject(
                 "propulsion-state-invalid",
@@ -688,6 +715,7 @@ impl PropulsionGeometry<'_> {
                 group_forces
                     .as_deref()
                     .expect("custom surface groups were prepared"),
+                section_channels,
             )?;
             force = force + additional.force;
             moment = moment + additional.torque;
@@ -699,9 +727,14 @@ impl PropulsionGeometry<'_> {
                 let section_speed = section_speed2.sqrt();
                 let q = 0.5 * rho * section_speed2;
                 let width = (panel.b[1] - panel.a[1]).abs();
-                let cm = crate::sections::section_quarter_chord_moment(
-                    fields.strip_alpha_eff_rad[s],
-                    camber,
+                let cm = section_channels.map_or_else(
+                    || {
+                        crate::sections::section_quarter_chord_moment(
+                            fields.strip_alpha_eff_rad[s],
+                            camber,
+                        )
+                    },
+                    |channels| channels[s].cm_quarter,
                 );
                 moment.y += q * strip.chord_m * strip.chord_m * width * cm;
                 let cd = crate::sections::section_profile_drag(

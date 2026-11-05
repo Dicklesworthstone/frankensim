@@ -179,6 +179,7 @@ impl<'a> LiftingSurfaces<'a> {
         origin: [f64; 3],
         fields: &AerodynamicFields<'_>,
         group_forces: &[Vec3],
+        section_channels: Option<&[fs_airfoil::unsteady::SectionChannels]>,
     ) -> Result<Wrench, Refusal> {
         let local = fields.strip_velocity_mps.ok_or_else(|| {
             reject(
@@ -188,6 +189,12 @@ impl<'a> LiftingSurfaces<'a> {
         })?;
         if local.len() != self.strips.len()
             || fields.strip_alpha_eff_rad.len() != self.strips.len()
+            || section_channels.is_some_and(|channels| {
+                channels.len() != self.strips.len()
+                    || channels
+                        .iter()
+                        .any(|channel| !channel.cm_quarter.is_finite())
+            })
             || !origin.iter().all(|v| v.is_finite())
         {
             return Err(reject(
@@ -216,9 +223,14 @@ impl<'a> LiftingSurfaces<'a> {
             let profile_force = vec(flow.velocity_mps).scale(-q * area * cd / flow.speed_mps);
             let panel = self.panels[strip.panel_indices[0]];
             let arm = (vec(panel.a) + vec(panel.b)).scale(0.5) - vec(origin);
-            let cm = crate::sections::section_quarter_chord_moment(
-                fields.strip_alpha_eff_rad[s],
-                section.camber_ratio,
+            let cm = section_channels.map_or_else(
+                || {
+                    crate::sections::section_quarter_chord_moment(
+                        fields.strip_alpha_eff_rad[s],
+                        section.camber_ratio,
+                    )
+                },
+                |channels| channels[s].cm_quarter,
             );
             force = force + profile_force;
             moment = moment
@@ -247,20 +259,29 @@ impl<'a> LiftingSurfaces<'a> {
         let direction = cg_air.scale(1.0 / speed2.sqrt());
         for (group, &load) in self.groups.iter().zip(group_forces) {
             if ![load.x, load.y, load.z].iter().all(|v| v.is_finite()) {
-                return Err(reject("lifting-surfaces-invalid", "nonfinite grouped circulatory load"));
+                return Err(reject(
+                    "lifting-surfaces-invalid",
+                    "nonfinite grouped circulatory load",
+                ));
             }
             let transverse = load - direction.scale(load.dot(direction));
             let drag = transverse.dot(transverse)
                 / (q * core::f64::consts::PI * group.oswald_e * group.span_m * group.span_m);
             if !drag.is_finite() || drag < 0.0 {
-                return Err(reject("lifting-surfaces-invalid", "unrepresentable induced drag"));
+                return Err(reject(
+                    "lifting-surfaces-invalid",
+                    "unrepresentable induced drag",
+                ));
             }
             force = force - direction.scale(drag);
         }
         if ![force.x, force.y, force.z].iter().all(|v| v.is_finite())
             || ![moment.x, moment.y, moment.z].iter().all(|v| v.is_finite())
         {
-            return Err(reject("lifting-surfaces-invalid", "unrepresentable total aerodynamic wrench"));
+            return Err(reject(
+                "lifting-surfaces-invalid",
+                "unrepresentable total aerodynamic wrench",
+            ));
         }
         Ok(Wrench::new(moment, force))
     }
@@ -354,7 +375,14 @@ mod load_admission_tests {
                     oblique: None,
                 };
                 let result = surfaces
-                    .additional_wrench(rho, vec(velocity[0]), origin, &fields, &[Vec3::default()])
+                    .additional_wrench(
+                        rho,
+                        vec(velocity[0]),
+                        origin,
+                        &fields,
+                        &[Vec3::default()],
+                        None,
+                    )
                     .unwrap();
                 // Independent pressure-resultant moment about c/4; symmetric
                 // camber would incorrectly give zero under the attached law.
@@ -363,6 +391,27 @@ mod load_admission_tests {
                 let expected = Vec3::new(0.0, cos_cant, sin_cant).scale(-normal_force * cp_arm);
                 assert!(expected.norm() > 10.0);
                 assert!((result.torque - expected).norm() < 1e-10);
+                // An unsteady owner supplies its own free couple. It must use
+                // this same physical span, including vertical/canted surfaces.
+                let channels = [fs_airfoil::unsteady::SectionChannels {
+                    cl: 0.4,
+                    cm_quarter: -0.123,
+                    alpha_eff_rad: 0.1,
+                    f: 0.6,
+                }];
+                let dynamic = surfaces
+                    .additional_wrench(
+                        rho,
+                        vec(velocity[0]),
+                        origin,
+                        &fields,
+                        &[Vec3::default()],
+                        Some(&channels),
+                    )
+                    .unwrap();
+                let expected_dynamic = Vec3::new(0.0, cos_cant, sin_cant)
+                    .scale(q * width * chord * chord * channels[0].cm_quarter);
+                assert!((dynamic.torque - expected_dynamic).norm() < 1e-10);
             }
         }
     }
@@ -403,7 +452,7 @@ mod load_admission_tests {
         };
         let loads = [Vec3::new(0.0, 0.0, -10.0)];
         let evaluate = |rho, speed: [f64; 3], groups: &[Vec3]| {
-            surfaces.additional_wrench(rho, vec(speed), [0.0; 3], &fields, groups)
+            surfaces.additional_wrench(rho, vec(speed), [0.0; 3], &fields, groups, None)
         };
         assert!(evaluate(1.225, [12.0, 0.0, 0.0], &loads).is_ok());
         for speed in [
@@ -412,10 +461,19 @@ mod load_admission_tests {
             [f64::NAN, 0.0, 0.0],
             [f64::MAX, 0.0, 0.0],
         ] {
-            assert_eq!(evaluate(1.225, speed, &loads).unwrap_err().code, "lifting-surfaces-invalid");
+            assert_eq!(
+                evaluate(1.225, speed, &loads).unwrap_err().code,
+                "lifting-surfaces-invalid"
+            );
         }
-        assert_eq!(evaluate(0.0, [12.0, 0.0, 0.0], &loads).unwrap_err().code, "lifting-surfaces-invalid");
-        assert_eq!(evaluate(1.225, [12.0, 0.0, 0.0], &[]).unwrap_err().code, "lifting-surfaces-invalid");
+        assert_eq!(
+            evaluate(0.0, [12.0, 0.0, 0.0], &loads).unwrap_err().code,
+            "lifting-surfaces-invalid"
+        );
+        assert_eq!(
+            evaluate(1.225, [12.0, 0.0, 0.0], &[]).unwrap_err().code,
+            "lifting-surfaces-invalid"
+        );
         assert_eq!(
             evaluate(1.225, [12.0, 0.0, 0.0], &[Vec3::new(f64::MAX, 0.0, 0.0)])
                 .unwrap_err()
@@ -428,7 +486,15 @@ mod load_admission_tests {
             ..fields
         };
         assert_eq!(
-            surfaces.additional_wrench(1.225, vec([12.0, 0.0, 0.0]), [0.0; 3], &bad_fields, &loads)
+            surfaces
+                .additional_wrench(
+                    1.225,
+                    vec([12.0, 0.0, 0.0]),
+                    [0.0; 3],
+                    &bad_fields,
+                    &loads,
+                    None
+                )
                 .unwrap_err()
                 .code,
             "lifting-surfaces-invalid"

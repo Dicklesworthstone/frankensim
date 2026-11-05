@@ -1001,3 +1001,287 @@ fn g1_real_coupled_aerodynamic_midpoint_refines_with_step_size() {
         assert!((3.5..4.5).contains(&(pair[0] / pair[1])));
     }
 }
+
+#[test]
+fn g1_unsteady_developed_trim_has_no_startup_transient_or_solver_aging() {
+    use fs_airfoil::unsteady::UNSTEADY_SECTION_V1;
+    use fs_flyer::spine::rotors::propulsion::unsteady::UnsteadyPropulsion;
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    design.coupling.tol = 1e-10;
+    design.coupling.cap = 64;
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let propulsion = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let model = UnsteadyPropulsion::new(&propulsion, UNSTEADY_SECTION_V1).unwrap();
+    // Nonzero developed gust tests both channels' initialization. The wind
+    // callback remains the complete material-air field, sampled only once.
+    let gust = vec![0.015; model.section_count()];
+    let wind = |_| Ok([0.0, 0.0, -0.18]);
+    let motion = flight_state(&assembly);
+    let state = model
+        .trimmed_state(motion, inputs(), &wind, &gust, None)
+        .unwrap();
+    let before = state.clone();
+    let first = model
+        .evaluate(&state, inputs(), &wind, &gust, None)
+        .unwrap();
+    let repeated = model
+        .evaluate(&state, inputs(), &wind, &gust, None)
+        .unwrap();
+    assert_eq!(first, repeated);
+    assert_eq!(state, before);
+    for (s, memory) in state.sections.iter().enumerate() {
+        assert_eq!(memory.motion.x, [0.0; 2]);
+        assert_eq!(memory.gust.x, [0.0; 2]);
+        assert_eq!(memory.gust.input_prev, gust[s]);
+        let alpha = first.aerodynamics.coupled.strip_alpha_eff_rad[s];
+        assert!((memory.motion.input_prev + gust[s] - alpha).abs() < 2e-6);
+        assert!((first.aerodynamics.sections[s].alpha_eff_rad - alpha).abs() < 2e-6);
+    }
+    let steady = propulsion.evaluate(&motion, inputs(), &wind, None).unwrap();
+    let force = v(steady.aerodynamic_force_body_n);
+    let moment = v(steady.loads.carrier.moment_nm);
+    assert!((v(first.aerodynamic_force_body_n) - force).norm() < 1e-5 * (1.0 + force.norm()));
+    assert!((v(first.loads.carrier.moment_nm) - moment).norm() < 1e-5 * (1.0 + moment.norm()));
+}
+
+#[test]
+fn g3_unsteady_history_changes_real_forces_and_trajectory_with_two_stages() {
+    use fs_airfoil::unsteady::UNSTEADY_SECTION_V1;
+    use fs_flyer::spine::rotors::propulsion::unsteady::UnsteadyPropulsion;
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let propulsion = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let model = UnsteadyPropulsion::new(&propulsion, UNSTEADY_SECTION_V1).unwrap();
+    let gust = vec![0.0; model.section_count()];
+    let mut state = model
+        .trimmed_state(
+            flight_state(&assembly),
+            inputs(),
+            &|_| Ok(ZERO),
+            &gust,
+            None,
+        )
+        .unwrap();
+    // An explicit new incidence at unchanged physical history produces a
+    // Wagner response, not the fully developed static lift at this new state.
+    state.motion.rigid.vel_mps = [12.0 * 0.16_f64.cos(), 0.0, 12.0 * 0.16_f64.sin()];
+    let before = state.clone();
+    let transient = model
+        .evaluate(&state, inputs(), &|_| Ok(ZERO), &gust, None)
+        .unwrap();
+    let developed = model
+        .trimmed_state(state.motion, inputs(), &|_| Ok(ZERO), &gust, None)
+        .unwrap();
+    let steady = model
+        .evaluate(&developed, inputs(), &|_| Ok(ZERO), &gust, None)
+        .unwrap();
+    assert!(transient.aerodynamic_force_body_n[2] - steady.aerodynamic_force_body_n[2] > 1.0);
+    let mut controls_calls = 0;
+    let mut gust_calls = 0;
+    let result = model
+        .step(
+            &state,
+            0.0,
+            0.002,
+            ZERO,
+            None,
+            |_, _| {
+                controls_calls += 1;
+                Ok(inputs())
+            },
+            |_, _| Ok(ZERO),
+            |_, _, _| {
+                gust_calls += 1;
+                Ok(0.0)
+            },
+        )
+        .unwrap();
+    assert_eq!(controls_calls, 2);
+    assert_eq!(gust_calls, 2 * model.section_count());
+    assert_eq!(state, before);
+    assert_ne!(result.state.sections, state.sections);
+    assert_ne!(result.state.motion, state.motion);
+    assert_eq!(result.state.motion, result.motion.state);
+    assert!(v(result.motion.linear_momentum_residual).norm() < 1e-9);
+    assert!(v(result.motion.angular_momentum_residual).norm() < 1e-8);
+    let static_step = propulsion
+        .step(
+            &state.motion,
+            0.0,
+            0.002,
+            ZERO,
+            None,
+            |_, _| Ok(inputs()),
+            |_, _| Ok(ZERO),
+        )
+        .unwrap();
+    assert!(
+        (v(result.state.motion.rigid.vel_mps) - v(static_step.motion.state.rigid.vel_mps)).norm()
+            > 1e-6
+    );
+}
+
+#[test]
+fn g1_unsteady_separation_uses_the_accepted_memory_effective_midpoint() {
+    use fs_airfoil::unsteady::UNSTEADY_SECTION_V1;
+    use fs_flyer::spine::rotors::propulsion::unsteady::UnsteadyPropulsion;
+    use fs_math::det;
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let propulsion = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    // Manufactured early break makes memory and instantaneous targets
+    // distinguishable in an otherwise mild, admitted forward-flight fixture.
+    let mut spec = UNSTEADY_SECTION_V1;
+    spec.separation.alpha_break_rad = 0.03;
+    let model = UnsteadyPropulsion::new(&propulsion, spec).unwrap();
+    let gust = vec![0.0; model.section_count()];
+    let mut state = model
+        .trimmed_state(
+            flight_state(&assembly),
+            inputs(),
+            &|_| Ok(ZERO),
+            &gust,
+            None,
+        )
+        .unwrap();
+    state.motion.rigid.vel_mps = [12.0 * 0.22_f64.cos(), 0.0, 12.0 * 0.22_f64.sin()];
+    let dt = 0.002;
+    let result = model
+        .step(
+            &state,
+            0.0,
+            dt,
+            ZERO,
+            None,
+            |_, _| Ok(inputs()),
+            |_, _| Ok(ZERO),
+            |_, _, _| Ok(0.0),
+        )
+        .unwrap();
+    let (_, strips) = design.layout(inputs().canard_rad).unwrap();
+    let mut target_difference: f64 = 0.0;
+    for (s, strip) in strips.iter().enumerate() {
+        let midpoint = &result.midpoint.aerodynamics;
+        let ds = 2.0 * midpoint.chordwise_speed_mps[s] * dt / strip.chord_m;
+        let target = spec.separation.f_static(midpoint.sections[s].alpha_eff_rad);
+        let decay = det::exp(-ds / spec.separation.t_f);
+        let expected = target + (state.sections[s].separation.f - target) * decay;
+        assert!((result.state.sections[s].separation.f - expected).abs() < 2e-15);
+        let instantaneous_target = spec
+            .separation
+            .f_static(midpoint.coupled.strip_alpha_eff_rad[s]);
+        target_difference = target_difference.max((target - instantaneous_target).abs());
+    }
+    assert!(
+        target_difference > 1e-3,
+        "the fixture must expose the two different targets"
+    );
+}
+
+#[test]
+fn g3_explicit_gust_selects_kussner_response_in_the_same_total_air_field() {
+    use fs_airfoil::unsteady::UNSTEADY_SECTION_V1;
+    use fs_flyer::spine::rotors::propulsion::unsteady::UnsteadyPropulsion;
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let propulsion = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let model = UnsteadyPropulsion::new(&propulsion, UNSTEADY_SECTION_V1).unwrap();
+    let zero_gust = vec![0.0; model.section_count()];
+    let motion = flight_state(&assembly);
+    let state = model
+        .trimmed_state(motion, inputs(), &|_| Ok(ZERO), &zero_gust, None)
+        .unwrap();
+    let before = state.clone();
+    // The field owner declares only its external upwash-angle increment.
+    // Induced flow and prop wash remain in the coupled motion input.
+    let gust_upwash = 0.3;
+    let incident = motion.rigid.vel_mps;
+    let angle = (incident[2] + gust_upwash).atan2(incident[0]) - incident[2].atan2(incident[0]);
+    let gust = vec![angle; model.section_count()];
+    let total_wind = |_| Ok([0.0, 0.0, -gust_upwash]);
+    let as_motion = model
+        .evaluate(&state, inputs(), &total_wind, &zero_gust, None)
+        .unwrap();
+    let as_gust = model
+        .evaluate(&state, inputs(), &total_wind, &gust, None)
+        .unwrap();
+    // The same physical air field with a declared gust has the smaller
+    // instantaneous lift increment (Kussner zero gain versus Wagner half).
+    assert!(as_gust.aerodynamic_force_body_n[2] - as_motion.aerodynamic_force_body_n[2] > 1.0);
+    assert_eq!(as_gust.aerodynamics.gust_angle_rad, gust);
+    assert_eq!(state, before);
+}
+
+#[test]
+fn g0_refused_unsteady_step_preserves_all_accepted_history_and_motion() {
+    use fs_airfoil::unsteady::UNSTEADY_SECTION_V1;
+    use fs_flyer::spine::rotors::propulsion::unsteady::UnsteadyPropulsion;
+    let mut design = wright_openloop_v1();
+    design.coupling = CANDIDATE_B;
+    let assembly = aero_assembly(design.gross_mass_kg);
+    let propulsion = GearedPropulsion::new(&design, &assembly, mounts()).unwrap();
+    let model = UnsteadyPropulsion::new(&propulsion, UNSTEADY_SECTION_V1).unwrap();
+    let gust = vec![0.0; model.section_count()];
+    let state = model
+        .trimmed_state(
+            flight_state(&assembly),
+            inputs(),
+            &|_| Ok(ZERO),
+            &gust,
+            None,
+        )
+        .unwrap();
+    let before = state.clone();
+    let mut controls_calls = 0;
+    let refused = model.step(
+        &state,
+        0.0,
+        0.002,
+        ZERO,
+        None,
+        |_, _| {
+            controls_calls += 1;
+            Ok(inputs())
+        },
+        |_, _| Ok(ZERO),
+        |time, _, _| Ok(if time == 0.0 { 0.0 } else { f64::NAN }),
+    );
+    assert_eq!(refused.unwrap_err().code, "unsteady-propulsion-invalid");
+    assert_eq!(
+        controls_calls, 2,
+        "the failure must occur after a real first solve"
+    );
+    assert_eq!(state, before);
+    assert!(
+        model
+            .evaluate(
+                &state,
+                inputs(),
+                &|_| Ok(ZERO),
+                &gust[..gust.len() - 1],
+                None
+            )
+            .is_err()
+    );
+    let mut malformed = state.clone();
+    malformed.sections[0].separation.f = -0.1;
+    assert!(
+        model
+            .evaluate(&malformed, inputs(), &|_| Ok(ZERO), &gust, None)
+            .is_err()
+    );
+    let mut out_of_domain = state.clone();
+    out_of_domain.sections[0].motion.x = [-1.0, 0.0];
+    assert_eq!(
+        model
+            .evaluate(&out_of_domain, inputs(), &|_| Ok(ZERO), &gust, None)
+            .unwrap_err()
+            .code,
+        "unsteady-propulsion-invalid"
+    );
+    assert_eq!(state, before);
+}
