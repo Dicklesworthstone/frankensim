@@ -49,6 +49,70 @@ pub struct RotorTransientStep {
     pub work_energy_residual_j: f64,
 }
 
+/// Mechanical power available to one commanded generalized-effort pattern.
+///
+/// These are signed NET interval-average limits for the complete pattern, not
+/// per-coordinate or instantaneous limits. A source may absorb and return work
+/// inside the interval. Electrical efficiency, finite source storage and peak
+/// power require their own models and a resolved time grid.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RotorPowerControl {
+    /// Maximum nonnegative average mechanical power supplied to the rotor [W].
+    pub maximum_motoring_power_w: f64,
+    /// Maximum nonnegative magnitude of average power recovered from it [W].
+    pub maximum_regenerative_power_w: f64,
+    /// Explicit absolute allowance [W] for final power-limit excess and the
+    /// original step's independently evaluated work/energy residual divided
+    /// by its duration. Zero requests exact represented closure.
+    pub absolute_power_tolerance_w: f64,
+}
+
+/// Accepted motion with the original commanded effort uniformly curtailed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotorPowerStep {
+    /// Original full-coordinate trajectory and independent operator work.
+    pub motion: RotorTransientStep,
+    /// Applied force/torque is this fraction in [0,1] times the supplied command.
+    /// Individual effort magnitudes can never exceed their authored command.
+    pub effort_fraction: f64,
+    /// Actual original source work divided by the accepted duration [W].
+    pub average_input_power_w: f64,
+}
+
+/// A failed power-controlled step publishes no motion or source debit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RotorPowerError {
+    /// Original model, state, factorization, momentum or cancellation refusal.
+    Dynamics(RotorError),
+    /// Power inputs or their scalar response cannot be represented faithfully.
+    Invalid(&'static str),
+    /// Final original work violates the explicitly authored power allowance.
+    PowerBalance {
+        /// Actual signed input work divided by duration [W].
+        average_input_power_w: f64,
+        /// Nonnegative amount by which either signed limit is exceeded [W].
+        limit_excess_w: f64,
+        /// Signed native kinetic/operator/source work residual per second [W].
+        work_residual_w: f64,
+        /// Caller-authored absolute admission allowance [W].
+        tolerance_w: f64,
+    },
+}
+
+impl From<RotorError> for RotorPowerError {
+    fn from(error: RotorError) -> Self {
+        Self::Dynamics(error)
+    }
+}
+
+impl core::fmt::Display for RotorPowerError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "rotor power-controlled motion refused: {self:?}")
+    }
+}
+
+impl std::error::Error for RotorPowerError {}
+
 /// Instantaneous physical generalized impulse, with unchanged configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RotorImpulseResponse {
@@ -171,27 +235,12 @@ impl RotorMidpoint<'_> {
         self.admit_vector(midpoint_force)?;
         let n = self.model.n;
         let h = self.duration_seconds;
-        let mut half_position = [0.0; MAX_ROTOR_DOFS];
-        for (i, value) in half_position.iter_mut().enumerate().take(n) {
-            *value = (0.5 * h).mul_add(state.velocity[i], state.displacement[i]);
-        }
-        self.admit_vector(&half_position[..n])?;
-        let velocity_force = action(&self.velocity_operator, &state.velocity, &mut cancelled)?;
-        let spring_force = action(&self.model.stiffness, &half_position[..n], &mut cancelled)?;
-        let mut increment = [0.0; MAX_ROTOR_DOFS];
-        for i in 0..n {
-            increment[i] = ((h * (midpoint_force[i] - velocity_force[i] - spring_force[i]))
-                / self.mass_scale[i])
-                / self.step_row_scale[i];
-        }
-        self.admit_vector(&increment[..n])?;
-        self.step_factor.solve(&mut increment[..n]);
-        poll(&mut cancelled)?;
+        let increment = self.velocity_increment(state, midpoint_force, &mut cancelled)?;
         let velocity: Vec<_> = state
             .velocity
             .iter()
             .enumerate()
-            .map(|(i, &v)| v + increment[i] / self.mass_scale[i])
+            .map(|(i, &v)| v + increment[i])
             .collect();
         let midpoint_velocity = midpoint(&state.velocity, &velocity);
         let displacement = state
@@ -264,6 +313,109 @@ impl RotorMidpoint<'_> {
         })
     }
 
+    /// Advance with finite commanded effort and explicit average-power limits.
+    ///
+    /// The applied force is `alpha * commanded_force`, with the largest
+    /// admissible `alpha` in [0,1] for this original midpoint discretization.
+    /// The SAME cached full nonsymmetric factorization supplies the unforced
+    /// response and the force influence. Consequently the source's mean power
+    /// is `alpha * (b + alpha * a)`, including the acceleration caused by the
+    /// source itself. Neither initial-speed clipping nor division by a stalled
+    /// shaft speed is used. The command itself supplies the finite effort cap.
+    ///
+    /// Both roots are considered; active/cross-coupled bearings and reversal
+    /// can make source work nonmonotone in `alpha`. These are net interval
+    /// limits, so an interval with zero net work can still exchange energy in
+    /// both directions. Shorten the duration to resolve instantaneous limits,
+    /// within-step reversal, controller changes and source-storage constraints.
+    ///
+    /// Two bounded response solves select the fraction, then the original
+    /// [`Self::step`] independently checks the actual rounded endpoint under
+    /// that effort. Its source work, signed bearing work and gyro work remain
+    /// authoritative; no additional heat or energy debit is created. The final
+    /// mean power and native work residual must meet `control` before return.
+    /// Preparation is reused, work stays O(n²), and the extra workspace consists
+    /// of fixed stack arrays; no matrix inverse or nonlinear iteration is added.
+    ///
+    /// # Errors
+    /// Nonfinite/negative limits or allowance, unrepresentable response/root,
+    /// native dynamics refusal, failed final power/energy admission, or
+    /// cancellation. The original state and command are borrowed unchanged.
+    pub fn step_power_limited(
+        &self,
+        state: &RotorTransientState,
+        commanded_force: &[f64],
+        control: RotorPowerControl,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RotorPowerStep, RotorPowerError> {
+        poll(&mut cancelled)?;
+        self.admit_state(state)?;
+        self.admit_vector(commanded_force)?;
+        if [
+            control.maximum_motoring_power_w,
+            control.maximum_regenerative_power_w,
+            control.absolute_power_tolerance_w,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+        {
+            return Err(RotorPowerError::Invalid(
+                "finite nonnegative power limits and absolute allowance required",
+            ));
+        }
+
+        let n = self.model.n;
+        let zero = [0.0; MAX_ROTOR_DOFS];
+        let free_increment = self.velocity_increment(state, &zero[..n], &mut cancelled)?;
+        let mut force_increment = [0.0; MAX_ROTOR_DOFS];
+        for i in 0..n {
+            force_increment[i] = ((self.duration_seconds * commanded_force[i])
+                / self.mass_scale[i])
+                / self.step_row_scale[i];
+        }
+        self.solve_velocity_increment(&mut force_increment[..n], &mut cancelled)?;
+
+        let mut a = Dd::ZERO;
+        let mut b = Dd::ZERO;
+        let half = Dd::from_f64(0.5);
+        for i in 0..n {
+            let force = Dd::from_f64(commanded_force[i]);
+            a = a + force * (half * Dd::from_f64(force_increment[i]));
+            b = b + force
+                * (Dd::from_f64(state.velocity[i]) + half * Dd::from_f64(free_increment[i]));
+        }
+        for value in [a.hi, a.lo, b.hi, b.lo] {
+            finite(value)?;
+        }
+        let effort_fraction = power_fraction(a, b, control)?;
+        let mut applied = [0.0; MAX_ROTOR_DOFS];
+        for i in 0..n {
+            applied[i] = effort_fraction * commanded_force[i];
+        }
+        let motion = self.step(state, &applied[..n], &mut cancelled)?;
+        let average_input_power_w = finite(motion.input_work_j / self.duration_seconds)?;
+        let work_residual_w = finite(motion.work_energy_residual_j / self.duration_seconds)?;
+        let limit_excess_w = (average_input_power_w - control.maximum_motoring_power_w)
+            .max(-average_input_power_w - control.maximum_regenerative_power_w)
+            .max(0.0);
+        if limit_excess_w > control.absolute_power_tolerance_w
+            || work_residual_w.abs() > control.absolute_power_tolerance_w
+        {
+            return Err(RotorPowerError::PowerBalance {
+                average_input_power_w,
+                limit_excess_w,
+                work_residual_w,
+                tolerance_w: control.absolute_power_tolerance_w,
+            });
+        }
+        poll(&mut cancelled)?;
+        Ok(RotorPowerStep {
+            motion,
+            effort_fraction,
+            average_input_power_w,
+        })
+    }
+
     /// Apply an instantaneous generalized impulse through the ORIGINAL full M.
     /// Bearings and gyroscopic forces are finite forces and supply no impulsive
     /// correction. Positions remain unchanged. An unrepresentable momentum
@@ -311,6 +463,46 @@ impl RotorMidpoint<'_> {
             impulse_work_j,
             kinetic_energy_change_j,
         })
+    }
+
+    fn velocity_increment(
+        &self,
+        state: &RotorTransientState,
+        force: &[f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<[f64; MAX_ROTOR_DOFS], RotorError> {
+        let n = self.model.n;
+        let h = self.duration_seconds;
+        let mut half_position = [0.0; MAX_ROTOR_DOFS];
+        for (i, value) in half_position.iter_mut().enumerate().take(n) {
+            *value = (0.5 * h).mul_add(state.velocity[i], state.displacement[i]);
+        }
+        self.admit_vector(&half_position[..n])?;
+        let velocity_force = action(&self.velocity_operator, &state.velocity, cancelled)?;
+        let spring_force = action(&self.model.stiffness, &half_position[..n], cancelled)?;
+        let mut increment = [0.0; MAX_ROTOR_DOFS];
+        for i in 0..n {
+            increment[i] = ((h * (force[i] - velocity_force[i] - spring_force[i]))
+                / self.mass_scale[i])
+                / self.step_row_scale[i];
+        }
+        self.solve_velocity_increment(&mut increment[..n], cancelled)?;
+        Ok(increment)
+    }
+
+    fn solve_velocity_increment(
+        &self,
+        increment: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), RotorError> {
+        self.admit_vector(increment)?;
+        poll(cancelled)?;
+        self.step_factor.solve(increment);
+        poll(cancelled)?;
+        for (value, scale) in increment.iter_mut().zip(&self.mass_scale) {
+            *value = finite(*value / scale)?;
+        }
+        Ok(())
     }
 
     fn admit_state(&self, state: &RotorTransientState) -> Result<(), RotorError> {
@@ -362,6 +554,94 @@ impl RotorMidpoint<'_> {
             Ok(relative)
         }
     }
+}
+
+// If full command is outside the permitted interval, continuity from P(0)=0
+// proves a crossing of that same violated bound. The LAST root in [0,1] is
+// the largest feasible fraction, even when the quadratic first crosses the
+// opposite bound or when its curvature is negative. A monotone bisection from
+// zero would select the wrong branch in those cases.
+fn power_fraction(a: Dd, b: Dd, control: RotorPowerControl) -> Result<f64, RotorPowerError> {
+    let scale = a.abs().hi.max(b.abs().hi);
+    if scale == 0.0 {
+        return Ok(1.0);
+    }
+    let full = a / Dd::from_f64(scale) + b / Dd::from_f64(scale);
+    let positive = !full.lt(Dd::ZERO);
+    let limit = if positive {
+        control.maximum_motoring_power_w
+    } else {
+        control.maximum_regenerative_power_w
+    };
+    // A huge allowance cannot invalidate a tiny finite response. Avoid asking
+    // double-double division to represent an irrelevant infinite ratio.
+    if (limit / scale).is_infinite()
+        || !((Dd::from_f64(limit) / Dd::from_f64(scale)).lt(full.abs()))
+    {
+        return Ok(1.0);
+    }
+    let target = Dd::from_f64(if positive { limit } else { -limit });
+
+    if b == Dd::ZERO {
+        // In particular, start from rest without first forming target/a:
+        // that ratio can underflow although its square root and the eventual
+        // finite torque, velocity and work are all representable.
+        let root = target.abs().sqrt() / a.abs().sqrt();
+        if root.hi.is_finite() && root.lo.is_finite() && !root.lt(Dd::ZERO) && !Dd::ONE.lt(root) {
+            return Ok(root.to_f64());
+        }
+        return Err(RotorPowerError::Invalid(
+            "pure-quadratic power fraction is unrepresentable",
+        ));
+    }
+
+    // Normalize by the SELECTED boundary, not a possibly enormous allowance on
+    // the other power direction. Retain small roots through the stable q-form.
+    let scale = Dd::from_f64(a.abs().hi.max(b.abs().hi).max(target.abs().hi));
+    let quadratic = a / scale;
+    let linear = b / scale;
+    let constant = -target / scale;
+    for (original, scaled) in [(a, quadratic), (b, linear), (-target, constant)] {
+        if !scaled.hi.is_finite()
+            || !scaled.lo.is_finite()
+            || original != Dd::ZERO && scaled == Dd::ZERO
+        {
+            return Err(RotorPowerError::Invalid(
+                "power-response coefficient scaling is unrepresentable",
+            ));
+        }
+    }
+    let roots = if quadratic == Dd::ZERO {
+        [Some(-constant / linear), None]
+    } else if constant == Dd::ZERO {
+        [Some(-linear / quadratic), Some(Dd::ZERO)]
+    } else {
+        let discriminant = linear * linear - Dd::from_f64(4.0) * quadratic * constant;
+        if discriminant.lt(Dd::ZERO) || !discriminant.hi.is_finite() || !discriminant.lo.is_finite()
+        {
+            return Err(RotorPowerError::Invalid(
+                "no representable real power-boundary crossing",
+            ));
+        }
+        let root = discriminant.sqrt();
+        let signed_root = if linear.lt(Dd::ZERO) { -root } else { root };
+        let q = Dd::from_f64(-0.5) * (linear + signed_root);
+        [Some(q / quadratic), Some(constant / q)]
+    };
+    let mut selected = None;
+    for root in roots.into_iter().flatten() {
+        if root.hi.is_finite()
+            && root.lo.is_finite()
+            && !root.lt(Dd::ZERO)
+            && !Dd::ONE.lt(root)
+            && selected.is_none_or(|previous: Dd| previous.lt(root))
+        {
+            selected = Some(root);
+        }
+    }
+    selected.map(Dd::to_f64).ok_or(RotorPowerError::Invalid(
+        "no representable power-limited effort fraction in [0,1]",
+    ))
 }
 
 fn midpoint(before: &[f64], after: &[f64]) -> [f64; MAX_ROTOR_DOFS] {

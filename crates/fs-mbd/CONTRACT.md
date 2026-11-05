@@ -7021,3 +7021,50 @@ second-order momentum/angular-momentum/energy refinement, origin/boost changes,
 signed caloric data, dry coast, work limits and late cancellation. The bounded
 actual-source native run passed all 69 included tests; workspace Cargo gates were
 not run in this constrained environment.
+
+## Finite actuator power on original rotor motion
+
+`rotordynamics::transient::RotorMidpoint::step_power_limited` advances the
+original full mass, gyroscopic, damping and stiffness operators under one
+finite commanded generalized-effort pattern. It selects the largest admitted
+fraction in `[0,1]`, retaining the command's force/torque proportions and never
+exceeding an individual commanded magnitude. Separate nonnegative motoring and
+regenerative limits constrain the signed net interval-average mechanical power.
+
+The same cached nonsymmetric midpoint factorization supplies the unforced
+response and command influence. Their actual source response is the scalar
+quadratic `P(alpha) = alpha * (b + alpha * a)`. Both roots are considered when
+necessary: active bearing coefficients and velocity reversal need not make
+source work monotone in drive fraction. The pure-quadratic start-from-rest
+case takes separate square roots before division, preserving a representable
+small effort fraction even when the corresponding power ratio underflows.
+Initial speed is never a divisor, so finite commands remain finite at stall.
+
+The selected effort enters the original `step` once. Its rounded physical
+endpoint, momentum admission, source work and independent kinetic, bearing,
+stiffness and gyroscopic work remain authoritative. Final actual source work
+per second must meet the signed limits within the explicitly authored
+`absolute_power_tolerance_w`; the original work/energy residual per second must
+also meet that allowance. Refusal or cancellation returns no partial state or
+source debit. All inputs remain borrowed and unchanged.
+
+Preparation and original state ownership are unchanged. The additional work is
+two bounded cached linear solves and fixed-size stack arrays, followed by the
+original accepted solve; each step stays `O(n^2)` for at most 32 coordinates,
+with no refactorization, matrix inverse or nonlinear search. This is one net
+mechanical source, without per-coordinate power allocation, instantaneous
+power limits, finite source storage, electrical efficiency or thermal losses.
+An interval may absorb and return energy while its net work is zero; within-step
+reversal and source constraints require a resolved time grid and their own laws.
+The original constant-spin linear rotor model and temporal-error limits remain.
+
+Six focused native tests cover finite stall torque, unchanged full-command
+parity, constant-power acceleration and regeneration with exact energy and
+three-rung position refinement, nonmonotone/active-bearing root selection,
+full tensor/gyro/cross-coupling and coordinate-unit changes, `1e-180..1e180`
+power scaling, a representable `1e-300` effort fraction, strict final energy
+refusal, and every observed cancellation boundary. All six pass alongside all
+12 original rotor operating-point tests and four unchanged transient
+regressions in a source-selected native build using the original numerical
+owners. Unrelated rigid-disk/periodic module exports were omitted from that
+build; whole-crate Cargo/DSR verification is not claimed.
