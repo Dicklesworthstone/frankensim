@@ -343,7 +343,7 @@ impl<'a> GasGraphSources<'a> {
         Ok(GraphReservoirHeat { admission, convection })
     }
 
-    /// Section-integrated original Hausen heat with the original gas source.
+    /// Section-integrated original duct relation with the original gas source.
     /// Every actual inertial rate retains native gas Mach and work admission.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_developing_sections(

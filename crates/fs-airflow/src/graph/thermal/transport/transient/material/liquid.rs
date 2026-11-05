@@ -279,7 +279,7 @@ impl<'a, 'card> LiquidGraphSources<'a, 'card> {
         Ok(GraphReservoirHeat { admission, convection })
     }
 
-    /// Section-integrated original Hausen heat at the actual inertial endpoint.
+    /// Section-integrated original duct relation at the actual inertial endpoint.
     /// Native whole-wall links and reservoirs share one bounded evaluator.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_developing_sections(
