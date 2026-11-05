@@ -32,6 +32,10 @@ use fs_wing::nonlinear::{solve_nonlinear_with_incident, solve_nonlinear_with_sec
 #[path = "dynamic/first_harmonic.rs"]
 pub mod first_harmonic;
 
+/// Evolving propeller induction composed with per-strip unsteady lift memory.
+#[path = "dynamic/unsteady.rs"]
+pub mod unsteady;
+
 #[path = "dynamic/blade_wash.rs"]
 mod blade_wash;
 use blade_wash::BladeWash;
