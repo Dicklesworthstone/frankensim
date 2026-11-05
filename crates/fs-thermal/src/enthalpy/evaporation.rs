@@ -10,7 +10,9 @@
 //! Reference geometry, heat links and cell identities remain unchanged. This
 //! is a cell-uniform, fixed-exposure model: recession is reported, not silently
 //! turned into moving geometry. Exhaustion, freezing or boiling needs another
-//! admitted phase/topology owner. Refine the full heat/phase split in time.
+//! admitted phase/topology owner. The original split timeline, coupled IMEX
+//! timeline and implicit endpoint adapter retain distinct time-error models;
+//! refine time independently of their algebraic mass/energy tolerances.
 
 use super::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, EnergyAudit, Event,
@@ -24,6 +26,9 @@ use crate::evaporation::{
 #[path = "evaporation/coupled.rs"]
 mod coupled;
 pub use coupled::CoupledEvaporationAudit;
+
+#[path = "evaporation/implicit.rs"]
+pub mod implicit;
 
 /// A failed phase or thermal proposal leaves all accepted state unchanged.
 #[derive(Clone, Debug, PartialEq)]

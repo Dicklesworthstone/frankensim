@@ -1642,6 +1642,40 @@ independently solved source/contact/bath balances, mass-dependent CFL limits,
 birth and coverage events, large shifted birth-energy datums with an unchanged
 high-energy neighbor, and late event/cancellation rollback.
 
+`evaporation::implicit::EvaporatingBackwardEulerStep` assembles original
+backward-Euler heat transport and signed phase transfer at one common endpoint.
+Its unknowns retain `m0*(h1-h0)` in the original stable cell order. The liquid
+equation includes `dm*L(T1)` once; acceptance installs the actual remaining
+mass `m1=m0-dm` and reports complete vapor enthalpy `dm*(h1+L(T1))`. Contact,
+source, convection, reservoir and resolved bath/radiation inputs use the same
+original backward-Euler coefficient ingress. No explicit conductive CFL is
+imposed by this residual adapter.
+
+The resolver receives both the original thermal endpoint with `m0` retained
+for its energy coordinates and an explicit proposed liquid state with `m1`.
+Mass-dependent sources must use that proposed inventory. One original thermal
+rate pass measures physical heat before latent exchange; the native residual
+pass includes the latent sink. This preserves an independent physical account
+without recovering small heat inputs by subtracting large mixed source terms.
+The source law is queried once per endpoint evaluation. Original authored
+boundaries and topology survive acceptance; events at the endpoint remain
+pending until coupled owners accept the preceding interval.
+
+`EvaporatingBackwardEulerAudit` separates physical external heat, actual
+changed-mass storage and the complete surface receipt. Compensated relative
+energy and mass accounts accompany the original local and whole-system
+backward-Euler gates. Represented mass-rate error, remaining inventory,
+original material-cell constraints and final cancellation are checked before
+returning an accepted candidate. The caller supplies the nonlinear solver and
+bounds its work; this API does not itself solve the nonlinear system, estimate
+time error, or evolve finite gas, geometry, boiling or dryout.
+
+Seven native implicit regression groups cover an independent stiff two-cell
+solution, temperature-dependent latent heat with an enthalpy datum shift,
+proposed-mass sources and resolved bath/radiation/pair-transfer inputs, both
+flux reversals, original inventory/source-domain refusal, independent
+local/mass/cancellation gates, and pending endpoint event exposure.
+
 Heating can turn initial equilibrium or condensation into evaporation. An
 exhausted endpoint now uses the larger initial/endpoint frozen evaporation
 rate for its finite retry estimate. The estimate remains advisory: a retry

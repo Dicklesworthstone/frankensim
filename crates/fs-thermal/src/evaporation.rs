@@ -221,7 +221,7 @@ fn log_carrier_ratio(a: f64, b: f64, difference: f64) -> f64 {
     }
 }
 
-fn flux(p: EvaporationProperties, film: GasFilm) -> Result<SurfaceFlux, EvaporationError> {
+pub(crate) fn flux(p: EvaporationProperties, film: GasFilm) -> Result<SurfaceFlux, EvaporationError> {
     film.validate()?;
     if p.saturation_pressure_pa >= film.total_pressure_pa {
         return Err(EvaporationError::Boiling {
