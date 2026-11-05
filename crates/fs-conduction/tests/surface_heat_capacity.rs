@@ -4,6 +4,9 @@ mod support;
 #[path = "surface_heat_capacity/enthalpy.rs"]
 mod enthalpy;
 
+#[path = "surface_heat_capacity/tensor.rs"]
+mod tensor;
+
 use fs_conduction::assemble::{assemble_jacobian, assemble_operator, full_residual};
 use fs_conduction::bc::history::ThermalBoundaryHistory;
 use fs_conduction::bc::history::march::{
@@ -546,7 +549,7 @@ fn coated_slab_retains_exact_bulk_plus_sheet_heat_and_tangential_flux() {
             close(cold, -expected, 2e-7);
             close(reaction.iter().sum(), 0.0, 1e-9);
             for surface in boundary.surface_heat_conduction() {
-                let mean = surface.nodal_conductance_w_per_k().iter().sum::<f64>() / 3.0;
+                let mean = surface.nodal_conductance_w_per_k().unwrap().iter().sum::<f64>() / 3.0;
                 let flux = surface
                     .mean_heat_flux_w_per_m(&mesh, &solved.temperature)
                     .unwrap();

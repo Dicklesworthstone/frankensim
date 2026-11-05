@@ -41,7 +41,8 @@ G1 regressions in `tests/surface_heat_capacity/enthalpy.rs` cover uniform heatin
 ## Tangential heat conduction in bonded thin coatings
 
 `SurfaceHeatConduction` declares finite, nonnegative isotropic sheet conductance
-`k*t` in W/K on original boundary triangles. Uniform and P1 nodal coefficients
+`k*t` or a symmetric positive-semidefinite in-plane sheet tensor in W/K on
+original boundary triangles. Uniform and P1 nodal coefficients
 use the original face vertex order; a declared thickness or conductivity is not
 inferred from the bulk material. `ThermalBoundary::with_surface_heat_conduction`
 binds those laws to the original mesh and thermal partition. Perfect bonding
@@ -49,7 +50,7 @@ and negligible through-thickness gradients give the film the solid's trace
 temperature, without additional temperature degrees of freedom.
 
 The shared boundary assembly adds the exact P1 tangential Fourier block
-`A * mean(k*t) * grad_s(N_i).grad_s(N_j)`. Its symmetric internal transfers
+`A * grad_s(N_i).mean(K_s).grad_s(N_j)`. Its symmetric internal transfers
 preserve a constant-temperature null mode and add no reservoir load. Existing
 Dirichlet reactions therefore include coating heat spreading; Neumann, Robin,
 contact and radiation accounts keep their original physical meanings.
@@ -67,14 +68,31 @@ so the CSR graph is unchanged; staging-size arithmetic is checked. This is not
 a peak-memory guarantee. The roundoff estimate counts the extra contributions.
 
 Film storage remains an independent `SurfaceHeatCapacity` input to its existing
-owner, and a separately meshed layer must not be counted again. This declared
-linear sheet law adds no material-source authority, temperature dependence,
-anisotropy, finite through-thickness resistance or film-property derivative.
+owner, and a separately meshed layer must not be counted again.
+
+Tensor constructors require an explicit pair of orthonormal world-space
+tangent axes, checked to absolute tolerance `1e-12`; boundary binding checks
+their original face plane. Each nodal 2-D coefficient must be finite, symmetric
+and positive semidefinite. Rank-one sheets retain an insulated in-plane
+direction; zero sheets add nothing. P1 interpolation and exact face averaging
+preserve the declared dissipation law. Tensor laws do not silently become
+scalar means: the isotropic coefficient accessor returns `None` for them.
+The frame is fixed on each original triangle, and no projection or reduction of
+a general bulk tensor with normal/tangential coupling is inferred.
+
+This declared linear sheet law adds no material-source authority, temperature
+dependence, finite through-thickness resistance or film-property derivative.
 Continuum mean verification explicitly refuses active coatings until its flux
 model represents tangential transport. Regressions in
 `tests/surface_heat_capacity.rs` check exact uniform/varying coated-slab heat and
 flux, the regular-tetrahedron decay mode with combined storage, enthalpy scaling,
 nonlinear bulk tangents, event histories and zero/input-refusal behavior.
+The `surface_heat_capacity/tensor.rs` G1/G3 regressions add rotated directional
+P1 flux, dissipation and heat closure, isotropic degeneration, a backward-Euler
+analytic decay mode, rank-one null directions and input admission. These are
+discrete numerical references, not experimental material validation or a
+continuum-error certificate. Tensor transport uses fixed-size stack arithmetic
+and the same nine triplets per face; no throughput improvement is claimed.
 
 ## Retained pointwise-radiation and contact enthalpy endpoints
 
