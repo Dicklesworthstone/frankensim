@@ -27,6 +27,9 @@
 use crate::Voigt;
 use fs_math::det;
 
+/// Original material-card initiation curves and their retained source support.
+pub mod source;
+
 /// Complete rectangular calibration bounds. Every interval is closed; a
 /// degenerate interval represents a fixed calibrated condition.
 #[derive(Clone, Copy, Debug, PartialEq)]

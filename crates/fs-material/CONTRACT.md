@@ -15279,3 +15279,51 @@ water, with fixed controls during each interval. It supplies no settling/slip,
 pump or level model, tank-volume inference, empty-sump operating policy,
 plant calibration or continuous-time error enclosure. Numerical conservation
 does not certify the first-order trajectory's discretization error.
+
+
+## Irreversible ductile initiation from native plastic history
+
+`ductile` owns local damage initiation as
+`omega += delta_alpha / epsilon_f(eta, delta_alpha / dt, T)`, with native
+accumulated equivalent PLASTIC strain, tensile-positive physical stress
+triaxiality and an explicit physical duration. Endpoint-held conditions make
+this first-order quadrature for changing stress/rate/temperature histories.
+Elastic unloading preserves utilization; reversed plastic flow adds to it.
+History is immutable until its caller accepts a complete candidate. Overshoot
+is retained and omega >= 1 means initiation, not zero carrying capacity.
+
+Explicit Johnson--Cook parameters use `exp(-d3 * eta)`, whose d3 sign is the
+opposite of the original publication's convention. Positive finite factors
+are admitted over the complete rectangular domain. Original tabulated loci
+retain every knot and use binary-search piecewise-linear evaluation with no
+extrapolation. Rate and triaxiality are checked when plastic flow occurs;
+temperature support applies on every step. Physical Cauchy or Kirchhoff stress
+is required, never first Piola components or stress relative to backstress.
+Scaled invariant evaluation avoids unnecessary overflow; undefined
+hydrostatic stress with positive plastic flow refuses.
+
+`ductile::source::resolve_ductile_locus` requires the exact property
+`ductile-fracture-equivalent-plastic-strain` against
+`stress-triaxiality`, dimensionless typed coordinates, original positive
+`equivalent-plastic-strain-rate` bounds in 1/s, and a semantic absolute
+temperature. It retains original card/state identity, selected claim, fixed
+context, every original knot and verified query receipt. It authors numerical
+interpolation without changing the source's interpolation policy or promoting
+intermediate values to measurements. Engineering elongation, reduction of area
+and fatigue ductility are not aliases. Unsupported evolving coordinates refuse.
+
+A resolved one-dimensional locus holds the selected temperature fixed and
+inherits the original rate applicability interval; it does not fit dependence
+on either coordinate. Source/native binding requires the same original card,
+named material state and complete fixed context in both directions, excluding
+only the actual runtime triaxiality and plastic rate. Native-only environmental
+coordinates cannot silently acquire fracture calibration.
+
+Eight core tests and seven source regression definitions cover independent
+formula/analytic initiation, signed-factor admission, path irreversibility,
+rotation/scaling, restart, source meaning, typed domains, ambiguity pins and
+original material/context binding. These new tests have not executed: the
+execution environment failed during dependency preparation. This owner adds
+no post-initiation softening, fracture energy, characteristic length, crack
+topology, mesh-objective failure, Lode dependence or experimentally validated
+component failure. Those broader fracture tasks remain open.
