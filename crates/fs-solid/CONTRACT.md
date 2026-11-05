@@ -1187,6 +1187,14 @@ coordinates are excluded; the runtime law enforces their source domains.
 Custom source temperature axes remain intact. These checks retain original
 calibration evidence without establishing validated component life.
 
+An explicitly selected Walker fit derives its operating R from those same
+native tensile stress extrema. Mean load and fixed thermal/residual prestress
+therefore affect growth through the calibrated shared law while original
+elastic stress, displacement, inertia, reactions and work remain unchanged.
+The reference R and gamma remain inspectable in the retained law and, for a
+source-resolved fit, in its original six material claims. This does not change
+the fixed-temperature restriction or establish a changing-temperature transfer.
+
 The original immutable geometry and its context remain inspectable through
 `geometry(gauge)`. The shared material owner evaluates the changing factor
 during advancement and forecasting; Y is not frozen at the initial crack.
@@ -1231,6 +1239,10 @@ and reports the actual adaptive table resolution and direct secant factor.
 Its material coefficients remain explicitly synthetic; the analytical
 interpolation criterion is not a floating-point error certificate and does not
 establish component or material validation.
+The composable `--walker` flag selects explicitly synthetic reference-R/gamma
+parameters and prints their independent rate multiplier. Constant-geometry,
+varying-geometry and finite-width comparison references all include that
+same multiplier; no hidden mean-stress coefficient is selected.
 
 Both native owners expose a read-only `cycles_to_length` forecast for a gauge
 whose representative cycle is fully sampled but not yet explicitly consumed.

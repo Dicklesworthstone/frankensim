@@ -1,8 +1,10 @@
 //! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000
 //! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000 --varying-geometry
 //! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000 --finite-width
+//! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000 --walker
+//! cargo run -p fs-solid --example fatigue_crack_growth -- --demo 1000000 --finite-width --walker
 //!
-//! SYNTHETIC Paris-law demonstration; coefficients are not measured material data.
+//! SYNTHETIC Paris/Walker demonstration; coefficients are not measured material data.
 //! Three native solves resolve one tensile 2 -> 8 -> 2 MPa cycle. The caller then
 //! explicitly declares identical quasistatic cycles with fixed material, thermal
 //! state, supports and uncracked mechanics. Constant Y=1 and the explicitly
@@ -14,6 +16,9 @@
 //! separately. Here a is physical half-crack length, full crack length is 2a,
 //! and growth leaves stiffness fixed. The interpolation criterion is analytic;
 //! floating-point intervals and material lifetime are not certified.
+//! Optional normalized Walker correction composes with either geometry mode.
+//! Its synthetic gamma=0.5 and reference R=0 give a 4/3 rate multiplier at the
+//! actual R=0.25, while the same native mechanical stress cycle is retained.
 
 use std::sync::Arc;
 
@@ -24,7 +29,7 @@ use fs_material::fatigue::FatigueScope;
 use fs_material::fatigue::crack_growth::{
     ConstantGeometryCrack, CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext,
     CrackGrowthLimits, FiniteWidthCentreCrack, ParisDomain, ParisLaw, ParisParameters,
-    TabulatedCrackGeometry,
+    TabulatedCrackGeometry, WalkerParameters,
 };
 use fs_solid::fatigue::crack_growth::{
     CrackStressTolerance, TetCrackGrowthConfig, TetCrackGrowthGauge, TetCrackGrowthPath,
@@ -43,21 +48,26 @@ const MAXIMUM_STRESS_PA: f64 = 8e6;
 const FULL_PLATE_WIDTH_M: f64 = 0.02;
 const FINITE_WIDTH_RELATIVE_Y_TOLERANCE: f64 = 1e-5;
 const FINITE_WIDTH_MAXIMUM_POINTS: usize = 1025;
+const WALKER_REFERENCE_LOAD_RATIO: f64 = 0.0;
+const WALKER_GAMMA: f64 = 0.5;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if !(2..=3).contains(&args.len())
-        || args[0] != "--demo"
-        || args
-            .get(2)
-            .is_some_and(|flag| flag != "--varying-geometry" && flag != "--finite-width")
-    {
-        return Err(
-            "usage: fatigue_crack_growth --demo CYCLES [--varying-geometry | --finite-width] (1..=1000000); synthetic data only".into(),
-        );
+    const USAGE: &str = "usage: fatigue_crack_growth --demo CYCLES [--varying-geometry | --finite-width] [--walker] (1..=1000000); synthetic data only";
+    if !(2..=4).contains(&args.len()) || args[0] != "--demo" {
+        return Err(USAGE.into());
     }
-    let varying_geometry = args.get(2).is_some_and(|flag| flag == "--varying-geometry");
-    let finite_width = args.get(2).is_some_and(|flag| flag == "--finite-width");
+    let mut varying_geometry = false;
+    let mut finite_width = false;
+    let mut use_walker = false;
+    for flag in &args[2..] {
+        match flag.as_str() {
+            "--varying-geometry" if !varying_geometry && !finite_width => varying_geometry = true,
+            "--finite-width" if !finite_width && !varying_geometry => finite_width = true,
+            "--walker" if !use_walker => use_walker = true,
+            _ => return Err(USAGE.into()),
+        }
+    }
     let finite_plate = if finite_width {
         Some(FiniteWidthCentreCrack::new(FULL_PLATE_WIDTH_M)?)
     } else {
@@ -87,35 +97,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fixed_dofs: &fixed_dofs,
         budget: Default::default(),
     };
-    let law = Arc::new(ParisLaw::new(
-        FatigueScope {
-            source_reference: "SYNTHETIC m=2 arithmetic fixture; not measured".into(),
-            material: "synthetic elastic demonstration".into(),
-            process: "synthetic".into(),
-            surface_and_geometry: if finite_width {
-                "centred through crack in a long elastic plate; full W=0.02 m; physical half-length a".into()
-            } else if varying_geometry {
-                "synthetic Y(a)=sqrt(a/a0) table; a is crack half-length".into()
-            } else {
-                "declared constant Y=1; a is crack half-length".into()
+    let scope = FatigueScope {
+        source_reference: if use_walker {
+            "SYNTHETIC normalized Walker m=2 arithmetic fixture; not measured".into()
+        } else {
+            "SYNTHETIC m=2 arithmetic fixture; not measured".into()
+        },
+        material: "synthetic elastic demonstration".into(),
+        process: "synthetic".into(),
+        surface_and_geometry: if finite_width {
+            "centred through crack in a long elastic plate; full W=0.02 m; physical half-length a"
+                .into()
+        } else if varying_geometry {
+            "synthetic Y(a)=sqrt(a/a0) table; a is crack half-length".into()
+        } else {
+            "declared constant Y=1; a is crack half-length".into()
+        },
+        environment: "synthetic fixed conditions".into(),
+        load_basis: "tensile Mode-I full stress-intensity range".into(),
+        temperature_k: 300.0,
+    };
+    let parameters = ParisParameters {
+        reference_delta_k_pa_sqrt_m: REFERENCE_DELTA_K,
+        reference_rate_m_per_cycle: REFERENCE_RATE,
+        exponent: 2.0,
+    };
+    let domain = ParisDomain {
+        minimum_delta_k_pa_sqrt_m: 1.0,
+        maximum_delta_k_pa_sqrt_m: 1e8,
+        minimum_load_ratio: 0.0,
+        maximum_load_ratio: 0.95,
+        maximum_k_pa_sqrt_m: 1e9,
+    };
+    let law = Arc::new(if use_walker {
+        ParisLaw::new_walker(
+            scope,
+            parameters,
+            domain,
+            WalkerParameters {
+                reference_load_ratio: WALKER_REFERENCE_LOAD_RATIO,
+                gamma: WALKER_GAMMA,
             },
-            environment: "synthetic fixed conditions".into(),
-            load_basis: "tensile Mode-I full stress-intensity range".into(),
-            temperature_k: 300.0,
-        },
-        ParisParameters {
-            reference_delta_k_pa_sqrt_m: REFERENCE_DELTA_K,
-            reference_rate_m_per_cycle: REFERENCE_RATE,
-            exponent: 2.0,
-        },
-        ParisDomain {
-            minimum_delta_k_pa_sqrt_m: 1.0,
-            maximum_delta_k_pa_sqrt_m: 1e8,
-            minimum_load_ratio: 0.0,
-            maximum_load_ratio: 0.95,
-            maximum_k_pa_sqrt_m: 1e9,
-        },
-    )?);
+        )?
+    } else {
+        ParisLaw::new(scope, parameters, domain)?
+    });
     let allowance = CrackStressTolerance {
         absolute_stress_pa: 1e-5,
         relative: 1e-9,
@@ -202,7 +228,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Independent m=2 integrals: constant Y gives da/dN=k*a, while
         // Y(a)=sqrt(a/a0) gives da/dN=k*a^2/a0.
         let normalized_range = (MAXIMUM_STRESS_PA - MINIMUM_STRESS_PA) / REFERENCE_DELTA_K;
-        let exposure = REFERENCE_RATE * normalized_range.powi(2) * std::f64::consts::PI * cycles as f64;
+        let actual_load_ratio = MINIMUM_STRESS_PA / MAXIMUM_STRESS_PA;
+        // Independent normalized Walker multiplier at m=2. It is constant for
+        // the declared identical cycles, so all three geometry references apply.
+        let rate_multiplier = if use_walker {
+            ((1.0 - WALKER_REFERENCE_LOAD_RATIO) / (1.0 - actual_load_ratio))
+                .powf(2.0 * (1.0 - WALKER_GAMMA))
+        } else {
+            1.0
+        };
+        let exposure = REFERENCE_RATE * normalized_range.powi(2)
+            * std::f64::consts::PI * cycles as f64 * rate_multiplier;
         let expected = if finite_width {
             None
         } else if varying_geometry {
@@ -212,6 +248,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         println!("SYNTHETIC demonstration, not validated component life");
         println!("Declared identical quasistatic cycles; uncracked mechanics stay fixed.");
+        if use_walker {
+            println!("fatigue_law=normalized_Walker synthetic_reference_load_ratio={WALKER_REFERENCE_LOAD_RATIO:.6e} synthetic_gamma={WALKER_GAMMA:.6e}");
+            println!("actual_load_ratio={actual_load_ratio:.6e} independent_m2_rate_multiplier={rate_multiplier:.12e}");
+        }
         println!("geometry={}", if finite_width {
             "finite-width centred through crack; elastic secant factor in a log-log table"
         } else if varying_geometry {

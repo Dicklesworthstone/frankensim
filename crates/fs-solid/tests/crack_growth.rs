@@ -13,12 +13,13 @@ use fs_matdb::{
 };
 use fs_material::fatigue::FatigueScope;
 use fs_material::fatigue::crack_growth::source::{
-    ParisProperty, ParisSourceRequest, STRESS_INTENSITY_SQUARED_DIMS, resolve_paris,
+    ParisProperty, ParisSourceRequest, STRESS_INTENSITY_SQUARED_DIMS, WalkerProperty,
+    resolve_paris, resolve_walker,
 };
 use fs_material::fatigue::crack_growth::{
     ConstantGeometryCrack, CrackGeometry, CrackGeometryPoint, CrackGeometryTableContext,
     CrackGrowthError, CrackGrowthLimits, ParisDomain, ParisLaw, ParisParameters,
-    TabulatedCrackGeometry,
+    TabulatedCrackGeometry, WalkerParameters,
 };
 use fs_material::state_point::{MaterialPropertySelection, ResolvedMaterialStatePoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
@@ -1297,5 +1298,337 @@ fn g1_inertial_cycles_keep_original_motion_while_crack_geometry_evolves() {
         }
         assert_eq!(checkpoint.states(), observed.states());
         assert_eq!(checkpoint.mechanics().state(), observed.mechanics().state());
+    });
+}
+
+fn walker_law() -> Arc<ParisLaw> {
+    let reference = law(1.0, 1e9);
+    Arc::new(
+        ParisLaw::new_walker(
+            reference.scope().clone(),
+            reference.parameters(),
+            reference.domain(),
+            WalkerParameters {
+                reference_load_ratio: 0.25,
+                gamma: 0.5,
+            },
+        )
+        .unwrap(),
+    )
+}
+
+fn analytical_walker_length(cycles: f64, rate_multiplier: f64) -> f64 {
+    // For m=2, gamma=1/2 and R_ref=1/4, the normalized multiplier is
+    // (1-R_ref)/(1-R). Integrate da/dN=k*multiplier*a independently.
+    let k = 1e-16 * std::f64::consts::PI * 6e6 * 6e6;
+    INITIAL_A * (k * cycles * rate_multiplier).exp()
+}
+
+#[test]
+fn g1_native_walker_mean_stress_changes_growth_and_forecast_without_changing_mechanics() {
+    with_cx(false, |cx| {
+        let material = material();
+        let thermal = thermal();
+        let fixed = fixed();
+        let problem = problem(&material, &fixed);
+        let geometry = geometry(cx);
+        let mut outcomes = Vec::new();
+        for (minimum, maximum, multiplier) in [(2e6, 8e6, 1.0), (6e6, 12e6, 1.5)] {
+            let mut calibrated = gauge();
+            calibrated.law = walker_law();
+            let mut path = path(&problem, &thermal, vec![calibrated, gauge()], cx);
+            for (index, stress) in [minimum, maximum, minimum].into_iter().enumerate() {
+                let load = load(&geometry, stress, cx);
+                let sample = path.advance(index as f64, &load, cx).unwrap();
+                let original = load
+                    .solve(
+                        &problem,
+                        TetThermalStrainField::Uniform(&thermal),
+                        Default::default(),
+                        FRAME,
+                        0.01,
+                        cx,
+                    )
+                    .unwrap();
+                assert_eq!(sample.mechanics.stress, original.stress);
+                assert_eq!(sample.mechanics.displacement, original.displacement);
+                for normal in sample.normal_stress_pa {
+                    close(normal, stress, 1e-6);
+                }
+            }
+            assert_eq!(maximum - minimum, 6e6);
+            let before = path.states();
+            let target = 1.2 * INITIAL_A;
+            let walker_forecast = path.cycles_to_length(0, target, cx).unwrap();
+            let paris_forecast = path.cycles_to_length(1, target, cx).unwrap();
+            close(
+                walker_forecast.additional_cycles,
+                paris_forecast.additional_cycles / multiplier,
+                1e-9,
+            );
+            assert_eq!(path.states(), before);
+            let completed = path.close_repeated_cycle(20, cx).unwrap();
+            close(
+                completed[0].after.crack_length_m,
+                analytical_walker_length(20.0, multiplier),
+                2e-16,
+            );
+            close(
+                completed[1].after.crack_length_m,
+                analytical_walker_length(20.0, 1.0),
+                2e-16,
+            );
+            assert_eq!(path.observed_samples(), 3);
+            assert_eq!(path.last_time_s(), Some(2.0));
+            for step in &completed {
+                assert_eq!(step.after.cycles, 20.0);
+                assert_eq!(step.after.blocks, 1);
+            }
+            outcomes.push((
+                completed[0].after.crack_length_m,
+                walker_forecast.additional_cycles,
+            ));
+        }
+        assert!(outcomes[1].0 > outcomes[0].0);
+        assert!(outcomes[1].1 < outcomes[0].1);
+        close(outcomes[1].1, outcomes[0].1 / 1.5, 1e-9);
+    });
+}
+
+fn walker_source_fixture(revision: u32) -> ParisSourceFixture {
+    let template = paris_source_fixture(0);
+    let mut claims = template.card.claims().clone();
+    let validity = template
+        .law
+        .source()
+        .unwrap()
+        .claim(ParisProperty::ReferenceDeltaKSquared)
+        .validity
+        .clone();
+    for (property, value) in [
+        (WalkerProperty::ReferenceDeltaKSquared, 1e12),
+        (WalkerProperty::ReferenceGrowthRate, 1e-4),
+        (WalkerProperty::Exponent, 2.0),
+        (WalkerProperty::MaximumKSquared, 1e18),
+        (WalkerProperty::ReferenceLoadRatio, 0.25),
+        (WalkerProperty::Gamma, 0.5),
+    ] {
+        let key = property.property_key();
+        claims
+            .insert_claim(PropertyClaim {
+                value: PropertyValue::Scalar {
+                    value,
+                    dims: key.dims(),
+                },
+                key,
+                validity: validity.clone(),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "synthetic original normalized Walker fit; not measured".into(),
+                    license: "test-only".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    let mut card = MaterialCard::assemble(template.card.id().clone(), claims, vec![]).unwrap();
+    for _ in 0..revision {
+        card = MaterialCard::supersede(&card, card.claims().clone(), vec![]).unwrap();
+    }
+    let native_point = template.bundle.query();
+    let bundle = Arc::new(
+        SolidStiffnessModel::Isotropic
+            .resolve_reference(
+                &card,
+                &native_point,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap(),
+    );
+    let material = SolidStiffnessModel::Isotropic
+        .material(
+            &bundle,
+            bundle.property("density").unwrap().value_si(),
+            bundle.identity(),
+            0.01,
+        )
+        .unwrap();
+    let thermal = TetThermalStrainState::try_new(
+        300.0,
+        300.0,
+        [0.0; 6],
+        bundle.identity().0,
+        ContentHash([108; 32]),
+        0.01,
+    )
+    .unwrap();
+    let mut request = paris_source_request();
+    request.load_basis =
+        "tensile full-range Mode-I normalized Walker fit; metres per full cycle".into();
+    let law = Arc::new(
+        resolve_walker(
+            &card,
+            &template.fit_point,
+            &request,
+            [ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly); 6],
+        )
+        .unwrap(),
+    );
+    ParisSourceFixture {
+        card,
+        fit_point: template.fit_point,
+        bundle,
+        material,
+        thermal,
+        law,
+    }
+}
+
+#[test]
+fn g1_sourced_walker_resolves_frozen_thermal_prestress_on_original_newmark_support_motion() {
+    with_cx(false, |cx| {
+        let source = walker_source_fixture(0);
+        let foreign = walker_source_fixture(1);
+        let fixed: Vec<_> = (0..12).collect();
+        let problem = problem(&source.material, &fixed);
+        let geometry = geometry(cx);
+        let load = geometry.assemble(&[], VolumeLoad3::None, &[], cx).unwrap();
+        // Both observed cycles stay at 300 K. This second, fixed thermal state
+        // declares axial alpha=1e-6/K after cooling from a stress-free 320 K.
+        // With nu=0, its -20 microstrain adds 4 MPa tensile stress under the
+        // SAME support displacements; no temperature transfer occurs in a run.
+        let cooled = TetThermalStrainState::try_new(
+            300.0,
+            320.0,
+            [-20e-6, 0.0, 0.0, 0.0, 0.0, 0.0],
+            source.bundle.identity().0,
+            ContentHash([109; 32]),
+            0.01,
+        )
+        .unwrap();
+        let mut initial = ZERO;
+        initial[1][0] = 2e6 / 200e9;
+        let mut outcomes = Vec::new();
+        for (thermal, prestress, multiplier) in [(&source.thermal, 0.0, 1.0), (&cooled, 4e6, 1.5)] {
+            let mut original = load
+                .begin_transient_with_supports(
+                    &problem,
+                    Some(TetThermalStrainField::Uniform(thermal)),
+                    0.0,
+                    &initial,
+                    &ZERO,
+                    &ZERO,
+                    TransientConfig3::default(),
+                    cx,
+                )
+                .unwrap();
+            let mut selected = gauge();
+            selected.material_state_identity = source.bundle.identity().0;
+            selected.material_source = Some(source.bundle.clone());
+            selected.law = source.law.clone();
+            let mut observed = original
+                .clone()
+                .with_crack_growth(FRAME, vec![selected.clone()], config(), cx)
+                .unwrap();
+            assert_eq!(
+                observed.law(0).unwrap().walker(),
+                Some(WalkerParameters {
+                    reference_load_ratio: 0.25,
+                    gamma: 0.5
+                })
+            );
+            let retained = observed.law(0).unwrap().source().unwrap();
+            assert_eq!(retained.card_identity(), source.card.content_hash());
+            assert_eq!(retained.query(), &source.fit_point);
+            assert_eq!(
+                retained.walker().unwrap().gamma_claim().key,
+                WalkerProperty::Gamma.property_key()
+            );
+            assert_eq!(
+                retained
+                    .walker()
+                    .unwrap()
+                    .reference_load_ratio_answer()
+                    .evidence
+                    .value
+                    .value,
+                0.25
+            );
+            assert!(std::ptr::eq(
+                observed.material_source(0).unwrap(),
+                source.bundle.as_ref()
+            ));
+            let initial_stress =
+                observed.recover_response(cx).unwrap().stress.elements()[0].stress_mandel_pa()[0];
+            close(initial_stress, 2e6 + prestress, 1e-6);
+
+            let mut missing_bundle = selected.clone();
+            missing_bundle.material_source = None;
+            let mut foreign_fit = selected.clone();
+            foreign_fit.law = foreign.law.clone();
+            let mut foreign_bundle = selected;
+            foreign_bundle.material_source = Some(foreign.bundle.clone());
+            for bad in [missing_bundle, foreign_fit, foreign_bundle] {
+                assert!(matches!(
+                    original
+                        .clone()
+                        .with_crack_growth(FRAME, vec![bad], config(), cx),
+                    Err(TetCrackGrowthError::Binding(
+                        TetFatigueError::SourceMismatch { .. }
+                    ))
+                ));
+            }
+
+            let mut minimum = initial_stress;
+            let mut maximum = initial_stress;
+            for stress_from_displacement in [8e6, 2e6] {
+                let supports = [(3, stress_from_displacement / 200e9)];
+                let expected = original
+                    .advance_with_supports(&load, &supports, 0.05, cx)
+                    .unwrap();
+                let actual = observed
+                    .advance_with_supports(&load, &supports, 0.05, cx)
+                    .unwrap();
+                assert_eq!(actual.mechanics, expected);
+                assert_eq!(
+                    actual.response,
+                    original.recover_response(FRAME, 0.01, cx).unwrap()
+                );
+                assert_eq!(observed.mechanics().state(), original.state());
+                close(
+                    actual.normal_stress_pa[0],
+                    stress_from_displacement + prestress,
+                    1e-6,
+                );
+                minimum = minimum.min(actual.normal_stress_pa[0]);
+                maximum = maximum.max(actual.normal_stress_pa[0]);
+            }
+            close(maximum - minimum, 6e6, 1e-6);
+            close(
+                minimum / maximum,
+                if prestress == 0.0 { 0.25 } else { 0.5 },
+                1e-12,
+            );
+            let before = observed.states();
+            let forecast = observed.cycles_to_length(0, 1.2 * INITIAL_A, cx).unwrap();
+            assert_eq!(observed.states(), before);
+            observed.close_cycle(cx).unwrap();
+            close(
+                observed.states()[0].crack_length_m,
+                analytical_walker_length(1.0, multiplier),
+                2e-16,
+            );
+            assert_eq!(observed.states()[0].cycles, 1.0);
+            assert_eq!(observed.states()[0].blocks, 1);
+            assert_eq!(observed.observed_samples(), 3);
+            outcomes.push((
+                observed.states()[0].crack_length_m,
+                forecast.additional_cycles,
+            ));
+        }
+        assert!(outcomes[1].0 > outcomes[0].0);
+        close(outcomes[1].1, outcomes[0].1 / 1.5, 1e-9);
     });
 }
