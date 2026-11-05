@@ -1763,7 +1763,7 @@ algebraic energy residual.
 same implicit boundary seam. A bounded scalar solve resolves the exterior
 surface temperature through the original cellwise `k(h)`, centre-to-face
 distance and optional coating/contact resistance. Convection and gray radiation
-then act in parallel at that surface. The explicitly fixed emissivity and htc
+then act in parallel at that surface. The explicitly fixed or source-bound emissivity and htc
 are used once; authored htc and another radiation source must not also own the
 selected channel. Air and the large black radiative surroundings share the
 actual bath temperature supplied by the original boundary, including its events.
@@ -1781,8 +1781,9 @@ return no response or accepted thermal candidate.
 This uses the native cellwise conductivity approximation, not an integrated
 within-cell `k(T)` profile. It assumes an opaque gray surface with a complete
 view of one isothermal surrounding, fixed geometry and no surface heat capacity.
-Separate radiative/convective bath temperatures, variable emissivity, finite
-enclosure reflections and spectral photon entropy require their own closures.
+Separate radiative/convective bath temperatures and original-enthalpy surface
+response use the closures below. Finite enclosure reflections and spectral
+photon entropy require their own closures.
 The existing thermal entropy account describes bulk/bath entropy exchange,
 not a spectral radiation field. G1/G3 regressions independently reconstruct
 Stefan-Boltzmann plus film heat and the material tangent, exercise sharp latent
@@ -1795,8 +1796,8 @@ validation. The boundary relation follows [MOOSE's radiation formulation](https:
 `GrayTwoBathBoundary` resolves one common exterior surface through the original
 half-cell/coating resistance. The selected native boundary supplies actual gas
 temperature and its admitted events; an explicitly prescribed, fixed radiation
-temperature supplies the large black surrounding. Fixed htc and emissivity act
-once at that surface. The analytic total enthalpy tangent retains both `dT/dh`
+temperature supplies the large black surrounding. Explicitly fixed or
+source-bound htc and emissivity act once at that surface. The analytic total enthalpy tangent retains both `dT/dh`
 and `dk/dh`, including phase-driven conductivity on a latent plateau.
 
 `with_boundary_exchanges` carries the two signed outward powers and their
@@ -1822,7 +1823,47 @@ internal conduction, and transactional ownership/refusals.
 These and the five prior radiation regressions passed in a focused build of
 the complete production thermal library and original numerical dependencies.
 This remains fixed-geometry, cellwise-conductivity, gray full-view exchange
-without surface storage, variable emissivity or spectral radiation entropy.
+without surface storage or spectral radiation entropy.
+
+### Original enthalpy-dependent gray surface response
+
+`ImplicitGraySurfaceLaw` binds emissivity, convective htc and their complete
+original-enthalpy derivatives to the same caloric object as the body.
+`GrayAmbientBoundary::with_surface_law` and
+`GrayTwoBathBoundary::with_surface_law` replace zero fixed coefficients with one
+source owner. Finite source bounds, emissivity in [0,1], nonnegative htc and
+finite tangents are required. Each endpoint resolves the source once at its
+original bulk h, before insulation/zero-area shortcuts, and holds those
+coefficients fixed during the bounded common-surface solve. No extrapolation,
+clipping, apparent heat capacity or additional half-cell is introduced.
+
+This is an explicitly cell-state surface closure: the source owns its
+temperature/phase chain rule at bulk h. Solved exterior temperature is not
+substituted into source coordinates. A source needing distinct surface phase,
+coating evolution, changing flow/pressure or another evolving coordinate needs
+a separate closure. Source evaluation retains its own costs; the native face
+kernel remains allocation-free.
+
+Writing `a=1/(d/k+R)`,
+`F=htc(h)*(Ts-Tgas)+epsilon(h)*sigma*(Ts^4-Trad^4)`,
+`Fs=htc+4*epsilon*sigma*Ts^3` and
+`Fh=htc_h*(Ts-Tgas)+epsilon_h*sigma*(Ts^4-Trad^4)`, the same solved balance
+`a*(T-Ts)=F` gives
+`Qh=A*[Fs*(a*Th+ah*(T-Ts))+a*Fh]/(a+Fs)`.
+Factored radiation differences retain near-equilibrium flux. The direct `Fh`
+term survives a latent plateau and zero-coefficient onset without dividing by
+emissivity. A disconnected bulk retains zero total body tangent while the two
+actual baths can still exchange heat.
+
+The original chain/graph, backward Euler/SDIRK stages, covered/exposed face
+areas, enthalpy storage and separate bath entropy owners remain unchanged.
+Five focused regressions independently solve the exterior balance and caloric
+endpoint/stages, verify source query count, latent/onset derivatives, ambient
+counterflow and actual free area, fixed-coefficient equivalence, source
+identity/domain/ownership refusals and cancellation atomicity. The complete
+production thermal library compiled cleanly and all 29 selected native tests
+passed; this is numerical verification of the declared closure, not empirical
+qualification of a material source.
 
 ## Implicit upwind enthalpy with native conduction
 

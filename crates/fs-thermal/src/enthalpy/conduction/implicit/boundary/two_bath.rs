@@ -5,9 +5,11 @@
 //! agree; the original finite half-cell is shared, never duplicated.
 
 use super::super::ImplicitConductionLaw;
+use super::surface::BoundGraySurface;
 use super::{
     GrayAmbientBoundary, GrayAmbientControls, ImplicitBoundaryExchangeLaw,
-    ImplicitBoundaryExchangeState, ImplicitBoundaryGeometry,
+    ImplicitBoundaryExchangeState, ImplicitBoundaryGeometry, ImplicitGraySurfaceLaw,
+    ImplicitGraySurfaceState,
 };
 use crate::enthalpy::backward_euler::PrescribedBathHeat;
 use crate::enthalpy::{DepositionError, ThermalLaw, finite, nonnegative, positive};
@@ -38,19 +40,21 @@ pub struct GrayTwoBathResponse {
 /// chain/graph `with_boundary_exchanges`; each exchange then retains its actual
 /// reservoir entropy rather than using an inferred effective temperature.
 ///
-/// Emissivity and convection htc are fixed. The geometry's resistance denotes
+/// Emissivity and convection htc are fixed or supplied by the original
+/// `with_surface_law` bulk-enthalpy response. The geometry's resistance denotes
 /// coating/contact BEFORE this common exterior surface; it is not a second
 /// convection film. The original k(h) is cellwise uniform in a trial, with its
 /// full derivative retained even on a latent plateau. The surface has no
 /// storage, so the original caloric object remains the only body-energy owner.
 /// This is a gray full-view boundary, not a finite radiosity enclosure or a
-/// spectral photon-entropy model. Every successful surface query allocates no
-/// memory. Boundary events affecting the gas still obey the chosen native
+/// spectral photon-entropy model. The surface kernel allocates no memory; a
+/// source law retains its own evaluation costs. Gas boundary events obey native
 /// time integrator's admission rules.
 pub struct GrayTwoBathBoundary<'a> {
     material: &'a dyn ImplicitConductionLaw,
     emissivity: f64,
     convection_w_m2_k: f64,
+    surface_law: Option<BoundGraySurface<'a>>,
     radiative_temperature_k: f64,
     controls: GrayAmbientControls,
 }
@@ -74,9 +78,28 @@ impl<'a> GrayTwoBathBoundary<'a> {
             material,
             emissivity,
             convection_w_m2_k,
+            surface_law: None,
             radiative_temperature_k,
             controls,
         })
+    }
+
+    /// Replace zero fixed emissivity/htc with one original enthalpy surface law.
+    /// Its caloric identity, bounds and source coordinates have the same
+    /// meaning as `GrayAmbientBoundary::with_surface_law`. Each trial resolves
+    /// the source once, then both baths exchange heat at the same solved surface
+    /// and retain their actual temperatures for entropy accounting.
+    pub fn with_surface_law(
+        mut self,
+        law: &'a dyn ImplicitGraySurfaceLaw,
+    ) -> Result<Self, DepositionError> {
+        if self.surface_law.is_some() || self.emissivity != 0.0 || self.convection_w_m2_k != 0.0 {
+            return Err(DepositionError::InvalidInput(
+                "gray surface source must uniquely replace zero fixed emissivity and htc",
+            ));
+        }
+        self.surface_law = Some(BoundGraySurface::new(self.material.caloric_law(), law)?);
+        Ok(self)
     }
 
     /// Resolve one shared surface, its signed bath powers and exact total tangent.
@@ -111,7 +134,15 @@ impl<'a> GrayTwoBathBoundary<'a> {
         {
             return Err(DepositionError::MaterialDomain);
         }
-        if geometry.area_m2 == 0.0 || (self.emissivity == 0.0 && self.convection_w_m2_k == 0.0) {
+        let coefficients = match &self.surface_law {
+            Some(law) => law.evaluate(specific_h_j_kg, checkpoint)?,
+            None => ImplicitGraySurfaceState::fixed(self.emissivity, self.convection_w_m2_k),
+        };
+        if geometry.area_m2 == 0.0
+            || (coefficients.emissivity == 0.0
+                && coefficients.convection_w_m2_k == 0.0
+                && (k == 0.0 || !coefficients.has_enthalpy_response()))
+        {
             checkpoint()?;
             return Ok(self.response(t, gas_temperature_k, [0.0; 2], 0.0, 0.0, 0)?);
         }
@@ -134,8 +165,8 @@ impl<'a> GrayTwoBathBoundary<'a> {
         let radiative_delta = self.radiative_temperature_k - gas_temperature_k;
         let mut lo = 0.0_f64.min(cell_delta).min(radiative_delta);
         let mut hi = 0.0_f64.max(cell_delta).max(radiative_delta);
-        let initial_radiation = self.radiation_coefficients(t)?.0;
-        let initial_total = finite(bulk + self.convection_w_m2_k + initial_radiation)?;
+        let initial_radiation = self.radiation_coefficients(t, coefficients.emissivity)?.0;
+        let initial_total = finite(bulk + coefficients.convection_w_m2_k + initial_radiation)?;
         if !positive(initial_total) {
             return Err(DepositionError::Arithmetic);
         }
@@ -154,9 +185,10 @@ impl<'a> GrayTwoBathBoundary<'a> {
             if !positive(surface) {
                 return Err(DepositionError::Arithmetic);
             }
-            let (radiation_g, radiation_slope) = self.radiation_coefficients(surface)?;
-            let surface_slope = finite(self.convection_w_m2_k + radiation_slope)?;
-            let convection_flux = finite(self.convection_w_m2_k * offset)?;
+            let (radiation_g, radiation_slope) =
+                self.radiation_coefficients(surface, coefficients.emissivity)?;
+            let surface_slope = finite(coefficients.convection_w_m2_k + radiation_slope)?;
+            let convection_flux = finite(coefficients.convection_w_m2_k * offset)?;
             let radiation_flux = finite(radiation_g * (offset - radiative_delta))?;
             let conducted_flux = finite(bulk * (cell_delta - offset))?;
             let convection = finite(geometry.area_m2 * convection_flux)?;
@@ -176,7 +208,7 @@ impl<'a> GrayTwoBathBoundary<'a> {
                 };
                 // Qh=A*f'(Ts)/(a+f'(Ts))*[a*Th+a_h*(Tc-Ts)]. Both bath
                 // temperatures are held fixed; no apparent heat capacity is used.
-                let derivative = finite(
+                let mut derivative = finite(
                     geometry.area_m2
                         * fraction(surface_slope, bulk)
                         * finite(
@@ -184,6 +216,22 @@ impl<'a> GrayTwoBathBoundary<'a> {
                                 + bulk_derivative * (cell_delta - offset),
                         )?,
                 )?;
+                if bulk != 0.0 && coefficients.has_enthalpy_response() {
+                    // Direct coefficient response at fixed Ts contributes
+                    // A*a/(a+Fs)*Fh after the SAME surface balance is resolved.
+                    // A disconnected bulk has exactly zero total derivative,
+                    // while its two baths may still exchange finite heat.
+                    let source_derivative = coefficients.flux_enthalpy_derivative(
+                        surface,
+                        self.radiative_temperature_k,
+                        offset,
+                        offset - radiative_delta,
+                    )?;
+                    derivative = finite(
+                        derivative
+                            + geometry.area_m2 * fraction(bulk, surface_slope) * source_derivative,
+                    )?;
+                }
                 checkpoint()?;
                 return self.response(
                     surface,
@@ -216,12 +264,16 @@ impl<'a> GrayTwoBathBoundary<'a> {
         ))
     }
 
-    fn radiation_coefficients(&self, t: f64) -> Result<(f64, f64), DepositionError> {
-        if self.emissivity == 0.0 {
+    fn radiation_coefficients(
+        &self,
+        t: f64,
+        emissivity: f64,
+    ) -> Result<(f64, f64), DepositionError> {
+        if emissivity == 0.0 {
             return Ok((0.0, 0.0));
         }
         let bath = self.radiative_temperature_k;
-        let scale = self.emissivity * SIGMA;
+        let scale = emissivity * SIGMA;
         Ok((
             finite(scale * (t + bath) * t.mul_add(t, bath * bath))?,
             finite(((4.0 * scale * t) * t) * t)?,

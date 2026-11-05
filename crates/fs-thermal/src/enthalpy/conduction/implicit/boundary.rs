@@ -17,6 +17,11 @@ pub use radiation::{GrayAmbientBoundary, GrayAmbientControls, GrayAmbientRespons
 mod two_bath;
 pub use two_bath::{GrayTwoBathBoundary, GrayTwoBathResponse};
 
+/// Original enthalpy-dependent gray emissivity and convective surface response.
+#[path = "boundary/surface.rs"]
+mod surface;
+pub use surface::{ImplicitGraySurfaceLaw, ImplicitGraySurfaceState};
+
 /// Original centre-to-face geometry and the external film/contact resistance.
 /// Area is the actual reservoir coverage or exposed ambient area. Resistance
 /// is area-specific; a material owner converts it to total K/W exactly once.

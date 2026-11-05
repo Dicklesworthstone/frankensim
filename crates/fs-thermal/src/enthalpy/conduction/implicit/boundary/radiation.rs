@@ -7,7 +7,11 @@
 //! optional series coating/contact resistance. No surface storage is added.
 
 use super::super::ImplicitConductionLaw;
-use super::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState};
+use super::surface::BoundGraySurface;
+use super::{
+    ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundaryState, ImplicitGraySurfaceLaw,
+    ImplicitGraySurfaceState,
+};
 use crate::enthalpy::{DepositionError, ThermalLaw, finite, nonnegative, positive};
 
 // CODATA value, rounded consistently with the existing fs-conduction owner.
@@ -58,7 +62,8 @@ pub struct GrayAmbientResponse {
 /// Attach using `with_boundary_laws` on the original chain or graph. Both
 /// mechanisms use the supplied bath temperature; distinct gas and radiative
 /// bath temperatures require a different boundary model. Emissivity and htc
-/// are explicitly fixed, never inferred from a material name or authored htc.
+/// are explicit constants or the original `with_surface_law` response, never
+/// inferred from a material name or the cell's authored htc.
 /// This law REPLACES the selected channel and must not also enter as a source.
 ///
 /// The original k(h) is cellwise uniform in each trial, as in the native
@@ -67,12 +72,13 @@ pub struct GrayAmbientResponse {
 /// k(T) profile inside a half-cell or resolve a finite radiation enclosure.
 /// The geometry's resistance denotes an additional coating/contact BEFORE
 /// the exterior surface; convection htc is supplied separately and counted
-/// once. No source-dependent emissivity, moving area or surface heat capacity
-/// is introduced. Every successful query is allocation-free.
+/// once. No moving area or surface heat capacity is introduced. The face
+/// kernel allocates nothing; a source law retains its own evaluation costs.
 pub struct GrayAmbientBoundary<'a> {
     material: &'a dyn ImplicitConductionLaw,
     emissivity: f64,
     convection_w_m2_k: f64,
+    surface_law: Option<BoundGraySurface<'a>>,
     controls: GrayAmbientControls,
 }
 
@@ -100,8 +106,27 @@ impl<'a> GrayAmbientBoundary<'a> {
             material,
             emissivity,
             convection_w_m2_k,
+            surface_law: None,
             controls,
         })
+    }
+
+    /// Replace zero fixed emissivity/htc with one original enthalpy surface law.
+    /// The same caloric object and finite source bounds are required. Actual
+    /// source support is checked once at each trial's original bulk enthalpy,
+    /// before insulation shortcuts. The source owns both exterior coefficients;
+    /// a second attachment or nonzero authored coefficients refuse.
+    pub fn with_surface_law(
+        mut self,
+        law: &'a dyn ImplicitGraySurfaceLaw,
+    ) -> Result<Self, DepositionError> {
+        if self.surface_law.is_some() || self.emissivity != 0.0 || self.convection_w_m2_k != 0.0 {
+            return Err(DepositionError::InvalidInput(
+                "gray surface source must uniquely replace zero fixed emissivity and htc",
+            ));
+        }
+        self.surface_law = Some(BoundGraySurface::new(self.material.caloric_law(), law)?);
+        Ok(self)
     }
 
     /// Resolve surface temperature, original heat balance and analytic tangent.
@@ -134,9 +159,15 @@ impl<'a> GrayAmbientBoundary<'a> {
         {
             return Err(DepositionError::MaterialDomain);
         }
+        let coefficients = match &self.surface_law {
+            Some(law) => law.evaluate(specific_h_j_kg, checkpoint)?,
+            None => ImplicitGraySurfaceState::fixed(self.emissivity, self.convection_w_m2_k),
+        };
         if geometry.area_m2 == 0.0
             || k == 0.0
-            || (self.emissivity == 0.0 && self.convection_w_m2_k == 0.0)
+            || (coefficients.emissivity == 0.0
+                && coefficients.convection_w_m2_k == 0.0
+                && !coefficients.has_enthalpy_response())
         {
             checkpoint()?;
             return Ok(GrayAmbientResponse {
@@ -161,17 +192,22 @@ impl<'a> GrayAmbientBoundary<'a> {
         let delta = t - bath_temperature_k;
         // x=(Ts-Tb)/(Tc-Tb) preserves a small thermal difference without
         // subtracting rounded surface temperatures or fourth powers.
-        let mut x = fraction(bulk, self.surface_coefficients(t, bath_temperature_k)?.0);
+        let mut x = fraction(
+            bulk,
+            self.surface_coefficients(t, bath_temperature_k, coefficients)?
+                .0,
+        );
         let (mut lo, mut hi) = (0.0, 1.0);
         for iterations in 1..=self.controls.maximum_iterations {
             checkpoint()?;
             let surface = delta.mul_add(x, bath_temperature_k);
             let (surface_g, surface_slope, radiation_g) =
-                self.surface_coefficients(surface, bath_temperature_k)?;
+                self.surface_coefficients(surface, bath_temperature_k, coefficients)?;
             let g = finite(geometry.area_m2 * series(bulk, surface_g))?;
             let power = finite(g * delta)?;
             let surface_delta = finite(x * delta)?;
-            let convection = finite(geometry.area_m2 * self.convection_w_m2_k * surface_delta)?;
+            let convection =
+                finite(geometry.area_m2 * coefficients.convection_w_m2_k * surface_delta)?;
             let radiation = finite(geometry.area_m2 * radiation_g * surface_delta)?;
             let surface_power = finite(convection + radiation)?;
             let conducted = finite(geometry.area_m2 * bulk * ((1.0 - x) * delta))?;
@@ -188,7 +224,7 @@ impl<'a> GrayAmbientBoundary<'a> {
                     bulk * (bulk_resistance / resistance)
                         * (state.conductivity_slope_kg_w_m_k_j / k),
                 )?;
-                let derivative = finite(
+                let mut derivative = finite(
                     geometry.area_m2
                         * fraction(surface_slope, bulk)
                         * finite(
@@ -196,6 +232,21 @@ impl<'a> GrayAmbientBoundary<'a> {
                                 + bulk_derivative * ((1.0 - x) * delta),
                         )?,
                 )?;
+                if coefficients.has_enthalpy_response() {
+                    // F(Ts,h) now varies directly with original h. From
+                    // a(T-Ts)=F, Qh=A*[Fs*(a*Th+ah*(T-Ts))+a*Fh]/(a+Fs).
+                    // Keep Fh at fixed Ts, including emissivity onset at zero.
+                    let source_derivative = coefficients.flux_enthalpy_derivative(
+                        surface,
+                        bath_temperature_k,
+                        surface_delta,
+                        surface_delta,
+                    )?;
+                    derivative = finite(
+                        derivative
+                            + geometry.area_m2 * fraction(bulk, surface_slope) * source_derivative,
+                    )?;
+                }
                 checkpoint()?;
                 return Ok(GrayAmbientResponse {
                     boundary: ImplicitBoundaryState {
@@ -233,19 +284,24 @@ impl<'a> GrayAmbientBoundary<'a> {
     }
 
     // Factoring T^4-Tb^4 retains near-equilibrium radiative flux exactly once.
-    fn surface_coefficients(&self, t: f64, bath: f64) -> Result<(f64, f64, f64), DepositionError> {
-        let (radiation, slope) = if self.emissivity == 0.0 {
+    fn surface_coefficients(
+        &self,
+        t: f64,
+        bath: f64,
+        coefficients: ImplicitGraySurfaceState,
+    ) -> Result<(f64, f64, f64), DepositionError> {
+        let (radiation, slope) = if coefficients.emissivity == 0.0 {
             (0.0, 0.0)
         } else {
-            let scale = self.emissivity * SIGMA;
+            let scale = coefficients.emissivity * SIGMA;
             (
                 finite(scale * (t + bath) * t.mul_add(t, bath * bath))?,
                 finite(((4.0 * scale * t) * t) * t)?,
             )
         };
         Ok((
-            finite(self.convection_w_m2_k + radiation)?,
-            finite(self.convection_w_m2_k + slope)?,
+            finite(coefficients.convection_w_m2_k + radiation)?,
+            finite(coefficients.convection_w_m2_k + slope)?,
             radiation,
         ))
     }
