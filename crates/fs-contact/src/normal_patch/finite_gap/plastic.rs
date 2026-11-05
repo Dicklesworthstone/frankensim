@@ -16,6 +16,8 @@
 
 mod continuation;
 pub use continuation::*;
+mod load;
+pub use load::*;
 
 use core::fmt;
 

@@ -1,9 +1,11 @@
-//! Held-approach surface recession and fixed-grid material refresh.
+//! Surface recession and fixed-grid material refresh with explicit normal work.
 //!
 //! Recession increases the relative undeformed separation and remains separate
-//! from residual plastic indentation. Both continuations preserve the original
-//! gap datum and hold the rigid approach fixed. Signed parameter work is the
-//! endpoint estimate `delta(elastic energy) + incremental plastic work`.
+//! from residual plastic indentation. Every continuation preserves the original
+//! gap datum. Recession and material refresh normally hold the approach fixed;
+//! load-controlled recession instead accounts for constant-resultant normal
+//! work. Signed parameter work is the endpoint estimate
+//! `delta(elastic energy) + incremental plastic work - normal work`.
 //! Condition/geometry paths require refinement when intermediate equilibria
 //! matter. No part of this bookkeeping is automatically converted to heat.
 
@@ -16,7 +18,7 @@ use super::{
     invalid,
 };
 
-/// Physical parameter changed while the rigid approach is held fixed.
+/// Physical change advanced from an accepted contact history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum FiniteGapPlasticContinuationKind {
@@ -24,6 +26,8 @@ pub enum FiniteGapPlasticContinuationKind {
     SurfaceRecession = 0,
     /// New indentation hardness and/or reduced modulus on the original grid.
     MaterialRefresh = 1,
+    /// Relative surface recession with the original compressive resultant maintained.
+    SurfaceRecessionAtLoad = 2,
 }
 
 /// Complete candidate from an explicitly authorized physical continuation.
@@ -35,7 +39,7 @@ pub struct FiniteGapPlasticContinuation {
     pub receipt: FiniteGapPlasticContinuationReceipt,
 }
 
-/// Held-approach response with an explicit predecessor and successor owner.
+/// Continuation response with explicit predecessor/successor owners and normal work.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteGapPlasticContinuationReceipt {
     /// Content identity of the complete continuation and its physical response.
@@ -50,17 +54,26 @@ pub struct FiniteGapPlasticContinuationReceipt {
     pub predecessor_state_identity: ContentHash,
     /// Exact candidate history after re-equilibration.
     pub successor_state_identity: ContentHash,
-    /// Rigid approach, held fixed relative to the original gap datum [m].
+    /// Accepted predecessor approach relative to the original gap datum [m].
+    pub previous_approach_m: f64,
+    /// Candidate approach relative to the same original gap datum [m].
     pub approach_m: f64,
+    /// Work of the controlled normal resultant during this continuation [J].
+    ///
+    /// Zero for held-approach operations. For maintained-load recession this is
+    /// the prescribed constant force times the rigid approach change; the
+    /// separate load receipt retains equilibrium force tolerances/residuals.
+    pub normal_work_j: f64,
     /// Elastic energy before changing geometry or material parameters [J].
     pub previous_elastic_energy_j: f64,
     /// Elastic energy of the re-equilibrated candidate [J].
     pub elastic_energy_j: f64,
     /// Signed change in reversible elastic storage [J].
     pub elastic_energy_change_j: f64,
-    /// Signed endpoint parameter-work estimate `delta(U) + delta(W_plastic)` [J].
+    /// Signed endpoint estimate `delta(U) + delta(W_plastic) - normal_work` [J].
     ///
-    /// Negative values represent energy released from the modeled contact.
+    /// Negative values represent energy leaving through changed parameters;
+    /// they need not imply a decrease in elastic storage.
     /// This is not wear heat, thermal heat capacity, or a complete external
     /// work integral along an unresolved condition/geometry path.
     pub parameter_work_j: f64,
@@ -78,6 +91,7 @@ struct ContinuationAccounting {
     kind: FiniteGapPlasticContinuationKind,
     previous_elastic_energy_j: f64,
     previous_opening_m: Option<Vec<f64>>,
+    normal_work_j: f64,
     recession_increment_m: Vec<f64>,
 }
 
@@ -139,6 +153,7 @@ impl FiniteGapPlasticModel {
                 kind: FiniteGapPlasticContinuationKind::SurfaceRecession,
                 previous_elastic_energy_j,
                 previous_opening_m,
+                normal_work_j: 0.0,
                 recession_increment_m: actual_increment,
             },
             cx,
@@ -196,6 +211,7 @@ impl FiniteGapPlasticModel {
                 kind: FiniteGapPlasticContinuationKind::MaterialRefresh,
                 previous_elastic_energy_j,
                 previous_opening_m,
+                normal_work_j: 0.0,
                 recession_increment_m: vec![0.0; self.gap_m.len()],
             },
             cx,
@@ -223,7 +239,7 @@ impl FiniteGapPlasticModel {
         Ok(())
     }
 
-    fn stored_energy_and_opening(
+    pub(super) fn stored_energy_and_opening(
         &self,
         state: &FiniteGapPlasticState,
         cx: &Cx<'_>,
@@ -245,7 +261,7 @@ impl FiniteGapPlasticModel {
         Ok((energy, opening))
     }
 
-    fn unchanged_advance(
+    pub(super) fn unchanged_advance(
         &self,
         before: &FiniteGapPlasticState,
         opening: Vec<f64>,
@@ -303,6 +319,35 @@ impl FiniteGapPlasticModel {
         })
     }
 
+    pub(super) fn finish_load_recession(
+        &self,
+        before: &FiniteGapPlasticState,
+        advance: FiniteGapPlasticAdvance,
+        actual_recession_increment_m: Vec<f64>,
+        maintained_force_n: f64,
+        cx: &Cx<'_>,
+    ) -> Result<FiniteGapPlasticContinuation, FiniteGapPlasticError> {
+        self.check_state_owner(before)?;
+        let (previous_elastic_energy_j, opening) = self.stored_energy_and_opening(before, cx)?;
+        let normal_work_j = maintained_force_n * (advance.candidate.approach_m - before.approach_m);
+        if !normal_work_j.is_finite() {
+            return Err(invalid("finite maintained-load normal work"));
+        }
+        self.finish_continuation(
+            self,
+            before,
+            advance,
+            ContinuationAccounting {
+                kind: FiniteGapPlasticContinuationKind::SurfaceRecessionAtLoad,
+                previous_elastic_energy_j,
+                previous_opening_m: Some(opening),
+                normal_work_j,
+                recession_increment_m: actual_recession_increment_m,
+            },
+            cx,
+        )
+    }
+
     fn finish_continuation(
         &self,
         previous_model: &Self,
@@ -323,7 +368,8 @@ impl FiniteGapPlasticModel {
             ),
             None => 0.0,
         };
-        let parameter_work_j = elastic_energy_change_j + advance.receipt.plastic_work_j;
+        let parameter_work_j =
+            elastic_energy_change_j + advance.receipt.plastic_work_j - accounting.normal_work_j;
         if !elastic_energy_change_j.is_finite() || !parameter_work_j.is_finite() {
             return Err(invalid("finite continuation energy accounting"));
         }
@@ -340,6 +386,8 @@ impl FiniteGapPlasticModel {
         }
         for value in [
             before.approach_m,
+            advance.candidate.approach_m,
+            accounting.normal_work_j,
             accounting.previous_elastic_energy_j,
             elastic_energy_j,
             elastic_energy_change_j,
@@ -351,7 +399,7 @@ impl FiniteGapPlasticModel {
             bytes.extend_from_slice(&value.to_bits().to_le_bytes());
         }
         let identity = hash_domain(
-            "org.frankensim.fs-contact.finite-gap-plastic-continuation.v1",
+            "org.frankensim.fs-contact.finite-gap-plastic-continuation.v2",
             &bytes,
         );
         checkpoint(cx)?;
@@ -363,7 +411,9 @@ impl FiniteGapPlasticModel {
                 successor_model_identity: self.identity,
                 predecessor_state_identity: before.identity,
                 successor_state_identity: advance.candidate.identity,
-                approach_m: before.approach_m,
+                previous_approach_m: before.approach_m,
+                approach_m: advance.candidate.approach_m,
+                normal_work_j: accounting.normal_work_j,
                 previous_elastic_energy_j: accounting.previous_elastic_energy_j,
                 elastic_energy_j,
                 elastic_energy_change_j,

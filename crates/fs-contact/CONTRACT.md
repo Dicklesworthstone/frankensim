@@ -2840,3 +2840,34 @@ dent by wear, retained reload history, scalar/profile volume agreement, a
 single-cell pressure-decay refinement oracle, late physical-domain refusal,
 and temperature changes after wear. These are numerical/model tests, not
 experimental qualification of a material pair.
+
+## Prescribed normal force for a hardness-limited finite contact
+
+The native plastic contact model also solves for rigid approach at a prescribed
+compressive force. Every equilibrium trial uses the same accepted plastic depth
+and prior work; unsuccessful trials cannot add a residual dent. A bounded
+safeguarded force solve retains explicit approach bounds, absolute/relative
+force tolerances, approach resolution, and an equilibrium-evaluation budget.
+The load receipt reports the actual force residual and remaining approach/load
+bracket. It does not establish actuator dynamics or the work of an unresolved
+force ramp.
+
+A positive load on a true perfectly plastic plateau does not determine unique
+indentation. The force owner refuses that ambiguity instead of selecting an
+arbitrary deeper dent. Exact accepted equilibria may be retained unchanged.
+Zero load follows the explicit unloaded-approach convention in the native API.
+Capacity, boundary, resolution, convergence and cancellation refusals remain
+transactional.
+
+Maintained-load recession solves the changed gap and approach together against
+the original accepted plastic history. It requires the predecessor already to
+match the requested force within the declared force tolerance; changing force
+is a separate normal loading operation. No held-approach plastic intermediate
+is committed.
+
+Continuation receipts separately retain the original and final approach,
+normal boundary work F*delta(approach), elastic-storage change, and additional
+plastic work. Recession parameter work is delta(U)+delta(W_plastic)-normal_work.
+The original held-approach operations retain zero normal work. Signed parameter
+work is not assigned to heat or debris; it remains an explicit account of the
+prescribed geometry change. Finite geometry paths still require refinement.
