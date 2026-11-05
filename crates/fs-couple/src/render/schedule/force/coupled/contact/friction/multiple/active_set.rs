@@ -56,6 +56,11 @@
 //! slips, and the rows of `(I + D Nn)^-1 D Nt` for contact-loaded normals. A
 //! partition whose stops can't be resolved is named `stops-unresolved` in the
 //! refusal's payload.
+//!
+//! A dry contact with zero normal load is released: its equation is zero
+//! traction, not zero slip. This row remains in the coupled linear system so
+//! loaded neighbours still see the original cross-contact response. Released
+//! rows have one canonical partition and never create artificial root ties.
 
 use super::*;
 
@@ -308,6 +313,11 @@ fn solve_partition(
         let mut r = vec![0.0f64; p];
         let mut jac = vec![0.0f64; p * p];
         for i in 0..p {
+            if normal[i] == 0.0 {
+                r[i] = t[i];
+                jac[i * p + i] = 1.0;
+                continue;
+            }
             match cells[i] {
                 Branch::Stuck => {
                     r[i] = slip[i];
@@ -389,6 +399,13 @@ fn solve_condensed(
         let mut r = vec![0.0f64; p];
         let mut jac = vec![0.0f64; p * p];
         for i in 0..p {
+            // Re-evaluate release at every trial: a coupled normal obstacle
+            // can open or close as its neighbours' tangential forces change.
+            if point.normal[i] == 0.0 {
+                r[i] = t[i];
+                jac[i * p + i] = 1.0;
+                continue;
+            }
             if cells[i] == Branch::Stuck {
                 r[i] = point.slip[i];
                 jac[i * p..(i + 1) * p].copy_from_slice(&point.dslip[i * p..(i + 1) * p]);
@@ -461,12 +478,18 @@ fn consistent_at(
     slip: &[f64],
     normal: &[f64],
     law: &[&FrictionLaw],
-    dt: f64,
+    _dt: f64,
     cells: &[Branch],
     t: &[f64],
 ) -> Result<bool, ModalFrictionError> {
     let p = slip.len();
     for i in 0..p {
+        if normal[i] == 0.0 {
+            if t[i] != 0.0 {
+                return Ok(false);
+            }
+            continue;
+        }
         match cells[i] {
             Branch::Stuck => {
                 let cap = law[i].static_coefficient()? * normal[i];
@@ -475,12 +498,12 @@ fn consistent_at(
                 }
             }
             Branch::SlidePos => {
-                if !(slip[i] > 0.0) || (slip[i] / dt).abs() < 1e-12 || t[i] <= 0.0 {
+                if !(slip[i] > 0.0) || t[i] < 0.0 {
                     return Ok(false);
                 }
             }
             Branch::SlideNeg => {
-                if !(slip[i] < 0.0) || (slip[i] / dt).abs() < 1e-12 || t[i] >= 0.0 {
+                if !(slip[i] < 0.0) || t[i] > 0.0 {
                     return Ok(false);
                 }
             }
@@ -596,13 +619,19 @@ pub(super) fn nearest_consistent_partition(
                 b
             })
             .collect();
+        // At zero load S/+/- all denote the same zero-force released row.
+        // Solve it once; duplicate labels are not distinct physical roots.
+        if cells.iter().zip(normal).any(|(cell, n)| *n == 0.0 && *cell != Branch::Stuck) {
+            continue;
+        }
         let Some(t) = solve_partition_by_speed(a, f, normal, law, dt, &cells, 100) else {
             continue;
         };
         if !consistent_at(&slips(a, f, &t), normal, law, dt, &cells, &t)? {
             continue;
         }
-        let distance = cells.iter().zip(previous).filter(|(c, b)| c != b).count();
+        let distance = cells.iter().zip(previous).zip(normal)
+            .filter(|((c, b), n)| **n != 0.0 && c != b).count();
         let best = nearest.as_ref().map(|(d, ..)| *d);
         if best == Some(distance) {
             tied = true;
@@ -612,7 +641,8 @@ pub(super) fn nearest_consistent_partition(
         }
     }
     Ok(match nearest {
-        Some((_, t, cells)) if !tied => Some((t, cells.iter().map(|&b| regime_of(b)).collect())),
+        Some((_, t, cells)) if !tied => Some((t, cells.iter().zip(normal)
+            .map(|(&b, &n)| if n == 0.0 { ModalFrictionRegime::Released } else { regime_of(b) }).collect())),
         _ => None,
     })
 }
@@ -715,7 +745,7 @@ fn solve_partition_by_speed(
     max_newton: usize,
 ) -> Option<Vec<f64>> {
     let p = f.len();
-    let sliding = |i: usize| cells[i] != Branch::Stuck;
+    let sliding = |i: usize| normal[i] != 0.0 && cells[i] != Branch::Stuck;
     let mut x = vec![0.0f64; p];
     for i in 0..p {
         if sliding(i) {
@@ -744,6 +774,11 @@ fn solve_partition_by_speed(
         let mut neg = vec![0.0f64; p];
         let mut jac = vec![0.0f64; p * p];
         for i in 0..p {
+            if normal[i] == 0.0 {
+                neg[i] = -t[i];
+                jac[i * p + i] = 1.0;
+                continue;
+            }
             let row = if sliding(i) { slip[i] - branch_sign(cells[i]) * x[i] * dt } else { slip[i] };
             neg[i] = -row;
             for j in 0..p {
@@ -771,7 +806,9 @@ fn solve_partition_by_speed(
     let (t, _) = tractions(&x)?;
     let slip = slips(a, f, &t);
     for i in 0..p {
-        let r = if sliding(i) {
+        let r = if normal[i] == 0.0 {
+            t[i]
+        } else if sliding(i) {
             t[i] - kinetic_traction(law[i], normal[i], branch_sign(cells[i]), slip[i], dt).ok()?
         } else {
             slip[i]
@@ -805,9 +842,11 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
             Ok(t) => t,
             Err((condition, size)) => {
                 // This partition did not resolve; perturb by flipping the port
-                // with the largest |slip| that is pinned stuck, else give up.
-                let slip = match line.state(&vec![0.0; p]) {
-                    Ok((slip, _)) => slip,
+                // with the largest |slip| that is loaded and pinned stuck,
+                // else give up. Relabeling a released row leaves F=0 unchanged
+                // and must not spend a pivot needed by the loaded subsystem.
+                let (slip, normal) = match line.state(&vec![0.0; p]) {
+                    Ok(state) => state,
                     Err(error) => {
                         worst = KktViolation { port: 0, condition: STOPS_UNRESOLVED, size: refusal_size(&error) };
                         return Ok(Resolution::Exhausted { pivots, last_set: encode(&cells), worst });
@@ -816,7 +855,7 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
                 let mut flip = None;
                 let mut w = 0.0;
                 for i in 0..p {
-                    if cells[i] == Branch::Stuck && slip[i].abs() > w {
+                    if normal[i] != 0.0 && cells[i] == Branch::Stuck && slip[i].abs() > w {
                         w = slip[i].abs();
                         flip = Some(i);
                     }
@@ -842,7 +881,8 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
             }
         };
         if consistent_at(&slip, &normal, law, dt, &cells, &t)? {
-            let regimes = cells.iter().map(|&b| regime_of(b)).collect();
+            let regimes = cells.iter().zip(&normal)
+                .map(|(&b, &n)| if n == 0.0 { ModalFrictionRegime::Released } else { regime_of(b) }).collect();
             return Ok(Resolution::Solved(t, regimes));
         }
         // Flip the single worst KKT violator, recording port/condition/size.
@@ -851,6 +891,9 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
         let mut wport = 0usize;
         let mut wcond = "none";
         for i in 0..p {
+            if normal[i] == 0.0 {
+                continue;
+            }
             let (viol, cond, want) = match cells[i] {
                 Branch::Stuck => {
                     let cap = law[i].static_coefficient()? * normal[i];
@@ -861,11 +904,11 @@ fn walk_line(line: &Line<'_>, p: usize, law: &[&FrictionLaw], dt: f64, budget: u
                     )
                 }
                 Branch::SlidePos => {
-                    let bad = if slip[i] <= 0.0 || t[i] <= 0.0 { slip[i].abs().max(1.0) } else { -1.0 };
+                    let bad = if slip[i] <= 0.0 || t[i] < 0.0 { slip[i].abs().max(1.0) } else { -1.0 };
                     (bad, "slide-pos-wrong-direction-or-nondissipative", Branch::Stuck)
                 }
                 Branch::SlideNeg => {
-                    let bad = if slip[i] >= 0.0 || t[i] >= 0.0 { slip[i].abs().max(1.0) } else { -1.0 };
+                    let bad = if slip[i] >= 0.0 || t[i] > 0.0 { slip[i].abs().max(1.0) } else { -1.0 };
                     (bad, "slide-neg-wrong-direction-or-nondissipative", Branch::Stuck)
                 }
             };
@@ -1376,18 +1419,104 @@ mod tests {
     }
 
     #[test]
-    fn a_state_with_no_consistent_partition_is_refused_not_invented() {
-        // A port with zero normal load: stuck needs a nonzero traction inside a zero
-        // cone, and sliding needs a strictly positive traction from a zero load. No
-        // partition is consistent, so the rescue must exhaust, not return one.
+    fn g1_unloaded_contact_releases_without_constraining_slip() {
+        // G1: N=0 admits exactly F=0, whatever the relative motion. It does not
+        // constrain velocity or need a nonzero kinetic force to keep moving.
         let l = a4_law();
         let laws = [&l];
         let seed = vec![ModalFrictionRegime::Sticking];
-        match solve_active_set(&[3.0e-6], &[1.0e-7], &[0.0], &laws, A4_DT, &seed, 8).unwrap() {
-            Resolution::Exhausted { last_set, worst, .. } => {
-                assert!(!last_set.is_empty() && worst.condition != "none");
+        for free in [-1.0e-7, 0.0, 1.0e-7] {
+            match solve_active_set(&[3.0e-6], &[free], &[0.0], &laws, A4_DT, &seed, 1).unwrap() {
+                Resolution::Solved(t, regime) => {
+                    assert_eq!(t, [0.0]);
+                    assert_eq!(regime, [ModalFrictionRegime::Released]);
+                    assert_eq!(slips(&[3.0e-6], &[free], &t), [free]);
+                }
+                Resolution::Exhausted { .. } => panic!("an unloaded contact must release"),
             }
-            Resolution::Solved(t, _) => panic!("a zero-load port has no consistent partition, got tractions {t:?}"),
+        }
+    }
+
+    #[test]
+    fn g1_released_neighbour_retains_the_loaded_contacts_full_response() {
+        // G1: eliminate F_1=0 analytically from a coupled positive-definite
+        // compliance. The loaded contact sticks at F_0=f_0/a_00=0.1 N;
+        // the released point moves by f_1-a_10 F_0, without applying a force.
+        let a = [2.0, 0.5, 0.5, 1.0];
+        let normal = [1.0, 0.0];
+        let l = FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 };
+        let laws = [&l; 2];
+        for released_free in [-1.0, 0.0, 1.0] {
+            let f = [0.2, released_free];
+            let seed = [ModalFrictionRegime::Sticking; 2];
+            let check = |result| match result {
+                Resolution::Solved(t, regime) => {
+                    assert!((t[0] - 0.1).abs() < 1e-15);
+                    assert_eq!(t[1], 0.0);
+                    assert_eq!(regime, [ModalFrictionRegime::Sticking, ModalFrictionRegime::Released]);
+                    let slip = slips(&a, &f, &t);
+                    assert!(slip[0].abs() < 1e-15);
+                    assert!((slip[1] - (released_free - 0.05)).abs() < 1e-15);
+                }
+                Resolution::Exhausted { .. } => panic!("coupled released row must resolve"),
+            };
+            check(solve_active_set(&a, &f, &normal, &laws, 1.0, &seed, 1).unwrap());
+            struct FixedStops<'a> { a: &'a [f64], f: &'a [f64] }
+            impl CondensedLine for FixedStops<'_> {
+                fn at(&self, t: &[f64]) -> Result<LinePoint, ModalFrictionError> {
+                    Ok(LinePoint { slip: slips(self.a, self.f, t), normal: vec![1.0, 0.0],
+                        dslip: self.a.iter().map(|x| -x).collect(), dnormal: vec![0.0; 4] })
+                }
+            }
+            check(solve_active_set_condensed(&FixedStops { a: &a, f: &f }, 2, &laws, 1.0, 1).unwrap());
+            let (t, regime) = nearest_consistent_partition(&a, &f, &normal, &laws, 1.0,
+                &[Branch::Stuck, Branch::SlideNeg]).unwrap().expect("one physical partition");
+            check(Resolution::Solved(t, regime));
+        }
+    }
+
+    #[test]
+    fn g1_unloaded_motion_does_not_spend_the_loaded_subsystems_pivot_budget() {
+        // Coincident attachments have incompatible all-stuck equations. The
+        // large free slip of an unloaded neighbour cannot resolve that rank
+        // deficiency; the two-pivot budget must be spent on a loaded contact.
+        let a = [1.0; 9];
+        let f = [0.2, -0.2, 10.0];
+        let normal = [1.0, 1.0, 0.0];
+        let law = FrictionLaw::Coulomb { static_mu: 0.8, kinetic_mu: 0.4 };
+        match solve_active_set(&a, &f, &normal, &[&law; 3], 1.0,
+            &[ModalFrictionRegime::Sticking; 3], 2).unwrap() {
+            Resolution::Solved(t, regimes) => {
+                assert!((t[0] - 0.4).abs() < 1e-15);
+                assert!((t[1] + 0.6).abs() < 1e-15);
+                assert_eq!(t[2], 0.0);
+                assert_eq!(regimes, [ModalFrictionRegime::Sliding,
+                    ModalFrictionRegime::Sticking, ModalFrictionRegime::Released]);
+                let slip = slips(&a, &f, &t);
+                for (actual, expected) in slip.iter().zip([0.4, 0.0, 10.2]) {
+                    assert!((actual - expected).abs() < 2e-15);
+                }
+            }
+            Resolution::Exhausted { .. } => panic!("release must not consume a useful pivot"),
+        }
+    }
+
+    #[test]
+    fn g1_zero_kinetic_friction_and_small_nonzero_slip_are_admissible() {
+        // G1: a zero kinetic coefficient is the free-sliding limit. A fixed
+        // velocity threshold must not turn a finite slip into an absent root.
+        for (static_mu, free) in [(0.8, 2.0), (0.0, 1e-13)] {
+            let l = FrictionLaw::Coulomb { static_mu, kinetic_mu: 0.0 };
+            for sign in [-1.0, 1.0] {
+                match solve_active_set(&[1.0], &[sign * free], &[1.0], &[&l], 1.0,
+                    &[ModalFrictionRegime::Sticking], 2).unwrap() {
+                    Resolution::Solved(t, regime) => {
+                        assert_eq!(t, [0.0]);
+                        assert_eq!(regime, [ModalFrictionRegime::Sliding]);
+                    }
+                    Resolution::Exhausted { .. } => panic!("zero-traction sliding is dissipative"),
+                }
+            }
         }
     }
 
@@ -1491,25 +1620,26 @@ mod tests {
     }
 
     #[test]
-    fn a_step_with_no_consistent_partition_keeps_the_walks_refusal_through_the_last_resort() {
-        // The zero-load port above: no partition is consistent, so the last resort
-        // finds nothing and the walk's exhaustion comes back unchanged.
+    fn g1_released_rows_have_one_physical_root_in_hysteretic_enumeration() {
+        // An unloaded contact has one physical root, independent of the three
+        // labels the enumeration uses for loaded contacts. Releasing a formerly
+        // sliding contact must not create a nearest-partition tie.
         let l = a4_law();
         let laws = [&l];
         let seed = vec![ModalFrictionRegime::Sticking];
         let (a, f, n) = ([3.0e-6], [1.0e-7], [0.0]);
-        assert!(nearest_consistent_partition(&a, &f, &n, &laws, A4_DT, &[Branch::Stuck]).unwrap().is_none());
-        let walked = solve_active_set(&a, &f, &n, &laws, A4_DT, &seed, 8).unwrap();
-        let rescued = solve_active_set_with_hysteresis(&a, &f, &n, &laws, A4_DT, &seed, &[Branch::Stuck], 8).unwrap();
-        match (walked, rescued) {
-            (
-                Resolution::Exhausted { pivots: p0, last_set: s0, worst: w0 },
-                Resolution::Exhausted { pivots: p1, last_set: s1, worst: w1 },
-            ) => assert_eq!(
-                (p0, s0, w0.port, w0.condition, w0.size.to_bits()),
-                (p1, s1, w1.port, w1.condition, w1.size.to_bits())
-            ),
-            _ => panic!("a zero-load port has no consistent partition: both must refuse"),
+        for previous in all_branches() {
+            let (t, regimes) = nearest_consistent_partition(&a, &f, &n, &laws, A4_DT, &[previous])
+                .unwrap().expect("one released root");
+            assert_eq!(t, [0.0]);
+            assert_eq!(regimes, [ModalFrictionRegime::Released]);
+            match solve_active_set_with_hysteresis(&a, &f, &n, &laws, A4_DT, &seed, &[previous], 1).unwrap() {
+                Resolution::Solved(got_t, got_regimes) => {
+                    assert_eq!(got_t, t);
+                    assert_eq!(got_regimes, regimes);
+                }
+                Resolution::Exhausted { .. } => panic!("released row must not exhaust"),
+            }
         }
     }
 

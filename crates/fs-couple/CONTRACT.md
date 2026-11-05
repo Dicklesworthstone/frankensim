@@ -157,6 +157,16 @@ without translating them to Stribeck curves. Focused native integration fixtures
 exercise kinetic continuation inside the static cone, opposite port directions,
 actual mechanical work and the independent exact-oscillator load line.
 
+The simultaneous dry-friction active-set rescue retains zero-load contacts as
+zero-traction released rows, including on the condensed normal-obstacle line.
+Their relative motion is unconstrained; loaded neighbours retain the original
+cross-contact compliance. Enumeration counts each released row only once,
+independent of its former sliding direction. Zero kinetic friction permits
+zero-traction sliding, and no fixed small-speed cutoff erases a nonzero slip.
+G1 regressions compare the coupled released row with analytical elimination and
+the actual modal rescue with the converged joint sweep, including its work
+balance. Adhesive and stateful shear laws keep their separate owners.
+
 ## Source-backed ionic phases during finite moisture exchange
 
 `FiniteMoistureSolution::with_electrolyte_solubility` retains the original
