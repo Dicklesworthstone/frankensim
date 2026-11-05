@@ -6184,3 +6184,60 @@ remain outside these entry points.
 One provider-face budget covers initial exterior admission, all phases and discarded numerical trials; stabilized operator work remains separately cumulative. Providers must be replayable under repeated and nonmonotone observations. Provider/budget failure terminates without numerical retry; original bounded numerical retries remain intact. Cells, time, endpoint profiles, face loads and reports publish only after complete acceptance. Failed timed calls preserve subsequent held-force recovery, and a zero force delegates to the existing timed path exactly. Existing caller-budgeted forcing scratch and reservoir caches are reused without per-stage allocation. Body forcing remains authored and held over the accepted interval; this adds no stochastic volume forcing, well-balanced gravity scheme or turbulence-accuracy certificate.
 
 Focused native coverage reconstructs force/advection/force independently from kinetic energy, reconstructs both original molecular halves and central forced Euler (including active RKL stage acceleration), checks conservative source/boundary work and exact zero-force parity, and exercises Mach-driven whole replay, cumulative provider exhaustion, late source/cancellation rollback and held recovery.
+
+## Held body forcing with stage-time volumetric mixture reservoirs
+
+`spatial::mixture::MixtureEuler3d::step_with_forcing_and_reservoir_profiles`
+composes the existing held `BodyForce3d` with complete prescribed exterior gas
+at the original SSP RK2 stage times. The original force half-kicks surround
+those residuals. Uniform and per-cell acceleration use the compensated sum of
+canonical partial densities at each actual kick; force density remains per
+volume. The exact momentum impulse and kinetic work use the original fixed-order
+compensated source ledger. No species change, formation-reference shift,
+additional heating source or stochastic volume-force model is introduced.
+
+The timed residuals now carry the original force control through every cell,
+reconstructed face and updated RK stage. Final kick admission retains the
+Mach and combined three-axis acoustic CFL bounds, alongside exterior and
+Riemann-wave checks. Numerical failures restart both half-kicks from accepted
+cells at the shortened interval. Complete exterior profiles are then observed
+at the retry's actual stage times. A single face-provider budget includes
+initial admission and every actual provider call in discarded attempts.
+Provider refusal, exterior-source admission errors and budget exhaustion are
+terminal; they never become additional numerical retries.
+
+The corresponding `MolecularEuler3d` methods
+`step_with_forcing_and_reservoir_profiles` and
+`step_stabilized_with_forcing_and_reservoir_profiles` place the same forced
+Euler transaction between the original molecular halves. Molecular phase
+clocks remain `[t,t+h/2]` and `[t+h/2,t+h]`; central Euler stages remain
+`[t,t+h]`. One shared profile context and its non-resetting budget cover all
+three phases and complete-interval retries. Native SSP substeps, RKL2
+abscissae, source calorics, Maxwell--Stefan transport, partial enthalpies,
+Fourier heat, full stress and any already configured SGS operator remain
+owned by their existing implementations. RKL2's separate operator budget
+still counts discarded residuals. Final coupled force admission includes the
+second molecular half, and mechanical source work remains separate from
+boundary exchange in both native and complete-split balances.
+
+A zero force retains the original timed arithmetic and reports. All supplied
+forcing scratch remains subject to the original complete-owner byte budget,
+even when the force is zero. The new compositions add no numerical buffers
+beyond existing prepared profile banks, forcing scratch and opt-in RKL work.
+Only a complete success publishes accepted cells, physical clock, endpoint
+profiles, native and composed reports, and every boundary load. Late refusal
+or cancellation preserves all accepted quantities; a subsequent call restores
+and reuses the existing trial banks. Providers remain pure, replayable absolute
+time observations; caller-side effects are outside the transaction.
+
+Focused regressions compare the combined native step against independent
+analytic force impulses and kinetic-work differences around the original
+timed residuals, including spatial force-density and acceleration fields.
+They exercise canonical absent species, variable-caloric energy conservation,
+zero-force and constant-history parity, native and complete-split shortening
+with deterministic replay, one cumulative face budget, SSP/RKL physical
+sample times, and terminal late source/provider/budget or final-cancellation
+rollback with subsequent successful reuse. These manufactured checks do not
+establish turbulent spectra or experimental validation. Finite wall inertia,
+wall acceleration and adaptive molecular compositions retain their existing
+explicit limits; held-profile APIs retain their existing semantics.

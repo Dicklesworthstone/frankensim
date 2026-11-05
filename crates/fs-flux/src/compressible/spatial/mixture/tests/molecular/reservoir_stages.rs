@@ -8,6 +8,9 @@ use crate::compressible::spatial::mixture::{
 };
 use fs_gas::multicomponent::dissipation::Rkl2Scheme;
 
+#[path = "forced_reservoir_stages.rs"]
+mod forced;
+
 const SIDES: [BoundarySide; 2] = [BoundarySide::XMin, BoundarySide::XMax];
 const TOPOLOGY: Boundaries3d = Boundaries3d {
     x: OPEN,

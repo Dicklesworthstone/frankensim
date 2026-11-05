@@ -28,8 +28,8 @@ impl MixtureEuler3d {
     /// Existing admitted active/trial profile storage is reused without
     /// allocating numerical buffers. Only a completely accepted step publishes
     /// endpoint profiles, cells, time, loads and report together. Ordinary
-    /// `step`, forcing/contact options and composed molecular/reacting owners
-    /// retain their explicit held-profile semantics.
+    /// `step` and the existing held-profile options retain their semantics;
+    /// `step_with_forcing_and_reservoir_profiles` also admits a held body force.
     pub fn step_with_reservoir_profiles(
         &mut self,
         maximum_duration: Time,
@@ -145,6 +145,7 @@ impl<'a> Context<'a> {
         dt: f64,
         cfl: f64,
         reconstruction: Reconstruction,
+        force_control: Option<ForceControl3d>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<stepping::StageStats, AttemptError> {
         stepping::rk2(cancelled, |final_stage, cancelled| {
@@ -174,7 +175,7 @@ impl<'a> Context<'a> {
                 dt,
                 cfl,
                 reconstruction,
-                None,
+                force_control,
                 None,
                 final_stage,
                 cancelled,
@@ -206,6 +207,12 @@ impl AttemptError {
             error,
             terminal: true,
         }
+    }
+}
+
+impl From<Error> for AttemptError {
+    fn from(error: Error) -> Self {
+        Self::retryable(error)
     }
 }
 

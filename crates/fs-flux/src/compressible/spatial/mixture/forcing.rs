@@ -105,6 +105,61 @@ impl MixtureEuler3d {
             cancelled,
         )
     }
+
+    /// Advance held body forcing with complete exterior gas at native RK times.
+    ///
+    /// The original exact kinetic-work half-kicks surround the original RK2
+    /// residuals, sampled at `t` and `t + dt`. Acceleration uses the actual local
+    /// mixture density at each kick; neither kick changes canonical species.
+    /// Mach, cell-acoustic and reconstructed-face CFL checks admit the forced
+    /// stages. Work and impulse remain separate from physical boundary exchange.
+    ///
+    /// Profile preparation, replayability and the single non-resetting face
+    /// budget follow `step_with_reservoir_profiles`. Source refusal and exhausted
+    /// provider budgets terminate the transaction. Numerical retries restart
+    /// both kicks from the accepted state and resample their actual stage times.
+    /// Only a fully accepted attempt publishes cells, time, profiles and loads.
+    /// A zero force follows the unforced timed path exactly after admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing_and_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(
+            f64,
+            BoundarySide,
+            usize,
+            [f64; 3],
+            &mut [f64],
+        ) -> Result<ReservoirFaceState, Error>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        stepping::poll::<Error>(&mut cancelled)?;
+        force_controls.admit::<Error>()?;
+        workspace.admit(self)?;
+        if !force.admit::<Error>(self.cell_count(), &mut cancelled)? {
+            return self.step_with_reservoir_profiles(
+                maximum_duration,
+                controls,
+                maximum_face_evaluations,
+                sample,
+                cancelled,
+            );
+        }
+        let mut context = reservoir_stages::Context::new(&mut sample, maximum_face_evaluations);
+        self.step_impl_with_contact(
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            None,
+            Some(&mut context),
+            cancelled,
+        )
+    }
 }
 
 /// Fixed cell order, with one compensated sum for each mechanical source term.

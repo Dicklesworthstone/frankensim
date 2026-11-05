@@ -343,6 +343,93 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         )
     }
 
+    /// Compose held body forcing with stage-time reservoirs across the complete
+    /// molecular--Euler--molecular split.
+    ///
+    /// Exact kinetic-work half-kicks surround the central Euler RK2 interval;
+    /// acceleration uses each kick's actual mixture density. Original stress,
+    /// species, enthalpy, heat and optional SGS operators sample the prescribed
+    /// exterior gas throughout the two molecular half intervals. Force work and
+    /// impulse retain their separate ledger and final Mach/acoustic admission.
+    ///
+    /// One provider budget covers every stage and rejected split; it is never
+    /// reset on shortening. Numerical retries replay from the accepted state;
+    /// source/budget refusal is terminal. Cells, clock, profiles, all loads and
+    /// reports publish together. Zero forcing uses the original timed split.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_forcing_and_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(
+            f64,
+            BoundarySide,
+            usize,
+            [f64; 3],
+            &mut [f64],
+        ) -> Result<ReservoirFaceState, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, DissipationError> {
+        let mut context = Context::new(&mut sample, maximum_face_evaluations);
+        self.step_impl(
+            maximum_duration,
+            controls,
+            Some((force, force_controls, workspace)),
+            None,
+            &[],
+            Some(&mut context),
+            cancelled,
+        )
+    }
+
+    /// The same forced physical split with native RKL2 molecular stage times.
+    ///
+    /// The face-provider budget spans both halves, central forced RK stages
+    /// and all retries. The independent RKL operator budget also counts every
+    /// discarded residual. Supplied forcing scratch counts even for zero force.
+    /// Prescribed wall velocities are retained; finite inertia and accelerated
+    /// walls remain outside the timed-profile composition.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_stabilized_with_forcing_and_reservoir_profiles(
+        &mut self,
+        maximum_duration: Time,
+        controls: StabilizedMolecularStepControl,
+        force: BodyForce3d<'_>,
+        force_controls: ForceControl3d,
+        workspace: &mut ForcingWorkspace3d,
+        maximum_face_evaluations: usize,
+        mut sample: impl FnMut(
+            f64,
+            BoundarySide,
+            usize,
+            [f64; 3],
+            &mut [f64],
+        ) -> Result<ReservoirFaceState, Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StabilizedMolecularStepReport3d, DissipationError> {
+        let mut context = Context::new(&mut sample, maximum_face_evaluations);
+        let mut work = StepWork::new(controls.molecular);
+        let transport = self.step_impl(
+            maximum_duration,
+            controls.split(),
+            Some((force, force_controls, workspace)),
+            Some(&mut work),
+            &[],
+            Some(&mut context),
+            cancelled,
+        )?;
+        Ok(StabilizedMolecularStepReport3d {
+            transport,
+            operator_evaluations: work.evaluations,
+            maximum_stages_used: work.maximum_stages_used,
+            maximum_scaled_parabolic_number: work.maximum_scaled_parabolic_number,
+        })
+    }
+
     /// Drive existing no-slip walls through their stage-resolved tangential
     /// acceleration history. The endpoint velocities publish only with the
     /// complete accepted fluid interval, including any shortening retries.
@@ -517,9 +604,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 maximum_duration.value(),
                 self.molecular.inertia.is_some(),
             )?;
-            if forcing.is_some() || !accelerations.is_empty() {
+            if !accelerations.is_empty() {
                 return Err(DissipationError::Invalid(
-                    "time-resolved molecular reservoirs do not compose forcing or wall acceleration",
+                    "time-resolved molecular reservoirs do not compose wall acceleration",
                 ));
             }
         }
@@ -671,7 +758,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                     self.trial.step_impl_with_contact(
                         Time::new(dt),
                         controls.advection,
-                        None,
+                        forcing.as_mut().map(|(force, control, workspace)| {
+                            (*force, *control, &mut **workspace)
+                        }),
                         None,
                         Some(context),
                         &mut cancelled,

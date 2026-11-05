@@ -597,22 +597,7 @@ impl MixtureEuler3d {
             controls,
             &mut cancelled,
             |dt, reconstruction, cancelled| {
-                if let Some(context) = profiles.as_mut() {
-                    return context.attempt(
-                        self.time,
-                        &self.gas,
-                        &self.grid,
-                        self.boundaries,
-                        &mut self.reservoirs,
-                        &self.states,
-                        &mut self.work,
-                        dt,
-                        controls.cfl,
-                        reconstruction,
-                        cancelled,
-                    );
-                }
-                let mut run = || -> Result<stepping::StageStats, Error> {
+                let mut run = || -> Result<stepping::StageStats, reservoir_stages::AttemptError> {
                     if let Some((control, workspace)) = contact.as_mut() {
                         workspace.begin_attempt(*control)?;
                     }
@@ -632,19 +617,36 @@ impl MixtureEuler3d {
                         )?;
                         // The original spatial primitive sweep admits the first
                         // kicked state without a duplicate caloric recovery.
-                        let mut stats = attempt(
-                            &self.gas,
-                            &self.grid,
-                            self.boundaries,
-                            &self.reservoirs,
-                            &workspace.kicked,
-                            &mut self.work,
-                            dt,
-                            controls.cfl,
-                            reconstruction,
-                            Some(*control),
-                            cancelled,
-                        )?;
+                        let mut stats = if let Some(context) = profiles.as_mut() {
+                            context.attempt(
+                                self.time,
+                                &self.gas,
+                                &self.grid,
+                                self.boundaries,
+                                &mut self.reservoirs,
+                                &workspace.kicked,
+                                &mut self.work,
+                                dt,
+                                controls.cfl,
+                                reconstruction,
+                                Some(*control),
+                                cancelled,
+                            )?
+                        } else {
+                            attempt(
+                                &self.gas,
+                                &self.grid,
+                                self.boundaries,
+                                &self.reservoirs,
+                                &workspace.kicked,
+                                &mut self.work,
+                                dt,
+                                controls.cfl,
+                                reconstruction,
+                                Some(*control),
+                                cancelled,
+                            )?
+                        };
                         let final_rate = forcing::kick_field(
                             &self.gas,
                             &self.grid,
@@ -660,6 +662,21 @@ impl MixtureEuler3d {
                         stats.rate = stats.rate.max(final_rate);
                         source_change = source.finish()?;
                         Ok(stats)
+                    } else if let Some(context) = profiles.as_mut() {
+                        context.attempt(
+                            self.time,
+                            &self.gas,
+                            &self.grid,
+                            self.boundaries,
+                            &mut self.reservoirs,
+                            &self.states,
+                            &mut self.work,
+                            dt,
+                            controls.cfl,
+                            reconstruction,
+                            None,
+                            cancelled,
+                        )
                     } else {
                         attempt_with_contact(
                             &self.gas,
@@ -675,9 +692,10 @@ impl MixtureEuler3d {
                             contact.as_mut().map(|(_, workspace)| &mut **workspace),
                             cancelled,
                         )
+                        .map_err(reservoir_stages::AttemptError::retryable)
                     }
                 };
-                run().map_err(reservoir_stages::AttemptError::retryable)
+                run()
             },
         )
         .map_err(|failure| failure.error)?;

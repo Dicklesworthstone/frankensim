@@ -8,14 +8,14 @@ use crate::compressible::mixture::molecular::stabilized::IntervalFailure;
 /// rounded half-step origin to another half-step can exceed `t + dt` by one
 /// ulp, which would query outside a bounded prescribed stochastic interval.
 #[derive(Clone, Copy)]
-pub(super) struct Clock {
-    pub(super) origin_s: f64,
-    pub(super) phase_start_s: f64,
-    pub(super) phase_end_s: f64,
+pub(in crate::compressible::spatial::mixture) struct Clock {
+    pub(in crate::compressible::spatial::mixture) origin_s: f64,
+    pub(in crate::compressible::spatial::mixture) phase_start_s: f64,
+    pub(in crate::compressible::spatial::mixture) phase_end_s: f64,
 }
 
 impl Clock {
-    pub(super) fn direct(origin_s: f64, duration: f64) -> Self {
+    pub(in crate::compressible::spatial::mixture) fn direct(origin_s: f64, duration: f64) -> Self {
         Self {
             origin_s,
             phase_start_s: 0.0,
@@ -132,7 +132,7 @@ impl IntervalFailure for Failure {
     }
 }
 
-pub(super) fn admit(
+pub(in crate::compressible::spatial::mixture) fn admit(
     flow: &MixtureEuler3d,
     clock: Clock,
     duration: f64,

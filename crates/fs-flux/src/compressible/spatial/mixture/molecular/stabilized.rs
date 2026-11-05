@@ -122,7 +122,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn advance_stabilized_with_profiles_unpublished(
+    pub(in crate::compressible::spatial::mixture) fn advance_stabilized_with_profiles_unpublished(
         &mut self,
         flow: &mut MixtureEuler3d,
         duration: Time,

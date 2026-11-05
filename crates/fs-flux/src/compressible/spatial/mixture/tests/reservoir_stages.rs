@@ -2,6 +2,9 @@ use super::*;
 use crate::compressible::AxisBoundaries;
 use crate::compressible::mixture::tests::{close, standard};
 
+#[path = "forced_reservoir_stages.rs"]
+mod forced;
+
 const OPEN: AxisBoundaries = AxisBoundaries::Ends {
     lower: BoundaryCondition::Transmissive,
     upper: BoundaryCondition::Transmissive,

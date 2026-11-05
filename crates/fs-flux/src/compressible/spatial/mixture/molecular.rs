@@ -28,7 +28,7 @@ mod driving;
 mod inertia;
 mod reservoir;
 mod stabilized;
-mod timed;
+pub(super) mod timed;
 pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
 pub use coupled::{
     MolecularEuler3d, MolecularStepControl, MolecularStepReport3d, StabilizedMolecularStepControl,
@@ -388,6 +388,15 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         Ok(report)
     }
 
+    pub(super) fn admit_time_resolved_profiles(
+        &self,
+        flow: &MixtureEuler3d,
+        clock: timed::Clock,
+        duration: f64,
+    ) -> Result<(), DissipationError> {
+        timed::admit(flow, clock, duration, self.inertia.is_some())
+    }
+
     pub(super) fn prepare_wall_drive(
         &self,
         accelerations: &[WallAcceleration3d],
@@ -470,7 +479,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn advance_driven_with_profiles_unpublished(
+    pub(super) fn advance_driven_with_profiles_unpublished(
         &mut self,
         flow: &mut MixtureEuler3d,
         duration: Time,
