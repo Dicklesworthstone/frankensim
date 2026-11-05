@@ -70,6 +70,11 @@ impl EffusiveMomentumInterface {
         // cannot borrow an angular qualification made for another interface.
         if !Arc::ptr_eq(&self.interface.gas_catalog, &original.gas_catalog)
             || !Arc::ptr_eq(&self.interface.transmissions, &original.transmissions)
+            || match (&self.interface.collision, &original.collision) {
+                (None, None) => false,
+                (Some(bound), Some(sampled)) => !Arc::ptr_eq(bound, sampled),
+                _ => true,
+            }
         {
             return Err(invalid(
                 "effusive momentum lost its original qualified interface",

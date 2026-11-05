@@ -42,6 +42,8 @@ impl ClosedGasParcel {
     /// vacuum is not queried against a positive-pressure gas source domain.
     /// Zero exposed area is exactly inactive, including for an unrelated
     /// interface catalog. A selected zero transmission still admits its source.
+    /// Attached collision data recheck the actual emitting mixture's free paths;
+    /// the exact vacuum itself has neither collision partners nor a gas query.
     ///
     /// A finite update must debit every gross original species inventory and
     /// apply its molecular energy correction before the one caloric inversion.

@@ -23,12 +23,14 @@
 //! of the retained gas catalog over the entire authored T/p support. No mean
 //! free path, thinness, species selectivity or empirical accuracy is inferred.
 
-/// Molecular escape into a true vacuum, with no invented receiver state.
-pub mod vacuum;
-/// Explicitly qualified molecular momentum moments for mechanical consumers.
-pub mod momentum;
+/// Actual-mixture collision lengths from explicitly declared binary cross sections.
+pub mod collision;
 /// Source-qualified aperture incidence from a drifting local Maxwellian.
 pub mod drift;
+/// Explicitly qualified molecular momentum moments for mechanical consumers.
+pub mod momentum;
+/// Molecular escape into a true vacuum, with no invented receiver state.
+pub mod vacuum;
 
 use super::{
     ClosedGasParcel, GasEnergyError, SpeciesId, Sum, catalog, invalid, poll, positive,
@@ -302,6 +304,7 @@ pub struct EffusiveInterface {
     transmissions: Arc<[EffusiveSpeciesTransmission]>,
     support: EffusiveSupport,
     regime: EffusiveRegime,
+    collision: Option<Arc<collision::EffusiveCollisionModel>>,
 }
 impl EffusiveInterface {
     pub fn try_new(
@@ -335,7 +338,70 @@ impl EffusiveInterface {
             transmissions: transmissions.into(),
             support,
             regime,
+            collision: None,
         })
+    }
+
+    /// Add an independent actual-state collision check to the original global
+    /// qualification. The original catalog, support, transmissions and authored
+    /// minimum mean free path are retained. Collision data may narrow admission;
+    /// they never establish wall accommodation or remove the drift qualification.
+    pub fn with_collision_model(
+        mut self,
+        collision: collision::EffusiveCollisionModel,
+    ) -> Result<Self, GasEnergyError> {
+        if collision.gas_catalog().thermodynamics().components().len()
+            != self.gas_catalog().thermodynamics().components().len()
+        {
+            return Err(invalid(
+                "effusive collision data must cover the exact original interface catalog",
+            ));
+        }
+        admit_calibration(collision.gas_catalog(), self.gas_catalog())?;
+        admit_calibration(self.gas_catalog(), collision.gas_catalog())?;
+        self.collision = Some(Arc::new(collision));
+        Ok(self)
+    }
+
+    /// Explicit pair sources and their actual-mixture mean-path approximation.
+    pub fn collision_model(&self) -> Option<&collision::EffusiveCollisionModel> {
+        self.collision.as_deref()
+    }
+
+    /// Check an exposed molecular path against the actual gas collision length.
+    ///
+    /// A longer channel supplies its full characteristic length; this check
+    /// never uses less than the original aperture diameter. It requires
+    /// `length / min_i(lambda_i) <= 0.1` for every present species, including
+    /// species blocked by transmission. The path's original geometric and
+    /// collisional qualification remains necessary. This equilibrium hard-sphere
+    /// estimate is not a resolved collision probability for a selected beam.
+    ///
+    /// Without attached collision data there is no added gas/source query.
+    /// Geometrically closed callers must skip this active-path admission.
+    pub fn admit_collision_length(
+        &self,
+        parcel: &ClosedGasParcel,
+        characteristic_length_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), GasEnergyError> {
+        poll(&mut cancelled)?;
+        let Some(collision) = self.collision_model() else {
+            return Ok(());
+        };
+        if !positive(characteristic_length_m) {
+            return Err(invalid(
+                "active molecular collision check needs a positive finite path length",
+            ));
+        }
+        let length = characteristic_length_m.max(self.regime.aperture_diameter_m());
+        let estimate = collision.evaluate_parcel(parcel, &mut cancelled)?;
+        if length / estimate.minimum_mean_free_path_m() > 0.1 {
+            return Err(invalid(
+                "actual mixture collision length is outside the free-molecular regime",
+            ));
+        }
+        poll(&mut cancelled)
     }
     pub fn gas_catalog(&self) -> &ThermochemicalGasModel {
         &self.gas_catalog
@@ -380,6 +446,9 @@ impl EffusiveInterface {
                 .binary_search_by(|transmission| transmission.species.cmp(component.species()))
                 .map_err(|_| invalid("effusive qualification is missing an active gas species"))?;
             self.transmissions[index].admit(state.temperature, state.pressure)?;
+        }
+        if self.collision.is_some() {
+            self.admit_collision_length(parcel, self.regime.aperture_diameter_m(), &mut cancelled)?;
         }
         poll(&mut cancelled)
     }
@@ -461,6 +530,15 @@ impl ClosedGasParcel {
         let (pl, pr) = (left_state.pressure, right_state.pressure);
         for (t, p) in [(tl, pl), (tr, pr)] {
             interface.support.admit(t, p)?;
+        }
+        if interface.collision.is_some() {
+            for parcel in [self, right] {
+                interface.admit_collision_length(
+                    parcel,
+                    interface.regime.aperture_diameter_m(),
+                    &mut cancelled,
+                )?;
+            }
         }
         if [self, right]
             .iter()
