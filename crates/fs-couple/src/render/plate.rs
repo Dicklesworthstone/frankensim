@@ -383,5 +383,8 @@ fn admit_radiators(bodies: &[CompactBody], config: PlateVoiceConfig) -> Result<(
 pub mod file;
 /// Nonlinear shell/film impact with physical striker and hysteretic felt storage.
 pub mod impact;
+/// Continuous physical tone excitation of the complete nonlinear plate, observed
+/// as source-time interval-mean compact pressure on its admitted sample clock.
+pub mod tones;
 /// Finite-wavelength baffled-surface observation of the original modal motion.
 pub mod spatial;
