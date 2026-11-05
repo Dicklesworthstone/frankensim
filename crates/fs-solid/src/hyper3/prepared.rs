@@ -8,6 +8,8 @@
 //! kernel, with the same deterministic element order and cancellation points.
 
 mod energy_momentum;
+/// Source-bound tensile assessment of original finite-strain Cauchy stresses.
+pub mod tensile;
 
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;

@@ -19,6 +19,9 @@
 //! Mechanics theory, “Rankine Cutoff”:
 //! <https://doc.comsol.com/6.3/doc/com.comsol.help.sme/sme_ug_theory.06.033.html>.
 
+mod finite;
+pub use finite::ResolvedTensileHyperelastic;
+
 use crate::Voigt;
 use crate::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,

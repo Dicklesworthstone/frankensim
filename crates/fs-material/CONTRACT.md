@@ -15408,3 +15408,16 @@ execution environment failed during dependency preparation. This owner adds
 no post-initiation softening, fracture energy, characteristic length, crack
 topology, mesh-objective failure, Lode dependence or experimentally validated
 component failure. Those broader fracture tasks remain open.
+
+## Hyperelastic models with explicit Cauchy tensile limits
+
+`strength::ResolvedTensileHyperelastic::from_cauchy_limit` binds the original
+`ResolvedHyperelastic` and an explicit isotropic tensile limit from the same
+immutable material card and complete typed query. The exact constitutive model
+must be a member of that card; source identity covers model selection, strength
+property and conditions. Energy, Piola stress and tangent delegate to the native
+owner unchanged. The constructor explicitly selects a current-area Cauchy-strength
+interpretation; it does not convert engineering UTS or supply a damage law.
+Changing conditions requires readmitting both original owners. Tests in
+`tests/tensile_hyperelastic.rs` cover unchanged native response, model/card/query
+mismatches, law-domain refusal and distinct source bindings.

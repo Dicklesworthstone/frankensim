@@ -7518,3 +7518,21 @@ limit; they do not bound unsampled surface/interior stresses, supply anisotropic
 or ductile failure laws, or predict crack growth, fracture energy, plastic
 failure, fragmentation or service life. Finite-strain Piola stress is not
 accepted as Cauchy stress by these small-strain adapters.
+
+## Finite-strain tensile assessment on prepared P1 solids
+
+`HyperTetProblem<ResolvedTensileHyperelastic>::assess_tensile_strength` and the
+prepared owner's same method use the original total F, Piola stress and Cauchy
+push-forward from `hyper3::response`. The actual mechanics field also owns each
+selected Cauchy-strength limit. Cached reference geometry is reused for repeated
+observations; one result vector is allocated and no tangent or second solve is
+formed. Every sample retains the unmodified native response and material/limit
+identities. Only roundoff-scale Cauchy skew is admitted before comparing its
+symmetric part; original stress components remain inspectable. Sample-count,
+allocation, source/law-domain and cancellation refusals publish no partial field.
+The manufactured cases in `tests/hyper3_tensile_strength.rs` distinguish Piola
+from current-area stress, test hydrostatic extension/compression, rigid rotation,
+heterogeneous materials and deterministic governing samples. These are local
+stress/limit observations, without equilibrium, continuum-peak or fracture-
+evolution authority. Caller-selected engineering strength is never silently
+converted into a finite-strain rupture law.
