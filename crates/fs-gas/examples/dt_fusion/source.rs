@@ -23,7 +23,7 @@ fn id(name: &str) -> SpeciesId {
     SpeciesId::new(name).expect("literal species")
 }
 
-fn monatomic(name: &str, mass: f64, spin_weight: f64) -> Nasa9StandardStateModelV1 {
+pub(super) fn monatomic(name: &str, mass: f64, spin_weight: f64) -> Nasa9StandardStateModelV1 {
     let p0 = 100_000.0;
     // Sackur-Tetrode translational entropy with an explicit ground-state
     // spin weight; zero formation energy keeps nuclear rest energy outside U.

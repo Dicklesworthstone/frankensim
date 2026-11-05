@@ -41,9 +41,12 @@ use fs_thermochem::fusion::{FusionErrorV1, FusionReactionV1};
 use fs_thermochem::plasma_radiation::{BremsstrahlungErrorV1, ElectronIonBremsstrahlungV1};
 
 mod solve;
+mod thermal;
+
+/// Competing D–T, D–D and D–He3 reactions on the same material state.
+pub mod network;
 
 const AVOGADRO: f64 = 6.022_140_76e23;
-const BOLTZMANN: f64 = 1.380_649e-23;
 const CV_MOLAR: f64 = 1.5 * R;
 
 /// Explicit local alpha thermalization and constant externally supplied powers.
@@ -196,7 +199,7 @@ pub enum DtFusionError {
 
 impl core::fmt::Display for DtFusionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "D-T fusion burn: {self:?}")
+        write!(f, "fusion burn: {self:?}")
     }
 }
 impl std::error::Error for DtFusionError {}

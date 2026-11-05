@@ -1,14 +1,9 @@
 //! Original-source thermal operators within the finite-fuel midpoint solve.
 
+use super::super::thermal::{evaluate, exchange_energy, radiated_energy};
 use super::*;
-use fs_math::det::sqrt;
 
-#[derive(Clone, Copy)]
-pub(super) struct Sources {
-    pub temperatures: [f64; 2],
-    conductance_w_k: f64,
-    radiation_w_per_sqrt_k: f64,
-}
+pub(super) use super::super::thermal::ThermalSources as Sources;
 
 impl Problem<'_> {
     pub(super) fn sources(
@@ -17,40 +12,9 @@ impl Problem<'_> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Sources, DtFusionError> {
         let temperatures = self.admit(point, cancelled)?;
-        let [th, te] = temperatures.map(Temperature::new);
         let amounts = self.amounts(point);
         let volume = self.initial.volume();
-        let conductance_w_k = if let Some(model) = &self.transport.coulomb {
-            model
-                .evaluate_point(&amounts, volume, th, te, &mut *cancelled)
-                .map_err(coulomb_error)?
-                .electron_heavy_thermal_conductance_w_m3_k()
-                * volume.value()
-        } else {
-            0.0
-        };
-        let radiation_w_per_sqrt_k = if let Some(model) = &self.transport.bremsstrahlung {
-            model
-                .evaluate_point(&amounts, volume, th, te, &mut *cancelled)
-                .map_err(radiation_error)?
-                .total_power_over_sqrt_temperature_w_k_sqrt()
-        } else {
-            0.0
-        };
-        if [conductance_w_k, radiation_w_per_sqrt_k]
-            .iter()
-            .any(|x| !x.is_finite() || *x < 0.0)
-        {
-            return Err(DtFusionError::Arithmetic(
-                "finite thermal source coefficients",
-            ));
-        }
-        poll(cancelled)?;
-        Ok(Sources {
-            temperatures,
-            conductance_w_k,
-            radiation_w_per_sqrt_k,
-        })
+        evaluate(self.transport, &amounts, volume, temperatures, cancelled)
     }
 
     /// Freeze coefficients at the predictor midpoint, then compose thermal
@@ -114,20 +78,12 @@ impl Problem<'_> {
         if conductance == 0.0 || dt == 0.0 {
             return Ok(old);
         }
-        let [th, te] = self.temperatures(old)?;
-        let [ch, ce] = self.capacities(old);
-        let exposure = (conductance / ch + conductance / ce) * dt;
-        if exposure.is_nan() || exposure < 0.0 {
-            return Err(DtFusionError::Arithmetic("Coulomb thermal exposure"));
-        }
-        // ch*ce/(ch+ce), without multiplying two extensive capacities.
-        let reduced_capacity = ch.min(ce) / (1.0 + ch.min(ce) / ch.max(ce));
-        let transfer = reduced_capacity * (te - th) * (-expm1(-exposure));
-        if !transfer.is_finite() {
-            return Err(DtFusionError::Arithmetic(
-                "reciprocal Coulomb energy transfer",
-            ));
-        }
+        let transfer = exchange_energy(
+            self.temperatures(old)?,
+            self.capacities(old),
+            dt,
+            conductance,
+        )?;
         let mut next = old;
         next.coulomb_transfer.add(transfer);
         Ok(next)
@@ -143,33 +99,9 @@ impl Problem<'_> {
         }
         let te = self.temperatures(old)?[1];
         let ce = self.capacities(old)[1];
-        let root = sqrt(te);
-        let decrement = (0.5 * coefficient / ce) * dt;
-        if !decrement.is_finite() || decrement >= root {
-            return Err(DtFusionError::OutsideDomain);
-        }
-        let loss = (coefficient * dt) * (root - 0.5 * decrement);
-        if !loss.is_finite() || loss < 0.0 {
-            return Err(DtFusionError::Arithmetic(
-                "escaping free-free photon energy",
-            ));
-        }
+        let loss = radiated_energy(te, ce, dt, coefficient)?;
         let mut next = old;
         next.photon_energy.add(loss);
         Ok(next)
-    }
-}
-
-fn coulomb_error(error: CoulombErrorV1) -> DtFusionError {
-    match error {
-        CoulombErrorV1::Cancelled => DtFusionError::Cancelled,
-        error => DtFusionError::Coulomb(error),
-    }
-}
-
-fn radiation_error(error: BremsstrahlungErrorV1) -> DtFusionError {
-    match error {
-        BremsstrahlungErrorV1::Cancelled => DtFusionError::Cancelled,
-        error => DtFusionError::Radiation(error),
     }
 }

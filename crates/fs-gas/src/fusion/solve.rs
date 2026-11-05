@@ -6,11 +6,11 @@ mod thermal;
 /// Compensated cumulative physical transfers, retained across adaptive steps.
 #[derive(Clone, Copy, Debug, Default)]
 pub(super) struct Sum {
-    value: f64,
+    pub(super) value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, x: f64) {
+    pub(super) fn add(&mut self, x: f64) {
         let y = x - self.correction;
         let next = self.value + y;
         self.correction = (next - self.value) - y;
@@ -227,27 +227,18 @@ impl<'a> Problem<'a> {
     /// Exact finite-fuel map with rate and per-event energies frozen at T.
     fn frozen_step(&self, old: Point, dt: f64, temperature: f64) -> Result<Point, DtFusionError> {
         let reaction = FusionReactionV1::DeuteriumTritium;
-        let rate = reaction
-            .reactivity(Temperature::new(temperature))
+        let event = reaction
+            .thermal_event(Temperature::new(temperature))
             .map_err(DtFusionError::Reaction)?;
         let (remaining, extent) = frozen_depletion(
             old.limiting_fuel,
             self.excess_fuel,
-            rate.value_m3_s(),
+            event.reactivity().value_m3_s(),
             self.initial.volume().value(),
             dt,
         )?;
-        let relative = rate.mean_reacting_relative_energy_j();
-        let translation = 1.5 * BOLTZMANN * temperature;
-        let removed = relative + translation;
-        let fraction = reaction.product_relative_energy_fractions()[0];
-        let alpha = fraction * (reaction.q_j() + relative) + (1.0 - fraction) * translation;
-        let neutron = reaction.q_j() + removed - alpha;
-        if [relative, alpha, neutron].iter().any(|&e| !positive(e)) {
-            return Err(DtFusionError::Arithmetic(
-                "reaction-weighted product energies",
-            ));
-        }
+        let removed = event.reacting_ion_energy_j();
+        let [alpha, neutron] = event.product_kinetic_energies_j();
         let mut next = old;
         next.time = old.time + dt;
         next.limiting_fuel = remaining;

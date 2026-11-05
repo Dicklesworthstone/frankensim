@@ -1,5 +1,53 @@
 # fs-gas contract
 
+## Competing light-ion fusion and secondary-fuel burn
+
+`fusion::network::advance_fusion_network` evolves explicitly selected D-T,
+D-D→He3+n, D-D→T+p and D-He3 channels against one original six-species
+`LightIonFusionPlasmaV1` bank. D-D products can feed secondary D-T and D-He3
+burn during the same interval without trace seeds. Each independent D-D rate
+receives the identical-pair event factor once and consumes two deuterons;
+there is no additional assumed equal branching fraction. Every enabled
+reaction must support the authored temperature interval, including initially
+absent fuels. All four source domains intersect at 0.5–100 keV ion temperature.
+
+Original shared thermal-event laws supply each channel's reactant kinetic
+debit and both product energies. Per-product electron deposition fractions
+are explicitly authored; all charged products remain and thermalize immediately,
+and every neutron escapes. The source state supplies pressure, heat capacities
+and sensible energy from actual populations. Nuclear baryons, charge and Q
+replace chemical element/mass invariants for this owner only.
+
+A fixed palindromic composition of exact binary finite-stock maps resolves
+shared fuel competition at midpoint coefficients. Small withdrawals use
+compensated populations; deep withdrawals use the analytic positive survivor,
+without clipping or erasing representable traces. Shared Coulomb/radiation
+kernels surround the reaction map, and held external powers enter its physical
+clock once. Fixed-size trial storage allocates nothing on successful evolution.
+Step doubling controls amounts, each channel extent, product energies, both
+temperatures and thermal transfers. Smooth fixed-step refinement exhibits
+second order; this is not an exact finite-step simultaneous network solution
+or a global/physical error certificate.
+
+Publication independently checks original source energies, every species
+against channel stoichiometry, baryons including emitted neutrons, and charge.
+The complete account is
+`delta(Uh+Ue) + En + Ephotons - sum(Qr*xir) - Eexternal = 0`.
+Results retain all sources, selected channels, deposition assumptions and
+eight product-energy accounts. The original D-T API reuses the same thermal
+kernels and reaction-energy law.
+
+Twenty-four native gas-fusion tests pass, including the seventeen existing
+D-T checks and seven new network checks. Independently converged RK4 references
+cover initially pure D and mixed-fuel burn with Coulomb exchange, constant-Gaunt
+radiation and unequal product-deposition fractions. Tests also cover exact DD
+counting, fixed-step refinement, channel/source domains, conservation, volume
+scaling, restart and atomic refusal. The compiled `light_ion_fusion` example
+compares primary-only DD with secondary burn and demonstrates a mixed case
+with the bounded Itoh radiation fit. The existing `dt_fusion` example retains
+its numerical result. No confinement, fast-particle slowing, neutron transport,
+opacity or relativistic product-spectrum model is inferred.
+
 ## Coupled fusion, Coulomb equilibration and escaping photons
 
 `fusion::advance_dt_fusion_with_transport` adds explicitly selected
