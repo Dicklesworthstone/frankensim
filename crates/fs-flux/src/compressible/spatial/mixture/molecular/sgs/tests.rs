@@ -9,6 +9,7 @@ use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 
 mod channel;
 mod dynamic;
+mod wall;
 
 const PERIODIC: Boundaries3d = Boundaries3d {
     x: AxisBoundaries::Periodic,

@@ -67,8 +67,9 @@ struct MolecularWorkspace {
 /// slip walls by default. Explicit no-slip walls prescribe tangential velocity
 /// and adiabatic or fixed-temperature heat transfer. Their stress work uses
 /// the wall velocity and their Fourier flux uses the physical half-cell
-/// distance. Modeled SGS flux vanishes at impermeable walls; wall shear and
-/// heat therefore require a resolved molecular wall layer. Transmissive ends
+/// distance. SGS wall flux vanishes by default; an explicit smooth equilibrium
+/// stress model can supply adiabatic wall traction on a coarse SGS mesh.
+/// Other walls require a resolved molecular wall layer. Transmissive ends
 /// have zero molecular flux by default. [`Self::with_reservoir_exchange`]
 /// enables heat and stress exchange through complete source-admitted uniform
 /// or face-resolved reservoirs. All workspaces are preallocated.
@@ -188,6 +189,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             return Err(MolecularError::Invalid(
                 "channel dynamic transport requires no-slip walls",
             ));
+        }
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(sgs) = &self.sgs {
+            sgs.admit_wall(side, wall)?;
         }
         let domain = self.gas.domain();
         wall.validate(
@@ -715,9 +720,31 @@ fn spatial<L: TransportLaw>(
                 };
             let longitudinal = (4.0 / 3.0) * mu + bulk;
             let cross = bulk - (2.0 / 3.0) * mu;
+            // The wall law replaces only tangential traction. Bulk and normal
+            // stresses retain the source molecular viscosity; the nonlinear
+            // wall-traction Jacobian supplies its own diffusion bound.
+            #[cfg(feature = "experimental-sgs")]
+            let wall_viscosity = match (subgrid.as_ref(), wall_model) {
+                (Some(sgs), Some(model)) => sgs.wall_viscosity(
+                    2 * axis + usize::from(face == count),
+                    model,
+                    pl,
+                    0.5 * grid.spacing[axis],
+                    mu,
+                )?,
+                _ => sgs::wall::WallViscosity {
+                    secant: mu,
+                    tangent: mu,
+                },
+            };
+            #[cfg(feature = "experimental-sgs")]
+            let (wall_mu, shear_diffusion) = (wall_viscosity.secant, wall_viscosity.tangent);
+            #[cfg(not(feature = "experimental-sgs"))]
+            let (wall_mu, shear_diffusion) = (mu, mu);
             // Cover both tangential cross-derivative stencils, variable face
             // coefficients and doubled half-cell wall or reservoir gradients.
-            let diffusivity = ((longitudinal + 2.0 * cross.abs() + 4.0 * mu) / minimum_density)
+            let diffusivity = ((longitudinal + 2.0 * cross.abs() + 4.0 * shear_diffusion)
+                / minimum_density)
                 .max(conductivity / minimum_cv);
             if !diffusivity.is_finite() {
                 return Err(MolecularError::Invalid(
@@ -767,7 +794,7 @@ fn spatial<L: TransportLaw>(
                     pl.velocity,
                     pl.temperature,
                     0.5 * grid.spacing[axis],
-                    mu,
+                    wall_mu,
                     conductivity,
                 );
                 ([shear[tangential[0]], shear[tangential[1]]], energy)

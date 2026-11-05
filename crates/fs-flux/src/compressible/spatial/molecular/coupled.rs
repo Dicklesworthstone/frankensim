@@ -101,6 +101,27 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         self.molecular.wall(side)
     }
 
+    /// Apply the same equilibrium SGS wall stress in both molecular half
+    /// steps, retaining the original complete-step wall-work ledger.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_equilibrium_sgs_wall(
+        mut self,
+        side: BoundarySide,
+        config: sgs::EquilibriumWallConfig,
+    ) -> Result<Self, MolecularError> {
+        let changed = self.molecular.equilibrium_sgs_wall(side) != Some(config);
+        self.molecular = self.molecular.with_equilibrium_sgs_wall(side, config)?;
+        if changed {
+            self.last_step = None;
+        }
+        Ok(self)
+    }
+
+    #[cfg(feature = "experimental-sgs")]
+    pub fn equilibrium_sgs_wall(&self, side: BoundarySide) -> Option<sgs::EquilibriumWallConfig> {
+        self.molecular.equilibrium_sgs_wall(side)
+    }
+
     /// Compose explicit subgrid stress and heat with the original Euler
     /// advection and atomic retry mechanism. Every stage CFL includes SGS.
     #[cfg(feature = "experimental-sgs")]

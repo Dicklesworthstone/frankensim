@@ -85,6 +85,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         )?;
         let mut result = Self::new(flow, source, maximum_workspace_bytes, &mut cancelled)?;
         result.sgs = Some(SubgridTransport {
+            wall_models: [None; 6],
             closure: ViscosityClosure::DynamicSpecies(DynamicSpeciesTransport {
                 config,
                 work: ThermalWorkspace::new(&flow.grid)?,

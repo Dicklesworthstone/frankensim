@@ -129,6 +129,7 @@ impl SubgridTransport {
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
             closure: SubgridClosure::DynamicThermal(closure),
+            wall_models: [None; 6],
             dynamic_viscosity,
         })
     }

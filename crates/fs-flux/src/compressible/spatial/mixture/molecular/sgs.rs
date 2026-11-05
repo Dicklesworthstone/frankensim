@@ -10,9 +10,10 @@
 //! independently of stress and heat; it retains this same mass-frame and
 //! referenced-enthalpy flux rather than prescribing a turbulent Schmidt number.
 //!
-//! Physical wall faces retain the original molecular law: modeled wall stress,
-//! heat and species flux are zero. Wall-resolved grids are required; no wall
-//! function or turbulent reaction-rate closure is inferred. The existing
+//! Physical wall faces retain the original molecular law unless explicitly
+//! given [`EquilibriumWallConfig`] for smooth adiabatic wall stress. All other
+//! walls require resolved molecular layers; no wall heat/species or turbulent
+//! reaction-rate closure is inferred. The existing
 //! reactive split integrator can compose this operator without changing its
 //! chemistry owner. Isotropic SGS energy, backscatter, pressure dilatation,
 //! flame wrinkling and shock/turbulence interaction are not represented.
@@ -28,7 +29,8 @@ use super::*;
 use crate::compressible::spatial::molecular::sgs::face_gradient;
 pub use crate::compressible::spatial::molecular::sgs::{
     ChannelDynamicThermalSubgridConfig, DynamicAveraging, DynamicScalarConfig, DynamicSgsConfig,
-    DynamicSubgridConfig, DynamicThermalSubgridConfig, SgsModel, SgsUse, SubgridConfig,
+    DynamicSubgridConfig, DynamicThermalSubgridConfig, EquilibriumWallConfig, SgsModel, SgsUse,
+    SubgridConfig,
 };
 use fs_gas::multicomponent::dissipation::{MaxwellStefanSolveV1, TransportFaceReport};
 use fs_gas::multicomponent::{Error as FlowError, MAX_SPECIES};
@@ -37,6 +39,7 @@ use fs_qty::Temperature;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod dynamic;
+mod wall;
 pub use dynamic::{
     ChannelDynamicComponentsConfig, DynamicComponentsConfig,
     MixtureChannelDynamicSpeciesSubgridConfig, MixtureDynamicSpeciesSubgridConfig,
@@ -137,6 +140,7 @@ enum ViscosityClosure {
 
 pub(super) struct SubgridTransport {
     closure: ViscosityClosure,
+    wall_models: [Option<EquilibriumWallConfig>; 6],
     dynamic_viscosity: Vec<f64>,
     heat_capacity_v_density: Vec<f64>,
 }
@@ -153,6 +157,7 @@ impl SubgridTransport {
             ));
         }
         Ok(Self {
+            wall_models: [None; 6],
             closure: ViscosityClosure::Local {
                 config,
                 widths,
@@ -176,7 +181,14 @@ impl SubgridTransport {
             }
     }
 
-    pub(super) fn admit_wall(&self, wall: MolecularWall3d) -> Result<(), DissipationError> {
+    pub(super) fn admit_wall(
+        &self,
+        side: BoundarySide,
+        wall: MolecularWall3d,
+    ) -> Result<(), DissipationError> {
+        if let Some(config) = self.wall_models[side_index(side)] {
+            config.admit_wall(wall).map_err(DissipationError::Invalid)?;
+        }
         match &self.closure {
             ViscosityClosure::DynamicChannelThermal(dynamic) => dynamic.admit_wall(wall),
             ViscosityClosure::ChannelDynamicSpecies(_)

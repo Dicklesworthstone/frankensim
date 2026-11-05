@@ -95,6 +95,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         }
         result.sgs =
             Some(SubgridTransport {
+                wall_models: [None; 6],
                 closure: ViscosityClosure::DynamicChannelThermal(
                     DynamicChannelThermalTransport::new(&flow.grid, normal_axis, config)?,
                 ),

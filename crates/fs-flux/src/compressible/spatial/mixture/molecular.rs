@@ -267,7 +267,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         }
         #[cfg(feature = "experimental-sgs")]
         if let Some(sgs) = &self.sgs {
-            sgs.admit_wall(wall)?;
+            sgs.admit_wall(side, wall)?;
         }
         self.walls[side_index(side)] = wall;
         Ok(self)
@@ -966,7 +966,8 @@ fn spatial<'a, L: TransportLaw>(
                 condition: BoundaryCondition::Reflecting,
             } => {
                 let side = side_for(axis, sign > 0.0);
-                match walls[side_index(side)] {
+                let wall = walls[side_index(side)];
+                let receipt = match wall {
                     MolecularWall3d::SlipAdiabatic => source.wall_from_primitive(
                         normal(cell, axis),
                         -sign * 2.0 * primitive[cell].velocity[axis] / grid.spacing[axis],
@@ -988,7 +989,22 @@ fn spatial<'a, L: TransportLaw>(
                             output,
                             &mut *cancelled,
                         )?,
-                }
+                };
+                #[cfg(feature = "experimental-sgs")]
+                let receipt = if let Some(sgs) = sgs.as_ref() {
+                    sgs.add_wall(
+                        side,
+                        wall,
+                        primitive[cell],
+                        0.5 * grid.spacing[axis],
+                        species,
+                        receipt,
+                        output,
+                    )?
+                } else {
+                    receipt
+                };
+                receipt
             }
             cartesian::FaceKind::Boundary {
                 cell,

@@ -14,8 +14,10 @@
 //!
 //! This is an explicit exploration model for low-Mach, frozen-composition
 //! flow, not a closure for shock/turbulence interaction. Isotropic SGS kinetic
-//! energy, pressure dilatation, backscatter, species mixing and wall models
-//! are absent. Reflecting boundaries retain their adiabatic slip semantics.
+//! energy, pressure dilatation, backscatter and species mixing are absent.
+//! Reflecting boundaries retain their adiabatic slip semantics unless an
+//! explicit wall is authored. [`EquilibriumWallConfig`] optionally supplies
+//! smooth adiabatic wall stress when the viscous sublayer is not resolved.
 //! No coefficient or turbulent Prandtl number is chosen implicitly.
 //!
 //! References: Nicoud & Ducros (1999), doi:10.1023/A:1009995426001;
@@ -26,6 +28,8 @@
 use super::*;
 use fs_lbm::sgs3::{SgsConfig, eddy_viscosity, vreman_eddy_viscosity};
 pub use fs_lbm::sgs3::{SgsModel, SgsUse};
+pub(in crate::compressible::spatial) mod wall;
+pub use wall::EquilibriumWallConfig;
 
 mod dynamic;
 pub use dynamic::DynamicSubgridConfig;
@@ -122,6 +126,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
 
 pub(super) struct SubgridTransport {
     closure: SubgridClosure,
+    wall_models: [Option<EquilibriumWallConfig>; 6],
     // Reused at every stage. No allocation in the per-cell/face hot path.
     dynamic_viscosity: Vec<f64>,
 }
@@ -151,6 +156,7 @@ impl SubgridTransport {
             ));
         }
         Ok(Self {
+            wall_models: [None; 6],
             closure: SubgridClosure::Local {
                 config,
                 widths,

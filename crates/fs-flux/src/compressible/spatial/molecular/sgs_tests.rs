@@ -1,6 +1,9 @@
 use super::*;
 use crate::compressible::spatial::molecular::sgs::{SgsModel, SgsUse, SubgridConfig};
 
+#[path = "sgs/wall_tests.rs"]
+mod wall;
+
 fn config(model: SgsModel) -> SubgridConfig {
     SubgridConfig {
         model,

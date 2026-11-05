@@ -3,7 +3,8 @@
 //! Only the two homogeneous periodic directions are test-filtered. The current
 //! physical no-slip wall data determine the shared half-cell derivatives.
 //! Interior modeled transport uses the original stress/work/heat faces and
-//! parabolic estimate; impermeable wall fluxes remain purely molecular.
+//! parabolic estimate; impermeable wall fluxes remain molecular unless an
+//! equilibrium adiabatic stress model is explicitly selected.
 
 use super::*;
 use fs_lbm::sgs3::dynamic::DynamicSgsError;
@@ -110,9 +111,10 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Both stationary/moving tangential walls and adiabatic/isothermal heat
     /// conditions retain their original material and half-cell flux owner.
     ///
-    /// This is a resolved-wall, low-Mach exploration closure. It supplies no
-    /// coarse-grid wall function, shock model or full compressible SGS energy
-    /// equation. All added arrays obey the byte budget and are reused.
+    /// This is a low-Mach exploration closure with resolved walls by default;
+    /// [`Self::with_equilibrium_sgs_wall`] can explicitly model smooth adiabatic
+    /// wall stress. No shock model or full compressible SGS energy equation
+    /// is supplied. All added arrays obey the byte budget and are reused.
     pub fn with_channel_dynamic_thermal_sgs(
         flow: &Euler3d,
         law: L,
@@ -191,6 +193,7 @@ impl SubgridTransport {
         dynamic::admit_bytes(bytes, maximum_bytes)?;
         Ok(Self {
             closure: SubgridClosure::ChannelDynamicThermal(closure),
+            wall_models: [None; 6],
             dynamic_viscosity,
         })
     }

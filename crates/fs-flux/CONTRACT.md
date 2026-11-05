@@ -2310,8 +2310,9 @@ ghosts mirror all components about the wall, supplying the full SGS gradient.
 Wall shear and Fourier heat use the physical half-cell distance; stress work
 uses the prescribed wall velocity. The original transport law is evaluated at
 the cell/wall mean temperature for an isothermal surface. Modeled SGS stress
-and heat vanish at impermeable faces, leaving molecular wall transport and a
-requirement to resolve the wall layer. Normal wall motion, out-of-domain
+and heat vanish at impermeable faces by default. An explicitly configured
+smooth equilibrium SGS wall may supply adiabatic tangential stress as described
+below; other walls require a resolved molecular layer. Normal wall motion, out-of-domain
 temperature and assigning a wall to periodic/transmissive sides refuse.
 Open ends retain zero molecular flux unless the complete-reservoir exchange
 is explicitly enabled as described below. The combined normal wall traction is
@@ -2366,10 +2367,69 @@ stress/heat formula, temperature-mode decay, refusal atomicity and bitwise
 replay. These are numerical consistency tests, not DNS/experimental turbulence
 validation. The local stress/heat model follows Nicoud's 2007 course equations
 (24)-(26); no backscatter, SGS kinetic-energy equation,
-pressure-dilatation or shock/turbulence closure, evolving-species mixing, or
-wall function is supplied. Reflecting sides use the molecular wall treatment
-above, with zero modeled SGS flux at the face. Acceptance renders refuse. This opt-in low-Mach exploration lane does
+pressure-dilatation or shock/turbulence closure or evolving-species mixing is
+supplied. Reflecting sides retain the molecular wall treatment unless the
+equilibrium SGS wall below is explicitly selected. Acceptance renders refuse. This opt-in low-Mach exploration lane does
 not change the default solver, incompressible BDM, or reacting-mixture paths.
+
+### Smooth equilibrium wall stress for coarse SGS gas meshes
+
+Both frozen-gas and evolving-mixture `MolecularTransport3d` owners expose
+`with_equilibrium_sgs_wall(side, EquilibriumWallConfig)` under `experimental-sgs`.
+Configure an adiabatic no-slip physical wall and an explicit local or channel
+dynamic SGS operator first. Frozen `MolecularEuler3d` exposes the same selector;
+the mixture coupled/reactive owners consume the already configured operator.
+No default wall or zero-interior-coefficient behavior changes without this
+additional selection. The current original source density, molecular viscosity,
+sound speed, wall velocity and physical half-cell distance are used at every
+face evaluation, SSP stage and retry. The source law is not evaluated twice.
+
+This integration reuses `fs-lbm::conjugate::turbulence::law_of_the_wall_ratios`
+with its Spalding constants `kappa=0.41`, `E=8.6`. The profile satisfies
+`y+ = u+ + [exp(kappa*u+) - 1 - kappa*u+ - (kappa*u+)^2/2 -
+(kappa*u+)^3/6]/E` and `u+*y+ = rho*|u_t-u_wall|*y/mu`.
+Its **secant** `r=y+/u+` supplies `mu_wall=mu*r`, giving the physical traction
+`rho*u_tau^2` over the actual half-cell distance and a continuous molecular
+limit at rest and within the viscous sublayer. Tangential traction opposes
+the wall-relative velocity; bulk viscosity and normal stress retain their
+original molecular source values. The existing wall-work flux uses the same
+wall velocity and modified traction. No separate viscous heating, SGS kinetic
+energy or chemical source is introduced; an adiabatic stationary wall exchanges
+momentum without removing total gas energy, while a moving wall transfers its
+native mechanical work. Species flux and the original zero wall heat flux
+remain unchanged.
+
+The nonlinear traction derivative enters the original parabolic bound.
+For `s=dy+/du+`, the largest tangential Jacobian eigenvalue multiplied by the
+wall distance is `mu*2*r*s/(r+s)`, rather than the smaller secant viscosity.
+The frozen operator uses this shear coefficient in its full stress row-sum
+estimate; the mixture owner adds its excess over the already accounted
+molecular shear bound. Both retain the original half-cell and three-axis
+inverse lengths. Six fixed-size wall controls add no per-face allocation or
+numerical heap workspace, and dynamic heat/species fits remain independent.
+
+The explicit controls admit `0 < maximum_wall_distance_plus <= 1000` and
+`0 < maximum_mach_number <= 0.3`; current states outside either authored bound
+refuse the complete trial without clipping wall stress. The Mach check uses
+the full wall-relative velocity. Positive source density and molecular
+viscosity are required. Changing a modeled side to slip or isothermal also
+refuses, since no turbulent thermal wall law is supplied. These numerical
+checks do not establish physical applicability: the caller must select smooth,
+attached, approximately equilibrium flow and an adjacent sample within its
+inner layer. Roughness, separation/adverse-pressure-gradient corrections,
+transition, nonequilibrium wall history and shock interactions are absent.
+This is an engineering wall closure, not a turbulent-channel DNS qualification.
+
+Focused regressions manufacture Spalding samples across the viscous, buffer
+and logarithmic layers and differentiate traction independently to check the
+stability coefficient. Native frozen and mixture faces cover all normal axes,
+both wall signs, local and channel dynamic momentum/heat/species owners,
+moving-wall work, species impermeability, no added workspace, enhanced
+coarse-cell braking and total-energy conservation. Late wall-domain refusal
+preserves accepted fields, loads and mixture reports. The coefficient check
+also covers rest, the viscous limit and wall-relative Galilean invariance.
+
+### Periodic dynamic gas transport
 
 Both frozen-gas molecular owners also expose `with_dynamic_sgs`, which consumes
 the original `fs-lbm::sgs3::dynamic::PeriodicDynamicSgs` Favre--Germano fit at
@@ -2445,8 +2505,9 @@ Interior faces use the original conservative stress, stress work and heat
 operator, adding `mean(rho*nu_t)` to shear viscosity and
 `mean(rho*alpha_t)*Cp(T_face)` to conductivity from the original caloric source.
 The original molecular bulk viscosity is retained. Modeled stress and heat
-vanish at the physical wall: the native molecular half-cell traction, Fourier
-heat and prescribed-wall-velocity work remain their sole owners. Fits and total
+vanish at the physical wall by default; the explicit equilibrium wall selector
+can replace adiabatic tangential traction while retaining the same wall-work
+owner. Other walls keep molecular half-cell traction and Fourier heat. Fits and total
 parabolic estimates are refreshed at every original SSP stage and retry,
 including both molecular halves of `MolecularEuler3d`. The existing complete
 interval transaction owns accepted cells, time, reports and boundary impulses;
@@ -2456,9 +2517,9 @@ The caller's additional SGS capacity budget covers all filter, primitive
 staging and coefficient arrays: nominally 256 bytes/cell, excluding existing
 molecular/Euler workspaces, fixed metadata and allocator overhead. These arrays
 are reused without per-stage allocation. Periodic constructors keep their
-existing geometry and numerical arithmetic. This is a low-Mach resolved-wall
-exploration model requiring adequate normal resolution; it supplies no
-coarse-grid wall function, curved/open channel treatment, SGS kinetic-energy
+existing geometry and numerical arithmetic. This is a low-Mach exploration
+model requiring either adequate wall resolution or the explicitly admitted
+equilibrium stress treatment; it supplies no curved/open channel treatment, SGS kinetic-energy
 equation, compressible pressure-dilatation or shock closure. Acceptance renders
 refuse, and no turbulent DNS or arbitrary-aspect-ratio accuracy is established.
 
@@ -2865,10 +2926,11 @@ offsets. No separate chemical or viscous heating source is added. The original
 face receipt now exposes its actual molecular `dynamic_viscosity_pa_s`, so
 the eddy/molecular ratio is checked without evaluating a stateful law twice.
 
-Physical walls keep molecular transport with zero modeled wall flux. A
+Physical walls keep molecular transport with zero modeled wall flux by default. A
 prescribed constant no-slip wall uses zero physical tangential derivatives
 in its normal traction, even when adjacent-cell divergence is nonzero. This
-requires a resolved wall layer and supplies no wall function. The existing
+requires a resolved wall layer unless the smooth equilibrium stress model
+above is explicitly selected on an adiabatic side. The existing
 `ReactingEuler3d::step_with_dissipation` composes this transport with its
 unchanged chemistry; no turbulent reaction-rate or flame-wrinkling closure
 is inferred.
@@ -2914,9 +2976,10 @@ source calorics and molecular bulk viscosity. The modeled common species flux
 `j_i = -mean(rho*D_t)*grad(Y_i)` uses the existing present-species pivot, exactly
 absent species and matching source-referenced partial enthalpies in conservative
 total energy. Independent heat and species transport remain available when
-the momentum fit vanishes. Modeled stress, heat and species flux are zero on
-physical walls; the original half-cell stress, heat and prescribed-wall work
-remain authoritative. Every SSP stage and retry refreshes the fits and the
+the momentum fit vanishes. Modeled heat and species flux are zero on physical
+walls; an explicit equilibrium wall may supply tangential stress using the
+same prescribed-wall work. Other walls retain the molecular half-cell stress
+and heat. Every SSP stage and retry refreshes the fits and the
 combined viscous/thermal/species-enthalpy stability bound. The existing complete
 interval and reactive split owners retain accepted state, reports and boundary
 exchanges.
@@ -2926,8 +2989,8 @@ numerical bytes/cell over molecular-only flow, independent of species count.
 All arrays are reused without per-stage allocation or a transposed species
 field. Positive coefficient, molecular stress/heat ratio and physical species
 diffusivity bounds refuse rather than clip; negative fits use zero backscatter.
-This is a low-Mach resolved-wall exploratory closure, without a coarse-grid
-wall function, curved/open geometry, catalytic or turbulent reaction-rate
+This is a low-Mach exploratory closure with resolved walls by default and an
+optional smooth adiabatic equilibrium wall stress, without curved/open geometry, catalytic or turbulent reaction-rate
 model, SGS kinetic-energy equation or shock/pressure-dilatation closure.
 Acceptance renders refuse; no turbulent DNS or arbitrary-aspect-ratio accuracy
 is established.
@@ -5001,8 +5064,9 @@ rectangular uniform cells are supported. Tangential directions require at
 least three cells; two normal cells suffice for fixed-temperature walls,
 while any adiabatic wall requires three. Complete storage adds 264 nominal
 numerical bytes per fluid cell, with reused buffers and atomic field/report
-publication. Applicability remains low-Mach, wall-resolved exploratory LES;
-no wall function, dynamic species channel fit, reaction-rate model or
+publication. Applicability remains low-Mach exploratory LES, with resolved
+walls by default and optional smooth adiabatic equilibrium wall stress;
+no reaction-rate model or
 DNS-accuracy qualification is claimed.
 
 Four new native tests cover original source Cp/partial enthalpy and wall work,

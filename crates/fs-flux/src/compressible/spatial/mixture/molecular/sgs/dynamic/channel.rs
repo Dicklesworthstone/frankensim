@@ -90,6 +90,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             result = result.with_wall(side_for(normal, upper), wall)?;
         }
         result.sgs = Some(SubgridTransport {
+            wall_models: [None; 6],
             closure: ViscosityClosure::ChannelDynamicSpecies(ChannelDynamicSpeciesTransport {
                 config,
                 momentum: ChannelDynamicSgs::new_cartesian(

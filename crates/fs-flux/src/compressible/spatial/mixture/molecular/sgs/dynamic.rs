@@ -96,6 +96,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         let dynamic = DynamicTransport::new(&flow.grid, config)?;
         result.sgs = Some(SubgridTransport {
             closure: ViscosityClosure::Dynamic(dynamic),
+            wall_models: [None; 6],
             dynamic_viscosity: allocated(flow.cell_count(), 0.0)?,
             heat_capacity_v_density: allocated(flow.cell_count(), 0.0)?,
         });
