@@ -286,10 +286,52 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
         controls: NavierStokesControls,
         resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
     ) -> Result<MaterialNavierStokesRheologyStep<G>, MaterialFluxError> {
+        self.bdf2_navier_stokes_mixed_rheology_step(
+            force_density,
+            boundaries,
+            previous_velocity,
+            None,
+            timestep_s,
+            controls,
+            resolve,
+        )
+    }
+
+    /// Equal-step BDF2 pressure-driven generalized-Newtonian flow with the
+    /// original source law, or original BDF1 startup when older history is None.
+    ///
+    /// Both velocity histories are original BDM1 moments at the same fixed
+    /// mesh and reference density; their intervals must equal `timestep_s`.
+    /// The actual previous velocity initializes each source query. Only the
+    /// inertial load uses BDF2's two-history combination, while viscosity and
+    /// convection converge together at the returned physical endpoint.
+    ///
+    /// Force density, traction, pressure and heat retain their original SI
+    /// units and reference-density normalization. Exact final material owners
+    /// are retained in [`MaterialNavierStokesRheologyStep::samples`]. Returned
+    /// kinetic energy and viscous heating describe that endpoint; multiplying
+    /// its heating rate by dt does not establish a BDF2 energy/heat balance.
+    /// There is no temperature, composition or density evolution, variable-step
+    /// integration, moving-mesh history or whole-scheme passivity claim.
+    ///
+    /// # Errors
+    /// Preserves native two-history admission, original source refusals and
+    /// nonlinear endpoint checks without changing either caller-owned history.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bdf2_navier_stokes_mixed_rheology_step<G: FluidTransport>(
+        &self,
+        force_density: &dyn Fn([f64; 2]) -> [f64; 2],
+        boundaries: &[MaterialNavierStokesBoundary<'_>],
+        previous_velocity: &[f64],
+        older_velocity: Option<&[f64]>,
+        timestep_s: f64,
+        controls: NavierStokesControls,
+        resolve: impl FnMut(MaterialFluxRheologyPoint, &FluidTransportState) -> Result<G, MaterialError>,
+    ) -> Result<MaterialNavierStokesRheologyStep<G>, MaterialFluxError> {
         let density = self.transport.density_kg_m3();
         let field = RheologyField::new(&self.system.mesh.centroids, &self.transport, resolve);
         let result = with_kinematic_boundaries(density, boundaries, |native| {
-            self.system.bdf1_navier_stokes_mixed_rheology_step_checked(
+            self.system.bdf2_navier_stokes_mixed_rheology_step_checked(
                 self.params,
                 &|cell, _, rate| field.viscosity(cell, rate),
                 &|point| {
@@ -298,6 +340,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
                 },
                 native,
                 previous_velocity,
+                older_velocity,
                 timestep_s,
                 controls,
                 &|| field.is_valid(),

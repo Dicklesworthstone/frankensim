@@ -529,9 +529,9 @@ geometry and must never be labelled as volts or discharge reach.
 - 3D (tets, BDM on faces), BDM2+/higher-order pressures, and curved
   boundaries — recorded successors on the same dof-Vandermonde
   surface (bead dcng's high-order FEEC would unblock them).
-- Projection/splitting time integrators, nonlinear Navier–Stokes BDF2 and
-  BDF3+ remain successors. Equal-step linear mixed-Stokes BDF2 is available
-  below; the IMEX convection entry remains BDF1.
+- Projection/splitting time integrators, variable-step nonlinear BDF2 and
+  BDF3+ remain successors. Equal-step mixed-Stokes and generalized-Newtonian
+  mixed Navier–Stokes BDF2 are available below; IMEX convection remains BDF1.
 - Fine-mesh Ghia tables, Re=1000 cavity, cylinder benchmarks, and
   asymptotic-regime convergence confirmation — perf-lane scope,
   ledgered in invariants 2 and 4.
@@ -1423,6 +1423,25 @@ Reporting does not query the source again. Captured temperature/composition
 stay fixed, and this generalized-Newtonian law adds no material fitting,
 thermal evolution, viscoelastic memory or density evolution.
 
+The native and material-bound `bdf2_navier_stokes_mixed_rheology_step`
+entries use `(3 u_new - 4 u_n + u_(n-1))/(2 dt)` on the same fixed mesh and
+constant reference density. Both history intervals must equal the supplied
+timestep. `older_velocity=None` is the original BDF1 startup, bit-for-bit;
+two finite histories are otherwise required. One per-step mass-load vector
+`(4 u_n-u_(n-1))/3` and effective mass timestep `2 dt/3` reuse the original
+quadrature and reaction rows. The actual u_n initializes strain and convection;
+the load combination is never used as a physical constitutive query. Invalid
+or unrepresentable histories refuse before boundary, force or source callbacks.
+No history buffer is allocated in the startup path or inside nonlinear loops.
+
+This extends temporal accuracy for smooth resolved, converged nonlinear flows
+to second order, including the BDF1 startup at a fixed positive final time.
+Endpoint material owners, physical pressure and instantaneous `mu gamma²`
+heating retain their original meaning. The endpoint kinetic energy is not
+BDF2's two-history energy, and endpoint heating multiplied by dt is not a
+whole-step heat balance. There is no variable-step, ALE-history, thermal
+evolution or general nonlinear stability/passivity claim.
+
 The focused `navier_stokes_rheology.rs` regressions under `tests/stokes_boundary`
 and `tests/material_flow` add an independently derived affine unsteady flow
 with nonzero history, live convection and shear-dependent spatial viscosity;
@@ -1430,10 +1449,18 @@ both explicit backflow laws and traction pressure datums; independent endpoint
 assembly with lagged-strain and lagged-advection falsifiers; physical material
 swaps and analytic kinetic energy; retained final source identities and bounded
 query counts; and final-reassembly source/density refusals, invalid coefficients
-and exhausted nonlinear work without changed history. These regressions were
-added but not executed in the resource-limited implementation session. They
-claim no general nonlinear convergence, empirical material validity or error
-envelope beyond their explicit manufactured physics.
+and exhausted nonlinear work without changed history. They claim no general
+nonlinear convergence, empirical material validity or error envelope beyond
+their explicit manufactured physics.
+
+The G1/G3 BDF2 additions in those same files cover an independently differentiated
+time-quadratic affine flow with spatial rheology and both backflow policies;
+temporal refinement of exponential flow with real BDF1 startup; bit-identical
+startup; first source queries at actual historical strain; invalid two-history
+refusal; final source retention, physical pressure and instantaneous heating
+at different material densities; and endpoint source refusal with both
+histories preserved. These are numerical manufactured-flow checks, not
+empirical validation of a named material or an integrated thermal model.
 
 ## Discrete pressure and viscous boundary reactions
 

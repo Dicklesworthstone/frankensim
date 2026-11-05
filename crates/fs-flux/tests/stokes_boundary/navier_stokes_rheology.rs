@@ -185,3 +185,252 @@ fn mixed_rheology_rejects_invalid_coefficients_and_exhausted_work() {
     ));
     assert!(previous.iter().all(|value| *value == 0.0));
 }
+
+#[test]
+fn bdf2_quadratic_time_flow_closes_spatial_rheology_and_actual_history_strain() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let dt = 0.08;
+    let time = 3.0 * dt;
+    let coefficients = |t: f64| {
+        [
+            0.2 + 0.3 * t + 0.1 * t * t,
+            0.35 + 0.2 * t - 0.15 * t * t,
+            0.4 + 0.1 * t + 0.4 * t * t,
+            0.1 - 0.05 * t + 0.2 * t * t,
+        ]
+    };
+    let velocity = |t: f64, p: [f64; 2]| {
+        let [a, b, c, d] = coefficients(t);
+        [a * p[0] + b * p[1] + c, -a * p[1] + d]
+    };
+    let previous = moments(&mesh, &|p| velocity(time - dt, p));
+    let older = moments(&mesh, &|p| velocity(time - 2.0 * dt, p));
+    let snapshots = [previous.clone(), older.clone()];
+    let previous_rates = system.shear_rates(&previous);
+    let first_rates = std::cell::RefCell::new(vec![None; mesh.tris.len()]);
+    let law = |cell: usize, p: [f64; 2], rate: f64| {
+        first_rates.borrow_mut()[cell].get_or_insert(rate);
+        (0.7 + 0.12 * p[0] + 0.08 * p[1]) / (1.0 + 0.25 * rate * rate)
+    };
+    let [a, b, c, d] = coefficients(time);
+    let rate = (4.0 * a * a + b * b).sqrt();
+    let denominator = 1.0 + 0.25 * rate * rate;
+    let target = |p| velocity(time, p);
+    // Independent differential equation: affine spatial velocity, quadratic
+    // time, linear spatial viscosity. BDF2 differentiates this time law exactly.
+    let force = |p: [f64; 2]| {
+        let acceleration = [
+            (0.3 + 0.2 * time) * p[0] + (0.2 - 0.3 * time) * p[1] + 0.1 + 0.8 * time,
+            -(0.3 + 0.2 * time) * p[1] - 0.05 + 0.4 * time,
+        ];
+        [
+            acceleration[0] + a * a * p[0] + a * c + b * d
+                - (2.0 * a * 0.12 + b * 0.08) / denominator
+                + 2.0,
+            acceleration[1] + a * a * p[1]
+                - a * d
+                - (b * 0.12 - 2.0 * a * 0.08) / denominator
+                - 3.0,
+        ]
+    };
+    for policy in [
+        OpenBoundaryPolicy::NaturalTraction,
+        OpenBoundaryPolicy::DissipativeBackflow,
+    ] {
+        let traction = |p: [f64; 2], n: [f64; 2]| {
+            let pressure = 5.0 + 2.0 * p[0] - 3.0 * p[1];
+            let nu = (0.7 + 0.12 * p[0] + 0.08 * p[1]) / denominator;
+            let u = target(p);
+            let resistance = match policy {
+                OpenBoundaryPolicy::NaturalTraction => 0.0,
+                OpenBoundaryPolicy::DissipativeBackflow => (u[0] * n[0] + u[1] * n[1]).min(0.0),
+            };
+            [
+                (2.0 * a * nu - pressure) * n[0] + b * nu * n[1] - resistance * u[0],
+                b * nu * n[0] + (-2.0 * a * nu - pressure) * n[1] - resistance * u[1],
+            ]
+        };
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, geometry)| {
+                if geometry.normal[0].abs() > 0.5 {
+                    NavierStokesBoundary::Open {
+                        edge,
+                        traction: &traction,
+                        backflow: policy,
+                    }
+                } else {
+                    NavierStokesBoundary::Velocity {
+                        edge,
+                        value: &target,
+                    }
+                }
+            })
+            .collect();
+        first_rates.borrow_mut().fill(None);
+        let step = system
+            .bdf2_navier_stokes_mixed_rheology_step(
+                FluxParams::default(),
+                &law,
+                &force,
+                &boundaries,
+                &previous,
+                Some(&older),
+                dt,
+                NavierStokesControls {
+                    relative_tolerance: 1e-10,
+                    ..NavierStokesControls::default()
+                },
+            )
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&step.solution.field.x, &target);
+        assert!(error < 3e-9 && divergence < 3e-9, "{error}, {divergence}");
+        assert!(step.nonlinear_residual <= 1e-10);
+        for (pressure, p) in step.solution.pressure.iter().zip(&mesh.centroids) {
+            assert!((pressure - (5.0 + 2.0 * p[0] - 3.0 * p[1])).abs() < 4e-8);
+        }
+        for (initial, expected) in first_rates.borrow().iter().zip(&previous_rates) {
+            assert_eq!(
+                *initial,
+                Some(*expected),
+                "mass history is not an initial strain state"
+            );
+        }
+    }
+    assert_eq!(previous, snapshots[0]);
+    assert_eq!(older, snapshots[1]);
+}
+
+#[test]
+fn bdf2_rheology_has_second_order_temporal_refinement_with_bdf1_startup() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let base = |p: [f64; 2]| [0.2 * p[0] + 0.3 * p[1] + 0.4, -0.2 * p[1] + 0.1];
+    let law = |_: usize, p: [f64; 2], rate: f64| (0.6 + 0.1 * p[0]) / (1.0 + 0.25 * rate * rate);
+    let mut errors = Vec::new();
+    for steps in [4, 8, 16] {
+        let dt = 0.4 / f64::from(steps);
+        let mut previous = moments(&mesh, &base);
+        let mut older = None;
+        for step in 1..=steps {
+            let time = f64::from(step) * dt;
+            let amplitude = (-time).exp();
+            let rate = 0.5 * amplitude;
+            let viscosity_slope = 0.1 / (1.0 + 0.25 * rate * rate);
+            let force = |p: [f64; 2]| {
+                let u = base(p).map(|value| amplitude * value);
+                [
+                    -u[0] + amplitude * amplitude * (0.04 * p[0] + 0.11)
+                        - 0.4 * amplitude * viscosity_slope
+                        + 2.0,
+                    -u[1] + amplitude * amplitude * (0.04 * p[1] - 0.02)
+                        - 0.3 * amplitude * viscosity_slope
+                        - 3.0,
+                ]
+            };
+            let traction = |p: [f64; 2], n: [f64; 2]| {
+                let pressure = 5.0 + 2.0 * p[0] - 3.0 * p[1];
+                let nu = law(0, p, rate);
+                [
+                    (0.4 * amplitude * nu - pressure) * n[0] + 0.3 * amplitude * nu * n[1],
+                    0.3 * amplitude * nu * n[0] + (-0.4 * amplitude * nu - pressure) * n[1],
+                ]
+            };
+            let boundaries = open(&mesh, &traction, OpenBoundaryPolicy::NaturalTraction);
+            let endpoint = system
+                .bdf2_navier_stokes_mixed_rheology_step(
+                    FluxParams::default(),
+                    &law,
+                    &force,
+                    &boundaries,
+                    &previous,
+                    older.as_deref(),
+                    dt,
+                    NavierStokesControls {
+                        relative_tolerance: 1e-11,
+                        ..NavierStokesControls::default()
+                    },
+                )
+                .unwrap();
+            older = Some(previous);
+            previous = endpoint.solution.field.x[..system.n_u].to_vec();
+        }
+        let error = system
+            .velocity_error(&previous, &|p| base(p).map(|u| (-0.4_f64).exp() * u))
+            .0;
+        errors.push(error);
+    }
+    for pair in errors.windows(2) {
+        assert!(
+            pair[0] / pair[1] > 3.2 && pair[0] / pair[1] < 4.8,
+            "{errors:?}"
+        );
+    }
+}
+
+#[test]
+fn bdf2_rheology_startup_is_bdf1_and_bad_histories_never_query_a_source() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let previous = vec![0.0; system.n_u];
+    let traction = |p: [f64; 2], n: [f64; 2]| {
+        let pressure = 3.0 - p[0];
+        [-pressure * n[0], -pressure * n[1]]
+    };
+    let boundaries = open(&mesh, &traction, OpenBoundaryPolicy::NaturalTraction);
+    let law = |_: usize, _: [f64; 2], rate: f64| 1.0 / (1.0 + 0.2 * rate);
+    let force = |_: [f64; 2]| [0.0; 2];
+    let bdf1 = system
+        .bdf1_navier_stokes_mixed_rheology_step(
+            FluxParams::default(),
+            &law,
+            &force,
+            &boundaries,
+            &previous,
+            0.02,
+            NavierStokesControls::default(),
+        )
+        .unwrap();
+    let startup = system
+        .bdf2_navier_stokes_mixed_rheology_step(
+            FluxParams::default(),
+            &law,
+            &force,
+            &boundaries,
+            &previous,
+            None,
+            0.02,
+            NavierStokesControls::default(),
+        )
+        .unwrap();
+    assert_eq!(startup.solution.field.x, bdf1.solution.field.x);
+    assert_eq!(startup.iterations, bdf1.iterations);
+    assert_eq!(startup.nonlinear_residual, bdf1.nonlinear_residual);
+    for (recent, old, dt) in [
+        (previous.clone(), vec![0.0; system.n_u - 1], 0.02),
+        (previous.clone(), vec![f64::NAN; system.n_u], 0.02),
+        (
+            vec![f64::MAX; system.n_u],
+            vec![-f64::MAX; system.n_u],
+            0.02,
+        ),
+        (previous.clone(), previous.clone(), 1.25 / f64::MAX),
+    ] {
+        let result = system.bdf2_navier_stokes_mixed_rheology_step(
+            FluxParams::default(),
+            &|_, _, _| panic!("invalid history queried viscosity"),
+            &|_| panic!("invalid history queried force"),
+            &boundaries,
+            &recent,
+            Some(&old),
+            dt,
+            NavierStokesControls::default(),
+        );
+        assert!(matches!(result, Err(StokesBoundaryError::InvalidInput(_))));
+    }
+    assert!(previous.iter().all(|value| *value == 0.0));
+}
