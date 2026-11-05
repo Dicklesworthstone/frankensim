@@ -8,8 +8,8 @@ import { PIECE_NAMES } from "../midi/arrange";
 
 const BLACK = [false, true, false, true, false, false, true, false, true, false, true, false];
 const isBlack = (m: number): boolean => BLACK[m % 12]!;
-const PIECE_ABBR: Record<PieceId, string> = { kick: "K", snare: "S", "snare-off": "S·", "tom-12": "T", "tom-14": "F", "hihat-closed": "H", "hihat-open": "O", crash: "C", ride: "R" };
-const CYMBAL = new Set<PieceId>(["hihat-closed", "hihat-open", "crash", "ride"]);
+const PIECE_ABBR: Record<PieceId, string> = { kick: "K", snare: "S", "snare-off": "S·", "tom-12": "T", "tom-14": "F", hihat: "H", crash: "C", ride: "R" };
+const CYMBAL = new Set<PieceId>(["hihat", "crash", "ride"]);
 
 interface Lane { x: number; w: number; black: boolean }
 
@@ -326,7 +326,15 @@ export class RollView {
       const d = Math.max(4, Math.min(this.drumW - 3, 3 + h.g * (this.drumW - 6)));
       const lit = now - h.t >= 0 && now - h.t < 0.09;
       g.beginPath();
-      g.arc(x + this.drumW / 2, y - d / 2, d / 2, 0, Math.PI * 2);
+      if (h.note === 44) {
+        // A foot closure is a different command from the round stick holes.
+        const centre = x + this.drumW / 2;
+        g.moveTo(centre, y - d);
+        g.lineTo(centre + d / 2, y - d / 2);
+        g.lineTo(centre, y);
+        g.lineTo(centre - d / 2, y - d / 2);
+        g.closePath();
+      } else g.arc(x + this.drumW / 2, y - d / 2, d / 2, 0, Math.PI * 2);
       if (lit) {
         const c = CYMBAL.has(h.piece) ? "#f0c674" : "#ef8a5a";
         g.fillStyle = c; g.shadowColor = c; g.shadowBlur = 10; g.fill(); g.shadowBlur = 0;

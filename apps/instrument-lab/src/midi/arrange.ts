@@ -8,19 +8,24 @@
 import { chordTimeline } from "./chords";
 import { orchestrate, type Role, type SourcePart } from "./orchestrate";
 import { tempoClock, type DecodedMidi, type DecodedTrack, type PairedNote } from "./smf";
+import { HIHAT_CLOSED_FORCE_N, HIHAT_TRANSITION_SECONDS } from "../live/hiHat";
 
-export type PieceId = "kick" | "snare" | "snare-off" | "tom-12" | "tom-14" | "hihat-closed" | "hihat-open" | "crash" | "ride";
+export type PieceId = "kick" | "snare" | "snare-off" | "tom-12" | "tom-14" | "hihat" | "crash" | "ride";
 export const PIECE_NAMES: Record<PieceId, string> = {
   kick: "Kick", snare: "Snare", "snare-off": "Snare, wires off", "tom-12": "Rack tom", "tom-14": "Floor tom",
-  "hihat-closed": "Hi-hat", "hihat-open": "Open hi-hat", crash: "Crash", ride: "Ride",
+  hihat: "Hi-hat", crash: "Crash", ride: "Ride",
 };
 
 /** A key the piano plays: times in seconds of the file at its own tempo. */
 export interface PianoNote { key: number; t: number; off: number; vel: number; speed: number }
 /** A key event for the engine (strike, release) or a pedal position. */
 export interface PianoEvent { t: number; on?: number; off?: number; silent?: number; speed?: number; sustain?: number; unaCorda?: boolean; sostenuto?: boolean }
-/** A stroke: where on the piece, as fractions of its radius, and a factor on its standard stick speed. */
+/** A roll marker: stroke position/rate, or note 44's pedal closure (g=0, never a stick strike). */
 export interface DrumHit { t: number; piece: PieceId; u: number; v: number; g: number; note: number; vel: number }
+/** Controls and stick strokes for ONE moving pair of hi-hat cymbals, in execution order. */
+export type HiHatEvent = { t: number; pedalForceN: number; transitionSeconds: number }
+  | { t: number; u: number; v: number; g: number };
+export interface HiHatPerformance { initialForceN: number; events: HiHatEvent[] }
 export type { Role } from "./orchestrate";
 /** A part of the file (one track and channel) and what the player did with it. */
 export interface Part { track: number; channel: number; name: string; role: Role; notes: number; program: number | null; actions: string[]; notesOut: number; leftOut: boolean }
@@ -34,6 +39,7 @@ export interface Arrangement {
   events: PianoEvent[];
   pedal: { t: number; value: number }[];
   hits: DrumHit[];
+  hiHat: HiHatPerformance;
   pieces: PieceId[];
   chords: { t: number; label: string }[];
   sections: { t: number; text: string }[];
@@ -166,9 +172,9 @@ const DRUM_MAP: Record<number, DrumRule> = {
   40: { piece: "snare", u: 0.3, v: 0.05, g: 1.05 },
   41: { piece: "tom-14", u: 0.35, v: 0.1, g: 1 },
   43: { piece: "tom-14", u: 0.3, v: 0.12, g: 1 },
-  42: { piece: "hihat-closed", u: 0.85, v: 0, g: 1 },
-  44: { piece: "hihat-closed", u: 0.85, v: 0.08, g: 0.6, label: "Pedal hi-hat → a soft closed-hat stroke (the pedal's own chick is not simulated)" },
-  46: { piece: "hihat-open", u: 0.85, v: 0, g: 1 },
+  42: { piece: "hihat", u: 0.85, v: 0, g: 1 },
+  44: { piece: "hihat", u: 0, v: 0, g: 0 },
+  46: { piece: "hihat", u: 0.85, v: 0, g: 1 },
   45: { piece: "tom-12", u: 0.4, v: 0.1, g: 1 },
   47: { piece: "tom-12", u: 0.35, v: 0.1, g: 1 },
   48: { piece: "tom-12", u: 0.3, v: 0.12, g: 1 },
@@ -202,6 +208,66 @@ const GM_PERCUSSION: Record<number, string> = {
   72: "Long whistle", 73: "Short güiro", 74: "Long güiro", 75: "Claves", 76: "High wood block", 77: "Low wood block", 78: "Mute cuíca",
   79: "Open cuíca", 80: "Mute triangle", 81: "Open triangle", 82: "Shaker", 83: "Jingle bell", 84: "Bell tree", 85: "Castanets", 86: "Mute surdo", 87: "Open surdo",
 };
+
+/**
+ * Interpret GM's discrete articulations as gestures on the same paired shells.
+ * A changed target gets up to one ramp of preparation, never before the preceding
+ * hi-hat note. Note 44 closes at its written onset, with no stick. When needed,
+ * release first; a preceding foot closure gets its full ramp before that release.
+ * Rapid notes may therefore arrive while the real shells are still moving.
+ * These are declared performer inputs, not fitted acoustics or an audio choke.
+ */
+export function hiHatPerformance(hits: readonly DrumHit[], tempoFactor = 1): HiHatPerformance {
+  if (!(Number.isFinite(tempoFactor) && tempoFactor > 0)) throw new Error("hi-hat tempo factor must be finite and positive");
+  const hats = hits.filter((h) => h.piece === "hihat");
+  const initialForceN = hats[0]?.note === 42 ? HIHAT_CLOSED_FORCE_N : 0;
+  const events: HiHatEvent[] = [];
+  let target = initialForceN;
+  let previous: DrumHit | undefined;
+  // The clock converts score seconds by tempoFactor. Pedal ramp durations are
+  // physical seconds, so scale only their preparatory interval on the score.
+  const preparation = HIHAT_TRANSITION_SECONDS * tempoFactor;
+  const pedal = (t: number, force: number): void => {
+    events.push({ t, pedalForceN: force, transitionSeconds: HIHAT_TRANSITION_SECONDS });
+    target = force;
+  };
+  for (const h of hats) {
+    const previousTime = previous?.t ?? 0;
+    if (h.note === 44) {
+      if (target > 0) {
+        const afterPrevious = previousTime + (previous?.note === 44 ? preparation : 0);
+        const releaseAt = Math.max(afterPrevious, h.t - preparation);
+        if (releaseAt < h.t) pedal(releaseAt, 0);
+      }
+      pedal(h.t, HIHAT_CLOSED_FORCE_N);
+    } else {
+      const force = h.note === 42 ? HIHAT_CLOSED_FORCE_N : 0;
+      // Do not anticipate an opening at the exact start of a preceding foot
+      // closure and cancel that gesture before the mechanics takes a step.
+      const afterPrevious = previousTime + (previous?.note === 44 ? preparation : 0);
+      const prepareAt = force === target ? h.t : Math.min(h.t, Math.max(afterPrevious, h.t - preparation));
+      pedal(prepareAt, force);
+      events.push({ t: h.t, u: h.u, v: h.v, g: h.g });
+    }
+    previous = h;
+  }
+  return { initialForceN, events };
+}
+
+/**
+ * Restore the target before a seek, then retain only unplayed controls/strokes.
+ * Preparatory moves count even when their associated strike is still ahead.
+ * Exact-boundary events remain in their original order; past vibration is not
+ * reconstructed and no old stick stroke is replayed.
+ */
+export function hiHatEventsFrom(performance: HiHatPerformance, from: number): HiHatPerformance {
+  let initialForceN = performance.initialForceN, i = 0;
+  for (; i < performance.events.length && performance.events[i]!.t < from; i++) {
+    const e = performance.events[i]!;
+    if ("pedalForceN" in e) initialForceN = e.pedalForceN;
+  }
+  return { initialForceN, events: performance.events.slice(i) };
+}
 
 // ------------------------------------------------------- track roles (copied)
 // Provenance: the M1-ROLE rule order and constants of jazz_chord_progression_editor_html (same
@@ -331,6 +397,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
       const rr = Math.max(0, Math.min(0.92, r + rand() * 0.07)), aa = a + rand() * (r > 0.05 ? 0.5 : 6);
       hits.push({ t, piece: rule.piece, u: rr * Math.cos(aa), v: rr * Math.sin(aa), g: rule.g * stickFactor(vel) * (1 + rand() * 0.04), note: n.key, vel: Math.round(vel) });
     }
+    if (notes.some((n) => [42, 44, 46].includes(n.key))) part.actions.push("one moving hi-hat pair; pedal notes close it without a stick strike");
     if (flat) part.actions.push(`every stroke written at velocity ${written[written.length >> 1]}: played at a drummer's ordinary weights`);
     if (silenced) part.actions.push(`${silenced} strokes silenced by the file's own volume`);
   }
@@ -342,7 +409,11 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     const kept: DrumHit[] = [];
     for (const h of hits) {
       const prev = lastAt.get(h.piece);
-      if (prev && h.t - prev.t < 0.045) { prev.g = Math.max(prev.g, h.g); report.drumsLayered++; continue; }
+      // Distinct hi-hat articulations are ordered pedal/strike commands on one
+      // physical pair. They must survive, even at the same tick. Foot commands
+      // are never merged with a stick or suppressed by the strike-rate limit.
+      const sameStroke = h.piece !== "hihat" || (h.note === prev?.note && h.note !== 44);
+      if (prev && sameStroke && h.t - prev.t < 0.045) { prev.g = Math.max(prev.g, h.g); report.drumsLayered++; continue; }
       lastAt.set(h.piece, h);
       kept.push(h);
     }
@@ -529,7 +600,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
   const lastHit = hits.length ? hits[hits.length - 1]!.t : 0;
   const lastEventS = Math.max(lastNote, lastHit, events.at(-1)?.t ?? 0);
   const usedPieces = [...new Set(hits.map((h) => h.piece))];
-  const order: PieceId[] = ["kick", "snare", "snare-off", "hihat-closed", "hihat-open", "tom-12", "tom-14", "ride", "crash"];
+  const order: PieceId[] = ["kick", "snare", "snare-off", "hihat", "tom-12", "tom-14", "ride", "crash"];
   const tempo0 = midi.tempoMap.find((e) => e.tick <= 0) ?? midi.tempoMap[0];
   const meter0 = midi.meterMap.reduce<{ m: (typeof midi.meterMap)[number] | null; span: number }>((best, m, i) => {
     const span = (midi.meterMap[i + 1]?.tick ?? lastTick) - m.tick;
@@ -546,6 +617,7 @@ export function arrange(midi: DecodedMidi, fileName: string): Arrangement {
     events,
     pedal,
     hits,
+    hiHat: hiHatPerformance(hits),
     pieces: order.filter((p) => usedPieces.includes(p)),
     chords,
     sections,

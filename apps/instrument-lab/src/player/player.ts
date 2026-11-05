@@ -11,7 +11,8 @@ import { createLiveAudioContext } from "../live/liveAudio";
 import { createLiveMix, KitLane, LaneDisposed, PianoLane, type KitReady, type KitScoreEvent, type LaneWorkerStats, type LiveMix, type PianoReady } from "../live/mix";
 import { parsePianoSnapshot } from "../live/pianoClient";
 import { decodeMidi, MAX_MIDI_BYTES } from "../midi/smf";
-import { arrange, gmInstrument, pianoEventsFrom, PIECE_NAMES, type Arrangement, type PieceId } from "../midi/arrange";
+import { arrange, gmInstrument, hiHatEventsFrom, hiHatPerformance, pianoEventsFrom, PIECE_NAMES, type Arrangement, type PieceId } from "../midi/arrange";
+import { HIHAT_CLOSED_FORCE_N, HIHAT_TRANSITION_SECONDS } from "../live/hiHat";
 import { RollView } from "./roll";
 import { SoundboardView } from "./soundboard3d";
 import { KitView, fmtJ } from "./kit3d";
@@ -30,9 +31,9 @@ const LEAD_WARM_S = 0.85;
 /** One fixed playback gain per instrument (see the evidence note). */
 const PIANO_GAIN = 0.8;
 /** Standard stick speeds [m/s] and the live kit's per-piece gains (src/live/kitStage.ts). */
-const STICK: Record<PieceId, number> = { kick: 3.0, snare: 4.5, "snare-off": 4.5, "tom-12": 3.5, "tom-14": 3.5, "hihat-closed": 2.5, "hihat-open": 2.5, crash: 6.0, ride: 2.5 };
+const STICK: Record<PieceId, number> = { kick: 3.0, snare: 4.5, "snare-off": 4.5, "tom-12": 3.5, "tom-14": 3.5, hihat: 2.5, crash: 6.0, ride: 2.5 };
 // the live kit section's gains (src/live/kitStage.ts), re-derived for the retuned kit (fs-vkplate 96ccf8f1b)
-const KIT_GAIN: Record<PieceId, number> = { kick: 0.0319, snare: 0.0129, "snare-off": 0.0115, "tom-12": 0.0276, "tom-14": 0.0267, "hihat-closed": 0.134, "hihat-open": 0.134, crash: 0.0496, ride: 0.182 };
+const KIT_GAIN: Record<PieceId, number> = { kick: 0.0319, snare: 0.0129, "snare-off": 0.0115, "tom-12": 0.0276, "tom-14": 0.0267, hihat: 0.134, crash: 0.0496, ride: 0.182 };
 const IDLE_DISPOSE_MS = 90_000;
 /**
  * Each piece's grid choice: the grid coarsenings it may use (finest first) and the speed it must
@@ -68,8 +69,7 @@ const GRID: Record<PieceId, { scales: number[]; minRt: number; benchMs?: number 
   "snare-off": { scales: [4, 5, 6, 7, 8], minRt: 1.5 },
   "tom-12": { scales: [5, 6], minRt: 1.8 },
   "tom-14": { scales: [4, 5, 6], minRt: 1.8 },
-  "hihat-closed": { scales: [4, 4.5, 6, 7], minRt: 1.5 },
-  "hihat-open": { scales: [4, 4.5, 6, 7], minRt: 1.5 },
+  hihat: { scales: [4, 4.5, 6, 7], minRt: 1.5 },
   crash: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
   ride: { scales: [3, 3.5, 4, 5, 6], minRt: 1.5 },
 };
@@ -497,7 +497,11 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
    * restarted one grid coarser (see the stats handler), and the page says so.
    */
   function startPiece(m: LiveMix, p: PieceId, scales: number[]): Promise<void> {
-    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], aheadFrames: AHEAD, chunk: CHUNK, minRealtime: GRID[p].minRt, benchMs: GRID[p].benchMs, scales, fieldFrames: SR / 40, bursts: false });
+    const from = phase === "playing" ? scoreTime() + LEAD_WARM_S : position;
+    const hihatPedal = p === "hihat" && arr
+      ? { initialForceN: hiHatEventsFrom(hiHatPerformance(arr.hits, tempoFactor), from).initialForceN }
+      : undefined;
+    const lane = new KitLane(m, p, { gain: KIT_GAIN[p], hihatPedal, aheadFrames: AHEAD, chunk: CHUNK, minRealtime: GRID[p].minRt, benchMs: GRID[p].benchMs, scales, fieldFrames: SR / 40, bursts: false });
     const entry = { lane, ready: null as KitReady | null };
     kits.set(p, entry);
     const h: Health = { rt: 0, late: 0, gap: 0, base: 0, skipBase: 0, detail: "", slow: 0 };
@@ -644,11 +648,22 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     for (const h of Object.values(health)) { h.base = h.late; h.skipBase = h.stats?.skippedFrames ?? 0; }
   }
 
-  /** A piece's strokes from score time `from` on, on the clock of the score now playing. */
+  /** A piece's physical controls from `from` on, on the current score clock. */
   function kitScore(p: PieceId, from: number): KitScoreEvent[] {
     if (!arr) return [];
     const R = kits.get(p)?.ready?.radius ?? 0.2;
     const at = (t: number): number => startFrame + ((t - startPos) / tempoFactor) * SR;
+    if (p === "hihat") {
+      const resumed = hiHatEventsFrom(hiHatPerformance(arr.hits, tempoFactor), from);
+      // Restore only the old pedal target during the muted lead-in. Warm seeks
+      // keep the existing vibration semantics; no historical stick is replayed.
+      // A cold/rebuilt lane is already prepared at this target by its constructor.
+      return [{ frame: at(from) - (HIHAT_TRANSITION_SECONDS + 0.04) * SR,
+        pedalForceN: resumed.initialForceN, transitionSeconds: HIHAT_TRANSITION_SECONDS },
+      ...resumed.events.map((e): KitScoreEvent => "pedalForceN" in e
+        ? { frame: at(e.t), pedalForceN: e.pedalForceN, transitionSeconds: e.transitionSeconds }
+        : { frame: at(e.t), x: e.u * R, y: e.v * R, speed: STICK.hihat * e.g })];
+    }
     return arr.hits.filter((h) => h.piece === p && h.t >= from).map((h) => ({ frame: at(h.t), x: h.u * R, y: h.v * R, speed: STICK[p] * h.g }));
   }
 
@@ -809,7 +824,9 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
   }
   function readyLine(a: Arrangement): string {
     const n = a.pieces.length;
-    return `${a.notes.length.toLocaleString("en-US")} piano notes${a.hits.length ? ` and ${a.hits.length.toLocaleString("en-US")} drum strokes on ${n} piece${n > 1 ? "s" : ""}` : ""}, ${fmtTime(a.durationS)}. Press Play.`;
+    const feet = a.hits.filter((h) => h.note === 44).length;
+    const percussion = `${(a.hits.length - feet).toLocaleString("en-US")} drum strokes${feet ? ` and ${feet.toLocaleString("en-US")} hi-hat pedal closures` : ""}`;
+    return `${a.notes.length.toLocaleString("en-US")} piano notes${a.hits.length ? ` and ${percussion} on ${n} piece${n > 1 ? "s" : ""}` : ""}, ${fmtTime(a.durationS)}. Press Play.`;
   }
   function playingLine(): string {
     return tempoFactor === 1 ? "Playing. Every note is computed in this tab about a second before you hear it." : `Playing at ${Math.round(tempoFactor * 100)}% of the file's tempo.`;
@@ -880,6 +897,8 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
     const drumBlock = a.hits.length || r.drumNotesIn
       ? el("div", { class: "pp-drums" },
         el("ul", { class: "pp-drum-bars" }, ...[...counts].map(([p, n]) => el("li", {}, el("span", {}, PIECE_NAMES[p]), el("i", { style: `--w:${((n / maxCount) * 100).toFixed(1)}%` }), el("b", { class: "num" }, n.toLocaleString("en-US"))))),
+        a.pieces.includes("hihat") ? el("p", { class: "small muted" }, el("b", {}, "One hi-hat pair: "),
+          `${a.hits.filter((h) => h.note === 44).length} pedal closures (diamond marks), without a stick strike. Closed/open notes command ${HIHAT_CLOSED_FORCE_N}/0 N with ${HIHAT_TRANSITION_SECONDS * 1000} ms ramps, prepared between notes when time allows. Repeated pedal notes release first; rapid changes can arrive while the cymbals are still moving. This declared gesture is not a measured performance.`) : null,
         mapped.length ? el("p", { class: "small muted" }, el("b", {}, "Substituted: "), mapped.map(([k, n]) => `${k} (${n})`).join("; "), ".") : null,
         r.drumsLayered ? el("p", { class: "small muted" }, el("b", {}, "Layered: "), `${r.drumsLayered} drum notes struck together on one piece (a doubled kick) played as one stroke.`) : null,
         skipped.length ? el("p", { class: "small pp-skipped" }, el("b", {}, "Skipped, no matching piece: "), skipped.map(([k, n]) => `${k} ×${n}`).join(", "), ".") : null)
@@ -945,7 +964,10 @@ export async function mountPlayer(root: HTMLElement): Promise<void> {
       // strokes being heard now: flash the pad and the stick mark
       while (hitCursor < a.hits.length && a.hits[hitCursor]!.t <= t) {
         const h = a.hits[hitCursor++]!;
-        if (t - h.t < 0.25) { roll.flash(h.piece, wall); kit.stroke(h.piece, h.u, h.v, wall); }
+        if (t - h.t < 0.25) {
+          roll.flash(h.piece, wall);
+          if (h.note !== 44) kit.stroke(h.piece, h.u, h.v, wall);
+        }
       }
       // the soundboard as it is now
       let due: { frame: number; data: Float32Array } | null = null;
@@ -1163,12 +1185,12 @@ function evidenceBody(): HTMLElement {
       p("Velocity sets the hammer's speed as it leaves the escapement, log-linear between 0.6 m/s (velocity 1), 2 m/s (64, mezzo-forte) and 5 m/s (127). Controller 64 is the sustain pedal, with half-pedal positions kept. Soft pedal (67, on at 64 or above) uses the grand's una corda: later strikes miss the last string of each unison, leaving at least one. It does not reduce hammer speed or apply a volume filter; the model does not shift the felt material. Sostenuto (66, also on at 64 or above) catches the dampers of keys held when it goes down; with full sustain down then, it catches every raised damper. Later keys are not caught. Either pitched part can hold each pedal down. At the same score time, releases precede sustain and soft-pedal changes, then sostenuto, then strikes. Channel volume (7) and expression (11) scale each note's velocity as it starts, and a note they fade to silence is not played; other controllers are not used."),
       p("Resuming, seeking or changing tempo restores captured dampers using silent key presses and the existing pedals before re-striking keys still held. It preserves which dampers sostenuto caught, including keys released since; it does not reconstruct their earlier vibration."),
       p("Drum notes go to the piece their General MIDI number names: kick, snare (side stick near the rim, claps on the snare), rack and floor toms, crash (china and splash too), ride and its bell; bongos and congas to the toms, timbales to the snare with its wires off. Anything else is skipped and listed. Velocity scales the piece's standard stroke, and each stroke lands a little away from the last, so no two are identical."),
-      p("Hi-hats: closed strokes play the closed hat, open strokes the open one, and a pedal note a softer closed stroke (the pedal's own chick is not simulated). The two cymbals rub at their rims with dry friction, so a closed stroke dies within a few tenths of a second, as on a real hat; on the coarse grids a browser can afford, it is darker than a real hat (little above 4 kHz). The open and closed hats are separate simulations, so a closed stroke does not choke an open one still ringing."),
+      p(`Hi-hats: closed and open notes press or release the pedal, then strike one shared pair of cymbals. A foot note moves only the pedal, with no stick strike. The pair keeps its motion and rim-contact state, so closing the pedal acts on an open stroke still ringing. The declared gesture uses ${HIHAT_CLOSED_FORCE_N}/0 N targets and ${HIHAT_TRANSITION_SECONDS * 1000} ms ramps, prepared between notes when time allows; rapid changes can arrive while the cymbals are still moving. Seeking restores the pedal target without replaying old strikes.`),
       p("The engines have limits, and the roll keeps within them where it can: a chord of more than ten notes keeps its bass, its top and its loudest notes; no more than sixteen strikes in any quarter second. The piano simulates 24 sounding keys at once; beyond that the quietest strings are retired early.")),
     el("div", {},
       el("h4", {}, "What is computed"),
       p("The piano is engine-piano, the grand's own hammer, string, damper and soundboard equations for the keys that are sounding, on the largest soundboard this device keeps up with (16 to 128 coordinates, chosen for this device when the engines start). Each drum piece is fs-vkplate, the plate solver of the drum kit above, on a grid several times coarser, chosen per piece for this device when the engines start. Only the pieces a file uses are started."),
-      p("Levels: one gain per instrument and nothing else. The piano plays at 0.8 of its engine's full scale (10 Pa at the microphone); each drum piece keeps the live kit's own gain, matched to a recorded kit's balance and rescaled for the grid it runs on, so that its standard stroke is as loud on every grid (the crash is about 5 dB louder on its 3–4× grids than on the 5× grid the gains were matched on; a quiet stroke is raised only while its peak stays under the kit's cap). Measured in these same engines on the first 12 seconds of six rolls, the loudest moments reach 0.48–0.68 of full scale, so nothing clips. There is no reverb, no equaliser and no limiter."),
+      p(`Levels: one fixed gain per instrument. The piano plays at 0.8 of its engine's full scale (10 Pa at the microphone). Other kit pieces keep the live kit's gains and existing grid-specific level tables. The shared hi-hat uses the declared gain ${KIT_GAIN.hihat}, with no measured grid-specific loudness table yet. Its pedal changes contact mechanics without an audio fade or gain change. Previous kit-balance and mix-headroom measurements used the separate fixed open/closed hats; the shared pedal pair has not yet been remeasured. There is no reverb, no equaliser and no limiter.`),
       p("The roll's library comes from a jazz chord-progression editor: its chord charts, played as choruses through that editor's own bass and comping generators (the same voicings and grooves it plays), with drum parts written for each groove. Uploaded files go through that editor's MIDI salvage pass, which repairs re-struck, orphaned and unterminated notes and says so, and its rules for naming chords and track roles."),
       p("The soundboard view is the engine's modal sum on its own surface points, heights exaggerated by the factor shown. The kit shows each piece's computed surface velocity; each piece's colour scale follows its own motion down as it decays.")));
 }

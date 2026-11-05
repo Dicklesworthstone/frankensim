@@ -6,11 +6,12 @@ import { claimPlayback, registerPlayer } from "../audio";
 import { el } from "../util";
 import { createLiveAudioContext } from "./liveAudio";
 import { createLiveMix, KitLane, type GasSourceOptions, type KitBurst, type KitField, type KitMaterialOptions, type KitReady, type LiveMix } from "./mix";
+import { HIHAT_CLOSED_FORCE_N, HIHAT_TRANSITION_SECONDS } from "./hiHat";
 
 /** Slow-motion factor for the replay of each stroke's first milliseconds. */
 const SLOW = 60;
 
-type PieceId = "kick" | "snare" | "tom-12" | "tom-14" | "hihat-closed" | "hihat-open" | "crash" | "ride";
+type PieceId = "kick" | "snare" | "tom-12" | "tom-14" | "hihat" | "crash" | "ride";
 
 interface PieceDef {
   id: PieceId;
@@ -65,8 +66,7 @@ const PIECES: PieceDef[] = [
   { id: "snare", name: "Snare", key: "S", speed: 4.5, gain: 0.0129, kind: "drum", finish: "#c9cdd3", benchMs: 450, scales: [6, 7, 8] },
   { id: "tom-12", name: "Rack tom", key: "T", speed: 3.5, gain: 0.0276, kind: "drum", finish: "#5c1d1a", scales: DONOR.rack },
   { id: "tom-14", name: "Floor tom", key: "F", speed: 3.5, gain: 0.0267, kind: "drum", finish: "#5c1d1a", scales: DONOR.floor },
-  { id: "hihat-closed", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.134, kind: "hat", scales: HAT_SCALES },
-  { id: "hihat-open", name: "Open hi-hat", key: "O", speed: 2.5, gain: 0.134, kind: "hat", scales: HAT_SCALES },
+  { id: "hihat", name: "Hi-hat", key: "H", speed: 2.5, gain: 0.134, kind: "hat", scales: HAT_SCALES },
   { id: "crash", name: "Crash", key: "C", speed: 6.0, gain: 0.0496, kind: "cymbal" },
   { id: "ride", name: "Ride", key: "R", speed: 2.5, gain: 0.182, kind: "cymbal" },
 ];
@@ -116,19 +116,19 @@ interface Live {
 export function mountLiveKit(root: HTMLElement): void {
   const canvas = el("canvas", { class: "kit-canvas", "aria-label": "A drum kit: press a head or a cymbal to strike it there" });
   const start = el("button", { class: "btn primary kit-start", type: "button" }, "▶ Start the kit");
-  const overlay = el("div", { class: "kit-overlay" }, start, el("p", { class: "small muted" }, "Eight pieces, each solved in its own Worker as you play."));
+  const overlay = el("div", { class: "kit-overlay" }, start, el("p", { class: "small muted" }, "Seven pieces, including one hi-hat you can open and close while it rings."));
   const slowLabel = el("div", { class: "kit-slow", hidden: "" }, `first ${(32 * 0.25).toFixed(0)} ms after the stroke, ${SLOW}× slower`);
   const stage = el("div", { class: "kit-stage" }, canvas, overlay, slowLabel);
   const hud = el("div", { class: "kit-hud", role: "status" });
   const hatMode = el("div", { class: "seg", role: "group", "aria-label": "Hi-hat pedal" });
-  let hatOpen = false;
-  for (const [open, label] of [[false, "Pedal down (closed)"], [true, "Pedal up (open)"]] as const) {
-    const b = el("button", { type: "button", "aria-pressed": String(open === hatOpen) }, label);
-    b.addEventListener("click", () => {
-      hatOpen = open;
-      for (const x of hatMode.querySelectorAll("button")) x.setAttribute("aria-pressed", String(x === b));
-      paintStatic = true;
-    });
+  let hatForceN = HIHAT_CLOSED_FORCE_N;
+  const hatForce = el("input", { type: "range", min: "0", max: String(HIHAT_CLOSED_FORCE_N), step: "1",
+    value: String(hatForceN), "aria-label": "Hi-hat pedal force in newtons" }) as HTMLInputElement;
+  const hatForceLabel = el("output", { class: "num small" }, `${hatForceN} N`);
+  hatForce.addEventListener("input", () => setHatForce(Number(hatForce.value)));
+  for (const [force, label] of [[HIHAT_CLOSED_FORCE_N, "P · Pedal down"], [0, "O · Pedal up"]] as const) {
+    const b = el("button", { type: "button", "aria-pressed": String(force === hatForceN), "data-force": String(force) }, label);
+    b.addEventListener("click", () => setHatForce(force));
     hatMode.append(b);
   }
   const dyn = el("input", { type: "range", min: "0.4", max: "1.6", step: "0.05", value: "1", "aria-label": "Stroke strength" }) as HTMLInputElement;
@@ -137,7 +137,7 @@ export function mountLiveKit(root: HTMLElement): void {
   const buttons = el("div", { class: "kit-keys" });
   const controls = el("div", { class: "kit-controls" },
     el("label", { class: "kit-dyn" }, el("span", { class: "small muted" }, "Stroke"), dyn, dynLabel),
-    hatMode);
+    hatMode, el("label", { class: "kit-dyn" }, el("span", { class: "small muted" }, "Pedal force"), hatForce, hatForceLabel));
   const numberInput = (value: number, min: number, max: number): HTMLInputElement =>
     el("input", { type: "number", value: String(value), min: String(min), max: String(max), step: "any", required: "" });
   const temperature = numberInput(20, 0, 50);
@@ -330,7 +330,8 @@ export function mountLiveKit(root: HTMLElement): void {
   }
   const evidence = el("details", { class: "evidence" }, el("summary", {}, "What is computed"),
     el("p", { class: "small" }, "Each piece is the same finite-difference solver as the drum kit above: tensioned Mylar heads with the air between them, von Kármán bronze shells, Hertz stick contacts, a felt beater, snare wires and a pedal-clamped hi-hat whose rims rub with dry friction. Here it runs on a grid several times coarser (picked per piece for this device when you start), so it is cheaper and loses detail above a few kHz. A piece that has gone quiet is not stepped until it is struck again."),
-    el("p", { class: "small muted" }, "The colours are the computed transverse velocity of the surface (warm up, cool down), drawn from the solver state about 20 ms ahead of what you hear. Energy is the kinetic energy of the piece; force is the peak stick force of the last stroke. Levels: one gain per piece, matched on one grid to a real kit's recorded balance, except that the cymbals are capped so their very sharp attacks do not clip. A stroke's loudness changes with the grid (the crash is about 5 dB louder on a 3× grid than on 5×), so each piece's gain is rescaled for the grid it runs on, from a table of that stroke measured on every grid; it is raised only while the stroke stays under the same peak cap."));
+    el("p", { class: "small" }, "Press H or touch the hi-hat to strike it. O releases the pedal; P presses it. The force slider moves the same pull rod between 0 and 80 N over 120 ms, preserving both cymbals' motion. Closing a ringing hat brings its rims into contact; pedal-only actions add no stick strike. The starting force is settled before playback."),
+    el("p", { class: "small muted" }, "The colours are the computed transverse velocity of the surface (warm up, cool down), drawn from the solver state about 20 ms ahead of what you hear. Energy is the kinetic energy of the piece; force is the peak stick force of the last stroke. Levels use one fixed gain per piece. Where a measured table exists, gain is rescaled for the chosen grid; the shared hi-hat keeps its declared gain throughout pedal motion and has no open/closed level correction."));
   root.replaceChildren(el("div", { class: "panel kit-live" }, stage, el("div", { class: "kit-bar" }, controls, buttons), atmosphere, materialsPanel, hud, evidence));
   root.style.minHeight = "0";
 
@@ -391,7 +392,7 @@ export function mountLiveKit(root: HTMLElement): void {
     b.fillStyle = "rgba(122, 40, 32, 0.22)";
     ellipse(b, rug.cx, rug.cy, rug.rx, rug.ry);
     b.fill();
-    const order = [...PIECES.filter((p) => p.id !== "hihat-open")].sort((a, c) => spotOf(a.id).z - spotOf(c.id).z);
+    const order = [...PIECES].sort((a, c) => spotOf(a.id).z - spotOf(c.id).z);
     // stands first, behind everything
     for (const p of order) if (p.kind === "cymbal" || p.kind === "hat") stand(b, px(spotOf(p.id)), p.kind === "hat");
     for (const p of order) {
@@ -412,7 +413,6 @@ export function mountLiveKit(root: HTMLElement): void {
     let slowTag = false;
     for (const p of PIECES) {
       const L = lives.get(p.id)!;
-      if (p.id === "hihat-open" && !hatOpen && !L.kinetic) continue;
       const s = px(spotOf(p.id));
       let fade = L.kpeak > 0 ? Math.max(0, Math.min(1, (Math.log10(Math.max(L.kinetic, 1e-30) / L.kpeak) + 4.5) / 4.5)) : 0;
       let src: Float32Array | null = L.field ? L.field.v : null;
@@ -504,6 +504,22 @@ export function mountLiveKit(root: HTMLElement): void {
   }
 
   // ------------------------------------------------------------- playing
+  function setHatForce(forceN: number): void {
+    if (!Number.isFinite(forceN) || forceN < 0 || forceN > HIHAT_CLOSED_FORCE_N) return;
+    const changed = forceN !== hatForceN;
+    hatForceN = forceN;
+    hatForce.value = String(forceN);
+    hatForceLabel.textContent = `${forceN} N`;
+    for (const button of hatMode.querySelectorAll("button")) {
+      button.setAttribute("aria-pressed", String(Number(button.dataset.force) === forceN));
+    }
+    if (running && changed) {
+      const hat = lives.get("hihat");
+      hat?.lane?.pedal(forceN, HIHAT_TRANSITION_SECONDS);
+      if (hat) hat.replay = null;
+      kickDraw();
+    }
+  }
   function hitAt(id: PieceId, x: number, y: number, speed: number): void {
     const L = lives.get(id)!;
     if (!L.lane) return;
@@ -520,12 +536,12 @@ export function mountLiveKit(root: HTMLElement): void {
     hitAt(id, at[0]!, at[1]!, L.def.speed * Number(dyn.value));
   }
   function pick(cx: number, cy: number): { id: PieceId; x: number; y: number } | null {
-    const order = [...PIECES.filter((p) => p.id !== "hihat-open")].sort((a, b) => spotOf(b.id).z - spotOf(a.id).z);
+    const order = [...PIECES].sort((a, b) => spotOf(b.id).z - spotOf(a.id).z);
     for (const p of order) {
       const s = px(spotOf(p.id));
       const u = (cx - s.cx) / s.rx, v = (cy - s.cy) / s.ry;
       if (u * u + v * v <= 1.04) {
-        const id: PieceId = p.id === "hihat-closed" && hatOpen ? "hihat-open" : p.id;
+        const id = p.id;
         const R = lives.get(id)!.ready?.radius ?? 0.2;
         return { id, x: u * R, y: v * R };
       }
@@ -546,12 +562,14 @@ export function mountLiveKit(root: HTMLElement): void {
   });
   window.addEventListener("keydown", (e) => {
     if (!running || e.metaKey || e.ctrlKey || e.altKey || (e.target as HTMLElement).closest("input, textarea, select")) return;
-    const def = PIECES.find((p) => p.key === e.key.toUpperCase());
-    if (!def || !root.isConnected) return;
+    const key = e.key.toUpperCase();
+    const def = PIECES.find((p) => p.key === key);
+    if ((!def && key !== "O" && key !== "P") || !root.isConnected) return;
     const r = root.getBoundingClientRect();
     if (r.bottom < 0 || r.top > innerHeight) return;
     e.preventDefault();
-    hitCentre(def.id);
+    if (key === "O" || key === "P") setHatForce(key === "O" ? 0 : HIHAT_CLOSED_FORCE_N);
+    else if (def) hitCentre(def.id);
   });
 
   // every start is a session; stop() ends it, and a start still building finds out at its next await
@@ -584,6 +602,7 @@ export function mountLiveKit(root: HTMLElement): void {
     // same immutable record even if controls are edited while startup awaits.
     claimPlayback(onClaimed);
     const my = ++session;
+    const initialHatForceN = hatForceN;
     start.disabled = true;
     start.textContent = "Building the kit…";
     atmosphereStatus.textContent = `Building in ${environment.label}…`;
@@ -601,7 +620,9 @@ export function mountLiveKit(root: HTMLElement): void {
       let built = 0;
       await Promise.all(PIECES.map(async (def) => {
         const L = lives.get(def.id)!;
-        const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, gasSources, materials, aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
+        const lane = new KitLane(m, def.id, { gain: def.gain, gasRecord: environment.record, gasSources, materials,
+          ...(def.id === "hihat" ? { hihatPedal: { initialForceN: initialHatForceN } } : {}),
+          aheadFrames: 1024, minRealtime: 1.7, benchMs: def.benchMs, scales: def.scales, fieldHz: 45 });
         L.lane = lane;
         lane.onField = (f) => {
           L.field = f;
@@ -624,6 +645,9 @@ export function mountLiveKit(root: HTMLElement): void {
         const r = await lane.ready;
         if (my !== session) { lane.dispose(); return; }
         if (r.gasRecord !== environment.record) throw new Error("The kit engine did not retain the requested atmosphere. Reload after rebuilding the live kit.");
+        if (def.id === "hihat" && r.hihatPedal?.initialForceN !== initialHatForceN) {
+          throw new Error("The kit engine did not prepare the shared hi-hat pedal. Rebuild the live kit before playing it.");
+        }
         if (gasSources && !(r.info.gas?.sourceSpecies && r.info.gas.sourceSpecies > 0)) {
           throw new Error("The kit engine did not retain the imported gas sources. Rebuild the live kit before applying them.");
         }
@@ -651,12 +675,13 @@ export function mountLiveKit(root: HTMLElement): void {
       }));
       if (my !== session) return;
       running = true;
+      if (hatForceN !== initialHatForceN) lives.get("hihat")?.lane?.pedal(hatForceN, HIHAT_TRANSITION_SECONDS);
       const gas = lives.get("kick")?.ready?.info.gas;
       atmosphereStatus.textContent = `${environment.label}. ${gas
-        ? `Density ${gas.densityKgM3.toFixed(3)} kg/m³ · sound speed ${gas.soundSpeedMps.toFixed(1)} m/s. ` : ""}All eight pieces use this atmosphere.`;
+        ? `Density ${gas.densityKgM3.toFixed(3)} kg/m³ · sound speed ${gas.soundSpeedMps.toFixed(1)} m/s. ` : ""}All seven pieces use this atmosphere.`;
       const solid = lives.get("kick")?.ready?.info.materials;
       materialStatus.textContent = solid
-        ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All eight pieces use these material cards.${solid.filmLossStatedUnknown ? ` Drum heads: ${solid.filmLossStatedUnknown}.` : ""}`
+        ? `${selectedMaterials.label}. Surface density ${solid.primary.densityKgM3.toFixed(1)} kg/m³ · Young's modulus ${(solid.primary.youngPa / 1e9).toPrecision(4)} GPa · striker mass ${(solid.strikerMassKg * 1000).toPrecision(4)} g. All seven pieces use these material cards.${solid.filmLossStatedUnknown ? ` Drum heads: ${solid.filmLossStatedUnknown}.` : ""}`
         : `Standard kit materials are active. ${lives.get("kick")?.ready?.info.headLoss ?? ""}`.trimEnd();
       overlay.hidden = true;
       kickDraw();

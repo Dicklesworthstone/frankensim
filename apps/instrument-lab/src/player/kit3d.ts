@@ -18,14 +18,13 @@ const SPECS: Record<PieceId, Spec> = {
   "snare-off": { pos: [-0.46, 0.64, 0.3], tilt: 0.16, r: 0.178, kind: "drum", depth: 0.14, finish: 0xc9cdd3 },
   "tom-12": { pos: [-0.1, 0.84, -0.06], tilt: 0.36, r: 0.152, kind: "drum", depth: 0.2, finish: 0x5c1d1a },
   "tom-14": { pos: [0.52, 0.55, 0.26], tilt: 0.1, r: 0.178, kind: "drum", depth: 0.36, finish: 0x5c1d1a },
-  "hihat-closed": { pos: [-0.86, 0.93, 0.08], tilt: 0.08, r: 0.178, kind: "hat", depth: 0 },
-  "hihat-open": { pos: [-0.86, 0.93, 0.08], tilt: 0.08, r: 0.178, kind: "hat", depth: 0 },
+  hihat: { pos: [-0.86, 0.93, 0.08], tilt: 0.08, r: 0.178, kind: "hat", depth: 0 },
   crash: { pos: [-0.56, 1.34, -0.36], tilt: 0.42, r: 0.229, kind: "cymbal", depth: 0 },
   ride: { pos: [0.66, 1.18, -0.24], tilt: 0.3, r: 0.254, kind: "cymbal", depth: 0 },
 };
-const ORDER: PieceId[] = ["kick", "tom-12", "tom-14", "snare", "hihat-closed", "crash", "ride"];
+const ORDER: PieceId[] = ["kick", "tom-12", "tom-14", "snare", "hihat", "crash", "ride"];
 /** Two solver pieces at one place: the one struck last is shown. */
-const TWIN: Partial<Record<PieceId, PieceId>> = { "hihat-open": "hihat-closed", "hihat-closed": "hihat-open", "snare-off": "snare", snare: "snare-off" };
+const TWIN: Partial<Record<PieceId, PieceId>> = { "snare-off": "snare", snare: "snare-off" };
 
 interface Surface {
   geom: THREE.BufferGeometry;
@@ -91,7 +90,7 @@ export class KitView {
     key.position.set(1.2, 3.2, 2.4);
     this.scene.add(key);
     this.buildRoom();
-    for (const id of [...ORDER, "snare-off", "hihat-open"] as PieceId[]) this.buildPiece(id);
+    for (const id of [...ORDER, "snare-off"] as PieceId[]) this.buildPiece(id);
     new ResizeObserver(() => this.resize()).observe(host);
     this.resize();
     this.ok = true;
@@ -171,10 +170,9 @@ export class KitView {
     label.className = "pp-kit-label";
     label.textContent = PIECE_NAMES[id];
     this.labels.append(label);
-    const hidden = id === "snare-off" || id === "hihat-open";
+    const hidden = id === "snare-off";
     group.visible = !hidden;
     label.hidden = hidden;
-    if (id === "hihat-open") group.position.y += 0.012; // the top cymbal lifted off the bottom one
     this.pieces.set(id, { id, group, surface: null, queue: [], shown: null, vref: 1e-6, kpeak: 0, kinetic: 0, force: 0, label, used: false, flashes: [], ring });
   }
 
@@ -190,9 +188,9 @@ export class KitView {
       p.used = used.includes(p.id);
       this.dimPiece(p, !p.used && !(TWIN[p.id] && used.includes(TWIN[p.id]!)));
     }
-    // a twin (open hat, snare with its wires off) shares its partner's place: show the main one
+    // A snare with its wires off shares its partner's place: show the main one
     // unless only the twin is played
-    for (const [alt, main] of [["hihat-open", "hihat-closed"], ["snare-off", "snare"]] as [PieceId, PieceId][]) {
+    for (const [alt, main] of [["snare-off", "snare"]] as [PieceId, PieceId][]) {
       this.showTwin(used.includes(main) || !used.includes(alt) ? main : alt);
     }
     this.requestRender();

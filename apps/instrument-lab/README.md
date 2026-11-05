@@ -33,6 +33,38 @@ Two tracks, always labelled:
 
 `public/{audio,img,data,viz}` and `public/live/*/engine*` are generated and not committed.
 
+## Shared live hi-hat
+
+The playable kit uses one `hihat` trajectory for open strokes, closed strokes and
+pedal motion. **H** strikes its current surface, **O** releases the pedal, and
+**P** presses it. The pedal-force slider prescribes 0–80 N on the pull rod with
+a 120 ms force ramp. These are declared performer inputs, not acoustic decay
+parameters. Both cymbals keep their displacement, velocity, rim contact and
+friction state as the pedal moves. A pedal-only action supplies no stick impulse.
+The output gain stays fixed during the gesture.
+
+`KitLane` accepts `hihatPedal: { initialForceN }` for this shared piece. Every
+candidate grid is prepared under that load before it is benchmarked or played,
+using the same selected atmosphere and material-card packs. Native preparation
+is transactional and reuses the existing quiet-state settlement. Later
+`pedal(forceN, transitionSeconds, frame?)` commands and mixed pedal/strike scores
+run at the lane's frame boundaries. Repeated identical commands retain an
+unfinished ramp's original endpoint.
+
+MIDI notes 42 (closed), 46 (open) and 44 (foot) use this same lane. The MIDI
+interpreter schedules up to 120 ms of pedal preparation before a stick stroke,
+clipped after the preceding hi-hat event. A foot event releases a held pedal
+when there is enough time, then commands closure at its written onset; it never
+creates a stick strike. This is an explicit performance interpretation of
+General MIDI articulations, not a measured foot trajectory. Fast gestures may
+not reach their requested gap before the next event. Seeking restores the
+appropriate pedal target without replaying earlier strikes.
+
+Rebuild `engine-kit` together with the frontend for the `prepareHiHatPedal`
+export. An older engine is refused rather than silently replacing the shared
+pair with independent open/closed presets. The shared pair currently has no
+grid-specific loudness table; its declared gain is left unscaled.
+
 ## Rebuilding
 
 The workspace needs its sibling repos at the `constellation.lock` pins. If the shared sibling
