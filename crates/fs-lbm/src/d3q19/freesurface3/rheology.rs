@@ -2,7 +2,7 @@
 //!
 //! The native owner still performs collision, forcing, gas reconstruction,
 //! conservative mass exchange and phase conversion. This adapter supplies its
-//! existing per-wet-cell BGK relaxation hook, using the same constitutive
+//! existing per-wet-cell BGK/TRT relaxation hook, using the same constitutive
 //! stress inversion as the plain 2-D/3-D grids. No material card is synthesized.
 
 use std::collections::BTreeMap;
@@ -12,11 +12,14 @@ use fs_exec::CancelGate;
 use super::transport::MassLocation3;
 use super::{Cell3, FreeSurface3, FreeSurfaceError3, TILE, TILE_CELLS, check_cancel};
 use crate::d3q19::{CollisionModel3, RigidFrame3};
+use crate::lattice3::{D3q19, ViscousLattice3};
 use crate::rheology::{
     PreparedRheology, Rheology, RheologyField, RheologyFieldError, RheologyStats,
 };
 
 type Relaxations = BTreeMap<(u64, usize), f64>;
+
+mod motion;
 
 /// Native flow, field admission, or constitutive inversion refused publication.
 #[derive(Debug, Clone, PartialEq)]
@@ -79,6 +82,9 @@ enum Assignment {
 /// private native candidate, resolves its new wet cells, then publishes flow,
 /// phase, mass, local relaxation and statistics together. A refusal or observed
 /// cancellation leaves every accepted component unchanged.
+/// Two Morton-keyed relaxation maps retain entries across steps and law
+/// rebinds. Only newly wet keys need new entries after both maps are populated;
+/// failed preparation may change private scratch, never the accepted map.
 ///
 /// Constitutive laws remain generalized Newtonian; finite yield regularization
 /// permits creep and supplies no elastic, plastic, thixotropic or phase memory.
@@ -88,6 +94,7 @@ pub struct FreeSurfaceRheology3 {
     lattice: FreeSurface3,
     assignment: Assignment,
     tau: Relaxations,
+    scratch_tau: Relaxations,
     stats: RheologyStats,
 }
 
@@ -125,6 +132,7 @@ impl FreeSurfaceRheology3 {
             lattice,
             assignment,
             tau,
+            scratch_tau: Relaxations::new(),
             stats,
         })
     }
@@ -197,10 +205,16 @@ impl FreeSurfaceRheology3 {
         assignment: Assignment,
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceRheologyError3> {
-        let (tau, stats) = resolve(&self.lattice, &assignment, &self.tau, gate)?;
+        let stats = resolve_into(
+            &self.lattice,
+            &assignment,
+            &self.tau,
+            &mut self.scratch_tau,
+            gate,
+        )?;
         check_cancel(gate)?;
         self.assignment = assignment;
-        self.tau = tau;
+        core::mem::swap(&mut self.tau, &mut self.scratch_tau);
         self.stats = stats;
         Ok(())
     }
@@ -249,16 +263,32 @@ impl FreeSurfaceRheology3 {
         gate: &CancelGate,
     ) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
         check_cancel(gate)?;
-        let applied = self.stats;
         let mut candidate = self.lattice.clone();
         if let Some((frame, acceleration)) = frame {
             frame.prepare_free_surface_step(&mut candidate, acceleration, gate)?;
         }
         candidate.step_with_material_relaxation_and_pressure(gate, &self.tau, None)?;
-        let (tau, stats) = resolve(&candidate, &self.assignment, &self.tau, gate)?;
+        self.accept_candidate(candidate, gate)
+    }
+
+    // Every native boundary path admits the actual endpoint through this same
+    // constitutive solve before publishing any populations or source epoch.
+    fn accept_candidate(
+        &mut self,
+        candidate: FreeSurface3,
+        gate: &CancelGate,
+    ) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
+        let stats = resolve_into(
+            &candidate,
+            &self.assignment,
+            &self.tau,
+            &mut self.scratch_tau,
+            gate,
+        )?;
         check_cancel(gate)?;
+        let applied = self.stats;
         self.lattice = candidate;
-        self.tau = tau;
+        core::mem::swap(&mut self.tau, &mut self.scratch_tau);
         self.stats = stats;
         Ok(applied)
     }
@@ -275,16 +305,31 @@ fn resolve(
     warm: &Relaxations,
     gate: &CancelGate,
 ) -> Result<(Relaxations, RheologyStats), FreeSurfaceRheologyError3> {
+    let mut tau = Relaxations::new();
+    let stats = resolve_into(lattice, assignment, warm, &mut tau, gate)?;
+    Ok((tau, stats))
+}
+
+fn resolve_into(
+    lattice: &FreeSurface3,
+    assignment: &Assignment,
+    warm: &Relaxations,
+    tau: &mut Relaxations,
+    gate: &CancelGate,
+) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
     check_cancel(gate)?;
-    let CollisionModel3::Bgk { tau: initial_tau } = lattice.grid.collision().0 else {
-        return Err(FreeSurfaceRheologyError3::Invalid(
-            "analytic free-surface rheology requires the native BGK collision",
-        ));
+    let initial_tau = match lattice.collision_model() {
+        CollisionModel3::Bgk { tau } | CollisionModel3::Trt { tau, .. } => tau,
+        _ => {
+            return Err(FreeSurfaceRheologyError3::Invalid(
+                "analytic free-surface rheology requires native BGK or TRT collision",
+            ));
+        }
     };
     // Static dispatch preserves the uniform-law path without dense field
     // indexing or repeated parameter validation inside the cell loop.
     match assignment {
-        Assignment::Uniform(law) => solve_cells(lattice, |_, _| law, warm, initial_tau, gate),
+        Assignment::Uniform(law) => solve_cells(lattice, |_, _| law, warm, tau, initial_tau, gate),
         Assignment::Field(field) => {
             let (x, y, z) = lattice.grid.tile_dims();
             let shape = [x * TILE, y * TILE, z * TILE];
@@ -296,6 +341,7 @@ fn resolve(
                     field.prepared((z * shape[1] + y) * shape[0] + x)
                 },
                 warm,
+                tau,
                 initial_tau,
                 gate,
             )
@@ -307,10 +353,30 @@ fn solve_cells<'a>(
     lattice: &FreeSurface3,
     law_at: impl Fn(u64, usize) -> &'a PreparedRheology,
     warm: &Relaxations,
+    tau: &mut Relaxations,
     initial_tau: f64,
     gate: &CancelGate,
-) -> Result<(Relaxations, RheologyStats), FreeSurfaceRheologyError3> {
-    let mut tau = Relaxations::new();
+) -> Result<RheologyStats, FreeSurfaceRheologyError3> {
+    // Keep existing entries in place. Sparse slot changes do not move material
+    // coordinates; gas and retired tiles must not retain a collision rate.
+    let mut visited = 0usize;
+    for _ in tau.extract_if(.., |&(key, lane), _| {
+        let poll = visited.is_multiple_of(TILE_CELLS);
+        visited += 1;
+        // A cancelled traversal yields immediately, even if every cached key
+        // is still wet. Removing that one private scratch entry is harmless:
+        // the error below drops the lazy iterator before visiting more keys.
+        (poll && gate.is_requested())
+            || lattice
+                .tiles
+                .get(&key)
+                .is_none_or(|tile| tile.cells[lane] == Cell3::Gas)
+    }) {
+        check_cancel(gate)?;
+    }
+    check_cancel(gate)?;
+    let collision = lattice.collision_model();
+    let is_trt = matches!(collision, CollisionModel3::Trt { .. });
     let mut stats = RheologyStats {
         floored: 0,
         capped: 0,
@@ -333,6 +399,18 @@ fn solve_cells<'a>(
                     coordinates: coordinates(key, lane),
                     reason,
                 })?;
+            if is_trt {
+                // The even stress uses the same constitutive inversion as BGK.
+                // Admit the actual derived odd rate before this source epoch
+                // can publish; a finite even tau alone is not sufficient.
+                D3q19::with_shear_relaxation(collision, local.tau).map_err(|source| {
+                    FreeSurfaceError3::Collision {
+                        tile_key: key,
+                        lane,
+                        source,
+                    }
+                })?;
+            }
             tau.insert((key, lane), local.tau);
             stats.floored = stats.floored.checked_add(u32::from(local.floored)).ok_or(
                 FreeSurfaceRheologyError3::Invalid("rheology floor count overflows"),
@@ -349,11 +427,12 @@ fn solve_cells<'a>(
         stats.tau_range = (0.0, 0.0);
     }
     check_cancel(gate)?;
-    Ok((tau, stats))
+    Ok(stats)
 }
 
 #[cfg(test)]
 mod tests {
+    mod moving_walls;
     use super::*;
     use crate::d3q19::freesurface3::{ContactModel3, ConversionRedistribution3};
     use crate::d3q19::sparse::morton3;

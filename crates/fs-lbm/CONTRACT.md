@@ -837,7 +837,7 @@ response, physical-velocity rescaling, admission and cancellation.
 
 `d3q19::freesurface3::rheology::FreeSurfaceRheology3` supplies prepared
 Newtonian, power-law, Carreau and regularized Herschel--Bulkley laws to the
-existing sparse VOF wet-cell BGK relaxation hook. This complements the
+existing sparse VOF wet-cell BGK/TRT relaxation hook. This complements the
 pre-existing source-resolved material rheology owner. A uniform law requires
 no dense field; a spatial `RheologyField<3>` covers the full domain in fixed
 Eulerian global coordinates, including newly wet cells after sparse-slot
@@ -860,6 +860,40 @@ accepted strain refuses. Five focused regressions cover manufactured stress
 and actual forced collision, Newtonian/uniform-field reduction, phase/slot
 association, rollback and fallible-kernel limiting behavior. No advected
 material label, inferred mixture law, thermal owner or yield history is added.
+
+The prepared owner accepts native TRT without changing its authored even/odd
+relaxation product. The full force-corrected even stress enters the same local
+constitutive inversion as BGK. Every resolved even relaxation also admits the
+actual derived odd relaxation before the source epoch can publish; finite even
+viscosity alone is insufficient. Unsupported collision families still refuse,
+and the original constitutive floor/cap statistics and numerical limits remain.
+
+`FreeSurfaceRheology3::step_with_planar_wall_velocity_field` connects prepared
+Newtonian, power-law, Carreau and regularized Herschel--Bulkley viscosity to the
+original tangential face-field wall transaction. Accepted local rates govern
+its actual collision and reflected populations. The actual endpoint stress,
+including wall-generated shear and the Guo half-force correction, then refreshes
+the same law before populations, mass, phase, relaxation and statistics publish.
+No stationary exterior or gas velocity is substituted into a gradient. The
+returned native face/total impulses, moments, couples and actuator work belong
+to that same accepted flow step; applied and next-endpoint constitutive
+statistics remain distinct.
+
+Two Morton-keyed relaxation maps retain existing entries across steps and law
+rebinds, pruning gas/retired keys and admitting newly wet cells at their global
+field coordinates. Accepted rates supply warm starts while the other map is
+private scratch; a failed native or endpoint constitutive solve cannot replace
+the accepted epoch. One native candidate is cloned, with no unused thermal
+mass-route trace. Wall/domain budgets and the existing fixed, completely flooded,
+tangent-only plane, Mach, positivity and mass restrictions remain. This is
+isothermal explicit constitutive splitting, without inferred heat, normal
+geometry motion or an implicit wall/material solve.
+
+Focused regressions cover independently reconstructed forced TRT collision with
+an odd nonhydrodynamic mode, all-face Newtonian/native population and wall-account
+identity, wall-generated Carreau shear and work, retained map entries, derived
+odd-rate refusal and complete endpoint rollback with exact retry. They make no
+new measured accuracy, convergence or performance claim.
 
 ## Exploratory Smagorinsky transport on the native sparse free surface
 
