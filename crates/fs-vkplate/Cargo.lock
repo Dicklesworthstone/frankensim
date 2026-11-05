@@ -567,6 +567,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs-fft"
+version = "0.0.1"
+dependencies = [
+ "asupersync",
+ "fs-alloc",
+ "fs-exec",
+ "fs-la",
+ "fs-math",
+ "fs-simd",
+]
+
+[[package]]
 name = "fs-geom"
 version = "0.0.1"
 dependencies = [
@@ -635,6 +647,7 @@ version = "0.0.1"
 dependencies = [
  "fs-alloc",
  "fs-exec",
+ "fs-fft",
  "fs-la",
  "fs-math",
  "fs-sparse",
@@ -734,6 +747,7 @@ dependencies = [
  "fs-evidence",
  "fs-exec",
  "fs-la",
+ "fs-math",
  "fs-qty",
 ]
 

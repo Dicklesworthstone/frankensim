@@ -572,3 +572,235 @@ fn simultaneous_loaded_contacts_close_energy_and_radiation_work() {
         "loaded simultaneous contact energy defect {worst:e}"
     );
 }
+
+#[test]
+fn instrument_contact_refusal_preserves_clock_output_and_requires_restoration() {
+    let k = 0.001;
+    let mut instrument = Instrument::new(1.0 / k);
+    instrument.add(point_body(1.0, k, 0.004, 0.004));
+    instrument.add(point_body(0.7, k, 0.0, 0.0));
+    instrument.add(point_body(1.5, k, -0.003, -0.003));
+    instrument.contacts = chain_contacts();
+    instrument.mics.push(Mic::new([0.0, 0.0, 1.0]));
+    instrument.prepare();
+    let mut restored = instrument.clone();
+    let previous_frames: Vec<_> = instrument
+        .bodies
+        .iter()
+        .map(|b| (b.w.clone(), b.wp.clone()))
+        .collect();
+    let previous_ring = instrument.mics[0].ring.clone();
+    instrument.contact_solver_controls.max_newton_iterations = 0;
+    let mut output = [17.25];
+    let error = instrument.try_step(&mut output).unwrap_err();
+    assert!(matches!(error, ContactSolveError::NoConvergence { .. }));
+    assert_eq!(instrument.step_index, 0);
+    assert_eq!(instrument.time(), 0.0);
+    assert_eq!(output, [17.25]);
+    assert_eq!(instrument.mics[0].ring, previous_ring);
+    for (body, (w, wp)) in instrument.bodies.iter().zip(previous_frames) {
+        assert_eq!(body.w, w);
+        assert_eq!(body.wp, wp);
+    }
+    assert!(
+        instrument
+            .contacts
+            .iter()
+            .all(|c| c.force == 0.0 && c.peak_force == 0.0)
+    );
+
+    // Increasing the budget cannot resume histories advanced before refusal.
+    // A second attempt returns before prediction or microphone publication.
+    instrument.contact_solver_controls = ContactSolveControls::default();
+    let refused_pose: Vec<_> = instrument.bodies.iter().map(|b| b.wn.clone()).collect();
+    output[0] = -23.5;
+    assert_eq!(instrument.try_step(&mut output), Err(error));
+    assert_eq!(instrument.step_index, 0);
+    assert_eq!(instrument.time(), 0.0);
+    assert_eq!(output, [-23.5]);
+    assert_eq!(instrument.mics[0].ring, previous_ring);
+    for (body, pose) in instrument.bodies.iter().zip(refused_pose) {
+        assert_eq!(body.wn, pose);
+    }
+
+    restored.try_step(&mut output).unwrap();
+    assert_eq!(restored.step_index, 1);
+    assert_eq!(restored.time(), k);
+    assert!(output[0].is_finite());
+    assert!(restored.contacts.iter().all(|c| c.force > 0.0));
+}
+
+#[test]
+fn independent_scalar_candidates_match_coupled_physics_and_keep_sparse_publication() {
+    let k = 0.001;
+    let initial: Vec<_> = (0..8)
+        .map(|i| {
+            let position = 0.001 + 0.0001 * i as f64;
+            point_body(0.7 + 0.1 * i as f64, k, position, position)
+        })
+        .collect();
+    let contacts: Vec<_> = (0..7)
+        .map(|i| {
+            Contact::new(
+                vec![(i, 0, 1.0), (7, 0, 0.0)],
+                vec![],
+                0.0,
+                Law::Power {
+                    k: 1e6 + 1e5 * i as f64,
+                    alpha: 1.5,
+                    mu: 0.0,
+                },
+            )
+        })
+        .collect();
+    let mut results = Vec::new();
+    for limit in [32, 31] {
+        let mut bodies = initial.clone();
+        bodies[7].tmp[0] = 91.0;
+        let mut contacts = contacts.clone();
+        let controls = Controls {
+            max_newton_iterations: limit,
+            ..Controls::default()
+        };
+        let report = solve_contacts_checked(
+            &mut bodies,
+            &mut contacts,
+            &mut ContactQueue::default(),
+            &mut Workspace::default(),
+            k,
+            controls,
+        )
+        .unwrap();
+        check_final_laws(&bodies, &contacts, k);
+        assert_eq!(bodies[7].wn, initial[7].wn);
+        if limit == 32 {
+            assert_eq!(report.cg_iterations, 0);
+            assert_eq!(report.compliance_applications, 1);
+            assert_eq!(
+                bodies[7].tmp[0], 91.0,
+                "sparse publication must skip zero weights"
+            );
+        } else {
+            assert!(report.cg_iterations > 0);
+        }
+        results.push((bodies, contacts));
+    }
+    for i in 0..7 {
+        assert!((results[0].0[i].wn[0] - results[1].0[i].wn[0]).abs() < 2e-14);
+        assert!((results[0].1[i].force - results[1].1[i].force).abs() < 2e-8);
+    }
+}
+
+#[test]
+fn loaded_scalar_path_requires_true_contact_independence() {
+    let k = 0.002;
+    let mut initial = loaded_body(k);
+    initial.wp = vec![0.0002, 0.0003, 0.0001, -0.0001];
+    initial.wn = vec![0.0004, 0.0002, 0.0003, -0.0002];
+    let law = Law::Power {
+        k: 1e8,
+        alpha: 1.5,
+        mu: 0.0,
+    };
+    let contact = Contact::new(vec![(0, 0, 1.0), (0, 2, 0.3)], vec![(0, 1, 0.2)], 0.0, law);
+    let mut results = Vec::new();
+    for limit in [32, 31] {
+        let mut body = initial.clone();
+        let mut contacts = vec![contact.clone()];
+        let controls = Controls {
+            max_newton_iterations: limit,
+            ..Controls::default()
+        };
+        let report = solve_contacts_checked(
+            std::slice::from_mut(&mut body),
+            &mut contacts,
+            &mut ContactQueue::default(),
+            &mut Workspace::default(),
+            k,
+            controls,
+        )
+        .unwrap();
+        check_final_laws(std::slice::from_ref(&body), &contacts, k);
+        if limit == 32 {
+            assert_eq!(report.cg_iterations, 0);
+            assert_eq!(report.compliance_applications, 2);
+        } else {
+            assert!(report.cg_iterations > 0);
+        }
+        results.push((body, contacts));
+    }
+    for i in 0..4 {
+        assert!((results[0].0.wn[i] - results[1].0.wn[i]).abs() < 2e-14);
+    }
+    assert!((results[0].1[0].force - results[1].1[0].force).abs() < 2e-8);
+
+    // Distinct nodes are coupled through the same nonlocal loaded body.
+    let mut contacts = vec![
+        Contact::new(vec![(0, 0, 1.0)], vec![], 0.0, law),
+        Contact::new(vec![(0, 1, 1.0)], vec![], 0.0, law),
+    ];
+    let mut body = initial.clone();
+    let report = solve_contacts_checked(
+        std::slice::from_mut(&mut body),
+        &mut contacts,
+        &mut ContactQueue::default(),
+        &mut Workspace::default(),
+        k,
+        Controls::default(),
+    )
+    .unwrap();
+    check_final_laws(std::slice::from_ref(&body), &contacts, k);
+    assert!(
+        report.cg_iterations > 0,
+        "nonlocal cross-compliance cannot use independent scalar laws"
+    );
+
+    // Repeated terms also use the aggregate operator, so a diagonal sum of
+    // squared terms cannot silently replace the square of their signed sum.
+    let mut body = point_body(1.0, k, 0.001, 0.001);
+    let mut contacts = vec![Contact::new(
+        vec![(0, 0, 0.4), (0, 0, 0.6)],
+        vec![],
+        0.0,
+        law,
+    )];
+    let report = solve_contacts_checked(
+        std::slice::from_mut(&mut body),
+        &mut contacts,
+        &mut ContactQueue::default(),
+        &mut Workspace::default(),
+        k,
+        Controls::default(),
+    )
+    .unwrap();
+    check_final_laws(std::slice::from_ref(&body), &contacts, k);
+    assert!(report.cg_iterations > 0);
+
+    let mut body = point_body(1.0, k, 0.0, 0.0);
+    let mut contacts = vec![Contact::new(
+        vec![(0, 0, 1.0)],
+        vec![(0, 0, 1.0)],
+        -0.001,
+        law,
+    )];
+    let report = solve_contacts_checked(
+        std::slice::from_mut(&mut body),
+        &mut contacts,
+        &mut ContactQueue::default(),
+        &mut Workspace::default(),
+        k,
+        Controls::default(),
+    )
+    .unwrap();
+    check_final_laws(std::slice::from_ref(&body), &contacts, k);
+    assert_eq!(
+        body.wn[0], 0.0,
+        "opposite signed terms have zero net footprint"
+    );
+    // Zero C needs no Newton correction, but must still use the aggregate
+    // operator: its nonzero-force action and final publication check. The
+    // all-zero warm force needs no operator application.
+    assert_eq!(report.cg_iterations, 0);
+    assert_eq!(report.compliance_applications, 2);
+    assert!((contacts[0].force - 1e8 * 0.001_f64.powf(1.5)).abs() < 1e-9);
+}

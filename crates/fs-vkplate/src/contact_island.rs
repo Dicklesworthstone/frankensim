@@ -20,6 +20,9 @@ pub struct Controls {
     pub displacement_tolerance: f64,
     /// Absolute force tolerance, in newtons.
     pub force_tolerance: f64,
+    /// Coupled Newton steps. Independent scalar laws may instead use the
+    /// existing fixed 60-iteration safeguarded solve at the default budget.
+    /// Reducing this budget disables that scalar fast path.
     pub max_newton_iterations: usize,
     /// CG iteration budget per Newton step, including defect corrections.
     pub max_cg_iterations: usize,
@@ -36,6 +39,25 @@ impl Default for Controls {
             max_cg_iterations: 256,
             max_backtracks: 24,
         }
+    }
+}
+
+impl Controls {
+    pub(crate) fn validate(self) -> Result<(), SolveError> {
+        if !(self.relative_tolerance.is_finite()
+            && self.relative_tolerance > 0.0
+            && self.relative_tolerance < 1.0
+            && self.displacement_tolerance.is_finite()
+            && self.displacement_tolerance > 0.0
+            && self.force_tolerance.is_finite()
+            && self.force_tolerance > 0.0)
+            || self.max_cg_iterations == 0
+        {
+            return Err(SolveError::InvalidInput(
+                "invalid accuracy or CG work limit",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -92,6 +114,7 @@ impl std::error::Error for SolveError {}
 /// absolute-plus-relative tolerances. Both must be at most one to succeed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SolveReport {
+    /// Coupled Newton steps; zero when independent scalar laws suffice.
     pub newton_iterations: usize,
     pub cg_iterations: usize,
     pub compliance_applications: usize,
@@ -251,19 +274,7 @@ impl Workspace {
                 "invalid prediction, warm force, or compliance bound",
             ));
         }
-        if !(controls.relative_tolerance.is_finite()
-            && controls.relative_tolerance > 0.0
-            && controls.relative_tolerance < 1.0
-            && controls.displacement_tolerance.is_finite()
-            && controls.displacement_tolerance > 0.0
-            && controls.force_tolerance.is_finite()
-            && controls.force_tolerance > 0.0)
-            || controls.max_cg_iterations == 0
-        {
-            return Err(SolveError::InvalidInput(
-                "invalid accuracy or CG work limit",
-            ));
-        }
+        controls.validate()?;
         for v in [
             &mut self.d,
             &mut self.force,

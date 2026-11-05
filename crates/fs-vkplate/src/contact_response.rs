@@ -1,6 +1,9 @@
 //! Adapt the normal-contact solve to the same frozen inverse as body prediction.
 
-use super::{Body, Contact, ContactQueue, Crush, Law, contact_phi, crush_phi, viscoelastic_phi};
+use super::{
+    Body, Contact, ContactQueue, Crush, Law, contact_force, contact_phi, crush_force, crush_phi,
+    viscoelastic_force, viscoelastic_phi,
+};
 use crate::contact_island::{Controls, SolveError, SolveReport, Workspace as IslandWorkspace};
 
 #[derive(Clone, Default)]
@@ -14,6 +17,11 @@ pub(crate) struct Workspace {
     crush: Vec<Option<Crush>>,
     touched: Vec<usize>,
     seen: Vec<bool>,
+    owner: Vec<usize>,
+    diagonal: Vec<f64>,
+    scalar_force: Vec<f64>,
+    scalar_pose: Vec<f64>,
+    actual_pose: Vec<f64>,
 }
 
 /// Apply N^T A^-1 N without forming a contact matrix. Scatter all contact
@@ -71,13 +79,113 @@ fn law(c: &Contact, previous: f64, crush: Option<&Crush>, d: f64, k: f64) -> (f6
     }
 }
 
+/// Pure scalar candidates: reuse the queue's interleaved Hertz arithmetic,
+/// without its sequential publication. Independence must already be proved.
+fn independent_forces(
+    contacts: &[Contact],
+    indices: &[usize],
+    predicted: &[f64],
+    previous: &[f64],
+    diagonal: &[f64],
+    crush: &[Option<Crush>],
+    queue: &mut ContactQueue,
+    k: f64,
+    force: &mut [f64],
+    pose: &mut [f64],
+) {
+    queue.j.clear();
+    for v in [
+        &mut queue.dp,
+        &mut queue.cm,
+        &mut queue.x0,
+        &mut queue.hi,
+        &mut queue.dn,
+        &mut queue.kk,
+        &mut queue.mu,
+        &mut queue.f,
+    ] {
+        v.clear();
+    }
+    queue.fx.clear();
+    for (slot, &ci) in indices.iter().enumerate() {
+        let c = &contacts[ci];
+        let Law::Power {
+            k: stiffness,
+            alpha,
+            mu,
+        } = c.law;
+        if alpha == 1.5
+            && crush[slot].is_none()
+            && c.retardation_s.is_none()
+            && !(predicted[slot] <= 0.0 && previous[slot] <= 0.0)
+        {
+            let hi = contact_phi(predicted[slot], previous[slot], stiffness, alpha, mu, k).0;
+            queue.j.push(slot);
+            queue.dp.push(predicted[slot]);
+            queue.cm.push(diagonal[slot]);
+            queue.x0.push(if c.force > 0.0 && c.force < hi {
+                c.force
+            } else {
+                0.5 * hi
+            });
+            queue.hi.push(hi);
+            queue.dn.push(previous[slot]);
+            queue.kk.push(stiffness);
+            queue.mu.push(mu);
+            queue.fx.push(c.fixed_point_exit);
+        } else {
+            force[slot] = match crush[slot].as_ref() {
+                Some(crush) => crush_force(
+                    predicted[slot],
+                    diagonal[slot],
+                    c.force,
+                    previous[slot],
+                    c.law,
+                    crush,
+                    c.fixed_point_exit,
+                    k,
+                ),
+                None => match c.retardation_s {
+                    Some(retardation) => viscoelastic_force(
+                        predicted[slot],
+                        diagonal[slot],
+                        c.force,
+                        previous[slot],
+                        stiffness,
+                        retardation,
+                        c.fixed_point_exit,
+                        k,
+                    ),
+                    None => contact_force(
+                        predicted[slot],
+                        diagonal[slot],
+                        c.force,
+                        previous[slot],
+                        c.law,
+                        c.fixed_point_exit,
+                        k,
+                    ),
+                },
+            };
+        }
+    }
+    queue.solve(k);
+    for (&slot, &f) in queue.j.iter().zip(&queue.f) {
+        force[slot] = f;
+    }
+    queue.j.clear(); // No pending sequential publication may escape this helper.
+    for slot in 0..indices.len() {
+        pose[slot] = predicted[slot] - diagonal[slot] * force[slot];
+    }
+}
+
 /// Publish all normal forces, crush memories and body displacements together.
 /// A refusal changes only private numerical scratch. Friction is a subsequent,
 /// separate stage and is not included in this normal-contact consistency claim.
 pub(crate) fn solve_contacts_checked(
     bodies: &mut [Body],
     contacts: &mut [Contact],
-    _queue: &mut ContactQueue,
+    queue: &mut ContactQueue,
     work: &mut Workspace,
     k: f64,
     controls: Controls,
@@ -87,15 +195,26 @@ pub(crate) fn solve_contacts_checked(
             "time step must be positive and finite",
         ));
     }
+    controls.validate()?;
     work.indices.clear();
     work.predicted.clear();
     work.previous.clear();
     work.previous_force.clear();
     work.diagonal_bound.clear();
+    work.diagonal.clear();
     work.crush.clear();
     work.touched.clear();
     work.seen.resize(bodies.len(), false);
     work.seen.fill(false);
+    work.owner.resize(bodies.len(), usize::MAX);
+    work.owner.fill(usize::MAX);
+    queue.mark.resize_with(bodies.len(), Vec::new);
+    for (mark, body) in queue.mark.iter_mut().zip(bodies.iter()) {
+        mark.resize(body.n, 0);
+    }
+    queue.new_batch();
+    let mut independent = true;
+    let mut nonlocal = false;
     for (ci, c) in contacts.iter().enumerate().filter(|(_, c)| c.active) {
         let Law::Power {
             k: stiffness,
@@ -137,7 +256,7 @@ pub(crate) fn solve_contacts_checked(
                 "crushing needs positive Hertz stiffness, area and pressure",
             ));
         }
-        let (mut dp, mut previous, mut norm_bound) = (-c.gap, -c.gap, 0.0);
+        let (mut dp, mut previous, mut norm_bound, mut exact_diagonal) = (-c.gap, -c.gap, 0.0, 0.0);
         for (terms, sign) in [(&c.a, 1.0), (&c.b, -1.0)] {
             for &(b, i, w) in terms {
                 let body = bodies.get(b).ok_or(SolveError::InvalidInput(
@@ -158,6 +277,19 @@ pub(crate) fn solve_contacts_checked(
                 // bound also covers repeated signed nodes without sorting or
                 // allocating. It is only a preconditioner, never the physics.
                 norm_bound += w.abs() * diagonal.sqrt();
+                exact_diagonal += w * w * diagonal;
+                if w != 0.0 {
+                    if queue.mark[b][i] == queue.batch
+                        || (body.nonlocal_response()
+                            && work.owner[b] != usize::MAX
+                            && work.owner[b] != ci)
+                    {
+                        independent = false;
+                    }
+                    queue.mark[b][i] = queue.batch;
+                    work.owner[b] = ci;
+                    nonlocal |= body.nonlocal_response();
+                }
                 if !work.seen[b] {
                     work.seen[b] = true;
                     work.touched.push(b);
@@ -177,8 +309,13 @@ pub(crate) fn solve_contacts_checked(
         work.previous.push(previous);
         work.previous_force.push(c.force);
         work.diagonal_bound.push(bound);
+        work.diagonal.push(exact_diagonal);
         work.crush.push(crush);
     }
+    let count = work.indices.len();
+    work.scalar_force.resize(count, 0.0);
+    work.scalar_pose.resize(count, 0.0);
+    work.actual_pose.resize(count, 0.0);
     let Workspace {
         core,
         indices,
@@ -188,115 +325,223 @@ pub(crate) fn solve_contacts_checked(
         diagonal_bound,
         crush,
         touched,
+        diagonal,
+        scalar_force,
+        scalar_pose,
+        actual_pose,
         ..
     } = work;
-    let result = core.solve(
-        predicted,
-        previous_force,
-        diagonal_bound,
-        controls,
-        |force, response| apply_compliance(bodies, contacts, indices, touched, k, force, response),
-        |slot, d| {
-            law(
-                &contacts[indices[slot]],
-                previous[slot],
-                crush[slot].as_ref(),
-                d,
+    // Reduced work budgets retain the checked coupled driver. The inherited
+    // scalar lanes have a separate fixed 60-iteration per-contact safeguard.
+    let mut scalar =
+        independent && controls.max_newton_iterations >= Controls::default().max_newton_iterations;
+    let mut report = SolveReport::default();
+    if scalar {
+        if nonlocal && count != 0 {
+            // With independence proved, C * 1 is its exact diagonal. Apply
+            // each touched body's inverse once for the whole scalar batch.
+            scalar_force.fill(1.0);
+            apply_compliance(
+                bodies,
+                contacts,
+                indices,
+                touched,
                 k,
-            )
-        },
-    );
-    let mut report = result.map_err(|error| match error {
-        SolveError::InvalidLaw { contact } => SolveError::InvalidLaw {
-            contact: indices[contact],
-        },
-        other => other,
-    })?;
-    // Do not rely on whichever Krylov/trial application happened last. The
-    // accepted aggregate response is computed once more for publication.
-    apply_compliance(
-        bodies,
-        contacts,
-        indices,
-        touched,
-        k,
-        core.forces(),
-        previous_force,
-    );
-    if !indices.is_empty() {
-        report.compliance_applications += 1;
-    }
-    for &bi in touched.iter() {
-        let body = &bodies[bi];
-        if body
-            .wn
-            .iter()
-            .zip(&body.tmp)
-            .any(|(&next, &delta)| !(next - delta).is_finite())
-        {
-            return Err(SolveError::InvalidResponse);
+                scalar_force,
+                diagonal,
+            );
+            report.compliance_applications += 1;
+        }
+        if diagonal.iter().all(|a| a.is_finite() && *a >= 0.0) {
+            independent_forces(
+                contacts,
+                indices,
+                predicted,
+                previous,
+                diagonal,
+                crush,
+                queue,
+                k,
+                scalar_force,
+                scalar_pose,
+            );
+        } else {
+            scalar = false;
         }
     }
-    // Re-evaluate the actual rounded nodal pose, rather than only dp - C f.
-    // Large common offsets must not hide a constitutive force mismatch.
-    for (slot, &ci) in indices.iter().enumerate() {
-        let c = &contacts[ci];
-        let mut d = -c.gap;
-        for (terms, sign) in [(&c.a, 1.0), (&c.b, -1.0)] {
-            for &(b, i, w) in terms {
-                d += sign * w * (bodies[b].wn[i] - bodies[b].tmp[i]);
+    loop {
+        if !scalar {
+            let spent = report.compliance_applications;
+            let result = core.solve(
+                predicted,
+                previous_force,
+                diagonal_bound,
+                controls,
+                |force, response| {
+                    apply_compliance(bodies, contacts, indices, touched, k, force, response)
+                },
+                |slot, d| {
+                    law(
+                        &contacts[indices[slot]],
+                        previous[slot],
+                        crush[slot].as_ref(),
+                        d,
+                        k,
+                    )
+                },
+            );
+            report = result.map_err(|error| match error {
+                SolveError::InvalidLaw { contact } => SolveError::InvalidLaw {
+                    contact: indices[contact],
+                },
+                other => other,
+            })?;
+            report.compliance_applications += spent;
+        }
+        let (forces, penetrations) = if scalar {
+            (&scalar_force[..], &scalar_pose[..])
+        } else {
+            (core.forces(), core.penetrations())
+        };
+        let sparse = scalar && !nonlocal;
+        let accepted = (|| {
+            if !forces.iter().all(|f| f.is_finite() && *f >= 0.0)
+                || !penetrations.iter().all(|d| d.is_finite())
+            {
+                return Err(SolveError::InvalidResponse);
+            }
+            // Do not rely on whichever Krylov/trial application happened last. The
+            // accepted aggregate response is computed once more for publication.
+            if sparse {
+                // Every nonzero node occurs exactly once. Only those diagonal
+                // responses can move; leave unrelated body scratch and nodes alone.
+                for (&ci, &f) in indices.iter().zip(forces) {
+                    let c = &contacts[ci];
+                    for (terms, sign) in [(&c.a, 1.0), (&c.b, -1.0)] {
+                        for &(b, i, w) in terms {
+                            if w != 0.0 {
+                                bodies[b].tmp[i] = sign * w * bodies[b].compliance(i, k) * f;
+                            }
+                        }
+                    }
+                }
+            } else {
+                apply_compliance(bodies, contacts, indices, touched, k, forces, actual_pose);
+            }
+            if !indices.is_empty() {
+                report.compliance_applications += 1;
+            }
+            if sparse {
+                for &ci in indices.iter() {
+                    let c = &contacts[ci];
+                    for &(b, i, w) in c.a.iter().chain(&c.b) {
+                        if w != 0.0 && !(bodies[b].wn[i] - bodies[b].tmp[i]).is_finite() {
+                            return Err(SolveError::InvalidResponse);
+                        }
+                    }
+                }
+            } else {
+                for &bi in touched.iter() {
+                    let body = &bodies[bi];
+                    if body
+                        .wn
+                        .iter()
+                        .zip(&body.tmp)
+                        .any(|(&next, &delta)| !(next - delta).is_finite())
+                    {
+                        return Err(SolveError::InvalidResponse);
+                    }
+                }
+            }
+            // Re-evaluate the actual rounded nodal pose, rather than only dp - C f.
+            // Large common offsets must not hide a constitutive force mismatch.
+            for (slot, &ci) in indices.iter().enumerate() {
+                let c = &contacts[ci];
+                let mut d = -c.gap;
+                for (terms, sign) in [(&c.a, 1.0), (&c.b, -1.0)] {
+                    for &(b, i, w) in terms {
+                        if w != 0.0 {
+                            d += sign * w * (bodies[b].wn[i] - bodies[b].tmp[i]);
+                        }
+                    }
+                }
+                let (actual_force, slope) = law(c, previous[slot], crush[slot].as_ref(), d, k);
+                if !d.is_finite()
+                    || !actual_force.is_finite()
+                    || actual_force < 0.0
+                    || !slope.is_finite()
+                    || slope < 0.0
+                {
+                    return Err(SolveError::InvalidResponse);
+                }
+                let f = forces[slot];
+                let force_scale = controls.force_tolerance
+                    + controls.relative_tolerance * f.abs().max(actual_force.abs());
+                let displacement_scale = controls.displacement_tolerance
+                    + controls.relative_tolerance
+                        * d.abs()
+                            .max(penetrations[slot].abs())
+                            .max(predicted[slot].abs());
+                if !force_scale.is_finite() || !displacement_scale.is_finite() {
+                    return Err(SolveError::InvalidResponse);
+                }
+                report.force_residual = report
+                    .force_residual
+                    .max((f - actual_force).abs() / force_scale);
+                report.displacement_residual = report
+                    .displacement_residual
+                    .max((d - penetrations[slot]).abs() / displacement_scale);
+                actual_pose[slot] = d;
+            }
+            if !report.force_residual.is_finite()
+                || !report.displacement_residual.is_finite()
+                || report.force_residual > 1.0
+                || report.displacement_residual > 1.0
+            {
+                return Err(SolveError::NoConvergence {
+                    newton_iterations: report.newton_iterations,
+                    displacement_residual: report.displacement_residual,
+                    force_residual: report.force_residual,
+                });
+            }
+            Ok(())
+        })();
+        if let Err(error) = accepted {
+            if scalar {
+                // A scalar stopping rule is only a candidate. Preserve the
+                // original warm forces and retry the simultaneous owner before
+                // refusing a physically valid but more demanding tolerance.
+                scalar = false;
+                continue;
+            }
+            return Err(error);
+        }
+        if sparse {
+            for &ci in indices.iter() {
+                let c = &contacts[ci];
+                for &(b, i, w) in c.a.iter().chain(&c.b) {
+                    if w != 0.0 {
+                        bodies[b].wn[i] -= bodies[b].tmp[i];
+                    }
+                }
+            }
+        } else {
+            for &bi in touched.iter() {
+                let body = &mut bodies[bi];
+                for (next, &delta) in body.wn.iter_mut().zip(&body.tmp) {
+                    *next -= delta;
+                }
             }
         }
-        let (actual_force, slope) = law(c, previous[slot], crush[slot].as_ref(), d, k);
-        if !d.is_finite()
-            || !actual_force.is_finite()
-            || actual_force < 0.0
-            || !slope.is_finite()
-            || slope < 0.0
-        {
-            return Err(SolveError::InvalidResponse);
+        for (slot, &ci) in indices.iter().enumerate() {
+            let c = &mut contacts[ci];
+            c.force = forces[slot];
+            c.peak_force = c.peak_force.max(c.force);
+            c.d_now = actual_pose[slot];
+            c.crush = crush[slot];
         }
-        let f = core.forces()[slot];
-        let force_scale = controls.force_tolerance
-            + controls.relative_tolerance * f.abs().max(actual_force.abs());
-        let displacement_scale = controls.displacement_tolerance
-            + controls.relative_tolerance
-                * d.abs()
-                    .max(core.penetrations()[slot].abs())
-                    .max(predicted[slot].abs());
-        report.force_residual = report
-            .force_residual
-            .max((f - actual_force).abs() / force_scale);
-        report.displacement_residual = report
-            .displacement_residual
-            .max((d - core.penetrations()[slot]).abs() / displacement_scale);
-        previous_force[slot] = d;
+        return Ok(report);
     }
-    if !report.force_residual.is_finite()
-        || !report.displacement_residual.is_finite()
-        || report.force_residual > 1.0
-        || report.displacement_residual > 1.0
-    {
-        return Err(SolveError::NoConvergence {
-            newton_iterations: report.newton_iterations,
-            displacement_residual: report.displacement_residual,
-            force_residual: report.force_residual,
-        });
-    }
-    for &bi in touched.iter() {
-        let body = &mut bodies[bi];
-        for (next, &delta) in body.wn.iter_mut().zip(&body.tmp) {
-            *next -= delta;
-        }
-    }
-    for (slot, &ci) in indices.iter().enumerate() {
-        let c = &mut contacts[ci];
-        c.force = core.forces()[slot];
-        c.peak_force = c.peak_force.max(c.force);
-        c.d_now = previous_force[slot];
-        c.crush = crush[slot];
-    }
-    Ok(report)
 }
 
 /// The exported sequential stepper is equivalent only for independent
