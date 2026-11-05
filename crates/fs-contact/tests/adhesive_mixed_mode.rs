@@ -8,6 +8,8 @@ mod motion;
 mod path;
 #[path = "adhesive_mixed_mode/temperature.rs"]
 mod temperature;
+#[path = "adhesive_mixed_mode/transport.rs"]
+mod transport;
 
 use core::f64::consts::PI;
 use fs_contact::normal_patch::adhesive::{

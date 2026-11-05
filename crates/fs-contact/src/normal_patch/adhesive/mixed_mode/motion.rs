@@ -19,6 +19,9 @@
 /// Original-source prescribed-temperature continuation at held coordinates.
 pub mod temperature;
 
+/// Objective retained shear and actual native projection continuation.
+pub mod transport;
+
 use super::{
     JkrMixedModeResponse, SourceJkrMixedMode,
     path::{JkrMixedModePath, JkrMixedModePathError},

@@ -1578,6 +1578,26 @@ static-capacity and source-identity refusals preserve the input source. These
 are conservative floating-point screens, not interval certificates or an
 inferred dynamic post-slip, post-fold, dissipation or healing law.
 
+`prepare_discrete_path` retains a sealed original endpoint so subsequent trials
+reuse its constitutive solve; mutable returned diagnostics cannot replace that
+endpoint, and failed trials preserve the accepted cache.
+
+`mixed_mode::motion::transport` rebinds accepted elastic shear through the
+existing checked tangent-history rotation and a caller-supplied complete native
+mobility and actual projected rates. Normal approach, original source and shear
+owners, numerical policy, clock and step count remain fixed; an identity transfer
+with unchanged projection preserves the exact token. One or two original source
+queries admit the transported constant state, strict attached branch, actual-area
+static capacity, force and speed under the shared work budget. The original
+normal/shear/surface storage must remain unchanged within the stated numerical
+energy gate. This is an orientation/projection transfer, not an integration of a
+fictitious shear chord. The reported change of `v^T W^-1 v/2` is only a signed
+contact-observable kinetic repartition; it is neither work nor heat. The native
+owner must authenticate compatible geometry, actual momenta and total body
+energy. Contact migration, relative torsion, intervening finite-rotation accuracy
+and reattachment remain outside this source-level operation. Refusal preserves
+accepted history and all physical owners.
+
 `mixed_mode::motion::temperature` continues an accepted coupled trajectory
 through the existing sealed held-indentation normal refresh and original pinned
 junction-claim rebind. All three mechanical coordinates, velocities, clock,

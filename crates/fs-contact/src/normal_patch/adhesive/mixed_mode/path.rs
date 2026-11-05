@@ -63,6 +63,72 @@ pub struct JkrMixedModePath {
     pub evaluations: usize,
 }
 
+/// Immutable original endpoint for repeated native geometry/Newton proposals.
+/// Only this source can create or advance the cached response. Caller-editable
+/// diagnostic fields never become constitutive state. Preparation costs one
+/// original equilibrium query; each changed trial endpoint costs one more.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedJkrMixedModePath<'a> {
+    source: &'a SourceJkrMixedMode,
+    contact: JkrMixedModeResponse,
+}
+
+/// A sealed successor accompanies the ordinary work/tangent diagnostics.
+/// Whole-path and static-capacity admission remain the physical caller's job.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PreparedJkrMixedModeTrial<'a> {
+    endpoint: PreparedJkrMixedModePath<'a>,
+    path: JkrMixedModePath,
+}
+
+impl<'a> PreparedJkrMixedModePath<'a> {
+    pub const fn source(&self) -> &'a SourceJkrMixedMode {
+        self.source
+    }
+    pub const fn contact(&self) -> &JkrMixedModeResponse {
+        &self.contact
+    }
+    pub fn position_m(&self) -> [f64; 3] {
+        [
+            self.contact.indentation_m,
+            self.contact.tangential_displacement_m[0],
+            self.contact.tangential_displacement_m[1],
+        ]
+    }
+
+    /// Propose from the same original accepted radius without solving it again.
+    /// Exact coincidence uses no source query. Every failure leaves this cache
+    /// unchanged; accepting a trial is explicit through its sealed endpoint.
+    pub fn trial(
+        &self,
+        to: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<PreparedJkrMixedModeTrial<'a>, JkrMixedModePathError> {
+        let path = self
+            .source
+            .discrete_path_from_response(self.contact, to, gate)?;
+        Ok(PreparedJkrMixedModeTrial {
+            endpoint: Self {
+                source: self.source,
+                contact: path.contact,
+            },
+            path,
+        })
+    }
+}
+
+impl<'a> PreparedJkrMixedModeTrial<'a> {
+    pub const fn endpoint(&self) -> PreparedJkrMixedModePath<'a> {
+        self.endpoint
+    }
+    pub const fn path(&self) -> &JkrMixedModePath {
+        &self.path
+    }
+    pub fn into_parts(self) -> (PreparedJkrMixedModePath<'a>, JkrMixedModePath) {
+        (self.endpoint, self.path)
+    }
+}
+
 /// Conservative bounds over every point of an admitted quadratic trajectory.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct JkrMixedModePathBounds {
@@ -75,6 +141,21 @@ pub struct JkrMixedModePathBounds {
 }
 
 impl SourceJkrMixedMode {
+    /// Prepare an original, strictly stable endpoint for allocation-free trials.
+    /// This performs one source query and the coincident radial-tangent check;
+    /// it neither establishes a physical trajectory nor admits static capacity.
+    pub fn prepare_discrete_path(
+        &self,
+        from: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<PreparedJkrMixedModePath<'_>, JkrMixedModePathError> {
+        let path = self.discrete_path(from, from, gate)?;
+        Ok(PreparedJkrMixedModePath {
+            source: self,
+            contact: path.contact,
+        })
+    }
+
     /// Symmetric, second-order, work-consistent endpoint force and its analytic
     /// derivative with respect to `to`, in [approach,shear1,shear2] order.
     /// Source and radial secant singularities refuse; no fold continuation is
@@ -94,7 +175,7 @@ impl SourceJkrMixedMode {
     }
 
     /// Reuse an immutable ORIGINAL response already evaluated by this module's
-    /// motion owner. This is intentionally not a public response-taking API:
+    /// motion or prepared-path owner. This is not a public response-taking API:
     /// caller-editable diagnostic fields cannot become constitutive authority.
     /// Counts only new source evaluations (zero at coincidence, one otherwise).
     pub(super) fn discrete_path_from_response(

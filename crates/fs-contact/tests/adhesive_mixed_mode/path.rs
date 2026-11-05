@@ -110,6 +110,54 @@ fn g1_discrete_gradient_closes_original_vector_work_and_reversal() {
 }
 
 #[test]
+fn prepared_paths_reuse_only_sealed_original_endpoints_and_preserve_failed_trials() {
+    let law = model(1.0);
+    let gate = CancelGate::new();
+    let initial = [2e-6, 0.2e-6, -0.1e-6];
+    let mut prepared = law.prepare_discrete_path(initial, &gate).unwrap();
+    assert!(core::ptr::eq(prepared.source(), &law));
+    for next in [initial, [3e-6, -0.4e-6, 0.3e-6], [1e-6, 0.1e-6, 0.2e-6]] {
+        let original = prepared;
+        let uncached = law
+            .discrete_path(prepared.position_m(), next, &gate)
+            .unwrap();
+        let trial = prepared.trial(next, &gate).unwrap();
+        let mut comparable = *trial.path();
+        assert_eq!(
+            comparable.evaluations,
+            usize::from(next != prepared.position_m())
+        );
+        comparable.evaluations += 1;
+        assert_eq!(comparable, uncached);
+        let (endpoint, mut diagnostic) = trial.into_parts();
+        diagnostic.contact.contact_radius_m *= 10.0;
+        diagnostic.contact.tangential_displacement_m = [99.0; 2];
+        assert_eq!(endpoint.contact(), &uncached.contact);
+        assert_eq!(endpoint.position_m(), next);
+        assert_eq!(prepared, original);
+        assert_ne!(diagnostic.contact, *endpoint.contact());
+        prepared = endpoint;
+    }
+    let retained = prepared;
+    assert!(prepared.trial([f64::NAN, 0.0, 0.0], &gate).is_err());
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    assert!(matches!(
+        prepared.trial(initial, &cancelled),
+        Err(JkrMixedModePathError::Cancelled)
+    ));
+    assert!(matches!(
+        law.prepare_discrete_path(initial, &cancelled),
+        Err(JkrMixedModePathError::Cancelled)
+    ));
+    assert_eq!(prepared, retained);
+    assert_eq!(
+        prepared.trial(initial, &gate).unwrap(),
+        retained.trial(initial, &gate).unwrap()
+    );
+}
+
+#[test]
 fn g1_analytic_discrete_tangent_matches_independent_endpoint_differences() {
     let law = model(1.0);
     let gate = CancelGate::new();
