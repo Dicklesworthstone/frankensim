@@ -38,6 +38,8 @@ use std::collections::BinaryHeap;
 pub mod array;
 /// Spherical-wave transmission through one finite original fluid layer.
 pub mod layer;
+/// Reflected and coherent total fields in the original incident fluid.
+pub mod reflection;
 
 mod force;
 pub use force::{
@@ -339,46 +341,66 @@ struct SpectralPoint {
     measure: [f64; 2],
 }
 
-impl Kernel {
-    // Regions use x in [0,1]. The two measure factors multiply to q*dq/dx;
-    // keeping them separate permits division by D before the large product.
-    fn point(&self, region: usize, x: f64) -> SpectralPoint {
-        let (q, low, high, measure) = if region < 2 {
-            let (sin, cos) = det::sin_cos(FRAC_PI_2 * x);
-            if region == 0 {
-                let q = self.kmin * sin;
-                let zlow = self.kmin * cos;
-                (
-                    q,
-                    C64::from_re(zlow),
-                    C64::from_re(det::hypot(self.gap, zlow)),
-                    [q, zlow * FRAC_PI_2],
-                )
-            } else {
-                let ilo = self.gap * sin;
-                let rhi = self.gap * cos;
-                (
-                    det::hypot(self.kmin, ilo),
-                    C64::new(0.0, ilo),
-                    C64::from_re(rhi),
-                    [ilo, rhi * FRAC_PI_2],
-                )
-            }
-        } else {
-            let t = self.tail_extent * x;
+// The original two critical circles and tail share this branch map across
+// transmission and reflection. The measure factors multiply to q*dq/dx.
+fn spectral_point(
+    kmin: f64,
+    kmax: f64,
+    gap: f64,
+    incident_has_larger_k: bool,
+    tail_extent: f64,
+    region: usize,
+    x: f64,
+) -> SpectralPoint {
+    let (q, low, high, measure) = if region < 2 {
+        let (sin, cos) = det::sin_cos(FRAC_PI_2 * x);
+        if region == 0 {
+            let q = kmin * sin;
+            let zlow = kmin * cos;
             (
-                det::hypot(self.kmax, t),
-                C64::new(0.0, det::hypot(self.gap, t)),
-                C64::new(0.0, t),
-                [t, self.tail_extent],
+                q,
+                C64::from_re(zlow),
+                C64::from_re(det::hypot(gap, zlow)),
+                [q, zlow * FRAC_PI_2],
             )
-        };
-        let zeta = if self.incident_has_larger_k {
-            [high, low]
         } else {
-            [low, high]
-        };
-        SpectralPoint { q, zeta, measure }
+            let ilo = gap * sin;
+            let rhi = gap * cos;
+            (
+                det::hypot(kmin, ilo),
+                C64::new(0.0, ilo),
+                C64::from_re(rhi),
+                [ilo, rhi * FRAC_PI_2],
+            )
+        }
+    } else {
+        let t = tail_extent * x;
+        (
+            det::hypot(kmax, t),
+            C64::new(0.0, det::hypot(gap, t)),
+            C64::new(0.0, t),
+            [t, tail_extent],
+        )
+    };
+    let zeta = if incident_has_larger_k {
+        [high, low]
+    } else {
+        [low, high]
+    };
+    SpectralPoint { q, zeta, measure }
+}
+
+impl Kernel {
+    fn point(&self, region: usize, x: f64) -> SpectralPoint {
+        spectral_point(
+            self.kmin,
+            self.kmax,
+            self.gap,
+            self.incident_has_larger_k,
+            self.tail_extent,
+            region,
+            x,
+        )
     }
 
     fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {

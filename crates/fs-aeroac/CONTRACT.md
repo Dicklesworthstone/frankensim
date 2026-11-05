@@ -1656,6 +1656,52 @@ motion, rotation covariance, tensor-norm refinement, physical observation clocks
 and work/cancellation refusals. A balanced-half-decay unit regression covers
 representable force gradients after raw evanescent exponential underflow.
 
+## Reflected and coherent incident-side full-wave observations
+
+`curle3d::refraction::full_wave::reflection::PreparedReflectedFullWaveMonopole`
+places both original source and observer in the incident fluid at the existing
+`PlanarFluidInterface`. It retains the complete spherical reflection spectrum,
+including both critical circles, total internal reflection, evanescent and
+reactive contributions. `evaluate_reflected` returns only the returning field;
+`evaluate_total` coherently adds the original homogeneous direct field before
+forming pressure/velocity intensity. Original phases and interference cross
+terms are retained. Both views expose native harmonic lines without another
+propagation delay. A coincident source/receiver admits a finite reflected field
+but refuses the singular direct/total field; it does not infer source feedback.
+
+With outgoing `zeta_j=sqrt(k_j^2-q^2)` and incident-side clearances a,b, the
+pressure reflection factor is `R=(rho2*zeta1-rho1*zeta2)/(rho2*zeta1+rho1*zeta2)`.
+The shared Weyl weight is `q*dq*R*exp(i*zeta1*(a+b))/zeta1`; its pressure scale
+is `omega*rho1/(4 pi)`, while radial and normal velocity follow analytic
+receiving derivatives. Returning normal velocity retains its minus sign.
+Equal original sound speeds use an exact density-jump spherical image,
+including induction; identical fluids return exact zero reflected field.
+
+The original critical-branch map and bounded Gauss--Kronrod engine are shared
+with transmission. The incident-grazing quotient is cancelled analytically
+before evaluation. Log-scaled admittance products and spectral weights avoid
+premature overflow/underflow. Phase and attenuation resolution are supplemented
+by a bound on within-panel reflection-factor variation, preserving narrow
+critical transitions when original speeds nearly coincide. Analytic omitted
+tail bounds use `|R|<=1` and the complete reflected clearance `a+b`.
+
+`FullWaveMonopoleLimits` and diagnostics control the reflected transfer.
+The coherent total inherits its absolute numerical error estimates but has no
+relative-accuracy guarantee at direct/reflected cancellation. Quadrature errors
+remain estimates; roundoff, geometry and Bessel errors remain outside those
+estimates and the analytic tail bounds. Preparation is bounded/cancellable;
+application uses cached coefficients without allocation or transcendental work.
+This is a stationary, lossless, infinite two-fluid plane with prescribed compact
+sources; absorption, finite edges, layers, moving fluids, loading and measured
+SPL authority are outside the model.
+
+`tests/full_wave_reflection.rs` covers independently refined direct-q spectra
+for both critical orderings and nearly equal speeds; exact image/interference
+fields; interface pressure and normal-velocity continuity against the original
+transmission owner; momentum, reciprocity, rotation, finite reflected self-field,
+native observation clocks and bounded refusals. Private regressions exercise
+critical endpoints, raw-exponential underflow and narrow reflection transitions.
+
 ## Full-wave compact-source arrays and source coherence
 
 `curle3d::refraction::full_wave::array::PreparedFullWaveCompactSourceObserver`
