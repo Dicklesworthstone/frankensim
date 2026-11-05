@@ -1,7 +1,7 @@
 //! Steady anisotropic Stokes–Brinkman flow on the original BDM1–P0 mesh.
 //!
-//! The superficial velocity solves
-//! `-div(2 nu_eff D(u)) + nu K^-1 u + grad(pi) = f`, `div(u) = 0`.
+//! The macroscopic velocity solves
+//! `-div(2 nu_eff D(u)) + nu K^-1 (u-u_s) + grad(pi) = f`, `div(u) = 0`.
 //! Intrinsic `K` is in m², `nu` is the actual fluid's molecular viscosity
 //! divided by the constant reference density, and `pi = p/rho`. The effective
 //! Brinkman shear viscosity is a separately declared closure, never inferred
@@ -9,9 +9,14 @@
 //!
 //! Reference: Sandia Aria, *Brinkman Momentum*,
 //! <https://www.sandia.gov/files/sierra/Aria_Users_5_28/theory/gov_eq/brinkman_mom.html>.
-//! The rigid, stationary skeleton is fully saturated by one incompressible
-//! fluid. There is no pore inertia/storage, Forchheimer/slip correction,
-//! moving skeleton, unsaturated mobility, thermal deposition or Biot wave.
+//! Prescribed skeleton motion uses the one-domain Brinkman approximation,
+//! with the phi=1 velocity convention of Sherwood (2020), equations 2.4–2.5,
+//! <https://doi.org/10.1017/jfm.2020.265>. It does not identify finite-porosity
+//! laboratory superficial velocity with intrinsic pore velocity: that would
+//! require the phi factor in equation 2.3 and a different storage/flux model.
+//! The skeleton geometry and coefficients are frozen during this steady solve.
+//! There is no pore inertia/storage, Forchheimer/slip correction, moving mesh,
+//! deformation, unsaturated mobility, thermal deposition or Biot wave.
 //! This steady entry inherits the existing synchronous Stokes solver's
 //! iteration budget and cancellation limitations; it adds no cancellation claim.
 
@@ -27,6 +32,7 @@ use fs_sparse::Csr;
 pub struct BrinkmanCell {
     permeability: Option<IntrinsicPermeability>,
     effective_viscosity_ratio: f64,
+    skeleton_velocity: [f64; 2],
 }
 
 impl BrinkmanCell {
@@ -36,6 +42,7 @@ impl BrinkmanCell {
         Self {
             permeability: None,
             effective_viscosity_ratio: 1.0,
+            skeleton_velocity: [0.0; 2],
         }
     }
 
@@ -98,7 +105,35 @@ impl BrinkmanCell {
         Ok(Self {
             permeability: Some(permeability),
             effective_viscosity_ratio,
+            skeleton_velocity: [0.0; 2],
         })
+    }
+
+    /// Prescribe this cell's uniform skeleton velocity [m/s] in world axes.
+    ///
+    /// Drag acts on `u-u_s` and its reaction can perform mechanical work. This
+    /// selects the one-domain/high-porosity Brinkman velocity convention
+    /// (phi=1), not a finite-porosity fluid-only superficial flux. The supplied
+    /// geometry is a frozen snapshot: this does not move interfaces, evolve
+    /// porosity, deform the solid or solve for the skeleton's dynamics.
+    /// Zero velocity retains the original stationary arithmetic exactly.
+    ///
+    /// # Errors
+    /// Refuses nonfinite velocity or nonzero skeleton motion in a free-fluid
+    /// cell, which has no skeleton to prescribe.
+    pub fn with_skeleton_velocity(
+        mut self,
+        velocity: [f64; 2],
+    ) -> Result<Self, StokesBoundaryError> {
+        if !velocity.iter().all(|value| value.is_finite())
+            || self.permeability.is_none() && velocity != [0.0; 2]
+        {
+            return Err(invalid(
+                "Brinkman skeleton motion requires finite velocity in a porous cell",
+            ));
+        }
+        self.skeleton_velocity = velocity;
+        Ok(self)
     }
 
     /// Original intrinsic tensor; `None` identifies a resolved free-fluid cell.
@@ -111,6 +146,12 @@ impl BrinkmanCell {
     #[must_use]
     pub const fn effective_viscosity_ratio(&self) -> f64 {
         self.effective_viscosity_ratio
+    }
+
+    /// Authored skeleton velocity [m/s] in the same world frame as the flow.
+    #[must_use]
+    pub const fn skeleton_velocity(&self) -> [f64; 2] {
+        self.skeleton_velocity
     }
 }
 
@@ -127,6 +168,7 @@ fn invalid(reason: &'static str) -> StokesBoundaryError {
 pub(super) struct DarcyDrag {
     rates: [f64; 3],
     axes: [[f64; 2]; 3],
+    skeleton_velocity: [f64; 2],
 }
 
 impl DarcyDrag {
@@ -135,6 +177,7 @@ impl DarcyDrag {
             return Ok(Self {
                 rates: [0.0; 3],
                 axes: [[0.0; 2]; 3],
+                skeleton_velocity: [0.0; 2],
             });
         };
         let rates = permeability.principal_m2().map(|k| nu / k);
@@ -146,19 +189,28 @@ impl DarcyDrag {
         let axes = permeability
             .material_axes_in_world()
             .map(|axis| [axis[0], axis[1]]);
-        Ok(Self { rates, axes })
+        Ok(Self {
+            rates,
+            axes,
+            skeleton_velocity: cell.skeleton_velocity,
+        })
     }
 
-    pub(super) fn local_matrix(
+    pub(super) fn local_matrix_and_load(
         &self,
         basis: &CellBasis,
         vertices: [[f64; 2]; 3],
         area: f64,
-    ) -> [[f64; 6]; 6] {
+    ) -> ([[f64; 6]; 6], [f64; 6]) {
         let mut matrix = [[0.0; 6]; 6];
+        let mut load = [0.0; 6];
         if self.rates == [0.0; 3] {
-            return matrix;
+            return (matrix, load);
         }
+        let moving = self.skeleton_velocity != [0.0; 2];
+        let skeleton = self
+            .axes
+            .map(|axis| axis[0] * self.skeleton_velocity[0] + axis[1] * self.skeleton_velocity[1]);
         for (point, weight) in tri_quad(vertices, area) {
             let projected: [[f64; 3]; 6] = core::array::from_fn(|i| {
                 let value = eval_basis(basis, i, point);
@@ -166,6 +218,14 @@ impl DarcyDrag {
                     .map(|axis| axis[0] * value[0] + axis[1] * value[1])
             });
             for i in 0..6 {
+                if moving {
+                    // The same spectral factors and quadrature supply D*u_s
+                    // to the original load/reaction rows, once per cell.
+                    let value: f64 = (0..3)
+                        .map(|a| self.rates[a] * projected[i][a] * skeleton[a])
+                        .sum();
+                    load[i] += weight * value;
+                }
                 for j in i..6 {
                     let value: f64 = (0..3)
                         .map(|a| self.rates[a] * projected[i][a] * projected[j][a])
@@ -179,16 +239,79 @@ impl DarcyDrag {
                 matrix[i][j] = matrix[j][i];
             }
         }
-        matrix
+        (matrix, load)
     }
 
     fn power(&self, velocity: [f64; 2]) -> f64 {
+        let relative = [
+            velocity[0] - self.skeleton_velocity[0],
+            velocity[1] - self.skeleton_velocity[1],
+        ];
         (0..3)
             .map(|a| {
-                let projection = self.axes[a][0] * velocity[0] + self.axes[a][1] * velocity[1];
+                let projection = self.axes[a][0] * relative[0] + self.axes[a][1] * relative[1];
                 self.rates[a] * projection * projection
             })
             .sum()
+    }
+
+    fn exchange(&self, velocity: [f64; 2]) -> BrinkmanDragExchange {
+        let relative = [
+            velocity[0] - self.skeleton_velocity[0],
+            velocity[1] - self.skeleton_velocity[1],
+        ];
+        let mut exchange = BrinkmanDragExchange::default();
+        for (rate, axis) in self.rates.into_iter().zip(self.axes) {
+            let projection = axis[0] * relative[0] + axis[1] * relative[1];
+            let effort = rate * projection;
+            for a in 0..2 {
+                exchange.skeleton_force[a] += effort * axis[a];
+            }
+            exchange.fluid_power -= effort * (axis[0] * velocity[0] + axis[1] * velocity[1]);
+            exchange.skeleton_power += effort
+                * (axis[0] * self.skeleton_velocity[0] + axis[1] * self.skeleton_velocity[1]);
+            exchange.dissipation += effort * projection;
+        }
+        exchange
+    }
+}
+
+/// Area-integrated Darcy exchange divided by the same reference density.
+///
+/// Force is per out-of-plane depth/density [m³/s²], and powers are per
+/// depth/density [m⁴/s³]. Positive power is work ON the named subsystem.
+/// `fluid_power + skeleton_power + dissipation = 0` to quadrature/roundoff;
+/// a driven skeleton may give the fluid positive work while dissipating heat.
+/// These are constitutive exchanges, not automatic thermal/body updates or
+/// a complete energy balance for the spatial discretization.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BrinkmanDragExchange {
+    /// Force exerted by the fluid ON the skeleton; fluid force is its negative.
+    pub skeleton_force: [f64; 2],
+    /// Signed work rate of Darcy force on the fluid.
+    pub fluid_power: f64,
+    /// Signed work rate of the opposite reaction on the prescribed skeleton.
+    pub skeleton_power: f64,
+    /// Nonnegative `integral(nu (u-u_s).K^-1.(u-u_s))`.
+    pub dissipation: f64,
+}
+
+impl BrinkmanDragExchange {
+    fn add_scaled(&mut self, value: Self, weight: f64) {
+        for a in 0..2 {
+            self.skeleton_force[a] += weight * value.skeleton_force[a];
+        }
+        self.fluid_power += weight * value.fluid_power;
+        self.skeleton_power += weight * value.skeleton_power;
+        self.dissipation += weight * value.dissipation;
+    }
+
+    fn finite(self) -> bool {
+        self.skeleton_force.iter().all(|value| value.is_finite())
+            && self.fluid_power.is_finite()
+            && self.skeleton_power.is_finite()
+            && self.dissipation.is_finite()
+            && self.dissipation >= 0.0
     }
 }
 
@@ -220,7 +343,7 @@ impl BrinkmanAssembly<'_, '_> {
         self.stokes.solve()
     }
 
-    /// Integrate `nu u.K^-1.u` in each triangle using the assembled coefficients.
+    /// Integrate `nu (u-u_s).K^-1.(u-u_s)` using the assembled coefficients.
     /// Values have units m⁴/s³ for this 2-D mesh; multiply by the SAME reference
     /// density to obtain physical Darcy dissipation per out-of-plane depth [W/m].
     /// These losses are diagnostics, never automatically added to a heat model.
@@ -258,14 +381,56 @@ impl BrinkmanAssembly<'_, '_> {
         }
         Ok(powers)
     }
+
+    /// Integrate the reaction, signed subsystem work and positive relative
+    /// dissipation in each original triangle. Uses the same spectral factors,
+    /// velocity reconstruction and quadrature as the assembled Darcy operator.
+    /// A common frame translation preserves reaction and dissipation; signed
+    /// subsystem powers change by equal and opposite force-times-velocity work.
+    ///
+    /// # Errors
+    /// Refuses incorrect velocity dimensions, nonfinite states or overflow.
+    pub fn cell_darcy_exchange_per_density(
+        &self,
+        velocity: &[f64],
+    ) -> Result<Vec<BrinkmanDragExchange>, StokesBoundaryError> {
+        if velocity.len() != self.system.n_u || velocity.iter().any(|value| !value.is_finite()) {
+            return Err(invalid(
+                "Darcy exchange requires exactly the finite native velocity DOFs",
+            ));
+        }
+        let mesh = self.system.mesh;
+        let mut exchanges = Vec::with_capacity(mesh.tris.len());
+        for (cell, drag) in self.drag.iter().enumerate() {
+            let vertices = core::array::from_fn(|i| mesh.verts[mesh.tris[cell][i]]);
+            let mut exchange = BrinkmanDragExchange::default();
+            for (point, weight) in tri_quad(vertices, mesh.areas[cell]) {
+                let mut value = [0.0; 2];
+                for i in 0..6 {
+                    let basis = eval_basis(&self.system.bases[cell], i, point);
+                    let dof = velocity[self.system.dof(cell, i)];
+                    value[0] += dof * basis[0];
+                    value[1] += dof * basis[1];
+                }
+                exchange.add_scaled(drag.exchange(value), weight);
+            }
+            if !exchange.finite() {
+                return Err(invalid("Darcy force or work is not representable"));
+            }
+            exchanges.push(exchange);
+        }
+        Ok(exchanges)
+    }
 }
 
 impl<'m> FluxSystem<'m> {
-    /// Assemble stationary, fully saturated Stokes–Brinkman momentum.
+    /// Assemble steady, fully saturated Stokes–Brinkman momentum.
     ///
     /// `params.nu` is molecular fluid viscosity/density. Each cell provides an
     /// intrinsic tensor and separate effective shear-viscosity ratio; free-fluid
-    /// cells have no drag. No permeability component is replaced by a diagonal
+    /// cells have no drag. Prescribed skeleton velocity contributes the matching
+    /// `nu K^-1 u_s` load; it does not change the matrix or stress law.
+    /// No permeability component is replaced by a diagonal
     /// approximation: all in-plane couplings enter the velocity block together.
     /// Cellwise coefficients are compiled once outside all quadrature loops.
     /// Strong normal moments, total-traction boundaries, SIP interfaces, exact

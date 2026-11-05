@@ -518,7 +518,7 @@ impl<'m> FluxSystem<'m> {
                     .map(|(q, w)| w * positive_viscosity(field(t, q)))
                     .sum::<f64>()
             });
-            let drag_matrix = darcy.map(|cells| cells[t].local_matrix(basis, p, area));
+            let drag_terms = darcy.map(|cells| cells[t].local_matrix_and_load(basis, p, area));
             // A rigid moving chart changes vector axes between time levels.
             // Integrate Q*u_old from its ORIGINAL cell field; rotating edge
             // coefficients would mix discontinuous tangential traces into
@@ -556,6 +556,11 @@ impl<'m> FluxSystem<'m> {
                     fi += w * (fv[0] * v[0] + fv[1] * v[1]);
                 }
                 rhs[gi] += fi;
+                if let Some((_, load)) = &drag_terms {
+                    if load[i] != 0.0 {
+                        rhs[gi] += load[i];
+                    }
+                }
                 if con[gi].is_none() || reactions.is_some() {
                     for j in 0..6 {
                         let gj = self.dof(t, j);
@@ -575,9 +580,9 @@ impl<'m> FluxSystem<'m> {
                             &con,
                             gi,
                             gj,
-                            drag_matrix
+                            drag_terms
                                 .as_ref()
-                                .map_or(value, |drag| value + drag[i][j]),
+                                .map_or(value, |(drag, _)| value + drag[i][j]),
                         );
                     }
                 }

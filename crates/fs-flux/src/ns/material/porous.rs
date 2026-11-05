@@ -3,8 +3,68 @@
 use super::{MaterialBoundaryLoad, MaterialFluxError, MaterialFluxSystem, MaterialStokesBoundary};
 use crate::ns::FluxSolution;
 use crate::ns::boundary::{StokesBoundary, StokesPressureReference, StokesSolution};
-use crate::ns::porous::BrinkmanCell;
+use crate::ns::porous::{BrinkmanCell, BrinkmanDragExchange};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
+
+/// Physical Darcy force and work per metre of out-of-plane depth.
+///
+/// Positive power acts ON the named subsystem. The two signed powers sum
+/// to minus the nonnegative relative dissipation. No heat or solid dynamics
+/// are updated implicitly; the coupled owner decides where these exchanges go.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MaterialBrinkmanDragExchange {
+    /// Reaction exerted by the fluid on the skeleton [N/m].
+    pub skeleton_force_n_per_m: [f64; 2],
+    /// Signed Darcy work on the fluid [W/m].
+    pub fluid_power_w_per_m: f64,
+    /// Signed reaction work on the prescribed skeleton [W/m].
+    pub skeleton_power_w_per_m: f64,
+    /// Nonnegative `integral(mu (u-u_s).K^-1.(u-u_s))` [W/m].
+    pub dissipation_w_per_m: f64,
+}
+
+impl MaterialBrinkmanDragExchange {
+    fn from_kinematic(
+        value: BrinkmanDragExchange,
+        density: f64,
+    ) -> Result<Self, MaterialFluxError> {
+        let physical = Self {
+            skeleton_force_n_per_m: value.skeleton_force.map(|force| density * force),
+            fluid_power_w_per_m: density * value.fluid_power,
+            skeleton_power_w_per_m: density * value.skeleton_power,
+            dissipation_w_per_m: density * value.dissipation,
+        };
+        physical.admit()?;
+        Ok(physical)
+    }
+
+    fn add(&mut self, value: Self) {
+        for a in 0..2 {
+            self.skeleton_force_n_per_m[a] += value.skeleton_force_n_per_m[a];
+        }
+        self.fluid_power_w_per_m += value.fluid_power_w_per_m;
+        self.skeleton_power_w_per_m += value.skeleton_power_w_per_m;
+        self.dissipation_w_per_m += value.dissipation_w_per_m;
+    }
+
+    fn admit(self) -> Result<(), MaterialFluxError> {
+        if !self
+            .skeleton_force_n_per_m
+            .iter()
+            .all(|force| force.is_finite())
+            || !self.fluid_power_w_per_m.is_finite()
+            || !self.skeleton_power_w_per_m.is_finite()
+            || !self.dissipation_w_per_m.is_finite()
+            || self.dissipation_w_per_m < 0.0
+        {
+            Err(MaterialFluxError::Invalid(
+                "Brinkman physical Darcy force or work is not representable",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// Accepted native flow, original transport snapshot and actual pore dissipation.
 pub struct MaterialBrinkmanSolution {
@@ -14,6 +74,8 @@ pub struct MaterialBrinkmanSolution {
     pressure_pa: Vec<f64>,
     cell_darcy_power_w_per_m: Vec<f64>,
     darcy_power_w_per_m: f64,
+    cell_darcy_exchange: Vec<MaterialBrinkmanDragExchange>,
+    darcy_exchange: MaterialBrinkmanDragExchange,
 }
 
 impl MaterialBrinkmanSolution {
@@ -42,7 +104,8 @@ impl MaterialBrinkmanSolution {
     pub const fn discrete(&self) -> &FluxSolution {
         &self.flow.field
     }
-    /// Physical superficial-velocity moments [m/s].
+    /// Physical macroscopic-velocity moments [m/s]. Prescribed skeleton motion
+    /// uses the one-domain/phi=1 convention documented by [`BrinkmanCell`].
     #[must_use]
     pub fn velocity_dofs(&self) -> &[f64] {
         &self.flow.field.x[..self.flow.field.n_u]
@@ -73,7 +136,7 @@ impl MaterialBrinkmanSolution {
     pub fn cells(&self) -> &[BrinkmanCell] {
         &self.cells
     }
-    /// `integral(mu u.K^-1.u)` per triangle, per out-of-plane depth [W/m].
+    /// `integral(mu (u-u_s).K^-1.(u-u_s))` per triangle and unit depth [W/m].
     /// Physical dissipation is reported once; no thermal solver is updated here.
     #[must_use]
     pub fn cell_darcy_power_w_per_m(&self) -> &[f64] {
@@ -83,6 +146,19 @@ impl MaterialBrinkmanSolution {
     #[must_use]
     pub const fn darcy_power_w_per_m(&self) -> f64 {
         self.darcy_power_w_per_m
+    }
+
+    /// Original cell quadratures converted with the SAME material density.
+    /// Includes skeleton reaction and both signed powers, not only the loss.
+    #[must_use]
+    pub fn cell_darcy_exchange(&self) -> &[MaterialBrinkmanDragExchange] {
+        &self.cell_darcy_exchange
+    }
+
+    /// Sum of the original cell force/work exchanges, in deterministic order.
+    #[must_use]
+    pub const fn darcy_exchange(&self) -> &MaterialBrinkmanDragExchange {
+        &self.darcy_exchange
     }
 }
 
@@ -98,8 +174,12 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
     /// property fit is manufactured. Supplied cell laws alone carry no measured
     /// material authority, and do not infer saturation or applicability bounds.
     ///
-    /// This is a steady, rigid-frame incompressible closure. It does not deposit
-    /// drag work into heat or add poromechanical, capillary or gas-slip physics.
+    /// This is a steady incompressible closure on frozen geometry. Authored
+    /// skeleton velocities use the one-domain/high-porosity approximation
+    /// described by [`BrinkmanCell::with_skeleton_velocity`]. Their reaction
+    /// work remains separate from relative dissipation: neither is silently
+    /// deposited into heat. No solid dynamics, moving interface, finite-porosity
+    /// storage correction, poromechanics, capillary or gas-slip law is added.
     ///
     /// # Errors
     /// Preserves material and native Stokes refusals, rejecting nonfinite loads,
@@ -167,13 +247,22 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             )
             .map_err(MaterialFluxError::Boundary)?;
         let flow = assembly.solve().map_err(MaterialFluxError::Boundary)?;
-        let cell_darcy_power_w_per_m: Vec<_> = assembly
-            .cell_darcy_power_per_density(&flow.field.x[..self.system.n_u])
+        let cell_darcy_exchange: Vec<_> = assembly
+            .cell_darcy_exchange_per_density(&flow.field.x[..self.system.n_u])
             .map_err(MaterialFluxError::Boundary)?
             .into_iter()
-            .map(|power| density * power)
+            .map(|value| MaterialBrinkmanDragExchange::from_kinematic(value, density))
+            .collect::<Result<_, _>>()?;
+        let mut darcy_exchange = MaterialBrinkmanDragExchange::default();
+        let cell_darcy_power_w_per_m: Vec<_> = cell_darcy_exchange
+            .iter()
+            .map(|exchange| {
+                darcy_exchange.add(*exchange);
+                exchange.dissipation_w_per_m
+            })
             .collect();
-        let darcy_power_w_per_m: f64 = cell_darcy_power_w_per_m.iter().sum();
+        darcy_exchange.admit()?;
+        let darcy_power_w_per_m = darcy_exchange.dissipation_w_per_m;
         let pressure_pa: Vec<_> = flow
             .pressure
             .iter()
@@ -196,6 +285,8 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             pressure_pa,
             cell_darcy_power_w_per_m,
             darcy_power_w_per_m,
+            cell_darcy_exchange,
+            darcy_exchange,
         })
     }
 }

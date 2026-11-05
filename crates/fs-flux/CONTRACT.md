@@ -3072,19 +3072,33 @@ Dilution alone does not certify weak collective cloud interaction.
 
 ## Anisotropic Stokes–Brinkman permeability (`continuum`)
 
-`FluxSystem::assemble_brinkman_mixed` adds `nu K^-1 u` to the existing
-BDM1–P0 velocity operator. The stationary, fully saturated rigid-frame model
-is `-div(2 nu_eff D(u)) + nu K^-1 u + grad(p/rho) = f/rho`, `div(u)=0`.
-Velocity is superficial, geometry is metres, intrinsic permeability is m²,
+`FluxSystem::assemble_brinkman_mixed` adds `nu K^-1 (u-u_s)` to the existing
+BDM1–P0 velocity operator. The steady, fully saturated rigid-frame model
+is `-div(2 nu_eff D(u)) + nu K^-1 (u-u_s) + grad(p/rho) = f/rho`, `div(u)=0`.
+At rest, velocity is superficial; geometry is metres, intrinsic permeability is m²,
 and `nu=mu/rho` comes from the actual fluid. `BrinkmanCell` retains the
 original `fs_material::porous::permeability::IntrinsicPermeability` and an
 explicit `mu_eff/mu` shear closure; effective shear viscosity never replaces
 molecular viscosity in Darcy drag. The reference for that distinction is
 [Sandia Aria, Brinkman Momentum](https://www.sandia.gov/files/sierra/Aria_Users_5_28/theory/gov_eq/brinkman_mom.html).
 
+`BrinkmanCell::with_skeleton_velocity` explicitly prescribes a uniform world
+velocity per porous cell. Motion uses the one-domain/high-porosity Brinkman
+approximation (phi=1 velocity convention) of [Sherwood (2020), equations
+2.4–2.5](https://doi.org/10.1017/jfm.2020.265). This does not equate an arbitrary
+finite-porosity fluid-only superficial flux with intrinsic fluid velocity:
+that would require the phi factor in that paper's equation 2.3 and a different
+flux/storage treatment. Geometry, permeability and prescribed motion are a
+frozen steady snapshot; interfaces, porosity and solid dynamics are not evolved.
+Nonzero skeleton motion is refused in free-fluid cells. Zero prescribed motion
+keeps the original stationary matrix and load exactly.
+
 All in-plane tensor couplings enter the same momentum matrix. Positive
 principal rates and world-axis projections compile once per cell; symmetric
 cell integrals use the original quadrature without a second global matrix.
+The same spectral projections add `nu K^-1 u_s` to the original momentum and
+constraint-reaction load rows. The matrix and stress law do not change with
+prescribed velocity, and no force is injected after the constrained solve.
 The original SIP interface law, strong normal velocity moments, total-traction
 loads, exact cell continuity, pressure datum and checked residuals remain in
 force. Positive pore drag anchors rigid velocity modes in its own connected
@@ -3095,7 +3109,16 @@ Free-fluid cells have exactly zero drag and preserve the original Stokes law.
 `MaterialFluxSystem::solve_brinkman_mixed` uses the original immutable material
 snapshot for viscosity, force/traction division and physical pressure. The
 accepted result retains cell laws and reports nonnegative cell/total Darcy
-dissipation `integral(mu u.K^-1.u)` in W/m of out-of-plane depth. It does not
+dissipation `integral(mu (u-u_s).K^-1.(u-u_s))` in W/m of out-of-plane depth.
+`cell_darcy_exchange` and `darcy_exchange` also retain force ON the skeleton
+[N/m], signed fluid drag work and signed reaction work ON the skeleton [W/m].
+The two powers sum to minus relative dissipation. A driven skeleton can do
+positive work on the fluid while producing heat; its mechanical power is not
+mislabelled as dissipation. The primitive `cell_darcy_exchange_per_density`
+uses the same velocity reconstruction, tensor and quadrature. A common velocity
+translation preserves force and loss, while changing the two subsystem powers
+by equal and opposite reaction-force work. These are constitutive accounts,
+not a complete energy balance or error certificate for the discretization. It does not
 automatically deposit that loss into a thermal model or reinterpret superficial
 velocity as pore-scale inertia. Raw pore tensors and viscosity ratios do not
 gain measured source authority through this binding.
@@ -3113,6 +3136,11 @@ rotated Darcy slab without artificial velocity pins, affine tensor-flow and
 dissipation identities, hyperbolic Brinkman-channel refinement, symmetric
 positive drag power, mixed free/porous cells, original-source viscosity versus
 density scaling, free-fluid equivalence and explicit refusal boundaries.
+Moving-frame checks add the independently known translating anisotropic Darcy
+slab, Galilean force/loss invariance, positive fluid work from a driven skeleton,
+cellwise motion with exact affine moments and original boundary-reaction
+closure, zero-relative-flow and exact stationary limits, and invalid/overflow
+refusals. No arbitrary-porosity or moving-geometry claim follows from those tests.
 
 ## Inclined two-fluid capillary displacement
 

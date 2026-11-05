@@ -510,3 +510,333 @@ fn g0_drag_in_one_component_does_not_anchor_a_disconnected_free_fluid() {
     assert!((solution.pressure[0] - 3.0).abs() < 1e-11);
     assert!((solution.pressure[1] - 7.0).abs() < 1e-11);
 }
+
+#[test]
+fn g1_translating_anisotropic_skeleton_preserves_relative_flow_and_work() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        nu: 0.02,
+        ..FluxParams::default()
+    };
+    let (s, c) = 0.53_f64.sin_cos();
+    let kxx = 0.002 * c * c + 0.0005 * s * s;
+    let kxy = (0.002 - 0.0005) * s * c;
+    let kyy = 0.002 * s * s + 0.0005 * c * c;
+    let gradient = [-3.0, 1.0];
+    let relative = [
+        -(kxx * gradient[0] + kxy * gradient[1]) / params.nu,
+        -(kxy * gradient[0] + kyy * gradient[1]) / params.nu,
+    ];
+    let traction = |x: [f64; 2], n: [f64; 2]| {
+        let pressure = 8.0 + gradient[0] * x[0] + gradient[1] * x[1];
+        [-pressure * n[0], -pressure * n[1]]
+    };
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, _)| StokesBoundary::TotalTraction {
+            edge,
+            value: &traction,
+        })
+        .collect();
+    for boost in [[0.0, 0.0], [0.7, -0.4], [-0.3, 0.6]] {
+        let skeleton = [-0.9 + boost[0], 0.4 + boost[1]];
+        let exact = [skeleton[0] + relative[0], skeleton[1] + relative[1]];
+        let cell = BrinkmanCell::try_new(tensor(0.53), 1.0)
+            .unwrap()
+            .with_skeleton_velocity(skeleton)
+            .unwrap();
+        assert_eq!(cell.skeleton_velocity(), skeleton);
+        let assembly = system
+            .assemble_brinkman_mixed(
+                params,
+                &vec![cell; mesh.tris.len()],
+                &|_| [0.0; 2],
+                &boundaries,
+            )
+            .unwrap();
+        let flow = assembly.solve().unwrap();
+        let (error, divergence) = system.velocity_error(&flow.field.x, &|_| exact);
+        assert!(error < 2e-10 && divergence < 2e-10);
+        for (pressure, x) in flow.pressure.iter().zip(&mesh.centroids) {
+            near(
+                *pressure,
+                8.0 + gradient[0] * x[0] + gradient[1] * x[1],
+                2e-9,
+            );
+        }
+        let velocity = &flow.field.x[..system.n_u];
+        let powers = assembly.cell_darcy_power_per_density(velocity).unwrap();
+        let exchanges = assembly.cell_darcy_exchange_per_density(velocity).unwrap();
+        for ((exchange, area), power) in exchanges.iter().zip(&mesh.areas).zip(powers) {
+            for a in 0..2 {
+                near(exchange.skeleton_force[a], -area * gradient[a], 2e-10);
+            }
+            near(
+                exchange.fluid_power,
+                area * (gradient[0] * exact[0] + gradient[1] * exact[1]),
+                2e-10,
+            );
+            near(
+                exchange.skeleton_power,
+                -area * (gradient[0] * skeleton[0] + gradient[1] * skeleton[1]),
+                2e-10,
+            );
+            near(
+                exchange.dissipation,
+                -area * (gradient[0] * relative[0] + gradient[1] * relative[1]),
+                2e-10,
+            );
+            near(
+                exchange.fluid_power + exchange.skeleton_power + exchange.dissipation,
+                0.0,
+                2e-13,
+            );
+            assert_eq!(exchange.dissipation, power);
+            if boost == [0.0, 0.0] {
+                assert!(exchange.fluid_power > 0.0);
+                assert!(exchange.skeleton_power < 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_cellwise_moving_medium_retains_material_force_and_boundary_reactions() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
+    let system = FluxSystem::new(&mesh);
+    let (density, mu, ratio) = (7.0, 0.2, 1.0);
+    let material = CountedMaterial {
+        state: FluidTransportState::try_new(density, 1000.0, 0.5, mu).unwrap(),
+        reads: Cell::new(0),
+    };
+    let (s, c) = 0.53_f64.sin_cos();
+    let rxx = c * c / 0.002 + s * s / 0.0005;
+    let rxy = s * c * (1.0 / 0.002 - 1.0 / 0.0005);
+    let ryy = s * s / 0.002 + c * c / 0.0005;
+    let velocity = |x: [f64; 2]| [0.3 + 0.2 * x[1], -0.1];
+    let cells: Vec<_> = mesh
+        .centroids
+        .iter()
+        .map(|point| {
+            if point[0] > 0.7 {
+                BrinkmanCell::free_fluid()
+            } else {
+                BrinkmanCell::try_new(tensor(0.53), ratio)
+                    .unwrap()
+                    .with_skeleton_velocity([0.8 - 0.3 * point[1], 0.1 + 0.2 * point[0]])
+                    .unwrap()
+            }
+        })
+        .collect();
+    let force = |point: [f64; 2]| {
+        let cell = cells[mesh.containing_cell(point).unwrap()];
+        if cell.permeability().is_none() {
+            return [0.0; 2];
+        }
+        let u = velocity(point);
+        let frame = cell.skeleton_velocity();
+        let relative = [u[0] - frame[0], u[1] - frame[1]];
+        [
+            mu * (rxx * relative[0] + rxy * relative[1]),
+            mu * (rxy * relative[0] + ryy * relative[1]),
+        ]
+    };
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, _)| MaterialStokesBoundary::Velocity {
+            edge,
+            value: &velocity,
+        })
+        .collect();
+    let binding =
+        MaterialFluxSystem::new(&system, &material, MaterialFluxNumerics::default()).unwrap();
+    let solution = binding
+        .solve_brinkman_mixed(&cells, &force, &boundaries)
+        .unwrap();
+    assert_eq!(material.reads.get(), 1);
+    let (error, divergence) = system.velocity_error(&solution.discrete().x, &velocity);
+    assert!(
+        error < 2e-10 && divergence < 2e-10,
+        "error={error:e}, divergence={divergence:e}"
+    );
+    assert!(
+        solution
+            .pressure_pa()
+            .iter()
+            .all(|pressure| pressure.abs() < 2e-8)
+    );
+    for (i, exchange) in solution.cell_darcy_exchange().iter().enumerate() {
+        if cells[i].permeability().is_none() {
+            assert_eq!(*exchange, fs_flux::MaterialBrinkmanDragExchange::default());
+            continue;
+        }
+        let area = mesh.areas[i];
+        let mean_u = velocity(mesh.centroids[i]);
+        let frame = cells[i].skeleton_velocity();
+        let mean_r = [mean_u[0] - frame[0], mean_u[1] - frame[1]];
+        // Exact uniform-triangle second moment, independent of solver quadrature.
+        let variance_y = mesh.tris[i]
+            .iter()
+            .map(|&vertex| (mesh.verts[vertex][1] - mesh.centroids[i][1]).powi(2))
+            .sum::<f64>()
+            / 12.0;
+        let expected_force = [
+            area * mu * (rxx * mean_r[0] + rxy * mean_r[1]),
+            area * mu * (rxy * mean_r[0] + ryy * mean_r[1]),
+        ];
+        let expected_loss = area
+            * mu
+            * (rxx * (mean_r[0].powi(2) + 0.04 * variance_y)
+                + 2.0 * rxy * mean_r[0] * mean_r[1]
+                + ryy * mean_r[1].powi(2));
+        for a in 0..2 {
+            near(exchange.skeleton_force_n_per_m[a], expected_force[a], 2e-9);
+        }
+        near(exchange.dissipation_w_per_m, expected_loss, 2e-9);
+        near(
+            exchange.skeleton_power_w_per_m,
+            expected_force[0] * frame[0] + expected_force[1] * frame[1],
+            2e-9,
+        );
+        near(
+            exchange.fluid_power_w_per_m
+                + exchange.skeleton_power_w_per_m
+                + exchange.dissipation_w_per_m,
+            0.0,
+            2e-12,
+        );
+        assert_eq!(
+            exchange.dissipation_w_per_m,
+            solution.cell_darcy_power_w_per_m()[i]
+        );
+    }
+    assert_eq!(
+        solution.darcy_exchange().dissipation_w_per_m,
+        solution.darcy_power_w_per_m()
+    );
+    // The new volume load must also enter the original constrained reaction rows.
+    // Constant shear with zero pressure has zero net boundary traction. Omitting
+    // D*u_s from those rows would report a spurious reaction on the outer walls.
+    let selected: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, _)| edge)
+        .collect();
+    let load = solution
+        .boundary_loads(&selected, [0.0; 2], &[Some(0.0)])
+        .unwrap();
+    near(load.stress.force_n_per_m[0], 0.0, 2e-8);
+    near(load.stress.force_n_per_m[1], 0.0, 2e-8);
+    near(load.stress.moment_n, 0.0, 2e-8);
+}
+
+#[test]
+fn g0_comotion_and_explicit_stationary_skeleton_limits() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        nu: 0.02,
+        ..FluxParams::default()
+    };
+    let stationary = BrinkmanCell::try_new(tensor(0.53), 1.0).unwrap();
+    let velocity = |_: [f64; 2]| [0.7, -0.4];
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, _)| StokesBoundary::Velocity {
+            edge,
+            value: &velocity,
+        })
+        .collect();
+    let base = system
+        .assemble_brinkman_mixed(
+            params,
+            &vec![stationary; mesh.tris.len()],
+            &|_| [0.0; 2],
+            &boundaries,
+        )
+        .unwrap();
+    let explicit = system
+        .assemble_brinkman_mixed(
+            params,
+            &vec![stationary.with_skeleton_velocity([0.0; 2]).unwrap(); mesh.tris.len()],
+            &|_| [0.0; 2],
+            &boundaries,
+        )
+        .unwrap();
+    assert_eq!(base.matrix().to_dense(), explicit.matrix().to_dense());
+    assert_eq!(base.rhs(), explicit.rhs());
+    let moving = system
+        .assemble_brinkman_mixed(
+            params,
+            &vec![
+                stationary
+                    .with_skeleton_velocity(velocity([0.0; 2]))
+                    .unwrap();
+                mesh.tris.len()
+            ],
+            &|_| [0.0; 2],
+            &boundaries,
+        )
+        .unwrap();
+    assert_eq!(base.matrix().to_dense(), moving.matrix().to_dense());
+    let flow = moving.solve().unwrap();
+    let (error, divergence) = system.velocity_error(&flow.field.x, &velocity);
+    assert!(error < 2e-11 && divergence < 2e-11);
+    for exchange in moving
+        .cell_darcy_exchange_per_density(&flow.field.x[..system.n_u])
+        .unwrap()
+    {
+        assert!(
+            exchange
+                .skeleton_force
+                .iter()
+                .all(|force| force.abs() < 2e-11)
+        );
+        assert!(exchange.dissipation < 1e-23);
+    }
+    assert!(moving.cell_darcy_exchange_per_density(&[]).is_err());
+    assert!(
+        moving
+            .cell_darcy_exchange_per_density(&vec![f64::NAN; system.n_u])
+            .is_err()
+    );
+    assert!(
+        BrinkmanCell::free_fluid()
+            .with_skeleton_velocity([1.0, 0.0])
+            .is_err()
+    );
+    assert_eq!(
+        BrinkmanCell::free_fluid()
+            .with_skeleton_velocity([0.0; 2])
+            .unwrap(),
+        BrinkmanCell::free_fluid()
+    );
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(stationary.with_skeleton_velocity([0.0, bad]).is_err());
+    }
+    let overflowing = stationary
+        .with_skeleton_velocity([f64::MAX, f64::MAX])
+        .unwrap();
+    assert!(
+        system
+            .assemble_brinkman_mixed(
+                params,
+                &vec![overflowing; mesh.tris.len()],
+                &|_| [0.0; 2],
+                &boundaries
+            )
+            .is_err()
+    );
+}
