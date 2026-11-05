@@ -1,11 +1,10 @@
 //! Closed, isobaric dissolution and precipitation in one finite thermal bath.
 //!
-//! The original ideal solubility law owns saturation and its constant molar
-//! dissolution enthalpy. Each component explicitly declares ONE positive Cp(T)
-//! curve shared by its dissolved and pure-solid phases. Their sensible terms
-//! then cancel in the phase difference, so h_dissolved - h_solid is exactly the
-//! same constant delta H used by van't Hoff saturation. Unequal phase capacities
-//! require a different, temperature-dependent thermodynamic law.
+//! The original ideal solubility law owns saturation and molar dissolution
+//! enthalpy. It may bind distinct positive solid and dissolved Cp(T) curves;
+//! their Kirchhoff integral supplies the SAME temperature-dependent enthalpy
+//! difference used by the integrated van't Hoff law. A constant-enthalpy law
+//! instead requires one explicitly shared curve, retaining the equal-Cp limit.
 //!
 //! Solvent and every finite component contribute sensible heat exactly once.
 //! Dissolution can cool the bath, precipitation can warm it, and solid exhaustion
@@ -59,22 +58,26 @@ impl From<BinaryCaloricErrorV1> for SolubilityCaloricErrorV1 {
     }
 }
 
-/// Original saturation law and a declared COMMON dissolved/solid molar Cp(T).
-/// This explicit equality is required by the law's constant dissolution enthalpy;
-/// a pure-liquid heat-capacity wrapper is not accepted as solid-phase evidence.
+/// Original saturation law and thermodynamically compatible phase calorics.
+/// A pure-liquid heat-capacity wrapper is not accepted as solid/dissolved evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SolubilityCaloricComponentV1 {
     law: IdealSolubilityV1,
-    common_phase_cp: MolarHeatCapacityCurveV1,
+    // None uses the exact phase curves already owned by the saturation law.
+    // No second copy or independently supplied phase model can drift from it.
+    common_phase_cp: Option<MolarHeatCapacityCurveV1>,
 }
 impl SolubilityCaloricComponentV1 {
+    /// Bind a common phase Cp to the original constant-enthalpy law. A law
+    /// carrying its own phase curves must use `from_phase_heat_capacities`.
     pub fn new(
         law: IdealSolubilityV1,
         common_phase_cp: MolarHeatCapacityCurveV1,
     ) -> Result<Self, SolubilityCaloricErrorV1> {
         let law_domain = law.temperature_domain();
         let cp_domain = common_phase_cp.temperature_domain();
-        if law.solute() != common_phase_cp.species()
+        if law.phase_heat_capacities().is_some()
+            || law.solute() != common_phase_cp.species()
             || law_domain[0].value().max(cp_domain[0].value())
                 >= law_domain[1].value().min(cp_domain[1].value())
         {
@@ -84,14 +87,48 @@ impl SolubilityCaloricComponentV1 {
         }
         Ok(Self {
             law,
-            common_phase_cp,
+            common_phase_cp: Some(common_phase_cp),
         })
     }
+
+    /// Consume the SAME phase-qualified curves that control saturation and
+    /// dissolution enthalpy. No additional curve or reference offset is inferred.
+    pub fn from_phase_heat_capacities(
+        law: IdealSolubilityV1,
+    ) -> Result<Self, SolubilityCaloricErrorV1> {
+        if law.phase_heat_capacities().is_none() {
+            return Err(SolubilityCaloricErrorV1::Invalid(
+                "solubility law must own explicit solid and dissolved heat capacities",
+            ));
+        }
+        Ok(Self {
+            law,
+            common_phase_cp: None,
+        })
+    }
+
     pub const fn law(&self) -> &IdealSolubilityV1 {
         &self.law
     }
-    pub const fn common_phase_heat_capacity(&self) -> &MolarHeatCapacityCurveV1 {
-        &self.common_phase_cp
+    /// A shared curve exists only for an explicitly equal-Cp component.
+    pub const fn common_phase_heat_capacity(&self) -> Option<&MolarHeatCapacityCurveV1> {
+        self.common_phase_cp.as_ref()
+    }
+    pub fn solid_heat_capacity(&self) -> &MolarHeatCapacityCurveV1 {
+        self.common_phase_cp.as_ref().unwrap_or_else(|| {
+            &self
+                .law
+                .phase_heat_capacities()
+                .expect("admitted phase calorics")[0]
+        })
+    }
+    pub fn dissolved_heat_capacity(&self) -> &MolarHeatCapacityCurveV1 {
+        self.common_phase_cp.as_ref().unwrap_or_else(|| {
+            &self
+                .law
+                .phase_heat_capacities()
+                .expect("admitted phase calorics")[1]
+        })
     }
 }
 
@@ -134,7 +171,8 @@ impl SolubilityCaloricModelV1 {
             }
             for span in [
                 component.law.temperature_domain(),
-                component.common_phase_cp.temperature_domain(),
+                component.solid_heat_capacity().temperature_domain(),
+                component.dissolved_heat_capacity().temperature_domain(),
             ] {
                 domain[0] = Temperature::new(domain[0].value().max(span[0].value()));
                 domain[1] = Temperature::new(domain[1].value().min(span[1].value()));
@@ -302,9 +340,9 @@ impl SolubilityCaloricModelV1 {
 
     /// Heat, cool or adiabatically equilibrate the complete finite bath.
     ///
-    /// At saturation, dn_diss/dT = n_diss * delta_H/(R*T^2). Thus the equilibrium
-    /// enthalpy derivative is positive sensible capacity plus
-    /// sum(n_diss * delta_H^2/(R*T^2)) over components with retained solid.
+    /// At saturation, dn_diss/dT = n_diss * delta_H(T)/(R*T^2). Thus the
+    /// equilibrium enthalpy derivative is positive phase-weighted sensible
+    /// capacity plus sum(n_diss * delta_H(T)^2/(R*T^2)) over components with solid.
     /// The enthalpy is continuous at solid exhaustion. One bounded bisection
     /// therefore resolves a unique temperature without an inner nonlinear solve.
     pub fn add_heat(
@@ -517,14 +555,14 @@ impl SolubilityCaloricModelV1 {
         {
             poll(cancelled)?;
             if total.value() != 0.0 {
-                let cp = &component.common_phase_cp;
+                let cp = component.solid_heat_capacity();
                 enthalpy.add(scaled(
                     total.value(),
                     cp.enthalpy_change_j_per_mol(cp.reference_temperature(), temperature)?,
                 )?)?;
                 enthalpy.add(scaled(
                     dissolved.value(),
-                    component.law.dissolution_enthalpy_j_mol(),
+                    component.law.dissolution_enthalpy_at(temperature)?,
                 )?)?;
             }
         }
@@ -564,15 +602,33 @@ impl SolubilityCaloricModelV1 {
             poll(cancelled)?;
             let total = initial.total_solute[index].value();
             if total != 0.0 {
+                let initial_dissolved = initial.dissolved_solute[index].value();
+                if let Some(cp) = component.common_phase_heat_capacity() {
+                    // Preserve the original equal-Cp arithmetic exactly.
+                    sum.add(scaled(
+                        total,
+                        cp.enthalpy_change_j_per_mol(initial.temperature, temperature)?,
+                    )?)?;
+                } else {
+                    // First heat each ORIGINAL phase stock to the trial T,
+                    // then transfer between phases at that same T. Positive
+                    // sensible increments avoid subtracting large enthalpies
+                    // or nearly equal phase Cp integrals.
+                    for (moles, cp) in [
+                        (total - initial_dissolved, component.solid_heat_capacity()),
+                        (initial_dissolved, component.dissolved_heat_capacity()),
+                    ] {
+                        if moles != 0.0 {
+                            sum.add(scaled(
+                                moles,
+                                cp.enthalpy_change_j_per_mol(initial.temperature, temperature)?,
+                            )?)?;
+                        }
+                    }
+                }
                 sum.add(scaled(
-                    total,
-                    component
-                        .common_phase_cp
-                        .enthalpy_change_j_per_mol(initial.temperature, temperature)?,
-                )?)?;
-                sum.add(scaled(
-                    dissolved_at(index)?.value() - initial.dissolved_solute[index].value(),
-                    component.law.dissolution_enthalpy_j_mol(),
+                    dissolved_at(index)?.value() - initial_dissolved,
+                    component.law.dissolution_enthalpy_at(temperature)?,
                 )?)?;
             }
         }
@@ -631,7 +687,7 @@ impl SolubilityCaloricStateV1 {
     }
     /// Diagnostic reference enthalpy [J]. Balances use direct local increments.
     /// Pure solvent and solid sensible enthalpies are zero at their own Cp datums;
-    /// each dissolved phase differs from its solid by its original law's delta H.
+    /// each dissolved phase differs from its solid by the original law's delta H(T).
     pub const fn enthalpy_j(&self) -> f64 {
         self.enthalpy_j
     }

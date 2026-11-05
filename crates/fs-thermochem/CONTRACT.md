@@ -4,11 +4,20 @@
 
 `solution::solubility::IdealSolubilityV1` binds explicit solvent and neutral
 solute identities, reference concentration in mol/m³ of incompressible solvent,
-reference temperature, constant dissolution-enthalpy slope and an inclusive
-temperature domain. The ideal-dilute van't Hoff law increases saturation with
-temperature for an endothermic dissolution. Logarithmic evaluation preserves
+reference temperature, reference dissolution enthalpy and an inclusive
+temperature domain. Without additional caloric data the enthalpy is constant.
+`with_phase_heat_capacities` binds explicit positive solid and dissolved Cp(T)
+curves for the same component across the complete original temperature domain.
+Their Kirchhoff integral supplies `delta_H(T) = delta_H_ref + integral(delta_Cp)`;
+integrating `d ln(c_sat)/dT = delta_H(T)/(R*T*T)` supplies saturation from those
+same curves. The ideal-dilute law increases saturation wherever dissolution is
+endothermic, and admits a turning point where its enthalpy changes sign.
+Logarithmic evaluation preserves
 representable results even when a separately formed exponential would overflow;
-reference-temperature and zero-enthalpy values remain exact.
+reference-temperature values and the original zero-enthalpy/equal-Cp limit.
+Original phase curves and their merged integration knots share immutable
+storage. Evaluations allocate nothing, use stable local analytic integrals and
+never infer caloric measurements or phase evidence from a species name.
 
 `equilibrate` retains a finite total component stock and returns separate
 dissolved and pure-solid amounts. Dissolved amount is `min(total, c_sat*V)`;
@@ -44,20 +53,24 @@ component totals, exact original solvent volume, and one shared temperature.
 An initial state may explicitly contain unequilibrated phase inventories;
 zero applied heat then gives adiabatic dissolution or precipitation.
 
-Every component binds its original `IdealSolubilityV1` and one explicitly
-declared common dissolved/solid molar heat-capacity curve. Equal sensible
-curves keep the phase enthalpy difference equal to the law's original constant
-dissolution enthalpy at every admitted temperature. Solvent and full component
-stocks each contribute sensible heat once; changing dissolved amount contributes
-the original phase enthalpy once. The shared `MolarHeatCapacityCurveV1` extracts
+Every component binds its original `IdealSolubilityV1`. Constant-enthalpy
+components explicitly declare one common dissolved/solid molar heat-capacity
+curve. `SolubilityCaloricComponentV1::from_phase_heat_capacities` instead uses
+the exact distinct phase curves already held by the saturation law, preventing
+a second caloric source from changing its thermodynamics. Solvent and actual
+phase stocks each contribute sensible heat once; changing dissolved amount
+contributes the original phase enthalpy at the trial temperature once.
+The shared `MolarHeatCapacityCurveV1` extracts
 the existing exact piecewise-linear Cp integration without implying a phase
 qualification. `PureLiquidHeatCapacityV1` preserves its liquid-specific meaning.
 
 The closed first-law increment integrates Cp directly from the initial to trial
-temperature and uses the change in dissolved amount. It never subtracts two
+temperature, weights the solid/dissolved sensible terms by the initial phase
+stocks, and uses `delta_n_dissolved * delta_H(T_final)` for phase transfer.
+It never subtracts two
 large reference enthalpies. Equilibrium enthalpy is continuous at solid
 exhaustion and strictly increases with temperature: positive sensible capacity
-is augmented by n_dissolved*(delta_H)^2/(R*T^2) for each saturated component.
+is augmented by n_dissolved*(delta_H(T))^2/(R*T^2) for each saturated component.
 One bounded scalar bisection therefore resolves the common bath without an
 inner chemical solve. Trial evaluations allocate nothing and construct accepted
 phase arrays only once. The original pair and Cp domains, explicit temperature
@@ -70,15 +83,15 @@ volume. Amount-based preparation remains available. Original source identity,
 ordered totals, phase partitions, solvent amount/volume and direct energy
 residuals remain inspectable. Independent analytic cases cover both signs of
 dissolution enthalpy, precipitation, opposed phase transfers into one bath,
-solid exhaustion/recrystallization, variable Cp, small heat increments,
-volume roundoff, work limits and immutable refusal.
+solid exhaustion/recrystallization, distinct phase Cp, the independent equilibrium
+enthalpy derivative, variable Cp, small heat increments, volume roundoff,
+work limits and immutable refusal.
 
 This is the thermal closure of the stated ideal neutral-solute approximation.
 It supplies no electrolyte activities, common-ion chemistry, pressure-dependent
-solubility, variable-pressure work, separate phase temperatures, phase-dependent
-Cp difference, nucleation or finite dissolution kinetics. Unequal phase heat
-capacities require a compatible temperature-dependent dissolution law; numeric
-caller coefficients do not authenticate measured material data.
+solubility, variable-pressure work, separate phase temperatures, nucleation or
+finite dissolution kinetics. Numeric caller coefficients do not authenticate
+measured material data.
 
 ## Binary liquid miscibility and source-owned thermodynamic forces
 

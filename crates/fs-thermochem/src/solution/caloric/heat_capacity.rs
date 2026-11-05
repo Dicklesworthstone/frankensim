@@ -59,6 +59,36 @@ impl MolarHeatCapacityCurveV1 {
         ]
     }
 
+    /// Original species buffer and source-knot allocation, excluding inline fields.
+    pub fn heap_bytes(&self) -> usize {
+        self.species.heap_bytes() + self.knots.capacity() * core::mem::size_of::<(f64, f64)>()
+    }
+
+    /// Original interpolation knots in coherent SI, for shared thermodynamic
+    /// integration. Callers must preserve this curve's declared interpolation.
+    pub(crate) fn knots_si(&self) -> &[(f64, f64)] {
+        &self.knots
+    }
+
+    /// Positive molar Cp at an admitted temperature, using the source's exact
+    /// piecewise-linear interpolation. No extrapolation or phase inference.
+    pub fn heat_capacity_at(
+        &self,
+        temperature: Temperature,
+    ) -> Result<MolarThermalQuantityV1, BinaryCaloricErrorV1> {
+        let t = temperature.value();
+        self.admit(t)?;
+        let index = self
+            .knots
+            .partition_point(|&(knot, _)| knot <= t)
+            .saturating_sub(1)
+            .min(self.knots.len() - 2);
+        Ok(MolarThermalQuantityV1::new(interpolate(
+            &self.knots[index..=index + 1],
+            t,
+        )))
+    }
+
     /// Exact integral of the declared piecewise-linear Cp interpolation [J/mol].
     /// Integrates only crossed segments, using their local temperature spans;
     /// cooling is the exact negative of the same ascending integration.

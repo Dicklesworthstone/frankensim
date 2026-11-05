@@ -85,6 +85,136 @@ fn conserved(initial: &SolubilityCaloricStateV1, final_state: &SolubilityCaloric
     }
 }
 
+fn unequal_component() -> SolubilityCaloricComponentV1 {
+    let law = component("A", 300.0, 500.0, 1000.0, 30.0)
+        .law()
+        .clone()
+        .with_phase_heat_capacities(common_cp("A", 30.0), common_cp("A", 90.0))
+        .unwrap();
+    SolubilityCaloricComponentV1::from_phase_heat_capacities(law).unwrap()
+}
+
+#[test]
+fn g1_unequal_phase_capacities_close_saturation_and_heat_together() {
+    let model = model(vec![unequal_component()]);
+    let initial = model
+        .equilibrate(
+            Temperature::new(300.0),
+            Amount::new(10.0),
+            &[Amount::new(2.0)],
+            || false,
+        )
+        .unwrap();
+    // Independent constant-delta-Cp closed form, with 0.1 mol dissolved at
+    // the reference temperature. Both endpoints retain a finite solid stock.
+    let target = 320.0;
+    let delta_cp = 60.0;
+    let delta_h = 1000.0 + delta_cp * (target - 300.0);
+    let exponent = (1000.0 * (1.0 / 300.0 - 1.0 / target)
+        + delta_cp * ((target / 300.0_f64).ln() + 300.0 / target - 1.0))
+        / crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+    let dissolved = 0.1 * exponent.exp();
+    let heat =
+        (10.0 * 50.0 + 1.9 * 30.0 + 0.1 * 90.0) * (target - 300.0) + (dissolved - 0.1) * delta_h;
+    let result = model
+        .add_heat(&initial, heat, controls(300.0, 335.0), || false)
+        .unwrap();
+    near(result.final_state().temperature().value(), target, 1e-9);
+    near(
+        result.final_state().dissolved_solute()[0].value(),
+        dissolved,
+        2e-12,
+    );
+    near(result.enthalpy_change_j(), heat, 1e-8);
+    conserved(&initial, result.final_state());
+
+    let returned = model
+        .add_heat(result.final_state(), -heat, controls(285.0, 320.0), || {
+            false
+        })
+        .unwrap();
+    near(returned.final_state().temperature().value(), 300.0, 1e-9);
+    near(
+        returned.final_state().dissolved_solute()[0].value(),
+        0.1,
+        2e-12,
+    );
+    conserved(&initial, returned.final_state());
+}
+
+#[test]
+fn g0_equilibrium_caloric_derivative_uses_actual_phase_capacities() {
+    let model = model(vec![unequal_component()]);
+    for total in [0.01, 2.0] {
+        let state_at = |t| {
+            model
+                .equilibrate(
+                    Temperature::new(t),
+                    Amount::new(10.0),
+                    &[Amount::new(total)],
+                    || false,
+                )
+                .unwrap()
+        };
+        let t = 315.0;
+        let center = state_at(t);
+        let dissolved = center.dissolved_solute()[0].value();
+        let delta_h = 1000.0 + 60.0 * (t - 300.0);
+        let latent_capacity = if dissolved < total {
+            dissolved * delta_h * delta_h / (crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t * t)
+        } else {
+            0.0
+        };
+        let expected = 500.0 + (total - dissolved) * 30.0 + dissolved * 90.0 + latent_capacity;
+        let measured = model
+            .enthalpy_change_j(&state_at(t - 0.001), &state_at(t + 0.001))
+            .unwrap()
+            / 0.002;
+        near(measured, expected, 3e-7);
+    }
+}
+
+#[test]
+fn g1_all_dissolved_stock_heats_with_dissolved_cp_and_source_binding_is_exact() {
+    let component = unequal_component();
+    assert!(component.common_phase_heat_capacity().is_none());
+    assert_eq!(component.solid_heat_capacity(), &common_cp("A", 30.0));
+    assert_eq!(component.dissolved_heat_capacity(), &common_cp("A", 90.0));
+    // A second common Cp cannot override the phase sources in saturation.
+    assert!(
+        SolubilityCaloricComponentV1::new(component.law().clone(), common_cp("A", 30.0)).is_err()
+    );
+    assert!(
+        SolubilityCaloricComponentV1::from_phase_heat_capacities(
+            self::component("A", 300.0, 500.0, 1000.0, 30.0)
+                .law()
+                .clone()
+        )
+        .is_err()
+    );
+
+    let model = model(vec![component]);
+    let initial = model
+        .equilibrate(
+            Temperature::new(300.0),
+            Amount::new(10.0),
+            &[Amount::new(0.01)],
+            || false,
+        )
+        .unwrap();
+    let heat = (500.0 + 0.01 * 90.0) * 20.0;
+    let result = model
+        .add_heat(&initial, heat, controls(300.0, 335.0), || false)
+        .unwrap();
+    near(result.final_state().temperature().value(), 320.0, 1e-9);
+    assert_eq!(result.final_state().dissolved_solute()[0].value(), 0.01);
+    assert_eq!(
+        result.final_state().solid_solute().next().unwrap().value(),
+        0.0
+    );
+    conserved(&initial, result.final_state());
+}
+
 #[test]
 fn g1_adiabatic_dissolution_and_precipitation_close_the_same_latent_energy() {
     // Ten solvent moles and two solute moles each carry 50 J/(mol K):

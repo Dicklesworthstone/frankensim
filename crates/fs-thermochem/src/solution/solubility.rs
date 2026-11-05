@@ -2,8 +2,10 @@
 //!
 //! The explicitly supplied concentration is mol per m³ of incompressible
 //! solvent, with negligible solute volume. A constant dissolution enthalpy gives
-//! `ln(c_sat(T)/c_ref) = -ΔH/R (1/T - 1/T_ref)`. This is a caller-qualified
-//! ideal-dilute pair law on a bounded temperature interval, not a solubility
+//! `ln(c_sat(T)/c_ref) = -ΔH/R (1/T - 1/T_ref)`. Optional original solid and
+//! dissolved Cp(T) curves instead give `ΔH(T) = ΔH_ref + ∫ ΔCp dT` and integrate
+//! the SAME van't Hoff equation `d ln(c_sat)/dT = ΔH(T)/(R T²)`. This is a
+//! caller-qualified ideal-dilute pair law on a bounded temperature interval, not a solubility
 //! inferred from a material name. Endothermic dissolution increases solubility
 //! with temperature. No heat is added to a finite thermal owner by this law.
 //!
@@ -23,9 +25,14 @@
 
 pub mod caloric;
 
+mod heat_capacity;
+
+use crate::solution::caloric::MolarHeatCapacityCurveV1;
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use fs_math::det::{exp, ln};
 use fs_qty::{Amount, AmountConcentration, Temperature, Volume};
+use heat_capacity::PhaseHeatCapacities;
+use std::sync::Arc;
 
 /// Invalid pair/model inputs, unsupported temperature, or lost numerical range.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +63,7 @@ pub struct IdealSolubilityV1 {
     reference_solubility: AmountConcentration,
     dissolution_enthalpy_j_mol: f64,
     temperature_domain: [Temperature; 2],
+    phase_heat_capacities: Option<Arc<PhaseHeatCapacities>>,
 }
 impl IdealSolubilityV1 {
     /// Bind an ideal-dilute saturation fit with an explicit concentration basis.
@@ -95,7 +103,34 @@ impl IdealSolubilityV1 {
             reference_solubility,
             dissolution_enthalpy_j_mol,
             temperature_domain,
+            phase_heat_capacities: None,
         })
+    }
+
+    /// Bind explicitly phase-qualified solid and dissolved molar Cp(T) curves.
+    ///
+    /// Both must name this solute and cover the FULL original temperature
+    /// domain. Their independent sensible datums do not replace this law's
+    /// reference dissolution enthalpy. The caller supplies phase/source
+    /// qualification; a numerical curve does not establish measured authority.
+    /// Preparation merges their knots once. Subsequent evaluation allocates
+    /// nothing, and cloning retains immutable shared source data.
+    pub fn with_phase_heat_capacities(
+        mut self,
+        solid: MolarHeatCapacityCurveV1,
+        dissolved: MolarHeatCapacityCurveV1,
+    ) -> Result<Self, SolubilityErrorV1> {
+        let phases =
+            PhaseHeatCapacities::new(&self.solute, self.temperature_domain, solid, dissolved)?;
+        self.phase_heat_capacities = Some(Arc::new(phases));
+        Ok(self)
+    }
+
+    /// Original phase curves in fixed `[solid, dissolved]` order, when selected.
+    pub fn phase_heat_capacities(&self) -> Option<&[MolarHeatCapacityCurveV1; 2]> {
+        self.phase_heat_capacities
+            .as_ref()
+            .map(|phases| phases.curves())
     }
 
     /// Original solvent identity, never guessed from a phase or density.
@@ -118,44 +153,81 @@ impl IdealSolubilityV1 {
     pub const fn reference_solubility(&self) -> AmountConcentration {
         self.reference_solubility
     }
-    /// Declared constant dissolution enthalpy/slope parameter [J/mol].
+    /// Declared dissolution enthalpy at the original reference temperature [J/mol].
+    /// It is constant only when no unequal phase heat capacities are selected.
     pub const fn dissolution_enthalpy_j_mol(&self) -> f64 {
         self.dissolution_enthalpy_j_mol
     }
 
-    /// Retained pair-identity buffers, excluding the inline law fields.
+    /// Dissolved-minus-solid molar enthalpy at the actual temperature [J/mol].
+    /// The same original Cp difference controls saturation and caloric feedback.
+    pub fn dissolution_enthalpy_at(
+        &self,
+        temperature: Temperature,
+    ) -> Result<f64, SolubilityErrorV1> {
+        self.admit_temperature(temperature)?;
+        let increment = match &self.phase_heat_capacities {
+            Some(phases) => phases
+                .enthalpy_increment(self.reference_temperature.value(), temperature.value())?,
+            None => 0.0,
+        };
+        if increment == 0.0 {
+            return Ok(self.dissolution_enthalpy_j_mol);
+        }
+        let enthalpy = self.dissolution_enthalpy_j_mol + increment;
+        if !enthalpy.is_finite() {
+            return Err(SolubilityErrorV1::Unrepresentable(
+                "temperature-dependent dissolution enthalpy",
+            ));
+        }
+        Ok(enthalpy)
+    }
+
+    /// Retained identities and phase-Cp source/preparation storage, excluding
+    /// inline law fields. Shared immutable allocations are counted in full.
     pub fn heap_bytes(&self) -> usize {
-        self.solvent.heap_bytes() + self.solute.heap_bytes()
+        self.solvent.heap_bytes()
+            + self.solute.heap_bytes()
+            + self.phase_heat_capacities.as_ref().map_or(0, |phases| {
+                core::mem::size_of::<PhaseHeatCapacities>()
+                    + 2 * core::mem::size_of::<usize>()
+                    + core::mem::align_of::<PhaseHeatCapacities>()
+                    + phases.heap_bytes()
+            })
     }
 
     /// Saturation at the actual temperature, with no unqualified extrapolation.
     ///
     /// This scalar evaluation allocates nothing. Logarithmic evaluation avoids
     /// overflowing the exponential when the final concentration is representable.
-    /// The original reference value and zero-enthalpy limit remain bit-exact.
+    /// The original reference value and constant/equal-Cp limits remain bit-exact.
     pub fn saturation_concentration(
         &self,
         temperature: Temperature,
     ) -> Result<AmountConcentration, SolubilityErrorV1> {
+        self.admit_temperature(temperature)?;
         let t = temperature.value();
-        if !t.is_finite()
-            || t < self.temperature_domain[0].value()
-            || t > self.temperature_domain[1].value()
-        {
-            return Err(SolubilityErrorV1::OutsideTemperatureDomain);
-        }
         let reference_t = self.reference_temperature.value();
-        if t == reference_t || self.dissolution_enthalpy_j_mol == 0.0 {
+        if t == reference_t {
             return Ok(self.reference_solubility);
         }
         // (T-Tref)/Tref/T avoids both subtracting nearly equal reciprocals
         // and forming a potentially overflowing product T*Tref.
-        let exponent =
-            (self.dissolution_enthalpy_j_mol / R) * ((t - reference_t) / reference_t / t);
+        let mut exponent = if self.dissolution_enthalpy_j_mol == 0.0 {
+            0.0
+        } else {
+            (self.dissolution_enthalpy_j_mol / R) * ((t - reference_t) / reference_t / t)
+        };
+        if let Some(phases) = &self.phase_heat_capacities {
+            exponent += phases.log_saturation_correction(reference_t, t)? / R;
+        }
         if !exponent.is_finite() {
             return Err(SolubilityErrorV1::Unrepresentable(
                 "temperature-dependent saturation exponent",
             ));
+        }
+        if exponent == 0.0 {
+            return Ok(self.reference_solubility);
         }
         let concentration = exp(ln(self.reference_solubility.value()) + exponent);
         if !positive(concentration) {
@@ -164,6 +236,17 @@ impl IdealSolubilityV1 {
             ));
         }
         Ok(AmountConcentration::new(concentration))
+    }
+
+    fn admit_temperature(&self, temperature: Temperature) -> Result<(), SolubilityErrorV1> {
+        let t = temperature.value();
+        if !t.is_finite()
+            || t < self.temperature_domain[0].value()
+            || t > self.temperature_domain[1].value()
+        {
+            return Err(SolubilityErrorV1::OutsideTemperatureDomain);
+        }
+        Ok(())
     }
 
     /// Equilibrate the complete component stock at the actual solvent volume.
