@@ -341,6 +341,7 @@ fn reference_power(
     conductor: &ResolvedConductorState,
     lines: &[ThermalInterferenceLine<'_>],
     nodes: &[AngularSpectrumHeatDepthSample],
+    carrier: [f64; 2],
     time: f64,
 ) -> f64 {
     let pole = dielectric.poles()[0];
@@ -364,6 +365,29 @@ fn reference_power(
             .unwrap()
         })
         .collect();
+    let kt = carrier[0].hypot(carrier[1]);
+    let p = if kt == 0.0 {
+        [1.0, 0.0]
+    } else {
+        carrier.map(|k| k / kt)
+    };
+    // Integral of exp(-2 i k_carrier.x) over the authored unit-square cell.
+    // For a common carrier, integral Re(z exp(-i k.x))² equals
+    // (|z|² + Re(z² integral exp(-2 i k.x)))/2, including optical sum tones.
+    let spatial = carrier.into_iter().fold(C64::ONE, |value, k| {
+        if k == 0.0 {
+            value
+        } else {
+            value * C64::new(k.cos(), -k.sin()).scale(k.sin() / k)
+        }
+    });
+    let mean_square = |value: C64| {
+        if kt == 0.0 {
+            value.re * value.re
+        } else {
+            0.5 * (value.norm_sq() + (value * value * spatial).re)
+        }
+    };
     let mut total = 0.0;
     for node in nodes {
         let fields: Vec<_> = stacks
@@ -371,13 +395,21 @@ fn reference_power(
             .zip(lines)
             .map(|(stack, line)| {
                 let mut electric = [C64::ZERO; 3];
-                for (axis, polarization) in [(0, Polarization::Tm), (1, Polarization::Te)] {
-                    let illumination = stack.prepare_illumination(1.0, polarization).unwrap();
+                let k = line.angular_frequency_rad_s
+                    * (stack.incident_permittivity_f_m() * stack.incident_permeability_h_m())
+                        .sqrt();
+                let cosine = (1.0 - (kt / k).powi(2)).sqrt();
+                for polarization in [Polarization::Tm, Polarization::Te] {
+                    let component = |e: [C64; 2]| match polarization {
+                        Polarization::Tm => e[0].scale(p[0]) + e[1].scale(p[1]),
+                        Polarization::Te => e[1].scale(p[0]) - e[0].scale(p[1]),
+                    };
+                    let illumination = stack.prepare_illumination(cosine, polarization).unwrap();
                     let point = illumination.prepare_point(0, node.depth_m).unwrap();
                     let field = point
                         .evaluate([
-                            line.left_tangential_e_v_per_m[0][axis],
-                            line.right_tangential_e_v_per_m[0][axis],
+                            component(line.left_tangential_e_v_per_m[0]),
+                            component(line.right_tangential_e_v_per_m[0]),
                         ])
                         .unwrap();
                     for axis in 0..3 {
@@ -389,8 +421,8 @@ fn reference_power(
             .collect();
         for real in [-1.0, 1.0] {
             for proper in [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)] {
-                let mut electric = [0.0; 3];
-                let mut current = [0.0; 3];
+                let mut electric = [C64::ZERO; 3];
+                let mut current = [C64::ZERO; 3];
                 for (index, (line, field)) in lines.iter().zip(&fields).enumerate() {
                     let coefficient = if index < 2 {
                         C64::ONE
@@ -405,17 +437,16 @@ fn reference_power(
                     let filter = C64::new(0.0, omega * pole.permittivity_increment_f_m)
                         / C64::new(1.0, omega * pole.relaxation_time_s);
                     for axis in 0..3 {
-                        electric[axis] += (field[axis] * temporal).re;
-                        current[axis] += (filter * field[axis] * temporal).re;
+                        electric[axis] = electric[axis] + field[axis] * temporal;
+                        current[axis] = current[axis] + filter * field[axis] * temporal;
                     }
                 }
                 total += node.weight_m / 8.0
                     * (0..3)
                         .map(|axis| {
-                            sigma * electric[axis] * electric[axis]
+                            sigma * mean_square(electric[axis])
                                 + pole.relaxation_time_s / pole.permittivity_increment_f_m
-                                    * current[axis]
-                                    * current[axis]
+                                    * mean_square(current[axis])
                         })
                         .sum::<f64>();
             }
@@ -426,6 +457,15 @@ fn reference_power(
 
 #[test]
 fn g1_refreshed_two_face_mixed_heat_matches_direct_native_fields_and_debye_ode() {
+    check_refreshed_carrier_heat([0.0; 2]);
+}
+
+#[test]
+fn off_axis_two_frequency_heat_retains_physical_carrier_and_continuous_cell_interference() {
+    check_refreshed_carrier_heat([1.1, 0.6]);
+}
+
+fn check_refreshed_carrier_heat(carrier: [f64; 2]) {
     let exterior_card = card("external medium", 360.0, false);
     let medium = state(&exterior_card, false);
     let card = card("temperature dependent film", 360.0, true);
@@ -453,7 +493,26 @@ fn g1_refreshed_two_face_mixed_heat_matches_direct_native_fields_and_debye_ode()
         factors: &factors,
     };
     let nodes = depth();
-    let owner = QuasiSteadyFilmHeating::try_new(
+    let quadrature = AngularSpectrumHeatVolumeQuadrature {
+        transverse: AngularSpectrumHeatAreaQuadrature::ContinuousPeriodicCell,
+        ..volume(&nodes)
+    };
+    let owner = QuasiSteadyFilmHeating::try_new_with_carrier(
+        &stack,
+        0,
+        &card,
+        "T",
+        &body,
+        GRID,
+        carrier,
+        drive,
+        quadrature,
+        limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(owner.carrier_transverse_wavenumber_rad_m(), carrier);
+    let legacy = QuasiSteadyFilmHeating::try_new(
         &stack,
         0,
         &card,
@@ -461,11 +520,15 @@ fn g1_refreshed_two_face_mixed_heat_matches_direct_native_fields_and_debye_ode()
         &body,
         GRID,
         drive,
-        volume(&nodes),
+        quadrature,
         limits(),
         || false,
     )
     .unwrap();
+    assert_eq!(legacy.carrier_transverse_wavenumber_rad_m(), [0.0; 2]);
+    let normal = legacy
+        .heat_load(legacy.initial_state(Dd::ZERO, 0.0).unwrap(), || false)
+        .unwrap();
     let original_identity = dielectric.material().identity();
     let load_300 = owner
         .heat_load(owner.initial_state(Dd::ZERO, 0.0).unwrap(), || false)
@@ -496,13 +559,43 @@ fn g1_refreshed_two_face_mixed_heat_matches_direct_native_fields_and_debye_ode()
     for time in [0.0, 0.17, 0.71, 1.4] {
         close(
             load_300.spectrum().evaluate(time).unwrap(),
-            reference_power(&medium, &dielectric, &conductor, &lines, &nodes, time),
+            reference_power(
+                &medium,
+                &dielectric,
+                &conductor,
+                &lines,
+                &nodes,
+                carrier,
+                time,
+            ),
             2e-11,
         );
         close(
             load_320.spectrum().evaluate(time).unwrap(),
-            reference_power(&medium, &warm, &warm_conductor, &lines, &nodes, time),
+            reference_power(
+                &medium,
+                &warm,
+                &warm_conductor,
+                &lines,
+                &nodes,
+                carrier,
+                time,
+            ),
             2e-11,
+        );
+        if carrier == [0.0; 2] {
+            assert_eq!(
+                load_300.spectrum().evaluate(time).unwrap(),
+                normal.spectrum().evaluate(time).unwrap()
+            );
+        }
+    }
+    if carrier != [0.0; 2] {
+        assert!(
+            (load_300.spectrum().evaluate(0.17).unwrap()
+                - normal.spectrum().evaluate(0.17).unwrap())
+            .abs()
+                > 1e-2
         );
     }
     assert!(
@@ -515,7 +608,7 @@ fn g1_refreshed_two_face_mixed_heat_matches_direct_native_fields_and_debye_ode()
 }
 
 #[test]
-fn g3_native_heat_feedback_rebuilds_next_interval_and_preserves_late_dd_phase_clock() {
+fn g3_off_axis_heat_feedback_rebuilds_next_interval_and_preserves_late_dd_phase_clock() {
     let exterior_card = card("external medium", 360.0, false);
     let medium = state(&exterior_card, false);
     let card = card("temperature dependent film", 360.0, true);
@@ -549,13 +642,15 @@ fn g3_native_heat_feedback_rebuilds_next_interval_and_preserves_late_dd_phase_cl
     };
     let mut continuous_limits = limits();
     continuous_limits.heat.maximum_fft_work = 0;
-    let owner = QuasiSteadyFilmHeating::try_new(
+    let carrier = [0.7, -0.45];
+    let owner = QuasiSteadyFilmHeating::try_new_with_carrier(
         &stack,
         0,
         &card,
         "T",
         &body,
         GRID,
+        carrier,
         drive,
         continuous_volume,
         continuous_limits,
@@ -713,6 +808,47 @@ fn g4_domain_excursion_volume_budgets_and_cancellation_preserve_original_state()
     assert!(small.endpoint().phase_state().temperature_k() > 300.0);
     assert_eq!(initial.phase_state().temperature_k(), 300.0);
     assert_eq!(dielectric.material().state_coordinate("T"), Some(300.0));
+
+    for carrier in [[f64::NAN, 0.0], [0.0, f64::INFINITY]] {
+        assert!(
+            QuasiSteadyFilmHeating::try_new_with_carrier(
+                &stack,
+                0,
+                &card,
+                "T",
+                &body,
+                GRID,
+                carrier,
+                drive,
+                volume(&nodes),
+                limits(),
+                || false,
+            )
+            .is_err()
+        );
+    }
+    // A finite carrier still has to propagate at EVERY source frequency.
+    // It is grazing at omega=2 while the higher-frequency line propagates;
+    // it must not be silently dropped or reinterpreted as a fixed angle.
+    let cutoff = QuasiSteadyFilmHeating::try_new_with_carrier(
+        &stack,
+        0,
+        &card,
+        "T",
+        &body,
+        GRID,
+        [2.0, 0.0],
+        drive,
+        volume(&nodes),
+        limits(),
+        || false,
+    )
+    .unwrap();
+    assert!(
+        cutoff
+            .heat_load(cutoff.initial_state(Dd::ZERO, 0.0).unwrap(), || false)
+            .is_err()
+    );
 
     let areas = [1.0];
     let masked = AngularSpectrumHeatVolumeQuadrature {

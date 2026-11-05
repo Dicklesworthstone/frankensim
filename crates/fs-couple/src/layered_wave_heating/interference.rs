@@ -63,6 +63,8 @@ use fs_qty::{
 
 /// Peak tangential fields on the two original physical faces, in V/m.
 /// Both faces use the original grid axes and the same exp(+i omega t) clock.
+/// With an explicit transverse carrier, these are envelope samples with the
+/// same exp(-i k_carrier.x) removed on both faces and at every frequency.
 /// An explicitly zero right-face array describes left-only illumination;
 /// the original propagating two-port admission still applies.
 #[derive(Clone, Copy, Debug)]
@@ -212,6 +214,7 @@ pub struct QuasiSteadyFilmHeating<'a, 'm> {
     temperature_axis: &'a str,
     body: &'a LumpedEnthalpyBody<'a>,
     grid: AngularSpectrumGrid,
+    carrier_rad_m: [f64; 2],
     drive: ThermalInterferenceDrive<'a>,
     quadrature: AngularSpectrumHeatVolumeQuadrature<'a>,
     limits: ThermalInterferenceLimits,
@@ -308,9 +311,53 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
         drive: ThermalInterferenceDrive<'a>,
         quadrature: AngularSpectrumHeatVolumeQuadrature<'a>,
         limits: ThermalInterferenceLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ThermalInterferenceError> {
+        Self::try_new_with_carrier(
+            original,
+            layer_index,
+            card,
+            temperature_axis,
+            body,
+            grid,
+            [0.0; 2],
+            drive,
+            quadrature,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Retain a common physical transverse wavevector [rad/m] through every
+    /// frequency solve and temperature rebuild. Source arrays describe its
+    /// periodic envelopes, so an arbitrary incidence angle does not require
+    /// the spatial grid to sample the carrier's short wavelength.
+    ///
+    /// This holds wavevector, not angle: each line's original exterior law
+    /// and frequency determine its longitudinal wavevector and incidence.
+    /// Both faces and every mean/factor line share this carrier, as required
+    /// by the native coherent exposure. The full shifted spectrum must still
+    /// propagate in both exterior ports when the heat load is prepared.
+    /// `ContinuousPeriodicCell` integrates transverse carrier products exactly;
+    /// sampled `PeriodicCell` heat still needs its own spatial resolution.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_carrier(
+        original: &'a PlanarDielectricLayers<'m>,
+        layer_index: usize,
+        card: &'a MaterialCard,
+        temperature_axis: &'a str,
+        body: &'a LumpedEnthalpyBody<'a>,
+        grid: AngularSpectrumGrid,
+        carrier_rad_m: [f64; 2],
+        drive: ThermalInterferenceDrive<'a>,
+        quadrature: AngularSpectrumHeatVolumeQuadrature<'a>,
+        limits: ThermalInterferenceLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, ThermalInterferenceError> {
         poll(&mut cancelled)?;
+        if carrier_rad_m.iter().any(|k| !k.is_finite()) {
+            return Err(bad("the transverse carrier must be finite in rad/m"));
+        }
         let film = original
             .layer(layer_index)
             .ok_or(bad("target film is absent"))?;
@@ -364,6 +411,7 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
             temperature_axis,
             body,
             grid,
+            carrier_rad_m,
             drive,
             quadrature,
             limits,
@@ -400,6 +448,10 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
     }
     pub fn grid(&self) -> AngularSpectrumGrid {
         self.grid
+    }
+    /// Authored common wavevector, unchanged across frequencies and refreshes.
+    pub const fn carrier_transverse_wavenumber_rad_m(&self) -> [f64; 2] {
+        self.carrier_rad_m
     }
     pub fn drive(&self) -> ThermalInterferenceDrive<'a> {
         self.drive
@@ -545,6 +597,7 @@ impl<'a, 'm> QuasiSteadyFilmHeating<'a, 'm> {
                 &views,
                 &frequencies,
                 self.grid,
+                self.carrier_rad_m,
                 self.drive,
                 self.line_count,
                 self.limits,
@@ -825,6 +878,7 @@ pub(super) fn with_drive_ensemble<'s, 'm, C: FnMut() -> bool, R>(
     stacks: &[&'s PlanarDielectricLayers<'m>],
     frequencies: &[f64],
     grid: AngularSpectrumGrid,
+    carrier_rad_m: [f64; 2],
     drive: ThermalInterferenceDrive<'_>,
     line_count: usize,
     owner_limits: ThermalInterferenceLimits,
@@ -847,9 +901,10 @@ pub(super) fn with_drive_ensemble<'s, 'm, C: FnMut() -> bool, R>(
             .map_err(|_| bad("authored frequency is absent from its native cache"))?;
         let mut limits = owner_limits.angular;
         limits.maximum_workspace_bytes = work.remaining().min(limits.maximum_workspace_bytes);
-        let beam = PlanarAngularSpectrum::prepare(
+        let beam = PlanarAngularSpectrum::prepare_with_carrier(
             stacks[index],
             grid,
+            carrier_rad_m,
             line.left_tangential_e_v_per_m,
             limits,
             &mut *cancelled,

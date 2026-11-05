@@ -136,7 +136,7 @@ fn feedback_limits() -> SpatialInterferenceFeedbackLimits {
     }
 }
 
-fn exercise(endpoint_domain_refusal: bool) {
+fn exercise(endpoint_domain_refusal: bool, carrier: [f64; 2]) {
     let outside = state(&card("feedback-exterior", 1.0, 0.0), false, 100_000.0);
     let source_card = temperature_card(if endpoint_domain_refusal {
         300.000001
@@ -209,10 +209,11 @@ fn exercise(endpoint_domain_refusal: bool) {
     }; 2];
     let footprint = AngularSpectrumAperture::try_new([0.15, -0.2], [0.5, 0.4]).unwrap();
     let cards = [&source_card];
-    let owner = QuasiSteadySpatialInterferenceHeating::try_new(
+    let owner = QuasiSteadySpatialInterferenceHeating::try_new_with_carrier(
         &original,
         &cards,
         grid,
+        carrier,
         drive,
         &quadrature,
         footprint,
@@ -220,6 +221,7 @@ fn exercise(endpoint_domain_refusal: bool) {
         || false,
     )
     .unwrap();
+    assert_eq!(owner.carrier_transverse_wavenumber_rad_m(), carrier);
     assert_eq!(owner.frequencies_rad_s(), [OMEGA, OMEGA + 50.0]);
     let temperatures = if endpoint_domain_refusal {
         [300.0; 2]
@@ -264,6 +266,46 @@ fn exercise(endpoint_domain_refusal: bool) {
         return;
     }
     let result = result.unwrap();
+    let legacy = QuasiSteadySpatialInterferenceHeating::try_new(
+        &original,
+        &cards,
+        grid,
+        drive,
+        &quadrature,
+        footprint,
+        feedback_limits(),
+        || false,
+    )
+    .unwrap();
+    assert_eq!(legacy.carrier_transverse_wavenumber_rad_m(), [0.0; 2]);
+    let zero_carrier = legacy
+        .advance_to(
+            &initial,
+            dt,
+            2.0,
+            temporal,
+            conduction(),
+            LayeredThermalSolveControls::default(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    if carrier == [0.0; 2] {
+        assert_eq!(result.step.cell_energy_j, zero_carrier.step.cell_energy_j);
+        assert_eq!(
+            result.step.state.thermal().cells(),
+            zero_carrier.step.state.thermal().cells()
+        );
+    } else {
+        assert!(
+            result
+                .step
+                .cell_energy_j
+                .iter()
+                .zip(&zero_carrier.step.cell_energy_j)
+                .any(|((_, tilted), (_, normal))| (tilted - normal).abs() > 1e-4 * tilted.abs())
+        );
+    }
     // Same geometry, drive and phase epoch, but different accepted native
     // temperatures: the applied optical joules themselves must change. This
     // falsifies a refresh that updates metadata while leaving fields frozen.
@@ -427,10 +469,15 @@ fn exercise(endpoint_domain_refusal: bool) {
 
 #[test]
 fn nonuniform_native_cells_refresh_causal_sources_without_resetting_mixed_bank_clocks() {
-    exercise(false);
+    exercise(false, [0.0; 2]);
+}
+
+#[test]
+fn off_axis_envelopes_heat_finite_cells_and_keep_their_carrier_through_temperature_rebuilds() {
+    exercise(false, [0.65, -0.4]);
 }
 
 #[test]
 fn endpoint_optical_domain_refusal_leaves_the_original_cell_history_unchanged() {
-    exercise(true);
+    exercise(true, [0.0; 2]);
 }

@@ -95,6 +95,7 @@ pub struct QuasiSteadySpatialInterferenceHeating<'h, 'b, 'a, 'm> {
     original: &'h LayeredWaveHeating<'b, 'a, 'm>,
     cards: &'h [&'h MaterialCard],
     grid: AngularSpectrumGrid,
+    carrier_rad_m: [f64; 2],
     drive: ThermalInterferenceDrive<'h>,
     quadrature: &'h [SpatialInterferenceCellQuadrature<'h>],
     footprint: AngularSpectrumAperture,
@@ -141,9 +142,37 @@ impl<'h, 'b, 'a, 'm> QuasiSteadySpatialInterferenceHeating<'h, 'b, 'a, 'm> {
         quadrature: &'h [SpatialInterferenceCellQuadrature<'h>],
         footprint: AngularSpectrumAperture,
         limits: SpatialInterferenceFeedbackLimits,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, SpatialInterferenceFeedbackError> {
+        Self::try_new_with_carrier(
+            original, cards, grid, [0.0; 2], drive, quadrature, footprint, limits, cancelled,
+        )
+    }
+
+    /// Heat the original cells with a common physical transverse carrier
+    /// [rad/m]. Both face arrays and every frequency/factor are envelopes
+    /// with exp(-i k_carrier.x) removed. Their exact carrier phase reaches the
+    /// finite footprint's spatial interference and irreversible heat.
+    ///
+    /// The authored wavevector is fixed across frequencies and per-cell
+    /// temperature rebuilds; incidence angles follow each original exterior
+    /// wavelength. The native two-port light-cone admission remains in force.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_carrier(
+        original: &'h LayeredWaveHeating<'b, 'a, 'm>,
+        cards: &'h [&'h MaterialCard],
+        grid: AngularSpectrumGrid,
+        carrier_rad_m: [f64; 2],
+        drive: ThermalInterferenceDrive<'h>,
+        quadrature: &'h [SpatialInterferenceCellQuadrature<'h>],
+        footprint: AngularSpectrumAperture,
+        limits: SpatialInterferenceFeedbackLimits,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, SpatialInterferenceFeedbackError> {
         poll(&mut cancelled)?;
+        if carrier_rad_m.iter().any(|k| !k.is_finite()) {
+            return Err(invalid("the transverse carrier must be finite in rad/m"));
+        }
         let body = original.thermal_body().prepared_body();
         let n = body.cell_count();
         if n == 0
@@ -242,6 +271,7 @@ impl<'h, 'b, 'a, 'm> QuasiSteadySpatialInterferenceHeating<'h, 'b, 'a, 'm> {
             original,
             cards,
             grid,
+            carrier_rad_m,
             drive,
             quadrature,
             footprint,
@@ -258,6 +288,10 @@ impl<'h, 'b, 'a, 'm> QuasiSteadySpatialInterferenceHeating<'h, 'b, 'a, 'm> {
     }
     pub const fn drive(&self) -> ThermalInterferenceDrive<'h> {
         self.drive
+    }
+    /// Authored common wavevector, unchanged across frequencies and refreshes.
+    pub const fn carrier_transverse_wavenumber_rad_m(&self) -> [f64; 2] {
+        self.carrier_rad_m
     }
     pub const fn footprint(&self) -> AngularSpectrumAperture {
         self.footprint
@@ -409,6 +443,7 @@ impl<'h, 'b, 'a, 'm> QuasiSteadySpatialInterferenceHeating<'h, 'b, 'a, 'm> {
                 &stacks,
                 &self.frequencies,
                 self.grid,
+                self.carrier_rad_m,
                 self.drive,
                 self.line_count,
                 self.limits.fields,
