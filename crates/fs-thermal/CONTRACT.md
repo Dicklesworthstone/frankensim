@@ -559,11 +559,27 @@ opposed pressure-mouth work owner and explicit pure-liquid enthalpy on actual
 inflow, including backflow. Its fixed thermodynamic reference pressure remains
 separate from the hydrodynamic pressure gauge: adding hydrodynamic `p/rho` to
 the inlet enthalpy would count the physical pressure supply twice. Exact-solid
-pressure-mouth topology remains unsupported. Selective streams, stationary species,
-bulk-enthalpy entropy auditing and nonempty bulk-enthalpy reconstruction also
-refuse until their own phase-specific closures are supplied. Alloy melting
-ranges, unequal phase densities and moving solid skeletons are outside this
-model.
+pressure-mouth topology remains unsupported. Selective streams, stationary species
+and nonempty bulk-enthalpy reconstruction still refuse until their own
+phase-specific closures are supplied. Alloy melting ranges, unequal phase
+densities and moving solid skeletons are outside this model.
+
+The optional explicit-trajectory entropy audit now follows the same moving
+liquid. Face and boundary entropy use the original law at
+`h_liquid=max(h_bulk,h_liquidus)`, while stored entropy remains the actual
+mixture's `mass*integral(dh_bulk/T)`. At pure-substance coexistence,
+`s_liquid-s_bulk=(h_liquid-h_bulk)/T_m`; local balanced liquid mass flux
+cancels that stationary-phase offset. Isothermal liquid circulation and
+flushing therefore create no artificial mixing entropy or latent heat.
+The existing component energy reference uses the same carried-enthalpy
+function. Source heat/work, spatial upwind mixing and temporal entropy error
+remain separate. Instantaneous implicit endpoint queries do not integrate
+an entropy history.
+
+Five entropy regressions cover circulation and flushing, independent
+superheat-to-latent balances, open-stream entropy, freezing with separately
+accounted cooling, large positive/negative caloric datum shifts, fully liquid
+equivalence and cancellation.
 
 Five thermal regressions cover isothermal circulation, large datum shifts,
 implicit latent melting by superheat, fully liquid equivalence and admission

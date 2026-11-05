@@ -1,7 +1,7 @@
 //! Open liquid streams use the same fixed-mass enthalpy and boundary accounts.
 use super::*;
 
-fn boundaries(inlet: CellId, outlet: CellId, rate: f64, h: f64) -> Vec<MassBoundary> {
+pub(super) fn boundaries(inlet: CellId, outlet: CellId, rate: f64, h: f64) -> Vec<MassBoundary> {
     vec![
         MassBoundary::Inlet {
             id: 10, cell: inlet, kg_s: rate, material_id: MAT, specific_h_j_kg: h,

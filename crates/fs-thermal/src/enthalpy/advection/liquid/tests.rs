@@ -8,7 +8,10 @@ use crate::enthalpy::{
     Boundary, CellGeometry, CellId, DepositionBudget, Event, StepConfig, TimedEvent,
 };
 
+#[path = "tests/open.rs"]
 mod open;
+#[path = "tests/entropy.rs"]
+mod entropy;
 
 const MAT: MaterialId = MaterialId(1);
 
@@ -25,6 +28,30 @@ impl ThermalLaw for PhaseLaw {
             else { 500.0 + self.melting_range_k + 0.5 * (h - 100.0) })
     }
     fn maximum_temperature_slope(&self) -> f64 { 0.5 }
+    fn specific_entropy_change_j_kg_k(&self, from: f64, to: f64)
+        -> Result<Option<f64>, DepositionError> {
+        self.temperature_k(from)?;
+        self.temperature_k(to)?;
+        // Analytic entropy relative to the solid-side melting endpoint:
+        // sensible branches have Cp=2, and the sharp latent jump is L/Tm.
+        let entropy = |h: f64| {
+            let h = h - self.datum;
+            if h < 0.0 {
+                return 2.0 * (h / 1000.0).ln_1p();
+            }
+            let phase_h = h.min(100.0);
+            let latent = if self.melting_range_k == 0.0 {
+                phase_h / 500.0
+            } else {
+                100.0 / self.melting_range_k
+                    * (self.melting_range_k * phase_h / 50_000.0).ln_1p()
+            };
+            latent + if h <= 100.0 { 0.0 } else {
+                2.0 * ((h - 100.0) / (1000.0 + 2.0 * self.melting_range_k)).ln_1p()
+            }
+        };
+        Ok(Some(entropy(to) - entropy(from)))
+    }
 }
 fn source_knots(law: &PhaseLaw) -> Vec<LiquidCarrierKnot> {
     [(-100.0, 0.0), (0.0, 0.0), (50.0, 0.5), (100.0, 1.0), (300.0, 1.0)]
@@ -182,8 +209,8 @@ fn phase_source_admission_and_incompatible_transport_modes_refuse() {
     let initial = prepare(&law, &[25.0; 3], 2.0);
     let original = Advected::new((), flows(3, 0.5), 3).unwrap();
     let selected = original.clone().with_liquid_carrier(carrier(&law)).unwrap();
-    assert!(original.clone().with_entropy_audit().with_liquid_carrier(carrier(&law)).is_err());
-    assert!(selected.clone().with_entropy_audit().endpoint_transport(&initial, || Ok(())).is_err());
+    assert!(original.clone().with_entropy_audit().with_liquid_carrier(carrier(&law)).is_ok());
+    assert!(selected.clone().with_entropy_audit().endpoint_transport(&initial, || Ok(())).is_ok());
     assert!(selected.clone().with_stationary_species(vec!["liquid".into()], vec![], 3, 1).is_err());
     let reconstruction = LimitedEnthalpyReconstruction::try_new(&initial,
         &[AxialCellStencil { previous: CellId(0), cell: CellId(1), next: CellId(2) }], 1, || Ok(())).unwrap();

@@ -159,7 +159,12 @@ impl LiquidEnthalpyCarrier {
         {
             return Err(invalid("liquid carriage changed original material or fixed-density inventory"));
         }
-        let h = cell.specific_h_j_kg;
+        self.carried_h_at(cell.specific_h_j_kg)
+    }
+
+    /// Evaluate the same carrier on a retained starting-state enthalpy. The
+    /// original flow epoch separately admits its cell identity and inventory.
+    pub(super) fn carried_h_at(&self, h: f64) -> Result<f64, DepositionError> {
         if !h.is_finite() || h < self.enthalpy_bounds_j_kg[0] || h > self.enthalpy_bounds_j_kg[1] {
             return Err(DepositionError::MaterialDomain);
         }
@@ -187,13 +192,13 @@ impl<O> Advected<O> {
     ///
     /// Existing conservative transfers, component-reference subtraction and
     /// physical energy gates remain authoritative. The carried-h slope is in
-    /// [0,1], so the original outgoing-mass CFL remains conservative. A bulk-h
-    /// entropy audit, species mixing or nonempty bulk-h reconstruction refuses.
+    /// [0,1], so the original outgoing-mass CFL remains conservative. The optional
+    /// entropy audit uses liquid-side entropy for transport and the original
+    /// mixture entropy for storage. Species mixing and nonempty bulk-h
+    /// reconstruction remain unsupported.
     pub fn with_liquid_carrier(mut self, carrier: LiquidEnthalpyCarrier) -> Result<Self, DepositionError> {
-        if self.stationary_species.is_some() || !self.selective_outlets.is_empty()
-            || self.entropy.is_some()
-        {
-            return Err(invalid("liquid-carrier transport excludes species and bulk-entropy mixing"));
+        if self.stationary_species.is_some() || !self.selective_outlets.is_empty() {
+            return Err(invalid("liquid-carrier transport excludes species mixing and selective streams"));
         }
         for boundary in &self.boundaries { carrier.admit_boundary(boundary)?; }
         self.liquid_carrier = Some(carrier);
@@ -209,4 +214,5 @@ impl<O> Advected<O> {
 }
 
 #[cfg(test)]
+#[path = "liquid/tests.rs"]
 mod tests;

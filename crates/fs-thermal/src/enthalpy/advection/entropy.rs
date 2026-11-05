@@ -4,7 +4,10 @@
 //! Only NET boundary entropy is reported: a common relative entropy reference
 //! cancels because the existing owner balances mass. Chemical mixing, unequal
 //! pressure conventions and unlike-law transport require another entropy owner.
+//! With a stationary solid skeleton, only the moving liquid's enthalpy and
+//! entropy cross faces; original mixture entropy remains in cell storage.
 
+use super::liquid::LiquidEnthalpyCarrier;
 use super::{Advected, MassBoundary, MassFlow, finite, invalid};
 use crate::enthalpy::{CellId, DepositionError, DepositionSimulation, MaterialId};
 use std::collections::BTreeMap;
@@ -22,11 +25,15 @@ pub struct AdvectionEntropyAudit {
     /// Net inlet donor entropy minus CURRENT outlet donor entropy, integrated
     /// on the same starting-state quadrature as the original enthalpy flux.
     /// This is independent of a common absolute entropy datum for balanced mass.
+    /// Liquid-only carriage uses the pure-liquid side at coexistence, even
+    /// when a cell retains stationary solid and its bulk entropy is smaller.
     pub advective_boundary_entropy_input_j_k: f64,
     /// Sum dm*[(h_donor-h_receiver)/T_receiver - (s_donor-s_receiver)].
     /// This is spatial upwind/control-volume mixing, not constitutive fluid
     /// dissipation. It is nonnegative for monotone T(h) in exact arithmetic;
     /// small signed roundoff remains visible and is never clamped into heat.
+    /// Donor and receiver h/s are those of the actual carrier. An isothermal
+    /// liquid loop has zero mixing regardless of stationary solid fractions.
     pub upwind_mixing_j_k: f64,
     /// Sum m*[integral(dh/T) - delta_h/T_start] for the actual accepted update.
     /// Separates explicit temporal entropy error from spatial upwind mixing.
@@ -45,6 +52,14 @@ impl<O> Advected<O> {
     /// must provide its exact dh/T integral. Flowing cells and inlets must use
     /// the same immutable MaterialId; a shared enthalpy datum alone is not
     /// enough. Stationary composition mixing deliberately refuses this audit.
+    ///
+    /// For an admitted liquid carrier, fluxes use `h_liquid=max(h,h_liquidus)`
+    /// and the original law's entropy at that liquid state. Cell storage still
+    /// uses the actual bulk h. At pure-substance coexistence,
+    /// `s_liquid-s_bulk=(h_liquid-h_bulk)/T_m`; local liquid mass balance
+    /// cancels this stationary-phase offset. No additional melting entropy or
+    /// latent energy source is introduced. This does not cover alloy segregation,
+    /// phase kinetics, unequal phase densities or a moving solid skeleton.
     ///
     /// Extra work is sparse and only occurs when enabled. The original energy,
     /// mass, CFL, event and transactional refusal semantics remain unchanged.
@@ -157,6 +172,7 @@ impl EntropyState {
         flows: &[MassFlow],
         boundaries: &[MassBoundary],
         energy_reference_cells: &BTreeMap<CellId, CellId>,
+        liquid_carrier: Option<LiquidEnthalpyCarrier>,
         temperatures: &BTreeMap<CellId, f64>,
         dt: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
@@ -170,6 +186,16 @@ impl EntropyState {
             return Err(invalid("advective entropy must retain its active cells"));
         }
         let initial = &self.initial_h;
+        // Reconstruct the actual original carrier at the retained source
+        // epoch, never from the post-step mixture fraction. Nonflowing solid
+        // cells still participate in storage and need no liquid admission.
+        let carried = |id| -> Result<f64, DepositionError> {
+            let h = *initial.get(&id).ok_or(DepositionError::Arithmetic)?;
+            match liquid_carrier {
+                Some(carrier) => carrier.carried_h_at(h),
+                None => Ok(h),
+            }
+        };
         let mut powers: BTreeMap<_, _> = initial.keys().map(|&id| (id, 0.0)).collect();
         // A single relative reference per immutable material law. Separate
         // disconnected components with this same law can share the reference.
@@ -185,8 +211,8 @@ impl EntropyState {
                 .cells()
                 .get(&id)
                 .ok_or(DepositionError::Arithmetic)?;
-            let h = *initial.get(&id).ok_or(DepositionError::Arithmetic)?;
-            let energy_reference = initial[energy_reference_cells.get(&id).unwrap_or(&id)];
+            let h = carried(id)?;
+            let energy_reference = carried(*energy_reference_cells.get(&id).unwrap_or(&id))?;
             let reference = *references.entry(cell.material_id).or_insert(h);
             let t = temperature(temperatures, id)?;
             match *entry {
@@ -233,12 +259,12 @@ impl EntropyState {
                     "advective entropy requires one immutable caloric law",
                 ));
             }
-            let hu = *initial.get(&up).ok_or(DepositionError::Arithmetic)?;
-            let hd = *initial.get(&down).ok_or(DepositionError::Arithmetic)?;
+            let hu = carried(up)?;
+            let hd = carried(down)?;
             let td = temperature(temperatures, down)?;
             let ds = difference(thermal, donor.material_id, hd, hu)?;
             mixing.add(finite(rate * finite((hu - hd) / td - ds)?)?)?;
-            let energy_reference = initial[energy_reference_cells.get(&up).unwrap_or(&up)];
+            let energy_reference = carried(*energy_reference_cells.get(&up).unwrap_or(&up))?;
             let power = finite(rate * finite(hu - energy_reference)?)?;
             add_power(&mut powers, up, -power)?;
             add_power(&mut powers, down, power)?;

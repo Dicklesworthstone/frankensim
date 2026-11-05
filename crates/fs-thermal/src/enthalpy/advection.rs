@@ -433,10 +433,8 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         -> Result<BTreeMap<CellId, f64>, Self::Error> {
         check()?;
         if let Some(carrier) = &self.liquid_carrier {
-            if self.stationary_species.is_some() || !self.selective_outlets.is_empty()
-                || self.entropy.is_some()
-            {
-                return Err(invalid("liquid-carrier transport excludes species and bulk-entropy mixing").into());
+            if self.stationary_species.is_some() || !self.selective_outlets.is_empty() {
+                return Err(invalid("liquid-carrier transport excludes species mixing and selective streams").into());
             }
             carrier.admit_law(thermal)?;
         }
@@ -642,7 +640,8 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
         self.audit.maximum_courant = self.audit.maximum_courant.max(finite(dt*pending.decay_per_s)?);
         self.audit.substeps = self.audit.substeps.checked_add(1).ok_or(DepositionError::Arithmetic)?;
         if let Some(entropy) = &mut self.entropy {
-            entropy.record(thermal, &self.flows, &self.boundaries, &self.reference_cells, old, dt, check)?;
+            entropy.record(thermal, &self.flows, &self.boundaries, &self.reference_cells,
+                self.liquid_carrier, old, dt, check)?;
         }
         self.inner.step(start_s, dt, old, thermal, check)
     }
