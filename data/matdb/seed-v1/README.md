@@ -6,6 +6,11 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [pyrrhotite guide](MINING_PYRRHOTITE.md) adds three matched NBS material
+profiles and four conserved endpoints for FeS/Fe7S8 oxidation and ferric attack.
+Finite oxidant inventories, direct proton production, standard reaction heat
+and Gibbs sums retain the original mineral phase and formula-unit basis.
+
 The [nonideal residence guide](MINING_NONIDEAL_RESIDENCE.md) adds unequal
 active/stagnant tank volumes, explicit bypass and exchange during flow stops.
 Its callable forward model independently accounts for outlet and retained

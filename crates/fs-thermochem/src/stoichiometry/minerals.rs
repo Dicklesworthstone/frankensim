@@ -7,6 +7,17 @@
 //! Combining seven such oxidations with two ferric-pyrite attacks recovers
 //! the two-pyrite ferrous endpoint; intermediate iron is accounted for rather
 //! than treated as a free oxidant. No reaction rate or cycle turnover is inferred.
+//! Pyrrhotite oxygen endpoints use the conserved coefficient in USGS OFR
+//! 02-195, chapter L, equation 3:
+//! <https://pubs.usgs.gov/of/2002/of02-195/OF02-195L.pdf>.
+//! The two selected compositions are NBS Table 41:Fe's crystalline alpha
+//! Fe1.000S and sulfur-rich Fe7S8, not an interpolated Fe1-xS phase. Oxygen
+//! remains an explicit dissolved inventory. Ferric attack to elemental sulfur
+//! follows chapter B, equation 3:
+//! <https://pubs.usgs.gov/of/2002/of02-195/OF02-195B.pdf>.
+//! Its S(s) product selects the NBS orthorhombic elemental reference per mole
+//! of S atoms. These separate endpoints do not select a pathway, predict a
+//! passivating layer or provide kinetics, iron hydrolysis or oxygen transfer.
 //! Carbonate neutralizations
 //! combine mineral dissolution with CO3(2-) + 2 H+ -> CO2(aq) + H2O from
 //! the USGS PHREEQC database:
@@ -313,6 +324,19 @@ pub enum MineralReaction {
     BicarbonateDissociation,
     /// 2 FeS2(s) + 7 O2(g) + 2 H2O(l) -> 2 Fe2+ + 4 SO4(2-) + 4 H+.
     PyriteOxidationFerrous,
+    /// FeS(alpha-pyrrhotite) + 2 O2(aq) -> Fe2+(aq) + SO4(2-)(aq).
+    /// Source-specific iron-rich endpoint; no direct proton production.
+    IronRichPyrrhotiteDissolvedOxygenOxidation,
+    /// 2 Fe7S8(pyrrhotite) + 31 O2(aq) + 2 H2O(l)
+    /// -> 14 Fe2+(aq) + 16 SO4(2-)(aq) + 4 H+(aq).
+    /// Extent is per two Fe7S8 formula units, not two normalized Fe0.875S units.
+    SulfurRichPyrrhotiteDissolvedOxygenOxidation,
+    /// FeS(alpha-pyrrhotite) + 2 Fe3+(aq) -> 3 Fe2+(aq) + S(s).
+    /// Ferric reagent and mineral iron remain distinct inventory contributions.
+    FerricIronRichPyrrhotiteLeach,
+    /// Fe7S8(pyrrhotite) + 14 Fe3+(aq) -> 21 Fe2+(aq) + 8 S(s).
+    /// Declared orthorhombic-sulfur endpoint; no sulfate or proton is inferred.
+    FerricSulfurRichPyrrhotiteLeach,
     /// 4 Fe2+(aq) + O2(g) + 4 H+(aq) -> 4 Fe3+(aq) + 2 H2O(l).
     /// Oxidation consumes one proton per ferrous ion; rate remains an input.
     FerrousOxidationFerric,
@@ -861,6 +885,48 @@ impl MineralReaction {
                     ("Fe[2+](aq)", &[1, 0, 0, 0], 2, 2),
                     ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 4),
                     ("H+(aq)", &[0, 0, 0, 1], 1, 4),
+                ],
+            ),
+            Self::IronRichPyrrhotiteDissolvedOxygenOxidation => (
+                "pyrrhotite-fes-oxidation-dissolved-oxygen",
+                &["Fe", "S", "O"],
+                &[
+                    ("FeS(s-alpha-pyrrhotite)", &[1, 1, 0], 0, -1),
+                    ("O2(aq)", &[0, 0, 2], 0, -2),
+                    ("Fe[2+](aq)", &[1, 0, 0], 2, 1),
+                    ("SO4[2-](aq)", &[0, 1, 4], -2, 1),
+                ],
+            ),
+            Self::SulfurRichPyrrhotiteDissolvedOxygenOxidation => (
+                "pyrrhotite-fe7s8-oxidation-dissolved-oxygen",
+                &["Fe", "S", "O", "H"],
+                &[
+                    ("Fe7S8(s-pyrrhotite)", &[7, 8, 0, 0], 0, -2),
+                    ("O2(aq)", &[0, 0, 2, 0], 0, -31),
+                    ("H2O(l)", &[0, 0, 1, 2], 0, -2),
+                    ("Fe[2+](aq)", &[1, 0, 0, 0], 2, 14),
+                    ("SO4[2-](aq)", &[0, 1, 4, 0], -2, 16),
+                    ("H+(aq)", &[0, 0, 0, 1], 1, 4),
+                ],
+            ),
+            Self::FerricIronRichPyrrhotiteLeach => (
+                "ferric-pyrrhotite-fes-leach",
+                &["Fe", "S"],
+                &[
+                    ("FeS(s-alpha-pyrrhotite)", &[1, 1], 0, -1),
+                    ("Fe[3+](aq)", &[1, 0], 3, -2),
+                    ("Fe[2+](aq)", &[1, 0], 2, 3),
+                    ("S(s)", &[0, 1], 0, 1),
+                ],
+            ),
+            Self::FerricSulfurRichPyrrhotiteLeach => (
+                "ferric-pyrrhotite-fe7s8-leach",
+                &["Fe", "S"],
+                &[
+                    ("Fe7S8(s-pyrrhotite)", &[7, 8], 0, -1),
+                    ("Fe[3+](aq)", &[1, 0], 3, -14),
+                    ("Fe[2+](aq)", &[1, 0], 2, 21),
+                    ("S(s)", &[0, 1], 0, 8),
                 ],
             ),
             Self::FerrousOxidationFerric => (
