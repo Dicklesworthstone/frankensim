@@ -376,3 +376,109 @@ fn prescribed_support_balances_a_small_couple_at_a_distant_world_origin() {
     assert_eq!(result.kinetic_energy_change, 0.0);
     assert_eq!(result.impulse_work, 0.0);
 }
+
+#[test]
+fn large_impulses_report_absorbed_existing_linear_and_spin_momentum() {
+    for sign in [-1.0, 1.0] {
+        let old = RigidBodyState::new(
+            Pose::identity(),
+            Vec3::new(sign, 0.0, 0.0),
+            Vec3::new(0.0, sign, 0.0),
+        )
+        .unwrap();
+        let linear = Vec3::new(sign * 1e20, 0.0, 0.0);
+        let angular = Vec3::new(0.0, sign * 1e20, 0.0);
+        let result = old
+            .apply_momentum_impulse(properties(), linear, angular)
+            .unwrap();
+        assert_eq!(result.state_after.linear_momentum_world(), linear);
+        assert_eq!(result.state_after.angular_momentum_body(), angular);
+        // Each f64 endpoint difference rounds back to the requested impulse.
+        // The original one-unit momentum was nevertheless lost in each frame.
+        assert_eq!(result.linear_increment_world, linear);
+        assert_eq!(result.angular_increment_body, angular);
+        assert_eq!(result.linear_residual_world, Vec3::new(-sign, 0.0, 0.0));
+        assert_eq!(result.angular_residual_body, Vec3::new(0.0, -sign, 0.0));
+        assert_eq!(result.work.work_energy_residual_j, -1e20);
+
+        let point = state(Vec3::ZERO, Vec3::new(sign, 0.0, 0.0))
+            .apply_impulse_at_body_point(properties(), Vec3::ZERO, linear)
+            .unwrap();
+        // Rounded total work and kinetic change coincide. Their physical
+        // defect must come from the compensated momentum error, not subtraction.
+        assert_eq!(
+            point.work.kinetic_energy_change_j,
+            point.work.impulse_work_j
+        );
+        assert_eq!(point.work.work_energy_residual_j, -5e19);
+    }
+}
+
+#[test]
+fn momentum_exchange_retains_the_small_original_kinetic_energy() {
+    for large in [LARGE, 1e20] {
+        for spin in [false, true] {
+            let before = Vec3::new(1.0, 0.0, large);
+            let applied = Vec3::new(large, 0.0, -large);
+            let old = RigidBodyState::new(
+                Pose::identity(),
+                if spin { Vec3::ZERO } else { before },
+                if spin { before } else { Vec3::ZERO },
+            )
+            .unwrap();
+            let result = old
+                .apply_momentum_impulse(
+                    properties(),
+                    if spin { Vec3::ZERO } else { applied },
+                    if spin { applied } else { Vec3::ZERO },
+                )
+                .unwrap();
+            // Unit mass/inertia: final squared momentum is large^2, while
+            // initial squared momentum is large^2+1. No large K subtraction.
+            assert_eq!(result.work.kinetic_energy_change_j, -0.5);
+            assert_eq!(result.work.impulse_work_j, 0.5 * large);
+            assert_eq!(result.work.work_energy_residual_j, -0.5 * large);
+        }
+    }
+}
+
+#[test]
+fn equal_and_opposite_large_impulses_expose_swallowed_prior_pair_momentum() {
+    for large in [LARGE, 1e20] {
+        let position = Vec3::new(0.0, 2.0, 0.0);
+        let first = state(position, Vec3::new(large, 0.0, 0.0));
+        let second = state(position, Vec3::new(1.0, 0.0, 0.0));
+        let result = apply_equal_and_opposite_impulse_at_body_points(
+            first,
+            properties(),
+            Vec3::ZERO,
+            second,
+            properties(),
+            Vec3::ZERO,
+            Vec3::new(large, 0.0, 0.0),
+        )
+        .unwrap();
+        assert_eq!(result.impulse_balance_world, Vec3::ZERO);
+        assert_eq!(result.first.state_after.linear_momentum_world(), Vec3::ZERO);
+        assert_eq!(
+            result.second.state_after.linear_momentum_world(),
+            Vec3::new(large, 0.0, 0.0)
+        );
+        assert_eq!(
+            result.linear_momentum_change_world,
+            Vec3::new(-1.0, 0.0, 0.0)
+        );
+        assert_eq!(result.angular_impulse_world, Vec3::ZERO);
+        assert_eq!(
+            result.angular_momentum_change_world,
+            Vec3::new(0.0, 0.0, 2.0)
+        );
+        assert_eq!(
+            result.angular_momentum_residual_world,
+            Vec3::new(0.0, 0.0, 2.0)
+        );
+        assert_eq!(result.kinetic_energy_change_j, -0.5);
+        assert_eq!(result.impulse_work_j, 0.5 * large);
+        assert_eq!(result.work_energy_residual_j, -0.5 * large);
+    }
+}
