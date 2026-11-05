@@ -2804,9 +2804,24 @@ homogenization, the P2 milestone.
   converted to an allowable here) from every bonded layer. A common axial
   strain gives layer stress `E_i N / EA`; the capacity is
   `min_i(limit_i EA / E_i)` and that layer governs. A layer without the claim
-  refuses as missing data, never as unbreakable. Only axial-force stress is
-  checked: residual drawing/winding stress, thermal eigenstrain, vibration
-  bending stress and fatigue are absent.
+  refuses as missing data, never as unbreakable. The capacity retains the
+  original section and the complete strength answers, including the explicit
+  caller-owned diameter-resolved path. Bundled strength sources must be static
+  at held external conditions; moisture/pressure/composition dependence is
+  retained, while unowned strain, rate and frequency applicability refuses.
+  `assess_axial_bending` reports each annulus's normal-stress extrema
+  `E_i N/EA +/- E_i r_outer_i |M|/EI`, comparing only positive maximum stress
+  with that layer's own limit. Signed compression and biaxial bending are
+  admitted. `assess_thermoelastic_axial_bending` requires the exact original
+  section/material states and reuses its integrated thermal eigenstrain and
+  current elastic layer stresses, including self-equilibrated tension at zero
+  resultant force. Total and elastic strain bounds apply to the bending
+  extrema as well. Nonfinite/unrepresentable arithmetic refuses. G0/G1/G3
+  analytical regressions cover combined loads, layer-specific governing
+  limits, thermal self-stress, rotation, subdivision and source/state refusals.
+  These are small-strain, perfectly bonded elastic stress assessments;
+  residual drawing/winding stress, shear/torsional failure, yielding
+  redistribution, crack evolution, buckling and fatigue are absent.
 - `section::loss_angle::ConcentricLossAngleSection` binds a named dimensionless
   loss tangent `Im(E)/Re(E)` from every bonded layer: the complex bending
   stiffness is `EI + iH`, `H = sum(E_i I_i tan(delta_i))`, with no averaged

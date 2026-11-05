@@ -94,6 +94,12 @@ fn fixture(pair: u8, varying: bool) -> (MaterialCard, ResolvedMaterialStatePoint
     let mut requirements = Vec::new();
     for (name, dims, endpoints) in values {
         let curve = varying && endpoints[0] != endpoints[1];
+        let validity = ValidityDomain::unconstrained()
+            .with_quantity("T", absolute(), 300.0, 500.0);
+        // Static tensile strength has no frequency owner. Loss coefficients
+        // retain their original frequency applicability in this fixture.
+        let validity = if name == "strength" { validity }
+            else { validity.with("omega", 1.0, 20000.0) };
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -110,9 +116,7 @@ fn fixture(pair: u8, varying: bool) -> (MaterialCard, ResolvedMaterialStatePoint
                         dims,
                     }
                 },
-                validity: ValidityDomain::unconstrained()
-                    .with_quantity("T", absolute(), 300.0, 500.0)
-                    .with("omega", 1.0, 20000.0),
+                validity,
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: if curve {
                     InterpolationPolicy::LinearInside
