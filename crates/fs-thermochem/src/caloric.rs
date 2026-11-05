@@ -1,4 +1,4 @@
-//! Explicit, bounded reconciliation of independent NASA-9 caloric references.
+//! NASA-9 caloric references and cancellation-safe reaction differences.
 //!
 //! Cp remains source-authored. Constant h/s offsets make contiguous charts
 //! agree at their shared endpoints; u=h-RT and g=h-Ts follow the same owner.
@@ -15,6 +15,139 @@ use std::sync::Arc;
 
 /// Operation-tree version for explicit continuous caloric references.
 pub const NASA9_CONTINUOUS_CALORIC_EVALUATOR_VERSION_V1: u32 = 2;
+
+// Shared reaction calorics combine original source coefficients before applying
+// their common temperature basis. Summing rounded absolute species energies
+// instead would lose chemical differences beside a conserved elemental datum.
+// Keep this operation tree shared by equilibrium constants and kinetic rates.
+pub(crate) struct ReactionCaloricBasis {
+    pub(crate) temperature: f64,
+    enthalpy: [f64; 9],
+    entropy: [f64; 9],
+}
+impl ReactionCaloricBasis {
+    pub(crate) fn new(temperature: Temperature) -> Self {
+        let t = temperature.value();
+        let inverse = 1.0 / t;
+        let ln_t = fs_math::det::ln(t);
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let t4 = t2 * t2;
+        Self {
+            temperature: t,
+            enthalpy: [
+                -inverse,
+                ln_t,
+                t,
+                t2 / 2.0,
+                t3 / 3.0,
+                t4 / 4.0,
+                t4 * t / 5.0,
+                1.0,
+                0.0,
+            ],
+            entropy: [
+                -0.5 * inverse * inverse,
+                -inverse,
+                ln_t,
+                t,
+                t2 / 2.0,
+                t3 / 3.0,
+                t4 / 4.0,
+                0.0,
+                1.0,
+            ],
+        }
+    }
+}
+
+#[derive(Default)]
+struct CaloricSum {
+    sum: f64,
+    correction: f64,
+}
+impl CaloricSum {
+    fn add(&mut self, term: f64) {
+        let next = self.sum + term;
+        self.correction += if self.sum.abs() >= term.abs() {
+            (self.sum - next) + term
+        } else {
+            (term - next) + self.sum
+        };
+        self.sum = next;
+    }
+    fn value(&self) -> f64 {
+        self.sum + self.correction
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ReactionCaloricSum {
+    coefficients: [CaloricSum; 9],
+    enthalpy_offset: CaloricSum,
+    entropy_offset: CaloricSum,
+}
+impl ReactionCaloricSum {
+    // Callers still admit every original species through its usual property
+    // evaluator, preserving domain and finite-property checks and receipts.
+    pub(crate) fn add_model(
+        &mut self,
+        model: &Nasa9StandardStateModelV1,
+        coefficient: f64,
+        temperature: f64,
+    ) -> Result<(), ThermochemErrorV1> {
+        let (index, region) = model.region_for_temperature(temperature).ok_or(
+            ThermochemErrorV1::TemperatureOutOfRange {
+                bits: temperature.to_bits(),
+            },
+        )?;
+        for (total, value) in self.coefficients.iter_mut().zip(region.coefficients()) {
+            total.add(coefficient * value);
+        }
+        if let Some(reference) = model.caloric_reference() {
+            let correction = &reference.regions()[index];
+            self.enthalpy_offset
+                .add(coefficient * correction.enthalpy_offset().value());
+            self.entropy_offset
+                .add(coefficient * correction.entropy_offset().value());
+        }
+        Ok(())
+    }
+
+    // Original Delta h, Delta u and Delta g in J/mol of reaction progress.
+    // The caller checks the results required by its physical formulation.
+    pub(crate) fn evaluate(
+        &self,
+        basis: &ReactionCaloricBasis,
+        delta_molecules: f64,
+    ) -> (f64, f64, f64) {
+        let (mut h, mut u, mut s) = (
+            CaloricSum::default(),
+            CaloricSum::default(),
+            CaloricSum::default(),
+        );
+        for (i, total) in self.coefficients.iter().enumerate() {
+            let coefficient = total.value();
+            // Inactive powers must not create 0*inf at extreme temperatures.
+            if coefficient != 0.0 {
+                h.add(coefficient * basis.enthalpy[i]);
+                s.add(coefficient * basis.entropy[i]);
+            }
+            let internal = if i == 2 {
+                coefficient - delta_molecules
+            } else {
+                coefficient
+            };
+            if internal != 0.0 {
+                u.add(internal * basis.enthalpy[i]);
+            }
+        }
+        let h = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * h.value() + self.enthalpy_offset.value();
+        let u = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * u.value() + self.enthalpy_offset.value();
+        let s = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * s.value() + self.entropy_offset.value();
+        (h, u, h - basis.temperature * s)
+    }
+}
 
 /// One original source identity and its explicit constant caloric offsets.
 #[derive(Debug, Clone, PartialEq, Eq)]

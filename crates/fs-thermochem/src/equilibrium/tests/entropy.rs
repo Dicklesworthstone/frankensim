@@ -170,3 +170,135 @@ fn g0_affinity_preserves_small_remainders_of_large_stoichiometric_logs() {
     assert_eq!(mass_action_affinity(1e16, 1.0, 1e16), Some(-1.0));
     assert_eq!(mass_action_affinity(-1e16, -1.0, -1e16), Some(1.0));
 }
+
+fn reference_shifted_water(
+    reversed: bool,
+    enthalpy_reference_r: [f64; 2],
+    entropy_reference_r: [f64; 2],
+    binding_r: f64,
+) -> IdealGasReactionEquilibriumV1 {
+    let models = [
+        ("H2", 0.002_015_88, 3.0, 2.0, 0.0, 0.0, 1.0),
+        ("O2", 0.031_998_8, 3.5, 0.0, 2.0, 0.0, 2.0),
+        ("H2O", 0.018_015_28, 4.0, 2.0, 1.0, -binding_r, 4.0),
+    ]
+    .into_iter()
+    .map(|(name, mass, cp_r, hydrogen, oxygen, formation_r, entropy_r)| {
+        let mut coefficients = [0.0; 9];
+        coefficients[2] = cp_r;
+        coefficients[7] = hydrogen * enthalpy_reference_r[0]
+            + oxygen * enthalpy_reference_r[1]
+            + formation_r;
+        coefficients[8] = hydrogen * entropy_reference_r[0]
+            + oxygen * entropy_reference_r[1]
+            + entropy_r;
+        Nasa9StandardStateModelV1::new(
+            species(name),
+            MolarMass::new(mass),
+            convention(100_000.0),
+            vec![crate::Nasa9RegionV1::from_card(card(coefficients, 100_000.0)).unwrap()],
+        )
+        .unwrap()
+    })
+    .collect();
+    let (stoichiometric, certificate, reaction_id) = water_stoichiometry(reversed);
+    IdealGasReactionEquilibriumV1::new(stoichiometric, certificate, reaction_id, models).unwrap()
+}
+
+#[test]
+fn g3_elemental_caloric_reference_shifts_preserve_equilibrium_and_reverse_rates() {
+    // These dyadic shifts preserve the authored binding/entropy differences
+    // exactly in the source coefficients. They must cancel under A*N=0 before
+    // absolute species properties are rounded; lost input bits are not repaired.
+    let h_shift = [2.0_f64.powi(50), -2.0_f64.powi(48)];
+    let s_shift = [2.0_f64.powi(40), -2.0_f64.powi(39)];
+    for t in [250.0, 800.0, 5000.0] {
+        let temperature = Temperature::new(t);
+        let baseline = ThermodynamicReverseRateClosureV1::new(
+            reference_shifted_water(false, [0.0; 2], [0.0; 2], 1024.0),
+            progress_rate_scale(7.0),
+        )
+        .evaluate(temperature)
+        .unwrap();
+        // Independent constant-Cp solution for 2 H2 + O2 -> 2 H2O.
+        let h = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * (-1.5 * t - 2048.0);
+        let s = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * (-1.5 * fs_math::det::ln(t) + 4.0);
+        relative_close(baseline.equilibrium().standard_reaction_gibbs().value(), h - t * s);
+        for (h_reference, s_reference) in [
+            (h_shift, [0.0; 2]),
+            ([0.0; 2], s_shift),
+            (h_shift.map(|v| -v), s_shift.map(|v| -v)),
+        ] {
+            let closure = ThermodynamicReverseRateClosureV1::new(
+                reference_shifted_water(false, h_reference, s_reference, 1024.0),
+                progress_rate_scale(7.0),
+            );
+            let shifted = closure.evaluate(temperature).unwrap();
+            assert_eq!(
+                shifted.equilibrium().standard_reaction_gibbs(),
+                baseline.equilibrium().standard_reaction_gibbs()
+            );
+            assert_eq!(
+                shifted.equilibrium().log_equilibrium_constant(),
+                baseline.equilibrium().log_equilibrium_constant()
+            );
+            assert_eq!(
+                shifted.reverse_progress_rate_scale(),
+                baseline.reverse_progress_rate_scale()
+            );
+            assert_eq!(shifted.receipt().equilibrium_receipt().evaluator_version(), 2);
+            assert_eq!(
+                shifted.receipt().equilibrium_receipt(),
+                shifted.equilibrium().receipt()
+            );
+            for (term, receipt) in closure
+                .equilibrium()
+                .terms()
+                .iter()
+                .zip(shifted.equilibrium().receipt().terms())
+            {
+                let source = term.model().evaluate(temperature).unwrap();
+                assert_eq!(receipt.standard_state_receipt(), source.receipt());
+                assert_eq!(receipt.standard_gibbs_bits(), source.properties().g().value().to_bits());
+                assert_eq!(
+                    receipt.contribution_bits(),
+                    ((term.coefficient() as f64) * source.properties().g().value()).to_bits()
+                );
+            }
+            let reversed = reference_shifted_water(true, h_reference, s_reference, 1024.0)
+                .evaluate(temperature)
+                .unwrap();
+            assert_eq!(
+                reversed.standard_reaction_gibbs().value().to_bits(),
+                (-shifted.equilibrium().standard_reaction_gibbs().value()).to_bits()
+            );
+            assert_eq!(
+                reversed.log_equilibrium_constant().value().to_bits(),
+                (-shifted.equilibrium().log_equilibrium_constant().value()).to_bits()
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_elemental_reference_cancellation_retains_physical_binding_energy() {
+    let h_reference = [2.0_f64.powi(50), -2.0_f64.powi(48)];
+    let s_reference = [2.0_f64.powi(40), -2.0_f64.powi(39)];
+    let temperature = Temperature::new(800.0);
+    let original = reference_shifted_water(false, h_reference, s_reference, 1024.0)
+        .evaluate(temperature)
+        .unwrap();
+    let stronger_binding = reference_shifted_water(false, h_reference, s_reference, 2048.0)
+        .evaluate(temperature)
+        .unwrap();
+    relative_close(
+        stronger_binding.standard_reaction_gibbs().value()
+            - original.standard_reaction_gibbs().value(),
+        -2048.0 * UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K,
+    );
+    relative_close(
+        stronger_binding.log_equilibrium_constant().value()
+            - original.log_equilibrium_constant().value(),
+        2048.0 / temperature.value(),
+    );
+}

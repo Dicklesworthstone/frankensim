@@ -1154,9 +1154,12 @@ capacity, mixture mass basis and physical/numerical refusal boundaries.
 
 ### Reaction caloric differences
 
-Kinetic evaluator version 5 combines the original NASA-9 coefficients under
-each exact stoichiometric column before evaluating reaction internal and Gibbs
-energies. Conserved elemental formation references cancel in that reduction;
+Kinetic evaluator version 5 and reaction-equilibrium evaluator version 2 share
+one reduction of the original NASA-9 coefficients under each exact
+stoichiometric column before evaluating reaction enthalpy, internal and Gibbs
+energies. Conserved elemental enthalpy and entropy references cancel before
+absolute species properties are rounded; input differences already lost when
+source coefficients were authored cannot be recovered. In that reduction,
 distinct formation energies, molecular-count pressure-work differences, raw
 regional jumps and explicitly declared continuity offsets remain. One shared
 temperature basis serves all reactions without additional per-reaction logs.
@@ -1447,16 +1450,31 @@ dependency:
 
 For one exactly conserved reaction column with negative reactant and positive
 product coefficients `nu_i`, common ideal-gas standard-state models, and
-absolute temperature `T`, version 1 evaluates active species once in canonical
-`SpeciesId` order:
+absolute temperature `T`, version 2 admits active species once in canonical
+`SpeciesId` order and retains their complete original evaluation receipts.
+Reaction calorics use the same compensated source-coefficient reduction as
+kinetics, followed by the original NASA-9 enthalpy and entropy basis:
 
 ```text
-term_i   = binary64_exact(nu_i) * g_i^0(T)
-delta_g  = fixed_order_sum_i(term_i)
-R_T      = R * T
-ln(K_p)  = -delta_g / R_T
-K_p      = deterministic_exp(ln(K_p)) when positive finite
+delta_a_j = compensated_sum_i(binary64_exact(nu_i) * a_i,j)
+h_offset  = compensated_sum_i(nu_i * declared_h_offset_i)
+s_offset  = compensated_sum_i(nu_i * declared_s_offset_i)
+delta_h   = R * compensated_sum_j(delta_a_j * h_basis_j(T)) + h_offset
+delta_s   = R * compensated_sum_j(delta_a_j * s_basis_j(T)) + s_offset
+delta_g   = delta_h - T * delta_s
+R_T       = R * T
+ln(K_p)   = -delta_g / R_T
+K_p       = deterministic_exp(ln(K_p)) when positive finite
 ```
+
+Inactive polynomial powers are skipped. Conserved elemental reference terms
+cancel before species-property rounding, while physical formation differences,
+raw source-region jumps and explicitly declared constant caloric corrections
+remain active. The original per-species `nu_i * g_i^0(T)` values remain in receipts
+as source diagnostics; their rounded sum is not the version 2 reaction total.
+Every source evaluation and diagnostic contribution must still be finite.
+Nested reverse-rate and mass-action receipts carry this version 2 equilibrium
+receipt while preserving their original source NASA-9 receipts.
 
 `K_p` is dimensionless because each ideal-gas activity is `p_i / p0`; all
 active models must bind the same exact `p0`. Coefficients outside
@@ -1664,8 +1682,9 @@ evaluator version bind the elementary-math dialect; repeated evaluation on one
 target is expected to be bit-identical.
 
 Reaction equilibrium canonicalizes models to the exact stoichiometric species
-axis, evaluates each active species once, and uses one fixed reduction and
-`fs_math::det::exp`. Caller model permutation cannot change the admitted model,
+axis, evaluates each active species once, and uses one fixed compensated
+coefficient reduction shared with kinetics, then `fs_math::det::exp`.
+Caller model permutation cannot change the admitted model,
 standard reaction Gibbs energy, log/direct constant, or receipt. Forward and
 exactly reversed columns retain opposite Gibbs/log values under the same
 models.
@@ -1800,8 +1819,12 @@ Inline tests in `src/transport.rs` add:
 Inline tests in `src/equilibrium.rs` add:
 
 - G0 exact conserved-water reaction binding, canonical active terms, an
-  independently assembled fixed-order Gibbs/log result, and complete nested
-  stoichiometric/conservation receipt identities;
+  independent analytic constant-Cp reaction Gibbs/log result, evaluator version
+  2, and complete nested stoichiometric/conservation receipt identities;
+- G0/G3 elemental enthalpy and entropy reference invariance, changed molecular
+  binding energy, exact reaction reversal and reverse-rate source receipts;
+  kinetic/equilibrium crosswalks also cover raw region jumps and explicit
+  caloric continuity corrections;
 - G3 unknown, zero, and one-sided columns; certificate drift; missing species
   model; reference-pressure mismatch; maximum exact coefficient with both
   log-only overflow and underflow retention; and first inexact coefficient

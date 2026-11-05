@@ -1,8 +1,10 @@
 //! Shared source-path admission for kinetic reactors and compressible flow.
 
-use super::{BoundReaction, IdealGasKineticsV1, KineticsErrorV1, R, Sum, poll, positive};
+use super::{BoundReaction, IdealGasKineticsV1, KineticsErrorV1, R, poll, positive};
+pub(super) use crate::caloric::ReactionCaloricBasis;
+use crate::caloric::ReactionCaloricSum;
 use crate::equilibrium::composition::IdealGasEquilibriumV1;
-use crate::{MolarEnergyQuantityV1, Nasa9StandardStateModelV1, ThermochemErrorV1};
+use crate::{MolarEnergyQuantityV1, Nasa9StandardStateModelV1};
 use fs_qty::Temperature;
 
 /// Original standard-state energy changes per mole of reaction progress.
@@ -134,100 +136,24 @@ impl IdealGasKineticsV1 {
     }
 }
 
-// One set of powers and one logarithm for every reaction at the shared T.
-pub(super) struct ReactionCaloricBasis {
-    temperature: f64,
-    enthalpy: [f64; 9],
-    entropy: [f64; 9],
-}
-impl ReactionCaloricBasis {
-    pub(super) fn new(temperature: Temperature) -> Self {
-        let t = temperature.value();
-        let inverse = 1.0 / t;
-        let ln_t = fs_math::det::ln(t);
-        let t2 = t * t;
-        let t3 = t2 * t;
-        let t4 = t2 * t2;
-        Self {
-            temperature: t,
-            enthalpy: [
-                -inverse,
-                ln_t,
-                t,
-                t2 / 2.0,
-                t3 / 3.0,
-                t4 / 4.0,
-                t4 * t / 5.0,
-                1.0,
-                0.0,
-            ],
-            entropy: [
-                -0.5 * inverse * inverse,
-                -inverse,
-                ln_t,
-                t,
-                t2 / 2.0,
-                t3 / 3.0,
-                t4 / 4.0,
-                0.0,
-                1.0,
-            ],
-        }
-    }
-}
-
-// All species have the same T, convention and ideal-gas R. Linearity lets the
-// stoichiometric sum act on source coefficients before the caloric basis. This
-// preserves a small chemical enthalpy beside a large conserved reference and
-// uses the original NASA-9 h/R and s/R basis with no caloric approximation.
+// Equilibrium constants and kinetic reverse rates share the original source
+// coefficient reduction, including explicit h/s corrections.
 pub(super) fn reaction_calorics(
     source: &IdealGasEquilibriumV1,
     reaction: &BoundReaction,
     basis: &ReactionCaloricBasis,
 ) -> Result<ReactionCaloricChangeV1, KineticsErrorV1> {
-    let t = basis.temperature;
-    let mut coefficients: [Sum; 9] = core::array::from_fn(|_| Sum::default());
-    let mut enthalpy_offset = Sum::default();
-    let mut entropy_offset = Sum::default();
+    let mut calorics = ReactionCaloricSum::default();
     for &(i, coefficient) in &reaction.net {
         let model = &source.models()[i];
-        let (index, region) =
-            model
-                .region_for_temperature(t)
-                .ok_or_else(|| KineticsErrorV1::SpeciesEvaluation {
-                    species: model.species().clone(),
-                    source: ThermochemErrorV1::TemperatureOutOfRange { bits: t.to_bits() },
-                })?;
-        for (total, value) in coefficients.iter_mut().zip(region.coefficients()) {
-            total.add(coefficient * value);
-        }
-        if let Some(reference) = model.caloric_reference() {
-            let correction = &reference.regions()[index];
-            enthalpy_offset.add(coefficient * correction.enthalpy_offset().value());
-            entropy_offset.add(coefficient * correction.entropy_offset().value());
-        }
+        calorics
+            .add_model(model, coefficient, basis.temperature)
+            .map_err(|source| KineticsErrorV1::SpeciesEvaluation {
+                species: model.species().clone(),
+                source,
+            })?;
     }
-    let coefficients = coefficients.map(|value| value.value());
-    let (mut h, mut u, mut s) = (Sum::default(), Sum::default(), Sum::default());
-    for (i, &coefficient) in coefficients.iter().enumerate() {
-        // Skip inactive powers so an unused high power cannot create 0*inf.
-        if coefficient != 0.0 {
-            h.add(coefficient * basis.enthalpy[i]);
-            s.add(coefficient * basis.entropy[i]);
-        }
-        let internal = if i == 2 {
-            coefficient - reaction.delta_molecules
-        } else {
-            coefficient
-        };
-        if internal != 0.0 {
-            u.add(internal * basis.enthalpy[i]);
-        }
-    }
-    let h = R * h.value() + enthalpy_offset.value();
-    let u = R * u.value() + enthalpy_offset.value();
-    let s = R * s.value() + entropy_offset.value();
-    let g = h - t * s;
+    let (h, u, g) = calorics.evaluate(basis, reaction.delta_molecules);
     if !h.is_finite() || !u.is_finite() || !g.is_finite() {
         return Err(KineticsErrorV1::Arithmetic("reaction caloric reduction"));
     }

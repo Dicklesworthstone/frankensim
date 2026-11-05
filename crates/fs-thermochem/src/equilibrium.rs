@@ -16,6 +16,8 @@ use core::fmt;
 
 use fs_qty::{Dimensionless, Qty, Temperature};
 
+use crate::caloric::{ReactionCaloricBasis, ReactionCaloricSum};
+
 use crate::{
     ConservationCertificate, ElementalReferenceIdV1, MolarEnergyQuantityV1,
     Nasa9EvaluationReceiptV1, Nasa9StandardStateModelV1, ReactionId, ReferenceEquationOfStateV1,
@@ -24,7 +26,7 @@ use crate::{
 };
 
 /// Version of the fixed standard-state reaction-equilibrium operation tree.
-pub const REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1: u32 = 1;
+pub const REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1: u32 = 2;
 /// Version of the reverse-progress-rate consistency operation tree.
 pub const REVERSE_RATE_CLOSURE_EVALUATOR_VERSION_V1: u32 = 1;
 /// Version of the declared stoichiometric mass-action operation tree.
@@ -577,7 +579,8 @@ impl IdealGasReactionEquilibriumV1 {
         (f64, f64, EquilibriumConstantStatusV1, Option<ReactionEquilibriumConstantV1>),
         ReactionEquilibriumErrorV1,
     > {
-        let mut delta_g = 0.0f64;
+        let mut calorics = ReactionCaloricSum::default();
+        let mut delta_molecules = 0.0;
         for term in &self.terms {
             let (gibbs, source_receipt) = if term_receipts.is_some() {
                 term.model.evaluate(temperature).map(|evaluation| {
@@ -597,14 +600,13 @@ impl IdealGasReactionEquilibriumV1 {
                     bits: contribution.to_bits(),
                 });
             }
-            delta_g += contribution;
-            if !delta_g.is_finite() {
-                return Err(ReactionEquilibriumErrorV1::UnrepresentableArithmeticValue {
-                    species: Some(term.species().clone()),
-                    value: ReactionEquilibriumArithmeticValueV1::StandardReactionGibbsEnergy,
-                    bits: delta_g.to_bits(),
-                });
-            }
+            calorics
+                .add_model(&term.model, term.coefficient as f64, temperature.value())
+                .map_err(|source| ReactionEquilibriumErrorV1::SpeciesEvaluation {
+                    species: term.species().clone(),
+                    source,
+                })?;
+            delta_molecules += term.coefficient as f64;
             if let Some(receipts) = term_receipts.as_mut() {
                 receipts.push(ReactionEquilibriumTermReceiptV1 {
                     species: term.species().clone(),
@@ -614,6 +616,16 @@ impl IdealGasReactionEquilibriumV1 {
                     standard_state_receipt: source_receipt.expect("complete source evaluation"),
                 });
             }
+        }
+
+        let basis = ReactionCaloricBasis::new(temperature);
+        let (_, _, delta_g) = calorics.evaluate(&basis, delta_molecules);
+        if !delta_g.is_finite() {
+            return Err(ReactionEquilibriumErrorV1::UnrepresentableArithmeticValue {
+                species: None,
+                value: ReactionEquilibriumArithmeticValueV1::StandardReactionGibbsEnergy,
+                bits: delta_g.to_bits(),
+            });
         }
 
         let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * temperature.value();
@@ -649,10 +661,14 @@ impl IdealGasReactionEquilibriumV1 {
     /// Evaluate standard reaction Gibbs energy and its dimensionless
     /// pressure-activity equilibrium constant.
     ///
-    /// Version 1 evaluates every NASA-9 model once in canonical species order,
-    /// accumulates `delta_g = sum_i(nu_i g_i^0)`, then computes
+    /// Version 2 admits every NASA-9 model once in canonical species order,
+    /// combines its original caloric coefficients and explicit h/s corrections
+    /// before evaluating `delta_g = sum_i(nu_i g_i^0)`, then computes
     /// `ln(K_p) = -delta_g / (R T)`. `K_p` uses dimensionless ideal-gas
     /// activities `p_i / p0`; the common `p0` is retained in every receipt.
+    /// Conserved elemental reference shifts cancel before rounding absolute
+    /// species energies. This is the same caloric owner as kinetics; genuine
+    /// formation differences and source-region jumps remain active.
     /// If deterministic exponentiation overflows or underflows, the finite log
     /// value remains successful and the direct constant is explicitly absent.
     ///
@@ -830,7 +846,9 @@ impl ReactionEquilibriumTermReceiptV1 {
         self.standard_gibbs_bits
     }
 
-    /// Exact coefficient-times-Gibbs contribution bits.
+    /// Exact coefficient-times-Gibbs contribution bits for the source receipt.
+    /// Version 2 evaluates the reaction total from the original coefficients,
+    /// not by summing these already-rounded diagnostic contributions.
     #[must_use]
     pub const fn contribution_bits(&self) -> u64 {
         self.contribution_bits
@@ -2866,16 +2884,14 @@ mod tests {
         let evaluation = equilibrium
             .evaluate(temperature)
             .expect("equilibrium evaluation");
-        let expected_delta_g = equilibrium.terms().iter().fold(0.0, |sum, term| {
-            let gibbs = term
-                .model()
-                .evaluate(temperature)
-                .expect("species evaluation")
-                .properties()
-                .g()
-                .value();
-            sum + (term.coefficient() as f64) * gibbs
-        });
+        // For 2 H2 + O2 -> 2 H2O, the authored constant-Cp fixtures give
+        // Delta Cp/R = -1.5 and Delta s_reference/R = 2 - 1.2.
+        // Evaluate that analytic reaction directly, without subtracting
+        // independently rounded absolute species Gibbs energies.
+        let expected_h = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * (-1.5 * temperature.value());
+        let expected_s = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+            * (-1.5 * fs_math::det::ln(temperature.value()) + (2.0 - 1.2));
+        let expected_delta_g = expected_h - temperature.value() * expected_s;
         assert_eq!(
             evaluation.standard_reaction_gibbs().value().to_bits(),
             expected_delta_g.to_bits()
@@ -2892,6 +2908,8 @@ mod tests {
         );
         assert!(evaluation.equilibrium_constant().is_some());
         assert_eq!(evaluation.receipt().terms().len(), 3);
+        assert_eq!(REACTION_EQUILIBRIUM_EVALUATOR_VERSION_V1, 2);
+        assert_eq!(evaluation.receipt().evaluator_version(), 2);
         assert_eq!(
             evaluation.receipt().stoichiometric_identity(),
             equilibrium.stoichiometric_matrix().identity().as_bytes()

@@ -134,6 +134,36 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+fn assert_equilibrium_caloric_crosswalk(
+    mechanism: &IdealGasKineticsV1,
+    temperature: Temperature,
+    gibbs: f64,
+) {
+    let models = mechanism.bound[0]
+        .net
+        .iter()
+        .map(|(i, _)| mechanism.thermodynamics.models()[*i].clone())
+        .collect();
+    let equilibrium = crate::equilibrium::IdealGasReactionEquilibriumV1::new(
+        mechanism.stoichiometry.clone(),
+        mechanism.conservation,
+        mechanism.reactions[0].reaction().clone(),
+        models,
+    )
+    .unwrap()
+    .evaluate(temperature)
+    .unwrap();
+    assert_eq!(
+        equilibrium.standard_reaction_gibbs().value().to_bits(),
+        gibbs.to_bits()
+    );
+    assert_eq!(
+        equilibrium.log_equilibrium_constant().value().to_bits(),
+        (-gibbs / (R * temperature.value())).to_bits()
+    );
+    assert_eq!(equilibrium.receipt().evaluator_version(), 2);
+}
+
 #[test]
 fn g3_reaction_calorics_cancel_only_conserved_formation_references() {
     // A and A2 carry one and two nuclei. The arbitrary elemental reference
@@ -170,6 +200,14 @@ fn g3_reaction_calorics_cancel_only_conserved_formation_references() {
                 .reaction_caloric_change_at(0, temperature, || false)
                 .unwrap();
             close(caloric.molar_internal_energy.value(), expected, 2e-11);
+            let expected_gibbs = R * (1.5 * temperature.value() + formation_r)
+                - temperature.value() * (R * 1.5 * fs_math::det::ln(temperature.value()));
+            close(caloric.molar_gibbs_energy.value(), expected_gibbs, 2e-11);
+            assert_equilibrium_caloric_crosswalk(
+                &mechanism,
+                temperature,
+                caloric.molar_gibbs_energy.value(),
+            );
             close(
                 caloric.molar_enthalpy.value(),
                 R * (1.5 * temperature.value() + formation_r),
@@ -361,6 +399,11 @@ fn g0_reaction_calorics_retain_raw_region_jumps_and_explicit_corrections() {
                 b.evaluate_properties(temperature).unwrap().g().value()
                     - a.evaluate_properties(temperature).unwrap().g().value(),
                 1e-8,
+            );
+            assert_equilibrium_caloric_crosswalk(
+                &mechanism,
+                temperature,
+                caloric.molar_gibbs_energy.value(),
             );
             let mut energy = [0.0];
             mechanism
