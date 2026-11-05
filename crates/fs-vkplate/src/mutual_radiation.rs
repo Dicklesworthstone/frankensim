@@ -387,6 +387,76 @@ mod tests {
         (0..n).map(|i| vec![(i, 0, 1.0)]).collect()
     }
 
+    fn coupled_points(velocity: [f64; 2]) -> crate::Instrument {
+        let mut instrument = crate::Instrument::new(1024.0);
+        for (i, speed) in velocity.into_iter().enumerate() {
+            let mut body = crate::Body::point(&format!("source {i}"), 1.0);
+            body.wp[0] = -instrument.k() * speed;
+            instrument.add(body);
+        }
+        let source = ResistanceSample::new(
+            2,
+            100.0,
+            instrument.gas.density,
+            instrument.gas.sound_speed,
+            vec![2.0, -2.0, -2.0, 2.0],
+        ).unwrap();
+        instrument.attach_mutual_radiation(source, separate(2)).unwrap();
+        instrument
+    }
+
+    /// G1: the public instrument path, including prediction, finish and rotate,
+    /// must use the complete mutual operator and its matching energy account.
+    #[test]
+    fn instrument_collective_modes_and_discrete_energy_follow_the_attached_load() {
+        let mut dark = coupled_points([0.25, 0.25]);
+        let mut bright = coupled_points([1.0, -1.0]);
+        let dt = bright.k();
+        let energy = |ins: &crate::Instrument| {
+            ins.bodies.iter().map(|b| b.discrete_energy(dt)).sum::<f64>()
+                + ins.mutual_radiation_energy_correction()
+                + ins.mutual_radiated_j()
+        };
+        let initial = energy(&bright);
+        for step in 1..=128 {
+            dark.try_step(&mut []).unwrap();
+            bright.try_step(&mut []).unwrap();
+            let expected = (1.0 - 4.0 * dt).powi(step);
+            let actual = (bright.bodies[0].w[0] - bright.bodies[0].wp[0]) / dt;
+            assert!((actual - expected).abs() < 3e-13);
+            assert!((energy(&bright) - initial).abs() < 3e-13);
+        }
+        assert_eq!(dark.mutual_radiated_j(), 0.0);
+        assert_eq!((dark.bodies[0].w[0] - dark.bodies[0].wp[0]) / dt, 0.25);
+        assert!(bright.mutual_radiated_j() > 0.0);
+        let mut replay = bright.clone();
+        bright.try_step(&mut []).unwrap();
+        replay.try_step(&mut []).unwrap();
+        assert_eq!(bright.bodies[0].w, replay.bodies[0].w);
+        assert_eq!(bright.mutual_radiated_j(), replay.mutual_radiated_j());
+        assert!(bright.has_mutual_radiation());
+        assert!(bright.image().has_mutual_radiation);
+    }
+
+    /// G0: a second owner cannot silently double the physical radiation loss.
+    #[test]
+    fn instrument_refuses_overlapping_owners_and_invalid_assembly_edits() {
+        let mut instrument = coupled_points([1.0, -1.0]);
+        let source = ResistanceSample::new(
+            2, 100.0, instrument.gas.density, instrument.gas.sound_speed,
+            vec![1.0, 0.0, 0.0, 1.0],
+        ).unwrap();
+        assert!(instrument.attach_mutual_radiation(source, separate(2)).is_err());
+        assert_eq!(instrument.mutual_radiation.len(), 1);
+        assert_eq!(instrument.step_index, 0);
+        assert_eq!(instrument.mutual_radiated_j(), 0.0);
+        instrument.rate = 200.0;
+        assert!(instrument.validate_mutual_radiation().is_err());
+        instrument.rate = 1024.0;
+        instrument.bodies[0].mass[0] = 0.0;
+        assert!(instrument.validate_mutual_radiation().is_err());
+    }
+
     #[test]
     fn full_signed_psd_load_has_exact_bright_and_dark_collective_modes() {
         let source = sample(vec![2.0, -2.0, -2.0, 2.0], 2);
