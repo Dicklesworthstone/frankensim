@@ -23,6 +23,8 @@ use crate::MaterialError;
 use fs_math::c64::C64;
 
 pub(crate) mod dispersion;
+mod wave;
+pub use wave::BulkThermoviscousWave;
 
 /// Prepared classical bulk absorption, with no per-frequency material queries.
 #[derive(Clone, Copy, Debug, PartialEq)]

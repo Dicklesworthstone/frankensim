@@ -16,9 +16,11 @@
 //! Lossless calls need only rho and c. Thermoviscous calls use the existing
 //! no-slip, isothermal-boundary Zwikker–Kosten model, with full Bessel or
 //! explicitly admitted wide-tube response. A separate compliant wall or
-//! terminal load may also dissipate energy. Mean flow, molecular/bulk-viscous
-//! absorption, evolving cavitation, nonlinear water hammer and shell dynamics
-//! are outside this model. A supplied
+//! terminal load may also dissipate energy. Separate homogeneous bulk viscous
+//! propagation is available through [`bulk::BulkTractionCylinder`], whose
+//! mechanical ports explicitly carry total traction rather than pressure.
+//! Mean flow, molecular absorption, evolving cavitation, nonlinear water hammer
+//! and shell dynamics are outside these models. A supplied
 //! [`fs_material::fluid_acoustics::FrozenHomogeneousMixture`] can drive the
 //! lossless path in its frozen-mass, homogeneous long-wavelength limit; bubble
 //! resonance, phase transfer and mixture transport losses are not inferred.
@@ -35,6 +37,8 @@
 
 /// Distinct original fluid materials in the same axial pressure/flow chain.
 pub mod regional;
+/// Homogeneous bulk viscous acoustic propagation with explicit traction ports.
+pub mod bulk;
 
 use crate::compose::{self, ChainResult, ComposeOptions, InputReflection, PreparedChain, TwoPort};
 use crate::network::NetworkLoad;
@@ -140,6 +144,9 @@ pub fn segment_wave<M: FluidAcoustics + ?Sized>(
 /// inconsistent pressure/velocity impedance. This does not add wall diffusion
 /// or a damping fit. The constitutive caller owns the frequency, amplitude and
 /// homogenization limits of its complex bulk response.
+/// This pressure relation assumes inviscid longitudinal momentum. With bulk
+/// viscous stress, `rho * omega / k` is total traction/velocity instead; use
+/// [`bulk::BulkTractionCylinder`] to preserve the distinct pressure observable.
 pub fn segment_wave_with_wavenumber<M: FluidAcoustics + ?Sized>(
     material: &M,
     radius: f64,

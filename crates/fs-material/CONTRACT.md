@@ -9482,6 +9482,22 @@ nonlinear response or experimental validity outside the original coefficients'
 supported band. The parabolic transport equations do not establish a finite
 wavefront; an observer's `r/c` reference delay is a numerical convention.
 
+`ClassicalBulkAbsorption::thermoviscous_wave` returns the typed
+`BulkThermoviscousWave` from that same acoustic root, with distinct total
+compressive traction/velocity and thermodynamic pressure/velocity impedances
+[Pa s/m]. With `eta = 4 mu/3 + zeta`, `t = p - eta du/dx`, hence
+`Z_t = rho omega/k` and `Z_p = Z_t + i eta k` in `exp(i k x - i omega t)`.
+The root owner retains the caloric contribution before subtracting viscous
+stress; pressure remains resolved even when those latter terms would cancel,
+including coincident viscous/thermal diffusion scales. DC returns the continuous
+limit `k=0`, `Z_t=Z_p=rho c`. Nonfinite/unrepresentable impedances refuse.
+Mechanical power uses `Re(t conj(u))/2`; complete thermal acoustic-energy flux
+also includes `Re(T' conj(q'))/(2 T0)`. This acoustic eigenmode does not supply
+the independent thermal mode or thermal end conditions. Native regressions
+close the original momentum/heat equations and full energy flux, the exact
+Cp=Cv viscous solution, separate shear/bulk heating, and weak/strong-loss limits.
+The existing wavenumber evaluation order and branch/refusal policy are retained.
+
 `fluid_acoustics::FluidAcoustics` admits one immutable acoustic snapshot with
 positive finite density, adiabatic sound speed, bulk modulus `K_s = rho c²`,
 compressibility `1/K_s` and plane-wave impedance `rho c`. Gas adapters reuse the

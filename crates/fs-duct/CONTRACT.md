@@ -114,6 +114,32 @@ independent Poiseuille/inertance/compliance limits. A gas with viscous shear
 above ten but thermal shear below ten must now refuse consistently through
 both public entry points; full Bessel remains available at that same state.
 
+### Homogeneous bulk viscosity with traction ports
+
+`fluid::bulk::BulkTractionCylinder` propagates the original
+`ClassicalBulkAbsorption::thermoviscous_wave` acoustic mode through a uniform,
+constant-area cylinder. The prepared response uses the native stable wave
+basis, complex LU, scattering and load composition; no growing exponential or
+weak-loss attenuation fit replaces that solve. Its mechanical effort is total
+compressive traction `t = p - (4 mu/3 + zeta) du/dx`, paired with volume flow.
+The exposed scattering matrix and loads explicitly use traction, with positive
+real reference `rho c/area`; the internal pressure-named algebra stays private.
+`BulkTractionResponse` separately reconstructs inlet/outlet thermodynamic
+pressure using the material's same pressure/traction ratio for both traveling
+directions. The generic pressure-port `*_with_wavenumber` path assumes inviscid
+longitudinal momentum and must not silently receive a viscous traction law.
+
+Radius, length and frequency must be positive and finite. Original material,
+geometry and composition refusals propagate; unresolved pressure reconstruction
+refuses. `None` imposes zero outlet volume flow within the acoustic subspace.
+Thermal end conditions, the independent thermal mode, transverse/wall diffusion,
+variable area and material interfaces are outside this constant-medium model.
+Traction/flow work is mechanical power; the independent thermal acoustic-energy
+flux is not included in this port. Native tests check matched traction,
+pressure and transmitted flow, segment splitting including opaque propagation,
+and exact viscous-heating integrals against mechanical work for reflecting and
+zero-flow loads, with invalid geometry/frequency/load refusal.
+
 ### Regional shared-fluid pressure and flow
 
 `fluid::regional::{duct_chain,input_impedance_load}` and their `_with_loss`
