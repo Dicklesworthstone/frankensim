@@ -677,6 +677,15 @@ sum supplies the aggregate heat. Undamped and free modes report exactly zero;
 high-Q losses are not recovered by subtracting large mechanical energies.
 Per-mode and aggregate force-work/energy balance checks remain separate and
 refuse disagreement beyond their floating-point allowances before state commit.
+Bank energies, heat, allowances and ordinary signed work use fixed-order
+compensated reductions. Pressure accumulates velocity and displacement
+quadratures separately, retaining quiet coherent contributions between
+cancelling modes or quadratures. Restored states and static equilibria use the
+same energy reduction for budget admission. State transitions, double-double
+impulse work, physical ceilings and balance-tolerance formulas are unchanged.
+`tests/modal_bank_reduction.rs` covers a 4096-mode high-Q ringdown, retained
+signed work and pressure, and energy/pressure refusals that naive summation
+could conceal; this is floating-point compensation, not a certified enclosure.
 The held force's work is taken over the displacement increment the transition
 itself adds to the stored displacement (free, undamped and short damped steps
 carry it; the long damped step forms `q - q0`), never over `next - state`,
