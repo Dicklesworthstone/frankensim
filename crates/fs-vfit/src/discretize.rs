@@ -36,7 +36,15 @@ impl Biquad {
     /// Frequency response at `z = e^{i*omega*t_s}`.
     #[must_use]
     pub fn eval(&self, omega: f64, t_s: f64) -> C64 {
-        let zi = C64::new(det::cos(omega * t_s), -det::sin(omega * t_s));
+        let phase = omega * t_s;
+        if phase.is_finite() && self.b[0].is_finite() && is_lossless_differentiator(self) {
+            // g * (1-z^-1)/(1+z^-1) = i*g*tan(theta/2).
+            // Near Nyquist cos(theta) rounds to -1; forming the complex
+            // quotient then manufactures a real part of -g in a lossless
+            // element. Preserve its exact zero resistance analytically.
+            return C64::new(0.0, self.b[0] * det::tan(0.5 * phase));
+        }
+        let zi = C64::new(det::cos(phase), -det::sin(phase));
         let zi2 = zi * zi;
         let num = C64::from_re(self.b[0]) + zi.scale(self.b[1]) + zi2.scale(self.b[2]);
         let den = C64::ONE + zi.scale(self.a[0]) + zi2.scale(self.a[1]);

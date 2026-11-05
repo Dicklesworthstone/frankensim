@@ -94,6 +94,12 @@ to parallel biquad sections and discrete state-space.
   silent drop). Stable continuous poles above the sampled band remain
   admissible because Tustin maps the complete open left half-plane inside
   the unit circle; only sampled/prewarp frequencies are Nyquist-bounded.
+  Exact lossless differentiator sections use their analytic imaginary
+  tangent response for frequency observation. Their resistance remains exactly
+  zero near Nyquist, where a rounded complex quotient can otherwise create
+  spurious negative resistance. The manufactured inertance regressions in
+  `tests/lossless_spectrum.rs` compare independent high-precision reactance
+  references and prewarp agreement.
 - `discretize::DigitalFilter::step` — transposed DF-II runtime of the
   parallel bank. `reflectance` is the scattering map
   `(Z−Zc)/(Z+Zc)`. `modulate_delay` peels or applies a known
