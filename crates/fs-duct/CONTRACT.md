@@ -169,6 +169,44 @@ equates work loss to integrated `eta*A*|u'|²/2 + kappa*T0*A*|theta'|²/2`, with
 transverse modes, varying area, interfaces and nonlinear evolution remain
 outside this uniform-medium model.
 
+`BulkThermalCylinder::from_relaxation` and its controlled variant put the
+original `RelaxationState` reservoirs into this same complete axial NSF
+operator. The original gas supplies the coherent equilibrium, shear viscosity
+and conductivity; its evaluated `Cp(omega)=Cv(omega)+R` enters the energy
+equation once. Momentum, ideal-gas continuity, the EOS pressure/traction map,
+both spatial modes and both thermal end conditions remain coupled. There is
+no additional constant bulk viscosity, ISO term or weak Stokes--Kirchhoff
+attenuation. A law without positive reservoir strength follows the original
+classical zero-bulk-viscosity cylinder bitwise.
+
+For `s=-i*omega`, dimensional heat transport is
+`Q'=A*s*(p-rho*Cp(s)*T')`. The real equilibrium still owns the power references;
+the normalized energy row uses the full dynamic capacity without subtracting
+nearly equal equilibrium and frozen capacities. Positive molecular work adds
+`rho*A*T0*omega*Im(Cp)*|theta|^2/2` to the original shear and Fourier losses.
+Equivalently, each original reservoir contributes
+`rho*A*T0*C_j*|theta-theta_j|^2/(2*tau_j)`, with
+`theta_j=theta/(1-i*omega*tau_j)`. These are small-signal acoustic energy losses,
+not a nonlinear mean-temperature evolution. Caloric convention and limits follow
+Petculescu and Lueptow, PRL 94, 238301 (2005), equations 2/4, conjugated to the
+workspace phasor convention; no new reservoir fitting or material data is added.
+
+The original bounded exponential, complex LU and scattering doublings retain
+authority. Cancellation is checked around the exponential, inside native
+composition and before publication. This molecular constructor remains
+homogeneous, constant-area, frozen ideal-gas NSF with slip walls; it does not
+attach reservoirs to regional general fluids, introduce lateral wall layers,
+mean flow, reactions or changing thermodynamic state.
+
+Six focused G1/G3/G4 regressions check exact empty-law parity; agreement with
+the material's coupled `causal_wavenumber` acoustic mode; independent dimensional
+NSF integration and separately evaluated positive shear/Fourier/reservoir heat;
+equilibrium and frozen compression limits; opaque-span composition; and
+admission/cancellation refusal. All 18 native bulk-duct tests pass through the
+established original-source facade, including the 12 retained classical and
+regional tests. This is scoped numerical verification, not a full constellation
+build or a measured-gas accuracy claim.
+
 `BulkThermalCylinder::from_regions` and its controlled variant extend the same
 full four-field owner to authored `BulkThermalRegion` segments at one constant
 area, frequency and exact common equilibrium temperature. Each segment retains

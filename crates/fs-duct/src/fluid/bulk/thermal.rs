@@ -5,7 +5,9 @@
 //! normalized temperature theta=T'/T0 paired with heat power. Their rightward
 //! energy flux is `Re(t conj(U) + theta conj(Q))/2`. Thermal end conditions remain
 //! separate from mechanical loads. No lateral wall layers, transverse modes,
-//! nonlinear thermodynamics or molecular relaxation are inferred. Authored
+//! nonlinear thermodynamics or molecular relaxation are inferred. Explicit
+//! original molecular reservoirs enter through
+//! [`BulkThermalCylinder::from_relaxation`]. Authored
 //! homogeneous regions may share ideal mechanical/thermal contacts through
 //! [`BulkThermalCylinder::from_regions`]. Radius supplies area only: this is
 //! planar/slip-wall propagation, not a no-slip viscothermal bore model.
@@ -20,6 +22,7 @@ use fs_math::{c64::C64, det};
 
 mod regional;
 pub use regional::BulkThermalRegion;
+mod molecular;
 
 /// Homogeneous thermal condition at one axial end, independent of its load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,11 +41,17 @@ impl ThermalEndCondition {
     }
 }
 
-/// The native duct or exponential owner refused; no fallback mode is selected.
+/// An original material, duct or exponential owner refused; no fallback is selected.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BulkThermalError {
+    Material(fs_material::MaterialError),
     Duct(DuctError),
     Exponential(fs_phs::PhsError),
+}
+impl From<fs_material::MaterialError> for BulkThermalError {
+    fn from(error: fs_material::MaterialError) -> Self {
+        Self::Material(error)
+    }
 }
 impl From<DuctError> for BulkThermalError {
     fn from(error: DuctError) -> Self {
@@ -57,6 +66,7 @@ impl From<fs_phs::PhsError> for BulkThermalError {
 impl core::fmt::Display for BulkThermalError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Material(error) => write!(f, "{error}"),
             Self::Duct(error) => write!(f, "{error}"),
             Self::Exponential(error) => write!(f, "FS-DUCT-BULK-THERMAL: {error}"),
         }
@@ -65,6 +75,7 @@ impl core::fmt::Display for BulkThermalError {
 impl std::error::Error for BulkThermalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Material(error) => Some(error),
             Self::Duct(error) => Some(error),
             Self::Exponential(error) => Some(error),
         }
@@ -131,6 +142,29 @@ impl ThermalNetwork {
         omega_rad_s: f64,
         maximum_condition: f64,
     ) -> Result<Self, BulkThermalError> {
+        Self::with_caloric_response(
+            material,
+            radius_m,
+            length_m,
+            omega_rad_s,
+            maximum_condition,
+            None,
+            &mut || false,
+        )
+    }
+
+    // A molecular gas changes only the heat equation's dynamic Cp. The real
+    // equilibrium owns EOS, transport, references and pressure reconstruction.
+    fn with_caloric_response(
+        material: &BulkThermoviscousEquilibrium,
+        radius_m: f64,
+        length_m: f64,
+        omega_rad_s: f64,
+        maximum_condition: f64,
+        molecular_cp_j_kg_k: Option<C64>,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> Result<Self, BulkThermalError> {
+        poll(cancelled, 0)?;
         Segment::Cylinder {
             radius: radius_m,
             length: length_m,
@@ -185,6 +219,17 @@ impl ThermalNetwork {
         generator[9] = -(generator[2] / d).scale(coupling);
         generator[12] = generator[9];
         generator[13] = (C64::new(1.0, -x) / d) * C64::new(0.0, thermal_rate);
+        if let Some(dynamic_cp) = molecular_cp_j_kg_k {
+            let cp = transport.specific_heat_j_kg_k();
+            let relative = C64::new(dynamic_cp.re / cp, dynamic_cp.im / cp);
+            // Q' gains -s*rho*A*T0*delta_Cp*theta, s=-i*omega. In the
+            // original real power coordinates its coefficient is
+            // i*sqrt(omega/chi)*delta_Cp/Cp_eq. Evaluate the combined row
+            // without subtracting nearly equal equilibrium/frozen Cp values.
+            // No EOS term changes; (1-i*x)/d = 1+i*x*(gamma-1)/d.
+            generator[13] = C64::new(0.0, thermal_rate)
+                * (relative + (C64::new(0.0, x) / d).scale(gamma - 1.0));
+        }
         let norm = matrix_norm(&generator, 4);
         if generator.iter().any(|&z| !finite(z)) || !norm.is_finite() || norm <= 0.0 {
             return Err(bad("thermal cylinder generator is unrepresentable").into());
@@ -199,10 +244,16 @@ impl ThermalNetwork {
             doublings += 1;
         }
         let transfer = exponential(&generator, span)?;
+        poll(cancelled, 1)?;
         let (mut scattering, mut condition) = transfer_scattering(&transfer, maximum_condition)?;
         for _ in 0..doublings {
-            let (next, estimate) =
-                redheffer_star(&scattering, &scattering, 2, maximum_condition, || false)?;
+            let (next, estimate) = redheffer_star(
+                &scattering,
+                &scattering,
+                2,
+                maximum_condition,
+                &mut *cancelled,
+            )?;
             scattering.copy_from_slice(&next);
             condition = condition.max(estimate);
         }
@@ -212,6 +263,7 @@ impl ThermalNetwork {
             // multiplying so large viscosity cannot erase a small pressure.
             coefficients: [d.recip(), (C64::new(0.0, -x) / d).scale(coupling)],
         };
+        poll(cancelled, doublings + 2)?;
         Ok(Self {
             scattering,
             references,
@@ -335,6 +387,14 @@ impl BulkThermalCylinder {
             inlet_heat_power_over_inlet_flow_pa: heat[0],
             outlet_heat_power_over_inlet_flow_pa: heat[1],
         })
+    }
+}
+
+fn poll(cancelled: &mut dyn FnMut() -> bool, completed_steps: usize) -> Result<(), DuctError> {
+    if cancelled() {
+        Err(DuctError::Cancelled { completed_steps })
+    } else {
+        Ok(())
     }
 }
 
