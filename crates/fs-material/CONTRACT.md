@@ -10777,6 +10777,40 @@ assembly, finite-strain plasticity, damage and experimental calibration are
 separate capabilities. Focused native material tests cover axial/cyclic/energy
 limits, nonproportional plane stress, retained transverse history and rate-law
 semantics; no full-workspace or runtime qualification follows from those tests.
+
+### Finite plastic sheet forming and thickness recovery
+
+`plastic::finite::plane_stress` reduces the original multiplicative finite J2
+return to traction-free sheet kinematics. Given the in-plane deformation and a
+positive transverse seed, bounded Newton/backtracking solves all three Piola
+tractions `P[:,2]=0`. The shared positive transverse factorization supplies the
+Schur-complement tangent of that same discrete return. Every trial borrows the
+same accepted plastic metric and accumulation; trial iterations cannot harden
+the specimen or consume additional physical time.
+
+`FinitePlaneStressResponse` retains the full three-dimensional deformation,
+candidate metric, plastic/creep accumulations, native stresses and separate
+incremental-potential, stored-energy and physical-dissipation accounts. Normal
+thickness is recovered as `h_reference * F22`. Plastic volume is preserved by
+the native metric update, while elastic and thermal volume changes remain
+possible; an isochoric initialization is never a final total-volume constraint.
+The identical reduction supports the original rate-independent, Perzyna,
+Norton, combined creep/plastic and frozen-temperature families. Kinetic thermal
+inspection without an actual physical interval still refuses. Source adapters
+continue to own the original law, model card and validity domain.
+
+The reduction uses fixed-size arrays and the original native spectral workspace;
+spatial consumers poll cancellation between material points. Rejection
+or exhausted local work returns no candidate and changes no accepted history.
+G1/G3 tests in `finite_plastic_plane_stress` compare equibiaxial compression and
+tension against independent logarithmic-strain equations, check residual shape
+and thickness after unloading, differentiate frozen-history stress/potential,
+and exercise transverse-shear memory and thermal/rate ownership. This is a
+locally stable transverse branch of an isotropic yield law. It does not model
+shell bending, wrinkling, necking, anisotropic forming limits, tool contact or
+fracture, and synthetic constitutive tests do not establish measured metal
+formability.
+
 ## Finite-rate liquid-water evaporation and condensation
 
 `evaporation::WaterEvaporation` binds a strictly liquid interval of the original

@@ -31,6 +31,8 @@ pub mod rate;
 pub mod source;
 /// Affine temperature dependence and multiplicative isotropic thermal stretch.
 pub mod thermal;
+/// Traction-free thickness/shear relaxation of the original finite return map.
+pub mod plane_stress;
 /// Energetic Voce saturation on the same finite metric, flow and tangent owner.
 pub mod voce;
 

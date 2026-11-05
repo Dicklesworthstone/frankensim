@@ -85,12 +85,12 @@ fn state_error(what: &str) -> MaterialError {
 
 // Factor the 3x3 eliminated block after scalar normalization. No inverse,
 // regularization, stiffness floor, or pivot clipping is introduced.
-struct PositiveBlock {
+pub(crate) struct PositiveBlock {
     lower: [[f64; 3]; 3],
     scale: f64,
 }
 impl PositiveBlock {
-    fn new(a: [[f64; 3]; 3]) -> Result<Self, MaterialError> {
+    pub(crate) fn new(a: [[f64; 3]; 3]) -> Result<Self, MaterialError> {
         let scale = a.iter().flatten().map(|v| v.abs()).fold(0.0, f64::max);
         if !(scale.is_finite() && scale > 0.0) || a.iter().flatten().any(|v| !v.is_finite()) {
             return Err(state_error("nonfinite or zero transverse stiffness"));
@@ -116,7 +116,7 @@ impl PositiveBlock {
         Ok(Self { lower, scale })
     }
 
-    fn solve(&self, rhs: [f64; 3]) -> Result<[f64; 3], MaterialError> {
+    pub(crate) fn solve(&self, rhs: [f64; 3]) -> Result<[f64; 3], MaterialError> {
         let mut x = [0.0; 3];
         for i in 0..3 {
             x[i] = (rhs[i] / self.scale - (0..i).map(|j| self.lower[i][j] * x[j]).sum::<f64>())
@@ -132,7 +132,7 @@ impl PositiveBlock {
         Ok(x)
     }
 
-    fn traction_scale(&self) -> Result<f64, MaterialError> {
+    pub(crate) fn traction_scale(&self) -> Result<f64, MaterialError> {
         let mut compliance = 0.0;
         for i in 0..3 {
             let mut rhs = [0.0; 3];
