@@ -1,5 +1,41 @@
 # fs-solid CONTRACT
 
+## Explicit brittle through-seams and conservative fragment transfer
+
+`brittle::topology::TetFractureTopology` lowers explicitly selected internal
+tetrahedral faces into separate exterior traces for the existing P1 cohesive
+owner. Per-node tetrahedral-star connectivity duplicates only the nodes needed
+by the requested cuts. Unselected faces keep their shared DOFs; original
+element/local-corner order, reference coordinates, seam IDs and explicit A/B
+roles remain unchanged. Fragment IDs follow surviving volume-face connectivity.
+The existing matching-trace quadrature supplies actual triangle areas.
+
+Construction requires original `TetLoadGeometry3` admission and explicit
+node/face/seam budgets. Exterior, nonmanifold, repeated or wrong-owner faces
+refuse; original disconnected node stars and still-tied crack-front vertices
+refuse because the current cohesive trace owner requires distinct side DOFs.
+Construction and transfer are cancellable and publish no partial result.
+
+Motion transfer duplicates nodal displacement and velocity exactly. Independent
+before/after reconstructions preserve consistent P1 mass, first mass moment,
+linear momentum, angular momentum using current positions, and kinetic energy.
+Fragment inventories and split nodal row-sum masses remain inspectable; those
+row sums do not replace the consistent mass operator. Element material/source
+bindings and history blocks retain their original borrowed slices and order,
+without averaging, resetting damage or rebinding opaque solver checkpoints.
+
+The six pure-core tests use independent degree-two tetrahedral quadrature,
+consistent-versus-lumped kinetic energy, rotation/origin transformations, history
+identity, surviving-face continuity and refusal/cancellation checks.
+`tests/brittle_topology.rs` exercises admitted geometry, native P1 mass/stiffness,
+force-driven cohesive failure, separated motion and compressive reclosure.
+
+This is an explicit through-seam preparation/transfer path. It does not convert
+a loaded smeared crack-band state into a fresh cohesive surface. Such insertion
+still needs traction/history/fracture-work transfer, and evolving crack fronts
+need a trace owner supporting tied front nodes. Existing cohesive mechanics owns
+subsequent fracture dissipation, inertia and reclosure; no element mass is deleted.
+
 ## Directional brittle crack bands in native solid solves
 
 `brittle::TetCrackBandGeometry::from_element` consumes the original admitted

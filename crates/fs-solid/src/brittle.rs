@@ -21,6 +21,9 @@ pub mod solid;
 use crate::loads3::TetLoadGeometry3;
 use fs_material::brittle::BrittleCrackBandSettings;
 
+/// Explicit conforming seams with conservative transfer to separated traces.
+pub mod topology;
+
 /// A bounded refusal while deriving a crack band from admitted reference geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TetCrackBandGeometryError {
