@@ -2234,3 +2234,30 @@ Focused G1/G3 tests cover original spherical limits, independent two-family
 spherical images, both-face pressure/normal-velocity continuity, receiving-fluid
 momentum, reciprocal pressure, rotation, near-face evanescent survival, native
 clock identity and transactional domain/work/cancellation refusals.
+
+## Causal transient Lighthill volume-stress observation
+
+`curle3d::quadrupole::transient::PreparedTransientQuadrupoleObserver` observes
+stationary symmetric stress moments in the original homogeneous lossless
+`FluidAcousticState`. Pressure retains the complete retarded stress,
+first-derivative and second-derivative terms. Vector particle velocity also
+retains the causal stress integral and transverse induction field. Tensor
+trace and physical off-diagonal entries are preserved. Source pressure and
+velocity are summed coherently before forming the signed instantaneous flux
+`p u`; neither a harmonic half-product nor a plane-wave intensity shortcut
+is used.
+
+Preparation caches each source's geometry, material coefficients and travel
+time under an explicit source-count budget. Evaluation allocates nothing,
+uses fixed-order double-double accumulation and checks cancellation. The
+receiver-time callback observes each source at its own emission time, applying
+propagation delay exactly once. Caller-owned source histories retain their
+original derivatives, integral, interpolation and bandwidth; callback/block
+boundaries do not reset physical history. Invalid inputs, unresolved timestamps
+and nonfinite outputs refuse without publishing a partial field.
+
+G1/G3 regressions compare harmonic field/mean-flux parity, independently
+differentiated retarded Green potentials, all three momentum equations, causal
+pulse arrivals, transverse velocity at pressure nulls and coherent interference.
+This adds no source-model validation, finite-cell quadrature bound, moving
+quadrupole, absorption, scattering, reciprocal loading or measured-SPL claim.

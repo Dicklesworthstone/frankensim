@@ -34,6 +34,8 @@ pub mod lbm;
 /// Physical-clock acquisition and propagation of resolved volume histories.
 pub mod recorded;
 mod reflection;
+/// Causal near and far fields of prescribed transient volume-stress histories.
+pub mod transient;
 mod welch;
 
 /// Physical scope retained by every quadrupole observation.
