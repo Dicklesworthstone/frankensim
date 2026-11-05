@@ -22,3 +22,6 @@ pub use response_curve::*;
 
 /// Finite-zone Maugis--Dugdale adhesive sphere contact.
 pub mod maugis;
+
+/// Source-preserving spatial tractions and conservative annular patch transfer.
+pub mod traction;

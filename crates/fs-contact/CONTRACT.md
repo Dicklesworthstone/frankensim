@@ -2715,3 +2715,35 @@ source_plastic_contact specifies original material/test propagation,
 softer-surface pressure control, source-order/condition mismatch and late
 physical-domain refusal. These are synthetic numerical and source-contract
 checks; execution status belongs to the associated validation record.
+
+## Spatial adhesive traction and conservative annular transfer
+
+`normal_patch::traction::AdhesiveTractionProfile` exposes the actual JKR or
+Maugis axisymmetric pressure field from its original material/geometry owner.
+`NormalLawSource::adhesive_traction_profile` keeps the existing mechanical
+binding's branch policy, including explicitly enabled deformed Maugis
+noncontact continuation. JKR point pressure refuses its singular contact edge;
+finite annular loads integrate that singularity without clipping tension.
+Maugis retains the original finite cohesive annulus and uniform noncontact
+disk. Neither attractive annulus nor noncontact disk contributes solid area.
+
+Closed annular integrals use factored radius differences and a positive-term
+angular expression; no adaptive quadrature or cumulative-load subtraction is
+needed. Each query takes constant work and memory. The caller-owned annular
+transfer uses two linear passes with constant scratch, checks full footprint
+coverage and the original signed resultant against an explicit absolute force
+gate, then publishes all ring forces. A failed source or partition leaves the
+output unchanged. These forces are work conjugate to piecewise constant normal
+ring velocities; finite-body or nonaxisymmetric structural compliance remains
+the receiving solver's responsibility. Original source authority is retained.
+
+The existing DMT-M resultant, arbitrary finite-gap curves and nonadhesive point
+bindings return no profile from this adhesive entry point. In particular, a
+rigid-parabolic DMT annulus is not silently presented as an exact elastic
+traction field. No contact history, snap selection, tangent, plastic yield
+certificate or experimental calibration is added by the spatial transfer.
+
+`tests/adhesive_traction.rs` covers dimensional JKR fields, finite edge forces,
+Maugis pressure and full-load recovery across adhesion ranges, partition and
+virtual-work invariance, narrow rings, noncontact solid-area exclusion,
+original binding admission and atomic source/partition refusals (G1/G3).

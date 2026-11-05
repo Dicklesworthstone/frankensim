@@ -88,7 +88,7 @@ pub struct MaugisResponse {
     pub authority: InputAuthority,
     adhesive_stress_pa: f64,
     hertz_peak_pressure_pa: f64,
-    annulus_root_m: f64,
+    pub(super) annulus_root_m: f64,
 }
 impl MaugisResponse {
     /// Identity of the unchanged normal interface source state.
