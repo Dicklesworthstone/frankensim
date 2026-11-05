@@ -1,6 +1,8 @@
 //! G1/G3/G4: original mixed-mode potential, apparatus work and irreversible release.
 #[path = "adhesive_dmt_coupled/common.rs"]
 mod common;
+#[path = "adhesive_pull_off/combined.rs"]
+mod combined;
 #[path = "adhesive_pull_off/controls.rs"]
 mod controls;
 #[path = "adhesive_pull_off/events.rs"]

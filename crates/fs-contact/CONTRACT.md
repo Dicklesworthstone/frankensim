@@ -1799,6 +1799,32 @@ destination is inferred. Four focused tests compare against the independent
 normal-withdrawal boundary, check reaction-work quadrature, vector reversal and
 subdivision, initial/detached history, and atomic domain/budget/cancel refusal.
 
+`withdraw_and_shear_until_event` advances the normal and both tangential stages
+SIMULTANEOUSLY on one straight path. Attached paths require nonincreasing normal
+stage and nondecreasing shear-stage magnitude from the start; a nonmonotone
+combined path refuses rather than trusting its endpoints. Eliminating both tips
+makes the original Griffith residual a quadratic in path fraction at each
+radius. On its tensile domain that residual is strictly convex in radius and
+nondecreasing along the declared loading direction. The retained radius thus
+decreases to a unique fold, while the original static-capacity ratio increases.
+Bounded scalar radius roots locate the first slip/fold with no source query or
+fixture reconstruction inside the search. Original radius/applicability screens,
+decreasing indentation and convex nominal-strain bounds admit the entire prefix.
+
+The `JkrCombinedStageTransition` carries the canonical source/response pair,
+critical-radius bracket, event fraction and all THREE untraversed stage
+increments. Its work is the change in complete contact-plus-apparatus potential,
+including `N dD_n` as well as both shear-stage contributions. Numerical retreat
+from the event uses a 128-epsilon stage-coordinate allowance; held coordinates
+remain bit-exact. All queries and the single successor share the original work
+budget. Detached paths keep their cumulative release and never rebond; attached
+event handoffs retain storage without inventing slip, snap dynamics or heat.
+Four native G1/G3/G4 regressions check independent normal-withdrawal boundaries,
+three-component reaction-work quadrature, subdivision and tangent rotation,
+single-axis recovery, initial/zero-capacity limits, detached history, and atomic
+nonmonotone/source/budget/cancellation refusal. The source-selected native
+pull-off test target passes all 23 tests, including the previous 19 regressions.
+
 ## Dynamic wetting, contact-line pinning and mechanical adhesion
 
 `capillary_bridge::contact_line::SourceContactLineBridge` evolves the actual

@@ -10,6 +10,9 @@
 /// First-event continuation with retained boundary storage and unused travel.
 pub mod events;
 
+/// Simultaneous normal withdrawal and outward vector shear-stage loading.
+pub mod combined;
+
 use super::{
     JkrMixedModeError, JkrPullOffBranch, JkrPullOffError, JkrPullOffFixture, JkrPullOffResponse,
     JkrPullOffState, Parameters, Work, finite,
@@ -135,45 +138,26 @@ impl JkrPullOffFixture {
         budget: &mut Work<'_>,
     ) -> Result<JkrShearStageTransition, JkrPullOffError> {
         let previous = before.state;
-        let (source, mut response) = if requested_stage_m == self.tangential_stage {
-            (self.clone(), before)
-        } else {
-            if previous.branch == JkrPullOffBranch::Attached
-                && let Some(minimum) =
-                    minimum_segment_magnitude(self.tangential_stage, requested_stage_m)
-            {
-                let parameters = Parameters {
-                    stage: [minimum, 0.0],
-                    ..self.parameters()
-                };
-                let maximum =
-                    parameters.kinematics(self.limits.maximum_contact_radius_m, budget)?;
-                if maximum.ratio <= 1.0 || previous.normal_stage_m > maximum.stage {
-                    return Err(JkrPullOffError::OutsideStageEnvelope);
-                }
-                self.contact
-                    .normal_source()
-                    .validate_indentation(maximum.delta)
-                    .map_err(JkrMixedModeError::from)?;
-            }
-            let source = Self::new_with_budget(
-                self.contact.clone(),
-                self.shear.clone(),
-                self.normal_stiffness,
-                self.tangential_stiffness,
-                requested_stage_m,
-                self.limits,
-                budget,
-            )?;
-            let response = match previous.branch {
-                JkrPullOffBranch::Attached => source.attached(previous.normal_stage_m, budget)?,
-                JkrPullOffBranch::Detached => {
-                    source.detached(previous.normal_stage_m, previous.released_energy_j)?
-                }
+        if requested_stage_m != self.tangential_stage
+            && previous.branch == JkrPullOffBranch::Attached
+            && let Some(minimum) =
+                minimum_segment_magnitude(self.tangential_stage, requested_stage_m)
+        {
+            let parameters = Parameters {
+                stage: [minimum, 0.0],
+                ..self.parameters()
             };
-            (source, response)
-        };
-        response.state.released_energy_j = previous.released_energy_j;
+            let maximum = parameters.kinematics(self.limits.maximum_contact_radius_m, budget)?;
+            if maximum.ratio <= 1.0 || previous.normal_stage_m > maximum.stage {
+                return Err(JkrPullOffError::OutsideStageEnvelope);
+            }
+            self.contact
+                .normal_source()
+                .validate_indentation(maximum.delta)
+                .map_err(JkrMixedModeError::from)?;
+        }
+        let (source, response) =
+            self.stage_successor(before, previous.normal_stage_m, requested_stage_m, budget)?;
         let mechanical_work_j = response.total_stored_energy_j - before.total_stored_energy_j;
         finite(mechanical_work_j)?;
         budget.poll()?;
@@ -188,6 +172,45 @@ impl JkrPullOffFixture {
             requested_stage_m,
             untraversed_stage_m: [0.0; 2],
         })
+    }
+
+    /// Only an endpoint constructor. Each caller separately proves its entire
+    /// prescribed path admissible before publishing this canonical successor.
+    fn stage_successor(
+        &self,
+        before: JkrPullOffResponse,
+        normal_stage_m: f64,
+        tangential_stage_m: [f64; 2],
+        budget: &mut Work<'_>,
+    ) -> Result<(Self, JkrPullOffResponse), JkrPullOffError> {
+        self.check_stage(normal_stage_m)?;
+        let source = if tangential_stage_m == self.tangential_stage {
+            self.clone()
+        } else {
+            Self::new_with_budget(
+                self.contact.clone(),
+                self.shear.clone(),
+                self.normal_stiffness,
+                self.tangential_stiffness,
+                tangential_stage_m,
+                self.limits,
+                budget,
+            )?
+        };
+        let mut response = if tangential_stage_m == self.tangential_stage
+            && normal_stage_m == before.state.normal_stage_m
+        {
+            before
+        } else {
+            match before.state.branch {
+                JkrPullOffBranch::Attached => source.attached(normal_stage_m, budget)?,
+                JkrPullOffBranch::Detached => {
+                    source.detached(normal_stage_m, before.state.released_energy_j)?
+                }
+            }
+        };
+        response.state.released_energy_j = before.state.released_energy_j;
+        Ok((source, response))
     }
 }
 
