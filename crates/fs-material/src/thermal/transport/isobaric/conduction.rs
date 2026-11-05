@@ -11,28 +11,30 @@
 //! interpretation still apply. Spatial resolution and temporal accuracy are
 //! properties of the thermal solve, not of this constitutive adapter.
 
-use super::super::{CONDUCTIVITY, ThermalTransportError, positive, source_line};
+use super::super::{ThermalTransportError, conductivity::PreparedScalarConductivity};
 use super::IsobaricHeatCapacityLaw;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{ClaimSelection, MaterialCard, PropertyKey, PropertyLineSlice};
-use fs_qty::{
-    QuantitySpec,
-    semantic::{QuantityKind, SemanticType, ValueForm},
-};
 use fs_thermal::enthalpy::conduction::ConductivityLaw;
 use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionLaw, ImplicitConductionObservables, ImplicitConductionState,
 };
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
+#[cfg(test)]
+use super::super::CONDUCTIVITY;
+#[cfg(test)]
+use fs_qty::{
+    QuantitySpec,
+    semantic::{QuantityKind, SemanticType, ValueForm},
+};
+
 /// One original caloric owner and its continuously supported conductivity path.
 /// Construction resolves source evidence once; runtime queries allocate nothing.
 #[derive(Clone, Debug)]
 pub struct IsobaricConductionLaw<'a> {
     caloric: &'a IsobaricHeatCapacityLaw,
-    source: PropertyLineSlice,
-    knots: Vec<[f64; 2]>,
-    slopes: Vec<f64>,
+    conductivity: PreparedScalarConductivity,
     identity: ContentHash,
 }
 
@@ -48,29 +50,13 @@ impl<'a> IsobaricConductionLaw<'a> {
         selection: ClaimSelection,
     ) -> Result<Self, ThermalTransportError> {
         let invalid = ThermalTransportError::Invalid;
-        let quantity = conductivity.quantity();
-        let static_conductivity = QuantitySpec::semantic(SemanticType::new(
-            QuantityKind::ThermalConductivity,
-            ValueForm::Static,
-        ));
         if card.content_hash() != caloric.material_card_identity() {
             return Err(invalid(
                 "conduction must retain the original isobaric material card",
             ));
         }
-        if (quantity != QuantitySpec::dimensional(CONDUCTIVITY)
-            && quantity != static_conductivity)
-            || conductivity.hardness_test().is_some()
-            || conductivity.elastic_component().is_some()
-            || conductivity.strain_component().is_some()
-            || conductivity.stress_component().is_some()
-        {
-            return Err(invalid(
-                "isobaric conduction requires scalar static conductivity",
-            ));
-        }
         let [lower, upper] = caloric.query_endpoints();
-        let source = source_line(
+        let conductivity = PreparedScalarConductivity::try_new(
             card,
             conductivity,
             caloric.temperature_axis(),
@@ -78,54 +64,25 @@ impl<'a> IsobaricConductionLaw<'a> {
             upper,
             selection,
         )?;
-        if source.knots.len() < 2 {
-            return Err(invalid("conductivity source requires a nonempty temperature interval"));
-        }
         let claim = card
             .claims()
-            .claim(source.knots[0].1.receipt.selected)
+            .claim(conductivity.source_line().knots[0].1.receipt.selected)
             .ok_or(invalid("selected conductivity source is missing"))?;
-        if !claim.validity.bounds().contains_key(caloric.pressure_axis()) {
+        if !claim
+            .validity
+            .bounds()
+            .contains_key(caloric.pressure_axis())
+        {
             return Err(invalid(
                 "conductivity source must support the original isobaric pressure",
             ));
         }
-        let knots: Vec<_> = source
-            .knots
-            .iter()
-            .map(|(temperature, answer)| [*temperature, answer.evidence.value.value])
-            .collect();
-        if knots.iter().any(|knot| !positive(knot[1])) {
-            return Err(invalid(
-                "source conductivity must remain finite and positive",
-            ));
-        }
-        let mut slopes = Vec::with_capacity(knots.len() - 1);
-        for pair in knots.windows(2) {
-            let width = pair[1][0] - pair[0][0];
-            let difference = pair[1][1] - pair[0][1];
-            if !positive(width) {
-                return Err(invalid("source conductivity temperatures must increase"));
-            }
-            let slope = difference / width;
-            if !slope.is_finite() || (difference != 0.0 && slope == 0.0) {
-                return Err(invalid(
-                    "source conductivity derivative is unrepresentable",
-                ));
-            }
-            slopes.push(slope);
-        }
         let mut hash = DomainHasher::new("org.frankensim.fs-material.isobaric-conduction.v1");
         hash.update(caloric.identity().as_bytes());
-        hash.update(&(source.knots.len() as u64).to_le_bytes());
-        for (_, answer) in &source.knots {
-            hash.update(answer.receipt.content_hash().as_bytes());
-        }
+        conductivity.append_identity(&mut hash);
         Ok(Self {
             caloric,
-            source,
-            knots,
-            slopes,
+            conductivity,
             identity: hash.finalize(),
         })
     }
@@ -139,46 +96,12 @@ impl<'a> IsobaricConductionLaw<'a> {
     /// Original material-source receipts and uncertainty, without resampling.
     #[must_use]
     pub const fn source_line(&self) -> &PropertyLineSlice {
-        &self.source
+        self.conductivity.source_line()
     }
 
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity
-    }
-
-    // Share original k(T) interpolation between explicit and implicit consumers.
-    // The explicit route needs no Cp query or enthalpy tangent evaluation.
-    fn conductivity_at_temperature(
-        &self,
-        temperature: f64,
-    ) -> Result<(f64, f64), ThermalTransportError> {
-        let invalid = ThermalTransportError::Invalid;
-        if !temperature.is_finite()
-            || temperature < self.knots[0][0]
-            || temperature > self.knots[self.knots.len() - 1][0]
-        {
-            return Err(invalid("temperature outside original conductivity source"));
-        }
-        let index = self
-            .knots
-            .partition_point(|knot| knot[0] <= temperature)
-            .min(self.knots.len() - 1)
-            - 1;
-        let [a, ka] = self.knots[index];
-        let [b, kb] = self.knots[index + 1];
-        let conductivity = if temperature == a {
-            ka
-        } else if temperature == b {
-            kb
-        } else {
-            let fraction = (temperature - a) / (b - a);
-            (1.0 - fraction) * ka + fraction * kb
-        };
-        if !positive(conductivity) {
-            return Err(invalid("source conductivity is unrepresentable"));
-        }
-        Ok((conductivity, self.slopes[index]))
     }
 
     /// One original inverse and analytic derivatives on the same temperature.
@@ -188,36 +111,19 @@ impl<'a> IsobaricConductionLaw<'a> {
         &self,
         h: f64,
     ) -> Result<ImplicitConductionState, ThermalTransportError> {
-        let invalid = ThermalTransportError::Invalid;
-        let temperature = self
-            .caloric
-            .temperature_k(h)
-            .map_err(|_| invalid("enthalpy outside original isobaric law"))?;
+        let temperature = self.caloric.temperature_k(h).map_err(|_| {
+            ThermalTransportError::Invalid("enthalpy outside original isobaric law")
+        })?;
         let cp = self.caloric.specific_heat_cp_j_kg_k(temperature)?;
-        let (conductivity, dk_dt) = self.conductivity_at_temperature(temperature)?;
-        let temperature_slope = 1.0 / cp;
-        let conductivity_slope = dk_dt / cp;
-        if !positive(temperature_slope)
-            || !conductivity_slope.is_finite()
-            || (dk_dt != 0.0 && conductivity_slope == 0.0)
-        {
-            return Err(invalid(
-                "isobaric conduction state or tangent is unrepresentable",
-            ));
-        }
-        Ok(ImplicitConductionState {
-            temperature_k: temperature,
-            temperature_slope_kg_k_j: temperature_slope,
-            conductivity_w_m_k: conductivity,
-            conductivity_slope_kg_w_m_k_j: conductivity_slope,
-        })
+        self.conductivity.state(temperature, cp)
     }
 }
 
 impl ConductivityLaw for IsobaricConductionLaw<'_> {
     fn conductivity_w_m_k(&self, h: f64) -> Result<f64, DepositionError> {
         let temperature = self.caloric.temperature_k(h)?;
-        self.conductivity_at_temperature(temperature)
+        self.conductivity
+            .at_temperature(temperature)
             .map(|(conductivity, _)| conductivity)
             .map_err(|_| DepositionError::MaterialDomain)
     }

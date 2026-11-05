@@ -48,6 +48,10 @@ pub mod isochoric;
 #[path = "transport/capacity.rs"]
 mod capacity;
 
+// Shared scalar source conductivity and exact caloric tangents for Cp and Cv.
+#[path = "transport/conductivity.rs"]
+mod conductivity;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{
     ClaimSelection, MaterialCard, PropertyKey, PropertyLineSlice, PropertySupportError, QueryPoint,

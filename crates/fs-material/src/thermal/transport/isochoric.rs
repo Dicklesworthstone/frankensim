@@ -13,6 +13,10 @@
 //! Thermodynamic convention: NASA Glenn, "Specific Heat – Cp & Cv",
 //! https://www1.grc.nasa.gov/beginners-guide-to-aeronautics/specific-heat-cp-cv/.
 
+/// Source-exact Cv(T) and conductivity on native implicit conduction networks.
+#[path = "isochoric/conduction.rs"]
+pub mod conduction;
+
 use super::{
     DENSITY, SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point,
     capacity::{CapacityCurve, CapacityInverse},

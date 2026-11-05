@@ -8388,6 +8388,29 @@ This is numerical single-phase calorimetry, not an EOS, pressure prediction,
 phase transition, chemical reaction, evolving strain model or experimental
 material validation.
 
+## Source-exact fixed-density heat capacity in implicit conduction
+
+`thermal::transport::isochoric::conduction::IsochoricConductionLaw` binds the
+original Cv internal-energy law to scalar conductivity from the same material
+card and complete fixed-density source path. Conductivity must explicitly
+support that density. The original cell mass/volume admission remains active.
+The private scalar-conductivity preparation and interpolation kernel is shared
+with `IsobaricConductionLaw`; its existing source identity convention is retained.
+
+The native explicit and implicit conduction interfaces receive the original
+temperature inverse, dT/du = 1/Cv, and dk/du = (dk/dT)/Cv. Historical h-labelled
+native fields carry u on this declared `InternalEnergy` basis. Source knots
+remain independent, runtime evaluation allocates nothing, and the existing
+chain, graph and adaptive SDIRK2 owners retain energy/entropy and acceptance
+responsibility. This introduces no density evolution, pressure-work closure,
+phase change or permission to use internal energy as stream enthalpy.
+
+Four G0/G1 tests cover exact constitutive tangents, source/density refusals,
+nonlinear two-cell exchange against an independent heat root, and branched
+adaptive SDIRK2 decay against an analytic network mode. The focused Rust test
+build was killed by shared-memory pressure while compiling the genuine pinned
+asupersync dependency, before fs-material; these tests are not yet executed.
+
 ## Source-exact isobaric heat capacity in implicit conduction
 
 `thermal::transport::isobaric::conduction::IsobaricConductionLaw` borrows the
