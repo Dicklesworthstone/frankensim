@@ -67,7 +67,7 @@ fn solve_ambient(f: &Fixture, ordinal: usize, output: Option<&str>, surface: boo
     patch.claim = None;
     let gray = f.dir.join(format!("capacity-gray-{ordinal}.fsmcdpk"));
     std::fs::write(&gray, bytes).unwrap();
-    let (source, contact, ledger) = prepare_with_pack(&changed, ordinal, output, contact_pack(surface));
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(&changed, ordinal, output, contact_pack(surface));
     let result = fs_cli::run(vec!["--json".into(), "solve".into(),
         source.display().to_string(), ledger.display().to_string(),
         "--materials".into(), f.dir.join("solid.fsmcdpk").display().to_string(),

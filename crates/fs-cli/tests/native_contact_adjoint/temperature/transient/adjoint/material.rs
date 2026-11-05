@@ -111,7 +111,7 @@ fn physical_probe(
         materials.push(path);
     }
     let (source, contact, ledger) =
-        prepare_with_pack(&probe, ordinal, None, scaled_contact(surface, scales[2]));
+        prepare_fixed_pressure_surface(&probe, ordinal, None, scaled_contact(surface, scales[2]));
     let mut args = vec![
         "--json".to_string(),
         "solve".into(),

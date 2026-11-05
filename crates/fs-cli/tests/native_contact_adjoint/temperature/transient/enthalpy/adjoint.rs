@@ -1,5 +1,7 @@
 //! Full physical enthalpy histories retain latent storage and live source laws.
 use super::*;
+#[path = "adjoint/radiation.rs"]
+mod radiation;
 
 const FINAL: &str = "temperature-final-adjoint";
 const PEAK: &str = "temperature-sampled-peak-adjoint";
@@ -65,7 +67,7 @@ fn solve_history(f: &Fixture, ordinal: usize, output: Option<&str>, surface: boo
             .find(|row| row.region == "hot").unwrap().material_card_identity =
             fs_blake3::ContentHash::from_hex(&card).unwrap();
     }
-    let (source, contact, ledger) = prepare_with_pack(&changed, ordinal, output, source_pack(surface, resistance));
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(&changed, ordinal, output, source_pack(surface, resistance));
     let mut args = vec!["--json".to_string(), "solve".into(),
         source.display().to_string(), ledger.display().to_string(),
         "--interfaces".into(), contact.display().to_string()];

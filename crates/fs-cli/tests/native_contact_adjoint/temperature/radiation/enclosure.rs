@@ -163,7 +163,7 @@ fn source_curve_and_surface_contact_share_open_cavity_without_heating_air_with_r
 
 fn run_output(f: &Fixture, ordinal: usize, output: Option<&str>,
     pack: (Vec<u8>, String, String)) -> (fs_cli::CommandOutput, PathBuf) {
-    let (source, contact, ledger) = prepare_with_pack(f, ordinal, output, pack);
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(f, ordinal, output, pack);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = fs_cli::run(vec!["--json".into(), "solve".into(),
         source.display().to_string(), ledger.display().to_string(), "--materials".into(),

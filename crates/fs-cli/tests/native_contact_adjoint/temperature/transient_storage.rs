@@ -131,7 +131,7 @@ fn solve(f: &Fixture, ordinal: usize) -> (J, J) {
 }
 
 fn solve_with_pack(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
-    let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(f, ordinal, None, pack);
     let result = run(f, &source, &contact, &ledger);
     assert_eq!(
         result.exit_code,

@@ -32,7 +32,7 @@ fn surface_receipt(f: &Fixture) -> (J, J, String, String) {
         dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
     });
     let (card, claim) = (pack.1.clone(), pack.2.clone());
-    let (source, contact, ledger) = prepare_with_pack(f, 151, None, pack);
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(f, 151, None, pack);
     let output = run(f, &source, &contact, &ledger);
     assert_eq!(output.exit_code, fs_cli::exit::SUCCESS, "{}\n{}", output.stdout, output.stderr);
     let output = J::parse(&output.stdout).unwrap();

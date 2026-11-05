@@ -40,7 +40,7 @@ fn surface_pack() -> (Vec<u8>, String, String) {
 }
 
 fn solve_with_pack(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> (J, J) {
-    let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(f, ordinal, None, pack);
     let output = run(f, &source, &contact, &ledger);
     assert_eq!(output.exit_code, fs_cli::exit::SUCCESS, "{}\n{}", output.stdout, output.stderr);
     let output = J::parse(&output.stdout).unwrap();

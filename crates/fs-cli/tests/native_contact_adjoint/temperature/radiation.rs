@@ -11,7 +11,7 @@ fn receipt(f: &Fixture, ordinal: usize) -> J {
 }
 
 fn receipt_with_pack(f: &Fixture, ordinal: usize, pack: (Vec<u8>, String, String)) -> J {
-    let (source, contact, ledger) = prepare_with_pack(f, ordinal, None, pack);
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(f, ordinal, None, pack);
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = fs_cli::run(vec![
         "--json".into(),

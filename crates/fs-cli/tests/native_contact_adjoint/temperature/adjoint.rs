@@ -29,6 +29,7 @@ fn scaled_pack(scale: f64, surface: bool) -> (Vec<u8>, String, String) {
 fn solve(f: &Fixture, scales: &[f64], surface: bool, output: Option<&str>, ordinal: usize) -> (J, J) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut project = f.project.clone();
+    if surface { fix_contact_pressure(&mut project); }
     let bindings = project.interface_cards.as_mut().unwrap();
     assert_eq!(bindings.len(), scales.len());
     let mut cards = Vec::new();

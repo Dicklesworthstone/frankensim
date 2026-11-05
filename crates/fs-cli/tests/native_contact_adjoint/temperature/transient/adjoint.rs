@@ -13,19 +13,18 @@ const FINAL: &str = "temperature-final-adjoint";
 const PEAK: &str = "temperature-sampled-peak-adjoint";
 
 fn contact_pack(surface: bool) -> (Vec<u8>, String, String) {
+    // Keep the original 280--400 K law and its interior slope, with positive
+    // authored extensions covering the complete declared material range.
+    let knots = vec![(200.0, 0.01), (280.0, 0.02), (400.0, 1.22), (450.0, 1.72)];
     if !surface {
-        return temperature_pack_from_knots(vec![(280.0, 0.02), (400.0, 1.22)]);
+        return temperature_pack_from_knots(knots);
     }
     temperature_pack_from_value(PropertyValue::Surface2D {
         axes: ["T".into(), "normal_pressure".into()],
         axis_dims: [dims::TEMPERATURE, dims::PRESSURE],
-        samples: vec![
-            ([280.0, 0.8e6], 0.02),
-            ([400.0, 0.8e6], 1.22),
-            ([280.0, 1.2e6], 0.02),
-            ([400.0, 1.2e6], 1.22),
-        ],
-        triangles: vec![[0, 1, 3], [0, 3, 2]],
+        samples: [0.8e6, 1.2e6].into_iter().flat_map(|pressure|
+            knots.iter().map(move |&(temperature, resistance)| ([temperature, pressure], resistance))).collect(),
+        triangles: vec![[0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5], [2, 3, 7], [2, 7, 6]],
         dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
     })
 }
@@ -44,7 +43,7 @@ fn time(f: &mut Fixture) -> &mut ConductionTransient {
 }
 
 fn solve(f: &Fixture, ordinal: usize, output: Option<&str>, surface: bool) -> (J, J) {
-    let (source, card, ledger) = prepare_with_pack(f, ordinal, output, contact_pack(surface));
+    let (source, card, ledger) = prepare_fixed_pressure_surface(f, ordinal, output, contact_pack(surface));
     let result = run(f, &source, &card, &ledger);
     assert_eq!(
         result.exit_code,

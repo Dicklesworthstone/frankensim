@@ -7,11 +7,13 @@ use fs_conduction::{
 };
 use fs_conduction::radiation::{GrayDiffuseEnclosure, OpenDiffuseEnclosure};
 use fs_conduction::transient::enthalpy::adjoint::pointwise as core_pointwise;
+use fs_conduction::transient::enthalpy::heterogeneous::EnthalpyRadiation;
 
 use super::{
     ConductionProblem, Cx, EnthalpyStepConfig, EnthalpyStepLinearization,
     EnthalpyStepSolution, HeterogeneousEnthalpyBackwardEuler,
     HeterogeneousEnthalpyStepLinearization, Instant, SolveRefusal, ThermalInterfaces,
+    TemperatureContacts,
     bad, failed, finite, json_string, lower, number, poll, radiation, zeros,
 };
 
@@ -59,6 +61,7 @@ pub(in crate::solve::transient) fn storage_bytes(
 pub(super) fn linearize<'m>(
     cx: &Cx<'_>, engine: &HeterogeneousEnthalpyBackwardEuler<'m, '_>,
     problem: ConductionProblem<'_>, interfaces: Option<&ThermalInterfaces>,
+    contacts: Option<&TemperatureContacts<'_, '_>>, max_contact_pairs: usize,
     old_h: &[f64], dt_s: f64, config: EnthalpyStepConfig,
     lowering: &radiation::LoweredRadiation, enclosure: Option<&GrayDiffuseEnclosure>,
     open_enclosure: Option<&OpenDiffuseEnclosure>,
@@ -66,7 +69,8 @@ pub(super) fn linearize<'m>(
     max_radiation_entries: usize, deadline: Option<(Instant, f64)>,
 ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, SolveRefusal> {
     poll(cx, deadline)?;
-    if !lowering.is_pointwise()
+    if contacts.is_some() && interfaces.is_some()
+        || !lowering.is_pointwise()
         || lowering.is_enclosure() != (enclosure.is_some() || open_enclosure.is_some())
         || enclosure.is_some() && open_enclosure.is_some()
         || lowering.open_ambient_temperature_k().is_some() != open_enclosure.is_some()
@@ -84,26 +88,50 @@ pub(super) fn linearize<'m>(
                 .ok_or_else(|| bad("open pointwise history lost its black environment"))?,
             tolerance,
         ).map_err(lower)?;
-        engine.linearize_accepted_with_pointwise_enclosure_radiation(
-            cx, problem, interfaces, old_h, dt_s, config, &owner, accepted,
-            physical_target_j, max_radiation_entries,
-        )
+        if let Some(contacts) = contacts {
+            engine.linearize_temperature_contact_endpoint_with_radiation(
+                cx, problem, contacts, old_h, dt_s, config,
+                EnthalpyRadiation::PointwiseEnclosure(&owner), accepted,
+                physical_target_j, max_radiation_entries, max_contact_pairs,
+            )
+        } else {
+            engine.linearize_accepted_with_pointwise_enclosure_radiation(
+                cx, problem, interfaces, old_h, dt_s, config, &owner, accepted,
+                physical_target_j, max_radiation_entries,
+            )
+        }
     } else if let Some(model) = enclosure {
         let owner = PointwiseEnclosureRadiation::new(
             cx, problem.mesh, problem.boundary, model, tolerance,
         ).map_err(lower)?;
-        engine.linearize_accepted_with_pointwise_enclosure_radiation(
-            cx, problem, interfaces, old_h, dt_s, config, &owner, accepted,
-            physical_target_j, max_radiation_entries,
-        )
+        if let Some(contacts) = contacts {
+            engine.linearize_temperature_contact_endpoint_with_radiation(
+                cx, problem, contacts, old_h, dt_s, config,
+                EnthalpyRadiation::PointwiseEnclosure(&owner), accepted,
+                physical_target_j, max_radiation_entries, max_contact_pairs,
+            )
+        } else {
+            engine.linearize_accepted_with_pointwise_enclosure_radiation(
+                cx, problem, interfaces, old_h, dt_s, config, &owner, accepted,
+                physical_target_j, max_radiation_entries,
+            )
+        }
     } else {
         let owner = PointwiseAmbientRadiation::new(
             cx, problem.mesh, problem.boundary, &lowering.patches,
         ).map_err(lower)?;
-        engine.linearize_accepted_with_pointwise_ambient_radiation(
-            cx, problem, interfaces, old_h, dt_s, config, &owner, accepted,
-            physical_target_j, max_radiation_entries,
-        )
+        if let Some(contacts) = contacts {
+            engine.linearize_temperature_contact_endpoint_with_radiation(
+                cx, problem, contacts, old_h, dt_s, config,
+                EnthalpyRadiation::PointwiseAmbient(&owner), accepted,
+                physical_target_j, max_radiation_entries, max_contact_pairs,
+            )
+        } else {
+            engine.linearize_accepted_with_pointwise_ambient_radiation(
+                cx, problem, interfaces, old_h, dt_s, config, &owner, accepted,
+                physical_target_j, max_radiation_entries,
+            )
+        }
     }.map_err(failed)?;
     poll(cx, deadline)?;
     Ok(result)

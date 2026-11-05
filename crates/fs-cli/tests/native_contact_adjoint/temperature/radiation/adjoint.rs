@@ -65,7 +65,7 @@ fn solve(
         .radiation.as_mut().unwrap().surfaces[0];
     patch.card = card;
     patch.claim = None;
-    let (source, contact, ledger) = prepare_with_pack(&changed, ordinal, output,
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(&changed, ordinal, output,
         contact_source(contact_scale, surface));
     let result = fs_cli::run(vec!["--json".into(), "solve".into(),
         source.display().to_string(), ledger.display().to_string(),

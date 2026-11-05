@@ -1,13 +1,44 @@
 # CONTRACT: fs-cli
 
+## Pointwise radiation through live-contact enthalpy histories — driver 126
+
+Final-temperature and sampled-peak total-enthalpy adjoints now compose original
+live contact laws with pointwise ambient or closed/open enclosure radiation.
+The retained local-emission and reflected-irradiation owner binds the unchanged
+enthalpy endpoint before contact feedback attaches. Original physical residual,
+storage-energy, chart/source smoothness and radiation workspace gates remain
+active. The physical audit also re-queries contact on the actual natural/air
+boundary, with a separate actual-air energy check when airflow is present.
+
+Independent absolute physical-surface emissivities and ambient reservoir
+temperatures, or one shared open black-environment temperature, contract the
+same complete physical dual as the storage/material/boundary controls. The
+masked nodal-load dual already includes dt; outward radiation contributes its
+sign once. Prescribed columns retain local and reflected feedback. The black
+bath has no solid trace or enthalpy, and radiation never heats transported air.
+
+Source identities, surface ordering and view factors remain fixed. Native
+state-dependent material-emissivity owners retain their separate receipt and
+phase-response checks; the current CLI continues to lower fixed sourced
+emissivities and cannot replace those owners by scalars. Patch-mean live-contact
+enthalpy radiation and phase-dependent contact resistance remain unsupported.
+Driver 126 invalidates earlier cached producer results.
+
+Native and imported-project regressions exercise actual perturbed pointwise
+histories, local versus reflected heat, source/contact and radiative controls,
+latent carry and zero future controls for an initial selected peak. They retain
+unchanged forward temperature, enthalpy, phase and energy evidence. Syntax and
+source review do not establish numerical execution; the new regressions still
+require a completed native run.
+
 ## Live-contact total-enthalpy trajectory adjoints — driver 125
 
 Final-temperature and sampled-peak reports now reverse the original accepted
 total-enthalpy history with live temperature-dependent contact laws. Their
 material-report aliases retain the same controls. Prescribed and scheduled
 boundaries, natural convection and transported air compose through the native
-heterogeneous endpoint owner. This increment admits no radiative live-contact
-enthalpy adjoint; existing forward pointwise-radiation support is unchanged.
+heterogeneous endpoint owner. Driver 126 extends these reports to the original
+pointwise ambient and closed/open enclosure radiation owners.
 
 The temperature objective maps to specific enthalpy once. Subsequent history
 carry remains in enthalpy coordinates, including through latent plateaus. Each

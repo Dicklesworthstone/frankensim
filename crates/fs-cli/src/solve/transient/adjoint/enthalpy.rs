@@ -356,8 +356,9 @@ pub(in crate::solve::transient) fn finish(
     let boundary_history = super::super::boundary_history::BoundaryHistory::bind(
         cx, spec, policy, problem, deadline,
     )?;
-    if temperature_contacts.is_some() && (interfaces.is_some() || radiation.is_some()) {
-        return Err(bad("live enthalpy contact adjoints require the original source owner without duplicate frozen interfaces or radiation"));
+    if temperature_contacts.is_some() && (interfaces.is_some()
+        || radiation.is_some_and(|lowering| !lowering.is_pointwise())) {
+        return Err(bad("live enthalpy contact adjoints require the original source owner without duplicate frozen interfaces and the original pointwise owner when radiation is declared"));
     }
     if ends_s.is_empty() || tape.temperature.n != n || tape.initial_h.len() != n
         || tape.accepted.len() != ends_s.len()
@@ -652,17 +653,17 @@ pub(in crate::solve::transient) fn finish(
             }
             poll(cx, deadline)?;
         }
-        let mut step = if let Some(contacts) = temperature_contacts {
+        let mut step = if let Some(lowering) = pointwise {
+            BoundEndpoint::Prescribed(pointwise::linearize(
+                cx, engine, step_problem, interfaces, temperature_contacts, max_contact_pairs,
+                old_h, dt, endpoint_config, lowering, enclosure, open_enclosure.as_ref(), endpoint,
+                physical_tolerance_j, max_radiation_entries, deadline,
+            )?)
+        } else if let Some(contacts) = temperature_contacts {
             BoundEndpoint::Prescribed(engine.linearize_temperature_contact_endpoint(
                 cx, step_problem, contacts, old_h, dt, endpoint_config, endpoint,
                 physical_tolerance_j, max_contact_pairs,
             ).map_err(failed)?)
-        } else if let Some(lowering) = pointwise {
-            BoundEndpoint::Prescribed(pointwise::linearize(
-                cx, engine, step_problem, interfaces, old_h, dt, endpoint_config,
-                lowering, enclosure, open_enclosure.as_ref(), endpoint,
-                physical_tolerance_j, max_radiation_entries, deadline,
-            )?)
         } else if let Some(model) = enclosure {
             let lowering = radiation.ok_or_else(|| bad("enclosure adjoint lost its controls"))?;
             BoundEndpoint::Prescribed(engine.linearize_accepted_parameters_with_enclosure_radiation(
@@ -913,7 +914,7 @@ pub(in crate::solve::transient) fn finish(
         selected.state,
     ) } else { String::new() };
     let contact_scope = temperature_contacts.map(|_| format!(
-        "{original_scope} Live contact retains the original pinned temperature-dependent source owner and both trace-temperature partials in the complete specific-enthalpy tangent, including each chart's temperature response. Every consumed endpoint passes its original physical residual and energy targets, plus actual-air energy when present. Material contractions use the same complete masked nodal-load dual with its timestep already included. Prescribed-temperature columns retain contact feedback. History carry stays energetic across latent plateaus. Pressure, finish, source selection and geometry remain fixed; phase-dependent contact resistance and radiative live-contact trajectory derivatives are not supplied by this adapter."
+        "{original_scope} Live contact retains the original pinned temperature-dependent source owner and both trace-temperature partials in the complete specific-enthalpy tangent, including each chart's temperature response. Every consumed endpoint passes its original physical residual and energy targets, plus actual-air energy when present. Material contractions use the same complete masked nodal-load dual with its timestep already included. Prescribed-temperature columns retain contact feedback. History carry stays energetic across latent plateaus. Pointwise ambient or closed/open enclosure radiation retains its complete local-emission and reflected-irradiation tangent, original physical source receipts and absolute emissivity/reservoir controls in this same dual. The open black bath has one control and no solid state. Pressure, finish, source selection and geometry remain fixed; phase-dependent contact resistance and patch-mean live-contact enthalpy radiation are not supplied by this adapter."
     ));
     let original_scope = contact_scope.as_deref().unwrap_or(original_scope);
     let history_scope = boundary_history.as_ref().map(|_| format!(

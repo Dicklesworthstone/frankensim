@@ -60,7 +60,7 @@ fn cooling_fixture(mixed: bool, radiating: bool) -> Fixture {
 fn run_cooling(f: &Fixture, ordinal: usize, output: Option<&str>, surface: bool)
     -> (fs_cli::CommandOutput, PathBuf)
 {
-    let (source, contact, ledger) = prepare_with_pack(f, ordinal, output, contact_pack(surface));
+    let (source, contact, ledger) = prepare_fixed_pressure_surface(f, ordinal, output, contact_pack(surface));
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let result = fs_cli::run(vec!["--json".into(), "solve".into(),
         source.display().to_string(), ledger.display().to_string(),

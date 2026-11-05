@@ -84,6 +84,35 @@ fn prepare(f: &Fixture, ordinal: usize, output: Option<&str>) -> (PathBuf, PathB
     prepare_with_pack(f, ordinal, output, temperature_pack())
 }
 
+/// These synthetic thermal controls hold the manufactured pressure fixed;
+/// they make no claim about support over a temperature x pressure box.
+fn fix_contact_pressure(project: &mut fs_project::ProjectSpec) {
+    for binding in project.interface_cards.as_mut().unwrap() {
+        let fs_project::InterfaceState::DryContact { pressure_half_width, .. } = &mut binding.state
+            else { panic!("thermal surface fixture requires a dry contact"); };
+        pressure_half_width.value = 0.0;
+    }
+}
+
+/// Explicit opt-in for the thermal Surface2D fixtures. Curves retain their
+/// original manufacturing band; neither path changes any thermal range.
+fn prepare_fixed_pressure_surface(
+    f: &Fixture, ordinal: usize, output: Option<&str>,
+    pack: (Vec<u8>, String, String),
+) -> (PathBuf, PathBuf, PathBuf) {
+    let source = NormalizedInterfacePack::from_bytes(&pack.0).unwrap();
+    let selected = source.card().claims().claims_ordered()
+        .find(|(id, _)| id.0.to_hex() == pack.2).unwrap().1;
+    if let PropertyValue::Surface2D { axes, .. } = &selected.value {
+        assert_eq!(axes, &["T".to_string(), "normal_pressure".to_string()]);
+        let mut fixed = Fixture { dir: f.dir.clone(), project: f.project.clone() };
+        fix_contact_pressure(&mut fixed.project);
+        prepare_with_pack(&fixed, ordinal, output, pack)
+    } else {
+        prepare_with_pack(f, ordinal, output, pack)
+    }
+}
+
 fn prepare_with_pack(
     f: &Fixture, ordinal: usize, output: Option<&str>,
     (bytes, card, selected): (Vec<u8>, String, String),

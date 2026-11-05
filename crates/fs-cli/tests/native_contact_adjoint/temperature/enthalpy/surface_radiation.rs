@@ -266,7 +266,7 @@ fn source_surface_pointwise_enthalpy_refuses_late_domain_exit_and_retries_origin
             watts: QtyAny::new(watts, dims::POWER),
         })
         .collect();
-    let (project, contact, ledger) = prepare_with_pack(&f, 162, None, surface_pack(293.0, 293.3));
+    let (project, contact, ledger) = prepare_fixed_pressure_surface(&f, 162, None, surface_pack(293.0, 293.3));
     let result = run_with_radiation_pack(&f, &project, &contact, &ledger);
     assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
     let refusal = format!("{}{}", result.stdout, result.stderr);
