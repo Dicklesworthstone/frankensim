@@ -32522,3 +32522,26 @@ original physical constraint admission. Pinned Rust parser/format checks and
 independent three-port closure/unit/work algebra passed. Native execution is
 still pending: the current environment kills the unchanged upstream dependency
 build before these crates. Source checks are not native numerical validation.
+
+### Typed velocity histories on native open flow faces
+
+`scenario_velocity::sample_velocity3` executes the existing typed scenario
+velocity in its declared Cartesian axes at physical time, then converts all
+three signed components using the supplied frozen `MaterialScaling`. The full
+Euclidean speed must fit that scaling's declared scenario bound. No material
+is re-evaluated, history copied, direction inferred from a scalar, or carrier
+velocity added by a coordinate-frame rotation.
+
+`rebind_velocity_face3` sends the checked sample to the original D3Q19
+`BoundaryGrid3::rebind_open_boundaries`. The caller explicitly maps the named
+region to a face and supplies the same scaling used for the grid; lattice axes
+are WORLD Cartesian axes. Other face data, populations, force coordinates and
+time remain unchanged. The next native step applies the held velocity through
+the existing force-corrected boundary reconstruction. Sampling, bounds, native
+kind/profile refusal or cancellation publish no target. This is a uniform
+prescribed velocity on a fixed open face, not a moving boundary, a spatial
+profile, a finite reservoir or an additional time integrator.
+
+`tests/scenario_velocity.rs` checks signed rotated/interpolated histories on a
+real forced inlet, all three physical velocity components after native steps,
+full-vector speed admission, unchanged state on refusal and cancellation.
