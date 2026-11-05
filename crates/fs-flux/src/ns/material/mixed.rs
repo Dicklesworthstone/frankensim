@@ -16,6 +16,9 @@ use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 mod density;
 pub use density::{MaterialStokesCell, MaterialStokesField, MaterialStokesFieldSolution};
 
+/// Conservative evolving density and native IMEX momentum on one fixed mesh.
+pub mod density_transport;
+
 /// Physical effort per metre of out-of-plane depth, about an explicit origin.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialBoundaryWrench {
