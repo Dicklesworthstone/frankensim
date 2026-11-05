@@ -1,4 +1,7 @@
 //! Complete physical feedback and time refinement through the shared controller.
+#[path = "molecular_coupled_gas_law.rs"]
+mod selected_gas_law_tests;
+
 use super::*;
 use fs_couple::cavity_phs::piston::thermal::boundary::ports::network::material::state::flow::molecular::coupled::*;
 

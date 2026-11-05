@@ -4,6 +4,10 @@
 //! trajectories. The reusable molecular workspace is the only mutable capture;
 //! no accepted inventory, thermal state or mechanical state lives in that cache.
 
+/// Complete molecular time accuracy with a caller-selected gas/body heat law.
+#[path = "molecular_coupled_gas_law.rs"]
+pub mod gas_law;
+
 use super::super::diffusion::coupled::{CoupledDiffusionReport, TransportLedger};
 use super::*;
 use fs_gas::material::transport::parcel::ParcelMolecularError;
