@@ -1,8 +1,9 @@
-//! Complete continuous feedback tangents on the shared autonomous orbit owners.
+//! Complete continuous feedback tangents on the shared periodic orbit owners.
 
 use super::{
-    AutonomousPortFeedback, InputKind, PhsOrbitError, PhsOrbitProblem, PhsStorageHessianAction,
-    autonomous::feedback_problem, bad, port_flows_into, tangent::StorageTangent,
+    AutonomousPortFeedback, InputKind, PeriodicPortInput, PhsOrbitError, PhsOrbitProblem,
+    PhsStorageHessianAction, autonomous::feedback_problem, bad, port_flows_into,
+    tangent::StorageTangent,
 };
 use core::cell::RefCell;
 use fs_orbit::{
@@ -27,8 +28,9 @@ use fs_phs::PortHamiltonian;
 /// belong in explicit original states; there is no externally prescribed clock.
 pub type PhsFeedbackStateJacobian<'a> = dyn Fn(&[f64], &[f64], &mut [f64]) -> bool + 'a;
 
-struct FeedbackVariationalProblem<'a> {
-    original: PhsOrbitProblem<'a>,
+pub(super) struct FeedbackVariationalProblem<'a> {
+    pub(super) original: PhsOrbitProblem<'a>,
+    pub(super) external: Option<&'a PeriodicPortInput>,
     feedback_jacobian: &'a PhsFeedbackStateJacobian<'a>,
     derivative: RefCell<Vec<f64>>,
 }
@@ -38,10 +40,11 @@ impl OrbitProblem for FeedbackVariationalProblem<'_> {
         self.original.dim()
     }
     fn autonomous(&self) -> bool {
-        true
+        self.external.is_none()
     }
     fn island(&self, time: f64, state: &[f64], out: &mut [f64]) {
-        self.original.island(time, state, out);
+        self.original
+            .island_with_external_input(time, state, out, self.external);
     }
     fn island_state_jacobian(&self) -> Option<IslandStateJacobian<Self>> {
         self.original
@@ -110,7 +113,7 @@ impl FeedbackVariationalProblem<'_> {
     }
 }
 
-fn feedback_tangent_problem<'a>(
+pub(super) fn feedback_tangent_problem<'a>(
     system: &'a PortHamiltonian,
     feedback: &'a dyn AutonomousPortFeedback,
     feedback_jacobian: &'a PhsFeedbackStateJacobian<'a>,
@@ -127,6 +130,7 @@ fn feedback_tangent_problem<'a>(
     };
     Ok(FeedbackVariationalProblem {
         original,
+        external: None,
         feedback_jacobian,
         derivative: RefCell::new(vec![0.0; derivative_count]),
     })

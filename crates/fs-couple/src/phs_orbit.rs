@@ -56,6 +56,16 @@ pub use variational_feedback::{
     solve_autonomous_feedback_shooting_variational,
     solve_autonomous_feedback_shooting_variational_analytic,
 };
+mod forced_feedback;
+pub use forced_feedback::{
+    PhsForcedFeedbackAudit, audit_forced_feedback_orbit,
+    solve_forced_feedback_harmonic_balance_adaptive_scaled_seeded,
+    solve_forced_feedback_harmonic_balance_analytic_adaptive_scaled_seeded,
+    solve_forced_feedback_harmonic_balance_analytic_scaled_seeded,
+    solve_forced_feedback_harmonic_balance_scaled_seeded,
+    solve_forced_feedback_shooting_variational,
+    solve_forced_feedback_shooting_variational_analytic,
+};
 mod autonomous;
 /// Full-state parameter branches of the original self-excited pHS.
 pub use autonomous::continuation as autonomous_continuation;
@@ -224,6 +234,14 @@ impl OrbitProblem for PhsOrbitProblem<'_> {
     }
 
     fn island(&self, t: f64, x: &[f64], out: &mut [f64]) {
+        self.island_with_external_input(t, x, out, None);
+    }
+}
+
+impl PhsOrbitProblem<'_> {
+    fn island_with_external_input(
+        &self, t: f64, x: &[f64], out: &mut [f64], external: Option<&PeriodicPortInput>,
+    ) {
         let n = self.system.state_dim();
         let m = self.system.port_dim();
         if x.len() != n || out.len() != n || x.iter().any(|v| !v.is_finite()) {
@@ -251,6 +269,21 @@ impl OrbitProblem for PhsOrbitProblem<'_> {
             }
         };
         if !ok { self.fail(out); return; }
+
+        if let Some(periodic) = external {
+            // Feedback has consumed the conjugate flows. Reuse that scratch
+            // for the state-independent drive, then apply the complete force
+            // through the original compensated J/R/G owner in one contraction.
+            let InputKind::Feedback { flows, .. } = &self.input else {
+                self.fail(out); return;
+            };
+            let mut drive = flows.borrow_mut();
+            if !periodic.sample_into(t, &mut drive) { self.fail(out); return; }
+            for (value, imposed) in input.iter_mut().zip(drive.iter()) {
+                *value += imposed;
+            }
+            if input.iter().any(|v| !v.is_finite()) { self.fail(out); return; }
+        }
 
         if self.system.vector_field_from_effort_into(&effort, &input, out).is_err() {
             self.fail(out);
@@ -553,6 +586,14 @@ fn audit_orbit_with_input(
     system: &PortHamiltonian, orbit: &HbOrbit, samples: usize,
     mut input: impl FnMut(f64, &[f64], &[f64], &mut [f64]) -> bool,
 ) -> Result<PhsOrbitAudit, PhsOrbitError> {
+    audit_orbit_with_input_effort(system, orbit, samples,
+        |time, state, _, flows, out| input(time, state, flows, out))
+}
+
+fn audit_orbit_with_input_effort(
+    system: &PortHamiltonian, orbit: &HbOrbit, samples: usize,
+    mut input: impl FnMut(f64, &[f64], &[f64], &[f64], &mut [f64]) -> bool,
+) -> Result<PhsOrbitAudit, PhsOrbitError> {
     let width=orbit.coeffs.first().map_or(0,Vec::len);
     if system.state_dim()==0 || orbit.coeffs.len()!=system.state_dim() || width==0
         || !orbit.omega.is_finite() || orbit.omega<=0.0
@@ -576,7 +617,7 @@ fn audit_orbit_with_input(
         if e.iter().any(|v|!v.is_finite()) {return Err(PhsOrbitError::SourceRefused);}
         let time=theta/orbit.omega;
         u.fill(f64::NAN);
-        if !port_flows_into(system,&e,&mut flows) || !input(time,&x,&flows,&mut u)
+        if !port_flows_into(system,&e,&mut flows) || !input(time,&x,&e,&flows,&mut u)
             || u.iter().any(|value|!value.is_finite())
         {return Err(PhsOrbitError::SourceRefused);}
         let h=system.hamiltonian(&x);
