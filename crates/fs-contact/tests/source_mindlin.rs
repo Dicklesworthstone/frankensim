@@ -188,6 +188,51 @@ fn original_bulk_interface_and_hertz_patch_determine_the_tangential_response() {
 }
 
 #[test]
+fn prescribed_trial_uses_original_sources_and_returns_the_same_accepted_work() {
+    let source = resolve(normal(1e7, Some(0.6), Dims::NONE, false)).unwrap();
+    let d = source.law().gross_slip_displacement_m();
+    let loaded = source
+        .advance(&source.initial_state(), &step(&source, 0.5 * d))
+        .unwrap()
+        .state;
+    let saved = loaded.clone();
+    let input = step(&source, -0.1 * d);
+    let trial = source.trial_prescribed(&loaded, &input).unwrap();
+    let native = source
+        .law()
+        .trial_prescribed(loaded.constitutive_state(), &input)
+        .unwrap();
+    let accepted = source.advance(&loaded, &input).unwrap();
+    assert_eq!(trial, native);
+    assert_eq!(trial.average_force_n, accepted.traction_n[0]);
+    assert_eq!(trial.endpoint_force_n, accepted.state.endpoint_force_n());
+    assert_eq!(trial.stored_change_j, accepted.stored_change_j);
+    assert_eq!(trial.dissipated_j, accepted.dissipated_j);
+    assert_eq!(trial.closure_residual_j, accepted.closure_residual_j);
+    assert!(trial.stored_change_j < 0.0);
+    assert!(trial.average_force_n * input.slip_increment_m[0] < 0.0);
+    assert_eq!(loaded, saved);
+
+    // Matching numerical moduli and friction do not authorize another source
+    // to inspect this retained history through the new numerical entry point.
+    let other = resolve(normal_with_history(
+        1e7,
+        Some(0.6),
+        Dims::NONE,
+        false,
+        "another Mindlin trial specimen",
+    ))
+    .unwrap();
+    assert_eq!(other.law(), source.law());
+    assert!(
+        other
+            .trial_prescribed(&loaded, &step(&other, -0.1 * d))
+            .is_err()
+    );
+    assert_eq!(source.trial_prescribed(&saved, &input).unwrap(), trial);
+}
+
+#[test]
 fn material_and_ordered_interface_changes_reach_distinct_physical_quantities() {
     let soft = resolve(normal(1e7, Some(0.6), Dims::NONE, false)).unwrap();
     let stiff = resolve(normal(3e7, Some(0.6), Dims::NONE, false)).unwrap();
@@ -348,6 +393,7 @@ fn frozen_temperature_load_direction_and_normal_envelope_refuse_without_losing_h
         },
     ] {
         assert!(law.advance(&loaded.state, &bad).is_err());
+        assert!(law.trial_prescribed(&loaded.state, &bad).is_err());
         assert_eq!(loaded.state, saved);
     }
     assert_eq!(law.advance(&loaded.state, &input).unwrap(), expected);

@@ -44,13 +44,129 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g1_prescribed_trials_match_path_work_and_the_analytic_average_tangent() {
+    let law = model();
+    let d = law.gross_slip_displacement_m();
+    let energy_scale = law.gross_slip_capacity_n() * d;
+    let mut state = law.initial_state();
+    let mut returned_storage = false;
+    // Load, unload, nested reversal, and both gross-slide directions. Every
+    // derivative probe starts from the same accepted checkpoint, not from a
+    // history advanced by an earlier nonlinear trial.
+    for fraction in [0.7, -0.2, 0.1, -1.5, -0.2, 2.5] {
+        let request = input(&law, fraction * d, 0.0);
+        let saved = state.clone();
+        let trial = law.trial_prescribed(&state, &request).unwrap();
+        let accepted = law.advance(&state, &request).unwrap();
+        assert_eq!(trial.average_force_n, accepted.traction_n[0]);
+        assert_eq!(trial.endpoint_force_n, accepted.state.endpoint_force_n());
+        assert_eq!(trial.stored_change_j, accepted.stored_change_j);
+        assert_eq!(trial.dissipated_j, accepted.dissipated_j);
+        assert_eq!(trial.closure_residual_j, accepted.closure_residual_j);
+        assert_eq!(state, saved);
+        assert_eq!(trial, law.trial_prescribed(&state, &request).unwrap());
+        assert!(trial.dissipated_j >= 0.0);
+        close(trial.closure_residual_j, 0.0, 3e-14 * energy_scale);
+        returned_storage |= trial.stored_change_j < 0.0
+            && trial.average_force_n * request.slip_increment_m[0] < 0.0;
+
+        // Independent finite differences of the original accepted force,
+        // away from zero-increment branch ties, verify the exposed Jacobian.
+        let h = 2e-6 * d;
+        let average = |delta| {
+            law.advance(&state, &input(&law, fraction * d + delta, 0.0))
+                .unwrap()
+                .traction_n[0]
+        };
+        let numerical = (average(h) - average(-h)) / (2.0 * h);
+        close(
+            trial.average_tangent_n_per_m,
+            numerical,
+            3e-8 * law.initial_stiffness_n_per_m(),
+        );
+        state = accepted.state;
+    }
+    assert!(
+        returned_storage,
+        "unloading must be able to return elastic energy"
+    );
+}
+
+#[test]
+fn g0_prescribed_trial_keeps_force_and_domain_refusals_without_changing_history() {
+    let law = model();
+    let state = law.initial_state();
+    let saved = state.clone();
+    let request = input(&law, 0.3 * law.gross_slip_displacement_m(), 0.0);
+    let expected = law.trial_prescribed(&state, &request).unwrap();
+    assert!(expected.average_force_n > 0.0);
+    let mut capped = request;
+    capped.solve.maximum_force_n = expected.average_force_n;
+    assert_eq!(law.trial_prescribed(&state, &capped).unwrap(), expected);
+    capped.solve.maximum_force_n = expected.average_force_n.next_down();
+    assert!(matches!(
+        law.trial_prescribed(&state, &capped),
+        Err(TriboError::OutsideApplicability {
+            field: "maximum_force_n",
+            ..
+        })
+    ));
+    for bad in [
+        TangentialStepInput {
+            compliance_m_per_n: 1.0,
+            ..request
+        },
+        TangentialStepInput {
+            normal_n: request.normal_n.next_up(),
+            ..request
+        },
+        TangentialStepInput {
+            slip_increment_m: [0.0, 1e-20],
+            ..request
+        },
+        TangentialStepInput {
+            contact_temperature_k: Some(f64::NAN),
+            ..request
+        },
+        TangentialStepInput {
+            dt_s: 0.0,
+            ..request
+        },
+    ] {
+        assert!(law.trial_prescribed(&state, &bad).is_err());
+        assert_eq!(state, saved);
+    }
+    let foreign = MindlinDeresiewiczPoint::new(MindlinPointParameters {
+        contact_radius_m: 2e-3,
+        ..parameters()
+    })
+    .unwrap();
+    assert!(
+        law.trial_prescribed(&foreign.initial_state(), &request)
+            .is_err()
+    );
+    assert_eq!(state, saved);
+    assert_eq!(law.trial_prescribed(&state, &request).unwrap(), expected);
+}
+
+#[test]
 fn returned_traction_satisfies_its_actual_compliant_load_line_after_reversals() {
     let law = model();
     let virgin = law.initial_state();
-    let loaded = law.advance(&virgin,
-        &input(&law, 0.7 * law.gross_slip_displacement_m(), 0.0)).unwrap().state;
-    let reversed = law.advance(&loaded,
-        &input(&law, -0.2 * law.gross_slip_displacement_m(), 0.0)).unwrap().state;
+    let loaded = law
+        .advance(
+            &virgin,
+            &input(&law, 0.7 * law.gross_slip_displacement_m(), 0.0),
+        )
+        .unwrap()
+        .state;
+    let reversed = law
+        .advance(
+            &loaded,
+            &input(&law, -0.2 * law.gross_slip_displacement_m(), 0.0),
+        )
+        .unwrap()
+        .state;
     // The returned effort drives the body, so the original law must agree at
     // free-C*RETURNED_TRACTION, not merely at the last internal root iterate.
     for (history, state) in [&virgin, &loaded, &reversed].into_iter().enumerate() {
@@ -71,11 +187,16 @@ fn returned_traction_satisfies_its_actual_compliant_load_line_after_reversals() 
                 let tolerance = request.solve.force_absolute_tolerance_n
                     + request.solve.force_relative_tolerance
                         * step.traction_n[0].abs().max(checked.traction_n[0].abs());
-                assert!(residual.abs() <= tolerance,
-                    "history={history}, C*k0={ratio}, free/d={fraction}, residual={residual:e}, tolerance={tolerance:e}");
+                assert!(
+                    residual.abs() <= tolerance,
+                    "history={history}, C*k0={ratio}, free/d={fraction}, residual={residual:e}, tolerance={tolerance:e}"
+                );
                 assert!(step.dissipated_j >= 0.0);
-                close(step.closure_residual_j, 0.0,
-                    2e-14 * law.gross_slip_capacity_n() * law.gross_slip_displacement_m());
+                close(
+                    step.closure_residual_j,
+                    0.0,
+                    2e-14 * law.gross_slip_capacity_n() * law.gross_slip_displacement_m(),
+                );
             }
         }
     }
@@ -322,6 +443,18 @@ fn g0_gross_slip_rest_preload_and_frictionless_limit() {
     assert_eq!(step.regime, fs_tribo::FrictionRegime::Sliding);
     assert_eq!(step.slip_increment_m, [0.1, 0.0]);
     assert_eq!(step.dissipated_j, 0.0);
+    let trial = frictionless
+        .trial_prescribed(
+            &frictionless.initial_state(),
+            &input(&frictionless, 0.1, 0.0),
+        )
+        .unwrap();
+    assert_eq!(trial.average_force_n, 0.0);
+    assert_eq!(trial.endpoint_force_n, 0.0);
+    assert_eq!(trial.average_tangent_n_per_m, 0.0);
+    assert_eq!(trial.stored_change_j, 0.0);
+    assert_eq!(trial.dissipated_j, 0.0);
+    assert_eq!(trial.closure_residual_j, 0.0);
 }
 
 #[test]

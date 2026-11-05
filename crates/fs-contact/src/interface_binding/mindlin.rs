@@ -22,7 +22,9 @@ use fs_material::state_point::{
     ScalarPropertyRequirement, resolve_interface_state_point,
 };
 use fs_qty::{Dims, QuantitySpec};
-use fs_tribo::mindlin::{MindlinDeresiewiczPoint, MindlinPointParameters, MindlinState};
+use fs_tribo::mindlin::{
+    MindlinDeresiewiczPoint, MindlinPointParameters, MindlinState, MindlinTrialResponse,
+};
 use fs_tribo::{TangentialLaw, TangentialStep, TangentialStepInput, TriboError};
 
 use super::BoundNormalContactLaw;
@@ -242,6 +244,24 @@ impl SourceMindlinContact {
     #[must_use]
     pub const fn temperature_kelvin(&self) -> f64 {
         self.temperature_kelvin
+    }
+
+    /// Immutable prescribed-slip response for a coupled mechanical solve.
+    ///
+    /// Uses the same source identities, frozen temperature, fixed Hertz load,
+    /// first tangent and original normal envelope as the final `advance`.
+    /// Zero compliance means the mechanical solver supplies actual trial
+    /// displacement; no source is refreshed and no history is copied or
+    /// advanced. The returned derivative belongs to the exact average effort.
+    /// `advance` remains authoritative for constructing the accepted candidate
+    /// and checking the original retained-history ceiling.
+    pub fn trial_prescribed(
+        &self,
+        state: &SourceMindlinState,
+        input: &TangentialStepInput,
+    ) -> Result<MindlinTrialResponse, SourceMindlinError> {
+        self.admit_step(state, input)?;
+        Ok(self.law.trial_prescribed(&state.constitutive, input)?)
     }
 
     /// Observe radial pressure, signed shear traction and relative elastic

@@ -143,6 +143,29 @@ impl MindlinState {
     }
 }
 
+/// Immutable response on a prescribed scalar shear path from accepted history.
+/// All efforts enter the interface; body reactions have the opposite sign.
+/// This contains no candidate history and allocates no memory. The final
+/// [`TangentialLaw::advance`] still owns admission of the retained-history cap.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MindlinTrialResponse {
+    /// Exact path-average effort used for mechanical work [N].
+    pub average_force_n: f64,
+    /// Effort at the path endpoint, distinct from the average [N].
+    pub endpoint_force_n: f64,
+    /// Derivative of average effort with respect to the prescribed increment
+    /// [N/m], holding the original history fixed. At zero increment this uses
+    /// the original scalar solver's selected elastic tangent; directional
+    /// derivatives at a slip boundary can differ.
+    pub average_tangent_n_per_m: f64,
+    /// Change of reversible interface storage [J], possibly negative.
+    pub stored_change_j: f64,
+    /// Nonnegative physical microslip and gross-slip heat [J].
+    pub dissipated_j: f64,
+    /// `stored_change_j + dissipated_j - average_force_n * increment_m` [J].
+    pub closure_residual_j: f64,
+}
+
 impl MindlinDeresiewiczPoint {
     /// Derives compliance from the two elastic bodies and the Hertz radius.
     pub fn new(parameters: MindlinPointParameters) -> Result<Self, TriboError> {
@@ -210,12 +233,108 @@ impl MindlinDeresiewiczPoint {
         self.critical_slip_m
     }
 
+    /// Evaluate a prescribed increment without advancing or copying history.
+    ///
+    /// The normal load, first tangent direction, checkpoint and input budgets
+    /// have exactly the same admission as [`TangentialLaw::advance`]. Scalar
+    /// body compliance must be zero: the caller's coupled mechanical solver
+    /// supplies the actual trial displacement. The force ceiling bounds the
+    /// returned average, not an unexamined endpoint or peak force.
+    ///
+    /// The analytic tangent differentiates that same average from the same
+    /// accepted memory. At zero motion it selects the original elastic tangent;
+    /// at a slip boundary no uniqueness of a directional derivative is claimed.
+    /// Accepted mechanical solutions must still call `advance` once to obtain
+    /// the candidate memory and enforce its retained-history ceiling.
+    pub fn trial_prescribed(
+        &self,
+        state: &MindlinState,
+        input: &TangentialStepInput,
+    ) -> Result<MindlinTrialResponse, TriboError> {
+        self.admit_step(state, input)?;
+        if input.compliance_m_per_n != 0.0 {
+            return Err(TriboError::InvalidInput {
+                field: "mindlin_trial_requires_prescribed_motion",
+            });
+        }
+        let increment = input.slip_increment_m[0];
+        checked_add(state.slip_m, increment, "mindlin_accumulated_slip_m")?;
+        let response = self.response(state, increment, None)?;
+        if response.average_n.abs() > input.solve.maximum_force_n {
+            return Err(TriboError::OutsideApplicability {
+                field: "maximum_force_n",
+                value: response.average_n.abs(),
+                minimum: 0.0,
+                maximum: input.solve.maximum_force_n,
+            });
+        }
+        let work = checked_mul(response.average_n, increment, "mindlin_work_j")?;
+        let closure_residual_j = response.stored_change_j + response.heat_j - work;
+        finite(closure_residual_j, "mindlin_closure_residual_j")?;
+        Ok(MindlinTrialResponse {
+            average_force_n: response.average_n,
+            endpoint_force_n: response.endpoint_n,
+            average_tangent_n_per_m: response.derivative_n_per_m,
+            stored_change_j: response.stored_change_j,
+            dissipated_j: response.heat_j,
+            closure_residual_j,
+        })
+    }
+
+    fn admit_step(&self, state: &MindlinState, x: &TangentialStepInput) -> Result<(), TriboError> {
+        x.solve.validate()?;
+        if state.owner != *self {
+            return Err(TriboError::InvalidInput {
+                field: "mindlin_checkpoint_owner",
+            });
+        }
+        positive_finite(x.normal_n, "normal_force")?;
+        if x.normal_n != self.parameters.normal_force_n {
+            return Err(TriboError::OutsideApplicability {
+                field: "mindlin_fixed_normal_force_n",
+                value: x.normal_n,
+                minimum: self.parameters.normal_force_n,
+                maximum: self.parameters.normal_force_n,
+            });
+        }
+        positive_finite(x.dt_s, "dt_s")?;
+        nonnegative_finite(x.compliance_m_per_n, "compliance_m_per_n")?;
+        if let Some(t) = x.contact_temperature_k {
+            positive_finite(t, "temperature_kelvin")?;
+        }
+        if let Some(p) = x.nominal_pressure_pa {
+            nonnegative_finite(p, "contact_pressure_pa")?;
+        }
+        for value in x.slip_increment_m {
+            finite(value, "slip_increment_m")?;
+        }
+        if x.slip_increment_m[1] != 0.0 {
+            return Err(TriboError::InvalidInput {
+                field: "mindlin_requires_proportional_first_axis_motion",
+            });
+        }
+        Ok(())
+    }
+
     fn response(
         &self,
         state: &MindlinState,
         increment_m: f64,
         mut memory: Option<&mut Vec<MemoryInterval>>,
     ) -> Result<Response, TriboError> {
+        if self.capacity_n == 0.0 {
+            if let Some(out) = memory {
+                out.extend_from_slice(&state.memory);
+            }
+            return Ok(Response {
+                average_n: 0.0,
+                endpoint_n: 0.0,
+                energy_j: 0.0,
+                stored_change_j: 0.0,
+                heat_j: 0.0,
+                derivative_n_per_m: 0.0,
+            });
+        }
         let increment = increment_m / self.critical_slip_m;
         finite(increment, "mindlin_normalized_increment")?;
         if increment == 0.0 {
@@ -475,37 +594,7 @@ impl TangentialLaw for MindlinDeresiewiczPoint {
         state: &Self::State,
         x: &TangentialStepInput,
     ) -> Result<TangentialStep<Self::State>, TriboError> {
-        x.solve.validate()?;
-        if state.owner != *self {
-            return Err(TriboError::InvalidInput {
-                field: "mindlin_checkpoint_owner",
-            });
-        }
-        positive_finite(x.normal_n, "normal_force")?;
-        if x.normal_n != self.parameters.normal_force_n {
-            return Err(TriboError::OutsideApplicability {
-                field: "mindlin_fixed_normal_force_n",
-                value: x.normal_n,
-                minimum: self.parameters.normal_force_n,
-                maximum: self.parameters.normal_force_n,
-            });
-        }
-        positive_finite(x.dt_s, "dt_s")?;
-        nonnegative_finite(x.compliance_m_per_n, "compliance_m_per_n")?;
-        if let Some(t) = x.contact_temperature_k {
-            positive_finite(t, "temperature_kelvin")?;
-        }
-        if let Some(p) = x.nominal_pressure_pa {
-            nonnegative_finite(p, "contact_pressure_pa")?;
-        }
-        for value in x.slip_increment_m {
-            finite(value, "slip_increment_m")?;
-        }
-        if x.slip_increment_m[1] != 0.0 {
-            return Err(TriboError::InvalidInput {
-                field: "mindlin_requires_proportional_first_axis_motion",
-            });
-        }
+        self.admit_step(state, x)?;
         let (increment, iterations) = if self.capacity_n == 0.0 {
             (x.slip_increment_m[0], 0)
         } else {
@@ -514,19 +603,7 @@ impl TangentialLaw for MindlinDeresiewiczPoint {
         let mut memory = Vec::with_capacity(
             (state.memory.len() + 1).min(self.parameters.maximum_history_intervals),
         );
-        let response = if self.capacity_n == 0.0 {
-            memory.extend_from_slice(&state.memory);
-            Response {
-                average_n: 0.0,
-                endpoint_n: 0.0,
-                energy_j: 0.0,
-                stored_change_j: 0.0,
-                heat_j: 0.0,
-                derivative_n_per_m: 0.0,
-            }
-        } else {
-            self.response(state, increment, Some(&mut memory))?
-        };
+        let response = self.response(state, increment, Some(&mut memory))?;
         if response.average_n.abs() > x.solve.maximum_force_n {
             return Err(TriboError::OutsideApplicability {
                 field: "maximum_force_n",
