@@ -29,7 +29,8 @@ at every joint.
   ScreenReport}` — panel L/D with the DOCUMENTED drag proxy (profile
   cd₀(t) + induced cl²/(π·AR·e); the inviscid panel has no drag of its
   own), the fs-vpm flapping wake metric (BEM-shed vortices advected as
-  particles, streamwise vorticity drift), and the E-RACED generation:
+  particles with the clockwise BEM sign converted to counterclockwise VPM;
+  absolute-circulation-weighted streamwise rearrangement speed), and the E-RACED generation:
   losses normalized against a fixed analytical `LossSpan` per the fs-eproc
   contract (the vessel flagship's measured lesson applied), eliminations and
   the fixed-N-equivalent savings LEDGERED. `screen_generation` returns the
@@ -74,6 +75,11 @@ at every joint.
    objectives, identical race trajectories (gated).
 4. Reports never drop their honesty labels (model-form agreement is
    sign + order-band, not point-matching).
+5. The wake handoff preserves induced-flow direction. `flap_metric` measures
+   `sum |Gamma_i| |x_i(T)-x_i(0)| / (T sum |Gamma_i|)`, in freestream-speed
+   units. It is invariant under translation of the coordinate origin and gives
+   no weight to zero-circulation tracers; an empty/zero-strength wake gives zero.
+   This measures rearrangement, not centroid drift or an aircraft thrust force.
 
 ## Error model
 
@@ -111,6 +117,11 @@ None.
   (6× saved — the P7 payoff measured after checked-span normalization);
   the flap metric responds to
   the gait.
+- `screen` unit tests preserve the analytic clockwise dipole direction and the
+  independently summed induced field of the actual gained BEM screening wake.
+  A weighted-displacement fixture checks translation invariance, zero-strength
+  tracers and empty wakes. The gait gain is a screening ansatz; stronger input
+  modulation does not imply a universal monotone thrust or maneuver response.
 - **orn-003** refine: native wall-force lift agrees with the panel
   sign and a declared coefficient order band; drag is positive,
   steadiness is below 1e-4 after two flow-throughs, and the honesty

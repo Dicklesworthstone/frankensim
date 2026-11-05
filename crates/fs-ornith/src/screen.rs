@@ -2,8 +2,8 @@
 //! proxy — the inviscid panel method has no drag of its own: profile
 //! drag cd₀(t) plus induced drag cl²/(π·AR·e), the classic smoke
 //! model) plus the fs-vpm FLAPPING metric (wake vortices shed by the
-//! fs-bem unsteady wake, advected as vortex particles; thrust proxy =
-//! streamwise drift of the vorticity field per unit time). Generations
+//! fs-bem unsteady wake, advected as vortex particles; the metric measures
+//! circulation-weighted streamwise rearrangement, not thrust). Generations
 //! are E-RACED through fs-race: dominated candidates die at a fraction
 //! of their solve budget with anytime validity, and the payoff is
 //! MEASURED (evaluations used vs the fixed-N equivalent), ledgered in
@@ -11,7 +11,7 @@
 
 use crate::param::OrnithCandidate;
 use fs_bem::panel2d::solve;
-use fs_bem::wake2d::WakeSim;
+use fs_bem::wake2d::{WakeSim, WakeVortex};
 use fs_vpm::{VortexParticle, advect};
 
 /// Screen-stage panel count (smoke fixture).
@@ -33,10 +33,15 @@ pub fn lift_to_drag(c: &OrnithCandidate) -> f64 {
     cl / cd
 }
 
-/// The flapping-gait maneuver proxy: shed the unsteady BEM wake, hand
-/// the vortices to fs-vpm as particles, advect, and measure the
-/// streamwise vorticity drift (a thrust-like signature; higher =
-/// stronger gait authority).
+/// A screening measure of wake rearrangement under the prescribed gait gain.
+/// The BEM wake is handed to VPM with its physical circulation sign retained.
+/// The result is `sum |Gamma_i| |x_i(T)-x_i(0)| / (T sum |Gamma_i|)` in
+/// freestream-speed units, or zero for a wake with no circulation.
+///
+/// This measures the amount of streamwise motion of the represented vorticity,
+/// independently of the coordinate origin or zero-strength tracer particles.
+/// It is neither signed centroid drift nor a thrust/force prediction. The gain
+/// modulation remains a screening ansatz, not resolved flapping kinematics.
 #[must_use]
 pub fn flap_metric(c: &OrnithCandidate) -> f64 {
     let foil = c.section(PANELS);
@@ -46,22 +51,36 @@ pub fn flap_metric(c: &OrnithCandidate) -> f64 {
         sim.step()
             .expect("short bounded wake fixture must remain finite");
     }
-    // Lift the wake into vortex particles, modulate by the gait.
-    let particles: Vec<VortexParticle> = sim
-        .wake()
-        .iter()
+    let particles = gait_particles(sim.wake(), c.flap_amp, c.flap_freq);
+    let moved = advect_steps(&particles, 0.1, 12, 0.05);
+    rearrangement_rate(&particles, &moved, 1.2)
+}
+
+fn gait_particles(wake: &[WakeVortex], amplitude: f64, frequency: f64) -> Vec<VortexParticle> {
+    wake.iter()
         .enumerate()
         .map(|(k, w)| {
-            let phase = c.flap_freq * k as f64;
-            let gain = c.flap_amp.mul_add(fs_math::det::sin(phase), 1.0);
-            VortexParticle::new(w.pos, w.gamma * gain)
+            let phase = frequency * k as f64;
+            let gain = amplitude.mul_add(fs_math::det::sin(phase), 1.0);
+            // BEM is clockwise-positive; VPM is counterclockwise-positive.
+            // Convert once, before the original VPM transport kernels.
+            VortexParticle::new(w.pos, -w.gamma * gain)
         })
-        .collect();
-    let x0: f64 =
-        particles.iter().map(|p| p.pos[0].abs()).sum::<f64>() / particles.len().max(1) as f64;
-    let moved = advect_steps(&particles, 0.1, 12, 0.05);
-    let x1: f64 = moved.iter().map(|p| p.pos[0].abs()).sum::<f64>() / moved.len().max(1) as f64;
-    (x1 - x0) / 1.2
+        .collect()
+}
+
+fn rearrangement_rate(initial: &[VortexParticle], moved: &[VortexParticle], elapsed: f64) -> f64 {
+    debug_assert_eq!(initial.len(), moved.len());
+    let strength: f64 = initial.iter().map(|p| p.circulation.abs()).sum();
+    if strength == 0.0 {
+        return 0.0;
+    }
+    initial
+        .iter()
+        .zip(moved)
+        .map(|(p, q)| p.circulation.abs() * (q.pos[0] - p.pos[0]).abs())
+        .sum::<f64>()
+        / (elapsed * strength)
 }
 
 /// Advect helper mirroring fs-vpm's `simulate` with a fixed step count.
@@ -148,16 +167,91 @@ mod tests {
     use super::*;
 
     #[test]
-    fn advect_steps_matches_manual() {
-        let p = vec![
-            VortexParticle::new([0.0, 0.1], 1.0),
-            VortexParticle::new([0.0, -0.1], -1.0),
+    fn clockwise_bem_dipole_keeps_its_physical_transport_direction() {
+        let wake = [
+            WakeVortex {
+                pos: [0.0, 0.5],
+                gamma: 1.0,
+            },
+            WakeVortex {
+                pos: [0.0, -0.5],
+                gamma: -1.0,
+            },
         ];
-        let a = advect_steps(&p, 0.05, 3, 0.05);
-        let mut b = p;
-        for _ in 0..3 {
-            b = advect(&b, 0.05, 0.05);
+        let particles = gait_particles(&wake, 0.0, 1.0);
+        let moved = advect_steps(&particles, 0.05, 4, 0.05);
+        // Clockwise positive above counterclockwise negative translates left.
+        // Its separation is constant, so this is the exact finite-core speed.
+        let speed = -1.0 / (std::f64::consts::TAU * (1.0 + 0.05 * 0.05));
+        for (p, q) in particles.iter().zip(&moved) {
+            assert!((q.pos[0] - p.pos[0] - 0.2 * speed).abs() < 2e-15);
+            assert!((q.pos[1] - p.pos[1]).abs() < 2e-15);
         }
-        assert_eq!(a[0].pos[0].to_bits(), b[0].pos[0].to_bits());
+        assert!((rearrangement_rate(&particles, &moved, 0.2) + speed).abs() < 2e-15);
+    }
+
+    #[test]
+    fn actual_bem_screen_handoff_preserves_the_gained_induced_field() {
+        let candidate = OrnithCandidate::from_genes(&[0.5, 0.5, 0.5, 0.5, 0.5]);
+        let mut sim =
+            WakeSim::new(&candidate.section(PANELS), candidate.alpha, 0.08, 0.05).unwrap();
+        for _ in 0..24 {
+            sim.step().unwrap();
+        }
+        let particles = gait_particles(sim.wake(), candidate.flap_amp, candidate.flap_freq);
+        assert!(!particles.is_empty());
+        for point in [[0.75, 0.1], [1.5, -0.2], [3.0, 0.4]] {
+            let mut expected = [0.0; 2];
+            for (k, w) in sim.wake().iter().enumerate() {
+                let gain = candidate
+                    .flap_amp
+                    .mul_add(fs_math::det::sin(candidate.flap_freq * k as f64), 1.0);
+                let dx = point[0] - w.pos[0];
+                let dy = point[1] - w.pos[1];
+                let denominator = std::f64::consts::TAU * (dx * dx + dy * dy + 0.05 * 0.05);
+                // Independently evaluate BEM's clockwise-positive velocity.
+                expected[0] += w.gamma * gain * dy / denominator;
+                expected[1] -= w.gamma * gain * dx / denominator;
+            }
+            let actual = fs_vpm::induced_velocity(&particles, point, 0.05);
+            assert!(expected[0].abs() + expected[1].abs() > 1e-5);
+            for axis in 0..2 {
+                assert!((actual[axis] - expected[axis]).abs() < 2e-14);
+            }
+        }
+        let moved = advect_steps(&particles, 0.1, 12, 0.05);
+        assert_eq!(
+            flap_metric(&candidate),
+            rearrangement_rate(&particles, &moved, 1.2)
+        );
+    }
+
+    #[test]
+    fn rearrangement_uses_circulation_and_displacements_not_world_positions() {
+        let initial = [
+            VortexParticle::new([-2.0, 0.0], 2.0),
+            VortexParticle::new([1.0, 0.0], -1.0),
+            VortexParticle::new([10.0, 0.0], 0.0),
+        ];
+        let moved = [
+            VortexParticle::new([-1.0, 0.0], 2.0),
+            VortexParticle::new([-1.0, 0.0], -1.0),
+            VortexParticle::new([100.0, 0.0], 0.0),
+        ];
+        let expected = 2.0 / 3.0; // (2*1 + 1*2) / (2 seconds * 3 strength).
+        assert_eq!(rearrangement_rate(&initial, &moved, 2.0), expected);
+        let translate = |values: [VortexParticle; 3]| {
+            values.map(|p| VortexParticle::new([p.pos[0] + 32.0, p.pos[1] - 5.0], p.circulation))
+        };
+        assert_eq!(
+            rearrangement_rate(&translate(initial), &translate(moved), 2.0),
+            expected
+        );
+        assert_eq!(
+            rearrangement_rate(&initial[..2], &moved[..2], 2.0),
+            expected
+        );
+        assert_eq!(rearrangement_rate(&initial[2..], &moved[2..], 2.0), 0.0);
+        assert_eq!(rearrangement_rate(&[], &[], 2.0), 0.0);
     }
 }

@@ -90,7 +90,11 @@ fn orn_002_screen_eraced() {
         rep.winner == expected
             && rep.eliminated >= 20
             && rep.evaluations_used * 3 < rep.fixed_n_equivalent
-            && fm_hi > fm_lo,
+            && fm_lo.is_finite()
+            && fm_hi.is_finite()
+            && fm_lo >= 0.0
+            && fm_hi >= 0.0
+            && (fm_hi - fm_lo).abs() > 1e-8,
         &format!(
             "race winner {} == argmax L/D {}; {}/24 dominated candidates eliminated early; {} evals vs fixed-N {} ({}x saved); flap metric responds: {fm_lo:.4} -> {fm_hi:.4}",
             rep.winner,
