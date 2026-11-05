@@ -592,26 +592,8 @@ fn held_body_loads_keep_the_existing_symplectic_trajectory_and_gravity_account()
         })
         .unwrap();
     assert_eq!(receipt.step, native);
-    // The compensated staged impulse and legacy single full kick can round
-    // differently; they integrate the same held resultant force.
-    vector(
-        receipt.step.state_after.linear_momentum_world(),
-        original.state_after.linear_momentum_world(),
-        2e-14,
-    );
-    vector(
-        receipt.step.state_after.pose().position_world(),
-        original.state_after.pose().position_world(),
-        2e-14,
-    );
-    assert_eq!(
-        receipt.step.state_after.angular_momentum_body(),
-        original.state_after.angular_momentum_body(),
-    );
-    assert_eq!(
-        receipt.step.state_after.pose().orientation(),
-        original.state_after.pose().orientation(),
-    );
+    // Held and endpoint loads share the same compensated kick/drift owner.
+    assert_eq!(receipt.step, original);
     vector(receipt.linear_momentum_residual_world, Vec3::ZERO, 2e-14);
     vector(receipt.angular_momentum_residual_world, Vec3::ZERO, 2e-14);
     close(

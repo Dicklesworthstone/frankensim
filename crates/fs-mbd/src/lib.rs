@@ -1784,16 +1784,27 @@ impl RigidBodyIntegrator {
         let total_force_world = wrench
             .force_world
             .add(self.gravity.acceleration_world().scale(properties.mass));
-        let linear_momentum_mid = state
-            .linear_momentum_world
-            .add(total_force_world.scale(0.5 * duration_seconds));
-        let position_after = state
-            .pose
-            .position_world
-            .add(linear_momentum_mid.scale(duration_seconds / properties.mass));
-        let linear_momentum_after = state
-            .linear_momentum_world
-            .add(total_force_world.scale(duration_seconds));
+        let linear_momentum_mid = verlet::add_half_impulse(
+            verlet::lifted(state.linear_momentum_world),
+            total_force_world,
+            duration_seconds,
+        );
+        let position_after = verlet::drift_position(
+            state.pose.position_world,
+            linear_momentum_mid,
+            properties.mass,
+            duration_seconds,
+            "midpoint.drift_scale",
+            "midpoint.position_after",
+        )?;
+        let linear_momentum_after = verlet::rounded(
+            verlet::add_impulse(
+                verlet::lifted(state.linear_momentum_world),
+                total_force_world,
+                duration_seconds,
+            ),
+            "midpoint.linear_momentum_after",
+        )?;
 
         let (angular_momentum_after, orientation_after) = implicit_rotation_step(
             state.angular_momentum_body,
@@ -1842,51 +1853,8 @@ impl RigidBodyIntegrator {
         wrench: Wrench,
         duration_seconds: f64,
     ) -> Result<StepReceipt, DynamicsError> {
-        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
-            return Err(DynamicsError::InvalidStepDuration);
-        }
-        self.gravity.validate()?;
-        state.validate()?;
-        properties.validate()?;
-        wrench.validate()?;
-        let diagnostics_before = self.diagnostics(state, properties)?;
-        let total_force_world = wrench
-            .force_world
-            .add(self.gravity.acceleration_world().scale(properties.mass));
-        let linear_momentum_mid = state
-            .linear_momentum_world
-            .add(total_force_world.scale(0.5 * duration_seconds));
-        let position_after = state
-            .pose
-            .position_world
-            .add(linear_momentum_mid.scale(duration_seconds / properties.mass));
-        let linear_momentum_after = state
-            .linear_momentum_world
-            .add(total_force_world.scale(duration_seconds));
-
-        let half_torque_impulse = wrench.torque_body.scale(0.5 * duration_seconds);
-        let angular_momentum_kicked = state.angular_momentum_body.add(half_torque_impulse);
-        let (orientation_after, angular_momentum_drifted) = free_rotation_step(
-            state.pose.orientation,
-            angular_momentum_kicked,
-            properties,
-            duration_seconds,
-        )?;
-        let angular_momentum_after = angular_momentum_drifted.add(half_torque_impulse);
-
-        let state_after = RigidBodyState::new(
-            Pose::new(position_after, orientation_after)?,
-            linear_momentum_after,
-            angular_momentum_after,
-        )?;
-        let diagnostics_after = self.diagnostics(state_after, properties)?;
-        Ok(StepReceipt {
-            duration_seconds,
-            state_before: state,
-            state_after,
-            diagnostics_before,
-            diagnostics_after,
-        })
+        self.begin_verlet(state, properties, wrench, duration_seconds)?
+            .finish(wrench)
     }
 
     /// Advance pose-dependent loads with symmetric endpoint kicks and the
@@ -1959,23 +1927,35 @@ impl RigidBodyIntegrator {
         let total_force_world = wrench
             .force_world
             .add(self.gravity.acceleration_world().scale(properties.mass));
-        let linear_momentum_after = state
-            .linear_momentum_world
-            .add(total_force_world.scale(duration_seconds));
-        let position_after = state
-            .pose
-            .position_world
-            .add(linear_momentum_after.scale(duration_seconds / properties.mass));
+        let linear_kicked = verlet::add_impulse(
+            verlet::lifted(state.linear_momentum_world),
+            total_force_world,
+            duration_seconds,
+        );
+        let linear_momentum_after =
+            verlet::rounded(linear_kicked, "kick_drift.linear_momentum_after")?;
+        let position_after = verlet::drift_position(
+            state.pose.position_world,
+            linear_kicked,
+            properties.mass,
+            duration_seconds,
+            "kick_drift.drift_scale",
+            "kick_drift.position_after",
+        )?;
 
-        let angular_momentum_kicked = state
-            .angular_momentum_body
-            .add(wrench.torque_body.scale(duration_seconds));
-        let (orientation_after, angular_momentum_after) = free_rotation_step(
+        let angular_momentum_kicked = verlet::add_impulse(
+            verlet::lifted(state.angular_momentum_body),
+            wrench.torque_body,
+            duration_seconds,
+        );
+        let (orientation_after, angular_drifted) = free_rotation_step_compensated(
             state.pose.orientation,
             angular_momentum_kicked,
             properties,
             duration_seconds,
         )?;
+        let angular_momentum_after =
+            verlet::rounded(angular_drifted, "kick_drift.angular_momentum_after")?;
 
         let state_after = RigidBodyState::new(
             Pose::new(position_after, orientation_after)?,
@@ -2234,6 +2214,40 @@ fn solve_rotation_3(mut a: [[f64; 3]; 3], mut b: [f64; 3]) -> Result<[f64; 3], D
         }
     }
     Ok(x)
+}
+
+fn free_rotation_step_compensated(
+    orientation: UnitQuaternion,
+    momentum: [Dd; 3],
+    properties: MassProperties,
+    duration_seconds: f64,
+) -> Result<(UnitQuaternion, [Dd; 3]), DynamicsError> {
+    properties.angular_velocity_body_checked(verlet::rounded(
+        momentum,
+        "free_rotation.angular_momentum",
+    )?)?;
+    let rotation = |q: UnitQuaternion| {
+        fs_ga::So3::try_from_quat(fs_ga::Quat {
+            w: q.w,
+            x: q.x,
+            y: q.y,
+            z: q.z,
+        })
+        .map_err(|_| DynamicsError::InvalidOrientation)
+    };
+    let moments = properties.principal_inertia_body;
+    let (next, momentum) = fs_time::lie::compensated::rigid_body_momentum_step_in_frame(
+        rotation(orientation)?,
+        momentum,
+        fs_ga::Vec3::new(moments.x, moments.y, moments.z),
+        rotation(properties.principal_to_body)?,
+        duration_seconds,
+    )
+    .map_err(|_| DynamicsError::NonFinite("free_rotation"))?;
+    let q = next.as_quat();
+    // The cached principal frame and common time owner advance one paired
+    // attitude/momentum map. Only the established MBD pose boundary rounds.
+    Ok((UnitQuaternion::new(q.w, q.x, q.y, q.z)?, momentum))
 }
 
 fn free_rotation_step(

@@ -850,6 +850,26 @@ is rounded after adding the original position, preserving a small displacement
 when large drift and origin offsets cancel. Callback views and accepted states
 keep their original `f64` representation; no extra substeps or allocation occur.
 
+Angular half-kicks retain the same two-component momentum through the native
+`fs-time::lie::compensated` Hamiltonian drift and the endpoint kick. Retained
+momentum drives each rotation phase, quaternion composition and paired inverse
+momentum transport; carrying a tail after a rounded drift is insufficient.
+The cached principal frame supports full SPD inertia without a new eigensolve.
+`step_symplectic` uses this same staged owner for its held wrench, while
+`step_kick_drift` retains its full kick through the same angular drift and
+linear position contraction. Half impulses include any subnormal-duration
+remainder before force contraction, preserving a representable complete impulse.
+Equal endpoint forces use one finite full impulse for accepted linear momentum,
+including minimum subnormal impulses whose individual halves cannot be stored;
+overflowing full products retain the original staged evaluation.
+Translation in `step` and `step_cayley` also uses the shared retained half-kick
+and position contraction alongside their existing implicit angular midpoint.
+`tests/angular_momentum_stages.rs` supplies independent large-phase, full-inertia,
+endpoint-impulse, reversal, full-kick quotient, subnormal-duration and cancelling
+linear drift regressions across the public rigid steppers. These are numerical
+precision improvements within the existing splitting and accepted state types;
+they add no energy projection, extra time subdivisions or general-inertia solve.
+
 For smooth configuration-only loads this is a symmetric second-order
 splitting. Spin plus orbital momentum changes only through the
 two physical endpoint impulses, up to floating-point error. The free map
