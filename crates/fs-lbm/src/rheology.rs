@@ -421,7 +421,7 @@ impl PreparedRheology {
     /// invariant B, so gamma = sqrt((A/tau)^2 + B^2). Only the deviatoric
     /// contribution varies with shear tau. Treating B as A/tau would apply
     /// the shear relaxation rate to the collision's independent bulk mode.
-    fn solve_with_fixed_strain(
+    pub(crate) fn solve_with_fixed_strain(
         &self,
         numerator: f64,
         fixed_rate: f64,

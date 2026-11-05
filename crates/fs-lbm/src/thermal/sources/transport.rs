@@ -2,7 +2,8 @@
 //!
 //! These are numerical relaxation times, not another material law. Scalars
 //! per cell describe isotropic transport with uniform thermal storage. The
-//! existing BGK/TRT, low-Mach and boundary approximations remain in force.
+//! existing low-Mach and boundary approximations remain in force. Three-
+//! dimensional plates may retain independently selected bulk central moments.
 
 use super::{
     ThermalLbm, ThermalLbm3, ThermalSourceBalance, ThermalSourceError,
@@ -18,6 +19,8 @@ use super::{
 /// generally mean equal thermal relaxation times.
 /// With TRT, the grid's authored product is retained and every implied odd
 /// relaxation must also be representably finite and greater than one half.
+/// With 3-D independent-bulk central moments, this field changes only shear;
+/// the selected bulk/higher-order rates survive the step and its snapshots.
 ///
 /// The fields are held fixed over this one step. They do not reset populations
 /// or persist into subsequent calls. Existing scalar diagnostics such as

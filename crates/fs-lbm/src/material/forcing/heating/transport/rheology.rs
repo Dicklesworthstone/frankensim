@@ -5,8 +5,11 @@
 //! with `gamma_dot = numerator / (tau dt)`; the background tau is only an
 //! initial iterate. This avoids interpreting a state with the wrong viscosity
 //! after step-local transport restores the background relaxation field.
+//! With independent bulk relaxation in 3-D, this numerator contains only
+//! deviatoric strain; the independently relaxed dilation enters the same
+//! constitutive query in quadrature and remains fixed during the shear solve.
 //!
-//! This is an explicit generalized-Newtonian, fixed-storage BGK coupling.
+//! This is an explicit generalized-Newtonian, fixed-storage coupling.
 //! Local constitutive convergence is not implicit time integration, viscoelastic
 //! memory, a stability guarantee or experimental validation. The base entry
 //! adds no viscous heat; [`heating`] explicitly thermalizes the same samples.
@@ -76,6 +79,8 @@ impl RheologySolve {
 pub(crate) struct LocalRheology<F> {
     pub value: F,
     pub shear_rate_per_s: f64,
+    /// Actual iterate used for the retained material query, not its next tau.
+    pub relaxation_time: f64,
     pub iterations: usize,
     pub relaxation_defect: f64,
 }
@@ -161,6 +166,7 @@ pub(crate) fn solve_local_with_fixed_strain<F, E>(
             return Ok(LocalRheology {
                 value,
                 shear_rate_per_s: rate,
+                relaxation_time: tau,
                 iterations,
                 relaxation_defect,
             });
@@ -224,6 +230,10 @@ pub struct RheologyMaterial<F> {
     transport: FluidTransportState,
     iterations: usize,
     relaxation_defect: f64,
+    // Some([sqrt(2 D_dev:D_dev), sqrt(2/3)|div u|]) in 1/s only when
+    // bulk is independent. Retain the queried components without subtracting
+    // nearly equal squared invariants or re-reading population stress for heat.
+    strain_components_per_s: Option<[f64; 2]>,
 }
 impl<F> RheologyMaterial<F> {
     /// Original material owner, including its property/source receipts.
@@ -251,26 +261,28 @@ impl<F> FluidTransport for RheologyMaterial<F> {
 }
 
 trait StressSlab<const D: usize, const Q: usize>: Slab<D, Q> {
-    fn shear_numerator(&self, cell: usize) -> f64;
+    fn strain_components(&self, cell: usize) -> [f64; 2];
+    fn independent_bulk(&self) -> bool { false }
 }
 impl StressSlab<2, 5> for ThermalLbm {
-    fn shear_numerator(&self, cell: usize) -> f64 {
+    fn strain_components(&self, cell: usize) -> [f64; 2] {
         let m = self.grid.moments(cell);
         let force = std::array::from_fn(|d| self.grid.g[d].mul_add(m.rho, self.grid.fext[cell][d]));
-        crate::core2::force_corrected_shear_rate(&self.grid.f[cell], m.rho, m.u, force, 1.0)
+        [crate::core2::force_corrected_shear_rate(&self.grid.f[cell], m.rho, m.u, force, 1.0), 0.0]
     }
 }
 impl StressSlab<3, 7> for ThermalLbm3 {
-    fn shear_numerator(&self, cell: usize) -> f64 {
+    fn strain_components(&self, cell: usize) -> [f64; 2] {
         let (rho, u) = self.grid.moments3(cell);
-        crate::d3q19::force_corrected_shear_rate3(
+        crate::d3q19::rheology_stress_components3(
             &self.grid.f[cell],
             rho,
             u,
             self.grid.fext[cell],
-            1.0,
+            self.grid.collision_model_at(cell),
         )
     }
+    fn independent_bulk(&self) -> bool { self.grid.central_moment_bulk_rates().is_some() }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -284,13 +296,32 @@ fn sample<S: StressSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usize
     gate: &CancelGate,
     resolve: &mut impl FnMut(RheologyPoint, &FluidTransportState) -> Result<F, MaterialError>,
 ) -> Result<Vec<TransportSample<RheologyMaterial<F>>>, MaterialTransportError> {
+    sample_with_strain::<S, F, D, Q>(
+        mapping, state, cells, plane, range, solve, gate, resolve,
+        state.independent_bulk(), |cell| state.strain_components(cell),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_with_strain<S: Slab<D, Q>, F: FluidTransport, const D: usize, const Q: usize>(
+    mapping: &MaterialSlab<S>,
+    state: &S,
+    cells: usize,
+    plane: usize,
+    range: [f64; 2],
+    solve: RheologySolve,
+    gate: &CancelGate,
+    resolve: &mut impl FnMut(RheologyPoint, &FluidTransportState) -> Result<F, MaterialError>,
+    independent_bulk: bool,
+    mut strain: impl FnMut(usize) -> [f64; 2],
+) -> Result<Vec<TransportSample<RheologyMaterial<F>>>, MaterialTransportError> {
     let temperature = temperatures::<S, D, Q>(mapping, state, range, gate)?;
     // Validate the complete stress field before asking any source to resolve it.
-    let mut numerator = vec![0.0; cells];
+    let mut components = vec![[0.0; 2]; cells];
     for cell in plane..cells - plane {
         poll(gate)?;
-        numerator[cell] = state.shear_numerator(cell);
-        if !numerator[cell].is_finite() || numerator[cell] < 0.0 {
+        components[cell] = strain(cell);
+        if components[cell].iter().any(|value| !value.is_finite() || *value < 0.0) {
             return Err(MaterialTransportError::Invalid(
                 "unrepresentable non-equilibrium shear stress",
             ));
@@ -305,8 +336,9 @@ fn sample<S: StressSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usize
         range,
         gate,
         &mut |cell, temperature_k, retained| {
-            let root = solve_local(
-                numerator[cell],
+            let root = solve_local_with_fixed_strain(
+                components[cell][0],
+                components[cell][1],
                 units.timestep_s,
                 state.momentum_relaxation()[cell],
                 solve,
@@ -356,6 +388,10 @@ fn sample<S: StressSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usize
                 },
                 iterations: root.iterations,
                 relaxation_defect: root.relaxation_defect,
+                strain_components_per_s: independent_bulk.then(|| [
+                    (components[cell][0] / root.relaxation_time) / units.timestep_s,
+                    components[cell][1] / units.timestep_s,
+                ]),
             })
         },
     )

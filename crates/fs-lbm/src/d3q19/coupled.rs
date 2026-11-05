@@ -14,7 +14,8 @@
 //! fast path: those carry frozen bit-semantics goldens and stay untouched;
 //! this is the correctness-first reference rung, mirroring how the 2-D
 //! extensions run on the plain grid. Collision reuses the shared
-//! [`collide_cell3`](super::collide_cell3) kernel (BGK or TRT with Guo forcing), so the collision algebra
+//! [`collide_cell3`](super::collide_cell3) kernel (BGK, TRT or independent-bulk
+//! central moments with Guo forcing), so the collision algebra
 //! is written exactly once.
 //!
 //! Temperature rides a D3Q7 advection-diffusion population (rest + six
@@ -70,6 +71,8 @@ pub struct PlatesGrid3 {
     // The material/rheology owner retains tau per cell. Only the independent
     // even/odd product belongs to this selector; no reference viscosity is copied.
     pub(crate) trt_magic: Option<f64>,
+    // Independent trace and higher-order rates. Shear remains in local tau.
+    pub(crate) central_moment_bulk: Option<[f64; 2]>,
     post: Vec<[f64; Q3]>,
     plate_motion: Option<moving_walls::PlateMotion3>,
     plate_exchange: Option<[super::WallMomentumExchange3; 2]>,
@@ -153,6 +156,7 @@ impl PlatesGrid3 {
             tau: vec![tau; cells],
             fext: vec![[0.0; 3]; cells],
             trt_magic: None,
+            central_moment_bulk: None,
             post: vec![f0; cells],
             plate_motion: None,
             plate_exchange: None,
@@ -167,19 +171,44 @@ impl PlatesGrid3 {
     /// establish that property for spatially varying viscosity or arbitrary flow.
     /// All fluid-cell even/odd rates must be representable before publication.
     pub fn set_trt_magic(&mut self, magic: f64) -> Result<(), PlateStepError3> {
-        self.admit_collision(Some(magic))?;
+        self.admit_collision(Some(magic), None)?;
         self.trt_magic = Some(magic);
+        self.central_moment_bulk = None;
         Ok(())
     }
 
     /// Restore the original BGK collision without changing cell viscosity or state.
     pub fn set_bgk_collision(&mut self) -> Result<(), PlateStepError3> {
-        self.admit_collision(None)?;
+        self.admit_collision(None, None)?;
         self.trt_magic = None;
+        self.central_moment_bulk = None;
         Ok(())
     }
 
-    /// Authored TRT product, or `None` for the original BGK collision.
+    /// Select independent bulk/shear central-moment collision. Both supplied
+    /// rates must lie strictly in `(0, 2)`; local `tau` still controls shear.
+    /// The physical 3-D bulk coefficient is `zeta/rho=(2/9)(1/bulk_rate-1/2)`
+    /// in lattice units. Selecting a numerical rate alone supplies no heat.
+    /// All cells are admitted before the selector changes.
+    pub fn set_central_moment_bulk_collision(
+        &mut self,
+        bulk_rate: f64,
+        higher_order_rate: f64,
+    ) -> Result<(), PlateStepError3> {
+        let rates = [bulk_rate, higher_order_rate];
+        self.admit_collision(None, Some(rates))?;
+        self.trt_magic = None;
+        self.central_moment_bulk = Some(rates);
+        Ok(())
+    }
+
+    /// Independently authored `[bulk, higher-order]` rates, when selected.
+    #[must_use]
+    pub fn central_moment_bulk_rates(&self) -> Option<[f64; 2]> {
+        self.central_moment_bulk
+    }
+
+    /// Authored TRT product, or `None` for BGK or central-moment collision.
     #[must_use]
     pub fn trt_magic(&self) -> Option<f64> {
         self.trt_magic
@@ -189,7 +218,11 @@ impl PlatesGrid3 {
     /// As with [`Self::moments3`], an index outside the storage panics.
     #[must_use]
     pub fn collision_model_at(&self, cell: usize) -> CollisionModel3 {
-        plate_collision(self.tau[cell], self.trt_magic)
+        self.collision_with_tau(self.tau[cell])
+    }
+
+    pub(crate) fn collision_with_tau(&self, tau: f64) -> CollisionModel3 {
+        plate_collision(tau, self.trt_magic, self.central_moment_bulk)
     }
 
     fn checked_layout(&self) -> Result<(usize, usize), PlateStepError3> {
@@ -206,10 +239,10 @@ impl PlatesGrid3 {
         Ok((plane, count))
     }
 
-    fn admit_collision(&self, magic: Option<f64>) -> Result<(), PlateStepError3> {
+    fn admit_collision(&self, magic: Option<f64>, bulk: Option<[f64; 2]>) -> Result<(), PlateStepError3> {
         let (plane, count) = self.checked_layout()?;
         for cell in plane..count - plane {
-            plate_collision(self.tau[cell], magic)
+            plate_collision(self.tau[cell], magic, bulk)
                 .validate()
                 .map_err(|source| PlateStepError3::Collision { cell, source })?;
         }
@@ -426,7 +459,14 @@ impl PlatesGrid3 {
     }
 }
 
-fn plate_collision(tau: f64, trt_magic: Option<f64>) -> CollisionModel3 {
+fn plate_collision(tau: f64, trt_magic: Option<f64>, bulk: Option<[f64; 2]>) -> CollisionModel3 {
+    if let Some([bulk_rate, higher_order_rate]) = bulk {
+        return CollisionModel3::CentralMomentBulk {
+            shear_rate: 1.0 / tau,
+            bulk_rate,
+            higher_order_rate,
+        };
+    }
     match trt_magic {
         Some(magic) => CollisionModel3::Trt { tau, magic },
         None => CollisionModel3::Bgk { tau },
@@ -576,8 +616,10 @@ fn update_tau3_prepared<'a>(
             for x in 0..grid.nx {
                 let i = grid.idx(x, y, z);
                 let (rho, u) = grid.moments3(i);
-                let numerator = force_corrected_shear_rate3(&grid.f[i], rho, u, grid.fext[i], 1.0);
-                let local = law_at(i).solve(numerator, grid.tau[i]);
+                let [numerator, fixed] = super::rheology_stress_components3(
+                    &grid.f[i], rho, u, grid.fext[i], grid.collision_model_at(i),
+                );
+                let local = law_at(i).solve_with_fixed_strain(numerator, fixed, grid.tau[i]);
                 grid.tau[i] = local.tau;
                 stats.floored += u32::from(local.floored);
                 stats.capped += u32::from(local.capped);

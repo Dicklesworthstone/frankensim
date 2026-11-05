@@ -384,6 +384,7 @@ impl Slab<3, 7> for ThermalLbm3 {
         let weights = s.gpop[0];
         s.grid.f.clone_from(&g.f); s.grid.tau.clone_from(&g.tau); s.grid.fext.clone_from(&g.fext);
         s.grid.trt_magic = g.trt_magic();
+        s.grid.central_moment_bulk = g.central_moment_bulk_rates();
         s.grid.copy_plate_state_from(g);
         s.gpop.clone_from(&self.gpop);
         s.advection_history.clone_from(&self.advection_history);
@@ -404,6 +405,9 @@ impl Slab<3, 7> for ThermalLbm3 {
     fn momentum_relaxation(&self) -> &[f64] { &self.grid.tau }
     fn momentum_relaxation_mut(&mut self) -> &mut [f64] { &mut self.grid.tau }
     fn momentum_relaxation_valid(&self, tau: &[f64]) -> bool {
+        if self.grid.central_moment_bulk_rates().is_some() {
+            return tau.iter().all(|&value| self.grid.collision_with_tau(value).validate().is_ok());
+        }
         self.grid.trt_magic().is_none_or(|magic| trt_rates_valid(tau, magic))
     }
     fn advance_local(&mut self, forces: &[[f64; 3]], thermal_tau: &[f64]) -> Result<(), ThermalForcingError> {

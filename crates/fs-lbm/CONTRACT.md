@@ -12845,5 +12845,40 @@ free-surface stress SGS path retains its explicit BGK/TRT-only admission.
 
 This is a weakly compressible, isothermal collision capability. Longitudinal
 continuum waves decay at `Gamma = (4nu/3 + zeta/rho) k²/2`, while transverse waves
-decay at `nu k²`. It does not add a thermal equation, molecular relaxation,
-temperature-dependent bulk-viscosity sampling or bulk dissipation heating.
+decay at `nu k²`. The collision operator alone adds no thermal equation,
+molecular relaxation or temperature-dependent bulk-viscosity sampling. The
+separate thermal-plate coupling below explicitly supplies physical bulk heat.
+
+## Physical shear and bulk heating on 3-D thermal plates
+
+`PlatesGrid3::set_central_moment_bulk_collision` retains independent bulk and
+higher-order rates while local material/rheology fields change only shear.
+Checked thermal snapshots preserve that selector, the held Guo force frame,
+plate state and directional buoyancy. Selecting numerical damping alone does
+not create a heat source.
+
+`MaterialSlab3::step_with_material_rheology_and_bulk_viscous_heating` takes one
+explicit physical `zeta` in Pa s, spatially uniform and held for that step. The
+same coefficient sets `tau_bulk=1/2+(9/2)(zeta/rho_ref)dt/dx²` and volumetric
+heat `zeta(div u)²`. The retained source callback supplies local
+`mu(T,sqrt(2 D:D))` and conductivity. Its bounded constitutive solve separates
+the Guo-corrected deviatoric numerator from independently relaxed dilation.
+Cached components at the actual accepted query give
+`q=2mu D_dev:D_dev+zeta(div u)²`; isotropic shear power is not added a second time.
+
+The existing source half-kicks, material endpoint checks and independently
+measured wall/sensible-heat balance publish the collision selection and thermal
+state together. Cancellation or any source/conversion/temperature refusal keeps
+the accepted slab. Higher-order relaxation and numerical kinetic-energy
+residuals supply no heat. The earlier heated API refuses independent bulk unless
+this explicit physical binding is provided; BGK/TRT paths retain their behavior.
+
+This remains explicit low-Mach, fixed-density/Cp sensible-heat transport. It
+does not assert compressible total-energy conservation, an implicit heating
+solve or local temperature/shear-dependent bulk viscosity. Positive bulk
+viscosity must remain representable with `0<bulk_rate<2`; zero and underresolved
+bulk coefficients refuse rather than acquiring an artificial positive floor.
+The native `material_bulk_viscous_heating` tests compare forced pure-shear,
+pure-dilation and mixed-strain tensor power against actual thermal transport,
+exercise successive temperature/material queries and changes in physical zeta,
+and verify endpoint/cancellation refusal without publishing state or selectors.

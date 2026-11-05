@@ -5,23 +5,29 @@
 //! evaluation supplies both collision viscosity and this nonnegative source.
 //! No numerical kinetic-energy residual, pressure work, bulk-viscosity loss,
 //! turbulence closure or elastic energy is relabelled as thermal power.
+//! The explicitly sourced 3-D bulk entry point instead uses
+//! `2 mu D_dev:D_dev + zeta (div u)^2`, with the same positive physical
+//! `zeta` controlling trace relaxation and heating during that step.
 
 use super::super::super::Inputs;
 use super::super::boussinesq::{
     BackgroundBuoyancy, BoussinesqConfig, BoussinesqMaterial, candidate_with_buoyancy,
 };
-use super::super::{advance_with_sampler_and_sources, advance_with_sampler_sources_and_candidate};
+use super::super::{advance_with_sampler_and_sources, advance_with_sampler_sources_and_candidate,
+    candidate_with_prepared_input};
 use super::{
     FluidTransport, FluidTransportState, HeatSourceLimits, MaterialError, MaterialSlab,
     MaterialTransportError, MaterialTransportStep, RheologyMaterial, RheologyPoint, RheologySolve,
-    StressSlab, ThermalLbm, ThermalLbm3, TransportSample, poll, sample,
+    StressSlab, ThermalLbm, ThermalLbm3, TransportSample, poll, sample, sample_with_strain,
 };
 use fs_exec::CancelGate;
 
 /// Explicit source partition for an accepted physical viscous-heating step.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViscousHeating {
-    /// `mu * gamma_dot^2` [W/m3], one value per cell including zero wall entries.
+    /// Constitutive stress power [W/m3], with zero wall entries. The original
+    /// API uses `mu * gamma_dot^2`; the explicit 3-D bulk API separates
+    /// deviatoric shear and volumetric power without counting dilation twice.
     /// These are the applied initial-state values, held over one time step.
     pub power_w_m3: Vec<f64>,
     /// Integrated constitutive stress work converted into sensible heat [J].
@@ -54,6 +60,7 @@ fn source_inputs<S, F, const D: usize>(
     limits: HeatSourceLimits,
     original: Inputs<D>,
     applied: &[TransportSample<RheologyMaterial<F>>],
+    bulk_viscosity_pa_s: Option<f64>,
     gate: &CancelGate,
 ) -> Result<(Inputs<D>, ViscousHeating), MaterialTransportError> {
     let units = mapping.force_units;
@@ -67,7 +74,22 @@ fn source_inputs<S, F, const D: usize>(
         let viscosity = value.transport.dynamic_viscosity_pa_s();
         // This multiplication order avoids overflowing rate^2 before a small
         // viscosity can scale it. Both values come from the cached query.
-        let power = (viscosity * rate) * rate;
+        let power = match (bulk_viscosity_pa_s, value.material.strain_components_per_s) {
+            (None, None) => (viscosity * rate) * rate,
+            (Some(bulk), Some([deviatoric, dilation])) => {
+                let shear_power = (viscosity * deviatoric) * deviatoric;
+                let bulk_power = ((bulk * dilation) * dilation) * 1.5;
+                if (deviatoric != 0.0 && shear_power == 0.0)
+                    || (dilation != 0.0 && bulk_power == 0.0)
+                {
+                    return Err(MaterialTransportError::Invalid("physical viscous heating is unrepresentable"));
+                }
+                shear_power + bulk_power
+            }
+            _ => return Err(MaterialTransportError::Invalid(
+                "independent bulk relaxation requires explicitly sourced bulk heating",
+            )),
+        };
         let energy = (power * volume) * units.timestep_s;
         if !power.is_finite()
             || power < 0.0
@@ -146,7 +168,7 @@ fn advance<S: StressSlab<D, Q>, F: FluidTransport, const D: usize, const Q: usiz
             },
             |mapping, original, applied| {
                 source_inputs(
-                    mapping, power, forces, depth_m, limits, original, applied, gate,
+                    mapping, power, forces, depth_m, limits, original, applied, None, gate,
                 )
             },
         )?;
@@ -203,7 +225,7 @@ fn advance_boussinesq<
         },
         |mapping, original, applied| {
             source_inputs(
-                mapping, power, forces, depth_m, limits, original, applied, gate,
+                mapping, power, forces, depth_m, limits, original, applied, None, gate,
             )
         },
         |mapping, input, applied| {
@@ -309,6 +331,88 @@ impl MaterialSlab<ThermalLbm> {
 }
 
 impl MaterialSlab<ThermalLbm3> {
+    /// Couple local temperature/shear-dependent material transport to explicit
+    /// physical shear AND bulk viscous heat on the original D3Q19/D3Q7 slab.
+    ///
+    /// `bulk_viscosity_pa_s` is a declared physical material coefficient,
+    /// spatially uniform and held for this step. It supplies both
+    /// `tau_bulk = 1/2 + (9/2)(zeta/rho_ref) dt/dx^2` and the volumetric
+    /// power `zeta (div u)^2`. The material callback still supplies the local
+    /// `mu(T, sqrt(2 D:D))`, conductivity and retained source at both epochs.
+    /// Deviatoric power is `2 mu D_dev:D_dev`, so dilation is counted once.
+    /// Authored power must exclude both constitutive losses.
+    ///
+    /// The independent central-moment selector, source half-kicks, original
+    /// material receipts and endpoint temperature/energy checks publish
+    /// together. Every refusal leaves the prior populations, force frame and
+    /// collision selector intact. Accepted steps retain the selected bulk and
+    /// higher-order rates; subsequent calls can explicitly change physical
+    /// zeta. The legacy heated API refuses that selector without this binding.
+    ///
+    /// Zero or unrepresentably small zeta is refused: this collision family
+    /// requires `0 < bulk_rate < 2`, with no artificial positive viscosity floor.
+    /// `higher_order_rate` also lies in `(0, 2)` and never supplies heat.
+    /// This is explicit low-Mach sensible-heat transport, not a compressible
+    /// total-energy solver, variable-density storage or implicit heating solve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_material_rheology_and_bulk_viscous_heating<F: FluidTransport>(
+        &mut self,
+        power_w_m3: &[f64],
+        forces_n_m3: &[[f64; 3]],
+        bulk_viscosity_pa_s: f64,
+        higher_order_rate: f64,
+        limits: HeatSourceLimits,
+        solve: RheologySolve,
+        gate: &CancelGate,
+        mut resolve: impl FnMut(RheologyPoint, &FluidTransportState) -> Result<F, MaterialError>,
+    ) -> Result<ViscousRheologyStep<F>, MaterialTransportError> {
+        poll(gate)?;
+        solve.validate()?;
+        let units = self.force_units;
+        let bulk_lattice = ((bulk_viscosity_pa_s / units.transport.density_kg_m3())
+            / units.velocity_scale) / units.cell_size_m;
+        let bulk_tau = 0.5 + 4.5 * bulk_lattice;
+        let bulk_rate = 1.0 / bulk_tau;
+        let model = crate::d3q19::CollisionModel3::CentralMomentBulk {
+            shear_rate: 1.0, bulk_rate, higher_order_rate,
+        };
+        if !bulk_viscosity_pa_s.is_finite() || bulk_viscosity_pa_s <= 0.0
+            || !bulk_tau.is_finite() || bulk_tau <= 0.5 || model.validate().is_err()
+        {
+            return Err(MaterialTransportError::Invalid("physical bulk viscosity or relaxation is unrepresentable"));
+        }
+        let depth_m = units.cell_size_m;
+        let (transport, viscous) = advance_with_sampler_sources_and_candidate::<
+            ThermalLbm3, RheologyMaterial<F>, ViscousHeating, 3, 7,
+        >(
+            self, power_w_m3, forces_n_m3, depth_m, limits, gate,
+            |mapping, state, cells, plane| {
+                sample_with_strain::<ThermalLbm3, F, 3, 7>(
+                    mapping, state, cells, plane, limits.temperature_range_k,
+                    solve, gate, &mut resolve, true,
+                    |cell| {
+                        let (rho, velocity) = state.grid.moments3(cell);
+                        crate::d3q19::rheology_stress_components3(
+                            &state.grid.f[cell], rho, velocity, state.grid.fext[cell], model,
+                        )
+                    },
+                )
+            },
+            |mapping, original, applied| source_inputs(
+                mapping, power_w_m3, forces_n_m3, depth_m, limits, original,
+                applied, Some(bulk_viscosity_pa_s), gate,
+            ),
+            |mapping, input, applied| candidate_with_prepared_input::<ThermalLbm3, _, 3, 7>(
+                mapping, input, applied, gate,
+                |trial| {
+                    trial.grid.trt_magic = None;
+                    trial.grid.central_moment_bulk = Some([bulk_rate, higher_order_rate]);
+                },
+            ),
+        )?;
+        Ok(ViscousRheologyStep { transport, viscous })
+    }
+
     /// 3D counterpart, with the same physical source, feedback and atomicity.
     /// Cell volume is the retained `dx^3`; see the 2D method for model limits.
     pub fn step_with_material_rheology_and_viscous_heating<F: FluidTransport>(
