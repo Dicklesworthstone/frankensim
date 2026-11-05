@@ -2025,6 +2025,8 @@ pub struct Cavity {
 /// the weights are stored per shape: `shape[m]` is mode `m`'s shape, and `heads` holds per head body its
 /// weights shape-major (`g` of shape `s` at node `i` is `weights[s * n + i]`) and per mode its sign there.
 /// The step projects and loads once per shape, the same sums as per mode.
+/// A vent contributes its outward volume displacement times the aperture-mean pressure shape to `Y`.
+/// The SAME shape maps modal pressure back onto the vent's inertance, preserving pressure/flow work.
 #[derive(Clone)]
 pub struct AirModes {
     pub kappa: Vec<f64>,
@@ -2033,6 +2035,9 @@ pub struct AirModes {
     pub xp: Vec<f64>,
     pub shape: Vec<usize>,
     pub heads: Vec<(usize, Vec<f64>, Vec<f64>)>,
+    /// `(cavity index, aperture-mean shape per mode)` for each attached lumped vent.
+    /// Shapes are dimensionless and signed; a nodal aperture may have zero coupling.
+    pub ports: Vec<(usize, Vec<f64>)>,
     /// Scratch for the projected volumes, then the pressure amplitudes, of one step.
     pub y: Vec<f64>,
     /// Scratch per shape: a head's projection on it, then the pressure it carries there.
@@ -2305,7 +2310,11 @@ impl AirLayers {
 #[derive(Clone)]
 pub struct Port {
     pub area: f64,
+    /// Throat length plus the end corrections still represented by this plug [m].
     pub length: f64,
+    /// Included interior end correction [m]. Explicit cavity modes replace it
+    /// with resolved air inertia; the exterior correction remains in `length`.
+    pub interior_end_correction: f64,
     /// Radiation (and flow) resistance on the volume velocity [Pa s / m^3].
     pub resistance: f64,
     /// Opening position and outward normal sign along z (for microphones).
@@ -2320,8 +2329,9 @@ impl Port {
     pub fn new(radius: f64, head_thickness: f64, pos: [f64; 3], facing: f64) -> Port {
         let area = PI * radius * radius;
         // two flanged end corrections of 0.85 r each
-        let length = head_thickness + 1.7 * radius;
-        Port { area, length, resistance: 0.0, pos, facing, x: 0.0, u: 0.0, du: 0.0 }
+        let interior_end_correction = 0.85 * radius;
+        let length = head_thickness + 2.0 * interior_end_correction;
+        Port { area, length, interior_end_correction, resistance: 0.0, pos, facing, x: 0.0, u: 0.0, du: 0.0 }
     }
 }
 
@@ -3613,7 +3623,12 @@ impl Instrument {
                 })
                 .collect();
             let gkl = |k: usize, l: usize| -> f64 {
-                grams.iter().map(|(gram, sign)| sign[k] * sign[l] * gram[air.shape[k] * ns + air.shape[l]]).sum()
+                let heads: f64 = grams.iter().map(|(gram, sign)| sign[k] * sign[l] * gram[air.shape[k] * ns + air.shape[l]]).sum();
+                let ports: f64 = air.ports.iter().map(|(cavity, shape)| {
+                    let port = self.cavities[*cavity].port.as_ref().expect("air-mode vent must exist");
+                    shape[k] * shape[l] * port.area / (self.gas.density * port.length)
+                }).sum();
+                heads + ports
             };
             let trace: f64 = (0..nm).map(|k| air.kappa[k] * gkl(k, k)).sum();
             let trace_bound = trace + air.wt2.iter().fold(0.0f64, |x, &y| x.max(y));
@@ -3757,11 +3772,9 @@ impl Instrument {
                 }
             }
             if let Some(q) = c.port.as_mut() {
-                // the air plug: rho L / A du/dt = p - R u (symplectic Euler, far below its limit)
-                let du = k * (p - q.resistance * q.u) * q.area / (self.gas.density * q.length);
-                q.u += du;
-                q.du = du / k;
-                q.x += k * q.u;
+                // Accumulate every pressure on the same old volume state before
+                // advancing the port. `du` becomes acceleration again below.
+                q.du = p;
             }
         }
         // the enclosed air's modes beyond the lumped term (`AirModes`): forces from this step's head
@@ -3781,6 +3794,12 @@ impl Instrument {
                 }
                 for m in 0..nm {
                     air.y[m] += sign[m] * air.q[air.shape[m]];
+                }
+            }
+            for (cavity, shape) in &air.ports {
+                let port = self.cavities[*cavity].port.as_ref().expect("air-mode vent must exist");
+                for m in 0..nm {
+                    air.y[m] += shape[m] * port.x;
                 }
             }
             match &mut air.layers {
@@ -3835,6 +3854,20 @@ impl Instrument {
                         *f += p * g;
                     }
                 }
+            }
+            for (cavity, shape) in &air.ports {
+                let port = self.cavities[*cavity].port.as_mut().expect("air-mode vent must exist");
+                port.du += shape.iter().zip(&air.y).map(|(g, p)| g * p).sum::<f64>();
+            }
+        }
+        for c in &mut self.cavities {
+            if let Some(q) = &mut c.port {
+                // u lives at the half steps, x at the same integer times as
+                // heads and air modes. All reciprocal forces use that time.
+                let du = k * (q.du - q.resistance * q.u) * q.area / (self.gas.density * q.length);
+                q.u += du;
+                q.du = du / k;
+                q.x += k * q.u;
             }
         }
         for r in &self.rads {

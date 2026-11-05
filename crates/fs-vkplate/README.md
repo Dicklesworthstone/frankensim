@@ -63,6 +63,17 @@ Node count alone does not establish audio-band fidelity.
   on half the difference of the heads' outward volume velocities, `D` from the piece's closed-body
   table, each head's own share taken off the volume shapes' baffled load. It is an estimate: free-field
   law, no floor, `w` the membrane-law lower hybrid. An optional port models a vented front head.
+- **Vented cavity modes**: `kit::attach_cavity_modes` couples the optional vent to every retained
+  pressure mode, as well as uniform compression. The projection is the mode's mean over the
+  circular aperture, including its position, finite radius and axial sign. Its transpose applies
+  that same pressure to the vent, so flow changes the cavity and the cavity drives flow with one
+  reciprocal work balance. The acoustic coordinates, heads and vent use the same time level;
+  timestep admission includes the vent's additional modal stiffness. The modes replace the
+  plug's interior end correction, retaining its throat and exterior correction, so the interior
+  air mass is counted once. Unresolved near-aperture inertia requires cutoff convergence;
+  attachment is allowed once per vent, before stepping. This retains the existing
+  linear lumped-port, full-head structural and truncated rigid-cylinder basis approximations;
+  it does not resolve the membrane cutout, port-edge flow or nonlinear jet losses.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
   A baffled microphone hears only surfaces facing it. Over a rigid floor (any plane,
   `floor_z`, `floor_y`) it also hears, by the floor's image, the surfaces facing that image.
