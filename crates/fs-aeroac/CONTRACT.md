@@ -1791,6 +1791,44 @@ Q/F sources, all covariance/intensity components, independent and factored
 coherence, unequal-speed composition, shared work exhaustion, singular versus
 finite self-fields, harmonic clocks, cancellation and invalid inputs.
 
+## Full-wave reflection from a finite fluid layer
+
+`curle3d::refraction::full_wave::layer::reflection::PreparedLayeredReflectedFullWaveMonopole`
+observes the original incident-side source and receiver at one
+`PlanarFluidLayer`. Its returning Green function retains every coherent
+internal reflection, all three critical circles, evanescence, and the full
+pressure/particle-velocity field. The original prescribed-source clock is
+retained; no ray delay, truncated image train, artificial damping, or source
+feedback is introduced. `evaluate_reflected` and `evaluate_total` retain
+separate cached responses, and native harmonic-line methods carry those same
+amplitudes. A finite reflected self-field is admitted; its singular direct
+total field is refused.
+
+The original transmission denominator supplies the effective reflection
+coefficient through a signed numerator from the same continuity equations.
+Shared critical-point maps, density normalization, scaled trigonometric
+functions, and denominator-variation guards resolve internal resonances without
+forming growing transfer matrices. Analytic incident-grazing cancellation and
+logarithmic numerator/denominator scaling preserve representable fields. The
+tail starts beyond every critical circle, where `|R|<=1`, and uses the exterior
+return clearance `a+b`; layer thickness is not incorrectly added to that decay.
+This bound is not asserted for intermediate evanescent regions.
+
+Original monopole limits and layer diagnostics control the reflected transfer.
+Total observations inherit absolute reflected error estimates without a
+relative guarantee at interference nulls. A zero-thickness layer or one matched
+to its receiving half-space delegates to the original interface owner exactly.
+Applying prepared responses uses fixed work without allocation or quadrature.
+The original slow-layer guided-pole refusal, lossless/static/infinite-plane
+scope, and absence of interval or measured-SPL authority remain.
+
+`tests/full_wave_layer_reflection.rs` covers independently refined 35/50-digit
+direct-q references, zero-thickness and matched-interface reductions, a shifted
+original interface, coherent equal-speed image trains and total intensity,
+momentum, reciprocity, original clocks, finite self-fields, and bounded input,
+work and cancellation refusals. Private tests cover every grazing branch,
+reflection zeros and physically scaled fields beyond raw exponential underflow.
+
 ## Full spherical-wave transmission through a finite fluid layer
 
 `curle3d::refraction::full_wave::layer::PreparedLayeredFullWaveMonopole`

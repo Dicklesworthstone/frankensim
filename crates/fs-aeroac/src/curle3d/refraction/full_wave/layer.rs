@@ -38,6 +38,7 @@ mod force;
 pub use force::{
     FULL_WAVE_LAYER_FORCE_SCOPE, FullWaveLayerForceDiagnostics, PreparedLayeredFullWaveForce,
 };
+pub mod reflection;
 
 /// Applicability of the original finite-layer source-to-receiver transfer.
 pub const FULL_WAVE_LAYER_MONOPOLE_SCOPE: &str = "Prescribed stationary compact 3D volume \

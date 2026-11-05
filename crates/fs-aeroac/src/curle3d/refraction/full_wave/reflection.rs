@@ -260,11 +260,11 @@ impl PreparedReflectedFullWaveMonopole {
     }
 }
 
-fn singular_total() -> AeroacError {
+pub(super) fn singular_total() -> AeroacError {
     invalid("total incident-side field is singular at the prescribed point source")
 }
 
-fn apply(transfer: [C64; 4], amplitude: C64) -> Result<[C64; 4], AeroacError> {
+pub(super) fn apply(transfer: [C64; 4], amplitude: C64) -> Result<[C64; 4], AeroacError> {
     if !finite(amplitude) {
         return Err(nonfinite("reflected volume-flow phasor"));
     }
@@ -275,7 +275,10 @@ fn apply(transfer: [C64; 4], amplitude: C64) -> Result<[C64; 4], AeroacError> {
     Ok(values)
 }
 
-fn field(amplitudes: [C64; 4], scope: &'static str) -> Result<CoherentCompactField, AeroacError> {
+pub(super) fn field(
+    amplitudes: [C64; 4],
+    scope: &'static str,
+) -> Result<CoherentCompactField, AeroacError> {
     let [pressure, ux, uy, uz] = amplitudes;
     let velocity = [ux, uy, uz];
     let intensity = velocity.map(|v| pressure.scale(0.5) * v.conj());
@@ -291,7 +294,7 @@ fn field(amplitudes: [C64; 4], scope: &'static str) -> Result<CoherentCompactFie
     })
 }
 
-fn line(frequency_hz: f64, amplitudes: [C64; 4]) -> HarmonicFieldLine<3> {
+pub(super) fn line(frequency_hz: f64, amplitudes: [C64; 4]) -> HarmonicFieldLine<3> {
     let [pressure, ux, uy, uz] = amplitudes;
     HarmonicFieldLine {
         frequency_hz,
@@ -301,15 +304,15 @@ fn line(frequency_hz: f64, amplitudes: [C64; 4]) -> HarmonicFieldLine<3> {
 }
 
 #[derive(Clone, Copy)]
-struct ReflectionCoordinates {
-    omega: f64,
-    height: Dd,
-    range: f64,
-    tangent: [f64; 3],
+pub(super) struct ReflectionCoordinates {
+    pub(super) omega: f64,
+    pub(super) height: Dd,
+    pub(super) range: f64,
+    pub(super) tangent: [f64; 3],
 }
 
 impl ReflectionCoordinates {
-    fn new(
+    pub(super) fn new(
         interface: PlanarFluidInterface,
         frequency_hz: f64,
         source: [f64; 3],
@@ -402,15 +405,15 @@ fn equal_speed_monopole(
 }
 
 /// q*dq*R*exp(i*zeta1*H)/zeta1, with physical scale retained before derivatives.
-struct ReflectionSpectralWeight {
-    q: f64,
-    zeta: C64,
-    unit: C64,
-    log_magnitude: f64,
+pub(super) struct ReflectionSpectralWeight {
+    pub(super) q: f64,
+    pub(super) zeta: C64,
+    pub(super) unit: C64,
+    pub(super) log_magnitude: f64,
 }
 
 impl ReflectionSpectralWeight {
-    fn scaled(&self, direction: C64, log_scale: f64, real_weight: f64) -> C64 {
+    pub(super) fn scaled(&self, direction: C64, log_scale: f64, real_weight: f64) -> C64 {
         log_weighted(
             self.unit * direction,
             self.log_magnitude + log_scale,
@@ -558,63 +561,87 @@ impl ReflectionKernel {
         channels: [usize; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<[f64; 2], AeroacError> {
-        let h = self.coordinates.height.to_f64();
-        let hk = h * self.kmax;
-        if !hk.is_finite() {
-            return Err(nonfinite("reflected clearance wavenumber"));
-        }
-        // For q²=kmax²+t², q*dq/|zeta1| <= dt, |R|<=1,
-        // exp(-H*Im(zeta1)) <= exp(-H*t), and q,|zeta1| <= t+kmax.
-        let log_h = det::ln(h);
-        let goals = [limits.absolute_pressure, limits.absolute_velocity].map(det::ln);
-        let goals = core::array::from_fn::<_, 2, _>(|i| {
-            goals[i] - det::ln(4.0 * det::sqrt(channels[i] as f64))
-        });
-        let logs = |s: f64| {
-            core::array::from_fn::<_, 2, _>(|i| {
-                let x = s + hk + 1.0;
-                let polynomial = match degrees[i] {
-                    0 => 0.0,
-                    1 => det::ln(x),
-                    // (s+hk)^2 + 2(s+hk) + 2 = x²+1; no x² overflow.
-                    _ => 2.0 * det::ln(x) + det::ln(1.0 + (1.0 / x) * (1.0 / x)),
-                };
-                log_scales[i] - (f64::from(degrees[i]) + 1.0) * log_h - s + polynomial
-            })
-        };
-        let (mut low, mut high) = (0.0, 1.0);
-        let mut admitted = false;
-        for _ in 0..32 {
-            poll(cancelled)?;
-            let bound = logs(high);
-            if bound[0] <= goals[0] && bound[1] <= goals[1] {
-                admitted = true;
-                break;
-            }
-            low = high;
-            high *= 2.0;
-        }
-        if !admitted {
-            return Err(invalid(
-                "reflected evanescent tail cannot meet requested tolerances",
-            ));
-        }
-        for _ in 0..24 {
-            poll(cancelled)?;
-            let middle = low + (high - low) * 0.5;
-            let bound = logs(middle);
-            if bound[0] <= goals[0] && bound[1] <= goals[1] {
-                high = middle;
-            } else {
-                low = middle;
-            }
-        }
-        self.tail_extent = high / h;
-        if !positive(self.tail_extent) {
-            return Err(nonfinite("reflected evanescent cutoff"));
-        }
-        Ok(logs(high).map(det::exp))
+        let (extent, bounds) = prepare_reflected_tail(
+            self.coordinates.height.to_f64(),
+            self.kmax,
+            limits,
+            degrees,
+            log_scales,
+            channels,
+            cancelled,
+        )?;
+        self.tail_extent = extent;
+        Ok(bounds)
     }
+}
+
+/// Above EVERY medium's critical wavenumber, the reflected amplitude has
+/// magnitude at most one for an original lossless positive-density fluid
+/// interface or finite fluid layer. H is the exterior return clearance only.
+pub(super) fn prepare_reflected_tail(
+    h: f64,
+    kmax: f64,
+    limits: QuadratureLimits,
+    degrees: [u32; 2],
+    log_scales: [f64; 2],
+    channels: [usize; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, [f64; 2]), AeroacError> {
+    let hk = h * kmax;
+    if !hk.is_finite() {
+        return Err(nonfinite("reflected clearance wavenumber"));
+    }
+    // For q²=kmax²+t², q*dq/|zeta1| <= dt, |R|<=1,
+    // exp(-H*Im(zeta1)) <= exp(-H*t), and q,|zeta1| <= t+kmax.
+    let log_h = det::ln(h);
+    let goals = [limits.absolute_pressure, limits.absolute_velocity].map(det::ln);
+    let goals = core::array::from_fn::<_, 2, _>(|i| {
+        goals[i] - det::ln(4.0 * det::sqrt(channels[i] as f64))
+    });
+    let logs = |s: f64| {
+        core::array::from_fn::<_, 2, _>(|i| {
+            let x = s + hk + 1.0;
+            let polynomial = match degrees[i] {
+                0 => 0.0,
+                1 => det::ln(x),
+                // (s+hk)^2 + 2(s+hk) + 2 = x²+1; no x² overflow.
+                _ => 2.0 * det::ln(x) + det::ln(1.0 + (1.0 / x) * (1.0 / x)),
+            };
+            log_scales[i] - (f64::from(degrees[i]) + 1.0) * log_h - s + polynomial
+        })
+    };
+    let (mut low, mut high) = (0.0, 1.0);
+    let mut admitted = false;
+    for _ in 0..32 {
+        poll(cancelled)?;
+        let bound = logs(high);
+        if bound[0] <= goals[0] && bound[1] <= goals[1] {
+            admitted = true;
+            break;
+        }
+        low = high;
+        high *= 2.0;
+    }
+    if !admitted {
+        return Err(invalid(
+            "reflected evanescent tail cannot meet requested tolerances",
+        ));
+    }
+    for _ in 0..24 {
+        poll(cancelled)?;
+        let middle = low + (high - low) * 0.5;
+        let bound = logs(middle);
+        if bound[0] <= goals[0] && bound[1] <= goals[1] {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    let tail_extent = high / h;
+    if !positive(tail_extent) {
+        return Err(nonfinite("reflected evanescent cutoff"));
+    }
+    Ok((tail_extent, logs(high).map(det::exp)))
 }
 
 impl Spectrum<3> for ReflectionKernel {
