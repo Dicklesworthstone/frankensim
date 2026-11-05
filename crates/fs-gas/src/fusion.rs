@@ -334,7 +334,7 @@ pub fn advance_dt_fusion(
 ///
 /// The same adaptive solve resolves fuel, ash, two-temperature feedback and
 /// outgoing photon/neutron energy. Frozen reciprocal exchange is integrated
-/// exponentially and fixed-Gaunt free-free cooling analytically; symmetric
+/// exponentially and free-free cooling with frozen coefficients analytically; symmetric
 /// composition and midpoint source refresh are second order for smooth admitted
 /// evolution. A cutoff crossover need not have a smooth local-error expansion.
 /// Domain/cancellation refusal publishes no partial state. The step-doubling

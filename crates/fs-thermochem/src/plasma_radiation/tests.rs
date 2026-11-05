@@ -50,7 +50,7 @@ fn bank(electron_mass: f64, label: &str) -> IdealGasEquilibriumV1 {
                 parameters,
                 state_schema_version: NASA9_STATE_SCHEMA_VERSION_V1,
                 initial_state: InitialStatePolicy::ZeroInternalState,
-                validity: ValidityDomain::unconstrained().with("T", 1e4, 2e9),
+                validity: ValidityDomain::unconstrained().with("T", 1e3, 2e9),
                 sources: vec![],
                 provenance: Provenance {
                     source: label.into(),
@@ -89,7 +89,7 @@ fn bank(electron_mass: f64, label: &str) -> IdealGasEquilibriumV1 {
 
 fn controls() -> BremsstrahlungControlsV1 {
     BremsstrahlungControlsV1 {
-        frequency_integrated_gaunt_factor: 1.2,
+        frequency_integrated_gaunt_factor: BremsstrahlungGauntFactorV1::Constant(1.2),
         minimum_electron_temperature_k: 1e4,
         maximum_electron_temperature_k: 2e9,
         maximum_electron_thermal_rest_energy_ratio: 0.1,
@@ -230,7 +230,7 @@ fn g3_volume_density_temperature_and_gaunt_scaling() {
         p.total_power_over_sqrt_temperature_w_k_sqrt()
     );
     let mut c = controls();
-    c.frequency_integrated_gaunt_factor *= 2.0;
+    c.frequency_integrated_gaunt_factor = BremsstrahlungGauntFactorV1::Constant(2.4);
     let alternate = ElectronIonBremsstrahlungV1::new(law.thermodynamics().clone(), c).unwrap();
     close(
         evaluate(&alternate, [5e19, 5e19, 0.0], 1.0, 1e8).total_power_w(),
@@ -403,10 +403,119 @@ fn g0_absent_carriers_are_exact_zero_and_invalid_inputs_are_refused() {
     );
     for g in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         let mut c = controls();
-        c.frequency_integrated_gaunt_factor = g;
+        c.frequency_integrated_gaunt_factor = BremsstrahlungGauntFactorV1::Constant(g);
         assert!(c.validate().is_err());
     }
     let mut c = controls();
     c.maximum_electron_thermal_phase_space_density = 1.0;
     assert!(c.validate().is_err());
+}
+
+#[test]
+fn g2_itoh_table2_anchors_and_charge_temperature_scaling() {
+    // Independently evaluated with 70-digit Decimal arithmetic, direct powers
+    // rather than the implementation's simultaneous Horner operation tree.
+    let anchors = [
+        (1.0, 5e7, 1.1664502635097814, -6.216533811375891e-10),
+        (2.0, 5e7, 1.2249777654893104, -1.0801979788864634e-9),
+        (1.0, 1e8, 1.1487442167500536, -2.0746969464285134e-10),
+        (2.0, 1e8, 1.1918104241032491, -4.20284717595417e-10),
+        (1.0, 1579.0, 1.160573, 2.6939900060587048e-5),
+        (1.0, 157900000.0, 1.139223, -1.5166916524559948e-10),
+    ];
+    for (z, temperature, expected, expected_derivative) in anchors {
+        let (g, derivative_log_temperature) = itoh_nonrelativistic_gaunt(z, temperature).unwrap();
+        close(g, expected, 2e-14);
+        close(
+            derivative_log_temperature / temperature,
+            expected_derivative,
+            2e-12,
+        );
+    }
+    // At x=0 the value and slope select the two leading table coefficients.
+    let (g, derivative_log_temperature) =
+        itoh_nonrelativistic_gaunt(1.0, ITOH_RYDBERG_TEMPERATURE_K * sqrt(10.0)).unwrap();
+    close(g, 1.42752, 4.0 * f64::EPSILON);
+    close(derivative_log_temperature, -0.029649631715120525, 2e-14);
+    let hydrogen = itoh_nonrelativistic_gaunt(1.0, 3e7).unwrap();
+    let helium = itoh_nonrelativistic_gaunt(2.0, 1.2e8).unwrap();
+    assert_eq!(hydrogen, helium); // Same Z²/Te, including the logarithmic slope.
+}
+
+#[test]
+fn g3_itoh_mixed_ion_power_and_full_temperature_derivative() {
+    let constant = fixture();
+    let mut c = controls();
+    c.frequency_integrated_gaunt_factor = BremsstrahlungGauntFactorV1::ItohNonrelativistic;
+    let law = ElectronIonBremsstrahlungV1::new(constant.thermodynamics().clone(), c).unwrap();
+    let densities = [4e19, 3e19, 1.5e19];
+    let point = evaluate(&law, densities, 1.0, 1e8);
+    // Independent 70-digit value: C*ne*sqrt(Te)*(7e19*g1 + 6e19*g2).
+    close(point.power_density_w_m3(), 21663.894760226435, 2e-14);
+    close(point.derivative_w_per_k(), 1.0265255526546084e-4, 2e-14);
+    let h = 1e3;
+    let plus = evaluate(&law, densities, 1.0, 1e8 + h).total_power_w();
+    let minus = evaluate(&law, densities, 1.0, 1e8 - h).total_power_w();
+    close((plus - minus) / (2.0 * h), point.derivative_w_per_k(), 1e-8);
+    // A fitted coefficient varies with temperature; omitting dg/dTe would
+    // yield P/(2Te), which disagrees with the physical source fit's slope.
+    assert!((point.derivative_w_per_k() / (point.total_power_w() / (2.0e8)) - 1.0).abs() > 0.04);
+    assert!(
+        point.total_power_over_sqrt_temperature_w_k_sqrt()
+            < evaluate(&law, densities, 1.0, 5e7).total_power_over_sqrt_temperature_w_k_sqrt()
+    );
+}
+
+#[test]
+fn g0_itoh_bounds_are_inclusive_and_apply_to_every_populated_ion() {
+    for z in [1.0, 2.0] {
+        let lower = z * z * ITOH_RYDBERG_TEMPERATURE_K / 100.0;
+        let upper = z * z * ITOH_RYDBERG_TEMPERATURE_K / 1e-3;
+        assert!(itoh_nonrelativistic_gaunt(z, lower).is_ok());
+        assert!(itoh_nonrelativistic_gaunt(z, upper).is_ok());
+        assert!(itoh_nonrelativistic_gaunt(z, lower.next_down()).is_err());
+        assert!(itoh_nonrelativistic_gaunt(z, upper.next_up()).is_err());
+    }
+    let constant = fixture();
+    let mut c = controls();
+    c.frequency_integrated_gaunt_factor = BremsstrahlungGauntFactorV1::ItohNonrelativistic;
+    c.minimum_electron_temperature_k = 1e3;
+    let fit = ElectronIonBremsstrahlungV1::new(constant.thermodynamics().clone(), c).unwrap();
+    let fuel = amounts(&fit, [5e15, 5e15, 0.0], 1.0);
+    let with_ash = amounts(&fit, [4.9e15, 4.9e15, 1e14], 1.0);
+    // At4000K hydrogen's gamma² lies in the fit, helium's does not. An absent
+    // ash row does not constrain the law until it actually becomes populated.
+    fit.evaluate_point(
+        &fuel,
+        Volume::new(1.0),
+        Temperature::new(4000.0),
+        Temperature::new(4000.0),
+        || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        fit.evaluate_point(
+            &with_ash,
+            Volume::new(1.0),
+            Temperature::new(4000.0),
+            Temperature::new(4000.0),
+            || false
+        ),
+        Err(BremsstrahlungErrorV1::Domain(_))
+    ));
+    // Conversely, helium supports200MK but populated hydrogen does not.
+    evaluate(&fit, [0.0, 0.0, 5e19], 1.0, 2e8);
+    assert!(matches!(
+        fit.evaluate_point(
+            &amounts(&fit, [5e19, 5e19, 0.0], 1.0),
+            Volume::new(1.0),
+            Temperature::new(1e8),
+            Temperature::new(2e8),
+            || false
+        ),
+        Err(BremsstrahlungErrorV1::Domain(_))
+    ));
+    // The explicitly selected constant alternative remains available; a fit
+    // refusal is never silently converted into that different source model.
+    evaluate(&constant, [5e19, 5e19, 0.0], 1.0, 2e8);
 }

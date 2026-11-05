@@ -14,7 +14,9 @@ use fs_thermochem::coulomb::{
 };
 use fs_thermochem::fusion::KELVIN_PER_KEV;
 use fs_thermochem::fusion::plasma::DtFusionPlasmaLimitsV1;
-use fs_thermochem::plasma_radiation::{BremsstrahlungControlsV1, ElectronIonBremsstrahlungV1};
+use fs_thermochem::plasma_radiation::{
+    BremsstrahlungControlsV1, BremsstrahlungGauntFactorV1, ElectronIonBremsstrahlungV1,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (model, initial) = source::plasma([5.0e19, 5.0e19, 0.0], 1.0, [10.0, 5.0]);
@@ -60,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bremsstrahlung: Some(ElectronIonBremsstrahlungV1::new(
             model.thermodynamics().clone(),
             BremsstrahlungControlsV1 {
-                frequency_integrated_gaunt_factor: 1.2,
+                frequency_integrated_gaunt_factor: BremsstrahlungGauntFactorV1::ItohNonrelativistic,
                 minimum_electron_temperature_k: 1e6,
                 maximum_electron_temperature_k: 20.0 * KELVIN_PER_KEV,
                 maximum_electron_thermal_rest_energy_ratio: 0.05,
@@ -89,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Exchange: static all-carrier Debye screening with an explicit quantum-diffraction cutoff."
     );
     println!(
-        "Radiation: electron-ion free-free emission with an authored constant Gaunt factor of 1.2."
+        "Radiation: electron-ion free-free emission with the bounded Itoh temperature/charge Gaunt fit."
     );
     println!(
         "No confinement, fast-particle slowing, opacity or other emission channels are modeled."

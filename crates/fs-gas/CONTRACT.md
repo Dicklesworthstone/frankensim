@@ -12,13 +12,15 @@ signed electron-to-heavy Coulomb transfer separately from outgoing photons.
 
 Frozen reciprocal exchange integrates the temperature difference exponentially,
 with reduced heat capacity `Ch*Ce/(Ch+Ce)`; it does not overshoot equilibrium
-for a fixed coefficient. Frozen constant-Gaunt cooling integrates
-`d(sqrt(Te))/dt = -A/(2Ce)` analytically. Symmetric source composition surrounds
-the exact finite-fuel/external-power step, and a predictor refreshes coefficients
-at the interval midpoint. Capacities come from each stage's actual composition.
-The method is second order for smooth admitted evolution, as checked by fixed
-step refinement; the cutoff crossover need not have a smooth local-error
-expansion. Step doubling remains an estimate, not a global error certificate.
+for a fixed coefficient. Freezing the instantaneous radiation coefficient
+`A = P/sqrt(Te)` integrates `d(sqrt(Te))/dt = -A/(2Ce)` analytically.
+Symmetric source composition surrounds the exact finite-fuel/external-power
+step, and a predictor refreshes both coefficients at the interval midpoint,
+including any selected temperature-dependent Gaunt factor. Capacities come
+from each stage's actual composition. The method is second order for smooth
+admitted evolution, as checked by fixed step refinement; the cutoff crossover
+need not have a smooth local-error expansion. Step doubling remains an
+estimate, not a global error certificate.
 
 The publication account is
 `delta(Uh+Ue) + En + Ephotons - Q - Eexternal = 0`.
@@ -27,12 +29,16 @@ and neutron thermal energy remains included. Fixed-size trials and compensated
 transfer sums retain allocation-free evolution and cancellation/refusal atomicity.
 A restart reuses the retained operators on the actual new populations.
 
-All sixteen focused native fusion tests pass, including six coupled checks:
+All seventeen focused native fusion tests pass, including seven coupled checks:
 analytic no-fuel radiative cooling, reciprocal relaxation, two independently
-converged RK4 burn references, second-order refinement, volume scaling/restart,
-and source-domain/cancellation refusal. Ten existing thermal-energy tests and
-thirteen ionization tests also pass. The `dt_fusion` example runs both isolated
-and coupled cases with explicit Gaunt/cutoff/thermalization assumptions.
+converged constant-Gaunt RK4 burn references, second-order refinement, volume
+scaling/restart, source-domain/cancellation refusal, and a separately converged
+burn reference with the temperature/charge-dependent Itoh Gaunt fit.
+Ten existing thermal-energy tests and thirteen ionization tests also pass.
+The `dt_fusion` example runs both isolated and coupled cases and selects the
+bounded Itoh fit with explicit cutoff/thermalization assumptions. Populated
+D/T impose that fit's 157,900,000 K electron-temperature ceiling, independently
+of the fusion reaction's ion-temperature support; no extrapolation is supplied.
 
 ## Finite D-T burn and two-temperature energy feedback
 

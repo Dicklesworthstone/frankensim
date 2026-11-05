@@ -4,11 +4,21 @@
 
 `plasma_radiation::ElectronIonBremsstrahlungV1` evaluates frequency-integrated
 electron-ion thermal bremsstrahlung from the existing canonical species bank:
-`P/V = 1.426e-40 * g * ne * sum(ni Zi^2) * sqrt(Te)` in SI. The coefficient
-is the direct CGS-to-SI conversion of [Itoh et al., Eq.(11)](https://arxiv.org/abs/astro-ph/0011044);
-it is separate from the caller's explicitly authored constant integrated
-Gaunt factor and temperature interval. No Gaunt fit or physical uncertainty
-is inferred. Newly populated helium ash contributes charge-square weight four.
+`P/V = 1.426e-40 * ne * sum(ni Zi^2 gi(Te)) * sqrt(Te)` in SI. The coefficient
+is the direct CGS-to-SI conversion of [Itoh et al., Eq.(11)](https://arxiv.org/abs/astro-ph/0011044).
+Newly populated helium ash contributes charge-square weight four.
+
+`BremsstrahlungGauntFactorV1` explicitly selects `Constant(f64)` or
+`ItohNonrelativistic`. The latter uses the eleven literal Table 2 coefficients
+in a degree-ten Horner evaluation and its analytic temperature derivative,
+separately for each populated positive ion. The published variable is
+`gamma^2 = Zi^2 * 1.579e5 K / Te`, with inclusive support `1e-3..=100`.
+Thus D/T require 1,579–157,900,000 K and He++ requires 6,316–631,600,000 K,
+intersected with the caller's temperature interval and all original source
+and physical limits. Endpoint admission precedes conversion to gamma-squared;
+there is no clipping, extrapolation or automatic constant-factor fallback.
+The published fit residual is not a physical uncertainty or derivative-error
+certificate.
 
 Allocation-free point evaluation checks the original populated caloric sources,
 canonical amounts, volume, electron identity and mass, electron degeneracy and
@@ -16,12 +26,14 @@ relativity, and the neglected ion/electron thermal-variance ratio. These
 admission limits are explicit policies. The plasma owner still admits weak
 coupling and negligible collective spectral effects.
 
-Results distinguish emissive power, its temperature derivative and its
-square-root-temperature coefficient. Escaped radiation requires an explicit
-optically thin consumer closure. This law supplies no absorption, opacity,
-electron-electron, line, recombination or synchrotron radiation. Six focused
-native tests pass for source normalization, charge-square ash weighting,
-scaling/derivatives, source/domain refusals and cancellation.
+Results distinguish emissive power, its full temperature derivative and the
+instantaneous `P/sqrt(Te)` coefficient, which is temperature independent only
+for the constant Gaunt law at fixed populations and volume. Escaped radiation
+requires an explicit optically thin consumer closure. This law supplies no
+absorption, opacity, electron-electron, line, recombination or synchrotron
+radiation. Nine focused native tests pass: the six constant-law checks plus
+published-coefficient/derivative anchors, charge-temperature scaling, mixed-ion
+fit evaluation, exact per-charge endpoints and newly populated ash refusals.
 
 ## Quantum-diffraction Coulomb exchange and changing populations
 

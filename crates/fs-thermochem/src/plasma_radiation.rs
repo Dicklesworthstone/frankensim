@@ -5,10 +5,12 @@
 //! `1.426e-27 * g * n_e * sum(n_i Z_i²) * sqrt(Te)` in erg/(s cm³),
 //! with number densities in cm⁻³ and Te in kelvin. The SI coefficient is
 //! therefore `1.426e-40`, not the eV-temperature NRL coefficient with its
-//! implicit Gaunt approximation. `g` here is an explicitly caller-authored,
-//! frequency-integrated Maxwellian Gaunt factor, constant over a declared
-//! temperature interval. Its composition/temperature approximation has no
-//! inferred uncertainty. The published Gaunt-factor fits are not implemented.
+//! implicit Gaunt approximation. The caller selects a constant integrated
+//! Gaunt factor or the paper's bounded nonrelativistic fit, equations (10),
+//! (13)–(14), table 2. The latter evaluates each populated positive ion's
+//! `g(Z²*1.579e5 K/Te)` separately, including its analytic temperature slope.
+//! For mixed ions the sum is `sum(n_i Z_i² g_i)`. The source's stated fit
+//! residual is not a physical uncertainty or derivative-error certificate.
 //!
 //! This is a nondegenerate Maxwellian electron population scattering from
 //! effectively stationary Coulomb ions. Actual electron degeneracy, electron
@@ -41,16 +43,66 @@ pub const ELECTRON_ION_BREMSSTRAHLUNG_COEFFICIENT_SI_V1: f64 = 1.426e-40;
 const SPEED_OF_LIGHT_M_S: f64 = 299_792_458.0;
 const PLANCK_J_S: f64 = 6.626_070_15e-34;
 
+/// Explicit frequency-integrated Maxwellian Gaunt law; no automatic fallback.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BremsstrahlungGauntFactorV1 {
+    /// Caller-authored positive finite factor, shared by all positive ions.
+    Constant(f64),
+    /// Itoh et al., equations (10), (13)–(14), table 2: degree 10 in
+    /// `(log10(gamma²)+0.5)/2.5`, with `gamma²=Z²*1.579e5 K/Te`.
+    /// Every populated ion must satisfy `1e-3 <= gamma² <= 100`.
+    /// Thus D/T require 1,579–157,900,000 K; He++ requires 6,316–631,600,000 K,
+    /// intersecting the original source and the other physical limits.
+    ItohNonrelativistic,
+}
+
+// Literal eleven coefficients from table 2 of arXiv:astro-ph/0011044v2.
+// Retain the paper's rounded Rydberg-temperature scale with its source fit.
+const ITOH_RYDBERG_TEMPERATURE_K: f64 = 1.579e5;
+const ITOH_NR_GAUNT_COEFFICIENTS: [f64; 11] = [
+    1.42752, 0.170677, -0.813616, -0.488059, 1.33141, 0.727788, -1.50917, -0.599317, 0.986146,
+    0.199586, -0.272392,
+];
+
+/// Return (g, dg/dlnTe); charge comes from the retained positive-ion axis.
+fn itoh_nonrelativistic_gaunt(
+    charge: f64,
+    temperature_k: f64,
+) -> Result<(f64, f64), BremsstrahlungErrorV1> {
+    let scale = (charge * charge) * ITOH_RYDBERG_TEMPERATURE_K;
+    // Compare in the authored Kelvin basis. Converting an exact source
+    // endpoint to gamma² can otherwise round it an ULP outside the interval.
+    if temperature_k < scale / 100.0 || temperature_k > scale / 1.0e-3 {
+        return Err(BremsstrahlungErrorV1::Domain(
+            "outside the populated ion's Itoh nonrelativistic Gaunt fit",
+        ));
+    }
+    let x = (ln(scale / temperature_k) / core::f64::consts::LN_10 + 0.5) / 2.5;
+    let mut value = ITOH_NR_GAUNT_COEFFICIENTS[10];
+    let mut derivative_x = 0.0_f64;
+    for &coefficient in ITOH_NR_GAUNT_COEFFICIENTS[..10].iter().rev() {
+        derivative_x = derivative_x.mul_add(x, value);
+        value = value.mul_add(x, coefficient);
+    }
+    let derivative_log_temperature = -derivative_x / (2.5 * core::f64::consts::LN_10);
+    if !positive(value) || !derivative_log_temperature.is_finite() {
+        return Err(BremsstrahlungErrorV1::Arithmetic(
+            "Itoh Gaunt fit or analytic slope",
+        ));
+    }
+    Ok((value, derivative_log_temperature))
+}
+
 /// Explicit Gaunt approximation and physical validity screens, with no defaults.
 /// These limits are admission policies, not accuracy or uncertainty certificates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BremsstrahlungControlsV1 {
-    /// Frequency-integrated Maxwellian Gaunt factor, shared by all positive
-    /// ions and held constant over the declared interval; finite and positive.
-    pub frequency_integrated_gaunt_factor: f64,
-    /// Inclusive lower bound of the caller's constant-Gaunt approximation [K].
+    /// Selected frequency-integrated Gaunt law, retained as part of model identity.
+    pub frequency_integrated_gaunt_factor: BremsstrahlungGauntFactorV1,
+    /// Inclusive caller-selected lower temperature bound [K], intersecting any
+    /// per-ion published fit domain and the original material source support.
     pub minimum_electron_temperature_k: f64,
-    /// Inclusive upper bound of the caller's constant-Gaunt approximation [K].
+    /// Inclusive caller-selected upper temperature bound [K].
     pub maximum_electron_temperature_k: f64,
     /// Largest admitted kB*Te/(me*c²), strictly inside (0,1).
     pub maximum_electron_thermal_rest_energy_ratio: f64,
@@ -66,7 +118,7 @@ pub struct BremsstrahlungControlsV1 {
 impl BremsstrahlungControlsV1 {
     /// Reject invalid Gaunt data, temperature intervals and physical limits.
     pub fn validate(self) -> Result<(), BremsstrahlungErrorV1> {
-        if !positive(self.frequency_integrated_gaunt_factor)
+        if matches!(self.frequency_integrated_gaunt_factor, BremsstrahlungGauntFactorV1::Constant(g) if !positive(g))
             || !positive(self.minimum_electron_temperature_k)
             || !positive(self.maximum_electron_temperature_k)
             || self.minimum_electron_temperature_k > self.maximum_electron_temperature_k
@@ -112,7 +164,7 @@ impl core::fmt::Display for BremsstrahlungErrorV1 {
 }
 impl std::error::Error for BremsstrahlungErrorV1 {}
 
-/// Immutable original species bank and explicit constant-Gaunt radiation law.
+/// Immutable original species bank and explicitly selected Gaunt radiation law.
 /// The bank's existing bounded canonical charge axis is the only species map.
 /// Successful evaluations allocate nothing and scan at most128 source species.
 #[derive(Clone, Debug, PartialEq)]
@@ -230,12 +282,12 @@ impl ElectronIonBremsstrahlungV1 {
         if te < self.controls.minimum_electron_temperature_k
             || te > self.controls.maximum_electron_temperature_k
         {
-            return Err(E::Domain(
-                "outside declared constant-Gaunt temperature interval",
-            ));
+            return Err(E::Domain("outside declared radiation temperature interval"));
         }
         let ne = number_density(amounts[self.electron_index].value(), v)?;
         let mut ion_weight = Sum::default();
+        let mut fitted_ion_weight = Sum::default();
+        let mut fitted_ion_log_derivative = Sum::default();
         let mut maximum_ion_variance = 0.0_f64;
         for (index, (model, amount)) in self.thermodynamics.models().iter().zip(amounts).enumerate()
         {
@@ -276,6 +328,13 @@ impl ElectronIonBremsstrahlungV1 {
                     return Err(E::Arithmetic("charge-squared ion amount"));
                 }
                 ion_weight.add(weight);
+                if self.controls.frequency_integrated_gaunt_factor
+                    == BremsstrahlungGauntFactorV1::ItohNonrelativistic
+                {
+                    let (gaunt, derivative_log_temperature) = itoh_nonrelativistic_gaunt(z, te)?;
+                    fitted_ion_weight.add(weight * gaunt);
+                    fitted_ion_log_derivative.add(weight * derivative_log_temperature);
+                }
             }
         }
         if !ion_weight.value.is_finite() {
@@ -314,16 +373,43 @@ impl ElectronIonBremsstrahlungV1 {
             electron_phase_space: if ne == 0.0 { 0.0 } else { phase_space },
         };
         if ne > 0.0 && ions > 0.0 {
-            let density_coefficient = product(&[
-                ELECTRON_ION_BREMSSTRAHLUNG_COEFFICIENT_SI_V1,
-                self.controls.frequency_integrated_gaunt_factor,
-                ne,
-                ions,
-            ])?;
+            let (density_coefficient, logarithmic_gaunt_slope) =
+                match self.controls.frequency_integrated_gaunt_factor {
+                    BremsstrahlungGauntFactorV1::Constant(gaunt) => (
+                        product(&[
+                            ELECTRON_ION_BREMSSTRAHLUNG_COEFFICIENT_SI_V1,
+                            gaunt,
+                            ne,
+                            ions,
+                        ])?,
+                        0.0,
+                    ),
+                    BremsstrahlungGauntFactorV1::ItohNonrelativistic => {
+                        if !positive(fitted_ion_weight.value)
+                            || !fitted_ion_log_derivative.value.is_finite()
+                        {
+                            return Err(E::Arithmetic("summed fitted Gaunt contributions"));
+                        }
+                        (
+                            product(&[
+                                ELECTRON_ION_BREMSSTRAHLUNG_COEFFICIENT_SI_V1,
+                                ne,
+                                number_density(fitted_ion_weight.value, v)?,
+                            ])?,
+                            fitted_ion_log_derivative.value / fitted_ion_weight.value,
+                        )
+                    }
+                };
             result.temperature_coefficient = product(&[density_coefficient, v])?;
             result.power_density = product(&[density_coefficient, sqrt(te)])?;
             result.total_power = product(&[result.temperature_coefficient, sqrt(te)])?;
-            result.derivative = product(&[0.5, result.total_power, 1.0 / te])?;
+            let logarithmic_power_slope = 0.5 + logarithmic_gaunt_slope;
+            result.derivative = if logarithmic_power_slope == 0.0 {
+                0.0
+            } else {
+                logarithmic_power_slope.signum()
+                    * product(&[logarithmic_power_slope.abs(), result.total_power, 1.0 / te])?
+            };
         }
         poll(&mut cancelled)?;
         Ok(result)
@@ -351,13 +437,16 @@ impl BremsstrahlungEvaluationV1 {
     pub const fn power_density_w_m3(self) -> f64 {
         self.power_density
     }
-    /// Exact coefficient of sqrt(Te) in this constant-Gaunt, frozen-population
-    /// model [W/K¹ᐟ²]. Retaining it permits an exact isolated cooling substep;
-    /// the subsequent temperature must still pass all source/domain admission.
+    /// Instantaneous P/sqrt(Te) [W/K¹ᐟ²]. It is temperature-independent only
+    /// for the Constant Gaunt law at frozen populations. A fitted-law consumer
+    /// may explicitly freeze this coefficient at a predictor midpoint; that
+    /// thermal substep is a numerical approximation to the changing Gaunt law.
+    /// Subsequent temperatures must still pass every source/domain check.
     pub const fn total_power_over_sqrt_temperature_w_k_sqrt(self) -> f64 {
         self.temperature_coefficient
     }
-    /// Partial dP/dTe with populations, volume and Gaunt factor fixed [W/K].
+    /// Partial dP/dTe at fixed populations and volume [W/K]. This includes the
+    /// selected fitted Gaunt law's analytic derivative when present.
     pub const fn derivative_w_per_k(self) -> f64 {
         self.derivative
     }

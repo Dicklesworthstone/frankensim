@@ -1,6 +1,6 @@
 use super::*;
 use fs_thermochem::coulomb::{CoulombLimitsV1, CoulombScreeningV1, CoulombShortRangeCutoffV1};
-use fs_thermochem::plasma_radiation::BremsstrahlungControlsV1;
+use fs_thermochem::plasma_radiation::{BremsstrahlungControlsV1, BremsstrahlungGauntFactorV1};
 
 fn thermal_sources(state: &FrozenIonizedGasStateV1) -> DtFusionTransport {
     DtFusionTransport {
@@ -26,7 +26,7 @@ fn thermal_sources(state: &FrozenIonizedGasStateV1) -> DtFusionTransport {
             ElectronIonBremsstrahlungV1::new(
                 state.thermodynamics().clone(),
                 BremsstrahlungControlsV1 {
-                    frequency_integrated_gaunt_factor: 1.2,
+                    frequency_integrated_gaunt_factor: BremsstrahlungGauntFactorV1::Constant(1.2),
                     minimum_electron_temperature_k: 1e6,
                     maximum_electron_temperature_k: 20.0 * KELVIN_PER_KEV,
                     maximum_electron_thermal_rest_energy_ratio: 0.05,
@@ -248,6 +248,75 @@ fn g1_coupled_midpoint_has_second_order_fixed_step_convergence() {
             "errors={errors:?}, ratio={ratio}"
         );
     }
+}
+
+#[test]
+fn g1_temperature_and_charge_dependent_gaunt_fit_matches_independent_burn() {
+    let (model, state) = source::plasma([5e19, 5e19, 0.0], 1.0, [10.0, 5.0]);
+    let mut transport = thermal_sources(&state);
+    let mut radiation = transport.bremsstrahlung.as_ref().unwrap().controls();
+    radiation.frequency_integrated_gaunt_factor = BremsstrahlungGauntFactorV1::ItohNonrelativistic;
+    transport.bremsstrahlung =
+        Some(ElectronIonBremsstrahlungV1::new(state.thermodynamics().clone(), radiation).unwrap());
+    let result = advance_dt_fusion_with_transport(
+        &state,
+        &model,
+        heating(0.8),
+        &transport,
+        Time::new(0.1),
+        controls(),
+        || false,
+    )
+    .unwrap();
+    // Independent direct-power polynomial evaluation for each ion charge and
+    // 2048-step RK4. Halving from 1024 steps changes T by <6e-8 K and En by <1e-9 J.
+    let b = result.balance();
+    let actual = [
+        b.reaction_extent_mol,
+        result.state().heavy_temperature().value(),
+        result.state().electron_temperature().value(),
+        b.neutron_energy_escaped_j,
+        b.alpha_energy_deposited_j,
+        b.reacting_ion_energy_removed_j,
+        b.electron_to_heavy_coulomb_energy_j,
+        b.photon_energy_escaped_j,
+    ];
+    let expected = [
+        3.732378518218533e-8,
+        99955214.72411978,
+        79564004.12157919,
+        50709.684203134755,
+        12819.5169105779,
+        186.84015043764742,
+        -35745.48568658078,
+        1389.4026753618346,
+    ];
+    for (index, (a, e)) in actual.into_iter().zip(expected).enumerate() {
+        close(
+            a,
+            e,
+            if index == 1 || index == 2 { 3e-8 } else { 3e-7 },
+            if index == 0 { 1e-20 } else { 1e-7 },
+        );
+    }
+    assert!(b.total_energy_residual_j.abs() < 1e-6);
+    assert!(b.photon_energy_escaped_j < 1441.409810658896);
+
+    // Hydrogen's published gamma-squared domain ends near 13.6 keV. The fitted
+    // operator refuses hotter electrons instead of silently changing its law.
+    let (model, too_hot) = source::plasma([5e19, 5e19, 0.0], 1.0, [10.0, 15.0]);
+    assert!(matches!(
+        advance_dt_fusion_with_transport(
+            &too_hot,
+            &model,
+            heating(0.8),
+            &transport,
+            Time::new(0.1),
+            controls(),
+            || false
+        ),
+        Err(DtFusionError::Radiation(BremsstrahlungErrorV1::Domain(_)))
+    ));
 }
 
 #[test]
