@@ -1,5 +1,6 @@
 //! Molecular source viscosity and physical units for native Brinkman momentum.
 
+#[path = "porous/forchheimer.rs"]
 mod forchheimer;
 pub use forchheimer::MaterialForchheimerSolution;
 

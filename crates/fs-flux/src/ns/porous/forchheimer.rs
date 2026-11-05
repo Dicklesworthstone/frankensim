@@ -426,7 +426,9 @@ impl<'m> FluxSystem<'m> {
             self.admit_stokes_problem_with_velocity_anchors(params, boundaries, &anchors)?;
         let (previous, inv_dt) =
             history.map_or((None, 0.0), |(velocity, rate)| (Some(velocity), rate));
-        let assemble = |resistance| {
+        // Each call integrates its short-lived resistance into owned matrix/load
+        // storage. Do not infer one shared borrow across Newton trial states.
+        let assemble = |resistance: CellResistance<'_>| {
             self.assemble_stokes_admitted_cell_resistance(
                 params,
                 &|cell, _| effective_nu[cell],
