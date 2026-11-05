@@ -1,5 +1,8 @@
 //! G0/G1: native heat storage, deposition inventories, events and rollback.
 
+#[path = "chamber/tests.rs"]
+mod shared_chamber;
+
 use super::{CoatingAudit, CoatingSimulation, CoatingSurface};
 use crate::enthalpy::sublimation::ThermalSublimationError;
 use crate::enthalpy::{

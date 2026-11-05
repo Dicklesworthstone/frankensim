@@ -1,4 +1,4 @@
-//! A cold ice film in a maintained vacuum and in a finite vapor chamber.
+//! Ice sublimation and deposition on finite substrates sharing one vapor chamber.
 //!
 //! Run: cargo run -p fs-material --example sublimating_ice
 //!
@@ -14,13 +14,25 @@
 //! gradients and geometry remapping are not solved. Recession is reported on
 //! the fixed reference area. Halve MAX_DT_S to assess first-order coupling
 //! error; conservation residuals alone do not establish physical accuracy.
+//!
+//! The final case puts a 250 K ice coating and a bare 220 K support in the SAME
+//! initially empty chamber. Each nonvolatile support is an illustrative 20 g
+//! body with constant cp=500 J/(kg K) and density=8000 kg/m^3, not a resolved
+//! material dataset. Heterogeneous deposition is explicitly admitted without
+//! a nucleation barrier. Coating/support temperatures equilibrate instantly
+//! through thickness; their finite heat storage remains separate and both
+//! receive the deposition heat. No substrate mass can enter the vapor.
 
 use fs_material::sublimation::WaterIceSublimation;
+use fs_thermal::enthalpy::sublimation::coating::{ChamberCoatingSurface, CoatingSimulation};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
     DepositionSimulation, Event, MaterialId, Reservoir, StepConfig, ThermalLaw, TimedEvent,
 };
-use fs_thermal::sublimation::{SolverConfig, SublimationLaw, SurfaceKinetics, VaporReservoir};
+use fs_thermal::sublimation::chamber::ChamberSolverConfig;
+use fs_thermal::sublimation::{
+    SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics, VaporReservoir,
+};
 
 const INITIAL_T_K: f64 = 230.0;
 const SOLID_CP_J_KG_K: f64 = 2000.0;
@@ -29,11 +41,29 @@ const FRONT_AREA_M2: f64 = 0.001;
 const FILM_THICKNESS_M: f64 = 10.0e-6;
 const CHAMBER_VOLUME_M3: f64 = 100.0e-6; // 100 mL
 const MAX_DT_S: f64 = 25.0e-6;
+const SUBSTRATE_MASS_KG: f64 = 0.02;
+const SUBSTRATE_CP_J_KG_K: f64 = 500.0;
+const SUBSTRATE_DENSITY_KG_M3: f64 = 8000.0;
 
-struct SolidIceCaloric;
-impl ThermalLaw for SolidIceCaloric {
+// Both bodies use this same bounded caloric chart, with their explicitly
+// supplied heat capacities. The original ice datum remains ice at 230 K.
+struct ConstantCaloric {
+    cp_j_kg_k: f64,
+}
+impl ConstantCaloric {
+    fn specific_enthalpy_j_kg(&self, temperature: f64) -> Result<f64, SublimationError> {
+        if (200.0..=260.0).contains(&temperature) {
+            Ok(self.cp_j_kg_k * (temperature - INITIAL_T_K))
+        } else {
+            Err(SublimationError::Invalid(
+                "illustrative caloric temperature domain",
+            ))
+        }
+    }
+}
+impl ThermalLaw for ConstantCaloric {
     fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
-        let temperature = INITIAL_T_K + h / SOLID_CP_J_KG_K;
+        let temperature = INITIAL_T_K + h / self.cp_j_kg_k;
         if (200.0..=260.0).contains(&temperature) {
             Ok(temperature)
         } else {
@@ -41,10 +71,15 @@ impl ThermalLaw for SolidIceCaloric {
         }
     }
     fn maximum_temperature_slope(&self) -> f64 {
-        1.0 / SOLID_CP_J_KG_K
+        1.0 / self.cp_j_kg_k
     }
 }
-static CALORIC: SolidIceCaloric = SolidIceCaloric;
+static CALORIC: ConstantCaloric = ConstantCaloric {
+    cp_j_kg_k: SOLID_CP_J_KG_K,
+};
+static SUBSTRATE_CALORIC: ConstantCaloric = ConstantCaloric {
+    cp_j_kg_k: SUBSTRATE_CP_J_KG_K,
+};
 
 fn thermal_config() -> StepConfig {
     StepConfig {
@@ -170,6 +205,158 @@ fn run_case(
     })
 }
 
+fn run_supported_chamber(law: &WaterIceSublimation) -> Result<(), Box<dyn std::error::Error>> {
+    let substrate_volume = SUBSTRATE_MASS_KG / SUBSTRATE_DENSITY_KG_M3;
+    let mut births = Vec::new();
+    for (id, temperature) in [(1, 250.0), (2, 220.0)] {
+        births.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Birth(DepositedCell {
+                id: CellId(id),
+                segment_id: id,
+                body_id: id,
+                material_id: MaterialId(2),
+                mass_kg: SUBSTRATE_MASS_KG,
+                specific_h_j_kg: SUBSTRATE_CALORIC.specific_enthalpy_j_kg(temperature)?,
+                geometry: CellGeometry {
+                    start_m: [id as f64 * 0.1, 0.0, 0.0],
+                    end_m: [id as f64 * 0.1 + FRONT_AREA_M2.sqrt(), 0.0, 0.0],
+                    volume_m3: substrate_volume,
+                    surface_area_m2: 2.0 * FRONT_AREA_M2,
+                },
+                boundary: Boundary {
+                    ambient_k: INITIAL_T_K,
+                    htc_w_m2_k: 0.0,
+                    source_w: 0.0,
+                    // The insulated back is unavailable for vapor exchange.
+                    reservoir: Some(Reservoir {
+                        area_m2: FRONT_AREA_M2,
+                        conductance_w_k: 0.0,
+                        temperature_k: INITIAL_T_K,
+                    }),
+                },
+            }),
+        });
+    }
+    let thermal = DepositionSimulation::new(
+        births,
+        &[(MaterialId(2), &SUBSTRATE_CALORIC)],
+        DepositionBudget {
+            max_cells: 2,
+            max_links: 0,
+            max_events: 2,
+            max_substeps: 10_000,
+        },
+    )?
+    .advance_to(0.0, thermal_config(), || Ok(()))?
+    .0;
+    let kinetics = SurfaceKinetics {
+        accommodation_coefficient: 1.0,
+        mass_transfer_coefficient_m_s: None,
+    };
+    let initial_ice = SOLID_DENSITY_KG_M3 * FRONT_AREA_M2 * FILM_THICKNESS_M;
+    let deposit_h = |temperature| CALORIC.specific_enthalpy_j_kg(temperature);
+    let mut state = CoatingSimulation::new_shared_chamber(
+        thermal,
+        &[
+            ChamberCoatingSurface {
+                cell_id: CellId(1),
+                kinetics,
+                initial_mass_kg: initial_ice,
+            },
+            ChamberCoatingSurface {
+                cell_id: CellId(2),
+                kinetics,
+                initial_mass_kg: 0.0,
+            },
+        ],
+        law,
+        &deposit_h,
+        VaporReservoir::Finite {
+            vapor_mass_kg: 0.0,
+            volume_m3: CHAMBER_VOLUME_M3,
+            temperature_k: INITIAL_T_K,
+        },
+        || Ok(()),
+    )?;
+    let initial_energy = state.energy_j();
+    let molar_mass = law.properties(INITIAL_T_K)?.molar_mass_kg_mol;
+    let controls = ChamberSolverConfig {
+        surface_solver: SolverConfig {
+            relative_tolerance: 1e-11,
+            absolute_energy_tolerance_j: 1e-12,
+            max_iterations: 128,
+        },
+        relative_mass_tolerance: 1e-11,
+        absolute_mass_tolerance_kg: 1e-18,
+        max_iterations: 128,
+        max_surfaces: 2,
+    };
+    let mut vapor_energy = 0.0;
+    let mut external_heat = 0.0;
+    println!("\nShared cold trap: one warm ice coating and one initially BARE colder support.");
+    println!("Nonvolatile supports: 20 g each; illustrative cp=500 J/(kg K), density=8000 kg/m^3.");
+    println!("One initially empty 100-mL chamber, held at 230 K; no nucleation barrier.");
+    println!(
+        "time_ms  warm_K    cold_K    warm_ice_um  cold_ice_um  vapor_Pa  mass_residual_kg  energy_residual_J"
+    );
+    for sample in 1..=5 {
+        let target_s = f64::from(sample) * 0.001;
+        let (next, audit) =
+            state.advance_chamber_to(target_s, thermal_config(), controls, || Ok(()))?;
+        state = next;
+        vapor_energy += audit.vapor_energy_j;
+        external_heat += audit.thermal.external_heat_j;
+        let vapor = state
+            .shared_reservoir()
+            .expect("shared chamber was admitted");
+        let VaporReservoir::Finite { vapor_mass_kg, .. } = vapor else {
+            unreachable!("shared chamber retains one finite reservoir")
+        };
+        // Sum the physical chamber inventory ONCE, never one copy per coating.
+        let mass_residual = state.deposit_mass_kg() + vapor_mass_kg - initial_ice;
+        let energy_residual = state.energy_j() - initial_energy - external_heat + vapor_energy;
+        assert!(
+            mass_residual.abs() < 1e-15,
+            "shared volatile mass did not close"
+        );
+        assert!(
+            energy_residual.abs() < 1e-8,
+            "substrate/deposit/vapor energy did not close"
+        );
+        assert!(audit.absolute_energy_residual_j <= thermal_config().energy_tolerance_j);
+        assert!(
+            state
+                .cells()
+                .values()
+                .all(|cell| cell.mass_kg == SUBSTRATE_MASS_KG)
+        );
+        let thickness = |id| {
+            state.coatings()[&CellId(id)].mass_kg / (SOLID_DENSITY_KG_M3 * FRONT_AREA_M2) * 1e6
+        };
+        println!(
+            "{:7.3}  {:8.4}  {:8.4}  {:11.6}  {:11.6}  {:8.4}  {:16.3e}  {:18.3e}",
+            target_s * 1e3,
+            state.temperature_k(CellId(1))?,
+            state.temperature_k(CellId(2))?,
+            thickness(1),
+            thickness(2),
+            vapor.partial_pressure_pa(molar_mass)?,
+            mass_residual,
+            energy_residual,
+        );
+    }
+    assert!(state.coatings()[&CellId(1)].mass_kg < initial_ice);
+    assert!(state.coatings()[&CellId(2)].mass_kg > 0.0);
+    assert!(state.temperature_k(CellId(1))? < 250.0);
+    assert!(state.temperature_k(CellId(2))? > 220.0);
+    println!("Cold deposit grew from zero; the warm coating supplied all chamber water.");
+    println!(
+        "Latent heating/cooling changed finite substrate temperatures without consuming substrate mass."
+    );
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let law = WaterIceSublimation::try_new(SOLID_DENSITY_KG_M3)?;
     println!("Sublimation of a 10-micrometre ice film initially at 230 K.");
@@ -200,5 +387,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         chamber.transferred_mass_kg * 1.0e9,
     );
     println!("Vapor backpressure limits loss; sublimation cools the same finite solid inventory.");
+    run_supported_chamber(&law)?;
     Ok(())
 }

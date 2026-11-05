@@ -9,9 +9,10 @@
 //! This is a thin, isothermal coating with negligible internal/contact thermal
 //! resistance. Conductance and exposed area retain their authored reference
 //! geometry. Porosity, melting, moving geometry, resolved gas temperature and
-//! observer-driven sources need their own coupled owners. Each surface has an
-//! independent prescribed or thermostatted finite vapor reservoir; copying one
-//! finite reservoir does not create shared chamber backpressure.
+//! observer-driven sources need their own coupled owners. Surfaces may have
+//! independent reservoirs or explicitly share one finite thermostatted chamber.
+//! A shared chamber solves all active surfaces at one endpoint pressure; copying
+//! finite reservoirs into the independent constructor does not connect them.
 //!
 //! Heat then phase exchange uses first-order splitting on every native CFL
 //! substep. Both intermediate states must remain in their material domains.
@@ -32,6 +33,10 @@ use crate::sublimation::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "coating/chamber.rs"]
+mod chamber;
+pub use chamber::ChamberCoatingSurface;
+
 /// Explicit heterogeneous-deposition admission for one persistent substrate.
 /// `deposit_enthalpy` is the original continuous nondecreasing PURE-SOLID h(T),
 /// with the datum used by `law`'s latent enthalpy. The substrate datum is
@@ -49,7 +54,8 @@ pub struct CoatingSurface<'a> {
     pub reservoir: VaporReservoir,
 }
 
-/// Actual deposited storage and its independent vapor reservoir.
+/// Actual deposited storage and its vapor-reservoir observation. In a shared
+/// chamber every active coating repeats the SAME inventory, not separate stocks.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CoatingState {
     pub mass_kg: f64,
@@ -70,7 +76,8 @@ pub struct CoatingAudit {
     pub vapor_energy_j: f64,
     /// Complete substrate + coating storage change, including births, J.
     pub stored_energy_change_j: f64,
-    /// Actual coating mass changes plus signed vapor transfer, kg.
+    /// Actual coating plus finite-vapor inventory changes, kg. Prescribed
+    /// external baths instead contribute their signed exported transfer.
     pub mass_balance_residual_kg: f64,
     /// Stored change - incoming energy - external heat + vapor energy, J.
     /// Evaluated locally, not by subtracting large absolute energy totals.
@@ -79,6 +86,12 @@ pub struct CoatingAudit {
     /// Opposing defects cannot cancel out of the conservation admission.
     pub absolute_energy_residual_j: f64,
     pub phase_steps: usize,
+    /// Total scalar pressure trials for shared-chamber substeps; zero for
+    /// independent reservoirs. Surface nonlinear work has its own solver cap.
+    pub pressure_iterations: usize,
+    /// Sum of absolute shared pressure-closure defects [kg]. This is separate
+    /// from actual mass conservation, which reconstructs inventory from transfer.
+    pub absolute_nonlinear_mass_residual_kg: f64,
     /// Latest exchange per active coating; no full history is allocated.
     pub last_steps: BTreeMap<CellId, SupportedSurfaceStep>,
 }
@@ -90,6 +103,7 @@ pub struct CoatingSimulation<'a> {
     thermal: DepositionSimulation<'a>,
     surfaces: BTreeMap<CellId, CoatingSurface<'a>>,
     coatings: BTreeMap<CellId, CoatingState>,
+    chamber: Option<VaporReservoir>,
 }
 
 impl<'a> CoatingSimulation<'a> {
@@ -144,6 +158,7 @@ impl<'a> CoatingSimulation<'a> {
             thermal,
             surfaces: models,
             coatings,
+            chamber: None,
         };
         finite(state.mass_kg())?;
         finite(state.energy_j())?;
@@ -173,7 +188,8 @@ impl<'a> CoatingSimulation<'a> {
     pub fn deposit_mass_kg(&self) -> f64 {
         self.coatings.values().map(|c| c.mass_kg).sum()
     }
-    /// Complete condensed mass; independent vapor inventories are in coatings().
+    /// Complete condensed mass. Add shared_reservoir() ONCE for a closed
+    /// chamber; independent vapor inventories are instead in coatings().
     pub fn mass_kg(&self) -> f64 {
         self.thermal.mass_kg() + self.deposit_mass_kg()
     }
@@ -227,6 +243,12 @@ impl<'a> CoatingSimulation<'a> {
     ) -> Result<(), ThermalSublimationError> {
         checkpoint()?;
         self.require_processed_events()?;
+        if self.chamber.is_some() {
+            return Err(DepositionError::InvalidInput(
+                "replace a shared coating chamber with set_shared_reservoir",
+            )
+            .into());
+        }
         let state = self.coatings.get(&id).ok_or(DepositionError::InvalidInput(
             "reservoir replacement requires an active coated substrate",
         ))?;
@@ -252,6 +274,23 @@ impl<'a> CoatingSimulation<'a> {
         target_s: f64,
         thermal_config: StepConfig,
         phase_config: SolverConfig,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, CoatingAudit), ThermalSublimationError> {
+        if self.chamber.is_some() {
+            return Err(DepositionError::InvalidInput(
+                "advance a shared coating chamber with advance_chamber_to",
+            )
+            .into());
+        }
+        self.advance_impl(target_s, thermal_config, phase_config, None, checkpoint)
+    }
+
+    fn advance_impl(
+        &self,
+        target_s: f64,
+        thermal_config: StepConfig,
+        phase_config: SolverConfig,
+        chamber_config: Option<crate::sublimation::chamber::ChamberSolverConfig>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, CoatingAudit), ThermalSublimationError> {
         checkpoint()?;
@@ -277,6 +316,8 @@ impl<'a> CoatingSimulation<'a> {
             energy_residual_j: 0.0,
             absolute_energy_residual_j: 0.0,
             phase_steps: 0,
+            pressure_iterations: 0,
+            absolute_nonlinear_mass_residual_kg: 0.0,
             last_steps: BTreeMap::new(),
         };
         let mut sums = Ledger::default();
@@ -298,10 +339,16 @@ impl<'a> CoatingSimulation<'a> {
                 next.thermal.apply(event, &mut incoming)?;
                 if let Some(id) = birth {
                     if let Some(model) = next.surfaces.get(&id) {
+                        let mut model = *model;
+                        // A late substrate joins the current shared gas. Birth
+                        // cannot restore a private copy of the initial vapor.
+                        if let Some(reservoir) = next.chamber {
+                            model.reservoir = reservoir;
+                        }
                         let state = initial_state(
                             &next.thermal,
                             &next.thermal.cells[&id],
-                            model,
+                            &model,
                             &mut checkpoint,
                         )?;
                         incoming.incoming_mass_kg =
@@ -410,84 +457,42 @@ impl<'a> CoatingSimulation<'a> {
             sums.heat_residual.add(internal_defect)?;
             sums.defects.add(internal_defect.abs())?;
             // START exposure: endpoint coverage/source events are still pending.
-            for (&id, coating) in &mut next.coatings {
-                checkpoint()?;
-                let model = &next.surfaces[&id];
-                let cell = next.thermal.cells.get_mut(&id).unwrap();
-                let caloric = next.thermal.materials[&cell.material_id];
-                let mut refusal = None;
-                let result = advance_supported_surface(
-                    model.law,
-                    model.kinetics,
-                    supported_state(cell, *coating, areas[&id]),
-                    coating.reservoir,
-                    dt,
-                    phase_config,
-                    |h| {
-                        caloric.temperature_k(h).map_err(|_| {
-                            SublimationError::Invalid(
-                                "original substrate calorics refused phase trial",
-                            )
-                        })
-                    },
-                    model.deposit_enthalpy,
-                    || {
-                        checkpoint().map_err(|error| {
-                            refusal = Some(error);
-                            SublimationError::Cancelled
-                        })
-                    },
-                );
-                if let Some(error) = refusal {
-                    return Err(error.into());
+            if let Some(config) = chamber_config {
+                next.exchange_chamber(&areas, dt, config, &mut sums, &mut audit, &mut checkpoint)?;
+            } else {
+                for (&id, coating) in &mut next.coatings {
+                    checkpoint()?;
+                    let model = &next.surfaces[&id];
+                    let cell = next.thermal.cells.get_mut(&id).unwrap();
+                    let caloric = next.thermal.materials[&cell.material_id];
+                    let mut refusal = None;
+                    let result = advance_supported_surface(
+                        model.law,
+                        model.kinetics,
+                        supported_state(cell, *coating, areas[&id]),
+                        coating.reservoir,
+                        dt,
+                        phase_config,
+                        |h| {
+                            caloric.temperature_k(h).map_err(|_| {
+                                SublimationError::Invalid(
+                                    "original substrate calorics refused phase trial",
+                                )
+                            })
+                        },
+                        model.deposit_enthalpy,
+                        || {
+                            checkpoint().map_err(|error| {
+                                refusal = Some(error);
+                                SublimationError::Cancelled
+                            })
+                        },
+                    );
+                    if let Some(error) = refusal {
+                        return Err(error.into());
+                    }
+                    accept_phase_step(cell, coating, result?, true, &mut sums, &mut audit)?;
                 }
-                let step = result?;
-                let dm = step.phase.transferred_mass_kg;
-                let actual_dm = finite(step.state.deposit_mass_kg - coating.mass_kg)?;
-                let mass_defect = finite(actual_dm + dm)?;
-                admit_mass(coating.mass_kg, step.state.deposit_mass_kg, dm, mass_defect)?;
-                if let (
-                    VaporReservoir::Finite {
-                        vapor_mass_kg: old, ..
-                    },
-                    VaporReservoir::Finite {
-                        vapor_mass_kg: new, ..
-                    },
-                ) = (coating.reservoir, step.phase.reservoir)
-                {
-                    admit_mass(old, new, dm, finite((new - old) - dm)?)?;
-                }
-                // Use ACTUAL represented inventory changes. Substituting -dm
-                // could hide mass-rounding energy error at a large caloric datum.
-                let deposit_h = step.phase.solid.specific_enthalpy_j_kg;
-                let deposit_delta = finite(
-                    coating.mass_kg * (deposit_h - coating.specific_enthalpy_j_kg)
-                        + actual_dm * deposit_h,
-                )?;
-                let stored = finite(step.substrate_energy_change_j + deposit_delta)?;
-                // Cancel the COMMON transported datum algebraically before
-                // adding energies. The remaining mass-rounding correction is
-                // still charged against the actual represented inventory.
-                let defect =
-                    finite(step.phase.energy_residual_j + finite(mass_defect * deposit_h)?)?;
-                sums.phase_storage.add(stored)?;
-                sums.phase_residual.add(defect)?;
-                sums.defects.add(defect.abs())?;
-                sums.mass_residual.add(mass_defect)?;
-                sums.transferred.add(dm)?;
-                sums.latent.add(step.phase.latent_energy_j)?;
-                sums.vapor.add(step.phase.vapor_energy_j)?;
-                cell.specific_h_j_kg = step.state.substrate_specific_enthalpy_j_kg;
-                *coating = CoatingState {
-                    mass_kg: step.state.deposit_mass_kg,
-                    specific_enthalpy_j_kg: deposit_h,
-                    reservoir: step.phase.reservoir,
-                };
-                audit.phase_steps = audit
-                    .phase_steps
-                    .checked_add(1)
-                    .ok_or(DepositionError::Arithmetic)?;
-                audit.last_steps.insert(id, step);
             }
             if sums.defects.value() > thermal_config.energy_tolerance_j {
                 return Err(DepositionError::EnergyBalance(sums.defects.value()).into());
@@ -560,6 +565,64 @@ impl<'a> CoatingSimulation<'a> {
         }
         Ok(areas)
     }
+}
+
+fn accept_phase_step(
+    cell: &mut DepositedCell,
+    coating: &mut CoatingState,
+    step: SupportedSurfaceStep,
+    independent_reservoir: bool,
+    sums: &mut Ledger,
+    audit: &mut CoatingAudit,
+) -> Result<(), ThermalSublimationError> {
+    let dm = step.phase.transferred_mass_kg;
+    let actual_dm = finite(step.state.deposit_mass_kg - coating.mass_kg)?;
+    let mass_defect = finite(actual_dm + dm)?;
+    admit_mass(coating.mass_kg, step.state.deposit_mass_kg, dm, mass_defect)?;
+    if independent_reservoir {
+        if let (
+            VaporReservoir::Finite {
+                vapor_mass_kg: old, ..
+            },
+            VaporReservoir::Finite {
+                vapor_mass_kg: new, ..
+            },
+        ) = (coating.reservoir, step.phase.reservoir)
+        {
+            let vapor_defect = finite((new - old) - dm)?;
+            admit_mass(old, new, dm, vapor_defect)?;
+            sums.mass_residual.add(vapor_defect)?;
+        }
+    }
+    // Use ACTUAL represented inventory changes. Substituting -dm could hide
+    // mass-rounding energy error at a large caloric datum.
+    let deposit_h = step.phase.solid.specific_enthalpy_j_kg;
+    let deposit_delta = finite(
+        coating.mass_kg * (deposit_h - coating.specific_enthalpy_j_kg) + actual_dm * deposit_h,
+    )?;
+    let stored = finite(step.substrate_energy_change_j + deposit_delta)?;
+    // Cancel the common transported datum algebraically before adding energies;
+    // charge any mass-rounding correction against represented inventory.
+    let defect = finite(step.phase.energy_residual_j + finite(mass_defect * deposit_h)?)?;
+    sums.phase_storage.add(stored)?;
+    sums.phase_residual.add(defect)?;
+    sums.defects.add(defect.abs())?;
+    sums.mass_residual.add(mass_defect)?;
+    sums.transferred.add(dm)?;
+    sums.latent.add(step.phase.latent_energy_j)?;
+    sums.vapor.add(step.phase.vapor_energy_j)?;
+    cell.specific_h_j_kg = step.state.substrate_specific_enthalpy_j_kg;
+    *coating = CoatingState {
+        mass_kg: step.state.deposit_mass_kg,
+        specific_enthalpy_j_kg: deposit_h,
+        reservoir: step.phase.reservoir,
+    };
+    audit.phase_steps = audit
+        .phase_steps
+        .checked_add(1)
+        .ok_or(DepositionError::Arithmetic)?;
+    audit.last_steps.insert(cell.id, step);
+    Ok(())
 }
 
 fn supported_state(

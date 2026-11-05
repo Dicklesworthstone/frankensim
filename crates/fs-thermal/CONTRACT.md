@@ -702,6 +702,16 @@ phase law, kinetics and independent prescribed/thermostatted vapor reservoir.
 Future births may carry an authored coating; its mass and sensible energy enter
 the incoming account exactly once.
 
+`CoatingSimulation::new_shared_chamber` instead selects one common volatile
+law, one original deposit h(T), and one finite chamber for all authored
+`ChamberCoatingSurface`s. `advance_chamber_to` supplies explicit surface and
+pressure budgets and calls the joint supported-deposit operator on each native
+thermal substep. Active cells are ordered by persistent identity; future cells
+join only at their scheduled birth, with the then-current chamber inventory.
+`shared_reservoir` is the single gas stock. Per-coating reservoir observations
+repeat it and must not be summed. Individual reservoir replacement refuses in
+this mode; `set_shared_reservoir` replaces the external bath atomically.
+
 The material adapter `fs_material::thermal::PureSolidThermalLaw::
 specific_enthalpy_at_temperature` supplies original solid h(T) directly from
 its borrowed curve. It retains exact source knots, varying sensible slopes and
@@ -727,12 +737,18 @@ opposing local defects cannot cancel out of its absolute admission.
 This remains first-order heat/phase splitting with fixed reference area and
 conductances and a shared substrate/coating temperature. It does not resolve
 thick-layer resistance, porosity, melting, moving geometry, dynamic
-observer-based sources, or a shared gas chamber. Finite baths in different
-surface bindings are independent. Seven native integration tests cover combined
+observer-based sources, or evolving gas sensible heat. Finite baths supplied to
+the independent constructor remain independent. Seven native integration tests cover combined
 storage/conduction/source work, zero-inventory growth and regrowth, finite vapor
 conservation, exact event exposure, coated births, cancellation/budgets,
 restart and independent caloric datums; seven heat tests additionally cover
 nonlinear storage, domain backtracking and unrepresentable heat.
+Five shared-timeline regressions additionally cover competing bare substrates,
+canonical replay, late births without replenishing vapor, empty pre-birth
+intervals, contact shielding, combined heat storage, independent substrate
+datums, shared work limits and late cancellation. Their selected-source native
+lane exercises the original timeline and phase bodies; full workspace gates
+remain a separate dependency requirement.
 
 ## Numerical and physical limits
 
