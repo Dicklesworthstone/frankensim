@@ -191,7 +191,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         Ok((report, walls))
     }
 
-    pub(super) fn prepare_channel_sgs_with_motion(
+    pub(in crate::lattice3) fn prepare_channel_sgs_with_motion(
         &self,
         config: SgsConfig,
         molecular: Option<&[L::Collision]>,
@@ -430,7 +430,7 @@ impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
         )
     }
 
-    pub(super) fn prepare_channel_dynamic_sgs_with_motion(
+    pub(in crate::lattice3) fn prepare_channel_dynamic_sgs_with_motion(
         &self,
         config: ChannelDynamicSgsConfig,
         molecular: Option<&[L::Collision]>,
