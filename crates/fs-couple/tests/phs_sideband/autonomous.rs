@@ -2,7 +2,8 @@ use super::{controls, near, orbit, scales};
 use fs_couple::phs_orbit::{
     AutonomousPortFeedback,
     sideband::{
-        PhsPortSidebandError, solve_autonomous_feedback_port_sideband_response,
+        PhsPortSidebandError, PhsPortSidebandSource,
+        solve_autonomous_feedback_port_sideband_response,
         solve_autonomous_feedback_port_sideband_response_analytic,
     },
 };
@@ -333,4 +334,115 @@ fn autonomous_neutral_carrier_is_not_phase_pinned_or_given_artificial_damping() 
             SidebandError::Singular { .. }
         ))
     ));
+}
+
+#[test]
+fn prepared_autonomous_sweep_reuses_one_complete_tangent_and_keeps_physical_memory_outputs() {
+    let drive = CycleDrive {
+        omega: 1.2,
+        gain: 0.45,
+        resistance: 0.2,
+        cubic: 0.6,
+        memory: 0.3,
+    };
+    let (tau, phase) = (0.7, 0.31);
+    let system = system(&drive, tau, None);
+    let base = candidate(&drive, tau, phase);
+    let original = base.coeffs.clone();
+    let calls = core::cell::Cell::new(0_usize);
+    let derivative = |x: &[f64], y: &[f64], out: &mut [f64]| {
+        calls.set(calls.get() + 1);
+        drive.total_derivative(x, y, out)
+    };
+    let c = controls(3, 2, 2, 4);
+    let mut source =
+        PhsPortSidebandSource::autonomous_feedback(&system, &drive, &derivative, &base, &c)
+            .unwrap();
+    let mut prepared = source.prepare(&scales(3), || false).unwrap();
+    let preparations = 3 * c.sideband.samples_per_period + 1;
+    assert_eq!(calls.get(), preparations);
+    assert!(prepared.base_residual() < 1e-11);
+    assert!(prepared.tangent_sampling_defect() < 1e-11);
+    let forces = [
+        [C64::new(0.12, -0.04), C64::new(-0.03, 0.05)],
+        [C64::new(-0.07, 0.09), C64::new(0.11, -0.02)],
+    ];
+    for carrier in [0.47, 1.93, -0.37] {
+        let mut factor = prepared.factor(carrier, || false).unwrap();
+        assert_eq!(factor.carrier_angular_frequency(), carrier);
+        for force in forces {
+            let mut forcing = vec![C64::ZERO; 10];
+            forcing[4..6].copy_from_slice(&force);
+            let result = factor.solve(&forcing, || false).unwrap();
+            // Factorization and physical observation must not resample the
+            // feedback tangent, despite changing carrier and complex port drive.
+            assert_eq!(calls.get(), preparations);
+            let mechanics = exact_mechanical(&drive, phase, carrier, force);
+            let expected: Vec<_> = mechanics
+                .iter()
+                .enumerate()
+                .map(|(band, response)| {
+                    let w = carrier + (band as f64 - 2.0) * drive.omega;
+                    [
+                        response[0],
+                        response[1],
+                        response[0].scale(det::sqrt(drive.memory)) / C64::new(1.0, tau * w),
+                    ]
+                })
+                .collect();
+            for (actual, expected) in result
+                .state_response
+                .coefficients
+                .iter()
+                .zip(expected.iter().flatten())
+            {
+                near(*actual, *expected, 5e-11);
+            }
+            let state = |k: isize, j: usize| {
+                if k.unsigned_abs() > 2 {
+                    C64::ZERO
+                } else {
+                    expected[(k + 2) as usize][j]
+                }
+            };
+            let modulation = (base.coeffs[0][1] * base.coeffs[0][1]).scale(3.0 * drive.cubic);
+            for k in -4..=4 {
+                let effort = state(k, 0).scale(1.0 + drive.memory + 1.5 * drive.cubic)
+                    + modulation * state(k - 2, 0)
+                    + modulation.conj() * state(k + 2, 0)
+                    - state(k, 2).scale(det::sqrt(drive.memory));
+                near(
+                    result.port_coefficients[(k + 4) as usize * 2],
+                    effort,
+                    5e-11,
+                );
+                near(
+                    result.port_coefficients[(k + 4) as usize * 2 + 1],
+                    state(k, 1),
+                    5e-11,
+                );
+            }
+            assert_eq!(result.observation_trace.len(), 3);
+            assert_eq!(result.hessian_actions, 2 * (64 + 128 + 256));
+        }
+        assert!(matches!(
+            factor.solve(&[C64::ZERO], || false),
+            Err(PhsPortSidebandError::Invalid(_))
+        ));
+        assert!(matches!(
+            factor.solve(&[C64::ZERO; 10], || true),
+            Err(PhsPortSidebandError::Cancelled)
+        ));
+        // A refused/cancelled solve leaves the same cached factor usable.
+        let zero = factor.solve(&[C64::ZERO; 10], || false).unwrap();
+        assert!(
+            zero.state_response
+                .coefficients
+                .iter()
+                .all(|z| *z == C64::ZERO)
+        );
+        assert!(zero.port_coefficients.iter().all(|z| *z == C64::ZERO));
+    }
+    assert_eq!(calls.get(), preparations);
+    assert_eq!(base.coeffs, original);
 }

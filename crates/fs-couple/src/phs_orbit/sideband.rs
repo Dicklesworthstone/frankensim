@@ -13,24 +13,28 @@
 //! This is an infinitesimal-probe response, not a new finite-amplitude orbit
 //! or a claim of Floquet stability. Its finite-grid checks are not tail bounds.
 
-use super::tangent::StorageTangent;
-use super::variational_feedback::feedback_tangent_problem;
 use super::{
     AutonomousPortFeedback, PeriodicPortInput, PhsFeedbackStateJacobian, PhsOrbitProblem,
-    PhsStorageHessianAction, forced_problem,
+    PhsStorageHessianAction,
 };
 use fs_fft::{C64 as FftComplex, Fft};
 use fs_math::{c64::C64, det};
 use fs_orbit::{
-    HbOrbit, OrbitProblem,
-    sideband::{
-        PreparedPeriodicLinearization, SidebandControls, SidebandError, SidebandResponse,
-        SidebandScales,
-    },
+    HbOrbit,
+    sideband::{SidebandControls, SidebandError, SidebandResponse, SidebandScales},
 };
 use fs_phs::PortHamiltonian;
 
+mod prepared;
+pub use prepared::{
+    FactoredPhsPortSidebands, PhsPortSidebandSource, PreparedPhsPortSidebands,
+    solve_forced_feedback_port_sideband_response,
+    solve_forced_feedback_port_sideband_response_analytic,
+};
+
 /// Independent state-response and physical-output accuracy/resource limits.
+/// Work and action caps apply to each operation, not cumulatively across a
+/// reusable source's lifetime. Returned responses become caller-owned storage.
 #[derive(Clone, Debug)]
 pub struct PhsPortSidebandControls {
     pub sideband: SidebandControls,
@@ -43,15 +47,18 @@ pub struct PhsPortSidebandControls {
     /// Largest power-of-two grid, at most 65536 and at least four times the
     /// first. Two successive grid comparisons must pass independently.
     pub max_samples: usize,
-    /// Maximum observation Hessian actions; two per sample, for the real and
+    /// Maximum observation Hessian actions PER response; two per sample, for the real and
     /// imaginary envelopes. Generic tangent preparation has its own budget.
     pub max_hessian_actions: usize,
     /// Extra adapter numerical payload, including mapped input, retained state
     /// response, tangent scratch, FFT plans/samples and both output spectra.
-    /// The generic solver's separate payload cap still applies. Source/caller
-    /// storage, callback-internal allocation and allocator metadata are excluded.
+    /// The generic solver's separate payload cap still applies. A prepared
+    /// response keeps its tangent and one factor alive during observation:
+    /// their combined live bound is the SUM of this cap and the generic cap.
+    /// Original model/caller storage, callback-internal allocation and allocator
+    /// metadata are excluded. Adapter source/tolerance scratch is included.
     pub max_workspace_bytes: usize,
-    /// Conservative observer/port-map arithmetic cap, including dense quadratic
+    /// Conservative observer/port-map arithmetic cap PER response, including dense quadratic
     /// Hessian actions. Other source callbacks' internal work is source-defined.
     pub max_observation_work: u64,
     /// Absolute complex-envelope L2 tolerance per original output port, in its
@@ -286,39 +293,18 @@ fn solve_autonomous(
 ) -> Result<PhsPortSidebandResponse> {
     poll(&mut cancelled)?;
     admit(system, orbit, carrier, forcing, c)?;
-    if feedback.port_count() != system.port_dim() {
-        return Err(PhsPortSidebandError::Invalid(
-            "feedback must cover every original physical port",
-        ));
-    }
-    // Reserve the complete feedback derivative plus its original flows and
-    // this local tolerance vector before constructing the shared source adapter.
-    let extra = 8 * system.port_dim() as u128 * (system.state_dim() as u128 + 2);
-    if extra > c.max_workspace_bytes as u128 {
-        return Err(PhsPortSidebandError::Budget(
-            "complete feedback tangent exceeds the adapter payload cap",
-        ));
-    }
-    let mut remaining = c.clone();
-    remaining.max_workspace_bytes -= extra as usize;
-    admit_storage(
-        system.state_dim(),
-        system.port_dim(),
-        &remaining,
-        c.initial_samples,
-    )?;
-    let problem = feedback_tangent_problem(system, feedback, feedback_jacobian, hessian)
-        .map_err(|_| PhsPortSidebandError::Invalid("complete original feedback source required"))?;
-    solve_problem(
-        &problem,
-        problem.original_problem(),
+    let mut source = PhsPortSidebandSource::from_feedback(
+        system,
+        None,
+        feedback,
+        feedback_jacobian,
         orbit,
-        carrier,
-        forcing,
-        &remaining,
-        scales,
-        cancelled,
-    )
+        c,
+        hessian,
+    )?;
+    let mut prepared = source.prepare(scales, &mut cancelled)?;
+    let mut factor = prepared.factor(carrier, &mut cancelled)?;
+    factor.solve(forcing, cancelled)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -335,73 +321,10 @@ fn solve(
 ) -> Result<PhsPortSidebandResponse> {
     poll(&mut cancelled)?;
     admit(system, orbit, carrier, forcing, c)?;
-    if system.port_dim() != input.port_count()
-        || orbit.omega.to_bits() != input.omega_rad_s().to_bits()
-        || c.sideband.samples_per_period <= 2 * input.highest_nonzero_harmonic()
-    {
-        return Err(PhsPortSidebandError::Invalid(
-            "matching complete resolved periodic input required",
-        ));
-    }
-    let mut problem = forced_problem(system, input).map_err(|_| {
-        PhsPortSidebandError::Invalid("complete original physical port input required")
-    })?;
-    if let Some(action) = hessian {
-        problem.tangent = StorageTangent::hessian(system.state_dim(), action);
-    }
-    solve_problem(
-        &problem, &problem, orbit, carrier, forcing, c, scales, cancelled,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn solve_problem<P: OrbitProblem>(
-    problem: &P,
-    original: &PhsOrbitProblem<'_>,
-    orbit: &HbOrbit,
-    carrier: f64,
-    forcing: &[C64],
-    c: &PhsPortSidebandControls,
-    scales: &SidebandScales,
-    mut cancelled: impl FnMut() -> bool,
-) -> Result<PhsPortSidebandResponse> {
-    let system = original.system;
-    // Release the dense generic preparation/factor before allocating observation
-    // grids. No self-referential prepared adapter or duplicate source is needed.
-    let (state_response, base_residual, tangent_sampling_defect) = {
-        let prepared =
-            PreparedPeriodicLinearization::new(problem, orbit, c.sideband, scales, &mut cancelled)?;
-        let factored = prepared.factor(carrier, &mut cancelled)?;
-        let rhs = input_forcing(system, forcing, c.sideband.harmonics, &mut cancelled)?;
-        let response = factored.solve(&rhs, &mut cancelled)?;
-        (
-            response,
-            prepared.base_residual,
-            prepared.tangent_sampling_defect,
-        )
-    };
-    let (port_coefficients, observation_trace, hessian_actions) = observe(
-        original,
-        orbit,
-        &state_response.coefficients,
-        c,
-        &mut cancelled,
-    )?;
-    poll(&mut cancelled)?;
-    Ok(PhsPortSidebandResponse {
-        omega_rad_s: orbit.omega,
-        carrier_angular_frequency: carrier,
-        state_harmonics: c.sideband.harmonics,
-        output_harmonics: c.output_harmonics,
-        state_dimension: system.state_dim(),
-        port_count: system.port_dim(),
-        state_response,
-        port_coefficients,
-        base_residual,
-        tangent_sampling_defect,
-        observation_trace,
-        hessian_actions,
-    })
+    let mut source = PhsPortSidebandSource::from_forced(system, input, orbit, c, hessian)?;
+    let mut prepared = source.prepare(scales, &mut cancelled)?;
+    let mut factor = prepared.factor(carrier, &mut cancelled)?;
+    factor.solve(forcing, cancelled)
 }
 
 fn admit(
@@ -409,6 +332,46 @@ fn admit(
     orbit: &HbOrbit,
     carrier: f64,
     forcing: &[C64],
+    c: &PhsPortSidebandControls,
+) -> Result<()> {
+    admit_source(system, orbit, c)?;
+    admit_carrier(orbit, carrier, c)?;
+    admit_forcing(system, forcing, c)
+}
+
+fn admit_carrier(orbit: &HbOrbit, carrier: f64, c: &PhsPortSidebandControls) -> Result<()> {
+    if !carrier.is_finite()
+        || !((c.output_harmonics as f64).mul_add(orbit.omega, carrier)).is_finite()
+        || !(-(c.output_harmonics as f64))
+            .mul_add(orbit.omega, carrier)
+            .is_finite()
+    {
+        return Err(PhsPortSidebandError::Invalid(
+            "finite signed physical output frequencies required",
+        ));
+    }
+    Ok(())
+}
+
+fn admit_forcing(
+    system: &PortHamiltonian,
+    forcing: &[C64],
+    c: &PhsPortSidebandControls,
+) -> Result<()> {
+    let bands = 2 * c.sideband.harmonics + 1;
+    if system.port_dim().checked_mul(bands) != Some(forcing.len())
+        || forcing.iter().any(|&z| !finite(z))
+    {
+        return Err(PhsPortSidebandError::Invalid(
+            "finite sideband-major original port forcing required",
+        ));
+    }
+    Ok(())
+}
+
+fn admit_source(
+    system: &PortHamiltonian,
+    orbit: &HbOrbit,
     c: &PhsPortSidebandControls,
 ) -> Result<()> {
     let n = system.state_dim();
@@ -419,7 +382,6 @@ fn admit(
         || width == 0
         || width > 513
         || c.sideband.harmonics > 64
-        || !carrier.is_finite()
         || orbit.coeffs.len() != n
         || !orbit.omega.is_finite()
         || orbit.omega <= 0.0
@@ -434,10 +396,6 @@ fn admit(
         || c.initial_samples > c.max_samples / 4
         || c.output_harmonics >= c.initial_samples / 2
         || (width - 1).max(c.sideband.harmonics) >= c.initial_samples / 2
-        || !((c.output_harmonics as f64).mul_add(orbit.omega, carrier)).is_finite()
-        || !(-(c.output_harmonics as f64))
-            .mul_add(orbit.omega, carrier)
-            .is_finite()
         || c.envelope_tolerances.len() != m
         || c.envelope_tolerances
             .iter()
@@ -448,11 +406,6 @@ fn admit(
         ));
     }
     let bands = 2 * c.sideband.harmonics + 1;
-    if m.checked_mul(bands) != Some(forcing.len()) || forcing.iter().any(|&z| !finite(z)) {
-        return Err(PhsPortSidebandError::Invalid(
-            "finite sideband-major original port forcing required",
-        ));
-    }
     if n as u128 * bands as u128 > c.sideband.maximum_unknowns.min(1024) as u128 {
         return Err(PhsPortSidebandError::Budget(
             "full original state exceeds the sideband dimension cap",
