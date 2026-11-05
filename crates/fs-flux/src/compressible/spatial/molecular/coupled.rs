@@ -59,6 +59,26 @@ pub struct MolecularEuler3d<L> {
 }
 
 impl<L: TransportLaw> MolecularEuler3d<L> {
+    /// Enable the original molecular bath law in both split half steps.
+    ///
+    /// Complete source-admitted uniform or face-resolved Euler reservoirs
+    /// supply the held bath traces. Unbound open sides retain zero molecular
+    /// flux. This selection survives accepted/trial swaps and forced or
+    /// stabilized steps; it does not resample a timed inlet during the split.
+    /// Changing the selection invalidates the prior complete-step report.
+    pub fn with_reservoir_exchange(mut self) -> Self {
+        if !self.molecular.reservoir_exchange_enabled() {
+            self.last_step = None;
+        }
+        self.molecular = self.molecular.with_reservoir_exchange();
+        self
+    }
+
+    /// Whether complete reservoirs supply heat and molecular traction.
+    pub const fn reservoir_exchange_enabled(&self) -> bool {
+        self.molecular.reservoir_exchange_enabled()
+    }
+
     /// Apply the same physical wall to both molecular half steps. Euler keeps
     /// its impermeable pressure boundary; wall work/heat enter the combined
     /// conservative exchange report only through the molecular face flux.
@@ -265,8 +285,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     /// Prepare identical held exterior faces in both accepted and trial fields.
     /// The byte allowance covers BOTH owners' active and candidate arrays.
     /// Callbacks run once, on the original grid/source; no resampling occurs
-    /// during molecular halves, Euler stages or retries. Existing molecular
-    /// flux at transmissive ends remains zero: these are advective traces.
+    /// during molecular halves, Euler stages or retries. Molecular exchange is
+    /// zero by default and can use these same held traces through the explicit
+    /// [`Self::with_reservoir_exchange`] selection.
     pub fn prepare_reservoir_profiles(
         &mut self,
         sides: &[BoundarySide],

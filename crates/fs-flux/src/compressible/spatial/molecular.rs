@@ -20,6 +20,7 @@ mod coupled;
 pub use coupled::{MolecularEuler3d, MolecularStepReport3d, StabilizedMolecularStepReport3d};
 mod stabilized;
 pub use stabilized::StabilizedMolecularReport3d;
+mod reservoir;
 
 /// Explicit local or periodic dynamic subgrid transport for low-Mach studies.
 #[cfg(feature = "experimental-sgs")]
@@ -67,12 +68,15 @@ struct MolecularWorkspace {
 /// the wall velocity and their Fourier flux uses the physical half-cell
 /// distance. Modeled SGS flux vanishes at impermeable walls; wall shear and
 /// heat therefore require a resolved molecular wall layer. Transmissive ends
-/// have zero molecular flux. All workspaces are preallocated.
+/// have zero molecular flux by default. [`Self::with_reservoir_exchange`]
+/// enables heat and stress exchange through complete source-admitted uniform
+/// or face-resolved reservoirs. All workspaces are preallocated.
 pub struct MolecularTransport3d<L> {
     gas: FrozenGas,
     grid: CartesianGrid,
     boundaries: Boundaries3d,
     walls: [MolecularWall3d; 6],
+    reservoir_exchange: bool,
     law: L,
     boundary_impulses: Vec<BoundaryImpulse>,
     work: MolecularWorkspace,
@@ -105,6 +109,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             grid: flow.grid,
             boundaries: flow.boundaries,
             walls: [MolecularWall3d::SlipAdiabatic; 6],
+            reservoir_exchange: false,
             law,
             stabilized: None,
             #[cfg(feature = "experimental-sgs")]
@@ -133,6 +138,25 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     /// Original immutable material/collision source and its reusable workspace.
     pub const fn law(&self) -> &L {
         &self.law
+    }
+
+    /// Enable molecular heat and full Newtonian stress at complete reservoirs.
+    ///
+    /// Each stage borrows the original Euler owner's held, source-admitted
+    /// trace at the physical face. Normal gradients use half a cell; mechanical
+    /// work uses the prescribed bath velocity. The original transport law is
+    /// evaluated at the cell/bath midpoint temperature and pressure. No modeled
+    /// SGS bath flux or additional numerical storage is introduced. Unbound
+    /// transmissive sides and pressure-only outlets retain zero molecular flux.
+    /// This does not sample a time-dependent inlet during molecular stages.
+    pub fn with_reservoir_exchange(mut self) -> Self {
+        self.reservoir_exchange = true;
+        self
+    }
+
+    /// Whether complete reservoirs supply the optional molecular bath law.
+    pub const fn reservoir_exchange_enabled(&self) -> bool {
+        self.reservoir_exchange
     }
 
     /// Configure an impermeable physical wall. Normal wall motion requires
@@ -210,6 +234,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         let before = checked_totals(&flow.states, self.grid.cell_volume(), &mut cancelled)?;
         self.work.current.copy_from_slice(&flow.states);
         self.work.boundary_trial.fill(Totals::default());
+        let reservoirs = self.reservoir_exchange.then_some(&flow.reservoirs);
         let mut elapsed = 0.0;
         let mut accepted = 0;
         let mut rejected = 0;
@@ -228,6 +253,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                 &self.grid,
                 self.boundaries,
                 &self.walls,
+                reservoirs,
                 &self.work.current,
                 &mut self.law,
                 &mut self.work.primitive,
@@ -270,6 +296,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                             &self.grid,
                             self.boundaries,
                             &self.walls,
+                            reservoirs,
                             &self.work.current,
                             &mut self.law,
                             &mut self.work.primitive,
@@ -307,6 +334,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         &self.grid,
                         self.boundaries,
                         &self.walls,
+                        reservoirs,
                         &self.work.stage,
                         &mut self.law,
                         &mut self.work.primitive,
@@ -436,6 +464,7 @@ fn spatial<L: TransportLaw>(
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
     walls: &[MolecularWall3d; 6],
+    reservoirs: Option<&super::reservoir::Reservoirs>,
     states: &[State],
     law: &mut L,
     primitive: &mut [Primitive],
@@ -475,15 +504,30 @@ fn spatial<L: TransportLaw>(
             // An admitted no-slip side is always reflecting. Mirror every
             // component about its prescribed velocity, not just the normal
             // component as for the original slip ghost.
-            for (outside, sample, wall) in [
-                (c[axis] == 0, &mut lower, walls[2 * axis]),
+            for (outside, sample, wall, sign) in [
+                (c[axis] == 0, &mut lower, walls[2 * axis], -1.0),
                 (
                     c[axis] + 1 == grid.shape[axis],
                     &mut upper,
                     walls[2 * axis + 1],
+                    1.0,
                 ),
             ] {
                 if outside && let Some(ghost) = wall.velocity_ghost(primitive[cell].velocity) {
+                    sample[1..4].copy_from_slice(&ghost);
+                } else if outside
+                    && let Some(exterior) =
+                        reservoirs.and_then(|r| r.get_at(grid, axis, sign, cell))
+                {
+                    // Mirror about the physical bath trace, half a cell away.
+                    let ghost: [f64; 3] = std::array::from_fn(|d| {
+                        2.0 * exterior.primitive().velocity[d] - primitive[cell].velocity[d]
+                    });
+                    if !ghost.iter().all(|v| v.is_finite()) {
+                        return Err(MolecularError::Invalid(
+                            "molecular reservoir ghost velocity overflow",
+                        ));
+                    }
                     sample[1..4].copy_from_slice(&ghost);
                 }
             }
@@ -524,22 +568,44 @@ fn spatial<L: TransportLaw>(
             } else {
                 false
             };
-            if exterior && pair != AxisBoundaries::Periodic && !wall {
+            let sign = if face == 0 { -1.0 } else { 1.0 };
+            let mut adjacent = c;
+            adjacent[axis] = if face == 0 { 0 } else { count - 1 };
+            let adjacent = grid.index(adjacent);
+            let bath = if exterior && pair != AxisBoundaries::Periodic && !wall {
+                reservoirs.and_then(|r| r.get_at(grid, axis, sign, adjacent))
+            } else {
+                None
+            };
+            if exterior && pair != AxisBoundaries::Periodic && !wall && bath.is_none() {
                 flux[index] = SpatialFaceFlux::default();
                 continue;
             }
             let mut left = c;
             let mut right = c;
             left[axis] = if face == 0 {
-                if wall { 0 } else { count - 1 }
+                if wall || bath.is_some() { 0 } else { count - 1 }
             } else {
                 face - 1
             };
             right[axis] = if face == count { count - 1 } else { face };
             let left = grid.index(left);
             let right = grid.index(right);
-            let pl = primitive[left];
-            let pr = primitive[right];
+            let pl = if face == 0 {
+                bath.map_or(primitive[left], |r| r.primitive())
+            } else {
+                primitive[left]
+            };
+            let pr = if face == count {
+                bath.map_or(primitive[right], |r| r.primitive())
+            } else {
+                primitive[right]
+            };
+            let distance = if bath.is_some() {
+                0.5 * grid.spacing[axis]
+            } else {
+                grid.spacing[axis]
+            };
             let wall_model = wall.then(|| walls[2 * axis + usize::from(face == count)]);
             let temperature = match wall_model {
                 Some(model @ MolecularWall3d::NoSlip { .. }) => {
@@ -567,28 +633,29 @@ fn spatial<L: TransportLaw>(
                 ));
             }
             #[cfg(feature = "experimental-sgs")]
-            let (mu, conductivity) = if let Some(sgs) = subgrid.as_ref().filter(|_| !wall) {
-                sgs.face_coefficients(
-                    gas,
-                    left,
-                    right,
-                    axis,
-                    index,
-                    grid.spacing[axis],
-                    primitive,
-                    gradient,
-                    temperature,
-                    pressure,
-                    mu,
-                    conductivity,
-                )?
-            } else {
-                (mu, conductivity)
-            };
+            let (mu, conductivity) =
+                if let Some(sgs) = subgrid.as_ref().filter(|_| !wall && bath.is_none()) {
+                    sgs.face_coefficients(
+                        gas,
+                        left,
+                        right,
+                        axis,
+                        index,
+                        grid.spacing[axis],
+                        primitive,
+                        gradient,
+                        temperature,
+                        pressure,
+                        mu,
+                        conductivity,
+                    )?
+                } else {
+                    (mu, conductivity)
+                };
             let longitudinal = (4.0 / 3.0) * mu + bulk;
             let cross = bulk - (2.0 / 3.0) * mu;
             // Cover both tangential cross-derivative stencils, variable face
-            // coefficients and the doubled half-cell reflecting-wall gradient.
+            // coefficients and doubled half-cell wall or reservoir gradients.
             let diffusivity = ((longitudinal + 2.0 * cross.abs() + 4.0 * mu) / minimum_density)
                 .max(conductivity / minimum_cv);
             if !diffusivity.is_finite() {
@@ -601,7 +668,20 @@ fn spatial<L: TransportLaw>(
                 let sign = if face == 0 { 1.0 } else { -1.0 };
                 sign * 2.0 * pl.velocity[axis] / grid.spacing[axis]
             } else {
-                (pr.velocity[axis] - pl.velocity[axis]) / grid.spacing[axis]
+                (pr.velocity[axis] - pl.velocity[axis]) / distance
+            };
+            let bath_gradient = if bath.is_some() {
+                Some(reservoir::tangential_gradient(
+                    grid,
+                    boundaries,
+                    reservoirs.ok_or(MolecularError::Invalid("missing molecular reservoir"))?,
+                    axis,
+                    sign,
+                    adjacent,
+                    &gradient[adjacent],
+                )?)
+            } else {
+                None
             };
             let transverse_divergence: f64 =
                 if matches!(wall_model, Some(MolecularWall3d::NoSlip { .. })) {
@@ -610,6 +690,8 @@ fn spatial<L: TransportLaw>(
                     // substituting adjacent-cell divergence creates false normal
                     // traction in a nonuniform boundary layer.
                     0.0
+                } else if let Some(derivatives) = bath_gradient {
+                    derivatives[0][1] + derivatives[1][2]
                 } else {
                     tangential
                         .into_iter()
@@ -631,16 +713,28 @@ fn spatial<L: TransportLaw>(
             } else {
                 let shear: [f64; 2] = std::array::from_fn(|i| {
                     let t = tangential[i];
-                    mu * ((pr.velocity[t] - pl.velocity[t]) / grid.spacing[axis]
-                        + 0.5 * gradient[left][axis][t]
-                        + 0.5 * gradient[right][axis][t])
+                    if let Some(derivatives) = bath_gradient {
+                        mu * ((pr.velocity[t] - pl.velocity[t]) / distance + derivatives[i][0])
+                    } else {
+                        mu * ((pr.velocity[t] - pl.velocity[t]) / distance
+                            + 0.5 * gradient[left][axis][t]
+                            + 0.5 * gradient[right][axis][t])
+                    }
                 });
-                let energy = -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
-                    - shear[0]
-                        * (0.5 * pl.velocity[tangential[0]] + 0.5 * pr.velocity[tangential[0]])
-                    - shear[1]
-                        * (0.5 * pl.velocity[tangential[1]] + 0.5 * pr.velocity[tangential[1]])
-                    - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis];
+                let energy = if let Some(bath) = bath {
+                    let velocity = bath.primitive().velocity;
+                    -normal_stress * velocity[axis]
+                        - shear[0] * velocity[tangential[0]]
+                        - shear[1] * velocity[tangential[1]]
+                        - conductivity * (pr.temperature - pl.temperature) / distance
+                } else {
+                    -normal_stress * (0.5 * pl.velocity[axis] + 0.5 * pr.velocity[axis])
+                        - shear[0]
+                            * (0.5 * pl.velocity[tangential[0]] + 0.5 * pr.velocity[tangential[0]])
+                        - shear[1]
+                            * (0.5 * pl.velocity[tangential[1]] + 0.5 * pr.velocity[tangential[1]])
+                        - conductivity * (pr.temperature - pl.temperature) / grid.spacing[axis]
+                };
                 (shear, energy)
             };
             if ![normal_stress, shear_stress[0], shear_stress[1], energy]

@@ -17,6 +17,7 @@ fn prepare(op: &mut MolecularTransport3d<ConstantTransport>, flow: &Euler3d) {
         &op.grid,
         op.boundaries,
         &op.walls,
+        None,
         &flow.states,
         &mut op.law,
         &mut op.work.primitive,

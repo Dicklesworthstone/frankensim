@@ -15,8 +15,9 @@ pub(super) use profiles::TimedSource;
 ///
 /// This is a complete-state Riemann boundary, with no finite reservoir storage,
 /// characteristic-pressure-only condition or nonreflecting claim. The optional
-/// molecular operator retains its existing zero molecular flux on open sides;
-/// these advective traces do not introduce a conducting or viscous boundary bath.
+/// molecular operator retains zero molecular flux on open sides by default;
+/// its explicit `with_reservoir_exchange` option also uses this complete trace
+/// as a conducting and viscous exterior bath.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ReservoirBoundary {
     /// One physical side whose topology is explicitly open.
@@ -51,6 +52,10 @@ pub(super) struct AdmittedReservoir {
     primitive: Primitive,
 }
 impl AdmittedReservoir {
+    pub(super) fn primitive(&self) -> Primitive {
+        self.primitive
+    }
+
     pub(super) fn normal(&self, axis: usize) -> SpatialPrimitive {
         let [a, b] = tangents(axis);
         SpatialPrimitive {

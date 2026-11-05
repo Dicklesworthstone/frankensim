@@ -2006,7 +2006,8 @@ the cell/wall mean temperature for an isothermal surface. Modeled SGS stress
 and heat vanish at impermeable faces, leaving molecular wall transport and a
 requirement to resolve the wall layer. Normal wall motion, out-of-domain
 temperature and assigning a wall to periodic/transmissive sides refuse.
-Open ends retain zero molecular flux. The combined normal wall traction is
+Open ends retain zero molecular flux unless the complete-reservoir exchange
+is explicitly enabled as described below. The combined normal wall traction is
 signed `p-tau_nn`; it may be tensile and is not clipped to positive pressure.
 
 Five wall regressions cover half-cell traction/heat/work on all six sides,
@@ -5382,9 +5383,10 @@ already profiled Euler field. Its explicit prepare budget and workspace-byte
 getter cover both copies; its update stages and synchronizes both candidates
 before either publishes. Profiles survive accepted/trial ownership swaps and
 share the original complete-interval retry. Transmissive molecular flux remains
-zero; these are prescribed infinite advective reservoirs, not viscous/thermal
-bath boundary data, finite storage, nonreflecting outlets, nonlinear averaged
-fluxes or a calibrated turbulence model.
+zero by default; the explicit reservoir-exchange selection below enables
+viscous and thermal bath coupling. These remain prescribed infinite exterior
+states, without finite storage, nonreflecting behavior, nonlinear flux averaging
+or a calibrated turbulence model.
 
 Five focused G0/G1/G4 tests were authored: uniform bit-equivalence and canonical
 sampling; analytical supersonic mass, all momentum components and enthalpy on
@@ -5626,3 +5628,49 @@ nonreflecting inlet or experimentally qualified flow. This native Euler entry
 point does not implicitly retime forcing, molecular, reacting or evolving
 stochastic-source compositions. Those owners continue using their documented
 held-source methods until an explicit stage-aware composition is supplied.
+
+
+## Frozen-gas molecular exchange with prescribed volumetric reservoirs
+
+`spatial::molecular::MolecularTransport3d::with_reservoir_exchange` and the
+corresponding `MolecularEuler3d` builder explicitly enable heat and traction
+through complete uniform or face-resolved reservoirs already admitted by the
+original Euler owner. The default remains zero molecular flux at open ends.
+Unbound transmissive ends and pressure-only outlets retain that original
+zero-flux behavior even when reservoir exchange is selected. No incomplete
+exterior thermodynamic state is inferred.
+
+Every molecular stage borrows the original cached source-admitted bath trace.
+The same original transport law evaluates the cell/bath midpoint temperature,
+pressure and frozen composition. The normal stress, both shear tractions and
+Fourier heat use the physical half-cell normal distance. Total-energy exchange
+uses the prescribed bath velocity for all mechanical work; no separate viscous
+heating source or finite bath storage is introduced. Source coefficient maxima
+from these faces enter the original conservative parabolic rate, whose factor
+of four includes doubled half-cell boundary conductance.
+
+Bath velocity ghosts mirror the boundary trace into the existing cell-gradient
+cache. Tangential profile derivatives use centered differences, periodic
+wrapping or quadratic one-sided end differences; two faces use a linear
+derivative and a single face resolves no variation. The original midpoint
+stress approximation combines these with adjacent-cell tangential derivatives.
+Local SGS sees the consistent adjacent gradients; its modeled flux at the
+externally maintained bath remains zero. Periodic/channel dynamic-fit admission
+is unchanged. No additional numerical buffers or per-face allocations are
+introduced.
+
+SSP RK2, native RKL2 (including retry anchors and endpoint admission), both
+coupled molecular halves and forced/stabilized coupled steps share this same
+spatial operator and boundary quadrature. The selection survives accepted/trial
+owner swaps. Complete bath profiles are held through each requested molecular
+interval and its retries; the timed native Euler inlet API does not make these
+molecular split stages sample a varying bath. Source refusal, work limits and
+cancellation publish no partial field or boundary impulse.
+
+Seven authored regressions exercise all six face signs and anisotropic spacings,
+uniform/profile agreement, exact source midpoint sampling, hot-bath transport
+rate bounds, quadratic tangential profile stress, uniform equilibrium, original
+unbound behavior, SSP/RKL conservation and late cancellation/replay, forced
+owner swaps, and active interior SGS with unchanged molecular bath flux. These
+are source/stencil/balance fixtures, not gas-specific turbulence, DNS, wall-law,
+nonreflecting-boundary or experimental validation. Composition remains frozen.

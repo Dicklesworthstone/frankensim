@@ -123,6 +123,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             poll(cancelled)?;
             tile.fill(Totals::default());
         }
+        let reservoirs = self.reservoir_exchange.then_some(&flow.reservoirs);
         let accepted = controller::advance(
             duration.value(), selected, evaluations, cancelled,
             |action, elapsed, evaluations, cancelled| {
@@ -130,6 +131,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                     Action::First => {
                         return spatial(
                             &self.gas, &self.grid, self.boundaries, &self.walls,
+                            reservoirs,
                             &self.work.current, &mut self.law, &mut self.work.primitive,
                             &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
                             #[cfg(feature = "experimental-sgs")]
@@ -138,7 +140,8 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
                         ).map(|rate| Stage { rate, ..Stage::default() });
                     }
                     Action::Trial { dt, scheme, first, cached } => self.rkl_trial(
-                        dt, scheme, first.rate, cached, selected, elapsed, evaluations, cancelled,
+                        reservoirs, dt, scheme, first.rate, cached, selected, elapsed,
+                        evaluations, cancelled,
                     )?,
                 };
                 for (index, (total, change)) in self.work.boundary_trial.iter_mut()
@@ -175,6 +178,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     #[allow(clippy::too_many_arguments)]
     fn rkl_trial(
         &mut self,
+        reservoirs: Option<&super::super::reservoir::Reservoirs>,
         dt: f64,
         scheme: Rkl2Scheme,
         first: f64,
@@ -190,6 +194,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
             spatial(
                 &self.gas, &self.grid, self.boundaries, &self.walls,
+                reservoirs,
                 &self.work.current, &mut self.law, &mut self.work.primitive,
                 &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
                 #[cfg(feature = "experimental-sgs")]
@@ -223,6 +228,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
             reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
             let stage_rate = spatial(
                 &self.gas, &self.grid, self.boundaries, &self.walls,
+                reservoirs,
                 &self.work.stage, &mut self.law, &mut self.work.primitive,
                 &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
                 #[cfg(feature = "experimental-sgs")]
@@ -273,6 +279,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
         let endpoint_rate = spatial(
             &self.gas, &self.grid, self.boundaries, &self.walls,
+            reservoirs,
             &self.work.stage, &mut self.law, &mut self.work.primitive,
             &mut self.work.gradient, &mut self.work.flux, &mut self.work.binary,
             #[cfg(feature = "experimental-sgs")]
