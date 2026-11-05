@@ -4,6 +4,8 @@
 
 #[path = "sphere_scene/connected.rs"]
 mod connected;
+#[path = "sphere_scene/elliptic.rs"]
+mod elliptic;
 
 use fs_contact::broad_phase::SweepConfig;
 use fs_contact::frictional_multicontact::FrictionalContactConfig;
@@ -115,7 +117,7 @@ fn partition_square_sum(report: &SphereSceneReport) -> f64 {
         .sum()
 }
 
-fn balances(report: &SphereSceneReport, duration: f64) {
+fn balances<R>(report: &SphereSceneReport<R>, duration: f64) {
     close(report.duration_s, duration, 1e-12);
     close(
         report.steps.iter().map(|step| step.native.duration_s).sum(),

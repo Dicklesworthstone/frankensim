@@ -15,6 +15,7 @@
 
 use super::islands::{IslandContactError, IslandContactResult};
 use super::spheres::{ContactSphere, SphereContactError, sphere_pair_witness};
+use super::step::elliptic::step_rigid_elliptic_contact_islands;
 use super::step::{
     RigidContactPath, RigidContactStepControls, RigidContactStepError, RigidContactStepReport,
     step_rigid_contact_islands,
@@ -26,7 +27,12 @@ use crate::{DynamicsError, Gravity, MassProperties, RigidBodyState, Vec3, Wrench
 use fs_contact::broad_phase::{
     SweepConfig, SweepError, SweepItem, SweepPair, sweep_candidates, swept_sphere_aabb,
 };
-use fs_contact::frictional_multicontact::NormalVelocityLaw;
+use fs_contact::frictional_multicontact::elliptic::{
+    EllipticFriction, EllipticFrictionalContactError, EllipticFrictionalContactResult,
+};
+use fs_contact::frictional_multicontact::{
+    FrictionalContactError, FrictionalContactResult, NormalVelocityLaw,
+};
 use fs_contact::swept_sphere::{SweptSphereInput, first_sphere_contact};
 use fs_exec::CancelGate;
 use fs_math::dd::Dd;
@@ -57,6 +63,45 @@ pub enum SphereSceneContactKey {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SphereSceneLaw {
     pub friction_coefficient: f64,
+    pub restitution: f64,
+}
+
+/// Authored first principal direction of a directional contact interface.
+///
+/// The direction is projected into the actual contact tangent plane. Its
+/// perpendicular principal direction is normal cross first direction. A zero,
+/// nonfinite or normal-parallel direction is refused, never replaced by an
+/// arbitrary world axis. Reversing either principal axis describes the same
+/// friction ellipse.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SphereSceneTextureDirection {
+    /// Direction held in the world frame, for example a translating belt's
+    /// grooves. Rotate this direction with the scene when changing frames.
+    World(Vec3),
+    /// Material direction attached to one of the two contacting spheres.
+    /// The original staged body attitude transports it at every interval;
+    /// the ID must name a sphere in this contact, not an unrelated body.
+    Sphere {
+        /// Stable sphere ID, independent of its current array position.
+        id: u64,
+        /// Material direction in that sphere's native body frame.
+        direction_body: Vec3,
+    },
+}
+
+/// Source-resolved directional coefficients for an ideal point contact.
+///
+/// These are the two principal coefficients of one maximum-dissipation
+/// ellipse, not separate static and kinetic coefficients. A zero coefficient
+/// permits exact free slip along that principal axis. No pressure, slip
+/// history, finite patch size or impact heat is inferred from this law.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SphereSceneEllipticLaw {
+    /// Coefficients along the projected texture direction and its perpendicular.
+    pub coefficients_mu: [f64; 2],
+    /// Explicit material frame for the first coefficient.
+    pub texture_direction: SphereSceneTextureDirection,
+    /// Normal restitution in [0,1], applied to the pre-kick incoming velocity.
     pub restitution: f64,
 }
 
@@ -93,16 +138,16 @@ pub struct SphereScenePathReport {
 }
 
 /// One accepted native step, including its original physics receipt.
-pub struct SphereSceneStep {
+pub struct SphereSceneStep<R = FrictionalContactResult> {
     /// End of the accepted interval, relative to this call's start.
     pub elapsed_s: f64,
     /// Stable keys in the native contact-ID order.
     pub contact_keys: Vec<SphereSceneContactKey>,
     /// Largest actual geometric gap among activated contacts.
     pub maximum_contact_gap_m: f64,
-    pub native: RigidContactStepReport<SphereScenePathReport, IslandContactResult>,
+    pub native: RigidContactStepReport<SphereScenePathReport, IslandContactResult<R>>,
 }
-impl core::fmt::Debug for SphereSceneStep {
+impl<R> core::fmt::Debug for SphereSceneStep<R> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SphereSceneStep")
             .field("elapsed_s", &self.elapsed_s)
@@ -115,9 +160,9 @@ impl core::fmt::Debug for SphereSceneStep {
 
 /// Whole-call trajectory and work/momentum accounting.
 #[derive(Debug)]
-pub struct SphereSceneReport {
+pub struct SphereSceneReport<R = FrictionalContactResult> {
     pub duration_s: f64,
-    pub steps: Vec<SphereSceneStep>,
+    pub steps: Vec<SphereSceneStep<R>>,
     pub rejected_steps: usize,
     pub sphere_pair_queries: usize,
     pub broad_phase_comparisons: usize,
@@ -186,36 +231,42 @@ impl std::error::Error for SphereScenePathError {}
 
 /// Every refusal preserves all caller-owned body states.
 #[derive(Debug)]
-pub enum SphereSceneError {
+pub enum SphereSceneError<R = FrictionalContactResult, E = FrictionalContactError> {
     Invalid(&'static str),
     MissingLaw(SphereSceneContactKey),
     Dynamics(DynamicsError),
     SphereGeometry(SphereContactError),
     Impact(RigidFrictionalImpactError),
     Geometry(SphereScenePathError),
-    Step(RigidContactStepError<SphereScenePathError, IslandContactResult, IslandContactError>),
+    Step(
+        RigidContactStepError<
+            SphereScenePathError,
+            IslandContactResult<R>,
+            IslandContactError<R, E>,
+        >,
+    ),
     StepBudget,
     RejectionBudget,
     NoProgress,
     Cancelled,
     Audit(&'static str),
 }
-impl From<DynamicsError> for SphereSceneError {
+impl<R, E> From<DynamicsError> for SphereSceneError<R, E> {
     fn from(e: DynamicsError) -> Self {
         Self::Dynamics(e)
     }
 }
-impl From<SphereContactError> for SphereSceneError {
+impl<R, E> From<SphereContactError> for SphereSceneError<R, E> {
     fn from(e: SphereContactError) -> Self {
         Self::SphereGeometry(e)
     }
 }
-impl From<RigidFrictionalImpactError> for SphereSceneError {
+impl<R, E> From<RigidFrictionalImpactError> for SphereSceneError<R, E> {
     fn from(e: RigidFrictionalImpactError) -> Self {
         Self::Impact(e)
     }
 }
-impl From<SphereScenePathError> for SphereSceneError {
+impl<R, E> From<SphereScenePathError> for SphereSceneError<R, E> {
     fn from(e: SphereScenePathError) -> Self {
         if matches!(e, SphereScenePathError::Cancelled) {
             Self::Cancelled
@@ -224,12 +275,18 @@ impl From<SphereScenePathError> for SphereSceneError {
         }
     }
 }
-impl core::fmt::Display for SphereSceneError {
+impl<R: core::fmt::Debug, E: core::fmt::Debug> core::fmt::Display for SphereSceneError<R, E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "sphere scene: {self:?}")
     }
 }
-impl std::error::Error for SphereSceneError {}
+impl<R: core::fmt::Debug, E: core::fmt::Debug> std::error::Error for SphereSceneError<R, E> {}
+
+/// Directional scene trajectory retaining every physical elliptic solve receipt.
+pub type EllipticSphereSceneReport = SphereSceneReport<EllipticFrictionalContactResult>;
+/// Directional scene refusal retaining the original constitutive and native audit.
+pub type EllipticSphereSceneError =
+    SphereSceneError<EllipticFrictionalContactResult, EllipticFrictionalContactError>;
 
 #[derive(Default)]
 struct Queries {
@@ -302,7 +359,7 @@ struct Exchange {
 /// limits. This does not provide arbitrary-shape CCD, pose repair, exact
 /// impact-time resolution, finite-patch/rolling drag or an automatic time-error
 /// estimate. Refine maximum_step_s and activation_gap_m for convergence.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn advance_sphere_scene(
     bodies: &mut [RigidBodyState],
     properties: &[MassProperties],
@@ -316,6 +373,183 @@ pub fn advance_sphere_scene(
     law: impl Fn(SphereSceneContactKey) -> Option<SphereSceneLaw>,
     gate: &CancelGate,
 ) -> Result<SphereSceneReport, SphereSceneError> {
+    advance_with(
+        bodies,
+        properties,
+        spheres,
+        planes,
+        wrenches,
+        gravity,
+        start_time_s,
+        duration_s,
+        controls,
+        |d, _, _| {
+            let resolved = law(d.key).ok_or(SphereSceneError::MissingLaw(d.key))?;
+            if !resolved.friction_coefficient.is_finite() || resolved.friction_coefficient < 0.0 {
+                return Err(SphereSceneError::Invalid(
+                    "finite nonnegative source-resolved friction coefficient required",
+                ));
+            }
+            let axis = if d.normal.x.abs() < 0.8 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            };
+            Ok(ResolvedSceneLaw {
+                friction: resolved.friction_coefficient,
+                tangent_world: d.normal.cross(axis),
+                restitution: resolved.restitution,
+            })
+        },
+        |bodies, properties, wrenches, gravity, contacts, dt, controls, admit, gate| {
+            step_rigid_contact_islands(
+                bodies, properties, wrenches, gravity, contacts, dt, controls, admit, gate,
+            )
+        },
+        gate,
+    )
+}
+
+/// Advance automatically discovered sphere/plane contacts with directional friction.
+///
+/// This shares scalar scene discovery, dynamic-body islands, restitution targets,
+/// force/contact/drift integration, full-path collision admission and atomic
+/// whole-call work/momentum gates with [`advance_sphere_scene`]. Every island
+/// uses the existing simultaneous elliptic law, including exact free slip for
+/// a zero principal coefficient and the circular law for equal coefficients.
+///
+/// The pure callback resolves a coefficient pair and an explicit material
+/// direction for each actual contact key. Sphere-attached directions are
+/// transported by the current staged body attitude before projection into the
+/// contact plane; world directions remain world-held. No geometric helper axis
+/// is interpreted as texture. The frame and coefficients are held during each
+/// first-order interval and refreshed after every accepted drift, including
+/// when new contacts appear. Refine the timestep to resolve texture rotation.
+///
+/// The callback must not publish external history. Coefficients describe one
+/// ideal Coulomb ellipse, without an automatic static/kinetic switch or an
+/// inferred finite-time friction/thermal trajectory. Contact loss remains
+/// unallocated mechanical loss. A source refusal or any late physics/geometry
+/// failure leaves all caller-owned body states unchanged.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_elliptic_sphere_scene(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    spheres: &[ContactSphere],
+    planes: &[SphereScenePlane],
+    wrenches: &[Wrench],
+    gravity: Gravity,
+    start_time_s: f64,
+    duration_s: f64,
+    controls: SphereSceneControls,
+    law: impl Fn(SphereSceneContactKey) -> Option<SphereSceneEllipticLaw>,
+    gate: &CancelGate,
+) -> Result<EllipticSphereSceneReport, EllipticSphereSceneError> {
+    advance_with(
+        bodies,
+        properties,
+        spheres,
+        planes,
+        wrenches,
+        gravity,
+        start_time_s,
+        duration_s,
+        controls,
+        |d, bodies, spheres| {
+            let resolved = law(d.key).ok_or(SphereSceneError::MissingLaw(d.key))?;
+            if resolved
+                .coefficients_mu
+                .iter()
+                .any(|mu| !mu.is_finite() || *mu < 0.0)
+            {
+                return Err(SphereSceneError::Invalid(
+                    "finite nonnegative source-resolved principal coefficients required",
+                ));
+            }
+            let direction = match resolved.texture_direction {
+                SphereSceneTextureDirection::World(direction) => {
+                    direction.normalized("scene texture direction")?
+                }
+                SphereSceneTextureDirection::Sphere { id, direction_body } => {
+                    let index = if spheres[d.point.body].id == id {
+                        d.point.body
+                    } else if let RigidImpactCounterpart::Body(other) = d.other
+                        && spheres[other.body].id == id
+                    {
+                        other.body
+                    } else {
+                        return Err(SphereSceneError::Invalid(
+                            "texture sphere must participate in this contact",
+                        ));
+                    };
+                    bodies[index].pose().orientation().rotate_body_to_world(
+                        direction_body.normalized("scene body texture direction")?,
+                    )
+                }
+            };
+            // Cross twice avoids subtracting two nearly equal normal vectors.
+            // The native owner normalizes this same authored tangent frame.
+            let perpendicular = d
+                .normal
+                .cross(direction)
+                .normalized("scene texture tangent")?;
+            let tangent_world = perpendicular
+                .cross(d.normal)
+                .normalized("scene texture tangent")?;
+            Ok(ResolvedSceneLaw {
+                friction: EllipticFriction {
+                    coefficients_mu: resolved.coefficients_mu,
+                    principal_axis: [1.0, 0.0],
+                },
+                tangent_world,
+                restitution: resolved.restitution,
+            })
+        },
+        |bodies, properties, wrenches, gravity, contacts, dt, controls, admit, gate| {
+            step_rigid_elliptic_contact_islands(
+                bodies, properties, wrenches, gravity, contacts, dt, controls, admit, gate,
+            )
+        },
+        gate,
+    )
+}
+
+type SceneStepResult<R, E> = Result<
+    RigidContactStepReport<SphereScenePathReport, IslandContactResult<R>>,
+    RigidContactStepError<SphereScenePathError, IslandContactResult<R>, IslandContactError<R, E>>,
+>;
+type ScenePathAdmission<'a, F> =
+    dyn FnMut(&RigidContactPath<'_, F>) -> Result<SphereScenePathReport, SphereScenePathError> + 'a;
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn advance_with<F: Copy, R, E>(
+    bodies: &mut [RigidBodyState],
+    properties: &[MassProperties],
+    spheres: &[ContactSphere],
+    planes: &[SphereScenePlane],
+    wrenches: &[Wrench],
+    gravity: Gravity,
+    start_time_s: f64,
+    duration_s: f64,
+    controls: SphereSceneControls,
+    law: impl Fn(
+        &Detected,
+        &[RigidBodyState],
+        &[ContactSphere],
+    ) -> Result<ResolvedSceneLaw<F>, SphereSceneError<R, E>>,
+    step: impl Fn(
+        &mut [RigidBodyState],
+        &[MassProperties],
+        &[Wrench],
+        Gravity,
+        &[RigidFrictionalContact<F>],
+        f64,
+        RigidContactStepControls,
+        &mut ScenePathAdmission<'_, F>,
+        &CancelGate,
+    ) -> SceneStepResult<R, E>,
+    gate: &CancelGate,
+) -> Result<SphereSceneReport<R>, SphereSceneError<R, E>> {
     poll(gate)?;
     let planes = prepare(
         bodies,
@@ -361,7 +595,7 @@ pub fn advance_sphere_scene(
             if h <= 0.0 || elapsed + h == elapsed || time + h == time {
                 return Err(SphereSceneError::NoProgress);
             }
-            let result = step_rigid_contact_islands(
+            let result = step(
                 &mut staged,
                 properties,
                 wrenches,
@@ -369,7 +603,9 @@ pub fn advance_sphere_scene(
                 &contacts,
                 h,
                 controls.step,
-                |path| admit_path(path, spheres, &current_planes, controls, &mut queries, gate),
+                &mut |path| {
+                    admit_path(path, spheres, &current_planes, controls, &mut queries, gate)
+                },
                 gate,
             );
             match result {
@@ -519,7 +755,7 @@ pub fn advance_sphere_scene(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare(
+fn prepare<R, E>(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     spheres: &[ContactSphere],
@@ -530,7 +766,7 @@ fn prepare(
     duration: f64,
     c: SphereSceneControls,
     gate: &CancelGate,
-) -> Result<Vec<SphereScenePlane>, SphereSceneError> {
+) -> Result<Vec<SphereScenePlane>, SphereSceneError<R, E>> {
     gravity.validate()?;
     if bodies.is_empty()
         || bodies.len() != properties.len()
@@ -662,17 +898,35 @@ struct Detected {
     gap: f64,
     incoming: f64,
 }
+
+struct ResolvedSceneLaw<F> {
+    friction: F,
+    tangent_world: Vec3,
+    restitution: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn detected_contacts(
+fn detected_contacts<F, R, E>(
     bodies: &[RigidBodyState],
     properties: &[MassProperties],
     spheres: &[ContactSphere],
     planes: &[SphereScenePlane],
     c: SphereSceneControls,
-    law: &impl Fn(SphereSceneContactKey) -> Option<SphereSceneLaw>,
+    law: &impl Fn(
+        &Detected,
+        &[RigidBodyState],
+        &[ContactSphere],
+    ) -> Result<ResolvedSceneLaw<F>, SphereSceneError<R, E>>,
     q: &mut Queries,
     gate: &CancelGate,
-) -> Result<(Vec<RigidFrictionalContact>, Vec<SphereSceneContactKey>, f64), SphereSceneError> {
+) -> Result<
+    (
+        Vec<RigidFrictionalContact<F>>,
+        Vec<SphereSceneContactKey>,
+        f64,
+    ),
+    SphereSceneError<R, E>,
+> {
     let mut detected = Vec::new();
     for pair in candidates(
         bodies,
@@ -779,10 +1033,8 @@ fn detected_contacts(
     let mut maximum_gap = 0.0_f64;
     for (id, d) in detected.into_iter().enumerate() {
         poll(gate)?;
-        let resolved = law(d.key).ok_or(SphereSceneError::MissingLaw(d.key))?;
-        if !resolved.friction_coefficient.is_finite()
-            || resolved.friction_coefficient < 0.0
-            || !resolved.restitution.is_finite()
+        let resolved = law(&d, bodies, spheres)?;
+        if !resolved.restitution.is_finite()
             || !(0.0..=1.0).contains(&resolved.restitution)
             || !d.incoming.is_finite()
         {
@@ -790,19 +1042,14 @@ fn detected_contacts(
                 "finite source-resolved contact coefficients and velocity required",
             ));
         }
-        let axis = if d.normal.x.abs() < 0.8 {
-            Vec3::new(1.0, 0.0, 0.0)
-        } else {
-            Vec3::new(0.0, 1.0, 0.0)
-        };
         contacts.push(RigidFrictionalContact {
             id: id as u64,
             point: d.point,
             other: d.other,
             normal_world: d.normal,
-            tangent_world: d.normal.cross(axis),
+            tangent_world: resolved.tangent_world,
             activation_tolerance_m: c.activation_gap_m,
-            friction_coefficient: resolved.friction_coefficient,
+            friction_coefficient: resolved.friction,
             normal_law: NormalVelocityLaw::Target {
                 speed: -resolved.restitution * d.incoming.min(0.0),
             },
@@ -813,8 +1060,8 @@ fn detected_contacts(
     Ok((contacts, keys, maximum_gap))
 }
 
-fn admit_path(
-    path: &RigidContactPath<'_>,
+fn admit_path<F>(
+    path: &RigidContactPath<'_, F>,
     spheres: &[ContactSphere],
     planes: &[SphereScenePlane],
     c: SphereSceneControls,
@@ -973,7 +1220,7 @@ fn geometry_poll(gate: &CancelGate) -> Result<(), SphereScenePathError> {
         Ok(())
     }
 }
-fn poll(gate: &CancelGate) -> Result<(), SphereSceneError> {
+fn poll<R, E>(gate: &CancelGate) -> Result<(), SphereSceneError<R, E>> {
     if gate.is_requested() {
         Err(SphereSceneError::Cancelled)
     } else {

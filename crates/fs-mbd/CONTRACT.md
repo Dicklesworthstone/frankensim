@@ -3275,6 +3275,34 @@ the seven shared broad-phase groups pass separately. This selected-source
 native verification uses the pinned nightly. It does not establish a full
 Cargo/DSR workspace gate; the required sibling constellation was unavailable.
 
+### Directional friction in automatic sphere scenes
+
+`advance_elliptic_sphere_scene` uses the same discovery, retry, path admission
+and whole-call staging as `advance_sphere_scene`, dispatching the original
+simultaneous elliptic contact-island solver. `SphereSceneEllipticLaw` supplies
+two principal Coulomb coefficients and an explicit
+`SphereSceneTextureDirection`. The texture can be held in the world frame or
+attached to either contacting sphere by stable source ID and body direction.
+The actual staged attitude transports attached texture at each accepted
+interval; rejected retries cannot advance it. Tangent projection uses the
+actual contact normal. Zero, nonfinite, normal-parallel or unrelated texture
+directions refuse instead of inventing a material axis.
+
+Both coefficients define one coupled maximum-dissipation ellipse. A zero
+principal coefficient retains exact free sliding in that direction; equal
+coefficients recover the circular law. This does not introduce separate
+static/kinetic phase history. Normal restitution still uses pre-kick incoming
+velocity. Every contact retains native finite-body recoil, moving-support work,
+complete island coupling and the original momentum/energy admission.
+
+The material frame is held during each native first-order interval and refreshed
+after accepted drift. The same authored time resolution and straight-path
+geometry limits apply. Mechanical contact loss remains unallocated.
+Generic report/error defaults preserve the scalar API; elliptic aliases expose
+the original directional receipts. `tests/sphere_scene/elliptic.rs` covers
+circular parity, a frictionless principal direction, rotated moving supports,
+attitude transport, sphere-pair recoil and complete rollback.
+
 ## Sustained loaded articulated contact
 
 `articulated_contacts::step::step_articulated_frictional_contacts` adds a
