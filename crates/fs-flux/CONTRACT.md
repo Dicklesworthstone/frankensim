@@ -510,7 +510,8 @@ provenance, but never mistakes it for a static restart constraint.
 
 The discretization retains pressure-driven Poiseuille mass flux plus moving-wall
 Couette mass flux, implicit storage, and squeeze through exact old/new gap
-values. Both walls receive the full no-slip Couette--Poiseuille tangential
+values. With the default `NoSlipContinuum` policy, both walls receive the full
+no-slip Couette--Poiseuille tangential
 traction: wall-on-gas values are `mu*(U_upper-U_lower)/h + h*p_x/2` at the
 upper wall and `-mu*(U_upper-U_lower)/h + h*p_x/2` at the lower wall. The
 pressure contribution uses the accepted Reynolds face gradient and face gap,
@@ -518,7 +519,7 @@ averaged onto each cell. Gas-on-wall tractions have exactly opposite signs;
 the old `upper_wall_shear_pa` remains the upper-wall-on-gas alias. Upper-wall
 normal traction and gauge load retain their explicit sign/reference conventions.
 
-Viscous dissipation includes both `mu*(U_upper-U_lower)^2/h` and
+For no-slip, viscous dissipation includes both `mu*(U_upper-U_lower)^2/h` and
 `h^3*p_x^2/(12*mu)`. Pressure-driven heat is integrated on full interior face
 intervals and half intervals at the boundaries, before averaging gradients,
 so opposing gradients cannot erase dissipation. Closed exterior faces infer
@@ -548,7 +549,7 @@ partial state is published.
 first slice admits only a contiguous active prefix followed by excluded cells.
 An interior hole, topology change, too-few active cells, non-positive gap or
 absolute pressure, EOS-density mismatch, excessive slope/Mach/Knudsen number,
-or requested slip/rarefied/roughness model is refused with `GasFilmError`.
+or an unadmitted slip/rarefied/roughness model is refused with `GasFilmError`.
 Smooth-wall admission requires a named roughness bound strictly below every
 active gap. There is no
 anonymous `h_min`, pressure clamp, liquid cavitation substitution, or
@@ -565,14 +566,68 @@ uniform sealed isothermal squeeze/expansion, `p*h` and therefore `lambda/h`
 remain constant; a smaller gap alone does not imply greater rarefaction.
 
 The Mach envelope includes pressure-driven gas speed, not only wall motion.
-Each accepted face gradient and gap reconstruct the same no-slip
+Each accepted face gradient and gap reconstruct the same selected-wall-law
 Couette--Poiseuille velocity profile used for traction and dissipation. Its
 two wall values and interior stationary point, if present, give the exact
 maximum absolute tangential speed; an off-centre peak cannot be hidden by a
 mean-flow or mid-gap check. The receipt reports `maximum_gas_mach_number`.
 Exceeding either pressure-dependent applicability envelope refuses the step
-before a checkpoint or receipt is published; no slip or compressible-inertia
+before a checkpoint or receipt is published; no wall-law or compressible-inertia
 correction is silently substituted.
+
+#### Explicit first-order Maxwell slip
+
+`SlipPolicy::MaxwellFirstOrder` admits the classical isothermal Maxwell boundary
+condition on two smooth walls with the **same declared** tangential momentum
+accommodation coefficient `sigma` in `(0,1]`. Its source identity and coefficient
+are bound into restart fingerprints. Existing no-slip fingerprints and wall-law
+behavior are retained; an unspecified `RarefiedSlipRequested` still refuses.
+No accommodation value is inferred or calibrated. The local slip length is
+`b(p) = ((2-sigma)/sigma) * lambda_ref * p_ref/p`, using the same pressure-scaled
+mean free path as the Knudsen checks. This explicit policy always refuses local
+`Kn > 0.1`, even when the caller supplies a looser cap; a stricter caller cap
+remains effective. It models slip flow, not transition or molecular flow.
+
+The closure follows the Maxwell/Navier law described by
+[Lockerby (2025), §2](https://doi.org/10.1017/flo.2024.34).
+The bounded Knudsen regime is supported by the opposing-wall DSMC study of
+[Gavasane et al. (2011)](https://doi.org/10.1260/1759-3093.2.2-3.109).
+These references motivate the model and its scope; they do not certify these
+caller-declared surfaces or establish a kinetic-theory error bound. There is no
+temperature jump, thermal creep, Knudsen-layer correction, or fitted effective
+viscosity in this isothermal first-order policy.
+
+Writing `g = dp/dx`, `Delta_U = U_upper-U_lower`, and
+`U_mean = (U_upper+U_lower)/2`, the shared wall law gives
+
+```
+q = h*U_mean - h^3/(12*mu) * (1+6*b/h) * g
+tau_upper =  mu*Delta_U/(h+2*b) + h*g/2
+tau_lower = -mu*Delta_U/(h+2*b) + h*g/2
+```
+
+The Reynolds mass flux is `(p/(R*T))*q`. The same slip-enhanced conductance enters
+the bounded pressure iteration and closed-boundary backpressure reconstruction.
+Since `b*p` is constant, the extra mass conductance is pressure independent and
+is evaluated without a per-face allocation. The wall-law coefficient is compiled
+once per step; the neighbor stencil uses fixed stack storage.
+
+The gas-side wall velocities and interior extremum come from that same quadratic
+profile, so the Mach check includes pressure-driven slip and the shifted peak
+under unequal wall velocities. Bulk dissipation is
+`mu*h*(Delta_U/(h+2*b))^2 + h^3*g^2/(12*mu)`. The additional nonnegative interface
+dissipation is `2*mu*b*(Delta_U/(h+2*b))^2 + b*h^2*g^2/(2*mu)`.
+`viscous_heat_w_per_m` includes both terms; the new
+`wall_slip_dissipation_w_per_m` exposes the interface part separately and is
+exactly zero for no-slip. Consequently tangential wall work plus pressure-force
+work still equals total dissipation. This is mechanical accounting; it neither
+assigns the interface heat to a wall/gas temperature equation nor solves one.
+
+Focused tests cover analytic slip Couette traction and bulk/interface heating,
+the exact compressible Poiseuille profile with `(p+6*b*p/h)^2` linear in `x`,
+convergent total dissipation, off-centre gas-speed limits in both flow directions,
+and moving wedges with sealed/open/vented boundaries and restart. Invalid
+accommodation, out-of-regime pressure states, and changes of wall law refuse.
 
 The implementation is bit-deterministic on one ISA by fixed cell/face order and
 bounded Jacobi/Picard sweeps. It has no RNG, no `Cx` cancellation hook, no
@@ -594,7 +649,7 @@ iteration-budget refusal, and deterministic checkpoint replay.  These are
 software/numerical checks of declared equations only.
 
 No gas-film result establishes thermochemical validity, lubrication-regime
-selection, roughness or slip closure, continuum validity outside the stated
+selection, roughness or accommodation calibration, continuum validity outside the stated
 gates, liquid/mixed/EHL/cavitation behavior, moving-domain topology changes,
 2-D/axisymmetric geometry, energy/entropy closure, coupled contact, or any
 device outcome.  The blocked fs-matdb, fs-thermochem, fs-tribo lubrication, and

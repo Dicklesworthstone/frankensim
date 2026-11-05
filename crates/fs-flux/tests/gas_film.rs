@@ -923,3 +923,288 @@ fn g1_opposing_pressure_gradients_do_not_cancel_viscous_heat() {
     assert!((step.receipt.viscous_heat_w_per_m / expected_heat - 1.0).abs() < 1.0e-12);
     assert_mechanical_balance(&input, &step);
 }
+
+fn maxwell_fixture(cells: usize, accommodation: f64) -> GasFilmInput {
+    let mut input = fixture(cells);
+    // Lower pressure for the same declared isothermal gas moves this fixture
+    // into the slip regime: lambda*p stays fixed, and Kn is about 0.033.
+    input.applicability.mean_free_path_m *= input.initial_absolute_pressure_pa / 20_000.0;
+    input.initial_absolute_pressure_pa = 20_000.0;
+    input.gauge_reference_absolute_pressure_pa = 20_000.0;
+    input.gas.declared_density_kg_m3 = input.initial_absolute_pressure_pa
+        / (input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k);
+    input.applicability.maximum_knudsen_number = 0.1;
+    input.slip_policy = SlipPolicy::MaxwellFirstOrder {
+        source_id: "synthetic-shared-wall-maxwell-v1".to_owned(),
+        tangential_momentum_accommodation: accommodation,
+    };
+    input
+}
+
+#[test]
+fn maxwell_couette_has_analytic_shear_and_bulk_plus_wall_dissipation() {
+    for sigma in [1.0, 0.5] {
+        let mut input = maxwell_fixture(6, sigma);
+        input.boundary = GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: input.initial_absolute_pressure_pa,
+            right_absolute_pressure_pa: input.initial_absolute_pressure_pa,
+        };
+        let speed = 2.0;
+        input.wall_motion.upper_tangential_velocity_m_per_s = speed;
+        let step = solve_isothermal_gas_film_1d(&input, None).expect("Maxwell Couette flow");
+        let h = input.grid.gap_m[0];
+        let mu = input.gas.dynamic_viscosity_pa_s;
+        let b = (2.0 - sigma) / sigma * input.applicability.mean_free_path_m;
+        let effective_gap = h + 2.0 * b;
+        let shear = mu * speed / effective_gap;
+        let total_heat = shear * speed * input.grid.length_m;
+        let bulk_heat = mu * (speed / effective_gap).powi(2) * h * input.grid.length_m;
+        let slip_heat = 2.0 * mu * b * (speed / effective_gap).powi(2) * input.grid.length_m;
+        for pressure in active_pressure(&step) {
+            assert!((pressure / input.initial_absolute_pressure_pa - 1.0).abs() < 1.0e-12);
+        }
+        for cell in 0..input.grid.gap_m.len() {
+            assert!(
+                (step.receipt.upper_wall_shear_pa[cell].unwrap() / shear - 1.0).abs() < 1.0e-12
+            );
+            assert!(
+                (step.receipt.lower_wall_on_gas_tangential_traction_pa[cell].unwrap() / -shear
+                    - 1.0)
+                    .abs()
+                    < 1.0e-12
+            );
+        }
+        assert!((step.receipt.viscous_heat_w_per_m / total_heat - 1.0).abs() < 1.0e-12);
+        assert!((step.receipt.wall_slip_dissipation_w_per_m / slip_heat - 1.0).abs() < 1.0e-12);
+        assert!(
+            ((step.receipt.viscous_heat_w_per_m - step.receipt.wall_slip_dissipation_w_per_m)
+                / bulk_heat
+                - 1.0)
+                .abs()
+                < 1.0e-12
+        );
+        let peak_gas_speed = speed * (h + b) / effective_gap;
+        assert!(
+            (step.receipt.maximum_gas_mach_number * input.applicability.speed_of_sound_m_per_s
+                / peak_gas_speed
+                - 1.0)
+                .abs()
+                < 1.0e-12
+        );
+        assert_mechanical_balance(&input, &step);
+    }
+}
+
+#[test]
+fn maxwell_poiseuille_matches_pressure_dependent_slip_flux_and_heat_limit() {
+    let sigma = 0.8;
+    let left: f64 = 30_000.0;
+    let right: f64 = 20_000.0;
+    let mut heat_errors = Vec::new();
+    for cells in [8, 32] {
+        let mut input = maxwell_fixture(cells, sigma);
+        input.boundary = GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: right,
+            right_absolute_pressure_pa: right,
+        };
+        let mut checkpoint = solve_isothermal_gas_film_1d(&input, None)
+            .expect("quiescent slip checkpoint")
+            .checkpoint;
+        input.boundary = GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: left,
+            right_absolute_pressure_pa: right,
+        };
+        let h = input.grid.gap_m[0];
+        let mu = input.gas.dynamic_viscosity_pa_s;
+        let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+        let bp = (2.0 - sigma) / sigma
+            * input.applicability.mean_free_path_m
+            * input.initial_absolute_pressure_pa;
+        let shift = 6.0 * bp / h;
+        // With b(p)*p constant, the exact steady solution has (p+shift)^2
+        // linear in x, not p^2 and not the constant-slip-length solution.
+        checkpoint.active_absolute_pressure_pa = (0..cells)
+            .map(|cell| {
+                let x = (cell as f64 + 0.5) / cells as f64;
+                ((left + shift).powi(2) + ((right + shift).powi(2) - (left + shift).powi(2)) * x)
+                    .sqrt()
+                    - shift
+            })
+            .collect();
+        let expected_pressure = checkpoint.active_absolute_pressure_pa.clone();
+        let step = solve_isothermal_gas_film_1d(&input, Some(&checkpoint))
+            .expect("steady compressible Maxwell Poiseuille flow");
+        let expected_mass = h.powi(3) * (left - right) * (left + right + 2.0 * shift)
+            / (24.0 * mu * rt * input.grid.length_m);
+        assert!(
+            (step.receipt.right_boundary_outward_mass_flux_kg_per_m_s / expected_mass - 1.0).abs()
+                < 1.0e-10
+        );
+        assert!(
+            (-step.receipt.left_boundary_outward_mass_flux_kg_per_m_s / expected_mass - 1.0).abs()
+                < 1.0e-10
+        );
+        for (actual, expected) in active_pressure(&step).iter().zip(expected_pressure) {
+            assert!((actual / expected - 1.0).abs() < 1.0e-12);
+        }
+        // Pressure stress remains Newtonian. Increased throughput is not an
+        // invented effective viscosity or a change to the imposed pressure drop.
+        let force = step
+            .receipt
+            .upper_wall_on_gas_tangential_traction_pa
+            .iter()
+            .map(|traction| traction.unwrap() * input.grid.length_m / cells as f64)
+            .sum::<f64>();
+        assert!((force / (0.5 * h * (right - left)) - 1.0).abs() < 1.0e-12);
+        let exact_total_heat = expected_mass * rt * (left / right).ln();
+        heat_errors.push((step.receipt.viscous_heat_w_per_m / exact_total_heat - 1.0).abs());
+        assert!(step.receipt.wall_slip_dissipation_w_per_m > 0.0);
+        assert!(step.receipt.wall_slip_dissipation_w_per_m < step.receipt.viscous_heat_w_per_m);
+        assert_mechanical_balance(&input, &step);
+    }
+    assert!(heat_errors[1] < 2.0e-5, "{heat_errors:?}");
+    assert!(heat_errors[1] < heat_errors[0] / 10.0, "{heat_errors:?}");
+}
+
+#[test]
+fn maxwell_squeeze_wedge_and_boundaries_preserve_mass_and_mechanical_power() {
+    for boundary in [
+        GasFilmBoundaryTopology::Sealed,
+        GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: 20_000.0,
+            right_absolute_pressure_pa: 15_000.0,
+        },
+        GasFilmBoundaryTopology::Vented {
+            cell_index: 5,
+            absolute_pressure_pa: 16_000.0,
+        },
+    ] {
+        let mut input = maxwell_fixture(12, 0.7);
+        input.boundary = boundary;
+        input.grid.gap_m = (0..12).map(|cell| 10.0e-6 + cell as f64 * 0.1e-6).collect();
+        input.wall_motion.lower_tangential_velocity_m_per_s = -0.5;
+        input.wall_motion.upper_tangential_velocity_m_per_s = 1.5;
+        let rates = (0..12)
+            .map(|cell| -1.0e-4 - cell as f64 * 1.0e-5)
+            .collect::<Vec<_>>();
+        input.wall_motion.gap_rate_profile_m_per_s = Some(rates.clone());
+        let first = solve_isothermal_gas_film_1d(&input, None).expect("slipping wedge step");
+        assert_mechanical_balance(&input, &first);
+        assert!(first.receipt.mass_closure_residual_kg_per_m_s.abs() < 2.0e-11);
+        for (gap, rate) in input.grid.gap_m.iter_mut().zip(rates) {
+            *gap += rate * input.timestep_s;
+        }
+        let second = solve_isothermal_gas_film_1d(&input, Some(&first.checkpoint))
+            .expect("slipping wedge restart");
+        assert_mechanical_balance(&input, &second);
+        assert!(second.receipt.mass_closure_residual_kg_per_m_s.abs() < 2.0e-11);
+        assert!(second.receipt.wall_slip_dissipation_w_per_m > 0.0);
+        assert_eq!(second.checkpoint.step_index, 2);
+    }
+}
+
+#[test]
+fn maxwell_admission_requires_physical_accommodation_and_first_order_knudsen() {
+    for sigma in [0.0, -0.1, 1.01, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            solve_isothermal_gas_film_1d(&maxwell_fixture(4, sigma), None),
+            Err(GasFilmError::InvalidInput {
+                field: "slip_policy.tangential_momentum_accommodation"
+            })
+        );
+    }
+    let mut input = maxwell_fixture(4, 1.0);
+    input.applicability.maximum_knudsen_number = 1.0;
+    input.boundary = GasFilmBoundaryTopology::Open {
+        left_absolute_pressure_pa: 20_000.0,
+        right_absolute_pressure_pa: 5_000.0,
+    };
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&input, None),
+        Err(GasFilmError::Unavailable {
+            reason: "maxwell-slip-knudsen-outside-first-order-envelope"
+        })
+    );
+    input.boundary = GasFilmBoundaryTopology::Sealed;
+    input.applicability.mean_free_path_m = 0.11 * input.grid.gap_m[0];
+    assert_eq!(
+        solve_isothermal_gas_film_1d(&input, None),
+        Err(GasFilmError::Unavailable {
+            reason: "maxwell-slip-knudsen-outside-first-order-envelope"
+        })
+    );
+}
+
+#[test]
+fn maxwell_checkpoint_binds_wall_law_and_replays_without_mutation() {
+    let input = maxwell_fixture(4, 0.8);
+    let step = solve_isothermal_gas_film_1d(&input, None).expect("Maxwell state");
+    let replay = solve_isothermal_gas_film_1d(&input, Some(&step.checkpoint)).expect("replay");
+    assert_eq!(
+        replay,
+        solve_isothermal_gas_film_1d(&input, Some(&step.checkpoint)).unwrap()
+    );
+    for policy in [
+        SlipPolicy::MaxwellFirstOrder {
+            source_id: "synthetic-shared-wall-maxwell-v1".to_owned(),
+            tangential_momentum_accommodation: 0.6,
+        },
+        SlipPolicy::NoSlipContinuum {
+            source_id: "synthetic-shared-wall-maxwell-v1".to_owned(),
+        },
+    ] {
+        let mut changed = input.clone();
+        changed.slip_policy = policy;
+        assert_eq!(
+            solve_isothermal_gas_film_1d(&changed, Some(&step.checkpoint)),
+            Err(GasFilmError::CheckpointMismatch {
+                field: "configuration_fingerprint"
+            })
+        );
+    }
+}
+
+#[test]
+fn maxwell_mach_uses_slipping_gas_profile_and_off_center_extremum() {
+    let sigma = 0.8;
+    for direction in [1.0, -1.0] {
+        let mut input = maxwell_fixture(2, sigma);
+        input.boundary = GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: if direction > 0.0 { 30_000.0 } else { 20_000.0 },
+            right_absolute_pressure_pa: if direction > 0.0 { 20_000.0 } else { 30_000.0 },
+        };
+        input.wall_motion.lower_tangential_velocity_m_per_s = direction;
+        input.wall_motion.upper_tangential_velocity_m_per_s = 3.0 * direction;
+        let step =
+            solve_isothermal_gas_film_1d(&input, None).expect("Maxwell pressure/Couette flow");
+        let inlet = if direction > 0.0 { 0 } else { 1 };
+        let pressure = step.absolute_pressure_pa[inlet].unwrap();
+        let face_pressure = 0.5 * (30_000.0 + pressure);
+        let h = input.grid.gap_m[inlet];
+        let beta = (2.0 - sigma) / sigma
+            * input.applicability.mean_free_path_m
+            * input.initial_absolute_pressure_pa
+            / (face_pressure * h);
+        let gradient = (30_000.0 - pressure) / (0.25 * input.grid.length_m);
+        let curvature = h.powi(2) * gradient / (2.0 * input.gas.dynamic_viscosity_pa_s);
+        let gas_velocity_difference = 2.0 / (1.0 + 2.0 * beta);
+        let midpoint_speed = 2.0 + curvature * (0.25 + beta);
+        let peak_speed = midpoint_speed + gas_velocity_difference.powi(2) / (4.0 * curvature);
+        assert!(curvature > gas_velocity_difference);
+        assert!(
+            (step.receipt.maximum_gas_mach_number * input.applicability.speed_of_sound_m_per_s
+                / peak_speed
+                - 1.0)
+                .abs()
+                < 1.0e-12
+        );
+        input.applicability.maximum_mach_number =
+            (midpoint_speed + peak_speed) / (2.0 * input.applicability.speed_of_sound_m_per_s);
+        assert_eq!(
+            solve_isothermal_gas_film_1d(&input, None),
+            Err(GasFilmError::Unavailable {
+                reason: "gas-mach-outside-declared-envelope"
+            })
+        );
+    }
+}

@@ -12,6 +12,9 @@ use core::fmt::Write;
 
 const MODEL_ID: &str = "fs-flux/isothermal-compressible-reynolds-1d-v1";
 const MAX_GEOMETRIC_CELLS: usize = 4_096;
+// Classical first-order Maxwell slip is not a transition/molecular-flow model.
+// See Gavasane et al., doi:10.1260/1759-3093.2.2-3.109.
+const MAX_MAXWELL_SLIP_KNUDSEN_NUMBER: f64 = 0.1;
 const RESTART_GAP_EVOLUTION_ABSOLUTE_TOLERANCE_M: f64 = 1.0e-15;
 const RESTART_GAP_EVOLUTION_RELATIVE_TOLERANCE: f64 = 1.0e-12;
 
@@ -169,7 +172,7 @@ pub struct MovingWallInput {
     pub gap_rate_profile_m_per_s: Option<Vec<f64>>,
 }
 
-/// Explicit continuum-domain gates.  There is no slip correction in this slice.
+/// Explicit continuum/slip-flow admission gates for the selected wall policy.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GasFilmApplicability {
     /// Caller-supplied molecular mean free path [m] at the declared temperature
@@ -198,15 +201,29 @@ pub struct GasFilmUncertainty {
     pub pressure_relative_bound: f64,
 }
 
-/// This foundation only admits no-slip continuum flow.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Explicit smooth-wall boundary condition for the isothermal gas film.
+#[derive(Debug, Clone, PartialEq)]
 pub enum SlipPolicy {
     /// Named no-slip continuum policy.
     NoSlipContinuum {
         /// Source identity of the policy.
         source_id: String,
     },
-    /// Any rarefied/slip correction requires a separately admitted model.
+    /// Classical first-order Maxwell velocity slip on both smooth walls.
+    ///
+    /// Both walls use the same declared tangential momentum accommodation
+    /// coefficient `sigma` in `(0, 1]`, with slip length
+    /// `b(p) = (2-sigma)/sigma * lambda_ref * p_ref/p`. The caller's Knudsen
+    /// cap still applies, and local `Kn > 0.1` is always refused. Temperature
+    /// is uniform: there is no thermal creep, temperature jump, or fitted
+    /// higher-order/Knudsen-layer correction. This is not a molecular model.
+    MaxwellFirstOrder {
+        /// Identity of the caller's gas/surface accommodation declaration.
+        source_id: String,
+        /// Shared wall tangential momentum accommodation coefficient `(0, 1]`.
+        tangential_momentum_accommodation: f64,
+    },
+    /// An unspecified rarefied/slip model is not an explicit Maxwell admission.
     RarefiedSlipRequested {
         /// Source identity of requested slip model.
         source_id: String,
@@ -364,11 +381,16 @@ pub struct GasFilmReceipt {
     /// Here `q` is the accepted mass flux divided by the face ideal-gas density.
     /// This is not boundary enthalpy transport or a total-energy closure.
     pub pressure_gradient_power_to_gas_w_per_m: f64,
-    /// Nonnegative Couette-plus-Poiseuille viscous dissipation [W m^-1].
+    /// Nonnegative Couette-plus-Poiseuille dissipation [W m^-1], including
+    /// gas/wall slip friction when the explicit Maxwell policy is selected.
     ///
     /// Equals tangential wall work plus pressure-gradient force work up to
     /// roundoff; normal gap work is separate. No temperature evolution is solved.
     pub viscous_heat_w_per_m: f64,
+    /// Part of `viscous_heat_w_per_m` dissipated at the slipping gas/wall
+    /// interfaces [W m^-1]; exactly zero for no-slip. The remainder is bulk
+    /// viscous dissipation. No thermal partition between wall and gas is assumed.
+    pub wall_slip_dissipation_w_per_m: f64,
     /// Maximum pressure-scaled Knudsen number of accepted cells and reservoirs/vent.
     pub maximum_knudsen_number: f64,
     /// Maximum tangential gas Mach number across the accepted face profiles,
@@ -443,14 +465,74 @@ fn active_prefix(mask: &[bool]) -> Result<usize, GasFilmError> {
     Ok(active)
 }
 
+// Compile the wall law once per step. For Maxwell slip, b*p is constant at
+// fixed temperature, so the extra MASS conductance is independent of pressure.
+// No-slip keeps the original arithmetic and requires no added allocation.
+struct FilmTransport {
+    viscosity_pa_s: f64,
+    rt: f64,
+    mean_wall_velocity_m_per_s: f64,
+    slip_pressure_length_pa_m: f64,
+}
+
+impl FilmTransport {
+    fn new(input: &GasFilmInput, rt: f64) -> Result<Self, GasFilmError> {
+        let slip_pressure_length_pa_m = match &input.slip_policy {
+            SlipPolicy::NoSlipContinuum { .. } => 0.0,
+            SlipPolicy::MaxwellFirstOrder {
+                tangential_momentum_accommodation: sigma,
+                ..
+            } => derived(
+                (2.0 - sigma) / sigma
+                    * input.applicability.mean_free_path_m
+                    * input.initial_absolute_pressure_pa,
+                "maxwell_slip_pressure_length_pa_m",
+            )?,
+            SlipPolicy::RarefiedSlipRequested { .. } => {
+                return Err(GasFilmError::Unavailable {
+                    reason: "slip-or-rarefied-model-not-implemented",
+                });
+            }
+        };
+        Ok(Self {
+            viscosity_pa_s: input.gas.dynamic_viscosity_pa_s,
+            rt,
+            mean_wall_velocity_m_per_s: 0.5
+                * (input.wall_motion.lower_tangential_velocity_m_per_s
+                    + input.wall_motion.upper_tangential_velocity_m_per_s),
+            slip_pressure_length_pa_m,
+        })
+    }
+
+    fn slip_length_m(&self, pressure_pa: f64) -> Result<f64, GasFilmError> {
+        derived(
+            self.slip_pressure_length_pa_m / pressure_pa,
+            "wall_slip_length_m",
+        )
+    }
+
+    fn mass_conductance(&self, pressure_pa: f64, gap_m: f64) -> Result<f64, GasFilmError> {
+        let no_slip = derived(
+            gap_m.powi(3) * pressure_pa / (12.0 * self.viscosity_pa_s * self.rt),
+            "reynolds_mass_conductance",
+        )?;
+        if self.slip_pressure_length_pa_m == 0.0 {
+            return Ok(no_slip);
+        }
+        // rho*h^3*(1+6*b/h)/(12*mu), with b = (b*p)/p.
+        let slip =
+            gap_m.powi(2) * self.slip_pressure_length_pa_m / (2.0 * self.viscosity_pa_s * self.rt);
+        derived(no_slip + slip, "maxwell_reynolds_mass_conductance")
+    }
+}
+
 fn face_flux(
     left_pressure_pa: f64,
     right_pressure_pa: f64,
     left_gap_m: f64,
     right_gap_m: f64,
     distance_m: f64,
-    gas: IsothermalIdealGas,
-    mean_wall_velocity_m_per_s: f64,
+    transport: &FilmTransport,
 ) -> Result<f64, GasFilmError> {
     let pressure = derived(
         0.5 * (left_pressure_pa + right_pressure_pa),
@@ -459,20 +541,13 @@ fn face_flux(
     let gap = derived(0.5 * (left_gap_m + right_gap_m), "face_gap_m")?;
     positive(pressure, "face_pressure_pa")?;
     positive(gap, "face_gap_m")?;
-    let rt = derived(
-        gas.specific_gas_constant_j_kg_k * gas.temperature_k,
-        "specific_gas_constant_times_temperature",
-    )?;
-    let conductance = derived(
-        gap.powi(3) * pressure / (12.0 * gas.dynamic_viscosity_pa_s * rt),
-        "reynolds_mass_conductance",
-    )?;
+    let conductance = transport.mass_conductance(pressure, gap)?;
     let pressure_flux = derived(
         -conductance * (right_pressure_pa - left_pressure_pa) / distance_m,
         "pressure_mass_flux",
     )?;
     let couette_flux = derived(
-        pressure * gap * mean_wall_velocity_m_per_s / rt,
+        pressure * gap * transport.mean_wall_velocity_m_per_s / transport.rt,
         "couette_mass_flux",
     )?;
     let flux = derived(pressure_flux + couette_flux, "face_mass_flux")?;
@@ -493,6 +568,13 @@ impl GasFilmInput {
                 * (self.initial_absolute_pressure_pa / pressure_pa),
             "pressure_scaled_knudsen_number",
         )?;
+        if matches!(self.slip_policy, SlipPolicy::MaxwellFirstOrder { .. })
+            && knudsen > MAX_MAXWELL_SLIP_KNUDSEN_NUMBER
+        {
+            return Err(GasFilmError::Unavailable {
+                reason: "maxwell-slip-knudsen-outside-first-order-envelope",
+            });
+        }
         if knudsen > self.applicability.maximum_knudsen_number {
             return Err(GasFilmError::Unavailable {
                 reason: "rarefied-knudsen-outside-continuum-envelope",
@@ -524,6 +606,17 @@ impl GasFilmInput {
         match &self.slip_policy {
             SlipPolicy::NoSlipContinuum { source_id } => {
                 canonical_identity(source_id, "slip_source_id")?;
+            }
+            SlipPolicy::MaxwellFirstOrder {
+                source_id,
+                tangential_momentum_accommodation: sigma,
+            } => {
+                canonical_identity(source_id, "slip_source_id")?;
+                if !(sigma.is_finite() && *sigma > 0.0 && *sigma <= 1.0) {
+                    return Err(GasFilmError::InvalidInput {
+                        field: "slip_policy.tangential_momentum_accommodation",
+                    });
+                }
             }
             SlipPolicy::RarefiedSlipRequested { .. } => {
                 return Err(GasFilmError::Unavailable {
@@ -882,6 +975,17 @@ fn invariant_configuration_fingerprint(input: &GasFilmInput) -> String {
     }
     match &input.slip_policy {
         SlipPolicy::NoSlipContinuum { source_id } => text(&mut output, "slip", source_id),
+        SlipPolicy::MaxwellFirstOrder {
+            source_id,
+            tangential_momentum_accommodation,
+        } => {
+            text(&mut output, "maxwell_first_order", source_id);
+            number(
+                &mut output,
+                "maxwell_tmac",
+                *tangential_momentum_accommodation,
+            );
+        }
         SlipPolicy::RarefiedSlipRequested { source_id } => {
             text(&mut output, "rarefied_slip", source_id);
         }
@@ -1045,6 +1149,17 @@ fn accepted_request_fingerprint(input: &GasFilmInput) -> String {
     }
     match &input.slip_policy {
         SlipPolicy::NoSlipContinuum { source_id } => text(&mut output, "slip", source_id),
+        SlipPolicy::MaxwellFirstOrder {
+            source_id,
+            tangential_momentum_accommodation,
+        } => {
+            text(&mut output, "maxwell_first_order", source_id);
+            number(
+                &mut output,
+                "maxwell_tmac",
+                *tangential_momentum_accommodation,
+            );
+        }
         SlipPolicy::RarefiedSlipRequested { source_id } => {
             text(&mut output, "rarefied_slip", source_id);
         }
@@ -1147,10 +1262,8 @@ fn boundary_fluxes(
     gap: &[f64],
     input: &GasFilmInput,
     spacing: f64,
+    transport: &FilmTransport,
 ) -> Result<(f64, f64), GasFilmError> {
-    let velocity = 0.5
-        * (input.wall_motion.lower_tangential_velocity_m_per_s
-            + input.wall_motion.upper_tangential_velocity_m_per_s);
     match input.boundary {
         GasFilmBoundaryTopology::Sealed | GasFilmBoundaryTopology::Vented { .. } => Ok((0.0, 0.0)),
         GasFilmBoundaryTopology::Open {
@@ -1163,8 +1276,7 @@ fn boundary_fluxes(
                 gap[0],
                 gap[0],
                 0.5 * spacing,
-                input.gas,
-                velocity,
+                transport,
             )?,
             face_flux(
                 pressure[pressure.len() - 1],
@@ -1172,8 +1284,7 @@ fn boundary_fluxes(
                 gap[gap.len() - 1],
                 gap[gap.len() - 1],
                 0.5 * spacing,
-                input.gas,
-                velocity,
+                transport,
             )?,
         )),
     }
@@ -1184,14 +1295,12 @@ fn face_fluxes(
     gap: &[f64],
     input: &GasFilmInput,
     spacing: f64,
+    transport: &FilmTransport,
 ) -> Result<Vec<f64>, GasFilmError> {
     let mut flux = vec![0.0; pressure.len() + 1];
-    let (left, right) = boundary_fluxes(pressure, gap, input, spacing)?;
+    let (left, right) = boundary_fluxes(pressure, gap, input, spacing, transport)?;
     flux[0] = left;
     flux[pressure.len()] = right;
-    let velocity = 0.5
-        * (input.wall_motion.lower_tangential_velocity_m_per_s
-            + input.wall_motion.upper_tangential_velocity_m_per_s);
     for face in 1..pressure.len() {
         flux[face] = face_flux(
             pressure[face - 1],
@@ -1199,8 +1308,7 @@ fn face_fluxes(
             gap[face - 1],
             gap[face],
             spacing,
-            input.gas,
-            velocity,
+            transport,
         )?;
     }
     Ok(flux)
@@ -1215,20 +1323,19 @@ fn pressure_driven_mechanics(
     flux: &[f64],
     input: &GasFilmInput,
     spacing: f64,
-    rt: f64,
-) -> Result<(Vec<f64>, f64, f64, f64), GasFilmError> {
-    let mean_velocity = 0.5
-        * (input.wall_motion.lower_tangential_velocity_m_per_s
-            + input.wall_motion.upper_tangential_velocity_m_per_s);
+    transport: &FilmTransport,
+) -> Result<(Vec<f64>, f64, f64, f64, f64), GasFilmError> {
+    let mean_velocity = transport.mean_wall_velocity_m_per_s;
     let lower_velocity = input.wall_motion.lower_tangential_velocity_m_per_s;
     let upper_velocity = input.wall_motion.upper_tangential_velocity_m_per_s;
     let relative_velocity = derived(upper_velocity - lower_velocity, "relative_wall_velocity")?;
-    let mut maximum_speed = lower_velocity.abs().max(upper_velocity.abs());
+    let mut maximum_speed = 0.0_f64;
     let viscosity = input.gas.dynamic_viscosity_pa_s;
     let active = pressure.len();
     let mut face_shear = Vec::with_capacity(active + 1);
     let mut heat = 0.0;
     let mut pressure_work = 0.0;
+    let mut wall_slip_heat = 0.0;
     for (face, mass_flux) in flux.iter().copied().enumerate() {
         let (face_gap, face_pressure, gradient, distance) = if face > 0 && face < active {
             (
@@ -1270,22 +1377,55 @@ fn pressure_driven_mechanics(
                 }
             }
         };
-        let gradient = derived(gradient, "face_pressure_gradient_pa_per_m")?;
         let face_gap = derived(face_gap, "mechanical_face_gap_m")?;
         let face_pressure = derived(face_pressure, "mechanical_face_pressure_pa")?;
-        // u(s) = U_lower + (U_upper-U_lower)*s + A*s*(s-1), s = y/h.
-        // The walls and the one stationary point give the exact profile peak.
+        let slip_length = transport.slip_length_m(face_pressure)?;
+        let slip_ratio = derived(slip_length / face_gap, "wall_slip_length_ratio")?;
+        let gradient = if (face == 0 || face == active)
+            && !matches!(input.boundary, GasFilmBoundaryTopology::Open { .. })
+        {
+            // Zero flux uses the same slip-enhanced conductance as an open face.
+            gradient / (1.0 + 6.0 * slip_ratio)
+        } else {
+            gradient
+        };
+        let gradient = derived(gradient, "face_pressure_gradient_pa_per_m")?;
+        // Symmetric Maxwell slip gives u(s) = u_gas_lower + V*s + A*s*(s-1),
+        // with V = (U_upper-U_lower)/(1+2*b/h) and s = y/h. The gas-side wall
+        // values differ from the solid velocities when b > 0.
+        // The endpoints and one stationary point give the exact profile peak.
         // A mean-flow or mid-gap check can miss an off-centre gas-speed maximum.
         let pressure_velocity = derived(
             face_gap.powi(2) * gradient / (2.0 * viscosity),
             "poiseuille_velocity_coefficient",
         )?;
-        if relative_velocity.abs() < pressure_velocity.abs() {
-            let stationary_point = 0.5 * (1.0 - relative_velocity / pressure_velocity);
+        let (gas_lower_velocity, gas_upper_velocity, gas_relative_velocity) = if slip_length == 0.0
+        {
+            (lower_velocity, upper_velocity, relative_velocity)
+        } else {
+            let relative = derived(
+                relative_velocity / (1.0 + 2.0 * slip_ratio),
+                "couette_gas_velocity_difference",
+            )?;
+            let lower = derived(
+                lower_velocity + slip_ratio * (relative - pressure_velocity),
+                "lower_wall_gas_velocity",
+            )?;
+            let upper = derived(
+                upper_velocity - slip_ratio * (relative + pressure_velocity),
+                "upper_wall_gas_velocity",
+            )?;
+            (lower, upper, relative)
+        };
+        maximum_speed = maximum_speed
+            .max(gas_lower_velocity.abs())
+            .max(gas_upper_velocity.abs());
+        if gas_relative_velocity.abs() < pressure_velocity.abs() {
+            let stationary_point = 0.5 * (1.0 - gas_relative_velocity / pressure_velocity);
             let velocity = derived(
-                lower_velocity
+                gas_lower_velocity
                     + stationary_point
-                        * (relative_velocity + pressure_velocity * (stationary_point - 1.0)),
+                        * (gas_relative_velocity + pressure_velocity * (stationary_point - 1.0)),
                 "interior_gas_velocity",
             )?;
             maximum_speed = maximum_speed.max(velocity.abs());
@@ -1304,11 +1444,22 @@ fn pressure_driven_mechanics(
             face_gap.powi(3) / (12.0 * viscosity),
             "reynolds_volume_conductance",
         )?;
+        let slip_conductance = derived(
+            face_gap.powi(2) * slip_length / (2.0 * viscosity),
+            "maxwell_slip_volume_conductance",
+        )?;
         heat = derived(
-            heat + conductance * gradient * gradient * distance,
+            heat + (conductance + slip_conductance) * gradient * gradient * distance,
             "poiseuille_viscous_heat_w_per_m",
         )?;
-        let volume_flux = derived(mass_flux * rt / face_pressure, "face_volume_flux_m2_per_s")?;
+        wall_slip_heat = derived(
+            wall_slip_heat + slip_conductance * gradient * gradient * distance,
+            "pressure_wall_slip_dissipation_w_per_m",
+        )?;
+        let volume_flux = derived(
+            mass_flux * transport.rt / face_pressure,
+            "face_volume_flux_m2_per_s",
+        )?;
         pressure_work = derived(
             pressure_work - volume_flux * gradient * distance,
             "pressure_gradient_power_to_gas_w_per_m",
@@ -1320,6 +1471,7 @@ fn pressure_driven_mechanics(
         heat,
         pressure_work,
         maximum_speed / input.applicability.speed_of_sound_m_per_s,
+        wall_slip_heat,
     ))
 }
 
@@ -1332,6 +1484,7 @@ pub fn solve_isothermal_gas_film_1d(
     checkpoint: Option<&GasFilmCheckpoint>,
 ) -> Result<GasFilmStep, GasFilmError> {
     let (active, spacing, rt, max_slope) = input.validate()?;
+    let transport = FilmTransport::new(input, rt)?;
     let (old_pressure, old_gap, old_step_index) = initial_state(input, active, checkpoint)?;
     let gap = &input.grid.gap_m[..active];
     // Both the starting state and the imposed reservoirs must belong to the
@@ -1373,7 +1526,7 @@ pub fn solve_isothermal_gas_film_1d(
     let mut iterations = 0;
     let mut max_residual: f64;
     while iterations < input.budget.maximum_iterations {
-        let flux = face_fluxes(&pressure, gap, input, spacing)?;
+        let flux = face_fluxes(&pressure, gap, input, spacing, &transport)?;
         let mut next = pressure.clone();
         max_residual = 0.0;
         for cell in 0..active {
@@ -1399,32 +1552,32 @@ pub fn solve_isothermal_gas_film_1d(
             )?;
             max_residual = max_residual.max(residual.abs());
             let mut diagonal = storage_coefficient;
-            let mut neighbors = Vec::with_capacity(2);
-            if cell > 0 {
-                neighbors.push((pressure[cell - 1], gap[cell - 1], spacing));
+            let left = if cell > 0 {
+                Some((pressure[cell - 1], gap[cell - 1], spacing))
             } else if let GasFilmBoundaryTopology::Open {
                 left_absolute_pressure_pa,
                 ..
             } = input.boundary
             {
-                neighbors.push((left_absolute_pressure_pa, gap[cell], 0.5 * spacing));
-            }
-            if cell + 1 < active {
-                neighbors.push((pressure[cell + 1], gap[cell + 1], spacing));
+                Some((left_absolute_pressure_pa, gap[cell], 0.5 * spacing))
+            } else {
+                None
+            };
+            let right = if cell + 1 < active {
+                Some((pressure[cell + 1], gap[cell + 1], spacing))
             } else if let GasFilmBoundaryTopology::Open {
                 right_absolute_pressure_pa,
                 ..
             } = input.boundary
             {
-                neighbors.push((right_absolute_pressure_pa, gap[cell], 0.5 * spacing));
-            }
-            for (neighbor_pressure, neighbor_gap, distance) in neighbors {
+                Some((right_absolute_pressure_pa, gap[cell], 0.5 * spacing))
+            } else {
+                None
+            };
+            for (neighbor_pressure, neighbor_gap, distance) in [left, right].into_iter().flatten() {
                 let p_face = 0.5 * (pressure[cell] + neighbor_pressure);
                 let h_face = 0.5 * (gap[cell] + neighbor_gap);
-                let k = derived(
-                    h_face.powi(3) * p_face / (12.0 * input.gas.dynamic_viscosity_pa_s * rt),
-                    "linearized_reynolds_conductance",
-                )?;
+                let k = transport.mass_conductance(p_face, h_face)?;
                 diagonal = derived(diagonal + k / (distance * spacing), "cell_diagonal")?;
             }
             positive(diagonal, "cell_diagonal")?;
@@ -1445,7 +1598,7 @@ pub fn solve_isothermal_gas_film_1d(
             break;
         }
     }
-    let flux = face_fluxes(&pressure, gap, input, spacing)?;
+    let flux = face_fluxes(&pressure, gap, input, spacing, &transport)?;
     let mut cell_residual = vec![0.0; active];
     max_residual = 0.0;
     for cell in 0..active {
@@ -1517,8 +1670,13 @@ pub fn solve_isothermal_gas_film_1d(
     let mut gas_on_lower_tangential = Vec::with_capacity(input.grid.gap_m.len());
     let mut lower_on_gas_tangential = Vec::with_capacity(input.grid.gap_m.len());
     let mut upper_shear = Vec::with_capacity(input.grid.gap_m.len());
-    let (pressure_shear, mut viscous_power, pressure_gradient_power, max_gas_mach) =
-        pressure_driven_mechanics(&pressure, gap, &flux, input, spacing, rt)?;
+    let (
+        pressure_shear,
+        mut viscous_power,
+        pressure_gradient_power,
+        max_gas_mach,
+        mut wall_slip_power,
+    ) = pressure_driven_mechanics(&pressure, gap, &flux, input, spacing, &transport)?;
     let mut tangential_wall_power = 0.0;
     let mut normal_gap_power = 0.0;
     let relative_velocity = input.wall_motion.upper_tangential_velocity_m_per_s
@@ -1547,8 +1705,10 @@ pub fn solve_isothermal_gas_film_1d(
             normal_gap_power - pressure_value * input.gap_rate_m_per_s(index) * spacing,
             "normal_gap_power_to_gas_w_per_m",
         )?;
+        let slip_length = transport.slip_length_m(pressure_value)?;
+        let couette_gap = derived(gap + 2.0 * slip_length, "couette_effective_gap_m")?;
         let couette_shear = derived(
-            input.gas.dynamic_viscosity_pa_s * relative_velocity / gap,
+            input.gas.dynamic_viscosity_pa_s * relative_velocity / couette_gap,
             "couette_wall_shear_pa",
         )?;
         // The face average gives each cell half of each adjacent interval,
@@ -1566,6 +1726,11 @@ pub fn solve_isothermal_gas_film_1d(
         viscous_power = derived(
             viscous_power + couette_shear * relative_velocity * spacing,
             "viscous_heat_w_per_m",
+        )?;
+        wall_slip_power = derived(
+            wall_slip_power
+                + (2.0 * slip_length / couette_gap) * couette_shear * relative_velocity * spacing,
+            "couette_wall_slip_dissipation_w_per_m",
         )?;
         tangential_wall_power = derived(
             tangential_wall_power
@@ -1618,6 +1783,7 @@ pub fn solve_isothermal_gas_film_1d(
             wall_power_to_gas_w_per_m: wall_power,
             pressure_gradient_power_to_gas_w_per_m: pressure_gradient_power,
             viscous_heat_w_per_m: viscous_power,
+            wall_slip_dissipation_w_per_m: wall_slip_power,
             maximum_knudsen_number: max_knudsen,
             maximum_gas_mach_number: max_gas_mach,
             maximum_gap_slope: max_slope,
