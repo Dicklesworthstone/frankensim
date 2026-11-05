@@ -22,7 +22,10 @@ use crate::bdm::{eval_basis, tri_quad};
 use crate::ns::boundary::{StokesAssembly, StokesBoundary, StokesBoundaryError, StokesSolution};
 use crate::ns::{FluxParams, FluxRheologyError, FluxSolution, FluxSystem};
 
+mod convergence;
 mod law;
+
+use convergence::VelocityUpdate;
 
 /// One original Brinkman cell plus an explicitly authored isotropic form-drag
 /// coefficient [1/m], with no hidden factor of 1/2 or permeability conversion.
@@ -75,10 +78,17 @@ pub struct ForchheimerControls {
     /// Maximum halvings per Newton direction, in 0..=60; zero tries only the
     /// full step. Each trial is checked against the actual nonlinear equations.
     pub max_backtracks: usize,
-    /// Required original and row-scaled nonlinear residuals AND unrelaxed
-    /// relative velocity correction, using the fixed references documented by
-    /// the solve entry. Finite and strictly between zero and one.
+    /// Required original and row-scaled nonlinear residuals; also the relative
+    /// full velocity-correction threshold. Finite and strictly between zero and
+    /// one. The velocity correction may instead meet the explicit absolute
+    /// threshold below, while BOTH residual criteria remain mandatory.
     pub relative_tolerance: f64,
+    /// Optional absolute FULL velocity-correction tolerance [m/s], finite and
+    /// nonnegative. Default zero retains strict relative-only stopping. This is
+    /// the Euclidean norm of native BDM velocity moments; choose it for the
+    /// mesh's DOF normalization and required physical accuracy. It does not
+    /// depend on pressure datum and never changes or clips the accepted field.
+    pub absolute_velocity_tolerance_m_s: f64,
 }
 
 impl Default for ForchheimerControls {
@@ -87,6 +97,7 @@ impl Default for ForchheimerControls {
             max_iterations: 40,
             max_backtracks: 24,
             relative_tolerance: 1e-9,
+            absolute_velocity_tolerance_m_s: 0.0,
         }
     }
 }
@@ -98,6 +109,8 @@ impl ForchheimerControls {
             || !self.relative_tolerance.is_finite()
             || self.relative_tolerance <= 0.0
             || self.relative_tolerance >= 1.0
+            || !self.absolute_velocity_tolerance_m_s.is_finite()
+            || self.absolute_velocity_tolerance_m_s < 0.0
             || !params.tol.is_finite()
             || params.tol <= 0.0
             || params.tol > self.relative_tolerance
@@ -122,9 +135,14 @@ pub struct ForchheimerSolution {
     /// Total rejected trial steps before acceptance.
     pub line_search_reductions: usize,
     /// Last FULL Newton velocity correction relative to the fixed maximum of
-    /// initial and first Newton candidate velocity norms. No velocity floor or
-    /// small relaxed step can alone establish convergence.
+    /// initial and first Newton candidate velocity norms. This may exceed the
+    /// relative threshold only when the explicitly requested absolute velocity
+    /// criterion passed. A small relaxed step cannot establish convergence.
     pub relative_update: f64,
+    /// Actual Euclidean norm of the FULL native BDM velocity-moment correction
+    /// [m/s], before line-search relaxation. Zero for an accepted initial state
+    /// or the exact zero-beta linear path.
+    pub velocity_update_norm_m_s: f64,
     /// Actual accepted Darcy exchange, divided by reference density, per cell.
     pub cell_darcy_exchange: Vec<BrinkmanDragExchange>,
     /// Actual accepted `beta |w| w` exchange, divided by reference density,
@@ -301,14 +319,18 @@ impl<'m> FluxSystem<'m> {
     ///
     /// A consistent symmetric tangent and the native positive cell quadrature
     /// drive bounded Newton/backtracking. Both true original and row-scaled
-    /// residuals plus the full Newton correction must converge. Residual row
+    /// residuals must converge, together with either the relative full Newton
+    /// correction or the explicitly authored absolute velocity tolerance.
+    /// Residual row
     /// weights and reference loads come from the zero-velocity operator; only
     /// a homogeneous zero-load norm falls back to the initial true defect.
     /// Thus the artificial Newton affine load cannot change convergence scales.
     /// The velocity reference is fixed to the larger norm of the projected
     /// initial state and first Newton candidate, without an artificial floor.
-    /// Strong normal
-    /// moments, continuity, traction pressure datums, slip and SIP terms retain
+    /// The optional absolute criterion uses the full Euclidean BDM moment norm
+    /// [m/s], independent of pressure datum. Its default is zero; callers can
+    /// admit an explicitly chosen physical correction when solving near rest.
+    /// Strong normal moments, continuity, traction pressure datums, slip and SIP terms retain
     /// their original owner. Reactions use a fresh accepted-state tangent/load.
     ///
     /// All-zero beta takes the original Darcy solve and diagnostics exactly.
@@ -432,6 +454,7 @@ impl<'m> FluxSystem<'m> {
                 iterations: 0,
                 line_search_reductions: 0,
                 relative_update: 0.0,
+                velocity_update_norm_m_s: 0.0,
                 cell_darcy_exchange,
                 cell_forchheimer_exchange: vec![BrinkmanDragExchange::default(); cells.len()],
             });
@@ -526,10 +549,13 @@ impl<'m> FluxSystem<'m> {
         );
         let mut iterations = 0;
         let mut reductions = 0;
-        let mut update = 0.0;
+        let mut update = VelocityUpdate::default();
         while relative > controls.relative_tolerance
             || scaled > controls.relative_tolerance
-            || update > controls.relative_tolerance
+            || !update.converged(
+                controls.relative_tolerance,
+                controls.absolute_velocity_tolerance_m_s,
+            )
         {
             if !relative.is_finite() || !scaled.is_finite() || !merit.is_finite() {
                 return Err(invalid(
@@ -537,7 +563,11 @@ impl<'m> FluxSystem<'m> {
                 ));
             }
             if iterations == controls.max_iterations {
-                return Err(nonlinear_failure(iterations, update, relative.max(scaled)));
+                return Err(nonlinear_failure(
+                    iterations,
+                    update.relative,
+                    relative.max(scaled),
+                ));
             }
             let linear = self.solve_linear_result(assembly.matrix(), assembly.rhs(), params)?;
             if !linear.x.iter().all(|value| value.is_finite()) || !linear.converged(params.tol) {
@@ -553,21 +583,15 @@ impl<'m> FluxSystem<'m> {
                 .zip(&field.x)
                 .map(|(next, old)| next - old)
                 .collect();
-            let numerator = direction[..self.n_u]
-                .iter()
-                .fold(0.0_f64, |norm, value| norm.hypot(*value));
             let denominator = linear.x[..self.n_u]
                 .iter()
                 .fold(0.0_f64, |norm, value| norm.hypot(*value));
             if iterations == 0 {
                 velocity_reference = velocity_reference.max(denominator);
             }
-            if !velocity_reference.is_finite() {
-                return Err(invalid(
-                    "Forchheimer velocity reference is not representable",
-                ));
-            }
-            update = relative_norm(numerator, velocity_reference);
+            update =
+                VelocityUpdate::measure(direction[..self.n_u].iter().copied(), velocity_reference)
+                    .map_err(invalid)?;
             iterations += 1;
             let mut step = 1.0;
             let mut accepted = None;
@@ -598,12 +622,14 @@ impl<'m> FluxSystem<'m> {
                         let next_scaled = relative_norm(next_merit, scaled_reference);
                         let converged = next_relative <= controls.relative_tolerance
                             && next_scaled <= controls.relative_tolerance
-                            && update <= controls.relative_tolerance;
+                            && update.converged(
+                                controls.relative_tolerance,
+                                controls.absolute_velocity_tolerance_m_s,
+                            );
                         if next_merit.is_finite()
                             && next_relative.is_finite()
                             && next_scaled.is_finite()
-                            && ((next_merit < merit
-                                && next_merit <= (1.0 - 1e-4 * step) * merit)
+                            && ((next_merit < merit && next_merit <= (1.0 - 1e-4 * step) * merit)
                                 || converged)
                         {
                             accepted = Some((
@@ -623,7 +649,11 @@ impl<'m> FluxSystem<'m> {
             let Some((candidate, endpoint, next_relative, next_scaled, next_merit, backtrack)) =
                 accepted
             else {
-                return Err(nonlinear_failure(iterations, update, relative.max(scaled)));
+                return Err(nonlinear_failure(
+                    iterations,
+                    update.relative,
+                    relative.max(scaled),
+                ));
             };
             field.x = candidate;
             field.iters = linear.iters;
@@ -633,7 +663,7 @@ impl<'m> FluxSystem<'m> {
             merit = next_merit;
             reductions += backtrack;
         }
-        if !relative.is_finite() || !scaled.is_finite() || !update.is_finite() {
+        if !relative.is_finite() || !scaled.is_finite() {
             return Err(invalid("Forchheimer accepted state is not representable"));
         }
         field.rel_residual = relative;
@@ -654,7 +684,8 @@ impl<'m> FluxSystem<'m> {
             flow,
             iterations,
             line_search_reductions: reductions,
-            relative_update: update,
+            relative_update: update.relative,
+            velocity_update_norm_m_s: update.norm_m_s,
             cell_darcy_exchange,
             cell_forchheimer_exchange,
         })

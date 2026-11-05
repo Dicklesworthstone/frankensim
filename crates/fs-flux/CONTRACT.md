@@ -3386,9 +3386,24 @@ BDF1 history. A zero reference load norm uses the initial actual defect instead;
 it is never replaced by the changing artificial Newton affine source. The full
 Newton velocity correction uses the fixed larger norm of the projected initial
 velocity and first Newton candidate. Both original and fixed-row-scaled defects
-and that unrelaxed correction must satisfy the requested tolerance. This admits
-homogeneous relaxation to rest without dividing by a vanishing quadratic
-Newton load or introducing an artificial velocity scale. The line search uses
+must satisfy the requested relative tolerance. The full velocity correction
+must satisfy either its relative threshold or the explicitly authored
+`ForchheimerControls::absolute_velocity_tolerance_m_s`. This absolute tolerance
+is finite and nonnegative and defaults to zero, preserving strict relative-only
+stopping. It measures the Euclidean norm of native BDM velocity-moment
+corrections [m/s]; the caller selects it for the mesh's DOF normalization and
+physical accuracy. It is independent of pressure datum and cannot replace either
+force/continuity residual criterion. No implicit velocity scale or field clipping
+is introduced. The native result's `velocity_update_norm_m_s` and matching
+material accessor expose the actual FULL unrelaxed correction, including when
+an explicitly accepted absolute correction exceeds the relative threshold.
+
+The fixed relative reference admits homogeneous relaxation to rest without
+dividing by a vanishing quadratic Newton load. An explicit absolute correction
+allowance also permits pressure-balanced rest, where the first candidate's
+velocity may consist only of roundoff. Such an allowance is never inferred from
+large pressure loads; resolvable weak nonlinear flow retains the same explicit
+accuracy requirement after a pressure-datum shift. The line search uses
 the fixed-row-scaled absolute defect and bounded halvings. Exhaustion,
 stagnation and unrepresentable states return refusal without a candidate flow.
 
@@ -3432,7 +3447,13 @@ exact boundary projection, heterogeneous physical source/reaction closure,
 implicit relaxation and BDF1 energy balance, exact zero-beta arithmetic, and
 failure without accepted state. The production constitutive leaf has direct
 force-difference, symmetry, positive tangent, frame-work, scaling, zero-limit
-and representability tests.
+and representability tests. The production convergence helper separately tests
+actual correction norms, explicit absolute thresholds, weak-flow protection,
+strict default behavior and representability. Native pressure-rest regressions
+cover steady/BDF1 equilibrium with affine offset pressure and a large synthetic
+beta, material propagation of the actual correction norm, and weak nonlinear
+flow under a large pressure datum. These synthetic tests assert no empirical
+coefficient validity.
 
 ## Inclined two-fluid capillary displacement
 

@@ -17,6 +17,7 @@ pub struct MaterialForchheimerSolution {
     iterations: usize,
     line_search_reductions: usize,
     relative_update: f64,
+    velocity_update_norm_m_s: f64,
 }
 
 impl MaterialForchheimerSolution {
@@ -65,10 +66,19 @@ impl MaterialForchheimerSolution {
         self.line_search_reductions
     }
 
-    /// Full, unrelaxed final relative velocity correction.
+    /// Full, unrelaxed final relative velocity correction. It may exceed the
+    /// relative threshold when an explicitly selected absolute criterion passed.
     #[must_use]
     pub const fn relative_update(&self) -> f64 {
         self.relative_update
+    }
+
+    /// Actual full Euclidean BDM velocity-moment correction norm [m/s], before
+    /// relaxation. Both nonlinear residual checks remain mandatory when an
+    /// explicit absolute correction tolerance is used.
+    #[must_use]
+    pub const fn velocity_update_norm_m_s(&self) -> f64 {
+        self.velocity_update_norm_m_s
     }
 }
 
@@ -245,6 +255,7 @@ impl<F: FluidTransport + ?Sized> MaterialFluxSystem<'_, '_, '_, F> {
             iterations: solution.iterations,
             line_search_reductions: solution.line_search_reductions,
             relative_update: solution.relative_update,
+            velocity_update_norm_m_s: solution.velocity_update_norm_m_s,
         })
     }
 }

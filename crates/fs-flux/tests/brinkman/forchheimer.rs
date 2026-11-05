@@ -497,6 +497,8 @@ fn g0_zero_beta_retains_exact_steady_and_bdf1_native_fields_and_darcy_accounts()
             vec![fs_flux::BrinkmanDragExchange::default(); cells.len()]
         );
         assert_eq!(actual.iterations, 0);
+        assert_eq!(actual.relative_update, 0.0);
+        assert_eq!(actual.velocity_update_norm_m_s, 0.0);
     }
 }
 
@@ -551,6 +553,18 @@ fn g0_invalid_initial_history_and_controls_refuse_before_callbacks() {
         },
         ForchheimerControls {
             relative_tolerance: f64::NAN,
+            ..ForchheimerControls::default()
+        },
+        ForchheimerControls {
+            absolute_velocity_tolerance_m_s: -1.0,
+            ..ForchheimerControls::default()
+        },
+        ForchheimerControls {
+            absolute_velocity_tolerance_m_s: f64::NAN,
+            ..ForchheimerControls::default()
+        },
+        ForchheimerControls {
+            absolute_velocity_tolerance_m_s: f64::INFINITY,
             ..ForchheimerControls::default()
         },
     ] {
@@ -816,4 +830,252 @@ fn g1_material_bdf1_keeps_one_density_for_inertia_force_and_cubic_loss() {
         mu / 0.1 * exact * exact,
         3e-8,
     );
+}
+
+#[test]
+fn g1_pressure_balanced_rest_accepts_an_explicit_absolute_update_in_steady_and_bdf1() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.3, 0.9, 3, 3));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        nu: 0.023,
+        ..FluxParams::default()
+    };
+    // Synthetic large beta makes roundoff velocity change the Newton tangent.
+    // This is a numerical equilibrium regression, not an empirical calibration.
+    let cells =
+        vec![
+            ForchheimerCell::try_new(BrinkmanCell::try_new(tensor(0.37), 1.4).unwrap(), 1e18,)
+                .unwrap();
+            mesh.tris.len()
+        ];
+    let gradient = [0.37, -1.13];
+    let pressure = |x: [f64; 2]| 9.7 + gradient[0] * x[0] + gradient[1] * x[1];
+    let traction = |x: [f64; 2], normal: [f64; 2]| {
+        let p = pressure(x);
+        [-p * normal[0], -p * normal[1]]
+    };
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, _)| StokesBoundary::TotalTraction {
+            edge,
+            value: &traction,
+        })
+        .collect();
+    let zero = vec![0.0; system.n_u];
+    let controls = ForchheimerControls {
+        absolute_velocity_tolerance_m_s: 1e-12,
+        ..ForchheimerControls::default()
+    };
+    for dt in [None, Some(0.37)] {
+        let solution = if let Some(dt) = dt {
+            system.bdf1_brinkman_forchheimer_mixed_step(
+                params,
+                &cells,
+                &|_| gradient,
+                &boundaries,
+                &zero,
+                dt,
+                controls,
+            )
+        } else {
+            system.solve_brinkman_forchheimer_mixed(
+                params,
+                &cells,
+                &|_| gradient,
+                &boundaries,
+                &zero,
+                controls,
+            )
+        }
+        .unwrap();
+        let (error, divergence) = system.velocity_error(&solution.flow.field.x, &|_| [0.0; 2]);
+        assert!(
+            error < 2e-12 && divergence < 2e-12,
+            "error={error:e}, divergence={divergence:e}"
+        );
+        assert!(solution.flow.field.converged(controls.relative_tolerance));
+        assert!(solution.velocity_update_norm_m_s.is_finite());
+        assert!(solution.velocity_update_norm_m_s <= controls.absolute_velocity_tolerance_m_s);
+        for (p, centroid) in solution.flow.pressure.iter().zip(&mesh.centroids) {
+            near(*p, pressure(*centroid), 3e-8);
+        }
+        for exchange in &solution.cell_forchheimer_exchange {
+            assert!(
+                exchange
+                    .skeleton_force
+                    .iter()
+                    .all(|force| force.abs() < 1e-8)
+            );
+            assert!(exchange.dissipation >= 0.0 && exchange.dissipation < 1e-18);
+        }
+    }
+    assert!(zero.iter().all(|value| *value == 0.0));
+}
+
+#[test]
+fn g1_explicit_absolute_update_does_not_hide_weak_nonlinear_flow_under_pressure_offset() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams {
+        nu: 0.02,
+        ..FluxParams::default()
+    };
+    let (beta, driving) = (1e6, 1e-6);
+    let cells = vec![
+        ForchheimerCell::try_new(
+            BrinkmanCell::try_new(IntrinsicPermeability::isotropic(params.nu).unwrap(), 1.0)
+                .unwrap(),
+            beta,
+        )
+        .unwrap();
+        mesh.tris.len()
+    ];
+    let exact = 2.0 * driving / (1.0 + (1.0 + 4.0 * beta * driving).sqrt());
+    let zero = vec![0.0; system.n_u];
+    let controls = ForchheimerControls {
+        absolute_velocity_tolerance_m_s: 1e-9,
+        ..ForchheimerControls::default()
+    };
+    for datum in [0.0, 1e5] {
+        let traction = |x: [f64; 2], normal: [f64; 2]| {
+            let p = datum - driving * x[0];
+            [-p * normal[0], -p * normal[1]]
+        };
+        let boundaries: Vec<_> = mesh
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge, _)| mesh.is_boundary(*edge))
+            .map(|(edge, _)| StokesBoundary::TotalTraction {
+                edge,
+                value: &traction,
+            })
+            .collect();
+        // The first Newton velocity is driving/alpha = 1e-6, about62% above
+        // the nonlinear root. Pressure datum must not relax the update gate.
+        assert!(matches!(
+            system.solve_brinkman_forchheimer_mixed(
+                params,
+                &cells,
+                &|_| [0.0; 2],
+                &boundaries,
+                &zero,
+                ForchheimerControls {
+                    max_iterations: 1,
+                    ..controls
+                }
+            ),
+            Err(StokesBoundaryError::Rheology(
+                fs_flux::FluxRheologyError::NonlinearConvergence { .. }
+            ))
+        ));
+        let solution = system
+            .solve_brinkman_forchheimer_mixed(
+                params,
+                &cells,
+                &|_| [0.0; 2],
+                &boundaries,
+                &zero,
+                controls,
+            )
+            .unwrap();
+        let (error, divergence) = system.velocity_error(&solution.flow.field.x, &|_| [exact, 0.0]);
+        assert!(
+            error < 5e-9 && divergence < 5e-9,
+            "datum={datum:e}, error={error:e}, divergence={divergence:e}"
+        );
+        assert!(
+            solution.iterations > 1 && solution.flow.field.converged(controls.relative_tolerance)
+        );
+        assert!(
+            solution.relative_update <= controls.relative_tolerance
+                || solution.velocity_update_norm_m_s <= controls.absolute_velocity_tolerance_m_s
+        );
+        if datum == 0.0 {
+            // Even a deliberately coarse absolute update allowance cannot
+            // replace the mandatory nonlinear force/continuity residuals.
+            assert!(matches!(
+                system.solve_brinkman_forchheimer_mixed(
+                    params,
+                    &cells,
+                    &|_| [0.0; 2],
+                    &boundaries,
+                    &zero,
+                    ForchheimerControls {
+                        max_iterations: 1,
+                        absolute_velocity_tolerance_m_s: 1.0,
+                        ..controls
+                    }
+                ),
+                Err(StokesBoundaryError::Rheology(
+                    fs_flux::FluxRheologyError::NonlinearConvergence { .. }
+                ))
+            ));
+        }
+    }
+}
+
+#[test]
+fn g1_material_pressure_rest_reports_the_actual_full_absolute_update() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.3, 0.9, 3, 3));
+    let system = FluxSystem::new(&mesh);
+    let density = 7.0;
+    let material = CountedMaterial {
+        state: FluidTransportState::try_new(density, 1000.0, 0.5, density * 0.023).unwrap(),
+        reads: Cell::new(0),
+    };
+    let cells =
+        vec![
+            ForchheimerCell::try_new(BrinkmanCell::try_new(tensor(0.37), 1.4).unwrap(), 1e18,)
+                .unwrap();
+            mesh.tris.len()
+        ];
+    let gradient = [0.37, -1.13];
+    let pressure = |x: [f64; 2]| density * (9.7 + gradient[0] * x[0] + gradient[1] * x[1]);
+    let traction = |x: [f64; 2], normal: [f64; 2]| {
+        let p = pressure(x);
+        [-p * normal[0], -p * normal[1]]
+    };
+    let boundaries: Vec<_> = mesh
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(edge, _)| mesh.is_boundary(*edge))
+        .map(|(edge, _)| MaterialStokesBoundary::TotalTraction {
+            edge,
+            value: &traction,
+        })
+        .collect();
+    let binding =
+        MaterialFluxSystem::new(&system, &material, MaterialFluxNumerics::default()).unwrap();
+    let controls = ForchheimerControls {
+        absolute_velocity_tolerance_m_s: 1e-12,
+        ..ForchheimerControls::default()
+    };
+    let zero = vec![0.0; system.n_u];
+    let solution = binding
+        .bdf1_brinkman_forchheimer_mixed_step(
+            &cells,
+            &|_| gradient.map(|value| density * value),
+            &boundaries,
+            &zero,
+            0.37,
+            controls,
+        )
+        .unwrap();
+    assert_eq!(material.reads.get(), 1);
+    assert!(
+        solution
+            .flow()
+            .discrete()
+            .converged(controls.relative_tolerance)
+    );
+    assert!(solution.velocity_update_norm_m_s().is_finite());
+    assert!(solution.velocity_update_norm_m_s() <= controls.absolute_velocity_tolerance_m_s);
+    for (p, centroid) in solution.flow().pressure_pa().iter().zip(&mesh.centroids) {
+        near(*p, pressure(*centroid), 2e-7);
+    }
 }
