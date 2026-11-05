@@ -27,9 +27,11 @@ use fs_vfit::mimo::{
 pub struct SolidMimoTransientBudget {
     /// Full native port map, cached sparse responses and small Schur factor.
     pub ports: ViscoDynamicPortBudget,
-    /// Conservative accepted/candidate MIMO payload, using twice the original
-    /// admitted load allowance plus 32 bytes per port. The original body,
-    /// constitutive history and their native candidate allowance are separate.
+    /// Original admitted load allowance plus 2048 bytes of fixed mean-effort /
+    /// history scratch and 32 bytes per port. Preview reuses the source's own
+    /// candidate state; its model and reports are never cloned per interval.
+    /// The body, constitutive history and their native candidate allowance are
+    /// separate.
     pub maximum_load_payload_bytes: usize,
     /// Relative effort and signed exchange-work gate, in (0, 1e-8]. Scales use
     /// the uncancelled source terms; no absolute force/work floor is inserted.
@@ -152,7 +154,7 @@ impl<'p, 'a> PreparedSolidMimoTransient<'p, 'a> {
                 "solid and original MIMO load require exactly the same physical clock",
             ));
         }
-        let bytes = 2 * source.limits().max_memory_bytes as u128 + 32 * source.ports() as u128;
+        let bytes = source.limits().max_memory_bytes as u128 + 2048 + 32 * source.ports() as u128;
         if bytes > budget.maximum_load_payload_bytes as u128
             || !budget.maximum_relative_exchange_error.is_finite()
             || budget.maximum_relative_exchange_error <= 0.0
@@ -224,15 +226,15 @@ impl<'p, 'a> PreparedSolidMimoTransient<'p, 'a> {
             cx,
         )?;
         checkpoint(cx)?;
-        let mut source_candidate = self.source.clone();
-        let mut effort = [0.0; 128];
-        source_candidate.step_mean_into(&structure.port.mean_flows, &mut effort[..p])?;
+        let duration = self.duration_s();
+        let source_candidate = self.source.prepare_mean_step(&structure.port.mean_flows)?;
+        let effort = source_candidate.mean_effort();
         let mut source_work_j = 0.0;
         let mut work_correction = 0.0;
         let mut absolute_work_j = 0.0;
         for a in 0..p {
             checkpoint(cx)?;
-            let direct_scale = self.source.mean_direct_term()[a * p..(a + 1) * p]
+            let direct_scale = self.ports.mean_impedance()[a * p..(a + 1) * p]
                 .iter()
                 .zip(&structure.port.mean_flows)
                 .map(|(d, u)| (d * u).abs())
@@ -243,7 +245,7 @@ impl<'p, 'a> PreparedSolidMimoTransient<'p, 'a> {
                 history[a].abs() + direct_scale + structure.port.mean_efforts[a].abs(),
                 self.exchange_tolerance,
             )?;
-            let work = finite(self.duration_s() * structure.port.mean_flows[a] * effort[a])?;
+            let work = finite(duration * structure.port.mean_flows[a] * effort[a])?;
             // Coherent ports may exchange large opposite works. Preserve the
             // remaining small transfer instead of erasing it by cancellation.
             let (sum, error) = fs_math::eft::two_sum(source_work_j, work);
@@ -271,8 +273,10 @@ impl<'p, 'a> PreparedSolidMimoTransient<'p, 'a> {
         )?;
         let balance_residual_j = finite(structure.body.balance_residual_j + exchange)?;
         checkpoint(cx)?;
+        // Every fallible operation is complete. The exclusive source preview
+        // now publishes its already checked pole state without a payload copy.
+        source_candidate.commit();
         self.trajectory = body_candidate;
-        self.source = source_candidate;
         Ok(SolidMimoTransientStep {
             structure,
             source_work_j,

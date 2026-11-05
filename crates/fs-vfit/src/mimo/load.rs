@@ -42,9 +42,10 @@ impl std::error::Error for MimoLoadError {}
 
 /// An admitted source model, exact ZOH runtime and its two distinct reports.
 ///
-/// Clone this owner when a larger interconnection needs a candidate transaction.
-/// A refused step changes neither the accepted pole coordinates nor the caller's
-/// output. Successful steps preserve the source model, clock and admission limits.
+/// Use `prepare_mean_step` when an interconnection must validate exchanged work
+/// before publishing its held-flow interval. A refused step changes neither the
+/// accepted pole coordinates nor the caller's output. Successful steps preserve
+/// the source model, clock and admission limits.
 #[derive(Clone, Debug)]
 pub struct PreparedMimoLoad {
     source: MimoModel,
@@ -53,6 +54,34 @@ pub struct PreparedMimoLoad {
     runtime: MimoZoh,
     continuous: MimoPassivityReport,
     sampled: MimoPassivityReport,
+}
+
+/// A finite held-flow candidate borrowing its original admitted source.
+///
+/// The source's reusable scratch contains the next pole state. Until `commit`,
+/// neither its accepted history nor its last input changes. Dropping the
+/// candidate rejects it; the exclusive borrow prevents another preview from
+/// replacing its scratch before publication. No model, reports, or pole arrays
+/// are cloned and no allocation occurs.
+#[must_use = "commit the candidate only after the enclosing work and cancellation checks succeed"]
+pub struct PreparedMimoMeanStep<'load, 'input> {
+    load: &'load mut PreparedMimoLoad,
+    input: &'input [f64],
+    effort: [f64; 128],
+}
+
+impl PreparedMimoMeanStep<'_, '_> {
+    /// Exact interval-mean effort for the original history and held input.
+    /// This is an output, not a storage or passivity certificate.
+    pub fn mean_effort(&self) -> &[f64] {
+        &self.effort[..self.load.ports()]
+    }
+
+    /// Publish the already checked finite candidate. All fallible work and
+    /// enclosing cancellation/energy checks must precede this infallible call.
+    pub fn commit(self) {
+        self.load.runtime.accept_state(self.input);
+    }
 }
 
 /// Shape, stability, physical-clock and retained-source admission shared with
@@ -189,12 +218,35 @@ impl PreparedMimoLoad {
     /// No allocation occurs. Invalid shapes, nonfinite input, output or candidate
     /// state refuse before accepted history or caller output changes. The caller
     /// remains responsible for checking its coupled work and accepting the whole
-    /// interconnection transaction; clone this owner for that candidate state.
+    /// interconnection transaction; use `prepare_mean_step` to check before
+    /// publishing without cloning this owner's immutable source data.
     pub fn step_mean_into(
         &mut self, input: &[f64], output: &mut [f64],
     ) -> Result<(), MimoLoadError> {
         let n = self.ports();
         if input.len() != n || output.len() != n {
+            return Err(MimoLoadError("MIMO step requires one input and output per port"));
+        }
+        let candidate = self.prepare_mean_step(input)?;
+        output.copy_from_slice(candidate.mean_effort());
+        candidate.commit();
+        Ok(())
+    }
+
+    /// Preview one original exact ZOH held-flow interval without publishing it.
+    ///
+    /// Coupled solvers can check the mean effort against their actual nodal or
+    /// boundary work, then commit the source and their already validated body
+    /// candidate together. A failed check simply drops the guard. This avoids
+    /// cloning immutable source matrices and passivity reports at every step.
+    /// Accepted history remains unchanged on invalid input or a nonfinite
+    /// candidate; preview scratch is private and is overwritten by the next
+    /// successful preparation. No allocation occurs.
+    pub fn prepare_mean_step<'load, 'input>(
+        &'load mut self, input: &'input [f64],
+    ) -> Result<PreparedMimoMeanStep<'load, 'input>, MimoLoadError> {
+        let n = self.ports();
+        if input.len() != n {
             return Err(MimoLoadError("MIMO step requires one input and output per port"));
         }
         if input.iter().any(|v| !v.is_finite()) {
@@ -209,9 +261,7 @@ impl PreparedMimoLoad {
         if candidate[..n].iter().any(|v| !v.is_finite()) || !self.runtime.preview_state(input) {
             return Err(MimoLoadError("MIMO candidate output or state left the finite set"));
         }
-        self.runtime.accept_state(input);
-        output.copy_from_slice(&candidate[..n]);
-        Ok(())
+        Ok(PreparedMimoMeanStep { load: self, input, effort: candidate })
     }
 
     /// Transfer the same admitted runtime and reports to an existing owner that
@@ -273,6 +323,47 @@ mod tests {
             }
             assert_eq!(prepared.pole_states(), original.pole_states());
         }
+    }
+
+    #[test]
+    fn mean_candidate_drop_preserves_history_and_commit_keeps_real_and_pair_states() {
+        let mut source = model();
+        source.poles.push(PoleTerm::Pair {
+            pole: C64::new(-200.0, 600.0), residue: C64::ZERO,
+        });
+        source.residues.push(
+            [120.0, -20.0, -20.0, 80.0].map(C64::from_re).to_vec(),
+        );
+        let mut admitted = limits();
+        admitted.max_states = 8;
+        let mut prepared = PreparedMimoLoad::new(&source, DT, admitted).unwrap();
+        let mut original = source.zoh(DT).unwrap();
+        for input in [[1.0, -0.5], [0.2, 0.8], [-0.3, 0.0], [0.0, 0.0]] {
+            let before = prepared.pole_states().to_vec();
+            let previous_input = prepared.runtime.last_input.clone();
+            // This is an enclosing solver's rejected work/cancellation check.
+            {
+                let candidate = prepared.prepare_mean_step(&[0.7, -1.2]).unwrap();
+                assert!(candidate.mean_effort().iter().all(|v| v.is_finite()));
+            }
+            assert_eq!(prepared.pole_states(), before);
+            assert_eq!(prepared.runtime.last_input, previous_input);
+            assert!(prepared.prepare_mean_step(&[f64::NAN, 0.0]).is_err());
+            assert_eq!(prepared.pole_states(), before);
+
+            let expected = original.step_mean(&input);
+            let candidate = prepared.prepare_mean_step(&input).unwrap();
+            for (actual, expected) in candidate.mean_effort().iter().zip(expected) {
+                assert!((actual - expected).abs()
+                    <= 32.0 * f64::EPSILON * actual.abs().max(expected.abs()).max(1.0));
+            }
+            candidate.commit();
+            assert_eq!(prepared.pole_states(), original.pole_states());
+            assert_eq!(prepared.runtime.last_input, input);
+        }
+        assert_eq!(prepared.source_model(), &source);
+        assert_eq!(prepared.limits(), &admitted);
+        assert!(prepared.reports().0.passive && prepared.reports().1.passive);
     }
 
     #[test]
