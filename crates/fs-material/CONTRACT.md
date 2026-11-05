@@ -14261,3 +14261,25 @@ flow, partitioned intervals and transactional refusal/cancellation. The
 `nonideal_residence` example and
 `data/matdb/seed-v1/MINING_NONIDEAL_RESIDENCE.md` demonstrate a complete authored
 pulse/stop/restart/flush inventory account without implying plant calibration.
+
+## Experimental Austin grinding population balances
+
+`comminution::austin::resolve_austin_grinding` resolves seven scalar Austin
+parameters and an exact class-size curve from one original observation with
+identical support. Typed envelope queries admit every source class and the
+complete requested contact interval. The existing `SelectionBreakageModel`
+retains original claims, observation, uncertainty and verified receipts through
+prepared passes. Published B_ij indexing generates conservative daughter columns
+without clipping or normalization; the terminal class collects unresolved fines
+with zero selection. Unsupported operating conditions and mixed sources refuse.
+
+The `quartz-assiros-petrakis-2017-austin` pack supplies three Table 2 laboratory
+calibrations and 24 claims. Its exact six-node sieve grid and 0–240 s declared
+calculation window preserve the source's operating conditions and its reported
+mismatch between original fitted and measured product size distributions.
+The incomplete Table 3 amplitude is not reconstructed. This fixed-grid batch
+model does not infer plant scale-up, liberation, power or media wear. The
+`austin_grinding_reference` example and `MINING_AUSTIN_GRINDING.md` demonstrate
+source-to-population-balance use; analytical and compiler-backed regressions
+check source selection rates, first/second populations, daughter mass closure,
+element transport, retained source identity and domain refusal.

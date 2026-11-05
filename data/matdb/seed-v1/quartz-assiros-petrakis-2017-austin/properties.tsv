@@ -1,0 +1,388 @@
+frankensim.matdb-source.v1
+observation	j20	Assiros quartz; 99.1 percent SiO2; 345 g dry charge; J=20 percent	Table 2 experimental regression, not Table 3 back-fit; 204 mm by 166 mm mill; 25.4 mm stainless-steel balls; 66 rpm; source preparation section 3	Beta fixed to 5.80 in source; covariance and test temperature/pressure unreported. Source section 4.3 reports product-PSD mismatch for Table 2. Derived model scope: source sieve sizes from 0.850 to 0.150 mm, last node an unresolved-fines sink; 0-240 s fitted-reference calculation, not plant qualification.
+scalar	j20-amplitude	j20	amplitude	0.71	min^-1	constant
+uncertainty	j20-amplitude	unstated	-	-	-	-
+validity	j20-amplitude	ball_filling	0.2	0.2	1
+validity	j20-amplitude	class_index	0	5	1
+validity	j20-amplitude	contact_time	0	240	s
+validity	j20-amplitude	powder_filling	0.04	0.04	1
+validity	j20-amplitude	mill_diameter	0.204	0.204	m
+validity	j20-amplitude	mill_length	0.166	0.166	m
+validity	j20-amplitude	ball_diameter	0.0254	0.0254	m
+validity	j20-amplitude	speed	1.1	1.1	Hz
+validity	j20-amplitude	charge_mass	0.345	0.345	kg
+validity	j20-amplitude	dry	1	1	1
+validity	j20-amplitude	temperature_known	0	0	1
+validity	j20-amplitude	pressure_known	0	0	1
+validity	j20-amplitude	model	1	1	1
+validity	j20-amplitude	operating_ore	0	0	1
+scalar	j20-alpha	j20	alpha	1.13	1	constant
+uncertainty	j20-alpha	unstated	-	-	-	-
+validity	j20-alpha	ball_filling	0.2	0.2	1
+validity	j20-alpha	class_index	0	5	1
+validity	j20-alpha	contact_time	0	240	s
+validity	j20-alpha	powder_filling	0.04	0.04	1
+validity	j20-alpha	mill_diameter	0.204	0.204	m
+validity	j20-alpha	mill_length	0.166	0.166	m
+validity	j20-alpha	ball_diameter	0.0254	0.0254	m
+validity	j20-alpha	speed	1.1	1.1	Hz
+validity	j20-alpha	charge_mass	0.345	0.345	kg
+validity	j20-alpha	dry	1	1	1
+validity	j20-alpha	temperature_known	0	0	1
+validity	j20-alpha	pressure_known	0	0	1
+validity	j20-alpha	model	1	1	1
+validity	j20-alpha	operating_ore	0	0	1
+scalar	j20-mu	j20	mu	2.11	mm	constant
+uncertainty	j20-mu	unstated	-	-	-	-
+validity	j20-mu	ball_filling	0.2	0.2	1
+validity	j20-mu	class_index	0	5	1
+validity	j20-mu	contact_time	0	240	s
+validity	j20-mu	powder_filling	0.04	0.04	1
+validity	j20-mu	mill_diameter	0.204	0.204	m
+validity	j20-mu	mill_length	0.166	0.166	m
+validity	j20-mu	ball_diameter	0.0254	0.0254	m
+validity	j20-mu	speed	1.1	1.1	Hz
+validity	j20-mu	charge_mass	0.345	0.345	kg
+validity	j20-mu	dry	1	1	1
+validity	j20-mu	temperature_known	0	0	1
+validity	j20-mu	pressure_known	0	0	1
+validity	j20-mu	model	1	1	1
+validity	j20-mu	operating_ore	0	0	1
+scalar	j20-lambda	j20	lambda	2.90	1	constant
+uncertainty	j20-lambda	unstated	-	-	-	-
+validity	j20-lambda	ball_filling	0.2	0.2	1
+validity	j20-lambda	class_index	0	5	1
+validity	j20-lambda	contact_time	0	240	s
+validity	j20-lambda	powder_filling	0.04	0.04	1
+validity	j20-lambda	mill_diameter	0.204	0.204	m
+validity	j20-lambda	mill_length	0.166	0.166	m
+validity	j20-lambda	ball_diameter	0.0254	0.0254	m
+validity	j20-lambda	speed	1.1	1.1	Hz
+validity	j20-lambda	charge_mass	0.345	0.345	kg
+validity	j20-lambda	dry	1	1	1
+validity	j20-lambda	temperature_known	0	0	1
+validity	j20-lambda	pressure_known	0	0	1
+validity	j20-lambda	model	1	1	1
+validity	j20-lambda	operating_ore	0	0	1
+scalar	j20-phi	j20	phi	0.76	1	constant
+uncertainty	j20-phi	unstated	-	-	-	-
+validity	j20-phi	ball_filling	0.2	0.2	1
+validity	j20-phi	class_index	0	5	1
+validity	j20-phi	contact_time	0	240	s
+validity	j20-phi	powder_filling	0.04	0.04	1
+validity	j20-phi	mill_diameter	0.204	0.204	m
+validity	j20-phi	mill_length	0.166	0.166	m
+validity	j20-phi	ball_diameter	0.0254	0.0254	m
+validity	j20-phi	speed	1.1	1.1	Hz
+validity	j20-phi	charge_mass	0.345	0.345	kg
+validity	j20-phi	dry	1	1	1
+validity	j20-phi	temperature_known	0	0	1
+validity	j20-phi	pressure_known	0	0	1
+validity	j20-phi	model	1	1	1
+validity	j20-phi	operating_ore	0	0	1
+scalar	j20-gamma	j20	gamma	1.02	1	constant
+uncertainty	j20-gamma	unstated	-	-	-	-
+validity	j20-gamma	ball_filling	0.2	0.2	1
+validity	j20-gamma	class_index	0	5	1
+validity	j20-gamma	contact_time	0	240	s
+validity	j20-gamma	powder_filling	0.04	0.04	1
+validity	j20-gamma	mill_diameter	0.204	0.204	m
+validity	j20-gamma	mill_length	0.166	0.166	m
+validity	j20-gamma	ball_diameter	0.0254	0.0254	m
+validity	j20-gamma	speed	1.1	1.1	Hz
+validity	j20-gamma	charge_mass	0.345	0.345	kg
+validity	j20-gamma	dry	1	1	1
+validity	j20-gamma	temperature_known	0	0	1
+validity	j20-gamma	pressure_known	0	0	1
+validity	j20-gamma	model	1	1	1
+validity	j20-gamma	operating_ore	0	0	1
+scalar	j20-beta	j20	beta	5.80	1	constant
+uncertainty	j20-beta	unstated	-	-	-	-
+validity	j20-beta	ball_filling	0.2	0.2	1
+validity	j20-beta	class_index	0	5	1
+validity	j20-beta	contact_time	0	240	s
+validity	j20-beta	powder_filling	0.04	0.04	1
+validity	j20-beta	mill_diameter	0.204	0.204	m
+validity	j20-beta	mill_length	0.166	0.166	m
+validity	j20-beta	ball_diameter	0.0254	0.0254	m
+validity	j20-beta	speed	1.1	1.1	Hz
+validity	j20-beta	charge_mass	0.345	0.345	kg
+validity	j20-beta	dry	1	1	1
+validity	j20-beta	temperature_known	0	0	1
+validity	j20-beta	pressure_known	0	0	1
+validity	j20-beta	model	1	1	1
+validity	j20-beta	operating_ore	0	0	1
+curve	j20-class_size	j20	class_size	class_index	1	mm	0:0.850,1:0.600,2:0.425,3:0.300,4:0.212,5:0.150	tabulated
+uncertainty	j20-class_size	unstated	-	-	-	-
+validity	j20-class_size	ball_filling	0.2	0.2	1
+validity	j20-class_size	class_index	0	5	1
+validity	j20-class_size	contact_time	0	240	s
+validity	j20-class_size	powder_filling	0.04	0.04	1
+validity	j20-class_size	mill_diameter	0.204	0.204	m
+validity	j20-class_size	mill_length	0.166	0.166	m
+validity	j20-class_size	ball_diameter	0.0254	0.0254	m
+validity	j20-class_size	speed	1.1	1.1	Hz
+validity	j20-class_size	charge_mass	0.345	0.345	kg
+validity	j20-class_size	dry	1	1	1
+validity	j20-class_size	temperature_known	0	0	1
+validity	j20-class_size	pressure_known	0	0	1
+validity	j20-class_size	model	1	1	1
+validity	j20-class_size	operating_ore	0	0	1
+observation	j10	Assiros quartz; 99.1 percent SiO2; 345 g dry charge; J=10 percent	Table 2 experimental regression, not Table 3 back-fit; 204 mm by 166 mm mill; 25.4 mm stainless-steel balls; 66 rpm; source preparation section 3	Beta fixed to 5.80 in source; covariance and test temperature/pressure unreported. Source section 4.3 reports product-PSD mismatch for Table 2. Derived model scope: source sieve sizes from 0.850 to 0.150 mm, last node an unresolved-fines sink; 0-240 s fitted-reference calculation, not plant qualification.
+scalar	j10-amplitude	j10	amplitude	0.35	min^-1	constant
+uncertainty	j10-amplitude	unstated	-	-	-	-
+validity	j10-amplitude	ball_filling	0.1	0.1	1
+validity	j10-amplitude	class_index	0	5	1
+validity	j10-amplitude	contact_time	0	240	s
+validity	j10-amplitude	powder_filling	0.04	0.04	1
+validity	j10-amplitude	mill_diameter	0.204	0.204	m
+validity	j10-amplitude	mill_length	0.166	0.166	m
+validity	j10-amplitude	ball_diameter	0.0254	0.0254	m
+validity	j10-amplitude	speed	1.1	1.1	Hz
+validity	j10-amplitude	charge_mass	0.345	0.345	kg
+validity	j10-amplitude	dry	1	1	1
+validity	j10-amplitude	temperature_known	0	0	1
+validity	j10-amplitude	pressure_known	0	0	1
+validity	j10-amplitude	model	1	1	1
+validity	j10-amplitude	operating_ore	0	0	1
+scalar	j10-alpha	j10	alpha	1.15	1	constant
+uncertainty	j10-alpha	unstated	-	-	-	-
+validity	j10-alpha	ball_filling	0.1	0.1	1
+validity	j10-alpha	class_index	0	5	1
+validity	j10-alpha	contact_time	0	240	s
+validity	j10-alpha	powder_filling	0.04	0.04	1
+validity	j10-alpha	mill_diameter	0.204	0.204	m
+validity	j10-alpha	mill_length	0.166	0.166	m
+validity	j10-alpha	ball_diameter	0.0254	0.0254	m
+validity	j10-alpha	speed	1.1	1.1	Hz
+validity	j10-alpha	charge_mass	0.345	0.345	kg
+validity	j10-alpha	dry	1	1	1
+validity	j10-alpha	temperature_known	0	0	1
+validity	j10-alpha	pressure_known	0	0	1
+validity	j10-alpha	model	1	1	1
+validity	j10-alpha	operating_ore	0	0	1
+scalar	j10-mu	j10	mu	2.34	mm	constant
+uncertainty	j10-mu	unstated	-	-	-	-
+validity	j10-mu	ball_filling	0.1	0.1	1
+validity	j10-mu	class_index	0	5	1
+validity	j10-mu	contact_time	0	240	s
+validity	j10-mu	powder_filling	0.04	0.04	1
+validity	j10-mu	mill_diameter	0.204	0.204	m
+validity	j10-mu	mill_length	0.166	0.166	m
+validity	j10-mu	ball_diameter	0.0254	0.0254	m
+validity	j10-mu	speed	1.1	1.1	Hz
+validity	j10-mu	charge_mass	0.345	0.345	kg
+validity	j10-mu	dry	1	1	1
+validity	j10-mu	temperature_known	0	0	1
+validity	j10-mu	pressure_known	0	0	1
+validity	j10-mu	model	1	1	1
+validity	j10-mu	operating_ore	0	0	1
+scalar	j10-lambda	j10	lambda	3.15	1	constant
+uncertainty	j10-lambda	unstated	-	-	-	-
+validity	j10-lambda	ball_filling	0.1	0.1	1
+validity	j10-lambda	class_index	0	5	1
+validity	j10-lambda	contact_time	0	240	s
+validity	j10-lambda	powder_filling	0.04	0.04	1
+validity	j10-lambda	mill_diameter	0.204	0.204	m
+validity	j10-lambda	mill_length	0.166	0.166	m
+validity	j10-lambda	ball_diameter	0.0254	0.0254	m
+validity	j10-lambda	speed	1.1	1.1	Hz
+validity	j10-lambda	charge_mass	0.345	0.345	kg
+validity	j10-lambda	dry	1	1	1
+validity	j10-lambda	temperature_known	0	0	1
+validity	j10-lambda	pressure_known	0	0	1
+validity	j10-lambda	model	1	1	1
+validity	j10-lambda	operating_ore	0	0	1
+scalar	j10-phi	j10	phi	0.77	1	constant
+uncertainty	j10-phi	unstated	-	-	-	-
+validity	j10-phi	ball_filling	0.1	0.1	1
+validity	j10-phi	class_index	0	5	1
+validity	j10-phi	contact_time	0	240	s
+validity	j10-phi	powder_filling	0.04	0.04	1
+validity	j10-phi	mill_diameter	0.204	0.204	m
+validity	j10-phi	mill_length	0.166	0.166	m
+validity	j10-phi	ball_diameter	0.0254	0.0254	m
+validity	j10-phi	speed	1.1	1.1	Hz
+validity	j10-phi	charge_mass	0.345	0.345	kg
+validity	j10-phi	dry	1	1	1
+validity	j10-phi	temperature_known	0	0	1
+validity	j10-phi	pressure_known	0	0	1
+validity	j10-phi	model	1	1	1
+validity	j10-phi	operating_ore	0	0	1
+scalar	j10-gamma	j10	gamma	1.00	1	constant
+uncertainty	j10-gamma	unstated	-	-	-	-
+validity	j10-gamma	ball_filling	0.1	0.1	1
+validity	j10-gamma	class_index	0	5	1
+validity	j10-gamma	contact_time	0	240	s
+validity	j10-gamma	powder_filling	0.04	0.04	1
+validity	j10-gamma	mill_diameter	0.204	0.204	m
+validity	j10-gamma	mill_length	0.166	0.166	m
+validity	j10-gamma	ball_diameter	0.0254	0.0254	m
+validity	j10-gamma	speed	1.1	1.1	Hz
+validity	j10-gamma	charge_mass	0.345	0.345	kg
+validity	j10-gamma	dry	1	1	1
+validity	j10-gamma	temperature_known	0	0	1
+validity	j10-gamma	pressure_known	0	0	1
+validity	j10-gamma	model	1	1	1
+validity	j10-gamma	operating_ore	0	0	1
+scalar	j10-beta	j10	beta	5.80	1	constant
+uncertainty	j10-beta	unstated	-	-	-	-
+validity	j10-beta	ball_filling	0.1	0.1	1
+validity	j10-beta	class_index	0	5	1
+validity	j10-beta	contact_time	0	240	s
+validity	j10-beta	powder_filling	0.04	0.04	1
+validity	j10-beta	mill_diameter	0.204	0.204	m
+validity	j10-beta	mill_length	0.166	0.166	m
+validity	j10-beta	ball_diameter	0.0254	0.0254	m
+validity	j10-beta	speed	1.1	1.1	Hz
+validity	j10-beta	charge_mass	0.345	0.345	kg
+validity	j10-beta	dry	1	1	1
+validity	j10-beta	temperature_known	0	0	1
+validity	j10-beta	pressure_known	0	0	1
+validity	j10-beta	model	1	1	1
+validity	j10-beta	operating_ore	0	0	1
+curve	j10-class_size	j10	class_size	class_index	1	mm	0:0.850,1:0.600,2:0.425,3:0.300,4:0.212,5:0.150	tabulated
+uncertainty	j10-class_size	unstated	-	-	-	-
+validity	j10-class_size	ball_filling	0.1	0.1	1
+validity	j10-class_size	class_index	0	5	1
+validity	j10-class_size	contact_time	0	240	s
+validity	j10-class_size	powder_filling	0.04	0.04	1
+validity	j10-class_size	mill_diameter	0.204	0.204	m
+validity	j10-class_size	mill_length	0.166	0.166	m
+validity	j10-class_size	ball_diameter	0.0254	0.0254	m
+validity	j10-class_size	speed	1.1	1.1	Hz
+validity	j10-class_size	charge_mass	0.345	0.345	kg
+validity	j10-class_size	dry	1	1	1
+validity	j10-class_size	temperature_known	0	0	1
+validity	j10-class_size	pressure_known	0	0	1
+validity	j10-class_size	model	1	1	1
+validity	j10-class_size	operating_ore	0	0	1
+observation	j6p7	Assiros quartz; 99.1 percent SiO2; 345 g dry charge; J=6.7 percent	Table 2 experimental regression, not Table 3 back-fit; 204 mm by 166 mm mill; 25.4 mm stainless-steel balls; 66 rpm; source preparation section 3	Beta fixed to 5.80 in source; covariance and test temperature/pressure unreported. Source section 4.3 reports product-PSD mismatch for Table 2. Derived model scope: source sieve sizes from 0.850 to 0.150 mm, last node an unresolved-fines sink; 0-240 s fitted-reference calculation, not plant qualification.
+scalar	j6p7-amplitude	j6p7	amplitude	0.23	min^-1	constant
+uncertainty	j6p7-amplitude	unstated	-	-	-	-
+validity	j6p7-amplitude	ball_filling	0.067	0.067	1
+validity	j6p7-amplitude	class_index	0	5	1
+validity	j6p7-amplitude	contact_time	0	240	s
+validity	j6p7-amplitude	powder_filling	0.04	0.04	1
+validity	j6p7-amplitude	mill_diameter	0.204	0.204	m
+validity	j6p7-amplitude	mill_length	0.166	0.166	m
+validity	j6p7-amplitude	ball_diameter	0.0254	0.0254	m
+validity	j6p7-amplitude	speed	1.1	1.1	Hz
+validity	j6p7-amplitude	charge_mass	0.345	0.345	kg
+validity	j6p7-amplitude	dry	1	1	1
+validity	j6p7-amplitude	temperature_known	0	0	1
+validity	j6p7-amplitude	pressure_known	0	0	1
+validity	j6p7-amplitude	model	1	1	1
+validity	j6p7-amplitude	operating_ore	0	0	1
+scalar	j6p7-alpha	j6p7	alpha	1.17	1	constant
+uncertainty	j6p7-alpha	unstated	-	-	-	-
+validity	j6p7-alpha	ball_filling	0.067	0.067	1
+validity	j6p7-alpha	class_index	0	5	1
+validity	j6p7-alpha	contact_time	0	240	s
+validity	j6p7-alpha	powder_filling	0.04	0.04	1
+validity	j6p7-alpha	mill_diameter	0.204	0.204	m
+validity	j6p7-alpha	mill_length	0.166	0.166	m
+validity	j6p7-alpha	ball_diameter	0.0254	0.0254	m
+validity	j6p7-alpha	speed	1.1	1.1	Hz
+validity	j6p7-alpha	charge_mass	0.345	0.345	kg
+validity	j6p7-alpha	dry	1	1	1
+validity	j6p7-alpha	temperature_known	0	0	1
+validity	j6p7-alpha	pressure_known	0	0	1
+validity	j6p7-alpha	model	1	1	1
+validity	j6p7-alpha	operating_ore	0	0	1
+scalar	j6p7-mu	j6p7	mu	2.38	mm	constant
+uncertainty	j6p7-mu	unstated	-	-	-	-
+validity	j6p7-mu	ball_filling	0.067	0.067	1
+validity	j6p7-mu	class_index	0	5	1
+validity	j6p7-mu	contact_time	0	240	s
+validity	j6p7-mu	powder_filling	0.04	0.04	1
+validity	j6p7-mu	mill_diameter	0.204	0.204	m
+validity	j6p7-mu	mill_length	0.166	0.166	m
+validity	j6p7-mu	ball_diameter	0.0254	0.0254	m
+validity	j6p7-mu	speed	1.1	1.1	Hz
+validity	j6p7-mu	charge_mass	0.345	0.345	kg
+validity	j6p7-mu	dry	1	1	1
+validity	j6p7-mu	temperature_known	0	0	1
+validity	j6p7-mu	pressure_known	0	0	1
+validity	j6p7-mu	model	1	1	1
+validity	j6p7-mu	operating_ore	0	0	1
+scalar	j6p7-lambda	j6p7	lambda	3.33	1	constant
+uncertainty	j6p7-lambda	unstated	-	-	-	-
+validity	j6p7-lambda	ball_filling	0.067	0.067	1
+validity	j6p7-lambda	class_index	0	5	1
+validity	j6p7-lambda	contact_time	0	240	s
+validity	j6p7-lambda	powder_filling	0.04	0.04	1
+validity	j6p7-lambda	mill_diameter	0.204	0.204	m
+validity	j6p7-lambda	mill_length	0.166	0.166	m
+validity	j6p7-lambda	ball_diameter	0.0254	0.0254	m
+validity	j6p7-lambda	speed	1.1	1.1	Hz
+validity	j6p7-lambda	charge_mass	0.345	0.345	kg
+validity	j6p7-lambda	dry	1	1	1
+validity	j6p7-lambda	temperature_known	0	0	1
+validity	j6p7-lambda	pressure_known	0	0	1
+validity	j6p7-lambda	model	1	1	1
+validity	j6p7-lambda	operating_ore	0	0	1
+scalar	j6p7-phi	j6p7	phi	0.77	1	constant
+uncertainty	j6p7-phi	unstated	-	-	-	-
+validity	j6p7-phi	ball_filling	0.067	0.067	1
+validity	j6p7-phi	class_index	0	5	1
+validity	j6p7-phi	contact_time	0	240	s
+validity	j6p7-phi	powder_filling	0.04	0.04	1
+validity	j6p7-phi	mill_diameter	0.204	0.204	m
+validity	j6p7-phi	mill_length	0.166	0.166	m
+validity	j6p7-phi	ball_diameter	0.0254	0.0254	m
+validity	j6p7-phi	speed	1.1	1.1	Hz
+validity	j6p7-phi	charge_mass	0.345	0.345	kg
+validity	j6p7-phi	dry	1	1	1
+validity	j6p7-phi	temperature_known	0	0	1
+validity	j6p7-phi	pressure_known	0	0	1
+validity	j6p7-phi	model	1	1	1
+validity	j6p7-phi	operating_ore	0	0	1
+scalar	j6p7-gamma	j6p7	gamma	1.11	1	constant
+uncertainty	j6p7-gamma	unstated	-	-	-	-
+validity	j6p7-gamma	ball_filling	0.067	0.067	1
+validity	j6p7-gamma	class_index	0	5	1
+validity	j6p7-gamma	contact_time	0	240	s
+validity	j6p7-gamma	powder_filling	0.04	0.04	1
+validity	j6p7-gamma	mill_diameter	0.204	0.204	m
+validity	j6p7-gamma	mill_length	0.166	0.166	m
+validity	j6p7-gamma	ball_diameter	0.0254	0.0254	m
+validity	j6p7-gamma	speed	1.1	1.1	Hz
+validity	j6p7-gamma	charge_mass	0.345	0.345	kg
+validity	j6p7-gamma	dry	1	1	1
+validity	j6p7-gamma	temperature_known	0	0	1
+validity	j6p7-gamma	pressure_known	0	0	1
+validity	j6p7-gamma	model	1	1	1
+validity	j6p7-gamma	operating_ore	0	0	1
+scalar	j6p7-beta	j6p7	beta	5.80	1	constant
+uncertainty	j6p7-beta	unstated	-	-	-	-
+validity	j6p7-beta	ball_filling	0.067	0.067	1
+validity	j6p7-beta	class_index	0	5	1
+validity	j6p7-beta	contact_time	0	240	s
+validity	j6p7-beta	powder_filling	0.04	0.04	1
+validity	j6p7-beta	mill_diameter	0.204	0.204	m
+validity	j6p7-beta	mill_length	0.166	0.166	m
+validity	j6p7-beta	ball_diameter	0.0254	0.0254	m
+validity	j6p7-beta	speed	1.1	1.1	Hz
+validity	j6p7-beta	charge_mass	0.345	0.345	kg
+validity	j6p7-beta	dry	1	1	1
+validity	j6p7-beta	temperature_known	0	0	1
+validity	j6p7-beta	pressure_known	0	0	1
+validity	j6p7-beta	model	1	1	1
+validity	j6p7-beta	operating_ore	0	0	1
+curve	j6p7-class_size	j6p7	class_size	class_index	1	mm	0:0.850,1:0.600,2:0.425,3:0.300,4:0.212,5:0.150	tabulated
+uncertainty	j6p7-class_size	unstated	-	-	-	-
+validity	j6p7-class_size	ball_filling	0.067	0.067	1
+validity	j6p7-class_size	class_index	0	5	1
+validity	j6p7-class_size	contact_time	0	240	s
+validity	j6p7-class_size	powder_filling	0.04	0.04	1
+validity	j6p7-class_size	mill_diameter	0.204	0.204	m
+validity	j6p7-class_size	mill_length	0.166	0.166	m
+validity	j6p7-class_size	ball_diameter	0.0254	0.0254	m
+validity	j6p7-class_size	speed	1.1	1.1	Hz
+validity	j6p7-class_size	charge_mass	0.345	0.345	kg
+validity	j6p7-class_size	dry	1	1	1
+validity	j6p7-class_size	temperature_known	0	0	1
+validity	j6p7-class_size	pressure_known	0	0	1
+validity	j6p7-class_size	model	1	1	1
+validity	j6p7-class_size	operating_ore	0	0	1

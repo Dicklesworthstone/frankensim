@@ -6,6 +6,12 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The [ball-mill kinetics guide](MINING_AUSTIN_GRINDING.md) adds three
+experimental Assiros quartz calibrations with 24 claims for selection
+frequencies, daughter distributions and the exact source size grid. They drive
+the existing batch population balance under the original mill and charge
+conditions, preserving unresolved fines and the source-reported PSD mismatch.
+
 The [pyrrhotite guide](MINING_PYRRHOTITE.md) adds three matched NBS material
 profiles and four conserved endpoints for FeS/Fe7S8 oxidation and ferric attack.
 Finite oxidant inventories, direct proton production, standard reaction heat

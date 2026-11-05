@@ -44,6 +44,10 @@ pub mod drop_weight;
 #[path = "comminution/kinetics.rs"]
 pub mod kinetics;
 
+/// Experimentally fitted Austin selection/daughter laws on a source-declared grid.
+#[path = "comminution/austin.rs"]
+pub mod austin;
+
 /// Source-explicit collection of a size-resolved stream into mineral leach charges.
 #[path = "comminution/leach_charge.rs"]
 pub mod leach_charge;
