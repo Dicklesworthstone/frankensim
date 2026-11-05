@@ -13,9 +13,11 @@
 
 mod finite;
 mod layered;
+mod paired;
 mod shared;
 
 pub use layered::LayeredMoistureAdvanceReport;
+pub use paired::{AtmosphereMoistureAdvanceAccount, PairedAtmosphereMoistureAdvanceReport};
 
 pub use shared::{
     SharedAtmosphereMoistureAdvanceCandidate, SharedCartesianAtmosphereMoistureAdvanceCandidate,
@@ -536,8 +538,32 @@ fn evolve_fields<S: Clone, R: ReportTransfers<N>, E: Retryable, const N: usize>(
     initial: &S,
     target_s: f64,
     controls: MoistureTimeControls,
+    propose: impl FnMut(&S, f64) -> Result<(S, R), E>,
+    snapshot: impl for<'a> Fn(&'a S) -> Result<Snapshot<'a>, E>,
+    cx: &Cx<'_>,
+) -> Result<(S, SharedMoistureAdvanceReport<R, N>), MoistureAdvanceError<E>> {
+    evolve_fields_with_error(
+        initial,
+        target_s,
+        controls,
+        propose,
+        snapshot,
+        |_, _, _| Ok(0.0),
+        cx,
+    )
+}
+
+// Paired chambers need separate RH and water coordinates: their opposite
+// exchanges can cancel in the total reservoir inventory and specimen storage.
+// They still use this one native full-versus-two-half controller and accounts.
+#[allow(clippy::too_many_arguments)]
+fn evolve_fields_with_error<S: Clone, R: ReportTransfers<N>, E: Retryable, const N: usize>(
+    initial: &S,
+    target_s: f64,
+    controls: MoistureTimeControls,
     mut propose: impl FnMut(&S, f64) -> Result<(S, R), E>,
     snapshot: impl for<'a> Fn(&'a S) -> Result<Snapshot<'a>, E>,
+    additional_error: impl Fn(&S, &S, &S) -> Result<f64, MoistureAdvanceError<E>>,
     cx: &Cx<'_>,
 ) -> Result<(S, SharedMoistureAdvanceReport<R, N>), MoistureAdvanceError<E>> {
     checkpoint(cx)?;
@@ -647,7 +673,17 @@ fn evolve_fields<S: Clone, R: ReportTransfers<N>, E: Retryable, const N: usize>(
             controls.reservoir_water_absolute_tolerance_kg,
             controls.relative_tolerance,
         )?;
-        let error = factor * field_error.max(activity_error).max(reservoir_error);
+        let extra = additional_error(&state, &coarse, &fine)?;
+        if !extra.is_finite() || extra < 0.0 {
+            return Err(MoistureAdvanceError::Invalid(
+                "unrepresentable additional moisture temporal comparison",
+            ));
+        }
+        let error = factor
+            * field_error
+                .max(activity_error)
+                .max(reservoir_error)
+                .max(extra);
         if error > 1.0 {
             let smaller = (span * 0.5).max(controls.minimum_step_s);
             if smaller < span {

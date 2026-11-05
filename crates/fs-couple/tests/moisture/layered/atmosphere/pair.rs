@@ -1,4 +1,6 @@
 //! G1/G3: independent coupled inventories across unlike native material layers.
+mod adaptive;
+
 use super::*;
 use fs_couple::moisture::atmosphere::pair::{
     MoistureAtmospherePort, PairedAtmosphereMoistureSolve,

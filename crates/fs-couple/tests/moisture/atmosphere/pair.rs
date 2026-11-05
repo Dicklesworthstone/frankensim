@@ -1,5 +1,7 @@
 //! G1/G3/G4: two finite chambers, original diffusion, and atomic refusal.
 //! All material and gas data are authored verification fixtures.
+mod adaptive;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_couple::moisture::{

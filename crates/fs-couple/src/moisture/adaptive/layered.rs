@@ -24,7 +24,7 @@ pub struct LayeredMoistureAdvanceReport<Step = MoistureLayeredReport> {
     pub layers: Vec<MoistureSpecimenAdvanceReport<2>>,
 }
 
-trait LayeredTransport {
+pub(super) trait LayeredTransport {
     fn transport(&self) -> &MoistureLayeredReport;
 }
 impl LayeredTransport for MoistureLayeredReport {
@@ -37,7 +37,14 @@ impl LayeredTransport for AtmosphereMoistureStep<MoistureLayeredReport> {
         &self.transport
     }
 }
-struct LayeredStep<R>(R);
+impl LayeredTransport
+    for crate::moisture::atmosphere::pair::PairedAtmosphereMoistureStep<MoistureLayeredReport>
+{
+    fn transport(&self) -> &MoistureLayeredReport {
+        &self.transport
+    }
+}
+pub(super) struct LayeredStep<R>(pub(super) R);
 impl<R: LayeredTransport> ReportTransfers<2> for LayeredStep<R> {
     fn transfers(&self) -> Specimens<(u64, [f64; 2])> {
         let step = self.0.transport();
@@ -62,7 +69,7 @@ impl<R: LayeredTransport> ReportTransfers<2> for LayeredStep<R> {
     }
 }
 
-fn observe(stack: &MoistureLayeredSlab) -> Snapshot<'_> {
+pub(super) fn observe(stack: &MoistureLayeredSlab) -> Snapshot<'_> {
     let fields = stack
         .layers()
         .iter()
@@ -89,7 +96,7 @@ fn observe(stack: &MoistureLayeredSlab) -> Snapshot<'_> {
     }
 }
 
-fn finish<R, E>(
+pub(super) fn finish<R, E>(
     report: SharedMoistureAdvanceReport<LayeredStep<R>, 2>,
     tolerance: f64,
     cx: &Cx<'_>,
