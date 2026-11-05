@@ -14,6 +14,9 @@
 use fs_material::cohesive::friction::project_tangent_disk;
 use std::fmt;
 
+/// Work-conjugate sustained directional-friction coordinates.
+pub mod elliptic;
+
 /// Coupled held-force solve through the original mechanical response.
 pub mod solve;
 

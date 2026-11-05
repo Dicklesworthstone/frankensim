@@ -14,6 +14,9 @@ use fs_math::dd::Dd;
 
 mod exact;
 
+/// Sustained directional Coulomb contact on original complete solid motion.
+pub mod elliptic;
+
 /// A fixed physical point trace in one orthonormal normal/two-tangent frame.
 ///
 /// Covectors are dimensionless. Free owners use `free_dofs()` order; the supported

@@ -16,6 +16,35 @@ pub(crate) struct Workspace {
 }
 
 impl CompleteSpectralSolid {
+    /// Advance an oriented Coulomb ellipse through the same original complete
+    /// response, work gates and atomic acceptance as sustained disk contact.
+    /// Physical contacts/forces reach the mandatory whole-path callback; the
+    /// returned nonlinear diagnostics explicitly retain solver coordinates.
+    pub fn advance_sustained_elliptic_contacts<P, E>(
+        &mut self,
+        contacts: &[contact::elliptic::SolidSustainedEllipticContact<'_>],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(
+            &contact::elliptic::SolidSustainedEllipticPath<'_, '_, Self>,
+        ) -> core::result::Result<P, E>,
+    ) -> core::result::Result<
+        contact::elliptic::SolidSustainedEllipticStep<P, ExactLinearSolidStep>,
+        SolidSustainedError<E, CompleteSpectralSolidError>,
+    > {
+        contact::elliptic::advance(
+            self,
+            contacts,
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
+
     /// Advance simultaneous held normal and two-tangent Coulomb forces using
     /// every mode of the original consistent-mass pencil, including rigid modes.
     ///

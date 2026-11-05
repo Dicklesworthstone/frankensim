@@ -2490,6 +2490,28 @@ Focused exact-source tests exercise loaded rest, static/sliding/breakaway
 friction, full off-diagonal inertia, shared contacts, elastic midpoint storage,
 fixed derivative actions, final replay, errors, cancellation and resource limits.
 
+### Work-conjugate sustained directional friction
+
+`sustained::elliptic::EllipticForceCoordinates` prepares an oriented Coulomb
+ellipse for the same sustained solver. Physical tangent force is `f = A q`;
+physical slip/velocity is transformed by `A^T`, retaining `f dot s = q dot s'`.
+The normalized principal columns retain the original directional coefficients
+without forming a cancellation-prone symmetric squared metric. Normal force
+and gap are unchanged. The complete original mechanical trace and its transpose
+must both use this map; applying it only to a friction limit would change the
+physical law. The fs-solid dense, complete-spectrum and prescribed-support
+owners consume these coordinates through their original held-force responses.
+
+Equal coefficients use exact identity, including zero friction. Unequal
+coefficients must both be positive with a representable inverse. A singly-zero
+ellipse is explicitly refused in this sustained lane; unlike the separate
+instantaneous impact owner, it has no auxiliary free-axis construction. Invalid
+axes, coefficients and non-finite force/path transformations refuse. The map
+does not introduce material stiffness, thermal allocation or a second dynamics
+solver. Native contact/path admission and original work checks remain mandatory.
+Focused coordinate tests specify ellipse support, conjugate work, inverse
+mapping, exact isotropic reduction and singular-input refusal.
+
 
 ## Complete simultaneous impulse response and work reductions
 

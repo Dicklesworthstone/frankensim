@@ -18,6 +18,40 @@ struct Workspace {
 }
 
 impl SupportedSpectralSolid {
+    /// Advance an oriented Coulomb ellipse through the same original complete
+    /// response, work gates and atomic acceptance as sustained disk contact.
+    /// Physical contacts/forces reach the mandatory whole-path callback; the
+    /// returned nonlinear diagnostics explicitly retain solver coordinates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sustained_elliptic_contacts<P, E>(
+        &mut self,
+        support_acceleration_end_mps2: &[f64],
+        contacts: &[contact::elliptic::SolidSustainedEllipticContact<'_>],
+        initial_forces_n: &[[f64; 3]],
+        external_force_n: &[f64],
+        controls: SolidSustainedControls,
+        cx: &Cx<'_>,
+        admit_path: impl FnOnce(
+            &contact::elliptic::SolidSustainedEllipticPath<'_, '_, Self>,
+        ) -> core::result::Result<P, E>,
+    ) -> core::result::Result<
+        contact::elliptic::SolidSustainedEllipticStep<P, SupportedSolidStep>,
+        SolidSustainedError<E, SupportedSolidError>,
+    > {
+        contact::elliptic::advance(
+            &mut Interval {
+                body: self,
+                acceleration_end: support_acceleration_end_mps2,
+            },
+            contacts,
+            initial_forces_n,
+            external_force_n,
+            controls,
+            cx,
+            admit_path,
+        )
+    }
+
     /// Advance held external/contact forces while support acceleration follows
     /// the original linear interpolation to the supplied endpoint.
     ///

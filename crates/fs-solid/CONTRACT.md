@@ -266,6 +266,38 @@ with cross mass and load partition, native continuation, and transactional
 refusal including the original whole-supported energy gate. Geometry/event
 discovery and allocation of frictional loss to thermal owners remain separate.
 
+### Sustained directional Coulomb ellipses
+
+`advance_sustained_elliptic_contacts` on `ExactLinearSolid`,
+`CompleteSpectralSolid` and `SupportedSpectralSolid` resolves an oriented
+two-principal-coefficient friction ellipse through the same original held-force
+flow. The shared fs-contact coordinates use physical force `f = A q` and
+conjugate point trace `A^T J`, preserving every original normal/tangent and
+cross-contact mechanical coupling. The existing simultaneous force solve,
+native inertia/stiffness/viscosity and complete support work remain authoritative.
+The extra staging is bounded O(contact count * original DOFs); no exponential,
+factorization, modal cutoff or artificial contact compliance is added.
+
+The mandatory callback receives original physical contacts, forces, actual
+gap/slip and original native motion. Before calling it, the adapter reconstructs
+the original transpose load and checks physical relative and moving-surface
+work against the transformed response. Sticking path/velocity tolerances are
+conservatively tightened by the smallest tangent scale. Transformation,
+physical-work, budget and callback refusals all precede native atomic acceptance.
+The result explicitly separates physical forces/paths from the transformed
+solver receipt; native motion and work accounts retain their original units.
+
+Equal coefficients preserve the existing isotropic response exactly, including
+the frictionless case. Unequal coefficients must both be positive; a single
+free-slip axis is refused rather than assigned an artificial coefficient.
+Principal directions and coefficients are held for the interval. This lane
+does not discover geometry/events, infer temperature or wear evolution, or
+allocate mechanical frictional loss to heat. The caller still admits the full
+trajectory and fixed directional law. Analytical point regressions specify
+directional breakaway, static holding, oblique maximum dissipation, translating
+surface work, tangent-frame covariance, isotropic reduction and atomic refusal.
+Runtime verification is recorded with the implementation commit.
+
 ## Native quadratic Maxwell force, contact and pressure drift
 
 `MixedViscoTetMotion::force_kick_candidate` integrates the accepted original
