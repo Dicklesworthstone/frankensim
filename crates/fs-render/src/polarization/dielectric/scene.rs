@@ -71,6 +71,10 @@ pub enum Interaction {
     /// surrounding medium. `reflectance` indexes the original borrowed
     /// spectral reflectance table; no emission or subsurface law is inferred.
     DepolarizingDiffuse { medium: usize, reflectance: usize },
+    /// Smooth lossless dielectric over the original spectral diffuse base.
+    /// Its constant exterior index must match the actual local medium. Mirror
+    /// and diffuse events share the same surface; internal returns are summed.
+    CoatedDiffuse { medium: usize, reflectance: usize, coating: crate::coated_diffuse::SmoothDiffuseCoating },
     /// A two-sided ideal receiver. Positive Q uses the world reference axis
     /// projected transverse to each arriving ray. A parallel axis is refused.
     /// No lens/pupil transformation or grazing-angle polarizer model is inferred.
@@ -419,6 +423,18 @@ impl<'a> PolarizedScene<'a> {
                     )?.beam;
                     offset = settings.query_offset_m;
                 }
+                Interaction::CoatedDiffuse { medium, reflectance, coating } => {
+                    if result.medium != medium {
+                        return Err(SceneError::MediumMismatch {
+                            object_id: hit.object_id, expected: medium, actual: result.medium,
+                        });
+                    }
+                    let rho = self.reflectances[reflectance].at(result.beam.wavelength_nm())
+                        .map_err(|_| BeamError::Dielectric(crate::dielectric::DielectricError::InvalidWavelength))?;
+                    let normal = hit.hit.normal.ok_or(SceneError::InvalidHit)?;
+                    result.beam = result.beam.sample_coated_diffuse(normal, coating, rho, samples(event))?.beam;
+                    offset = settings.query_offset_m;
+                }
                 Interaction::SmoothConductor { optics, medium } => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
@@ -536,7 +552,8 @@ fn admit_bindings(
                     return Err(SceneError::InvalidBindings);
                 }
             }
-            Interaction::DepolarizingDiffuse { medium, reflectance } => {
+            Interaction::DepolarizingDiffuse { medium, reflectance }
+            | Interaction::CoatedDiffuse { medium, reflectance, .. } => {
                 if medium >= media_count || reflectance >= reflectance_count {
                     return Err(SceneError::InvalidBindings);
                 }

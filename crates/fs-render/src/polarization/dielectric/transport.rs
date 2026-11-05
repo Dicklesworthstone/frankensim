@@ -44,6 +44,9 @@ pub mod bundle;
 /// Cosine-sampled diffuse power transport in the retained local medium.
 pub mod diffuse;
 
+/// Smooth clear coats with exact Fresnel entry/exit and diffuse internal returns.
+pub mod coated_diffuse;
+
 /// Direction-conditioned polarized radiance response and native surface proposals.
 pub mod connection;
 

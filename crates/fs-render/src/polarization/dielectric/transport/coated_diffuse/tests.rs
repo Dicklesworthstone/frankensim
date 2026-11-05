@@ -1,0 +1,152 @@
+use super::*;
+use crate::dielectric::{BeerLambertAbsorption, CauchyIor, DielectricGlass, GlassProvenance};
+use fs_geom::Point3;
+
+fn beam(direction: Vec3, state: Stokes) -> PolarizedBeam {
+    let glass = DielectricGlass::new(CauchyIor::try_constant(1.0).unwrap(),
+        BeerLambertAbsorption::CLEAR, GlassProvenance::Custom);
+    let axis = if direction.y == 0.0 { Vec3::new(0.0, 1.0, 0.0) } else { Vec3::new(1.0, 0.0, 0.0) };
+    PolarizedBeam::try_new(Point3::new(0.0, 0.0, 0.0),
+        PolarizationFrame::try_new(direction, axis).unwrap(), 550.0, glass, state).unwrap()
+}
+
+fn close(a: f64, b: f64) {
+    assert!((a-b).abs() < 2e-11*a.abs().max(b.abs()).max(1.0), "{a:.17e} != {b:.17e}");
+}
+
+#[test]
+fn g1_coated_diffuse_matches_scalar_response_and_mixed_proposal() {
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let input = beam(Vec3::new(0.6, 0.0, -0.8), Stokes::unpolarized(2.0));
+    let sample = input.sample_coated_diffuse(normal, coating, 0.6, [0.36, 0.27, 0.9]).unwrap();
+    assert!(!sample.delta);
+    let outgoing = sample.beam.frame().direction();
+    let cosine = outgoing.z;
+    close(sample.pdf, coating.branch_probabilities(0.8).unwrap()[1]*cosine/core::f64::consts::PI);
+    close(sample.beam.power().i*sample.pdf/(2.0*cosine), coating.diffuse_brdf(0.8, cosine, 0.6).unwrap());
+    assert_eq!(sample.beam.medium(), input.medium());
+    assert_eq!(sample.beam.ray().origin, input.ray().origin);
+    let source_frame = PolarizationFrame::try_new(outgoing.scale(-1.0), sample.beam.frame().horizontal()).unwrap();
+    let response = input.evaluate_coated_diffuse_connection(normal, coating, 0.6,
+        source_frame, Stokes::unpolarized(1.0)).unwrap();
+    close(response.factor, coating.diffuse_brdf(0.8, cosine, 0.6).unwrap());
+    close(response.pdf, sample.pdf);
+    let mirror = input.sample_coated_diffuse(normal, coating, 0.6, [0.36, 0.27, 0.0]).unwrap();
+    assert!(mirror.delta);
+    close(mirror.pdf, coating.branch_probabilities(0.8).unwrap()[0]);
+    close(mirror.beam.power().i*mirror.pdf/2.0,
+        crate::dielectric::fresnel_dielectric(0.8, 1.0, 1.5).unwrap().reflectance);
+}
+
+#[test]
+fn g1_base_depolarizes_but_exit_retains_fresnel_polarization() {
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let cosine = 1.0 / 1.5_f64.hypot(1.0);
+    for q in [-1.0, 0.0, 1.0] {
+        let input = beam(Vec3::new(0.0, 0.0, -1.0), Stokes { i: 1.0, q, u: 0.0, v: 0.0 });
+        let sample = input.sample_coated_diffuse(normal, coating, 0.7,
+            [1.0-cosine*cosine, 0.25, 0.9]).unwrap();
+        let state = sample.beam.power();
+        let native = fresnel_dielectric_polarized(sample.beam.frame().direction().z, 1.0, 1.5).unwrap();
+        close(state.q/state.i, native.transmission.0[0][1]/native.transmission.0[0][0]);
+        assert!(state.q < 0.0);
+        assert_eq!(state.u, 0.0);
+        assert_eq!(state.v, 0.0);
+        let normal_exit = input.sample_coated_diffuse(normal, coating, 0.7, [0.0, 0.25, 0.9]).unwrap();
+        close(normal_exit.beam.power().degree(), 0.0);
+    }
+}
+
+#[test]
+fn g3_reciprocal_source_and_analyser_retain_full_stokes_frames() {
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let a = beam(Vec3::new(0.6, 0.0, -0.8), Stokes { i: 1.0, q: 0.2, u: 0.3, v: 0.4 });
+    let b = beam(Vec3::new(0.0, 0.8, -0.6), Stokes { i: 1.0, q: -0.3, u: 0.1, v: 0.2 });
+    let forward = a.evaluate_coated_diffuse_connection(normal, coating, 0.6, b.frame(), b.power()).unwrap();
+    let reverse = b.evaluate_coated_diffuse_connection(normal, coating, 0.6, a.frame(), a.power()).unwrap();
+    close(forward.factor, reverse.factor);
+    let rotated = a.with_reference_axis(Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    close(forward.factor, rotated.evaluate_coated_diffuse_connection(normal.scale(-3.0), coating,
+        0.6, b.frame(), b.power()).unwrap().factor);
+}
+
+#[test]
+fn g1_white_furnace_conserves_polarized_incident_power() {
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    for q in [-1.0, 0.0, 1.0] {
+        let input = beam(Vec3::new(0.6, 0.0, -0.8), Stokes { i: 1.0, q, u: 0.0, v: 0.0 });
+        let masses = coating.branch_probabilities(0.8).unwrap();
+        let mirror = input.sample_coated_diffuse(normal, coating, 1.0, [0.3, 0.2, 0.0]).unwrap();
+        let mut diffuse = 0.0;
+        const N: usize = 16384;
+        for i in 0..N {
+            let sample = input.sample_coated_diffuse(normal, coating, 1.0,
+                [(i as f64+0.5)/N as f64, 0.2, 0.9]).unwrap();
+            diffuse += sample.beam.power().i/N as f64;
+        }
+        assert!((masses[0]*mirror.beam.power().i + masses[1]*diffuse - 1.0).abs() < 4e-6);
+    }
+}
+
+#[test]
+fn g0_matched_black_medium_and_sample_limits() {
+    let input = beam(Vec3::new(0.6, 0.0, -0.8), Stokes { i: 1.0, q: 0.2, u: 0.3, v: 0.4 });
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let matched = SmoothDiffuseCoating::try_new(1.0, 1.0).unwrap();
+    let actual = input.sample_coated_diffuse(normal, matched, 0.4, [0.2, 0.6, 0.3]).unwrap();
+    let original = input.sample_depolarizing_diffuse(normal, 0.4, [0.2, 0.6]).unwrap();
+    assert_eq!(actual.beam, original.beam);
+    assert_eq!(actual.pdf, original.pdf_solid_angle);
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+    assert_eq!(input.sample_coated_diffuse(normal, coating, 0.0, [0.2, 0.6, 0.9]).unwrap().beam.power().i, 0.0);
+    assert_eq!(input.sample_coated_diffuse(normal, SmoothDiffuseCoating::try_new(1.33, 1.5).unwrap(),
+        0.4, [0.2, 0.6, 0.3]), Err(BeamError::MediumMismatch));
+    for samples in [[-0.1, 0.2, 0.3], [0.1, 1.0, 0.3], [0.1, 0.2, f64::NAN]] {
+        assert_eq!(input.sample_coated_diffuse(normal, coating, 0.4, samples), Err(BeamError::InvalidDiffuseSample));
+    }
+}
+
+#[test]
+fn g0_coated_diffuse_normalizes_grazing_transmission_before_application() {
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let cosine = 1e-310;
+    let input = beam(Vec3::new(1.0, 0.0, -cosine), Stokes::unpolarized(1.0));
+    let mass = coating.branch_probabilities(cosine).unwrap();
+    assert!(mass[1] > 0.0 && mass[1] < f64::MIN_POSITIVE);
+    assert!((coating.diffuse_weight(1.0).unwrap() / mass[1]).is_infinite());
+    let sample = input.sample_coated_diffuse(normal, coating, 1.0,
+        [0.3, 0.2, 0.5 * mass[1]]).unwrap();
+    assert!(!sample.delta);
+    assert!(sample.pdf > 0.0);
+    let exit = crate::dielectric::fresnel_dielectric(
+        sample.beam.frame().direction().z, 1.0, 1.5).unwrap();
+    let expected = coating.diffuse_weight(1.0).unwrap() * exit.transmittance;
+    assert!((sample.beam.power().i / expected - 1.0).abs() < 3e-12);
+}
+
+#[test]
+fn g0_coated_diffuse_keeps_weak_conditional_power() {
+    let coating = SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    for (cosine, power) in [(1e-20, 1e-310), (0.01, f64::from_bits(8))] {
+        let input = beam(Vec3::new((1.0_f64-cosine*cosine).sqrt(), 0.0, -cosine),
+            Stokes::unpolarized(power));
+        let mass = coating.branch_probabilities(cosine).unwrap();
+        assert!(mass[0] > mass[1]);
+        let sample = input.sample_coated_diffuse(normal, coating, 1.0,
+            [0.3, 0.2, 0.5 * mass[1]]).unwrap();
+        assert!(!sample.delta);
+        let exit = crate::dielectric::fresnel_dielectric(
+            sample.beam.frame().direction().z, 1.0, 1.5).unwrap();
+        let expected = power * (coating.diffuse_weight(1.0).unwrap() * exit.transmittance);
+        let actual = sample.beam.power().i;
+        assert!(actual > 0.0, "recoverable conditional power was erased: {cosine}, {power}");
+        assert!((actual / expected - 1.0).abs() < 3e-12
+            || (actual - expected).abs() <= f64::from_bits(2), "{actual} != {expected}");
+    }
+}

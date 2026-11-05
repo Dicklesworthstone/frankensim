@@ -28,6 +28,7 @@ mod anisotropic_tests;
 pub(in super::super::super) fn receiver_media(interaction: Interaction) -> Option<[usize; 2]> {
     match interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::CoatedDiffuse { medium, .. }
         | Interaction::BrushedConductor { medium, .. } => Some([medium, medium]),
         Interaction::RoughConductor { medium, surface, .. } if !surface.is_delta() =>
             Some([medium, medium]),
@@ -165,6 +166,13 @@ impl SurfaceReceiver {
         let incoming = camera.scene.launch_beam(position, self.incoming.frame(), wavelength,
             self.medium, self.incoming.power()).map_err(CameraRadianceError::from)?;
         match native.interaction {
+            Interaction::CoatedDiffuse { reflectance, coating, .. } => {
+                let rho = camera.scene.reflectances[reflectance].at(wavelength)
+                    .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
+                incoming.evaluate_coated_diffuse_connection(contact.witness.normal,
+                    coating, rho, source_frame, source_stokes)
+                    .map_err(CurvedSceneError::from).map_err(CameraRadianceError::from).map_err(Into::into)
+            }
             Interaction::Dielectric { outside, inside, surface } if !surface.is_delta() => {
                 let opposite = if self.medium == outside { inside } else { outside };
                 let medium = camera.scene.medium_at(opposite, position, wavelength)
@@ -235,6 +243,7 @@ fn arrival_medium(interaction: Interaction, contact: CurvedContact, direction: V
     -> Result<usize, AreaLightCameraError> {
     match interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::CoatedDiffuse { medium, .. }
         | Interaction::RoughConductor { medium, .. }
         | Interaction::BrushedConductor { medium, .. } => Ok(medium),
         Interaction::Dielectric { outside, inside, .. } => {
@@ -260,4 +269,49 @@ fn stable_axis(direction: Vec3) -> Vec3 {
     if x <= y && x <= z { Vec3::new(1.0, 0.0, 0.0) }
     else if y <= z { Vec3::new(0.0, 1.0, 0.0) }
     else { Vec3::new(0.0, 0.0, 1.0) }
+}
+
+#[cfg(test)]
+mod coated_diffuse_tests {
+    use super::*;
+    use crate::instances::{InstanceScene, RigidTransform};
+    use crate::polarization::dielectric::scene::anisotropic_tests::{close, glass, input, plane, with_cx};
+    use crate::polarization::dielectric::scene::SurfaceBinding;
+    use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, CurvedTraceSettings, SceneMedium};
+    use crate::spectral::SpectralReflectance;
+
+    #[test]
+    fn g3_coated_receiver_connections_and_recorded_proposals_share_branch_mass() {
+        with_cx(|cx| {
+            let placement = RigidTransform::identity();
+            let geometry = InstanceScene::try_new(vec![plane(placement)]).unwrap();
+            let material = glass(1.0);
+            let media = [SceneMedium::Homogeneous(&material)];
+            let coating = crate::coated_diffuse::SmoothDiffuseCoating::try_new(1.0, 1.5).unwrap();
+            let reflectances = [SpectralReflectance::constant(0.6).unwrap()];
+            let scene = CurvedPolarizedScene::try_new_with_materials(cx, &geometry, &media, &[], &[],
+                &reflectances, vec![SurfaceBinding { object_id: 83,
+                    interaction: Interaction::CoatedDiffuse { medium: 0, reflectance: 0, coating } }], 100_000).unwrap();
+            let camera = CurvedCameraScene::try_new(cx, &scene, &[], None).unwrap();
+            let incoming = input(placement).advance(1.0).unwrap();
+            let path = scene.trace_with_samples(cx, input(placement), 0,
+                CurvedTraceSettings { max_surface_events: 1, max_distance_m: 3.0,
+                    ..CurvedTraceSettings::default() }, |_| [0.36, 0.3, 0.9]).unwrap();
+            let contact = *path.last_contact().unwrap();
+            let receiver = SurfaceReceiver::at_contact(&camera, contact, incoming, 0).unwrap().unwrap();
+            let sample = incoming.sample_coated_diffuse(contact.witness.normal, coating,
+                0.6, [0.36, 0.3, 0.9]).unwrap();
+            let frame = PolarizationFrame::try_new(sample.beam.frame().direction().scale(-1.0),
+                Vec3::new(0.0, 1.0, 0.0)).unwrap();
+            for state in [Stokes::unpolarized(1.0), Stokes { i: 1.0, q: 0.2, u: 0.4, v: 0.6 }] {
+                let actual = receiver.evaluate(&camera, contact, incoming.ray().origin,
+                    0, frame, state, 0).unwrap();
+                let expected = incoming.evaluate_coated_diffuse_connection(contact.witness.normal,
+                    coating, 0.6, frame, state).unwrap();
+                close(actual.factor, expected.factor);
+                close(actual.pdf, sample.pdf);
+                close(receiver.sampled_pdf(&camera, sample.beam.frame().direction(), 0, 0).unwrap(), sample.pdf);
+            }
+        });
+    }
 }
