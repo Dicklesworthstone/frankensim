@@ -73,6 +73,151 @@ fn tilt_tree(angle: TimeSignal) -> FrameTree {
 }
 
 #[test]
+fn chebyshev_translation_and_tilt_expose_exact_second_derivatives() {
+    let mut tree = FrameTree::new();
+    tree.add(frame(
+        1,
+        WORLD,
+        FrameMotion::Translating {
+            direction: [1.0, 0.0, 0.0],
+            displacement: TimeSignal::Chebfun(ChebProfile {
+                cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![1.0, 0.0, 0.5]),
+                dims: LENGTH,
+            }),
+        },
+    ));
+    tree.add(frame(
+        2,
+        FrameId(1),
+        FrameMotion::Tilt {
+            axis: [0.0, 0.0, 1.0],
+            center: Vec3::default(),
+            angle: TimeSignal::Chebfun(ChebProfile {
+                cheb: Cheb1::from_coeffs(-1.0, 1.0, vec![0.5, 0.0, 0.25]),
+                dims: Dims::NONE,
+            }),
+        },
+    ));
+    let path = tree
+        .prepare_kinematics(
+            FrameId(2),
+            FrameKinematicsBudget::default(),
+            &mut keep_going,
+        )
+        .unwrap();
+    let time = 0.25;
+    let sample = path.sample(time, &mut keep_going).unwrap();
+    let theta = 0.5 * time * time;
+    let omega = time;
+    let expected_origin = rotate_z(Vec3::new(time * time, 0.0, 0.0), theta);
+    let rotated_v = rotate_z(Vec3::new(2.0 * time, 0.0, 0.0), theta);
+    let rotated_a = rotate_z(Vec3::new(2.0, 0.0, 0.0), theta);
+    let spin = Vec3::new(0.0, 0.0, omega);
+    let expected_acceleration = rotated_a
+        + Vec3::new(0.0, 0.0, 1.0).cross(expected_origin)
+        + spin.scale(2.0).cross(rotated_v)
+        + spin.cross(spin.cross(expected_origin));
+    near(sample.origin_world(), expected_origin, 3e-13);
+    near(sample.origin_acceleration_world(), expected_acceleration, 5e-13);
+    near(
+        sample.angular_acceleration_world(),
+        Vec3::new(0.0, 0.0, 1.0),
+        3e-13,
+    );
+}
+
+#[test]
+fn point_acceleration_contains_centripetal_coriolis_and_relative_terms() {
+    let mut tree = FrameTree::new();
+    tree.add(frame(
+        1,
+        WORLD,
+        rotating([0.0, 0.0, 1.0], Vec3::default(), 2.0),
+    ));
+    let sample = tree
+        .prepare_kinematics(
+            FrameId(1),
+            FrameKinematicsBudget::default(),
+            &mut keep_going,
+        )
+        .unwrap()
+        .sample(0.0, &mut keep_going)
+        .unwrap();
+    let point = Vec3::new(1.0, 0.0, 0.0);
+    near(
+        sample
+            .material_acceleration_at_world_point(point)
+            .unwrap(),
+        Vec3::new(-4.0, 0.0, 0.0),
+        1e-14,
+    );
+    let motion = sample
+        .point_motion_in_world(
+            point,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 3.0, 0.0),
+        )
+        .unwrap();
+    near(motion.acceleration_world, Vec3::new(-4.0, 7.0, 0.0), 1e-14);
+}
+
+#[test]
+fn acceleration_discontinuities_refuse_instead_of_selecting_a_temporal_side() {
+    let tree = tilt_tree(TimeSignal::Ramp {
+        t_start: -1.0,
+        t_end: 1.0,
+        from: QtyAny::new(-1.0, Dims::NONE),
+        to: QtyAny::new(1.0, Dims::NONE),
+    });
+    let path = tree
+        .prepare_kinematics(
+            FrameId(1),
+            FrameKinematicsBudget::default(),
+            &mut keep_going,
+        )
+        .unwrap();
+    assert_eq!(
+        path.sample(0.0, &mut keep_going)
+            .unwrap()
+            .angular_acceleration_world(),
+        Vec3::default()
+    );
+    for time in [-1.0, 1.0] {
+        assert!(matches!(
+            path.sample(time, &mut keep_going),
+            Err(FrameKinematicsError::Nondifferentiable { .. })
+        ));
+    }
+
+    let mut endpoint = FrameTree::new();
+    endpoint.add(frame(
+        1,
+        WORLD,
+        FrameMotion::Tilt {
+            axis: [0.0, 0.0, 1.0],
+            center: Vec3::default(),
+            // theta=t² on [0,1]: zero endpoint rate at t=0 but nonzero
+            // acceleration, so clamping makes the second derivative discontinuous.
+            angle: TimeSignal::Chebfun(ChebProfile {
+                cheb: Cheb1::from_coeffs(0.0, 1.0, vec![0.75, 0.5, 0.125]),
+                dims: Dims::NONE,
+            }),
+        },
+    ));
+    let path = endpoint
+        .prepare_kinematics(
+            FrameId(1),
+            FrameKinematicsBudget::default(),
+            &mut keep_going,
+        )
+        .unwrap();
+    assert!(matches!(
+        path.sample(0.0, &mut keep_going),
+        Err(FrameKinematicsError::Nondifferentiable { .. })
+    ));
+}
+
+#[test]
 fn fixed_coordinates_do_not_create_a_carrier_velocity() {
     let world = FrameTree::new();
     let path = world

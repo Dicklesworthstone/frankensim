@@ -119,6 +119,7 @@ fn slope(a: f64, b: f64, start: f64, end: f64) -> Result<f64, FrameKinematicsErr
 struct PreparedSignal<'a> {
     source: &'a TimeSignal,
     derivative: Option<Cheb1>,
+    second_derivative: Option<Cheb1>,
 }
 
 impl<'a> PreparedSignal<'a> {
@@ -142,13 +143,17 @@ impl<'a> PreparedSignal<'a> {
             .ok_or(FrameKinematicsError::Storage(
                 "signal scalar count overflow",
             ))?;
-        let derivative_count = match source {
-            TimeSignal::Chebfun(profile) => profile.cheb.coeffs().len().saturating_sub(1).max(1),
-            _ => 0,
+        let (derivative_count, second_derivative_count) = match source {
+            TimeSignal::Chebfun(profile) => {
+                let n = profile.cheb.coeffs().len();
+                (n.saturating_sub(1).max(1), n.saturating_sub(2).max(1))
+            }
+            _ => (0, 0),
         };
         let needed = used_scalars
             .checked_add(dynamic)
             .and_then(|count| count.checked_add(derivative_count))
+            .and_then(|count| count.checked_add(second_derivative_count))
             .ok_or(FrameKinematicsError::Storage(
                 "signal scalar count overflow",
             ))?;
@@ -187,8 +192,29 @@ impl<'a> PreparedSignal<'a> {
             ),
             _ => None,
         };
+        let second_derivative = match derivative.as_ref() {
+            Some(first) => Some(
+                first
+                    .try_differentiate_with_checkpoint(&mut || {
+                        if checkpoint().is_break() {
+                            Err(ChebError::Cancelled)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .map_err(|error| match error {
+                        ChebError::Cancelled => FrameKinematicsError::Cancelled,
+                        other => FrameKinematicsError::Derivative(other),
+                    })?,
+            ),
+            None => None,
+        };
         *used_scalars = needed;
-        Ok(Self { source, derivative })
+        Ok(Self {
+            source,
+            derivative,
+            second_derivative,
+        })
     }
 
     fn sample(
@@ -196,14 +222,14 @@ impl<'a> PreparedSignal<'a> {
         frame: FrameId,
         time_s: f64,
         checkpoint: &mut impl FnMut() -> ControlFlow<()>,
-    ) -> Result<(f64, f64), FrameKinematicsError> {
+    ) -> Result<(f64, f64, f64), FrameKinematicsError> {
         let value = self
             .source
             .eval_prevalidated_with_checkpoint(time_s, &mut || poll(checkpoint))??
             .value;
         let corner = || FrameKinematicsError::Nondifferentiable { frame, time_s };
-        let rate = match self.source {
-            TimeSignal::Constant(_) => 0.0,
+        let (rate, acceleration) = match self.source {
+            TimeSignal::Constant(_) => (0.0, 0.0),
             TimeSignal::Ramp {
                 t_start,
                 t_end,
@@ -211,11 +237,11 @@ impl<'a> PreparedSignal<'a> {
                 to,
             } => {
                 if from.value == to.value || time_s < *t_start || time_s > *t_end {
-                    0.0
+                    (0.0, 0.0)
                 } else if time_s == *t_start || time_s == *t_end {
                     return Err(corner());
                 } else {
-                    slope(from.value, to.value, *t_start, *t_end)?
+                    (slope(from.value, to.value, *t_start, *t_end)?, 0.0)
                 }
             }
             TimeSignal::Table {
@@ -237,7 +263,7 @@ impl<'a> PreparedSignal<'a> {
                     {
                         return Err(corner());
                     }
-                    (Interp::Hold, _) => 0.0,
+                    (Interp::Hold, _) => (0.0, 0.0),
                     (Interp::Linear, Ok(index)) => {
                         let before = if index == 0 {
                             0.0
@@ -262,35 +288,53 @@ impl<'a> PreparedSignal<'a> {
                         if before != after {
                             return Err(corner());
                         }
-                        before
+                        (before, 0.0)
                     }
-                    (Interp::Linear, Err(index)) if index == 0 || index == times.len() => 0.0,
-                    (Interp::Linear, Err(index)) => slope(
-                        values[index - 1],
-                        values[index],
-                        times[index - 1],
-                        times[index],
-                    )?,
+                    (Interp::Linear, Err(index)) if index == 0 || index == times.len() => {
+                        (0.0, 0.0)
+                    }
+                    (Interp::Linear, Err(index)) => (
+                        slope(
+                            values[index - 1],
+                            values[index],
+                            times[index - 1],
+                            times[index],
+                        )?,
+                        0.0,
+                    ),
                 }
             }
             TimeSignal::Chebfun(profile) => {
                 let (start, end) = profile.cheb.domain();
                 if time_s < start || time_s > end {
-                    0.0
+                    (0.0, 0.0)
                 } else {
                     let derivative = self.derivative.as_ref().expect("prepared Chebyshev rate");
+                    let second = self
+                        .second_derivative
+                        .as_ref()
+                        .expect("prepared Chebyshev acceleration");
                     let rate = derivative.eval_with_checkpoint(time_s, &mut || poll(checkpoint))?;
-                    if (time_s == start || time_s == end) && rate != 0.0 {
+                    let acceleration =
+                        second.eval_with_checkpoint(time_s, &mut || poll(checkpoint))?;
+                    if (time_s == start || time_s == end)
+                        && (rate != 0.0 || acceleration != 0.0)
+                    {
                         return Err(corner());
                     }
-                    rate
+                    (rate, acceleration)
                 }
             }
         };
         if !rate.is_finite() {
             return Err(FrameKinematicsError::NonFinite("physical schedule rate"));
         }
-        Ok((value, rate))
+        if !acceleration.is_finite() {
+            return Err(FrameKinematicsError::NonFinite(
+                "physical schedule acceleration",
+            ));
+        }
+        Ok((value, rate, acceleration))
     }
 }
 
@@ -455,6 +499,8 @@ pub struct FrameKinematics {
     origin: Vec3,
     linear: Vec3,
     angular: Vec3,
+    linear_acceleration: Vec3,
+    angular_acceleration: Vec3,
 }
 
 /// Absolute WORLD position and velocity of an explicitly specified local point.
@@ -466,6 +512,14 @@ pub struct FramePointKinematics {
     pub velocity_world: Vec3,
 }
 
+/// Position, velocity and acceleration of a point moving relative to the frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FramePointMotion {
+    pub position_world: Vec3,
+    pub velocity_world: Vec3,
+    pub acceleration_world: Vec3,
+}
+
 impl PreparedFrameKinematics<'_> {
     /// Source frame whose admitted path this object borrows.
     #[must_use]
@@ -473,7 +527,8 @@ impl PreparedFrameKinematics<'_> {
         self.frame
     }
 
-    /// Sample pose, frame-origin velocity and angular velocity once at `time_s`.
+    /// Sample pose, frame-origin velocity/acceleration and angular
+    /// velocity/acceleration once at `time_s`.
     ///
     /// A clamped schedule's corners/jumps refuse rather than selecting an
     /// undeclared temporal side. At a linear table knot the represented
@@ -493,6 +548,8 @@ impl PreparedFrameKinematics<'_> {
         let mut origin = Vec3::default();
         let mut linear = Vec3::default();
         let mut angular = Vec3::default();
+        let mut linear_acceleration = Vec3::default();
+        let mut angular_acceleration = Vec3::default();
         for (frame, motion) in &self.path {
             poll(checkpoint)?;
             match motion {
@@ -504,30 +561,36 @@ impl PreparedFrameKinematics<'_> {
                     origin = rotation.rotate(origin) + *translation;
                     linear = rotation.rotate(linear);
                     angular = rotation.rotate(angular);
+                    linear_acceleration = rotation.rotate(linear_acceleration);
+                    angular_acceleration = rotation.rotate(angular_acceleration);
                     pose = local.compose(&pose);
                 }
                 PreparedMotion::Translating {
                     direction,
                     displacement,
                 } => {
-                    let (value, rate) = displacement.sample(*frame, time_s, checkpoint)?;
+                    let (value, rate, acceleration) =
+                        displacement.sample(*frame, time_s, checkpoint)?;
                     let offset = direction.scale(value);
                     origin = origin + offset;
                     linear = linear + direction.scale(rate);
+                    linear_acceleration =
+                        linear_acceleration + direction.scale(acceleration);
                     pose = Motor::translator(offset.x, offset.y, offset.z).compose(&pose);
                 }
                 _ => {
-                    let (axis, center, angle, rate) = match motion {
+                    let (axis, center, angle, rate, rate_acceleration) = match motion {
                         PreparedMotion::Rotating { axis, center, rate } => {
-                            (*axis, *center, rate * time_s, *rate)
+                            (*axis, *center, rate * time_s, *rate, 0.0)
                         }
                         PreparedMotion::Tilt {
                             axis,
                             center,
                             angle,
                         } => {
-                            let (value, rate) = angle.sample(*frame, time_s, checkpoint)?;
-                            (*axis, *center, value, rate)
+                            let (value, rate, acceleration) =
+                                angle.sample(*frame, time_s, checkpoint)?;
+                            (*axis, *center, value, rate, acceleration)
                         }
                         _ => unreachable!("fixed and translating motions handled above"),
                     };
@@ -537,16 +600,29 @@ impl PreparedFrameKinematics<'_> {
                     let local = rotation_about(axis, center, angle);
                     let rotation = Quat::from_rotor(&local);
                     let offset = rotation.rotate(origin - center);
-                    let spin = Vec3::new(axis[0], axis[1], axis[2]).scale(rate);
+                    let spin_axis = Vec3::new(axis[0], axis[1], axis[2]);
+                    let spin = spin_axis.scale(rate);
+                    let spin_acceleration = spin_axis.scale(rate_acceleration);
+                    let rotated_linear = rotation.rotate(linear);
+                    let rotated_angular = rotation.rotate(angular);
+                    linear_acceleration = rotation.rotate(linear_acceleration)
+                        + spin.scale(2.0).cross(rotated_linear)
+                        + spin_acceleration.cross(offset)
+                        + spin.cross(spin.cross(offset));
+                    angular_acceleration = rotation.rotate(angular_acceleration)
+                        + spin.cross(rotated_angular)
+                        + spin_acceleration;
                     origin = center + offset;
-                    linear = rotation.rotate(linear) + spin.cross(offset);
-                    angular = rotation.rotate(angular) + spin;
+                    linear = rotated_linear + spin.cross(offset);
+                    angular = rotated_angular + spin;
                     pose = local.compose(&pose);
                 }
             }
             finite_vector(origin, "frame origin")?;
             finite_vector(linear, "frame-origin velocity")?;
             finite_vector(angular, "frame angular velocity")?;
+            finite_vector(linear_acceleration, "frame-origin acceleration")?;
+            finite_vector(angular_acceleration, "frame angular acceleration")?;
             if !motor_is_finite(&pose) {
                 return Err(FrameKinematicsError::NonFinite("frame pose"));
             }
@@ -559,6 +635,8 @@ impl PreparedFrameKinematics<'_> {
             origin,
             linear,
             angular,
+            linear_acceleration,
+            angular_acceleration,
         })
     }
 }
@@ -600,6 +678,34 @@ impl FrameKinematics {
         self.angular
     }
 
+    /// Inertial acceleration of the frame origin in WORLD meters/second².
+    #[must_use]
+    pub const fn origin_acceleration_world(&self) -> Vec3 {
+        self.linear_acceleration
+    }
+
+    /// Angular acceleration in WORLD radians/second².
+    #[must_use]
+    pub const fn angular_acceleration_world(&self) -> Vec3 {
+        self.angular_acceleration
+    }
+
+    /// Instantaneous acceleration of the rigid carrier material point that is
+    /// currently at `point` in WORLD coordinates.
+    pub fn material_acceleration_at_world_point(
+        &self,
+        point: Vec3,
+    ) -> Result<Vec3, FrameKinematicsError> {
+        finite_vector(point, "WORLD query point")?;
+        let offset = finite_vector(point - self.origin, "WORLD point offset")?;
+        finite_vector(
+            self.linear_acceleration
+                + self.angular_acceleration.cross(offset)
+                + self.angular.cross(self.angular.cross(offset)),
+            "WORLD point acceleration",
+        )
+    }
+
     /// Evaluate the rigid carrier velocity at a fixed WORLD query position.
     ///
     /// This is the Eulerian velocity field `v_origin + omega × (x - origin)`.
@@ -615,6 +721,41 @@ impl FrameKinematics {
         )
     }
 
+    /// Transform a local point with explicitly supplied relative velocity and
+    /// acceleration, retaining rigid-frame Euler, centripetal and Coriolis terms.
+    pub fn point_motion_in_world(
+        &self,
+        point: Vec3,
+        relative_velocity: Vec3,
+        relative_acceleration: Vec3,
+    ) -> Result<FramePointMotion, FrameKinematicsError> {
+        finite_vector(point, "local point")?;
+        finite_vector(relative_velocity, "local relative velocity")?;
+        finite_vector(relative_acceleration, "local relative acceleration")?;
+        let rotation = Quat::from_rotor(&self.pose);
+        let offset = finite_vector(rotation.rotate(point), "rotated local point")?;
+        let relative_velocity_world =
+            finite_vector(rotation.rotate(relative_velocity), "rotated relative velocity")?;
+        let position_world = finite_vector(self.origin + offset, "WORLD point position")?;
+        let velocity_world = finite_vector(
+            self.linear + self.angular.cross(offset) + relative_velocity_world,
+            "WORLD point velocity",
+        )?;
+        let acceleration_world = finite_vector(
+            self.linear_acceleration
+                + self.angular_acceleration.cross(offset)
+                + self.angular.cross(self.angular.cross(offset))
+                + self.angular.scale(2.0).cross(relative_velocity_world)
+                + rotation.rotate(relative_acceleration),
+            "WORLD point acceleration",
+        )?;
+        Ok(FramePointMotion {
+            position_world,
+            velocity_world,
+            acceleration_world,
+        })
+    }
+
     /// Transform local point coordinates and their explicitly relative velocity.
     ///
     /// Adds origin transport, angular transport and the rotated relative rate:
@@ -625,18 +766,11 @@ impl FrameKinematics {
         point: Vec3,
         relative_velocity: Vec3,
     ) -> Result<FramePointKinematics, FrameKinematicsError> {
-        finite_vector(point, "local point")?;
-        finite_vector(relative_velocity, "local relative velocity")?;
-        let rotation = Quat::from_rotor(&self.pose);
-        let offset = finite_vector(rotation.rotate(point), "rotated local point")?;
-        let position_world = finite_vector(self.origin + offset, "WORLD point position")?;
-        let velocity_world = finite_vector(
-            self.linear + self.angular.cross(offset) + rotation.rotate(relative_velocity),
-            "WORLD point velocity",
-        )?;
+        let motion =
+            self.point_motion_in_world(point, relative_velocity, Vec3::default())?;
         Ok(FramePointKinematics {
-            position_world,
-            velocity_world,
+            position_world: motion.position_world,
+            velocity_world: motion.velocity_world,
         })
     }
 }
