@@ -14,6 +14,9 @@
 //! responsible for half-space depth, finite-layer, yield, adhesion, thermal,
 //! and geometry-sampling applicability.
 
+mod plastic;
+pub use plastic::*;
+
 use core::fmt;
 
 use fs_blake3::{ContentHash, hash_domain};
@@ -809,6 +812,7 @@ pub fn solve_finite_gap_half_space(
 /// rectangular-cell Boussinesq integrals evaluated at the exact
 /// difference offsets `(di * width, dj * depth)`, so the assembled matrix
 /// is exactly (bitwise) Toeplitz-symmetric.
+#[derive(Debug, Clone, PartialEq)]
 struct ComplianceKernel {
     cells_x: usize,
     cells_y: usize,

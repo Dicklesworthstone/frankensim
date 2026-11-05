@@ -2655,3 +2655,63 @@ finite positive value and the exact requested key. Existing ordered-surface,
 condition, selected-claim and thermal-refresh checks remain binding. Wear remains
 a volume diagnostic with the original k*N*distance/H law; geometry recession,
 debris transport and a heat partition require their own physical owners.
+
+## Hardness-limited finite-gap indentation and permanent surface history
+
+`normal_patch::FiniteGapPlasticModel` extends the rectangular-cell Boussinesq
+half-space compliance with a local pressure-saturation law. At one prescribed
+signed approach, it minimizes the convex elastic contact functional subject to
+0 <= p_i <= H_i, where each finite positive H_i is supplied in Pa. The original
+gap minimum is removed once when constructing the owner. Previously accumulated
+plastic depth remains in the relative gap during unloading, opening and
+reloading; no new datum is subtracted from a dented surface.
+
+The deterministic feasible active-set solve warm-starts the original pressure.
+Each free solve uses the existing cancellable Cholesky factorization, advances
+only to the first encountered pressure bound, and releases a violating bound
+after the free minimum is feasible. This avoids cycling caused by simultaneous
+unconstrained bound switches. Exact rectangular compliance offsets are prepared
+once per model. The existing 16,384-cell grid limit remains; the dense free set
+is explicitly limited to 2,048 cells, with bounded iterations and cancellation
+during assembly, factorization and substitution. These are resource limits,
+not an audio-rate or benchmark performance claim.
+
+At the upper pressure bound, unresolved closure adds nonnegative permanent
+relative indentation. Receipts retain every pressure, elastic displacement,
+plastic increment, contact area, yielded-cell count, force, complementarity
+residual and original datum. Reversible elastic energy remains one half of
+integral(p*u dA). Irreversible surface work is integral(H*delta_plastic_depth dA)
+and accumulates separately. It is not automatically assigned to heat. Complete
+model, predecessor, candidate and response identities retain the original
+history. Foreign-state, nonfinite, convergence, cancellation and boundary-ring
+failures return no adopted candidate and leave the input history unchanged.
+
+`normal_patch::plastic_source::SourcePlasticContact` binds this law to the
+original ordered dry, nonadhesive interface, its elastic states, and two strict
+`IndentationHardnessStatePoint` sources. Card identities, material roles,
+complete external conditions, quantity conventions and indentation tests must
+match. Original elastic and interface properties must also be static at fixed
+external conditions; a rate- or frequency-dependent snapshot cannot silently
+become this quasistatic law. The softer surface's supplied pressure hardness caps the relative
+contact; permanent relative depth is not arbitrarily split between the bodies.
+Explicit approach, permanent-depth and footprint-to-homogeneous-depth limits
+screen every candidate before return, using the farthest loaded cell corner
+for the footprint radius. The source and its envelope seal the history even
+when another source has numerically identical coefficients.
+
+This is an explicit quasistatic surface pressure-saturation approximation.
+It is not bulk J2 plasticity, strain hardening, pile-up, a residual subsurface
+stress model, dynamic impact, geometry erosion or a thermal feedback law.
+Changing temperature or material state requires a physical history-transfer
+operation; rebuilding an owner does not grant permission to reset old dents.
+No universal hardness/yield ratio or empirical hardness-scale conversion is
+provided. Source and numerical identities do not constitute experimental
+validation or a certified approximation-error bound.
+
+The finite_gap_plastic regressions specify an independent one-cell solution,
+elastic limiting response, heterogeneous caps, unilateral/KKT conditions,
+retained unloading/reloading dents, irreversible work and atomic refusals.
+source_plastic_contact specifies original material/test propagation,
+softer-surface pressure control, source-order/condition mismatch and late
+physical-domain refusal. These are synthetic numerical and source-contract
+checks; execution status belongs to the associated validation record.

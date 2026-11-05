@@ -11,6 +11,8 @@ mod law;
 mod response_curve;
 /// Source-bound point contact shared by generic potential and port consumers.
 pub mod source;
+/// Original material hardness driving irreversible finite-gap indentation.
+pub mod plastic_source;
 
 pub use binding::*;
 pub use embed::*;
