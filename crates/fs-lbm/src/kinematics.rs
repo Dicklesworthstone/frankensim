@@ -85,7 +85,9 @@ impl FlowKinematics3 {
     /// timestep belonging to the sampled state; `dx` cancels from the gradient.
     pub fn to_physical(self, dt_s: f64) -> Result<Self, KinematicsError> {
         if !(dt_s.is_finite() && dt_s > 0.0) {
-            return Err(KinematicsError::Input("timestep must be finite and positive"));
+            return Err(KinematicsError::Input(
+                "timestep must be finite and positive",
+            ));
         }
         Self::from_gradient(self.gradient.map(|row| row.map(|x| x / dt_s)))
     }
@@ -109,6 +111,31 @@ impl core::fmt::Display for KinematicsError {
     }
 }
 impl std::error::Error for KinematicsError {}
+
+/// Native moving-wall admission and resolved-gradient failures remain distinct.
+/// Neither refusal changes accepted populations, wall data or force history.
+#[derive(Clone, Debug)]
+pub enum MovingWallKinematicsError<E> {
+    Wall(crate::lattice3::GridError3<E>),
+    Kinematics(KinematicsError),
+}
+
+impl<E: core::fmt::Debug> core::fmt::Display for MovingWallKinematicsError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "FS-LBM-MOVING-WALL-KINEMATICS3: {self:?}")
+    }
+}
+impl<E: core::fmt::Debug> std::error::Error for MovingWallKinematicsError<E> {}
+impl<E> From<crate::lattice3::GridError3<E>> for MovingWallKinematicsError<E> {
+    fn from(error: crate::lattice3::GridError3<E>) -> Self {
+        Self::Wall(error)
+    }
+}
+impl<E> From<KinematicsError> for MovingWallKinematicsError<E> {
+    fn from(error: KinematicsError) -> Self {
+        Self::Kinematics(error)
+    }
+}
 
 /// Reused velocity cache and native-gradient output, with an explicit byte
 /// budget. Every successful field is x-fastest, `(z*ny+y)*nx+x`; solid cells
@@ -164,7 +191,11 @@ impl KinematicsWorkspace3 {
         })
     }
 
-    pub(crate) fn admit(&self, dimensions: [usize; 3], gate: &CancelGate) -> Result<(), KinematicsError> {
+    pub(crate) fn admit(
+        &self,
+        dimensions: [usize; 3],
+        gate: &CancelGate,
+    ) -> Result<(), KinematicsError> {
         checkpoint(gate)?;
         if self.dimensions != dimensions {
             return Err(KinematicsError::Input(

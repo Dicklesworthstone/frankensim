@@ -405,6 +405,48 @@ fn within_relative(defect: f64, scale: f64, tolerance: f64) -> bool {
 }
 
 impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
+    /// Resolve fluid vorticity against the finite wall's accepted endpoint
+    /// velocity, including its spatially varying normal-axis spin. The last
+    /// streaming midpoint is only step scratch and must not define this field.
+    /// Other walls remain stationary. Only the wall's reusable velocity scratch
+    /// changes; its accepted inertia/velocity and the fluid state are untouched.
+    pub fn kinematics_with_finite_wall<'a>(
+        &self,
+        gate: &CancelGate,
+        wall: &mut FinitePlanarWall3<L, Q>,
+        workspace: &'a mut crate::kinematics::KinematicsWorkspace3,
+    ) -> Result<
+        &'a [Option<crate::kinematics::FlowKinematics3>],
+        crate::kinematics::MovingWallKinematicsError<L::Error>,
+    > {
+        workspace.admit(self.dims, gate)?;
+        if wall.solid != self.solid {
+            return Err(GridError3::Input("finite wall fixed topology").into());
+        }
+        // Rebuild from state, never from a previously refused trial or the
+        // successful stream's midpoint. Poll the link sweep as well as cells.
+        let n = wall.face as usize / 2;
+        let a = (n + 1) % 3;
+        let b = (n + 2) % 3;
+        let v = wall.state.velocity;
+        for (i, (link, u)) in wall
+            .moving
+            .links
+            .iter()
+            .zip(&mut wall.velocities)
+            .enumerate()
+        {
+            if i % 64 == 0 {
+                crate::kinematics::checkpoint(gate)?;
+            }
+            let p = coordinates(link.cell, self.dims);
+            *u = [0.0; 3];
+            u[a] = v[0] - v[2] * (p[b] as f64 + 0.5 - wall.center[b]);
+            u[b] = v[1] + v[2] * (p[a] as f64 + 0.5 - wall.center[a]);
+        }
+        self.kinematics_with_forces_and_motion(gate, workspace, None, wall.motion())
+    }
+
     /// Solve actual drag and an external tangent impulse/axial couple into the
     /// wall's finite inertia, then stream at its solved midpoint velocity.
     /// Fluid and wall velocities publish together only after all admissions.

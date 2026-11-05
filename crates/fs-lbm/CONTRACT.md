@@ -3139,6 +3139,26 @@ in this implementation session after the shared executor disconnected.
 
 ### Resolved vorticity on native three-dimensional flow owners
 
+`Grid3::kinematics_with_moving_walls` and the corresponding `ForcedGrid3`
+entry bind the resolved gradient to the actual prescribed native wall drive.
+They share moving-stream topology, Mach, tangential-motion and local mass-flux
+admission. The wall velocity for each missing Cartesian neighbor comes from
+that axial reflected link; diagonal contacts are not averaged into it.
+Unselected links remain stationary, matching native streaming. This supports
+spatially varying drives and fixed staircase solids, without a channel-only
+restriction. A single ordered sweep of selected links uses fixed six-face
+scratch; repeated sampling adds no heap allocation. The ordinary stationary
+path retains its arithmetic, and spatial forcing retains the accepted epoch.
+`MovingWallKinematicsError` separates native wall refusals from gradient
+refusals. No moving geometry or curved-wall-distance model is introduced.
+The moving-wall regressions in `tests/kinematics.rs` check both lattices and
+all axes, co-translation, linear and quadratic shear, a one-cell gap,
+spatial forcing, a nonuniform wall drive, and refusal/retry without mutation.
+`Grid3::kinematics_with_finite_wall` binds the same query to the accepted
+finite-inertia wall endpoint, reconstructing its translation/spin field rather
+than reusing the previous stream's midpoint scratch. A regression advances the
+coupled wall/fluid state and distinguishes these two velocity epochs explicitly.
+
 `Grid3::kinematics`, `ForcedGrid3::kinematics`,
 `BoundaryGrid3::kinematics` and `NsfGrid3::kinematics` expose the full resolved
 velocity gradient independently of an SGS closure. Every adapter samples the

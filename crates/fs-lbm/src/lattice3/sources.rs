@@ -117,6 +117,28 @@ impl<L: ForcedLattice3<Q>, const Q: usize> ForcedGrid3<L, Q> {
             .kinematics_with_forces(gate, workspace, Some(&self.forces))
     }
 
+    /// Full gradients with the current spatial half-force correction and the
+    /// actual native moving-wall velocities at this same accepted epoch.
+    /// The probe, link ordering and boundary assumptions are identical to
+    /// [`Grid3::kinematics_with_moving_walls`]. No force history is detached.
+    pub fn kinematics_with_moving_walls<'a>(
+        &self,
+        gate: &CancelGate,
+        probe: &super::wall_loads::WallMomentumProbe3<L, Q>,
+        velocities: &[[f64; 3]],
+        workspace: &'a mut crate::kinematics::KinematicsWorkspace3,
+    ) -> Result<
+        &'a [Option<crate::kinematics::FlowKinematics3>],
+        crate::kinematics::MovingWallKinematicsError<L::Error>,
+    > {
+        self.grid.kinematics_with_forces_and_motion(
+            gate,
+            workspace,
+            Some(&self.forces),
+            super::moving_walls::WallMotion3 { probe, velocities },
+        )
+    }
+
     /// Advance with current-epoch collision coefficients and a force field at
     /// the NEXT time. A failure leaves force history, populations and step count
     /// unchanged. The supplied endpoint vector is consumed, never partly kept.

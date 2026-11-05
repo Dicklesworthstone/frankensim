@@ -1,7 +1,11 @@
 //! SGS integration through the existing per-cell collision owner.
 
+use super::moving_walls::WallMotion3;
+use super::wall_loads::WallMomentumProbe3;
 use super::{Grid3, GridError3, Lattice3, coordinates, macro_cell};
-use crate::kinematics::{FlowKinematics3, KinematicsError, KinematicsWorkspace3};
+use crate::kinematics::{
+    FlowKinematics3, KinematicsError, KinematicsWorkspace3, MovingWallKinematicsError,
+};
 use crate::sgs3::{
     SgsConfig, SgsError, SgsLattice3, SgsReport, SgsStepError, SgsWorkspace3, eddy_viscosity,
 };
@@ -247,11 +251,106 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
         self.kinematics_with_forces(gate, workspace, None)
     }
 
+    /// Resolve vorticity using the same prescribed halfway-wall velocities as
+    /// native moving-wall streaming. `velocities` follows `probe.wall_links()`;
+    /// unselected wall links stay stationary, exactly as in the step owner.
+    ///
+    /// Each missing Cartesian neighbor uses its actual axial wall link. This
+    /// supports spatially varying tangential drives and interior staircase
+    /// solids, without assuming homogeneous channel walls. Native topology,
+    /// Mach and local impermeability checks apply before sampling. A moving
+    /// geometry, curved-wall distance or swept-cell reconstruction is not implied.
+    ///
+    /// The query reuses the ordinary byte-budgeted workspace and visits selected
+    /// links once in their native order. It allocates no additional field and
+    /// leaves accepted populations and time unchanged. Supply wall velocities
+    /// at the sampled state's time, not a later step's boundary drive.
+    pub fn kinematics_with_moving_walls<'a>(
+        &self,
+        gate: &CancelGate,
+        probe: &WallMomentumProbe3<L, Q>,
+        velocities: &[[f64; 3]],
+        workspace: &'a mut KinematicsWorkspace3,
+    ) -> Result<&'a [Option<FlowKinematics3>], MovingWallKinematicsError<L::Error>> {
+        self.kinematics_with_forces_and_motion(
+            gate,
+            workspace,
+            None,
+            WallMotion3 { probe, velocities },
+        )
+    }
+
+    pub(super) fn kinematics_with_forces_and_motion<'a>(
+        &self,
+        gate: &CancelGate,
+        workspace: &'a mut KinematicsWorkspace3,
+        forces: Option<&[[f64; 3]]>,
+        motion: WallMotion3<'_, L, Q>,
+    ) -> Result<&'a [Option<FlowKinematics3>], MovingWallKinematicsError<L::Error>> {
+        workspace.admit(self.dims, gate)?;
+        motion.admit(self, || {
+            if gate.is_requested() {
+                Err(GridError3::Cancelled)
+            } else {
+                Ok(())
+            }
+        })?;
+        // Map incoming Cartesian populations to the boundary face they leave.
+        // Direction lookup is performed once, outside the cell/gradient sweep.
+        let mut axial_face = [6usize; Q];
+        for face in 0..6 {
+            let mut incoming = [0; 3];
+            incoming[face / 2] = if face % 2 == 0 { 1 } else { -1 };
+            let q = L::E
+                .iter()
+                .position(|&e| e == incoming)
+                .ok_or(KinematicsError::Input(
+                    "moving-wall curl requires Cartesian lattice links",
+                ))?;
+            axial_face[q] = face;
+        }
+        let mut cursor = 0;
+        let mut cached_cell = usize::MAX;
+        let mut walls = [[0.0; 3]; 6];
+        Ok(
+            self.kinematics_with_forces_and_walls(gate, workspace, forces, |cell, axis, high| {
+                if cached_cell != cell {
+                    cached_cell = cell;
+                    walls = [[0.0; 3]; 6];
+                    // Cell queries and probe links are both in x-fastest order.
+                    // Diagonal-only wall contacts can be skipped without inventing
+                    // an axial boundary or averaging unrelated surface velocities.
+                    while cursor < motion.probe.links.len()
+                        && motion.probe.links[cursor].cell <= cell
+                    {
+                        let link = &motion.probe.links[cursor];
+                        let face = axial_face[link.incoming];
+                        if link.cell == cell && face < 6 {
+                            walls[face] = motion.velocities[cursor];
+                        }
+                        cursor += 1;
+                    }
+                }
+                walls[2 * axis + usize::from(high)]
+            })?,
+        )
+    }
+
     pub(super) fn kinematics_with_forces<'a>(
         &self,
         gate: &CancelGate,
         workspace: &'a mut KinematicsWorkspace3,
         forces: Option<&[[f64; 3]]>,
+    ) -> Result<&'a [Option<FlowKinematics3>], KinematicsError> {
+        self.kinematics_with_forces_and_walls(gate, workspace, forces, |_, _, _| [0.0; 3])
+    }
+
+    fn kinematics_with_forces_and_walls<'a>(
+        &self,
+        gate: &CancelGate,
+        workspace: &'a mut KinematicsWorkspace3,
+        forces: Option<&[[f64; 3]]>,
+        mut wall_velocity: impl FnMut(usize, usize, bool) -> [f64; 3],
     ) -> Result<&'a [Option<FlowKinematics3>], KinematicsError> {
         workspace.admit(self.dims, gate)?;
         for cell in 0..self.f.len() {
@@ -277,7 +376,11 @@ impl<L: Lattice3<Q>, const Q: usize> Grid3<L, Q> {
                 None
             } else {
                 Some(FlowKinematics3::from_gradient(
-                    self.velocity_gradient(cell, &workspace.velocity),
+                    self.velocity_gradient_with_walls(
+                        cell,
+                        &workspace.velocity,
+                        &mut wall_velocity,
+                    ),
                 )?)
             };
         }
