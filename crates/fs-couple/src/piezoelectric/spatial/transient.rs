@@ -1,4 +1,4 @@
-//! Consistent-mass, reversible spatial piezoelectric motion.
+//! Consistent-mass spatial piezoelectric motion and retained material memory.
 //!
 //! The native solid mass participates only in mechanical momentum balance;
 //! electrostatics remains a charge constraint. Implicit midpoint solves one
@@ -9,8 +9,10 @@
 //! Supports and electrode topology/types are fixed. Prescribed voltages and
 //! charges vary linearly between accepted endpoints; force is the caller's
 //! midpoint value. The accepted energy account is kinetic + elastic + electric
-//! storage against `F_mid . delta_u + phi_mid . delta_Q`. There is no numerical
-//! damping, inferred physical loss, radiation, thermal update, or automatic
+//! storage plus independently recovered material heat against
+//! `F_mid . delta_u + phi_mid . delta_Q`. Optional source-bound Maxwell and
+//! Debye memories share the same midpoint solve. There is no numerical
+//! damping, inferred loss spectrum, radiation, thermal update, or automatic
 //! time/mesh-error certificate. Small-strain geometry and material coefficients
 //! stay fixed. A candidate never mutates the accepted body.
 
@@ -21,10 +23,13 @@ use super::{
     positive, prepare_boundary, validate_controls,
 };
 use fs_exec::Cx;
+use fs_material::piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric;
 use std::sync::Arc;
 
 /// Source-bound resistive loads and prescribed electrode currents on this solve.
 pub mod load;
+/// Source-bound intrinsic ceramic memories on the original spatial operators.
+pub mod relaxation;
 
 struct FixedBoundary {
     map: BoundaryMap,
@@ -42,6 +47,7 @@ pub struct TetPiezoelectricTransientState {
     electrode_conditions: Vec<ElectrodeCondition>,
     nodal_free_charge_c: Vec<f64>,
     kinetic_energy_j: f64,
+    material_memory_energy_j: f64,
 }
 
 impl TetPiezoelectricTransientState {
@@ -77,11 +83,16 @@ impl TetPiezoelectricTransientState {
     pub const fn kinetic_energy_j(&self) -> f64 {
         self.kinetic_energy_j
     }
-    /// Positive internal elastic plus electric storage [J].
+    /// Retained mechanical and dielectric memory storage [J]. This is already
+    /// included in `stored_energy_j()` and must not be added a second time.
+    pub const fn material_memory_energy_j(&self) -> f64 {
+        self.material_memory_energy_j
+    }
+    /// Positive internal elastic, electric and material memory storage [J].
     pub fn stored_energy_j(&self) -> f64 {
         self.field.stored_energy_j
     }
-    /// Kinetic plus elastic plus electric energy [J].
+    /// Kinetic plus all internal material storage [J].
     pub fn total_energy_j(&self) -> f64 {
         self.kinetic_energy_j + self.field.stored_energy_j
     }
@@ -94,6 +105,7 @@ pub struct TetPiezoelectricTransient<'model, 'mesh> {
     model: &'model TetPiezoelectricModel<'mesh>,
     boundary: Arc<FixedBoundary>,
     state: TetPiezoelectricTransientState,
+    intrinsic: Option<relaxation::Relaxation>,
 }
 
 /// Independent physical account for one midpoint window.
@@ -107,9 +119,18 @@ pub struct TetPiezoelectricTransientStep {
     pub electrical_work_j: f64,
     /// Consistent-mass kinetic energy change [J].
     pub kinetic_energy_change_j: f64,
-    /// Elastic plus electric storage change [J].
+    /// Elastic, electric and retained material memory storage change [J].
     pub stored_energy_change_j: f64,
-    /// Total energy change minus the two external supplies [J].
+    /// Nonnegative intrinsic mechanical and dielectric heat in the ceramic [J].
+    pub material_heat_j: f64,
+    /// Nonnegative intrinsic Maxwell relaxation heat [J].
+    pub mechanical_material_heat_j: f64,
+    /// Nonnegative intrinsic Debye polarization heat [J].
+    pub dielectric_material_heat_j: f64,
+    /// Retained material memory storage before and after the step [J]. This
+    /// subaccount is already included in the body's internal stored energy.
+    pub material_memory_energy_j: [f64; 2],
+    /// Total energy change plus material heat minus external supplies [J].
     pub energy_residual_j: f64,
     /// Independently reconstructed midpoint momentum residual [N].
     pub maximum_force_residual_n: f64,
@@ -238,7 +259,55 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             model,
             boundary,
             state,
+            intrinsic: None,
         })
+    }
+
+    /// Attach zero intrinsic memories to a newly initialized body. The base
+    /// tensor, source identity and mesh frame must match every original cell.
+    /// The base stiffness is relaxed; its permittivity is instantaneous/clamped.
+    /// Memory starts at zero even when initial strain or field is nonzero.
+    /// No history may be reset after time has advanced. `maximum_internal_variables`
+    /// explicitly bounds all retained cell scalars before any state allocation.
+    /// Frequency-limited source claims cannot authorize arbitrary transients.
+    pub fn with_relaxation(
+        mut self,
+        materials: Vec<RelaxingTensorPiezoelectric>,
+        maximum_internal_variables: usize,
+        controls: TetPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self> {
+        poll(cx)?;
+        validate_controls(controls)?;
+        if self.intrinsic.is_some() || self.state.time_s != 0.0 {
+            return Err(invalid(
+                "intrinsic memories can only be attached once at initialization",
+            ));
+        }
+        for cell in &self.state.field.cells {
+            poll(cx)?;
+            if norm(&cell.strain_mandel) > controls.maximum_strain_norm
+                || norm(&cell.response.electric_field_v_m) > controls.maximum_electric_field_v_m
+            {
+                return Err(invalid(
+                    "initial state leaves the requested small-signal envelope",
+                ));
+            }
+        }
+        self.intrinsic = Some(relaxation::Relaxation::new(
+            self.model,
+            materials,
+            maximum_internal_variables,
+            cx,
+        )?);
+        poll(cx)?;
+        Ok(self)
+    }
+
+    /// Latest intrinsic heat and memory-storage accounts, in original cell
+    /// order. Newly initialized memories report zeros; an unextended body is None.
+    pub fn material_relaxation_steps(&self) -> Option<&[relaxation::CellRelaxationStep]> {
+        self.intrinsic.as_ref().map(|memory| memory.steps())
     }
 
     /// Accepted state; candidate creation never changes it.
@@ -246,7 +315,8 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         &self.state
     }
 
-    /// Advance one reversible midpoint window. Source types and topology must
+    /// Advance one midpoint window, retaining any attached material memories.
+    /// Source types and topology must
     /// remain unchanged; the supplied voltage/charge values are ENDPOINT values.
     /// This is a fixed-reference linear dynamic solve, not an equilibrium reset.
     #[allow(clippy::too_many_arguments)]
@@ -360,7 +430,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                 _ => unreachable!("source types checked before normalization"),
             })
             .collect::<Vec<_>>();
-        let midpoint_charge = self
+        let mut midpoint_charge = self
             .state
             .nodal_free_charge_c
             .iter()
@@ -411,6 +481,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             controls,
             cx,
         )?);
+        relaxation::stamp(self, dt_s, &mut boundary, &mut load_entries, cx)?;
         let (matrix, rhs) =
             self.model
                 .reduced_system(&boundary, mass_coefficient, &load_entries, cx)?;
@@ -480,14 +551,36 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             controls,
             cx,
         )?;
+        let material_update =
+            relaxation::advance(self, dt_s, &full_increment, &full_midpoint, controls, cx)?;
         let inertial_force = mass_action(self.model, &acceleration, cx)?;
-        let effective_force = midpoint_nodal_forces_n
+        let mut effective_force = midpoint_nodal_forces_n
             .iter()
             .zip(&inertial_force)
             .map(|(load, inertia)| core::array::from_fn(|axis| load[axis] - inertia[axis]))
             .collect::<Vec<[f64; 3]>>();
+        let mut endpoint_force = vec![[0.0; 3]; n];
+        let endpoint_charge = if let Some(update) = &material_update {
+            for node in 0..n {
+                poll(cx)?;
+                for axis in 0..3 {
+                    effective_force[node][axis] -= update.midpoint.force_n[node][axis];
+                    endpoint_force[node][axis] = -update.endpoint.force_n[node][axis];
+                }
+                midpoint_charge[node] -= update.midpoint.charge_c[node];
+            }
+            Some(
+                endpoint_nodal_free_charge_c
+                    .iter()
+                    .zip(&update.endpoint.charge_c)
+                    .map(|(charge, polarization)| charge - polarization)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        };
         let midpoint_electrodes = electrode_views(&self.boundary, &midpoint_conditions);
-        let midpoint = self.model.recover(
+        let mut midpoint = self.model.recover(
             &full_midpoint,
             midpoint_displacement,
             full_midpoint[nu..].to_vec(),
@@ -505,19 +598,34 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let mut endpoint_boundary = boundary;
         endpoint_boundary.index[..nu].fill(None);
         let endpoint_electrodes = electrode_views(&self.boundary, &next_conditions);
-        let field = self.model.recover(
+        let mut field = self.model.recover(
             &full_endpoint,
             displacement,
             full_endpoint[nu..].to_vec(),
             &endpoint_boundary,
             &endpoint_electrodes,
-            &vec![[0.0; 3]; n],
-            endpoint_nodal_free_charge_c,
+            &endpoint_force,
+            endpoint_charge
+                .as_deref()
+                .unwrap_or(endpoint_nodal_free_charge_c),
             controls,
             iterations,
             relative_residual,
             cx,
         )?;
+        let (mechanical_material_heat_j, dielectric_material_heat_j, material_memory_energy_j) =
+            if let Some(update) = &material_update {
+                update.midpoint.enrich(self.model, &mut midpoint, cx)?;
+                update.endpoint.enrich(self.model, &mut field, cx)?;
+                (
+                    update.mechanical_heat_j,
+                    update.dielectric_heat_j,
+                    update.memory_energy_j,
+                )
+            } else {
+                (0.0, 0.0, [0.0; 2])
+            };
+        let material_heat_j = mechanical_material_heat_j + dielectric_material_heat_j;
         let mut electrical_work_j = 0.0;
         for node in 0..n {
             poll(cx)?;
@@ -537,7 +645,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         let kinetic_energy_j = kinetic_energy(self.model, &velocity, cx)?;
         let kinetic_energy_change_j = kinetic_energy_j - self.state.kinetic_energy_j;
         let stored_energy_change_j = field.stored_energy_j - self.state.field.stored_energy_j;
-        let energy_residual_j = kinetic_energy_change_j + stored_energy_change_j
+        let energy_residual_j = kinetic_energy_change_j + stored_energy_change_j + material_heat_j
             - mechanical_work_j
             - electrical_work_j;
         if [
@@ -545,6 +653,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             electrical_work_j,
             kinetic_energy_change_j,
             stored_energy_change_j,
+            material_heat_j,
             energy_residual_j,
         ]
         .iter()
@@ -554,7 +663,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         }
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(TetPiezoelectricError::Balance(
-                "kinetic, elastic and electric energy change does not match supplied work",
+                "kinetic and material storage plus intrinsic heat do not match supplied work",
             ));
         }
         let step = TetPiezoelectricTransientStep {
@@ -563,6 +672,10 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             electrical_work_j,
             kinetic_energy_change_j,
             stored_energy_change_j,
+            material_heat_j,
+            mechanical_material_heat_j,
+            dielectric_material_heat_j,
+            material_memory_energy_j,
             energy_residual_j,
             maximum_force_residual_n: midpoint.maximum_force_residual_n,
             maximum_charge_residual_c: midpoint
@@ -571,7 +684,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             iterations,
             relative_residual,
         };
-        let state = make_state(
+        let mut state = make_state(
             field,
             velocity,
             accepted_conditions,
@@ -582,6 +695,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             &self.boundary,
             cx,
         )?;
+        state.material_memory_energy_j = material_memory_energy_j[1];
         poll(cx)?;
         Ok((
             TetPiezoelectricTransientCandidate {
@@ -589,6 +703,7 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
                     model: self.model,
                     boundary: Arc::clone(&self.boundary),
                     state,
+                    intrinsic: material_update.map(|update| update.next),
                 },
                 step,
             },
@@ -729,5 +844,6 @@ fn make_state(
         electrode_conditions,
         nodal_free_charge_c,
         kinetic_energy_j,
+        material_memory_energy_j: 0.0,
     })
 }

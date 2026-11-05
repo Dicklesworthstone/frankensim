@@ -18,8 +18,9 @@
 //!
 //! Peak phasors use exp(-i omega t). Frequency coefficients and field recovery
 //! allocate nothing; source queries and frame preparation occur only at binding.
-//! This supplies a fixed-temperature harmonic constitutive response, not a
-//! transient integrator, thermal update, hysteresis, depoling or measured fit.
+//! The harmonic response and [`transient`] material memories hold temperature
+//! fixed. The consuming spatial owner supplies dynamics; no thermal update,
+//! hysteresis, depoling or measured fit is inferred.
 
 use super::{Result, TensorPiezoelectric, invalid};
 use crate::field_storage::ELECTRIC_PERMITTIVITY_DIMS;
@@ -30,11 +31,14 @@ use crate::state_point::{
 use crate::tensor::mandel_rotation;
 use crate::visco::tensor::{PronyBranch, TensorProny};
 use crate::visco_tensor::source::TensorBranchProperties;
-use fs_blake3::ContentHash;
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::MaterialCard;
 use fs_math::{c64::C64, det};
 use fs_qty::{Dims, Pressure, QuantitySpec, Time};
 use std::sync::Arc;
+
+/// Model-bound material memories and exact passive midpoint companion laws.
+pub mod transient;
 
 /// Original full Mandel stiffness increments; zero/rank-deficient branches are valid.
 pub const MAX_MECHANICAL_BRANCHES: usize = 64;
@@ -61,8 +65,11 @@ pub struct DirectedDebyeProperties {
 /// Source-derived polarization process, already expressed in the current frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectedDebyePole {
+    /// Positive directional permittivity increment [F/m].
     pub permittivity_increment_f_m: f64,
+    /// Positive original polarization time [s].
     pub relaxation_time_s: f64,
+    /// Original source unit direction, rotated into the current frame.
     pub direction: [f64; 3],
 }
 
@@ -76,6 +83,7 @@ pub struct RelaxingTensorPiezoelectric {
     dielectric_properties: Arc<[DirectedDebyeProperties]>,
     mechanical: TensorProny,
     dielectric: Arc<[DirectedDebyePole]>,
+    identity: ContentHash,
 }
 
 /// Peak complex constitutive coefficients for exp(-i omega t).
@@ -83,9 +91,13 @@ pub struct RelaxingTensorPiezoelectric {
 /// large base coefficient. Consumers must not recover them by subtraction.
 #[derive(Clone, Copy, Debug)]
 pub struct PiezoelectricFrequencyCoefficients {
+    /// Complete constant-field complex Mandel stiffness [Pa].
     pub stiffness_mandel_pa: [[C64; 6]; 6],
+    /// Directly accumulated Maxwell stiffness above C0 [Pa].
     pub stiffness_increment_mandel_pa: [[C64; 6]; 6],
+    /// Complete fully clamped complex permittivity [F/m].
     pub permittivity_f_m: [[C64; 3]; 3],
+    /// Directly accumulated Debye increment above epsilon_inf [F/m].
     pub permittivity_increment_f_m: [[C64; 3]; 3],
 }
 
@@ -93,16 +105,23 @@ pub struct PiezoelectricFrequencyCoefficients {
 /// Memory energies are subaccounts of total stored energy, not additional heat.
 #[derive(Clone, Copy, Debug)]
 pub struct RelaxingPiezoelectricHarmonicResponse {
+    /// Complete peak tensile stress in Mandel order [Pa].
     pub stress_mandel_pa: [C64; 6],
+    /// Complete peak electric displacement in the current frame [C/m²].
     pub displacement_c_m2: [C64; 3],
     /// Stress supplied by the retained Maxwell memories only [Pa].
     pub additional_stress_mandel_pa: [C64; 6],
     /// Displacement supplied by the retained Debye polarizations only [C/m²].
     pub polarization_c_m2: [C64; 3],
+    /// Cycle-average base plus memory free-energy density [J/m³].
     pub average_stored_energy_j_m3: f64,
+    /// Mechanical memory subaccount of total cycle-average storage [J/m³].
     pub average_mechanical_memory_energy_j_m3: f64,
+    /// Polarization memory subaccount of total cycle-average storage [J/m³].
     pub average_dielectric_memory_energy_j_m3: f64,
+    /// Cycle-average mechanical relaxation heat rate [W/m³].
     pub average_mechanical_heat_w_m3: f64,
+    /// Cycle-average dielectric polarization heat rate [W/m³].
     pub average_dielectric_heat_w_m3: f64,
 }
 
@@ -226,6 +245,57 @@ fn rotate_direction(rotation: [[f64; 3]; 3], direction: [f64; 3]) -> Result<[f64
         ));
     }
     Ok(result)
+}
+
+// Memory coordinates depend on the actual native Gram representation, not only
+// C=B^T B. Retain that representation, branch order and directed polarization
+// signs in addition to the complete source/frame identity.
+fn model_identity(
+    base: &TensorPiezoelectric,
+    material: &ResolvedMaterialStatePoint,
+    mechanical_properties: &[TensorBranchProperties],
+    dielectric_properties: &[DirectedDebyeProperties],
+    mechanical: &TensorProny,
+    dielectric: &[DirectedDebyePole],
+) -> ContentHash {
+    let mut hash = DomainHasher::new("org.frankensim.fs-material.piezoelectric-relaxation.v1");
+    hash.update(base.identity().as_bytes());
+    hash.update(material.identity().as_bytes());
+    hash.update(&(mechanical_properties.len() as u64).to_le_bytes());
+    hash.update(&(dielectric_properties.len() as u64).to_le_bytes());
+    for name in mechanical_properties
+        .iter()
+        .flat_map(|properties| {
+            properties
+                .stiffness_upper
+                .iter()
+                .chain(core::iter::once(&properties.relaxation_time))
+        })
+        .chain(dielectric_properties.iter().flat_map(|properties| {
+            core::iter::once(&properties.permittivity_increment)
+                .chain(core::iter::once(&properties.relaxation_time))
+                .chain(properties.direction.iter())
+        }))
+    {
+        hash.update(&(name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+    }
+    for (branch, factor) in mechanical.branches().iter().zip(mechanical.factors()) {
+        hash.update(&branch.tau_s.to_bits().to_le_bytes());
+        let gram = branch.resolved_gram_rows(factor);
+        for value in branch.c_pa.iter().flatten().chain(gram.iter().flatten()) {
+            hash.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    for pole in dielectric {
+        for value in [pole.permittivity_increment_f_m, pole.relaxation_time_s]
+            .iter()
+            .chain(&pole.direction)
+        {
+            hash.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    hash.finalize()
 }
 
 impl RelaxingTensorPiezoelectric {
@@ -363,17 +433,9 @@ impl RelaxingTensorPiezoelectric {
                 direction: rotate_direction(source_to_frame, direction)?,
             });
         }
-        let model = Self {
-            base,
-            material: Arc::new(material),
-            mechanical_properties: mechanical.into(),
-            dielectric_properties: dielectric.into(),
-            mechanical: mechanical_law,
-            dielectric: poles.into(),
-        };
         // Positive increments must still have a representable relaxed total.
-        let mut relaxed = *model.base.permittivity_f_m();
-        for pole in model.dielectric.iter() {
+        let mut relaxed = *base.permittivity_f_m();
+        for pole in &poles {
             for row in 0..3 {
                 for column in 0..3 {
                     relaxed[row][column] = scalar(
@@ -385,12 +447,32 @@ impl RelaxingTensorPiezoelectric {
                 }
             }
         }
-        Ok(model)
+        let identity = model_identity(
+            &base,
+            &material,
+            &mechanical,
+            &dielectric,
+            &mechanical_law,
+            &poles,
+        );
+        Ok(Self {
+            base,
+            material: Arc::new(material),
+            mechanical_properties: mechanical.into(),
+            dielectric_properties: dielectric.into(),
+            mechanical: mechanical_law,
+            dielectric: poles.into(),
+            identity,
+        })
     }
 
     /// Original reciprocal tensor in the current frame, including its identity.
     pub const fn base(&self) -> &TensorPiezoelectric {
         &self.base
+    }
+    /// Exact source, configuration, current frame and native memory-coordinate identity.
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
     }
     /// Original additional source selections at the exact base physical query.
     pub fn material(&self) -> &ResolvedMaterialStatePoint {
@@ -400,15 +482,19 @@ impl RelaxingTensorPiezoelectric {
     pub const fn mechanical_law(&self) -> &TensorProny {
         &self.mechanical
     }
+    /// Original ordered selectors of all mechanical tensor increments and times.
     pub fn mechanical_properties(&self) -> &[TensorBranchProperties] {
         &self.mechanical_properties
     }
+    /// Original ordered selectors of polarization increments, times and directions.
     pub fn dielectric_properties(&self) -> &[DirectedDebyeProperties] {
         &self.dielectric_properties
     }
+    /// Source-derived poles in the same current frame as the base tensor.
     pub fn dielectric_poles(&self) -> &[DirectedDebyePole] {
         &self.dielectric
     }
+    /// Closed intersection of all original source applicability bands [rad/s].
     pub fn frequency_band_rad_s(&self) -> [f64; 2] {
         let (low, high) = self.mechanical.band_rad_s();
         [low, high]
@@ -432,6 +518,14 @@ impl RelaxingTensorPiezoelectric {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+        let identity = model_identity(
+            &base,
+            &self.material,
+            &self.mechanical_properties,
+            &self.dielectric_properties,
+            &mechanical,
+            &dielectric,
+        );
         Ok(Self {
             base,
             mechanical,
@@ -439,6 +533,7 @@ impl RelaxingTensorPiezoelectric {
             material: self.material.clone(),
             mechanical_properties: self.mechanical_properties.clone(),
             dielectric_properties: self.dielectric_properties.clone(),
+            identity,
         })
     }
 

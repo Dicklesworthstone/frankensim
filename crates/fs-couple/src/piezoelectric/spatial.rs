@@ -12,8 +12,9 @@
 //! Remaining exterior faces are electrically insulating. A voltage reference
 //! is required on each connected body. Coefficients and reference geometry are
 //! fixed. Static solves and the [`transient`] consistent-mass midpoint model
-//! share these operators. Neither supplies ferroelectricity, breakdown, loss,
-//! acoustic radiation or exterior fringing fields.
+//! share these operators. Harmonic and transient paths can attach source-bound
+//! intrinsic material relaxation. Ferroelectricity, breakdown, acoustic
+//! radiation and exterior fringing fields remain outside these operators.
 
 use fs_blake3::ContentHash;
 use fs_em::electrostatic::tetrahedral::{

@@ -2,7 +2,8 @@
 //!
 //! A load changes the floating electrode's charge equation, not the solid's
 //! damping. Its positive Joule heat belongs to the retained conductor; no heat
-//! is assigned to the ceramic and no temperature evolution is inferred.
+//! is assigned to the ceramic. Any attached intrinsic material law retains its
+//! own separate ceramic heat account; no temperature evolution is inferred.
 
 use super::*;
 use fs_material::conductor::{OhmicDrive, ResolvedConductor};
@@ -50,7 +51,8 @@ pub struct LoadedPiezoelectricStep {
     pub electrical_source_work_j: f64,
     /// Sum of actual conductor losses [J].
     pub joule_heat_j: f64,
-    /// Delta(kinetic + elastic + electric) + heat - mechanical/source work [J].
+    /// Delta(all body storage) + conductor and intrinsic material heat
+    /// - mechanical/source work [J]. The body's step reports ceramic heat.
     pub energy_residual_j: f64,
     /// One source-bound record per input resistor, in original order.
     pub loads: Vec<ElectrodeLoadHeat>,
@@ -109,7 +111,9 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
             &outgoing,
             cx,
         )?;
-        let energy_residual_j = next.total_energy_j() - self.state.total_energy_j() + joule_heat_j
+        let energy_residual_j = next.total_energy_j() - self.state.total_energy_j()
+            + joule_heat_j
+            + candidate.step.material_heat_j
             - candidate.step.mechanical_work_j
             - electrical_source_work_j;
         if [electrical_source_work_j, joule_heat_j, energy_residual_j]

@@ -198,6 +198,11 @@ impl<'model, 'mesh> TetPiezoelectricTransient<'model, 'mesh> {
         if cancelled() {
             return Err(CircuitEnthalpyError::Cancelled);
         }
+        if self.material_relaxation_steps().is_some() {
+            return Err(CircuitEnthalpyError::Invalid(
+                "intrinsic piezoelectric heat requires a named ceramic thermal destination",
+            ));
+        }
         admit_driver_unknowns(thermal, thermal_controls, guess_j)?;
         let dt = target_s - thermal.time_s();
         if self.state().time_s() != thermal.time_s() || !dt.is_finite() || dt <= 0.0 {

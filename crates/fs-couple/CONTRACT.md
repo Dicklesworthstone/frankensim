@@ -15826,6 +15826,45 @@ intrinsic coupling loss, nonlinear domain motion or experimental calibration.
 The nominal PZT-5A example keeps intrinsic loss disabled because its source
 does not identify the required spectrum.
 
+### Retained intrinsic memories in spatial time integration
+
+`TetPiezoelectricTransient::with_relaxation` attaches one source-bound law or
+one per original tetrahedron exactly once at initialization. Original base
+identity and mesh frame must match. The explicit scalar budget covers six
+native Gram coordinates per mechanical branch and one polarization per Debye
+pole in every cell before allocation. Initial memories are zero, and finite
+frequency-band claims cannot authorize arbitrary transient histories.
+
+Each native midpoint step locally eliminates these material states into the
+existing sparse coupled increment, preserving consistent mass, reciprocal G,
+reference geometry and electrode constraints. Tangents are evaluated once per
+supplied law. The full old internal force receives its required Maxwell
+history correction; polarization history enters the original Gauss constraint.
+No material-memory unknown enlarges the global solve.
+
+Independent physical recovery integrates added stress force and polarization
+charge before the original complete force/Gauss audits. Published cell stress,
+electric displacement and storage include the actual retained state. Both
+ordinary and source-loaded candidates own all new memories transactionally;
+no failed candidate changes the accepted history.
+
+`TetPiezoelectricTransientStep` separately reports mechanical and dielectric
+material heat, their sum and before/after memory storage. Per-cell accounts
+are available through `material_relaxation_steps()`. Memory storage is already
+inside body and cell stored energy; conductor Joule heat remains separately
+owned. The body gate pays intrinsic heat against mechanical and net electrode
+work. Enclosing resistor and reactive-load gates also pay material heat while
+retaining conductor loss and external reactive storage. Absolute local memory
+work defects are integrated without sign cancellation before global acceptance.
+
+Four spatial synthetic groups independently verify current-driven Debye
+charging, Maxwell motion, a joint moving-piezo/Maxwell/Debye/R/RL trajectory,
+and source/frame/budget/band/amplitude/cancellation refusals. These are authored
+analytic cases, not measured ceramic calibration. The original resistor-only
+thermal adapter explicitly refuses intrinsic histories without named ceramic
+heat destinations; reported material heat is never silently dropped or assigned
+to a conductor. Temperature-driven coefficient work remains outside this path.
+
 ## Regional material walls in native duct propagation
 
 `bernoulli_aperture::wall::material::RegionalMaterialWallDg` retains one original

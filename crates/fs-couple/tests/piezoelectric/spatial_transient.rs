@@ -2,6 +2,9 @@
 use super::*;
 use fs_couple::piezoelectric::spatial::transient::TetPiezoelectricTransient as Body;
 
+#[path = "spatial_transient/relaxation.rs"]
+mod relaxation;
+
 fn zero_source(n: usize) -> (Vec<[f64; 3]>, Vec<f64>) {
     (vec![[0.0; 3]; n], vec![0.0; n])
 }

@@ -5566,12 +5566,28 @@ reported separately for mechanical and dielectric processes. Memory energy is
 part of total storage, not an extra heat source. Frequency evaluation and
 constitutive recovery allocate nothing; source preparation occurs at binding.
 
-Five focused synthetic groups in `tests/piezoelectric_tensor/relaxation.rs`
-specify independent coefficient limits, branch storage and constitutive work,
-anisotropic null spaces, frame covariance and source/domain refusals. They do
-not qualify a measured ceramic. This owner supplies a held-condition harmonic
-law; transient integration, thermal coefficient work, intrinsic coupling loss,
-DC leakage, domain switching, hysteresis and depoling remain separate work.
+The `relaxation::transient` companion retains private native Gram and directed
+polarization memories, bound to the exact source/configuration/frame and
+actual factor coordinates. Zero initialization leaves the original base field
+unchanged. A finite source frequency band cannot authorize arbitrary transient
+histories. The scalar count is available before state allocation.
+
+For one coupled midpoint window, the material supplies allocation-free tangent
+tensors and old-memory right-hand-side corrections. Only proposed state vectors
+allocate. Endpoint memories remain transactional. Positive heat is recovered
+from actual represented midpoint friction; it is never adjusted to close work.
+Compensated sums and actual endpoint increments preserve weak storage changes
+beside large bias energies. The enclosing spatial owner applies its explicit
+energy tolerance. Midpoint is second order and passive but not L-stable; fast
+unresolved modes may alternate and require time refinement.
+
+Five harmonic and four transient synthetic groups in
+`tests/piezoelectric_tensor/relaxation.rs` and its `transient` child specify
+independent coefficient limits, Maxwell decay, Debye charging, second-order
+convergence, branch storage/work/heat, anisotropic null spaces, frame covariance
+and source/domain/state refusals. They do not qualify a measured ceramic.
+Thermal coefficient work, intrinsic coupling loss, DC leakage, domain switching,
+hysteresis and depoling remain separate work.
 
 The model conventions follow the primary Debye and piezoelectric-loss theory:
 <https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_theory.05.36.html>

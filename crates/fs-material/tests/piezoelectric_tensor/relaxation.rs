@@ -1,4 +1,7 @@
 //! Independent manufactured Maxwell/Debye references; no measured-material claim.
+#[path = "relaxation/transient.rs"]
+mod transient;
+
 use super::*;
 use fs_material::piezoelectric::tensor::relaxation::{
     DirectedDebyeProperties, RelaxingTensorPiezoelectric,

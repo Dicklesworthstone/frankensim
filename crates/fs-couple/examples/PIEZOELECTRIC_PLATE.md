@@ -179,6 +179,66 @@ The source-backed model and its analytic checks are documented by the primary
 [piezoelectric-loss theory](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_modeling.05.109.html)
 and [Debye dispersion theory](https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_theory.05.36.html).
 
+## Retained intrinsic memories in time
+
+The same source-bound material law also extends the existing
+`TetPiezoelectricTransient` at initialization:
+
+```rust,ignore
+let body = TetPiezoelectricTransient::new(/* original mesh state and sources */)?
+    .with_relaxation(
+        vec![relaxing_material],
+        maximum_internal_variables,
+        controls,
+        cx,
+    )?;
+```
+
+Supply one uniform law or one per original tetrahedron. The explicit scalar
+budget counts six native Gram coordinates per Maxwell branch and one directed
+polarization per Debye pole, for every cell. Material identity, mesh frame and
+base coefficients must match the original model. A frequency-limited source
+fit cannot authorize an arbitrary transient. Initial memories are zero; they
+are not inferred from the initial displacement or field, and they cannot be
+reset after time has advanced.
+
+`step_candidate`, `step_with_loads_candidate` and retained reactive shunts all
+use these histories in the same sparse coupled midpoint solve. Each process
+is eliminated locally, so no material-memory degrees of freedom are added to
+the global matrix. The mechanical companion contributes
+`tau/(tau+dt/2) * C_branch`; the polarization companion contributes
+`(dt/2)/(tau+dt/2) * delta_epsilon * n n^T`. The original consistent mass,
+reciprocal coupling, field maps and electrode topology remain intact.
+
+The native step reports `mechanical_material_heat_j`,
+`dielectric_material_heat_j`, their sum `material_heat_j`, and before/after
+`material_memory_energy_j`. `material_relaxation_steps()` exposes the same
+heat and storage accounts per original cell. The accepted state's
+`material_memory_energy_j()` is a subaccount already included in
+`stored_energy_j()` and `total_energy_j()`. Conductor Joule heat remains a
+separate physical account. Complete cell stress and electric displacement
+include the retained material response.
+
+The acceptance identity is
+
+```text
+delta(kinetic + elastic + electric + material memory)
+  + intrinsic material heat = mechanical work + net electrode work.
+```
+
+Enclosing resistor/reactive reports also pay conductor heat and reactive
+storage against actual external source work. Both material heat channels are
+computed from positive midpoint memory/friction norms, independently of this
+identity. Rejected candidates leave all accepted mechanical, electrical and
+material histories unchanged. Implicit midpoint is second order and passive,
+but very fast unresolved relaxation modes can alternate; time refinement is
+still needed to resolve their dynamics.
+
+Intrinsic heat is reported but not automatically deposited into a temperature
+field. The existing resistor-only thermal adapter refuses bodies with these
+memories because it has no named ceramic heat destinations. Temperature-driven
+coefficient changes require their own source admission and material work.
+
 ## Verification and boundaries
 
 Run the focused native spatial suite:
@@ -189,7 +249,8 @@ cargo test -p fs-couple --test piezoelectric_spatial
 
 The new tests use explicitly synthetic source data and independent RC/LC/RLC
 and retained-coordinate equations. They exercise midpoint convergence,
-electrical and mechanical resonance, mean-power factors and signs, open/short
+electrical and mechanical resonance, Maxwell decay, Debye charging, joint
+mechanical/polarization/shunt trajectories, mean-power factors and signs, open/short
 limits, orientation/gauge/phase invariance, full-cycle amplitude limits and
 transactional refusal. They verify implementation behavior, not measured
 material accuracy.
@@ -202,7 +263,7 @@ the separate reduced rod adapter for the native general circuit graph.
 
 These models do not supply ferroelectric hysteresis, saturation,
 depoling, breakdown, fringing, acoustic radiation or dissipative piezoelectric
-cross coupling. Intrinsic relaxation currently enters the harmonic path.
+cross coupling. Intrinsic relaxation is available in harmonic and transient paths.
 The harmonic result is a periodic particular solution; it does not establish
 startup decay or uniqueness of an unexcited lossless mode. The plate mesh and
 time/frequency sampling must be refined for a concrete design question.

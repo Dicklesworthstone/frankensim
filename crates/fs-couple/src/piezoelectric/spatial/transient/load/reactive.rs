@@ -212,7 +212,9 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
 
     /// Advance motion, electric field, capacitor charge and winding flux in ONE
     /// midpoint solve. Each source type and all branch topology stay fixed.
-    /// No thermal update or additional empirical ceramic loss is introduced.
+    /// Attached intrinsic material memories remain in the native body solve;
+    /// their heat is accounted separately from conductor losses. No thermal
+    /// update or empirical damping is inferred.
     #[allow(clippy::too_many_arguments)]
     pub fn step_candidate(
         &self,
@@ -269,6 +271,7 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
             + reactive_energy_j[1]
             - reactive_energy_j[0]
             + joule_heat_j
+            + candidate.step.material_heat_j
             - candidate.step.mechanical_work_j
             - electrical_source_work_j;
         if reactive_energy_j
@@ -282,7 +285,7 @@ impl<'model, 'mesh> ReactivePiezoelectricTransient<'model, 'mesh> {
         }
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(TetPiezoelectricError::Balance(
-                "body and reactive storage, conductor heat and external source work disagree",
+                "body and reactive storage, material/conductor heat and external source work disagree",
             ));
         }
         let (body, body_step) = candidate.into_parts();
