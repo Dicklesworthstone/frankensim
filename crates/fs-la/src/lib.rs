@@ -11,6 +11,8 @@ pub mod canonical_check;
 pub mod canonical_qr;
 pub mod canonical_tree;
 pub mod canonical_tree_gauge;
+/// Positive acyclic population evolution and integrated transformation counts.
+pub mod decay;
 pub mod eigen;
 pub mod eigen_complex;
 pub mod factor;

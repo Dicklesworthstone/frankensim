@@ -890,3 +890,30 @@ fluid-interface solve and compares that peak against solve/output storage. The
 80-panel/64-worker regression refuses the former serial-sized allowance before
 factorization. This helper changes no pivots, arithmetic, cancellation or solver
 results.
+
+## Positive acyclic decay and independently integrated transformation counts
+
+`decay` owns bounded dense evolution of a closed, acyclic first-order transfer
+network with supplied nonnegative rates and positive branching fractions. Caller
+node order and repeated parent/daughter endpoints are retained. Decaying-parent
+fractions must sum to one within `32*f64::EPSILON`; cycles, missing daughters and
+outgoing stable-node branches refuse. No physical rate data is inferred.
+
+`DecayPlan` prepares population and independently integrated parent-transformation
+maps. Positive uniformization and triangular semigroup composition avoid
+equal-rate Bateman cancellation. Deterministic exp/expm1 diagonals are refreshed
+at every scale so an unrelated stiff component cannot erase slow parent counts.
+Application returns populations, integrated counts and the uncorrected population
+balance residual without mutating caller data. Plans are reusable across cells.
+
+Node/edge, series, squaring and scalar-work limits bound preparation, with
+cooperative cancellation. Nonnegative maps, closed population columns, per-node
+transfer balances and acyclic visit-count bounds are numerical admission checks,
+not certified forward-error enclosures. Unrepresentable scaled direct transfers
+refuse. Large inventories cannot silently recover subnormal or vanished coefficients;
+uncertain cases refuse unless a conservative tail bound proves the contribution
+unrepresentable in the caller's selected amount unit.
+
+Scope excludes cyclic reactions, fission/multiplication, external production,
+changing rates, adjoints and physical-data certification. Physical identities,
+activity units, radiation products and energy partitions belong to the caller.
