@@ -7500,3 +7500,45 @@ path jobs retain their stricter point-fixture/glass admission. Focused controls
 cover analytic axial spreading, independent oblique Snell rays and angular
 finite differences, retained s/p power, dispersion, native visibility and
 physical-domain/work refusals.
+
+## Incoherent transmitted slab history for calibrated point fixtures
+
+`PhotometricSource::transmitted_slab_history_irradiance` extends that selected
+image to the broad-face `T(RR)^mT` family for all nonnegative internal round-trip
+orders, subject to an explicit omitted-image tolerance. Each order unfolds
+`(2m+1)h` of glass and translates the virtual receiver by `2mh`, preserving the
+actual exterior distances. The existing Snell solver and analytic area
+Jacobian supply that order's wavelength-dependent source direction and
+spreading. Native geometry then traces every folded physical reflection and
+transmission. Original s/p power, reversed surface-film order and Beer loss
+along the summed internal segments remain intact. No radiance eta factor,
+roulette probability or first-image geometric multiplier enters source power.
+
+The actual signed receiver projection applies after the axis-plane solve.
+Back-facing/grazing orders, zero source intensity and opaque blockers zero
+only that order; later images can still illuminate the receiver. Existing
+selected-image back-face/grazing refusals remain unchanged. Additional media,
+nonparallel/edge encounters and unresolved geometry still refuse a result.
+
+The source's global angular peak bounds unevaluated orders, including hidden
+or unlit earlier images. Bare glass uses monotone s-polarized Fresnel
+reflectance to bound both polarization channels by a geometric series.
+Passive coated glass uses a decreasing inverse-square spreading series and
+integral bound; this can require looser tolerances or more work. Minimum bulk
+absorption tightens both. Bound products are evaluated in log space so optical
+underflow cannot erase a remainder that a bright source makes representable.
+Both slab APIs share source/Jacobian scaling with a log s/p power fallback;
+representable irradiance survives when normalized Beer/return throughput
+underflows, while ordinary finite arithmetic remains the fast path.
+Returned per-bin bounds and their native radiant/CIE integrals describe
+truncation of this model, not roundoff, geometric, calibration or measurement
+uncertainty. Bulk coherent interference, side-face paths and other scene
+illumination remain outside this observable.
+
+Each bin must satisfy its absolute-plus-relative tolerance before the complete
+80-bin spectrum is published. Image count, physical distance and total reserved
+interface work have independent hard caps; order m reserves `2m+2` interactions
+before tracing, including early terminated orders. Cancellation is checked at
+each bin, order and physical return. A work cap without convergence is an
+explicit error, never a silently truncated complete reading. Geometry is
+prepared once and individual histories use fixed local storage.

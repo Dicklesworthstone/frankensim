@@ -7,11 +7,13 @@
 //! Beer absorption uses the actual internal path length. Source intensity is
 //! evaluated along the solved launch direction, never the unrefracted chord.
 //!
-//! This is one transmitted image, not total illuminance: reflected images,
-//! internal-return images, diffuse/scattered light and coherent interference
-//! between slab faces are excluded. The actual material's coherent surface
-//! coatings remain part of each individual interface. No error enclosure or
-//! calibration accuracy is inferred from this deterministic calculation.
+//! [`PhotometricSource::transmitted_slab_irradiance`] selects the image with
+//! no internal returns. [`PhotometricSource::transmitted_slab_history_irradiance`]
+//! sums the incoherent broad-face transmitted family, with explicit work caps
+//! and an omitted-image bound. Neither includes other scene illumination,
+//! side-face paths, diffuse/scattered light or coherent interference between
+//! slab faces. The actual material's coherent surface coatings remain part of
+//! each individual interface. No calibration or roundoff enclosure is inferred.
 
 use super::bundle::{BundleIrradianceMeter, BundleIrradianceReading, PlanarIrradianceReceiver};
 use super::{PhotometricSource, SPECTRAL_BINS, wavelength_nm};
@@ -20,6 +22,9 @@ use crate::photometry::{IlluminanceProbe, PhotometryError, TransportOptions};
 use crate::tracer::{Scene, photometric::slab::SlabConnection};
 use fs_exec::Cx;
 use fs_geom::Vec3;
+
+mod history;
+pub use history::{SlabHistoryError, SlabHistoryOptions, TransmittedSlabHistorySpectrum};
 
 /// Complete native 80-bin spectrum for the selected two-transmission image.
 /// Opaque blockers can remove different bins when dispersion changes the path.
@@ -109,7 +114,7 @@ impl PhotometricSource {
             let wavelength = wavelength_nm(bin);
             let ray = connection.sample(cx, wavelength)?;
             let intensity = self.spectral_intensity_w_sr_nm(ray.launch_direction, wavelength)?;
-            let value = intensity / ray.area_per_solid_angle * ray.power_transmission;
+            let value = ray.irradiance(intensity)?;
             meter
                 .record_solved_irradiance(bin, value)
                 .map_err(|_| PhotometryError::NonFiniteResult)?;

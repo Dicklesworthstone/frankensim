@@ -12,6 +12,8 @@ use crate::tracer::{Camera, Material, Primitive, Shape, TracerError};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 use fs_geom::Point3;
 
+mod history;
+
 fn scope(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
