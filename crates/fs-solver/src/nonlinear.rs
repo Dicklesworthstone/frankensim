@@ -585,10 +585,13 @@ impl FgmresState {
     #[must_use]
     pub fn new(rhs: &[f64], restart: usize) -> Self {
         assert!(restart >= 1, "FGMRES restart length must be positive");
+        let bnorm = norm2(rhs);
         Self {
             x: vec![0.0; rhs.len()],
             restart,
-            bnorm: norm2(rhs).max(f64::MIN_POSITIVE),
+            // Only an exactly zero source needs a placeholder denominator.
+            // Flooring a nonzero subnormal norm weakens a relative target.
+            bnorm: if bnorm == 0.0 { 1.0 } else { bnorm },
             rel: if rhs.iter().all(|&value| value == 0.0) {
                 0.0
             } else {

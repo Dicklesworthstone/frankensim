@@ -261,6 +261,15 @@ Linear verification/admission returns structured findings naming the
 failed evidence rule. Nonlinear solves return typed dimension,
 non-finite, inner-solve, line-search, trust-region, and budget stalls.
 
+The shared Euclidean norm scales amplitudes by an exact power of two before
+squaring, using the original fixed 64-entry reduction order without allocating
+workspace. Nonzero finite residuals cannot vanish merely because their squares
+underflow; large representable norms do not overflow during accumulation.
+FGMRES retains a nonzero subnormal RHS norm instead of flooring its relative
+residual denominator. Zero sources, invalid data and final norm overflow remain
+distinct. This fixes residual measurement, not every dot product or operator's
+dynamic range, and does not change caller-authored absolute stopping tolerances.
+
 ## Determinism class
 
 Bit-deterministic across runs and (single-threaded v1) trivially

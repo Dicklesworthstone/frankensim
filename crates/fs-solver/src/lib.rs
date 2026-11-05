@@ -72,11 +72,85 @@ pub fn dot(a: &[f64], b: &[f64]) -> f64 {
     fs_tilelang::deterministic_sum(&prods)
 }
 
-/// Deterministic 2-norm.
+/// Deterministic 2-norm, with amplitude scaling before the squared reduction.
+///
+/// Power-of-two scaling retains the fixed 64-entry reduction order and needs
+/// no allocated workspace. Squared accumulation cannot overflow; final
+/// rescaling still reports an unrepresentable norm as infinity. A nonzero
+/// finite vector cannot acquire a zero norm just because its squares underflow.
 #[must_use]
 pub fn norm2(a: &[f64]) -> f64 {
-    fs_math::det::sqrt(dot(a, a))
+    let mut maximum = 0.0_f64;
+    for &value in a {
+        // f64::max ignores NaNs. A callback's invalid output must propagate
+        // to solver admission instead of disappearing from its residual norm.
+        if value.is_nan() {
+            return f64::NAN;
+        }
+        maximum = maximum.max(value.abs());
+    }
+    if maximum == 0.0 || maximum.is_infinite() {
+        return maximum;
+    }
+    // Remove the significand to obtain a normal power of two. Subnormal
+    // vectors use MIN_POSITIVE: even the smallest entry then scales to 2^-52,
+    // whose square is representable. The reciprocal is exact and finite.
+    let scale = f64::from_bits(maximum.to_bits() & (0x7ff_u64 << 52)).max(f64::MIN_POSITIVE);
+    let inverse_scale = scale.recip();
+    let mut total = 0.0;
+    for chunk in a.chunks(fs_tilelang::REDUCTION_CHUNK) {
+        let mut partial = 0.0;
+        for &value in chunk {
+            let normalized = value * inverse_scale;
+            partial += normalized * normalized;
+        }
+        total += partial;
+    }
+    scale * fs_math::det::sqrt(total)
 }
 
 /// Crate version, re-exported for provenance stamping.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod norm_tests {
+    use super::*;
+
+    #[test]
+    fn norm_preserves_nonzero_amplitudes_without_overflowing_their_squares() {
+        for amplitude in [1e-300, 1e-200, 1e-9, 1.0, 1e200, 1e300] {
+            let actual = norm2(&[3.0 * amplitude, -4.0 * amplitude]);
+            assert!((actual / amplitude - 5.0).abs() < 2e-15);
+        }
+        let quantum = f64::from_bits(1);
+        assert_eq!(
+            norm2(&[3.0 * quantum, 4.0 * quantum]).to_bits(),
+            (5.0 * quantum).to_bits()
+        );
+        assert_eq!(norm2(&[f64::MAX]), f64::MAX);
+    }
+
+    #[test]
+    fn norm_preserves_zero_and_distinguishes_invalid_and_unrepresentable_values() {
+        assert_eq!(norm2(&[]).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(norm2(&[0.0, -0.0]).to_bits(), 0.0_f64.to_bits());
+        assert_eq!(norm2(&[f64::INFINITY, 1.0]), f64::INFINITY);
+        assert_eq!(norm2(&[f64::MAX, f64::MAX]), f64::INFINITY);
+        for values in [[f64::NAN, 0.0], [f64::INFINITY, f64::NAN]] {
+            assert!(norm2(&values).is_nan());
+        }
+    }
+
+    #[test]
+    fn norm_retains_the_original_chunk_order_at_ordinary_scales() {
+        for count in [1, 63, 64, 65, 129, 1025] {
+            let values: Vec<_> = (0..count)
+                .map(|i| ((i * 17 % 41) as f64 - 20.0) / 13.0)
+                .collect();
+            assert_eq!(
+                norm2(&values).to_bits(),
+                fs_math::det::sqrt(dot(&values, &values)).to_bits()
+            );
+        }
+    }
+}

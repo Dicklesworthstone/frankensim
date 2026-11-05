@@ -506,6 +506,81 @@ impl NonlinearProblem for HugeResidual {
     }
 }
 
+#[test]
+fn fgmres_retains_weak_and_large_source_amplitudes() {
+    let operator = DenseSquare::new(2, &[4.0, 1.0, 0.0, 2.0]);
+    for amplitude in [1e-310, 1e-200, 1e-9, 1.0, 1e200] {
+        // The same physical shape at different source amplitudes. Squaring
+        // the RHS before normalization used to turn the weak cases into an
+        // exact zero residual and return the untouched zero solution.
+        let rhs = [2.0 * amplitude, -4.0 * amplitude];
+        let mut solver = FgmresState::new(&rhs, 2);
+        let report = solver.run(
+            &operator,
+            &fs_sparse::precond::IdentityPrecond,
+            &rhs,
+            2e-12,
+            8,
+        );
+        assert!(
+            report.converged_euclidean(),
+            "amplitude={amplitude}: {report:?}"
+        );
+        assert!(report.iters > 0, "a nonzero source must require a solve");
+        assert!((solver.x[0] / amplitude - 1.0).abs() < 2e-12);
+        assert!((solver.x[1] / amplitude + 2.0).abs() < 2e-12);
+        // Independent dimensionless residual: do not use the norm under test.
+        let x = [solver.x[0] / amplitude, solver.x[1] / amplitude];
+        let relative = (2.0 - 4.0 * x[0] - x[1]).hypot(-4.0 - 2.0 * x[1]) / 20.0_f64.sqrt();
+        assert!(
+            relative < 2e-12,
+            "amplitude={amplitude}: residual={relative}"
+        );
+    }
+}
+
+#[test]
+fn newton_relative_target_is_independent_of_residual_amplitude_units() {
+    struct ScaledRoots(f64);
+    impl NonlinearProblem for ScaledRoots {
+        fn dimension(&self) -> usize {
+            2
+        }
+        fn residual(&self, x: &[f64], output: &mut [f64]) {
+            output[0] = self.0 * (x[0] * x[0] - 2.0);
+            output[1] = self.0 * (x[1] * x[1] - 3.0);
+        }
+        fn jacobian_apply(&self, x: &[f64], direction: &[f64], output: &mut [f64]) {
+            for i in 0..2 {
+                output[i] = self.0 * (2.0 * x[i] * direction[i]);
+            }
+        }
+    }
+
+    for amplitude in [1e-200, 1e-9, 1.0, 1e200] {
+        for globalization in [
+            Globalization::LineSearch(LineSearchConfig::default()),
+            Globalization::TrustRegion(TrustRegionConfig::default()),
+        ] {
+            let problem = ScaledRoots(amplitude);
+            let config = NewtonKrylovConfig {
+                absolute_tolerance: 0.0,
+                relative_tolerance: 1e-11,
+                linear_restart: 2,
+                globalization,
+                ..NewtonKrylovConfig::default()
+            };
+            let mut solver = NewtonKrylovState::new(&problem, vec![1.0, 1.0], config)
+                .expect("finite representable residual norm");
+            assert!(solver.residual_norm() > 0.0);
+            let report = solver.run(&problem, 32);
+            assert!(report.converged, "amplitude={amplitude}: {report:?}");
+            assert!((solver.x[0] - 2.0_f64.sqrt()).abs() < 2e-11);
+            assert!((solver.x[1] - 3.0_f64.sqrt()).abs() < 2e-11);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BratuTwo {
     lambda: f64,
@@ -1389,9 +1464,12 @@ fn newton_relative_tolerance_zero_stops_on_the_absolute_tolerance_alone() {
     let mut residual = [0.0];
     SquareRootTwo.residual(&state.x, &mut residual);
     assert!(residual[0].abs() <= 1.0e-12, "residual {:e}", residual[0]);
-    for (absolute_tolerance, relative_tolerance) in
-        [(0.0, 0.0), (1.0e-12, -1.0e-3), (1.0e-12, 1.5), (1.0e-12, f64::NAN)]
-    {
+    for (absolute_tolerance, relative_tolerance) in [
+        (0.0, 0.0),
+        (1.0e-12, -1.0e-3),
+        (1.0e-12, 1.5),
+        (1.0e-12, f64::NAN),
+    ] {
         let config = NewtonKrylovConfig {
             absolute_tolerance,
             relative_tolerance,
