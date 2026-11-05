@@ -1,4 +1,4 @@
-//! Bounded incoherent sum of the original slab's transmitted image family.
+//! Bounded incoherent sums of the original slab's transmitted/reflected images.
 
 use super::*;
 
@@ -9,11 +9,13 @@ pub struct SlabHistoryOptions {
     pub absolute_tolerance_w_m2_nm: f64,
     /// Additional allowed omitted irradiance as a fraction of that bin's sum.
     pub relative_tolerance: f64,
-    /// Maximum evaluated images per wavelength, including the direct image.
+    /// Maximum evaluated images per wavelength, including the direct image
+    /// (transmission) or front-surface mirror (reflection).
     pub max_images_per_wavelength: u32,
-    /// Total reserved boundary interactions across all wavelengths. Order m
-    /// reserves 2m+2 before tracing, even if opacity or back-facing reception
-    /// makes it finish early. The receiver visibility query is additional.
+    /// Total reserved boundary interactions across all wavelengths. Order k
+    /// reserves 2k+2 for transmission or 2k+1 for reflection before tracing,
+    /// even if opacity or back-facing reception makes it finish early. The
+    /// receiver visibility query is additional.
     pub max_interface_interactions: u64,
 }
 
@@ -25,6 +27,22 @@ impl Default for SlabHistoryOptions {
             max_images_per_wavelength: 128,
             max_interface_interactions: 1_048_576,
         }
+    }
+}
+
+impl SlabHistoryOptions {
+    fn validate(self) -> Result<(), SlabHistoryError> {
+        if !self.absolute_tolerance_w_m2_nm.is_finite()
+            || self.absolute_tolerance_w_m2_nm < 0.0
+            || !self.relative_tolerance.is_finite()
+            || !(0.0..1.0).contains(&self.relative_tolerance)
+            || (self.absolute_tolerance_w_m2_nm == 0.0 && self.relative_tolerance == 0.0)
+            || self.max_images_per_wavelength == 0
+            || self.max_interface_interactions == 0
+        {
+            return Err(SlabHistoryError::InvalidOptions);
+        }
+        Ok(())
     }
 }
 
@@ -65,17 +83,27 @@ impl From<PhotometryError> for SlabHistoryError {
 
 impl core::fmt::Display for SlabHistoryError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "slab transmission history refused: {self:?}")
+        write!(f, "slab optical history refused: {self:?}")
     }
 }
 
 impl std::error::Error for SlabHistoryError {}
 
-/// Incoherent broad-face transmitted irradiance plus its omitted-history bound.
+/// Which broad-face family a complete reading contains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlabHistoryFamily {
+    /// T(RR)^kT across the slab, k >= 0.
+    Transmitted,
+    /// The front mirror R, followed by T R^(2k-1) T for k >= 1.
+    Reflected,
+}
+
+/// Incoherent broad-face irradiance plus its omitted-history bound.
 /// Bounds concern image truncation in the declared geometric-optics model;
 /// they do not enclose floating-point, mesh, spectrum or calibration errors.
 #[derive(Clone, Debug, PartialEq)]
-pub struct TransmittedSlabHistorySpectrum {
+pub struct SlabHistorySpectrum {
+    family: SlabHistoryFamily,
     bins_w_m2_nm: [f64; SPECTRAL_BINS],
     omitted_w_m2_nm: [f64; SPECTRAL_BINS],
     images: [u32; SPECTRAL_BINS],
@@ -84,7 +112,18 @@ pub struct TransmittedSlabHistorySpectrum {
     omitted_reading: BundleIrradianceReading,
 }
 
-impl TransmittedSlabHistorySpectrum {
+/// Spectrum returned by the opposite-side transmission measurement.
+pub type TransmittedSlabHistorySpectrum = SlabHistorySpectrum;
+
+/// Spectrum returned by the same-side reflection measurement.
+pub type ReflectedSlabHistorySpectrum = SlabHistorySpectrum;
+
+impl SlabHistorySpectrum {
+    /// Selected transmitted or reflected broad-face family.
+    pub const fn family(&self) -> SlabHistoryFamily {
+        self.family
+    }
+
     /// Sum of evaluated images at native wavelength midpoints, in W/(m² nm).
     pub const fn spectral_irradiance_w_m2_nm(&self) -> &[f64; SPECTRAL_BINS] {
         &self.bins_w_m2_nm
@@ -105,7 +144,7 @@ impl TransmittedSlabHistorySpectrum {
         self.reserved_interfaces
     }
 
-    /// Visible radiant irradiance and lux in the evaluated transmitted histories.
+    /// Visible radiant irradiance and lux in the evaluated selected histories.
     pub const fn reading(&self) -> BundleIrradianceReading {
         self.reading
     }
@@ -153,16 +192,7 @@ impl PhotometricSource {
         transport: TransportOptions,
         history: SlabHistoryOptions,
     ) -> Result<TransmittedSlabHistorySpectrum, SlabHistoryError> {
-        if !history.absolute_tolerance_w_m2_nm.is_finite()
-            || history.absolute_tolerance_w_m2_nm < 0.0
-            || !history.relative_tolerance.is_finite()
-            || !(0.0..1.0).contains(&history.relative_tolerance)
-            || (history.absolute_tolerance_w_m2_nm == 0.0 && history.relative_tolerance == 0.0)
-            || history.max_images_per_wavelength == 0
-            || history.max_interface_interactions == 0
-        {
-            return Err(SlabHistoryError::InvalidOptions);
-        }
+        history.validate()?;
         let connection = SlabConnection::try_new(
             cx,
             scene,
@@ -171,6 +201,65 @@ impl PhotometricSource {
             receiver,
             transport,
         )?;
+        self.slab_history_irradiance(cx, &connection, receiver, transport, history)
+    }
+
+    /// Measure the front-surface mirror plus every incoherent internal return
+    /// through the same broad face: R + T R (RR)^m T, m >= 0.
+    ///
+    /// The source and receiver are in vacuum on the same side of the selected
+    /// static, closed, smooth parallel slab. `front_face_point_m` is a point
+    /// on its original source-facing broad face. This witness selects the face
+    /// pair and is validated against the original body; it does not prescribe
+    /// a physical reflection point. Opaque geometry on that discovery segment
+    /// does not occlude light. Each solved physical segment sees the complete
+    /// scene. Colocated source and receiver positions are valid.
+    ///
+    /// Each wavelength and image independently determines its source direction,
+    /// reflected receiver projection and area Jacobian. The native surface
+    /// response retains s/p power, coatings seen from the actual side, and Beer
+    /// loss over every folded internal segment. Order zero is the front mirror;
+    /// order k >= 1 crosses 2k slab widths and has 2k-1 internal reflections.
+    /// Its reserved work is 2k+1 boundary interactions. Dark, blocked or
+    /// back-facing early images do not suppress later orders.
+    ///
+    /// The same per-bin truncation tolerances, image/interaction caps and
+    /// complete-spectrum cancellation semantics as transmitted histories apply.
+    /// The output excludes direct source-to-receiver light, side-face paths,
+    /// other scene illumination and coherent interference between bulk faces.
+    /// It does not relax general path jobs' point-source/glass admission.
+    #[allow(clippy::too_many_arguments)]
+    pub fn reflected_slab_history_irradiance(
+        &self,
+        cx: &Cx<'_>,
+        scene: &Scene,
+        slab_primitive: usize,
+        front_face_point_m: fs_geom::Point3,
+        receiver: IlluminanceProbe,
+        transport: TransportOptions,
+        history: SlabHistoryOptions,
+    ) -> Result<ReflectedSlabHistorySpectrum, SlabHistoryError> {
+        history.validate()?;
+        let connection = SlabConnection::try_reflected(
+            cx,
+            scene,
+            slab_primitive,
+            self.position_m(),
+            front_face_point_m,
+            receiver,
+            transport,
+        )?;
+        self.slab_history_irradiance(cx, &connection, receiver, transport, history)
+    }
+
+    fn slab_history_irradiance(
+        &self,
+        cx: &Cx<'_>,
+        connection: &SlabConnection<'_>,
+        receiver: IlluminanceProbe,
+        transport: TransportOptions,
+        history: SlabHistoryOptions,
+    ) -> Result<SlabHistorySpectrum, SlabHistoryError> {
         let plane = PlanarIrradianceReceiver::try_new(
             receiver.position_m(),
             receiver.normal(),
@@ -183,7 +272,12 @@ impl PhotometricSource {
             radiant_irradiance_w_m2: 0.0,
             illuminance_lux: 0.0,
         };
-        let mut result = TransmittedSlabHistorySpectrum {
+        let mut result = SlabHistorySpectrum {
+            family: if connection.is_reflected() {
+                SlabHistoryFamily::Reflected
+            } else {
+                SlabHistoryFamily::Transmitted
+            },
             bins_w_m2_nm: [0.0; SPECTRAL_BINS],
             omitted_w_m2_nm: [0.0; SPECTRAL_BINS],
             images: [0; SPECTRAL_BINS],
@@ -216,7 +310,7 @@ impl PhotometricSource {
                         remaining_bound_w_m2_nm: bound,
                     });
                 }
-                let required = 2 * (u64::from(images) + 1);
+                let required = image.interface_interactions(connection.is_reflected());
                 let remaining = history.max_interface_interactions - result.reserved_interfaces;
                 if required > remaining {
                     return Err(SlabHistoryError::InterfaceBudgetExceeded {

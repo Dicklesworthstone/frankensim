@@ -10,7 +10,9 @@
 //! [`PhotometricSource::transmitted_slab_irradiance`] selects the image with
 //! no internal returns. [`PhotometricSource::transmitted_slab_history_irradiance`]
 //! sums the incoherent broad-face transmitted family, with explicit work caps
-//! and an omitted-image bound. Neither includes other scene illumination,
+//! and an omitted-image bound. [`PhotometricSource::reflected_slab_history_irradiance`]
+//! supplies the front mirror and internal returns on the source side. These
+//! selected families exclude other scene illumination,
 //! side-face paths, diffuse/scattered light or coherent interference between
 //! slab faces. The actual material's coherent surface coatings remain part of
 //! each individual interface. No calibration or roundoff enclosure is inferred.
@@ -24,7 +26,10 @@ use fs_exec::Cx;
 use fs_geom::Vec3;
 
 mod history;
-pub use history::{SlabHistoryError, SlabHistoryOptions, TransmittedSlabHistorySpectrum};
+pub use history::{
+    ReflectedSlabHistorySpectrum, SlabHistoryError, SlabHistoryFamily, SlabHistoryOptions,
+    SlabHistorySpectrum, TransmittedSlabHistorySpectrum,
+};
 
 /// Complete native 80-bin spectrum for the selected two-transmission image.
 /// Opaque blockers can remove different bins when dispersion changes the path.

@@ -7542,3 +7542,47 @@ before tracing, including early terminated orders. Cancellation is checked at
 each bin, order and physical return. A work cap without convergence is an
 explicit error, never a silently truncated complete reading. Geometry is
 prepared once and individual histories use fixed local storage.
+
+## Incoherent reflected slab histories for calibrated point fixtures
+
+`PhotometricSource::reflected_slab_history_irradiance` measures the complementary
+same-side broad-face family: the front mirror `R`, then `T R^(2k-1) T` for
+positive k. The caller supplies a point on the original source-facing broad
+face. Body-only discovery verifies that witness, the parallel opposite face,
+and the original closed interior; it does not guess a face from the same-side
+endpoint chord or treat the witness as the physical reflection point. Source
+and receiver remain in vacuum in front of that face. Colocated endpoints are
+valid because direct source-to-receiver light is outside this observable.
+
+The front mirror uses its exact virtual-distance area map. Each internal image
+mirrors the receiver across the front face and unfolds `2kh` of glass before
+using the original dispersive inverse Snell solve and analytic Jacobian. The
+actual reflected arrival direction supplies the signed receiver projection.
+Native geometry then folds and checks every source, internal and outgoing
+segment against the complete original scene. The same shared s/p transport
+retains front-versus-inside coatings, `2k-1` physical internal reflections,
+and Beer absorption along their actual lengths. Dark, back-facing or blocked
+early images cannot remove subsequent illumination. A discovery-only blocker
+has no optical effect. Internal normalized-power underflow retains the existing
+logarithmic source-scaling fallback.
+
+The front contribution has its own peak-source bound, with factored logarithmic
+area scaling. The remaining family reuses the passive spreading bound with
+`D_k=H+2kh/n`, `H=a+b`, and the tighter bare-glass bound with Fresnel exponent
+`2k-1`; it never applies a negative exponent to the front mirror. Per-bin
+absolute-plus-relative tolerances and complete-spectrum cancellation remain
+shared with transmission. Reflected order k reserves `2k+1` interface events,
+so N evaluated orders consume `N²` events per wavelength. Physical distance,
+image and total interface caps refuse incomplete readings. Geometry/BVH
+preparation is shared once and individual images allocate no workspace.
+
+`SlabHistorySpectrum` exposes the selected `SlabHistoryFamily`; the transmitted
+and reflected result names alias this common reading and its spectral/radiant/
+photopic omitted-image bounds. These are analytic model-truncation bounds, not
+roundoff, mesh, calibration or measurement enclosures. Side-face paths,
+rough/curved/moving surfaces, bulk coherent interference, other illumination,
+and general point-fixture specular path-job admission remain outside this API.
+Focused controls include axial series and retroreception, independently folded
+oblique Snell rays and finite-difference areas, angular source support,
+visibility, tilted/grazing reception, a separate complex-amplitude absorbing-
+film reference, rescaled extreme attenuation and domain/work refusals.
