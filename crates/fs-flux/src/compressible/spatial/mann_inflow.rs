@@ -30,6 +30,7 @@ use geometry::{half_edges, rotation_is_proper, speed, to_field, to_grid};
 mod stages;
 pub use stages::MannReservoirStepReport3;
 mod bridge;
+pub use bridge::MannMixtureForce3;
 pub use bridge::MannReservoirBridgeReport3;
 
 /// The Cartesian grid uses metres already. Its origin is a cell CORNER, unlike
@@ -102,6 +103,7 @@ pub enum MannReservoirError3 {
     Mixture(MixtureError),
     Molecular(super::molecular::MolecularError),
     MixtureMolecular(fs_gas::multicomponent::dissipation::DissipationError),
+    Reactive(fs_gas::multicomponent::reactive::ReactiveError),
     /// Conditional OU normal variates across every stage and rejected trial.
     BridgeWork {
         required: usize,
@@ -137,6 +139,11 @@ impl From<super::molecular::MolecularError> for MannReservoirError3 {
 impl From<fs_gas::multicomponent::dissipation::DissipationError> for MannReservoirError3 {
     fn from(error: fs_gas::multicomponent::dissipation::DissipationError) -> Self {
         Self::MixtureMolecular(error)
+    }
+}
+impl From<fs_gas::multicomponent::reactive::ReactiveError> for MannReservoirError3 {
+    fn from(error: fs_gas::multicomponent::reactive::ReactiveError) -> Self {
+        Self::Reactive(error)
     }
 }
 

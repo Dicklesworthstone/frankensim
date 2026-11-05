@@ -5,7 +5,10 @@ use crate::compressible::spatial::{StepControl, StepReport};
 use fs_qty::Time;
 use std::cell::RefCell;
 
+mod forcing;
 mod molecular;
+mod reactive;
+pub use reactive::MannMixtureForce3;
 
 /// Native accepted physical balances and actual cumulative atmosphere work.
 #[derive(Clone, Copy, Debug, PartialEq)]

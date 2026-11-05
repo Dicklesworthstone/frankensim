@@ -6288,3 +6288,50 @@ heat and body work, original RKL2 stages above two, heat-release whole-trial
 replay and cumulative source work, physical split stages and rounded endpoints,
 terminal late provider/admission/budget failures, final cancellation, complete
 accepted-state rollback, later held recovery and early finite-inertia refusal.
+
+### Evolving Mann boundaries with mechanical forcing and reacting transport
+
+The experimental `MannReservoirInflow3` bridge adapters now reach the original
+forced frozen and multicomponent Euler transactions, including their SSP and
+RKL2 molecular compositions. They also reach original finite-rate reacting
+Euler, reacting SSP molecular transport, and reacting RKL2 transport, each
+with an optional held native mechanical force. `MannMixtureForce3` carries
+the original force, authored Mach control and caller-owned reusable scratch;
+it adds no source law, independent clock or numerical workspace.
+
+All adapters reuse the original conditional OU bridge observer and native
+time-resolved profile transactions. One retained stochastic realization is
+sampled at actual native stage times, including nonmonotone split observations
+and shortened complete-interval retries. The same frame is reused across all
+faces at one consecutive time. Exact rectangular face filtering, the original
+coordinate rotation, source identity checks and the advective phase bound
+remain active. The accepted `FixedStepMannField` is never advanced by these
+observations; the caller owns its eventual endpoint advance.
+
+One cumulative face/mode allowance and one conditional-normal allowance span
+the entire call, including discarded trials. Native forcing, chemistry and
+molecular work retain their existing separate budgets. Source or bridge work
+failure preserves every accepted physical field, clock, profile, report and
+boundary load, including the independently supplied molecular operator. The
+mutable bridge frame is reusable observation scratch, not an accepted physical
+state, and may retain a failed trial's last successful observation. Bridge and
+atmosphere errors retain their original values; reacting errors are carried by
+`MannReservoirError3::Reactive` without replacing their native cause.
+
+These paths add the Mann velocity fluctuations to the caller's complete mean
+exterior state. Species, temperature/composition histories, kinetics, calorics,
+Maxwell--Stefan diffusion, Fourier heat, full stress, force impulse and mechanical
+work stay with their native owners. The force is held over the accepted interval;
+this does not create stochastic volume forcing or a joint scalar turbulence
+model. Existing timed wall-inertia and acceleration exclusions still apply.
+Stabilized diffusion enlarges the explicit stability interval and does not
+certify stochastic temporal accuracy or physical turbulence spectra.
+
+Focused native tests compare the adapters to independent rotated/filtered
+bridge synthesis supplied directly to the original forced and reacting owners,
+with nonzero chemical heat and mechanical work. Both SSP and RKL2 compositions
+exercise late draw-budget rollback, identical subsequent replay, both owners'
+conservative loads and source immutability. Reacting molecular tests include
+the nonzero-epoch rounded endpoint case, so split clocks cannot observe beyond
+the retained source interval. These are manufactured numerical composition
+checks, not an experimental validation or a full workspace acceptance gate.

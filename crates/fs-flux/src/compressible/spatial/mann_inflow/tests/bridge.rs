@@ -9,6 +9,9 @@ use fs_thermochem::equilibrium::composition::IdealGasEquilibriumV1;
 use fs_thermochem::transport::kinetic::ThermalConductivityQuantityV1;
 use fs_thermochem::{ChargeVector, ElementId, ElementalMatrix};
 
+mod forcing;
+mod reactive;
+
 const DRAWS: usize = 100_000;
 
 fn source() -> FixedStepMannField {
