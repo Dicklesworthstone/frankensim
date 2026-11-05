@@ -45,6 +45,39 @@ the crash cascade with structurally exact energy accounting.
   after assembly into `Box<dyn Storage>` and supported pHS composition. Ordinary
   harmonic-balance and variational adapters can therefore differentiate the
   actual assembled law without maintaining a second force model or callback.
+- `PreloadedModalStorage::new(source, equilibrium_displacements)` translates
+  the SAME conservative SOS law under the required held generalized force
+  `f0 = grad V(a)`. Incremental storage is
+  `p^2/2 + V(a+q)-V(a)-f0.q`. Each source channel retains its quadratic,
+  cubic and quartic increments through the factored form
+  `c (s*u/2 + t^2 + t*u + u^2/4)`, with `s=a^T E a`, `t=(E a)^T q`,
+  and `u=q^T E q`. Small motion is not lost by subtracting nearly equal
+  source energies or forces. The complete local stiffness
+  `diag(omega^2) + sum c [s E + 2 (E a)(E a)^T]` includes its signed
+  off-diagonal entries; existing pHS PSD admission refuses negative tangent
+  curvature without altering it. Semidefinite curvature does not establish
+  local stability: cubic terms can destabilize a null direction. Exact stress symmetry is required rather
+  than silently repairing the source. `preload_forces()` is already
+  accounted in the translated potential; incremental applied drive excludes
+  that held force. `Storage::quadratic_part` supplies this full local stiffness
+  to existing exact-linear nonlinear stepping, and the continuous tangent
+  retains every nonlinear interaction. The stable midpoint remainder retains
+  the represented midpoint offset `o=(left-m)+(right-m)`, including quadratic
+  kinetic and elastic terms. For each channel, with `z=a+m`, it evaluates
+  `c [(z^T E d + d^T E o/2)(z^T E o + (d^T E d + o^T E o)/4)
+  + (z^T E z)(d^T E o)/2]` through compensated factored contractions of
+  source-reference coefficients, increments and offsets; it never forms `z`
+  or subtracts endpoint energies. At an exact midpoint this reduces to
+  `c/4 (d^T E d) [(E a)^T d + m^T E d]`. Warm calls allocate nothing;
+  diagonal stress channels cost O(modes), dense channels O(modes^2).
+  This is a caller-declared static displacement under a dead load, not a
+  pressure projection, equilibrium solve, curved-shell theory, local/global
+  stability certificate, or permission to ignore generated-harmonic bandwidth.
+  `tests/preload.rs` checks the exact biased Duffing law and its DC/even/odd
+  force harmonics, full coupled translation and tangent, tiny resolved motion
+  beside a large static reference, independent Gauss-integrated work, the
+  centered limit, represented-midpoint offsets, cubic instability in an
+  admitted Hessian nullspace, and negative-curvature/asymmetric refusals.
 - `assemble(storage, zetas, strike_weights)` — the pHS: symplectic
   pair blocks, per-mode viscous damping `R = diag(0, 2 zeta w)`
   (zetas come from the caller; the visco-damping facility's per-mode

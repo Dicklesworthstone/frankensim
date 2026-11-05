@@ -48,7 +48,9 @@ mod membrane;
 pub use membrane::{VkSampledPlateParams, von_karman_sampled_plate_with_membrane};
 
 pub mod longitudinal;
+pub mod preload;
 pub mod sav;
+pub use preload::PreloadedModalStorage;
 
 /// One Airy-stress coupling channel: coefficient `c >= 0` and the
 /// symmetric matrix `E` (row-major `n x n`) of `q^T E q`.
