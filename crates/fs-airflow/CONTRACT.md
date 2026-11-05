@@ -1,5 +1,49 @@
 # CONTRACT: fs-airflow
 
+## Unsteady laminar pipe networks with internal continuity
+
+`graph::inertial::laminar::network::LaminarNetwork` connects original
+`LaminarPipe` components through arbitrary ideal internal junctions,
+branches and loops. A boundary-rooted spanning forest supplies integer
+through-flow/circulation columns. Orthonormalizing their original inertia
+metric eliminates only redundant mean-flow coordinates; every radial
+memory arm remains. Internal volume continuity belongs to the continuous
+state space, not an endpoint or interval-average repair. Unresolved
+numerical rank refuses instead of discarding a physical circulation mode.
+
+The projected system retains original positive viscous source squares.
+`PreparedExactZoh` advances one coupled held-input trajectory, and
+`PreparedSourceLoss` measures each branch's actual heat on that trajectory.
+Reservoir ports and explicit pressure-head ports remain power conjugate to
+their original flows; the latter also provide interval-average branch flow
+without duplicate observer exponentials. Reservoir and head work are
+reported separately. Gauges are normalized per physical component before
+matrix products. Work and forcing roundoff bounds use uncancelled port
+terms so recovering and driving sources may coexist.
+
+Original fixed-density sources, branch Reynolds ceilings and sampled
+frequency bands remain attached. A cold native sparse LDLT prepares the
+steady response and checks the original momentum residual. Whole-interval
+Reynolds admission uses passive energy contraction, including the steady
+response residual. Accepted branch history can be imported/extracted and
+continued under new viscosity without resetting its profile. Prepared
+advancement reuses its state, flow and heat buffers; cancellation or refusal
+preserves accepted history and reports.
+
+The complete state/port augmentation is bounded by
+`MAX_LAMINAR_NETWORK_AUGMENTED`; no original memory arm is truncated to fit.
+Each connected component needs a pressure node, which may serve only as
+the gauge of a closed loop. Junctions have zero storage and no modeled
+entrance, mixing, area-change, thermal, cavitation or compressibility loss.
+A supplied pressure head is an explicit physical source, not an inferred
+pump constitutive law. Existing native pipe model and band limitations apply.
+
+G1/G3 tests cover original single-pipe/series limits, independent
+Poiseuille/Kirchhoff mesh equilibrium, loop head work, separate gauges,
+viscosity/history continuation and refusal atomicity. The source-level
+continuity tests cover topology, kinetic orthonormality, closed cycles,
+dead ends, disconnected gauges and unequal inertias.
+
 ## Unsteady laminar branches between common reservoirs
 
 `graph::inertial::laminar::parallel::LaminarParallel` connects original

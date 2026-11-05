@@ -24,6 +24,8 @@
 //! The frequency-domain error is sampled over an explicit band; arbitrary
 //! startup pulses do not inherit a time-domain error certificate.
 
+/// Coupled incompressible pipe networks with exact internal continuity.
+pub mod network;
 /// Common-pressure branches with independent viscous histories and heat.
 pub mod parallel;
 /// Coupled developed sections with separate viscosity histories and heat.
