@@ -4,7 +4,9 @@ use fs_phs::circuit::{
     Branch, CircuitGraph, MutualInductance, TransformerLink, assemble_circuit,
     assemble_circuit_with_mutual_inductance,
 };
-use fs_phs::harmonic::{HarmonicBudget, HarmonicError, HarmonicModel, HarmonicPortPower};
+use fs_phs::harmonic::{
+    HarmonicBudget, HarmonicError, HarmonicModel, HarmonicParameterDirection, HarmonicPortPower,
+};
 use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, ScalarLaw, SeparableStorage};
 
 fn budget() -> HarmonicBudget {
@@ -74,7 +76,42 @@ fn coherent_port_sum_preserves_a_weak_phasor_between_opposite_strong_responses()
         near(derivative.output_derivative[3], small.scale(-0.5), 3e-15);
         near(derivative.output_logarithmic_derivative(3).unwrap().unwrap(),
             C64::new(-0.5, 0.5), 3e-15);
+        // Scaling every input by (1+theta) differentiates back to the original
+        // response, including the small port output between strong modes.
+        let amplitude = factor.response_with_parameter_derivative(
+            &input, HarmonicParameterDirection::default(), Some(&input), || false,
+        ).unwrap();
+        near(amplitude.output_derivative[3], result.output[3], 3e-15);
+        assert!(amplitude.relative_derivative_residual < 1e-14);
     }
+}
+
+#[test]
+fn effort_and_port_map_tangents_retain_their_weak_combined_output() {
+    let identity = vec![1.0, 0.0, 0.0, 1.0];
+    let system = PortHamiltonian::new(
+        2, 3, vec![0.0; 4], identity.clone(),
+        vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0],
+        Box::new(QuadraticStorage::new(identity, 2).unwrap()),
+    ).unwrap();
+    let model = HarmonicModel::from_ode(&system, budget(), || false).unwrap();
+    let factor = model.factor(1.0, || false).unwrap();
+    let large = C64::from_re(2.0_f64.powi(54));
+    let input = [C64::ZERO, large, C64::ZERO];
+    let input_derivative = [large, C64::ONE, C64::ZERO];
+    // The undriven observation port changes from x0+x1 to x0+(1-theta)*x1.
+    // At theta=0, dx=[L,1]/(1-i) and x=[0,L]/(1-i), hence dy=1/(1-i).
+    // Separate rounding of G^T*de and dG^T*e, or of the two terms in the
+    // second row, would erase this entire output derivative.
+    let port_derivative = [0.0, 0.0, 0.0, 0.0, 0.0, -1.0];
+    let direction = HarmonicParameterDirection {
+        ports: Some(&port_derivative), ..HarmonicParameterDirection::default()
+    };
+    let result = factor.response_with_parameter_derivative(
+        &input, direction, Some(&input_derivative), || false,
+    ).unwrap();
+    near(result.output_derivative[2], C64::new(0.5, 0.5), 3e-15);
+    assert!(result.relative_derivative_residual < 1e-14);
 }
 
 #[test]
