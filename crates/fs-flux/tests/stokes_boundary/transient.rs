@@ -314,3 +314,302 @@ fn invalid_history_and_timestep_refuse_before_boundary_or_load_queries() {
     ));
     assert_eq!(calls.get(), 0);
 }
+
+fn density_test_moments(
+    system: &FluxSystem<'_>,
+    velocity: &dyn Fn([f64; 2]) -> [f64; 2],
+) -> Vec<f64> {
+    let mesh = system.mesh;
+    let mut moments = vec![0.0; system.n_u];
+    for (edge, geometry) in mesh.edges.iter().enumerate() {
+        let a = mesh.verts[geometry.verts.0];
+        let b = mesh.verts[geometry.verts.1];
+        for (point, weight) in edge_gauss_pub(a, b) {
+            let u = velocity(point);
+            let normal = u[0] * geometry.normal[0] + u[1] * geometry.normal[1];
+            let s = ((point[0] - a[0]) * (b[0] - a[0]) + (point[1] - a[1]) * (b[1] - a[1]))
+                / geometry.len.powi(2)
+                - 0.5;
+            moments[2 * edge] += weight * normal / geometry.len;
+            moments[2 * edge + 1] += weight * normal * s / geometry.len;
+        }
+    }
+    moments
+}
+
+/// Equal pressure gradients impart equal momentum to equal-volume chambers,
+/// while the denser fluid accelerates more slowly. Removing pressure coasts.
+#[test]
+fn variable_density_pressure_pulses_preserve_momentum_history_and_work() {
+    let mesh = separate_domains();
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let relative_density = |cell: usize, _: [f64; 2]| {
+        if system.pressure_components()[cell] == 0 {
+            1.0
+        } else {
+            4.0
+        }
+    };
+    let mut previous = density_test_moments(&system, &|_| [0.3, 0.0]);
+    let mut speeds = [0.3; 2];
+    for (dt, gradient) in [(0.2, 2.0), (0.1, 0.0), (0.08, -1.0)] {
+        let traction = |point: [f64; 2], normal: [f64; 2]| {
+            let pressure = 8.0 - gradient * point[0];
+            normal.map(|n| -pressure * n)
+        };
+        let boundaries = traction_boundaries(&mesh, &traction);
+        let assembly = system
+            .assemble_stokes_mixed_bdf1_variable_density(
+                params,
+                &relative_density,
+                &|_, _| 0.7,
+                &|_| [0.0; 2],
+                &boundaries,
+                &previous,
+                dt,
+            )
+            .unwrap();
+        let solved = assembly.solve().unwrap();
+        speeds[0] += dt * gradient;
+        speeds[1] += dt * gradient / 4.0;
+        let expected = |point: [f64; 2]| [speeds[usize::from(point[0] > 2.0)], 0.0];
+        let (error, divergence) = system.velocity_error(&solved.field.x, &expected);
+        assert!(error < 3e-11 && divergence < 3e-11, "{error}, {divergence}");
+        for (actual, point) in solved.pressure.iter().zip(&mesh.centroids) {
+            assert!((actual - (8.0 - gradient * point[0])).abs() < 3e-10);
+        }
+        // Constant cell density times affine BDM velocity integrates exactly
+        // at each centroid; this independently observes the solved momentum.
+        let momentum = |field: &[f64]| {
+            mesh.centroids
+                .iter()
+                .enumerate()
+                .map(|(cell, &point)| {
+                    mesh.areas[cell]
+                        * relative_density(cell, point)
+                        * system.velocity_at(field, point)[0]
+                })
+                .sum::<f64>()
+        };
+        assert!(
+            (momentum(&solved.field.x) - momentum(&previous) - 2.0 * dt * gradient).abs() < 3e-11
+        );
+        let old_energy = assembly.kinetic_energy(&previous).unwrap();
+        let new_energy = assembly.kinetic_energy(&solved.field.x).unwrap();
+        let difference: Vec<_> = solved.field.x[..system.n_u]
+            .iter()
+            .zip(&previous)
+            .map(|(new, old)| new - old)
+            .collect();
+        let temporal_loss = assembly.kinetic_energy(&difference).unwrap();
+        let pressure_work = dt * gradient * (speeds[0] + speeds[1]);
+        assert!((new_energy - 0.5 * (speeds[0].powi(2) + 4.0 * speeds[1].powi(2))).abs() < 2e-12);
+        assert!((new_energy - old_energy + temporal_loss - pressure_work).abs() < 3e-12);
+        previous.copy_from_slice(&solved.field.x[..system.n_u]);
+    }
+}
+
+/// rho=1+2y+3y² is stationary under this horizontal shear. Every force and
+/// density moment is an exactly integrated polynomial, with no local p/rho.
+#[test]
+fn graded_density_shear_retains_reference_normalization_energy_and_reactions() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 3, 3));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let dt = 0.2;
+    let intercept = 0.3 + 1.1 * dt;
+    let slope = 0.4 + 0.6 * dt;
+    let rho = |y: f64| 1.0 + 2.0 * y + 3.0 * y * y;
+    let velocity = |point: [f64; 2]| [intercept + slope * point[1], 0.0];
+    let previous = density_test_moments(&system, &|point| [0.3 + 0.4 * point[1], 0.0]);
+    let snapshot = previous.clone();
+    let boundary_edges: Vec<_> = (0..mesh.edges.len())
+        .filter(|&edge| mesh.is_boundary(edge))
+        .collect();
+    // Integral_0^1 (1+2y+3y²)(a+b*y)² dy / 2, independent of solver quadrature.
+    let exact_energy = 0.5
+        * (3.0 * intercept * intercept
+            + (23.0 / 6.0) * intercept * slope
+            + (43.0 / 30.0) * slope * slope);
+    for reference_density in [1.0, 5.0] {
+        let samples = Cell::new(0);
+        let relative_density = |_: usize, point: [f64; 2]| {
+            samples.set(samples.get() + 1);
+            rho(point[1]) / reference_density
+        };
+        let viscosity = |_: usize, point: [f64; 2]| (0.7 + 1.2 * point[1]) / reference_density;
+        let force = |point: [f64; 2]| {
+            [
+                (rho(point[1]) * (1.1 + 0.6 * point[1]) - 1.2 * slope - 2.0) / reference_density,
+                0.0,
+            ]
+        };
+        let traction = |point: [f64; 2], normal: [f64; 2]| {
+            let pressure = (8.0 - 2.0 * point[0]) / reference_density;
+            let shear = viscosity(0, point) * slope;
+            [
+                shear * normal[1] - pressure * normal[0],
+                shear * normal[0] - pressure * normal[1],
+            ]
+        };
+        let boundaries: Vec<_> = boundary_edges
+            .iter()
+            .map(|&edge| {
+                if mesh.edges[edge].normal[1].abs() > 0.5 {
+                    StokesBoundary::Velocity {
+                        edge,
+                        value: &velocity,
+                    }
+                } else {
+                    StokesBoundary::TotalTraction {
+                        edge,
+                        value: &traction,
+                    }
+                }
+            })
+            .collect();
+        let assembly = system
+            .assemble_stokes_mixed_bdf1_variable_density(
+                params,
+                &relative_density,
+                &viscosity,
+                &force,
+                &boundaries,
+                &previous,
+                dt,
+            )
+            .unwrap();
+        assert_eq!(samples.get(), 6 * mesh.tris.len());
+        let solved = assembly.solve().unwrap();
+        let (error, divergence) = system.velocity_error(&solved.field.x, &velocity);
+        assert!(error < 3e-11 && divergence < 3e-11, "{error}, {divergence}");
+        for (actual, point) in solved.pressure.iter().zip(&mesh.centroids) {
+            assert!((reference_density * actual - (8.0 - 2.0 * point[0])).abs() < 3e-10);
+        }
+        let energy = reference_density * assembly.kinetic_energy(&solved.field.x).unwrap();
+        assert!(
+            (energy - exact_energy).abs() < 3e-12,
+            "{energy} != {exact_energy}"
+        );
+        assert_eq!(
+            samples.get(),
+            6 * mesh.tris.len(),
+            "energy must retain the assembled metric"
+        );
+        let load = solved
+            .reactions
+            .resultant(&boundary_edges, [0.0; 2], &[None])
+            .unwrap();
+        let stress_gradient = 2.0 + 1.2 * slope;
+        assert!((reference_density * load.stress.force[0] + stress_gradient).abs() < 3e-10);
+        assert!((reference_density * load.stress.force[1]).abs() < 3e-10);
+        assert!((reference_density * load.stress.moment - 0.5 * stress_gradient).abs() < 3e-10);
+        assert_eq!(load.outward_momentum.force, [0.0; 2]);
+        assert_eq!(previous, snapshot);
+    }
+}
+
+#[test]
+fn unit_density_preserves_the_original_mass_and_history_bits() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let previous = density_test_moments(&system, &|point| [0.2 + point[1], -0.3 * point[0]]);
+    let viscosity = |_: usize, point: [f64; 2]| 0.7 + point[1];
+    let force = |point: [f64; 2]| [point[0] - point[1], 2.0 * point[0]];
+    let zero = |_: [f64; 2]| [0.0; 2];
+    let boundaries = velocity_boundaries(&mesh, &zero);
+    let original = system
+        .assemble_stokes_mixed_bdf1_variable_viscosity(
+            params,
+            &viscosity,
+            &force,
+            &boundaries,
+            &previous,
+            0.13,
+        )
+        .unwrap();
+    let weighted = system
+        .assemble_stokes_mixed_bdf1_variable_density(
+            params,
+            &|_, _| 1.0,
+            &viscosity,
+            &force,
+            &boundaries,
+            &previous,
+            0.13,
+        )
+        .unwrap();
+    assert_eq!(weighted.matrix().to_dense(), original.matrix().to_dense());
+    assert_eq!(weighted.rhs(), original.rhs());
+    assert_eq!(
+        weighted.kinetic_energy(&previous).unwrap(),
+        original.kinetic_energy(&previous).unwrap()
+    );
+    assert!(
+        (weighted.kinetic_energy(&previous).unwrap() - system.kinetic_energy(&previous)).abs()
+            < 1e-13
+    );
+    assert!(weighted.kinetic_energy(&[]).is_err());
+    assert!(
+        weighted
+            .kinetic_energy(&vec![f64::NAN; system.n_u])
+            .is_err()
+    );
+}
+
+#[test]
+fn invalid_density_refuses_before_viscosity_force_or_mass_assembly() {
+    let mesh = TriMesh::from_mesh2(&Mesh2::triangles(1.0, 1.0, 2, 2));
+    let system = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let zero = |_: [f64; 2]| [0.0; 2];
+    let boundaries = velocity_boundaries(&mesh, &zero);
+    let previous = vec![0.0; system.n_u];
+    let other_queries = Cell::new(0);
+    let viscosity = |_: usize, _: [f64; 2]| {
+        other_queries.set(other_queries.get() + 1);
+        1.0
+    };
+    let force = |_: [f64; 2]| {
+        other_queries.set(other_queries.get() + 1);
+        [0.0; 2]
+    };
+    for refused in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let density_queries = Cell::new(0);
+        let density = |_: usize, _: [f64; 2]| {
+            density_queries.set(density_queries.get() + 1);
+            refused
+        };
+        assert!(matches!(
+            system.assemble_stokes_mixed_bdf1_variable_density(
+                params,
+                &density,
+                &viscosity,
+                &force,
+                &boundaries,
+                &previous,
+                0.1,
+            ),
+            Err(StokesBoundaryError::InvalidDensity { cell: 0, .. })
+        ));
+        assert_eq!(density_queries.get(), 1);
+    }
+    assert_eq!(other_queries.get(), 0);
+    let density =
+        |_: usize, _: [f64; 2]| panic!("invalid history must refuse before density queries");
+    assert!(matches!(
+        system.assemble_stokes_mixed_bdf1_variable_density(
+            params,
+            &density,
+            &viscosity,
+            &force,
+            &boundaries,
+            &[],
+            0.1,
+        ),
+        Err(StokesBoundaryError::InvalidInput(_))
+    ));
+    assert!(previous.iter().all(|value| *value == 0.0));
+}

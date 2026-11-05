@@ -815,9 +815,48 @@ identity, an exact variable-viscosity affine unsteady solution, and invalid
 history/timestep and incompatible-flux refusals. `tests/material_flow.rs`
 checks actual shared-gas density in pressure-driven acceleration and physical
 pressure, dynamic-viscosity traction, inertia and energy in an affine shear.
-This is fixed-mesh, constant-density linear unsteady Stokes, without nonlinear
-open-boundary/backflow conditions, variable-density storage, thermal evolution,
+The homogeneous entries remain fixed-mesh, constant-density linear unsteady
+Stokes, without nonlinear open-boundary/backflow conditions, thermal evolution,
 BDF2+, continuum error bounds or new cancellation/throughput claims.
+
+### Fixed stratified density in native Stokes inertia
+
+`assemble_stokes_mixed_bdf1_variable_density` adds the spatially weighted
+consistent mass to the same original mixed-boundary BDF1 solver:
+`r(x) (u_new-u_previous)/dt - div(2 nu_reference D(u_new)) + grad(pi) = f`.
+The caller chooses one positive constant `rho_reference`. The density callback
+returns `r=rho(x)/rho_reference`; viscosity is `mu(x)/rho_reference`, force is
+physical force density divided by `rho_reference`, and pressure, total traction
+and Navier slip resistance use that same normalization. Dividing pressure or
+viscosity by the local density would solve a different equation. The primitive
+result retains its existing reference-normalized units and pressure datums.
+
+Positive density is sampled once at each of the original six positive volume
+quadrature points per cell; the cell index permits unsmeared one-sided material
+jumps. Stored weights supply both the full signed consistent mass and the
+immutable history load, including retained support-reaction equations. No mass
+lumping or cell-mean substitution is used. BDM1 velocity is affine, so the
+degree-four rule integrates density profiles through degree two per cell
+exactly; general fields require spatial quadrature/refinement. Unit relative
+density retains the original matrix and history arithmetic.
+
+`StokesAssembly::kinetic_energy` observes that same retained metric without
+re-querying density and returns energy per depth divided by `rho_reference`.
+Multiplying by `rho_reference` gives J/m. It accepts either original velocity
+moments or the complete solved field and checks representability. Invalid
+density samples refuse with their cell, position and value before constitutive
+or force assembly; failed steps never publish a partial state.
+
+This density field is fixed at both time levels: linear perturbations about a
+stationary stratification and shear parallel to density layers are supported.
+The entry does not advect density, move material interfaces, introduce
+nonlinear momentum convection, or model mixing, thermal feedback or gas
+compressibility. Its Stokes boundary transport diagnostics remain zero because
+convection is absent. `tests/stokes_boundary/transient.rs` adds independent
+unequal-density pressure acceleration/coasting and BDF1 work checks, quadratic
+stratified-density shear with analytic energy and supported stress/torque,
+invariance under the reference-density choice, original unit-density matrix
+identity, retained sampling and typed refusal regressions.
 
 ## Nonlinear pressure-driven flow with explicit backflow behavior
 

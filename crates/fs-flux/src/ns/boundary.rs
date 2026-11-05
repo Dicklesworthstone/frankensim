@@ -108,6 +108,15 @@ pub enum StokesBoundaryError {
         /// Refused kinematic viscosity [m²/s].
         value: f64,
     },
+    /// Density relative to one fixed reference was not positive and finite.
+    InvalidDensity {
+        /// Cell owning this one-sided density sample.
+        cell: usize,
+        /// Physical sample position [m].
+        point: [f64; 2],
+        /// Refused dimensionless ratio rho/rho_reference.
+        value: f64,
+    },
     /// Prescribed velocities violate the all-Dirichlet net-flux compatibility.
     IncompatibleFlux {
         /// Connected fluid component (ordered by its first triangle).
@@ -211,6 +220,9 @@ pub struct StokesAssembly<'a, 'm> {
     reference: StokesPressureReference,
     has_traction: Vec<bool>,
     reactions: reaction::ReactionOperator,
+    // Positive quadrature weights times rho/rho_reference. Both time levels
+    // and the kinetic-energy observer retain this same immutable metric.
+    inertia_weights: Option<Vec<[f64; 6]>>,
 }
 
 /// The admitted discrete field together with pressure in its declared datum.
@@ -241,6 +253,55 @@ impl StokesAssembly<'_, '_> {
     #[must_use]
     pub fn rhs(&self) -> &[f64] {
         &self.rhs
+    }
+
+    /// Kinetic energy per unit depth, divided by the fixed reference density.
+    ///
+    /// Uses the same retained density-weighted quadrature as this assembly's
+    /// mass and BDF1 history load, without querying a material callback again.
+    /// Ordinary assemblies use unit relative density. Multiply by rho_reference
+    /// [kg/m³] for J/m. Accepts velocity moments alone or the complete field.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite velocity or unrepresentable energy.
+    pub fn kinetic_energy(&self, velocity: &[f64]) -> Result<f64, StokesBoundaryError> {
+        let system = self.system;
+        if (velocity.len() != system.n_u && velocity.len() != system.n)
+            || velocity[..system.n_u]
+                .iter()
+                .any(|value| !value.is_finite())
+        {
+            return Err(StokesBoundaryError::InvalidInput(
+                "kinetic energy requires finite original velocity moments",
+            ));
+        }
+        let mut energy = 0.0;
+        for (cell, basis) in system.bases.iter().enumerate() {
+            let points = system.mesh.tris[cell].map(|node| system.mesh.verts[node]);
+            for (q, (point, weight)) in crate::bdm::tri_quad(points, system.mesh.areas[cell])
+                .into_iter()
+                .enumerate()
+            {
+                let weight = self
+                    .inertia_weights
+                    .as_ref()
+                    .map_or(weight, |weights| weights[cell][q]);
+                let mut value = [0.0; 2];
+                for local in 0..6 {
+                    let shape = crate::bdm::eval_basis(basis, local, point);
+                    let coefficient = velocity[system.dof(cell, local)];
+                    value[0] += coefficient * shape[0];
+                    value[1] += coefficient * shape[1];
+                }
+                energy += 0.5 * weight * (value[0] * value[0] + value[1] * value[1]);
+            }
+        }
+        if !energy.is_finite() {
+            return Err(StokesBoundaryError::InvalidInput(
+                "unrepresentable kinetic energy",
+            ));
+        }
+        Ok(energy)
     }
 
     /// Pressure datum selected by the admitted boundary partition.
@@ -440,6 +501,60 @@ impl<'m> FluxSystem<'m> {
         advecting_velocity: Option<&[f64]>,
         history_rotation: Option<[f64; 2]>,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        self.assemble_stokes_admitted_density(
+            params,
+            viscosity,
+            force,
+            admitted,
+            darcy,
+            inv_dt,
+            previous_velocity,
+            advecting_velocity,
+            history_rotation,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_stokes_admitted_density<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        admitted: &AdmittedBoundary,
+        darcy: Option<&[super::porous::DarcyDrag]>,
+        inv_dt: f64,
+        previous_velocity: Option<&[f64]>,
+        advecting_velocity: Option<&[f64]>,
+        history_rotation: Option<[f64; 2]>,
+        relative_density: Option<&dyn Fn(usize, [f64; 2]) -> f64>,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        let inertia_weights = if let Some(density) = relative_density {
+            let mut weights = Vec::with_capacity(self.mesh.tris.len());
+            for (cell, nodes) in self.mesh.tris.iter().enumerate() {
+                let points = nodes.map(|node| self.mesh.verts[node]);
+                let mut weighted = [0.0; 6];
+                for (q, (point, weight)) in crate::bdm::tri_quad(points, self.mesh.areas[cell])
+                    .into_iter()
+                    .enumerate()
+                {
+                    let value = density(cell, point);
+                    if !value.is_finite() || value <= 0.0 {
+                        return Err(StokesBoundaryError::InvalidDensity { cell, point, value });
+                    }
+                    weighted[q] = weight * value;
+                    if !weighted[q].is_finite() || weighted[q] <= 0.0 {
+                        return Err(StokesBoundaryError::InvalidInput(
+                            "density-weighted quadrature is unrepresentable",
+                        ));
+                    }
+                }
+                weights.push(weighted);
+            }
+            Some(weights)
+        } else {
+            None
+        };
         let bad_viscosity = Cell::new(None);
         let checked_viscosity = |cell, point| {
             if bad_viscosity.get().is_some() {
@@ -466,7 +581,7 @@ impl<'m> FluxSystem<'m> {
             }
         };
         let mut reactions = reaction::ReactionAssembly::new(self, admitted, advecting_velocity);
-        let (matrix, rhs) = self.assemble_operator(
+        let (matrix, rhs) = self.assemble_operator_with_inertia(
             params,
             Some(&checked_viscosity),
             &checked_force,
@@ -478,6 +593,7 @@ impl<'m> FluxSystem<'m> {
             Some(admitted),
             darcy,
             Some(&mut reactions),
+            inertia_weights.as_deref(),
         );
         if let Some((cell, point, value)) = bad_viscosity.get() {
             return Err(StokesBoundaryError::InvalidViscosity { cell, point, value });
@@ -507,6 +623,7 @@ impl<'m> FluxSystem<'m> {
             },
             has_traction: admitted.has_traction.clone(),
             reactions: reactions.finish(),
+            inertia_weights,
         })
     }
 

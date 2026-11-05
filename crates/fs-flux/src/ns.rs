@@ -466,7 +466,41 @@ impl<'m> FluxSystem<'m> {
         history_rotation: Option<[f64; 2]>,
         boundary: Option<&boundary::AdmittedBoundary>,
         darcy: Option<&[porous::DarcyDrag]>,
+        reactions: Option<&mut ReactionAssembly>,
+    ) -> (Csr, Vec<f64>) {
+        self.assemble_operator_with_inertia(
+            params,
+            viscosity,
+            f,
+            g,
+            advect,
+            inv_dt,
+            uprev,
+            history_rotation,
+            boundary,
+            darcy,
+            reactions,
+            None,
+        )
+    }
+
+    // An optional fixed density metric changes only the consistent inertia.
+    // Its admitted weights follow the original six-point cell quadrature.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn assemble_operator_with_inertia(
+        &self,
+        params: FluxParams,
+        viscosity: Option<&dyn Fn(usize, [f64; 2]) -> f64>,
+        f: &dyn Fn([f64; 2]) -> [f64; 2],
+        g: &dyn Fn([f64; 2]) -> [f64; 2],
+        advect: Option<&[f64]>,
+        inv_dt: f64,
+        uprev: Option<&[f64]>,
+        history_rotation: Option<[f64; 2]>,
+        boundary: Option<&boundary::AdmittedBoundary>,
+        darcy: Option<&[porous::DarcyDrag]>,
         mut reactions: Option<&mut ReactionAssembly>,
+        inertia_weights: Option<&[[f64; 6]]>,
     ) -> (Csr, Vec<f64>) {
         let mesh = self.mesh;
         let nu = params.nu;
@@ -519,6 +553,12 @@ impl<'m> FluxSystem<'m> {
                     .sum::<f64>()
             });
             let drag_terms = darcy.map(|cells| cells[t].local_matrix_and_load(basis, p, area));
+            let mut mass_quadrature = tri_quad(p, area);
+            if let Some(weights) = inertia_weights {
+                for (q, (_, weight)) in mass_quadrature.iter_mut().enumerate() {
+                    *weight = weights[t][q];
+                }
+            }
             // A rigid moving chart changes vector axes between time levels.
             // Integrate Q*u_old from its ORIGINAL cell field; rotating edge
             // coefficients would mix discontinuous tangential traces into
@@ -527,7 +567,7 @@ impl<'m> FluxSystem<'m> {
             // remap, global projection or second matrix.
             let rotated_history = history_rotation.zip(uprev).map(|([c, s], previous)| {
                 let mut load = [0.0; 6];
-                for (q, weight) in tri_quad(p, area) {
+                for (q, weight) in mass_quadrature {
                     let mut old = [0.0; 2];
                     let values: [[f64; 2]; 6] = core::array::from_fn(|j| eval_basis(basis, j, q));
                     for (j, value) in values.iter().enumerate() {
@@ -605,7 +645,7 @@ impl<'m> FluxSystem<'m> {
                     for j in 0..6 {
                         let gj = self.dof(t, j);
                         let mut mij = 0.0;
-                        for (q, w) in tri_quad(p, area) {
+                        for (q, w) in mass_quadrature {
                             let bi = eval_basis(basis, i, q);
                             let bj = eval_basis(basis, j, q);
                             mij += w * (bi[0] * bj[0] + bi[1] * bj[1]);
