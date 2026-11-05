@@ -1,5 +1,42 @@
 # fs-solid CONTRACT
 
+## Directional brittle crack bands in native solid solves
+
+`brittle::TetCrackBandGeometry::from_element` consumes the original admitted
+`loads3::TetLoadGeometry3` and one explicitly supplied reference normal.
+It retains the original element index/connectivity and volume, normalizes the
+direction, and computes the convex tetrahedron's orthogonal footprint from
+all four faces: `A_projected = sum |n dot area_vector| / 2`. The width
+`h = V / A_projected` makes complete pure-mode fracture work
+`V*(Gc/h) = Gc*A_projected`. This footprint is not the area of an arbitrary
+interior cut plane. Finite nonzero directions at either floating-point extreme
+are scaled before normalization; zero/nonfinite directions, invalid element
+indices and unrepresentable geometry refuse. No allocations or matrices are
+created by this bounded geometry query.
+
+`material_settings` carries that exact width and normal into the original
+`fs-material::brittle::BrittleCrackBand`. Its borrowed `SmallStrainLaw`
+uses the existing tetrahedral and HEX8 constitutive assembly, free-coordinate
+equilibrium, nonsymmetric tangent solve and accepted-history publication.
+Per-element fields keep distinct widths/laws; no mean material or new solver
+is introduced. The fully integrated HEX8 path retains its original eight
+quadrature histories and requires its own explicit geometric band width.
+
+The six regressions in `tests/brittle_crack_band.rs` specify geometric
+rotation/translation/scaling and winding admission, a free-sided tetrahedral
+tension/softening/unloading/failure/reclosure path, rejected-step isolation,
+distinct per-element widths, and native HEX8 fracture-work integration.
+The uniaxial expectations independently condense the transverse strains;
+loaded-node reaction is `sigma*V/L`, not a guessed face force. These tests
+are manufactured-model checks, not experimental material validation.
+
+This delivery retains reference geometry and inventory. It creates no
+separated fragments, new contact surfaces or transferred topology/history.
+The band plane stays fixed and kinematics remain small. Local positive
+softening does not remove structural snap-back or the existing solver's
+convergence/refusal limits. The wider MR63 post-failure transfer scope remains
+open.
+
 ## Source-bound transverse shear in native frames
 
 `Frame2d::add_material_shear_element` explicitly enables an elastic Timoshenko

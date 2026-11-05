@@ -30,6 +30,8 @@
 pub mod beamcol;
 /// Spatial thermoviscoelastic gravity sag of anchored deposited roads.
 pub mod bridge;
+/// Directional crack-band geometry for the shared brittle constitutive law.
+pub mod brittle;
 /// Quasistatic cohesive interface failure and structural load redistribution.
 pub mod cohesive;
 #[cfg(feature = "contact")]
