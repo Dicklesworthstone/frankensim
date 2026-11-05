@@ -23,6 +23,8 @@ use crate::MaterialError;
 use fs_math::c64::C64;
 
 pub(crate) mod dispersion;
+mod equilibrium;
+pub use equilibrium::BulkThermoviscousEquilibrium;
 mod wave;
 pub use wave::BulkThermoviscousWave;
 
