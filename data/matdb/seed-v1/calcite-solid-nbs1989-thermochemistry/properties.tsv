@@ -1,0 +1,59 @@
+frankensim.matdb-source.v1
+observation	identity	Pure crystalline calcium carbonate, calcite	NBS Table 94:Ca, Calcium (Prepared 1968), CaCO3 calcite state cr	The source gives CaCO3 formula-unit molar mass 100.0894 g/mol. Its explicit calcite identity is retained; the neighboring aragonite cr2 row is a distinct phase. This is not limestone of inferred purity, dissolved calcium carbonate, mixed gangue, or a specimen-specific ore.
+observation	standard	Literal corrected NBS calcite row	https://data.nist.gov/od/ds/mds2-2124/NBS_Tables_with_ErratumValues.csv	At 298.15 K the independent source columns give formation enthalpy -1206.92 kJ/mol, formation Gibbs energy -1128.79 kJ/mol, absolute entropy 92.9 J/(mol K), and isobaric heat capacity 81.88 J/(mol K). Formation Gibbs energy is not reconstructed from formation enthalpy and species entropy. The separately evaluated USGS calcite pack remains distinct.
+observation	scope	One crystalline phase at the source standard state	https://srd.nist.gov/JPCRD/jpcrdS2Vol11.pdf, sections 5.5 to 5.8; https://doi.org/10.6028/jres.125.007	All five facts require 298.15 K, 100000 Pa, the NBS elemental reference and source-phase-calcite. Per-row probability distributions and cross-species covariance are not supplied, so uncertainty stays Unstated. A point heat capacity provides no temperature extrapolation or process heat duty. These records supply neither mineral surface area nor acid-neutralization rate, gas transfer, nonideal activities, impurity effects or calibrated limestone dose. Selected equilibrium calculations must declare their complete competing phase and aqueous assemblage.
+scalar	molar-mass	identity,scope	mass	100.0894	g/mol	tabulated
+scalar	formation-enthalpy	identity,standard,scope	hf	-1206.92	kJ/mol	tabulated
+scalar	formation-gibbs-energy	identity,standard,scope	gf	-1128.79	kJ/mol	tabulated
+scalar	standard-entropy	identity,standard,scope	s0	92.9	J/mol/K	tabulated
+scalar	isobaric-heat-capacity	identity,standard,scope	cp	81.88	J/mol/K	tabulated
+uncertainty	molar-mass	unstated	-	-	-	-
+uncertainty	formation-enthalpy	unstated	-	-	-	-
+uncertainty	formation-gibbs-energy	unstated	-	-	-	-
+uncertainty	standard-entropy	unstated	-	-	-	-
+uncertainty	isobaric-heat-capacity	unstated	-	-	-	-
+validity	molar-mass	temperature	298.15	298.15	K
+validity	formation-enthalpy	temperature	298.15	298.15	K
+validity	formation-gibbs-energy	temperature	298.15	298.15	K
+validity	standard-entropy	temperature	298.15	298.15	K
+validity	isobaric-heat-capacity	temperature	298.15	298.15	K
+validity	molar-mass	pressure	100000	100000	Pa
+validity	formation-enthalpy	pressure	100000	100000	Pa
+validity	formation-gibbs-energy	pressure	100000	100000	Pa
+validity	standard-entropy	pressure	100000	100000	Pa
+validity	isobaric-heat-capacity	pressure	100000	100000	Pa
+validity	molar-mass	standard	1	1	1
+validity	formation-enthalpy	standard	1	1	1
+validity	formation-gibbs-energy	standard	1	1	1
+validity	standard-entropy	standard	1	1	1
+validity	isobaric-heat-capacity	standard	1	1	1
+validity	molar-mass	convention	1	1	1
+validity	formation-enthalpy	convention	1	1	1
+validity	formation-gibbs-energy	convention	1	1	1
+validity	standard-entropy	convention	1	1	1
+validity	isobaric-heat-capacity	convention	1	1	1
+validity	molar-mass	phase	1	1	1
+validity	formation-enthalpy	phase	1	1	1
+validity	formation-gibbs-energy	phase	1	1	1
+validity	standard-entropy	phase	1	1	1
+validity	isobaric-heat-capacity	phase	1	1	1
+validity	molar-mass	polymorph	1	1	1
+validity	formation-enthalpy	polymorph	1	1	1
+validity	formation-gibbs-energy	polymorph	1	1	1
+validity	standard-entropy	polymorph	1	1	1
+validity	isobaric-heat-capacity	polymorph	1	1	1
+validity	molar-mass	pure	1	1	1
+validity	formation-enthalpy	pure	1	1	1
+validity	formation-gibbs-energy	pure	1	1	1
+validity	standard-entropy	pure	1	1	1
+validity	isobaric-heat-capacity	pure	1	1	1
+validity	molar-mass	reference	1	1	1
+validity	formation-enthalpy	reference	1	1	1
+validity	formation-gibbs-energy	reference	1	1	1
+validity	standard-entropy	reference	1	1	1
+validity	isobaric-heat-capacity	reference	1	1	1
+validity	molar-mass	specimen	0	0	1
+validity	formation-enthalpy	specimen	0	0	1
+validity	formation-gibbs-energy	specimen	0	0	1
+validity	standard-entropy	specimen	0	0	1
+validity	isobaric-heat-capacity	specimen	0	0	1

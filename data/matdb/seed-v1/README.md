@@ -6,6 +6,16 @@ the compiler must reproduce them from the pinned manifest and source record.
 
 ## Mineral processing
 
+The matched NBS **calcite** profile adds five original reference facts and now
+runs with the existing calcium, carbonate, sulfate, gypsum and water profiles
+in a finite shared-calcium equilibrium. The reusable salt-assemblage owner
+recomputes pH and every phase at one common final state, preserving separate
+Ca/C/S accounts. The runnable example shows acid dissolving limestone while
+additional gypsum forms, without spending the same calcium twice. Seven new
+owner tests and five actual-source integration tests pass alongside the existing
+salt regressions. See [finite limestone dissolution and gypsum formation](MINING_LIMESTONE_SULFATE.md)
+for data, source identities, commands and the selected ideal-model limits.
+
 Three matched NBS packs add **silver sulfide, thiosulfate and thiocyanate**,
 with fourteen literal reference facts. The finite-inventory consumer now shares
 cyanide and dissolved oxygen between gold and silver leaching and explicitly

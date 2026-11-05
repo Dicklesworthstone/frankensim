@@ -238,6 +238,9 @@ pub enum MineralReaction {
     DolomiteAcidNeutralization,
     /// CaCO3(s) + H+ -> Ca2+ + HCO3-; bicarbonate remains in solution.
     CalciteBicarbonateNeutralization,
+    /// Ca2+(aq) + CO3(2-)(aq) -> CaCO3(s, calcite).
+    /// The source fixes the pure polymorph; pH and finite partition are separate.
+    CalcitePrecipitation,
     /// CaMg(CO3)2(s) + 2 H+ -> Ca2+ + Mg2+ + 2 HCO3-.
     DolomiteBicarbonateNeutralization,
     /// Ca(OH)2(s) + 2 H+ -> Ca2+ + 2 H2O(l).
@@ -549,6 +552,15 @@ impl MineralReaction {
                     ("H+(aq)", &[0, 0, 1, 0], 1, -1),
                     ("Ca[2+](aq)", &[1, 0, 0, 0], 2, 1),
                     ("HCO3[-](aq)", &[0, 1, 1, 3], -1, 1),
+                ],
+            ),
+            Self::CalcitePrecipitation => (
+                "calcite-precipitation",
+                &["Ca", "C", "O"],
+                &[
+                    ("Ca[2+](aq)", &[1, 0, 0], 2, -1),
+                    ("CO3[2-](aq)", &[0, 1, 3], -2, -1),
+                    ("CaCO3(s)", &[1, 1, 3], 0, 1),
                 ],
             ),
             Self::DolomiteBicarbonateNeutralization => (

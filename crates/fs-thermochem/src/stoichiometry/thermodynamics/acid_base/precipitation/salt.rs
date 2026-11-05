@@ -35,6 +35,9 @@ use super::{PrecipitationOptions, PrecipitationStatus};
 use fs_math::det;
 use fs_qty::{Amount, Dimensionless};
 
+/// Finite competition of distinct salt families for one original cation stock.
+pub mod assemblage;
+
 /// Original source-bound integer salt reaction and the complete aqueous owner.
 #[derive(Clone, Debug)]
 pub struct SaltPrecipitation {

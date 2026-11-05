@@ -48,6 +48,7 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         CalciteCarbonicAcidNeutralization,
         DolomiteAcidNeutralization,
         CalciteBicarbonateNeutralization,
+        CalcitePrecipitation,
         DolomiteBicarbonateNeutralization,
         HydratedLimeNeutralization,
         CalciumHydroxidePrecipitation,

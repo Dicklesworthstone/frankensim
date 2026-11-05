@@ -3153,3 +3153,65 @@ retaining residual copper binding and both dissolved Cu/S stocks. Secondary
 solid, if present, stays in the final inventory. Independent sequence balances
 include the removed primary solid. Unsupported final pH refuses with empty
 successful stdout. These constructed checks do not establish plant operation.
+
+## Finite salt assemblages with shared calcium
+
+`acid_base::precipitation::salt::assemblage::CommonCationSaltSystem` composes
+one through eight original `SaltPrecipitation` owners with one common cation,
+distinct acid families and identical complete aqueous/source definitions.
+Every coordinate reuses the original single-salt and acid/base solvers while
+holding other solid stocks fixed. Its available cation includes dissolved
+stock and only its own current solid. No coordinate can spend calcium already
+held by another phase.
+
+The final acceptance condition recomputes every phase's dissolution saturation
+residual at one common aqueous state and pH. Present solids require resolved
+saturation; absent solids require resolved undersaturation. Empty original
+components retain undefined saturation diagnostics. Inner pH resolution enters
+the phase decision. Independently summed cation and complete aqueous-family
+accounts include all stoichiometric solid holdings and must close within the
+declared allowances. Dissolved stocks are carried directly, retaining positive
+traces even when a solid amount rounds to its analytical total.
+
+Canonical phase order, at most 256 sweeps, at most 65,536 total aqueous solves,
+the original inner solver bounds and cancellation govern the entire operation.
+Remaining global work is reserved before each coordinate call. Exhausted work,
+unresolvable complementarity or numerical range loss refuses without a partial
+result or mutation of caller stocks. The immutable result retains original
+phase/source owners, controls, all component accounts, shared aqueous state,
+final phase diagnostics and actual work counts. It is a nominal numerical
+result under a selected ideal model, not an interval or source-uncertainty
+certificate. Shared-family/polymorph competition is explicitly unsupported.
+
+The matched `calcite-solid-nbs1989-thermochemistry` pack adds five original
+reference facts for pure crystalline calcite, with explicit phase, NBS reference,
+298.15 K and 100000 Pa selectors and unstated source uncertainty. The independent
+USGS calcite evaluation remains separate. `MineralReaction::CalcitePrecipitation`
+adds the conserved Ca2+ + CO3(2-) -> CaCO3 equation. The original direct-Gibbs
+column is retained independently of H-minus-T-times-S; source discrepancies are
+not silently reconciled.
+
+`limestone_sulfate_equilibrium` loads eleven authentic compiled source packs
+and couples finite calcite/gypsum partition to the original carbonic-component,
+sulfate and water speciation. Both selected phases consume one original calcium
+inventory. In the authored default cases, adding 0.005 mol HCl changes pH from
+6.6436764 to 6.5367336, calcite from 0.0151054091 to 0.0121458109 mol and gypsum
+from 0.0324344778 to 0.0349775905 mol. Free calcium also increases. Every requested
+case must succeed before output. These values demonstrate the selected model;
+they do not calibrate a plant acid dose.
+
+Seven independent assemblage tests and fourteen existing salt tests pass,
+including a closed-form two-phase state, bitwise one-phase reduction, absent
+and empty phases, scale/order invariance, trace preservation, incompatible
+sources, budgets and cancellation. The original reference-reaction conservation
+test and five actual-compiler/source integration tests also pass. The latter
+construct an independent pH-8 state from literal formation energies and
+protonation polynomials, and check source facts, complete accounts, final
+saturation and acid addition. Negative calcium or invalid activity basis
+refuses with empty successful stdout.
+
+The model has fixed solvent activity and ideal aqueous activities. It does not
+close a finite H/O solvent ledger or include calcium ion pairing, other phases,
+CO2 exchange, kinetics, passivation, thermal evolution or specimen qualification.
+Sources, original values, model equations and normal workspace commands are in
+`data/matdb/seed-v1/MINING_LIMESTONE_SULFATE.md`.
