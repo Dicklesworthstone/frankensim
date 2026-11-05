@@ -2050,6 +2050,10 @@ pub struct AirModes {
 const LAYER_FIT_POINTS: usize = 400;
 /// The fit's poles per decade, from a thirtieth of the band's lowest (warped) frequency to thirty times its highest.
 const LAYER_POLES_PER_DECADE: f64 = 3.0;
+/// Relative least-squares weight of the reactive quadrature. The full-band
+/// loss still has to pass its independent 1% gate. This is a numerical fit
+/// weight, not a material parameter or a correction to a mode's frequency.
+const LAYER_REACTANCE_WEIGHT: f64 = 0.1;
 /// The largest relative error the fit may leave in either layer's loss over its band.
 pub const LAYER_FIT_TOLERANCE: f64 = 0.01;
 
@@ -2070,12 +2074,16 @@ pub const LAYER_FIT_TOLERANCE: f64 = 0.01;
 ///   The fit is made in the leapfrog's own discrete domain (the trapezoid's warped frequency and the scheme's
 ///   `sin(omega k) / (omega k)` decay factor), so the stepped loss follows the law. The poles are numerical
 ///   (`LAYER_POLES_PER_DECADE`), not physics, and the band is 20 Hz to the smaller of 20 kHz and a fifth of the
-///   rate. The worst relative error left in either layer's loss over the band is in `fit_error`, and above
-///   `LAYER_FIT_TOLERANCE` the layers are refused.
+///   rate. Loss is fitted over that whole band; the reactive quadrature is fitted over the admitted modes'
+///   frequency range. Both use the same nonnegative pole weights, retaining the passive realization.
+///   The worst relative error left in either layer's loss over the band is in `fit_error`, and above
+///   `LAYER_FIT_TOLERANCE` the layers are refused. `reactance_fit_error` reports the separate residual over
+///   `resonance_band`; it is not a bound on the response outside that band or on a coupled pole.
 /// - Each mode scales the fit so that, at its own frequency, the viscous part decays at its viscous share and the
 ///   thermal part at its thermal share, so the mode rings down at its `sigma`. The layers' reactance also lowers
-///   its frequency. The law's first-order shift is `sigma / (2 pi)` Hz, but only the loss is fitted, so the
-///   fitted reactance gives less: about 0.9 of it at 591 Hz and 0.7 at 5.8 kHz (96 and 144 kHz).
+///   its frequency. The law's first-order shift is `sigma / (2 pi)` Hz. Fitting both quadratures resolves
+///   the missing frequency shift of the former loss-only fit without adding a pitch correction or changing
+///   the time step. Finite clock and pole-fit errors remain explicit and must converge under refinement.
 /// - Away from its own frequency a mode's loss follows the half-order law on both sides:
 ///   - Below it, where `X` follows the heads, the viscous layer scrubs the air the heads carry.
 ///   - Above it, where `X` barely moves, the thermal layer takes the air spring's share.
@@ -2109,16 +2117,23 @@ pub struct AirLayers {
     /// The fit's band [Hz], and its worst relative error there in the viscous and the thermal loss.
     pub band: (f64, f64),
     pub fit_error: (f64, f64),
+    /// Admitted mode-frequency range [Hz] used for the reactive quadrature,
+    /// and its worst relative fit errors (viscous, thermal) on a finer grid.
+    /// These precede each mode's exact loss normalization and are not pole-error bounds.
+    pub resonance_band: (f64, f64),
+    pub reactance_fit_error: (f64, f64),
     /// The largest static softening of an air spring, `sum_j G_j / kappa`, over the modes.
     pub softening: f64,
 }
 
 /// One pole's response on the leapfrog's clock: the trapezoid-stepped `p / (p + xi)` at `omega`, which is the
-/// continuous one at the warped frequency `(2 / k) tan(omega k / 2)`. Returns (Re, Im).
-fn layer_pole(k: f64, omega: f64, xi: f64) -> (f64, f64) {
+/// continuous one at the warped frequency `(2 / k) tan(omega k / 2)`.
+/// Returns (Re, Im, 1 - Re), computing the last term without subtraction:
+/// the thermal spring correction is `-G xi / (p + xi)`, not `G p / (p + xi)`.
+fn layer_pole(k: f64, omega: f64, xi: f64) -> (f64, f64, f64) {
     let w = 2.0 / k * (0.5 * omega * k).tan();
     let d = w * w + xi * xi;
-    (w * w / d, w * xi / d)
+    (w * w / d, w * xi / d, xi * xi / d)
 }
 
 /// The half-order law's shapes on the leapfrog's clock, both up to a constant: the viscous loss term
@@ -2145,44 +2160,88 @@ impl AirLayers {
         }
         let band = (20.0, (0.2 / k).min(20000.0));
         let (wa, wb) = (2.0 * PI * band.0, 2.0 * PI * band.1);
+        // The existing discrete loss compensation is not itself an exact
+        // fractional transfer under the trapezoid's frequency warp. Fit its
+        // reactive part where these actual resonances live, retaining the
+        // original full-band loss obligation. No instrument-specific cutoff.
+        let mut frequencies = Vec::with_capacity(nm);
+        for m in 0..nm {
+            let (sv, st) = (sigma_viscous[m], sigma_thermal[m]);
+            if !(sv.is_finite() && sv >= 0.0 && st.is_finite() && st >= 0.0) {
+                return Err(format!("air layers: mode {m}'s shares {sv} and {st} 1/s must be finite and not negative"));
+            }
+            let mass = kappa[m] / wt2[m];
+            let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
+            if !(mass.is_finite() && mass > 0.0 && om >= wa && om <= wb) {
+                return Err(format!("air layers: mode {m} at {:.1} Hz lies outside the fit's {}-{} Hz", om / (2.0 * PI), band.0, band.1));
+            }
+            frequencies.push(om);
+        }
+        let ra = frequencies.iter().copied().reduce(f64::min).unwrap_or(wa);
+        let rb = frequencies.iter().copied().reduce(f64::max).unwrap_or(wb);
+        let resonance_band = (ra / (2.0 * PI), rb / (2.0 * PI));
         let warp = |w: f64| 2.0 / k * (0.5 * w * k).tan();
         let (xi_lo, xi_hi) = (warp(wa) / 30.0, warp(wb) * 30.0);
         let poles = (LAYER_POLES_PER_DECADE * (xi_hi / xi_lo).log10()).ceil() as usize + 1;
         let xi: Vec<f64> = (0..poles).map(|j| xi_lo * (xi_hi / xi_lo).powf(j as f64 / (poles - 1) as f64)).collect();
         let at = |i: usize, n: usize| wa * (wb / wa).powf(i as f64 / (n - 1) as f64);
-        // one least squares per layer on the relative error, columns at unit norm (nnls's threshold is absolute)
+        let resonance_at = |i: usize, n: usize| ra * (rb / ra).powf(i as f64 / (n - 1) as f64);
+        // One nonnegative fit per layer. The two quadratures of sqrt(i omega)
+        // have equal magnitude; so do the softening and loss of -1/sqrt(i omega).
+        // Their discrete eigenvalue derivative supplies the same clock factor
+        // to frequency shift and decay. Columns have unit norm because nnls's
+        // threshold is absolute. The reactive rows add no states or hot-loop work.
         let fit = |viscous: bool| -> Vec<f64> {
-            let mut a = vec![0.0; LAYER_FIT_POINTS * poles];
+            let rows = 2 * LAYER_FIT_POINTS;
+            let mut a = vec![0.0; rows * poles];
+            let mut target = vec![1.0; rows];
+            target[LAYER_FIT_POINTS..].fill(LAYER_REACTANCE_WEIGHT);
             for i in 0..LAYER_FIT_POINTS {
                 let w = at(i, LAYER_FIT_POINTS);
                 let (tv, tt) = layer_targets(k, w);
+                let wr = resonance_at(i, LAYER_FIT_POINTS);
+                let (rv, rt) = layer_targets(k, wr);
                 for (j, &x) in xi.iter().enumerate() {
-                    let (re, im) = layer_pole(k, w, x);
+                    let (re, im, _) = layer_pole(k, w, x);
+                    let (_, ri, rc) = layer_pole(k, wr, x);
                     a[i * poles + j] = if viscous { re / tv } else { im / tt };
+                    a[(LAYER_FIT_POINTS + i) * poles + j] = LAYER_REACTANCE_WEIGHT
+                        * if viscous { ri / rv } else { rc / rt };
                 }
             }
-            let norms: Vec<f64> = (0..poles).map(|j| (0..LAYER_FIT_POINTS).map(|i| a[i * poles + j].powi(2)).sum::<f64>().sqrt()).collect();
-            for i in 0..LAYER_FIT_POINTS {
+            let norms: Vec<f64> = (0..poles).map(|j| (0..rows).map(|i| a[i * poles + j].powi(2)).sum::<f64>().sqrt()).collect();
+            for i in 0..rows {
                 for j in 0..poles {
                     a[i * poles + j] /= norms[j];
                 }
             }
-            let x = fs_material::visco::nnls(&a, &vec![1.0; LAYER_FIT_POINTS], LAYER_FIT_POINTS, poles);
+            let x = fs_material::visco::nnls(&a, &target, rows, poles);
             x.iter().zip(&norms).map(|(x, n)| x / n).collect()
         };
         let (wv, wt) = (fit(true), fit(false));
         let fine = 10 * LAYER_FIT_POINTS;
         let mut fit_error = (0.0f64, 0.0f64);
+        let mut reactance_fit_error = (0.0f64, 0.0f64);
         for i in 0..fine {
             let w = at(i, fine);
             let (tv, tt) = layer_targets(k, w);
             let (mut sv, mut st) = (0.0, 0.0);
+            let wr = resonance_at(i, fine);
+            let (rv, rt) = layer_targets(k, wr);
+            let (mut rsv, mut rst) = (0.0, 0.0);
             for (j, &x) in xi.iter().enumerate() {
-                let (re, im) = layer_pole(k, w, x);
+                let (re, im, _) = layer_pole(k, w, x);
+                let (_, ri, rc) = layer_pole(k, wr, x);
                 sv += wv[j] * re;
                 st += wt[j] * im;
+                rsv += wv[j] * ri;
+                rst += wt[j] * rc;
             }
             fit_error = (fit_error.0.max((sv / tv - 1.0).abs()), fit_error.1.max((st / tt - 1.0).abs()));
+            reactance_fit_error = (
+                reactance_fit_error.0.max((rsv / rv - 1.0).abs()),
+                reactance_fit_error.1.max((rst / rt - 1.0).abs()),
+            );
         }
         if !(fit_error.0 <= LAYER_FIT_TOLERANCE && fit_error.1 <= LAYER_FIT_TOLERANCE) {
             return Err(format!(
@@ -2196,17 +2255,11 @@ impl AirLayers {
         let mut softening: f64 = 0.0;
         for m in 0..nm {
             let (sv, st) = (sigma_viscous[m], sigma_thermal[m]);
-            if !(sv.is_finite() && sv >= 0.0 && st.is_finite() && st >= 0.0) {
-                return Err(format!("air layers: mode {m}'s shares {sv} and {st} 1/s must be finite and not negative"));
-            }
             let mass = kappa[m] / wt2[m];
-            let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
-            if !(mass.is_finite() && mass > 0.0 && om >= wa && om <= wb) {
-                return Err(format!("air layers: mode {m} at {:.1} Hz lies outside the fit's {}-{} Hz", om / (2.0 * PI), band.0, band.1));
-            }
+            let om = frequencies[m];
             let (mut re, mut im) = (0.0, 0.0);
             for (j, &x) in xi.iter().enumerate() {
-                let (r, i) = layer_pole(k, om, x);
+                let (r, i, _) = layer_pole(k, om, x);
                 re += wv[j] * r;
                 im += wt[j] * i;
             }
@@ -2240,6 +2293,8 @@ impl AirLayers {
             r: vec![0.0; nm * poles],
             band,
             fit_error,
+            resonance_band,
+            reactance_fit_error,
             softening,
         })
     }

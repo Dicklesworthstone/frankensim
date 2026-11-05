@@ -1486,9 +1486,10 @@ pub fn attach_cavity_modes_with(p: &mut Piece, spec: &DrumSpec, f_max: f64, wall
         let share = |i: usize| layers.sigma_viscous[i] / (layers.sigma_viscous[i] + layers.sigma_thermal[i]);
         let (v_lo, v_hi) = (0..nm).fold((1.0f64, 0.0f64), |(x, y), i| (x.min(share(i)), y.max(share(i))));
         format!(
-            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz. Each mode carries Pierce's two layers with their half-order law (sec. 10-4): the viscous layer on the air's kinetic energy, the thermal layer on its potential energy, each loss growing as sqrt(f) away from the mode's own frequency (viscous share {:.0}-{:.0} %). The half-order operators are {} poles fitted over {:.0}-{:.0} Hz on this clock, within {:.1e} (viscous) and {:.1e} (thermal) of the law; the thermal layer softens the air springs at rest by at most {:.2} %. The layers' reactance lowers each mode by less than the law's sigma / (2 pi) Hz (about 0.7-0.9 of it), since only the loss is fitted. No loss inside the air, none from the heads' own motion in the layers, and no coupling between modes through the layers. This replaces form B (79988cd3e), a dashpot on the stretch that was a lower bound below the air modes and overcharged the loss above them, and 9d3b26242's form, which overcharged it below them",
+            "shell rigid; viscothermal wall loss (opt-in, MB 15788): Pierce's boundary-layer loss (Acoustics 1981, Eq. (10-4.16)) on the shell and both heads as rigid walls at ambient temperature, from the gas record (mu {:.4e} Pa s, kappa {:.4e} W/(m K), c_p {:.1} J/(kg K), gamma {:.4}): Q {:.0} at {} to {:.0} at {}, T60 {t_lo:.2}-{t_hi:.2} s for the {} modes at 2-8 kHz. Each mode carries Pierce's two layers with their half-order law (sec. 10-4): the viscous layer on the air's kinetic energy, the thermal layer on its potential energy, each loss growing as sqrt(f) away from the mode's own frequency (viscous share {:.0}-{:.0} %). The half-order operators are {} poles fitted over {:.0}-{:.0} Hz on this clock, within {:.1e} (viscous) and {:.1e} (thermal) of the law; the thermal layer softens the air springs at rest by at most {:.2} %. The same passive poles fit the reactive quadrature over the modes' {:.0}-{:.0} Hz range, with relative fit errors {:.1e} (viscous) and {:.1e} (thermal) before exact per-mode loss normalization. The continuum first-order frequency shift is -sigma / (2 pi) Hz; these numerical fit residuals are not coupled-pole error bounds. No loss inside the air, none from the heads' own motion in the layers, and no coupling between modes through the layers. This replaces form B (79988cd3e), a dashpot on the stretch that was a lower bound below the air modes and overcharged the loss above them, and 9d3b26242's form, which overcharged it below them",
             gas.dynamic_viscosity, gas.thermal_conductivity, gas.specific_heat_cp, gas.gamma, q(lo), name(lo), q(hi), name(hi), band.len(),
-            100.0 * v_lo, 100.0 * v_hi, layers.xi.len(), layers.band.0, layers.band.1, layers.fit_error.0, layers.fit_error.1, 100.0 * layers.softening
+            100.0 * v_lo, 100.0 * v_hi, layers.xi.len(), layers.band.0, layers.band.1, layers.fit_error.0, layers.fit_error.1, 100.0 * layers.softening,
+            layers.resonance_band.0, layers.resonance_band.1, layers.reactance_fit_error.0, layers.reactance_fit_error.1
         )
     } else {
         "shell rigid, air lossless (no boundary-layer loss: a lower bound)".to_string()
@@ -2145,7 +2146,8 @@ mod cavity_wall_loss_tests {
     /// - The discrete energy E = (kappa / wt2) ((X - X-) / k)^2 / 2 + kappa X X- / 2 falls as exp(-2 sigma t).
     ///   Checked at 144 kHz over 1 / sigma, while the oscillation's energy falls by e^2; bound 1e-3.
     ///   Over longer windows the layers' slow memory (their low poles) is a larger share of what is left.
-    /// - Also printed: the ringing frequency against the mode's, read from interpolated zero crossings.
+    /// - G1: the ringing frequency, read from interpolated zero crossings, includes the boundary layer's
+    ///   first-order reactive shift. A loss-only fit missed roughly 30% of this shift.
     /// - The same mode without sigma or layers keeps E to 1e-9.
     #[test]
     fn a_held_head_air_mode_rings_down_at_its_sigma() {
@@ -2192,6 +2194,8 @@ mod cavity_wall_loss_tests {
             md.m, md.n, md.p, md.omega / (2.0 * PI), 3.0 * std::f64::consts::LN_10 / sigma, md.omega / (2.0 * sigma), f_lossy - f_lossless, sigma / (2.0 * PI)
         );
         assert!((measured / sigma - 1.0).abs() < 1e-3, "{measured} vs {sigma}");
+        let relative_shift = (f_lossless - f_lossy) / (sigma / (2.0 * PI));
+        assert!((relative_shift - 1.0).abs() < 0.025, "boundary-layer frequency shift is {relative_shift} times the physical first-order shift");
         assert!((lossless - 1.0).abs() < 1e-9, "{lossless}");
     }
 
@@ -2592,9 +2596,12 @@ mod cavity_wall_loss_tests {
     ///   rate, and the error is read on a grid ten times finer than the fit's.
     /// - At each mode's own frequency, its stepped coefficients give back its viscous and thermal shares to 1e-12,
     ///   by the scheme's first-order decay. So at resonance the loss is the mode's sigma.
+    /// - G1/G3: both reactive quadratures give the first-order frequency shift within 3% on the 60-7990 Hz
+    ///   modes, with decreasing error on the three clock rungs. The former loss-only fit misses by tens of percent.
     /// - Refused: a mode below the band, a negative share, mismatched lengths.
     #[test]
     fn the_half_order_fit_is_within_one_percent_over_the_band_and_exact_at_each_mode() {
+        let mut previous_shift_error = f64::INFINITY;
         for rate in [96000.0, 144000.0, 192000.0] {
             let k = 1.0 / rate;
             let freqs = [60.0, 591.0, 2400.0, 7990.0];
@@ -2608,16 +2615,24 @@ mod cavity_wall_loss_tests {
             );
             assert!(l.fit_error.0 <= LAYER_FIT_TOLERANCE && l.fit_error.1 <= LAYER_FIT_TOLERANCE, "{:?}", l.fit_error);
             assert!(l.band.0 == 20.0 && (l.band.1 / (0.2 * rate).min(20000.0) - 1.0).abs() < 1e-12, "band {:?}", l.band);
+            assert!(l.visc.iter().chain(&l.arm).all(|x| *x >= 0.0 && x.is_finite()));
+            assert!(l.kappa_rest.iter().all(|x| *x > 0.0));
+            assert!((l.resonance_band.0 / freqs[0] - 1.0).abs() < 1e-10);
+            assert!((l.resonance_band.1 / freqs[3] - 1.0).abs() < 1e-10);
             let nj = l.xi.len();
+            let mut worst_shift_error = 0.0f64;
             for m in 0..4 {
                 let mass = kappa[m] / wt2[m];
                 let om = 2.0 / k * (0.5 * k * wt2[m].sqrt()).asin();
                 let w = 2.0 / k * (0.5 * om * k).tan();
                 let (mut re, mut im) = (0.0, 0.0);
+                let (mut viscous_reactance, mut thermal_softening) = (0.0, 0.0);
                 for j in 0..nj {
                     let (den, d) = (1.0 + 0.5 * k * l.xi[j], w * w + l.xi[j] * l.xi[j]);
                     re += l.visc[m * nj + j] * den * w * w / d;
                     im += l.arm[m * nj + j] * den * w * l.xi[j] / d;
+                    viscous_reactance += l.visc[m * nj + j] * den * w * l.xi[j] / d;
+                    thermal_softening += l.arm[m * nj + j] * den * l.xi[j] * l.xi[j] / d;
                 }
                 let (back_v, back_t) = (re / (2.0 * mass), im * k / (2.0 * mass * (om * k).sin()));
                 assert!(
@@ -2625,7 +2640,15 @@ mod cavity_wall_loss_tests {
                     "{rate} Hz, mode at {} Hz: shares back {back_v} {back_t} against {} {}",
                     freqs[m], sv[m], st[m]
                 );
+                // The same discrete eigenvalue derivative divides each quadrature:
+                // shift_v / sigma_v = Im Z / Re Z and shift_t / sigma_t = -Re dK / Im dK.
+                worst_shift_error = worst_shift_error.max((viscous_reactance / re - 1.0).abs())
+                    .max((thermal_softening / im - 1.0).abs());
             }
+            eprintln!("{rate} Hz: reactive fit {:?} over {:?} Hz; worst normalized shift error {worst_shift_error:.4e}", l.reactance_fit_error, l.resonance_band);
+            assert!(worst_shift_error < 0.03, "{rate} Hz: {worst_shift_error}");
+            assert!(worst_shift_error < previous_shift_error, "clock refinement did not reduce reactive error: {worst_shift_error} vs {previous_shift_error}");
+            previous_shift_error = worst_shift_error;
         }
         let k = 1.0 / 96000.0;
         let wt2 = |f: f64| (2.0 - 2.0 * (2.0 * PI * f * k).cos()) / (k * k);
