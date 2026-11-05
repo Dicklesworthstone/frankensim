@@ -24,6 +24,9 @@
 use crate::pcm_wav::decimate as antialias;
 use fs_math::det;
 
+#[path = "baffled_pressure_fft.rs"]
+mod fft;
+
 #[path = "baffled_pressure_bandlimited.rs"]
 mod bandlimited;
 
@@ -141,6 +144,9 @@ pub struct CircularOutletReceiver {
 /// cold; one output step has a bounded multiply-add count and no allocation.
 pub struct BaffledPressure {
     kernels: Vec<(usize, Vec<f64>)>,
+    /// Optional cold-planned convolution; physical travel delay pays for its
+    /// input partition, without adding latency or changing the FIR weights.
+    fft: Option<fft::Uniform>,
     /// First-order microphones retain the reactive particle-velocity term on
     /// one additional, time-aligned bank of the SAME Rayleigh surface. This
     /// child consumes velocity directly and never has another child.
@@ -194,6 +200,7 @@ impl Clone for BaffledPressure {
     fn clone(&self) -> Self {
         let transposed=self.tap_history==self.history.as_ptr() as usize;
         let mut copy=Self { kernels:self.kernels.clone(),history:self.history.clone(),
+            fft:self.fft.clone(),
             directional_velocity:self.directional_velocity.clone(),
             history_frames:self.history_frames,taps:self.taps.clone(),
             packed_weights:self.packed_weights.clone(),tap_offsets:self.tap_offsets.clone(),tap_history:0,
@@ -388,7 +395,7 @@ impl BaffledPressure {
         let history_frames=last+1;
         let samples=history_frames.checked_mul(modes).ok_or("microphone history size overflow")?;
         let mut receiver = Self { kernels: bins.into_iter().collect(), history: vec![0.0;samples],history_frames,
-            directional_velocity:None,
+            directional_velocity:None,fft:None,
             taps:Vec::new(),packed_weights:Vec::new(),tap_offsets:Vec::new(),tap_history:0,
             previous_velocity:vec![0.0;modes],acceleration:vec![0.0;modes],head:0,modes,rate:f64::from(rate),
             decimator:antialias::Decimator::new(1,modes)?,differentiate_velocity:false,pressure_derivative:None,interpolation_delay:0,
@@ -402,6 +409,9 @@ impl BaffledPressure {
     /// still-zero history. Constructors call it after their final kernel
     /// choice. Rings above MAX_TAP_RING keep the direct form.
     fn prepare_taps(&mut self) {
+        // Material/path constructors can replace or shift the kernels. A plan
+        // for the previous support must never survive that cold rebuild.
+        self.fft = None;
         let (frames,count)=(self.history_frames,self.kernels.len());
         match frames.checked_mul(count) {
             Some(ring) if ring<=MAX_TAP_RING => {
@@ -417,6 +427,41 @@ impl BaffledPressure {
             }
         }
     }
+    /// Select partitioned convolution before accepting any input. The partition
+    /// must fit inside the first physical tap; refusal leaves the receiver intact.
+    /// This changes floating-point rounding, not the kernel or its timing.
+    pub fn enable_partitioned_fft(&mut self, partition: usize) -> Result<(), String> {
+        if self.started {
+            return Err("FFT receiver must be selected before stepping".into());
+        }
+        let plan = fft::Uniform::new(&self.kernels, self.modes, partition)?;
+        self.fft = Some(plan);
+        self.taps = Vec::new();
+        self.packed_weights = Vec::new();
+        self.tap_offsets = Vec::new();
+        self.tap_history = 0;
+        Ok(())
+    }
+
+    /// Select the largest supported power-of-two partition no larger than the
+    /// caller's bound that fits this receiver. Close microphones stay direct.
+    /// A reactive directional child keeps its existing convolution method.
+    pub fn enable_partitioned_fft_fitting(&mut self, maximum: usize) -> bool {
+        let bound = maximum.min(128);
+        if self.started || bound < 8 { return false; }
+        let mut partition = 1usize << (usize::BITS - 1 - bound.leading_zeros());
+        while partition >= 8 {
+            if self.enable_partitioned_fft(partition).is_ok() { return true; }
+            partition /= 2;
+        }
+        false
+    }
+
+    /// Whether this receiver's pressure FIR currently uses partitioned convolution.
+    pub fn uses_partitioned_fft(&self) -> bool { self.fft.is_some() }
+
+    /// Direct-convolution work estimate, including filters and reactive child.
+    /// With partitioned FFT enabled this is a reference cost, not executed work.
     pub fn multiply_adds_per_sample(&self)->usize {
         self.kernels.len()*self.modes + self.decimator.multiplies_per_output_frame()
             + self.pressure_derivative.as_ref().map_or(0, antialias::Decimator::multiplies_per_output_frame)
@@ -485,7 +530,9 @@ impl BaffledPressure {
         }
         let mut pressure=0.0;
         let transposed=self.tap_history==self.history.as_ptr() as usize;
-        if !transposed {
+        if let Some(fft) = &self.fft {
+            pressure = fft.pressure();
+        } else if !transposed {
             for (delay,weights) in &self.kernels {
                 let frame=if self.head>=*delay {self.head-*delay}else{self.head+self.history_frames-*delay};
                 let offset=frame*self.modes;
@@ -517,6 +564,7 @@ impl BaffledPressure {
         self.started = true;
         let ratio = self.decimator.input_frames();
         let filtered = self.decimator.pending_output();
+        if let Some(fft) = &mut self.fft { fft.step(filtered); }
         let transposed = self.tap_history == self.history.as_ptr() as usize;
         let offset=self.head*self.modes;
         self.history[offset..offset+self.modes].copy_from_slice(filtered);
@@ -553,6 +601,97 @@ mod tests {
     fn patch(x:f64,shape:f64)->SurfaceSample {
         SurfaceSample{position_m:[x,0.0,0.0],area_m2:0.1,mode_shape:vec![shape]}
     }
+    #[test]
+    fn partitioned_receiver_preserves_delay_and_all_filter_forms() {
+        let surface = [patch(0.0, 1.0), patch(0.37, -0.4)];
+        for ratio in [1, 2] {
+            for differentiating in [false, true] {
+                for summed in [false, true] {
+                    let mut direct = if differentiating {
+                        BaffledPressure::new_multirate_differentiating(
+                            &surface, 1, 32_000 * ratio, 32_000, [0.1, 0.0, 1.0], medium())
+                    } else {
+                        BaffledPressure::new_multirate(
+                            &surface, 1, 32_000 * ratio, 32_000, [0.1, 0.0, 1.0], medium())
+                    }.unwrap();
+                    if summed { direct.differentiate_pressure().unwrap(); }
+                    let mut fast = direct.clone();
+                    assert!(fast.enable_partitioned_fft_fitting(128));
+                    assert_eq!(fast.delay_samples, direct.delay_samples);
+                    assert_eq!(fast.filter_delay_samples(), direct.filter_delay_samples());
+                    let (mut error, mut signal) = (0.0, 0.0);
+                    for sample in 0..4096 {
+                        let trace: Vec<_> = (0..ratio).map(|sub| {
+                            let i = sample * ratio + sub;
+                            if i < 2 * ratio { 0.0 } else { (i as f64 * 0.08).sin() * 0.01 }
+                        }).collect();
+                        let expected = direct.step_trace(&trace).unwrap();
+                        let actual = fast.step_trace(&trace).unwrap();
+                        error += (expected - actual).powi(2);
+                        signal += expected.powi(2);
+                        assert!((actual - expected).abs() < 1e-10);
+                        if !summed || !differentiating || ratio != 1 {
+                            let mut modes = [0.0];
+                            fast.mode_pressures(&mut modes).unwrap();
+                            assert!((modes[0] - actual).abs() < 1e-10);
+                        }
+                    }
+                    assert!(signal > 0.0 && error / signal < 1e-20);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partitioned_receiver_clone_and_refused_frames_preserve_history() {
+        let mut receiver = BaffledPressure::new_differentiating(
+            &[patch(0.0, 1.0)], 1, 32_000, [0.0, 0.0, 1.0], medium()).unwrap();
+        receiver.enable_partitioned_fft(32).unwrap();
+        for n in 0..127 { receiver.step(&[(n as f64 * 0.1).sin()]).unwrap(); }
+        let mut clean = receiver.clone();
+        assert!(receiver.enable_partitioned_fft(16).is_err());
+        assert!(!receiver.enable_partitioned_fft_fitting(128));
+        for n in 127..1024 {
+            assert!(receiver.step(&[]).is_err());
+            assert!(receiver.step(&[f64::NAN]).is_err());
+            assert!(receiver.step(&[f64::INFINITY]).is_err());
+            let trace = [(n as f64 * 0.1).sin()];
+            assert_eq!(receiver.step(&trace).unwrap().to_bits(), clean.step(&trace).unwrap().to_bits());
+        }
+    }
+
+    #[test]
+    fn material_padding_invalidates_a_cold_fft_plan_and_keeps_alignment() {
+        let mut direct = BaffledPressure::new_differentiating(
+            &[patch(0.0, 1.0)], 1, 32_000, [0.0, 0.0, 1.0], medium()).unwrap();
+        let mut fast = direct.clone();
+        fast.enable_partitioned_fft(32).unwrap();
+        direct.add_gas_padding(17).unwrap();
+        fast.add_gas_padding(17).unwrap();
+        assert!(!fast.uses_partitioned_fft());
+        assert_eq!(fast.delay_samples, direct.delay_samples);
+        for n in 0..512 {
+            let trace = [(n as f64 * 0.1).sin()];
+            assert_eq!(fast.step(&trace).unwrap().to_bits(), direct.step(&trace).unwrap().to_bits());
+        }
+    }
+
+    #[test]
+    fn partitioned_receiver_preserves_reactive_directional_child() {
+        let pattern = fs_bem::near_field::FirstOrder::new(0.5, [0.0, 0.0, -1.0]).unwrap();
+        let mut direct = BaffledPressure::new_first_order(
+            &[patch(0.0, 1.0), patch(0.37, -0.4)], 1, 32_000,
+            [0.1, 0.0, 1.0], medium(), pattern).unwrap();
+        let mut fast = direct.clone();
+        assert!(fast.enable_partitioned_fft_fitting(128));
+        assert!(!fast.directional_velocity.as_ref().unwrap().uses_partitioned_fft());
+        for n in 0..2048 {
+            assert!(fast.step(&[f64::NAN]).is_err());
+            let trace = [(n as f64 * 0.1).sin() * 0.01];
+            assert!((fast.step(&trace).unwrap() - direct.step(&trace).unwrap()).abs() < 1e-10);
+        }
+    }
+
     #[test]
     fn modal_pressures_reconstruct_delayed_output_without_advancing_time() {
         let surface = [SurfaceSample {position_m:[0.0,0.0,0.0],area_m2:0.1,

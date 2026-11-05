@@ -7,6 +7,15 @@ transform path fs-cheb builds on). Layer: **L1 BEDROCK**. Depends on fs-math
 (strict-mode twiddles) and fs-simd (resolved exact-move/stage capsules).
 Plan §6.3.
 
+`SmallFft` is the bounded, cold-planned radix-2 owner for real-time receiver
+partitions (complex lengths 16 through 256). It allocates only at preparation,
+uses deterministic twiddles and ordinary multiply/add arithmetic, and scales
+the inverse by 1/N. Its rounding is separate from `Fft`'s transform-bit contract;
+adding it does not alter that contract or regenerate existing goldens. Its
+focused check compares every supported length to `Fft` and checks round trips;
+receiver consumers additionally compare the resulting convolution and timing
+against their direct FIR. This is not a general large-transform replacement.
+
 ## Exact-length physical-record transforms
 
 `GeneralFft` admits positive arbitrary 1D complex record lengths, including

@@ -40,6 +40,9 @@ pub mod welch;
 
 mod simd_view;
 
+mod small;
+pub use small::SmallFft;
+
 /// Joint harmonic estimation at caller-supplied frequencies, including
 /// records containing a non-integer number of fundamental periods.
 pub mod harmonic;
