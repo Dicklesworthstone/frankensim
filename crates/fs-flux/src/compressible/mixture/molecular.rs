@@ -11,8 +11,10 @@ use super::{
     MAX_MIXTURE_WORKSPACE_BYTES, MixtureEuler2d, Primitive, Totals, WIDTH_LIMIT, allocated,
     boundary_view, cartesian, cell, checked_totals, copy_values, sum_rows, update,
 };
+pub(in crate::compressible) mod adaptive;
 pub(in crate::compressible) mod interval;
 pub(in crate::compressible) mod stabilized;
+pub use adaptive::{AdaptiveDissipationControl, AdaptiveMolecularReport};
 pub use fs_gas::multicomponent::dissipation::{
     DissipationControl, DissipationError, PlanarTransport, TransportLaw,
 };
@@ -94,6 +96,7 @@ struct Workspace {
     stabilized_x_flux: Vec<f64>,
     stabilized_y_flux: Vec<f64>,
     stabilized_boundary: Vec<f64>,
+    adaptive: adaptive::Workspace,
     boundary_step: Vec<f64>,
     boundary_trial: Vec<f64>,
     boundary_correction: Vec<f64>,
@@ -203,6 +206,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
                 stabilized_x_flux: Vec::new(),
                 stabilized_y_flux: Vec::new(),
                 stabilized_boundary: Vec::new(),
+                adaptive: adaptive::Workspace::default(),
                 boundary_step: allocated(boundary, 0.0)?,
                 boundary_trial: allocated(boundary, 0.0)?,
                 boundary_correction: allocated(boundary, 0.0)?,
@@ -223,6 +227,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
     /// immutable/provider allocations described by required_workspace_bytes.
     pub fn workspace_bytes(&self) -> usize {
         self.source.workspace_bytes()
+            + self.work.adaptive.workspace_bytes()
             + (self.boundary_impulses.capacity()
                 + self.work.current.capacity()
                 + self.work.stage.capacity()

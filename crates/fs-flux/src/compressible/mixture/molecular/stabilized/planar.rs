@@ -232,6 +232,16 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             controls.transport,
             cancelled,
         )?;
+        self.cache_stabilized_anchor(cancelled)?;
+        Ok(first)
+    }
+
+    // The admitted endpoint RHS can start the next half without reevaluating
+    // its original constitutive source, Maxwell--Stefan or caloric owners.
+    pub(in crate::compressible::mixture::molecular) fn cache_stabilized_anchor(
+        &mut self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), DissipationError> {
         copy_values(
             &self.work.x_flux,
             &mut self.work.stabilized_x_flux,
@@ -241,8 +251,7 @@ impl<L: TransportLaw> MolecularTransport2d<L> {
             &self.work.y_flux,
             &mut self.work.stabilized_y_flux,
             cancelled,
-        )?;
-        Ok(first)
+        )
     }
 
     #[allow(clippy::too_many_arguments)]

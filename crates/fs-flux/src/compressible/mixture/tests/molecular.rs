@@ -1,3 +1,4 @@
+mod adaptive;
 mod stabilized;
 use super::*;
 use crate::compressible::mixture::molecular::{
