@@ -30,8 +30,10 @@
 //! pencil contract requires. Independent consistent Hermite stiffener mass
 //! integrates the existing cubic beam displacement exactly. The explicit
 //! eccentric beam option also integrates centroid motion and supplied bending
-//! rotary inertia; full DKT rotary-field and torsional mass consistency remain
-//! open. Membrane
+//! rotary inertia. An independent opt-in DKT rotary mass integrates the SAME
+//! quadratic rotations as bending stiffness, retaining the displacement/slope
+//! cross inertia that controls short-wavelength flexural dispersion. Beam
+//! torsional section inertia remains separate. Membrane
 //! prestress enters as the standard P1 geometric stiffness `K_G = T·∫∇w·∇w`
 //! (drumheads are the K_G-dominated, D→0 limit — tested against continuum
 //! membrane frequencies). Stiffeners are 2-node Hermite beams on plate node
@@ -46,7 +48,9 @@ pub mod loading;
 pub mod viscosity;
 pub mod shell;
 mod edge_cubic;
+mod dkt_kinetic;
 mod stiffener_mass;
+pub use dkt_kinetic::RotaryMass;
 use edge_cubic::edge_cubic_mass;
 pub use edge_cubic::{
     edge_cubic_transverse_gradient_shape, edge_cubic_transverse_mean_shape,
@@ -782,6 +786,7 @@ impl PlateChart {
             stiffeners,
             opts,
             TransverseMass::Linear,
+            RotaryMass::Lumped,
             StiffenerMass::Lumped,
         )
     }
@@ -806,6 +811,7 @@ impl PlateChart {
             stiffeners,
             opts,
             TransverseMass::EdgeCubic,
+            RotaryMass::Lumped,
             StiffenerMass::Lumped,
         )
     }
@@ -831,6 +837,7 @@ impl PlateChart {
             stiffeners,
             opts,
             transverse_mass,
+            RotaryMass::Lumped,
             stiffener_mass,
         )
     }
@@ -975,7 +982,8 @@ fn quad_shape_derivs(xi: f64, eta: f64) -> ([f64; 6], [f64; 6]) {
 }
 
 /// Assemble the 9-vectors `Hx,•` and `Hy,•` from quadratic shape-function
-/// derivatives `dn` (Batoz compact DKT form; per-node DOF order (w, wx, wy)).
+/// values OR derivatives `dn` (Batoz compact DKT form; per-node DOF order
+/// (w, wx, wy)). Rotary inertia and bending stiffness share this exact basis.
 fn h_vectors(cf: &EdgeCoeff, dn: &[f64; 6]) -> ([f64; 9], [f64; 9]) {
     // Corner→edge pairing: node 1 uses edges 5,6; node 2 edges 6,4;
     // node 3 edges 4,5 (edge indices 0,1,2 = DKT edges 4,5,6).
@@ -1224,11 +1232,14 @@ pub fn assemble_with_sections(
         stiffeners,
         opts,
         TransverseMass::Lumped,
+        RotaryMass::Lumped,
         StiffenerMass::Lumped,
     )
 }
 
-/// Translational panel inertia field; rotary slope inertia remains lumped.
+/// Translational panel inertia field. Existing mass-only assembly methods keep
+/// lumped rotary slopes; [`PlateChart::assemble_with_kinetic_mass`] selects that
+/// independent field through [`RotaryMass`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TransverseMass {
     /// Original nodal lumping, `rho*h*area/3` per vertex.
@@ -1240,7 +1251,7 @@ pub enum TransverseMass {
     EdgeCubic,
 }
 
-#[allow(clippy::too_many_lines)]// the same assembly pipeline with an explicit mass integral
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]// one assembly pipeline for all declared kinetic fields
 fn assemble_with_sections_inner(
     mesh: &PlateMesh,
     sections: PlateSectionField<'_>,
@@ -1248,6 +1259,7 @@ fn assemble_with_sections_inner(
     stiffeners: &[Stiffener],
     opts: &AssemblyOptions,
     transverse_mass: TransverseMass,
+    rotary_mass: RotaryMass,
     stiffener_mass: StiffenerMass,
 ) -> Result<PlateModel, PlateError> {
     mesh.validate()?;
@@ -1321,13 +1333,23 @@ fn assemble_with_sections_inner(
             }
         }
         // Transverse P1 mass is exactly ρhA/12 times [[2,1,1],...].
-        // The default remains lumped ρhA/3 per node. Rotary slope inertia
-        // retains its independent lumped ρh³/12·A/3 law in both cases.
+        // The default remains lumped ρhA/3 per node. The rotary choice is
+        // independent: legacy nodal slopes or the original quadratic DKT field.
         let h = section.thickness;
         let mt = section.density * h * area / 3.0;
         let mr = section.density * h * h * h / 12.0 * area / 3.0;
         if matches!(transverse_mass, TransverseMass::EdgeCubic) {
             let me = edge_cubic_mass(&x, &y, section.density * h * area);
+            for r in 0..9 {
+                for c in 0..9 {
+                    push_sym(&mut mc, gdof(r), gdof(c), me[9 * r + c]);
+                }
+            }
+        }
+        if matches!(rotary_mass, RotaryMass::Dkt) {
+            let me = dkt_kinetic::rotary_mass(
+                &x, &y, section.density * h * h * h / 12.0 * area,
+            )?;
             for r in 0..9 {
                 for c in 0..9 {
                     push_sym(&mut mc, gdof(r), gdof(c), me[9 * r + c]);
@@ -1347,8 +1369,10 @@ fn assemble_with_sections_inner(
             } else if matches!(transverse_mass, TransverseMass::Lumped) {
                 push_sym(&mut mc, gdof(3 * node), gdof(3 * node), mt);
             }
-            push_sym(&mut mc, gdof(3 * node + 1), gdof(3 * node + 1), mr);
-            push_sym(&mut mc, gdof(3 * node + 2), gdof(3 * node + 2), mr);
+            if matches!(rotary_mass, RotaryMass::Lumped) {
+                push_sym(&mut mc, gdof(3 * node + 1), gdof(3 * node + 1), mr);
+                push_sym(&mut mc, gdof(3 * node + 2), gdof(3 * node + 2), mr);
+            }
         }
         // Membrane prestress: P1 geometric stiffness on w DOFs,
         // K_G = T·A·(∇N)ᵀ(∇N) with the linear hat gradients.
@@ -1488,9 +1512,17 @@ fn assemble_with_sections_inner(
         }
     }
 
+    let mass = mc.assemble();
+    if matches!(rotary_mass, RotaryMass::Dkt)
+        && (0..free).any(|r| mass.row(r).1.iter().any(|v| !v.is_finite()))
+    {
+        return Err(PlateError::BadSection {
+            what: "assembled DKT kinetic mass overflow",
+        });
+    }
     Ok(PlateModel {
         k: kc.assemble(),
-        m: mc.assemble(),
+        m: mass,
         dof_map,
         free,
     })

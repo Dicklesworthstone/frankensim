@@ -919,7 +919,7 @@ measured piano bridge-mobility or high-band convergence claim.
   `PlateChart::assemble_consistent_transverse_mass` option uses the exact P1
   triangle integral for transverse panel inertia while retaining lumped
   slope and stiffener inertia. It preserves total rigid-translation mass;
-  consistent DKT rotary-field and torsional beam rotary inertia remain follow-ups. A second
+  torsional beam rotary inertia remains separate. A second
   opt-in, `PlateChart::assemble_edge_cubic_transverse_mass`, integrates a
   cubic Bernstein deflection field whose edges reproduce nodal Hermite values
   and tangential slopes. Its symmetric interior control reproduces quadratic
@@ -944,6 +944,25 @@ measured piano bridge-mobility or high-band convergence claim.
   or a quadratic rotation times a varying attachment arm require degree-three
   quadrature within each source facet. Neither option
   alone certifies Model D high-band bridge convergence.
+- `PlateChart::assemble_with_kinetic_mass` independently selects transverse,
+  `RotaryMass::{Lumped, Dkt}` and stiffener inertia. `Dkt` integrates
+  `rho*h^3/12 * integral(beta_x^2 + beta_y^2) dA` using the original quadratic
+  Batoz rotations that generate bending stiffness. A fixed positive six-point
+  degree-four rule is exact for their products and retains inter-node and
+  displacement/slope coupling. This term replaces panel slope lumping directly
+  in assembly, without subtracting nearly equal assembled matrices. The result
+  is the actual `PlateModel.m` used by modal, harmonic and transient consumers;
+  original stiffness, section fields, supports and beam inertia remain intact.
+  Existing entry points and `RotaryMass::Lumped` preserve legacy arithmetic.
+  DKT rotations differ from gradients of the optional edge-cubic displacement;
+  these remain explicitly different kinetic models. This is Rayleigh/Kirchhoff
+  rotary inertia, not transverse shear, a solid-wave correction or a physical
+  validity certificate at wavelengths comparable with thickness. Focused tests
+  check independent edge constraints and integration, rigid/quadratic kinetic
+  work, positive mass, exact support restriction and beam retention, and a
+  three-rung bending-wavelength ladder for both P1 and cubic transverse fields
+  against the declared continuum model.
+  Nonfinite or underflowed consistent rotary inertia refuses without mass floors.
 - Uniform isotropic pre-tension only (scalar T); tensor/nonuniform
   prestress fields join the soundboard-downbearing consumer.
 - Elastic pencils remain (K, M). The explicit MITC viscosity projection above
