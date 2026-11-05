@@ -241,6 +241,15 @@ impl<'a> From<&'a SpectralDiffuseThermalSurface> for DiffuseThermalSurface<'a> {
 }
 
 impl DiffuseThermalSurface<'_> {
+    /// Accepted thermodynamic temperature of the original source, in kelvin.
+    #[must_use]
+    pub const fn temperature_k(self) -> f64 {
+        match self {
+            Self::Gray(surface) => surface.temperature_k(),
+            Self::Spectral(surface) => surface.temperature_k(),
+        }
+    }
+
     /// Opaque reciprocal reflectance within the source's wavelength domain.
     pub fn reflectance(self, wavelength_nm: f64) -> Result<f64, ThermalSurfaceError> {
         match self {

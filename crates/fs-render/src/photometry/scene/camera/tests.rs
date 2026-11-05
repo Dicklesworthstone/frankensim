@@ -18,6 +18,8 @@ use fs_blake3::hash_domain;
 use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3, fixtures::SphereChart};
 
+mod thermal;
+
 const SPECTRUM: LiftedSpectrum = LiftedSpectrum {
     c: [3.0, -2.0, -0.25],
 };

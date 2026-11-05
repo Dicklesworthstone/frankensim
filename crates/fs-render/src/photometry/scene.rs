@@ -34,6 +34,7 @@ use crate::dielectric::DielectricGlass;
 use crate::instances::{
     GeometryInstance, InstanceError, InstanceScene, RigidTransform, SharedGeometry,
 };
+use crate::polarization::dielectric::scene::curved::camera::DiffuseThermalEmitter;
 use crate::polarization::dielectric::scene::curved::{
     CurvedPolarizedScene, CurvedSceneError, SceneMedium,
 };
@@ -112,6 +113,9 @@ pub enum NativeOpticalSceneError {
     InvalidMaterial {
         primitive: usize,
     },
+    ConflictingThermalEmission {
+        primitive: usize,
+    },
     InvalidDetectorAxis {
         primitive: usize,
     },
@@ -162,6 +166,7 @@ pub struct NativeOpticalScene {
     interior_media: Vec<Option<usize>>,
     conductors: Vec<ConductorOptics>,
     reflectances: Vec<SpectralReflectance>,
+    thermal_emitters: Vec<DiffuseThermalEmitter>,
     // Original primitive order; native admission sorts its bounded working copy.
     bindings: Vec<SurfaceBinding>,
 }
@@ -174,8 +179,10 @@ impl NativeOpticalScene {
     /// Dielectric, smooth/rough/brushed conductor, spectral diffuse and coated
     /// diffuse laws are retained exactly. Lifted Lambertian spectra use their
     /// original polynomial throughout the native visible band without a table
-    /// fit. Legacy Schlick GGX and thermal materials refuse until the curved
-    /// owner supports their original law.
+    /// fit. Original gray/spectral diffuse thermal materials retain their
+    /// accepted temperature and exact reciprocal reflection; the camera adds
+    /// their original SI Planck emission without authored-radiance calibration.
+    /// Legacy Schlick GGX refuses until the curved owner supports its law.
     /// Animated geometry requires an explicit caller-selected static snapshot.
     pub fn try_from_scene(
         cx: &Cx<'_>,
@@ -201,9 +208,15 @@ impl NativeOpticalScene {
                 bindings: bindings.len(),
             });
         }
-        let (mut dielectric_count, mut conductor_count, mut reflectance_count) = (0, 0, 0);
-        for (primitive, binding) in scene.primitives.iter().zip(bindings) {
+        let (mut dielectric_count, mut conductor_count, mut reflectance_count, mut thermal_count) =
+            (0, 0, 0, 0);
+        for (index, (primitive, binding)) in scene.primitives.iter().zip(bindings).enumerate() {
             cx.checkpoint()?;
+            if primitive.material.thermal_surface().is_some() && primitive.emission.is_some() {
+                return Err(NativeOpticalSceneError::ConflictingThermalEmission {
+                    primitive: index,
+                });
+            }
             if matches!(binding.role, NativeOpticalRole::Material { .. }) {
                 match primitive.material {
                     Material::Dielectric { .. } => dielectric_count += 1,
@@ -212,6 +225,11 @@ impl NativeOpticalScene {
                     }
                     Material::SpectralDiffuse { .. } | Material::CoatedDiffuse { .. } => {
                         reflectance_count += 1
+                    }
+                    Material::GrayDiffuseThermal { .. }
+                    | Material::SpectralDiffuseThermal { .. } => {
+                        reflectance_count += 1;
+                        thermal_count += 1;
                     }
                     _ => {}
                 }
@@ -247,6 +265,7 @@ impl NativeOpticalScene {
         let mut surfaces = reserved(count)?;
         let mut conductors = reserved(conductor_count)?;
         let mut reflectances = reserved(reflectance_count)?;
+        let mut thermal_emitters = reserved(thermal_count)?;
         for (index, (primitive, binding)) in scene.primitives.into_iter().zip(bindings).enumerate()
         {
             cx.checkpoint()?;
@@ -383,13 +402,30 @@ impl NativeOpticalScene {
                                 reason: "legacy Schlick GGX has no exact curved material owner",
                             });
                         }
-                        Material::GrayDiffuseThermal { .. }
-                        | Material::SpectralDiffuseThermal { .. } => {
-                            return Err(NativeOpticalSceneError::UnsupportedMaterial {
-                                primitive: index,
-                                reason: "thermal surface emission has no exact curved material owner",
-                            });
+                        Material::GrayDiffuseThermal { surface } => {
+                            let emitter = DiffuseThermalEmitter::try_gray_in_band(
+                                instance.object_id(),
+                                surface,
+                                media[medium].ior().wavelength_bounds_nm(),
+                            )
+                            .map_err(|_| {
+                                NativeOpticalSceneError::InvalidMaterial { primitive: index }
+                            })?;
+                            bind_thermal_surface(
+                                index,
+                                medium,
+                                emitter,
+                                &mut reflectances,
+                                &mut thermal_emitters,
+                            )?
                         }
+                        Material::SpectralDiffuseThermal { surface } => bind_thermal_surface(
+                            index,
+                            medium,
+                            DiffuseThermalEmitter::new(instance.object_id(), surface),
+                            &mut reflectances,
+                            &mut thermal_emitters,
+                        )?,
                     }
                 }
             };
@@ -419,6 +455,7 @@ impl NativeOpticalScene {
             interior_media,
             conductors,
             reflectances,
+            thermal_emitters,
             bindings: surfaces,
         })
     }
@@ -501,6 +538,29 @@ impl NativeOpticalScene {
         cx.checkpoint()?;
         Ok(observe(&scene))
     }
+}
+
+// Material reflection and camera emission retain the same accepted Kirchhoff
+// source. The native material owns 1-epsilon; emission is attached separately
+// only when observing the original scene camera, never fitted into a lamp.
+fn bind_thermal_surface(
+    primitive: usize,
+    medium: usize,
+    emitter: DiffuseThermalEmitter,
+    reflectances: &mut Vec<SpectralReflectance>,
+    emitters: &mut Vec<DiffuseThermalEmitter>,
+) -> Result<Interaction, NativeOpticalSceneError> {
+    let reflectance = reflectances.len();
+    reflectances.push(
+        emitter
+            .reflectance_spectrum()
+            .map_err(|_| NativeOpticalSceneError::InvalidMaterial { primitive })?,
+    );
+    emitters.push(emitter);
+    Ok(Interaction::DepolarizingDiffuse {
+        medium,
+        reflectance,
+    })
 }
 
 fn reserved<T>(count: usize) -> Result<Vec<T>, NativeOpticalSceneError> {

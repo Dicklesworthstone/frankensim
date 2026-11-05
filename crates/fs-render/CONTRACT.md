@@ -7613,7 +7613,9 @@ their optical tables/coatings and body-local detail. Native spectral diffuse and
 coated diffuse laws are unchanged. Lifted Lambertian reflectance is evaluated
 from its original coefficients at each physical wavelength throughout the native
 380–780 nm band, without fitting or a new table allocation. Legacy Schlick GGX
-and thermal materials currently refuse rather than becoming surrogate absorbers.
+currently refuses rather than becoming a surrogate absorber. Original gray and
+spectral diffuse thermal materials retain their reciprocal reflection and exact
+physical source, as specified in the thermal camera extension below.
 Detectors explicitly intercept the chosen original geometry. All other original
 geometry remains present, including physical occluders.
 
@@ -7675,7 +7677,8 @@ Material reflectance does not multiply local emission: native camera transport
 adds emission on arrival before sampling the original scattering material.
 The original environment is borrowed with its existing RGB spectral
 reconstruction and declared visible support; calibration does not recover a
-measured spectrum. Zero calibration is exact black in the declared band.
+measured spectrum. Zero calibration is exact black for these authored sources
+in the declared band; original thermal materials already have SI source units.
 
 The original camera eye, orthonormal forward/up basis and half-tangent projection
 are retained by the existing exact legacy-compatible pinhole branch. Callers
@@ -7704,3 +7707,45 @@ admission errors. Regressions cover original emission through a glass sphere,
 immersed-camera index scaling and actual Beer lengths, two-sided emission before
 diffuse/environment continuation, raster spectral/XYZ replay, exact source and
 geometry identity for area proposals, and absence of duplicate rectangle power.
+
+## Original thermal surfaces in refractive camera observations
+
+`NativeOpticalScene` now retains original `GrayDiffuseThermal` and
+`SpectralDiffuseThermal` materials instead of refusing them. Native diffuse
+reflection is exactly the reciprocal `1-epsilon` law. Original gray sources
+retain their accepted temperature, declared gray model and complete source
+identity; the constant native reflectance is prepared over their original
+surrounding medium's phase-law band. Spectral sources retain every original
+emissivity knot and their finite source band. Neither preparation fits Planck
+radiance, changes emissivity or extends a material/medium domain.
+
+`DiffuseThermalEmitter::try_gray_in_band` also makes this original gray source
+available directly to native camera and area-source users. `surface()` returns
+the existing `DiffuseThermalSurface` view, preserving the original gray or
+spectral value and identity. Exact source/material agreement remains required;
+only a blackbody may use native opaque termination. Source storage is bounded
+by the original object count and prepared once; path and spectral-lane queries
+reuse the original source law without allocations or new geometry.
+
+`with_curved_camera` attaches those accepted physical sources to the same native
+camera used by raster, sensor, area-light and molecular observations. Thermal
+radiance is already W/(m² sr nm), so neither authored surface calibration nor
+environment calibration scales it. The original two-sided law, emission before
+scattering, refracted path, Beer attenuation and camera/source index ratio are
+unchanged. Native area sampling and complementary emitter-hit MIS retain the
+same thermal snapshot and original geometry. A thermal material with any
+`Primitive::emission` metadata refuses at scene admission, including a zero
+strength, rather than creating two emission owners.
+
+The original vacuum/index-one emission restriction remains local to the actual
+source contact. A camera inside glass can observe a thermal source outside that
+glass; a source immersed in an unsupported host still refuses. This observes a
+frozen accepted thermal state and does not advance heat, infer bolometric power
+from finite spectral data, invent temperature for other materials, or supply
+coherent thermal fields. Four focused G0/G1/G3 regression groups cover analytic
+Planck radiance through glass with actual absorption lengths and immersed-camera
+scaling, gray/spectral equilibrium reflection and complementary area MIS,
+infrared photon-weighted detector response with replay and temperature changes,
+and source/domain/material/work refusals. Native Rust execution remains
+unavailable in the implementation environment; scoped formatting and source
+review are separate from those authored regressions.

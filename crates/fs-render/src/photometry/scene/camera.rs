@@ -19,6 +19,8 @@ use fs_exec::{Cancelled, Cx};
 /// radiance. Surface and environment units need not share a calibration. Both
 /// scales apply to the original spectrum times its original authored strength;
 /// they do not normalize total flux, alter color or infer a measured spectrum.
+/// Original thermal materials already emit SI radiance from their accepted
+/// temperature and emissivity; neither calibration scale applies to them.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NativeRadianceCalibration {
     surface_w_m2_sr_nm_per_unit: f64,
@@ -110,6 +112,11 @@ impl NativeOpticalScene {
     /// `CurvedAreaEmitter::from_camera` can prepare that original surface for
     /// native area-light MIS inside the callback, with explicit image seeds.
     /// The ordinary environment uses its exact native RGB spectral reconstruction.
+    /// Original gray/spectral diffuse thermal materials instead retain their
+    /// own Planck/Kirchhoff source in SI units, independent of this calibration.
+    /// Their source identity, two-sided emission and exact reciprocal reflection
+    /// also serve native area proposals. They retain the original index-one
+    /// emitting-medium restriction, even when the camera lies inside glass.
     ///
     /// The existing reciprocal camera retains n_camera²/n_source², actual Beer
     /// paths, emission before scattering, native material laws and unresolved
@@ -192,7 +199,8 @@ impl NativeOpticalScene {
             .transpose()?;
         cx.checkpoint()?;
         self.with_curved_scene(cx, max_build_work, |scene| {
-            let radiance = CurvedCameraScene::try_new(cx, scene, &emitters, environment)?;
+            let radiance = CurvedCameraScene::try_new(cx, scene, &emitters, environment)?
+                .with_diffuse_thermal_emitters(cx, &self.thermal_emitters)?;
             cx.checkpoint()?;
             Ok::<R, NativeCameraError>(observe(&radiance, &camera))
         })?
