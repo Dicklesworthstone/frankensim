@@ -1914,3 +1914,20 @@ phase refinement, verify conserved acoustic energy, and compare a forced P2
 polynomial pressure/potential solution with independent kinetic, compression,
 volume-input and passive-wall work. They also exercise strict high-order state
 admission, conflicting laws, free-DOF limits and reusable factors after refusal.
+
+`prepare_time_with_walls_and_pressure_release` composes these same constraints
+with the original causal mechanical and Maxwell-memory wall owner. Mechanical,
+real-admittance and pressure-release faces are disjoint, while adjacent patches
+may share original trace coordinates. Every wall displacement, velocity and
+memory coordinate remains present even on an edge shared with a constrained
+fluid trace. The original consistent face mass, wall storage, actual resistor
+and relaxation heat, and signed fluid-to-wall work remain unchanged.
+
+The condensed acoustic solve uses the free fluid coordinates and its existing
+factor budget; wall and memory limits still admit their complete trace spaces.
+The mechanical step explicitly refuses velocity forcing on release faces before
+calling the common projected solve. Empty release maps use the original wall
+path. Tests specify an exact positive-stiffness spring-balanced wall with an
+accelerating fluid at independent area/amplitude scales, a nonuniform Maxwell
+memory pulse adjoining a release edge with irreversible heat and acoustic
+energy transfer, and full-state/overlap/resource/cancellation refusals.

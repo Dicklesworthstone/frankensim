@@ -237,6 +237,15 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             )
             .into());
         }
+        // An empty release set has a known original dimension: retain its
+        // early cap refusal without allocating an unnecessary identity map.
+        if pressure_release_faces.is_empty() && self.ndof() > limits.max_dofs {
+            return Err(HeterogeneousError::Limit {
+                what: "transient pressure degrees of freedom",
+                requested: self.ndof(),
+                maximum: limits.max_dofs,
+            });
+        }
         let pressure_release = self
             .geometry
             .pressure_release_constraints(pressure_release_faces, cancelled)?;

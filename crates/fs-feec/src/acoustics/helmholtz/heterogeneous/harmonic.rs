@@ -156,11 +156,20 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         {
             return Err(invalid("positive harmonic limits and residual tolerance required").into());
         }
+        let cap = limits.max_dofs.min(MAX_HARMONIC_DOFS);
+        // Preserve cheap admission for the original unconstrained path before
+        // allocating an identity constraint map over a potentially large mesh.
+        if pressure_release_faces.is_empty() && self.ndof() > cap {
+            return Err(HeterogeneousError::Limit {
+                what: "unconstrained pressure degrees of freedom",
+                requested: self.ndof(),
+                maximum: cap,
+            });
+        }
         let pressure_release = self
             .geometry
             .pressure_release_constraints(pressure_release_faces, cancelled)?;
         let n = pressure_release.free_dofs.len();
-        let cap = limits.max_dofs.min(MAX_HARMONIC_DOFS);
         if n > cap {
             return Err(HeterogeneousError::Limit {
                 what: "unconstrained pressure degrees of freedom",
