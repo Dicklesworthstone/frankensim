@@ -412,20 +412,9 @@ impl<'c> HelmholtzFe<'c> {
         face: [u32; 3],
         quad: &[([f64; 3], f64)],
     ) -> Result<FaceRule, AcousticFeError> {
-        let mut key = face;
-        key.sort_unstable();
-        let fi = self
-            .space
-            .complex
-            .faces
-            .binary_search(&key)
-            .map_err(|_| AcousticFeError::FaceNotInMesh { face })?;
-        let (t, omit, count) = self.owners[fi];
-        if count != 1 {
-            return Err(AcousticFeError::FaceNotOnBoundary { face });
-        }
-        let tet = self.space.complex.tets[t as usize];
-        let local: Vec<usize> = (0..4).filter(|&l| l != omit as usize).collect();
+        let (t, omit) = self.boundary_owner(face)?;
+        let tet = self.space.complex.tets[t];
+        let local: Vec<usize> = (0..4).filter(|&l| l != omit).collect();
         let (weights, area) = if self.is_curved() {
             let mut weights = Vec::with_capacity(quad.len());
             let mut area = fs_math::dd::Dd::from_f64(0.0);
@@ -434,17 +423,17 @@ impl<'c> HelmholtzFe<'c> {
                 for i in 0..3 {
                     lam[local[i]] = b[i];
                 }
-                let surface = self.geometry_face_point(t as usize, omit as usize, lam)?;
+                let surface = self.geometry_face_point(t, omit, lam)?;
                 let weight = w * surface.surface_jacobian_m2;
                 if !weight.is_finite() || weight <= 0.0 {
-                    return Err(AcousticFeError::DegenerateTet { tet: t as usize });
+                    return Err(AcousticFeError::DegenerateTet { tet: t });
                 }
                 weights.push(weight);
                 area = area + fs_math::dd::Dd::from_f64(weight);
             }
             let area = area.to_f64();
             if !area.is_finite() || area <= 0.0 {
-                return Err(AcousticFeError::DegenerateTet { tet: t as usize });
+                return Err(AcousticFeError::DegenerateTet { tet: t });
             }
             (weights, area)
         } else {
@@ -457,7 +446,7 @@ impl<'c> HelmholtzFe<'c> {
         };
         let mut dofs = Vec::new();
         let mut phi = Vec::new();
-        for (global, f) in self.space.element_dofs(t as usize) {
+        for (global, f) in self.space.element_dofs(t) {
             let vals: Vec<f64> = quad
                 .iter()
                 .map(|(b, _)| {
@@ -488,6 +477,29 @@ impl<'c> HelmholtzFe<'c> {
         self.owners.iter().filter(|owner| owner.2 == 1).count()
     }
 
+    /// Original topology borrowed by the mixed fluid owner consuming this map.
+    pub(crate) fn complex(&self) -> &'c TetComplex {
+        self.space.complex
+    }
+
+    /// Reuse the original exterior-face admission for pointwise trace metrics.
+    /// The second index is the omitted local tetrahedron vertex.
+    pub(super) fn boundary_owner(&self, face: [u32; 3]) -> Result<(usize, usize), AcousticFeError> {
+        let mut key = face;
+        key.sort_unstable();
+        let fi = self
+            .space
+            .complex
+            .faces
+            .binary_search(&key)
+            .map_err(|_| AcousticFeError::FaceNotInMesh { face })?;
+        let (tet, omitted, count) = self.owners[fi];
+        if count != 1 {
+            return Err(AcousticFeError::FaceNotOnBoundary { face });
+        }
+        Ok((tet as usize, omitted as usize))
+    }
+
     /// Original corner positions. Quadratic midsides are retained separately;
     /// use `geometry_point` for physical sampling of either geometry order.
     #[must_use]
@@ -515,19 +527,8 @@ impl<'c> HelmholtzFe<'c> {
         &self,
         face: [u32; 3],
     ) -> Result<([[f64; 3]; 3], [f64; 3], f64), AcousticFeError> {
-        let mut key = face;
-        key.sort_unstable();
-        let fi = self
-            .space
-            .complex
-            .faces
-            .binary_search(&key)
-            .map_err(|_| AcousticFeError::FaceNotInMesh { face })?;
-        let (tet, _, count) = self.owners[fi];
-        if count != 1 {
-            return Err(AcousticFeError::FaceNotOnBoundary { face });
-        }
-        self.element_face_geometry(tet as usize, face)
+        let (tet, _) = self.boundary_owner(face)?;
+        self.element_face_geometry(tet, face)
     }
 
     /// One original tetrahedron face, including an INTERNAL material interface.
@@ -886,9 +887,9 @@ impl ReducedHelmholtz {
         }
         if let Some(supplied) = supplied_loads {
             if supplied.len() != ports.len()
-                || supplied.iter().any(|b| {
-                    b.len() != fe.ndof() || b.iter().any(|value| !value.is_finite())
-                })
+                || supplied
+                    .iter()
+                    .any(|b| b.len() != fe.ndof() || b.iter().any(|value| !value.is_finite()))
             {
                 return Err(AcousticFeError::InvalidInput {
                     what: "spatial port load shape or nonfinite value",
@@ -1346,15 +1347,26 @@ mod tests {
                 let expected = area * (values.iter().sum::<f64>() + values[i]) / 12.0;
                 assert!((load[face[i] as usize] - expected).abs() < 2e-13 * area);
             }
-            let permuted = fe.boundary_linear_load(&[
-                ([face[2], face[0], face[1]], [values[2], values[0], values[1]])
-            ]).unwrap();
+            let permuted = fe
+                .boundary_linear_load(&[(
+                    [face[2], face[0], face[1]],
+                    [values[2], values[0], values[1]],
+                )])
+                .unwrap();
             assert_eq!(load, permuted);
             let uniform = fe.boundary_linear_load(&[(face, [1.0; 3])]).unwrap();
             let (original, _) = fe.boundary_load(&[face]).unwrap();
-            for (a,b) in uniform.iter().zip(original) { assert!((a-b).abs() < 2e-13 * area); }
-            assert!(fe.boundary_linear_load(&[(face, values), (face, values)]).is_err());
-            assert!(fe.boundary_linear_load(&[(face, [f64::NAN, 0.0, 0.0])]).is_err());
+            for (a, b) in uniform.iter().zip(original) {
+                assert!((a - b).abs() < 2e-13 * area);
+            }
+            assert!(
+                fe.boundary_linear_load(&[(face, values), (face, values)])
+                    .is_err()
+            );
+            assert!(
+                fe.boundary_linear_load(&[(face, [f64::NAN, 0.0, 0.0])])
+                    .is_err()
+            );
         }
     }
 
@@ -1367,8 +1379,10 @@ mod tests {
             let center = [0.2, 0.15, 0.1];
             assert!(dot3(normal, sub3(vertices[0], center)) > 0.0);
             let (_, reversed, a) = fe.boundary_geometry([face[2], face[1], face[0]]).unwrap();
-            assert!((area-a).abs() < 1e-14);
-            for (n,r) in normal.iter().zip(reversed) { assert!((n-r).abs() < 1e-14); }
+            assert!((area - a).abs() < 1e-14);
+            for (n, r) in normal.iter().zip(reversed) {
+                assert!((n - r).abs() < 1e-14);
+            }
         }
     }
 

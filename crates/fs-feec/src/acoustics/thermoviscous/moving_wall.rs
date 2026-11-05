@@ -63,12 +63,35 @@ pub struct MovingWallField {
     pub power_into_fluid_w: f64,
 }
 
-pub(super) fn modal_impedance(mode: &ModalAcousticMode, damping_rate_per_s: f64, omega: f64) -> C64 {
+pub(super) fn modal_impedance(
+    mode: &ModalAcousticMode,
+    damping_rate_per_s: f64,
+    omega: f64,
+) -> C64 {
     let natural = mode.angular_frequency_rad_s;
-    C64::new(
-        damping_rate_per_s,
-        omega - natural * natural / omega,
-    )
+    C64::new(damping_rate_per_s, omega - natural * natural / omega)
+}
+
+fn moving_faces(wall: &MovingWall) -> Result<BTreeSet<[u32; 3]>, ThermoviscousError> {
+    let modes = wall.structure.modes().len();
+    if wall.faces.is_empty()
+        || modes == 0
+        || modes > MAX_MOVING_WALL_MODES
+        || wall.velocity_shapes.len() != modes
+    {
+        return Err(ThermoviscousError::InvalidInput(
+            "moving wall faces/mode count",
+        ));
+    }
+    let mut faces = BTreeSet::new();
+    for &face in &wall.faces {
+        if !faces.insert(canonical(face)) {
+            return Err(ThermoviscousError::InvalidInput(
+                "duplicate moving wall face",
+            ));
+        }
+    }
+    Ok(faces)
 }
 
 impl<'c> ThermoviscousFe<'c> {
@@ -93,27 +116,45 @@ impl<'c> ThermoviscousFe<'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ThermoviscousError> {
         poll(cancelled)?;
-        let modes = wall.structure.modes().len();
-        if wall.faces.is_empty()
-            || modes == 0
-            || modes > MAX_MOVING_WALL_MODES
-            || wall.velocity_shapes.len() != modes
-        {
-            return Err(ThermoviscousError::InvalidInput(
-                "moving wall faces/mode count",
-            ));
-        }
-        let mut faces = BTreeSet::new();
-        for &face in &wall.faces {
-            if !faces.insert(canonical(face)) {
-                return Err(ThermoviscousError::InvalidInput(
-                    "duplicate moving wall face",
-                ));
-            }
-        }
+        let faces = moving_faces(&wall)?;
         let mut model = Self::assemble_medium(
             complex,
             positions,
+            medium,
+            thermodynamics,
+            false,
+            boundary,
+            &faces,
+            limits,
+            cancelled,
+        )?;
+        model.constrain_moving_wall(wall, &faces, limits, cancelled)?;
+        Ok(model)
+    }
+
+    /// Consume the original admitted geometry with full-vector conforming
+    /// structural motion. The same mapped inertial, pressure and viscous forms
+    /// are assembled before the original exact congruence imposes the wall
+    /// velocity. Thus curved walls retain tangential no-slip work and the full
+    /// reciprocal fluid reaction, without replacing vector shapes by normals.
+    ///
+    /// The P2 shapes remain hierarchical coefficients in global Cartesian
+    /// axes on a fixed reference domain. This does not infer solid geometry or
+    /// validate its modal transfer; it is not a moving-mesh/ALE solve.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_geometry_with_moving_wall(
+        geometry: HelmholtzFe<'c>,
+        medium: ThermoviscousMedium,
+        thermodynamics: ThermoviscousThermodynamics,
+        boundary: &ThermoviscousBoundary,
+        wall: MovingWall,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        poll(cancelled)?;
+        let faces = moving_faces(&wall)?;
+        let mut model = Self::assemble_geometry(
+            geometry,
             medium,
             thermodynamics,
             false,

@@ -7,7 +7,8 @@
 //! rho C_j T0 eta_j^T M eta_j/2; exchange loss is
 //! rho C_j T0/tau_j (theta-eta_j)^T M (theta-eta_j).
 //!
-//! M is the original FULL hierarchical P2 mass. Only theta is restricted by
+//! M is the original FULL hierarchical P2 mass on the same admitted affine or
+//! curved fluid geometry, at its declared volume quadrature. Only theta is restricted by
 //! the translational thermal boundary. Reservoirs have no spatial conduction
 //! and no separate Dirichlet condition: a molecule at an isothermal wall can
 //! still start out of internal equilibrium and release its stored energy.
@@ -103,14 +104,18 @@ pub(super) fn assemble(
     }
     let ndof = model.space.ndof;
     let mut full_mass = vec![0.0; ndof * ndof];
-    let quad = duffy_quadrature(4);
+    let quad = duffy_quadrature(model.volume_quadrature_order());
     for t in 0..model.space.complex.tets.len() {
         poll(cancelled)?;
         let dofs = model.space.element_dofs(t);
-        let jac = 6.0 * model.geometry.vol_signed[t].abs();
+        let mut values = vec![0.0; dofs.len()];
         for &(bary, w) in &quad {
+            poll(cancelled)?;
+            let (jac, _) = model.volume_geometry(t, bary)?;
             let weight = jac * w;
-            let values: Vec<_> = dofs.iter().map(|(_, f)| f.eval(bary, 2)).collect();
+            for (value, (_, shape)) in values.iter_mut().zip(&dofs) {
+                *value = shape.eval(bary, 2);
+            }
             for (i, &(gi, _)) in dofs.iter().enumerate() {
                 for (j, &(gj, _)) in dofs.iter().enumerate() {
                     full_mass[gi * ndof + gj] += weight * values[i] * values[j];

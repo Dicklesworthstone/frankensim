@@ -2147,10 +2147,10 @@ zero-net shape from a zero projected source.
 Legacy APIs returning one triangle and one normal admit only genuinely affine
 selected faces, including planar openings in otherwise curved interiors.
 Nonaffine selected faces refuse instead of exporting their corner triangle.
-Standalone resolved LNS geometry remains on its separate affine constructor;
-this increment does not imply curved LNS, curved BEM panels, a curved-mesh
-importer or closed-cylinder/instrument qualification. The broader bead stays
-open.
+Resolved LNS consumes this same map through the complete mixed-fluid extension
+specified below. This geometry owner does not imply curved BEM panels, a
+curved-mesh importer or closed-cylinder/instrument qualification. The broader
+bead stays open.
 
 Twelve native regressions specify analytic volume/gradient moments, all 24
 tetrahedron vertex orders, shared curved-face reciprocity, rigorous fold and
@@ -2162,3 +2162,58 @@ and independent analytical moment/metric/inverse oracles passed. Native Rust
 compilation and tests remain unrun under the existing upstream dependency
 memory failure and full workspace; these source checks do not establish
 numerical test passage.
+
+## Quadratic geometry in the complete resolved viscous/thermal fluid
+
+`ThermoviscousFe::from_geometry`, `from_geometry_with_thermodynamics` and
+`from_geometry_with_moving_wall` consume the original admitted P2 Helmholtz
+geometry. They retain its full-element orientation proof, original topology,
+midside map and declared quadrature, and require the same equilibrium density
+and adiabatic sound speed. The complete P2/P1/P2 velocity, pressure and
+temperature coordinates remain. No replacement mesh, extra geometry proof,
+pressure reduction or second fluid operator is introduced.
+
+Variable volume determinants and physical inverse-transpose gradients enter
+every original inertial, viscous, conductive, pressure/divergence and
+thermodynamic storage block. Independent loss integration uses that same map.
+The existing full-vector moving-wall congruence therefore retains pressure,
+shear, inertia and tangential no-slip work on curved reference faces. The
+original affine constructors retain their established arithmetic. Element
+scratch buffers are reused across quadrature points instead of allocating
+value/gradient vectors at each point.
+
+Original heat-source callbacks receive mapped physical positions and variable
+volume weights once during preparation. Their independently requested order
+must meet the geometry's declared minimum. Signed source moments, cached full
+temperature loads, exact model identity and existing harmonic/time work pairing
+remain unchanged. Original molecular reservoirs use the same full mapped P2
+mass and quadrature as the resolved thermal field; they are not collapsed to
+bulk viscosity or a fitted heat capacity.
+
+Finite conductive wall assembly reuses the original mapped boundary mass.
+Independent pointwise wall heat uses cached physical surface Jacobians at the
+same original local-face quadrature points, with explicit permutation into
+canonical temperature traces. This preserves work even when stored tetrahedron
+and face orders differ. The solid's existing local normal-profile model still
+requires its declared curvature and tangential-scale admission; this does not
+supply a curved solid-volume mesh.
+
+Pressure traction ports, conforming planar interfaces and spatial slab owners
+continue to refuse nonaffine selected faces where their original physical
+representation requires a plane. Curved wall geometry does not silently become
+a flat corner triangle. Original mixed-space, dense-memory, mesh-aspect,
+constitutive, cancellation and source-identity refusals remain active. The
+aspect limit measures corner tetrahedra; curved determinant quality belongs
+to the consumed geometry's whole-element proof. Geometry, quadrature and the
+mesh resolving viscous/thermal layers remain separate convergence obligations.
+
+Eight focused native regressions specify affine matrix/load identity;
+manufactured curved stress, storage and divergence; driven reciprocity and
+power; full-vector moving-wall reaction; mapped heat-release moments; analytic
+coupled frozen-Cv/molecular exchange; and conductive surface quadrature/work
+under both tetrahedron orientations, plus admission refusals. Pinned Rust
+parsing/format checks and independent analytical moment/surface calculations
+were performed. Native compilation and test execution remain unverified under
+the existing upstream dependency-memory failure and full workspace. No
+closed-cylinder, instrument, spatial-resolution or broader bead acceptance is
+inferred.

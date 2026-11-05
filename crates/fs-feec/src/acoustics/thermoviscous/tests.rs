@@ -1,6 +1,8 @@
 use super::*;
 
 mod conductive;
+mod curved;
+mod curved_thermal;
 mod fluid;
 mod heat_source;
 mod moving_wall;

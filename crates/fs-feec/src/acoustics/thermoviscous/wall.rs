@@ -37,7 +37,17 @@ pub struct ConductiveWallRegion {
 #[derive(Clone)]
 struct FaceTrace {
     dofs: [usize; 6],
-    area: f64,
+    /// Permute the original owner's face quadrature to canonical trace DOFs.
+    local_to_trace: [usize; 3],
+    metric: FaceMetric,
+}
+
+#[derive(Clone)]
+enum FaceMetric {
+    /// Keep the established affine work arithmetic and one scalar per face.
+    AffineArea(f64),
+    /// Half the physical surface Jacobian at each declared quadrature point.
+    CurvedHalfJacobians(Vec<f64>),
 }
 
 pub(super) struct WallEntry {
@@ -51,6 +61,7 @@ pub(super) struct WallEntry {
 pub(super) struct PreparedWallTraces {
     regions: Vec<ConductiveWallRegion>,
     faces: Vec<Vec<FaceTrace>>,
+    quadrature: Vec<([f64; 3], f64)>,
     pub entries: Vec<WallEntry>,
     row_ptr: Vec<usize>,
 }
@@ -66,6 +77,10 @@ impl ThermoviscousFe<'_> {
     /// Sparse trace work is bounded by the already admitted mesh: at most 36
     /// entries per face before deterministic accumulation, with no additional
     /// dense matrix. Empty `regions` restores the original insulated remainder.
+    /// Curved walls use the admitted fluid map and the same surface quadrature
+    /// in both assembly and independent work integration. Their variable
+    /// surface Jacobians are cached once; the normal-profile solid model still
+    /// requires its own declared curvature and tangential-scale admission.
     pub fn with_conductive_walls(
         mut self,
         regions: &[ConductiveWallRegion],
@@ -76,7 +91,15 @@ impl ThermoviscousFe<'_> {
             return Err(ThermoviscousError::InvalidInput("conductive region count"));
         }
         let mut seen = BTreeSet::new();
-        let mut traces = PreparedWallTraces::default();
+        let quadrature_order = if self.fe.is_curved() {
+            self.fe.geometry_quadrature_order().max(3)
+        } else {
+            3
+        };
+        let mut traces = PreparedWallTraces {
+            quadrature: tri_quadrature(quadrature_order),
+            ..PreparedWallTraces::default()
+        };
         for (region_index, region) in regions.iter().enumerate() {
             poll(cancelled)?;
             if region.faces.is_empty()
@@ -100,7 +123,34 @@ impl ThermoviscousFe<'_> {
                         "conductive/isothermal/no-slip face partition",
                     ));
                 }
-                let (_, _, area) = self.fe.boundary_geometry(key)?;
+                let (local_to_trace, metric) = if self.fe.is_curved() {
+                    let (element, omitted) = self.fe.boundary_owner(key)?;
+                    let tet = self.space.complex.tets[element];
+                    let local: Vec<_> = (0..4).filter(|&i| i != omitted).collect();
+                    let local_to_trace = std::array::from_fn(|i| {
+                        key.iter()
+                            .position(|&vertex| vertex == tet[local[i]])
+                            .expect("original exterior face membership")
+                    });
+                    let mut jacobians = Vec::with_capacity(traces.quadrature.len());
+                    for &(bary, _) in &traces.quadrature {
+                        poll(cancelled)?;
+                        let mut lambda = [0.0; 4];
+                        for i in 0..3 {
+                            lambda[local[i]] = bary[i];
+                        }
+                        let surface = self.fe.geometry_face_point(element, omitted, lambda)?;
+                        let half_jacobian = 0.5 * surface.surface_jacobian_m2;
+                        if !half_jacobian.is_finite() || half_jacobian <= 0.0 {
+                            return Err(ThermoviscousError::NonFinite);
+                        }
+                        jacobians.push(half_jacobian);
+                    }
+                    (local_to_trace, FaceMetric::CurvedHalfJacobians(jacobians))
+                } else {
+                    let (_, _, area) = self.fe.boundary_geometry(key)?;
+                    ([0, 1, 2], FaceMetric::AffineArea(area))
+                };
                 let mut dofs = [0; 6];
                 for a in 0..3 {
                     dofs[a] = key[a] as usize;
@@ -138,7 +188,11 @@ impl ThermoviscousFe<'_> {
                         }
                     }
                 }
-                faces.push(FaceTrace { dofs, area });
+                faces.push(FaceTrace {
+                    dofs,
+                    local_to_trace,
+                    metric,
+                });
             }
             if traces.entries.len() == entry_start {
                 return Err(ThermoviscousError::InvalidInput(
@@ -224,7 +278,6 @@ impl PreparedWallTraces {
         admittances: &[C64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, ThermoviscousError> {
-        let quad = tri_quadrature(3);
         let shapes = [
             LocalFn::Vertex(0),
             LocalFn::Vertex(1),
@@ -237,8 +290,15 @@ impl PreparedWallTraces {
         for (faces, admittance) in self.faces.iter().zip(admittances) {
             for face in faces {
                 poll(cancelled)?;
-                for &(bary, weight) in &quad {
-                    let lam = [bary[0], bary[1], bary[2], 0.0];
+                for (q, &(bary, weight)) in self.quadrature.iter().enumerate() {
+                    let mut lam = [0.0; 4];
+                    for i in 0..3 {
+                        lam[face.local_to_trace[i]] = bary[i];
+                    }
+                    let half_jacobian = match &face.metric {
+                        FaceMetric::AffineArea(area) => *area,
+                        FaceMetric::CurvedHalfJacobians(jacobians) => jacobians[q],
+                    };
                     let temp = face
                         .dofs
                         .iter()
@@ -246,7 +306,8 @@ impl PreparedWallTraces {
                         .fold(C64::ZERO, |sum, (&dof, shape)| {
                             sum + temperature[dof].scale(shape.eval(lam, 2))
                         });
-                    power += admittance.re / mean_temperature * face.area * weight * temp.norm_sq();
+                    power +=
+                        admittance.re / mean_temperature * half_jacobian * weight * temp.norm_sq();
                 }
             }
         }

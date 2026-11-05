@@ -36,9 +36,12 @@ impl<'c> ThermoviscousFe<'c> {
     /// Integrate q's shape against every original P2 temperature test function.
     ///
     /// The callback receives the original tetrahedron index and SI position;
-    /// it returns a finite density [m^-3]. Quadrature is explicit, 4 through
+    /// it returns a finite density [m^-3]. Quadrature is explicit, at least the
+    /// original geometry's volume order (4 for affine elements), through
     /// [`MAX_QUADRATURE_ORDER`], and is independently refinable for localized
-    /// sources. Source errors and cancellation return without publishing a
+    /// sources. Curved elements use the admitted physical map and its variable
+    /// Jacobian, without a second geometry evaluation or callback. Source
+    /// errors and cancellation return without publishing a
     /// partial source. Isothermal constraints remain exact; their eliminated
     /// temperature tests receive no acoustic excitation.
     pub fn volume_heat_source<'a>(
@@ -48,7 +51,7 @@ impl<'c> ThermoviscousFe<'c> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermoviscousHeatSource<'a, 'c>, ThermoviscousError> {
         poll(cancelled)?;
-        if !(4..=MAX_QUADRATURE_ORDER).contains(&quadrature_order) {
+        if !(self.volume_quadrature_order()..=MAX_QUADRATURE_ORDER).contains(&quadrature_order) {
             return Err(ThermoviscousError::InvalidInput(
                 "volume heat-source quadrature order",
             ));
@@ -59,15 +62,23 @@ impl<'c> ThermoviscousFe<'c> {
         for (t, vertices) in self.space.complex.tets.iter().enumerate() {
             poll(cancelled)?;
             let dofs = self.space.element_dofs(t);
-            let jacobian = 6.0 * self.geometry.vol_signed[t].abs();
+            let affine_jacobian = 6.0 * self.geometry.vol_signed[t].abs();
             for &(bary, w) in &quad {
                 poll(cancelled)?;
-                let mut point = [0.0; 3];
-                for (&vertex, &weight) in vertices.iter().zip(&bary) {
-                    for (axis, coordinate) in point.iter_mut().enumerate() {
-                        *coordinate += weight * self.fe.positions()[vertex as usize][axis];
+                let (point, jacobian) = if self.fe.is_curved() {
+                    let geometry = self.fe.geometry_point(t, bary)?;
+                    (geometry.position_m, geometry.determinant_m3)
+                } else {
+                    // Preserve the established affine callback positions and
+                    // integration arithmetic exactly.
+                    let mut point = [0.0; 3];
+                    for (&vertex, &weight) in vertices.iter().zip(&bary) {
+                        for (axis, coordinate) in point.iter_mut().enumerate() {
+                            *coordinate += weight * self.fe.positions()[vertex as usize][axis];
+                        }
                     }
-                }
+                    (point, affine_jacobian)
+                };
                 let density = density_per_m3(t, point)?;
                 let weight = density * w * jacobian;
                 if !density.is_finite() || !weight.is_finite() {

@@ -1,4 +1,4 @@
-//! Resolved linearized Navier--Stokes acoustics on straight tetrahedra.
+//! Resolved linearized Navier--Stokes acoustics on affine or quadratic tetrahedra.
 //!
 //! The velocity/pressure pair is Taylor--Hood P2/P1; temperature is P2. With
 //! `exp(+i omega t)` and `theta = T'/T0`, the equations are
@@ -215,7 +215,10 @@ pub struct ThermoviscousLimits {
     pub max_dense_bytes: usize,
     /// Maximum element count.
     pub max_elements: usize,
-    /// Maximum `longest edge / smallest altitude` per tetrahedron.
+    /// Maximum `longest edge / smallest altitude` of each corner tetrahedron.
+    /// Curved maps additionally retain their original whole-element Jacobian
+    /// proof and its determinant-quality controls. This corner proxy is not
+    /// a bound on the curved map's condition number or a mesh error estimate.
     pub max_element_aspect_ratio: f64,
 }
 
@@ -462,6 +465,61 @@ impl<'c> ThermoviscousFe<'c> {
         )
     }
 
+    /// Consume an already admitted P2 acoustic geometry for the resolved ideal
+    /// gas. The original quadratic map, whole-element orientation proof and
+    /// declared quadrature order are retained; no geometry is reconstructed.
+    /// The geometry's medium must match this fluid's density and adiabatic
+    /// sound speed. Affine geometry is also accepted with the original rules.
+    ///
+    /// Every volume, heat-source and finite-wall form uses the same map. Curved
+    /// no-slip and thermal walls are supported. Pressure-traction ports still
+    /// require affine selected faces because their exported physical trace is
+    /// a planar triangle. Geometry/quadrature convergence and the resolved
+    /// viscous/thermal boundary-layer mesh remain independent obligations.
+    pub fn from_geometry(
+        geometry: HelmholtzFe<'c>,
+        medium: ThermoviscousMedium,
+        boundary: &ThermoviscousBoundary,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        poll(cancelled)?;
+        let thermodynamics = ThermoviscousThermodynamics::ideal_gas(medium)?;
+        Self::assemble_geometry(
+            geometry,
+            medium,
+            thermodynamics,
+            true,
+            boundary,
+            &BTreeSet::new(),
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Resolved general-fluid counterpart of [`Self::from_geometry`]. All
+    /// storage, signed thermal expansion and caloric stability still use the
+    /// explicitly supplied thermodynamic derivatives.
+    pub fn from_geometry_with_thermodynamics(
+        geometry: HelmholtzFe<'c>,
+        medium: ThermoviscousMedium,
+        thermodynamics: ThermoviscousThermodynamics,
+        boundary: &ThermoviscousBoundary,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        Self::assemble_geometry(
+            geometry,
+            medium,
+            thermodynamics,
+            false,
+            boundary,
+            &BTreeSet::new(),
+            limits,
+            cancelled,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn assemble_medium(
         complex: &'c TetComplex,
@@ -476,6 +534,90 @@ impl<'c> ThermoviscousFe<'c> {
     ) -> Result<Self, ThermoviscousError> {
         poll(cancelled)?;
         let sound_speed = thermodynamics.sound_speed_m_s(medium)?;
+        let (geometry, max_aspect) =
+            Self::admit_mesh(complex, positions, boundary, limits, cancelled)?;
+        // Preserve the original ideal-gas evaluation order. The generic path
+        // obtains c from beta_T, signed alpha_p and Cp, never from p0/rho.
+        let sound_speed = if ideal_gas {
+            let gamma = medium.cp_j_kg_k / (medium.cp_j_kg_k - medium.gas_constant_j_kg_k());
+            det::sqrt(gamma * medium.pressure_pa / medium.density_kg_m3)
+        } else {
+            sound_speed
+        };
+        let fe = HelmholtzFe::new(
+            complex,
+            positions,
+            2,
+            Medium {
+                density_kg_m3: medium.density_kg_m3,
+                sound_speed_m_s: sound_speed,
+            },
+        )?;
+        Self::assemble_admitted(
+            fe,
+            geometry,
+            max_aspect,
+            medium,
+            thermodynamics,
+            ideal_gas,
+            boundary,
+            moving_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_geometry(
+        fe: HelmholtzFe<'c>,
+        medium: ThermoviscousMedium,
+        thermodynamics: ThermoviscousThermodynamics,
+        ideal_gas: bool,
+        boundary: &ThermoviscousBoundary,
+        moving_faces: &BTreeSet<[u32; 3]>,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        poll(cancelled)?;
+        let sound_speed = thermodynamics.sound_speed_m_s(medium)?;
+        let sound_speed = if ideal_gas {
+            let gamma = medium.cp_j_kg_k / (medium.cp_j_kg_k - medium.gas_constant_j_kg_k());
+            det::sqrt(gamma * medium.pressure_pa / medium.density_kg_m3)
+        } else {
+            sound_speed
+        };
+        let same = |a: f64, b: f64| (a - b).abs() <= 64.0 * f64::EPSILON * a.abs().max(b.abs());
+        if fe.order() != 2
+            || !same(fe.medium().density_kg_m3, medium.density_kg_m3)
+            || !same(fe.medium().sound_speed_m_s, sound_speed)
+        {
+            return Err(ThermoviscousError::InvalidInput(
+                "resolved geometry requires P2 and the same equilibrium fluid",
+            ));
+        }
+        let (geometry, max_aspect) =
+            Self::admit_mesh(fe.complex(), fe.positions(), boundary, limits, cancelled)?;
+        Self::assemble_admitted(
+            fe,
+            geometry,
+            max_aspect,
+            medium,
+            thermodynamics,
+            ideal_gas,
+            boundary,
+            moving_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    fn admit_mesh(
+        complex: &TetComplex,
+        positions: &[[f64; 3]],
+        boundary: &ThermoviscousBoundary,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ElementGeometry, f64), ThermoviscousError> {
         if limits.max_dofs == 0
             || limits.max_dense_bytes == 0
             || limits.max_elements == 0
@@ -524,29 +666,34 @@ impl<'c> ThermoviscousFe<'c> {
             }
             max_aspect = max_aspect.max(aspect);
         }
+        Ok((geometry, max_aspect))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_admitted(
+        fe: HelmholtzFe<'c>,
+        geometry: ElementGeometry,
+        max_aspect: f64,
+        medium: ThermoviscousMedium,
+        thermodynamics: ThermoviscousThermodynamics,
+        ideal_gas: bool,
+        boundary: &ThermoviscousBoundary,
+        moving_faces: &BTreeSet<[u32; 3]>,
+        limits: ThermoviscousLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ThermoviscousError> {
+        let complex = fe.complex();
         let space = SimplexSpace::new(complex, 2);
-        // Preserve the original ideal-gas evaluation order. The generic path
-        // obtains c from beta_T, signed alpha_p and Cp, never from p0/rho.
-        let sound_speed = if ideal_gas {
-            let gamma = medium.cp_j_kg_k / (medium.cp_j_kg_k - medium.gas_constant_j_kg_k());
-            det::sqrt(gamma * medium.pressure_pa / medium.density_kg_m3)
-        } else {
-            sound_speed
-        };
-        let fe = HelmholtzFe::new(
-            complex,
-            positions,
-            2,
-            Medium {
-                density_kg_m3: medium.density_kg_m3,
-                sound_speed_m_s: sound_speed,
-            },
-        )?;
         poll(cancelled)?;
+        let exterior: BTreeSet<_> = fe.boundary_faces().into_iter().collect();
         let mut walls = BTreeSet::new();
         let mut thermal = BTreeSet::new();
         for &face in &boundary.no_slip_faces {
-            fe.boundary_geometry(face)?;
+            if !exterior.contains(&canonical(face)) {
+                return Err(ThermoviscousError::InvalidInput(
+                    "no-slip wall must be an original exterior face",
+                ));
+            }
             if !walls.insert(canonical(face)) {
                 return Err(ThermoviscousError::InvalidInput("duplicate wall"));
             }
@@ -582,7 +729,7 @@ impl<'c> ThermoviscousFe<'c> {
                 covered.insert(key);
             }
         }
-        if fe.boundary_faces().iter().any(|f| !covered.contains(f)) {
+        if exterior.iter().any(|f| !covered.contains(f)) {
             return Err(ThermoviscousError::InvalidInput("unassigned exterior face"));
         }
         let mask = |faces: &BTreeSet<[u32; 3]>| {
@@ -742,7 +889,10 @@ impl<'c> ThermoviscousFe<'c> {
         let first = traces.first()?;
         if traces.iter().any(|trace| {
             trace.values.iter().any(|value| *value != 1.0)
-                || trace.outward_normal.iter().zip(first.outward_normal)
+                || trace
+                    .outward_normal
+                    .iter()
+                    .zip(first.outward_normal)
                     .any(|(a, b)| (*a - b).abs() > 64.0 * f64::EPSILON)
         }) {
             return None;
@@ -751,26 +901,78 @@ impl<'c> ThermoviscousFe<'c> {
         let length = det::sqrt(self.areas[port]);
         for trace in traces {
             for vertex in trace.vertices {
-                let delta = std::array::from_fn::<_, 3, _>(|i| f64::from_bits(vertex[i]) - origin[i]);
-                let distance: f64 = delta.iter().zip(first.outward_normal).map(|(x, n)| x * n).sum();
+                let delta =
+                    std::array::from_fn::<_, 3, _>(|i| f64::from_bits(vertex[i]) - origin[i]);
+                let distance: f64 = delta
+                    .iter()
+                    .zip(first.outward_normal)
+                    .map(|(x, n)| x * n)
+                    .sum();
                 let scale = delta.iter().map(|x| x.abs()).sum::<f64>().max(length);
-                if !distance.is_finite() || !scale.is_finite()
-                    || distance.abs() > 128.0 * f64::EPSILON * scale {
+                if !distance.is_finite()
+                    || !scale.is_finite()
+                    || distance.abs() > 128.0 * f64::EPSILON * scale
+                {
                     return None;
                 }
             }
-            if self.physical_modes.iter().enumerate().any(|(other, modes)| {
-                other != port && modes.iter().any(|mode| mode.vertices == trace.vertices)
-            }) {
+            if self
+                .physical_modes
+                .iter()
+                .enumerate()
+                .any(|(other, modes)| {
+                    other != port && modes.iter().any(|mode| mode.vertices == trace.vertices)
+                })
+            {
                 return None;
             }
         }
         Some(self.areas[port])
     }
-    /// Largest admitted geometric aspect ratio.
+    /// Largest admitted corner-tetrahedron aspect ratio. Curved determinant
+    /// quality belongs to the consumed geometry's whole-element proof.
     #[must_use]
     pub const fn max_element_aspect_ratio(&self) -> f64 {
         self.max_aspect
+    }
+
+    /// Whether this complete mixed solve retains a quadratic geometric map.
+    #[must_use]
+    pub const fn is_curved(&self) -> bool {
+        self.fe.is_curved()
+    }
+
+    /// Declared Gauss count per Duffy axis for mixed volume forms and losses.
+    /// Curved rational gradients require independent quadrature refinement.
+    #[must_use]
+    pub fn geometry_quadrature_order(&self) -> usize {
+        self.volume_quadrature_order()
+    }
+
+    fn volume_quadrature_order(&self) -> usize {
+        if self.fe.is_curved() {
+            self.fe.geometry_quadrature_order()
+        } else {
+            4
+        }
+    }
+
+    // One geometry owner serves every mixed form, source and memory mass.
+    // Keep affine coefficients and their evaluation order unchanged.
+    fn volume_geometry(
+        &self,
+        element: usize,
+        bary: [f64; 4],
+    ) -> Result<(f64, [[f64; 3]; 4]), ThermoviscousError> {
+        if self.fe.is_curved() {
+            let point = self.fe.geometry_point(element, bary)?;
+            Ok((point.determinant_m3, point.barycentric_gradients))
+        } else {
+            Ok((
+                6.0 * self.geometry.vol_signed[element].abs(),
+                self.geometry.grads[element],
+            ))
+        }
     }
 
     fn assemble(&mut self, cancelled: &mut impl FnMut() -> bool) -> Result<(), ThermoviscousError> {
@@ -784,28 +986,23 @@ impl<'c> ThermoviscousFe<'c> {
         };
         let mu = gas.dynamic_viscosity_pa_s;
         let lambda = gas.bulk_viscosity_pa_s - 2.0 * mu / 3.0;
-        let quad = duffy_quadrature(4);
+        let quad = duffy_quadrature(self.volume_quadrature_order());
         for (t, tet) in self.space.complex.tets.iter().enumerate() {
             poll(cancelled)?;
             let dofs = self.space.element_dofs(t);
-            let jac = 6.0 * self.geometry.vol_signed[t].abs();
+            let mut values = vec![0.0; dofs.len()];
+            let mut gradients = vec![[0.0; 3]; dofs.len()];
             for &(bary, w) in &quad {
+                poll(cancelled)?;
+                let (jac, barycentric_gradients) = self.volume_geometry(t, bary)?;
                 let weight = jac * w;
-                let values = dofs
-                    .iter()
-                    .map(|(_, f)| f.eval(bary, 2))
-                    .collect::<Vec<_>>();
-                let gradients = dofs
-                    .iter()
-                    .map(|(_, f)| {
-                        let dl = f.d_lambda(bary, 2);
-                        std::array::from_fn::<_, 3, _>(|c| {
-                            (0..4)
-                                .map(|a| dl[a] * self.geometry.grads[t][a][c])
-                                .sum::<f64>()
-                        })
-                    })
-                    .collect::<Vec<_>>();
+                for (i, (_, f)) in dofs.iter().enumerate() {
+                    values[i] = f.eval(bary, 2);
+                    let dl = f.d_lambda(bary, 2);
+                    gradients[i] = std::array::from_fn::<_, 3, _>(|c| {
+                        (0..4).map(|a| dl[a] * barycentric_gradients[a][c]).sum()
+                    });
+                }
                 for (i, &(gi, _)) in dofs.iter().enumerate() {
                     for (j, &(gj, _)) in dofs.iter().enumerate() {
                         let mass = weight * values[i] * values[j];
@@ -997,8 +1194,12 @@ impl<'c> ThermoviscousFe<'c> {
                 .expect("moving coordinate")
                 .structure;
             let mode = row - 3 * self.velocity_count;
-            fluid + moving_wall::modal_impedance(&structure.modes()[mode],
-                structure.damping_rate_per_s(mode), omega)
+            fluid
+                + moving_wall::modal_impedance(
+                    &structure.modes()[mode],
+                    structure.damping_rate_per_s(mode),
+                    omega,
+                )
         } else {
             fluid
         }
@@ -1345,11 +1546,13 @@ impl PreparedThermoviscous<'_, '_> {
             structural_damping_w: moving_wall.damping_w,
         };
         power.input_w += moving_wall.external_input_w;
-        let quad = duffy_quadrature(4);
+        let quad = duffy_quadrature(model.volume_quadrature_order());
         for t in 0..model.space.complex.tets.len() {
             poll(cancelled)?;
             let dofs = model.space.element_dofs(t);
             for &(bary, w) in &quad {
+                poll(cancelled)?;
+                let (jac, barycentric_gradients) = model.volume_geometry(t, bary)?;
                 let mut grad_v = [[C64::ZERO; 3]; 3];
                 let mut grad_t = [C64::ZERO; 3];
                 let mut temp = C64::ZERO;
@@ -1357,7 +1560,7 @@ impl PreparedThermoviscous<'_, '_> {
                     let dl = f.d_lambda(bary, 2);
                     let gradient = std::array::from_fn::<_, 3, _>(|c| {
                         (0..4)
-                            .map(|a| dl[a] * model.geometry.grads[t][a][c])
+                            .map(|a| dl[a] * barycentric_gradients[a][c])
                             .sum::<f64>()
                     });
                     temp = temp + temperature_k[i].scale(f.eval(bary, 2));
@@ -1381,7 +1584,7 @@ impl PreparedThermoviscous<'_, '_> {
                         dev_norm += dev.norm_sq();
                     }
                 }
-                let volume_weight = 6.0 * model.geometry.vol_signed[t].abs() * w;
+                let volume_weight = jac * w;
                 let gas = model.medium;
                 power.viscous_w += volume_weight * gas.dynamic_viscosity_pa_s * dev_norm;
                 power.bulk_w +=
