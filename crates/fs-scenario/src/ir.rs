@@ -743,6 +743,20 @@ fn w_frame(out: &mut impl IrTextSink, f: &Frame) {
             w_vec3(out, *translation);
             out.push(')');
         }
+        FrameMotion::Translating {
+            direction,
+            displacement,
+        } => {
+            let _ = write!(
+                out,
+                "(translating (vec {} {} {}) ",
+                canonical_float(direction[0]),
+                canonical_float(direction[1]),
+                canonical_float(direction[2])
+            );
+            w_signal(out, displacement);
+            out.push(')');
+        }
         FrameMotion::Rotating { axis, center, rate } => {
             let _ = write!(
                 out,
@@ -2137,6 +2151,17 @@ fn as_frame(sx: &Sx, wire: DimensionWire) -> Result<Frame, ScenarioError> {
                     z: as_f64(&q_items[3]).field("motion.orientation.z")?,
                 },
                 translation: as_vec3(&rest[1]).field("motion.translation")?,
+            }
+        }
+        "translating" => {
+            if rest.len() != 2 {
+                return Err(err_node(&items[3], "translating motion needs direction and displacement")
+                    .prepend_path(".motion"));
+            }
+            let direction = as_vec3(&rest[0]).field("motion.direction")?;
+            FrameMotion::Translating {
+                direction: [direction.x, direction.y, direction.z],
+                displacement: as_signal(&rest[1], wire).field("motion.displacement")?,
             }
         }
         "rotating" => {

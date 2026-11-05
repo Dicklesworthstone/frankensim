@@ -1350,3 +1350,47 @@ E7. Ties in `governing_case` report EVERY attaining case. A report that
 - `reference_cooling_envelope` is REPRESENTATIVE, not canonical. No repo-wide
   "reference cooling scenario" artifact exists; the same honest boundary the
   `entity` module records for its own fixture applies here.
+
+## Analytic physical velocity of moving frames
+
+`FrameTree::prepare_kinematics` admits one immutable borrowed ancestor path
+under explicit frame-row and history-scalar limits. Fixed, rotating, translating
+and scheduled-tilt motions compose through the original native motors. Table
+histories remain borrowed; scalar validation and fallible native Chebyshev
+differentiation happen once. Sampling allocates nothing and performs no tree
+lookup or history rescan. Table rate lookup is logarithmic; smooth polynomial
+value/rate queries poll per coefficient, and composition polls per frame.
+
+`FrameKinematics` retains WORLD pose, origin, origin velocity and angular
+velocity at one physical time. `velocity_at_world_point` evaluates the rigid
+carrier field at an Eulerian query location. `point_in_world` instead maps a
+local point and its explicitly relative rate, adding origin transport and
+angular transport to the rotated relative velocity. These distinct operations
+do not change the rotation-only semantics of existing absolute vector payloads.
+
+Rates are analytic derivatives of the same clamped scalar histories. Ramp
+corners, Hold jumps and unequal represented one-sided Linear knot rates refuse;
+Chebyshev endpoints require a zero rate to meet the constant exterior. No
+temporal side, impulse, finite-difference scale or trajectory smoothing is
+invented. Malformed paths/data, unrepresentable rates, budget excess and
+cancellation publish no partial result. This supplies instantaneous rigid
+kinematics, not swept-geometry certification, mesh motion, acceleration,
+fictitious forces or recovery of coordinate information already rounded away.
+
+G0/G1/G3/G4 cases in `tests/frame_kinematics.rs` use independent analytic point
+trajectories, off-center rotation, noncommuting moving ancestors, explicit
+relative motion, fixed WORLD probes, translating schedules, polynomial rates,
+clamp/jump refusal, dimensions/topology, budgets and cancellation.
+
+## Translating scenario frames
+
+`FrameMotion::Translating` declares a finite unit direction in parent coordinates
+and a dimensioned displacement history in metres. Fixed parent offsets provide
+the reference origin. Pose evaluation, semantic validation, canonical IR and
+validation-work accounting all use this same history. The IR form is
+`(translating (vec dx dy dz) SIGNAL)`; existing motion forms retain their encoding.
+The analytic kinematics owner differentiates displacement to physical speed.
+Ordinary absolute vector payloads still rotate components only and acquire no
+implicit carrier velocity. `tests/translating_frames.rs` covers parent-axis
+composition, canonical round trips, velocity-reference semantics, malformed
+coordinates/units and retained-history budgets.

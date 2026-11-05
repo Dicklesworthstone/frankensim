@@ -182,7 +182,10 @@ impl<'a> EventLoadHistory3<'a> {
         for frame in &history.frames.frames {
             checkpoint(cx)?;
             if frame.name.len() > 4096 { return Err(invalid("event frame names exceed 4096 bytes")); }
-            if let FrameMotion::Tilt { angle, .. } = &frame.motion { index.signal(angle)?; }
+            if let FrameMotion::Tilt { angle: signal, .. }
+            | FrameMotion::Translating { displacement: signal, .. } = &frame.motion {
+                index.signal(signal)?;
+            }
         }
         checkpoint(cx)?;
         index.knots.sort_by(f64::total_cmp);
@@ -302,6 +305,9 @@ impl<'a> EventLoadHistory3<'a> {
             let motion = match &frame.motion {
                 FrameMotion::Tilt { axis, center, angle } => FrameMotion::Tilt {
                     axis: *axis, center: *center, angle: TimeSignal::Constant(before(angle, time)?),
+                },
+                FrameMotion::Translating { direction, displacement } => FrameMotion::Translating {
+                    direction: *direction, displacement: TimeSignal::Constant(before(displacement, time)?),
                 },
                 other => other.clone(),
             };

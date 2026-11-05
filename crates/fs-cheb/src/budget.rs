@@ -1818,9 +1818,9 @@ impl Cheb1 {
 
     /// Budgeted, cancellable derivative — the bitwise mirror of
     /// [`Cheb1::differentiate`] (identical recurrence and scaled
-    /// fallback), with admission preflighting the pass and polls at
-    /// the operation boundaries (the recurrence itself is one bounded
-    /// admitted tile).
+    /// fallback), with admission preflighting the pass and a poll at
+    /// every coefficient step. Unrepresentable physical coefficients
+    /// return a numerical refusal rather than the classic owner's panic.
     ///
     /// # Errors
     /// [`ChebError`] — cap/overflow refusals before allocation;
@@ -1831,10 +1831,7 @@ impl Cheb1 {
         cx: &Cx<'_>,
     ) -> Result<Cheb1, ChebError> {
         admit_calculus(self.coeffs().len(), budget)?;
-        checkpoint(cx)?;
-        let derivative = self.differentiate();
-        checkpoint(cx)?;
-        Ok(derivative)
+        self.try_differentiate_with_checkpoint(&mut || checkpoint(cx))
     }
 
     /// Budgeted, cancellable definite integral — the bitwise mirror of

@@ -24,6 +24,15 @@ pub const WORLD: FrameId = FrameId(0);
 /// Angular-rate dimensions (rad/s ⇒ s⁻¹ in SI exponents).
 pub const RATE_DIMS: Dims = Dims([0, 0, -1, 0, 0, 0]);
 
+/// Physical displacement dimensions (metres).
+pub const DISPLACEMENT_DIMS: Dims = Dims([1, 0, 0, 0, 0, 0]);
+
+mod kinematics;
+pub use kinematics::{
+    FrameKinematics, FrameKinematicsBudget, FrameKinematicsError, FramePointKinematics,
+    PreparedFrameKinematics,
+};
+
 /// How a frame moves relative to its parent.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameMotion {
@@ -33,6 +42,14 @@ pub enum FrameMotion {
         orientation: Quat,
         /// Translation relative to the parent (m).
         translation: Vec3,
+    },
+    /// Scheduled translation along a fixed direction in the parent frame.
+    /// Compose with a fixed parent offset for a nonzero reference origin.
+    Translating {
+        /// Finite unit translation direction in parent coordinates.
+        direction: [f64; 3],
+        /// Signed displacement history in metres; its derivative is speed.
+        displacement: TimeSignal,
     },
     /// Steady rotation about an axis through a center point.
     Rotating {
@@ -60,6 +77,8 @@ pub enum FrameMotion {
 pub enum FrameMotionKind {
     /// A constant rigid offset.
     Fixed,
+    /// A scheduled translation.
+    Translating,
     /// A steady rotation.
     Rotating,
     /// A scheduled tilt.
@@ -72,6 +91,7 @@ impl FrameMotion {
     pub const fn kind(&self) -> FrameMotionKind {
         match self {
             Self::Fixed { .. } => FrameMotionKind::Fixed,
+            Self::Translating { .. } => FrameMotionKind::Translating,
             Self::Rotating { .. } => FrameMotionKind::Rotating,
             Self::Tilt { .. } => FrameMotionKind::Tilt,
         }
@@ -420,6 +440,36 @@ impl FrameTree {
                 }
                 Motor::from_parts(*orientation, *translation)
             }
+            FrameMotion::Translating {
+                direction,
+                displacement,
+            } => {
+                if !axis_is_unit(direction) {
+                    return Err(ScenarioError::Frame {
+                        what: format!(
+                            "frame {:?}: translation direction is non-finite or not unit length",
+                            frame.name
+                        ),
+                    });
+                }
+                let distance = displacement.eval(t)?;
+                if distance.dims != DISPLACEMENT_DIMS {
+                    return Err(ScenarioError::Dimensions {
+                        context: format!("frame {:?} displacement", frame.name),
+                        expected: DISPLACEMENT_DIMS.0,
+                        got: distance.dims.0,
+                    });
+                }
+                if !distance.value.is_finite() {
+                    return Err(ScenarioError::Evaluate {
+                        what: format!("frame {:?}: displacement is non-finite", frame.name),
+                    });
+                }
+                Motor::from_parts(
+                    Quat::identity(),
+                    Vec3::new(direction[0], direction[1], direction[2]) * distance.value,
+                )
+            }
             FrameMotion::Rotating { axis, center, rate } => {
                 if !axis_is_unit(axis) {
                     return Err(ScenarioError::Frame {
@@ -701,6 +751,30 @@ impl FrameTree {
                             fix: "replace every translation component with a finite value"
                                 .to_string(),
                         });
+                    }
+                }
+                FrameMotion::Translating {
+                    direction,
+                    displacement,
+                } => {
+                    if !axis_is_unit(direction) {
+                        out.push(Violation {
+                            code: "frame-direction-not-unit",
+                            what: format!(
+                                "{ctx}: translation direction is non-finite or not unit length"
+                            ),
+                            fix: "supply a finite translation direction normalized to unit length"
+                                .to_string(),
+                        });
+                    }
+                    displacement.check_with_checkpoint(&ctx, out, checkpoint)?;
+                    if displacement.dims() != DISPLACEMENT_DIMS {
+                        out.push(dims_violation(
+                            &ctx,
+                            "displacement",
+                            DISPLACEMENT_DIMS,
+                            displacement.dims(),
+                        ));
                     }
                 }
                 FrameMotion::Rotating { axis, center, rate } => {

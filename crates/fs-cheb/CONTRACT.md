@@ -409,3 +409,20 @@ regressions, not new cross-ISA or multiplicity/completeness-theorem evidence.
 - `EigsRun` values are fixed-sweep estimates. `Complete` means all
   requested shifts finished; neither complete nor cancelled output is a
   convergence, residual, ordering, or uniqueness certificate.
+
+## Recoverable analytic time-history rates
+
+`Cheb1::try_differentiate_with_checkpoint` runs the original physical-domain
+derivative recurrence and its jointly scaled fallback, preserving successful
+coefficient arithmetic. It polls before each coefficient step and reserves
+storage fallibly; cancellation, allocation failure and unrepresentable
+physical derivative coefficients return a typed refusal with no partial
+object. The ordinary finite branch scales its retained buffer in place.
+Callers can prepare a derivative once and reuse allocation-free evaluations.
+
+`differentiate_budgeted` retains its original admission and now delegates to
+this checked owner, so a finite source with an unrepresentable physical rate
+does not panic through the budgeted API. The classic `differentiate` keeps its
+existing panic contract. The callback entry point does not itself admit a
+coefficient budget. G0/G1/G4 tests in `checked_derivative.rs` cover the exact
+cubic chain rule, wide-domain scaling, overflow refusal and cancellation.

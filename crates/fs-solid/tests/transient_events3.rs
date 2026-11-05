@@ -42,6 +42,28 @@ fn payload(times: &[f64], values: &[[f64;3]], interp: TableInterpolation,
         values.iter().map(|v| v.map(|x| QtyAny::new(x,ACCELERATION_DIMS)).to_vec()).collect(),interp,outside).unwrap()).unwrap()
 }
 #[test]
+fn translating_frame_history_knots_are_retained_by_the_native_event_owner() {
+    with_cx(false, |cx| {
+        let mut frames = FrameTree::new();
+        frames.add(Frame {
+            id: FrameId(1), parent: WORLD, name: "linear-drive".into(),
+            motion: FrameMotion::Translating {
+                direction: [1.0, 0.0, 0.0],
+                displacement: TimeSignal::Table {
+                    times: vec![0.0, 0.25, 0.75], values: vec![0.0, 0.1, 0.0],
+                    dims: Dims([1, 0, 0, 0, 0, 0]), interp: Interp::Hold,
+                },
+            },
+        });
+        let history = TetLoadHistory3 {
+            surfaces: &[], volume: VolumeHistory3::Fixed(VolumeLoad3::None),
+            nodal_forces_n: &[], frames: &frames,
+        };
+        let schedule = EventLoadHistory3::new(history, 16, cx).unwrap();
+        assert_eq!(schedule.knots_s(), &[0.0, 0.25, 0.75]);
+    });
+}
+#[test]
 fn g1_short_held_pulse_has_no_pre_response_and_exact_momentum() {
     with_cx(false,|cx| {
         let material=TetElasticMaterial::try_new(6.,60.,0.25,[83;32]).unwrap(); let p=problem(&material);

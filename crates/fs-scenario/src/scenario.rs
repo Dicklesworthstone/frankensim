@@ -922,10 +922,11 @@ impl Scenario {
                 frame.name.as_str(),
                 "frame identity bytes",
             )?;
-            if let FrameMotion::Tilt { angle, .. } = &frame.motion {
+            if let FrameMotion::Tilt { angle: signal, .. }
+            | FrameMotion::Translating { displacement: signal, .. } = &frame.motion {
                 checked_count_add(
                     &mut signal_scalars,
-                    angle.validation_dynamic_scalars().ok_or(
+                    signal.validation_dynamic_scalars().ok_or(
                         ValidationError::WorkPlanOverflow {
                             phase: "frame signal scalar count",
                         },

@@ -691,13 +691,48 @@ impl Cheb1 {
     /// the domain chain rule).
     #[must_use]
     pub fn differentiate(&self) -> Cheb1 {
+        self.try_differentiate_with_checkpoint(&mut || Ok(()))
+            .expect("physical Chebyshev derivative is not representable as finite f64 coefficients")
+    }
+
+    /// The original derivative recurrence with recoverable arithmetic and
+    /// allocation refusal and a checkpoint before each coefficient step.
+    ///
+    /// Successful coefficients retain [`Self::differentiate`]'s arithmetic,
+    /// including its jointly scaled fallback for extreme domains. No partial
+    /// derivative is published. Callers can prepare this object once and reuse
+    /// its allocation-free evaluations for an analytic time-history rate.
+    /// This entry point does not introduce a coefficient budget; the budgeted
+    /// owner or the caller must admit the supplied series length beforehand.
+    ///
+    /// # Errors
+    /// Propagates the checkpoint's refusal. Returns [`ChebError::Numerical`]
+    /// if storage cannot be reserved or physical coefficients are nonfinite.
+    pub fn try_differentiate_with_checkpoint(
+        &self,
+        checkpoint: &mut impl FnMut() -> Result<(), ChebError>,
+    ) -> Result<Cheb1, ChebError> {
+        fn zeroed(count: usize) -> Result<Vec<f64>, ChebError> {
+            let mut values = Vec::new();
+            values
+                .try_reserve_exact(count)
+                .map_err(|_| ChebError::Numerical {
+                    what: "derivative coefficient allocation failed",
+                })?;
+            values.resize(count, 0.0);
+            Ok(values)
+        }
+
+        checkpoint()?;
         let n = self.coeffs.len();
         if n == 1 {
-            return Cheb1 {
+            let derivative = Cheb1 {
                 a: self.a,
                 b: self.b,
-                coeffs: vec![0.0],
+                coeffs: zeroed(1)?,
             };
+            checkpoint()?;
+            return Ok(derivative);
         }
         // Preserve the established arithmetic/golden path whenever every
         // traditional intermediate is finite. Extreme domains and coefficient
@@ -705,44 +740,53 @@ impl Cheb1 {
         let width = self.b - self.a;
         let traditional_scale = 2.0 / width;
         if width.is_finite() && traditional_scale.is_finite() && traditional_scale != 0.0 {
-            let mut reference = vec![0.0f64; n];
+            let mut reference = zeroed(n)?;
             let mut finite = true;
             for k in (1..n).rev() {
+                checkpoint()?;
                 let above = if k + 2 < n { reference[k + 1] } else { 0.0 };
                 reference[k - 1] = (2.0 * k as f64).mul_add(self.coeffs[k], above);
                 finite &= reference[k - 1].is_finite();
             }
             if finite {
-                let traditional: Vec<f64> = reference[..n - 1]
-                    .iter()
-                    .map(|value| value * traditional_scale)
-                    .collect();
-                if traditional.iter().all(|value| value.is_finite()) {
-                    return Cheb1 {
+                // Scaling the retained buffer preserves the original product
+                // order while avoiding a second coefficient allocation.
+                reference.truncate(n - 1);
+                for value in &mut reference {
+                    checkpoint()?;
+                    *value *= traditional_scale;
+                    finite &= value.is_finite();
+                }
+                if finite {
+                    checkpoint()?;
+                    return Ok(Cheb1 {
                         a: self.a,
                         b: self.b,
-                        coeffs: traditional,
-                    };
+                        coeffs: reference,
+                    });
                 }
             }
         }
         // Run the standard recurrence after folding in the physical chain
         // rule. This avoids constructing an overflowing reference derivative
         // only to multiply it by a tiny domain scale afterward.
-        let mut out = vec![0.0f64; n - 1];
+        let mut out = zeroed(n - 1)?;
         for k in (1..n).rev() {
+            checkpoint()?;
             let above = if k + 1 < out.len() { out[k + 1] } else { 0.0 };
             out[k - 1] = scaled_derivative_term(self.coeffs[k], k, self.a, self.b) + above;
-            assert!(
-                out[k - 1].is_finite(),
-                "physical Chebyshev derivative is not representable as finite f64 coefficients"
-            );
+            if !out[k - 1].is_finite() {
+                return Err(ChebError::Numerical {
+                    what: "physical Chebyshev derivative is not representable as finite f64 coefficients",
+                });
+            }
         }
-        Cheb1 {
+        checkpoint()?;
+        Ok(Cheb1 {
             a: self.a,
             b: self.b,
             coeffs: out,
-        }
+        })
     }
 
     /// Definite integral over the whole domain: only even coefficients

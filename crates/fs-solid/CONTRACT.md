@@ -7212,3 +7212,13 @@ work and true Kelvin–Voigt/Maxwell heat in original element connectivity order
 consistent-mass quadrature. Existing aggregate accounts are unchanged; element
 receipts partition those accounts and are not added again. The native element
 regression suite is authored; full Cargo execution remains outstanding.
+
+## Translating-frame event histories
+
+The original scheduled solid-load/support owner indexes dimensioned translating
+frame histories alongside tilt histories and freezes their exact left values
+when evaluating a scheduled jump. A newly introduced displacement schedule
+cannot silently disappear from event timing. This does not reinterpret a vector
+support displacement as a moving frame origin or change the native transient
+integration law. The focused translating-frame case in `tests/transient_events3.rs`
+checks retained finite schedule knots.
