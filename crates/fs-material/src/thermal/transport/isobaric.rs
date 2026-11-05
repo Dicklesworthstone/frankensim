@@ -164,7 +164,7 @@ impl IsobaricHeatCapacityLaw {
         }
         let pressure_pa = query.lower.axes()[query.pressure_axis];
         let inverse = CapacityInverse::new(&curve, datum_temperature_k).ok();
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.isobaric-cp-law.v2");
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.isobaric-cp-law.v3");
         hash.update(card.content_hash().as_bytes());
         for axis in [query.temperature_axis, query.pressure_axis] {
             hash.update(&(axis.len() as u64).to_le_bytes());
@@ -244,16 +244,42 @@ impl IsobaricHeatCapacityLaw {
     }
 
     /// Integral Cp dT from the selected datum; no density or volume enters.
+    /// Reuse the caloric index and one original affine segment, retaining the
+    /// canonical support endpoints and direct integration at numerical edges.
     pub fn specific_enthalpy_j_kg(&self, temperature_k: f64) -> Result<f64, ThermalTransportError> {
-        self.specific_enthalpy_change_j_kg(self.datum_temperature_k, temperature_k)
+        let [cold, hot] = self.temperature_span_k();
+        let [low, high] = self.enthalpy_span;
+        if temperature_k == cold {
+            return Ok(low);
+        }
+        if temperature_k == hot {
+            return Ok(high);
+        }
+        let curve = CapacityCurve::new(&self.knots);
+        let direct = || curve.energy_change(self.datum_temperature_k, temperature_k);
+        let enthalpy = self.inverse.as_ref().map_or_else(
+            direct,
+            |inverse| inverse.energy_change_from_datum(&curve, temperature_k),
+        )?;
+        if enthalpy < low || enthalpy > high {
+            return direct();
+        }
+        Ok(enthalpy)
     }
 
-    /// Direct crossed-segment integration retains small changes near a large datum.
+    /// Datum-aligned changes reuse the caloric index. Other changes integrate
+    /// crossed source segments directly; no large reference energies are subtracted.
     pub fn specific_enthalpy_change_j_kg(
         &self,
         initial_k: f64,
         final_k: f64,
     ) -> Result<f64, ThermalTransportError> {
+        if initial_k == self.datum_temperature_k {
+            return self.specific_enthalpy_j_kg(final_k);
+        }
+        if final_k == self.datum_temperature_k {
+            return self.specific_enthalpy_j_kg(initial_k).map(|h| -h);
+        }
         CapacityCurve::new(&self.knots).energy_change(initial_k, final_k)
     }
 
@@ -399,7 +425,7 @@ mod tests {
             assert_eq!(law.is_ok(), accepted, "{pressure:?}");
             if let Ok(law) = law {
                 assert_eq!(law.material_card_identity(), card.content_hash());
-                assert_eq!(law.query_endpoints(), &[lower, upper]);
+                assert_eq!(law.query_endpoints(), &[lower.clone(), upper.clone()]);
                 assert_eq!(law.query_endpoints()[0].axis_quantities()["p"], pressure);
                 assert_eq!(law.caloric_identity(), Some(*law.identity().as_bytes()));
                 for target in [290.0, 293.25, 300.0, 306.75, 310.0] {
@@ -409,6 +435,39 @@ mod tests {
                 }
                 assert!((law.specific_enthalpy_change_j_kg(300.0, 310.0).unwrap() - 30.0).abs() < 1e-13);
                 assert!((law.specific_enthalpy_change_j_kg(305.0, 300.0).unwrap() + 12.5).abs() < 1e-13);
+                for datum in [290.0_f64, 295.25, 300.0, 305.25, 310.0] {
+                    let indexed = IsobaricHeatCapacityLaw::try_new(&card, IsobaricHeatCapacityQuery {
+                        specific_heat_cp: &key, temperature_axis: "T", pressure_axis: "p",
+                        lower: &lower, upper: &upper,
+                        selection: ClaimSelection::Policy(fs_matdb::SelectionPolicy::SingleClaimOnly),
+                    }, datum).unwrap();
+                    let mut direct = indexed.clone();
+                    direct.inverse = None;
+                    for target in [290.0, 293.25, 300.0, 306.75, 310.0,
+                        datum.next_down(), datum, datum.next_up()]
+                    {
+                        if !(290.0..=310.0).contains(&target) { continue; }
+                        let expected = direct.specific_enthalpy_j_kg(target).unwrap();
+                        let h = indexed.specific_enthalpy_j_kg(target).unwrap();
+                        assert!((h - expected).abs() <= 8.0 * f64::EPSILON * expected.abs());
+                        assert_eq!(indexed.specific_enthalpy_change_j_kg(datum, target).unwrap(), h);
+                        assert_eq!(indexed.specific_enthalpy_change_j_kg(target, datum).unwrap(), -h);
+                        assert!((indexed.temperature_k(h).unwrap() - target).abs()
+                            <= 8.0 * f64::EPSILON * target);
+                        if target == 290.0 || target == 310.0 || (target - datum).abs() < 1e-10 {
+                            assert_eq!(h, expected);
+                        }
+                    }
+                    // Unaligned relative queries retain their direct small increment.
+                    let a = 306.75_f64;
+                    let dh = indexed.specific_enthalpy_change_j_kg(a, a.next_up()).unwrap();
+                    assert!(dh > 0.0);
+                    assert_eq!(dh, direct.specific_enthalpy_change_j_kg(a, a.next_up()).unwrap());
+                    for outside in [289.0, 311.0, f64::NAN, f64::INFINITY] {
+                        assert!(indexed.specific_enthalpy_j_kg(outside).is_err());
+                        assert!(indexed.specific_enthalpy_change_j_kg(outside, datum).is_err());
+                    }
+                }
             }
         }
     }

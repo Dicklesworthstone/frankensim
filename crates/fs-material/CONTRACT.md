@@ -8265,12 +8265,11 @@ density, allowing only arithmetic roundoff. `ThermalStorageBasis::InternalEnergy
 keeps heat-only coupling available while the existing mass-advection owners
 reject treating this storage as stream enthalpy.
 
-Six G0/G1 regression tests specify independent affine-Cv energy and entropy
+Seven G0/G1 regression tests specify independent affine-Cv energy and entropy
 integrals, heating and cooling across knots, inverse/domain boundaries, retained
 source conditions, native heat-driven energy conservation, incompatible-volume
-refusal and open-stream refusal without publishing a candidate. These newly
-added tests were not executed in the authoring session: dependency compilation
-stopped on shared-storage exhaustion, then the execution environment disconnected.
+refusal and open-stream refusal without publishing a candidate. Indexed forward
+queries additionally retain small relative changes and canonical source support.
 This is numerical single-phase calorimetry, not an EOS, pressure prediction,
 phase transition, chemical reaction, evolving strain model or experimental
 material validation.
@@ -8890,25 +8889,34 @@ nonlinear calorimetry, source-boundary refusal and source-query counts on
 64- and 4096-knot curves; this is a work bound, not a general throughput claim.
 
 The fixed-datum timeline laws (`IsobaricHeatCapacityLaw`,
-`FixedVolumeThermalLaw` and `HeatStorageThermalLaw`) additionally prepare a
-compensated caloric search index in O(knots) time and storage. Repeated h-to-T
+`IsochoricHeatCapacityLaw`, `FixedVolumeThermalLaw` and `HeatStorageThermalLaw`)
+prepare a compensated caloric search index in O(knots) time and storage. Repeated h-to-T
 queries locate the source segment logarithmically and invert its original
 affine-capacity integral analytically, including decreasing capacity. They do
 not approximate the energy curve by straight lines or resample its source.
-Relative heat and entropy still integrate the crossed intervals directly.
+Forward T-to-energy queries reuse this same index: an intermediate source knot
+between datum and target supplies a same-sign prefix plus the original local
+affine-capacity integral. Cp/Cv changes to or from their datum also use this path,
+including the existing convection tangent when its reference equals that datum.
+There is no subtraction of large cached primitives. Other relative heat and
+entropy still integrate the crossed intervals directly. Exact support endpoint
+values retain the original accumulation and mass/volume conversion; a rounded
+candidate outside that canonical energy span retries the original integral.
 Numerically indistinguishable search knots or roundoff at a source boundary
-retain the direct inverse and its original refusal semantics. Law identities
-advance to v2 for this numerical operation change; source identities and
-uncertainty are unchanged. G1 tests cover both signs, interior datums, exact
+retain direct evaluation and its original refusal semantics. Current operation
+identities are Cp v3, Cv v2 and both generic storage wrappers v4; source identities
+and uncertainty are unchanged. G1 tests cover both signs, interior datums, exact
 support endpoints, near-datum increments and at most 16 capacity reads for
-ordinary queries on 64-, 4096- and 262144-knot tables. This is an algorithmic
-work test, not a hardware throughput or experimental-accuracy claim.
+ordinary inverse queries and eight for forward queries on 64-, 4096- and
+262144-knot tables. This is an algorithmic work test, not a hardware throughput
+or experimental-accuracy claim.
 
 `HeatStorageThermalLaw` binds this total storage to the existing thermal
 timeline's specific-energy coordinate with an explicit total mass and datum.
 Its basis is likewise `DeclaredSensibleStorage`, including after a sensible-
-entropy opt-in. Both generic capacity wrappers use v3 identities for this
-physical interpretation; source identities and capacity curves are unchanged.
+entropy opt-in. Both generic capacity wrappers retain this physical
+interpretation in their identities; source identities and capacity curves are
+unchanged.
 Mass-only assemblies must match their known total mass; mixed assemblies require
 additional positive mass for their volume-based constituents. The native
 timeline invokes each law's `validate_cell` before birth or inventory change;

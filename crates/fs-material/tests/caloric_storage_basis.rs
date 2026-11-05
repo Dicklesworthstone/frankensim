@@ -49,7 +49,9 @@ fn sources() -> (PreparedVolumetricThermalTransport, PreparedHeatStorage) {
                 value: PropertyValue::Curve {
                     abscissa: "T".into(),
                     abscissa_dims: Temperature::DIMS,
-                    knots: vec![(300.0, values[0]), (320.0, values[1])],
+                    knots: [300.0, 304.25, 310.0, 317.5, 320.0].into_iter()
+                        .map(|t| (t, values[0] + (t - 300.0) / 20.0 * (values[1] - values[0])))
+                        .collect(),
                     dims,
                 },
                 validity: ValidityDomain::unconstrained().with_quantity(
@@ -123,6 +125,40 @@ fn sources() -> (PreparedVolumetricThermalTransport, PreparedHeatStorage) {
     ])
     .unwrap();
     (path, storage)
+}
+
+#[test]
+fn g1_indexed_sensible_storage_keeps_mass_scaling_and_small_heat() {
+    let (path, storage) = sources();
+    for datum in [300.0_f64, 303.125, 310.0, 319.0, 320.0] {
+        let volume = FixedVolumeThermalLaw::try_new(&path, 10.0, datum).unwrap();
+        let assembly = HeatStorageThermalLaw::try_new(&storage, 2.0, datum).unwrap();
+        for target in [300.0, 304.25, 309.75, 310.0, 317.5, 319.999, 320.0,
+            datum.next_down(), datum, datum.next_up()]
+        {
+            if !(300.0..=320.0).contains(&target) { continue; }
+            // Both amount bindings have c(T)=2+0.2*(T-300) J/(kg K).
+            let expected = (2.0 + 0.1 * ((datum - 300.0) + (target - 300.0))) * (target - datum);
+            for (law, h, direct) in [
+                (&volume as &dyn ThermalLaw, volume.specific_storage_j_kg(target).unwrap(),
+                    path.storage_change_j_m3(datum, target).unwrap() / 10.0),
+                (&assembly as &dyn ThermalLaw, assembly.specific_storage_j_kg(target).unwrap(),
+                    storage.energy_change_j(datum, target).unwrap() / 2.0),
+            ] {
+                assert!((h - expected).abs() <= 16.0 * f64::EPSILON * expected.abs());
+                assert!((law.temperature_k(h).unwrap() - target).abs()
+                    <= 8.0 * f64::EPSILON * target);
+                if target != datum { assert_ne!(h, 0.0); }
+                if target == 300.0 || target == 320.0 || (target - datum).abs() < 1e-10 {
+                    assert_eq!(h, direct);
+                }
+            }
+        }
+        for outside in [299.0, 321.0, f64::NAN, f64::INFINITY] {
+            assert!(volume.specific_storage_j_kg(outside).is_err());
+            assert!(assembly.specific_storage_j_kg(outside).is_err());
+        }
+    }
 }
 
 fn step() -> StepConfig {

@@ -85,7 +85,7 @@ impl<'a> HeatStorageThermalLaw<'a> {
         }
         let inverse =
             CapacityInverse::new(&CapacityCurve::new(&storage.knots), datum_temperature_k).ok();
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.heat-storage-thermal-law.v3");
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.heat-storage-thermal-law.v4");
         hash.update(storage.identity().as_bytes());
         hash.update(&reference_mass_kg.to_bits().to_le_bytes());
         hash.update(&datum_temperature_k.to_bits().to_le_bytes());
@@ -139,8 +139,25 @@ impl<'a> HeatStorageThermalLaw<'a> {
         self.sensible_entropy
     }
 
+    /// Datum-relative storage from the retained caloric index and original local
+    /// integral, with canonical endpoints on the declared mass basis.
     pub fn specific_storage_j_kg(&self, temperature_k: f64) -> Result<f64, ThermalTransportError> {
-        let h = self.storage.energy_change_j(self.datum, temperature_k)? / self.reference_mass;
+        let [cold, hot] = self.storage.temperature_span_k();
+        let [low, high] = self.span;
+        if temperature_k == cold {
+            return Ok(low);
+        }
+        if temperature_k == hot {
+            return Ok(high);
+        }
+        let direct = || self.storage.energy_change_j(self.datum, temperature_k);
+        let energy = self.inverse.as_ref().map_or_else(direct, |inverse| {
+            inverse.energy_change_from_datum(&CapacityCurve::new(&self.storage.knots), temperature_k)
+        })?;
+        let mut h = energy / self.reference_mass;
+        if h < low || h > high {
+            h = direct()? / self.reference_mass;
+        }
         if !h.is_finite() || (temperature_k != self.datum && h == 0.0) {
             return Err(invalid("assembly specific storage is not representable"));
         }

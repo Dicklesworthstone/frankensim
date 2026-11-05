@@ -248,6 +248,14 @@ impl PreparedVolumetricThermalTransport {
         inverse.temperature(&CapacityCurve::new(&self.knots), storage_j_m3)
     }
 
+    pub(super) fn storage_from_index(
+        &self,
+        inverse: &CapacityInverse,
+        temperature_k: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        inverse.energy_change_from_datum(&CapacityCurve::new(&self.knots), temperature_k)
+    }
+
     #[must_use]
     pub const fn identity(&self) -> ContentHash {
         self.identity

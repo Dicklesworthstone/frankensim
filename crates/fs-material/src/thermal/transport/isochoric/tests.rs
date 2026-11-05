@@ -101,6 +101,39 @@ fn g1_affine_cv_uses_exact_internal_energy_entropy_and_inverse_across_source_kno
 }
 
 #[test]
+fn g1_indexed_cv_heat_preserves_relative_changes_and_original_support() {
+    let card = card(true, [500.0, 2000.0, 300.0]);
+    for datum in [250.0_f64, 301.25, 350.0, 425.25, 500.0] {
+        let indexed = prepare(&card, &point(250.0, 2.0), &point(500.0, 2.0), datum).unwrap();
+        let mut direct = indexed.clone();
+        direct.inverse = None;
+        for target in [250.0, 290.25, 350.0, 450.75, 500.0,
+            datum.next_down(), datum, datum.next_up()]
+        {
+            if !(250.0..=500.0).contains(&target) { continue; }
+            let expected = direct.specific_internal_energy_j_kg(target).unwrap();
+            let u = indexed.specific_internal_energy_j_kg(target).unwrap();
+            assert!((u - expected).abs() <= 8.0 * f64::EPSILON * expected.abs());
+            assert_eq!(indexed.specific_internal_energy_change_j_kg(datum, target).unwrap(), u);
+            assert_eq!(indexed.specific_internal_energy_change_j_kg(target, datum).unwrap(), -u);
+            assert!((indexed.temperature_k(u).unwrap() - target).abs()
+                <= 8.0 * f64::EPSILON * target);
+            if target == 250.0 || target == 500.0 || (target - datum).abs() < 1e-10 {
+                assert_eq!(u, expected);
+            }
+        }
+        let a = 400.0_f64;
+        let du = indexed.specific_internal_energy_change_j_kg(a, a.next_up()).unwrap();
+        assert!(du > 0.0);
+        assert_eq!(du, direct.specific_internal_energy_change_j_kg(a, a.next_up()).unwrap());
+        for outside in [249.0, 501.0, f64::NAN, f64::INFINITY] {
+            assert!(indexed.specific_internal_energy_j_kg(outside).is_err());
+            assert!(indexed.specific_internal_energy_change_j_kg(outside, datum).is_err());
+        }
+    }
+}
+
+#[test]
 fn g0_source_density_context_is_required_and_remains_in_the_law_identity() {
     let card = card(true, [700.0; 3]);
     let lower = point(250.0, 2.0);

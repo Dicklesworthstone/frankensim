@@ -84,7 +84,7 @@ impl<'p> FixedVolumeThermalLaw<'p> {
             ));
         }
         let inverse = path.capacity_inverse(datum_temperature_k);
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.fixed-volume-thermal-law.v3");
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.fixed-volume-thermal-law.v4");
         hash.update(path.identity().as_bytes());
         hash.update(&reference_density_kg_m3.to_bits().to_le_bytes());
         hash.update(&datum_temperature_k.to_bits().to_le_bytes());
@@ -153,11 +153,26 @@ impl<'p> FixedVolumeThermalLaw<'p> {
     }
 
     /// Derived specific storage for this fixed mass basis; not a source Cp claim.
+    /// Reuse the retained caloric index and original local integral, preserving
+    /// the canonical endpoints after reference-density conversion.
     pub fn specific_storage_j_kg(&self, temperature_k: f64) -> Result<f64, ThermalTransportError> {
-        let storage = self
-            .path
-            .storage_change_j_m3(self.datum_temperature, temperature_k)?
-            / self.reference_density;
+        let [cold, hot] = self.path.temperature_span_k();
+        let [low, high] = self.specific_storage_span;
+        if temperature_k == cold {
+            return Ok(low);
+        }
+        if temperature_k == hot {
+            return Ok(high);
+        }
+        let direct = || self.path.storage_change_j_m3(self.datum_temperature, temperature_k);
+        let energy = self.inverse.as_ref().map_or_else(
+            direct,
+            |inverse| self.path.storage_from_index(inverse, temperature_k),
+        )?;
+        let mut storage = energy / self.reference_density;
+        if storage < low || storage > high {
+            storage = direct()? / self.reference_density;
+        }
         if !storage.is_finite() || (temperature_k != self.datum_temperature && storage == 0.0) {
             return Err(invalid("specific storage is not representable"));
         }

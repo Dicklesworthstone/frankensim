@@ -22,12 +22,13 @@ pub(super) struct CapacityCurve<'a, K> {
     knots: &'a [K],
 }
 
-/// Prepared search coordinates for repeated inversions from one fixed datum.
+/// Prepared search coordinates for repeated caloric queries from one fixed datum.
 ///
 /// The coordinates locate an original capacity segment; they do not replace
 /// C(T) by a piecewise-linear energy law. Each query still solves the original
-/// quadratic integral on that segment. Relative heat and entropy integrations
-/// remain on `CapacityCurve`, so small changes never subtract cached primitives.
+/// quadratic integral on that segment. Datum-aligned forward queries add the
+/// original local integral to a same-sign prefix. Other relative heat and entropy
+/// integrations remain on `CapacityCurve`, without cached-primitive subtraction.
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct CapacityInverse {
     datum: f64,
@@ -85,6 +86,41 @@ impl CapacityInverse {
             return Err(invalid("caloric search knots are not numerically distinct"));
         }
         Ok(Self { datum, energy })
+    }
+
+    /// Forward energy from the same datum, with logarithmic knot lookup and
+    /// constant source work away from the domain endpoints. The datum's own
+    /// segment uses the direct integral, preserving small sensible increments.
+    /// Elsewhere the anchor lies BETWEEN the datum and the target, so the
+    /// prefix and local energy have the same sign and cannot cancel.
+    ///
+    /// The canonical endpoint integrals retain their original accumulation
+    /// order. Owners that already retain those two values may return them
+    /// directly. No difference between two large cached energies is taken.
+    pub(super) fn energy_change_from_datum<K: CapacityKnot>(
+        &self,
+        curve: &CapacityCurve<'_, K>,
+        temperature: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        curve.check_temperature(temperature)?;
+        let [cold, hot] = curve.span();
+        let segment = curve.segment(temperature);
+        if temperature == cold || temperature == hot || segment == curve.segment(self.datum) {
+            return curve.energy_change(self.datum, temperature);
+        }
+        let anchor = if temperature > self.datum {
+            segment
+        } else {
+            segment + 1
+        };
+        let local = curve.energy_change(curve.knots[anchor].temperature(), temperature)?;
+        let energy = self.energy[anchor] + local;
+        if !energy.is_finite() || energy == 0.0 || (energy > 0.0) != (temperature > self.datum) {
+            // The index is only an optimization. Its accumulation order must
+            // not refuse a source integral that the direct owner can represent.
+            return curve.energy_change(self.datum, temperature);
+        }
+        Ok(energy)
     }
 
     /// Binary search plus one original analytic segment inverse, with no
@@ -520,6 +556,55 @@ mod tests {
                     "fixed-datum inversion read {} capacities on {count} knots",
                     queries.get()
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_datum_aligned_forward_calorimetry_uses_bounded_source_work() {
+        for count in [64, 4096, 262_144] {
+            let queries = Cell::new(0);
+            let knots: Vec<_> = (0..count)
+                .map(|i| CountedKnot {
+                    values: [250.0 + f64::from(i), 1000.0 + 0.5 * f64::from(i)],
+                    queries: &queries,
+                })
+                .collect();
+            let curve = CapacityCurve::new(&knots);
+            let datum = 250.125 + f64::from(count / 2);
+            let index = CapacityInverse::new(&curve, datum).unwrap();
+            for target in [250.25, datum - 0.25, datum, datum + 0.25, 248.75 + f64::from(count)] {
+                // Independent integral of the source C(T)=1000+0.5*(T-250).
+                let expected = (1000.0 + 0.25 * (datum + target - 500.0)) * (target - datum);
+                queries.set(0);
+                let actual = index.energy_change_from_datum(&curve, target).unwrap();
+                assert!((actual - expected).abs() <= 8.0 * f64::EPSILON * expected.abs());
+                assert!(queries.get() <= 8, "forward query read {} capacities", queries.get());
+                let recovered = index.temperature(&curve, actual).unwrap();
+                assert!((recovered - target).abs() <= 8.0 * f64::EPSILON * target);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_indexed_forward_heat_retains_datum_neighbors_and_canonical_endpoints() {
+        let knots = [[200.0, 500.0], [300.0, 2000.0], [400.0, 4000.0], [500.0, 300.0]];
+        let curve = CapacityCurve::new(&knots);
+        for datum in [200.0_f64, 261.3, 300.0, 325.3, 500.0] {
+            let index = CapacityInverse::new(&curve, datum).unwrap();
+            for target in [200.0, 300.0, 400.0, 500.0, datum.next_down(), datum, datum.next_up()] {
+                if !(200.0..=500.0).contains(&target) { continue; }
+                let exact = curve.energy_change(datum, target).unwrap();
+                let indexed = index.energy_change_from_datum(&curve, target).unwrap();
+                if target == 200.0 || target == 500.0 || (target - datum).abs() < 1e-10 {
+                    assert_eq!(indexed, exact);
+                } else {
+                    assert!((indexed - exact).abs() <= 8.0 * f64::EPSILON * exact.abs());
+                }
+                if target != datum { assert_ne!(indexed, 0.0); }
+            }
+            for target in [199.0, 501.0, f64::NAN, f64::INFINITY] {
+                assert!(index.energy_change_from_datum(&curve, target).is_err());
             }
         }
     }

@@ -153,7 +153,7 @@ impl IsochoricHeatCapacityLaw {
         }
         let inverse = CapacityInverse::new(&curve, datum_temperature_k).ok();
         let density_kg_m3 = query.lower.axes()[query.density_axis];
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.isochoric-cv-law.v1");
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.isochoric-cv-law.v2");
         hash.update(card.content_hash().as_bytes());
         for axis in [query.temperature_axis, query.density_axis] {
             hash.update(&(axis.len() as u64).to_le_bytes());
@@ -210,16 +210,36 @@ impl IsochoricHeatCapacityLaw {
     }
 
     /// Integral Cv dT from the declared datum. No p/rho flow work is included.
+    /// Reuse the caloric index and one original affine segment, retaining the
+    /// canonical support endpoints and direct integration at numerical edges.
     pub fn specific_internal_energy_j_kg(
         &self, temperature_k: f64,
     ) -> Result<f64, ThermalTransportError> {
-        self.specific_internal_energy_change_j_kg(self.datum_temperature_k, temperature_k)
+        let [cold, hot] = self.temperature_span_k();
+        let [low, high] = self.energy_span;
+        if temperature_k == cold { return Ok(low); }
+        if temperature_k == hot { return Ok(high); }
+        let curve = CapacityCurve::new(&self.knots);
+        let direct = || curve.energy_change(self.datum_temperature_k, temperature_k);
+        let energy = self.inverse.as_ref().map_or_else(
+            direct,
+            |inverse| inverse.energy_change_from_datum(&curve, temperature_k),
+        )?;
+        if energy < low || energy > high { return direct(); }
+        Ok(energy)
     }
 
-    /// Signed original Cv integral; no large reference energies are subtracted.
+    /// Signed original Cv integral. Datum-aligned changes reuse the caloric
+    /// index; other changes never subtract large reference energies.
     pub fn specific_internal_energy_change_j_kg(
         &self, initial_k: f64, final_k: f64,
     ) -> Result<f64, ThermalTransportError> {
+        if initial_k == self.datum_temperature_k {
+            return self.specific_internal_energy_j_kg(final_k);
+        }
+        if final_k == self.datum_temperature_k {
+            return self.specific_internal_energy_j_kg(initial_k).map(|u| -u);
+        }
         CapacityCurve::new(&self.knots).energy_change(initial_k, final_k)
     }
 
