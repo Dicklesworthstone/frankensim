@@ -4,12 +4,13 @@
 //! their independently cycle-averaged powers. Applying the original M, K and
 //! symmetric part of C before observation keeps all spatial and temporal cross
 //! terms in kinetic energy, elastic energy and viscous heat. The instantaneous
-//! identity is F^T v = v^T M a + v^T K q + v^T D v, D=(C+C^T)/2;
-//! the skew gyroscopic part does no work. Each term is integrated independently.
+//! identity is F^T v = v^T M a + v^T K q + v^T D v + flow^T effort,
+//! D=(C+C^T)/2; the skew gyroscopic part does no work. A supplied physical
+//! impedance contributes signed boundary work. Every term is integrated independently.
 
 use super::{
-    HarmonicResponse, HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicResponse,
-    admit_size, finite, invalid, poll, symmetric_entry,
+    HarmonicPortControls, HarmonicResponse, HarmonicResponseControls, HarmonicResponseError,
+    PreparedHarmonicResponse, admit_size, finite, invalid, poll, symmetric_entry,
 };
 use fs_exec::Cx;
 use fs_fft::harmonic_window::{HarmonicProduct, HarmonicWindow, WindowError};
@@ -35,6 +36,90 @@ pub struct HarmonicForceTone<'a> {
     pub force: &'a [C64],
 }
 
+/// One physical owner's complete impedance at an authored frequency.
+#[derive(Clone, Copy, Debug)]
+pub struct HarmonicImpedanceSample<'a> {
+    /// Nonnegative angular frequency [rad/s], including DC.
+    pub angular_frequency_rad_s: f64,
+    /// Row-major `ports x ports` effort/flow map under exp(-i omega t).
+    pub impedance: &'a [C64],
+}
+
+/// Physical load shared by all coherent tones and statistical factors.
+///
+/// Samples must be strictly increasing and cover exactly the distinct source
+/// frequencies. No interpolation, extrapolation or impedance fit is performed.
+/// Each Hermitian part passes the existing pointwise PSD admission; the source
+/// owner remains responsible for broadband causality and physical port units.
+#[derive(Clone, Copy, Debug)]
+pub struct HarmonicInterferenceLoad<'a> {
+    /// Real row-major `n x ports` map: reaction is `-B effort`, flow is `B^T v`.
+    pub force_map: &'a [f64],
+    /// Number of physical effort/flow ports.
+    pub ports: usize,
+    /// One full impedance per distinct authored source frequency.
+    pub samples: &'a [HarmonicImpedanceSample<'a>],
+    /// Existing physical-port preparation limits, applied at every frequency.
+    pub controls: HarmonicPortControls,
+}
+
+impl<'a> HarmonicInterferenceLoad<'a> {
+    fn validate(
+        self,
+        n: usize,
+        maximum_samples: usize,
+        cx: &Cx<'_>,
+    ) -> Result<(), HarmonicResponseError> {
+        cap("load ports", self.ports, self.controls.maximum_ports)?;
+        let np = n
+            .checked_mul(self.ports)
+            .ok_or(invalid("force map extent overflow"))?;
+        let pp = self
+            .ports
+            .checked_mul(self.ports)
+            .ok_or(invalid("impedance extent overflow"))?;
+        if self.ports == 0
+            || self.force_map.len() != np
+            || self.force_map.iter().any(|x| !x.is_finite())
+            || self.samples.is_empty()
+            || self.samples.len() > maximum_samples
+        {
+            return Err(invalid(
+                "complete physical map and exact source-frequency load samples required",
+            ));
+        }
+        for (i, sample) in self.samples.iter().enumerate() {
+            poll(cx)?;
+            let omega = sample.angular_frequency_rad_s;
+            if !omega.is_finite()
+                || omega < 0.0
+                || (i > 0 && omega <= self.samples[i - 1].angular_frequency_rad_s)
+                || sample.impedance.len() != pp
+                || sample.impedance.iter().any(|&z| !finite(z))
+            {
+                return Err(invalid(
+                    "finite, strictly ordered, complete impedance samples required",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn impedance(self, omega: f64) -> Result<&'a [C64], HarmonicResponseError> {
+        self.samples
+            .binary_search_by(|sample| {
+                // Positive and negative zero represent the same physical DC.
+                if sample.angular_frequency_rad_s == omega {
+                    core::cmp::Ordering::Equal
+                } else {
+                    sample.angular_frequency_rad_s.total_cmp(&omega)
+                }
+            })
+            .map(|index| self.samples[index].impedance)
+            .map_err(|_| invalid("every source frequency requires its exact impedance sample"))
+    }
+}
+
 /// Admission for the complete multi-frequency preparation and observation.
 #[derive(Clone, Copy, Debug)]
 pub struct HarmonicInterferenceControls {
@@ -44,7 +129,7 @@ pub struct HarmonicInterferenceControls {
     /// response preparation/solve, retained responses and coefficient actions.
     /// Caller input, allocator overhead and thread stacks are excluded.
     pub maximum_payload_bytes: usize,
-    /// Maximum real harmonic products per observation: 6*n*distinct_tones^2.
+    /// Maximum real products: `(6*n + loaded_ports)*distinct_tones^2`.
     /// Checked before solving. This is a loop count, not a wall-time guarantee.
     pub maximum_product_terms: usize,
 }
@@ -66,11 +151,15 @@ pub struct HarmonicInterferenceMoments {
     /// <v^T D v> [W], with full symmetric D=(C+C^T)/2.
     /// Signed floating roundoff is retained rather than clipped.
     pub mean_viscous_power_w: f64,
+    /// <flow^T effort> [W] at the supplied physical load, zero when unloaded.
+    /// This is signed net boundary work, including reactive energy returned to
+    /// the structure; it is not an inferred heat or radiation decomposition.
+    pub mean_boundary_power_w: f64,
     /// <v^T M a + v^T K q> [W], computed independently of force and heat.
     /// Equals endpoint stored-energy change divided by duration only for a
     /// uniform window. A shaped detector measures the weighted local rate.
     pub mean_stored_energy_rate_w: f64,
-    /// Input minus viscous power minus the independently integrated storage rate.
+    /// Input minus viscous power, boundary work and structural storage rate.
     pub power_balance_residual_w: f64,
 }
 
@@ -95,7 +184,7 @@ struct Tone {
 ///
 /// This is a finite-dimensional, particular harmonic motion on a shared clock.
 /// It does not add startup/free-decay transients, infer stochastic coherence,
-/// resolve nonlinear interactions, or supply a broadband boundary impedance.
+/// resolve nonlinear interactions, or infer a broadband boundary impedance.
 /// Singular frequencies still refuse. Solver residuals and DD accumulation
 /// are numerical evidence, not forward-error or near-null relative bounds.
 #[derive(Clone, Debug)]
@@ -117,6 +206,59 @@ impl PreparedHarmonicInterference {
         stiffness: &[f64],
         n: usize,
         forces: &[HarmonicForceTone<'_>],
+        response_controls: HarmonicResponseControls,
+        controls: HarmonicInterferenceControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        Self::prepare(
+            mass,
+            damping,
+            stiffness,
+            n,
+            forces,
+            None,
+            response_controls,
+            controls,
+            cx,
+        )
+    }
+
+    /// Retain loaded coherent responses and their signed finite-window boundary
+    /// work. Every exact source frequency uses the original loaded pencil;
+    /// mutual and reactive impedance entries survive without cycle averaging.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_with_port_impedance(
+        mass: &[f64],
+        damping: &[f64],
+        stiffness: &[f64],
+        n: usize,
+        forces: &[HarmonicForceTone<'_>],
+        load: HarmonicInterferenceLoad<'_>,
+        response_controls: HarmonicResponseControls,
+        controls: HarmonicInterferenceControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        Self::prepare(
+            mass,
+            damping,
+            stiffness,
+            n,
+            forces,
+            Some(load),
+            response_controls,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        mass: &[f64],
+        damping: &[f64],
+        stiffness: &[f64],
+        n: usize,
+        forces: &[HarmonicForceTone<'_>],
+        load: Option<HarmonicInterferenceLoad<'_>>,
         response_controls: HarmonicResponseControls,
         controls: HarmonicInterferenceControls,
         cx: &Cx<'_>,
@@ -165,11 +307,23 @@ impl PreparedHarmonicInterference {
                 forces[pair[0]].angular_frequency_rad_s != forces[pair[1]].angular_frequency_rad_s
             })
             .count();
-        admit_payload(n, distinct, controls)?;
+        if let Some(load) = load {
+            load.validate(n, distinct, cx)?;
+            if load.samples.len() != distinct {
+                return Err(invalid(
+                    "exactly one load sample per distinct source frequency required",
+                ));
+            }
+            for tone in forces {
+                load.impedance(tone.angular_frequency_rad_s)?;
+            }
+        }
+        admit_payload(n, distinct, load, controls)?;
         let products = distinct
             .checked_mul(distinct)
-            .and_then(|x| x.checked_mul(n))
-            .and_then(|x| x.checked_mul(6))
+            .and_then(|x| {
+                x.checked_mul(n.checked_mul(6)?.checked_add(load.map_or(0, |l| l.ports))?)
+            })
             .ok_or(invalid("interference product extent overflow"))?;
         cap(
             "interference product terms",
@@ -200,12 +354,13 @@ impl PreparedHarmonicInterference {
                 }
                 force.push(C64::new(sum[0].to_f64(), sum[1].to_f64()));
             }
-            let prepared = PreparedHarmonicResponse::try_new(
+            let prepared = prepare_response(
                 mass,
                 damping,
                 stiffness,
                 n,
                 omega,
+                load,
                 response_controls,
                 cx,
             )?;
@@ -277,7 +432,7 @@ impl PreparedHarmonicInterference {
     }
 }
 
-// The deterministic owner and mixed-factor owner use exactly the same six
+// The deterministic owner and mixed-factor owner use exactly the same seven
 // physical contractions. Each frequency pair prepares its temporal kernel once;
 // dispatch on the explicit law occurs outside the coordinate/product loop.
 fn observe_sums(
@@ -286,9 +441,9 @@ fn observe_sums(
     window: HarmonicWindow,
     statistics: HarmonicFactorStatistics,
     cx: &Cx<'_>,
-) -> Result<[Dd; 6], HarmonicResponseError> {
+) -> Result<[Dd; 7], HarmonicResponseError> {
     poll(cx)?;
-    let mut moments = [Dd::ZERO; 6];
+    let mut moments = [Dd::ZERO; 7];
     for a in tones {
         for b in tones {
             poll(cx)?;
@@ -323,7 +478,7 @@ fn accumulate_pair(
     a: &Tone,
     b: &Tone,
     product: impl Fn([Dd; 2], [Dd; 2]) -> Result<Dd, HarmonicResponseError>,
-    moments: &mut [Dd; 6],
+    moments: &mut [Dd; 7],
     cx: &Cx<'_>,
 ) -> Result<(), HarmonicResponseError> {
     for i in 0..n {
@@ -347,17 +502,26 @@ fn accumulate_pair(
             *sum = checked(*sum + value)?;
         }
     }
+    if let (Some(a), Some(b)) = (&a.response.port_load, &b.response.port_load) {
+        for (i, (&flow, &effort)) in a.flow.iter().zip(&b.effort).enumerate() {
+            if i % 64 == 0 {
+                poll(cx)?;
+            }
+            moments[6] = checked(moments[6] + product(parts(flow), parts(effort))?)?;
+        }
+    }
     Ok(())
 }
 
-fn finish_moments(moments: [Dd; 6]) -> Result<HarmonicInterferenceMoments, HarmonicResponseError> {
+fn finish_moments(moments: [Dd; 7]) -> Result<HarmonicInterferenceMoments, HarmonicResponseError> {
     let stored = checked(moments[4] + moments[5])?;
-    let residual = checked(moments[2] - moments[3] - stored)?;
+    let residual = checked(moments[2] - moments[3] - moments[6] - stored)?;
     Ok(HarmonicInterferenceMoments {
         mean_kinetic_energy_j: moments[0].to_f64(),
         mean_elastic_energy_j: moments[1].to_f64(),
         mean_input_power_w: moments[2].to_f64(),
         mean_viscous_power_w: moments[3].to_f64(),
+        mean_boundary_power_w: moments[6].to_f64(),
         mean_stored_energy_rate_w: stored.to_f64(),
         power_balance_residual_w: residual.to_f64(),
     })
@@ -366,10 +530,12 @@ fn finish_moments(moments: [Dd; 6]) -> Result<HarmonicInterferenceMoments, Harmo
 fn admit_payload(
     n: usize,
     tones: usize,
+    load: Option<HarmonicInterferenceLoad<'_>>,
     controls: HarmonicInterferenceControls,
 ) -> Result<(), HarmonicResponseError> {
     // Original dense owner bound plus 144*n retained scalar bytes per tone
     // (F,q,v and three DD coefficient actions), headers and bounded scratch.
+    let additional_load = load_payload(n, tones, load)?;
     let bytes = n
         .checked_mul(n)
         .and_then(|x| x.checked_mul(144))
@@ -382,12 +548,59 @@ fn admit_payload(
                 )?,
             )
         })
+        .and_then(|x| x.checked_add(additional_load))
         .ok_or(invalid("interference payload extent overflow"))?;
     cap(
         "interference payload bytes",
         bytes,
         controls.maximum_payload_bytes,
     )
+}
+
+fn load_payload(
+    n: usize,
+    tones: usize,
+    load: Option<HarmonicInterferenceLoad<'_>>,
+) -> Result<usize, HarmonicResponseError> {
+    let Some(load) = load else {
+        return Ok(0);
+    };
+    // Retained original flow/effort per tone plus one loaded preparation/solve.
+    let preparation = super::impedance::dense_payload(n, load.ports)?;
+    tones
+        .checked_mul(load.ports)
+        .and_then(|x| x.checked_mul(32))
+        .and_then(|x| x.checked_add(preparation))
+        .ok_or(invalid("interference load payload extent overflow"))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_response(
+    mass: &[f64],
+    damping: &[f64],
+    stiffness: &[f64],
+    n: usize,
+    omega: f64,
+    load: Option<HarmonicInterferenceLoad<'_>>,
+    controls: HarmonicResponseControls,
+    cx: &Cx<'_>,
+) -> Result<PreparedHarmonicResponse, HarmonicResponseError> {
+    match load {
+        Some(load) => PreparedHarmonicResponse::try_with_port_impedance(
+            mass,
+            damping,
+            stiffness,
+            n,
+            load.force_map,
+            load.ports,
+            load.impedance(omega)?,
+            omega,
+            controls,
+            load.controls,
+            cx,
+        ),
+        None => PreparedHarmonicResponse::try_new(mass, damping, stiffness, n, omega, controls, cx),
+    }
 }
 
 fn cap(

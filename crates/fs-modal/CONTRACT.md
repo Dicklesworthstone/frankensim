@@ -215,6 +215,24 @@ solutions and real-signal quadrature; exercise coupled energy, gyroscopic work,
 short shutters, beating, DC, exact duplicate cancellation and source-clock
 shifts; and verify count, payload, product and singular-response refusals.
 
+`PreparedHarmonicInterference::try_with_port_impedance` and the corresponding
+ensemble constructor share the original loaded-response owner. A borrowed
+`HarmonicInterferenceLoad` supplies the original real force map B and exactly
+one `HarmonicImpedanceSample` per distinct source frequency, in strictly
+increasing order. The full mutual, reactive impedance is retained; there is no
+interpolation or inferred broadband causality certificate. One loaded
+factorization per frequency serves all mean/factor right-hand sides. The shared
+window observer independently integrates `flow^T effort`, including all
+within-bank cross-frequency products, as `mean_boundary_power_w`. This signed
+net boundary work can be negative when a passive load returns stored energy;
+it is not automatically heat or radiation. The balance subtracts structural
+viscous power, boundary work and independently differentiated structural
+energy. Warm work becomes `(6*n + ports)` products per ordered tone pair;
+admission also covers 32*ports retained flow/effort bytes per bank-frequency
+and one existing loaded preparation. Native regressions use an independent
+passive mutual mass/spring/resistor network and exact finite real/proper
+ensembles integrated over uniform and triangular windows.
+
 `harmonic::PreparedHarmonicResponse` prepares the complete retained mechanical
 pencil `K - omega^2 M - i omega C` under `exp(-i omega t)`. The source mass,
 stiffness and viscous damping remain fully coupled; a mode count or a list of
@@ -1107,8 +1125,9 @@ opposite forces in separate factors retain separate physical variance.
 Empty factors preserve their original indices, and a pure stochastic input
 needs no fabricated deterministic tone. Completely empty sources refuse.
 
-The coherent and statistical observers share the same six DD contractions of
-original-coordinate M*v, K*q, D*v and force, with D=(C+C^T)/2. Real factors
+The coherent and statistical observers share DD contractions of
+original-coordinate M*v, K*q, D*v and force, with D=(C+C^T)/2, plus the
+physical flow/effort work when loaded. Real factors
 retain sum and difference frequencies; proper factors retain the complete
 within-factor difference-frequency interference. Expected kinetic/elastic
 energy, input work, viscous heat, independent storage rate and power balance

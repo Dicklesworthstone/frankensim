@@ -58,6 +58,16 @@ pub(super) struct PortScaling {
     pub(super) minimum_time_exponent: i32,
 }
 
+// Shared with multi-frequency owners that retain responses while preparing
+// the next loaded frequency. Keep the physical owner's bound authoritative.
+pub(super) fn dense_payload(n: usize, ports: usize) -> Result<usize, HarmonicResponseError> {
+    n.checked_mul(ports)
+        .and_then(|x| x.checked_mul(64))
+        .and_then(|x| ports.checked_mul(ports)?.checked_mul(256)?.checked_add(x))
+        .and_then(|x| ports.checked_mul(128)?.checked_add(x))
+        .ok_or(invalid("physical port payload overflow"))
+}
+
 impl PreparedPortImpedance {
     pub(super) fn new(
         n: usize,
@@ -100,11 +110,7 @@ impl PreparedPortImpedance {
         if terms > controls.maximum_projection_terms {
             return Err(invalid("physical port projection exceeds its work budget"));
         }
-        let bytes = np
-            .checked_mul(64)
-            .and_then(|x| pp.checked_mul(256).and_then(|y| x.checked_add(y)))
-            .and_then(|x| ports.checked_mul(128).and_then(|y| x.checked_add(y)))
-            .ok_or(invalid("physical port payload overflow"))?;
+        let bytes = dense_payload(n, ports)?;
         cap(
             "load numerical payload bytes",
             bytes,
@@ -239,7 +245,9 @@ impl PreparedPortImpedance {
             }
         }
         if bz.iter().any(|&value| !finite(value)) {
-            return Err(invalid("scaled physical port factors are not representable"));
+            return Err(invalid(
+                "scaled physical port factors are not representable",
+            ));
         }
         Ok((b, bz))
     }

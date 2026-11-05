@@ -6,9 +6,10 @@
 //! stationary spectrum is inferred from a list of frequencies.
 
 use super::{
-    HarmonicForceTone, HarmonicInterferenceMoments, HarmonicResponse, HarmonicResponseControls,
-    HarmonicResponseError, MAX_INTERFERENCE_TONES, PreparedHarmonicResponse, Tone, admit_size,
-    apply, cap, checked, finish_moments, finite, invalid, observe_sums, parts, poll,
+    HarmonicForceTone, HarmonicInterferenceLoad, HarmonicInterferenceMoments, HarmonicResponse,
+    HarmonicResponseControls, HarmonicResponseError, MAX_INTERFERENCE_TONES, Tone, admit_size,
+    apply, cap, checked, finish_moments, finite, invalid, load_payload, observe_sums, parts, poll,
+    prepare_response,
 };
 use fs_exec::Cx;
 use fs_fft::harmonic_window::HarmonicWindow;
@@ -64,7 +65,7 @@ pub struct HarmonicEnsembleControls {
     /// ordering records, bank headers and one existing dense response owner.
     /// Caller inputs, allocator overhead and thread stacks are excluded.
     pub maximum_payload_bytes: usize,
-    /// Maximum observed products: 6*n*sum_b(distinct_tones_in_bank_b^2).
+    /// Maximum products: `(6*n + loaded_ports)*sum_b(distinct_tones_in_bank_b^2)`.
     /// Different factors have no cross contractions. Checked before any solve.
     pub maximum_product_terms: usize,
 }
@@ -91,7 +92,8 @@ struct Input {
 ///
 /// Each observation reuses original-coordinate M*v, K*q and D*v actions, with
 /// D=(C+C^T)/2. It allocates nothing, performs no solve or matrix application,
-/// and accumulates the existing six physical contractions in DD across banks.
+/// and accumulates the shared physical contractions in DD across banks,
+/// including signed boundary work when a physical impedance is supplied.
 ///
 /// Results are ensemble expectations of the actual sensitivity-weighted real
 /// products. Real factors retain sum-frequency terms; proper factors retain
@@ -121,6 +123,63 @@ impl PreparedHarmonicInterferenceEnsemble {
         n: usize,
         mean_tones: &[HarmonicForceTone<'a>],
         factors: &[HarmonicForceFactor<'a>],
+        response_controls: HarmonicResponseControls,
+        controls: HarmonicEnsembleControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        Self::prepare(
+            mass,
+            damping,
+            stiffness,
+            n,
+            mean_tones,
+            factors,
+            None,
+            response_controls,
+            controls,
+            cx,
+        )
+    }
+
+    /// Prepare every bank through the same physical frequency-dependent load.
+    /// One loaded factorization per distinct frequency serves every RHS there;
+    /// cross-frequency boundary work follows each factor's authored statistics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_with_port_impedance<'a>(
+        mass: &[f64],
+        damping: &[f64],
+        stiffness: &[f64],
+        n: usize,
+        mean_tones: &[HarmonicForceTone<'a>],
+        factors: &[HarmonicForceFactor<'a>],
+        load: HarmonicInterferenceLoad<'_>,
+        response_controls: HarmonicResponseControls,
+        controls: HarmonicEnsembleControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, HarmonicResponseError> {
+        Self::prepare(
+            mass,
+            damping,
+            stiffness,
+            n,
+            mean_tones,
+            factors,
+            Some(load),
+            response_controls,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare<'a>(
+        mass: &[f64],
+        damping: &[f64],
+        stiffness: &[f64],
+        n: usize,
+        mean_tones: &[HarmonicForceTone<'a>],
+        factors: &[HarmonicForceFactor<'a>],
+        load: Option<HarmonicInterferenceLoad<'_>>,
         response_controls: HarmonicResponseControls,
         controls: HarmonicEnsembleControls,
         cx: &Cx<'_>,
@@ -176,9 +235,12 @@ impl PreparedHarmonicInterferenceEnsemble {
         if authored == 0 {
             return Err(invalid("at least one ensemble force tone is required"));
         }
+        if let Some(load) = load {
+            load.validate(n, authored, cx)?;
+        }
         // Admit sorting storage before its first allocation; retain the exact
         // response count only after duplicates have been identified.
-        admit_payload(n, authored, bank_count, 0, controls)?;
+        admit_payload(n, authored, bank_count, 0, load, controls)?;
         let mut order = Vec::with_capacity(authored);
         for bank in 0..bank_count {
             poll(cx)?;
@@ -217,13 +279,24 @@ impl PreparedHarmonicInterferenceEnsemble {
                 retained += 1;
             }
         }
-        admit_payload(n, authored, bank_count, retained, controls)?;
+        if let Some(load) = load {
+            if load.samples.len() != frequency_count {
+                return Err(invalid(
+                    "exactly one load sample per distinct source frequency required",
+                ));
+            }
+            for item in &order {
+                load.impedance(item.omega)?;
+            }
+        }
+        admit_payload(n, authored, bank_count, retained, load, controls)?;
         let pair_count = counts[..bank_count].iter().try_fold(0usize, |sum, &count| {
             sum.checked_add(count.checked_mul(count)?)
         });
         let products = pair_count
-            .and_then(|pairs| pairs.checked_mul(n))
-            .and_then(|x| x.checked_mul(6))
+            .and_then(|pairs| {
+                pairs.checked_mul(n.checked_mul(6)?.checked_add(load.map_or(0, |l| l.ports))?)
+            })
             .ok_or(invalid("ensemble product extent overflow"))?;
         cap(
             "interference ensemble product terms",
@@ -251,12 +324,13 @@ impl PreparedHarmonicInterferenceEnsemble {
             while frequency_end < authored && order[frequency_end].omega == omega {
                 frequency_end += 1;
             }
-            let prepared = PreparedHarmonicResponse::try_new(
+            let prepared = prepare_response(
                 mass,
                 damping,
                 stiffness,
                 n,
                 omega,
+                load,
                 response_controls,
                 cx,
             )?;
@@ -381,7 +455,7 @@ impl PreparedHarmonicInterferenceEnsemble {
         cx: &Cx<'_>,
     ) -> Result<HarmonicInterferenceMoments, HarmonicResponseError> {
         poll(cx)?;
-        let mut sums = [Dd::ZERO; 6];
+        let mut sums = [Dd::ZERO; 7];
         for bank in &self.banks {
             poll(cx)?;
             let values = observe_sums(self.n, &bank.tones, window, bank.statistics, cx)?;
@@ -404,8 +478,10 @@ fn admit_payload(
     authored: usize,
     banks: usize,
     retained: usize,
+    load: Option<HarmonicInterferenceLoad<'_>>,
     controls: HarmonicEnsembleControls,
 ) -> Result<(), HarmonicResponseError> {
+    let additional_load = load_payload(n, retained, load)?;
     let bytes = n
         .checked_mul(n)
         .and_then(|x| x.checked_mul(144))
@@ -420,6 +496,7 @@ fn admit_payload(
                 )?,
             )
         })
+        .and_then(|x| x.checked_add(additional_load))
         .ok_or(invalid("ensemble payload extent overflow"))?;
     cap(
         "interference ensemble payload bytes",

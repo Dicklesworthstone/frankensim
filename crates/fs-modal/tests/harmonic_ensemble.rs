@@ -6,7 +6,8 @@ use fs_fft::harmonic_window::{HarmonicWindow, HarmonicWindowProfile};
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
     HarmonicEnsembleControls, HarmonicFactorStatistics, HarmonicForceFactor, HarmonicForceTone,
-    HarmonicInterferenceControls, HarmonicInterferenceMoments, HarmonicResponseControls,
+    HarmonicImpedanceSample, HarmonicInterferenceControls, HarmonicInterferenceLoad,
+    HarmonicInterferenceMoments, HarmonicPortControls, HarmonicResponseControls,
     HarmonicResponseError, PreparedHarmonicInterference, PreparedHarmonicInterferenceEnsemble,
 };
 
@@ -235,6 +236,139 @@ fn quadrature(
         }
     }
     sum
+}
+
+#[test]
+fn g1_loaded_real_and_proper_factors_match_passive_trajectory_ensemble() {
+    with_cx(&CancelGate::new(), |cx| {
+        let p = Pencil {
+            m: &[1.0],
+            c: &[0.2],
+            k: &[4.0],
+            n: 1,
+        };
+        let b = -1.5;
+        let (ml, r, kl) = (0.7, 0.3, 0.4);
+        let load_pencil = Pencil {
+            m: &[b * b * ml],
+            c: &[b * b * r],
+            k: &[b * b * kl],
+            n: 1,
+        };
+        let total = Pencil {
+            m: &[1.0 + b * b * ml],
+            c: &[0.2 + b * b * r],
+            k: &[4.0 + b * b * kl],
+            n: 1,
+        };
+        let bias = [[C64::new(0.5, 0.2)], [C64::new(-0.3, 0.4)]];
+        let real = [[C64::new(0.2, 0.5)], [C64::new(0.4, -0.1)]];
+        let proper = [[C64::new(0.7, -0.2)], [C64::new(-0.1, 0.3)]];
+        let bias = [tone(1.1, &bias[0]), tone(1.6, &bias[1])];
+        let real = [tone(1.1, &real[0]), tone(1.6, &real[1])];
+        let proper = [tone(1.1, &proper[0]), tone(1.6, &proper[1])];
+        let factors = [factor(&real, false), factor(&proper, true)];
+        let z = [
+            [C64::new(r, kl / 1.1 - 1.1 * ml)],
+            [C64::new(r, kl / 1.6 - 1.6 * ml)],
+        ];
+        let samples = [
+            HarmonicImpedanceSample {
+                angular_frequency_rad_s: 1.1,
+                impedance: &z[0],
+            },
+            HarmonicImpedanceSample {
+                angular_frequency_rad_s: 1.6,
+                impedance: &z[1],
+            },
+        ];
+        let load = HarmonicInterferenceLoad {
+            force_map: &[b],
+            ports: 1,
+            samples: &samples,
+            controls: HarmonicPortControls {
+                maximum_ports: 1,
+                maximum_projection_terms: 100,
+                maximum_payload_bytes: 1 << 20,
+            },
+        };
+        let mut limits = controls();
+        // Three banks, two tones each: the actual loaded observation needs 84
+        // products, not the 72 of the same unloaded source model.
+        limits.maximum_product_terms = 83;
+        assert!(matches!(
+            PreparedHarmonicInterferenceEnsemble::try_with_port_impedance(
+                p.m,
+                p.c,
+                p.k,
+                1,
+                &bias,
+                &factors,
+                load,
+                response_controls(),
+                limits,
+                cx,
+            ),
+            Err(HarmonicResponseError::Budget { .. })
+        ));
+        limits.maximum_product_terms = 84;
+        let prepared = PreparedHarmonicInterferenceEnsemble::try_with_port_impedance(
+            p.m,
+            p.c,
+            p.k,
+            1,
+            &bias,
+            &factors,
+            load,
+            response_controls(),
+            limits,
+            cx,
+        )
+        .unwrap();
+        assert_eq!(prepared.frequency_count(), 2);
+        for factor in 0..2 {
+            assert!(
+                prepared
+                    .factor_tone_response(factor, 0)
+                    .unwrap()
+                    .1
+                    .port_load
+                    .is_some()
+            );
+        }
+        // The eight equiprobable sign/quarter-phase realizations have exactly
+        // the authored joint real/proper second moments, without a random sampler.
+        let banks = [
+            reference(total, &bias),
+            reference(total, &real),
+            reference(total, &proper),
+        ];
+        let mut realizations = Vec::new();
+        for sign in [-1.0, 1.0] {
+            for z in [C64::ONE, -C64::ONE, C64::new(0.0, 1.0), C64::new(0.0, -1.0)] {
+                realizations.push([C64::ONE, C64::from_re(sign), z]);
+            }
+        }
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            for (start, duration) in [(0.17, 0.11), (0.31, 2.7)] {
+                let window = HarmonicWindow::with_profile(start, duration, profile).unwrap();
+                let actual = prepared.observe(window, cx).unwrap();
+                close_moments(actual, quadrature(p, &banks, &realizations, window), 2e-10);
+                // Boundary work is resistor heat plus the independently
+                // differentiated energy of the attached mass and spring.
+                let boundary = quadrature(load_pencil, &banks, &realizations, window);
+                close(
+                    actual.mean_boundary_power_w,
+                    boundary[3] + boundary[4],
+                    2e-10,
+                );
+                close(actual.power_balance_residual_w, 0.0, 4e-13);
+            }
+        }
+    });
 }
 
 #[test]

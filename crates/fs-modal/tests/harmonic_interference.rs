@@ -5,7 +5,8 @@ use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_fft::harmonic_window::{HarmonicWindow, HarmonicWindowProfile};
 use fs_math::c64::C64;
 use fs_modal::harmonic::{
-    HarmonicForceTone, HarmonicInterferenceControls, HarmonicInterferenceMoments,
+    HarmonicForceTone, HarmonicImpedanceSample, HarmonicInterferenceControls,
+    HarmonicInterferenceLoad, HarmonicInterferenceMoments, HarmonicPortControls,
     HarmonicResponseControls, HarmonicResponseError, PreparedHarmonicInterference,
 };
 
@@ -37,6 +38,13 @@ fn controls() -> HarmonicInterferenceControls {
         maximum_tones: 16,
         maximum_payload_bytes: 1 << 20,
         maximum_product_terms: 100_000,
+    }
+}
+fn port_controls() -> HarmonicPortControls {
+    HarmonicPortControls {
+        maximum_ports: 4,
+        maximum_projection_terms: 10_000,
+        maximum_payload_bytes: 1 << 20,
     }
 }
 fn close(actual: f64, expected: f64, tolerance: f64) {
@@ -618,4 +626,239 @@ fn g4_cancellation_preserves_prepared_observation_and_replay() {
         prepared.observe(window, cx).unwrap()
     });
     assert_eq!(original, replay);
+}
+
+#[test]
+fn g1_loaded_beats_match_passive_mutual_mass_spring_resistor_trajectories() {
+    with_cx(&CancelGate::new(), |cx| {
+        let m = [1.0];
+        let c = [0.2];
+        let k = [4.0];
+        let b = [1.0, -0.7];
+        // Independent passive physical network: full mutual matrices, with
+        // Z(w) = R - i*w*M_load + i*K_load/w under exp(-i*w*t).
+        let ml = [0.7, 0.1, 0.1, 0.4];
+        let rl = [0.3, 0.07, 0.07, 0.2];
+        let kl = [0.4, -0.05, -0.05, 0.25];
+        let effective =
+            |a: &[f64; 4]| b[0] * (a[0] * b[0] + a[1] * b[1]) + b[1] * (a[2] * b[0] + a[3] * b[1]);
+        let (lm, lr, lk) = (effective(&ml), effective(&rl), effective(&kl));
+        let forces = [[C64::new(1.0, 0.3)], [C64::new(-0.7, 0.4)]];
+        let tones = [
+            HarmonicForceTone {
+                angular_frequency_rad_s: 1.3,
+                force: &forces[0],
+            },
+            HarmonicForceTone {
+                angular_frequency_rad_s: 1.5,
+                force: &forces[1],
+            },
+        ];
+        let impedances: Vec<Vec<_>> = tones
+            .iter()
+            .map(|tone| {
+                let w = tone.angular_frequency_rad_s;
+                (0..4)
+                    .map(|i| C64::new(rl[i], kl[i] / w - w * ml[i]))
+                    .collect()
+            })
+            .collect();
+        let samples: Vec<_> = tones
+            .iter()
+            .zip(&impedances)
+            .map(|(tone, z)| HarmonicImpedanceSample {
+                angular_frequency_rad_s: tone.angular_frequency_rad_s,
+                impedance: z,
+            })
+            .collect();
+        let prepared = PreparedHarmonicInterference::try_with_port_impedance(
+            &m,
+            &c,
+            &k,
+            1,
+            &tones,
+            HarmonicInterferenceLoad {
+                force_map: &b,
+                ports: 2,
+                samples: &samples,
+                controls: port_controls(),
+            },
+            response_controls(),
+            controls(),
+            cx,
+        )
+        .unwrap();
+        let qtones: Vec<_> = tones
+            .iter()
+            .map(|&tone| analytic_response(&[m[0] + lm], &[c[0] + lr], &[k[0] + lk], 1, tone))
+            .collect();
+        for profile in [
+            HarmonicWindowProfile::Uniform,
+            HarmonicWindowProfile::Triangular,
+        ] {
+            for (start, duration) in [(0.2, 0.15), (1.4, 0.1), (2.0, 3.4)] {
+                let window = HarmonicWindow::with_profile(start, duration, profile).unwrap();
+                let actual = prepared.observe(window, cx).unwrap();
+                let steps = 4096;
+                let mut reference = [0.0; 6];
+                for i in 0..=steps {
+                    let u = i as f64 / steps as f64;
+                    let sensitivity = if profile == HarmonicWindowProfile::Uniform {
+                        1.0
+                    } else {
+                        2.0 * (1.0 - (2.0 * u - 1.0).abs())
+                    };
+                    let weight = sensitivity
+                        * if i == 0 || i == steps {
+                            1.0
+                        } else if i % 2 == 0 {
+                            2.0
+                        } else {
+                            4.0
+                        }
+                        / (3 * steps) as f64;
+                    let t = start + duration * u;
+                    for (sum, value) in reference
+                        .iter_mut()
+                        .zip(instantaneous(&m, &c, &k, 1, &tones, &qtones, t))
+                    {
+                        *sum += weight * value;
+                    }
+                    let (mut q, mut v, mut a) = (0.0, 0.0, 0.0);
+                    for (tone, amplitude) in tones.iter().zip(&qtones) {
+                        let w = tone.angular_frequency_rad_s;
+                        q += signal(amplitude[0], w, t);
+                        v += signal(C64::new(w * amplitude[0].im, -w * amplitude[0].re), w, t);
+                        a += signal(amplitude[0].scale(-w * w), w, t);
+                    }
+                    // Actual boundary work, independently of F*v and the
+                    // structural balance. Reactive work can have either sign.
+                    reference[5] += weight * v * (lr * v + lm * a + lk * q);
+                }
+                for (actual, expected) in values(actual)
+                    .into_iter()
+                    .chain([actual.mean_boundary_power_w])
+                    .zip(reference)
+                {
+                    close(actual, expected, 2e-10 * expected.abs().max(1.0));
+                }
+                close(actual.power_balance_residual_w, 0.0, 2e-13);
+                if start == 1.4 {
+                    assert!(
+                        actual.mean_boundary_power_w < -0.08,
+                        "passive reactive load returns energy"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g3_loaded_interference_requires_exact_samples_and_admits_port_work() {
+    with_cx(&CancelGate::new(), |cx| {
+        let f = [C64::new(1.0, 0.2)];
+        let tones = [
+            HarmonicForceTone {
+                angular_frequency_rad_s: 1.0,
+                force: &f,
+            },
+            HarmonicForceTone {
+                angular_frequency_rad_s: 1.2,
+                force: &f,
+            },
+        ];
+        let z = [C64::new(0.4, 0.0)];
+        let samples = [
+            HarmonicImpedanceSample {
+                angular_frequency_rad_s: 1.0,
+                impedance: &z,
+            },
+            HarmonicImpedanceSample {
+                angular_frequency_rad_s: 1.2,
+                impedance: &z,
+            },
+        ];
+        let load = HarmonicInterferenceLoad {
+            force_map: &[1.0],
+            ports: 1,
+            samples: &samples,
+            controls: port_controls(),
+        };
+        let prepare = |load, limits| {
+            PreparedHarmonicInterference::try_with_port_impedance(
+                &[1.0],
+                &[0.0],
+                &[1.0],
+                1,
+                &tones,
+                load,
+                response_controls(),
+                limits,
+                cx,
+            )
+        };
+        // The load resolves an exact bare pole; neither source is solved through
+        // the singular unloaded pencil. The extra port product must be admitted.
+        let mut limits = controls();
+        limits.maximum_product_terms = 27;
+        assert!(matches!(
+            prepare(load, limits),
+            Err(HarmonicResponseError::Budget { .. })
+        ));
+        limits.maximum_product_terms = 28;
+        let prepared = prepare(load, limits).unwrap();
+        close(
+            prepared
+                .observe(HarmonicWindow::new(0.3, 0.4).unwrap(), cx)
+                .unwrap()
+                .power_balance_residual_w,
+            0.0,
+            2e-13,
+        );
+        let bad_tables = [
+            vec![samples[0]],
+            vec![samples[1], samples[0]],
+            vec![samples[0], samples[0]],
+            vec![
+                samples[0],
+                HarmonicImpedanceSample {
+                    angular_frequency_rad_s: 1.3,
+                    impedance: &z,
+                },
+            ],
+        ];
+        for samples in &bad_tables {
+            assert!(matches!(
+                prepare(HarmonicInterferenceLoad { samples, ..load }, limits),
+                Err(HarmonicResponseError::Invalid(_))
+            ));
+        }
+        let active = [C64::new(-0.4, 0.0)];
+        let bad = [
+            HarmonicImpedanceSample {
+                impedance: &active,
+                ..samples[0]
+            },
+            samples[1],
+        ];
+        assert!(
+            prepare(
+                HarmonicInterferenceLoad {
+                    samples: &bad,
+                    ..load
+                },
+                limits
+            )
+            .is_err()
+        );
+        limits.maximum_payload_bytes = 1;
+        assert!(matches!(
+            prepare(load, limits),
+            Err(HarmonicResponseError::Budget {
+                quantity: "interference payload bytes",
+                ..
+            })
+        ));
+    });
 }
