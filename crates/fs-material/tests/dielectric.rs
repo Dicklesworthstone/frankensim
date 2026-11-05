@@ -1,6 +1,8 @@
 //! G0/G1 passive Debye laws from synthetic source data, not measured validation.
 #[path = "dielectric/bulk.rs"]
 mod bulk;
+#[path = "dielectric/leaky.rs"]
+mod leaky;
 
 use fs_evidence::ValidityDomain;
 use fs_matdb::{

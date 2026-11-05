@@ -29,6 +29,8 @@ pub mod reversible;
 pub mod thermal;
 /// Bulk multipole Debye polarization and passive local midpoint elimination.
 pub mod bulk;
+/// Source-backed Debye storage and independent DC Ohmic charge leakage.
+pub mod leaky;
 
 /// Explicit bound on retained polarization states and per-response work.
 pub const MAX_DIELECTRIC_POLES: usize = 16;

@@ -14534,3 +14534,26 @@ bulk transfer for proportional species streams, independent species energy
 reference shifts of order 1e24, source/catalog refusals, permutation/reversal,
 identity, exact retained density, and late failure/cancellation. The existing
 bulk-transfer and caloric regressions remain active.
+
+## Source-backed Ohmic leakage with dielectric memory
+
+`field_storage::dielectric::leaky::ResolvedLeakyDielectric` combines fixed
+isotropic multipole Debye polarization with independently selected nonnegative
+DC conductivity from the same complete source bundle. Explicit sigma=0 remains
+a valid sourced insulating limit; negative, nonfinite or unowned dynamic
+conductivity refuses. Consuming decomposition retains the full original
+material once, together with the exact conductivity quantity/name.
+
+Midpoint total-current elimination adds dt*sigma/2 to the effective field
+coefficient and dt*sigma*E_before/2 to its history. Recovery reports retained
+polarization, physical dielectric storage, separate polarization/Joule heat,
+and stable total-current work. Conductivity adds no storage. The numerical
+coefficient is not physical permittivity. This fixed-condition scalar lane
+does not supply anisotropic leakage, temperature feedback, induction,
+full-wave validity, breakdown or monotone decay for unresolved time steps.
+
+Six focused cases in tests/dielectric/leaky.rs exercise source retention,
+zero conductivity, independent midpoint/Maxwell relaxation laws, second-order
+convergence, DC/transient heat separation, biased increments, representable
+extreme coefficients, and invalid-source/state refusal. Native integration
+validation remains required; these fixtures are not measured qualification.
