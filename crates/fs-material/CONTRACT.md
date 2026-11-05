@@ -14425,6 +14425,42 @@ Seven focused regressions cover analytic off-grid kinetics, time-rescaling
 equivalence, mixed heating/cooling history and energy, source/quantity/support
 ownership, refusals, and implicit self-heating for both integrators.
 
+## Source-owned nonlinear convection on integrated material layers
+
+`ReservoirLayerGeometry::evaluate_convective_material_to_bath` composes an
+original nonlinear film callback with the same supported conductivity chart
+and analytic Kirchhoff inverse. The callback supplies signed surface-to-bulk
+heat, an explicit film conductance and its retained source payload at each
+actual surface temperature. One bounded root uses nonnegative solid power
+along the physical heat direction. The integral-coordinate solid power is
+retained directly, avoiding amplification of rounded surface temperature in
+thin, highly conducting layers.
+
+Only the actual material profile requires conductivity support; a bulk state
+outside that chart is admitted when a supported passive surface balance exists.
+The exact source-limit face closes the bracket. Acceptance requires the
+declared absolute/relative power residual, not a small temperature or power
+interval. Safeguarded secant steps reuse bracket residuals and fall back to
+bisection. No derivative, nested root, extra thermal inventory or global
+uniqueness certificate is introduced.
+
+Actual callback heat is authoritative. Its cell-to-bulk secant lowers once to
+the original reciprocal heat owner. At exact equilibrium the local original
+conductivity slope is in series with the declared film conductance; an explicit
+zero film conductance remains zero. Driven zero/active films, unsupported roots
+and unrepresentable inverses refuse. Original callback errors, thermal
+failures, cancellation and exhausted surface balances remain typed. Each solve
+uses at most the authored number of interior trials plus two bracket film
+calls, with cancellation checks around every call.
+
+Six focused G0/G1/G4 regressions cover constant-film parity, manufactured
+nonlinear film/k(T) profiles, both heat directions and equilibrium,
+source-limited roots, thin-metal flux accuracy, and typed
+source/cancellation/budget refusals.
+All six and eight existing reservoir tests passed in a bounded build of the
+original material modules with the native thermal error and series helpers.
+This does not establish full Cargo or graph/cavity integration execution.
+
 ## Source-integrated implicit reservoir and ambient fluxes
 
 `thermal::conduction::network::ImplicitLayerBoundary` borrows an original

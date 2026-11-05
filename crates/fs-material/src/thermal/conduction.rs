@@ -18,7 +18,9 @@ mod geometry;
 pub use geometry::LayerGeometry;
 
 mod reservoir;
-pub use reservoir::{ReservoirLayerGeometry, ReservoirLayerResponse};
+pub use reservoir::{
+    ConvectiveLayerError, ConvectiveLayerResponse, ReservoirLayerGeometry, ReservoirLayerResponse,
+};
 
 /// Endpoint coefficients for the original conservative thermal network.
 pub mod network;
