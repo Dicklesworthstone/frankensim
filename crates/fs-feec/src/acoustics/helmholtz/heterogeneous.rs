@@ -52,6 +52,9 @@ pub use observation::{
 mod source;
 pub use source::{MAX_VOLUME_SOURCES, VolumeVelocitySource};
 
+mod boundary_source;
+pub use boundary_source::{BoundaryVelocitySource, MAX_BOUNDARY_SOURCES};
+
 /// Broadband evolution in the original pressure-potential coordinates.
 pub mod time;
 

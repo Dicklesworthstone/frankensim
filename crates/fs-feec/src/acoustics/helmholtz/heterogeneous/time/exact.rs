@@ -22,7 +22,7 @@
 //! is frozen, lossless in the bulk, without mean flow. Reactive walls require
 //! their own causal states and are not replaced by a real admittance here.
 
-use super::super::VolumeVelocitySource;
+use super::super::{BoundaryVelocitySource, VolumeVelocitySource};
 use super::{
     BoundaryAdmittance, C64, Dd, HeterogeneousError, HeterogeneousHelmholtzFe,
     HeterogeneousTimeEnergy, HeterogeneousTimeState, PressureReleaseConstraints, RealVelocityTrace,
@@ -98,7 +98,8 @@ impl ExactTimeWork {
 pub struct ExactTimeStep<'m, 'f, 'c> {
     pub state: HeterogeneousTimeState<'m, 'f, 'c>,
     pub work: ExactTimeWork,
-    /// `integral_dt integral_boundary(shape * p) dA` [Pa m² s], in port order.
+    /// `integral_dt integral_boundary(shape * p) dA` [Pa m² s], with linear
+    /// velocity ports first, followed by prepared boundary sources in input order.
     /// Multiplication by each held velocity amplitude [m/s] gives its work.
     pub integrated_port_pressure_pa_m2_s: Vec<f64>,
     /// `integral_dt integral_volume(shape * p) dV` [Pa s], in source order.
@@ -235,10 +236,53 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: ExactTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedExactTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_exact_time_with_boundary_sources(
+            duration_s,
+            boundaries,
+            ports,
+            &[],
+            sources,
+            pressure_release_faces,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare the same exact trajectory with cached quadratic boundary motion.
+    /// The prepared source's original full-space load is reused without face
+    /// resampling, corner-only reconstruction or area normalization. It must
+    /// belong to this spatial/material operator. Pressure-release conflicts are
+    /// refused even for an identically zero shape; separate driving columns may
+    /// overlap each other and the real-admittance faces.
+    ///
+    /// Linear velocity ports come first, followed by `boundary_sources` in the
+    /// same order. Both use held amplitudes [m/s] in [`PreparedExactTime::step`]
+    /// and its volume-source variant. Their observations have units [Pa m² s].
+    /// Volume-flow amplitudes [m³/s] and observations [Pa s] stay separate.
+    /// Every column enters the existing augmented-state budget, forcing matrix
+    /// and conjugate-work observation exactly once, without extra dynamic states.
+    /// The pressure-release, strict state-admission and dense-cache semantics of
+    /// [`Self::prepare_exact_time_with_pressure_release`] are unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_exact_time_with_boundary_sources<'m>(
+        &'m self,
+        duration_s: f64,
+        boundaries: &[ResistiveBoundary],
+        ports: &[ExactVelocityPort],
+        boundary_sources: &[&BoundaryVelocitySource<'_, '_, '_>],
+        sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: ExactTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedExactTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
+        super::super::boundary_source::admit_count(boundary_sources.len())?;
         super::super::source::admit_count(sources.len())?;
-        let port_count = ports
+        let boundary_port_count = ports
             .len()
+            .checked_add(boundary_sources.len())
+            .ok_or_else(|| invalid("exact acoustic boundary source count overflow"))?;
+        let port_count = boundary_port_count
             .checked_add(sources.len())
             .ok_or_else(|| invalid("exact acoustic source count overflow"))?;
         if !duration_s.is_finite()
@@ -263,6 +307,21 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             .pressure_release_constraints(pressure_release_faces, cancelled)?;
         let n = pressure_release.free_dofs.len();
         let states = canonical_extent(n, port_count, limits.max_dofs)?;
+        for source in boundary_sources {
+            poll(cancelled)?;
+            source.validate(self)?;
+            if !pressure_release.faces.is_empty() {
+                for face in &source.faces {
+                    poll(cancelled)?;
+                    if pressure_release.faces.contains(face) {
+                        return Err(invalid(
+                            "pressure-release and prepared boundary-source faces must not overlap",
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
         for source in sources {
             poll(cancelled)?;
             source.validate(self)?;
@@ -311,6 +370,10 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 }
             }
             loads.push(self.geometry.boundary_linear_load(&port.profile)?);
+        }
+        for source in boundary_sources {
+            poll(cancelled)?;
+            loads.push(source.load.clone());
         }
         for source in sources {
             poll(cancelled)?;
@@ -495,7 +558,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             normalized_mass: mass,
             inverse_mass: inverse,
             pressure_release,
-            port_count: ports.len(),
+            port_count: boundary_port_count,
             volume_source_count: sources.len(),
             flow,
             limits,
@@ -509,6 +572,7 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
         self.duration_s
     }
 
+    /// Total boundary columns: original linear ports followed by prepared sources.
     #[must_use]
     pub const fn port_count(&self) -> usize {
         self.port_count
@@ -612,6 +676,8 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
     }
 
     /// Advance the complete field with source amplitudes held over this interval.
+    /// Supply all linear-port amplitudes followed by all prepared boundary-source
+    /// amplitudes, in their preparation order; every amplitude has units m/s.
     /// Returned physical pressure/potential is directly usable by the existing
     /// heterogeneous probes. Foreign states, invalid inputs and cancellation
     /// refuse without publishing a partial endpoint or advancing any clock.
@@ -769,6 +835,8 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
     }
 }
 
+#[cfg(test)]
+mod boundary_source_tests;
 #[cfg(test)]
 mod pressure_release_tests;
 #[cfg(test)]

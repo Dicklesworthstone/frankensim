@@ -28,7 +28,7 @@
 //! and their material validity remain caller-owned. Midpoint is passive but
 //! still needs temporal refinement to resolve the declared relaxation times.
 
-use super::super::{VolumeVelocitySource, source::admit_count};
+use super::super::{BoundaryVelocitySource, VolumeVelocitySource, source::admit_count};
 use super::{
     BoundaryAdmittance, C64, Coo, Csr, Dd, HeterogeneousError, HeterogeneousHelmholtzFe,
     HeterogeneousTimeEnergy, HeterogeneousTimeLimits, HeterogeneousTimeState,
@@ -115,6 +115,14 @@ impl core::fmt::Debug for MechanicalTimeState<'_, '_, '_, '_> {
 }
 
 impl MechanicalTimeState<'_, '_, '_, '_> {
+    /// Borrow the original acoustic state for the existing point and surface
+    /// probes. Its spatial/material identity and full hierarchical fields are
+    /// preserved; observing it cannot advance or modify the coupled walls.
+    #[must_use]
+    pub fn acoustic_state(&self) -> &HeterogeneousTimeState<'_, '_, '_> {
+        &self.acoustic
+    }
+
     /// Original hierarchical pressure-potential coefficients [Pa s].
     #[must_use]
     pub fn pressure_potential_pa_s(&self) -> &[f64] {
@@ -170,6 +178,8 @@ pub struct MechanicalTimeWork {
     pub wall_delta_energy_j: f64,
     /// Total signed boundary AND volume-source work, counted once.
     pub input_work_j: f64,
+    /// Signed prepared boundary-source subtotal already in `input_work_j`.
+    pub boundary_source_work_j: f64,
     /// Signed volume-source subtotal already included in `input_work_j`.
     pub volume_source_work_j: f64,
     /// Dissipation of the original REAL Robin patches only.
@@ -614,10 +624,26 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         sources: &[(&VolumeVelocitySource<'_, '_, '_>, f64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
+        self.step_with_boundary_sources(initial, inward_velocity, &[], sources, cancelled)
+    }
+
+    /// Compose prepared quadratic boundary motion, original linear traces and
+    /// volume injection with every distributed wall and memory coordinate.
+    /// Boundary amplitudes are midpoint velocities [m/s]; volume amplitudes
+    /// remain [m^3/s]. Each spatial source is projected once at preparation.
+    pub fn step_with_boundary_sources<'p>(
+        &'p self,
+        initial: &MechanicalTimeState<'_, '_, '_, '_>,
+        inward_velocity: &[RealVelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, f64)],
+        sources: &[(&VolumeVelocitySource<'_, '_, '_>, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate_state(initial)?;
         let core = &self.condensed;
         core.admit_velocity_faces(inward_velocity, cancelled)?;
+        core.admit_boundary_sources(boundary_sources, cancelled)?;
         admit_count(sources.len())?;
         for &(source, amplitude) in sources {
             poll(cancelled)?;
@@ -628,10 +654,13 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         }
         let h = self.duration_s();
         let mut source = core.model.geometry.boundary_linear_load(inward_velocity)?;
-        if !sources.is_empty() {
+        if !sources.is_empty() || !boundary_sources.is_empty() {
             for (row, value) in source.iter_mut().enumerate() {
                 poll(cancelled)?;
                 let mut sum = Dd::from_f64(*value);
+                for &(boundary, amplitude) in boundary_sources {
+                    sum = sum + Dd::from_f64(boundary.load[row]) * Dd::from_f64(amplitude);
+                }
                 for &(volume, amplitude) in sources {
                     sum = sum + Dd::from_f64(volume.load[row]) * Dd::from_f64(amplitude);
                 }
@@ -834,6 +863,17 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         let (boundary_loss, boundary_roundoff) =
             positive_form(&self.conductance, &midpoint_p, cancelled)?;
         let (input, input_roundoff) = paired_work(h, &midpoint_p, &source);
+        let mut boundary_work = Dd::from_f64(0.0);
+        for &(boundary, amplitude) in boundary_sources {
+            poll(cancelled)?;
+            let pressure = boundary.midpoint_pressure(initial.pressure_pa(), next.pressure_pa());
+            boundary_work =
+                boundary_work + Dd::from_f64(h) * Dd::from_f64(amplitude) * Dd::from_f64(pressure);
+        }
+        let boundary_source_work_j = boundary_work.to_f64();
+        if !boundary_source_work_j.is_finite() {
+            return Err(invalid("mechanical midpoint boundary-source work overflow").into());
+        }
         let mut volume_work = Dd::from_f64(0.0);
         for &(volume, amplitude) in sources {
             poll(cancelled)?;
@@ -852,6 +892,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             acoustic_delta_energy_j: acoustic.work.delta_energy_j,
             wall_delta_energy_j: wall_change,
             input_work_j: input,
+            boundary_source_work_j,
             volume_source_work_j,
             boundary_dissipation_j: h * boundary_loss,
             wall_dissipation_j: wall_loss,
@@ -932,6 +973,8 @@ fn balance(
     Ok(())
 }
 
+#[cfg(test)]
+mod boundary_source_tests;
 #[cfg(test)]
 mod pressure_release_tests;
 #[cfg(test)]

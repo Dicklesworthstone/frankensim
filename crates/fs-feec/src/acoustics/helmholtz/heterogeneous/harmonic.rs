@@ -3,7 +3,8 @@
 use super::super::pressure_release::PressureReleaseConstraints;
 use super::super::tri_quadrature;
 use super::{
-    HeterogeneousError, HeterogeneousHelmholtzFe, VolumeVelocitySource, finite, invalid, poll,
+    BoundaryVelocitySource, HeterogeneousError, HeterogeneousHelmholtzFe, VolumeVelocitySource,
+    finite, invalid, poll,
 };
 use fs_la::eigen_complex::{LuComplex, LuComplexError, lu_complex_with_cancel};
 use fs_math::{c64::C64, dd::Dd, det};
@@ -78,6 +79,10 @@ pub struct HeterogeneousPressureField {
     pub pressure_pa: Vec<C64>,
     /// Total boundary and volume-source work [W], with peak phasor factor 1/2.
     pub input_power_w: f64,
+    /// Signed work of prepared quadratic boundary sources [W], already included
+    /// in input power. The unprepared linear traces are not part of this subtotal.
+    /// Coherent sources may individually absorb work.
+    pub boundary_source_power_w: f64,
     /// Signed `Re(integral(conj(p) s))/2` [W], already included in input power.
     /// Coherent sources may individually absorb work; this is not bulk heat.
     pub volume_source_power_w: f64,
@@ -404,10 +409,51 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
+        self.solve_with_boundary_sources(inward_velocity, &[], sources, cancelled)
+    }
+
+    /// Drive the retained factor with linear boundary traces, prepared
+    /// quadratic boundary motion and original-volume injection together.
+    ///
+    /// A prepared boundary amplitude is inward normal velocity [m/s]; a volume
+    /// amplitude is volume flow [m^3/s]. Both are complex peak phasors in
+    /// `exp(+i omega t)`. Their original load columns add before solving, so
+    /// overlapping sources interfere without any area or shape normalization.
+    /// Source preparation and material sampling are not repeated. Every source
+    /// must belong to this model, even at zero amplitude; prepared faces cannot
+    /// overlap a pressure-release face. Passive admittance may share a source
+    /// face. Signed source work subtotals are already included in total input.
+    pub fn solve_with_boundary_sources(
+        &self,
+        inward_velocity: &[VelocityTrace],
+        boundary_sources: &[(&BoundaryVelocitySource<'_, '_, '_>, C64)],
+        volume_sources: &[(&VolumeVelocitySource<'_, '_, '_>, C64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousPressureField, HeterogeneousError> {
         poll(cancelled)?;
         self.admit_velocity_faces(inward_velocity, cancelled)?;
-        super::source::admit_count(sources.len())?;
-        for &(source, amplitude) in sources {
+        super::boundary_source::admit_count(boundary_sources.len())?;
+        super::source::admit_count(volume_sources.len())?;
+        for &(source, amplitude) in boundary_sources {
+            poll(cancelled)?;
+            source.validate(self.model)?;
+            if !finite(amplitude) {
+                return Err(invalid("finite harmonic boundary-velocity amplitude required").into());
+            }
+            if !self.pressure_release.faces.is_empty() {
+                for face in &source.faces {
+                    poll(cancelled)?;
+                    if self.pressure_release.faces.contains(face) {
+                        return Err(invalid(
+                            "pressure-release and prepared boundary-source faces must not overlap",
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+        for &(source, amplitude) in volume_sources {
+            poll(cancelled)?;
             source.validate(self.model)?;
             if !finite(amplitude) {
                 return Err(invalid("finite harmonic volume-flow amplitude required").into());
@@ -418,7 +464,11 @@ impl PreparedHeterogeneous<'_, '_, '_> {
             poll(cancelled)?;
             let mut real = Dd::from_f64(value.re);
             let mut imaginary = Dd::from_f64(value.im);
-            for &(source, amplitude) in sources {
+            for &(source, amplitude) in boundary_sources {
+                real = real + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude.re);
+                imaginary = imaginary + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude.im);
+            }
+            for &(source, amplitude) in volume_sources {
                 real = real + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude.re);
                 imaginary = imaginary + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude.im);
             }
@@ -426,7 +476,16 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         }
         let mut field = self.solve_projected(&load, cancelled)?;
         let mut work = Dd::from_f64(0.0);
-        for &(source, amplitude) in sources {
+        for &(source, amplitude) in boundary_sources {
+            poll(cancelled)?;
+            let pressure = source.harmonic_pressure(&field.pressure_pa);
+            work = work
+                + Dd::from_f64(pressure.re) * Dd::from_f64(amplitude.re)
+                + Dd::from_f64(pressure.im) * Dd::from_f64(amplitude.im);
+        }
+        field.boundary_source_power_w = 0.5 * work.to_f64();
+        work = Dd::from_f64(0.0);
+        for &(source, amplitude) in volume_sources {
             poll(cancelled)?;
             let pressure = source.harmonic_pressure(&field.pressure_pa);
             work = work
@@ -434,8 +493,8 @@ impl PreparedHeterogeneous<'_, '_, '_> {
                 + Dd::from_f64(pressure.im) * Dd::from_f64(amplitude.im);
         }
         field.volume_source_power_w = 0.5 * work.to_f64();
-        if !field.volume_source_power_w.is_finite() {
-            return Err(invalid("harmonic volume-source work overflow").into());
+        if !field.boundary_source_power_w.is_finite() || !field.volume_source_power_w.is_finite() {
+            return Err(invalid("harmonic prepared-source work overflow").into());
         }
         poll(cancelled)?;
         Ok(field)
@@ -603,6 +662,7 @@ impl PreparedHeterogeneous<'_, '_, '_> {
         Ok(HeterogeneousPressureField {
             pressure_pa,
             input_power_w,
+            boundary_source_power_w: 0.0,
             volume_source_power_w: 0.0,
             boundary_dissipation_w,
             kinetic_energy_j,

@@ -1984,3 +1984,50 @@ free coordinates plus strict trace/resource/cancellation refusals; and bitwise
 empty-map compatibility. Pinned Rust parsing and the independent analytical
 heat/work oracle were checked; native execution remains pending because the
 current environment kills the upstream dependency build before fs-feec.
+
+### Quadratic boundary motion across the original acoustic solvers
+
+`HeterogeneousHelmholtzFe::quadratic_velocity_source` prepares a signed six-node
+inward-normal velocity shape on original straight boundary triangles. Values
+are dimensionless samples at corners 0/1/2 and edge midpoints 01/12/20, in the
+supplied vertex order. Original H1 trace quadrature retains midside motion and
+higher-order pressure tests, including shapes with zero net volume flow. No
+area normalization, face-average replacement or corner reduction is applied.
+Each prepared `BoundaryVelocitySource` retains the original model, canonical
+support and load [m^2], with a signed area integral available for observation.
+
+Harmonic `solve_with_boundary_sources`, sparse-time and mechanical-wall
+`step_with_boundary_sources` combine original linear traces, these prepared
+boundary columns and original volume columns before the same physical solve.
+Prepared boundary amplitudes are velocities [m/s]; volume amplitudes remain
+volume flows [m^3/s]. Their signed conjugate-pressure work subtotals are already
+included once in total input work. Every distributed wall and Maxwell memory
+coordinate remains present. `MechanicalTimeState::acoustic_state` borrows the
+original typed field for the existing point and surface probes without a copy
+or loss of spatial/material identity.
+
+`prepare_exact_time_with_boundary_sources` appends the same cached columns
+after linear velocity ports. Combined boundary `port_count`, held velocities
+[m/s] and integrated pressure observations [Pa m^2 s] follow that order; volume
+flows and observations [Pa s] stay separate. Every column enters the existing
+augmented-state budget, forcing matrix and same-trajectory work observation
+exactly once. The original exponential, independent loss Gramian and restricted
+consistent mass are unchanged. No extra dynamic state or propagator is added.
+
+Preparation projects each shape once. Repeated drives perform no source/material
+query or boundary quadrature. At most 128 prepared boundary sources are admitted;
+exact evolution also applies its stricter augmented-state limits. Model identity,
+finite data, physical support, pressure-release conflicts and cancellation are
+checked, including for zero amplitudes/shapes. Empty prepared families retain
+existing paths, and empty release sets avoid repeated support-face traversal.
+This extends prescribed excitation on straight geometry; structural laws,
+curved geometry and radiation remain separate physical owners.
+
+Ten native regressions specify independent triangle moments and all vertex
+permutations, P3/P4 pressure-face coupling, zero-integral motion, coherent signed
+harmonic work, simultaneous volume input, midside-only transient/wall excitation,
+full probe access and exact tetrahedron dynamics with integrated Robin heat.
+Parser/format checks and independent exact-rational moment/work oracles passed.
+Native execution remains pending under the upstream dependency-memory blocker;
+these source checks do not establish numerical test passage or an instrument
+acceptance claim.

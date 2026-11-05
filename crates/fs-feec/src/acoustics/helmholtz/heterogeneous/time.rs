@@ -144,6 +144,8 @@ pub struct HeterogeneousTimeWork {
     pub delta_energy_j: f64,
     /// Total boundary and volume-source work at the same midpoint pressure.
     pub input_work_j: f64,
+    /// Signed prepared boundary-source subtotal [J], already in input work.
+    pub boundary_source_work_j: f64,
     /// Signed `h * integral(p_mid s_mid)` [J], already included in input work.
     pub volume_source_work_j: f64,
     /// `h * integral(Y p_mid^2)`, independently of stored-energy change.
@@ -510,9 +512,26 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         sources: &[(&super::VolumeVelocitySource<'_, '_, '_>, f64)],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeterogeneousTimeStep<'m, 'f, 'c>, HeterogeneousError> {
+        self.step_with_boundary_sources(initial, inward_velocity, &[], sources, cancelled)
+    }
+
+    /// Drive cached quadratic boundary shapes together with original volume
+    /// injection and linear velocity traces. Boundary-source amplitudes [m/s]
+    /// and volume-source amplitudes [m^3/s] use the same midpoint pressure;
+    /// both signed work subtotals are already included in total input work.
+    /// Preparation's complete spatial loads are reused without resampling.
+    pub fn step_with_boundary_sources(
+        &self,
+        initial: &HeterogeneousTimeState<'_, '_, '_>,
+        inward_velocity: &[RealVelocityTrace],
+        boundary_sources: &[(&super::BoundaryVelocitySource<'_, '_, '_>, f64)],
+        sources: &[(&super::VolumeVelocitySource<'_, '_, '_>, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<HeterogeneousTimeStep<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate_state(initial)?;
         self.admit_velocity_faces(inward_velocity, cancelled)?;
+        self.admit_boundary_sources(boundary_sources, cancelled)?;
         super::source::admit_count(sources.len())?;
         for &(source, amplitude) in sources {
             source.validate(self.model)?;
@@ -524,12 +543,26 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         for (row, value) in load.iter_mut().enumerate() {
             poll(cancelled)?;
             let mut sum = Dd::from_f64(*value);
+            for &(source, amplitude) in boundary_sources {
+                sum = sum + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude);
+            }
             for &(source, amplitude) in sources {
                 sum = sum + Dd::from_f64(source.load[row]) * Dd::from_f64(amplitude);
             }
             *value = sum.to_f64();
         }
         let mut result = self.step_projected(initial, &load, cancelled)?;
+        let mut boundary_work = Dd::from_f64(0.0);
+        for &(source, amplitude) in boundary_sources {
+            poll(cancelled)?;
+            let pressure = source.midpoint_pressure(&initial.pressure, &result.state.pressure);
+            boundary_work = boundary_work
+                + Dd::from_f64(pressure) * Dd::from_f64(amplitude) * Dd::from_f64(self.duration_s);
+        }
+        result.work.boundary_source_work_j = boundary_work.to_f64();
+        if !result.work.boundary_source_work_j.is_finite() {
+            return Err(invalid("midpoint prepared boundary-source work overflow").into());
+        }
         let mut work = Dd::from_f64(0.0);
         for &(source, amplitude) in sources {
             poll(cancelled)?;
@@ -543,6 +576,33 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
         }
         poll(cancelled)?;
         Ok(result)
+    }
+
+    fn admit_boundary_sources(
+        &self,
+        sources: &[(&super::BoundaryVelocitySource<'_, '_, '_>, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), HeterogeneousError> {
+        super::boundary_source::admit_count(sources.len())?;
+        for &(source, amplitude) in sources {
+            poll(cancelled)?;
+            source.validate(self.model)?;
+            if !amplitude.is_finite() {
+                return Err(invalid("finite midpoint boundary-velocity amplitude required").into());
+            }
+            if !self.pressure_release.faces.is_empty() {
+                for face in &source.faces {
+                    poll(cancelled)?;
+                    if self.pressure_release.faces.contains(face) {
+                        return Err(invalid(
+                            "pressure-release and prepared boundary-source faces must not overlap",
+                        )
+                        .into());
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn admit_velocity_faces(
@@ -757,6 +817,7 @@ impl<'m, 'f, 'c> PreparedHeterogeneousTime<'m, 'f, 'c> {
             final_energy_j: final_energy.total_j(),
             delta_energy_j: change,
             input_work_j: input.to_f64(),
+            boundary_source_work_j: 0.0,
             volume_source_work_j: 0.0,
             boundary_dissipation_j: self.duration_s * loss,
             backward_error,
@@ -844,6 +905,8 @@ fn energy_change(
     Ok(change)
 }
 
+#[cfg(test)]
+mod boundary_source_tests;
 #[cfg(test)]
 mod tests;
 
