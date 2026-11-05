@@ -1446,6 +1446,35 @@ fn cylinder_mode_wall_terms(md: &CylinderAirMode, radius: f64, depth: f64, gas: 
     Ok((viscous, thermal, 2.0 * rho * volume_sq))
 }
 
+/// Replace the kit builder's frozen vent radiation resistance with a causal
+/// uniform-piston load. The port's exterior end correction is then represented
+/// by that same response, so it is removed from the lumped inertance.
+/// Attach before stepping, on the final integration clock. Any additional
+/// declared neck resistance must be assigned after this replacement.
+pub fn attach_baffled_vent_radiation(piece: &mut Piece) -> Result<String, String> {
+    let ins = &mut piece.instrument;
+    if ins.step_index != 0 {
+        return Err("attach vent radiation before the first integration step".into());
+    }
+    let mut ports = vec![];
+    for (index, cavity) in ins.cavities.iter().enumerate() {
+        if let Some(port) = &cavity.port {
+            let mut next = port.clone();
+            next.enable_baffled_radiation(ins.gas.density, ins.gas.sound_speed, 1.0 / ins.rate)?;
+            next.resistance = 0.0; // replaces this builder's resonance-pinned radiation
+            ports.push((index, next));
+        }
+    }
+    if ports.is_empty() {
+        return Err("baffled vent radiation needs an existing cavity opening".into());
+    }
+    let count = ports.len();
+    for (index, port) in ports {
+        ins.cavities[index].port = Some(port);
+    }
+    Ok(format!("{count} vent(s): causal uniform-piston radiation in an infinite rigid baffle; replaces resonance-pinned resistance and exterior end correction. Positive finite-memory kernel on the {} Hz clock; stored exterior energy and emitted energy are separate. Time refinement still required; no shell diffraction or mutual exterior load. The receiver remains the compact vent observer", ins.rate))
+}
+
 /// Opt-in (ALL-IN, MB 14741): the drum's enclosed air as the rigid cylinder's acoustic modes below `f_max`
 /// (`cylinder_air_modes`), beside the lumped cavity, coupling both heads (`AirModes`). Values: the gas record's
 /// density and sound speed and the drum's radius and depth; `f_max` is a declared truncation. The shell is
@@ -1929,13 +1958,17 @@ mod air_mode_tests {
         // by uniform pressure alone would have exactly zero first acceleration.
         let rate = 96_000.0;
         let dt = 1.0 / rate;
-        for (resistance, coefficient) in [(0.0, 0.0), (1500.0, 0.0), (0.0, 1.7), (1500.0, 1.7)] {
+        for (resistance, coefficient, radiation) in [
+            (0.0, 0.0, false), (1500.0, 0.0, false), (0.0, 1.7, false), (1500.0, 1.7, false),
+            (0.0, 0.0, true), (1500.0, 0.0, true), (0.0, 1.7, true), (1500.0, 1.7, true),
+        ] {
             let mut ins = Instrument::new(rate);
             let head = ins.add(Body::point("head", 0.02));
             ins.bodies[head].h = 0.03;
             let mut port = Port::new(0.025, 0.0003, [0.0, 0.0, -0.15], -1.0);
             port.resistance = resistance;
             port.set_flow_loss_coefficient(coefficient).unwrap();
+            if radiation { port.enable_baffled_radiation(ins.gas.density, ins.gas.sound_speed, dt).unwrap(); }
             let inertance = ins.gas.density * port.length / port.area;
             ins.cavities.push(Cavity { heads: vec![head], volume: 0.02, port: Some(port) });
             let g = [0.0012, -0.0007];
@@ -1957,6 +1990,7 @@ mod air_mode_tests {
                 let old_volume = b.h * b.h * b.wp[0] + previous;
                 let mut e = 0.5 * b.mass[0] * ((b.w[0] - b.wp[0]) / dt).powi(2)
                     + 0.5 * inertance * port.u.powi(2)
+                    + port.radiation_energy_j()
                     + 0.5 * ins.gas.density * ins.gas.sound_speed.powi(2) / 0.02 * volume * old_volume;
                 for m in 0..2 {
                     let stretch = g[m] * b.w[0] + gp[m] * port.x - air.x[m];
@@ -1976,15 +2010,20 @@ mod air_mode_tests {
                 let loss_pressure = resistance * mean_flow + 0.5 * ins.gas.density * coefficient * velocity * velocity.abs();
                 if step == 0 {
                     let pressure = (0..2).map(|m| gp[m] * kappa[m] * x0[m]).sum::<f64>();
-                    assert!(((inertance * port.du + loss_pressure) / pressure - 1.0).abs() < 1e-14);
+                    if radiation {
+                        assert!(port.du * pressure > 0.0);
+                    } else {
+                        assert!(((inertance * port.du + loss_pressure) / pressure - 1.0).abs() < 1e-14);
+                    }
                 }
                 dissipated += dt * mean_flow * loss_pressure;
                 previous_u = port.u;
-                drift = drift.max((energy(&ins) + dissipated - e0).abs() / e0);
+                drift = drift.max((energy(&ins) + dissipated + port.radiated_j() - e0).abs() / e0);
                 assert!((port.dissipated_j - dissipated).abs() < 1e-12 * e0);
             }
-            assert!(drift < 2e-9, "R={resistance} K={coefficient}: relative pressure-work drift {drift}");
+            assert!(drift < 2e-9, "R={resistance} K={coefficient} radiation={radiation}: relative pressure-work drift {drift}");
             if resistance > 0.0 { assert!(dissipated > 0.01 * e0); }
+            if radiation { assert!(ins.cavities[0].port.as_ref().unwrap().radiated_j() > 0.01 * e0); }
         }
     }
 
@@ -2034,6 +2073,14 @@ mod air_mode_tests {
         for (mode, &g) in modes.iter().zip(projection) {
             assert_eq!(g, cylinder_port_shape(mode, spec.radius, port));
         }
+        attach_baffled_vent_radiation(&mut piece).unwrap();
+        let port = piece.instrument.cavities[0].port.as_ref().unwrap();
+        assert!(port.has_baffled_radiation());
+        assert_eq!(port.resistance, 0.0);
+        assert_eq!(port.exterior_end_correction, 0.0);
+        assert!((port.length - spec.reso.thickness).abs() < 1e-15,
+            "cavity modes and radiation each replace their own end correction");
+        assert!(attach_baffled_vent_radiation(&mut piece).is_err());
         piece.instrument.cavities[0].port.as_mut().unwrap().pos[0] = spec.radius;
         assert!(attach_cavity_modes(&mut piece, &spec, 2500.0).is_err());
         assert_eq!(piece.instrument.air_modes.len(), 1, "rejected attachment must be atomic");

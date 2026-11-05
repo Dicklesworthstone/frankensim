@@ -4182,6 +4182,9 @@ impl Instrument {
     /// render-gpu's plan refuses a microphone that has one. Nor is a `RadDipole`: the kit attaches one only to
     /// heads carrying a radiation load, which that plan refuses.
     pub fn image(&mut self) -> InstrumentImage {
+        assert!(self.cavities.iter().filter_map(|c| c.port.as_ref()).all(|q|
+            !q.has_baffled_radiation() && q.flow_loss_coefficient() == 0.0),
+            "the exported stepper does not implement nonlinear or memory vent pressure laws; use Instrument::step");
         if !self.prepared {
             self.prepare();
         }

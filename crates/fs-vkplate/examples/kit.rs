@@ -11,6 +11,8 @@
 //! length read from that table. It is an estimate; it is refused for a ported drum and on `--preset-heads`.
 //! `--port RADIUS_M` declares a front-head opening; optional `--port-flow-loss K`
 //! supplies its quasi-steady pressure-loss coefficient (no value is inferred).
+//! `--port-radiation` replaces its frozen radiation resistance with the causal
+//! uniform-piston response in an infinite rigid baffle, including exterior memory.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -34,6 +36,7 @@ const CAVITY_WALL_LOSS_FLAG: &str = "--cavity-wall-loss";
 const HEAD_DIPOLE_FLAG: &str = "--head-dipole";
 const PORT_FLAG: &str = "--port";
 const PORT_FLOW_LOSS_FLAG: &str = "--port-flow-loss";
+const PORT_RADIATION_FLAG: &str = "--port-radiation";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -46,9 +49,10 @@ fn main() {
     });
     let port_radius = port_value(PORT_FLAG);
     let port_flow_loss = port_value(PORT_FLOW_LOSS_FLAG);
+    let port_radiation = all.iter().any(|a| a == PORT_RADIATION_FLAG);
     if port_radius.is_some_and(|r| r <= 0.0) || port_flow_loss.is_some_and(|k| k < 0.0)
-        || (port_flow_loss.is_some() && port_radius.is_none()) {
-        eprintln!("refused: give {PORT_FLAG} RADIUS_M > 0 and optional {PORT_FLOW_LOSS_FLAG} K >= 0");
+        || ((port_flow_loss.is_some() || port_radiation) && port_radius.is_none()) {
+        eprintln!("refused: give {PORT_FLAG} RADIUS_M > 0, optional {PORT_FLOW_LOSS_FLAG} K >= 0 and optional {PORT_RADIATION_FLAG}");
         std::process::exit(1)
     }
     let observer = all.iter().position(|a| a == OBSERVER_FLAG).map(|i| {
@@ -93,12 +97,12 @@ fn main() {
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K]]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]]");
         std::process::exit(2);
     }
     if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
@@ -190,6 +194,15 @@ fn main() {
             }
         }
     }
+    if port_radiation {
+        match kit::attach_baffled_vent_radiation(&mut p) {
+            Ok(receipt) => p.notes.push(receipt),
+            Err(e) => {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            }
+        }
+    }
     if wire_contact.is_some() {
         if a[1] != "snare" {
             eprintln!("refused: {WIRE_CONTACT_FLAG} is the snare wires' contact; {} has none", a[1]);
@@ -247,6 +260,10 @@ fn main() {
         if let Some(port) = &cavity.port {
             eprintln!("vent {index}: {:.4e} J removed by linear and separated-flow pressure loss (K={})",
                 port.dissipated_j, port.flow_loss_coefficient());
+            if port.has_baffled_radiation() {
+                eprintln!("vent {index}: {:.4e} J radiated, {:.4e} J stored in the exterior radiation memory",
+                    port.radiated_j(), port.radiation_energy_j());
+            }
         }
     }
     eprintln!("{dur} s rendered in {wall:.1} s ({:.1}x real time); peak {peak:.3} Pa", wall / dur);

@@ -143,6 +143,14 @@ floating-point POLICY: FMA contraction, subnormals, NaN, ULP budgets
   qualification; they do not inherit the strict-core golden's measured proof.
   Relative error is ill-conditioned at J1 zeros; no uniform relative bound
   over neighborhoods of zeros or an interval enclosure is claimed.
+- `special::semicircle_hat_weights(h, maximum_taps)` — normalized causal
+  semicircle-kernel integrals against linear interpolation hats, shared by the
+  nonlinear duct and finite-memory vent radiation owners. The caller supplies
+  dimensionless clock/support spacing and a tap budget. Closed-form integrals
+  preserve the unit integral and first moment up to roundoff; negative or
+  nonfinite weights refuse. Physical impedance, port state and energy accounting
+  remain with consumers. The vent's G1 tests compare the transformed kernel to
+  the independent Bessel/Struve functions and check second-order time refinement.
 
 ## Invariants
 - No platform libm on any strict path (sqrt excepted: IEEE-exact).

@@ -87,6 +87,35 @@ Node count alone does not establish audio-band fidelity.
   No explicit drag CFL is needed, but time refinement remains necessary: implicit midpoint
   is passive, not L-stable, and a severely underresolved drag can alternate half-step flow.
   The elastic cavity/head timestep bound still applies.
+- **Causal vent radiation**: `kit::attach_baffled_vent_radiation` (CLI
+  `--port-radiation`) replaces the vent's resonance-pinned resistance with the
+  uniform circular piston's frequency-dependent pressure reaction in an infinite
+  rigid baffle. With aperture transit time `T = 2a/c`, it applies
+  `p_rad = (rho*c/A) [Q - integral_0^T K(tau) Q(t-tau) d tau]`,
+  `K(tau) = 4/(pi*T) sqrt(1-(tau/T)^2)`. This is the causal form of the shared
+  Bessel/Struve impedance, following
+  [Lindemann (1974)](https://doi.org/10.1121/1.1914587). The normalized kernel
+  integrals live in `fs-math` and are also used by `fs-duct`'s nonlinear bore.
+  The load carries the exterior added mass, so the port's old exterior end
+  correction is removed. Cavity modes independently replace the interior one.
+  The remaining throat/interior inertance, nonlinear loss and current radiation
+  term share one scalar centered-flow solve. Its finite delay memory is prepared
+  once; stepping allocates nothing and performs work linear in the tap count.
+  Every delayed branch has nonnegative storage and dissipation. Consequently
+  pressure work closes with plug kinetic energy, `radiation_energy_j()`,
+  `radiated_j()` and the separate `dissipated_j` account, even during a transient
+  return of stored exterior energy. A steady flow has zero radiation pressure.
+  Clock refinement converges to the complex piston impedance; the absolute
+  normalized harmonic interpolation error is bounded by `(omega*dt)^2/8`, plus
+  quadrature roundoff. Passivity alone does not establish waveform accuracy.
+  This isolated uniform aperture still assumes linear, low-Mach exterior
+  acoustics: shell diffraction, mutual radiation, the structural cutout and
+  nonuniform aperture flow remain unresolved. The existing microphone remains a
+  compact vent observer, so this load is not a full-band receiver upgrade.
+  Attach at rest on the final clock. Direct `Port::enable_baffled_radiation`
+  retains an independently supplied linear neck resistance; the kit attachment
+  specifically replaces its builder's radiation resistance. External/GPU
+  steppers that omit memory or nonlinear vent laws are refused at export.
 - **Sound**: the Rayleigh integral of surface acceleration at each microphone, per-node delays.
   A baffled microphone hears only surfaces facing it. Over a rigid floor (any plane,
   `floor_z`, `floor_y`) it also hears, by the floor's image, the surfaces facing that image.
@@ -866,8 +895,10 @@ The offline `kit` and `perform` examples use the fixed hi-hat names; `kit` also 
 and `crash-shaft`, which has no default speed (give SPEED_M_S).
 
 For a ported drum, `kit ... --port RADIUS_M` declares the opening at the builder's
-off-center position. Add `--port-flow-loss K` to select the coefficient described above;
-it requires `--port` and has no inferred default. `--cavity-modes F_MAX_HZ` also couples
+off-center position. Add `--port-flow-loss K` to select the coefficient described above
+(no coefficient is inferred), or `--port-radiation` for the causal baffled-piston
+pressure reaction. Both options require `--port` and can be combined.
+`--cavity-modes F_MAX_HZ` also couples
 that opening to the spatial pressure modes. Ported runs use the Rayleigh observer;
 the closed-body `--observer` tables do not contain an opening and are refused.
 

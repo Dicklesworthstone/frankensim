@@ -451,43 +451,10 @@ fn bore_mesh(
     })
 }
 
-// The regular part of the piston kernel against hat functions on the step
-// grid: closed-form antiderivatives of sqrt(1-s^2) and s sqrt(1-s^2).
+// Share the normalized impulse kernel with the other pressure/flow owners.
 fn piston_weights(step_s: f64, transit_s: f64) -> Result<Vec<f64>, NonlinearDuctError> {
-    let h = step_s / transit_s;
-    if !positive(h) {
-        return Err(unsupported("piston transit time and step"));
-    }
-    let taps = (1.0 / h).ceil() + 1.0;
-    if !(taps <= 1_048_576.0) {
-        return Err(unsupported(
-            "piston radiation memory exceeds its tap budget",
-        ));
-    }
-    let f0 = |s: f64| 0.5 * (s * det::sqrt(1.0 - s * s) + det::asin(s));
-    let f1 = |s: f64| -(1.0 - s * s) * det::sqrt(1.0 - s * s) / 3.0;
-    let mut weights = reserved(taps as usize)?;
-    for j in 0..taps as usize {
-        let centre = j as f64 * h;
-        let mut weight = 0.0;
-        // Rising half on [s_{j-1}, s_j], falling half on [s_j, s_{j+1}], both cut at s = 1.
-        if j > 0 {
-            let (a, b) = (centre - h, centre.min(1.0));
-            if a < b {
-                let i0 = f0(b) - f0(a);
-                let i1 = f1(b) - f1(a);
-                weight += (i1 - a * i0) / h;
-            }
-        }
-        let (a, b) = (centre, (centre + h).min(1.0));
-        if a < b {
-            let i0 = f0(b) - f0(a);
-            let i1 = f1(b) - f1(a);
-            weight += ((centre + h) * i0 - i1) / h;
-        }
-        weights.push(4.0 / core::f64::consts::PI * weight);
-    }
-    Ok(weights)
+    fs_math::special::semicircle_hat_weights(step_s / transit_s, 1_048_576)
+        .map_err(unsupported)
 }
 
 struct PistonRadiation {
