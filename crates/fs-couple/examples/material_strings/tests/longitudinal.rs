@@ -39,7 +39,7 @@ fn data_selected_axial_modes_reach_bonded_strings_cavity_gas_and_bit_stable_pcm(
                 .iter()
                 .map(|c| c.modes().len())
                 .collect::<Vec<_>>(),
-            vec![3, 2, 1, 12, 2]
+            vec![3, 2, 1, 12, 2, 8]
         );
         let expected = pressure(&mut direct, 37);
         assert!(expected.iter().any(|p| p.abs() > 1e-15));

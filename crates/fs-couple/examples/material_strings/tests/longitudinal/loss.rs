@@ -32,6 +32,15 @@ fn build(cx: &Cx<'_>, gate: &CancelGate, input: &str, sleeve_eta: f64, band: f64
         _ => pack(name,7800.0,200_000.0,None), // Body does NOT need axial loss data.
     }))
 }
+/// Under any material selection an axial mode keeps the separately sourced exterior-fluid
+/// tail, 2 zeta omega = R / mu, written as its owner writes it. The retained fluid branches
+/// carry the rest of the same spectral integral, so this counts no gas loss twice.
+fn axial_gas_tail(ready: &Ready, omega: f64) -> f64 {
+    let bank = ready.performance.bank().source().bank();
+    let flow = bank.cylinder_gas_loading().unwrap().strings()[0].flow();
+    let string = &bank.longitudinal_waves().unwrap().strings()[0];
+    0.5 * flow.axial_low_tail_resistance_per_length_n_s_m2() / string.solid_linear_density_kg_m() / omega
+}
 
 #[test]
 fn sleeve_viscosity_alone_changes_axial_decay_and_actual_coupled_pressure() {
@@ -59,9 +68,15 @@ fn sleeve_viscosity_alone_changes_axial_decay_and_actual_coupled_pressure() {
             if i != ai { assert_eq!(model.modes(),changed.performance.bank().system().components()[i].modes()); }
         }
         let modes = changed.performance.bank().system().components()[ai].modes();
+        let flow = changed.performance.bank().source().bank().cylinder_gas_loading().unwrap().strings()[0].flow();
+        println!("axial gas tail: viscosity {:e} Pa s, axial resistance {:e} N s/m2, solid mass {:e} kg/m",
+            flow.transport().dynamic_viscosity_pa_s(),flow.axial_low_tail_resistance_per_length_n_s_m2(),b.solid_linear_density_kg_m());
         for mode in modes {
-            let expected = loss.longitudinal_damping_ratio(mode.angular_frequency_rad_s).unwrap();
-            assert_eq!(mode.damping_ratio,expected);
+            let omega = mode.angular_frequency_rad_s;
+            let material = loss.longitudinal_damping_ratio(omega).unwrap();
+            let tail = axial_gas_tail(&changed,omega);
+            println!("  omega {omega:e}: material {material:e}, tail {tail:e}, mode {:e}",mode.damping_ratio);
+            assert_eq!(mode.damping_ratio,material+tail);
             assert!(mode.damping_ratio>0.0);
         }
         let x = pressure(&mut first,37);
@@ -124,8 +139,11 @@ fn finite_strain_selection_changes_material_reaction_and_shared_pressure_without
         let mut b = build(cx,gate,&input,4e5,200_000.0).unwrap();
         let law = b.performance.bank().source().bank().longitudinal_waves().unwrap().strings()[0].clone();
         assert!(law.has_finite_strain_viscosity());
-        assert!(b.performance.bank().system().components()[law.axial_component()].modes()
-            .iter().all(|mode|mode.damping_ratio==0.0));
+        // The material viscosity leaves the diagonal and acts once, through the retained strain.
+        // What stays on the diagonal is the exterior-fluid tail alone.
+        for mode in b.performance.bank().system().components()[law.axial_component()].modes() {
+            assert_eq!(mode.damping_ratio,axial_gas_tail(&b,mode.angular_frequency_rad_s));
+        }
         // Pure transverse instantaneous motion stretches material even with
         // every axial velocity zero. Linear u_xt loss would be exactly zero.
         let mut q = vec![0.0;law.coordinate_count()];
