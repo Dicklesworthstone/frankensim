@@ -139,6 +139,38 @@ pub(crate) fn edge_cubic_mass(x: &[f64; 3], y: &[f64; 3], rho_h_area: f64) -> [f
     mass
 }
 
+/// Exact degree-seven integral for a P1 reference density. The scalar scale
+/// is `rho_max*h*area`; density contains the normalized corner values. Form
+/// `G*B` once before `B^T*(G*B)`, avoiding a nodal-pair loop for every pair
+/// of Bernstein monomials. This adds no quadrature or temporary heap storage.
+pub(crate) fn edge_cubic_mass_graded(
+    x: &[f64; 3], y: &[f64; 3], scale: f64, density: [f64; 3],
+) -> [f64; 81] {
+    let b = edge_cubic_displacement(x, y);
+    let mut contracted = [[0.0; 9]; 10];
+    for i in 0..10 {
+        for j in 0..10 {
+            let powers = core::array::from_fn(|axis| {
+                (EDGE_CUBIC_EXP[i][axis] + EDGE_CUBIC_EXP[j][axis]) as usize
+            });
+            let gram = EDGE_CUBIC_MULT[i] * EDGE_CUBIC_MULT[j]
+                * crate::reference_density::moment(density, powers);
+            for c in 0..9 {
+                contracted[i][c] += gram * b[j][c];
+            }
+        }
+    }
+    let mut mass = [0.0; 81];
+    for r in 0..9 {
+        for c in r..9 {
+            let value = scale * (0..10).map(|i| b[i][r] * contracted[i][c]).sum::<f64>();
+            mass[9 * r + c] = value;
+            mass[9 * c + r] = value;
+        }
+    }
+    mass
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

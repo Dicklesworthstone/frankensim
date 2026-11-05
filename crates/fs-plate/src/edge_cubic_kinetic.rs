@@ -9,6 +9,11 @@ use fs_sparse::Coo;
 /// Exact polynomial area integral of the analytic cubic rotations. The scale
 /// is rho*h^3*area/12; geometry/section admission belongs to the assembly owner.
 fn rotary_mass(x: &[f64; 3], y: &[f64; 3], scale: f64) -> Result<[f64; 81], PlateError> {
+    rotary_mass_inner(x, y, scale, None)
+}
+
+fn rotary_mass_inner(x: &[f64; 3], y: &[f64; 3], scale: f64,
+    density: Option<[f64; 3]>) -> Result<[f64; 81], PlateError> {
     let bad = || PlateError::BadSection { what: "consistent cubic rotary inertia is not representable" };
     let a2 = (x[1]-x[0])*(y[2]-y[0])-(x[2]-x[0])*(y[1]-y[0]);
     if !a2.is_finite() || a2 <= 0.0 || !scale.is_finite() || scale <= 0.0 { return Err(bad()); }
@@ -39,8 +44,14 @@ fn rotary_mass(x: &[f64; 3], y: &[f64; 3], scale: f64) -> Result<[f64; 81], Plat
         let mut value = 0.0;
         for i in 0..6 { for j in 0..6 {
             // int_triangle lambda^alpha / area = 2*prod(alpha!)/(degree+2)!.
-            let gram = (2.0/720.0)*(0..3)
-                .map(|a| FACT[(POWERS[i][a]+POWERS[j][a]) as usize]).product::<f64>();
+            let gram = if let Some(rho) = density {
+                crate::reference_density::moment(rho, core::array::from_fn(|a| {
+                    (POWERS[i][a]+POWERS[j][a]) as usize
+                }))
+            } else {
+                (2.0/720.0)*(0..3)
+                    .map(|a| FACT[(POWERS[i][a]+POWERS[j][a]) as usize]).product::<f64>()
+            };
             value += gram*(derivative[0][i][row]*derivative[0][j][col]
                 + derivative[1][i][row]*derivative[1][j][col]);
         }}
@@ -77,14 +88,21 @@ impl PlateChart {
             let y = tri.map(|node| self.mesh.nodes[node].1);
             let area = 0.5*((x[1]-x[0])*(y[2]-y[0])-(x[2]-x[0])*(y[1]-y[0]));
             let h = s.thickness;
-            // Same operation order as the original assembler's slope mass.
-            let total = s.density*h*h*h/12.0*area;
-            let lumped = total/3.0;
-            let rotary = rotary_mass(&x,&y,total)?;
+            let density = self.reference_density().map_or([s.density;3], |rho| rho[element]);
+            let (lumped, rotary) = if density[0] == density[1] && density[1] == density[2] {
+                // Same operation order as the original assembler's slope mass.
+                let total = density[0]*h*h*h/12.0*area;
+                ([total/3.0;3], rotary_mass(&x,&y,total)?)
+            } else {
+                let (scale,rho) = crate::reference_density::normalized(density);
+                let total = scale*h*h*h/12.0*area;
+                (crate::reference_density::lumped(total,rho),
+                    rotary_mass_inner(&x,&y,total,Some(rho))?)
+            };
             for local in 0..9 {
                 if local%3 != 0 {
                     if let Some(index) = model.dof_map[3*tri[local/3]+local%3] {
-                        removed[index] += lumped;
+                        removed[index] += lumped[local/3];
                     }
                 }
             }

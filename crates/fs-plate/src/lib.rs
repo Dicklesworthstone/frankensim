@@ -50,6 +50,7 @@ pub mod shell;
 mod edge_cubic;
 mod dkt_kinetic;
 mod stiffener_mass;
+mod reference_density;
 pub use dkt_kinetic::RotaryMass;
 use edge_cubic::edge_cubic_mass;
 pub use edge_cubic::{
@@ -663,6 +664,7 @@ pub struct PlateChart {
     /// Uniform material and thickness section, used when no element field is set.
     pub section: PlateSection,
     element_sections: Option<Vec<PlateSection>>,
+    reference_density: Option<Vec<[f64; 3]>>,
     /// Labeled sub-regions (e.g., soundboard, bridge, braces, rim).
     pub regions: Vec<PlateRegion>,
     /// Boundary nodes identified for support.
@@ -682,6 +684,7 @@ impl PlateChart {
             mesh,
             section,
             element_sections: None,
+            reference_density: None,
             regions: Vec::new(),
             boundary_nodes,
         })
@@ -712,6 +715,7 @@ impl PlateChart {
             mesh,
             section,
             element_sections: None,
+            reference_density: None,
             regions,
             boundary_nodes,
         })
@@ -728,6 +732,7 @@ impl PlateChart {
     /// mesh coordinates, so material and grain may vary independently by element.
     /// Shared nodes impose a perfectly bonded interface; no laminate offsets,
     /// interfacial slip, delamination or sub-element homogenization are inferred.
+    /// An explicitly retained reference density field continues to own inertia.
     ///
     /// # Errors
     /// Missing/extra sections or nonphysical section data refuse.
@@ -759,12 +764,16 @@ impl PlateChart {
         stiffeners: &[Stiffener],
         opts: &AssemblyOptions,
     ) -> Result<PlateModel, PlateError> {
-        assemble_with_sections(
+        assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
+            self.reference_density(),
             &self.boundary_nodes,
             stiffeners,
             opts,
+            TransverseMass::Lumped,
+            RotaryMass::Lumped,
+            StiffenerMass::Lumped,
         )
     }
 
@@ -782,6 +791,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
+            self.reference_density(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -807,6 +817,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
+            self.reference_density(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -833,6 +844,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
+            self.reference_density(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -1228,6 +1240,7 @@ pub fn assemble_with_sections(
     assemble_with_sections_inner(
         mesh,
         sections,
+        None,
         boundary,
         stiffeners,
         opts,
@@ -1255,6 +1268,7 @@ pub enum TransverseMass {
 fn assemble_with_sections_inner(
     mesh: &PlateMesh,
     sections: PlateSectionField<'_>,
+    reference_density: Option<&[[f64; 3]]>,
     boundary: &[usize],
     stiffeners: &[Stiffener],
     opts: &AssemblyOptions,
@@ -1264,6 +1278,9 @@ fn assemble_with_sections_inner(
 ) -> Result<PlateModel, PlateError> {
     mesh.validate()?;
     sections.validate(mesh.tris.len())?;
+    if let Some(density) = reference_density {
+        reference_density::validate(mesh.tris.len(), density)?;
+    }
     if !opts.pretension.is_finite() {
         return Err(PlateError::BadSection {
             what: "plate pretension must be finite",
@@ -1332,46 +1349,68 @@ fn assemble_with_sections_inner(
                 }
             }
         }
-        // Transverse P1 mass is exactly ρhA/12 times [[2,1,1],...].
-        // The default remains lumped ρhA/3 per node. The rotary choice is
-        // independent: legacy nodal slopes or the original quadratic DKT field.
-        let h = section.thickness;
-        let mt = section.density * h * area / 3.0;
-        let mr = section.density * h * h * h / 12.0 * area / 3.0;
-        if matches!(transverse_mass, TransverseMass::EdgeCubic) {
-            let me = edge_cubic_mass(&x, &y, section.density * h * area);
-            for r in 0..9 {
-                for c in 0..9 {
-                    push_sym(&mut mc, gdof(r), gdof(c), me[9 * r + c]);
-                }
-            }
-        }
-        if matches!(rotary_mass, RotaryMass::Dkt) {
-            let me = dkt_kinetic::rotary_mass(
-                &x, &y, section.density * h * h * h / 12.0 * area,
+        let density = reference_density.map_or([section.density; 3], |rho| rho[eidx]);
+        if density[0] != density[1] || density[1] != density[2] {
+            let me = reference_density::panel_mass(
+                &x,
+                &y,
+                density,
+                section.thickness,
+                area,
+                transverse_mass,
+                rotary_mass,
             )?;
             for r in 0..9 {
                 for c in 0..9 {
-                    push_sym(&mut mc, gdof(r), gdof(c), me[9 * r + c]);
+                    let value = me[9 * r + c];
+                    if value != 0.0 {
+                        push_sym(&mut mc, gdof(r), gdof(c), value);
+                    }
                 }
             }
-        }
-        for node in 0..3 {
-            if matches!(transverse_mass, TransverseMass::Linear) {
-                for other in 0..3 {
-                    push_sym(
-                        &mut mc,
-                        gdof(3 * node),
-                        gdof(3 * other),
-                        mt * if node == other { 0.5 } else { 0.25 },
-                    );
+        } else {
+            // Keep the original arithmetic for every uniform reference profile.
+            // Transverse P1 mass is exactly ρhA/12 times [[2,1,1],...].
+            // The default remains lumped ρhA/3 per node. The rotary choice is
+            // independent: legacy nodal slopes or the original quadratic DKT field.
+            let h = section.thickness;
+            let mt = density[0] * h * area / 3.0;
+            let mr = density[0] * h * h * h / 12.0 * area / 3.0;
+            if matches!(transverse_mass, TransverseMass::EdgeCubic) {
+                let me = edge_cubic_mass(&x, &y, density[0] * h * area);
+                for r in 0..9 {
+                    for c in 0..9 {
+                        push_sym(&mut mc, gdof(r), gdof(c), me[9 * r + c]);
+                    }
                 }
-            } else if matches!(transverse_mass, TransverseMass::Lumped) {
-                push_sym(&mut mc, gdof(3 * node), gdof(3 * node), mt);
             }
-            if matches!(rotary_mass, RotaryMass::Lumped) {
-                push_sym(&mut mc, gdof(3 * node + 1), gdof(3 * node + 1), mr);
-                push_sym(&mut mc, gdof(3 * node + 2), gdof(3 * node + 2), mr);
+            if matches!(rotary_mass, RotaryMass::Dkt) {
+                let me = dkt_kinetic::rotary_mass(
+                    &x, &y, density[0] * h * h * h / 12.0 * area,
+                )?;
+                for r in 0..9 {
+                    for c in 0..9 {
+                        push_sym(&mut mc, gdof(r), gdof(c), me[9 * r + c]);
+                    }
+                }
+            }
+            for node in 0..3 {
+                if matches!(transverse_mass, TransverseMass::Linear) {
+                    for other in 0..3 {
+                        push_sym(
+                            &mut mc,
+                            gdof(3 * node),
+                            gdof(3 * other),
+                            mt * if node == other { 0.5 } else { 0.25 },
+                        );
+                    }
+                } else if matches!(transverse_mass, TransverseMass::Lumped) {
+                    push_sym(&mut mc, gdof(3 * node), gdof(3 * node), mt);
+                }
+                if matches!(rotary_mass, RotaryMass::Lumped) {
+                    push_sym(&mut mc, gdof(3 * node + 1), gdof(3 * node + 1), mr);
+                    push_sym(&mut mc, gdof(3 * node + 2), gdof(3 * node + 2), mr);
+                }
             }
         }
         // Membrane prestress: P1 geometric stiffness on w DOFs,

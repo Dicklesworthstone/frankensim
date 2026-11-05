@@ -49,6 +49,7 @@ impl PlateChart {
         assemble_with_sections_inner(
             &self.mesh,
             self.section_field(),
+            self.reference_density(),
             &self.boundary_nodes,
             stiffeners,
             opts,
@@ -78,9 +79,39 @@ const ROTATION_RULE: [([f64; 3], f64); 6] = {
     ]
 };
 
+/// Positive degree-five rule: P1 density times two quadratic rotations.
+const GRADED_ROTATION_RULE: [([f64; 3], f64); 7] = {
+    const A: f64 = 0.470_142_064_105_115_1;
+    const B: f64 = 0.101_286_507_323_456_34;
+    const WA: f64 = 0.132_394_152_788_506_2;
+    const WB: f64 = 0.125_939_180_544_827_17;
+    [
+        ([1.0 / 3.0; 3], 0.225),
+        ([1.0 - 2.0 * A, A, A], WA),
+        ([A, 1.0 - 2.0 * A, A], WA),
+        ([A, A, 1.0 - 2.0 * A], WA),
+        ([1.0 - 2.0 * B, B, B], WB),
+        ([B, 1.0 - 2.0 * B, B], WB),
+        ([B, B, 1.0 - 2.0 * B], WB),
+    ]
+};
+
 /// Exact kinetic Gram matrix [kg*m^2 in slope/slope entries]. Geometry has
 /// already passed the original DKT admission. `scale` is rho*h^3*area/12.
 pub(super) fn rotary_mass(x: &[f64; 3], y: &[f64; 3], scale: f64) -> Result<[f64; 81], PlateError> {
+    rotary_mass_inner(x, y, scale, &ROTATION_RULE, None)
+}
+
+pub(super) fn rotary_mass_graded(
+    x: &[f64; 3], y: &[f64; 3], scale: f64, density: [f64; 3],
+) -> Result<[f64; 81], PlateError> {
+    rotary_mass_inner(x, y, scale, &GRADED_ROTATION_RULE, Some(density))
+}
+
+fn rotary_mass_inner(
+    x: &[f64; 3], y: &[f64; 3], scale: f64,
+    rule: &[([f64; 3], f64)], density: Option<[f64; 3]>,
+) -> Result<[f64; 81], PlateError> {
     let bad = || PlateError::BadSection {
         what: "consistent DKT rotary inertia is not representable",
     };
@@ -89,7 +120,10 @@ pub(super) fn rotary_mass(x: &[f64; 3], y: &[f64; 3], scale: f64) -> Result<[f64
     }
     let cf = edge_coeffs(x, y);
     let mut mass = [0.0; 81];
-    for (l, weight) in ROTATION_RULE {
+    for &(l, weight) in rule {
+        let weight = density.map_or(weight, |rho| {
+            weight * (l[0] * rho[0] + l[1] * rho[1] + l[2] * rho[2])
+        });
         let shape = [
             l[0] * (2.0 * l[0] - 1.0),
             l[1] * (2.0 * l[1] - 1.0),

@@ -1033,6 +1033,42 @@ measured piano bridge-mobility or high-band convergence claim.
   (guitar-top holography) comparison yet — that case joins the
   instrument-matdb bead's consuming demo.
 
+## Graded reference density in the native flat-plate pencil
+
+`PlateChart::with_reference_density` retains positive P1 volumetric density
+at each triangle's original corners. It overrides section scalar density in
+every chart mass assembly method, including the analytic edge-cubic kinetic
+image; the section's stiffness/thickness and independent beam inertia retain
+their own meanings. Per-triangle corner values can represent material jumps
+without averaging neighboring specimens. The field is immutable through its
+accessor and coverage is rechecked when assembling the publicly editable mesh.
+
+Density is integrated jointly with the selected velocity fields. Exact
+barycentric moments give consistent P1 translation and the degree-seven
+edge-cubic translation integral. The latter forms the Bernstein `G*B` once,
+then `B^T*(G*B)`, using bounded stack storage and no runtime quadrature.
+The original DKT quadratic rotations use a positive degree-five rule; analytic
+cubic-gradient rotations use exact weighted polynomial moments. Positive nodal
+lumping preserves total mass and first in-plane moments, while retaining its
+declared approximation to the quadratic kinetic form. The cubic kinetic owner
+removes exactly these same graded panel slope row sums before inserting its
+consistent rotation operator. Uniform profiles dispatch the original arithmetic.
+
+The resulting full `PlateModel.m` is the native modal/harmonic/transient mass,
+so inertia, inertial forces and mass normalization use one operator. No mean
+density, modal retuning or added diagonal floor replaces that reference mass.
+This fixed-reference Rayleigh/Kirchhoff plate retains elementwise constant
+thickness and symmetric through-thickness density. It does not supply eccentric
+laminate moments, evolving density transport, finite-strain thickness change,
+or three-dimensional short-wavelength material physics.
+
+`tests/plate_reference_density.rs` checks exact mass/centroid and inertial-load
+moments in all kinetic images, quadratic continuum kinetic products, equal-mass
+profiles producing different native supported modes, uniform arithmetic parity,
+independent beam retention, vertex/frame changes, exact partition invariance,
+source retention and malformed coverage. These are G0/G1/G3 numerical checks;
+they do not establish measured specimen or audible realism.
+
 ## Physical compliant shell attachments
 
 `shell::mitc::connections` adds finite bilateral attachment resultants to the
