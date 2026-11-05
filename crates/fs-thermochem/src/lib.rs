@@ -15,6 +15,11 @@
 //! elemental inventory and electrical neutrality, including electron pressure
 //! and ionization energy from the original species models. This crate owns no transport solver, evolving state,
 //! mechanism evolution, kinetics integrator, or L3 protocol.
+//!
+//! Nuclear `fusion` is a separate, bounded reaction-law family: its explicit
+//! isotope identities conserve baryons and electric charge while changing
+//! chemical elements and rest mass. It binds the original gas calorics without
+//! applying chemical elemental/mass-conservation certificates to nuclear events.
 
 mod caloric;
 pub mod decay;
@@ -24,6 +29,7 @@ mod entropy;
 pub mod electron_collision;
 pub mod eos;
 pub mod equilibrium;
+pub mod fusion;
 pub mod kinetics;
 pub mod mixture;
 pub mod solution;

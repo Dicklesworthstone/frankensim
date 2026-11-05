@@ -1,5 +1,39 @@
 # CONTRACT: fs-thermochem
 
+## Maxwellian nuclear fusion and original plasma thermodynamics
+
+`fusion` evaluates the separate D-T, D-D neutron, D-D proton and D-He3
+channels from Bosch and Hale (1992), equation (14), table VII
+([primary source](https://doi.org/10.1088/0029-5515/32/4/I07)).
+Inputs are common Maxwellian ion temperatures in kelvin; outputs are
+particle-pair reactivities in m³/s and analytic temperature derivatives.
+The published intervals are inclusive; extrapolation is refused. D-D event
+counting includes its one-half identical-pair factor and consumes two deuterons.
+Integer nuclear charge and baryon inventories are distinct from chemical
+element conservation. Q values use [CODATA 2022 bare-nucleus masses](https://physics.nist.gov/cuu/Constants/Table/allascii.txt).
+
+The product energy split is leading nonrelativistic two-body kinematics.
+The fitted-rate derivative supplies the reaction-weighted incoming relative
+kinetic-energy moment. Neither fit residuals nor the regression tolerances
+certify that moment's physical uncertainty. Mass-defect boost and relativistic
+product corrections, screening, beam distributions and transport are outside
+this law's scope.
+
+`fusion::plasma::DtFusionPlasmaV1` explicitly binds D+, T+ and He4++ to the
+existing source-bearing ionized-gas bank and its electron. Admission requires
+the exact four-species charge/element layout, nominal bare-particle masses,
+original monatomic calorics with zero formation energy, and source support
+including initially absent ash. The caller supplies weak-coupling,
+nondegeneracy and nonrelativistic limits. Point admission uses fixed-size
+storage; it does not replace a source bank, insert neutron chemistry, or infer
+isotopes from material names. Burn evolution belongs to L3.
+
+The focused regression suite contains published table-VIII anchors, SI
+conversion, independent derivative differences, source boundaries,
+stoichiometry, Q/energy moments, deterministic repetition, and source/domain
+binding refusals. These assertions test the declared model, not ignition or a
+complete fusion reactor.
+
 ## Shared half-life and first-order removal laws
 
 `decay::DecayLawV1` admits a finite positive half-life or a finite nonnegative
