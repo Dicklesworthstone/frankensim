@@ -101,14 +101,15 @@
 //! outward/inward pair in human and artificial lips, the played note between them, and conclude that at least two degrees of
 //! freedom are needed to simulate the lip realistically. The aperture is the sum of the two modes' displacements under the same
 //! force. It needs `lip_response` (the face area is shared), not `lip`. Its published numbers carry no pre-stress law, so the
-//! linear loop refuses any lip tension but 1.0 by name and `bore nonlinear` refuses the record altogether. A file without the
-//! record is bit-identical to one written before it existed.
+//! linear loop and `bore nonlinear` ([`super::nonlinear::NonlinearLip::with_lip_mode2`], the same integrator) both refuse any lip tension
+//! but 1.0 by name. A file without the record is bit-identical to one written before it existed.
 //!
 //! `lip_area_exponent` is the opt-in exponent `q` of the flow aperture, `w h (h/H0)^(q-1)` with `H0` the lip record's rest gap
 //! ([`super::BrassVoice::with_lip_area_exponent`]). Copley and Strong (1996) describe the lip area against height as almost linear and
 //! print no exponent, so `q` is a stated bracket (`1 <= q <= 4`) and the normalisation at `H0`, which leaves the aperture at the rest
-//! gap unchanged, is ours. Only the flow area changes, not the lip's motion; `bore nonlinear` refuses the record. A file without
-//! the record, or with `q` exactly 1, is bit-identical to one written before it existed.
+//! gap unchanged, is ours. Only the flow area changes, not the lip's motion; `bore nonlinear` takes the same record
+//! ([`super::nonlinear::NonlinearLip::with_lip_area_exponent`]). A file without the record, or with `q` exactly 1, is bit-identical
+//! to one written before it existed.
 //!
 //! A `bessel` record is a Bessel horn `r(s) = b (u - s)^(-flare)` through the
 //! stated end radii over the stated length, expanded into `pieces` cones whose
@@ -783,9 +784,6 @@ impl LipDescription {
             Some(_) if !lip_from_response => {
                 return Err("lip_response_mode2 needs the lip_response record (its first mode and shared face area), not lip".into());
             }
-            Some(_) if nonlinear.is_some() => {
-                return Err("lip_response_mode2 is not supported on bore nonlinear: the second lip mode runs on the linear bore only".into());
-            }
             Some((freq, q, inverse_mu)) => Some(
                 LipMode2::from_response(freq, q, inverse_mu, core.face_area_m2)
                     .map_err(|e| format!("lip_response_mode2 refused: {e}"))?,
@@ -793,9 +791,6 @@ impl LipDescription {
         };
         let lip_area_exponent = match lip_area_exponent_raw {
             None => None,
-            Some(_) if nonlinear.is_some() => {
-                return Err("lip_area_exponent is not supported on bore nonlinear: the flow aperture exponent runs on the linear bore only".into());
-            }
             Some(q) if !(1.0..=4.0).contains(&q) => {
                 return Err(format!("lip_area_exponent must be in [1, 4] (a stated bracket), got {q}"));
             }
@@ -1183,6 +1178,14 @@ impl LipDescription {
         };
         let lip = match self.jet_noise {
             Some(card) => lip.with_jet_noise(card).map_err(|e| format!("jet_noise refused: {e}"))?,
+            None => lip,
+        };
+        let lip = match self.lip_mode2 {
+            Some(mode) => lip.with_lip_mode2(mode).map_err(|e| format!("lip_response_mode2 refused: {e}"))?,
+            None => lip,
+        };
+        let lip = match self.lip_area_exponent {
+            Some(q) => lip.with_lip_area_exponent(q).map_err(|e| format!("lip_area_exponent refused: {e}"))?,
             None => lip,
         };
         let lip = match self.constriction_noise {
@@ -2708,6 +2711,37 @@ mod tests {
         let error = description.build().err().expect("initial gas leaves the source's caloric domain");
         assert!(error.contains("mouth_reservoir"), "{error}");
     }
+
+    // MB 3915: the two lip rows run on bore nonlinear (the parser refused them there before). Thirty-two samples of a 3 kPa blow through the
+    // real lip and bore: q = 1 is bit-identical to no row, q = 1.4 and the second mode each reach the mouthpiece pressure, and the rows
+    // reach the parsed description.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn lip_area_exponent_and_second_mode_run_on_bore_nonlinear() {
+        let render = |rows: &str| {
+            let mut performance = finite_description(rows, "3e3").build().unwrap();
+            performance.apply_controls(0).unwrap();
+            performance.record_mouthpiece();
+            performance.block(&mut [0.0; 32]).unwrap();
+            performance.mouthpiece_pressure().to_vec()
+        };
+        let same = |a: &[f64], b: &[f64]| a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits());
+        let plain = render("");
+        assert!(plain.iter().any(|p| p.abs() > 1.0), "the blow must reach the cup for the comparison to mean anything");
+        assert!(same(&plain, &render("lip_area_exponent 1\n")), "q = 1 must be bit-identical to no row on the nonlinear bore");
+        let steeper = render("lip_area_exponent 1.4\n");
+        assert!(steeper.iter().all(|p| p.is_finite()));
+        assert!(!same(&plain, &steeper), "q = 1.4 must reach the mouthpiece pressure on the nonlinear bore");
+        let two = render("lip_response_mode2 244.5 11.0 -0.073\n");
+        assert!(two.iter().all(|p| p.is_finite()));
+        assert!(!same(&plain, &two), "the second mode must reach the mouthpiece pressure on the nonlinear bore");
+        assert!(same(&two, &render("lip_response_mode2 244.5 11.0 -0.073\n")), "the same card repeats bit for bit");
+        let both = finite_description("lip_response_mode2 244.5 11.0 -0.073\nlip_area_exponent 1.4\n", "3e3");
+        assert_eq!(both.lip_area_exponent(), Some(1.4));
+        assert!(both.lip_mode2().is_some());
+        assert!(both.build().is_ok());
+    }
+
     #[cfg(feature = "nonlinear-brass")]
     const SPECIMEN: &str = "thermochemical 293.15 101325 mole 1 specimen-gas 1";
 

@@ -6,7 +6,8 @@
 //! Zwikker-Kosten wall memory and the baffled-piston bell all live in that one
 //! field; no reflectance line, transfer function or fitted load is used.
 //!
-//! The lip channel is an isentropic nozzle of area `width * gap` from the
+//! The lip channel is an isentropic nozzle of area `width * gap` (with the opt-in exponent row, `width * gap * (gap / rest gap)^(q - 1)`;
+//! with the opt-in second lip mode, the gap is the rest gap plus both modes' displacements) from the
 //! mouth (stagnation gas at the blowing pressure and the room temperature) to
 //! the pressure on the bore's first face. Its jet mixes out over that face
 //! without pressure recovery, the linear loop's Bernoulli law made
@@ -41,7 +42,7 @@ use fs_phs::linear_exact::{LinearPropagator, LinearSplit, step_split};
 use fs_phs::{PortHamiltonian, mass_spring_damper};
 
 use super::{
-    BrassBlockDiag, BrassControl, LipIsland, TensionWork, prepare_lip, spring_work_j,
+    BrassBlockDiag, BrassControl, LipIsland, LipMode2, LipSecondMode, TensionWork, prepare_lip, spring_work_j,
     zero_crossing_lock_hz,
 };
 use crate::turbulence_noise::{
@@ -116,6 +117,10 @@ pub struct NonlinearLip {
     /// opt-in noises: the jet noise's Reynolds gate and reference jet speed, the constriction noise's reference jet speed.
     wall_viscosity_pa_s: f64,
     reference_density_kg_m3: f64,
+    /// Opt-in second lip mode ([`LipMode2`], the linear loop's own integrator); `None` leaves the lip exactly the one-mode lip.
+    lip2: Option<LipSecondMode>,
+    /// The opt-in flow-area exponent `q` ([`NonlinearLip::with_lip_area_exponent`]); exactly 1.0 is the plain `width x gap`.
+    area_exponent: f64,
 }
 
 impl NonlinearLip {
@@ -192,7 +197,53 @@ impl NonlinearLip {
             constriction_noise: None,
             wall_viscosity_pa_s,
             reference_density_kg_m3,
+            lip2: None,
+            area_exponent: 1.0,
         })
+    }
+
+    /// Add the opt-in second lip mode before any gas step: the linear loop's own integrator ([`super::BrassVoice::with_lip_mode2`]
+    /// is the reference: a second mass-spring-damper stepped under the SAME transmural force with the sign of its printed
+    /// `1/mu`, the aperture being `rest gap + q1 + q2` clipped at zero). A lip without it steps exactly the one-mode lip. Its
+    /// published numbers carry no pre-stress law, so it runs only at lip tension 1.0 and [`NonlinearLip::apply`] refuses any
+    /// other `SetLipTension` by name.
+    ///
+    /// # Errors
+    /// The lip's tension is not 1.0, or the mode is refused admission.
+    pub fn with_lip_mode2(mut self, mode: LipMode2) -> Result<Self, String> {
+        if self.tension != 1.0 {
+            return Err("the second lip mode (lip_response_mode2) has no printed pre-stress law and runs only at lip tension 1.0".into());
+        }
+        let sys = mass_spring_damper(mode.mass_kg, mode.stiffness_n_m, mode.damping_n_s_m)
+            .map_err(|_| "the second lip mode refused admission".to_string())?;
+        let linear = prepare_lip(&sys).map_err(|e| e.to_string())?;
+        self.lip2 = Some(LipSecondMode { mode, sys, linear, state: vec![0.0, 0.0] });
+        Ok(self)
+    }
+
+    /// Add the opt-in flow-area exponent `q` before any gas step: the aperture the lip channel meters through becomes
+    /// `w h (h/H0)^(q-1)` for the lip gap `h`, the rest gap `H0` and the width `w`, as on the linear bore
+    /// ([`super::BrassVoice::with_lip_area_exponent`] carries the label and the source: a bracket parameter, not a measured value).
+    /// `q = 1` is the plain `w h` and is bit-identical to a lip without the row. Only the flow area changes.
+    ///
+    /// # Errors
+    /// Unless `1 <= q <= 4`.
+    pub fn with_lip_area_exponent(mut self, q: f64) -> Result<Self, String> {
+        if !(q.is_finite() && (1.0..=4.0).contains(&q)) {
+            return Err("the lip area exponent (lip_area_exponent) must be finite and in [1, 4]".into());
+        }
+        self.area_exponent = q;
+        Ok(self)
+    }
+
+    // The flow aperture `w h (h/H0)^(q-1)` [m^2] for the lip gap `h`; exactly `w h` when the exponent is 1 or the lip is closed.
+    fn flow_width_height(&self, gap: f64) -> f64 {
+        let plain = self.lip.width_m * gap;
+        if self.area_exponent == 1.0 || gap <= 0.0 {
+            plain
+        } else {
+            plain * (gap / self.lip.rest_gap_m).powf(self.area_exponent - 1.0)
+        }
     }
 
     /// Attach finite upstream gas storage before any gas step.
@@ -304,6 +355,9 @@ impl NonlinearLip {
                 if !(t.is_finite() && t > 0.0) {
                     return Err("lip tension must be finite positive".into());
                 }
+                if self.lip2.is_some() && t != 1.0 {
+                    return Err("the second lip mode (lip_response_mode2) has no printed pre-stress law and runs only at lip tension 1.0".into());
+                }
                 // As in the linear loop: stiffness ~ t^2, damping ~ t, same state.
                 let lip_sys = mass_spring_damper(
                     self.lip.mass_kg,
@@ -339,8 +393,9 @@ impl NonlinearLip {
     }
 
     /// Signed tension-actuator work [J] by mode since construction, including
-    /// accepted controls not yet rendered. This one-mode path has zero second
-    /// entry. It is not part of gas exchange or a lip/gas passivity claim.
+    /// accepted controls not yet rendered. The second entry is zero: the second
+    /// lip mode runs only at tension 1.0, so no tension change reaches it. It is
+    /// not part of gas exchange or a lip/gas passivity claim.
     #[must_use]
     pub fn lip_tension_work_j(&self) -> [f64; 2] {
         self.tension_work.total_j()
@@ -485,9 +540,27 @@ impl NonlinearLip {
             dt,
         )
         .map_err(|_| "lip island step refused".to_string())?;
-        let defect = record.supply_defect().abs();
-        let gap = (self.lip.rest_gap_m + record.x[0]).max(0.0);
-        let opening = self.lip.width_m * gap;
+        let mut defect = record.supply_defect().abs();
+        // The opt-in second lip mode steps under `sign x force` and its displacement joins the first's; without it `displacement`
+        // is `record.x[0]` and every operation below is the one-mode lip's, in the same order.
+        let mut displacement = record.x[0];
+        let mut second_record = None;
+        if let Some(second) = self.lip2.as_ref() {
+            let record2 = step_split(
+                &second.sys,
+                &second.linear,
+                LinearPropagator::ExactZoh,
+                &second.state,
+                &[second.mode.sign * force],
+                dt,
+            )
+            .map_err(|_| "second lip mode step refused".to_string())?;
+            defect = defect.max(record2.supply_defect().abs());
+            displacement += record2.x[0];
+            second_record = Some(record2);
+        }
+        let gap = (self.lip.rest_gap_m + displacement).max(0.0);
+        let opening = self.flow_width_height(gap);
         let inlet = self.bore.inlet_area_m2();
         let gas = &self.gas;
         let mut finite_trial = self.finite_mouth.as_ref().map(|supply| supply.trial(mouth, dt, inlet));
@@ -518,6 +591,9 @@ impl NonlinearLip {
                 .map_err(|e| format!("finite mouth commit refused: {e}"))?;
         }
         self.lip_state = record.x;
+        if let (Some(second), Some(record2)) = (self.lip2.as_mut(), second_record) {
+            second.state = record2.x;
+        }
         self.face_pa = face.pressure_pa;
         if let Some(source) = self.jet_noise.as_mut() {
             // The metered mass flow as a volume flow at the reference density: `Re_h = Q rho / (w mu) = mdot / (w mu)` needs

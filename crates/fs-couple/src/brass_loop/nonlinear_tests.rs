@@ -755,3 +755,99 @@ fn finite_mouth_is_attached_once_before_stepping_and_requires_closed_noise_work(
     assert!(probe_lip().with_constriction_noise(constriction_card(7, 0.006)).unwrap()
         .with_finite_mouth(spec).is_err());
 }
+
+// MB 3915: the linear loop's two opt-in lip rows on the nonlinear bore. The probe lip at its default tension 1.0 (the only tension the
+// second mode runs at) with the second mode (Cullen 2000 Table A.2 embouchure 7: 244.5 Hz, Q 11, 1/mu -0.073 m^2/kg, on the probe lip's
+// 1e-4 m^2 face), the flow-area exponent, or neither.
+fn rows_lip(q: Option<f64>, mode2: Option<LipMode2>) -> NonlinearLip {
+    let mut lip = probe_lip();
+    if let Some(mode) = mode2 {
+        lip = lip.with_lip_mode2(mode).expect("a usable second mode");
+    }
+    if let Some(q) = q {
+        lip = lip.with_lip_area_exponent(q).expect("a usable exponent");
+    }
+    lip
+}
+
+fn embouchure_7_mode2() -> LipMode2 {
+    LipMode2::from_response(244.5, 11.0, -0.073, 1.0e-4).expect("embouchure 7")
+}
+
+fn rms(x: &[f64]) -> f64 {
+    (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).sqrt()
+}
+
+// G0 and G3. q = 1 (the row set to exactly 1) steps exactly the plain lip, bit for bit, on the nonlinear bore; q = 1.4 reaches the cup
+// pressure by more than 1 % of its rms, stays finite and repeats bit for bit.
+#[test]
+fn lip_area_exponent_one_on_the_nonlinear_bore_is_bit_identical_and_q_reaches_the_cup_pressure() {
+    let plain = jet_run(&mut rows_lip(None, None), 3000.0);
+    assert!(plain.iter().any(|p| p.abs() > 1.0), "the probe cup must carry pressure for the comparison to mean anything");
+    let unit = jet_run(&mut rows_lip(Some(1.0), None), 3000.0);
+    assert!(same_bits(&plain, &unit), "q = 1 must be the plain w h on the nonlinear bore");
+    let steeper = jet_run(&mut rows_lip(Some(1.4), None), 3000.0);
+    assert!(steeper.iter().all(|p| p.is_finite()));
+    assert!(!same_bits(&plain, &steeper), "q = 1.4 must reach the cup pressure");
+    assert!((rms(&steeper) - rms(&plain)).abs() > 0.01 * rms(&plain), "{} against {}", rms(&steeper), rms(&plain));
+    assert!(same_bits(&steeper, &jet_run(&mut rows_lip(Some(1.4), None), 3000.0)), "the same card repeats bit for bit");
+}
+
+// The aperture is the linear loop's: `w h (h/H0)^(q-1)`, the rest gap's aperture unchanged, zero when closed, and `w h` bit for bit
+// without the row; the exponent is refused by name outside [1, 4].
+#[test]
+fn lip_area_exponent_on_the_nonlinear_bore_scales_the_aperture_about_the_rest_gap_as_the_linear_loop_does() {
+    let lip = rows_lip(Some(2.0), None);
+    let (w, h0) = (lip.lip.width_m, lip.lip.rest_gap_m);
+    assert_eq!(lip.flow_width_height(h0).to_bits(), (w * h0).to_bits());
+    let wide = 2.0 * h0;
+    assert!((lip.flow_width_height(wide) - w * wide * 2.0).abs() <= 1e-15 * w * wide * 2.0);
+    let narrow = 0.5 * h0;
+    assert!((lip.flow_width_height(narrow) - w * narrow * 0.5).abs() <= 1e-15 * w * narrow);
+    assert_eq!(lip.flow_width_height(0.0), 0.0);
+    let q14 = rows_lip(Some(1.4), None);
+    let plain = rows_lip(None, None);
+    for gap in [0.3 * h0, h0, 1.7 * h0, 3.0 * h0] {
+        let expected = w * gap * (gap / h0).powf(1.4_f64 - 1.0);
+        assert_eq!(q14.flow_width_height(gap).to_bits(), expected.to_bits(), "gap {gap}");
+        assert_eq!(plain.flow_width_height(gap).to_bits(), (w * gap).to_bits(), "no row: the plain w h at gap {gap}");
+    }
+    for q in [0.0, 0.99, 4.01, -1.0, f64::NAN, f64::INFINITY] {
+        let refusal = probe_lip().with_lip_area_exponent(q).err().expect("outside [1, 4]");
+        assert!(refusal.contains("lip_area_exponent"), "{q}: {refusal}");
+    }
+    assert!(probe_lip().with_lip_area_exponent(4.0).is_ok());
+}
+
+// G3. The second lip mode reaches the cup pressure by more than 1 % of its rms, stays finite, repeats bit for bit and commits its own
+// state; both rows together differ from each alone.
+#[test]
+fn the_second_lip_mode_on_the_nonlinear_bore_reaches_the_cup_pressure_and_commits_its_state() {
+    let plain = jet_run(&mut rows_lip(None, None), 3000.0);
+    let two = jet_run(&mut rows_lip(None, Some(embouchure_7_mode2())), 3000.0);
+    assert!(two.iter().all(|p| p.is_finite()));
+    assert!(!same_bits(&plain, &two), "a second mode must reach the cup pressure");
+    assert!((rms(&two) - rms(&plain)).abs() > 0.01 * rms(&plain), "{} against {}", rms(&two), rms(&plain));
+    assert!(same_bits(&two, &jet_run(&mut rows_lip(None, Some(embouchure_7_mode2())), 3000.0)), "the same card repeats bit for bit");
+    let mut lip = rows_lip(None, Some(embouchure_7_mode2()));
+    jet_run(&mut lip, 3000.0);
+    assert!(lip.lip2.as_ref().is_some_and(|second| second.state.iter().any(|x| *x != 0.0)), "the second mode's state is committed");
+    let both = jet_run(&mut rows_lip(Some(1.4), Some(embouchure_7_mode2())), 3000.0);
+    assert!(both.iter().all(|p| p.is_finite()));
+    assert!(!same_bits(&both, &two) && !same_bits(&both, &jet_run(&mut rows_lip(Some(1.4), None), 3000.0)));
+}
+
+// The second mode has no printed pre-stress law: it refuses any tension but 1.0 by name, whether the tension comes after it or before.
+#[test]
+fn the_second_lip_mode_on_the_nonlinear_bore_runs_only_at_unit_tension_and_names_the_refusal() {
+    let mut lip = rows_lip(None, Some(embouchure_7_mode2()));
+    lip.apply(BrassControl::SetLipTension(1.0)).expect("tension 1 is the printed state");
+    let refusal = lip.apply(BrassControl::SetLipTension(1.2)).expect_err("another tension has no printed law");
+    assert!(refusal.contains("lip_response_mode2"), "{refusal}");
+    let mut one_mode = rows_lip(Some(1.4), None);
+    one_mode.apply(BrassControl::SetLipTension(1.2)).expect("the one-mode lip scales as before");
+    let mut tensioned = probe_lip();
+    tensioned.apply(BrassControl::SetLipTension(1.3)).expect("tension");
+    let refusal = tensioned.with_lip_mode2(embouchure_7_mode2()).err().expect("added after a tension change");
+    assert!(refusal.contains("lip_response_mode2"), "{refusal}");
+}
