@@ -387,8 +387,13 @@ fn frame_004_e_stopped_fragility() {
     for member in 0..ensemble.members {
         let real = ensemble.realize(member).expect("realizes");
         let mut frame = StoryFrame::new(params);
-        let drifts = frame.run(&real.values, dt);
-        if peak_drift(&drifts, params.h) > limit {
+        let response = frame
+            .run_from_time_zero(
+                GroundMotion::new(&real.values, dt),
+                HistoryLimits::new(real.values.len(), 30, 1e-12, 1.0),
+            )
+            .expect("reference history converges");
+        if response.peak_abs_displacement_m / params.h > limit {
             exceed += 1;
         }
     }
@@ -397,7 +402,11 @@ fn frame_004_e_stopped_fragility() {
     let covered = (report.p_hat - p_ref).abs() <= report.radius;
     verdict(
         "frame-004-e-stop-coverage",
-        covered && report.members_used <= 200 && exceed > 0 && exceed < 200,
+        covered
+            && report.members_used <= 200
+            && exceed > 0
+            && exceed < 200
+            && report.mlmc.levels.len() == 1,
         &format!(
             "p_ref {p_ref:.3} in CS [{:.3} ± {:.3}] at stop after {} members ({} exceedances)",
             report.p_hat, report.radius, report.members_used, report.exceedances

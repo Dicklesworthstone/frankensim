@@ -81,6 +81,14 @@ crates. Layer: **L6 HELM / interface surface**. The crate compiles as an
    then outward-divides verified endpoints by the physical yield stress. The
    four claim fields are appended to the layout block immediately before the
    existing sizing offset, so all earlier layout fields retain their positions.
+   FRAME time histories and confidence-curve replays also use the native
+   checked `StoryFrame::run_from_time_zero` owner. Source row zero establishes
+   force equilibrium, and N rows advance N-1 intervals. The history wire block
+   explicitly prepends the initial displacement/restoring shear so all three
+   channels retain their original N-row alignment. No local Newmark/fiber
+   transcription remains. The original-spectrum fragility diagnostic has one
+   level; a failed history or fallible fragility study returns the existing
+   refusal body without publishing a partial campaign.
 7. The browser isosurface is a serialization adapter, not a second polygonizer:
    each indexed `fs-viz` triangle is expanded to three positions plus three
    analytic gradient normals in the documented 18-value block.
@@ -243,7 +251,11 @@ None. WASM-only dependencies are target-gated under `cfg(target_arch =
 
 Native unit tests in the nested workspace exercise root demos, campaign
 defaults, geometry/PDE/deep modules, flagship headline/determinism cases, and
-the exact clock-free TrussPath certificate context. The native-host TrussPath
+the exact clock-free TrussPath certificate context. The FRAME helper test compares every advancing displacement/restoring-shear
+sample with the native initial-time owner and pins the explicit initial row;
+the headline gate requires its replayed final confidence-sequence values to
+match the fragility report and its default-spectrum diagnostic to have one
+level. The native-host TrussPath
 transcription test compares both serialized claim ranks/flags/outward endpoints
 and reconstructs the load-path replay golden from its two wire words for exact
 comparison against the native campaign; it is not browser execution or

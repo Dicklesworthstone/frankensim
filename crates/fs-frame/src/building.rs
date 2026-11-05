@@ -32,10 +32,10 @@ use fs_solid::fiber::material::RcSection;
 use fs_solid::fiber::rc_section;
 use fs_solid::frame2d::{FrameMassFormulation, FrameModalAnalysis, FrameModeStatus};
 use fs_solid::{Frame2d, Geometry, Rayleigh, SectionModel, SolidError};
-use fs_uq::mlmc::{MlmcReport, mlmc_estimate};
+use fs_uq::mlmc::{MlmcReport, coupled_mlmc_summary};
 
 use crate::assert_ground_motion_ensemble;
-use crate::history::{StoryFrame, StoryParams, peak_drift};
+use crate::history::{GroundMotion, HistoryLimits, StoryFrame, StoryParams};
 
 /// Standard gravity (m/s²).
 const G: f64 = 9.806_65;
@@ -505,15 +505,19 @@ pub struct BuildingFragility {
     pub exceedances: u32,
     /// Peak inter-story drift ratio of every consumed member.
     pub peak_drifts: Vec<f64>,
-    /// Multi-fidelity MLMC on the peak drift ratio (level 0: story model;
-    /// level 1: building − story on the same motion).
+    /// Paired observed-member diagnostics (level 0: story model; level 1:
+    /// building minus story). The mean and variance retain cross-level
+    /// covariance through the original fine values. Costs use declared
+    /// relative story/building weights 1:40, not measured time. This is
+    /// descriptive evidence, not an anytime interval or a targeted MLMC error.
     pub mlmc: MlmcReport,
 }
 
 /// Anytime-valid fragility of the BUILDING: `P(peak inter-story drift ratio
 /// > drift_limit)` over the ensemble, e-stopped once the confidence-sequence
 /// radius is `≤ margin` (after at least 8 members), plus the multi-fidelity
-/// MLMC report. `story` parameterizes the level-0 story model.
+/// diagnostic report. `story` parameterizes the level-0 story model; both
+/// models run once per consumed member, without a second resampling pass.
 ///
 /// # Errors
 /// Solver errors from any building time history.
@@ -536,13 +540,16 @@ pub fn building_fragility(
 
 /// Run the building fragility study from one explicitly admitted frame state.
 ///
-/// Every ensemble member and every MLMC fine correction starts from a clone
-/// of base, preserving its material selections, mass formulation and initial
+/// Every consumed ensemble member starts from a clone of base, preserving
+/// its material selections, mass formulation and initial
 /// constitutive state. The caller's frame is unchanged, including on a failed
 /// history. Pass a freshly gravity-loaded [`BuildingFrame::with_sections`]
 /// result for a study of the initial material-bearing building. The coarse
 /// story model is still an explicit approximation; it need not share the
 /// fine model's material laws for the paired MLMC correction to telescope.
+/// Both models use the source's first row as initial forcing and then advance
+/// N-1 steps over the same physical record; a refused coarse history also
+/// refuses the study.
 ///
 /// # Errors
 /// Propagates a failed fine-model time history without returning partial results.
@@ -563,10 +570,22 @@ pub fn building_fragility_from_frame(
     let mut cs = GaussianMixtureCs::new(0.5, 8.0, alpha);
     let (mut used, mut exceedances, mut stopped_early) = (0u32, 0u32, false);
     let mut peak_drifts = Vec::new();
+    let mut coarse_peaks = Vec::new();
     for member in 0..ensemble.members {
         let real = ensemble.realize(member).expect("ensemble realizes");
         let pd = base.clone().run(&real.values, dt)?.peak_drift_ratio;
+        let coarse = StoryFrame::new(story)
+            .run_from_time_zero(
+                GroundMotion::new(&real.values, dt),
+                HistoryLimits::new(real.values.len(), 30, 1e-12, 1.0),
+            )
+            .map_err(|error| SolidError::InvalidInput {
+                what: format!("coarse story history for member {member}: {error}"),
+            })?
+            .peak_abs_displacement_m
+            / story.h;
         peak_drifts.push(pd);
+        coarse_peaks.push(coarse);
         let x = if pd > drift_limit { 1.0 } else { 0.0 };
         if x > 0.5 {
             exceedances += 1;
@@ -582,31 +601,18 @@ pub fn building_fragility_from_frame(
         }
     }
     let (p_hat, radius) = cs.interval().expect("observed at least one member");
-    // Multi-fidelity MLMC: the sampler must be infallible, so a building
-    // failure poisons the sample with NaN and is reported below.
-    let mut failure: Option<SolidError> = None;
-    let mut sampler = |level: usize, g: u64| -> f64 {
-        let member = u32::try_from(g % u64::from(ensemble.members)).expect("small");
-        let real = ensemble.realize(member).expect("ensemble realizes");
-        let coarse = {
-            let mut frame = StoryFrame::new(story);
-            peak_drift(&frame.run(&real.values, dt), story.h)
-        };
-        if level == 0 {
-            return coarse;
-        }
-        match base.clone().run(&real.values, dt) {
-            Ok(r) => r.peak_drift_ratio - coarse,
-            Err(e) => {
-                failure.get_or_insert(e);
-                f64::NAN
-            }
-        }
-    };
-    let mlmc = mlmc_estimate(&mut sampler, &[1.0, 40.0], 4, 1e-6);
-    if let Some(e) = failure {
-        return Err(e);
-    }
+    // Both levels use the same consumed members. The native paired owner
+    // includes their covariance and never reruns an expensive fine history.
+    let mlmc = coupled_mlmc_summary(
+        coarse_peaks
+            .iter()
+            .zip(&peak_drifts)
+            .map(|(&coarse, &fine)| [coarse, fine]),
+        [1.0, 40.0],
+    )
+    .map_err(|error| SolidError::InvalidInput {
+        what: format!("paired building fragility moments: {error:?}"),
+    })?;
     Ok(BuildingFragility {
         members_used: used,
         p_hat,

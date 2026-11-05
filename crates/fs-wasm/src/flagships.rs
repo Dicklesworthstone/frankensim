@@ -42,7 +42,6 @@ use fs_race::{LossSpan, RaceSettings, race_field};
 use fs_rand::StreamKey;
 use fs_render::volumes::{AbsorptionImageSettings, VolumeGrid, render_absorption_transmittance};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
-use fs_solid::fiber::{Section, rc_section};
 use fs_sos::lyapunov_certifies_stability;
 use fs_sparse::{Coo, Csr};
 use fs_truss::{LayoutCertificateLimits, LayoutCertificateProblem, PdhgSettings};
@@ -1382,57 +1381,30 @@ fn frame_ensemble(seed: u32, members: u32, duration: f64, dt: f64) -> Stochastic
     }
 }
 
-/// A faithful capture of the nonlinear story time history (transcribes
-/// `fs_frame::history::StoryFrame::run` with a locally-owned fiber section so
-/// the true path-dependent shear `V(t)` — the hysteresis loop — is recorded).
-/// Returns `(x_history, v_history, k0)`.
-fn story_history(params: &fs_frame::StoryParams, ag: &[f64], dt: f64) -> (Vec<f64>, Vec<f64>, f64) {
-    let mut hinge: Section = rc_section(0.5, 0.35, 12, 0.002);
-    for f in &mut hinge.fibers {
-        f.area *= params.scale;
-    }
-    let restoring = |hinge: &Section, x: f64| -> (f64, f64) {
-        let kappa = x / (params.h * params.lp);
-        let st = hinge.respond(0.0, kappa);
-        let v = 2.0 * st.m / params.h;
-        let dv_dx = 2.0 * st.tangent[1][1] / (params.h * params.h * params.lp);
-        (v, dv_dx)
-    };
-    let k0 = restoring(&hinge, 1e-9).1;
-    let mm = params.mass;
-    let c = 2.0 * params.zeta * (k0 * mm).sqrt();
-    let (beta, gamma) = (0.25f64, 0.5f64);
-    let (mut cx, mut cv, mut ca) = (0.0f64, 0.0f64, 0.0f64);
-    let mut xs = Vec::with_capacity(ag.len());
-    let mut vs = Vec::with_capacity(ag.len());
-    for &agi in ag {
-        let p_ext = -mm * agi;
-        let (x0, v0, a0) = (cx, cv, ca);
-        let mut x = x0;
-        for _ in 0..30 {
-            let a_new = (x - x0 - dt * v0) / (beta * dt * dt) - (0.5 - beta) / beta * a0;
-            let v_new = v0 + dt * ((1.0 - gamma) * a0 + gamma * a_new);
-            let (fs, kt) = restoring(&hinge, x);
-            let r = mm * a_new + c * v_new + fs - p_ext;
-            let kdyn = mm / (beta * dt * dt) + c * gamma / (beta * dt) + kt;
-            let dx = -r / kdyn;
-            x += dx;
-            if dx.abs() < 1e-12 {
-                break;
-            }
-        }
-        let a_new = (x - x0 - dt * v0) / (beta * dt * dt) - (0.5 - beta) / beta * a0;
-        let v_new = v0 + dt * ((1.0 - gamma) * a0 + gamma * a_new);
-        let (shear, _) = restoring(&hinge, x);
-        let kappa = x / (params.h * params.lp);
-        hinge.commit(0.0, kappa);
-        cx = x;
-        cv = v_new;
-        ca = a_new;
-        xs.push(x);
-        vs.push(shear);
-    }
-    (xs, vs, k0)
+/// Native checked history, including the explicit initial row for the wire
+/// format's one-to-one alignment with the original acceleration samples.
+fn story_history(
+    params: &fs_frame::StoryParams,
+    ag: &[f64],
+    dt: f64,
+) -> Result<(Vec<f64>, Vec<f64>, f64), fs_frame::HistoryError> {
+    let mut frame = fs_frame::StoryFrame::new(*params);
+    let k0 = frame.initial_stiffness();
+    let initial_x = frame.x;
+    let initial_shear = frame.restoring(initial_x).0;
+    let response = frame.run_from_time_zero(
+        fs_frame::GroundMotion::new(ag, dt),
+        fs_frame::HistoryLimits::new(ag.len(), 30, 1e-12, 1.0),
+    )?;
+    let (mut xs, mut shears) = (response.displacement_m, response.restoring_shear_n);
+    xs.try_reserve(1)
+        .map_err(|_| fs_frame::HistoryError::AllocationFailed { samples: ag.len() })?;
+    shears
+        .try_reserve(1)
+        .map_err(|_| fs_frame::HistoryError::AllocationFailed { samples: ag.len() })?;
+    xs.insert(0, initial_x);
+    shears.insert(0, initial_shear);
+    Ok((xs, shears, k0))
 }
 
 /// **FRAME** — the e-stopped seismic frame flagship, run end to end at reduced
@@ -1538,21 +1510,29 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
 
     // ---- STAGE 3: TIME HISTORY (member 0, faithful hysteresis) ----------
     let ag = rep0.values.clone();
-    let (xs, vs, k0) = story_history(&base, &ag, dt);
+    let Ok((xs, vs, k0)) = story_history(&base, &ag, dt) else {
+        return frame_nan_body(seed);
+    };
     let ns_hist = ag.len();
     let peak = fs_frame::peak_drift(&xs, base.h);
     let vy = vs.iter().fold(0.0f64, |m, &v| m.max(v.abs()));
 
     // choose a drift_limit at the median member peak drift so p_hat ∈ (0,1)
     // (a thinned pre-pass — every third member — keeps this cheap).
-    let mut peaks: Vec<f64> = (0..members)
-        .step_by(3)
-        .filter_map(|mm| ensemble.realize(mm).ok())
-        .map(|r| {
-            let mut fr = fs_frame::StoryFrame::new(base);
-            fs_frame::peak_drift(&fr.run(&r.values, dt), base.h)
-        })
-        .collect();
+    let history_limits = fs_frame::HistoryLimits::new(ag.len(), 30, 1e-12, 1.0);
+    let mut peaks = Vec::new();
+    for member in (0..members).step_by(3) {
+        let Ok(record) = ensemble.realize(member) else {
+            return frame_nan_body(seed);
+        };
+        let Ok(response) = fs_frame::StoryFrame::new(base).run_from_time_zero(
+            fs_frame::GroundMotion::new(&record.values, dt),
+            history_limits,
+        ) else {
+            return frame_nan_body(seed);
+        };
+        peaks.push(response.peak_abs_displacement_m / base.h);
+    }
     peaks.sort_by(f64::total_cmp);
     let drift_limit = if peaks.is_empty() {
         base.h * 0.01
@@ -1562,18 +1542,39 @@ pub fn run_frame(seed: u32) -> Vec<f64> {
 
     // ---- STAGE 4: FRAGILITY (real e-stopped anytime CS + MLMC) ----------
     let (alpha, margin) = (0.1f64, 0.30f64);
-    let frag = fs_frame::e_stopped_fragility(&ensemble, base, drift_limit, alpha, margin);
+    let Ok(frag) = with_certificate_cx(|cx| {
+        fs_frame::try_e_stopped_fragility(
+            &ensemble,
+            base,
+            fs_frame::FragilityControls {
+                drift_limit,
+                alpha,
+                margin,
+                realization_budget: fs_scenario::RealizationBudget::default(),
+                history_limits,
+            },
+            cx,
+        )
+    }) else {
+        return frame_nan_body(seed);
+    };
     // running CS curve: replay members_used with the same GaussianMixtureCs.
     let mut cs = GaussianMixtureCs::new(0.5, 8.0, alpha);
     let mut cs_curve: Vec<(usize, f64, f64)> = Vec::new();
     for member in 0..frag.members_used {
-        if let Ok(r) = ensemble.realize(member) {
-            let mut fr = fs_frame::StoryFrame::new(base);
-            let pd = fs_frame::peak_drift(&fr.run(&r.values, dt), base.h);
-            cs.observe(if pd > drift_limit { 1.0 } else { 0.0 });
-            if let Some((center, radius)) = cs.interval() {
-                cs_curve.push((member as usize, center, radius));
-            }
+        let Ok(record) = ensemble.realize(member) else {
+            return frame_nan_body(seed);
+        };
+        let Ok(response) = fs_frame::StoryFrame::new(base).run_from_time_zero(
+            fs_frame::GroundMotion::new(&record.values, dt),
+            history_limits,
+        ) else {
+            return frame_nan_body(seed);
+        };
+        let pd = response.peak_abs_displacement_m / base.h;
+        cs.observe(if pd > drift_limit { 1.0 } else { 0.0 });
+        if let Some((center, radius)) = cs.interval() {
+            cs_curve.push((member as usize, center, radius));
         }
     }
 
@@ -1956,6 +1957,31 @@ mod tests {
     }
 
     #[test]
+    fn frame_history_preserves_initial_rows_and_native_checked_response() {
+        let params = fs_frame::StoryParams::default();
+        let acceleration = [0.8, 0.2, -0.4, 0.1, 0.3, -0.2];
+        let dt = 0.01;
+        let native = fs_frame::StoryFrame::new(params)
+            .run_from_time_zero(
+                fs_frame::GroundMotion::new(&acceleration, dt),
+                fs_frame::HistoryLimits::new(acceleration.len(), 30, 1e-12, 1.0),
+            )
+            .unwrap();
+        let (displacement, shear, stiffness) = story_history(&params, &acceleration, dt).unwrap();
+        assert_eq!(displacement.len(), acceleration.len());
+        assert_eq!(shear.len(), acceleration.len());
+        assert_eq!(displacement[0], 0.0);
+        assert_eq!(shear[0], 0.0);
+        assert_eq!(&displacement[1..], native.displacement_m.as_slice());
+        assert_eq!(&shear[1..], native.restoring_shear_n.as_slice());
+        assert_eq!(
+            stiffness,
+            fs_frame::StoryFrame::new(params).initial_stiffness()
+        );
+        assert!(story_history(&params, &[0.0, f64::NAN], dt).is_err());
+    }
+
+    #[test]
     fn frame_headline() {
         let v = run_frame(90210);
         assert_eq!(v[0], 2.0, "MAGIC");
@@ -1990,6 +2016,31 @@ mod tests {
         assert_eq!(all_pass, 1.0, "sizing all_pass");
         assert!(p_hat > 0.0 && p_hat < 1.0, "fragility p_hat {p_hat}");
         assert!(members_used < 48.0, "members_used {members_used}");
+        assert_eq!(v[off_fragility + 10], 1.0, "original-spectrum level count");
+        let off_history = v[5] as usize;
+        let history_samples = v[off_history + 2] as usize;
+        assert_eq!(
+            v[off_history + 5 + history_samples],
+            0.0,
+            "initial displacement"
+        );
+        assert_eq!(
+            v[off_history + 5 + 2 * history_samples],
+            0.0,
+            "initial restoring shear"
+        );
+        let curve_samples = v[off_fragility + 11] as usize;
+        let last_curve = off_fragility + 12 + 3 * (curve_samples - 1);
+        assert_eq!(
+            v[last_curve + 1].to_bits(),
+            p_hat.to_bits(),
+            "same CS replay"
+        );
+        assert_eq!(
+            v[last_curve + 2].to_bits(),
+            radius.to_bits(),
+            "same CS radius"
+        );
 
         let off_cvar = v[7] as usize;
         let scale_star = v[off_cvar];

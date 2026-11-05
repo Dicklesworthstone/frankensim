@@ -16,9 +16,9 @@ use fs_solid::fiber::{Section, rc_section};
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GroundMotion<'a> {
     /// Relative ground acceleration samples in metres per second squared.
-    /// Each value is applied at the end of one advancing time step; callers
-    /// importing a table whose first row is explicitly at `t = 0` must handle
-    /// that initial row before constructing this step-end sequence.
+    /// [`StoryFrame::run_checked`] applies each value at a step endpoint.
+    /// [`StoryFrame::run_from_time_zero`] instead uses the first value to
+    /// establish initial force equilibrium and advances through the remaining rows.
     pub acceleration_m_s2: &'a [f64],
     /// Uniform sample interval in seconds.
     pub dt_s: f64,
@@ -69,7 +69,8 @@ impl HistoryLimits {
 /// Auditable response histories from an admitted ground motion.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistoryResponse {
-    /// Relative story displacement at every admitted sample, in metres.
+    /// Relative story displacement at every advancing endpoint, in metres.
+    /// An explicitly initial-time row does not add an advancing endpoint.
     pub displacement_m: Vec<f64>,
     /// Fiber-section restoring shear at every admitted sample, in newtons.
     /// This excludes the viscous-damping contribution to a full support
@@ -90,6 +91,8 @@ pub struct HistoryResponse {
 pub enum HistoryError {
     /// A recorded-motion comparison requires at least one sample.
     EmptyRecord,
+    /// An initial-time record needs at least one later sample to advance.
+    MissingAdvancingSample,
     /// The sample interval was not finite and strictly positive.
     InvalidTimeStep {
         /// Rejected interval in seconds.
@@ -155,6 +158,9 @@ impl core::fmt::Display for HistoryError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::EmptyRecord => write!(formatter, "ground-motion record is empty"),
+            Self::MissingAdvancingSample => {
+                write!(formatter, "initial-time ground motion needs a later sample")
+            }
             Self::InvalidTimeStep { dt_s } => {
                 write!(
                     formatter,
@@ -458,15 +464,59 @@ impl StoryFrame {
     ///
     /// Returns [`HistoryError`] when the record, physical parameters, limits,
     /// allocation, or any nonlinear sample is inadmissible.
-    #[allow(clippy::too_many_lines)] // Preflight, staged integration, then one publication.
     pub fn run_checked(
         &mut self,
         motion: GroundMotion<'_>,
         limits: HistoryLimits,
     ) -> Result<HistoryResponse, HistoryError> {
+        self.run_checked_on_grid(motion, limits, None)
+    }
+
+    /// Run samples at `t = 0, dt, ..., (N-1)dt`.
+    ///
+    /// The first row sets relative acceleration from the original force
+    /// balance, including current restoring force and viscous damping. It does
+    /// not advance or commit the material. N rows produce N-1 advancing
+    /// endpoints; peak values also include the initial state. The complete
+    /// source record counts against the sample budget. As in
+    /// [`Self::run_checked`], every refusal leaves the frame unchanged.
+    ///
+    /// # Errors
+    /// Original history refusals, or fewer than two source samples.
+    pub fn run_from_time_zero(
+        &mut self,
+        motion: GroundMotion<'_>,
+        limits: HistoryLimits,
+    ) -> Result<HistoryResponse, HistoryError> {
+        self.run_sampled_checked(motion, limits, 1)
+    }
+
+    /// Initial-time integration at a positive source-index stride, retaining
+    /// the final row with a shorter last interval when needed. The fragility
+    /// owner admits the common spectral band before using stride two.
+    pub(crate) fn run_sampled_checked(
+        &mut self,
+        motion: GroundMotion<'_>,
+        limits: HistoryLimits,
+        stride: usize,
+    ) -> Result<HistoryResponse, HistoryError> {
+        assert!(stride > 0, "history sample stride must be positive");
+        self.run_checked_on_grid(motion, limits, Some(stride))
+    }
+
+    #[allow(clippy::too_many_lines)] // One preflight and staged Newmark owner for both clocks.
+    fn run_checked_on_grid(
+        &mut self,
+        motion: GroundMotion<'_>,
+        limits: HistoryLimits,
+        initial_time_stride: Option<usize>,
+    ) -> Result<HistoryResponse, HistoryError> {
         validate_story_parameters(self.params)?;
         if motion.acceleration_m_s2.is_empty() {
             return Err(HistoryError::EmptyRecord);
+        }
+        if initial_time_stride.is_some() && motion.acceleration_m_s2.len() < 2 {
+            return Err(HistoryError::MissingAdvancingSample);
         }
         if !motion.dt_s.is_finite() || motion.dt_s <= 0.0 {
             return Err(HistoryError::InvalidTimeStep { dt_s: motion.dt_s });
@@ -515,7 +565,10 @@ impl StoryFrame {
             });
         }
 
-        let samples = motion.acceleration_m_s2.len();
+        let source_samples = motion.acceleration_m_s2.len();
+        let samples = initial_time_stride.map_or(source_samples, |stride| {
+            (source_samples - 1).div_ceil(stride)
+        });
         let mut displacement_m = Vec::new();
         displacement_m
             .try_reserve_exact(samples)
@@ -528,17 +581,51 @@ impl StoryFrame {
         let mut staged = self.clone();
         let mut peak_abs_displacement_m = 0.0f64;
         let mut peak_abs_restoring_shear_n = 0.0f64;
+        if initial_time_stride.is_some() {
+            let restoring = staged.restoring(staged.x).0;
+            staged.a = -motion.acceleration_m_s2[0]
+                - (damping_n_s_m * staged.v + restoring) / staged.params.mass;
+            if !staged.x.is_finite()
+                || !staged.v.is_finite()
+                || !staged.a.is_finite()
+                || !restoring.is_finite()
+            {
+                return Err(HistoryError::NonFiniteState { sample: 0 });
+            }
+            peak_abs_displacement_m = staged.x.abs();
+            peak_abs_restoring_shear_n = restoring.abs();
+        }
         let mut max_abs_equilibrium_residual_n = 0.0f64;
         let mut max_newton_iterations_used = 0usize;
-        let controls = StepControls {
+        let mut controls = StepControls {
             dt_s: motion.dt_s,
             damping_n_s_m,
             max_newton_iterations: limits.max_newton_iterations,
             displacement_tolerance_m: limits.displacement_tolerance_m,
             equilibrium_tolerance_n: limits.equilibrium_tolerance_n,
         };
-        for (sample, &acceleration_m_s2) in motion.acceleration_m_s2.iter().enumerate() {
-            let response = staged.advance_sample::<true>(acceleration_m_s2, sample, controls)?;
+        let stride = initial_time_stride.unwrap_or(1);
+        let start = initial_time_stride.unwrap_or(0);
+        let last = source_samples - 1;
+        let tail = (initial_time_stride.is_some() && last % stride != 0).then_some(last);
+        let mut previous = 0;
+        for sample in (start..source_samples).step_by(stride).chain(tail) {
+            if initial_time_stride.is_some() {
+                #[allow(clippy::cast_precision_loss)]
+                let interval = (sample - previous) as f64;
+                controls.dt_s = interval * motion.dt_s;
+                if !controls.dt_s.is_finite() {
+                    return Err(HistoryError::InvalidTimeStep {
+                        dt_s: controls.dt_s,
+                    });
+                }
+            }
+            let response = staged.advance_sample::<true>(
+                motion.acceleration_m_s2[sample],
+                sample,
+                controls,
+            )?;
+            previous = sample;
             peak_abs_displacement_m = peak_abs_displacement_m.max(response.displacement_m.abs());
             peak_abs_restoring_shear_n =
                 peak_abs_restoring_shear_n.max(response.restoring_shear_n.abs());
@@ -596,4 +683,126 @@ fn validate_story_parameters(params: StoryParams) -> Result<(), HistoryError> {
 #[must_use]
 pub fn peak_drift(drifts: &[f64], h: f64) -> f64 {
     drifts.iter().fold(0.0f64, |m, &x| m.max(x.abs())) / h
+}
+
+#[cfg(test)]
+mod sampled_history_tests {
+    use super::{GroundMotion, HistoryError, HistoryLimits, StoryFrame, StoryParams};
+
+    fn limits() -> HistoryLimits {
+        HistoryLimits::new(64, 30, 1e-12, 1.0)
+    }
+
+    #[test]
+    fn g1_time_zero_uses_existing_force_equilibrium_and_rolls_back() {
+        let mut frame = StoryFrame::new(StoryParams::default());
+        frame
+            .run_checked(GroundMotion::new(&[0.5; 8], 0.01), limits())
+            .unwrap();
+        assert!(frame.x != 0.0 && frame.v != 0.0);
+        frame.a = 5_000.0; // The new initial forcing must replace this stale value.
+        let mut reference = frame.clone();
+        let initial_x = frame.x;
+        let restoring = reference.restoring(reference.x).0;
+        let damping = 2.0
+            * reference.params.zeta
+            * (reference.initial_stiffness() * reference.params.mass).sqrt();
+        let acceleration = [0.8, -0.4, 0.2];
+        reference.a =
+            -acceleration[0] - (damping * reference.v + restoring) / reference.params.mass;
+        let expected = reference
+            .run_checked(GroundMotion::new(&acceleration[1..], 0.005), limits())
+            .unwrap();
+        let actual = frame
+            .run_from_time_zero(GroundMotion::new(&acceleration, 0.005), limits())
+            .unwrap();
+        assert_eq!(actual.displacement_m, expected.displacement_m);
+        assert_eq!(actual.restoring_shear_n, expected.restoring_shear_n);
+        assert_eq!(actual.displacement_m.len(), acceleration.len() - 1);
+        assert_eq!(
+            actual.peak_abs_displacement_m,
+            initial_x.abs().max(expected.peak_abs_displacement_m)
+        );
+        assert_eq!(
+            [frame.x.to_bits(), frame.v.to_bits(), frame.a.to_bits()],
+            [
+                reference.x.to_bits(),
+                reference.v.to_bits(),
+                reference.a.to_bits()
+            ]
+        );
+
+        let mut untouched = frame.clone();
+        let state = [frame.x.to_bits(), frame.v.to_bits(), frame.a.to_bits()];
+        assert!(matches!(
+            frame.run_from_time_zero(
+                GroundMotion::new(&[0.8, -0.4], 0.005),
+                HistoryLimits::new(2, 1, 1e-30, 1e-30),
+            ),
+            Err(HistoryError::NewtonDidNotConverge { .. })
+        ));
+        assert_eq!(
+            [frame.x.to_bits(), frame.v.to_bits(), frame.a.to_bits()],
+            state
+        );
+        let probe = GroundMotion::new(&[0.1, -0.1], 0.005);
+        assert_eq!(
+            frame.run_checked(probe, limits()).unwrap(),
+            untouched.run_checked(probe, limits()).unwrap()
+        );
+    }
+
+    #[test]
+    fn g1_strided_initial_history_retains_last_short_interval() {
+        // Negligible restoring force relative to inertia: constant base
+        // acceleration has the independent free-mass limit x=-a*t^2/2, v=-a*t.
+        // Dyadic times also make the expected final horizon exact in f64.
+        let params = StoryParams {
+            mass: 1e20,
+            zeta: 0.0,
+            scale: 1e-6,
+            ..StoryParams::default()
+        };
+        let dt = 0.125f64;
+        for samples in 2usize..=8 {
+            let acceleration = vec![1.0; samples];
+            let motion = GroundMotion::new(&acceleration, dt);
+            let mut fine = StoryFrame::new(params);
+            let mut coarse = fine.clone();
+            let fine_response = fine.run_from_time_zero(motion, limits()).unwrap();
+            let coarse_response = coarse.run_sampled_checked(motion, limits(), 2).unwrap();
+            assert_eq!(fine_response.displacement_m.len(), samples - 1);
+            assert_eq!(
+                coarse_response.displacement_m.len(),
+                (samples - 1).div_ceil(2)
+            );
+            #[allow(clippy::cast_precision_loss)]
+            let time = (samples - 1) as f64 * dt;
+            for response in [fine, coarse] {
+                assert!((response.x + 0.5 * time * time).abs() < 1e-14);
+                assert!((response.v + time).abs() < 1e-14);
+                assert!((response.a + 1.0).abs() < 1e-14);
+            }
+        }
+        let mut frame = StoryFrame::new(params);
+        assert!(matches!(
+            frame.run_sampled_checked(GroundMotion::new(&[1.0, f64::NAN, 1.0], dt), limits(), 2,),
+            Err(HistoryError::NonFiniteAcceleration { sample: 1, .. })
+        ));
+        assert!(matches!(
+            frame.run_sampled_checked(
+                GroundMotion::new(&[1.0; 5], dt),
+                HistoryLimits::new(4, 30, 1e-12, 1.0),
+                2,
+            ),
+            Err(HistoryError::SampleLimitExceeded {
+                samples: 5,
+                max_samples: 4
+            })
+        ));
+        assert!(matches!(
+            frame.run_from_time_zero(GroundMotion::new(&[1.0], dt), limits()),
+            Err(HistoryError::MissingAdvancingSample)
+        ));
+    }
 }

@@ -51,8 +51,13 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   `t = 0` row must handle that row before constructing the advancing sequence.
   The path validates the whole record, reserves both output channels, and
   integrates a staged clone; a refusal publishes neither response nor committed
-  hinge state. The original `run(&[f64], dt)` remains the compatibility surface
-  for the synthetic smoke studies and preserves its fixed 30-correction behavior.
+  hinge state. `StoryFrame::run_from_time_zero` uses the same checked owner
+  for records at `0, dt, ..., (N-1)dt`: row zero sets relative acceleration
+  from the original restoring/damping/inertial balance without advancing or
+  committing the hinge. N rows produce N-1 endpoint pairs; peaks also include
+  the initial state, and all N source rows count against the sample limit.
+  The original `run(&[f64], dt)` retains its unchecked step-end semantics and
+  fixed 30-correction behavior.
   `frame-008` additionally pins the PEER/OpenSees Gallery Peknold El Centro 1940
   NS record (1,559 samples, 0.02 s, values in g), converts by exactly
   9.80665 m/s² per g, and produces a bounded diagnostic response. Its source
@@ -64,10 +69,23 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   HARD sub-Gaussian bound for indicators, not a plug-in); the study
   stops itself when the radius is decision-grade — validity AT the
   stopping time is the CS's construction, not a correction. An fs-uq
-  MLMC report over dt levels rides along as level-design evidence. The
-  smoke-tier entry point accepts only a non-empty Kanai–Tajimi
+  diagnostic report summarizes the same consumed fine histories. The original
+  record-periodic spectrum reaches the fine Nyquist limit, so this entry
+  point now reports one level and never decimates it or silently chooses a
+  different physical cutoff. `try_e_stopped_fragility` exposes the same source
+  with explicit `FragilityControls`, original scenario/history refusals and a
+  cancellation context. Both accept only a nonempty Kanai–Tajimi
   ground-acceleration ensemble; wind spectra and material-parameter bands are
   refused before their untyped realization vectors can reach the integrator.
+- `fragility::e_stopped_fragility_with_spectrum` accepts an explicit native
+  `SpectralDiscretization` whose cutoff fits the coarse Nyquist limit,
+  `omega_max_rad_s * 2dt <= pi`. Every consumed member is synthesized once,
+  and the same acceleration values and initial force equilibrium drive the dt
+  and 2dt histories. When N-1 is odd, the coarse history takes a final dt step
+  so both levels end at exactly the original `(N-1)dt` observation. The report
+  retains the exact optional grid and end time. No frequency tail is folded,
+  discarded during coarsening, or redistributed. The declared finite band and
+  frequency quadrature remain separate from structural timestep error.
 - `cvar::empirical_cvar` and `cvar::cvar` are direct re-exports of the
   canonical `fs-robust` report and scalar surfaces, respectively. The report
   retains deterministic VaR/minimizer and fractional-boundary metadata; empty
@@ -112,23 +130,29 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   loaded equilibrium, dynamic energy accounting and deterministic replay.
 - `building::building_fragility_from_frame(ensemble, frame, story, limit,
   alpha, margin)` clones the same admitted frame state for every fine
-  realization and paired MLMC correction. It preserves material selection,
+  realization. It preserves material selection,
   member inertia and starting constitutive state instead of rebuilding the
   authored fixture. The caller's frame is unchanged even if a realization
   fails; a fresh `with_sections` model represents the initial gravity-loaded
   building. The explicit coarse story approximation need not share the fine
-  model's materials for the paired correction to telescope.
+  model's materials for the paired correction to telescope. Both models use
+  row zero as initial forcing and advance over the same N-1 intervals. A
+  refused coarse history refuses the study. Every consumed motion feeds one
+  building and one story history; the diagnostic never reruns a fine model.
 - `building::building_fragility(ensemble, spec, story, limit, alpha,
   margin)`: e-stopped confidence sequence on `P(peak inter-story drift
   ratio > limit)` (stop once the radius is `≤ margin`, after ≥ 8 members),
   plus a two-level multi-fidelity MLMC on the peak drift ratio: level 0 is
   the smoke-tier story model, level 1 the building-minus-story correction
-  on the same motion (telescoping, so unbiased for the building).
+  on the same consumed motion. The native coupled-moment owner retains
+  cross-level covariance through the original fine values. Cost uses declared
+  relative story/building weights 1:40, not measured execution time.
 
 ## Checked smoke-tier CVaR feasibility
 
 The legacy `try_losses` path uses the same checked story-history owner as
-recorded-response diagnostics. Every step must satisfy the finite-state,
+recorded-response diagnostics, using `run_from_time_zero` to align all
+synthetic source rows with their original timestamps. Every step must satisfy the finite-state,
 Newton-correction and equilibrium gates; original history errors retain the
 ensemble-member index. Nonfinite or unconverged trajectories cannot disappear
 inside a peak-reduction operation and become zero-drift design losses.
@@ -250,11 +274,12 @@ provide numerical references, not measured-material or building qualification.
    restoring-shear value per displacement, reports peaks from those exact
    channels, and leaves the frame bit-replayable from its pre-call state after
    a nonlinear refusal.
-4. Fragility: the CS at the DATA-DEPENDENT stop covers the fixed-N
-   reference (p_ref 0.105 inside 0.098 ± 0.120 after 163/200
-   members); the threshold discriminates (16/200 exceedances); the
-   e-stop saving vs fixed-N is measured and LEDGERED (18% on the
-   smoke fixture) (frame-004).
+4. Fragility: the CS at the DATA-DEPENDENT stop is checked against the
+   full fixed-N reference of the same initial-time nonlinear histories, with
+   a discriminating threshold and a genuine early stop (frame-004). The
+   original-spectrum side report has one level. Explicit-spectrum tests
+   require the old fine history to equal the refined clock's coarse history
+   bit-for-bit on shared physical times, including an unchanged endpoint.
 5. CVaR: monotone in the section scale (0.408 → 0.0147 across the
    catalog range); bisection + snap yields a feasible design under
    the independent re-check (frame-005).
@@ -284,8 +309,8 @@ diagnostic). The fallible mass-minimization surface returns
 drift constraint. Statistical outputs carry their own uncertainty: the CS
 radius and stopping state ARE the answer's quality statement.
 
-`StoryFrame::run_checked` returns `HistoryError` for an empty or non-finite
-record, invalid SI time step or story parameter, sample-budget excess, invalid
+`StoryFrame::run_checked` and `run_from_time_zero` return `HistoryError` for an
+empty or non-finite record, invalid SI time step or story parameter, sample-budget excess, invalid
 Newton limits/tolerances, response-allocation failure, non-finite dynamic state,
 or exhaustion of the per-sample correction limit. Convergence currently means
 both the absolute Newton displacement correction and the absolute dynamic-
@@ -293,7 +318,11 @@ equilibrium residual are below their caller-supplied finite, positive
 tolerances, including a final post-correction residual check. The checked path
 is all-or-error with respect to both the returned histories and the frame's
 committed state; the compatibility `run` retains the older unchecked fixed-cap
-contract.
+contract. The initial-time surface also refuses a source with no advancing
+sample. `FragilityError` preserves original realization/history diagnostics
+and member identity, names an aliased coarse band, and reports cancellation or
+diagnostic allocation failure. All source rows are validated, including rows
+not used as coarse advancing endpoints.
 
 ## Determinism class
 
@@ -311,8 +340,10 @@ identity binding, and publication. Later fixed solver/dynamics loops remain
 synchronously bounded by iteration/member budgets. Checked history integration
 also has explicit sample and per-sample Newton limits and stages all mutable
 fiber state until success; it is synchronously bounded but does not yet accept
-an explicit `Cx`. The e-stop is itself the anytime-cancellation story: stopping
-at ANY member count leaves a valid interval.
+an explicit `Cx`. The fallible fragility surfaces check their explicit context
+before and after each bounded realization/history and before publication;
+latency may include one complete native history. The e-stop is itself the
+anytime-cancellation story: stopping at ANY member count leaves a valid interval.
 
 ## Unsafe boundary
 
@@ -335,6 +366,13 @@ canonical-CVaR refusal drills; frame-007 wrong-physics and empty-ensemble
 refusals at the realization boundary; frame-008 pinned El Centro record,
 provenance/license lint, checked diagnostic response, and diagnostic-only
 OpenSees displacement rounding envelope.
+
+`tests/fragility_frequency.rs` checks common-band admission, source/history
+budgets, cancellation, original-source preservation, time refinement with
+bitwise-identical shared histories, empirical paired variance, and consistent
+legacy fragility/CVaR time semantics. The history unit tests independently check
+a constant-acceleration free-mass limit over even and odd source lengths, initial
+force balance in an existing moving/loaded state, and whole-history rollback.
 
 `tests/building.rs` (full tier): building-001 modal band and separation of
 the gravity-loaded 3-story, 2-bay frame, energy-ledger closure and
@@ -372,8 +410,15 @@ and degenerate-spec refusal.
   Newton–Krylov multi-variable sizing, and arclength global-buckling
   sweeps: perf/full-tier scope.
 - MLMC here is a LEVEL-DESIGN REPORT, not the estimator of record
-  (the CS is); driving the fragility estimate itself through MLMC
-  with e-stopping per level is full-tier scope.
+  (the CS is). Diagnostics summarize only the already-consumed members, using
+  `fs-uq::mlmc::coupled_mlmc_summary` for the per-level corrections and the raw
+  fine mean/variance. They do not independently sample levels, modulo-replay
+  members, or adaptively top up to a variance target. Their sample variance
+  includes cross-level covariance but is not an anytime uncertainty bound
+  under the data-dependent stop. Smoke-tier costs count actual advancing
+  Newmark steps; building-tier costs are declared relative model weights.
+  Driving fragility itself through MLMC with e-stopping per level remains
+  full-tier scope.
 - No `explain()` artifact chain yet — the diagnostic and evidence fields are
   the auditable record; the fs-ledger integration is staged with the
   study-program (Appendix C) runner.

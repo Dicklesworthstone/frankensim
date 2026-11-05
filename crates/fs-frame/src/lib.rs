@@ -40,7 +40,10 @@ pub use cvar::{
     CvarDesign, FrameCvarError, cvar_mass_min, ensemble_cvar, try_cvar_mass_min, try_ensemble_cvar,
     try_losses,
 };
-pub use fragility::{FragilityReport, e_stopped_fragility};
+pub use fragility::{
+    FragilityControls, FragilityError, FragilityReport, e_stopped_fragility,
+    e_stopped_fragility_with_spectrum, try_e_stopped_fragility,
+};
 pub use history::{
     GroundMotion, HistoryError, HistoryLimits, HistoryResponse, StoryFrame, StoryParams, peak_drift,
 };

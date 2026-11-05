@@ -127,12 +127,28 @@ fn building_002_e_stopped_fragility_and_multifidelity_mlmc() {
             report.p_hat, report.radius, report.members_used, report.exceedances
         ),
     );
+    let consumed = f64::from(report.members_used);
+    let paired_mean = report.peak_drifts.iter().sum::<f64>() / consumed;
+    let paired_variance = report
+        .peak_drifts
+        .iter()
+        .map(|peak| (peak - paired_mean).powi(2))
+        .sum::<f64>()
+        / ((consumed - 1.0) * consumed);
     verdict(
         "building-002-mlmc",
         report.mlmc.levels.len() == 2
             && report.mlmc.estimate.is_finite()
             && report.mlmc.estimate > 0.0
-            && report.mlmc.estimator_variance.is_finite(),
+            && (report.mlmc.estimate - paired_mean).abs() <= 1e-12 * paired_mean
+            && (report.mlmc.estimator_variance - paired_variance).abs()
+                <= 1e-12 * paired_variance + 1e-24
+            && report
+                .mlmc
+                .levels
+                .iter()
+                .all(|level| level.samples == usize::try_from(report.members_used).unwrap())
+            && report.mlmc.total_cost == 41.0 * consumed,
         &format!(
             "MLMC E[peak drift] {:.4} (var {:.2e}) over story->building levels",
             report.mlmc.estimate, report.mlmc.estimator_variance

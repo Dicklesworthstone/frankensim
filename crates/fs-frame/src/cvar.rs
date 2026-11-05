@@ -113,7 +113,11 @@ impl core::fmt::Display for FrameCvarError {
                 f,
                 "even scale {hi_scale} violates CVaR limit {limit} (observed {cvar_observed})"
             ),
-            Self::CatalogRiskExceeded { scale, cvar_observed, limit } => write!(
+            Self::CatalogRiskExceeded {
+                scale,
+                cvar_observed,
+                limit,
+            } => write!(
                 f,
                 "catalog scale {scale} violates CVaR limit {limit} (observed {cvar_observed})"
             ),
@@ -162,7 +166,9 @@ pub(crate) fn try_assert_ground_motion_ensemble(
 /// Each smoke-tier history uses the existing checked owner: at most 30 Newton
 /// corrections per sample, displacement tolerance 1e-12 m and equilibrium
 /// tolerance 1 N. The native realization budget already bounds sample count.
-/// Input, nonfinite-state and convergence failures retain their member index.
+/// Source row zero establishes the initial force equilibrium; N rows advance
+/// N-1 steps, matching the scenario's physical timestamps. Input, nonfinite-state
+/// and convergence failures retain their member index.
 pub fn try_losses(
     ensemble: &StochasticEnsemble,
     base: StoryParams,
@@ -178,7 +184,7 @@ pub fn try_losses(
         let params = StoryParams { scale: s, ..base };
         let mut frame = StoryFrame::new(params);
         let history = frame
-            .run_checked(
+            .run_from_time_zero(
                 GroundMotion::new(&real.values, dt),
                 HistoryLimits::new(real.values.len(), 30, 1e-12, 1.0),
             )
