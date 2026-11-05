@@ -1,10 +1,12 @@
 //! Actual momentum, constitutive-memory and time-accuracy checks, using the
 //! original finite-strain solver and an independent small-strain Maxwell oracle.
 
-#[path = "hyper_visco_dynamics/nodal_density.rs"]
-mod nodal_density;
 #[path = "hyper_visco_dynamics/impulse.rs"]
 mod impulse;
+#[path = "hyper_visco_dynamics/nodal_density.rs"]
+mod nodal_density;
+#[path = "hyper_visco_dynamics/reference_change.rs"]
+mod reference_change;
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};

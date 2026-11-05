@@ -29,7 +29,8 @@ use fs_material::hyper::mixed::VolumetricTreatment;
 
 use super::super::{MixedUpSettings, MixedUpSolution, inertia_error};
 use super::{
-    MixedViscoTetEnergy, MixedViscoTetError, MixedViscoTetSolid, checkpoint, gate, invalid,
+    MixedViscoLawField, MixedViscoReferenceChangeControls, MixedViscoTetEnergy, MixedViscoTetError,
+    MixedViscoTetSolid, checkpoint, gate, invalid,
 };
 use crate::inertia::{BackwardEulerInertia, ReferenceMass};
 use crate::linear3::tet10::TET10_EDGES;
@@ -72,6 +73,23 @@ pub struct MixedViscoMotionStep<'a> {
     pub inertia: InertialEnergy,
     /// Momentum work residual plus the independent kinetic identity residual.
     pub balance_error_j: f64,
+}
+
+/// Admitted reference/pressure change with unchanged original-mass motion.
+#[derive(Debug)]
+pub struct MixedViscoMotionReferenceChange<'a> {
+    pub motion: MixedViscoTetMotion<'a>,
+    pub stored_before_j: f64,
+    pub stored_after_j: f64,
+    pub remainder_reference_work_j: f64,
+    pub bulk_reference_work_j: f64,
+    /// Signed material-reference exchange; pressure-constraint work is reported
+    /// separately below. Velocity, kinetic energy and viscous loss are unchanged.
+    pub reference_work_j: f64,
+    /// Signed weak-constraint contribution retained by the native body account:
+    /// `stored_after - stored_before = reference_work - constraint_defect`.
+    pub pressure_constraint_defect_j: f64,
+    pub relative_volume_residual: f64,
 }
 
 impl<'a> MixedViscoTetMotion<'a> {
@@ -246,6 +264,59 @@ impl<'a> MixedViscoTetMotion<'a> {
     }
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+
+    /// Admit a prescribed-reference change at the held total deformation and
+    /// caller-supplied pressure, without changing physical motion or inventory.
+    ///
+    /// The native solid re-admits its weak volume constraint and accounts for
+    /// remainder and reconstructed bulk energy separately. In particular, a
+    /// pressure choice cannot repair an incompatible exact-volume change at
+    /// fixed displacement. The original corner density and signed consistent
+    /// P2 mass are shared directly; no mass assembly or averaging occurs.
+    ///
+    /// Velocity and time are retained, and the new accepted body identity
+    /// invalidates old prepared contact/force/drift responses. This successor
+    /// does not borrow the predecessor wrapper. Any refusal or cancellation
+    /// leaves the previous motion, pressure and histories unchanged.
+    pub fn change_reference<'b>(
+        &self,
+        target_material: MixedViscoLawField<'b>,
+        pressure_pa: &[f64],
+        controls: MixedViscoReferenceChangeControls,
+        cx: &Cx<'_>,
+    ) -> Result<MixedViscoMotionReferenceChange<'b>, MixedViscoTetError>
+    where
+        'a: 'b,
+    {
+        let change = self
+            .solid
+            .change_reference(target_material, pressure_pa, controls, cx)?;
+        let mut velocity_mps = Vec::with_capacity(self.velocity_mps.len());
+        for chunk in self.velocity_mps.chunks(256) {
+            checkpoint(cx)?;
+            velocity_mps.extend_from_slice(chunk);
+        }
+        checkpoint(cx)?;
+        Ok(MixedViscoMotionReferenceChange {
+            motion: MixedViscoTetMotion {
+                solid: change.solid,
+                velocity_mps,
+                reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                reference_corner_density_kg_m3: self
+                    .reference_corner_density_kg_m3
+                    .as_ref()
+                    .map(Arc::clone),
+                mass: Arc::clone(&self.mass),
+            },
+            stored_before_j: change.stored_before_j,
+            stored_after_j: change.stored_after_j,
+            remainder_reference_work_j: change.remainder_reference_work_j,
+            bulk_reference_work_j: change.bulk_reference_work_j,
+            reference_work_j: change.reference_work_j,
+            pressure_constraint_defect_j: change.pressure_constraint_defect_j,
+            relative_volume_residual: change.relative_volume_residual,
+        })
     }
     /// Project a P2 reference acceleration [m/s²] through the retained mass.
     ///
