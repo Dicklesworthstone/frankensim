@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod affine_density;
+
 impl BoundaryGrid3 {
     /// Select a uniform held body acceleration, in lattice units `dx/dt²`.
     ///
@@ -16,9 +18,10 @@ impl BoundaryGrid3 {
     /// load or the next time's acceleration for a smooth prescribed history.
     /// An ordinary `step` instead retains the selected force density.
     ///
-    /// Closed walls and periodic boundaries are supported. Open-face density
-    /// reconstruction and finite-inertia immersed-body feedback need their own
-    /// coupled density-dependent source closure. Low-Mach lattice requirements
+    /// Closed, periodic and native velocity/pressure boundaries are supported.
+    /// Open-face endpoints solve their density-dependent source together with
+    /// the existing regularized reconstruction. Finite-inertia immersed-body
+    /// feedback needs its own coupled source closure. Low-Mach requirements
     /// remain unchanged; pressure, viscosity and wall reactions are not added
     /// again as body forces.
     pub fn rebind_body_acceleration(
@@ -26,9 +29,9 @@ impl BoundaryGrid3 {
         acceleration: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(), BoundaryForcingError3> {
-        // The zero-motion frame already owns the atomic rho*a preparation and
-        // physical Guo reframe, including reused population/force allocations.
-        RigidFrame3::default().prepare_step(self, acceleration, gate)
+        // Reuse the atomic zero-motion preparation, without broadening the
+        // public rotating-frame owner's boundary-admission contract.
+        RigidFrame3::prepare_body_acceleration(self, acceleration, gate)
     }
 
     /// Advance with prescribed acceleration at the next physical endpoint.
@@ -41,12 +44,17 @@ impl BoundaryGrid3 {
     /// [`Self::rebind_body_acceleration`] to preserve its physical velocity.
     ///
     /// This is prescribed acceleration, not a held force density or an
-    /// implicit velocity-dependent force. Closed/periodic boundaries and the
-    /// original forcing-compatible collision laws are supported. Endpoint
-    /// admission is fused into streaming; the accepted force allocation is
-    /// reused after first use. Refusal/cancellation changes neither accepted
-    /// populations nor forces. No additional grid clone or second collision
-    /// is introduced.
+    /// implicit velocity-dependent force. Closed, periodic and native open
+    /// boundaries use the original forcing-compatible collision laws. At a
+    /// wall/open seam, only open-owned populations change, so the final density
+    /// and its force are solved together. This preserves the existing partial
+    /// reconstruction convention: full-face targets need not hold at seams.
+    /// Reservoir transport remains separate from the body-force impulse.
+    ///
+    /// Endpoint admission is fused into streaming and open reconstruction;
+    /// the accepted force allocation is reused after first use. Refusal or
+    /// cancellation changes neither accepted populations nor forces. No
+    /// additional grid clone or second collision is introduced.
     pub fn step_with_endpoint_body_acceleration(
         &mut self,
         acceleration: [f64; 3],
@@ -129,14 +137,6 @@ impl BoundaryGrid3 {
                 "body acceleration requires a forcing-compatible collision model",
             ));
         }
-        if Face3::ALL
-            .into_iter()
-            .any(|face| self.boundaries.face(face).is_open())
-        {
-            return Err(invalid(
-                "body acceleration requires closed or periodic boundaries",
-            ));
-        }
         let initial_field = self
             .force_field
             .is_none()
@@ -145,6 +145,56 @@ impl BoundaryGrid3 {
             value,
             initial_field,
         })
+    }
+
+    // The native source frame is linear in force at fixed reconstruction
+    // velocity. A full face preserves its template density. At a wall seam,
+    // replacing only open-owned rows gives rho = B + C*rho for F = rho*a.
+    pub(in super::super) fn open_body_acceleration_populations(
+        &self,
+        fields: &[Vec<Tile>; Q3],
+        cell: [usize; 3],
+        rho: f64,
+        velocity: [f64; 3],
+        stress: [[f64; 3]; 3],
+        acceleration: [f64; 3],
+    ) -> Result<[f64; Q3], BoundaryStepError3> {
+        let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
+        let wall_mask = self.link_masks[tile].0[lane];
+        let open_mask = self.open_link_masks[tile].0[lane];
+        let before = core::array::from_fn(|q| fields[q][tile].0[lane]);
+        let template = regularized_populations(rho, velocity, stress);
+        let density = if wall_mask == 0 {
+            // The native Guo reframe retains the full template's zeroth moment.
+            template.iter().sum::<f64>()
+        } else {
+            let base = reconstruct_open_populations(
+                template, velocity, [0.0; 3], before, wall_mask, open_mask,
+            );
+            let mut response = [0.0; Q3];
+            crate::thermal::forcing::reframe3(&mut response, velocity, [0.0; 3], acceleration);
+            for (q, value) in response.iter_mut().enumerate() {
+                if open_mask & (1u32 << q) == 0 {
+                    *value = 0.0;
+                }
+            }
+            affine_density::solve(&base, &response)
+                .ok_or(BoundaryStepError3::Unphysical { cell })?
+        };
+        let force = acceleration.map(|value| density * value);
+        let reconstructed =
+            reconstruct_open_populations(template, velocity, force, before, wall_mask, open_mask);
+        // Admit against the ACTUAL reconstructed mass used at publication.
+        // A bad closure, overflowing source or physical velocity stays private.
+        let actual_force = EndpointSource3::Acceleration(acceleration)
+            .force(&reconstructed, tile, lane)
+            .ok_or(BoundaryStepError3::Unphysical { cell })?;
+        if !affine_density::matches(&reconstructed, density)
+            || !finite_forced_populations(&reconstructed, actual_force)
+        {
+            return Err(BoundaryStepError3::Unphysical { cell });
+        }
+        Ok(reconstructed)
     }
 
     // Called only after all endpoint cells and the final checkpoint admit.

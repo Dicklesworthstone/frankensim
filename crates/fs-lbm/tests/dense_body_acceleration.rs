@@ -2,7 +2,7 @@
 
 use fs_exec::{CancelGate, TilePool};
 use fs_lbm::d3q19::{BoundaryStepError3, CollisionModel3, E3, Q3};
-use fs_lbm::{BoundaryGrid3, BoundarySpec3, FaceBoundary3, equilibrium3};
+use fs_lbm::{BoundaryGrid3, BoundarySpec3, equilibrium3};
 
 fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
@@ -367,7 +367,7 @@ fn density_source_and_native_wall_loads_close_linear_and_angular_impulse_with_po
 }
 
 #[test]
-fn late_endpoint_refusal_cancellation_and_open_boundaries_preserve_accepted_state() {
+fn late_endpoint_refusal_and_cancellation_preserve_accepted_state() {
     let gate = CancelGate::new_clock_free();
     let pool = TilePool::for_host(2, 0xACCE2);
     for pooled in [false, true] {
@@ -402,21 +402,5 @@ fn late_endpoint_refusal_cancellation_and_open_boundaries_preserve_accepted_stat
         grid.voxelize_sdf(|_| 1.0);
         advance(&mut grid, [0.001, 0.0, 0.0], &gate).unwrap();
         assert_ne!(snapshot(&grid), before);
-        let mut faces = [FaceBoundary3::Periodic; 6];
-        faces[0] = FaceBoundary3::Velocity {
-            velocity: [0.01, 0.0, 0.0],
-        };
-        faces[1] = FaceBoundary3::Pressure { density: 1.0 };
-        let mut open = BoundaryGrid3::new(4, 4, 4, 0.9, [0.0; 3], BoundarySpec3::new(faces));
-        let before = snapshot(&open);
-        assert!(matches!(
-            advance(&mut open, [0.001, 0.0, 0.0], &gate),
-            Err(BoundaryStepError3::EndpointForce { .. })
-        ));
-        assert!(
-            open.rebind_body_acceleration([0.001, 0.0, 0.0], &gate)
-                .is_err()
-        );
-        assert_eq!(snapshot(&open), before);
     }
 }

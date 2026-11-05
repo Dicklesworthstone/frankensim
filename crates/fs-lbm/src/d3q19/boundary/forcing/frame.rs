@@ -61,8 +61,29 @@ impl RigidFrame3 {
         acceleration: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(), BoundaryForcingError3> {
+        self.prepare_step_inner(grid, acceleration, gate, false)
+    }
+
+    // The prescribed-acceleration owner shares this atomic Guo reframe, but
+    // supplies its own density-coupled endpoint reconstruction for open faces.
+    // Keep this exception private and restricted to the zero-motion frame.
+    pub(super) fn prepare_body_acceleration(
+        grid: &mut BoundaryGrid3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryForcingError3> {
+        Self::default().prepare_step_inner(grid, acceleration, gate, true)
+    }
+
+    fn prepare_step_inner(
+        self,
+        grid: &mut BoundaryGrid3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+        acceleration_open_faces: bool,
+    ) -> Result<(), BoundaryForcingError3> {
         poll(gate)?;
-        let denominator = self.admit(grid, acceleration)?;
+        let denominator = self.admit(grid, acceleration, acceleration_open_faces)?;
         let mut initial_force_field = if grid.force_field.is_none() {
             Some(vec![[0.0; 3]; grid.f[0].len() * TILE_CELLS])
         } else {
@@ -128,6 +149,7 @@ impl RigidFrame3 {
         self,
         grid: &BoundaryGrid3,
         acceleration: [f64; 3],
+        acceleration_open_faces: bool,
     ) -> Result<f64, BoundaryForcingError3> {
         use BoundaryForcingError3::Invalid;
         let denominator = self.midpoint_denominator(acceleration).map_err(Invalid)?;
@@ -138,7 +160,7 @@ impl RigidFrame3 {
         }
         for face in Face3::ALL {
             let boundary = grid.boundaries.face(face);
-            if boundary.is_open() {
+            if boundary.is_open() && !acceleration_open_faces {
                 return Err(Invalid(
                     "rigid-frame flow requires closed or compatible periodic boundaries",
                 ));

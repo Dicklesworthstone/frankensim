@@ -11182,8 +11182,10 @@ the incorrect-order negative control, serial/pooled bits and atomic refusals
 
 ### Actual-density body acceleration on the dense lattice
 
-`BoundaryGrid3::rebind_body_acceleration` uses the original zero-motion rigid-frame
+`BoundaryGrid3::rebind_body_acceleration` uses the original zero-motion Guo
 preparation to select `F = rho*a` without elapsed impulse or a stress reset.
+Its private open-boundary admission does not broaden `RigidFrame3`'s public
+rotating-frame restrictions.
 `step_with_endpoint_body_acceleration` and its pooled/selected-wall variants
 then use the original collision, streaming and wall-load kernels. Collision
 retains `F_n`; the streamed density supplies `F_(n+1) = rho_(n+1)*a_(n+1)`.
@@ -11196,16 +11198,33 @@ The endpoint force/velocity admission runs on the populations already held by
 each streaming kernel. Publication reuses the accepted force allocation after
 first use; it needs no new grid clone, source solver or second collision.
 Cancellation, nonrepresentable endpoint forces and late collision/stream refusal
-leave accepted populations and sources unchanged. Closed walls and periodic
-domains are supported; open faces refuse before stepping because their
-density-dependent force/reconstruction closure is not supplied here. Immersed
-finite-body feedback and full-flow energy conservation are not claimed.
+leave accepted populations and sources unchanged. Closed walls, periodic
+domains and native velocity/pressure faces are supported. Open reconstruction
+uses the interior's actual endpoint density and force-corrected stress. A full
+face retains the regularized template's density. At a wall/open seam, only
+open-owned rows change: the native Guo source gives an affine mass law
+`rho = B + C*rho`, solved directly as `B/(1-C)` before reconstructing in the
+`F = rho*a` source frame. This avoids iterative density guesses and retains
+wall-owned populations. Singular, nonpositive or nonrepresentable closures
+refuse atomically; the actual final population sum is checked before publication.
+
+Spatial velocity/pressure profiles remain authoritative. As with the original
+masked reconstruction, nominal full-face density/velocity targets need not hold
+at a mixed wall seam. Reservoir mass and momentum transport stay separate from
+body-force impulse; neither sealed-domain conservation nor reservoir work is
+claimed. Immersed finite-body feedback and full-flow energy conservation still
+need their own coupled owners.
 
 `tests/dense_body_acceleration.rs` checks unequal-density response and changing
 acceleration through four collision laws, retained non-equilibrium stress,
 independent affine-density endpoint moments, sinusoidal second-order time
 convergence, periodic total/local momentum, wall linear/angular impulse,
 serial/pooled population bits and transactional refusal (G0/G1/G3/G4/G5).
+`tests/open_body_acceleration.rs` adds all-axis/full-face analytical response,
+wall-seam closure against independently iterated prescribed-force reference
+steps, reservoir mass/momentum accounting, pooled parity and failed open-source
+publication. The scalar closure's inline tests cover retained rows, independent
+fixed-point agreement, noncontractive cases, density scaling and refused roots.
 
 ### Shared momentum reduction for immersed finite bodies
 

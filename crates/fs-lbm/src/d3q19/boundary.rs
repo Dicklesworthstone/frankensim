@@ -2384,7 +2384,7 @@ impl BoundaryGrid3 {
                 cell_force(*uniform, Some(local), tile, lane)
             }
             Some(EndpointForcing3::Acceleration { .. }) => {
-                unreachable!("body acceleration refuses open faces before stepping")
+                unreachable!("density-dependent sources use their open-boundary closure")
             }
             None => cell_force(self.force, self.force_field.as_deref(), tile, lane),
         }
@@ -2418,6 +2418,11 @@ impl BoundaryGrid3 {
         let (neighbor_rho, neighbor_velocity, stress) =
             self.regularized_source(fields, interior, endpoint)?;
         let (rho, velocity) = self.open_target(cell, face, neighbor_rho, neighbor_velocity);
+        if let Some(EndpointForcing3::Acceleration { value, .. }) = endpoint {
+            return self.open_body_acceleration_populations(
+                fields, cell, rho, velocity, stress, *value,
+            );
+        }
         let (tile, lane) = self.addr(cell[0], cell[1], cell[2]);
         let force = self.open_force_with_forcing(tile, lane, endpoint);
         let reconstructed = reconstruct_open_populations(
@@ -2467,7 +2472,14 @@ impl BoundaryGrid3 {
         endpoint: Option<&EndpointForcing3>,
     ) -> Result<(f64, [f64; 3], [[f64; 3]; 3]), BoundaryStepError3> {
         let (tile, lane) = self.addr(x, y, z);
-        let force = self.open_force_with_forcing(tile, lane, endpoint);
+        let force = if let Some(EndpointForcing3::Acceleration { value, .. }) = endpoint {
+            let populations = core::array::from_fn(|q| fields[q][tile].0[lane]);
+            EndpointSource3::Acceleration(*value)
+                .force(&populations, tile, lane)
+                .ok_or(BoundaryStepError3::Unphysical { cell: [x, y, z] })?
+        } else {
+            self.open_force_with_forcing(tile, lane, endpoint)
+        };
         self.regularized_source_with_force(fields, [x, y, z], force)
     }
 
