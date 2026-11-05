@@ -671,6 +671,52 @@ law and work accounting, pressure relaxation against independent two-cell ODE
 integration, time refinement, squeeze pressure between sealed and ideal-vent
 limits, separate tube applicability, and restart/reversed-bath behavior.
 
+#### Finite reservoir pressure feedback
+
+`GasFilmBoundaryTopology::CapillaryReservoir` replaces the capillary's infinite
+bath with a rigid finite volume of the same isothermal ideal gas.
+`GasFilmReservoir` declares volume per width and initial absolute pressure;
+the accepted checkpoint retains reservoir **mass**. Filling raises its pressure
+and reduces discharge, and draining lowers its pressure. Both film endpoints
+remain sealed, so capillary exchange is internal to the combined system.
+
+The existing pressure iteration includes this feedback at the same backward-
+Euler time level. With `G=N*pi*r^4/(16*mu*L*R*T)` and `B=V/(R*T*dt)`, the
+reservoir equation is `G*p_r^2+B*p_r = G*p_f^2+B*p_r_old`. Its positive root
+is eliminated analytically from each film update. The reduced derivative is
+`d(m_dot)/d(p_f)=2*G*p_f*B/(B+2*G*p_r)`, not the infinite-bath derivative.
+Scaled coefficients and a series-conductance expression avoid cancellation
+for small/large capacities. There is no extra nonlinear coupling loop,
+per-iteration allocation, explicit discharge stability limit, or pressure floor.
+The accepted mass receives exactly the same signed transfer used by the film;
+the represented reservoir storage residual, divided by the connection cell
+width, also participates in the existing mass-residual acceptance budget.
+
+`finite_reservoir` reports accepted pressure/mass, storage, receiving enthalpy,
+and combined film-plus-reservoir mass closure. Its pressure uses the original
+`p=m*R*T/V` closure. The receiving enthalpy is the film's outward vent enthalpy,
+with opposite outward orientation. At fixed temperature, `e=h-R*T`, so a rigid
+reservoir requires heat `Q_dot=-m_dot*R*T`: filling rejects heat and draining
+requires heat. This explicit thermal requirement is separate from capillary
+viscous dissipation and supplies no invented thermal conductance. It does not
+turn the isothermal film into a total-energy or temperature-evolution solver.
+
+Reservoir volume/initialization, connection geometry, and gas identity are
+bound to restart compatibility. Missing/nonpositive/nonfinite retained mass
+refuses; no trial reservoir state is published after failed pressure admission.
+The no-slip tube's initial and accepted Kn/Mach/Re checks use the actual
+evolving reservoir pressure. The finite volume is spatially uniform and has no
+external feed, moving wall, changing composition or resolved internal acoustics.
+Its well-mixed/isothermal approximation and negligible capillary storage must
+be justified on the physical forcing timescale; a small numerical step does
+not supply that justification. Very-small-capacity regressions exercise
+algebraic conditioning, not continuum or acoustic validity at those volumes.
+
+Focused regressions check closed-mass equilibration from either pressure order,
+independent ideal-gas equilibrium pressure, enthalpy and required heat,
+three-storage ODE time refinement, small-capacity stiffness and the large-bath
+limit, squeeze/expansion flow reversal, restart identity and failed-step recovery.
+
 The implementation is bit-deterministic on one ISA by fixed cell/face order and
 bounded Jacobi/Picard sweeps. It has no RNG, no `Cx` cancellation hook, no
 entropy model, and no thermochemical or material-data admission; the

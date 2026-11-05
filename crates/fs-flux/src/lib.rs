@@ -69,9 +69,10 @@ pub use capillary::{
 pub use gas_film::{
     CapillaryVent, CapillaryVentReport, ContactExclusionMask, GasFilmApplicability,
     GasFilmBoundaryTopology, GasFilmBudget, GasFilmCheckpoint, GasFilmError, GasFilmGrid1d,
-    GasFilmIdentity, GasFilmInput, GasFilmInputAuthority, GasFilmReceipt, GasFilmStep,
-    GasFilmUncertainty, IsothermalIdealGas, MovingWallInput, RoughnessPolicy, SlipPolicy,
-    isothermal_compressible_reynolds_model_id, solve_isothermal_gas_film_1d,
+    GasFilmIdentity, GasFilmInput, GasFilmInputAuthority, GasFilmReceipt, GasFilmReservoir,
+    GasFilmReservoirReport, GasFilmStep, GasFilmUncertainty, IsothermalIdealGas, MovingWallInput,
+    RoughnessPolicy, SlipPolicy, isothermal_compressible_reynolds_model_id,
+    solve_isothermal_gas_film_1d,
 };
 #[cfg(feature = "continuum")]
 pub use material::{
