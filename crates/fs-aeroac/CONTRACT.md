@@ -2468,3 +2468,40 @@ deep evanescent and equal-depth cases, reciprocity, all receiving momentum
 components, continuity-equation divergence, both-face pressure/velocity
 continuity, rotated geometry, finite reflected self-fields, symmetry,
 aggregate work exhaustion, cancellation and invalid-input refusals.
+
+## Physical force sources and receivers inside the original fluid layer
+
+`interior::internal::PreparedLayerInternalFullWaveForce` extends the original
+internal-layer Green function to prescribed three-dimensional forces ON the
+layer fluid in newtons. It caches boundary-return pressure and all Cartesian
+particle-velocity components, plus the coherent sum with the native direct
+force field when source and receiver are distinct. Reflected self-fields remain
+finite; total self-fields explicitly refuse. The original exp(-i omega t)
+source clock and harmonic-line intensity conventions remain unchanged.
+
+Source derivatives use `+i grad_source/(omega*rho_layer)`. Both returning
+families reuse the monopole owner's scaled pressure and normal-velocity
+numerators, original layer denominator, critical maps and DD clearances.
+Receiving momentum retains all seven cylindrical force channels, including the
+two distinct mixed velocity entries and their source/receiver normal signs.
+Each sample computes the common spectral basis once; warm evaluation applies
+cached Cartesian coefficients without quadrature or allocation.
+
+The two active families divide the absolute tolerances, use zero relative
+tolerance and share one evaluation budget. Per-face analytic tails retain the
+actual positive source-plus-receiver return length and the additional source
+and receiver derivative powers. Summed diagnostics bound omitted returns and
+estimate reflected-transfer quadrature; they do not certify relative accuracy
+at a coherent total-field null. An absent second face delegates to the native
+reversed single-interface force owner, including its exact equal-speed and
+homogeneous limits. Cancellation and exhaustion publish no partial result.
+
+`tests/full_wave_layer_internal_force.rs` covers all seven force channels against
+independent direct-q reference values refined at 35 and 50 decimal digits,
+rotated four-family spherical-force images, original source derivatives,
+receiving momentum, velocity reciprocity, coherent direct/total separation,
+self-fields, invisible-face limits and domain/work/cancellation refusals.
+The existing scalar implementation and its regressions remain in place.
+The scope remains prescribed sources in stationary, lossless, infinite planar,
+nontrapping fluid layers; guided poles, absorption, source loading and finite
+edges are not supplied. Native Rust execution is not claimed by this extension.

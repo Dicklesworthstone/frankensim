@@ -12,7 +12,7 @@
 //! Differentiating C3(h-z) and C1(z) gives +i*rho2*V3 and -i*rho2*V1;
 //! receiving velocity is the derivative of this same pressure field.
 
-use super::super::{LayerCoordinates, LayerKernel, wave_gap};
+use super::super::{LayerCoordinates, LayerKernel, LayerSpectralWeight, wave_gap};
 use super::ScaledNumerator;
 use crate::AeroacError;
 use crate::curle3d::refraction::full_wave::layer::{
@@ -30,6 +30,12 @@ use crate::curle3d::{CoherentCompactField, CompactSourcePhasor, PreparedCompactS
 use crate::observation::HarmonicFieldLine;
 use core::f64::consts::{FRAC_PI_2, PI, TAU};
 use fs_math::{c64::C64, dd::Dd, det};
+
+mod force;
+pub use force::{
+    FULL_WAVE_LAYER_INTERNAL_REFLECTED_FORCE_SCOPE, FULL_WAVE_LAYER_INTERNAL_TOTAL_FORCE_SCOPE,
+    PreparedLayerInternalFullWaveForce,
+};
 
 pub const FULL_WAVE_LAYER_INTERNAL_REFLECTED_SCOPE: &str = "Prescribed stationary \
 compact volume source and receiver strictly inside one infinite planar homogeneous \
@@ -408,6 +414,16 @@ struct FaceKernel<'a> {
     log_velocity: f64,
 }
 
+/// Original per-face pressure and receiving-velocity basis, shared with the
+/// physical source-force derivative without another boundary solve.
+struct FaceWeight {
+    spectrum: LayerSpectralWeight,
+    pressure: ScaledNumerator,
+    velocity: ScaledNumerator,
+    direction: C64,
+    log_coefficient: f64,
+}
+
 fn unit(value: C64) -> C64 {
     let length = value.abs();
     if length == 0.0 {
@@ -454,32 +470,8 @@ impl FaceKernel<'_> {
             wave_log,
         )
     }
-}
 
-impl Spectrum<3> for FaceKernel<'_> {
-    fn regions(&self) -> usize {
-        self.common.critical_count + 1
-    }
-    fn extent(&self) -> (f64, f64) {
-        self.common.extent()
-    }
-    fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
-        let lo = self.common.point(region, lower);
-        let hi = self.common.point(region, upper);
-        let longest = (Dd::from_f64(self.common.layer.thickness_m()) + self.source_depth).to_f64();
-        let phase = (hi.q - lo.q).abs() * self.common.coordinates.range
-            + longest * (hi.zeta[1].re - lo.zeta[1].re).abs();
-        let decay_depth = if lo.zeta[1].im * self.remaining_depth.to_f64() > 350.0 {
-            self.return_depth.to_f64()
-        } else {
-            longest
-        };
-        phase <= FRAC_PI_2
-            && self
-                .common
-                .resolved_at_depth(region, lower, upper, decay_depth)
-    }
-    fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
+    fn sample_weight(&self, region: usize, x: f64) -> Result<FaceWeight, AeroacError> {
         let spectrum = self
             .common
             .sample_weight_at_depth(region, x, self.return_depth)?;
@@ -511,6 +503,47 @@ impl Spectrum<3> for FaceKernel<'_> {
         let (sin, cos) = det::sin_cos_dd(phase);
         let direction = C64::new(cos.to_f64(), sin.to_f64()) * coefficient.unit * unit(z[1]).conj();
         let log_coefficient = coefficient.log_magnitude - l2;
+        Ok(FaceWeight {
+            spectrum,
+            pressure,
+            velocity,
+            direction,
+            log_coefficient,
+        })
+    }
+}
+
+impl Spectrum<3> for FaceKernel<'_> {
+    fn regions(&self) -> usize {
+        self.common.critical_count + 1
+    }
+    fn extent(&self) -> (f64, f64) {
+        self.common.extent()
+    }
+    fn resolved(&self, region: usize, lower: f64, upper: f64) -> bool {
+        let lo = self.common.point(region, lower);
+        let hi = self.common.point(region, upper);
+        let longest = (Dd::from_f64(self.common.layer.thickness_m()) + self.source_depth).to_f64();
+        let phase = (hi.q - lo.q).abs() * self.common.coordinates.range
+            + longest * (hi.zeta[1].re - lo.zeta[1].re).abs();
+        let decay_depth = if lo.zeta[1].im * self.remaining_depth.to_f64() > 350.0 {
+            self.return_depth.to_f64()
+        } else {
+            longest
+        };
+        phase <= FRAC_PI_2
+            && self
+                .common
+                .resolved_at_depth(region, lower, upper, decay_depth)
+    }
+    fn sample(&self, region: usize, x: f64) -> Result<[C64; 3], AeroacError> {
+        let FaceWeight {
+            spectrum,
+            pressure,
+            velocity,
+            direction,
+            log_coefficient,
+        } = self.sample_weight(region, x)?;
         let argument = spectrum.q * self.common.coordinates.range;
         let zero = j0(argument);
         let values = [
