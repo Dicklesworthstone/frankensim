@@ -624,3 +624,6 @@ fn pure_bath_heat_and_late_feedback_refusal_preserve_complete_state_and_ports() 
         });
     });
 }
+
+#[path = "molecular_reservoir_coupled.rs"]
+mod coupled;

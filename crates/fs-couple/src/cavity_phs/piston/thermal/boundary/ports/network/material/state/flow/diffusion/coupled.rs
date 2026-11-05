@@ -11,6 +11,12 @@ use fs_thermochem::SpeciesId;
 
 mod error;
 mod balance;
+mod physical;
+#[cfg(feature = "molecular-transport")]
+pub(crate) use error::scaled_error;
+pub use physical::PhysicalSubstep;
+#[cfg(feature = "molecular-transport")]
+pub(crate) use physical::PhysicalEstimate;
 pub use balance::{CoupledDiffusionBalance, CoupledDiffusionChamberBalance,
     CoupledDiffusionSpeciesBalance, CoupledReactionExtent};
 
@@ -73,7 +79,7 @@ impl CoupledDiffusionEstimate {
             self.piston_velocity, self.cell_energy, self.charge, self.flux]
             .into_iter().fold(0.0, f64::max)
     }
-    fn accumulate(&mut self, other: Self) {
+    pub(crate) fn accumulate(&mut self, other: Self) {
         self.species_mass = self.species_mass.max(other.species_mass);
         self.gas_temperature = self.gas_temperature.max(other.gas_temperature);
         self.gas_pressure = self.gas_pressure.max(other.gas_pressure);
@@ -85,6 +91,25 @@ impl CoupledDiffusionEstimate {
     }
 }
 
+/// Complete-assembly refusal with a transport-specific local-accuracy payload.
+#[derive(Debug)]
+pub enum CoupledPhysicalError<E> {
+    Invalid(&'static str),
+    Step { start_s: f64, end_s: f64, error: MaterialFlowError },
+    Accuracy { start_s: f64, step_s: f64, estimate: E },
+    WorkLimit { time_s: f64, evaluations: usize, accepted_substeps: usize },
+    Balance(&'static str),
+    Circuit(crate::material_circuit::MaterialCircuitError),
+    Gas { chamber: u64, error: fs_material::MaterialError },
+    Cancelled,
+}
+impl<E: core::fmt::Debug> core::fmt::Display for CoupledPhysicalError<E> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "coupled molecular diffusion: {self:?}")
+    }
+}
+impl<E: core::fmt::Debug> std::error::Error for CoupledPhysicalError<E> {}
+/// Original concrete closed-assembly error, preserving its variant namespace.
 #[derive(Debug)]
 pub enum CoupledDiffusionError {
     Invalid(&'static str),
@@ -102,14 +127,43 @@ impl core::fmt::Display for CoupledDiffusionError {
     }
 }
 impl std::error::Error for CoupledDiffusionError {}
+impl CoupledDiffusionError {
+    /// Preserve every physical refusal while adapting only the accuracy payload.
+    pub(crate) fn map_estimate<T>(self, convert: impl FnOnce(CoupledDiffusionEstimate) -> T) -> CoupledPhysicalError<T> {
+        match self {
+            Self::Invalid(reason) => CoupledPhysicalError::Invalid(reason),
+            Self::Step { start_s, end_s, error } => CoupledPhysicalError::Step { start_s, end_s, error },
+            Self::Accuracy { start_s, step_s, estimate } => CoupledPhysicalError::Accuracy {
+                start_s, step_s, estimate: convert(estimate),
+            },
+            Self::WorkLimit { time_s, evaluations, accepted_substeps } =>
+                CoupledPhysicalError::WorkLimit { time_s, evaluations, accepted_substeps },
+            Self::Balance(reason) => CoupledPhysicalError::Balance(reason),
+            Self::Circuit(error) => CoupledPhysicalError::Circuit(error),
+            Self::Gas { chamber, error } => CoupledPhysicalError::Gas { chamber, error },
+            Self::Cancelled => CoupledPhysicalError::Cancelled,
+        }
+    }
+}
+impl From<CoupledPhysicalError<CoupledDiffusionEstimate>> for CoupledDiffusionError {
+    fn from(error: CoupledPhysicalError<CoupledDiffusionEstimate>) -> Self {
+        match error {
+            CoupledPhysicalError::Invalid(reason) => Self::Invalid(reason),
+            CoupledPhysicalError::Step { start_s, end_s, error } => Self::Step { start_s, end_s, error },
+            CoupledPhysicalError::Accuracy { start_s, step_s, estimate } => Self::Accuracy { start_s, step_s, estimate },
+            CoupledPhysicalError::WorkLimit { time_s, evaluations, accepted_substeps } =>
+                Self::WorkLimit { time_s, evaluations, accepted_substeps },
+            CoupledPhysicalError::Balance(reason) => Self::Balance(reason),
+            CoupledPhysicalError::Circuit(error) => Self::Circuit(error),
+            CoupledPhysicalError::Gas { chamber, error } => Self::Gas { chamber, error },
+            CoupledPhysicalError::Cancelled => Self::Cancelled,
+        }
+    }
+}
 type Error = CoupledDiffusionError;
 
 /// One actual accepted half step, retaining every original source and balance.
-pub struct CoupledDiffusionSubstep<F = DiffusionNetworkStep> {
-    pub start_s: f64,
-    pub end_s: f64,
-    pub advance: MaterialFlowAdvance<F>,
-}
+pub type CoupledDiffusionSubstep<F = DiffusionNetworkStep> = PhysicalSubstep<MaterialFlowAdvance<F>>;
 pub struct CoupledDiffusionReport<F = DiffusionNetworkStep> {
     pub start_s: f64,
     pub end_s: f64,
@@ -206,106 +260,24 @@ impl<'m> MaterialExchangeState<'m> {
         &self, cx: &Cx<'_>, target_s: f64, ports: &[f64], drives: &[ChamberDrive],
         reactions: &[ChamberReaction<'_>], species_controls: SpeciesNetworkSolve,
         controls: NetworkSolve, guess_j: &[f64], time: CoupledDiffusionControls,
-        mut evolve: impl FnMut(&Self, f64, &[ChamberDrive], &[f64])
+        evolve: impl FnMut(&Self, f64, &[ChamberDrive], &[f64])
             -> Result<(Self, MaterialFlowAdvance<F>), MaterialFlowError>,
     ) -> Result<(Self, CoupledDiffusionReport<F>), Error> {
-        check(cx)?;
-        time.validate()?;
-        let start_s = self.time_s();
-        let duration = finite(target_s - start_s)?;
-        if duration <= 0.0 || guess_j.len() != self.thermal.cells().len()
-            || guess_j.iter().any(|x| !x.is_finite())
-            || drives.iter().any(|d| !d.heat_j.is_finite())
-            || self.thermal.pending_events().first().is_some_and(|e| e.time_s <= target_s)
-        {
-            return Err(Error::Invalid("one forward fixed-assembly window, finite inputs and no pending events through target required"));
-        }
-        let cap = time.maximum_evaluations.min(self.thermal.work_budget().max_substeps);
-        let mut next = Self::from_parts(self.thermal.clone(), self.circuit.clone(), self.chambers.clone());
-        let mut steps = Vec::new();
-        let (mut evaluations, mut accepted_intervals, mut rejected_intervals) = (0, 0, 0);
-        let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
-        let mut estimated_error = CoupledDiffusionEstimate::default();
-        let mut step_s = time.maximum_step_s.min(duration);
-        while next.time_s() < target_s {
-            check(cx)?;
-            let before = next.time_s();
-            let remaining = finite(target_s - before)?;
-            let dt = step_s.min(remaining);
-            let end = if dt == remaining { target_s } else { finite(before + dt)? };
-            let dt = finite(end - before)?;
-            let midpoint = finite(before + 0.5 * (end - before))?;
-            if midpoint <= before || midpoint >= end {
-                return Err(Error::Invalid("coupled diffusion half-step clock is unrepresentable"));
-            }
-            let fine_error_factor = error::fine_error_factor(midpoint - before, end - midpoint)
-                .ok_or(Error::Invalid("coupled diffusion half-step ratio is unrepresentable"))?;
-            let accepted_substeps = steps.len();
-            let mut evaluate = |state: &Self, end: f64, evaluations: &mut usize| {
-                check(cx)?;
-                if *evaluations >= cap {
-                    return Err(Error::WorkLimit { time_s: before, evaluations: *evaluations, accepted_substeps });
-                }
-                let left = (state.time_s() - start_s) / duration;
-                let right = if end == target_s { 1.0 } else { (end - start_s) / duration };
-                let subdrives: Vec<_> = drives.iter().map(|drive| ChamberDrive {
-                    heat_j: drive.heat_j * right - drive.heat_j * left, ..*drive
-                }).collect();
-                let fraction = (end - state.time_s()) / duration;
-                let guess: Vec<_> = guess_j.iter().map(|value| value * fraction).collect();
-                *evaluations += 1;
-                let (candidate, report) = evolve(state, end, &subdrives, &guess).map_err(|error| match error {
-                    MaterialFlowError::Cancelled => Error::Cancelled,
-                    error => Error::Step { start_s: state.time_s(), end_s: end, error },
-                })?;
-                fixed(self, &candidate)?;
-                Ok((candidate, report))
-            };
-            let comparison = (|| {
-                let (coarse, _) = evaluate(&next, end, &mut evaluations)?;
-                let (half, first) = evaluate(&next, midpoint, &mut evaluations)?;
-                let (fine, second) = evaluate(&half, end, &mut evaluations)?;
-                let estimate = compare(&next, &coarse, &fine, time, fine_error_factor, cx)?;
-                Ok((fine, first, second, estimate))
-            })();
-            let reduction = match comparison {
-                Ok((fine, first, second, estimate)) if estimate.maximum() <= 1.0 => {
-                    estimated_error.accumulate(estimate);
-                    accepted_intervals += 1;
-                    minimum = minimum.min(midpoint - before).min(end - midpoint);
-                    maximum = maximum.max(midpoint - before).max(end - midpoint);
-                    steps.push(CoupledDiffusionSubstep { start_s: before, end_s: midpoint, advance: first });
-                    steps.push(CoupledDiffusionSubstep { start_s: midpoint, end_s: end, advance: second });
-                    next = fine;
-                    let factor = error::step_factor(estimate.maximum(), true);
-                    step_s = error::bounded_step_s(dt, factor, time.minimum_step_s, time.maximum_step_s);
-                    continue;
-                }
-                Ok((_, _, _, estimate)) => {
-                    let failure = Error::Accuracy { start_s: before, step_s: dt, estimate };
-                    (error::step_factor(estimate.maximum(), false), failure)
-                }
-                Err(Error::Step { start_s, end_s, error }) if refinable(&error) || F::refinable(&error) =>
-                    (0.5, Error::Step { start_s, end_s, error }),
-                Err(error) => return Err(error),
-            };
-            rejected_intervals += 1;
-            if dt <= time.minimum_step_s {
-                return Err(reduction.1);
-            }
-            let smaller = error::bounded_step_s(dt, reduction.0, time.minimum_step_s, dt);
-            if !smaller.is_finite() || smaller >= dt || before + smaller >= end {
-                return Err(reduction.1);
-            }
-            step_s = smaller;
-        }
+        let (mut next, window) = self.coupled_physical_window_candidate(
+            cx, target_s, drives, guess_j, time, evolve,
+            |state_error, _, _, _, _| Ok(state_error), F::refinable,
+        )?;
         let balance = balance::summarize(self, &next, cx, ports, drives, reactions,
-            species_controls, controls, &steps)?;
+            species_controls, controls, &window.steps)?;
         balance::macro_ports(self, &mut next, cx, controls, &balance)?;
         check(cx)?;
-        Ok((next, CoupledDiffusionReport { start_s, end_s: target_s, evaluations,
-            accepted_intervals, rejected_intervals, minimum_accepted_substep_s: minimum,
-            maximum_accepted_substep_s: maximum, estimated_error, balance, steps }))
+        Ok((next, CoupledDiffusionReport {
+            start_s: window.start_s, end_s: window.end_s, evaluations: window.evaluations,
+            accepted_intervals: window.accepted_intervals, rejected_intervals: window.rejected_intervals,
+            minimum_accepted_substep_s: window.minimum_accepted_substep_s,
+            maximum_accepted_substep_s: window.maximum_accepted_substep_s,
+            estimated_error: window.estimated_error, balance, steps: window.steps,
+        }))
     }
 
     /// Publish only after complete-window accuracy, species/energy/impulse

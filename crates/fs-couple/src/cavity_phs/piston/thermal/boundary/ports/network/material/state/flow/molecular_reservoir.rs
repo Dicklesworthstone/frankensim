@@ -14,6 +14,9 @@ use fs_gas::material::transport::parcel::reservoir::{
 
 #[path = "molecular_reservoir_balance.rs"]
 mod balance;
+/// Adaptive complete-assembly evolution with separate directional stream accuracy.
+#[path = "molecular_reservoir_coupled.rs"]
+pub mod coupled;
 /// Held-bath molecular transport with caller-selected gas/body heat laws.
 #[path = "molecular_reservoir_gas_law.rs"]
 pub mod gas_law;
@@ -49,8 +52,8 @@ impl<'m> MaterialExchangeState<'m> {
     /// This is the original first-order split with fixed authored faces and held
     /// baths. The native bath owner admits internal molecular faces; bulk-flow,
     /// porous, membrane and effusion paths need their own simultaneous owner.
-    /// Geometry and bath states are not advanced. Refine the timestep to resolve
-    /// coupled feedback; the closed-system adaptive API does not admit bath streams.
+    /// Geometry and bath states are not advanced. For complete-assembly adaptive
+    /// accuracy, use [`Self::coupled_molecular_reservoir_candidate`].
     ///
     /// Final molecular source qualification covers every connected endpoint even
     /// when its initial flux was zero. Live gas, motion, thermal/circuit stores,
