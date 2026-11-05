@@ -1,5 +1,37 @@
 # fs-material — CONTRACT
 
+## Brittle thermal weakening with retained fracture history
+
+`brittle::temperature` adds an explicit fixed-strain coefficient/history
+transfer to the original crack-band law. Young's modulus, normal/shear
+strengths, fracture energies and the BK exponent may change. The native
+cohesive temperature owner retains the physical onset mode, irreversible
+damage and already dissipated fracture energy; cooling cannot rebond a crack.
+The in-plane elastic remainder participates in the signed parameter-work
+account. Publication requires parameter work minus total storage change minus
+new fracture release to meet the caller's volumetric energy tolerance.
+
+The plane, width and Poisson ratio stay fixed because they define the modal
+kinematics. Source refresh preserves the prepared projection bit for bit,
+including oblique normals. Strain must fit both owners' domains. Mechanical
+work is zero during this endpoint transfer; parameter work is not heat by
+definition. Thermal expansion, entropy, a temperature-path integration,
+crushing and thermal fatigue remain outside this model.
+
+`ResolvedBrittleCrackBand::at_temperature` refreshes the complete original
+material bundle at one positive absolute-temperature coordinate using the same
+card and selected claims. All other coordinates, source conventions, geometry
+and controls stay fixed; additional properties keep their source identities.
+`transfer_temperature` checks both original state ownership and the thermal
+successor before moving history. A raw law substitution still refuses.
+Refreshing a density observation does not modify mass or inertia.
+
+G0/G1/G3 coverage in `tests/brittle_temperature.rs` exercises full elastic
+parameter work, thermal failure, nonhealing on cooling/toughening, retained
+fracture loss, compressive reclosure, rotated mixed-mode histories, source
+refresh and oblique-plane identity. Numerical fixtures are not measured
+material qualification.
+
 ## Source indentation hardness for contact and wear
 
 `hardness::IndentationHardnessStatePoint` selects a positive static

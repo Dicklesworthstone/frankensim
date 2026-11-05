@@ -7,10 +7,11 @@
 //! deterministic estimate, not a weakest-link distribution or a calibrated
 //! failure probability. Band width and plane belong to the receiving geometry.
 //!
-//! External conditions remain fixed throughout a history. Resolving a second
-//! temperature creates a different law; it cannot replace the first law under
-//! an accepted history. Thermal damage, rate dependence and property transfer
-//! require an explicit history/work owner.
+//! Ordinary updates hold external conditions fixed. The explicit
+//! [`ResolvedBrittleCrackBand::at_temperature`] and history-transfer methods
+//! retain the original source claims, damage and parameter-work accounts.
+//! Resolving a second temperature alone never authorizes replacing a law under
+//! an accepted history. Rate dependence needs a separate history/work owner.
 
 use super::{
     BrittleCrackBand, BrittleCrackBandParameters, BrittleCrackBandSettings, BrittleError,
@@ -31,16 +32,16 @@ use fs_qty::{Dims, Pressure, QuantitySpec};
 pub const BRITTLE_TENSILE_STRENGTH_PROPERTY: &str = "brittle_tensile_strength";
 /// Pure shear crack-band peak traction, Pa; independent of the opening strength.
 pub const BRITTLE_SHEAR_STRENGTH_PROPERTY: &str = "brittle_shear_strength";
-/// Complete pure-opening fracture work per crack area, J/m2; not toughness K_Ic.
+/// Complete pure-opening fracture work per crack area, J/m²; not toughness K_Ic.
 pub const BRITTLE_MODE_I_FRACTURE_ENERGY_PROPERTY: &str = "brittle_mode_i_fracture_energy";
-/// Complete pure-shear fracture work per crack area, J/m2.
+/// Complete pure-shear fracture work per crack area, J/m².
 pub const BRITTLE_MODE_II_FRACTURE_ENERGY_PROPERTY: &str = "brittle_mode_ii_fracture_energy";
 /// Dimensionless Benzeggagh--Kenane exponent for the selected onset-mix law.
 pub const BRITTLE_BK_EXPONENT_PROPERTY: &str = "brittle_bk_exponent";
 
 /// Exact source requirements; no absent shear or mixed-mode data are inferred.
-pub fn brittle_crack_band_requirements(
-) -> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError> {
+pub fn brittle_crack_band_requirements()
+-> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError> {
     let positive = ScalarAdmissibility::StrictlyPositive;
     Ok(vec![
         ScalarPropertyRequirement::try_new(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, positive)?,
@@ -72,11 +73,7 @@ pub fn brittle_crack_band_requirements(
             FRACTURE_ENERGY_PER_AREA_DIMS,
             positive,
         )?,
-        ScalarPropertyRequirement::try_new(
-            BRITTLE_BK_EXPONENT_PROPERTY,
-            Dims::NONE,
-            positive,
-        )?,
+        ScalarPropertyRequirement::try_new(BRITTLE_BK_EXPONENT_PROPERTY, Dims::NONE, positive)?,
     ])
 }
 
@@ -84,7 +81,7 @@ pub fn brittle_crack_band_requirements(
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedBrittleCrackBand {
     material: ResolvedMaterialStatePoint,
-    law: BrittleCrackBand,
+    pub(super) law: BrittleCrackBand,
 }
 
 impl ResolvedBrittleCrackBand {
@@ -155,12 +152,8 @@ pub fn resolve_brittle_crack_band(
     selection: MaterialPropertySelection,
     settings: BrittleCrackBandSettings,
 ) -> Result<ResolvedBrittleCrackBand, BrittleSourceError> {
-    let material = resolve_material_state_point(
-        card,
-        point,
-        &brittle_crack_band_requirements()?,
-        selection,
-    )?;
+    let material =
+        resolve_material_state_point(card, point, &brittle_crack_band_requirements()?, selection)?;
     ResolvedBrittleCrackBand::try_from_material(material, settings)
 }
 

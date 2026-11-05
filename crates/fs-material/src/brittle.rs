@@ -26,8 +26,10 @@
 //! reclosure is not a geometric contact or nonpenetration algorithm. The plane
 //! does not rotate or nucleate automatically; no multiple-crack interaction,
 //! arbitrary-mesh objectivity, fragment topology, remeshing/state transfer,
-//! friction, crushing, temperature/rate evolution or experimental qualification
-//! is claimed. The caller must resolve load-path reversals and crack events.
+//! friction, crushing, rate evolution or experimental qualification is claimed.
+//! Ordinary strain updates hold coefficients fixed; [`temperature`] transfers
+//! damage and energy through explicit thermal coefficient changes at fixed
+//! Poisson ratio and geometry. The caller resolves load reversals/crack events.
 //!
 //! Crack-band energy scaling follows Bazant and Oh (1983),
 //! doi:10.1007/BF02486267. The fixed-plane elastic projection here is an explicit
@@ -47,6 +49,9 @@ use fs_math::det;
 
 /// Original bulk-material coefficients bound to this native constitutive law.
 pub mod source;
+
+/// History-preserving changes of source-defined thermal coefficients.
+pub mod temperature;
 
 /// Explicit pure-mode strengths and fracture work. No values are inferred from
 /// a material name, hardness, flexural modulus of rupture or yield stress.
@@ -428,7 +433,7 @@ impl<'a> SmallStrainLaw for BrittleSmallStrain<'a> {
             ValidityDomain::unconstrained().with("strain-magnitude", 0.0, self.owner.settings.maximum_strain),
             vec![
                 "no automatic nucleation, evolving crack plane, fragments or geometric contact".into(),
-                "no arbitrary-mesh objectivity, crushing, friction, temperature or rate dependence".into(),
+                "no arbitrary-mesh objectivity, crushing, friction or rate dependence; thermal transfer is an explicit fixed-projection step".into(),
                 "fracture-energy matching is not experimental material qualification".into(),
             ],
             // No calibration establishes a finite model-form discrepancy band.
