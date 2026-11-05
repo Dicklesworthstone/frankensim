@@ -333,3 +333,354 @@ fn g4_mixture_moving_geometry_and_late_cancellation_preserve_complete_state() {
     assert_eq!(invalid.mesh(), &mesh);
     assert_eq!(invalid.time().value(), 0.0);
 }
+
+fn contact_field(count: usize, velocity: f64) -> MixtureEuler1d {
+    let source = mixture([1e18, -7e17, 3e17]).source().clone();
+    let mut domain =
+        crate::dynamics::CaloricDomain::new(Temperature::new(0.001), Temperature::new(50.0));
+    domain.absolute_energy_tolerance = 1e-13;
+    domain.relative_energy_tolerance = 1e-14;
+    let gas = MixtureGas::new(source, domain, || false).unwrap();
+    let states = (0..count)
+        .map(|i| {
+            let densities = if i < count / 2 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            gas.conserved(&densities, velocity, 1.0).unwrap()
+        })
+        .collect();
+    MixtureEuler1d::new(
+        gas,
+        Length::new(1.0 / count as f64),
+        0.7,
+        states,
+        CLOSED,
+        || false,
+    )
+    .unwrap()
+}
+
+fn contact_workspace(count: usize) -> ContactWorkspace {
+    ContactWorkspace::new(
+        count,
+        ContactWorkspace::required_workspace_bytes(count).unwrap(),
+        || false,
+    )
+    .unwrap()
+}
+
+fn contact_control(budget: f64) -> ContactEquilibriumControl {
+    ContactEquilibriumControl {
+        relative_tolerance: 1e-10,
+        maximum_energy_defect_j: budget,
+    }
+}
+
+#[test]
+fn g0_ale_contact_pressure_survives_translation_and_volume_change_with_accounted_work() {
+    for wall_velocity in [[0.4, 0.4], [-0.4, -0.4], [0.25, -0.125], [-0.25, 0.125]] {
+        for reconstruction in [Reconstruction::FirstOrder, Reconstruction::Muscl] {
+            let mut ordinary = contact_field(64, 0.0);
+            let mut checked = contact_field(64, 0.0);
+            let before = checked.totals();
+            let mut workspace = contact_workspace(64);
+            let bytes = workspace.workspace_bytes();
+            let controls = StepControl {
+                reconstruction,
+                maximum_halvings: 0,
+                ..StepControl::default()
+            };
+            let (mut wall_work, mut wall_impulse, mut defect, mut absolute) = (0.0, 0.0, 0.0, 0.0);
+            for _ in 0..24 {
+                ordinary
+                    .step_with_moving_walls(Time::new(0.001), controls, wall_velocity, || false)
+                    .unwrap();
+                let report = checked
+                    .step_with_moving_walls_and_contact_equilibrium(
+                        Time::new(0.001),
+                        controls,
+                        wall_velocity,
+                        contact_control(1.0),
+                        &mut workspace,
+                        || false,
+                    )
+                    .unwrap();
+                assert_eq!(report.transport.halvings, 0);
+                assert!(!report.transport.first_order_retry);
+                assert!(
+                    report.correction.absolute_energy_j >= report.correction.signed_energy_j.abs()
+                );
+                close(report.corrected_energy_residual_j, 0.0, 2e-12);
+                close(report.transport.conservation_residual.momentum, 0.0, 2e-12);
+                for k in 0..3 {
+                    assert_eq!(report.transport.boundary_change.species_masses[k], 0.0);
+                    close(
+                        report.transport.conservation_residual.species_masses[k],
+                        0.0,
+                        2e-12,
+                    );
+                }
+                for q in checked.states.chunks_exact(5) {
+                    assert_eq!(q[2], 0.0);
+                    assert!(q[..3].iter().all(|rho| *rho >= 0.0));
+                }
+                wall_work += report.transport.boundary_change.energy;
+                wall_impulse += report.transport.boundary_change.momentum;
+                defect += report.correction.signed_energy_j;
+                absolute += report.correction.absolute_energy_j;
+            }
+            assert_eq!(ordinary.time(), checked.time());
+            assert_eq!(ordinary.mesh(), checked.mesh());
+            // The material front moves relative to the mesh. The short time
+            // leaves this interior window outside the physical wall waves.
+            let mut ordinary_error = 0.0_f64;
+            let mut corrected_error = 0.0_f64;
+            for i in 24..40 {
+                let old = ordinary
+                    .gas()
+                    .primitive(ordinary.cell(i).unwrap(), || false)
+                    .unwrap();
+                let new = checked
+                    .gas()
+                    .primitive(checked.cell(i).unwrap(), || false)
+                    .unwrap();
+                ordinary_error = ordinary_error.max((old.pressure - 1.0).abs());
+                corrected_error = corrected_error.max((new.pressure - 1.0).abs());
+                close(new.velocity, 0.0, 3e-10);
+            }
+            assert!(
+                ordinary_error > 1e-4,
+                "baseline pressure error: {ordinary_error:e}"
+            );
+            assert!(
+                corrected_error < 3e-10,
+                "corrected pressure error: {corrected_error:e}"
+            );
+            assert!(absolute > 1e-7);
+            assert!(wall_work.abs() > 1e-6);
+            let after = checked.totals();
+            close(after.energy - before.energy - wall_work, defect, 3e-12);
+            close(after.momentum - before.momentum, wall_impulse, 3e-12);
+            for k in 0..3 {
+                close(after.species_masses[k], before.species_masses[k], 3e-12);
+            }
+            assert_eq!(workspace.workspace_bytes(), bytes);
+        }
+    }
+}
+
+#[test]
+fn g0_ale_contact_zero_motion_and_resolved_acoustic_gradients_keep_native_maps() {
+    let mut fixed = contact_field(16, 0.7);
+    let mut moving = contact_field(16, 0.7);
+    let mut fixed_workspace = contact_workspace(16);
+    let mut moving_workspace = contact_workspace(16);
+    for _ in 0..3 {
+        let expected = fixed
+            .step_with_contact_equilibrium(
+                Time::new(0.001),
+                StepControl::default(),
+                contact_control(1.0),
+                &mut fixed_workspace,
+                || false,
+            )
+            .unwrap();
+        let actual = moving
+            .step_with_moving_walls_and_contact_equilibrium(
+                Time::new(0.001),
+                StepControl::default(),
+                [0.0; 2],
+                contact_control(1.0),
+                &mut moving_workspace,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(moving.states, fixed.states);
+        assert_eq!(moving.mesh(), fixed.mesh());
+        assert_eq!(moving.time(), fixed.time());
+        assert!(moving.moving.is_none());
+    }
+    for pressure_gradient in [false, true] {
+        let make = || {
+            let gas = mixture([0.0; 3]);
+            let states = (0..12)
+                .map(|i| {
+                    gas.conserved(
+                        &[0.2 + 0.03 * i as f64, 0.8 - 0.03 * i as f64, 0.0],
+                        if pressure_gradient {
+                            0.1
+                        } else {
+                            0.03 * i as f64
+                        },
+                        if pressure_gradient {
+                            1.0 + 0.02 * i as f64
+                        } else {
+                            1.0
+                        },
+                    )
+                    .unwrap()
+                })
+                .collect();
+            MixtureEuler1d::new(gas, Length::new(1.0 / 12.0), 0.7, states, CLOSED, || false)
+                .unwrap()
+        };
+        let mut ordinary = make();
+        let mut checked = make();
+        let expected = ordinary
+            .step_with_moving_walls(
+                Time::new(0.001),
+                StepControl::default(),
+                [0.2, -0.1],
+                || false,
+            )
+            .unwrap();
+        let actual = checked
+            .step_with_moving_walls_and_contact_equilibrium(
+                Time::new(0.001),
+                StepControl::default(),
+                [0.2, -0.1],
+                contact_control(0.0),
+                &mut contact_workspace(12),
+                || false,
+            )
+            .unwrap();
+        assert_eq!(actual.correction.corrected_cells, 0);
+        assert_eq!(actual.correction.absolute_energy_j, 0.0);
+        assert_eq!(actual.transport, expected);
+        assert_eq!(checked.states, ordinary.states);
+        assert_eq!(checked.mesh(), ordinary.mesh());
+    }
+}
+
+#[test]
+fn g4_ale_contact_budget_retry_retains_order_and_refusal_preserves_geometry() {
+    let controls = StepControl {
+        maximum_halvings: 0,
+        reconstruction: Reconstruction::Muscl,
+        ..StepControl::default()
+    };
+    let mut reference = contact_field(16, 0.0);
+    let full = reference
+        .step_with_moving_walls_and_contact_equilibrium(
+            Time::new(0.002),
+            controls,
+            [0.25, -0.125],
+            contact_control(1.0),
+            &mut contact_workspace(16),
+            || false,
+        )
+        .unwrap();
+    assert!(full.correction.absolute_energy_j > 0.0);
+    let mut checked = contact_field(16, 0.0);
+    let before = checked.states.clone();
+    let mesh = checked.mesh().clone();
+    let mut workspace = contact_workspace(16);
+    let refused = checked.step_with_moving_walls_and_contact_equilibrium(
+        Time::new(0.002),
+        controls,
+        [0.25, -0.125],
+        contact_control(0.0),
+        &mut workspace,
+        || false,
+    );
+    assert!(
+        matches!(refused, Err(Error::StepRetries { last, .. }) if matches!(*last, Error::ContactEnergyBudget { .. }))
+    );
+    assert_eq!(checked.states, before);
+    assert_eq!(checked.mesh(), &mesh);
+    assert_eq!(checked.time().value(), 0.0);
+    let budget = full.correction.absolute_energy_j / 4.0;
+    let report = checked
+        .step_with_moving_walls_and_contact_equilibrium(
+            Time::new(0.002),
+            StepControl {
+                maximum_halvings: 12,
+                ..controls
+            },
+            [0.25, -0.125],
+            contact_control(budget),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    assert!(report.transport.halvings > 0);
+    assert!(!report.transport.first_order_retry);
+    assert!(report.correction.absolute_energy_j <= budget);
+    close(report.corrected_energy_residual_j, 0.0, 2e-13);
+    close(
+        checked.mesh().positions()[0],
+        0.25 * report.transport.elapsed.value(),
+        2e-15,
+    );
+    close(
+        checked.mesh().positions()[16],
+        1.0 - 0.125 * report.transport.elapsed.value(),
+        2e-15,
+    );
+}
+
+#[test]
+fn g4_ale_contact_late_cancellation_is_atomic_and_reusable() {
+    let mut reference = contact_field(16, 0.0);
+    let mut calls = 0;
+    let expected = reference
+        .step_with_moving_walls_and_contact_equilibrium(
+            Time::new(0.002),
+            StepControl::default(),
+            [0.25, -0.125],
+            contact_control(1.0),
+            &mut contact_workspace(16),
+            || {
+                calls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert!(calls > 100);
+    for cutoff in [1, calls / 2, calls] {
+        let mut checked = contact_field(16, 0.0);
+        let before = checked.states.clone();
+        let mesh = checked.mesh().clone();
+        let mut workspace = contact_workspace(16);
+        let mut seen = 0;
+        let refused = checked.step_with_moving_walls_and_contact_equilibrium(
+            Time::new(0.002),
+            StepControl::default(),
+            [0.25, -0.125],
+            contact_control(1.0),
+            &mut workspace,
+            || {
+                seen += 1;
+                seen == cutoff
+            },
+        );
+        assert_eq!(refused, Err(Error::Cancelled));
+        assert_eq!(checked.states, before);
+        assert_eq!(checked.mesh(), &mesh);
+        assert_eq!(checked.time().value(), 0.0);
+        let actual = checked
+            .step_with_moving_walls_and_contact_equilibrium(
+                Time::new(0.002),
+                StepControl::default(),
+                [0.25, -0.125],
+                contact_control(1.0),
+                &mut workspace,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(actual.transport.elapsed, expected.transport.elapsed);
+        assert_eq!(checked.mesh(), reference.mesh());
+        close(
+            actual.correction.signed_energy_j,
+            expected.correction.signed_energy_j,
+            3e-13,
+        );
+        close(actual.corrected_energy_residual_j, 0.0, 3e-13);
+        for (&a, &b) in checked.states.iter().zip(&reference.states) {
+            close(a, b, 3e-12);
+        }
+    }
+}

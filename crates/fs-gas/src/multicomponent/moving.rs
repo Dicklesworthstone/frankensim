@@ -1,6 +1,9 @@
 //! Resolved moving-wall pressure on the original evolving species field.
 
-use super::evolve::{Stage, Workspace, operator_with_face_motion, totals};
+use super::evolve::{Stage, Workspace, operator_core, totals};
+use super::pressure_equilibrium::{
+    ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
+};
 use super::{
     Boundaries, Boundary, Error, MAX_COMPONENTS, Mesh1d, MixtureEuler1d, MixtureGas,
     Reconstruction, StepControl, StepReport, Totals, allocated, poll, positive,
@@ -38,6 +41,8 @@ impl MixtureEuler1d {
     /// General moving unequal-caloric material contacts retain the existing
     /// conservative scheme's pressure-oscillation limitation; the moving frame
     /// does not establish exact pressure equilibrium or an entropy theorem.
+    /// [`Self::step_with_moving_walls_and_contact_equilibrium`] provides a
+    /// separately budgeted correction for verified equilibrium contacts.
     ///
     /// # Errors
     /// Refuses unsupported geometry or boundaries, invalid speeds/controls,
@@ -50,7 +55,67 @@ impl MixtureEuler1d {
         wall_velocity: [f64; 2],
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
-        self.advance_moving(maximum_duration, controls, wall_velocity, None, cancelled)
+        self.advance_moving(
+            maximum_duration,
+            controls,
+            wall_velocity,
+            None,
+            None,
+            cancelled,
+        )
+    }
+
+    /// Preserve admitted material-contact pressure during moving-wall transport.
+    ///
+    /// This opt-in extension uses the original extensive ALE update, species
+    /// fluxes, laboratory momentum, moving-wall pressures and source calorics.
+    /// Each actual incident trace must share its recipient's original pressure
+    /// and laboratory velocity within the caller's tolerance. Wall cells,
+    /// acoustic gradients and HLL fallback stencils retain their conservative
+    /// update. The mesh velocity does not set the contact-matching tolerance.
+    ///
+    /// Energy is projected in the predicted and accepted states. The predictor
+    /// correction has RK weight 1/2 and the accepted correction has weight 1;
+    /// both use that state's moved physical cell volume. The reported signed
+    /// and absolute numerical energy defects are separate from the original
+    /// wall-pressure work. Species, momentum and geometry are never corrected.
+    ///
+    /// The caller prepares reusable scratch and bounds the absolute defect per
+    /// accepted step. A budget refusal halves the step without forcing MUSCL to
+    /// first order. Accepted state, mesh and clock publish together; zero wall
+    /// speeds use the existing stationary contact-equilibrium method exactly.
+    /// This requires constant area and two reflecting ends, and does not compose
+    /// body forces, chemistry, molecular transport or finite piston inertia.
+    ///
+    /// # Errors
+    /// The original moving-wall geometry, source and CFL refusals apply, as do
+    /// workspace dimensions, contact controls and energy-budget admission.
+    /// Refusal or cancellation publishes no cells, geometry or physical time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_moving_walls_and_contact_equilibrium(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        wall_velocity: [f64; 2],
+        equilibrium: ContactEquilibriumControl,
+        workspace: &mut ContactWorkspace,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ContactEquilibriumStepReport<StepReport>, Error> {
+        let transport = self.advance_moving(
+            maximum_duration,
+            controls,
+            wall_velocity,
+            None,
+            Some((equilibrium, &mut *workspace)),
+            cancelled,
+        )?;
+        let correction = workspace.receipt();
+        Ok(ContactEquilibriumStepReport {
+            corrected_energy_residual_j: transport.conservation_residual.energy
+                - correction.signed_energy_j,
+            transport,
+            correction,
+        })
     }
 
     /// Compose distributed body work and moving-wall pressure on every species.
@@ -94,15 +159,24 @@ impl MixtureEuler1d {
         let source = force
             .admit::<Error>(self.cell_count(), &mut cancelled)?
             .then_some((force, force_controls));
-        self.advance_moving(maximum_duration, controls, wall_velocity, source, cancelled)
+        self.advance_moving(
+            maximum_duration,
+            controls,
+            wall_velocity,
+            source,
+            None,
+            cancelled,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn advance_moving(
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
         wall_velocity: [f64; 2],
         source: Option<(BodyForce<'_>, ForceControl)>,
+        mut equilibrium: Option<(ContactEquilibriumControl, &mut ContactWorkspace)>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -125,6 +199,9 @@ impl MixtureEuler1d {
         {
             return Err(Error::Invalid("moving mixture speeds or step controls"));
         }
+        if let Some((control, workspace)) = equilibrium.as_ref() {
+            workspace.admit(self.cell_count(), *control)?;
+        }
         if wall_velocity == [0.0; 2] {
             return match source {
                 Some((force, force_controls)) => self.step_with_body_force(
@@ -134,7 +211,18 @@ impl MixtureEuler1d {
                     force_controls,
                     cancelled,
                 ),
-                None => self.step(maximum_duration, controls, cancelled),
+                None => match equilibrium {
+                    Some((control, workspace)) => self
+                        .step_with_contact_equilibrium(
+                            maximum_duration,
+                            controls,
+                            control,
+                            workspace,
+                            cancelled,
+                        )
+                        .map(|report| report.transport),
+                    None => self.step(maximum_duration, controls, cancelled),
+                },
             };
         }
         if source.is_some() && self.body_force_stage.is_none() {
@@ -191,6 +279,9 @@ impl MixtureEuler1d {
             } else {
                 controls.reconstruction
             };
+            if let Some((control, workspace)) = equilibrium.as_mut() {
+                workspace.begin_attempt(*control)?;
+            }
             let trial = if let Some((force, force_controls)) = source {
                 attempt_with_body_force(
                     &self.gas,
@@ -210,7 +301,7 @@ impl MixtureEuler1d {
                     &mut cancelled,
                 )
             } else {
-                attempt(
+                attempt_with_contact(
                     &self.gas,
                     &self.states,
                     &self.mesh,
@@ -220,6 +311,7 @@ impl MixtureEuler1d {
                     reconstruction,
                     &mut self.work,
                     moving,
+                    equilibrium.as_mut().map(|(_, workspace)| &mut **workspace),
                     &mut cancelled,
                 )
                 .map(|(a, b)| (a, b, ForceChange::default(), 0.0))
@@ -245,6 +337,13 @@ impl MixtureEuler1d {
                     report.halvings = halvings;
                     report.first_order_retry =
                         first_order_retry && controls.reconstruction == Reconstruction::Muscl;
+                    if let Some((_, workspace)) = equilibrium.as_ref()
+                        && !(report.conservation_residual.energy
+                            - workspace.receipt().signed_energy_j)
+                            .is_finite()
+                    {
+                        return Err(Error::Invalid("non-finite moving contact energy balance"));
+                    }
                     poll(&mut cancelled)?;
                     core::mem::swap(&mut self.states, &mut self.work.candidate);
                     core::mem::swap(&mut self.mesh, &mut moving.mesh);
@@ -253,7 +352,10 @@ impl MixtureEuler1d {
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(error) => {
-                    if !matches!(error, Error::CflExceeded { .. }) {
+                    if !matches!(
+                        error,
+                        Error::CflExceeded { .. } | Error::ContactEnergyBudget { .. }
+                    ) {
                         first_order_retry = true;
                     }
                     last = error;
@@ -361,13 +463,42 @@ pub(super) fn attempt(
     moving: &mut MovingWorkspace,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Stage, Stage), Error> {
+    attempt_with_contact(
+        gas,
+        states,
+        mesh,
+        boundaries,
+        dt,
+        cfl,
+        reconstruction,
+        work,
+        moving,
+        None,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attempt_with_contact(
+    gas: &MixtureGas,
+    states: &[f64],
+    mesh: &Mesh1d,
+    boundaries: Boundaries,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    work: &mut Workspace,
+    moving: &mut MovingWorkspace,
+    mut contact: Option<&mut ContactWorkspace>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Stage, Stage), Error> {
     moving
         .mesh
         .prepare_motion(mesh, &moving.velocity, dt, cancelled)
         .map_err(geometry_error)?;
     let n = gas.species_count();
     let m = n + 2;
-    let a = operator_with_face_motion(
+    let a = operator_core(
         gas,
         states,
         mesh,
@@ -379,6 +510,7 @@ pub(super) fn attempt(
         &mut work.face_data,
         [None; 2],
         Some(&moving.velocity),
+        contact.as_deref_mut().map(|workspace| (workspace, true)),
         cancelled,
     )?;
     check_cfl(a.signal_rate * dt, cfl)?;
@@ -393,13 +525,25 @@ pub(super) fn attempt(
                 + dt * area * (work.faces[i * m + k] - work.faces[(i + 1) * m + k]))
                 / after_volume;
         }
+        if let Some(workspace) = contact.as_deref_mut() {
+            stage[n + 1] = workspace.project_energy(
+                gas,
+                i,
+                &stage[..n],
+                &stage[n..n + 1],
+                stage[n + 1],
+                after_volume,
+                0.5,
+                &mut *cancelled,
+            )?;
+        }
         if !gas.admissible(stage) {
             return Err(Error::Invalid(
                 "moving mixture predictor outside source domain",
             ));
         }
     }
-    let b = operator_with_face_motion(
+    let b = operator_core(
         gas,
         &work.stage,
         &moving.mesh,
@@ -411,6 +555,7 @@ pub(super) fn attempt(
         &mut work.face_data,
         [None; 2],
         Some(&moving.velocity),
+        contact.as_deref_mut().map(|workspace| (workspace, false)),
         cancelled,
     )?;
     check_cfl(b.signal_rate * dt, cfl)?;
@@ -425,6 +570,23 @@ pub(super) fn attempt(
                     * (after_volume * work.stage[i * m + k]
                         + dt * area * (work.faces[i * m + k] - work.faces[(i + 1) * m + k])))
                 / after_volume;
+        }
+        if let Some(workspace) = contact.as_deref_mut() {
+            // Q1 = Q0 + dt*L0 + V1*dE1;
+            // Qnext = (Q0 + Q1 + dt*L1)/2 + V1*dEfinal.
+            // Thus the actual predictor/final projections contribute
+            // V1*dE1/2 + V1*dEfinal. No fictitious second-Euler volume,
+            // physical heating or moving-wall work enters this receipt.
+            candidate[n + 1] = workspace.project_energy(
+                gas,
+                i,
+                &candidate[..n],
+                &candidate[n..n + 1],
+                candidate[n + 1],
+                after_volume,
+                1.0,
+                &mut *cancelled,
+            )?;
         }
         gas.decode(candidate, Some(work.primitive[i].temperature), cancelled)?;
     }

@@ -964,7 +964,7 @@ pub(super) fn operator_with_face_motion(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn operator_core(
+pub(super) fn operator_core(
     gas: &MixtureGas,
     states: &[f64],
     mesh: &Mesh1d,

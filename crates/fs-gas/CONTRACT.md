@@ -4721,5 +4721,52 @@ accepted cells and time untouched. Source-inversion hints are private scratch.
 
 This Estimated option does not establish fully discrete entropy stability,
 general multicomponent shock accuracy, or equilibrium preservation outside
-admitted contacts. Variable-area, moving-mesh, body-force, reacting, molecular,
-piston and network compositions retain their original transport methods.
+admitted contacts. Variable-area, body-force, reacting, molecular, piston and
+network compositions retain their original transport methods. Moving-wall
+transport has the separate opt-in extension below.
+
+## Pressure equilibrium in moving-wall mixture transport
+
+`MixtureEuler1d::step_with_moving_walls_and_contact_equilibrium` extends the
+same source-owned contact projection to constant-area closed intervals with
+prescribed affine face motion. It retains the original extensive ALE update,
+canonical species fluxes, laboratory momentum, moving-wall pressure and
+physical `p_star * wall_velocity` work. It uses the same `ContactWorkspace`
+and caller-authored absolute energy-defect budget; no additional per-attempt
+numerical storage is allocated.
+
+Every actual incident trace must match the recipient's original pressure and
+laboratory velocity, with velocity tolerance scaled by the source sound speed.
+Mesh speed never enlarges this tolerance. Physical wall cells, resolved
+pressure/velocity gradients and HLL fallback stencils remain uncorrected.
+The predicted field is projected before its face solve, and the accepted
+candidate is projected before source admission and publication. Species,
+momentum, geometry and the source's separate species-energy references are
+not projected.
+
+For each cell, let `V1` be its moved physical volume and `dE1`, `dEf` the
+represented predictor and final energy-density corrections. The implemented
+extensive RK2 map satisfies
+`Q1 = Q0 + dt*L0 + V1*dE1` and
+`Qnext = (Q0 + Q1 + dt*L1)/2 + V1*dEf` on the energy component.
+Its signed numerical defect is therefore
+`sum(V1*dE1/2 + V1*dEf)`; the absolute budget sums the absolute values of
+these same contributions. Both projection weights use moved volumes, including
+compression and expansion. The native energy residual retains the defect, and
+`corrected_energy_residual_j` removes only this separately reported numerical
+change. Boundary pressure work is neither removed nor relabeled as correction.
+
+Budget failures halve the step without lowering the authored reconstruction
+order. Each retry resets the contact mask and accounting. Failed or cancelled
+attempts leave the accepted species, momenta, energy, complete mesh and clock
+unchanged. Zero wall speeds delegate to the stationary contact method,
+preserving its field and report exactly; the default moving method remains
+fully conservative. Body forces, chemistry, molecular transport, finite piston
+inertia and network composition are not enabled by this entry point.
+
+The local uniform-pressure/velocity criterion and the need to expose the
+conservation tradeoff follow Abgrall and Karni, *Computations of Compressible
+Multifluids*, JCP 169 (2001), section 3.2, DOI 10.1006/jcph.2000.6685.
+The volume-weighted accounting above is for this implemented ALE map. This
+Estimated extension does not assert general shock accuracy, entropy stability
+or pressure preservation outside the explicitly admitted contact stencils.
