@@ -14,8 +14,14 @@
 //!
 //! This is a periodic particular solution of the retained, fixed-material mesh.
 //! It does not establish startup decay, uniqueness at an unexcited lossless
-//! pole, mesh convergence, intrinsic ceramic loss, radiation or empirical
+//! pole, mesh convergence, intrinsic coupling loss, radiation or empirical
 //! material accuracy. A residual is not a forward-error bound near resonance.
+//!
+//! [`TetPiezoelectricModel::solve_harmonic_with_relaxation`] additionally admits
+//! original-card Maxwell mechanical and directed Debye polarization processes.
+//! Their complex increments use the same mesh gradients and reciprocal G;
+//! independently recovered material memory and heat extend the original work
+//! account. The fixed real piezoelectric coupling itself remains reversible.
 
 use super::transient::load::{ResistiveElectrodeLoad, reactive::ReactiveElectrodeLoad};
 use super::{
@@ -24,8 +30,11 @@ use super::{
     validate_controls,
 };
 use fs_exec::Cx;
+use fs_material::piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric;
 use fs_math::{c64::C64, det};
 use fs_sparse::Coo;
+
+mod relaxation;
 
 /// Prescribed peak phasor. A zero current is an AC open circuit, and a zero
 /// voltage is a short circuit to the component's explicit voltage reference.
@@ -135,6 +144,13 @@ pub struct HarmonicPiezoelectricCell {
     pub electric_field_v_m: [C64; 3],
     /// Peak electric displacement from the reciprocal source tensor [C/m²].
     pub displacement_c_m2: [C64; 3],
+    /// Mean physical Maxwell heat integrated over this original cell [W].
+    pub average_mechanical_heat_w: f64,
+    /// Mean physical Debye polarization heat over this original cell [W].
+    pub average_dielectric_heat_w: f64,
+    /// Mean mechanical plus polarization memory storage in this cell [J].
+    /// Already included in the response's total body stored energy.
+    pub average_memory_energy_j: f64,
 }
 
 /// Body free charge and external source current, including attached load current.
@@ -178,7 +194,7 @@ pub struct HarmonicPiezoelectricResponse {
     pub electrodes: Vec<HarmonicElectrodeResponse>,
     /// Actual branch current and heat in original load order.
     pub loads: Vec<HarmonicElectrodeLoadResponse>,
-    /// Cycle-averaged elastic plus electric storage in the body [J].
+    /// Cycle-averaged elastic, electric and material-memory body storage [J].
     pub average_stored_energy_j: f64,
     /// Cycle-averaged kinetic storage from the original consistent mass [J].
     pub average_kinetic_energy_j: f64,
@@ -188,7 +204,9 @@ pub struct HarmonicPiezoelectricResponse {
     pub average_electrical_power_w: f64,
     /// External resistor heat, counted once, never attributed to the ceramic [W].
     pub average_load_heat_w: f64,
-    /// Mechanical plus electrical mean supply minus external load heat [W].
+    /// Intrinsic mechanical plus dielectric heat, integrated over all cells [W].
+    pub average_material_heat_w: f64,
+    /// Mechanical plus electrical supply minus load AND material heat [W].
     pub power_balance_residual_w: f64,
     /// Largest peak complex force residual on an unconstrained mechanical DOF [N].
     pub maximum_force_residual_n: f64,
@@ -247,6 +265,69 @@ impl TetPiezoelectricModel<'_> {
     pub fn solve_harmonic(
         &self,
         omega_rad_s: f64,
+        prescribed_displacements: &[(usize, C64)],
+        electrodes: &[HarmonicElectrode<'_>],
+        loads: &[HarmonicElectrodeLoad],
+        nodal_forces_n: &[[C64; 3]],
+        nodal_free_charge_c: &[C64],
+        controls: HarmonicPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<HarmonicPiezoelectricResponse> {
+        self.solve_harmonic_internal(
+            omega_rad_s,
+            None,
+            prescribed_displacements,
+            electrodes,
+            loads,
+            nodal_forces_n,
+            nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    /// Solve with source-bound intrinsic mechanical and dielectric relaxation.
+    /// Supply one uniform law or one per original tetrahedron. Each law must
+    /// retain the EXACT original base tensor identity and mesh frame. Its base
+    /// C^E is explicitly relaxed and epsilon^S is explicitly high-frequency;
+    /// no single-frequency datasheet values are reinterpreted automatically.
+    ///
+    /// The same sparse pencil, reference inertia, coupling, boundary reduction,
+    /// work audit and physical residual gates are retained. Source frequency
+    /// domains are intersected by the material owner. Heat is reconstructed from
+    /// branch states, with external load heat reported separately. This is a
+    /// held-temperature linear model, not thermal feedback or hysteresis.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_harmonic_with_relaxation(
+        &self,
+        omega_rad_s: f64,
+        intrinsic_materials: &[RelaxingTensorPiezoelectric],
+        prescribed_displacements: &[(usize, C64)],
+        electrodes: &[HarmonicElectrode<'_>],
+        loads: &[HarmonicElectrodeLoad],
+        nodal_forces_n: &[[C64; 3]],
+        nodal_free_charge_c: &[C64],
+        controls: HarmonicPiezoelectricControls,
+        cx: &Cx<'_>,
+    ) -> Result<HarmonicPiezoelectricResponse> {
+        self.solve_harmonic_internal(
+            omega_rad_s,
+            Some(intrinsic_materials),
+            prescribed_displacements,
+            electrodes,
+            loads,
+            nodal_forces_n,
+            nodal_free_charge_c,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_harmonic_internal(
+        &self,
+        omega_rad_s: f64,
+        intrinsic_materials: Option<&[RelaxingTensorPiezoelectric]>,
         prescribed_displacements: &[(usize, C64)],
         electrodes: &[HarmonicElectrode<'_>],
         loads: &[HarmonicElectrodeLoad],
@@ -336,6 +417,9 @@ impl TetPiezoelectricModel<'_> {
                 "harmonic solve exceeds its explicit real-coordinate budget",
             ));
         }
+        let intrinsic_coefficients = intrinsic_materials
+            .map(|materials| relaxation::prepare(self, materials, omega_rad_s, cx))
+            .transpose()?;
         let mut full = boundary[0]
             .prescribed
             .iter()
@@ -396,6 +480,9 @@ impl TetPiezoelectricModel<'_> {
                 add(nu + row, nu + col, C64::from_re(-value), value.abs())?;
             }
         }
+        if let Some(coefficients) = &intrinsic_coefficients {
+            relaxation::stamp(self, coefficients, &mut add, cx)?;
+        }
         let mut admittances = Vec::with_capacity(loads.len());
         for load in loads {
             poll(cx)?;
@@ -446,6 +533,7 @@ impl TetPiezoelectricModel<'_> {
             &source_conditions,
             nodal_forces_n,
             nodal_free_charge_c,
+            intrinsic_materials,
             controls,
             iterations,
             relative_residual,
@@ -465,6 +553,7 @@ impl TetPiezoelectricModel<'_> {
         source_conditions: &[(bool, C64)],
         forces: &[[C64; 3]],
         charges: &[C64],
+        intrinsic_materials: Option<&[RelaxingTensorPiezoelectric]>,
         controls: HarmonicPiezoelectricControls,
         iterations: usize,
         relative_residual: f64,
@@ -484,6 +573,24 @@ impl TetPiezoelectricModel<'_> {
             let inertia = mass_u.scale(omega * omega);
             effective_force[row / 3][row % 3] = effective_force[row / 3][row % 3] + inertia;
             kinetic += 0.25 * (full[row].conj() * inertia).re;
+        }
+        let intrinsic = intrinsic_materials
+            .map(|materials| relaxation::recover(self, materials, omega, full, cx))
+            .transpose()?;
+        // Recover the original reversible operator with the exact additional
+        // constitutive force/charge moved to its right-hand side. Its residuals
+        // and reactions then remain those of the COMPLETE physical equations.
+        // Physical source work below still uses the original external charges.
+        let mut reversible_charges = charges.to_vec();
+        if let Some(intrinsic) = &intrinsic {
+            for node in 0..n {
+                poll(cx)?;
+                for axis in 0..3 {
+                    effective_force[node][axis] =
+                        effective_force[node][axis] - intrinsic.force_n[node][axis];
+                }
+                reversible_charges[node] = reversible_charges[node] - intrinsic.charge_c[node];
+            }
         }
         let mut outgoing = vec![C64::ZERO; electrodes.len()];
         let mut load_responses = Vec::with_capacity(loads.len());
@@ -562,7 +669,10 @@ impl TetPiezoelectricModel<'_> {
                 .iter()
                 .map(|f| f.map(scalar))
                 .collect::<Vec<_>>();
-            let q = charges.iter().map(|&q| scalar(q)).collect::<Vec<_>>();
+            let q = reversible_charges
+                .iter()
+                .map(|&q| scalar(q))
+                .collect::<Vec<_>>();
             parts.push(self.recover(
                 &full,
                 u,
@@ -579,9 +689,11 @@ impl TetPiezoelectricModel<'_> {
         }
         let (a, b) = (&parts[0], &parts[1]);
         let mut cells = Vec::with_capacity(self.tetrahedra.len());
-        for (a, b) in a.cells.iter().zip(&b.cells) {
+        let mut material_heat = 0.0;
+        let mut memory_energy = 0.0;
+        for (id, (a, b)) in a.cells.iter().zip(&b.cells).enumerate() {
             poll(cx)?;
-            let cell = HarmonicPiezoelectricCell {
+            let mut cell = HarmonicPiezoelectricCell {
                 strain_mandel: combine(a.strain_mandel, b.strain_mandel),
                 stress_mandel_pa: combine(a.response.stress_mandel_pa, b.response.stress_mandel_pa),
                 electric_field_v_m: combine(
@@ -592,7 +704,29 @@ impl TetPiezoelectricModel<'_> {
                     a.response.displacement_c_m2,
                     b.response.displacement_c_m2,
                 ),
+                average_mechanical_heat_w: 0.0,
+                average_dielectric_heat_w: 0.0,
+                average_memory_energy_j: 0.0,
             };
+            if let Some(intrinsic) = &intrinsic {
+                let response = &intrinsic.cells[id];
+                let volume = self.dielectric.volumes_m3()[id];
+                for axis in 0..6 {
+                    cell.stress_mandel_pa[axis] =
+                        cell.stress_mandel_pa[axis] + response.additional_stress_mandel_pa[axis];
+                }
+                for axis in 0..3 {
+                    cell.displacement_c_m2[axis] =
+                        cell.displacement_c_m2[axis] + response.polarization_c_m2[axis];
+                }
+                cell.average_mechanical_heat_w = volume * response.average_mechanical_heat_w_m3;
+                cell.average_dielectric_heat_w = volume * response.average_dielectric_heat_w_m3;
+                cell.average_memory_energy_j = volume
+                    * (response.average_mechanical_memory_energy_j_m3
+                        + response.average_dielectric_memory_energy_j_m3);
+                material_heat += cell.average_mechanical_heat_w + cell.average_dielectric_heat_w;
+                memory_energy += cell.average_memory_energy_j;
+            }
             if cycle_norm(&cell.strain_mandel) > controls.field.maximum_strain_norm
                 || cycle_norm(&cell.electric_field_v_m) > controls.field.maximum_electric_field_v_m
             {
@@ -699,11 +833,20 @@ impl TetPiezoelectricModel<'_> {
                 source_current_a,
             });
         }
-        let storage = 0.5 * a.stored_energy_j + 0.5 * b.stored_energy_j;
-        let residual = mechanical + electrical - heat;
-        if [kinetic, storage, mechanical, electrical, heat, residual]
-            .iter()
-            .any(|x| !x.is_finite())
+        let storage = 0.5 * a.stored_energy_j + 0.5 * b.stored_energy_j + memory_energy;
+        let residual = mechanical + electrical - heat - material_heat;
+        if [
+            kinetic,
+            storage,
+            mechanical,
+            electrical,
+            heat,
+            material_heat,
+            memory_energy,
+            residual,
+        ]
+        .iter()
+        .any(|x| !x.is_finite())
             || velocity_m_s.iter().flatten().any(|&z| !finite(z))
         {
             return Err(invalid(
@@ -712,7 +855,7 @@ impl TetPiezoelectricModel<'_> {
         }
         if residual.abs() > controls.power_tolerance_w {
             return Err(super::TetPiezoelectricError::Balance(
-                "harmonic mechanical/electrical source power does not equal external load heat",
+                "harmonic source power does not equal external load and intrinsic material heat",
             ));
         }
         poll(cx)?;
@@ -729,6 +872,7 @@ impl TetPiezoelectricModel<'_> {
             average_mechanical_power_w: mechanical,
             average_electrical_power_w: electrical,
             average_load_heat_w: heat,
+            average_material_heat_w: material_heat,
             power_balance_residual_w: residual,
             maximum_force_residual_n,
             maximum_charge_residual_c,

@@ -15788,6 +15788,44 @@ mesh convergence, startup decay or uniqueness at an unexcited lossless pole.
 `examples/PIEZOELECTRIC_PLATE.md` documents the nominal finite-plate consumer,
 source assumptions, `--harmonic` sweep and remaining model boundaries.
 
+### Intrinsic ceramic relaxation on the spatial harmonic pencil
+
+`TetPiezoelectricModel::solve_harmonic_with_relaxation` binds one uniform
+`RelaxingTensorPiezoelectric` or one per original tetrahedron. Exact base
+tensor identity and mesh frame must match. The material owner retains original
+card/query selection, native anisotropic Maxwell factors and directed Debye
+poles; its base stiffness is relaxed and its clamped permittivity is frozen.
+Missing pole data never become a fitted damping ratio or implicit ceramic loss.
+
+Frequency tensors are evaluated once per supplied law. Direct complex
+increments enter the original Mandel strain and dielectric gradient maps;
+positive-volume upper-triangle assembly mirrors identical values. Original
+consistent mass, reciprocal coupling, supports, electrode reduction, sparse
+MINRES, coordinate budgets and cancellation remain in the same solve.
+
+Independent cell constitutive recovery supplies added mechanical force and
+polarization charge. Moving these exact increments to the original reversible
+recovery's right-hand side retains physical support reactions and complete
+free-node/electrode charge residuals. External source work always uses the
+original physical volume charges. Published stress and displacement include
+the memory response.
+
+Per-cell mechanical and polarization heat are integrated from positive
+material memory/friction norms, not inferred from the input-power residual.
+The combined mean-work gate pays both `average_load_heat_w` and
+`average_material_heat_w`. Cell `average_memory_energy_j` is already inside
+total body storage; it is never added as heat or counted twice. Runtime
+constitutive evaluation allocates nothing.
+
+Five synthetic coupled regression groups compare Debye admittance, a retained
+Maxwell resonance, mixed intrinsic/external dissipation and complete storage
+to independent equations. Empty memory laws preserve the reversible path;
+source/frame/band, amplitude and cancellation refusals remain active. This is
+a held-condition periodic response, not startup integration, thermal feedback,
+intrinsic coupling loss, nonlinear domain motion or experimental calibration.
+The nominal PZT-5A example keeps intrinsic loss disabled because its source
+does not identify the required spectrum.
+
 ## Regional material walls in native duct propagation
 
 `bernoulli_aperture::wall::material::RegionalMaterialWallDg` retains one original

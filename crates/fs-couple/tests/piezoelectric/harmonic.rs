@@ -6,6 +6,9 @@ use fs_couple::piezoelectric::spatial::harmonic::{
 };
 use fs_math::c64::C64;
 
+#[path = "harmonic/relaxation.rs"]
+pub(super) mod relaxation;
+
 const ZERO: C64 = C64::new(0.0, 0.0);
 
 fn hc() -> HControls {

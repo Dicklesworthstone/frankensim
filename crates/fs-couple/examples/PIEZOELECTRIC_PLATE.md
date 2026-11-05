@@ -126,6 +126,58 @@ the **whole cycle**, rather than only each quadrature. Both quadratures also
 pass the existing constitutive reconstruction, force/charge residual and
 storage checks. The final mechanical plus electrical average supply must
 equal the actual external load heat within the caller's power tolerance.
+With intrinsic relaxation enabled, the same account also includes material heat.
+
+## Intrinsic mechanical and dielectric relaxation
+
+`TetPiezoelectricModel::solve_harmonic_with_relaxation` adds source-backed
+ceramic loss and dispersion to that same spatial solve. It accepts one uniform
+`RelaxingTensorPiezoelectric` or one per original tetrahedron. Every law must
+retain the exact original base tensor identity and mesh frame.
+
+The material owner is
+`fs_material::piezoelectric::tensor::relaxation::RelaxingTensorPiezoelectric`.
+Its `resolve` constructor takes the original base tensor and card, explicitly
+named native `TensorBranchProperties`, directed `DirectedDebyeProperties`, and
+the original material selection policy. All mechanical branch entries and all
+three dielectric direction components must be provided; zero coefficients are
+explicit source data. The direction is supplied in the base source frame and
+co-rotates with the specimen.
+
+**The base coefficients have specific limiting meanings:** mechanical C₀ is
+the relaxed constant-field stiffness, and ε∞ is the instantaneous clamped
+permittivity. Adding a Debye increment to an already relaxed permittivity
+would count polarization twice. A single-frequency loss tangent or mechanical
+quality factor does not identify the required spectrum. The nominal PZT-5A
+example therefore keeps intrinsic loss disabled; its cited data do not supply
+these relaxation parameters.
+
+For peak phasors under exp(−iωt), each mechanical Maxwell branch adds
+`C_j (-iωτ_j)/(1-iωτ_j)`. Each directed dielectric pole adds
+`Δε_j n_j n_jᵀ/(1-iωτ_j)`. Native positive-semidefinite mechanical factors
+and positive dielectric increments make their heat nonnegative. The original
+real piezoelectric coupling remains reciprocal; this model does not infer
+intrinsic coupling loss. Source frequency applicability is enforced without
+freezing a frequency-dependent measured curve into a constant parameter.
+
+The solve evaluates each supplied material's frequency coefficients once,
+adds its increments through the original mesh gradients, and reuses the same
+mass, coupling, boundary reduction and sparse solver. Constitutive response
+evaluation allocates nothing. Independent stress and polarization recovery
+supplies the actual forces, electrode charge and source currents.
+
+Each response cell reports `average_mechanical_heat_w`,
+`average_dielectric_heat_w` and `average_memory_energy_j`. These quantities are
+already integrated over that cell. Memory energy is included in
+`average_stored_energy_j`; it must not be added again. The response's
+`average_material_heat_w` sums the two intrinsic heat channels, while
+`average_load_heat_w` remains the external conductors' heat. The complete
+average supply must pay both. Coefficients stay at their held material state;
+these heat reports do not themselves evolve the ceramic's temperature.
+
+The source-backed model and its analytic checks are documented by the primary
+[piezoelectric-loss theory](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_modeling.05.109.html)
+and [Debye dispersion theory](https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_theory.05.36.html).
 
 ## Verification and boundaries
 
@@ -148,8 +200,10 @@ inductance, nonlinear switching and reactive material thermal feedback remain
 outside this path. The existing longitudinal `PiezoelectricCircuit` remains
 the separate reduced rod adapter for the native general circuit graph.
 
-Neither path added here supplies ferroelectric hysteresis, saturation,
-depoling, breakdown, fringing, acoustic radiation or intrinsic ceramic loss.
+These models do not supply ferroelectric hysteresis, saturation,
+depoling, breakdown, fringing, acoustic radiation or dissipative piezoelectric
+cross coupling. Intrinsic relaxation currently enters the harmonic path.
 The harmonic result is a periodic particular solution; it does not establish
 startup decay or uniqueness of an unexcited lossless mode. The plate mesh and
 time/frequency sampling must be refined for a concrete design question.
+
