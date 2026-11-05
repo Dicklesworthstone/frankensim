@@ -2,6 +2,9 @@
 
 use super::{FluxSystem, convection_edge_quadrature};
 
+/// Positive conservative density and carried-inventory transport on these faces.
+pub mod density;
+
 /// Integrated volume rates per unit depth on one original mesh edge.
 ///
 /// The global normal points outward from `edge.tris.0`, toward `edge.tris.1`
@@ -70,6 +73,46 @@ fn dimensional_rate(normalized: f64, scale: f64, length: f64) -> Option<f64> {
     (value.is_finite() && value > 0.0).then_some(value)
 }
 
+// One native face evaluation, shared by the volume-only entry and the
+// cancellable prepared density owner. Preserve the original arithmetic.
+fn edge_volume_rate(
+    index: usize,
+    length: f64,
+    moments: [f64; 2],
+) -> Result<EdgeVolumeTransport, FluxTransportError> {
+    if !length.is_finite() || length <= 0.0 {
+        return Err(FluxTransportError::InvalidEdgeLength { edge: index });
+    }
+    let scale = moments[0].abs().max(moments[1].abs());
+    if scale == 0.0 {
+        return Ok(EdgeVolumeTransport::default());
+    }
+    let mean = moments[0] / scale;
+    let linear = moments[1] / scale;
+    let mut rates = [0.0; 2];
+    let mut corrections = [0.0; 2];
+    for (point, weight, _) in convection_edge_quadrature([0.0, 0.0], [1.0, 0.0], moments) {
+        let normal = mean + 12.0 * linear * (point[0] - 0.5);
+        let direction = usize::from(normal < 0.0);
+        let corrected = weight * normal.abs() - corrections[direction];
+        let next = rates[direction] + corrected;
+        corrections[direction] = (next - rates[direction]) - corrected;
+        rates[direction] = next;
+    }
+    let refusal = || FluxTransportError::UnrepresentableRate { edge: index };
+    let along_normal_m2_s = dimensional_rate(rates[0], scale, length).ok_or_else(refusal)?;
+    let against_normal_m2_s = dimensional_rate(rates[1], scale, length).ok_or_else(refusal)?;
+    let net_m2_s = moments[0] * length;
+    if !net_m2_s.is_finite() || (moments[0] != 0.0 && net_m2_s == 0.0) {
+        return Err(refusal());
+    }
+    Ok(EdgeVolumeTransport {
+        along_normal_m2_s,
+        against_normal_m2_s,
+        net_m2_s,
+    })
+}
+
 impl FluxSystem<'_> {
     /// Resolve both physical directions on every original BDM1 mesh edge.
     ///
@@ -101,41 +144,11 @@ impl FluxSystem<'_> {
         }
         let mut result = Vec::with_capacity(self.mesh.edges.len());
         for (index, edge) in self.mesh.edges.iter().enumerate() {
-            if !edge.len.is_finite() || edge.len <= 0.0 {
-                return Err(FluxTransportError::InvalidEdgeLength { edge: index });
-            }
-            let moments = [velocity[2 * index], velocity[2 * index + 1]];
-            let scale = moments[0].abs().max(moments[1].abs());
-            if scale == 0.0 {
-                result.push(EdgeVolumeTransport::default());
-                continue;
-            }
-            let mean = moments[0] / scale;
-            let linear = moments[1] / scale;
-            let mut rates = [0.0; 2];
-            let mut corrections = [0.0; 2];
-            for (point, weight, _) in convection_edge_quadrature([0.0, 0.0], [1.0, 0.0], moments) {
-                let normal = mean + 12.0 * linear * (point[0] - 0.5);
-                let direction = usize::from(normal < 0.0);
-                let corrected = weight * normal.abs() - corrections[direction];
-                let next = rates[direction] + corrected;
-                corrections[direction] = (next - rates[direction]) - corrected;
-                rates[direction] = next;
-            }
-            let refusal = || FluxTransportError::UnrepresentableRate { edge: index };
-            let along_normal_m2_s =
-                dimensional_rate(rates[0], scale, edge.len).ok_or_else(refusal)?;
-            let against_normal_m2_s =
-                dimensional_rate(rates[1], scale, edge.len).ok_or_else(refusal)?;
-            let net_m2_s = moments[0] * edge.len;
-            if !net_m2_s.is_finite() || (moments[0] != 0.0 && net_m2_s == 0.0) {
-                return Err(refusal());
-            }
-            result.push(EdgeVolumeTransport {
-                along_normal_m2_s,
-                against_normal_m2_s,
-                net_m2_s,
-            });
+            result.push(edge_volume_rate(
+                index,
+                edge.len,
+                [velocity[2 * index], velocity[2 * index + 1]],
+            )?);
         }
         Ok(result)
     }

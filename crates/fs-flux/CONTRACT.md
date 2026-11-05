@@ -247,6 +247,49 @@ net directly from the original mean moment. Rates are per unit depth in m²/s;
 consumers supply density, depth, carried state and fixed-inventory continuity
 admission. The operator neither repairs divergence nor infers ALE mesh velocity.
 
+### Conservative density and specific-inventory transport
+
+`FluxSystem::prepare_density_transport` binds a prescribed BDM velocity to the
+original fixed triangle volumes and an explicit physical depth. It reuses the
+original sign-split face arithmetic, including both streams on a reversing edge.
+Every cell's incoming and outgoing volume rates must balance within a caller
+allowance no larger than 1e-12 relative; no velocity, rate or inventory is repaired.
+
+`PreparedDensityTransport::advance_into` advances positive P0 density and N
+finite specific quantities by synchronous donor-cell Euler. A directional mass
+transfer is the original donor density times that directional swept volume.
+The SAME transfer carries each specific quantity: N=3 may carry physical
+[u_x,u_y,h], evolving cell momentum and enthalpy inventories with mass.
+Boundary counterflow uses both the original interior state and an explicit
+exterior donor state; zero net volume does not imply zero mass or energy exchange.
+
+An outgoing-volume Courant cap strictly below one leaves positive donor mass.
+Density and specific-quantity bounds have the usual convex-mixture meaning
+up to the admitted volume imbalance and floating-point roundoff. Incoming
+specific differences preserve uniform specific fields exactly and retain small
+changes beside a common datum. If that difference update suffers severe
+cancellation, the same three native face transfers reconstruct the extensive
+convex mixture, preserving a small donor's finite inventory at large density
+contrast. Compensated product differences audit represented cell inventories;
+reported mass/carried balance residuals are not clamped or normalized away.
+
+Preparation and reusable workspace allocation have explicit logical byte caps
+and fallible reservations. The warm step is O((cells+edges)*N), allocates no heap
+storage, and polls cancellation at cell/edge boundaries. No refusal changes
+output cells. Every attempt invalidates the workspace's accepted-transfer view;
+`face_transfers` returns both actual directional mass/carried amounts only after
+the complete step succeeds. A changed advecting velocity requires preparation
+of a new plan; neither density nor specific quantities are frozen into the plan.
+
+This is first-order prescribed-flow transport, with numerical mixing to be
+assessed by refinement. It does not solve variable-density BDM momentum or
+pressure, update material viscosity/EOS, supply heat conduction or pressure work,
+move meshes/interfaces, or represent phase-volume sources. Cell momentum mixing
+loss is not silently converted to thermal enthalpy. `tests/density_transport.rs`
+contains G1/G3 analytical exchange/refinement, unequal-density counterflow,
+open-boundary inventory closure, high-contrast retained-inventory, throughflow
+constant-specific, depth/density/datum scaling and atomic-refusal regressions.
+
 Pressure/divergence coupling uses the exact integrated BDM face moments:
 signed edge length for mean moments and zero for linear moments. The momentum
 transpose and retained pressure reactions use the same coefficients, preserving
