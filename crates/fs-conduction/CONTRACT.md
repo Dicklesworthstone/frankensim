@@ -1,5 +1,30 @@
 # CONTRACT: fs-conduction
 
+## Retained live-contact total-enthalpy endpoints
+
+`HeterogeneousEnthalpyBackwardEuler::linearize_temperature_contact_endpoint`
+consumes the actual accepted `EnthalpyStepSolution`, original previous specific
+enthalpy and original absolute physical residual target. It re-queries the
+retained contact laws and revalidates the unchanged endpoint through the
+existing heterogeneous energy owner. The complete source-contact tangent then
+attaches to that same endpoint without a new nonlinear solve or synthetic
+forward receipt.
+
+Both trace-temperature partials act through the regional chart slopes. Native
+material-bound contacts additionally retain independent phase-source feedback.
+Prescribed columns remain in the full tangent, and bath, source, old-enthalpy,
+reference-density and phase-aware conductivity controls share its transpose.
+History carry stays in specific-enthalpy coordinates across latent plateaus.
+The existing natural/air Robin feedback can attach to the returned owner.
+This entry point does not own radiation; accepted radiation fields require
+their distinct complete boundary adapter.
+
+Focused regressions exercise nonuniform latent histories, ordered two-sided
+source laws, both prescribed-bath orientations, direct fixed-node objectives,
+original residual and energy gates, source/chart corners and cancellation.
+Syntax and source review do not establish numerical execution. This derivative
+supplies no continuous-time or constitutive-validation certificate.
+
 ## Capacity adjoints with live contacts and ambient radiation
 
 The complete `ContactCapacityLinearization` composes with the existing ambient

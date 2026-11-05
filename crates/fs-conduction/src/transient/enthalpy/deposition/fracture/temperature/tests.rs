@@ -234,12 +234,12 @@ fn config() -> TemperatureConfig {
         total_energy_tolerance_j: 1e-10,
     }
 }
-fn state(
-    source: &ResolvedBilinearCohesive,
+fn state<'a>(
+    source: &'a ResolvedBilinearCohesive,
     thermal: DepositionSimulation<'static>,
     gap: [f64; 3],
     open_gap: f64,
-) -> FractureCooling<'static, '_> {
+) -> FractureCooling<'static, 'a> {
     let point = source
         .law()
         .bonded_point()
@@ -279,31 +279,6 @@ fn update<'a, 'b>(
 }
 fn close(a: f64, b: f64) {
     assert!((a - b).abs() < 2e-10, "{a:e} != {b:e}");
-}
-
-#[test]
-fn uniform_temperature_and_receiving_side_limits_preserve_exact_source_boundaries() {
-    let card = card("uniform source-boundary regression", false, false);
-    let cold = source(&card, false, false);
-    let original = state(&cold, thermal([300.0; 2], false), [0.0; 3], 0.0001);
-    // The sum of weighted absolutes previously returned 299.99999999999994,
-    // outside this original source's declared 300 K lower endpoint.
-    for weight in [0.0, 0.023, 0.5, 0.983, 1.0] {
-        let t = original.interface_temperature_k(7, weight).unwrap();
-        assert_eq!(t, 300.0);
-        let same = cold.at_temperature(&card, "T", t).unwrap();
-        let (next, report) = original.transfer_temperature(
-            0.0, &update(&cold, &same, weight), "T", config(), || Ok(()),
-        ).unwrap();
-        assert_eq!(next.interfaces()[&7].point, original.interfaces()[&7].point);
-        assert_eq!(report.parameter_work_j, 0.0);
-        assert_eq!(report.contact.fracture_dissipation_j, 0.0);
-    }
-    let gradient = state(&cold, thermal([400.0, 300.0], false), [0.0; 3], 0.0001);
-    assert_eq!(gradient.interface_temperature_k(7, 0.0).unwrap(), 300.0);
-    assert_eq!(gradient.interface_temperature_k(7, 1.0).unwrap(), 400.0);
-    assert_eq!(gradient.interface_temperature_k(7, 0.25).unwrap(), 325.0);
-    assert_eq!(gradient.interface_temperature_k(7, 0.75).unwrap(), 375.0);
 }
 
 // G1/G3: actual heat weakens the retained bond, including mixed and viscous

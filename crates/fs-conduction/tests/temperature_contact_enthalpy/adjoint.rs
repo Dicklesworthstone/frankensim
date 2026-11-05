@@ -1,5 +1,5 @@
 use super::*;
-use fs_conduction::LinearConfig;
+use fs_conduction::{LinearConfig, ThermalBc};
 
 fn scaled_card(scale: f64) -> InterfaceSystemCard {
     let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
@@ -124,22 +124,30 @@ fn trajectory_gradient(cx: &Cx<'_>, complete_contact_feedback: bool) -> (f64, Ve
     for index in (0..dts.len()).rev() {
         let endpoint = accepted.pop().unwrap();
         if complete_contact_feedback {
-            let step = contacts.linearize_accepted_enthalpy(
-                cx, &engine, problem, &histories[index], dts[index], config(),
-                coupling().residual_tolerance_j, endpoint, 1,
+            let original = endpoint.conduction.clone();
+            let step = engine.linearize_temperature_contact_endpoint(
+                cx, problem, &contacts, &histories[index], dts[index], config(),
+                endpoint.conduction, coupling().residual_tolerance_j, 1,
             ).unwrap();
+            assert_eq!(step.primal().specific_enthalpy_j_kg, original.specific_enthalpy_j_kg);
+            assert_eq!(step.primal().temperature, original.temperature);
+            assert_eq!(step.primal().liquid_mass_fraction, original.liquid_mass_fraction);
+            assert_eq!(step.primal().newton.iterations, original.newton.iterations);
+            assert_eq!(step.primal().newton.history, original.newton.history);
             let seed = carry.take().unwrap_or_else(|| {
                 let mut temperature_seed = vec![0.0; 8];
                 temperature_seed[0] = 1.0;
-                step.temperature_pullback(cx, &temperature_seed).unwrap()
+                step.transport().temperature_pullback(cx, &temperature_seed).unwrap()
             });
-            let gradient = step.pullback_with_resistance_controls(
-                cx, &seed, linear(), 1,
+            let gradient = step.pullback(cx, &seed, linear()).unwrap();
+            let load = step.transport().nodal_load_pullback(cx, &gradient.transport.adjoint).unwrap();
+            let controls = endpoint.physical_contacts.frozen_interfaces().resistance_scale_pullback(
+                cx, &step.primal().temperature, &load, 1,
             ).unwrap();
-            assert_eq!(gradient.resistance_multipliers.len(), 1);
-            assert_eq!(gradient.resistance_multipliers[0].interface, "joint");
-            resistance += gradient.resistance_multipliers[0].derivative;
-            carry = Some(gradient.storage.transport.previous_specific_enthalpy);
+            assert_eq!(controls.len(), 1);
+            assert_eq!(controls[0].interface, "joint");
+            resistance += controls[0].derivative;
+            carry = Some(gradient.transport.previous_specific_enthalpy);
         } else {
             let contact = contacts.linearize_temperature(
                 cx, problem.boundary, &endpoint.conduction.temperature, 1,
@@ -330,24 +338,29 @@ fn g3_two_sided_enthalpy_adjoint_matches_endpoint_resistance_history_and_source_
         assert!(accepted.physical_contacts.states()[0].side_a_temperature_k > 310.);
         assert!(accepted.physical_contacts.states()[0].side_b_temperature_k < 350.);
         close(accepted.physical.stored_energy_change_j, 10. * dt, 1e-8);
-        let step = contacts.linearize_accepted_enthalpy(
-            cx, &engine, problem, &old, dt, config(), target.residual_tolerance_j, accepted, 1,
+        let step = engine.linearize_temperature_contact_endpoint(
+            cx, problem, &contacts, &old, dt, config(), accepted.conduction,
+            target.residual_tolerance_j, 1,
         ).unwrap();
         let temperature_seed = [0.7, -0.2, 0.4, 0.5, -0.3, 0.1, 0.2, -0.1];
-        let seed = step.temperature_pullback(cx, &temperature_seed).unwrap();
+        let seed = step.transport().temperature_pullback(cx, &temperature_seed).unwrap();
         for (i, &value) in seed.iter().enumerate() {
             close(value, if i == 3 { 0.0 } else { 0.1 * temperature_seed[i] }, 1e-14);
         }
-        let gradient = step.pullback_with_resistance_controls(cx, &seed, linear(), 1).unwrap();
-        assert_eq!(gradient.resistance_multipliers.len(), 1);
-        assert_eq!(gradient.resistance_multipliers[0].interface, "joint");
+        let gradient = step.pullback(cx, &seed, linear()).unwrap();
+        let load = step.transport().nodal_load_pullback(cx, &gradient.transport.adjoint).unwrap();
+        let controls = accepted.physical_contacts.frozen_interfaces().resistance_scale_pullback(
+            cx, &step.primal().temperature, &load, 1,
+        ).unwrap();
+        assert_eq!(controls.len(), 1);
+        assert_eq!(controls[0].interface, "joint");
         let history_direction = [7., -3., 4., 11., -5., 8., -6., 2.];
         let source_direction = [5., -2., 8., 11., -7., 4., -3., 6.];
         let derivatives = [
-            gradient.resistance_multipliers[0].derivative,
-            gradient.storage.transport.previous_specific_enthalpy.iter()
+            controls[0].derivative,
+            gradient.transport.previous_specific_enthalpy.iter()
                 .zip(history_direction).map(|(bar, direction)| bar * direction).sum(),
-            gradient.storage.transport.source_density.iter()
+            gradient.transport.source_density.iter()
                 .zip(source_direction).map(|(bar, direction)| bar * direction).sum(),
         ];
         assert!(derivatives.iter().all(|value| value.abs() > 0.01));
@@ -381,6 +394,135 @@ fn g3_two_sided_enthalpy_adjoint_matches_endpoint_resistance_history_and_source_
             for (actual, reference) in derivatives.into_iter().zip(expected) {
                 close(actual, reference, 2e-5 * reference.abs().max(1.0));
             }
+        }
+    });
+}
+
+#[test]
+fn g3_live_enthalpy_endpoint_prescribed_columns_and_direct_goal_match_fresh_bath_solves() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let cold = chart(false);
+        let hot = chart(true);
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh, &[
+            ReferenceEnthalpyMaterial { curve: &cold, reference_density_kg_m3: 1.0 },
+            ReferenceEnthalpyMaterial { curve: &hot, reference_density_kg_m3: 2.0 },
+        ], &[0, 1], EnthalpyBudget { max_vertices: 8, max_elements: 2 }).unwrap();
+        let material = ConductivityModel::isotropic(
+            ConductivityTable::declared_curve(vec![(280.0, 1.6), (380.0, 3.6)]).unwrap(),
+        );
+        let card = two_sided_scaled_card(1.0);
+        let source = ScalarField::Nodal(vec![0., 0., 0., 0., 60., 60., 60., 60.]);
+        let old = [230., 240., 260., 150., 430., 450., 470., 450.];
+        let dt = 0.35;
+        for (side, bath_k) in [(0_usize, 300.0), (1, 340.0)] {
+            let boundary = |temperature| ThermalBoundaryBuilder::new(&mesh).region(
+                "bath", |face| {
+                    let mut vertices = face.vertices;
+                    vertices.sort_unstable();
+                    vertices == [4 * side, 4 * side + 1, 4 * side + 3].map(|v| v as u32)
+                }, ThermalBc::dirichlet(temperature).unwrap(),
+            ).unwrap().adiabatic_remainder().finish().unwrap();
+            let bc = boundary(bath_k);
+            let contacts = TemperatureContacts::new(cx, &mesh, &bc, vec![],
+                vec![two_sided_law(&mesh, &card)], 1).unwrap();
+            let problem = ConductionProblem { mesh: &mesh, boundary: &bc,
+                material: &material, element_materials: None, source: &source };
+            let accepted = contacts.advance_enthalpy_newton(
+                cx, &engine, problem, &old, dt, coupled_newton(),
+            ).unwrap();
+            let step = engine.linearize_temperature_contact_endpoint(
+                cx, problem, &contacts, &old, dt, config(), accepted.conduction,
+                coupling().residual_tolerance_j, 1,
+            ).unwrap();
+            let mut weights = [0.0; 8];
+            weights[4 * (1 - side) + 2] = 1.0;
+            weights[4 * side] = 0.4;
+            let seed = step.transport().temperature_pullback(cx, &weights).unwrap();
+            let gradient = step.pullback(cx, &seed, linear()).unwrap();
+            let actual: f64 = gradient.transport.prescribed_temperature.iter().sum();
+            assert!(actual > 0.4 + 1e-4, "the bath must also influence the opposite body");
+            let load = step.transport().nodal_load_pullback(cx, &gradient.transport.adjoint).unwrap();
+            for &(vertex, _) in bc.dirichlet() {
+                assert_eq!(gradient.transport.previous_specific_enthalpy[vertex], 0.0);
+                assert_eq!(load[vertex], 0.0);
+            }
+            let objective = |temperature| {
+                let bc = boundary(temperature);
+                let contacts = TemperatureContacts::new(cx, &mesh, &bc, vec![],
+                    vec![two_sided_law(&mesh, &card)], 1).unwrap();
+                let solved = contacts.advance_enthalpy_newton(cx, &engine,
+                    ConductionProblem { boundary: &bc, ..problem }, &old, dt,
+                    coupled_newton()).unwrap();
+                solved.conduction.temperature.iter().zip(weights)
+                    .map(|(temperature, weight)| temperature * weight).sum::<f64>()
+            };
+            let epsilon = 1e-3;
+            let expected = (objective(bath_k + epsilon) - objective(bath_k - epsilon))
+                / (2.0 * epsilon);
+            close(actual, expected, 2e-6 * expected.abs().max(1.0));
+        }
+    });
+}
+
+#[test]
+fn g4_live_enthalpy_endpoint_keeps_original_gates_and_strict_source_chart_admission() {
+    use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh = mesh();
+        let bc = ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let curve = chart(false);
+        let engine = HeterogeneousEnthalpyBackwardEuler::new(cx, &mesh, &[
+            ReferenceEnthalpyMaterial { curve: &curve, reference_density_kg_m3: 1.0 },
+            ReferenceEnthalpyMaterial { curve: &curve, reference_density_kg_m3: 2.0 },
+        ], &[0, 1], EnthalpyBudget { max_vertices: 8, max_elements: 2 }).unwrap();
+        let material = ConductivityModel::isotropic_declared(2.0).unwrap();
+        let source = ScalarField::Uniform(0.0);
+        let problem = ConductionProblem { mesh: &mesh, boundary: &bc,
+            material: &material, element_materials: None, source: &source };
+        let original_card = card();
+        let contacts = TemperatureContacts::new(cx, &mesh, &bc, vec![],
+            vec![law(&mesh, &original_card)], 1).unwrap();
+        let old = [50.0; 8];
+        let accepted = contacts.advance_enthalpy_newton(
+            cx, &engine, problem, &old, 0.2, coupled_newton(),
+        ).unwrap().conduction;
+        let mut changed = accepted.clone();
+        changed.specific_enthalpy_j_kg[0] += 1.0;
+        // A loose inner Newton configuration cannot replace the original gate.
+        let mut loose = config();
+        loose.newton.absolute_tolerance = 10.0;
+        assert!(matches!(engine.linearize_temperature_contact_endpoint(
+            cx, problem, &contacts, &old, 0.2, loose, changed.clone(), 1e-10, 1,
+        ), Err(EnthalpyAdjointError::PrimalResidual { .. })));
+        assert!(matches!(engine.linearize_temperature_contact_endpoint(
+            cx, problem, &contacts, &old, 0.2, loose, changed, 10.0, 1,
+        ), Err(EnthalpyAdjointError::Enthalpy(EnthalpyError::EnergyBalance { .. }))));
+        assert!(engine.linearize_temperature_contact_endpoint(
+            cx, problem, &contacts, &old, 0.2, config(), accepted.clone(), 1e-10, 0,
+        ).is_err());
+        let gate = CancelGate::new_clock_free();
+        gate.request();
+        context(&gate, |cancelled| assert!(matches!(engine.linearize_temperature_contact_endpoint(
+            cancelled, problem, &contacts, &old, 0.2, config(), accepted.clone(), 1e-10, 1,
+        ), Err(EnthalpyAdjointError::Enthalpy(EnthalpyError::Conduction(
+            fs_conduction::ConductionError::Cancelled { .. },
+        ))))));
+
+        // Both are valid stationary forward endpoints. Neither a source kink
+        // nor a chart kink may acquire a classical adjoint, even for zero heat.
+        for (source_card, old) in [
+            (card_with_curve(vec![(280., 0.1), (accepted.temperature[0], 0.3), (380., 0.7)]), [50.; 8]),
+            (card(), [100.; 8]),
+        ] {
+            let contacts = TemperatureContacts::new(cx, &mesh, &bc, vec![],
+                vec![law(&mesh, &source_card)], 1).unwrap();
+            let accepted = contacts.advance_enthalpy_newton(
+                cx, &engine, problem, &old, 0.2, coupled_newton(),
+            ).unwrap().conduction;
+            assert!(engine.linearize_temperature_contact_endpoint(
+                cx, problem, &contacts, &old, 0.2, config(), accepted, 1e-10, 1,
+            ).is_err());
         }
     });
 }

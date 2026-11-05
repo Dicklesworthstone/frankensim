@@ -1353,6 +1353,55 @@ impl<'m> HeterogeneousEnthalpyBackwardEuler<'m, '_> {
         self.bind_linearization(cx, old_h, inner)
     }
 
+    /// Revalidate an unchanged endpoint against its original live contact laws
+    /// and attach their complete specific-enthalpy tangent, without a new solve.
+    ///
+    /// The supplied absolute residual target is the original forward physical
+    /// gate; it is never reconstructed from endpoint-frozen resistance or Robin
+    /// coefficients. The existing energy gate, strict chart/material/source
+    /// smoothness checks and exact mesh ownership remain active. Only the mesh
+    /// is borrowed by the result, which retains the accepted enthalpy field and
+    /// Newton history while recomputing its physical residual and energy.
+    ///
+    /// The tangent includes frozen contact transport once. The additional source
+    /// feedback includes both resistance temperature partials times `dT/dh`
+    /// and any independent phase-source derivative. Free rows retain their
+    /// prescribed columns, so the existing bath, history, source, reference
+    /// density and conductivity pullbacks all use the same complete transpose.
+    /// Physical Robin state feedback may subsequently be attached through
+    /// [`HeterogeneousEnthalpyStepLinearization::with_robin_feedback`].
+    ///
+    /// This entry point owns no radiation. `max_face_pairs` includes fixed
+    /// contacts and bounds their tangent work, not the total solver workspace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn linearize_temperature_contact_endpoint(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &crate::interface::temperature::TemperatureContacts<'_, '_>,
+        old_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        accepted: EnthalpyStepSolution,
+        residual_tolerance_j: f64,
+        max_face_pairs: usize,
+    ) -> Result<HeterogeneousEnthalpyStepLinearization<'m>, EnthalpyAdjointError> {
+        self.inner.admit_step(cx, problem, old_h, dt_s, config)?;
+        contacts.check_mesh(problem.mesh)?;
+        if !residual_tolerance_j.is_finite() || residual_tolerance_j <= 0.0 {
+            return Err(EnthalpyAdjointError::InvalidInput(
+                "positive finite original contact residual target required",
+            ));
+        }
+        let contact = contacts.linearize_enthalpy(
+            cx, problem.boundary, self, &accepted.specific_enthalpy_j_kg, max_face_pairs,
+        )?;
+        self.linearize_accepted_with_target(
+            cx, problem, Some(contact.physical_contacts().frozen_interfaces()),
+            old_h, dt_s, config, accepted, residual_tolerance_j,
+        )?.with_contact_temperature_feedback(cx, &contact)
+    }
+
     pub(crate) fn linearize_accepted_with_target(
         &self,
         cx: &Cx<'_>,
