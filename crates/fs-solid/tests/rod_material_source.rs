@@ -60,6 +60,69 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 
 #[test]
+fn nonuniform_thermal_refresh_preserves_inventory_and_actual_series_expansion() {
+    use fs_solid::rod::material_field::motion::RodRootBoundary;
+    let material = card(1.0, false);
+    let lengths = vec![0.125, 0.375];
+    let radii = [0.005_f64, 0.01];
+    let gate = CancelGate::new();
+    let source = RodMaterialSource::try_new_nonuniform(lengths.clone(),
+        radii.iter().map(|&radius| segment(&material, radius)).collect(),
+        "shear_modulus", 0.03, &gate).unwrap();
+    let original = source.reference_rod();
+    let model = original.clone().into_motion_model(RodRootBoundary::Clamped, &gate).unwrap();
+    let temperatures = [350.0, 450.0];
+    let mut hot = source.resolve_at(&temperatures, &gate).unwrap();
+    assert_eq!(hot.reference_segment_lengths_m(), lengths);
+    assert_eq!(hot.reference_mass(), original.reference_mass());
+    let mut expected_extension = 0.0;
+    let mut expected_mass = 0.0;
+    for i in 0..2 {
+        let delta = temperatures[i] - 300.0;
+        let area = core::f64::consts::PI * radii[i].powi(2);
+        let young = 1e6 - 2500.0 * delta;
+        let eigenstrain = 1e-5 * delta + 0.5e-7 * delta * delta;
+        expected_extension += lengths[i] * (eigenstrain + 0.1 / (young * area));
+        expected_mass += lengths[i] * 1000.0 * area;
+        near(hot.thermal_sections().unwrap()[i].zero_resultant_axial_strain(), eigenstrain, 1e-12);
+    }
+    hot.solve_static(&TipLoad { force: [0.1, 0.0, 0.0], moment: [0.0; 3] },
+        2, 1e-10, &gate).unwrap();
+    near(hot.positions_m()[2][0] - 0.5, expected_extension, 2e-7);
+    near(source.reference_mass_kg(), expected_mass, 2e-15);
+    let refreshed = model.rebind_material_temperatures(&source, &temperatures, &gate).unwrap();
+    assert_eq!(refreshed.inertia(), model.inertia());
+    assert_eq!(refreshed.source().reference_mass(), model.source().reference_mass());
+    assert_eq!(refreshed.source().reference_segment_lengths_m(), lengths);
+    let cold = source.resolve_at(&[300.0; 2], &gate).unwrap();
+    assert_eq!(cold.energy_j().unwrap(), 0.0);
+}
+
+#[test]
+fn nonuniform_isotropic_sources_retain_interval_identity_across_reference_geometry() {
+    use fs_ga::So3;
+    use fs_solid::rod::material_field::reference::RodReferenceGeometry;
+    let material = bulk_shear_card();
+    let lengths = vec![0.125, 0.375];
+    let gate = CancelGate::new();
+    let bindings = vec![vec![bulk_shear_binding()]; 2];
+    let source = RodMaterialSource::try_new_nonuniform_with_isotropic_parameters(lengths.clone(),
+        vec![segment(&material, 0.01); 2], &bindings, 0.03, &gate).unwrap();
+    let geometry = RodReferenceGeometry::try_nonuniform(lengths.clone(),
+        vec![[0.0; 3], [0.125, 0.0, 0.0], [0.5, 0.0, 0.0]], vec![So3::identity(); 3]).unwrap();
+    let bound = source.with_reference_geometry(geometry, &gate).unwrap();
+    let hot = bound.resolve_at(&[350.0, 450.0], &gate).unwrap();
+    assert_eq!(hot.reference_geometry().unwrap().segment_lengths_m(), lengths);
+    assert_eq!(hot.reference_mass(), source.reference_rod().reference_mass());
+    let wrong_partition = RodReferenceGeometry::try_new(0.5,
+        vec![[0.0; 3], [0.25, 0.0, 0.0], [0.5, 0.0, 0.0]], vec![So3::identity(); 3]).unwrap();
+    assert!(source.with_reference_geometry(wrong_partition, &gate).is_err());
+    let cancelled = CancelGate::new();
+    cancelled.request();
+    assert!(source.resolve_at(&[350.0, 450.0], &cancelled).is_err());
+}
+
+#[test]
 fn temperature_refresh_changes_stiffness_expansion_and_solved_extension_together() {
     let card = card(1.0, false);
     let source = source(&card);

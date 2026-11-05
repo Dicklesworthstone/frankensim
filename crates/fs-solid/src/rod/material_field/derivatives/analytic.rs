@@ -6,7 +6,7 @@
 use super::SpatialEnergy;
 use super::super::SpatialRodError;
 use crate::rod::Rod;
-use crate::rod::derivatives::analytic::{Assembly, Kinematics, Linearization,
+use crate::rod::derivatives::analytic::{Assembly, Linearization,
     PairResponse, array, vector, vadd, vsub, join};
 use fs_ga::Vec3;
 
@@ -20,7 +20,7 @@ impl SpatialEnergy<'_> {
         let mut assembly=Assembly::new(rod.positions.len(),free,tangent)?;
         for (segment,s) in self.owner.stiffness.iter().enumerate() {
             checkpoint()?;
-            let kinematics=Kinematics::new(rod,segment)?;
+            let kinematics=self.owner.kinematics_for(rod,segment)?;
             let (g,k)=self.owner.reference_relative_strains(segment,kinematics.strains())?;
             let (force,moment)=self.owner.resultants_from_strains(segment,g,k)?;
             let response=kinematics.linearize(vector(force),vector(moment),

@@ -245,10 +245,10 @@ impl SpatialMaterialRod {
         let reference = self.reference_mass();
         let mut inertia: Vec<_> = reference.nodal_mass_kg().iter().map(|&mass_kg|
             RodNodalInertia { mass_kg, principal_kg_m2: [0.0; 3] }).collect();
-        let half_length = 0.5 * reference.segment_length_m();
         for (segment, section) in reference.sections().iter().enumerate() {
             checkpoint(gate)?;
             admit_section(section)?;
+            let half_length = 0.5 * reference.segment_lengths_m()[segment];
             let mut diameter = 0.0;
             for geometry in section.elastic().layer_integrals() {
                 let value = half_length * (geometry.density_kg_m3() * geometry.second_moment_m4());
@@ -377,7 +377,7 @@ impl<I> PreparedRodMotion<I> {
         for segment in 0..count {
             checkpoint(gate)?;
             let kinematics = crate::rod::derivatives::analytic::Kinematics::from_nodes(
-                &pose.positions_m, &pose.frames, self.source.rod.l0, segment)?;
+                &pose.positions_m, &pose.frames, self.source.reference_segment_lengths_m()[segment], segment)?;
             // Unit section force differentiates L0 * gamma_axis, retaining the
             // midpoint-frame motion and its two exact body torque pullbacks.
             for (slot, &axis) in axes.iter().enumerate() {

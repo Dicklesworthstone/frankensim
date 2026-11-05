@@ -20,7 +20,7 @@ use fs_qty::{Density, Pressure};
 
 use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
 use crate::rod::MAX_MATERIAL_ROD_SEGMENTS;
-use crate::rod::material_field::reference::RodReferenceGeometry;
+use crate::rod::material_field::reference::{ReferencePartition, RodReferenceGeometry};
 
 /// The same pinned rod description lowered to complete layer thermodynamics.
 mod thermoelastic;
@@ -42,7 +42,7 @@ pub struct RodLayerSource<'a> {
     pub expansion_selection: MaterialPropertySelection,
 }
 
-/// One equal-reference-length segment of the rod.
+/// One material interval of the rod; its length is supplied to the constructor.
 #[derive(Clone, Debug)]
 pub struct RodSegmentSource<'a> {
     /// Explicit central bore radius [m], zero for a solid core.
@@ -89,7 +89,24 @@ impl<'a> RodMaterialSource<'a> {
         linear_strain_limit: f64,
         gate: &CancelGate,
     ) -> Result<Self, SpatialRodError> {
-        Self::build(length_m, segments, ElasticSources::NamedShear(shear_property),
+        checkpoint(gate)?;
+        let partition = ReferencePartition::uniform(length_m, segments.len())?;
+        Self::build(partition, segments, ElasticSources::NamedShear(shear_property),
+            linear_strain_limit, gate)
+    }
+
+    /// Admit the same pinned sources on explicit nonuniform reference intervals.
+    /// Every temperature refresh retains these lengths and their original mass.
+    pub fn try_new_nonuniform(
+        segment_lengths_m: Vec<f64>,
+        segments: Vec<RodSegmentSource<'a>>,
+        shear_property: &str,
+        linear_strain_limit: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, SpatialRodError> {
+        checkpoint(gate)?;
+        let partition = ReferencePartition::nonuniform(segment_lengths_m)?;
+        Self::build(partition, segments, ElasticSources::NamedShear(shear_property),
             linear_strain_limit, gate)
     }
 
@@ -109,19 +126,36 @@ impl<'a> RodMaterialSource<'a> {
         linear_strain_limit: f64,
         gate: &CancelGate,
     ) -> Result<Self, SpatialRodError> {
-        Self::build(length_m, segments, ElasticSources::Isotropic(parameters),
+        checkpoint(gate)?;
+        let partition = ReferencePartition::uniform(length_m, segments.len())?;
+        Self::build(partition, segments, ElasticSources::Isotropic(parameters),
+            linear_strain_limit, gate)
+    }
+
+    /// Nonuniform material intervals with the same explicit isotropic source roles.
+    /// No section, source selection or interval is averaged across the specimen.
+    pub fn try_new_nonuniform_with_isotropic_parameters(
+        segment_lengths_m: Vec<f64>,
+        segments: Vec<RodSegmentSource<'a>>,
+        parameters: &[Vec<LayerIsotropicParameters>],
+        linear_strain_limit: f64,
+        gate: &CancelGate,
+    ) -> Result<Self, SpatialRodError> {
+        checkpoint(gate)?;
+        let partition = ReferencePartition::nonuniform(segment_lengths_m)?;
+        Self::build(partition, segments, ElasticSources::Isotropic(parameters),
             linear_strain_limit, gate)
     }
 
     fn build(
-        length_m: f64,
+        partition: ReferencePartition,
         mut segments: Vec<RodSegmentSource<'a>>,
         sources: ElasticSources<'_>,
         linear_strain_limit: f64,
         gate: &CancelGate,
     ) -> Result<Self, SpatialRodError> {
         checkpoint(gate)?;
-        if !length_m.is_finite() || length_m <= 0.0
+        if segments.len() != partition.lengths_m.len()
             || segments.is_empty() || segments.len() > MAX_MATERIAL_ROD_SEGMENTS
             || segments.iter().any(|s| s.layers.is_empty() || s.layers.len() > MAX_CONCENTRIC_LAYERS)
             || !linear_strain_limit.is_finite() || linear_strain_limit <= 0.0 || linear_strain_limit >= 1.0
@@ -196,7 +230,7 @@ impl<'a> RodMaterialSource<'a> {
                 ElasticSources::Isotropic(_) => elastic.with_isotropic_shear(segment.shear_correction)?,
             });
         }
-        let reference = SpatialMaterialRod::try_straight(length_m, reference_sections)?;
+        let reference = SpatialMaterialRod::try_straight_with_partition(partition, reference_sections, None)?;
         let reference_mass_kg = reference.reference_mass().total_mass_kg();
         if !reference_mass_kg.is_finite() || reference_mass_kg <= 0.0 {
             return Err(SpatialRodError::Invalid("reference rod mass is unrepresentable"));
@@ -242,8 +276,8 @@ impl<'a> RodMaterialSource<'a> {
         }
         // Retain the original per-segment inventory and its density receipts.
         // Current rho(T) must not redefine weight on frozen reference geometry.
-        let mut rod = SpatialMaterialRod::try_straight_with_mass(
-            self.reference.reference_length_m(), mechanical, Some(self.reference.reference_mass.clone()),
+        let mut rod = SpatialMaterialRod::try_straight_with_partition(
+            self.reference.reference_mass.partition.clone(), mechanical, Some(self.reference.reference_mass.clone()),
         )?;
         rod.reference_geometry = self.reference.reference_geometry.clone();
         rod.rod.positions.clone_from(&self.reference.rod.positions);
@@ -260,8 +294,8 @@ impl<'a> RodMaterialSource<'a> {
         &self, geometry: RodReferenceGeometry, gate: &CancelGate,
     ) -> Result<Self, SpatialRodError> {
         checkpoint(gate)?;
-        if geometry.length_m().to_bits() != self.reference.reference_length_m().to_bits() {
-            return Err(SpatialRodError::Invalid("source and reference geometry must have the same material-coordinate length"));
+        if geometry.partition != self.reference.reference_mass.partition {
+            return Err(SpatialRodError::Invalid("source and reference geometry must have the same material-coordinate intervals"));
         }
         let mut candidate = self.clone();
         candidate.reference = SpatialMaterialRod::try_from_reference(

@@ -1,5 +1,36 @@
 # fs-solid CONTRACT
 
+## Nonuniform source-bound Cosserat reference intervals
+
+`SpatialMaterialRod::try_nonuniform_straight` and
+`RodReferenceGeometry::try_nonuniform` admit an explicit positive material
+interval for each original section. `RodMaterialSource::try_new_nonuniform`
+and `try_new_nonuniform_with_isotropic_parameters` retain that partition
+through source resolution and thermal refresh. Cumulative reference stations
+must represent every interval within the existing dimensionless geometry
+tolerance (64 machine epsilons); an unrepresentable tiny interval is refused
+instead of introducing artificial prestress or changing its authored inventory.
+Existing uniform constructors retain their original division and station
+arithmetic.
+
+Each interval drives the original shear/extension and curvature measures,
+analytic elastic force and tangent, immutable reference mass and rotary
+inertia, gravity and hydrostatic volume, and prepared dynamic displacement
+gradients. `RodReferenceMass::segment_lengths_m()` exposes the complete
+partition. The coupled axial, transverse, torsional and bending loss adapters
+use the corresponding section resistance divided by its own interval, and
+finite-cell enthalpy admission checks the matching original mass and volume.
+A source refresh cannot silently replace a partition with another having
+the same total length.
+
+The focused rod regressions cover independent axial/torsional series
+compliance, graded bending convergence, reference mass and inertia,
+objectivity, uniform parity, station representability, thermal continuation,
+all four dissipative adapters and caloric inventory. The existing bounded
+slender-rod model, frozen section geometry and dense static solve remain the
+declared scope; this does not add adaptive remeshing or a history-transfer law.
+
+
 ## Exact matrix-free finite-strain tangent actions
 
 `hyper3::prepared::PreparedHyperTetProblem::tangent_apply` streams the original

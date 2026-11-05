@@ -29,7 +29,7 @@ use super::{
 pub struct PreparedRodAxialLoss {
     sections: Vec<ConcentricAxialViscosity>,
     resistance_n_s_m: Vec<f64>,
-    segment_length_m: f64,
+    segment_lengths_m: Vec<f64>,
 }
 
 /// Physical axial heat in original segment order, separate from angular loss.
@@ -59,9 +59,9 @@ impl PreparedRodAxialLoss {
                 "axial loss needs matching bounded source sections",
             ));
         }
-        let segment_length_m = model.source().reference_mass().segment_length_m();
+        let segment_lengths_m = model.source().reference_mass().segment_lengths_m().to_vec();
         let mut resistance_n_s_m = Vec::with_capacity(sections.len());
-        for section in &sections {
+        for (section, &segment_length_m) in sections.iter().zip(&segment_lengths_m) {
             checkpoint(gate)?;
             if section.omega_band_rad_s() != (0.0, f64::MAX) {
                 return Err(RodMotionError::Invalid(
@@ -80,7 +80,7 @@ impl PreparedRodAxialLoss {
         let loss = Self {
             sections,
             resistance_n_s_m,
-            segment_length_m,
+            segment_lengths_m,
         };
         loss.admit(model, gate)?;
         Ok(loss)
@@ -101,7 +101,7 @@ impl PreparedRodAxialLoss {
         gate: &CancelGate,
     ) -> Result<(), RodMotionError> {
         if self.sections.len() != model.source().sections().len()
-            || self.segment_length_m != model.source().reference_mass().segment_length_m()
+            || self.segment_lengths_m != model.source().reference_mass().segment_lengths_m()
         {
             return Err(RodMotionError::Invalid(
                 "axial loss must match the reference rod segments",

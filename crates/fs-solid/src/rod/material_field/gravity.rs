@@ -22,7 +22,7 @@ pub use buoyancy::{ReferenceDisplacementVolume, SubmergedFluidLoad};
 #[derive(Clone, Debug, PartialEq)]
 pub struct RodReferenceMass {
     sections: Vec<ConcentricShearSection>,
-    segment_length_m: f64,
+    pub(super) partition: super::reference::ReferencePartition,
     segment_mass_kg: Vec<f64>,
     nodal_mass_kg: Vec<f64>,
     total_mass_kg: f64,
@@ -30,13 +30,13 @@ pub struct RodReferenceMass {
 
 impl RodReferenceMass {
     pub(super) fn try_new(
-        segment_length_m: f64, sections: &[ConcentricShearSection],
+        partition: &super::reference::ReferencePartition, sections: &[ConcentricShearSection],
     ) -> Result<Self, SpatialRodError> {
         let mut segment_mass_kg = Vec::with_capacity(sections.len());
         let mut nodal_mass_kg = vec![0.0; sections.len() + 1];
         let mut total_mass_kg = 0.0;
         for (segment, section) in sections.iter().enumerate() {
-            let mass = segment_length_m * section.elastic().line_density_kg_m();
+            let mass = partition.lengths_m[segment] * section.elastic().line_density_kg_m();
             let half = 0.5 * mass;
             if !mass.is_finite() || mass <= 0.0 || half == 0.0 {
                 return Err(SpatialRodError::Invalid("reference segment mass is unrepresentable"));
@@ -49,15 +49,18 @@ impl RodReferenceMass {
         if !total_mass_kg.is_finite() || !nodal_mass_kg.iter().all(|m| m.is_finite()) {
             return Err(SpatialRodError::Invalid("reference rod mass sum is unrepresentable"));
         }
-        Ok(Self { sections: sections.to_vec(), segment_length_m, segment_mass_kg,
+        Ok(Self { sections: sections.to_vec(), partition: partition.clone(), segment_mass_kg,
             nodal_mass_kg, total_mass_kg })
     }
     /// Original sections at the mass-reference state, NOT current heated data.
     #[must_use]
     pub fn sections(&self) -> &[ConcentricShearSection] { &self.sections }
-    /// Reference segment length [m].
+    /// Original ordered reference segment lengths [m], never a mean interval.
     #[must_use]
-    pub const fn segment_length_m(&self) -> f64 { self.segment_length_m }
+    pub fn segment_lengths_m(&self) -> &[f64] { &self.partition.lengths_m }
+    /// Original material-coordinate node stations [m], starting at zero.
+    #[must_use]
+    pub fn material_coordinates_m(&self) -> &[f64] { &self.partition.coordinates_m }
     /// Material mass per segment [kg], unchanged by temperature or elastic motion.
     #[must_use]
     pub fn segment_mass_kg(&self) -> &[f64] { &self.segment_mass_kg }
@@ -157,8 +160,7 @@ impl SpatialMaterialRod {
         let Some(load) = &self.gravity else { return Ok(0.0); };
         let mut potential = 0.0;
         for (node, (position, force)) in rod.positions.iter().zip(&load.force_n).enumerate() {
-            let reference = self.reference_geometry.as_ref().map_or(
-                [node as f64 * rod.l0, 0.0, 0.0], |geometry| geometry.positions_m()[node]);
+            let reference = self.reference_position_m(node);
             for c in 0..3 { potential -= force[c] * (position[c] - reference[c]); }
         }
         // Nodal forces already include link translations; only rotating offsets

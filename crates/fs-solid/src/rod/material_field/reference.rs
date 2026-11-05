@@ -8,8 +8,9 @@
 //! Curvature of an unloaded part is not elastic pre-stress. A loaded scan must
 //! NOT be passed as its stress-free shape; this API cannot infer residual stress.
 //!
-//! Nodes discretize equal MATERIAL-coordinate intervals, not necessarily equal
-//! spatial chords. Refine the centerline, frames and section assignments
+//! Nodes discretize explicit MATERIAL-coordinate intervals, not inferred spatial
+//! chords. The original constructor retains uniform intervals; the nonuniform
+//! entry retains every supplied length. Refine centerline, frames and sections
 //! together. This is the existing slender-rod model, not a 3D solid, a scan
 //! reconstruction, contact solve, or dynamics. No material names or target
 //! resonances select its geometry.
@@ -20,10 +21,93 @@ use std::sync::Arc;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, SpatialMaterialRod, SpatialRodError};
 
+/// The same material-coordinate intervals drive strain, storage and inventory.
+/// Uniform inputs retain the original node-multiplication arithmetic.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct ReferencePartition {
+    pub(super) length_m: f64,
+    pub(super) lengths_m: Vec<f64>,
+    pub(super) coordinates_m: Vec<f64>,
+}
+
+impl ReferencePartition {
+    pub(super) fn uniform(length_m: f64, count: usize) -> Result<Self, SpatialRodError> {
+        if !length_m.is_finite()
+            || length_m <= 0.0
+            || !(1..=MAX_MATERIAL_ROD_SEGMENTS).contains(&count)
+        {
+            return Err(SpatialRodError::Invalid(
+                "finite positive length and 1..=64 material segments are required",
+            ));
+        }
+        let length = length_m / count as f64;
+        if !length.is_finite() || length <= 0.0 {
+            return Err(SpatialRodError::Invalid(
+                "reference segment length is unrepresentable",
+            ));
+        }
+        let coordinates_m = (0..=count)
+            .map(|node| node as f64 * length)
+            .collect::<Vec<_>>();
+        if coordinates_m.iter().any(|x| !x.is_finite())
+            || coordinates_m.windows(2).any(|pair| pair[1] <= pair[0])
+        {
+            return Err(SpatialRodError::Invalid(
+                "reference material coordinates are unrepresentable",
+            ));
+        }
+        Ok(Self {
+            length_m,
+            lengths_m: vec![length; count],
+            coordinates_m,
+        })
+    }
+
+    pub(super) fn nonuniform(lengths_m: Vec<f64>) -> Result<Self, SpatialRodError> {
+        if !(1..=MAX_MATERIAL_ROD_SEGMENTS).contains(&lengths_m.len())
+            || lengths_m
+                .iter()
+                .any(|length| !length.is_finite() || *length <= 0.0)
+        {
+            return Err(SpatialRodError::Invalid(
+                "1..=64 finite positive reference segment lengths are required",
+            ));
+        }
+        let mut coordinates_m = Vec::with_capacity(lengths_m.len() + 1);
+        coordinates_m.push(0.0);
+        let mut length_m = 0.0;
+        for &length in &lengths_m {
+            let next = length_m + length;
+            if !next.is_finite() || next <= length_m {
+                return Err(SpatialRodError::Invalid(
+                    "reference segment boundaries must be finite and distinctly representable",
+                ));
+            }
+            // Distinct stations alone can still shorten/stretch a tiny interval
+            // by O(1) through cancellation in the actual nodal chord. Bound the
+            // resulting dimensionless axial strain at the same roundoff scale
+            // as reference-chord admission below, without changing authored L.
+            if (((next - length_m) / length) - 1.0).abs() > 64.0 * f64::EPSILON {
+                return Err(SpatialRodError::Invalid(
+                    "reference material stations cannot represent the supplied segment length accurately",
+                ));
+            }
+            coordinates_m.push(next);
+            length_m = next;
+        }
+        Ok(Self {
+            length_m,
+            lengths_m,
+            coordinates_m,
+        })
+    }
+}
+
 /// An explicit, immutable declaration of the unloaded reference configuration.
 #[derive(Clone, Debug)]
 pub struct RodReferenceGeometry {
     length_m: f64,
+    pub(super) partition: ReferencePartition,
     positions_m: Vec<[f64; 3]>,
     frames: Vec<So3>,
     pub(super) strains: Vec<([f64; 3], [f64; 3])>,
@@ -44,10 +128,31 @@ impl RodReferenceGeometry {
         positions_m: Vec<[f64; 3]>,
         frames: Vec<So3>,
     ) -> Result<Self, SpatialRodError> {
+        let partition = ReferencePartition::uniform(length_m, positions_m.len().saturating_sub(1))?;
+        Self::from_partition(partition, positions_m, frames)
+    }
+
+    /// Admit explicit nonuniform material intervals and their unloaded geometry.
+    /// Lengths are physical reference arc intervals, not inferred chord lengths.
+    /// Their order is the node/section order and no interval is averaged or rescaled.
+    /// Cumulative material stations must preserve each length to the same
+    /// roundoff precision as the reference-chord admission.
+    pub fn try_nonuniform(
+        segment_lengths_m: Vec<f64>,
+        positions_m: Vec<[f64; 3]>,
+        frames: Vec<So3>,
+    ) -> Result<Self, SpatialRodError> {
+        let partition = ReferencePartition::nonuniform(segment_lengths_m)?;
+        Self::from_partition(partition, positions_m, frames)
+    }
+
+    fn from_partition(
+        partition: ReferencePartition,
+        positions_m: Vec<[f64; 3]>,
+        frames: Vec<So3>,
+    ) -> Result<Self, SpatialRodError> {
         let invalid = SpatialRodError::Invalid;
-        if !length_m.is_finite()
-            || length_m <= 0.0
-            || !(2..=MAX_MATERIAL_ROD_SEGMENTS + 1).contains(&positions_m.len())
+        if positions_m.len() != partition.lengths_m.len() + 1
             || frames.len() != positions_m.len()
             || positions_m.iter().flatten().any(|v| !v.is_finite())
         {
@@ -56,18 +161,12 @@ impl RodReferenceGeometry {
             ));
         }
         let count = positions_m.len() - 1;
-        let l0 = length_m / count as f64;
-        if !l0.is_finite() || l0 <= 0.0 {
-            return Err(invalid(
-                "reference material segment length is unrepresentable",
-            ));
-        }
         // The kinematic owner does not consult stiffness. Actual coefficients
         // enter only when a material field is bound below.
         let rod = Rod {
             positions: positions_m,
             frames,
-            l0,
+            l0: partition.lengths_m[0],
             section: RodSection {
                 ea: 0.0,
                 ga: 0.0,
@@ -77,6 +176,7 @@ impl RodReferenceGeometry {
         };
         let mut strains = Vec::with_capacity(count);
         for segment in 0..count {
+            let l0 = partition.lengths_m[segment];
             let chord =
                 [0, 1, 2].map(|c| rod.positions[segment + 1][c] - rod.positions[segment][c]);
             let chord_length =
@@ -91,7 +191,13 @@ impl RodReferenceGeometry {
                     "reference chord exceeds its material-coordinate interval; supply the actual unloaded material length",
                 ));
             }
-            let (g, k) = rod.strains(segment)?;
+            let (g, k) = crate::rod::derivatives::analytic::Kinematics::from_nodes(
+                &rod.positions,
+                &rod.frames,
+                l0,
+                segment,
+            )?
+            .strains();
             let angle = fs_math::det::hypot(fs_math::det::hypot(k[0] * l0, k[1] * l0), k[2] * l0);
             if !g.iter().chain(&k).all(|v| v.is_finite())
                 || !angle.is_finite()
@@ -104,7 +210,8 @@ impl RodReferenceGeometry {
             strains.push((g, k));
         }
         Ok(Self {
-            length_m,
+            length_m: partition.length_m,
+            partition,
             positions_m: rod.positions,
             frames: rod.frames,
             strains,
@@ -114,6 +221,14 @@ impl RodReferenceGeometry {
     /// Reference material length [m], independently of chord lengths.
     pub const fn length_m(&self) -> f64 {
         self.length_m
+    }
+    /// Original ordered material interval lengths [m].
+    pub fn segment_lengths_m(&self) -> &[f64] {
+        &self.partition.lengths_m
+    }
+    /// Original material-coordinate node stations [m], starting at zero.
+    pub fn material_coordinates_m(&self) -> &[f64] {
+        &self.partition.coordinates_m
     }
     /// Unloaded centerline nodes [m].
     pub fn positions_m(&self) -> &[[f64; 3]] {
@@ -142,7 +257,8 @@ impl SpatialMaterialRod {
                 "one material section is required per reference segment",
             ));
         }
-        let mut rod = Self::try_straight(reference.length_m, sections)?;
+        let mut rod =
+            Self::try_straight_with_partition(reference.partition.clone(), sections, None)?;
         rod.rod.positions.clone_from(&reference.positions_m);
         rod.rod.frames.clone_from(&reference.frames);
         rod.reference_geometry = Some(Arc::new(reference));

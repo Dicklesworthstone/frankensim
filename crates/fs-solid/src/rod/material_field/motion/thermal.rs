@@ -99,6 +99,7 @@ impl<I: Clone> PreparedRodMotion<I> {
             (None, None) => true,
             (Some(a), Some(b)) => {
                 a.length_m().to_bits() == b.length_m().to_bits()
+                    && a.segment_lengths_m() == b.segment_lengths_m()
                     && a.positions_m() == b.positions_m()
                     && a.frames() == b.frames()
             }

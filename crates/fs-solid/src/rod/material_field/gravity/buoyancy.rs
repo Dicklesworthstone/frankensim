@@ -60,7 +60,7 @@ impl SubmergedFluidLoad {
         for (index, section) in inventory.sections().iter().enumerate() {
             checkpoint(gate)?;
             let volume =
-                displaced_area(section.elastic(), volume_model) * inventory.segment_length_m();
+                displaced_area(section.elastic(), volume_model) * inventory.segment_lengths_m()[index];
             add_volume(
                 volume,
                 [index, index + 1],
@@ -215,12 +215,7 @@ impl SpatialMaterialRod {
         let mut potential = 0.0;
         for (node, (position, force)) in rod.positions.iter().zip(&load.nodal_forces_n).enumerate()
         {
-            let reference = self
-                .reference_geometry
-                .as_ref()
-                .map_or([node as f64 * rod.l0, 0.0, 0.0], |geometry| {
-                    geometry.positions_m()[node]
-                });
+            let reference = self.reference_position_m(node);
             for axis in 0..3 {
                 potential -= force[axis] * (position[axis] - reference[axis]);
             }

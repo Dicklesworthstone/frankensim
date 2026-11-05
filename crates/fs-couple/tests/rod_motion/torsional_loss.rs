@@ -114,6 +114,21 @@ fn viscous(card: &MaterialCard) -> ConcentricTorsionalSection {
         .with_torsional_viscosity("shear_viscosity")
         .unwrap()
 }
+
+#[test]
+fn g1_nonuniform_reference_intervals_keep_their_actual_torsional_resistances() {
+    let card = card(800.0, (0.0, f64::MAX));
+    let lengths = vec![0.125, 0.375, 0.5];
+    let gate = CancelGate::new();
+    let model = SpatialMaterialRod::try_nonuniform_straight(lengths.clone(),
+        vec![sourced(&card, 300.0, false); 3]).unwrap()
+        .into_motion_model(RodRootBoundary::Free, &gate).unwrap();
+    let loss = PreparedRodTorsionalLoss::new(&model, vec![viscous(&card); 3], &gate).unwrap();
+    for (&actual, length) in loss.resistance_nm_s().iter().zip(lengths) {
+        let expected = 800.0 * core::f64::consts::PI * 0.05_f64.powi(4) / (2.0 * length);
+        near(actual, expected, 3e-14 * expected);
+    }
+}
 fn pinned_model(card: &MaterialCard, segments: usize) -> Arc<PreparedRodMotion> {
     let gate = CancelGate::new();
     let supports: Vec<_> = (1..=segments)

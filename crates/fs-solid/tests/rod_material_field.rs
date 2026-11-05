@@ -21,6 +21,8 @@ use fs_solid::rod::{Rod, RodSection, TipLoad, WorldTipLoad};
 mod reference;
 #[path = "rod_material_field/tension.rs"]
 mod tension;
+#[path = "rod_material_field/nonuniform.rs"]
+mod nonuniform;
 
 fn section(scale: f64) -> ConcentricShearSection {
     let mut claims = ClaimSet::new();

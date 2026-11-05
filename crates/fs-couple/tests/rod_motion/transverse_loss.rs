@@ -128,6 +128,21 @@ fn losses(loss: &PreparedRodTransverseLoss) -> RodMaterialLosses<'_> {
 }
 
 #[test]
+fn g1_nonuniform_reference_intervals_keep_their_actual_transverse_resistances() {
+    let section = viscous_section(800.0, Some((0.0, f64::MAX)), 300.0, 0.8);
+    let lengths = vec![0.125, 0.375, 0.5];
+    let gate = CancelGate::new();
+    let model = SpatialMaterialRod::try_nonuniform_straight(lengths.clone(), vec![section.clone(); 3]).unwrap()
+        .into_motion_model(RodRootBoundary::Free, &gate).unwrap();
+    let loss = PreparedRodTransverseLoss::new(&model,
+        vec![section.with_transverse_viscosity("shear_eta").unwrap(); 3], &gate).unwrap();
+    for (&actual, length) in loss.resistance_n_s_m().iter().zip(lengths) {
+        let expected = 0.8 * 800.0 * core::f64::consts::PI * 0.05_f64.powi(2) / length;
+        near(actual, expected, 3e-14 * expected);
+    }
+}
+
+#[test]
 fn g1_transverse_heat_and_supports_match_independent_split_oscillators() {
     let gate = CancelGate::new();
     for eta in [800.0, 8e8] {

@@ -507,10 +507,11 @@ impl<'r, 'n, 'a, I: RodMotionInertia> RodThermoelasticSystem<'r, 'n, 'a, I> {
             return Err(invalid("duplicate rod layer destination"));
         }
         let laws = source.thermoelastic_laws(gate).map_err(solid)?;
-        let length = positive(source.reference_rod().reference_length_m() / laws.len() as f64)?;
+        let lengths = source.reference_rod().reference_segment_lengths_m();
         let mut segments = Vec::with_capacity(laws.len());
         let mut used = BTreeSet::new();
         for (i, law) in laws.into_iter().enumerate() {
+            let length = positive(lengths[i])?;
             let mut receivers = Vec::with_capacity(law.axial_law().reference().layers().len());
             for (j, geometry) in law
                 .axial_law()

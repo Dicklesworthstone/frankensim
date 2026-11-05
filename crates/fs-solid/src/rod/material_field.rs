@@ -2,8 +2,8 @@
 //!
 //! A segment owns its actual concentric material section. Changing one segment
 //! changes equilibrium everywhere through shared nodal compatibility, not through
-//! an average modulus or separately solved pieces. Reference segments have equal
-//! length; cross-section/material jumps are one-dimensional idealizations, not
+//! an average modulus or separately solved pieces. Reference material intervals
+//! may have different lengths; cross-section/material jumps are idealizations, not
 //! resolved joint/interface stresses. The original clamped-root, dense Newton
 //! statics and body-frame tip-moment convention remain in force.
 //! An explicitly supplied stress-free centerline and material frames retain
@@ -30,6 +30,8 @@ pub mod motion;
 mod derivatives;
 
 use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad, TipLoading, WorldTipLoad};
+use super::derivatives::analytic::Kinematics;
+use reference::ReferencePartition;
 use crate::SolidError;
 
 /// Original solid/material failure, input refusal, or cancellation.
@@ -96,40 +98,57 @@ impl SpatialMaterialRod {
         length_m: f64,
         sections: Vec<ConcentricShearSection>,
     ) -> Result<Self, SpatialRodError> {
-        Self::try_straight_with_mass(length_m, sections, None)
+        let partition = ReferencePartition::uniform(length_m, sections.len())?;
+        Self::try_straight_with_partition(partition, sections, None)
+    }
+
+    /// Build a straight member with one explicit reference length per section.
+    /// Each length drives that segment's strain, energy, inventory and inertia.
+    /// Adjacent intervals share their actual node; no mean interval is used.
+    ///
+    /// # Errors
+    /// Refuses unmatched counts, nonpositive/nonfinite lengths, unrepresentable
+    /// material stations and the original source/section admission failures.
+    pub fn try_nonuniform_straight(
+        segment_lengths_m: Vec<f64>,
+        sections: Vec<ConcentricShearSection>,
+    ) -> Result<Self, SpatialRodError> {
+        let partition = ReferencePartition::nonuniform(segment_lengths_m)?;
+        Self::try_straight_with_partition(partition, sections, None)
     }
 
     // Source refreshes retain the reference inventory instead of evaluating
     // current density on frozen geometry. Only this module's descendants use it.
-    fn try_straight_with_mass(
-        length_m: f64, sections: Vec<ConcentricShearSection>,
+    fn try_straight_with_partition(
+        partition: ReferencePartition, sections: Vec<ConcentricShearSection>,
         reference_mass: Option<Arc<gravity::RodReferenceMass>>,
     ) -> Result<Self, SpatialRodError> {
-        if !length_m.is_finite() || length_m <= 0.0 || sections.is_empty()
-            || sections.len() > MAX_MATERIAL_ROD_SEGMENTS
-        {
-            return Err(SpatialRodError::Invalid("finite positive length and 1..=64 material segments are required"));
-        }
-        let l0 = length_m / sections.len() as f64;
-        if !l0.is_finite() || l0 <= 0.0 {
-            return Err(SpatialRodError::Invalid("reference segment length is unrepresentable"));
+        if sections.len() != partition.lengths_m.len() {
+            return Err(SpatialRodError::Invalid("one material section is required per reference interval"));
         }
         let stiffness = sections.iter().map(RodSection::try_from_concentric_material)
             .collect::<Result<Vec<_>, _>>()?;
         let reference_mass = match reference_mass {
             Some(mass) => {
                 if mass.segment_mass_kg().len() != sections.len()
-                    || mass.segment_length_m().to_bits() != l0.to_bits()
+                    || mass.partition != partition
                 {
                     return Err(SpatialRodError::Invalid("reference mass and rod discretization must match"));
                 }
                 mass
             }
-            None => Arc::new(gravity::RodReferenceMass::try_new(l0, &sections)?),
+            None => Arc::new(gravity::RodReferenceMass::try_new(&partition, &sections)?),
         };
-        let rod = Rod::straight(length_m, sections.len(), stiffness[0]);
+        // Rod is the unchanged pose/Newton carrier. Spatial constitutive work
+        // always uses the original interval below, never this legacy uniform l0.
+        let rod = Rod {
+            positions: partition.coordinates_m.iter().map(|&x| [x, 0.0, 0.0]).collect(),
+            frames: vec![So3::identity(); sections.len() + 1],
+            l0: partition.lengths_m[0],
+            section: stiffness[0],
+        };
         let free_dofs = (0..rod.ndof()).collect();
-        Ok(Self { rod, sections, stiffness, reference_length_m: length_m, thermal: None,
+        Ok(Self { rod, sections, stiffness, reference_length_m: partition.length_m, thermal: None,
             supports: Vec::new(), free_dofs, reference_mass, gravity: None,
             reference_geometry: None, tension_links: Vec::new() })
     }
@@ -146,6 +165,14 @@ impl SpatialMaterialRod {
     /// Authored material reference length [m], not the current arc length.
     #[must_use]
     pub const fn reference_length_m(&self) -> f64 { self.reference_length_m }
+    /// Original ordered material interval lengths [m], unaffected by motion/heating.
+    #[must_use]
+    pub fn reference_segment_lengths_m(&self) -> &[f64] { self.reference_mass.segment_lengths_m() }
+    /// Original material-coordinate node stations [m].
+    #[must_use]
+    pub fn reference_material_coordinates_m(&self) -> &[f64] {
+        self.reference_mass.material_coordinates_m()
+    }
 
     /// Elastic Cosserat strain/curvature relative to the stress-free geometry.
     /// Thermal eigenstrain is separate and is applied by the section owner.
@@ -189,13 +216,26 @@ impl SpatialMaterialRod {
     // Native analytical assembly does not perturb the material strain domain.
     fn probe_translation_scale_m(&self) -> f64 {
         if self.thermal.is_some() || self.reference_geometry.is_some() || !self.tension_links.is_empty() {
-            self.rod.l0
+            self.reference_segment_lengths_m().iter().copied().fold(f64::INFINITY, f64::min)
         } else { 1.0 }
     }
 
     fn strains_for(&self, rod: &Rod, segment: usize)
         -> Result<([f64; 3], [f64; 3]), SpatialRodError> {
-        self.reference_relative_strains(segment, rod.strains(segment)?)
+        self.reference_relative_strains(segment, self.kinematics_for(rod, segment)?.strains())
+    }
+
+    fn kinematics_for(&self, rod: &Rod, segment: usize) -> Result<Kinematics, SpatialRodError> {
+        let length = *self.reference_segment_lengths_m().get(segment)
+            .ok_or(SpatialRodError::Invalid("segment index is outside the material field"))?;
+        Ok(Kinematics::from_nodes(&rod.positions, &rod.frames, length, segment)?)
+    }
+
+    fn reference_position_m(&self, node: usize) -> [f64; 3] {
+        self.reference_geometry.as_ref().map_or_else(
+            || [self.reference_material_coordinates_m()[node], 0.0, 0.0],
+            |geometry| geometry.positions_m()[node],
+        )
     }
 
     fn reference_relative_strains(&self, segment: usize, (mut g, mut k): ([f64; 3], [f64; 3]))
@@ -217,13 +257,14 @@ impl SpatialMaterialRod {
     fn segment_energy_for(&self, rod: &Rod, segment: usize) -> Result<f64, SpatialRodError> {
         let section = &self.stiffness[segment];
         let (g, k) = self.strains_for(rod, segment)?;
+        let length = self.reference_segment_lengths_m()[segment];
         let energy = match &self.thermal {
             Some(field) => {
                 let axial_energy = field.summary(segment, g[0])?.1;
-                rod.l0 * axial_energy + 0.5 * rod.l0
+                length * axial_energy + 0.5 * length
                     * section.twice_energy_per_length([0.0, g[1], g[2]], k)
             }
-            None => 0.5 * rod.l0 * section.twice_energy_per_length(g, k),
+            None => 0.5 * length * section.twice_energy_per_length(g, k),
         };
         if !energy.is_finite() {
             return Err(SpatialRodError::Invalid("material segment strain energy is unrepresentable"));

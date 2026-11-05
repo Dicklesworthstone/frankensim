@@ -123,6 +123,21 @@ fn angular() -> RodAngularLosses<'static> {
         torsional: None,
     }
 }
+
+#[test]
+fn g1_nonuniform_reference_intervals_keep_their_actual_axial_resistances() {
+    let card = source(800.0, (0.0, f64::MAX));
+    let lengths = vec![0.125, 0.375, 0.5];
+    let gate = CancelGate::new();
+    let model = SpatialMaterialRod::try_nonuniform_straight(lengths.clone(),
+        vec![section(&card, 300.0, false); 3]).unwrap()
+        .into_motion_model(RodRootBoundary::Free, &gate).unwrap();
+    let loss = PreparedRodAxialLoss::new(&model, vec![viscous(&card, 300.0); 3], &gate).unwrap();
+    for (&actual, length) in loss.resistance_n_s_m().iter().zip(lengths) {
+        let expected = 800.0 * core::f64::consts::PI * 0.05_f64.powi(2) / length;
+        near(actual, expected, 3e-14 * expected);
+    }
+}
 fn vector(v: Vec3) -> [f64; 3] {
     [v.x, v.y, v.z]
 }

@@ -30,7 +30,7 @@ use super::{
 pub struct PreparedRodBendingLoss {
     sections: Vec<ConcentricKelvinVoigtSection>,
     resistance_nm_s: Vec<f64>,
-    segment_length_m: f64,
+    segment_lengths_m: Vec<f64>,
 }
 
 /// Physical bending heat, distinct from torsion and the native integration defect.
@@ -74,14 +74,9 @@ impl PreparedRodBendingLoss {
                 "bending loss needs matching bounded source sections",
             ));
         }
-        let segment_length_m = model.source().reference_mass().segment_length_m();
-        if !segment_length_m.is_finite() || segment_length_m <= 0.0 {
-            return Err(RodMotionError::Invalid(
-                "bending loss requires positive finite reference length",
-            ));
-        }
+        let segment_lengths_m = model.source().reference_mass().segment_lengths_m().to_vec();
         let mut resistance_nm_s = Vec::with_capacity(sections.len());
-        for section in &sections {
+        for (section, &segment_length_m) in sections.iter().zip(&segment_lengths_m) {
             checkpoint(gate)?;
             if section.omega_band_rad_s() != (0.0, f64::MAX) {
                 return Err(RodMotionError::Invalid(
@@ -102,7 +97,7 @@ impl PreparedRodBendingLoss {
         let loss = Self {
             sections,
             resistance_nm_s,
-            segment_length_m,
+            segment_lengths_m,
         };
         loss.admit(model, gate)?;
         Ok(loss)
@@ -125,7 +120,7 @@ impl PreparedRodBendingLoss {
     ) -> Result<(), RodMotionError> {
         let mechanical = model.source().sections();
         if self.sections.len() != mechanical.len()
-            || self.segment_length_m != model.source().reference_mass().segment_length_m()
+            || self.segment_lengths_m != model.source().reference_mass().segment_lengths_m()
         {
             return Err(RodMotionError::Invalid(
                 "bending loss must match the reference rod segments",

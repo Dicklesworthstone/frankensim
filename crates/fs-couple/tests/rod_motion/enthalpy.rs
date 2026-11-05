@@ -618,6 +618,55 @@ fn complete_source_energy_entropy_and_capacity_match_independent_six_strain_deri
 }
 
 #[test]
+fn nonuniform_material_intervals_match_actual_finite_cell_heat_capacities() {
+    let spec = Spec { young_slope: 0.0, shear_slope: 0.0, alpha: 0.0, ..Spec::default() };
+    let lengths = [0.2, 0.6];
+    let powers = [0.001, 0.002];
+    fixture(&[spec], 2, &[300.0; 2], &powers, false, |uniform, thermal, network| {
+        let gate = CancelGate::new();
+        let source = RodMaterialSource::try_new_nonuniform(lengths.to_vec(),
+            uniform.segments().to_vec(), "shear_modulus", 0.1, &gate).unwrap();
+        let area = geometry(0, 1).0;
+        let stations = [0.0, lengths[0], lengths.iter().sum()];
+        let events = thermal.cells().values().enumerate().map(|(i, original)| {
+            let mut cell = original.clone();
+            cell.mass_kg = RHO * area * lengths[i];
+            cell.geometry = CellGeometry {
+                start_m: [stations[i], 0.0, 0.0], end_m: [stations[i + 1], 0.0, 0.0],
+                volume_m3: area * lengths[i],
+                surface_area_m2: 2.0 * area + 2.0 * core::f64::consts::PI * RADIUS * lengths[i],
+            };
+            TimedEvent { time_s: 0.0, event: Event::Birth(cell) }
+        }).collect();
+        let laws = [(MaterialId(0), network.cells[0].curve as &dyn ThermalLaw)];
+        let mut thermal = DepositionSimulation::new(events, &laws, DepositionBudget {
+            max_cells: 2, max_links: 1, max_events: 3, max_substeps: 1024,
+        }).unwrap().advance_to(0.0, StepConfig { max_dt_s: 0.01, energy_tolerance_j: 1e-10 },
+            || Ok(())).unwrap().0;
+        let rod = source.resolve_at(&[300.0; 2], &gate).unwrap();
+        let supports = (1..=2).map(|node| RodSupport {
+            node, position_m: rod.positions_m()[node].map(Some), frame: Some(rod.frames()[node]),
+        }).collect::<Vec<_>>();
+        let model = Arc::new(rod.with_supports(&supports, &gate).unwrap()
+            .into_motion_model(RodRootBoundary::Clamped, &gate).unwrap());
+        let motion = RodMotion::new(model.clone(), model.initial_pose(),
+            &[[0.0; 3]; 3], &[[0.0; 3]; 3], 0.0, &gate).unwrap();
+        let mut owner = RodThermoelasticSystem::try_new(motion, &source, &thermal, network,
+            &destinations(1, 2), 1e-11, &gate).unwrap();
+        let dt = 0.01;
+        let report = owner.step(&mut thermal, dt, &[RodNodalWrench::default(); 3],
+            controls(dt), solve(), &powers.map(|power| power * dt), &gate).unwrap();
+        for i in 0..2 {
+            let expected = 300.0 + powers[i] * dt / (RHO * area * lengths[i] * spec.cp);
+            near(thermal.temperature_k(CellId(i as u64)).unwrap(), expected, 2e-8);
+        }
+        near(report.total_energy_residual_j, 0.0, 5e-11);
+        assert_eq!(owner.mechanical().model().inertia(), model.inertia());
+        assert_eq!(owner.mechanical().model().source().reference_segment_lengths_m(), lengths);
+    });
+}
+
+#[test]
 fn clamped_finite_heat_solves_internal_energy_and_refreshes_source_stress() {
     let gate = CancelGate::new();
     let dt = 0.01;
