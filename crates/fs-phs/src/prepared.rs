@@ -488,7 +488,7 @@ impl StepWorkspace {
         )?;
         let h0 = sys.hamiltonian(x0);
         if !h0.is_finite() { return Err(dimensions("nonfinite initial Hamiltonian").into()); }
-        crate::port_inputs_into(n, self.m, &sys.g, u, &mut self.forcing)?;
+        sys.input_flow_into(u, &mut self.forcing)?;
         for row in 0..n {
             let increment = dt * self.forcing[row];
             if !increment.is_finite() { return Err(dimensions("nonfinite input increment").into()); }
@@ -649,7 +649,7 @@ impl StepWorkspace {
         }
         dissipated *= dt;
         sys.output_from_effort_into(&self.effort, &mut self.output)?;
-        let supplied = crate::port_work(u, &self.output, dt,
+        let supplied = crate::port_work_from_effort(n, self.m, &sys.g, &self.effort, u, dt,
             self.nonlinear_power.supplied_power_w)?;
         // The storage-difference owner may overwrite its gradient scratch with
         // grad H(midpoint). Keep the accepted Gonzalez effort intact for actual

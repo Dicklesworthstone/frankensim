@@ -45,11 +45,29 @@ impl Sum {
         self.add(a.mul_add(b, -product))
     }
 
+    /// Peak-phasor mean work carries a factor of one half. Halve the larger
+    /// scalar before multiplication: a tiny quadrature must not disappear
+    /// before a large conjugate restores it, and a finite half-product must
+    /// not be refused just because the unhalved product would overflow.
+    pub(crate) fn half_product(&mut self, a: f64, b: f64) -> Option<()> {
+        let (larger, smaller) = if a.abs() >= b.abs() { (a, b) } else { (b, a) };
+        let half = 0.5 * larger;
+        if half == 0.0 && larger != 0.0 && smaller != 0.0 { return None; }
+        self.product(half, smaller)
+    }
+
     /// Carry BOTH first-stage words through the next physical contraction.
     /// Rounding `source.value()` first could remove an entire coupled mode.
     pub(crate) fn add_scaled(&mut self, source: Self, coefficient: f64) -> Option<()> {
         self.product(source.high, coefficient)?;
         self.product(source.low, coefficient)
+    }
+
+    /// Carry both original contraction words through a half-scaled physical
+    /// work term without first rounding the contraction or its product.
+    pub(crate) fn add_half_scaled(&mut self, source: Self, coefficient: f64) -> Option<()> {
+        self.half_product(source.high, coefficient)?;
+        self.half_product(source.low, coefficient)
     }
 
     /// Round only at the final structure entry, whose opposite transpose is
@@ -104,6 +122,36 @@ mod tests {
         let mut zero = Sum::default();
         zero.add_scaled(source, 0.0).unwrap();
         assert_eq!(zero.value().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn peak_mean_products_preserve_the_finite_range_and_weak_quadratures() {
+        for (a, b, expected) in [
+            (f64::MAX, 2.0, f64::MAX),
+            (2.0, f64::MAX, f64::MAX),
+            (f64::from_bits(1), 2.0_f64.powi(1023), 2.0_f64.powi(-52)),
+            (2.0_f64.powi(1023), f64::from_bits(1), 2.0_f64.powi(-52)),
+        ] {
+            let mut sum = Sum::default();
+            sum.half_product(a, b).unwrap();
+            assert_eq!(sum.value().unwrap(), expected);
+        }
+        assert!(Sum::default().half_product(f64::from_bits(1), 1.0).is_none());
+        assert!(Sum::default().half_product(f64::INFINITY, 0.0).is_none());
+    }
+
+    #[test]
+    fn peak_mean_work_keeps_the_unrounded_input_map_words() {
+        let large = 2.0_f64.powi(54);
+        let mut positive = Sum::default();
+        positive.product(large, 1.0).unwrap();
+        positive.product(1.0, 1.0).unwrap();
+        let mut negative = Sum::default();
+        negative.product(-large, 1.0).unwrap();
+        let mut work = Sum::default();
+        work.add_half_scaled(positive, 2.0).unwrap();
+        work.add_half_scaled(negative, 2.0).unwrap();
+        assert_eq!(work.value().unwrap(), 1.0);
     }
 
     #[test]

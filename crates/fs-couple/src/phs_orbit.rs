@@ -247,26 +247,8 @@ impl OrbitProblem for PhsOrbitProblem<'_> {
         };
         if !ok { self.fail(out); return; }
 
-        let (j, r, g) = self.system.structure();
-        for i in 0..n {
-            let mut value = 0.0;
-            let mut correction = 0.0;
-            for k in 0..n {
-                let term = (j[i*n+k] - r[i*n+k]) * effort[k];
-                let adjusted = term - correction;
-                let next = value + adjusted;
-                correction = (next - value) - adjusted;
-                value = next;
-            }
-            for p in 0..m {
-                let term = g[i*m+p] * input[p];
-                let adjusted = term - correction;
-                let next = value + adjusted;
-                correction = (next - value) - adjusted;
-                value = next;
-            }
-            if !value.is_finite() { self.fail(out); return; }
-            out[i] = value;
+        if self.system.vector_field_from_effort_into(&effort, &input, out).is_err() {
+            self.fail(out);
         }
     }
 }
@@ -593,10 +575,11 @@ fn audit_orbit_with_input(
             || u.iter().any(|value|!value.is_finite())
         {return Err(PhsOrbitError::SourceRefused);}
         let h=system.hamiltonian(&x);
-        let mut supply=0.0; let mut loss=0.0;
-        for p in 0..m {
-            supply+=u[p]*flows[p];
-        }
+        // Use the original effort and map: individually rounded output ports
+        // can hide real work when large opposite source powers cancel.
+        let supply=system.supplied_power_from_effort(&e,&u)
+            .map_err(|_|PhsOrbitError::SourceRefused)?;
+        let mut loss=0.0;
         for i in 0..n {
             let re=(0..n).map(|k|r[i*n+k]*e[k]).sum::<f64>();
             loss+=e[i]*re;
@@ -624,7 +607,7 @@ fn audit_orbit_with_input(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fs_phs::{PortHamiltonian, RelaxationBranch, Storage};
+    use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, Storage};
 
     fn hb(n: usize) -> HbBudget {
         HbBudget { harmonics:n, max_newton:60, tolerance:1e-11, deflate_equilibrium:false }
@@ -636,6 +619,65 @@ mod tests {
             residual_tolerances: vec![1e-8; dimension],
             state_tolerances: vec![1e-7; dimension],
             frequency_tolerance: 1e-9,
+        }
+    }
+
+    #[test]
+    fn g1_coherent_port_forcing_retains_the_weak_original_drive() {
+        let system=PortHamiltonian::new(1,3,vec![0.0],vec![0.0],vec![1.0;3],
+            Box::new(QuadraticStorage::new(vec![1.0],1).unwrap())).unwrap();
+        let large=2.0_f64.powi(54);
+        let input=[large,1.0,-large];
+        let problem=autonomous_problem(&system,&input).unwrap();
+        let mut derivative=[f64::NAN];
+        problem.island(0.0,&[0.0],&mut derivative);
+        assert!(!problem.source_refused());
+        assert_eq!(derivative,[1.0]);
+    }
+
+    #[test]
+    fn g1_forcing_and_internal_dynamics_cancel_before_final_rounding() {
+        let system=PortHamiltonian::new(1,2,vec![0.0],vec![1.0],vec![1.0;2],
+            Box::new(QuadraticStorage::new(vec![1.0],1).unwrap())).unwrap();
+        let large=2.0_f64.powi(54);
+        let input=[large,1.0];
+        let problem=autonomous_problem(&system,&input).unwrap();
+        let mut derivative=[f64::NAN];
+        // -R*effort + G*u = -L + L + 1. Rounding Gu first would lose 1.
+        problem.island(0.0,&[large],&mut derivative);
+        assert!(!problem.source_refused());
+        assert_eq!(derivative,[1.0]);
+    }
+
+    #[test]
+    fn g1_cycle_work_uses_original_map_even_when_observed_ports_round_equal() {
+        let system=PortHamiltonian::new(2,2,vec![0.0;4],
+            vec![0.0,0.0,0.0,1.0],vec![1.0,1.0,1.0,0.0],
+            Box::new(QuadraticStorage::new(vec![1.0,0.0,0.0,1.0],2).unwrap())).unwrap();
+        let large=2.0_f64.powi(54);
+        let state=[large,1.0];
+        let input=PeriodicPortInput::new(1.0,
+            vec![vec![C64::ONE],vec![C64::from_re(-1.0)]]).unwrap();
+        let problem=forced_problem(&system,&input).unwrap();
+        let mut derivative=[f64::NAN;2];
+        problem.island(0.0,&state,&mut derivative);
+        assert_eq!(derivative,[0.0,0.0]);
+        // This is an exact constant equilibrium with Gu=[0,1], supply=loss=1.
+        // Its observed outputs [L+1,L] both round to L; even a compensated
+        // input dot those rounded outputs would report zero supplied power.
+        assert_eq!(system.output(&state),[large,large]);
+        let orbit=HbOrbit {
+            omega:input.omega_rad_s(),
+            coeffs:state.into_iter().map(|x|vec![C64::from_re(x)]).collect(),
+            residual_trace:Vec::new(),residual:f64::NAN,
+            aft_samples:0,sampling_defect:f64::NAN,
+        };
+        for samples in [32,64] {
+            let audit=audit_forced_orbit(&system,&input,&orbit,samples).unwrap();
+            assert_eq!(audit.mean_supplied_power_w,1.0);
+            assert_eq!(audit.mean_resistance_loss_w,1.0);
+            assert_eq!(audit.cycle_power_residual_w,0.0);
+            assert_eq!(audit.relative_power_residual,0.0);
         }
     }
 

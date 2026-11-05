@@ -1,4 +1,5 @@
-use fs_phs::{PortHamiltonian, QuadraticStorage, StepWorkspace, Storage, step};
+use fs_phs::{DescriptorPortHamiltonian, PortHamiltonian, QuadraticStorage, StepWorkspace, Storage,
+    step, step_descriptor};
 
 fn oscillator(damping: f64) -> PortHamiltonian {
     PortHamiltonian::new(2, 1, vec![0.0, 1.0, -1.0, 0.0],
@@ -225,6 +226,83 @@ fn zero_duration_is_a_noop_with_the_correct_port_output() {
     let record = work.step_into(&sys, &[0.3, 0.7], &[2.0], 0.0, &mut next, &mut y).unwrap();
     assert_eq!(next, [0.3, 0.7]); assert_eq!(y, [0.7]);
     assert_eq!(record.delta_h, 0.0); assert_eq!(record.supplied, 0.0); assert_eq!(record.dissipated, 0.0);
+}
+
+#[test]
+fn coherent_input_drives_the_same_motion_and_work_in_all_step_owners() {
+    let system = PortHamiltonian::new(1, 3, vec![0.0], vec![0.0], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap())).unwrap();
+    let descriptor = DescriptorPortHamiltonian::new(1, 1, 3,
+        vec![0.0], vec![0.0], vec![1.0; 3],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap())).unwrap();
+    let mut workspace = StepWorkspace::new(&system).unwrap();
+    let large = 2.0_f64.powi(54);
+    for input in [[large, 1.0, -large], [-large, 1.0, large], [1.0, large, -large]] {
+        let mut forcing = [0.0];
+        system.input_flow_into(&input, &mut forcing).unwrap();
+        assert_eq!(forcing, [1.0]);
+        for dt in [0.0, 0.125, 0.25] {
+            // x'=sum(u)=1, H=x^2/2, so x(dt)=dt and supplied work=dt^2/2.
+            let ordinary = step(&system, &[0.0], &input, dt).unwrap();
+            let implicit = step_descriptor(&descriptor, &[0.0], &input, dt).unwrap();
+            let (mut next, mut output) = ([0.0], [0.0; 3]);
+            let prepared = workspace.step_into(&system, &[0.0], &input, dt,
+                &mut next, &mut output).unwrap();
+            for actual in [ordinary.x[0], implicit.x[0], next[0]] {
+                assert!((actual - dt).abs() < 2e-12);
+            }
+            for supplied in [ordinary.supplied, implicit.supplied, prepared.supplied] {
+                assert!((supplied - 0.5*dt*dt).abs() < 2e-12);
+            }
+            assert!((ordinary.delta_h - ordinary.supplied).abs() < 2e-12);
+            assert!((implicit.delta_h - implicit.supplied).abs() < 2e-12);
+            assert!(prepared.balance_residual().abs() < 2e-12);
+        }
+    }
+}
+
+#[test]
+fn physical_work_retains_both_unrounded_map_contractions() {
+    let system = PortHamiltonian::new(2, 2, vec![0.0; 4], vec![0.0; 4],
+        vec![1.0, 1.0, 1.0, 0.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap())).unwrap();
+    let large = 2.0_f64.powi(54);
+    // In the first case rounded port outputs erase the work. In the second,
+    // rounded forcing entries erase it. Keep the source words through e^T G u.
+    for (effort, input) in [([large, 1.0], [1.0, -1.0]), ([1.0, -1.0], [large, 1.0])] {
+        assert_eq!(system.supplied_power_from_effort(&effort, &input).unwrap(), 1.0);
+    }
+}
+
+#[test]
+fn stationary_dissipative_state_keeps_its_actual_port_work() {
+    let system = PortHamiltonian::new(2, 2, vec![0.0; 4], vec![0.0, 0.0, 0.0, 1.0],
+        vec![1.0, 1.0, 1.0, 0.0],
+        Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap())).unwrap();
+    let initial = [2.0_f64.powi(54), 1.0];
+    let input = [1.0, -1.0];
+    let mut workspace = StepWorkspace::new(&system).unwrap();
+    let (mut next, mut output) = ([0.0; 2], [0.0; 2]);
+    let ordinary = step(&system, &initial, &input, 0.125).unwrap();
+    let prepared = workspace.step_into(&system, &initial, &input, 0.125,
+        &mut next, &mut output).unwrap();
+    assert_eq!(ordinary.x, initial);
+    assert_eq!(next, initial);
+    assert_eq!(ordinary.supplied, 0.125);
+    assert_eq!(prepared.supplied, 0.125);
+    assert_eq!(ordinary.delta_h, 0.0);
+    assert_eq!(ordinary.dissipated, ordinary.supplied);
+    assert_eq!(prepared.balance_residual(), 0.0);
+}
+
+#[test]
+fn complete_vector_field_keeps_weak_motion_after_internal_force_cancellation() {
+    let system = PortHamiltonian::new(1, 2, vec![0.0], vec![1.0], vec![1.0; 2],
+        Box::new(QuadraticStorage::new(vec![1.0], 1).unwrap())).unwrap();
+    let large = 2.0_f64.powi(54);
+    let mut flow = [0.0];
+    system.vector_field_from_effort_into(&[large], &[large, 1.0], &mut flow).unwrap();
+    assert_eq!(flow, [1.0]);
 }
 
 #[test]

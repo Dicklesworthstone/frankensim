@@ -1097,6 +1097,68 @@ impl PortHamiltonian {
         port_outputs_into(self.n, self.m, &self.g, effort, out)
     }
 
+    /// Apply the original input map `G u` without allocating or discarding a
+    /// weak excitation between opposing strong port inputs.
+    ///
+    /// # Errors
+    /// Requires complete finite inputs and a state-sized output. Arithmetic
+    /// refusal leaves `out` as scratch; callers publish it only on success.
+    pub fn input_flow_into(&self, input: &[f64], out: &mut [f64]) -> Result<(), PhsError> {
+        port_inputs_into(self.n, self.m, &self.g, input, out)
+    }
+
+    /// Apply the complete original flow `J e - R e + G u` to an evaluated
+    /// storage effort. All products in a row share one compensated accumulator:
+    /// rounding the input forcing before cancelling an internal force can
+    /// otherwise remove the entire remaining physical motion.
+    ///
+    /// This method allocates nothing. It neither evaluates nor replaces the
+    /// storage law, and retains the original state and port order.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite data and unrepresentable arithmetic.
+    /// `out` is scratch on refusal; transactional owners publish only success.
+    pub fn vector_field_from_effort_into(
+        &self, effort: &[f64], input: &[f64], out: &mut [f64],
+    ) -> Result<(), PhsError> {
+        if effort.len() != self.n || input.len() != self.m || out.len() != self.n
+            || self.n.checked_mul(self.m) != Some(self.g.len())
+            || self.n.checked_mul(self.n) != Some(self.j.len())
+            || self.j.len() != self.r.len()
+        { return Err(PhsError::Dimension { what: "physical vector field extents" }); }
+        if effort.iter().chain(input).any(|value| !value.is_finite()) {
+            return Err(PhsError::Unadmitted { what: "nonfinite physical vector field input" });
+        }
+        for (row, value) in out.iter_mut().enumerate() {
+            let mut sum = interconnection::accumulation::Sum::default();
+            let refused = || PhsError::Unadmitted { what: "unrepresentable physical vector field" };
+            for (col, &e) in effort.iter().enumerate() {
+                let j = self.j[row * self.n + col];
+                let r = self.r[row * self.n + col];
+                if j != 0.0 { sum.product(j, e).ok_or_else(refused)?; }
+                if r != 0.0 { sum.product(-r, e).ok_or_else(refused)?; }
+            }
+            let forcing = port_input_row(&self.g[row*self.m..(row+1)*self.m], |p| input[p])
+                .ok_or_else(refused)?;
+            sum.add_scaled(forcing, 1.0).ok_or_else(refused)?;
+            *value = sum.value().ok_or_else(refused)?;
+        }
+        Ok(())
+    }
+
+    /// Original supplied power `e^T G u`, retaining both words of each input
+    /// contraction until the effort contraction is complete. Reconstructing
+    /// work from individually rounded port outputs or forcing entries can
+    /// incorrectly turn a finite supplied power into zero.
+    ///
+    /// # Errors
+    /// Refuses incomplete/nonfinite data and unrepresentable products or sums.
+    /// The calculation allocates nothing; it is not arbitrary precision.
+    pub fn supplied_power_from_effort(&self, effort: &[f64], input: &[f64]) -> Result<f64, PhsError> {
+        port_work_sum(self.n, self.m, &self.g, effort, input)?.value()
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical supplied power" })
+    }
+
     /// Structure matrices (row-major J, R, G) — read-only views.
     #[must_use]
     pub fn structure(&self) -> (&[f64], &[f64], &[f64]) {
@@ -1363,6 +1425,19 @@ fn port_outputs_into(
     Ok(())
 }
 
+/// Retain the low word for a subsequent flow or power contraction. In
+/// particular, do not call `value()` before adding an internal force or
+/// multiplying by the original effort. Empty rows represent zero-port input.
+pub(crate) fn port_input_row(
+    g: &[f64], input: impl Fn(usize) -> f64,
+) -> Option<interconnection::accumulation::Sum> {
+    let mut sum = interconnection::accumulation::Sum::default();
+    for (port, &coefficient) in g.iter().enumerate() {
+        if coefficient != 0.0 { sum.product(coefficient, input(port))?; }
+    }
+    Some(sum)
+}
+
 // The reciprocal physical input map uses the same signed arithmetic as its
 // transpose. Large opposing actuators must not erase a smaller applied load.
 fn port_inputs_into(
@@ -1371,15 +1446,60 @@ fn port_inputs_into(
     if input.len() != m || out.len() != n || n.checked_mul(m) != Some(g.len()) {
         return Err(PhsError::Dimension { what: "physical port input extents" });
     }
-    if input.iter().any(|v| !v.is_finite()) {
+    if input.iter().any(|value| !value.is_finite()) {
         return Err(PhsError::Unadmitted { what: "nonfinite physical port input" });
     }
     for (row, value) in out.iter_mut().enumerate() {
-        *value = interconnection::accumulation::Sum::dot(&g[row*m..(row+1)*m], input)
+        *value = port_input_row(&g[row*m..(row+1)*m], |p| input[p])
             .and_then(interconnection::accumulation::Sum::value)
             .ok_or(PhsError::Unadmitted { what: "unrepresentable physical port forcing" })?;
     }
     Ok(())
+}
+
+fn port_work_sum(
+    n: usize, m: usize, g: &[f64], effort: &[f64], input: &[f64],
+) -> Result<interconnection::accumulation::Sum, PhsError> {
+    if effort.len() != n || input.len() != m || n.checked_mul(m) != Some(g.len()) {
+        return Err(PhsError::Dimension { what: "physical supplied power extents" });
+    }
+    if effort.iter().chain(input).any(|value| !value.is_finite()) {
+        return Err(PhsError::Unadmitted { what: "nonfinite physical supplied power data" });
+    }
+    let mut power = interconnection::accumulation::Sum::default();
+    for (row, &e) in effort.iter().enumerate() {
+        let forcing = port_input_row(&g[row*m..(row+1)*m], |p| input[p])
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical power forcing" })?;
+        power.add_scaled(forcing, e)
+            .ok_or(PhsError::Unadmitted { what: "unrepresentable physical supplied power" })?;
+    }
+    Ok(power)
+}
+
+// Compute work from the original map and efforts: individually rounded port
+// outputs can erase physically supplied power. Keep the retained contraction
+// through nonlinear supply and duration scaling, rounding only the final work.
+fn port_work_from_effort(
+    n: usize, m: usize, g: &[f64], effort: &[f64], input: &[f64],
+    duration: f64, other_power: f64,
+) -> Result<f64, PhsError> {
+    if effort.len() != n || input.len() != m || n.checked_mul(m) != Some(g.len())
+        || !duration.is_finite() || duration < 0.0
+    {
+        return Err(PhsError::Dimension { what: "physical port work extents or duration" });
+    }
+    if !other_power.is_finite() || effort.iter().chain(input).any(|v| !v.is_finite()) {
+        return Err(PhsError::Unadmitted { what: "nonfinite physical port work" });
+    }
+    if duration == 0.0 { return Ok(0.0); }
+    let mut power = port_work_sum(n, m, g, effort, input)?;
+    let result = (|| {
+        power.product(1.0, other_power)?;
+        let mut work = interconnection::accumulation::Sum::default();
+        work.add_scaled(power, duration)?;
+        work.value()
+    })();
+    result.ok_or(PhsError::Unadmitted { what: "unrepresentable physical port work" })
 }
 
 // Work from the original conjugate port samples or already integrated outputs.
@@ -2100,7 +2220,8 @@ pub fn step_descriptor(
         dissipated += dg[i] * rd;
     }
     dissipated *= dt;
-    let supplied = port_work(u, &y, dt, 0.0).map_err(|_| PhsError::DescriptorDomain {
+    let supplied = port_work_from_effort(n, sys.m, &sys.g, &dg, u, dt, 0.0)
+        .map_err(|_| PhsError::DescriptorDomain {
         what: "accepted port work is unrepresentable",
     })?;
     if y.iter().any(|v| !v.is_finite())
@@ -2365,7 +2486,7 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     }
     // Forcing term dt*G*u (held over the step).
     let mut gu = vec![0.0; n];
-    port_inputs_into(n, sys.m, &sys.g, u, &mut gu)?;
+    sys.input_flow_into(u, &mut gu)?;
     let residual = |x1: &[f64], dg: &[f64]| -> Vec<f64> {
         let mut res = vec![0.0; n];
         for i in 0..n {
@@ -2528,7 +2649,7 @@ fn ledger(
     dissipated *= dt;
     let mut y = vec![0.0; sys.m];
     sys.output_from_effort_into(&dg, &mut y)?;
-    let supplied = port_work(u, &y, dt, 0.0)?;
+    let supplied = port_work_from_effort(n, sys.m, &sys.g, &dg, u, dt, 0.0)?;
     let delta_h = storage_energy_change(sys.storage.as_ref(), x0, &x1,
         &mut vec![0.0; n], &mut dg);
     Ok(StepRecord {
