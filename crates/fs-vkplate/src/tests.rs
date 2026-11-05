@@ -706,7 +706,7 @@ fn g3_shell_reanchoring_is_continuous_at_zero_previous_potential() {
 }
 
 #[test]
-fn g0_shell_loss_credit_uses_signed_total_viscous_work() {
+fn g0_shell_loss_credit_uses_positive_centered_dissipation() {
     let mut spec = kit::splash();
     spec.grid = 0.025;
     let shell = kit::cymbal(&spec, &[]).unwrap().instrument.bodies.remove(0);
@@ -736,21 +736,114 @@ fn g0_shell_loss_credit_uses_signed_total_viscous_work() {
             b.linear_forces();
             b.predict(dt);
             assert!(b.sav);
-            // Manufactured contact work reverses centered motion relative to
-            // the backward velocity; test either sign of total viscous work.
+            // A contact correction can reverse centered motion relative to
+            // backward velocity. Heat is still positive: signed backward
+            // work also contains a change of numerical staggered storage.
             for i in 0..b.n { b.wn[i] = direction * q[i]; }
             let work0 = s0 * mass_norm / (2.0 * dt);
-            let work1 = direction * s1 * edge_norm / (dt * b.h * b.h);
-            let expected = (work0 + work1).max(0.0);
+            let work1 = s1 * edge_norm / (2.0 * dt * b.h * b.h);
+            let expected = work0 + work1;
             b.finish(dt);
-            assert!((b.budget - expected).abs() < 1e-11 * (work0 + work1.abs()),
-                "s0 {work0} J, s1 {work1} J: credited {} J instead of net {expected} J", b.budget);
+            assert!((b.budget - expected).abs() < 1e-11 * expected,
+                "s0 {work0} J, s1 {work1} J: credited {} J instead of heat {expected} J", b.budget);
         }
     }
     let mut invalid = shell;
     invalid.wn[0] = f64::NAN;
     invalid.finish(dt);
     assert!(invalid.budget.is_nan(), "invalid viscous work became zero credit");
+}
+
+#[test]
+fn gradient_damping_closes_energy_on_uniform_and_tapered_surfaces() {
+    for edge in [Edge::Free, Edge::Clamped] {
+        for tapered in [false, true] {
+            for s0 in [0.0, 3.0] {
+                let thickness = |r: f64| 0.001 * (1.0 + if tapered { 5.0 * r } else { 0.0 });
+                let mut body = Body::plate("gradient loss", &PlateSpec {
+                    radius: 0.08, hole: 0.0, grid: 0.02, edge,
+                    thickness: &thickness, rest_height: &|_| 0.0, young: 2e9,
+                    poisson: 0.3, density: 1000.0, tension: 70.0, bending: true,
+                    nonlinear: Nonlinear::None, t60: NO_LOSS, support: None, muffle: None,
+                }).unwrap();
+                body.s0.fill(s0);
+                body.s1 = 0.02;
+                let dt = 1.0 / 192_000.0;
+                for i in 0..body.n {
+                    body.w[i] = 2e-6 * (0.31 * i as f64).sin();
+                    body.wp[i] = body.w[i] - dt * 0.01 * (0.47 * i as f64).cos();
+                }
+                body.sync();
+                let initial = body.discrete_energy(dt);
+                assert!(initial > 0.0);
+                let mut previous = initial;
+                let mut dissipated = 0.0;
+                for _ in 0..160 {
+                    body.linear_forces();
+                    body.predict(dt);
+                    // Independent geometric edge oracle, including fixed
+                    // exterior neighbours. No production damping quadratic.
+                    let velocity: Vec<_> = body.wn.iter().zip(&body.wp)
+                        .map(|(a, b)| (a - b) / (2.0 * dt)).collect();
+                    let mut edge_power = 0.0;
+                    for (&(x, y), &i) in &body.grid_index {
+                        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            match body.grid_index.get(&(x + dx, y + dy)) {
+                                Some(&j) if i < j => {
+                                    edge_power += 0.5 * (body.mass[i] + body.mass[j])
+                                        * (velocity[i] - velocity[j]).powi(2);
+                                }
+                                None if edge == Edge::Clamped => {
+                                    edge_power += body.mass[i] * velocity[i].powi(2);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    let local_power: f64 = body.mass.iter().zip(&velocity)
+                        .map(|(mass, v)| 2.0 * s0 * mass * v * v).sum();
+                    let heat = dt * (local_power + 2.0 * body.s1 / body.h.powi(2) * edge_power);
+                    body.finish(dt);
+                    body.rotate();
+                    dissipated += heat;
+                    let energy = body.discrete_energy(dt);
+                    assert!(heat >= 0.0 && energy >= 0.0);
+                    assert!(energy <= previous + 2e-12 * initial);
+                    assert!((energy + dissipated - initial).abs() < 2e-10 * initial,
+                        "{edge:?}, taper={tapered}, s0={s0}: E={energy:e}, D={dissipated:e}, E0={initial:e}");
+                    previous = energy;
+                }
+                assert!(dissipated > 0.01 * initial);
+            }
+        }
+    }
+}
+
+#[test]
+fn gradient_damping_preserves_free_surface_rigid_translation() {
+    let mut body = Body::plate("rigid translation", &PlateSpec {
+        radius: 0.08, hole: 0.0, grid: 0.02, edge: Edge::Free,
+        thickness: &|r| 0.001 * (1.0 + 5.0 * r), rest_height: &|_| 0.0,
+        young: 2e9, poisson: 0.3, density: 1000.0, tension: 0.0, bending: false,
+        nonlinear: Nonlinear::None, t60: NO_LOSS, support: None, muffle: None,
+    }).unwrap();
+    body.s1 = 0.02;
+    let dt = 1.0 / 192_000.0;
+    body.wp.fill(0.0);
+    body.w.fill(dt * 0.01);
+    body.sync();
+    let initial = body.discrete_energy(dt);
+    for _ in 0..32 {
+        body.linear_forces();
+        body.predict(dt);
+        body.finish(dt);
+        body.rotate();
+    }
+    assert!((body.discrete_energy(dt) - initial).abs() < 1e-12 * initial);
+    for (&w, &wp) in body.w.iter().zip(&body.wp) {
+        assert!(((w - wp) / dt - 0.01).abs() < 1e-12);
+    }
+    assert_eq!(body.lap.mass_flux_quadratic(&vec![1.0; body.n], &body.mass), 0.0);
 }
 
 #[test]

@@ -292,6 +292,29 @@ impl Csr {
         correction
     }
 
+    /// x' L_M x for this graph Laplacian, as nonnegative edge and boundary
+    /// squares. Internal edges carry the same mean mass as the force; a
+    /// Dirichlet edge carries its retained node's mass. Counting each edge
+    /// once avoids cancellation along rigid translations on free surfaces.
+    fn mass_flux_quadratic(&self, x: &[f64], mass: &[f64]) -> f64 {
+        let mut value = 0.0;
+        for i in 0..self.n {
+            let mut boundary = 0.0;
+            for p in self.ptr[i]..self.ptr[i + 1] {
+                let j = self.col[p];
+                let weight = self.val[p];
+                boundary += weight;
+                if j > i {
+                    let difference = x[i] - x[j];
+                    value += -weight * (0.5 * mass[i] + 0.5 * mass[j])
+                        * difference * difference;
+                }
+            }
+            value += boundary * mass[i] * x[i] * x[i];
+        }
+        value
+    }
+
     /// Whether row `i` of `mass_flux_correction` adds only signed zeros on a finite state, and its
     /// mass is positive: every entry has a finite weight 0.5 val and a mass difference that
     /// compares equal to zero. Then each term is (finite x +-0) x finite = +-0, and +0.0 plus +-0
@@ -1527,17 +1550,6 @@ impl Body {
         self.w.iter().fold(true, within) & self.wp.iter().fold(true, within)
     }
 
-    /// `Csr::mass_flux_correction` on row `i`, or on a `flux_zero` row of a bounded state the +0.0
-    /// that sum returns. An unbounded state sums every row, so NaN and infinity propagate as before.
-    #[inline]
-    fn flux_correction(&self, i: usize, bounded: bool) -> f64 {
-        if bounded && self.flux_zero.get(i) == Some(&true) {
-            0.0
-        } else {
-            self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass)
-        }
-    }
-
     /// Factor the implicit air mass and centered radiation resistance at
     /// step `k` (with the volume column when the piston air mass is present).
     fn prepare_head_radiation(&mut self, k: f64) -> Result<(), String> {
@@ -1686,22 +1698,20 @@ impl Body {
             // energy the loss terms removed over this step (the budget for raising psi next step):
             // Refresh at zero nonlinear gradient too: otherwise a zero-work
             // step retains credit already allocated by the previous step.
-            // s0: sum m s0 (wn - wp)^2 / (2k); s1 uses the same symmetric
-            // mass-weighted edge flux as predict, paired with centered velocity.
+            // Both losses use centered velocity. Backward s1 forces also
+            // change the -dt/4 v_half'C v_half numerical storage in
+            // discrete_energy; that reversible change is not damping credit.
             let ih2 = 1.0 / (self.h * self.h);
             let mut d0 = 0.0;
-            let mut d1 = 0.0;
-            let bounded = self.flux_state_bounded();
             for i in 0..self.n {
                 let dv = self.wn[i] - self.wp[i];
                 d0 += self.mass[i] * self.s0[i] * dv * dv;
-                let correction = self.flux_correction(i, bounded);
-                d1 += (self.mass[i] * (self.lw[i] - self.lwp[i]) + correction) * dv;
+                self.tmp[i] = dv;
             }
-            // Backward s1 velocity can do negative work against centered
-            // motion. Clip the signed total, not its separate contributions.
-            let loss = d0 / (2.0 * k) + self.s1 * ih2 / k * d1 + bending_loss;
-            self.budget = if loss < 0.0 { 0.0 } else { loss }; // preserve NaN
+            let d1 = if self.s1 > 0.0 {
+                self.lap.mass_flux_quadratic(&self.tmp, &self.mass)
+            } else { 0.0 };
+            self.budget = (d0 + self.s1 * ih2 * d1) / (2.0 * k) + bending_loss;
         }
         if self.sav {
             let d: f64 = self.g.iter().zip(&self.wn).zip(&self.wp).map(|((g, a), b)| g * (a - b)).sum();
@@ -1931,7 +1941,7 @@ impl Body {
 
     /// Staggered structural and attached-air energy.
     /// For an isolated body, each loss pairs with its centered-velocity work.
-    /// Only backward-velocity curvature and modal losses need the negative
+    /// Backward-velocity gradient, curvature and modal losses need the negative
     /// dt/4 v'C v stored-energy correction and their explicit damping CFL;
     /// this correction is never reported as material heat. Centered head
     /// radiation adds positive air inertia and dissipates without that correction.
@@ -1954,7 +1964,11 @@ impl Body {
             0.5 * self.air_mass * mean_velocity * mean_velocity
         } else { 0.0 };
         let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0)
-            + self.modal.as_ref().map_or(0.0, |m| k * m.c.quad(&velocity) / 4.0);
+            + self.modal.as_ref().map_or(0.0, |m| k * m.c.quad(&velocity) / 4.0)
+            + if self.s1 > 0.0 {
+                k * self.s1 / (2.0 * self.h * self.h)
+                    * self.lap.mass_flux_quadratic(&velocity, &self.mass)
+            } else { 0.0 };
         // Centered radiation resistance removes energy directly; unlike the
         // explicit viscous law, it needs no negative stored-energy correction.
         let air = self.head_radiation.as_deref().map_or(0.0, |load| {

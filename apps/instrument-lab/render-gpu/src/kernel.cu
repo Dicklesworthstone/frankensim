@@ -40,6 +40,25 @@ __device__ __forceinline__ double mass_flux_correction(const P& p, int i, ll o,
   return correction;
 }
 
+// One row's share of x' L_M x, x=wn-wp: each internal edge once, plus
+// fixed-boundary squares. This is centered dissipation, not the signed work
+// of the backward force (which also changes numerical staggered storage).
+__device__ __forceinline__ double mass_flux_quadratic(const P& p, int i, ll o,
+                                                     const double* wn, const double* wp) {
+  const double xi = wn[o + i] - wp[o + i], mi = __ldg(&p.mass[i]);
+  double boundary = 0.0, value = 0.0;
+  for (int q = 0; q < p.KL; q++) {
+    const int j = __ldg(&p.lapE_col[(ll)q * p.NT + i]);
+    const double weight = __ldg(&p.lapE_val[(ll)q * p.NT + i]);
+    boundary += weight;
+    if (j > i) {
+      const double difference = xi - (wn[o + j] - wp[o + j]);
+      value += -weight * (0.5 * mi + 0.5 * __ldg(&p.mass[j])) * difference * difference;
+    }
+  }
+  return value + boundary * mi * xi * xi;
+}
+
 #define TPB 256
 #ifndef SPIN_NS
 #define SPIN_NS 32
@@ -811,8 +830,8 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
         const double dv = Wn[o] - Wp[o];
         if (vk) {
           v[0] = __ldg(&p.ms0[i]) * dv * dv;
-          const double correction = mass_flux_correction(p, i, (ll)s * NT, W, Wp);
-          v[1] = (__ldg(&p.mass[i]) * (LW[o] - LWP[o]) + correction) * dv;
+          if (__ldg(&p.bs1[b]) > 0.0)
+            v[1] = mass_flux_quadratic(p, i, (ll)s * NT, Wn, Wp);
         }
         if (sav) v[2] = p.G[o] * dv;
         if (viscous) {
@@ -866,8 +885,7 @@ extern "C" __global__ void __launch_bounds__(TPB) vk_step(P p) {
           // Refresh shell credit even when the nonlinear gradient vanishes.
           if (vk) {
             const double ih2 = 1.0 / (__ldg(&p.bh[b]) * __ldg(&p.bh[b]));
-            const double loss = d[0] / (2.0 * k) + __ldg(&p.bs1[b]) * ih2 / k * d[1] + bending_loss;
-            p.budgetA[ob] = loss < 0.0 ? 0.0 : loss; // signed net loss; preserve NaN
+            p.budgetA[ob] = (d[0] + __ldg(&p.bs1[b]) * ih2 * d[1]) / (2.0 * k) + bending_loss;
           }
           if (sav) psi = psi + 0.5 * d[2];
           p.psiA[ob] = psi;

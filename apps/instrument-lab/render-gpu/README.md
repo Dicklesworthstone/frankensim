@@ -8,6 +8,11 @@ The GPU path is an optional accelerator, not a second solver:
 - It is checked against the CPU step (`--check`).
 - The CPU step stays the reference.
 
+Gradient damping uses the native solver's centered edge-square dissipation in
+the shell SAV recovery budget. The reversible staggered-energy correction of
+the backward damping force is excluded from that credit. CUDA execution of
+this update still requires a fresh `--check` on an NVIDIA host.
+
 Normal-contact damping reads current node positions rather than a cached intermediate
 compression. Sliding friction solves the same anisotropic Coulomb disk problem as the
 CPU, so its force opposes final slip. These changes require a fresh CPU/GPU comparison;

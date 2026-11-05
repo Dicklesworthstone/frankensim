@@ -50,6 +50,12 @@ Node count alone does not establish audio-band fidelity.
   dissipation. Multiplying the ordinary Laplacian by each node's mass instead would
   violate those properties. Uniform-mass surfaces retain their original operator;
   clock admission includes the mass-normalized damping bound on tapered surfaces.
+  Its backward-velocity discretization has the same `-dt/4 v_half^T C v_half`
+  numerical stored-energy correction as the curvature-viscosity law below.
+  `discrete_energy` retains that correction; shell SAV recovery spends only
+  the nonnegative centered-velocity dissipation, accumulated from edge and
+  fixed-boundary squares. Reversible changes of numerical storage are not loss
+  credit, including when contacts reverse the velocity within a step.
 - **Contacts** (stick, felt beater, snare wires, hi-hat rims): one-sided power laws with
   Hunt-Crossley loss use the discrete potential secant over the centered body interval.
   Interacting contacts solve simultaneously through the same SAV, air-inertia and radiation
