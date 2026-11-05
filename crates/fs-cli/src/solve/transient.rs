@@ -887,6 +887,14 @@ pub(super) fn solve(
             additional = additional.checked_add(adjoint::material_control_storage_bytes(
                 spec, problem.mesh.vertex_count(), problem.mesh.element_count(),
             )?).ok_or_else(|| bad("combined material-control adjoint memory estimate overflows"))?;
+            if temperature_contacts.is_some() {
+                // The original live source evaluation coexists with the full
+                // endpoint tangent during each material-control contraction.
+                additional = additional.checked_add(adjoint::contact_storage_bytes(
+                    problem.mesh.vertex_count(), problem.mesh.element_count(), max_contact_pairs,
+                    linear.restart,
+                )?).ok_or_else(|| bad("live material-control source workspace overflows"))?;
+            }
         }
         if temperature_contacts.is_some() {
             additional = additional.checked_add(adjoint::contact_storage_bytes(

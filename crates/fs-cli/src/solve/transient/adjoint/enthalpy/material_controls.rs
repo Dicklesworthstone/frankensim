@@ -12,6 +12,7 @@ use std::time::Instant;
 use fs_conduction::{
     ConductionMesh, ConductionProblem, ConductivityModel, ElementMaterials, ThermalInterfaces,
 };
+use fs_conduction::interface::temperature::{TemperatureContactEvaluation, TemperatureContacts};
 use fs_exec::Cx;
 use fs_project::ProjectSpec;
 
@@ -31,6 +32,12 @@ struct ContactInterface {
     mapped: bool,
     face_pairs: usize,
     derivative: f64,
+}
+
+#[derive(Clone, Copy)]
+enum ContactOwner<'m, 'c> {
+    Fixed(Option<&'m ThermalInterfaces>),
+    Live(&'m TemperatureContacts<'m, 'c>),
 }
 
 /// Extra accepted-step conductive terms (32 bytes/element), returned element
@@ -61,24 +68,60 @@ pub(in crate::solve::transient) fn storage_bytes(
 
 /// Immutable material/contact bindings and controls held throughout the
 /// selected prefix. Sharing a card never merges distinct declared coordinates.
-pub(in crate::solve::transient::adjoint) struct Controls<'m> {
+pub(in crate::solve::transient::adjoint) struct Controls<'m, 'c> {
     mesh: &'m ConductionMesh,
     fallback: &'m ConductivityModel,
     materials: Option<&'m ElementMaterials>,
-    interfaces: Option<&'m ThermalInterfaces>,
+    contact_owner: ContactOwner<'m, 'c>,
     element_regions: Vec<usize>,
     conductivity: Vec<ConductivityRegion>,
     contacts: Vec<ContactInterface>,
     steps: usize,
 }
 
-impl<'m> Controls<'m> {
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+impl<'m, 'c> Controls<'m, 'c> {
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::solve::transient::adjoint) fn new(
         cx: &Cx<'_>,
         spec: &ProjectSpec,
         problem: ConductionProblem<'m>,
         interfaces: Option<&'m ThermalInterfaces>,
+        labels: &[u32],
+        ids: &BTreeMap<String, u32>,
+        initial_temperature: &[f64],
+        deadline: Option<(Instant, f64)>,
+    ) -> Result<Self, SolveRefusal> {
+        Self::bind(cx, spec, problem, ContactOwner::Fixed(interfaces), labels,
+            ids, initial_temperature, deadline)
+    }
+
+    /// Bind capacity controls to the original source laws, not one frozen R(T).
+    /// Every accepted endpoint re-queries this SAME owner. Its mesh, paired
+    /// traces, source pins and nonthermal context cannot be replaced by a
+    /// per-step interface object carrying only matching names and face counts.
+    /// Initial binding needs physical source values, but no derivative or solve;
+    /// an initial sampled peak therefore retains exactly zero future controls.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::solve::transient::adjoint) fn new_live_capacity(
+        cx: &Cx<'_>,
+        spec: &ProjectSpec,
+        problem: ConductionProblem<'m>,
+        contacts: &'m TemperatureContacts<'m, 'c>,
+        labels: &[u32],
+        ids: &BTreeMap<String, u32>,
+        initial_temperature: &[f64],
+        deadline: Option<(Instant, f64)>,
+    ) -> Result<Self, SolveRefusal> {
+        Self::bind(cx, spec, problem, ContactOwner::Live(contacts), labels,
+            ids, initial_temperature, deadline)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn bind(
+        cx: &Cx<'_>,
+        spec: &ProjectSpec,
+        problem: ConductionProblem<'m>,
+        contact_owner: ContactOwner<'m, 'c>,
         labels: &[u32],
         ids: &BTreeMap<String, u32>,
         initial_temperature: &[f64],
@@ -92,7 +135,8 @@ impl<'m> Controls<'m> {
         storage_bytes(n, elements, bindings.len(), declared_contacts.len())?;
         if labels.len() != elements || initial_temperature.len() != n
             || problem.element_materials.is_some_and(|value| value.of_element().len() != elements)
-            || interfaces.map_or(0, ThermalInterfaces::surface_count) != declared_contacts.len()
+            || matches!(contact_owner, ContactOwner::Fixed(interfaces)
+                if interfaces.map_or(0, ThermalInterfaces::surface_count) != declared_contacts.len())
         {
             return Err(bad(
                 "enthalpy material controls require the original element and contact layout",
@@ -103,6 +147,19 @@ impl<'m> Controls<'m> {
             if !temperature.is_finite() || temperature <= 0.0 {
                 return Err(bad("enthalpy material-control initial temperatures must be positive"));
             }
+        }
+        let physical = match contact_owner {
+            ContactOwner::Fixed(_) => None,
+            ContactOwner::Live(contacts) => Some(contacts.evaluate(
+                cx, problem.boundary, initial_temperature,
+            ).map_err(lower)?),
+        };
+        let interfaces = match contact_owner {
+            ContactOwner::Fixed(interfaces) => interfaces,
+            ContactOwner::Live(_) => physical.as_ref().map(TemperatureContactEvaluation::frozen_interfaces),
+        };
+        if interfaces.map_or(0, ThermalInterfaces::surface_count) != declared_contacts.len() {
+            return Err(bad("live capacity material controls lost their declared contact layout"));
         }
         let mut region_owners = BTreeMap::new();
         let mut conductivity = Vec::new();
@@ -182,7 +239,7 @@ impl<'m> Controls<'m> {
             mesh: problem.mesh,
             fallback: problem.material,
             materials: problem.element_materials,
-            interfaces,
+            contact_owner,
             element_regions,
             conductivity,
             contacts,
@@ -206,7 +263,7 @@ impl<'m> Controls<'m> {
         deadline: Option<(Instant, f64)>,
     ) -> Result<(), SolveRefusal> {
         self.add_scaled(
-            cx, problem, interfaces, temperature, element_conductivity,
+            cx, problem, interfaces, None, temperature, element_conductivity,
             nodal_load_adjoint, 1.0, deadline,
         )
     }
@@ -220,6 +277,10 @@ impl<'m> Controls<'m> {
     /// natural and radiative feedback. No new primal or transpose is solved.
     /// A scale of one below is the identity change of residual coordinates,
     /// NOT a one-second physical timestep. Neither control receives another dt.
+    /// A live binding requires `interfaces == None` and evaluates its retained
+    /// source owner at this endpoint; the complete contact tangent must already
+    /// be in the supplied dual. Each whole law is R(T_A,T_B) -> s R(T_A,T_B),
+    /// so the fixed-state partial uses the actual endpoint resistance once.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::solve::transient::adjoint) fn add_capacity(
         &mut self,
@@ -231,11 +292,20 @@ impl<'m> Controls<'m> {
         deadline: Option<(Instant, f64)>,
     ) -> Result<(), SolveRefusal> {
         poll(cx, deadline)?;
+        let physical = match self.contact_owner {
+            ContactOwner::Fixed(_) => None,
+            ContactOwner::Live(contacts) => {
+                if interfaces.is_some() {
+                    return Err(bad("live capacity controls cannot substitute a frozen interface owner"));
+                }
+                Some(contacts.evaluate(cx, problem.boundary, temperature).map_err(lower)?)
+            },
+        };
         let conductivity = fs_conduction::adjoint::RobinResponse::conductivity_scale_pullback(
             cx, problem, temperature, nodal_load_adjoint, self.mesh.element_count(),
         ).map_err(lower)?;
         self.add_scaled(
-            cx, problem, interfaces, temperature, &conductivity,
+            cx, problem, interfaces, physical.as_ref(), temperature, &conductivity,
             nodal_load_adjoint, 1.0, deadline,
         )
     }
@@ -249,6 +319,7 @@ impl<'m> Controls<'m> {
         cx: &Cx<'_>,
         problem: ConductionProblem<'_>,
         interfaces: Option<&ThermalInterfaces>,
+        physical: Option<&TemperatureContactEvaluation>,
         temperature: &[f64],
         element_conductivity: &[f64],
         full_residual_multiplier: &[f64],
@@ -261,10 +332,15 @@ impl<'m> Controls<'m> {
             (None, None) => true,
             _ => false,
         };
-        let same_interfaces = match (self.interfaces, interfaces) {
-            (Some(original), Some(current)) => std::ptr::eq(original, current),
-            (None, None) => true,
-            _ => false,
+        let same_interfaces = match self.contact_owner {
+            ContactOwner::Fixed(original) => physical.is_none() && match (original, interfaces) {
+                (Some(original), Some(current)) => std::ptr::eq(original, current),
+                (None, None) => true,
+                _ => false,
+            },
+            // Only add_capacity can create this evaluation, from the retained
+            // live owner above. The enthalpy add path has no such witness.
+            ContactOwner::Live(_) => interfaces.is_none() && physical.is_some(),
         };
         let n = self.mesh.vertex_count();
         if !std::ptr::eq(self.mesh, problem.mesh)
@@ -296,6 +372,7 @@ impl<'m> Controls<'m> {
             }
         }
         let mut contact_values = zeros(self.contacts.len())?;
+        let interfaces = physical.map(TemperatureContactEvaluation::frozen_interfaces).or(interfaces);
         if let Some(interfaces) = interfaces {
             let mut load_dual = zeros(n)?;
             for (vertex, (weight, &lambda)) in load_dual.iter_mut()
@@ -364,3 +441,6 @@ impl<'m> Controls<'m> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -1,5 +1,34 @@
 # CONTRACT: fs-cli
 
+## Material controls through live contact histories — driver 123
+
+`temperature-final-material-adjoint` and
+`temperature-sampled-peak-material-adjoint` now admit the original live
+temperature-dependent contact owner throughout a regional-capacity history.
+Each regional conductivity multiplier scales its complete tensor or curve;
+each named contact multiplier scales its whole resistance law, including all
+source ordinates. The unchanged endpoint values enter their fixed-state
+parameter contractions while the complete bulk/contact tangent already
+contains temperature feedback. Both controls use the original watt-coordinate
+dual without another timestep factor or solve.
+
+The retained live owner binds the original mesh, matched traces, source pins
+and nonthermal context. Per-step evaluations cannot substitute a merely equal
+frozen interface owner. Existing fixed-interface identity checks remain exact.
+Distinct regions sharing one material card retain independent controls, and an
+initial selected peak retains their identities with exactly zero future
+influence. Admission reserves an additional bounded physical contact evaluation
+for explicit material reports. Ordinary reports retain their existing scope.
+
+These reports compose prescribed or scheduled boundaries with optional
+area-mean ambient and closed/open enclosure radiation. Derived-convection
+contact adjoints and pointwise capacity radiation remain outside this increment.
+Driver 123 invalidates cached results from earlier producers. Focused regressions
+compare independently perturbed complete histories for constant and nonlinear
+conductivity, curve and source-surface contacts, final and interior-peak goals,
+and unchanged primal receipts. Syntax/source review is complete; numerical
+runtime execution remains required on an adequately resourced build host.
+
 ## Capacity contact trajectories with ambient sensitivities — driver 122
 
 `temperature-final-adjoint` and `temperature-sampled-peak-adjoint` now compose
@@ -21,9 +50,9 @@ Original zero-flux radiation-only traces now participate in feedback and its
 memory allowance. They retain zero convection controls and do not become
 independently variable nonradiative fluxes. Ordinary convection and enclosure
 flux controls retain their existing physical owners. Driver 122 invalidates
-older cached producer results. Pointwise capacity radiation, derived-convection
-live-contact adjoints and material-extended live-contact reports remain outside
-this increment.
+older cached producer results. Driver 123 adds material-extended live-contact
+reports. Pointwise capacity radiation and derived-convection live-contact
+adjoints remain outside these increments.
 
 Native and imported-project regressions compare complete perturbed histories
 for curve/Newton and source-surface/fixed-point contacts, vacuum and Robin

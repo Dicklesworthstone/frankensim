@@ -197,11 +197,10 @@ pub(in crate::solve::transient) fn finish(
     if temperature_contacts.is_some()
         && (interfaces.is_some()
             || natural.is_some()
-            || airflow.is_some()
-            || objective.material_controls())
+            || airflow.is_some())
     {
         return Err(bad(
-            "capacity contact adjoints require original live sources with prescribed or scheduled boundaries and optional area-mean ambient or enclosure radiation; derived convection and material-control compositions are unsupported",
+            "capacity contact adjoints require original live sources with prescribed or scheduled boundaries and optional area-mean ambient or enclosure radiation; derived-convection compositions are unsupported",
         ));
     }
     let coupled = temperature_contacts.is_some()
@@ -288,6 +287,14 @@ pub(in crate::solve::transient) fn finish(
         })
         .transpose()?
         .unwrap_or(0);
+    // Live material controls retain one additional physical source evaluation
+    // while the complete endpoint tangent is alive. Conservatively reserve
+    // the existing contact allowance again; the fixed-owner report is unchanged.
+    let material_workspace = material_workspace.checked_add(
+        if objective.material_controls() && temperature_contacts.is_some() {
+            contact_workspace
+        } else { 0 },
+    ).ok_or_else(|| bad("live capacity material-control workspace overflows"))?;
     let additional_storage_bytes = storage_bytes(n, ends_s.len(), names.len())?
         .checked_add(radiation_workspace)
         .and_then(|value| value.checked_add(natural_workspace))
@@ -307,9 +314,15 @@ pub(in crate::solve::transient) fn finish(
     // Bind even for an initial selected peak so zero controls retain physical
     // identities. Ordinary capacity reports do not acquire this extra work.
     let mut material_controls = if objective.material_controls() {
-        Some(material_controls::Controls::new(
-            cx, spec, problem, interfaces, labels, region_ids, &tape.states[0], deadline,
-        )?)
+        Some(if let Some(contacts) = temperature_contacts {
+            material_controls::Controls::new_live_capacity(
+                cx, spec, problem, contacts, labels, region_ids, &tape.states[0], deadline,
+            )?
+        } else {
+            material_controls::Controls::new(
+                cx, spec, problem, interfaces, labels, region_ids, &tape.states[0], deadline,
+            )?
+        })
     } else { None };
     let mut prescribed_controls = prescribed_controls::Controls::new(cx, spec, problem, deadline)?;
     let mut flux_controls = flux_controls::Controls::new(cx, spec, problem, deadline)?;

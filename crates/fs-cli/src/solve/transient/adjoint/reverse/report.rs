@@ -68,7 +68,12 @@ pub(super) fn render(
             "with fixed matching contact",
             "with original source-backed matching contact",
         );
-        scope.push_str(" Live contact re-queries each pinned resistance law at its independent endpoint traces and retains both temperature partials in the same complete capacity/bulk transpose. Every selected endpoint is revalidated at the unchanged accepted field and its original absolute residual and energy targets, without a replacement solve. Source/material corners and validity endpoints refuse classical derivatives even when the forward semismooth solve succeeds. Geometry, pressure, finish, source selection and whole-law resistance scales remain fixed. Prescribed-boundary lifts include the full contact transpose at constrained vertices.");
+        scope.push_str(" Live contact re-queries each pinned resistance law at its independent endpoint traces and retains both temperature partials in the same complete capacity/bulk transpose. Every selected endpoint is revalidated at the unchanged accepted field and its original absolute residual and energy targets, without a replacement solve. Source/material corners and validity endpoints refuse classical derivatives even when the forward semismooth solve succeeds. Geometry, pressure, finish and source selection remain fixed. Prescribed-boundary lifts include the full contact transpose at constrained vertices.");
+        if objective.material_controls() {
+            scope.push_str(" Explicit material reports retain the original live source owner throughout the trajectory. Each whole-law resistance multiplier uses that owner's actual endpoint values and the same complete dual, including the law's temperature feedback; no new solve or timestep factor is introduced.");
+        } else {
+            scope.push_str(" Whole-law resistance scales remain fixed for this ordinary report.");
+        }
     }
     if !result.prescribed_temperature.is_empty() {
         scope = scope.replace("geometry, prescribed temperatures and material laws", "geometry and material laws")
