@@ -2340,6 +2340,41 @@ actual layer Q/F composition and all pressure/velocity moments, coherent versus
 independent source powers, shared work exhaustion, equal-speed density-layer
 work, original clocks, empty arrays and domain/cancellation refusal.
 
+### Coherent original source arrays inside the layer
+
+`interior::source::array::PreparedInteriorSourceFullWaveCompactSourceObserver`
+propagates prescribed Q/F sources strictly inside the original fluid layer to
+an observer strictly in its incident exterior. Reversing that same physical
+layer explicitly observes the other exterior. Native interior-source monopole
+and force owners supply one cached 4-by-4 Cartesian transfer per original
+location. Q remains peak volume flow [m³/s]; force remains peak force ON the
+actual layer fluid [N]. The receiver keeps its original exterior density,
+pressure/vector-velocity units and physical harmonic clock.
+
+The shared borrowed array evaluator supplies coherent fields, native harmonic
+lines, independent-source statistics and explicit low-rank coherence factors.
+All internal histories and Q/F phase stay within each original physical source
+before statistical reduction. Pressure/velocity moments and signed active and
+reactive flux retain source interference, including cancellation at pressure
+nulls. Applying a prepared transfer uses fixed-order DD accumulation, without
+allocation or further spectral integration; factor evaluation remains linear
+in the number of sources times coherence factors.
+
+One aggregate work cap bounds the native Q and force preparations. Per-source
+diagnostics retain their different physical units and do not imply relative
+array accuracy at interference nulls. Empty arrays still require positive layer
+thickness, a strict original DD exterior observer, positive frequency and valid
+numerical controls. Equal speeds use zero quadrature only when the second face
+is also physically absent; two unequal-density interfaces retain their returns.
+Source/observer geometry, source counts, work and cancellation admission publish
+no partial array. Interior receivers, zero-thickness source layers, face sources,
+guided poles, absorption, moving fluids and source loading remain outside scope.
+
+`tests/full_wave_layer_interior_source_array.rs` covers original homogeneous and
+reversed-interface limits, actual finite-layer Q/F composition, all coherent and
+partial-coherence moments, aggregate work exhaustion, source nulls, clocks,
+strict DD domains, empty arrays and cancellation.
+
 ## Causal transient Lighthill volume-stress observation
 
 `curle3d::quadrupole::transient::PreparedTransientQuadrupoleObserver` observes

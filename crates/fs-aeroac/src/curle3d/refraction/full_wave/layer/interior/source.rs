@@ -24,6 +24,8 @@ use crate::observation::HarmonicFieldLine;
 use core::f64::consts::TAU;
 use fs_math::{c64::C64, det};
 
+/// Coherent original layer volume-flow and force arrays observed in an exterior.
+pub mod array;
 mod force;
 pub use force::{FULL_WAVE_INTERIOR_SOURCE_FORCE_SCOPE, PreparedInteriorSourceFullWaveForce};
 
