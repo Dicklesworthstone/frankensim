@@ -157,6 +157,47 @@ impl WakeKinematics {
     pub fn divergence(&self) -> f64 {
         self.gradient[0][0] + self.gradient[1][1] + self.gradient[2][2]
     }
+
+    /// Symmetric rate-of-strain tensor S = (grad(u) + grad(u)^T) / 2 [1/s].
+    ///
+    /// Together with [`Self::vorticity`], this exposes the deformation that can
+    /// amplify or attenuate vorticity independently of the local rigid rotation.
+    #[must_use]
+    pub fn strain_rate(&self) -> [[f64; 3]; 3] {
+        std::array::from_fn(|i| {
+            std::array::from_fn(|j| 0.5 * (self.gradient[i][j] + self.gradient[j][i]))
+        })
+    }
+
+    /// Inviscid vortex-stretching/tilting term (omega . grad) u [1/s^2].
+    ///
+    /// For Cartesian components this is `gradient * omega`, where
+    /// `gradient[i][j] = d u_i / d x_j`. In an incompressible Newtonian flow,
+    /// this is the production term in `D omega / Dt = (omega . grad) u + nu
+    /// laplacian(omega)`. It is a local diagnostic of the represented velocity
+    /// field; it does not itself mutate filament circulation or core radius.
+    #[must_use]
+    pub fn vorticity_stretching(&self) -> [f64; 3] {
+        let omega = self.vorticity();
+        std::array::from_fn(|i| {
+            self.gradient[i][0] * omega[0]
+                + self.gradient[i][1] * omega[1]
+                + self.gradient[i][2] * omega[2]
+        })
+    }
+
+    /// Local production rate of enstrophy density `|omega|^2 / 2` [1/s^3].
+    ///
+    /// This is `omega . S omega`, equivalently `omega . (omega . grad)u`;
+    /// the antisymmetric rigid-rotation part contributes exactly zero.
+    #[must_use]
+    pub fn enstrophy_production_rate(&self) -> f64 {
+        let omega = self.vorticity();
+        let stretching = self.vorticity_stretching();
+        omega[0] * stretching[0]
+            + omega[1] * stretching[1]
+            + omega[2] * stretching[2]
+    }
 }
 
 /// The connected near-wake.
