@@ -23,13 +23,14 @@
 use std::collections::BTreeMap;
 
 use fs_thermal::sublimation::{
-    SolverConfig,
+    SolverConfig, SurfaceKinetics,
     coating::{SupportedSurfaceState, heat_supported_surface},
 };
 
 use super::super::{
     compatibility, invalid, molecular_stream_energy, nonnegative, phase_at, poll, positive,
-    snapshot_surface_at_temperature, validate_surface,
+    snapshot_surface_at_temperature, snapshot_surface_at_temperature_with_kinetics,
+    validate_surface,
 };
 use super::{
     ChamberSurfaceOwner, ClosedGasParcel, GasChamberCandidate, GasChamberSolve, GasChamberStep,
@@ -158,6 +159,17 @@ fn snapshot(
     duration_s: f64,
     controls: GasSupportedChamberSolve,
 ) -> Result<SurfaceSnapshot, GasSurfaceError> {
+    snapshot_with_film(surface, gas, catalog, None, duration_s, controls)
+}
+
+fn snapshot_with_film(
+    surface: &GasSupportedSurface<'_>,
+    gas: GasSpeciesSnapshot,
+    catalog: &ThermochemicalGasModel,
+    mass_transfer_coefficient_m_s: Option<f64>,
+    duration_s: f64,
+    controls: GasSupportedChamberSolve,
+) -> Result<SurfaceSnapshot, GasSurfaceError> {
     if !positive(surface.state.substrate_mass_kg)
         || !surface.state.substrate_specific_enthalpy_j_kg.is_finite()
     {
@@ -173,13 +185,17 @@ fn snapshot(
         area_m2: surface.state.area_m2,
     };
     validate_surface(surface.binding, deposit)?;
-    snapshot_surface_at_temperature(
+    snapshot_surface_at_temperature_with_kinetics(
         surface.law,
         surface.binding,
         deposit,
         gas,
         catalog,
         temperature,
+        SurfaceKinetics {
+            accommodation_coefficient: surface.binding.accommodation_coefficient,
+            mass_transfer_coefficient_m_s,
+        },
         duration_s,
         controls.chamber.surface,
     )
@@ -324,6 +340,66 @@ pub fn advance_supported_chamber<'catalog>(
     catalog: &'catalog ThermochemicalGasModel,
     duration_s: f64,
     controls: GasSupportedChamberSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasSupportedChamberCandidate<'catalog>, GasSurfaceError> {
+    advance_supported_chamber_impl(
+        surfaces,
+        accommodation,
+        None,
+        gas,
+        catalog,
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+/// Advance supported surfaces with optional prescribed gas-film resistances.
+///
+/// The coefficient map is sparse: an absent id retains the free-molecular
+/// limit, while a present zero seals only that surface's phase stream. Entries
+/// for unknown ids refuse the whole candidate. Finite positive values use the
+/// same D/delta series resistance as the thermal sublimation owner, scaling
+/// both opposing molecular streams before shared gas accounting.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_supported_chamber_with_films<'catalog>(
+    surfaces: &[GasSupportedSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    mass_transfer_coefficients_m_s: &BTreeMap<u64, f64>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasSupportedChamberSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasSupportedChamberCandidate<'catalog>, GasSurfaceError> {
+    let ids: BTreeMap<_, _> = surfaces.iter().map(|surface| (surface.id, ())).collect();
+    if mass_transfer_coefficients_m_s
+        .keys()
+        .any(|id| !ids.contains_key(id))
+    {
+        return Err(invalid("gas-film coefficient references an inactive supported surface"));
+    }
+    advance_supported_chamber_impl(
+        surfaces,
+        accommodation,
+        Some(mass_transfer_coefficients_m_s),
+        gas,
+        catalog,
+        duration_s,
+        controls,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_supported_chamber_impl<'catalog>(
+    surfaces: &[GasSupportedSurface<'_>],
+    accommodation: Option<&BTreeMap<u64, ThermalAccommodation>>,
+    mass_transfer_coefficients_m_s: Option<&BTreeMap<u64, f64>>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    duration_s: f64,
+    controls: GasSupportedChamberSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasSupportedChamberCandidate<'catalog>, GasSurfaceError> {
     let mut storage = Vec::new();
@@ -335,7 +411,11 @@ pub fn advance_supported_chamber<'catalog>(
         duration_s,
         controls.chamber,
         || validate_storage(controls.storage),
-        |surface, gas| snapshot(surface, gas, catalog, duration_s, controls),
+        |surface, gas| {
+            let film = mass_transfer_coefficients_m_s
+                .and_then(|coefficients| coefficients.get(&surface.id).copied());
+            snapshot_with_film(surface, gas, catalog, film, duration_s, controls)
+        },
         |surface, snapshot, reflected_heat, cancelled| {
             let (prepared, supported) = prepare(
                 surface,
