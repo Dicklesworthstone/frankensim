@@ -252,14 +252,72 @@ fn g1_surface_pressure_line_checks_the_whole_band_but_returns_nominal_values() {
 }
 
 #[test]
-fn g0_surface_temperature_and_manufacturing_box_still_requires_full_box_support() {
+fn g1_surface_temperature_and_manufacturing_box_retains_nominal_values_and_receipts() {
     let mut claims = ClaimSet::new();
     let selected = claims.insert_claim(surface_claim()).unwrap();
     for selection in [SINGLE, ClaimSelection::Pinned(selected)] {
-        assert!(matches!(query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &dry(),
-            "T", 200.0, 450.0, selection), Err(PropertySupportError::Evaluation { error, .. })
-            if matches!(*error, fs_matdb::MatDbError::UnsupportedEvaluation { .. })));
+        let fixed = query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &fixed_pressure(),
+            "T", 200.0, 450.0, selection).unwrap();
+        let band = query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &dry(),
+            "T", 200.0, 450.0, selection).unwrap();
+        assert_eq!(band, fixed, "manufacturing uncertainty does not replace the nominal state");
+        assert_eq!(band.lower.evidence.value.value, 1.5);
+        assert_eq!(band.upper.evidence.value.value, 5.0);
+        claims.verify_receipt(&band.lower.receipt).unwrap();
+        claims.verify_receipt(&band.upper.receipt).unwrap();
     }
+}
+
+#[test]
+fn g0_surface_manufacturing_box_cannot_hide_a_hole_away_from_the_nominal_line() {
+    let mut source = surface_claim();
+    if let PropertyValue::Surface2D { samples, triangles, .. } = &mut source.value {
+        // The nominal 1 MPa temperature path is supported. A hole entirely
+        // below that path still invalidates the declared 0.5--1.5 MPa band.
+        *samples = [[200.0, 0.5e6], [450.0, 0.5e6], [450.0, 1.5e6], [200.0, 1.5e6],
+            [300.0, 0.7e6], [350.0, 0.7e6], [350.0, 0.9e6], [300.0, 0.9e6]]
+            .map(|point| (point, 1.0 + point[0] / 250.0 + point[1] / 1.0e6)).to_vec();
+        *triangles = vec![[0, 1, 5], [0, 5, 4], [1, 2, 6], [1, 6, 5],
+            [2, 3, 7], [2, 7, 6], [3, 0, 4], [3, 4, 7]];
+    }
+    let mut claims = ClaimSet::new();
+    let selected = claims.insert_claim(source).unwrap();
+    let fixed = query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &fixed_pressure(),
+        "T", 200.0, 450.0, SINGLE).unwrap();
+    let mut narrow = dry();
+    if let InterfaceState::DryContact { pressure_half_width, .. } = &mut narrow {
+        pressure_half_width.value = 0.05e6;
+    }
+    let supported = query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &narrow,
+        "T", 200.0, 450.0, SINGLE).unwrap();
+    assert_eq!(supported, fixed);
+    for selection in [SINGLE, ClaimSelection::Pinned(selected)] {
+        assert!(query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &dry(),
+            "T", 200.0, 450.0, selection).is_err(), "a pin cannot cover an interior source hole");
+    }
+}
+
+#[test]
+fn g0_surface_manufacturing_box_preserves_conflicts_away_from_nominal_pressure() {
+    let mut claims = ClaimSet::new();
+    let selected = claims.insert_claim(surface_claim()).unwrap();
+    let mut competitor = surface_claim();
+    competitor.value = PropertyValue::Scalar { value: 0.4, dims: crate::CONTACT_RESISTANCE_DIMS };
+    competitor.validity = fs_evidence::ValidityDomain::unconstrained()
+        .with("T", 300.0, 350.0).with("normal_pressure", 0.6e6, 0.7e6);
+    competitor.interpolation = InterpolationPolicy::ConstantWithinValidity;
+    competitor.provenance.source = "competing manufacturing-band source".into();
+    claims.insert_claim(competitor).unwrap();
+    query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &fixed_pressure(),
+        "T", 200.0, 450.0, SINGLE).unwrap();
+    assert!(matches!(query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &dry(),
+        "T", 200.0, 450.0, SINGLE), Err(PropertySupportError::Evaluation { point, error })
+        if point.axes()["T"] == 300.0 && point.axes()["normal_pressure"] == 0.6e6
+            && matches!(*error, fs_matdb::MatDbError::AmbiguousSelection { .. })));
+    let pinned = query_envelope(&claims, crate::CONTACT_RESISTANCE_PROPERTY, &dry(),
+        "T", 200.0, 450.0, ClaimSelection::Pinned(selected)).unwrap();
+    assert_eq!(pinned.lower.receipt.selected, selected);
+    assert_eq!(pinned.upper.receipt.selected, selected);
 }
 
 #[test]

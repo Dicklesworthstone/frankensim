@@ -228,7 +228,8 @@ persistence.
   coordinates. Corners have identical axes/quantity descriptors and ordered
   finite coordinates. Every competing validity-box intersection is queried by
   the original selection path; a pin bypasses competing selection, never the
-  selected claim's support. This proves declared scalar/linear-curve coverage,
+  selected claim's support. This proves declared scalar/linear-curve and
+  source-triangulated surface coverage,
   not numerical finiteness at every future solver state, physical trajectory,
   multiaxis measured support beyond the admitted model, or experimental truth.
   G0 tests in `tests/query.rs` cover malformed corners, degenerate boxes and
@@ -366,10 +367,21 @@ Affine interpolation is the source's declared model, not an additional
 measurement, numerical enclosure, or inferred covariance. Stated uncertainty
 is retained. Sample covariance is transported, but propagation to an
 interpolated query is not claimed. Derivatives and integral uncertainty remain
-unsupported. Envelope requests varying either surface coordinate refuse:
-corner evaluations cannot prove continuous coverage across cells or holes.
+unsupported. Surface envelope requests require coverage of the entire declared
+coordinate rectangle. For positive-area rectangles, an actual source triangle
+must contain a representable strictly interior witness, and no exposed source
+edge may enter the rectangle's open interior. Exact orientation and interval
+comparisons distinguish boundary-only contact from intrusion. The admitted
+conforming, nonoverlapping cell complex is closed; exclusion of its boundary
+from the connected rectangle interior proves whole-rectangle coverage from
+that witness. This catches holes wholly inside the rectangle and does not let
+isolated exact samples stand in for area support. Unrepresentable witnesses
+refuse conservatively. Degenerate rectangles reuse the existing point/line
+owners, and nonzero `TabulatedOnly` spans still refuse. The ordinary selection,
+validity, coordinate, receipt and source-size gates remain authoritative.
 G0/G1/G3 tests in `tests/surface.rs` exercise a manufactured simultaneous
-temperature/shear law, explicit support, and portable replay.
+temperature/shear law, whole-box coverage, interior holes, boundary touching,
+explicit support, and portable replay.
 
 `ClaimSet::query_line_typed` supplies a distinct fixed-context path boundary:
 only one ordered coordinate varies, with all other coordinates and quantity

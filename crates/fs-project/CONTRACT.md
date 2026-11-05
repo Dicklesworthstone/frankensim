@@ -358,8 +358,9 @@ bindings; it runs no solves and admits no scenarios itself.
   fixed-pressure temperature ranges and fixed-temperature pressure bands are
   admitted without filling holes or changing claim selection. The complete
   manufacturing band is checked before nominal endpoint values are returned.
-  Genuine multi-coordinate surface boxes still require an unavailable full-box
-  support proof and refuse; a diagonal or nominal line cannot cover them.
+  Genuine multi-coordinate surface boxes use matdb's whole-box source-cell
+  coverage proof, including holes wholly inside the manufacturing range.
+  A supported diagonal or nominal line cannot conceal unsupported band states.
   Every value arrives as matdb
   `Evidence` + `PropertyUsageReceipt`; receipts are retained
   (`RetainedReceipt`: receipt, canonical bytes, content hash, context) for

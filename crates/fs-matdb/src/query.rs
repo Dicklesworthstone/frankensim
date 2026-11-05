@@ -1347,7 +1347,7 @@ pub struct MaterialAnswer {
 }
 
 /// Evaluated corners of a conservative box covered by one selected claim.
-/// This establishes declared scalar/curve support, not physical qualification
+/// This establishes declared scalar/curve/source-cell support, not physical qualification
 /// or finite solver results at every future state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnvelopeAnswer {
@@ -1566,8 +1566,8 @@ impl ClaimSet {
             .map(|(answer, _)| answer)
     }
 
-    // A fixed-context line has its own source-cell continuity proof. Ordinary
-    // box queries never acquire that authority from corner samples alone.
+    // A fixed-context line retains every crossed source edge. Ordinary boxes
+    // use the complete source-cell coverage proof, never corner samples alone.
     fn query_envelope_selected_with_line(
         &self,
         property: &str,
@@ -1621,14 +1621,13 @@ impl ClaimSet {
                 } = &claim.value
                     && axes.iter().any(|axis| lower.axes[axis] < upper.axes[axis])
                 {
-                    let Some(axis) = line_axis else {
-                        return Err(PropertySupportError::Evaluation {
-                            point: lower.clone(),
-                            error: Box::new(MatDbError::UnsupportedEvaluation {
-                                reason: "surface corner queries do not prove continuous box coverage across source cells or holes",
-                            }),
-                        });
-                    };
+                    let varying = axes.iter().position(|axis| {
+                        line_axis.map_or_else(
+                            || lower.axes[axis] < upper.axes[axis],
+                            |name| name == axis,
+                        )
+                    }).expect("a surface coordinate varies in the admitted request");
+                    let axis = &axes[varying];
                     if claim.interpolation == InterpolationPolicy::TabulatedOnly {
                         return Err(PropertySupportError::DiscreteSupport {
                             axis: axis.to_owned(),
@@ -1637,15 +1636,21 @@ impl ClaimSet {
                             claim: id,
                         });
                     }
-                    let varying = axes
-                        .iter()
-                        .position(|name| name == axis)
-                        .expect("a surface coordinate varies along the admitted line");
+                    let source_lower = [lower.axes[&axes[0]], lower.axes[&axes[1]]];
+                    let source_upper = [upper.axes[&axes[0]], upper.axes[&axes[1]]];
+                    if line_axis.is_none() && (0..2).all(|i| source_lower[i] < source_upper[i]) {
+                        crate::surface::rectangle_support(samples, triangles, source_lower, source_upper)
+                            .map_err(|error| PropertySupportError::Evaluation {
+                                point: lower.clone(),
+                                error: Box::new(error),
+                            })?;
+                        continue;
+                    }
                     line_knots = crate::surface::line_knots(
                         samples,
                         triangles,
                         varying,
-                        [lower.axes[&axes[0]], lower.axes[&axes[1]]],
+                        source_lower,
                         upper.axes[axis],
                     )
                     .map_err(|error| PropertySupportError::Evaluation {

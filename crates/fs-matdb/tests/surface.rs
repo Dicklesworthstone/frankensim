@@ -387,17 +387,10 @@ fn g1_fixed_context_line_retains_cell_crossings_and_canonical_receipts() {
         );
         claims.verify_receipt(&answer.receipt).unwrap();
     }
-    // Only the path has support authority; diagonal box corners are unchanged.
-    assert!(
-        claims
-            .query_envelope_typed(
-                &key,
-                &point(300.0, 0.0),
-                &point(400.0, 100.0),
-                ClaimSelection::Pinned(id)
-            )
-            .is_err()
-    );
+    // The complete declared cells cover this box; a line request still cannot
+    // silently become a simultaneous-coordinate path or box.
+    claims.query_envelope_typed(&key, &point(300.0, 0.0), &point(400.0, 100.0),
+        ClaimSelection::Pinned(id)).unwrap();
     assert!(
         claims
             .query_line_typed(
@@ -644,6 +637,172 @@ fn g0_box_and_convex_hull_do_not_fill_source_support_holes() {
         claims.query_pinned("dynamic_viscosity", &point(350.0, 25.0), id),
         Err(MatDbError::OutsideSurfaceSupport { .. })
     ));
+    assert!(claims.query_envelope("dynamic_viscosity", &point(305.0, 0.0),
+        &point(395.0, 25.0), ClaimSelection::Pinned(id)).is_err());
+}
+
+#[test]
+fn g1_source_cells_cover_closed_rectangles_with_canonical_corner_receipts() {
+    for reverse in [false, true] {
+        let mut source = claim();
+        if reverse {
+            let PropertyValue::Surface2D { triangles, .. } = &mut source.value else { unreachable!() };
+            triangles.reverse();
+            for triangle in triangles { triangle.swap(0, 2); }
+        }
+        let mut claims = ClaimSet::new();
+        let id = claims.insert_claim(source).unwrap();
+        let key = PropertyKey::new("dynamic_viscosity", VISCOSITY);
+        for (lo, hi) in [
+            ([300.0, 0.0], [400.0, 100.0]), // entire complex, exterior edges coincide
+            ([312.5, 12.5], [387.5, 87.5]), // crosses the shared diagonal
+            ([300.0, 0.0], [350.0, 50.0]), // one cell, exact corner on diagonal
+            ([300.0, 50.0], [400.0, 50.0]), // degenerate line crosses source cells
+            ([350.0, 0.0], [350.0, 100.0]), // the other coordinate may vary
+            ([350.0, 50.0], [350.0, 50.0]), // ordinary point on shared edge
+        ] {
+            let (lower, upper) = (point(lo[0], lo[1]), point(hi[0], hi[1]));
+            let answer = claims.query_envelope_typed(&key, &lower, &upper,
+                ClaimSelection::Pinned(id)).unwrap();
+            assert_eq!(answer, claims.query_envelope("dynamic_viscosity", &lower, &upper,
+                ClaimSelection::Pinned(id)).unwrap());
+            for (query, endpoint) in [(&lower, &answer.lower), (&upper, &answer.upper)] {
+                assert_eq!(*endpoint, claims.query_pinned_typed(&key, query, id).unwrap());
+                claims.verify_receipt(&endpoint.receipt).unwrap();
+            }
+        }
+    }
+
+    // Touching an exposed sloped edge only at a rectangle corner is allowed.
+    let mut source = claim();
+    let PropertyValue::Surface2D { triangles, .. } = &mut source.value else { unreachable!() };
+    triangles.truncate(1);
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(source).unwrap();
+    claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0), &point(350.0, 50.0),
+        ClaimSelection::Pinned(id)).unwrap();
+}
+
+fn source_with_interior_hole() -> PropertyClaim {
+    let mut source = claim();
+    let PropertyValue::Surface2D { samples, triangles, .. } = &mut source.value else { unreachable!() };
+    let temperatures = [300.0, 340.0, 360.0, 400.0];
+    let rates = [0.0, 20.0, 40.0, 100.0];
+    *samples = rates.into_iter().flat_map(|rate|
+        temperatures.into_iter().map(move |t| ([t, rate], law(t, rate)))).collect();
+    triangles.clear();
+    for row in 0..3_u32 {
+        for column in 0..3_u32 {
+            if (row, column) == (1, 1) { continue; }
+            let a = 4 * row + column;
+            triangles.extend([[a, a + 1, a + 5], [a, a + 5, a + 4]]);
+        }
+    }
+    source
+}
+
+#[test]
+fn g0_interior_hole_is_not_hidden_by_a_covered_perimeter_or_center() {
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(source_with_interior_hole()).unwrap();
+    // All box corners, the midpoint, and the entire perimeter are supported;
+    // the absent 340..360 by 20..40 cell remains a real interior hole.
+    for (t, rate) in [(300.0, 0.0), (400.0, 0.0), (300.0, 100.0), (400.0, 100.0), (350.0, 50.0)] {
+        claims.query_pinned("dynamic_viscosity", &point(t, rate), id).unwrap();
+    }
+    assert!(matches!(claims.query_pinned("dynamic_viscosity", &point(350.0, 30.0), id),
+        Err(MatDbError::OutsideSurfaceSupport { .. })));
+    for selection in [ClaimSelection::Pinned(id),
+        ClaimSelection::Policy(fs_matdb::SelectionPolicy::SingleClaimOnly)]
+    {
+        assert!(claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0),
+            &point(400.0, 100.0), selection).is_err());
+        // Contact with the hole's edge/vertex at the request boundary is safe.
+        claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0),
+            &point(400.0, 20.0), selection).unwrap();
+        claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0),
+            &point(340.0, 20.0), selection).unwrap();
+        // Extending by one ULP creates uncovered interior despite valid corners.
+        assert!(claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0),
+            &point(400.0, 20.0_f64.next_up()), selection).is_err());
+    }
+}
+
+#[test]
+fn g0_isolated_samples_and_unresolved_witnesses_cannot_supply_area_support() {
+    let mut source = claim();
+    let PropertyValue::Surface2D { samples, triangles, .. } = &mut source.value else { unreachable!() };
+    triangles.clear();
+    samples.push(([350.0, 50.0], law(350.0, 50.0)));
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(source).unwrap();
+    for (t, rate) in [(300.0, 0.0), (400.0, 100.0), (350.0, 50.0)] {
+        claims.query_pinned("dynamic_viscosity", &point(t, rate), id).unwrap();
+    }
+    assert!(claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0),
+        &point(400.0, 100.0), ClaimSelection::Pinned(id)).is_err());
+
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(claim()).unwrap();
+    // The original complex covers this strip, but no binary64 point lies
+    // strictly between these adjacent temperatures. Refuse this proof rather
+    // than round its interior witness onto a source/request boundary.
+    assert!(matches!(claims.query_envelope("dynamic_viscosity", &point(350.0, 0.0),
+        &point(350.0_f64.next_up(), 100.0), ClaimSelection::Pinned(id)),
+        Err(fs_matdb::PropertySupportError::Evaluation { error, .. })
+            if matches!(*error, MatDbError::UnsupportedEvaluation { reason }
+                if reason.contains("interior witness"))));
+    // A genuinely zero-width request uses the independent line-support owner.
+    claims.query_envelope("dynamic_viscosity", &point(350.0, 0.0),
+        &point(350.0, 100.0), ClaimSelection::Pinned(id)).unwrap();
+}
+
+#[test]
+fn g0_box_support_keeps_exact_sample_policies_and_interior_source_selection() {
+    let mut tabulated = claim();
+    tabulated.interpolation = InterpolationPolicy::TabulatedOnly;
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(tabulated).unwrap();
+    for upper in [point(400.0, 0.0), point(400.0, 100.0)] {
+        assert!(matches!(claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0),
+            &upper, ClaimSelection::Pinned(id)), Err(fs_matdb::PropertySupportError::DiscreteSupport { .. })));
+    }
+    claims.query_envelope("dynamic_viscosity", &point(300.0, 0.0), &point(300.0, 0.0),
+        ClaimSelection::Pinned(id)).unwrap();
+
+    let mut source = claim();
+    source.validity = source.validity.with("context", 0.0, 1.0);
+    let mut claims = ClaimSet::new();
+    let id = claims.insert_claim(source).unwrap();
+    let lower = point(300.0, 0.0).with("context", 0.0).unwrap();
+    let upper = point(400.0, 100.0).with("context", 1.0).unwrap();
+    let single = ClaimSelection::Policy(fs_matdb::SelectionPolicy::SingleClaimOnly);
+    claims.query_envelope("dynamic_viscosity", &lower, &upper, single).unwrap();
+    let mut competitor = claim();
+    competitor.value = PropertyValue::Scalar { value: 9.0, dims: VISCOSITY };
+    competitor.interpolation = InterpolationPolicy::ConstantWithinValidity;
+    competitor.validity = ValidityDomain::unconstrained()
+        .with_quantity("T", temperature(), 310.0, 320.0)
+        .with_quantity("shear_rate", QuantitySpec::dimensional(RATE), 70.0, 80.0)
+        .with("context", 0.2, 0.3);
+    competitor.provenance.source = "synthetic interior conflicting source".into();
+    claims.insert_claim(competitor).unwrap();
+    assert!(matches!(claims.query_envelope("dynamic_viscosity", &lower, &upper, single),
+        Err(fs_matdb::PropertySupportError::Evaluation { point, error })
+            if point.axes()["T"] == 310.0 && point.axes()["shear_rate"] == 70.0
+                && point.axes()["context"] == 0.2
+                && matches!(*error, MatDbError::AmbiguousSelection { .. })));
+    let pinned = claims.query_envelope("dynamic_viscosity", &lower, &upper,
+        ClaimSelection::Pinned(id)).unwrap();
+    for endpoint in [&pinned.lower, &pinned.upper] {
+        assert_eq!(endpoint.receipt.selected, id);
+        claims.verify_receipt(&endpoint.receipt).unwrap();
+    }
+    let wrong = QueryPoint::new().with_quantity("T", QuantitySpec::dimensional(RATE), 300.0)
+        .unwrap().with_quantity("shear_rate", QuantitySpec::dimensional(RATE), 0.0).unwrap()
+        .with("context", 0.0).unwrap();
+    assert!(claims.query_envelope("dynamic_viscosity", &wrong, &upper,
+        ClaimSelection::Pinned(id)).is_err());
 }
 
 #[test]

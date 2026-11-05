@@ -15,6 +15,8 @@ mod differential;
 pub use differential::{PreparedSurfaceResponse, SurfaceDifferential};
 mod path;
 pub(crate) use path::segment_knots;
+mod coverage;
+pub(crate) use coverage::rectangle_support;
 
 /// Maximum samples in one two-coordinate material response.
 pub const MAX_SURFACE_SAMPLES: usize = 4_096;

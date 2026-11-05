@@ -103,7 +103,7 @@ fn supported_envelope(
 /// Returning the manufacturing corners as nominal values would incorrectly
 /// turn pressure/thickness dependence into temperature dependence.
 /// A single varying coordinate uses the source-line support proof; genuine
-/// multi-coordinate surface boxes retain matdb's existing refusal.
+/// multi-coordinate surface boxes require coverage by the declared cells.
 pub fn query_envelope(
     claims: &ClaimSet, property: &str, state: &InterfaceState,
     temperature_axis: &str, low_k: f64, high_k: f64, selection: ClaimSelection,
