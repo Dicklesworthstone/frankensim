@@ -61,6 +61,34 @@ fn affine_gradients_preserve_canonical_values_and_original_cell_orientation() {
 }
 
 #[test]
+fn original_sample_basis_preserves_exact_samples_edges_and_source_order() {
+    let values = [4.0, 8.0, -2.0, 3.0];
+    for triangles in [vec![[1, 3, 2], [0, 1, 2]], vec![[1, 2, 3], [0, 2, 1]]] {
+        let prepared = source(values, triangles.clone()).value.prepare_surface_response().unwrap();
+        for point in [[0.25, 0.5], [1.5, 1.75], [1.0, 1.0], [0.0, 1.0], [2.0, 2.0]] {
+            let basis = prepared.sample_basis(point).unwrap();
+            let mut weights = [0.0; 4];
+            for (sample, weight) in basis { weights[sample as usize] += weight; }
+            assert!((weights.iter().sum::<f64>() - 1.0).abs() < 2e-15);
+            assert!(weights.iter().all(|&weight| weight >= 0.0));
+            let value: f64 = weights.iter().zip(values).map(|(weight, value)| weight * value).sum();
+            assert!((value - prepared.evaluate(point).unwrap().value).abs() < 2e-14);
+            for sample in 0..4 {
+                let mut plus = values; plus[sample] += 1e-5;
+                let mut minus = values; minus[sample] -= 1e-5;
+                let a = source(plus, triangles.clone()).value.prepare_surface_response().unwrap()
+                    .evaluate(point).unwrap().value;
+                let b = source(minus, triangles.clone()).value.prepare_surface_response().unwrap()
+                    .evaluate(point).unwrap().value;
+                assert!(((a - b) / 2e-5 - weights[sample]).abs() < 1e-9);
+            }
+        }
+        assert_eq!(prepared.sample_basis([2.0, 2.0]).unwrap(), [(3, 1.0), (3, 0.0), (3, 0.0)]);
+        assert!(prepared.sample_basis([3.0, 1.0]).is_err());
+    }
+}
+
+#[test]
 fn shared_edges_and_samples_have_explicit_original_one_sided_tangents() {
     let prepared = source([0.0, 2.0, 4.0, 10.0], vec![[0, 1, 2], [1, 3, 2]])
         .value

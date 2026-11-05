@@ -43,6 +43,13 @@ and unsupported wedges remain boundaries. This query neither extends source
 support nor changes the one-sided contract of `evaluate`; complete physical
 applicability and source selection still belong to the consumer.
 
+`PreparedSurfaceResponse::sample_basis` returns at most three original sample
+indices and ordinate weights at the canonical exact sample or containing cell.
+It shares the value evaluator's robust barycentric weights, preserves source
+ordering and topology, and leaves off-edge samples at zero weight. Source
+coordinates and cells are fixed controls; this does not differentiate a mesh
+or claim smoothness beyond the separately admitted active coordinates.
+
 The preparation owns an immutable numeric snapshot and cached gradients. Source
 selection, `LinearInside` policy, quantity checks, applicability and receipts
 remain with the original consumer. No point query or identity hash occurs in

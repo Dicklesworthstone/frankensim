@@ -358,6 +358,9 @@ fn solve_controls(
                 assert_eq!(knot_abscissae, &[300.0, 500.0]);
                 knot_value_derivatives.clone()
             }
+            MaterialEmissivityGradient::Surface { .. } => {
+                panic!("this fixture declares only scalar and temperature-curve sources")
+            }
         };
         derivatives.extend([
             patch.reservoir_temperature,

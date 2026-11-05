@@ -1,5 +1,5 @@
 //! Original emissivity controls through the current diffuse-gray reflection.
-//! Geometry, view factors, chart and knot abscissae are held fixed.
+//! Geometry, view factors, chart and source coordinates/cells are held fixed.
 
 use super::*;
 use crate::radiation::pointwise::material::adjoint::MaterialEmissivityGradient;
@@ -29,7 +29,7 @@ struct FaceParameters {
     patch: usize,
     /// Integral of Na Nb (sigma T_h^4 - G_patch), in W.
     emissivity: [[f64; 3]; 3],
-    basis: [[(usize, f64); 2]; 3],
+    basis: [[(usize, f64); 3]; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -41,21 +41,21 @@ pub(super) struct MaterialEnclosureParameterData {
 impl MaterialPointwiseEnclosureRadiation<'_> {
     /// Conservative numerical/index-word cap for the retained h action,
     /// original source controls, current patch factors and contraction scratch.
-    /// Immutable cards and source strings are excluded.
+    /// Immutable cards, prepared source owners and source strings are excluded.
     pub fn adjoint_workspace_entries(&self) -> Result<usize, ConductionError> {
         let fail = || invalid("material enclosure adjoint workspace overflow");
         if self.sources.is_empty() || self.sources.len() > 64 {
             return Err(invalid("material enclosure adjoint requires one to 64 patches"));
         }
         let controls = self.sources.iter().try_fold(0usize, |n, source| {
-            n.checked_add(source.control_count()).ok_or_else(fail)
+            n.checked_add(source.control_workspace_entries()?).ok_or_else(fail)
         })?;
         let equations = self.view_factors.len();
         self.base.geometry.vertices.checked_mul(8)
             .and_then(|n| self.base.geometry.faces.len().checked_mul(128).and_then(|f| n.checked_add(f)))
             .and_then(|n| equations.checked_mul(equations).and_then(|p| p.checked_mul(8)).and_then(|p| n.checked_add(p)))
             .and_then(|n| equations.checked_mul(64).and_then(|p| n.checked_add(p)))
-            .and_then(|n| controls.checked_mul(4).and_then(|p| n.checked_add(p)))
+            .and_then(|n| n.checked_add(controls))
             .filter(|&n| n <= isize::MAX as usize / std::mem::size_of::<usize>())
             .ok_or_else(fail)
     }
@@ -136,7 +136,7 @@ impl MaterialPointwiseEnclosureRadiation<'_> {
 }
 
 impl MaterialPointwiseEnclosureAssembly {
-    /// Contract original scalar/curve ordinates and the open black bath using
+    /// Contract original source ordinates and the open black bath using
     /// outward-load weights. The thermal owner supplies -dt*lambda on free rows.
     ///
     /// With K=I-diag(1-<epsilon>)F, solve K^T z=F^T a once using the retained
@@ -188,6 +188,11 @@ impl MaterialPointwiseEnclosureAssembly {
                     MaterialEmissivityGradient::Curve { knot_value_derivatives, .. } => {
                         for &(knot, basis) in &face.basis[j] {
                             knot_value_derivatives[knot] = finite(basis.mul_add(derivative, knot_value_derivatives[knot]))?;
+                        }
+                    }
+                    MaterialEmissivityGradient::Surface { sample_value_derivatives, .. } => {
+                        for &(sample, basis) in &face.basis[j] {
+                            sample_value_derivatives[sample] = finite(basis.mul_add(derivative, sample_value_derivatives[sample]))?;
                         }
                     }
                 }

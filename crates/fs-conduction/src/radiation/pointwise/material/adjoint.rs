@@ -1,5 +1,5 @@
-//! Original scalar/curve-ordinate controls of an admitted material trace.
-//! Geometry, knot abscissae, caloric chart and fixed source conditions stay fixed.
+//! Original scalar, curve and surface ordinates of an admitted material trace.
+//! Geometry, source coordinates/cells, chart and fixed conditions stay fixed.
 
 use super::source::{Coordinate, Response};
 use super::*;
@@ -16,6 +16,12 @@ pub enum MaterialEmissivityGradient {
         axis: String,
         knot_abscissae: Vec<f64>,
         knot_value_derivatives: Vec<f64>,
+    },
+    Surface {
+        axes: [String; 2],
+        sample_coordinates: Vec<[f64; 2]>,
+        triangles: Vec<[u32; 3]>,
+        sample_value_derivatives: Vec<f64>,
     },
 }
 
@@ -38,17 +44,28 @@ pub struct MaterialRadiationParameterGradient {
 
 impl MaterialEmissivitySource<'_> {
     pub(in crate::radiation) fn control_count(&self) -> usize {
-        match self.response {
+        match &self.response {
             Response::Constant => 1,
             Response::Curve { knots, .. } => knots.len(),
+            Response::Surface { response, .. } => response.samples().len(),
         }
+    }
+
+    /// Retained control template and contraction clone, including the original
+    /// surface coordinates and topology. Immutable prepared owners are separate.
+    pub(in crate::radiation) fn control_workspace_entries(&self) -> Result<usize, ConductionError> {
+        match &self.response {
+            Response::Surface { response, .. } => response.samples().len().checked_mul(8)
+                .and_then(|n| response.triangles().len().checked_mul(8).and_then(|t| n.checked_add(t))),
+            _ => self.control_count().checked_mul(4),
+        }.ok_or_else(|| invalid("material radiation source-control workspace overflow"))
     }
 
     pub(in crate::radiation) fn control_template(
         &self,
         cx: &Cx<'_>,
     ) -> Result<MaterialEmissivityGradient, ConductionError> {
-        Ok(match self.response {
+        Ok(match &self.response {
             Response::Constant => MaterialEmissivityGradient::Scalar { derivative: 0.0 },
             Response::Curve { coordinate, knots } => {
                 let mut knot_abscissae = Vec::with_capacity(knots.len());
@@ -66,6 +83,24 @@ impl MaterialEmissivitySource<'_> {
                     knot_value_derivatives: vec![0.0; knots.len()],
                 }
             }
+            Response::Surface { response, .. } => {
+                let mut sample_coordinates = Vec::with_capacity(response.samples().len());
+                for (index, &(coordinates, _)) in response.samples().iter().enumerate() {
+                    if index % ASSEMBLY_TILE == 0 { poll(cx, index)?; }
+                    sample_coordinates.push(coordinates);
+                }
+                let mut triangles = Vec::with_capacity(response.triangles().len());
+                for (index, &triangle) in response.triangles().iter().enumerate() {
+                    if index % ASSEMBLY_TILE == 0 { poll(cx, index)?; }
+                    triangles.push(triangle);
+                }
+                MaterialEmissivityGradient::Surface {
+                    axes: response.axes().clone(),
+                    sample_coordinates,
+                    triangles,
+                    sample_value_derivatives: vec![0.0; response.samples().len()],
+                }
+            }
         })
     }
 
@@ -73,9 +108,9 @@ impl MaterialEmissivitySource<'_> {
     pub(in crate::radiation) fn control_basis(
         &self,
         phase: EquilibriumPhaseState,
-    ) -> Result<[(usize, f64); 2], ConductionError> {
-        Ok(match self.response {
-            Response::Constant => [(0, 1.0), (0, 0.0)],
+    ) -> Result<[(usize, f64); 3], ConductionError> {
+        Ok(match &self.response {
+            Response::Constant => [(0, 1.0), (0, 0.0), (0, 0.0)],
             Response::Curve { coordinate, knots } => {
                 let value = match coordinate {
                     Coordinate::Temperature => phase.temperature_k(),
@@ -83,8 +118,12 @@ impl MaterialEmissivitySource<'_> {
                 };
                 let upper = knots.partition_point(|knot| knot.0 <= value).min(knots.len() - 1);
                 let fraction = finite((value - knots[upper - 1].0) / (knots[upper].0 - knots[upper - 1].0))?;
-                [(upper - 1, 1.0 - fraction), (upper, fraction)]
+                [(upper - 1, 1.0 - fraction), (upper, fraction), (0, 0.0)]
             }
+            Response::Surface { coordinates, response } => response
+                .sample_basis(coordinates.map(|axis| axis.value(phase)))
+                .map_err(|error| invalid(&error.to_string()))?
+                .map(|(sample, weight)| (sample as usize, weight)),
         })
     }
 }
@@ -95,7 +134,7 @@ struct FaceParameters {
     patch: usize,
     emissivity: [[f64; 3]; 3],
     reservoir: [f64; 3],
-    basis: [[(usize, f64); 2]; 3],
+    basis: [[(usize, f64); 3]; 3],
 }
 
 #[derive(Debug, Clone)]
@@ -106,8 +145,9 @@ pub(crate) struct MaterialRadiationParameterData {
 
 impl MaterialPointwiseAmbientRadiation<'_> {
     /// Conservative numerical/index-word cap for the retained full h action,
-    /// source-control data and contraction scratch. Source strings and immutable
-    /// cards are excluded, as in the existing pointwise adjoint allowance.
+    /// source-control data and contraction scratch. Source strings, immutable
+    /// cards and immutable prepared source owners are excluded, as in the
+    /// existing pointwise adjoint allowance.
     pub fn adjoint_workspace_entries(&self) -> Result<usize, ConductionError> {
         let fail = || invalid("material radiation adjoint workspace overflow");
         if self.patches.is_empty() || self.patches.len() > 64 {
@@ -115,9 +155,9 @@ impl MaterialPointwiseAmbientRadiation<'_> {
                 "material radiation adjoint requires one to 64 patches",
             ));
         }
-        let parameters = self.patches.iter().try_fold(0usize, |count, patch| {
+        let controls = self.patches.iter().try_fold(0usize, |count, patch| {
             count
-                .checked_add(patch.source.control_count())
+                .checked_add(patch.source.control_workspace_entries()?)
                 .ok_or_else(fail)
         })?;
         self.mesh
@@ -129,7 +169,7 @@ impl MaterialPointwiseAmbientRadiation<'_> {
                     .checked_mul(128)
                     .and_then(|f| n.checked_add(f))
             })
-            .and_then(|n| parameters.checked_mul(4).and_then(|p| n.checked_add(p)))
+            .and_then(|n| n.checked_add(controls))
             .and_then(|n| {
                 self.patches
                     .len()
@@ -250,7 +290,7 @@ impl MaterialPointwiseAmbientRadiation<'_> {
 }
 
 impl PointwiseRadiationAssembly {
-    /// Contract original scalar/curve values and bath temperature at a strictly
+    /// Contract original source values and bath temperature at a strictly
     /// admitted endpoint. These are outward-load weights; a solved thermal
     /// objective supplies `-dt*lambda` on free rows, not an incoming heat weight.
     pub fn material_parameter_pullback(
@@ -294,6 +334,10 @@ impl PointwiseRadiationAssembly {
                             knot_value_derivatives,
                             ..
                         } => &mut knot_value_derivatives[parameter],
+                        MaterialEmissivityGradient::Surface {
+                            sample_value_derivatives,
+                            ..
+                        } => &mut sample_value_derivatives[parameter],
                     };
                     *target = finite(nodal.mul_add(weight, *target))?;
                 }

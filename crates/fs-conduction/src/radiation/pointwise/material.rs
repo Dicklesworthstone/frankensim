@@ -51,8 +51,9 @@ struct PreparedPatch<'a> {
 
 /// Immutable prepared trace and original source laws. Every physical query
 /// refreshes emissivity at its actual nodal h, including latent-phase changes.
-/// Supported sources are static scalars and original linear curves in T or
-/// liquid mass fraction. No source switching, extrapolation or phase averaging.
+/// Sources are static scalars, original linear curves in T or liquid fraction,
+/// and original triangulated T/fraction surfaces. No source switching,
+/// extrapolation or phase averaging.
 #[derive(Debug)]
 pub struct MaterialPointwiseAmbientRadiation<'a> {
     mesh: &'a ConductionMesh,

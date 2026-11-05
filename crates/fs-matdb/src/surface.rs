@@ -401,6 +401,35 @@ fn axis_independent_value(
     None
 }
 
+fn interpolation_weights(
+    positions: [[f64; 2]; 3],
+    point: [f64; 2],
+) -> Result<([f64; 3], f64), MatDbError> {
+    let mut weights = [0.0; 3];
+    for vertex in 0..3 {
+        let a = positions[(vertex + 1) % 3];
+        let b = positions[(vertex + 2) % 3];
+        if orient2d(a, b, point) != Sign::Zero {
+            weights[vertex] = determinant(a, b, point).abs();
+            if weights[vertex] == 0.0 {
+                weights[vertex] = expanded_determinant(a, b, point).abs();
+            }
+            if weights[vertex] == 0.0 {
+                return Err(MatDbError::UnsupportedEvaluation {
+                    reason: "surface interpolation weights are numerically unresolved",
+                });
+            }
+        }
+    }
+    let total: f64 = weights.iter().sum();
+    if !total.is_finite() || total <= 0.0 {
+        return Err(MatDbError::UnsupportedEvaluation {
+            reason: "surface interpolation is not representable as a finite scalar",
+        });
+    }
+    Ok((weights, total))
+}
+
 pub(crate) fn evaluate(
     axes: &[String; 2],
     samples: &[([f64; 2], f64)],
@@ -436,28 +465,7 @@ pub(crate) fn evaluate(
             if !contains(positions, point) {
                 continue;
             }
-            let mut weights = [0.0; 3];
-            for vertex in 0..3 {
-                let a = positions[(vertex + 1) % 3];
-                let b = positions[(vertex + 2) % 3];
-                if orient2d(a, b, point) != Sign::Zero {
-                    weights[vertex] = determinant(a, b, point).abs();
-                    if weights[vertex] == 0.0 {
-                        weights[vertex] = expanded_determinant(a, b, point).abs();
-                    }
-                    if weights[vertex] == 0.0 {
-                        return Err(MatDbError::UnsupportedEvaluation {
-                            reason: "surface interpolation weights are numerically unresolved",
-                        });
-                    }
-                }
-            }
-            let total: f64 = weights.iter().sum();
-            if !total.is_finite() || total <= 0.0 {
-                return Err(MatDbError::UnsupportedEvaluation {
-                    reason: "surface interpolation is not representable as a finite scalar",
-                });
-            }
+            let (weights, total) = interpolation_weights(positions, point)?;
             // A constant cell or edge must retain its source value exactly:
             // rounded normalized weights need not sum to one. Only vertices
             // with exactly nonzero weights participate, so an off-edge vertex

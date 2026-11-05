@@ -4,6 +4,8 @@ mod support;
 mod adaptive;
 #[path = "material_ambient_radiation/adjoint.rs"]
 mod adjoint;
+#[path = "material_ambient_radiation/surface.rs"]
+mod surface;
 
 use fs_conduction::transient::enthalpy::adjoint::EnthalpyAdjointError;
 use fs_conduction::transient::enthalpy::heterogeneous::{

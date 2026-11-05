@@ -508,10 +508,10 @@ latent plateaus. Binding rechecks original source-state receipts, exact
 storage/boundary ownership, the physical nodal residual and total energy.
 Within explicit numerical-entry allowances, one existing transpose supplies
 history/source, heterogeneous reference-density, optional contact-resistance,
-original scalar or curve-ordinate emissivity, and independent bath-temperature
+original scalar, curve-ordinate or surface-sample emissivity, and independent bath-temperature
 pullbacks. Shared claim controls are summed by original card/claim identity.
 
-Geometry, caloric knots, source abscissae, source selection and nonthermal
+Geometry, caloric knots, source coordinates/cells, source selection and nonthermal
 conditions stay fixed. Unsupported two-sided source/phase neighborhoods
 return typed smoothness errors. Forward one-sided Newton slopes do not admit
 an adjoint. Material-dependent reports cannot be rebound as frozen-emissivity
@@ -765,9 +765,12 @@ outside these capacity entry points.
 `MaterialPointwiseAmbientRadiation` resolves original surface emissivity at each
 participating node's enthalpy-derived temperature and liquid mass fraction. Each
 named trace retains its original material card, caloric object, fixed nonthermal
-conditions and pinned source claim. Supported responses are static scalars and
-piecewise-linear source curves in the declared temperature or liquid-fraction
-axis. A different material chart requires a distinct trace; conflicting shared
+conditions and pinned source claim. Responses include static scalars,
+piecewise-linear curves in the declared temperature or liquid-fraction axis,
+and original triangulated `Surface2D(T, liquid fraction)` sources in either axis
+order. Surface tangents and original-sample control weights reuse matdb's
+prepared source response; the original cell topology is never replaced by a
+grid. A different material chart requires a distinct trace; conflicting shared
 vertex charts and mismatched storage/mesh bindings refuse before nodal lookup.
 
 The declared P1 discretization interpolates both temperature and emissivity.
@@ -785,6 +788,26 @@ The complete h action and transpose are available for physical operator checks.
 Reports retain actual nodal phase, emissivity and material receipts; fixed-snapshot
 adjoints explicitly refuse those reports before reconstructing an endpoint.
 
+For a joint source the chain rule is `d epsilon/dh = epsilon_T*dT/dh +
+epsilon_f*df/dh`. A strict derivative requires source support only along locally
+varying chart coordinates: a held-temperature latent seam or held-fraction
+solid/liquid support edge can remain admissible. Changing-coordinate corners,
+support endpoints, chart corners and active applicability endpoints refuse.
+Primal trials use the same active-axis gradient wherever strict admission is
+possible and otherwise retain an explicit one-sided source-cell slope.
+
+Ambient and closed/open enclosure adjoints retain original surface axes, sample
+coordinates, triangle order and sample-value derivatives. Each node contributes
+to at most three source samples; enclosure controls include the current
+emissivity-dependent reflection solve. Numerical control workspace charges
+eight words per surface sample and eight per source triangle, covering retained
+metadata and contraction output, while the existing 128-word face allowance
+covers the enlarged basis. Immutable prepared source caches remain owner memory,
+separate from this adjoint allowance. Focused source and thermal fixtures cover
+canonical basis weights, latent energy/action/control oracles, both source axis
+orders and simultaneous temperature/fraction tangents; native execution remains
+pending an available Rust build environment.
+
 Uniform, heterogeneous, generic `EnthalpyRadiation::MaterialAmbient`, independent
 endpoint-audit and coupled temperature-contact methods use the same original
 enthalpy/Newton owner. Adaptive material-ambient methods, with and without
@@ -793,8 +816,8 @@ heat integration. Source-domain trials backtrack without clipping, extrapolation
 or source switching. Tests cover hot/cold latent evolution, enthalpy datum shifts,
 nonuniform exact simplex moments, full tangent/transpose checks, source/mesh refusal
 and phase-controlled trajectories against an independent exponential solution.
-Variable-emissivity enclosure reflection and material source-parameter adjoints
-remain unsupported by this ambient-only extension.
+These source laws also feed the existing material enclosure reflection and
+original-source adjoint owners; spectral or directional emissivity is not added.
 
 ## Coupled primary-enthalpy contact Newton
 

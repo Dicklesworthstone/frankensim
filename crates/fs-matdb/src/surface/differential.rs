@@ -134,6 +134,32 @@ impl PreparedSurfaceResponse {
         })
     }
 
+    /// Derivatives with respect to the original sample ordinates at this point.
+    /// The canonical exact sample or first containing source cell determines
+    /// the indices; inactive entries have zero weight. Coordinates, source
+    /// topology and applicability are fixed, and no sample order is changed.
+    pub fn sample_basis(&self, point: [f64; 2]) -> Result<[(u32, f64); 3], MatDbError> {
+        let (_, evaluation) = super::evaluate(
+            &self.axes,
+            &self.samples,
+            &self.triangles,
+            point,
+            InterpolationPolicy::LinearInside,
+        )?;
+        match evaluation {
+            EvaluationDecision::ExactSurfaceSample { sample } => {
+                Ok([(sample, 1.0), (sample, 0.0), (sample, 0.0)])
+            }
+            EvaluationDecision::LinearInsideTriangle { triangle } => {
+                let indices = self.triangles[triangle as usize];
+                let (weights, total) =
+                    super::interpolation_weights(vertices(&self.samples, indices), point)?;
+                Ok([0, 1, 2].map(|i| (indices[i], weights[i] / total)))
+            }
+            _ => Err(unsupported("unexpected canonical surface decision")),
+        }
+    }
+
     /// Classical derivative on the explicitly varying source coordinates.
     ///
     /// All incident source cells that contribute to the requested coordinate
