@@ -3,11 +3,12 @@
  "family": "violin",
  "title": "Violin",
  "reference_instrument": "Violin (University of Iowa MIS)",
- "summary": "Not yet indistinguishable from a real violin. Pressure comes from a compact receiver and the body's modes stop at 5 kHz. E5 is too dark, A4 sounds cleaner than the recording, B6 does not hold a steady note, and the stopped notes score below the open ones. Four Dominant strings (Pickering's sections), each with two polarisations, drive a computed shell of the Guarneri il Cannone's scanned geometry in spruce and maple, with its enclosed air through an f-hole neck. The bow grips through the friction law measured on real rosin, except on B3, which keeps a Stribeck curve. G3, A4 and E5 use a bow of finite width with hair compliance. Stopped notes press a fingertip on the string with 3.5 N, and carry neither that bow nor the strings' residual flexibility. The open strings are tuned to equal temperament, never to a recording.",
+ "summary": "Not yet indistinguishable from a real violin. Pressure comes from a compact receiver and the body's modes stop at 5 kHz. E5 is too dark, A4 sounds cleaner than the recording, B6 does not hold a steady note, and the stopped notes score below the open ones. Four Dominant strings (Pickering's sections), each with two polarisations, drive a computed shell of the Guarneri il Cannone's scanned geometry in spruce and maple, with its enclosed air through an f-hole neck. The bow grips through the friction law measured on real rosin, except on B3, which keeps a Stribeck curve. G3, A4 and E5 use a bow of finite width with hair compliance. G3 also carries the air load on the shell's outside (the skin). Stopped notes press a fingertip on the string with 3.5 N, and carry neither that bow nor the strings' residual flexibility. The open strings are tuned to equal temperament, never to a recording.",
  "physics_present": [
   "four strings from compiled Dominant section packs (Pickering 1985), each with two transverse polarisations; all four stay coupled through the bridge while one is bowed",
   "a computed shell body from il Cannone's scanned geometry (Guarneri 1743) with the corrected f-hole shape: Norway spruce (Viala 2020) for the top, bass bar and soundpost, sycamore maple (Sonderegger 2013) for the back, ribs and bridge, 134 modes on the 6 mm mesh",
   "the enclosed air as one cavity through a physical f-hole neck, its conductance from a boundary-element computation of the f-holes",
+  "on G3, at 192 kHz: the air load on the shell's outside from a boundary-element computation (the body-radiation skin), with the f-hole neck's outer end handed to it. It changes how the body moves, not how the note is picked up. With it the air mode's Q is 52, against 19 printed (Jansson) and 19 without it, so the skin as built takes loss from the air mode; the cause is being read in code",
   "the steady-sliding friction law measured on real rosin (Woodhouse and Galluzzo 2025, eq. 13) on every note except B3",
   "a bow of finite width (10 mm in 3 cells) with hair compliance after Pitteroff and Woodhouse 1998, on G3, A4 and E5",
   "the exact static compliance of each string's omitted modes at its bridge (residual flexibility), on the open notes G3, D4, A4 and E5",
@@ -17,7 +18,7 @@
  ],
  "physics_missing": [
   "a radiating exterior: pressure on every page is the shell's volume and the cavity at 1 m through a compact receiver, with no directivity and no finite receiver",
-    "enough sound for the plates' motion: between about 1250 and 2000 Hz the plates move about as much per newton as Bissinger's print, within 4 dB, but give 3 to 8 dB too little sound on a finite receiver and 10 to 13 dB on the compact receiver the pages use; his two sets reach the critical line at about 3.5 and 4.3 kHz, and ours doesn't by 4 kHz",
+  "enough sound for the plates' motion: between about 1250 and 2000 Hz the plates move about as much per newton as Bissinger's print, within 4 dB, but give 3 to 8 dB too little sound on a finite receiver and 10 to 13 dB on the compact receiver the pages use; his two sets reach the critical line at about 3.5 and 4.3 kHz, and ours doesn't by 4 kHz",
   "body modes above 5 kHz, and any mesh convergence: every page is on the 6 mm mesh's 134 modes",
   "air modes beyond the one cavity",
   "the strings' tension loss: no printed loss exists for these strings",
