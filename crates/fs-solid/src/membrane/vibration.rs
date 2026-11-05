@@ -11,6 +11,7 @@
 
 use super::{MembraneError, MembranePatch, MembraneSolution, MembraneSolveSettings,
     finite_vectors, poll};
+use super::inertia::MembraneMassImage;
 use fs_modal::{ModePair, ModalError, eigh_gen_dense};
 
 /// Hard limit on the existing non-interruptible dense eigensolver leaf.
@@ -82,6 +83,7 @@ pub struct MembraneVibration<'a> {
 #[derive(Debug)]
 pub struct MembraneModes<'a> {
     patch: &'a MembranePatch,
+    inertia: MembraneMassImage,
     free_dofs: Vec<usize>,
     modes: Vec<ModePair>,
     pressure_load_per_pa: Vec<[f64;3]>,
@@ -115,7 +117,22 @@ impl MembranePatch {
     pub fn solve_vibration_with_pressure(
         &self, dead_load_n: &[[f64;3]], pressure_pa: f64, prescribed: &[(usize,f64)],
         initial_displacement_m: &[[f64;3]], solve: MembraneSolveSettings,
-        settings: VibrationSettings, mut cancelled: impl FnMut() -> bool,
+        settings: VibrationSettings, cancelled: impl FnMut() -> bool,
+    ) -> Result<MembraneVibration<'_>, VibrationError> {
+        self.solve_vibration_with_inertia(dead_load_n,pressure_pa,prescribed,
+            initial_displacement_m,solve,settings,MembraneMassImage::Lumped,cancelled)
+    }
+
+    /// Native pressure/dead-load equilibrium and modes with an explicit image
+    /// of the retained reference areal density. Consistent inertia integrates
+    /// density jointly with both P1 mode shapes, including inter-node terms.
+    /// The original constructor keeps its lumped image; no modal mass is fitted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn solve_vibration_with_inertia(
+        &self, dead_load_n: &[[f64;3]], pressure_pa: f64, prescribed: &[(usize,f64)],
+        initial_displacement_m: &[[f64;3]], solve: MembraneSolveSettings,
+        settings: VibrationSettings, inertia: MembraneMassImage,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<MembraneVibration<'_>, VibrationError> {
         poll(&mut cancelled)?;
         let nfull = 3*self.mesh().nodes.len();
@@ -151,8 +168,8 @@ impl MembranePatch {
             direction[dof/3][dof%3]=0.0;
             for (row,&r) in free_dofs.iter().enumerate() { k[row*n+col]=action[r/3][r%3]; }
         }
-        let basis=self.modes_from_tangent(&equilibrium.displacement_m,&free_dofs,&k,
-            settings,&mut cancelled)?;
+        let basis=self.modes_from_tangent_with_inertia(&equilibrium.displacement_m,&free_dofs,&k,
+            settings,inertia,&mut cancelled)?;
         Ok(MembraneVibration {equilibrium,basis})
     }
 
@@ -170,7 +187,20 @@ impl MembranePatch {
     /// No modes are clipped, selected or assigned independent masses/damping.
     pub fn modes_from_tangent(
         &self, displacement_m:&[[f64;3]], free_dofs:&[usize], stiffness:&[f64],
-        settings:VibrationSettings, mut cancelled:impl FnMut()->bool,
+        settings:VibrationSettings, cancelled:impl FnMut()->bool,
+    ) -> Result<MembraneModes<'_>,VibrationError> {
+        self.modes_from_tangent_with_inertia(displacement_m,free_dofs,stiffness,
+            settings,MembraneMassImage::Lumped,cancelled)
+    }
+
+    /// Lower a composing owner's tangent with the explicitly selected reference
+    /// mass image. Geometry, source, symmetry and complete-spectrum admission
+    /// are identical to `modes_from_tangent`; the consistent image keeps every
+    /// density-weighted off-diagonal mass entry before support elimination.
+    pub fn modes_from_tangent_with_inertia(
+        &self, displacement_m:&[[f64;3]], free_dofs:&[usize], stiffness:&[f64],
+        settings:VibrationSettings, inertia:MembraneMassImage,
+        mut cancelled:impl FnMut()->bool,
     ) -> Result<MembraneModes<'_>,VibrationError> {
         poll(&mut cancelled)?;
         let n=free_dofs.len();
@@ -186,10 +216,7 @@ impl MembranePatch {
         self.evaluate(displacement_m,&mut cancelled)?;
         self.admit_linearization(displacement_m,&mut cancelled)?;
         let k=stiffness;
-        let mut m=vec![0.0;n*n];
-        for (column,&dof) in free_dofs.iter().enumerate() {
-            m[column*n+column]=self.nodal_mass_kg()[dof/3];
-        }
+        let m=self.mass_on_dofs(inertia,free_dofs,&mut cancelled)?;
         // Check the exact assembled action BEFORE the shared dense owner does
         // its roundoff symmetrization. Never symmetrize a nonsymmetric physics law.
         let scale=k.iter().fold(0.0_f64,|a,b|a.max(b.abs()));
@@ -215,7 +242,7 @@ impl MembranePatch {
             }
         }
         let pressure_load_per_pa=self.pressure_load_n(displacement_m,1.0,&mut cancelled)?;
-        let mut result=MembraneModes {patch:self,free_dofs:free_dofs.to_vec(),modes,
+        let mut result=MembraneModes {patch:self,inertia,free_dofs:free_dofs.to_vec(),modes,
             pressure_load_per_pa,volume_coupling:vec![]};
         result.volume_coupling=result.project_nodal_force(&result.pressure_load_per_pa)?;
         poll(&mut cancelled)?;
@@ -226,6 +253,8 @@ impl MembranePatch {
 impl MembraneVibration<'_> {
     /// Original immutable geometry, grain, source bundles and reference masses.
     pub fn patch(&self) -> &MembranePatch {self.basis.patch()}
+    /// Reference inertia used for every modal normalization and projection.
+    pub fn inertia_image(&self) -> MembraneMassImage {self.basis.inertia_image()}
     /// Original accepted nonlinear equilibrium, including support reactions.
     pub fn equilibrium(&self) -> &MembraneSolution {&self.equilibrium}
     /// Reduced-to-full DOF map, with prescribed perturbations identically zero.
@@ -251,6 +280,8 @@ impl MembraneVibration<'_> {
 impl MembraneModes<'_> {
     /// Original immutable membrane material, geometry and reference mass.
     pub fn patch(&self) -> &MembranePatch {self.patch}
+    /// Reference inertia used for every modal normalization and projection.
+    pub const fn inertia_image(&self) -> MembraneMassImage {self.inertia}
     /// Sorted reduced-to-full map; all other perturbations are fixed to zero.
     pub fn free_dofs(&self) -> &[usize] {&self.free_dofs}
     /// Complete mass-normalized positive discrete spectrum from `fs-modal`.

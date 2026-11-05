@@ -63,6 +63,41 @@ load reversal, pure bending, rigid-motion inertia, a shared modal/harmonic/
 Newmark oscillator, the Euler–Bernoulli limit, a three-rung simply-supported
 Timoshenko frequency ladder, and source-refusal rollback checks.
 
+## Graded reference inventory and consistent membrane modes
+
+`MembranePatch::with_reference_areal_density` retains three positive P1
+reference areal densities [kg/m²] in each original triangle's connectivity
+order. This explicit inventory overrides the source sheet's scalar areal
+mass for inertia and acceleration loads; it does not change its original
+elastic law, grain, thickness or source authority. Incident triangles can
+retain different values at a shared node. Original scalar fields preserve
+the existing lumped arithmetic exactly.
+
+Positive row sums integrate density times each shape exactly, preserving
+mass and first moments. `MembraneMassImage::Consistent` integrates the full
+cubic product of P1 density and both P1 velocity shapes, retaining inter-node
+inertia. The same kernel supplies `reference_mass_apply`,
+`solve_vibration_with_inertia` and `modes_from_tangent_with_inertia`. The
+native modal owner still uses the original material/geometric/follower
+stiffness, support elimination, complete spectrum and work-conjugate pressure
+ports. Existing modal and nonlinear-motion entries keep their explicit lumped
+approximation; no mass or frequency is fitted. Mass matrices depend only on
+reference geometry and the retained inventory.
+
+`current_corner_areal_density_kg_m2` observes rho_area_reference/J on the
+original admitted P1 surface deformation, with J its current/reference area.
+It never writes that current density back into reference inertia. This is
+areal mass, not inferred bulk density or through-thickness rotary inertia.
+Density transport, absorption, evaporation and evolving material inventory
+are outside this fixed-reference model. Density admission is not independent
+measurement authority or empirical qualification.
+
+`tests/membrane/density.rs` adds G1/G3 exact cubic matrix, mass/centroid and
+acceleration-load moments; reference/current area conservation; equal-total-
+mass profiles with different native supported modes; off-diagonal modal
+inertia and pressure work; partition/permutation invariance; original uniform
+bits through modes and nonlinear motion; and typed input/cancellation refusal.
+
 ## Nonlinear source-bound membrane motion
 
 `membrane::dynamics::MembraneMotion` advances the original total-Lagrangian

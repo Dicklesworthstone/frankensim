@@ -184,3 +184,6 @@ mod pressure;
 
 #[path="membrane/dynamics.rs"]
 mod dynamics;
+
+#[path="membrane/density.rs"]
+mod density;

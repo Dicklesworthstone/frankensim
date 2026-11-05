@@ -86,6 +86,7 @@ pub struct MembranePatch {
     grain_rad: Vec<f64>,
     elements: Vec<Element>,
     nodal_mass_kg: Vec<f64>,
+    reference_areal_density_kg_m2: Vec<[f64; 3]>,
     domain: MembraneDomain,
 }
 
@@ -134,6 +135,7 @@ impl MembranePatch {
         }
         let mut elements = Vec::with_capacity(mesh.elems.len());
         let mut nodal_mass_kg = vec![0.0; mesh.nodes.len()];
+        let mut reference_areal_density_kg_m2 = Vec::with_capacity(mesh.elems.len());
         let mut seen = BTreeSet::new();
         for (index, conn) in mesh.elems.iter().enumerate() {
             poll(&mut cancelled)?;
@@ -170,6 +172,7 @@ impl MembranePatch {
             }
             let law = sheets[index].membrane_law().map_err(|source| MembraneError::Material { element: index, source })?;
             for &i in &nodes { nodal_mass_kg[i] += mass/3.0; }
+            reference_areal_density_kg_m2.push([sheets[index].areal_density_kg_m2(); 3]);
             elements.push(Element { nodes, gradients, area, law });
         }
         if nodal_mass_kg.iter().any(|m| !m.is_finite() || *m <= 0.0)
@@ -177,7 +180,8 @@ impl MembranePatch {
             return Err(MembraneError::Invalid("unused node or unrepresentable reference mass"));
         }
         poll(&mut cancelled)?;
-        Ok(Self { mesh, sheets, grain_rad, elements, nodal_mass_kg, domain })
+        Ok(Self { mesh, sheets, grain_rad, elements, nodal_mass_kg,
+            reference_areal_density_kg_m2, domain })
     }
     /// Original reference mesh, including its named boundary patches.
     pub fn mesh(&self) -> &Mesh2 { &self.mesh }
@@ -325,6 +329,9 @@ mod pressure;
 
 /// Nonlinear motion with source-owned elasticity and reference inertia.
 pub mod dynamics;
+
+/// Exact reference-density moments and explicit consistent/lumped mass images.
+pub mod inertia;
 
 /// Prestressed vibration and work-conjugate force/volume ports.
 pub mod vibration;
