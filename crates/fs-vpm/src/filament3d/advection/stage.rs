@@ -10,6 +10,10 @@ use crate::images3d::ImagePlane;
 use tree::SourceTree;
 pub use tree::field::{PreparedWakeTree, WakeTreeAccuracy, WakeTreeQueryReport};
 
+#[path = "adaptive.rs"]
+mod adaptive;
+pub(crate) use adaptive::integrate_adaptive_nodes;
+
 struct PreparedSource {
     geometry: SegmentGeometry,
     circulation: f64,
@@ -385,7 +389,7 @@ impl WorkMeter {
                 .ok_or_else(|| {
                     refusal(
                         "wake-advection-work-exhausted",
-                        "metered tree evolution exhausted its work cap",
+                        "metered wake evolution exhausted its work cap",
                     )
                 })?;
         }

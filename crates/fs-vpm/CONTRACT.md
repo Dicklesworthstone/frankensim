@@ -1306,6 +1306,50 @@ whole-step battery checks exact zero-tolerance parity, accuracy refinement,
 nonzero accepted-cell work, image/core evolution, bit-identical physical
 partitioning, deterministic measured work caps and transactional cancellation.
 
+### Adaptive connected-wake time integration
+
+`FilamentWake::shed_self_induced_adaptive` and
+`FarField::shed_self_induced_adaptive` advance the original connected material
+vertices with an embedded Bogacki--Shampine RK3(2) pair. They share source
+assembly, direct/tree field evaluation, prescribed line motion, images and
+age-dependent cores with the fixed midpoint owners. The fixed entry points
+retain their existing arithmetic. `SelfInducedShed::substeps` sets the adaptive
+initial and maximum timestep; `WakeTimeSpec` declares positive absolute local
+position tolerance, nonnegative relative tolerance, a positive minimum retry
+timestep and a cap on all accepted plus rejected trials. A final remainder
+may be shorter than the floor but cannot be refined further.
+
+The accepted third-order weights are `(2/9, 1/3, 4/9)` at stages
+`(0, 1/2, 3/4)`; an endpoint derivative completes the embedded second-order
+estimate. Relative error scales with the two candidate step displacements,
+never world coordinates. Four vertex buffers are allocated once. The accepted
+endpoint derivative is reused at the next start, including after rejected
+trials; the incident callback must be repeatable at the same point and time.
+Retries may revisit earlier times and do not undo callback side effects.
+
+Temporal error, excessive core/edge displacement, numerical edge collapse and
+trial image-plane crossing can shorten a trial. Initial input/line admission,
+non-finite calculations and original incident-field refusals remain hard
+errors. All source/tree evaluation work from rejected trials remains charged.
+In addition to native assembly/tree/target work, adaptive admission charges
+the initial vertex pass, one unit per trial and one per vertex in each algebraic
+buffer pass. Work, trial or minimum-step exhaustion and cancellation refuse
+without publishing either partition. Accepted stages advance retained ages
+once per complete interval; one new row is emitted and far moments are rebuilt
+only after that interval succeeds.
+
+`WakeAdaptiveReport` separates accepted temporal estimates and step counts
+from the nested field/work report. The estimate is local, not a certified
+global trajectory bound. It does not include spatial tree error, core-model
+error, discontinuous circulation changes or uncertainty in incident flow;
+image clearance is checked at stages, not continuously. No exact impulse or
+energy conservation, viscous tube strain or automatic remeshing is inferred.
+`tests/adaptive_advection3d.rs` and `tests/adaptive_hybrid_advection3d.rs` check
+analytic ring rotation and third-order refinement, incompressible strain and
+near-plane compression, moving-line transport, translation-invariant time
+control, the diffusing free-ring integral, physical near/far equivalence,
+tree acceleration, cumulative work and atomic failures.
+
 ### Coupled material motion across near/far representations
 
 `FarField::shed_self_induced` and its environment form advance retained exact

@@ -1,5 +1,5 @@
 //! Connected material-vertex wake evolution. Both the near-only and hybrid
-//! near/far paths share the same finite-core midpoint stages and admission.
+//! near/far paths share finite-core stages, admission and optional time control.
 
 use super::{FilamentWake, Refusal, ShedRow};
 use crate::farfield3d::WakeCoreEvolutionMode;
@@ -7,7 +7,7 @@ use crate::images3d::ImagePlane;
 
 #[path = "advection/stage.rs"]
 pub(crate) mod stage;
-use stage::{PreparedSources, StageSettings, integrate_nodes};
+use stage::{PreparedSources, StageSettings, integrate_adaptive_nodes, integrate_nodes};
 
 /// Prescribed geometry and stationary slip boundary for one shedding interval.
 #[derive(Clone, Copy, Debug, Default)]
@@ -35,6 +35,8 @@ pub struct SelfInducedShed {
     /// Same age-dependent algebraic spreading law used by the far field.
     pub core_mode: WakeCoreEvolutionMode,
     /// Fixed positive number of midpoint RK2 substeps during this interval.
+    /// Adaptive entry points use `1 / (shed_hz * substeps)` as their initial
+    /// and maximum timestep instead, refining it as needed.
     pub substeps: usize,
     /// Maximum full-substep displacement divided by the smaller of the
     /// smallest active core radius and resolved active segment length, in (0, 1].
@@ -47,6 +49,7 @@ pub struct SelfInducedShed {
     /// `(2 * substeps * (targets + 1) + 1) * (source_bound + 1)`.
     /// The source bound includes zero-strength edges and doubles for images,
     /// so admission is conservative.
+    /// Adaptive evolution meters actual work, including rejected trials.
     pub max_work: u64,
 }
 
@@ -102,6 +105,44 @@ pub struct WakeAdvectionReport {
     pub peak_tree_nodes: usize,
     /// Admitted work units, including assembly, construction and evaluation.
     pub work_used: u64,
+}
+
+/// Local temporal accuracy for connected material-vertex evolution.
+///
+/// The embedded RK3(2) estimate compares two endpoints at every free vertex.
+/// It does not certify accumulated trajectory error or include the separate
+/// tree-velocity approximation, core model or incident-field uncertainty.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WakeTimeSpec {
+    /// Positive absolute local position tolerance [m].
+    pub absolute_position_tolerance_m: f64,
+    /// Nonnegative relative tolerance, scaled by the larger of the two
+    /// estimated step displacements, never by distance from the world origin.
+    pub relative_position_tolerance: f64,
+    /// Positive smallest retry timestep [s], no larger than the initial step.
+    /// A final remainder may be shorter; it cannot be refined below this floor.
+    pub min_step_s: f64,
+    /// Maximum accepted plus rejected trials over the entire shedding interval.
+    pub max_trials: u64,
+}
+
+/// Temporal estimates and all work from a successfully completed adaptive interval.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WakeAdaptiveReport {
+    /// Field-evaluation evidence, including all rejected trials.
+    pub advection: WakeAdvectionReport,
+    /// Number of accepted internal substeps; emission still occurs once.
+    pub accepted_substeps: u64,
+    /// Trials rejected by temporal error, geometry or boundary resolution.
+    pub rejected_trials: u64,
+    /// Largest embedded position estimate among accepted substeps [m].
+    pub max_accepted_position_error_m: f64,
+    /// Largest accepted estimate divided by its local tolerance, at most one.
+    pub max_accepted_error_ratio: f64,
+    /// Shortest accepted substep [s].
+    pub min_accepted_step_s: f64,
+    /// Longest accepted substep [s].
+    pub max_accepted_step_s: f64,
 }
 
 impl FilamentWake {
@@ -165,8 +206,16 @@ impl FilamentWake {
         incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<(), Refusal> {
-        self.advance_self_induced(gamma, config, boundary, None, incident_variation, cancelled)
-            .map(|_| ())
+        self.advance_self_induced(
+            gamma,
+            config,
+            boundary,
+            None,
+            None,
+            incident_variation,
+            cancelled,
+        )
+        .map(|_| ())
     }
 
     /// Evolve the wake with an error-controlled tree, retaining exact near
@@ -193,20 +242,66 @@ impl FilamentWake {
             config,
             boundary,
             Some(tree),
+            None,
+            incident_variation,
+            cancelled,
+        )
+        .map(|report| report.advection)
+    }
+
+    /// Evolve the connected near wake with adaptive embedded RK3(2) stages.
+    ///
+    /// `config.substeps` bounds the initial and largest timestep. Every trial
+    /// uses the original finite-core sources, boundary and elapsed diffusion;
+    /// accepted endpoints use the third-order weights without extrapolation.
+    /// The embedded estimate and the existing core/edge resolution guard can
+    /// shorten a trial, as can a numerical stage crossing the image plane.
+    /// `tree: None` selects exact direct field evaluation;
+    /// a tree's spatial error remains separate from the temporal estimate.
+    ///
+    /// The incident callback must return the same field for the same point and
+    /// elapsed time: rejected trials revisit earlier times, and the endpoint
+    /// derivative is reused at the next start. Callback side effects are not
+    /// rolled back. All physical state, ages and the single endpoint emission
+    /// publish only after the complete interval succeeds.
+    ///
+    /// # Errors
+    /// Existing environment/tree refusals, invalid time control, exhausted
+    /// work/trial limits, or accuracy requiring a timestep below its floor.
+    /// Invalid initial/line boundaries and caller refusals propagate unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_self_induced_adaptive(
+        &mut self,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        time: WakeTimeSpec,
+        boundary: WakeBoundary<'_>,
+        tree: Option<WakeTreeSpec>,
+        incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdaptiveReport, Refusal> {
+        self.advance_self_induced(
+            gamma,
+            config,
+            boundary,
+            tree,
+            Some(time),
             incident_variation,
             cancelled,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn advance_self_induced(
         &mut self,
         gamma: &[f64],
         config: SelfInducedShed,
         boundary: WakeBoundary<'_>,
         tree: Option<WakeTreeSpec>,
+        time: Option<WakeTimeSpec>,
         mut incident_variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<WakeAdvectionReport, Refusal> {
+    ) -> Result<WakeAdaptiveReport, Refusal> {
         checkpoint(&mut cancelled)?;
         if self.downstream_gamma.is_some() {
             return Err(refusal(
@@ -229,19 +324,37 @@ impl FilamentWake {
             image_plane: boundary.image_plane,
             line_step_m: line.step_distance(config.substeps),
         };
-        let report = integrate_nodes(
-            &mut points,
-            config,
-            settings,
-            tree,
-            |stage_points, fraction, sources| {
-                scatter(&mut state, stage_points);
-                line.apply(&mut state, fraction)?;
-                append_near_sources(&state, proposal.growth_per_tick_m2, fraction, sources)
-            },
-            &mut incident_variation,
-            &mut cancelled,
-        )?;
+        let assemble = |stage_points: &[[f64; 3]], fraction, sources: &mut PreparedSources| {
+            scatter(&mut state, stage_points);
+            line.apply(&mut state, fraction)?;
+            append_near_sources(&state, proposal.growth_per_tick_m2, fraction, sources)
+        };
+        let report = if let Some(time) = time {
+            integrate_adaptive_nodes(
+                &mut points,
+                config,
+                settings,
+                tree,
+                time,
+                line.step_distance(1),
+                assemble,
+                &mut incident_variation,
+                &mut cancelled,
+            )?
+        } else {
+            WakeAdaptiveReport {
+                advection: integrate_nodes(
+                    &mut points,
+                    config,
+                    settings,
+                    tree,
+                    assemble,
+                    &mut incident_variation,
+                    &mut cancelled,
+                )?,
+                ..WakeAdaptiveReport::default()
+            }
+        };
         scatter(&mut state, &points);
         line.apply(&mut state, 1.0)?;
         for (row, original) in state.rows.iter_mut().zip(&self.rows) {

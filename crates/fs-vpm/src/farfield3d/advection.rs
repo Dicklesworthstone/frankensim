@@ -6,10 +6,13 @@ use std::collections::BTreeMap;
 
 use super::topology::{circulation_is_closed, node_key};
 use super::{FarCell, FarField, cell_from_segs_with_cores};
-use crate::filament3d::advection::stage::{PreparedSources, StageSettings, integrate_nodes};
+use crate::filament3d::advection::stage::{
+    PreparedSources, StageSettings, integrate_adaptive_nodes, integrate_nodes,
+};
 use crate::filament3d::advection::{LineMotion, append_near_sources, prepare_near};
 use crate::filament3d::{
-    FilamentWake, Refusal, SelfInducedShed, WakeAdvectionReport, WakeBoundary, WakeTreeSpec,
+    FilamentWake, Refusal, SelfInducedShed, WakeAdaptiveReport, WakeAdvectionReport, WakeBoundary,
+    WakeTimeSpec, WakeTreeSpec,
 };
 
 impl FarField {
@@ -70,8 +73,10 @@ impl FarField {
         variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
         cancelled: impl FnMut() -> bool,
     ) -> Result<(), Refusal> {
-        self.advance_self_induced(near, gamma, config, boundary, None, variation, cancelled)
-            .map(|_| ())
+        self.advance_self_induced(
+            near, gamma, config, boundary, None, None, variation, cancelled,
+        )
+        .map(|_| ())
     }
 
     /// Advance the complete connected near/far system with the common
@@ -99,6 +104,46 @@ impl FarField {
             config,
             boundary,
             Some(tree),
+            None,
+            variation,
+            cancelled,
+        )
+        .map(|report| report.advection)
+    }
+
+    /// Advance the complete near/far wake with common adaptive RK3(2) stages.
+    ///
+    /// Every shared free vertex follows one integration schedule, with the
+    /// same source order, moving line, images and elapsed core diffusion as
+    /// the near-only [`FilamentWake::shed_self_induced_adaptive`] method.
+    /// Exact retained far sources drive the motion; `tree` optionally controls
+    /// their spatial approximation. Temporal estimates do not include that
+    /// separate error. Far cells are rebuilt once after all trials succeed.
+    /// The incident callback must be repeatable at a given point and time.
+    ///
+    /// # Errors
+    /// The original coupled-environment/tree refusals plus invalid time
+    /// control or exhausted temporal accuracy, trial or work limits. Neither
+    /// near nor far state publishes on any error, including late cancellation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn shed_self_induced_adaptive(
+        &mut self,
+        near: &mut FilamentWake,
+        gamma: &[f64],
+        config: SelfInducedShed,
+        time: WakeTimeSpec,
+        boundary: WakeBoundary<'_>,
+        tree: Option<WakeTreeSpec>,
+        variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<WakeAdaptiveReport, Refusal> {
+        self.advance_self_induced(
+            near,
+            gamma,
+            config,
+            boundary,
+            tree,
+            Some(time),
             variation,
             cancelled,
         )
@@ -112,9 +157,10 @@ impl FarField {
         config: SelfInducedShed,
         boundary: WakeBoundary<'_>,
         tree: Option<WakeTreeSpec>,
+        time: Option<WakeTimeSpec>,
         mut variation: impl FnMut([f64; 3], f64) -> Result<[f64; 3], Refusal>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<WakeAdvectionReport, Refusal> {
+    ) -> Result<WakeAdaptiveReport, Refusal> {
         checkpoint(&mut cancelled)?;
         let proposal = prepare_near(near, gamma, config)?;
         if self.shed_dt_s != proposal.dt_s || self.mode != config.core_mode {
@@ -145,22 +191,40 @@ impl FarField {
             image_plane: boundary.image_plane,
             line_step_m: line.step_distance(config.substeps),
         };
-        let report = integrate_nodes(
-            &mut points,
-            config,
-            settings,
-            tree,
-            |stage_points, fraction, sources| {
-                bindings.scatter_near(&mut candidate, stage_points);
-                line.apply(&mut candidate, fraction)?;
-                // Preserve the physical source order of the pre-aggregation
-                // sheet. This also preserves compensated summation order.
-                append_far_sources(self, &bindings, stage_points, growth, fraction, sources)?;
-                append_near_sources(&candidate, growth, fraction, sources)
-            },
-            &mut variation,
-            &mut cancelled,
-        )?;
+        let assemble = |stage_points: &[[f64; 3]], fraction, sources: &mut PreparedSources| {
+            bindings.scatter_near(&mut candidate, stage_points);
+            line.apply(&mut candidate, fraction)?;
+            // Preserve the physical source order of the pre-aggregation
+            // sheet. This also preserves compensated summation order.
+            append_far_sources(self, &bindings, stage_points, growth, fraction, sources)?;
+            append_near_sources(&candidate, growth, fraction, sources)
+        };
+        let report = if let Some(time) = time {
+            integrate_adaptive_nodes(
+                &mut points,
+                config,
+                settings,
+                tree,
+                time,
+                line.step_distance(1),
+                assemble,
+                &mut variation,
+                &mut cancelled,
+            )?
+        } else {
+            WakeAdaptiveReport {
+                advection: integrate_nodes(
+                    &mut points,
+                    config,
+                    settings,
+                    tree,
+                    assemble,
+                    &mut variation,
+                    &mut cancelled,
+                )?,
+                ..WakeAdaptiveReport::default()
+            }
+        };
         bindings.scatter_near(&mut candidate, &points);
         line.apply(&mut candidate, 1.0)?;
         for (row, original) in candidate.rows.iter_mut().zip(&near.rows) {

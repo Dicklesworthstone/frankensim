@@ -24,8 +24,11 @@ use fs_blake3::hash_domain;
 
 #[path = "filament3d/advection.rs"]
 pub(crate) mod advection;
-pub use advection::{SelfInducedShed, WakeAdvectionReport, WakeBoundary, WakeTreeSpec};
 pub use advection::stage::{PreparedWakeTree, WakeTreeAccuracy, WakeTreeQueryReport};
+pub use advection::{
+    SelfInducedShed, WakeAdaptiveReport, WakeAdvectionReport, WakeBoundary, WakeTimeSpec,
+    WakeTreeSpec,
+};
 
 #[path = "filament3d/remesh.rs"]
 mod remesh;
