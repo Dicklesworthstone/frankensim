@@ -14,6 +14,9 @@
 //! explicitly applies an instantaneous input change without relaxation.
 //! Separation retains the scalar exponential toward the endpoint effective
 //! incidence's static target, not an exact integration of a varying target.
+//! `advance_midpoint` accepts the aircraft integrator's physical midpoint
+//! incidence and chordwise clock, retaining second-order coupled history
+//! updates without interpreting an extrapolated input as an endpoint load.
 //! All section updates are transactional; composition is subject to roundoff.
 
 use crate::Refusal;
@@ -375,10 +378,31 @@ pub struct SectionChannels {
     pub cl: f64,
     /// Quarter-chord moment coefficient.
     pub cm_quarter: f64,
-    /// The effective circulatory α the channels were built from [rad].
+    /// Effective geometric circulatory α, before any zero-lift offset [rad].
     pub alpha_eff_rad: f64,
     /// Current separation coordinate.
     pub f: f64,
+}
+
+/// Physical inputs sampled by an explicit midpoint integrator.
+///
+/// The caller solves the start and midpoint flow fields. The midpoint effective
+/// incidence includes both circulatory histories, with no zero-lift offset.
+/// The full reduced-time increment is supplied separately, using the actual
+/// midpoint chordwise convection speed; it need not equal twice the predictor
+/// clock. All angles are geometric, in radians.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SectionMidpointInputs {
+    /// Motion-channel input at the actual start state.
+    pub motion_start_rad: f64,
+    /// Gust-channel input at the actual start state.
+    pub gust_start_rad: f64,
+    /// Motion-channel input at the solved physical midpoint.
+    pub motion_midpoint_rad: f64,
+    /// Gust-channel input at the solved physical midpoint.
+    pub gust_midpoint_rad: f64,
+    /// Effective geometric incidence of the accepted midpoint section response.
+    pub effective_midpoint_rad: f64,
 }
 
 impl UnsteadySectionState {
@@ -391,6 +415,90 @@ impl UnsteadySectionState {
             gust: DuhamelState::trim(0.0),
             separation: SeparationLagState::trim(&spec.separation, alpha_trim_rad),
         }
+    }
+
+    /// Evaluate lift and moment without advancing or rebasing any history.
+    ///
+    /// `zero_lift_angle_rad` shifts only the lift constitutive law. The returned
+    /// effective incidence and the separation coordinate remain geometric;
+    /// camber therefore does not spuriously move the separation threshold.
+    /// The caller supplies any camber-dependent baseline moment in `spec.cm0`.
+    /// A zero offset preserves the original coefficient arithmetic exactly.
+    ///
+    /// # Errors
+    /// Refuses invalid specs, histories, offsets, or non-finite load results.
+    pub fn response(
+        &self,
+        spec: &UnsteadySectionSpec,
+        zero_lift_angle_rad: f64,
+    ) -> Result<SectionChannels, Refusal> {
+        spec.admit()?;
+        admit_input(zero_lift_angle_rad)?;
+        self.admit_history(spec)?;
+        self.channels(spec, zero_lift_angle_rad)
+    }
+
+    /// Accept one explicit-midpoint history update without producing a load.
+    ///
+    /// First rebase each deficiency to the actual start input without relaxing
+    /// its continuous memory. Then integrate an exact reduced-time ramp to
+    /// `midpoint + (midpoint - start)` over the supplied FULL midpoint clock.
+    /// The extrapolated endpoint is an integration reference, not a solved
+    /// physical endpoint input. Rebase it again when the next flow is solved.
+    ///
+    /// Separation relaxes over the same full clock toward the ACTUAL midpoint
+    /// effective geometric incidence. This gives a second-order update for
+    /// smooth inputs and positive, smooth chordwise convection, without aging
+    /// memory during the caller's nonlinear force iterations. At `ds = 0`,
+    /// every history bit freezes, including the previous input references.
+    ///
+    /// # Errors
+    /// Propagates spec/state/input refusals and refuses unrepresentable ramp
+    /// extrapolations. Every refusal preserves all accepted history.
+    pub fn advance_midpoint(
+        &mut self,
+        spec: &UnsteadySectionSpec,
+        ds: f64,
+        inputs: SectionMidpointInputs,
+    ) -> Result<(), Refusal> {
+        spec.admit()?;
+        admit_reduced_time(ds)?;
+        for input in [
+            inputs.motion_start_rad,
+            inputs.gust_start_rad,
+            inputs.motion_midpoint_rad,
+            inputs.gust_midpoint_rad,
+            inputs.effective_midpoint_rad,
+        ] {
+            admit_input(input)?;
+        }
+        self.admit_history(spec)?;
+        if ds == 0.0 {
+            return Ok(());
+        }
+
+        let motion_end =
+            inputs.motion_midpoint_rad + (inputs.motion_midpoint_rad - inputs.motion_start_rad);
+        let gust_end =
+            inputs.gust_midpoint_rad + (inputs.gust_midpoint_rad - inputs.gust_start_rad);
+        if !motion_end.is_finite() || !gust_end.is_finite() {
+            return Err(invalid_state(
+                "midpoint input extrapolation is not representable",
+            ));
+        }
+        let mut next = *self;
+        next.motion
+            .apply_jump(&spec.motion_kernel, inputs.motion_start_rad)?;
+        next.gust
+            .apply_jump(&spec.gust_kernel, inputs.gust_start_rad)?;
+        next.motion
+            .advance_linear(&spec.motion_kernel, ds, motion_end)?;
+        next.gust.advance_linear(&spec.gust_kernel, ds, gust_end)?;
+        next.separation
+            .advance(&spec.separation, ds, inputs.effective_midpoint_rad)?;
+        next.admit_history(spec)?;
+        *self = next;
+        Ok(())
     }
 
     /// Advance both inputs with the original midpoint-step convention,
@@ -480,13 +588,43 @@ impl UnsteadySectionState {
         }
         let alpha_eff = next.motion.effective() + next.gust.effective();
         next.separation.advance(&spec.separation, ds, alpha_eff)?;
-        let f = next.separation.f;
+        let channels = next.channels(spec, 0.0)?;
+        *self = next;
+        Ok(channels)
+    }
+
+    fn admit_history(&self, spec: &UnsteadySectionSpec) -> Result<(), Refusal> {
+        self.motion
+            .admit_update(&spec.motion_kernel, 0.0, self.motion.input_prev)?;
+        self.gust
+            .admit_update(&spec.gust_kernel, 0.0, self.gust.input_prev)?;
+        if !self.separation.f.is_finite() || !(0.0..=1.0).contains(&self.separation.f) {
+            return Err(invalid_state("separation coordinate must lie in [0, 1]"));
+        }
+        if !(self.motion.effective() + self.gust.effective()).is_finite() {
+            return Err(invalid_state("non-finite effective geometric incidence"));
+        }
+        Ok(())
+    }
+
+    fn channels(
+        &self,
+        spec: &UnsteadySectionSpec,
+        zero_lift_angle_rad: f64,
+    ) -> Result<SectionChannels, Refusal> {
+        let alpha_eff = self.motion.effective() + self.gust.effective();
+        let alpha_lift = if zero_lift_angle_rad == 0.0 {
+            alpha_eff
+        } else {
+            alpha_eff - zero_lift_angle_rad
+        };
+        let f = self.separation.f;
         // Kirchhoff: CL = CLα·α_eff·((1+√f)/2)².
         let kirchhoff = {
             let k = (1.0 + det::sqrt(f.max(0.0))) / 2.0;
             k * k
         };
-        let cl = spec.cl_alpha * alpha_eff * kirchhoff;
+        let cl = spec.cl_alpha * alpha_lift * kirchhoff;
         // Moment: cm0 + CL·(0.25 − x_ac(f)) with x_ac aft-shifting as
         // separation grows (both channels carry the kernel dynamics).
         let x_ac = 0.25 + spec.ac_shift * (1.0 - f);
@@ -496,7 +634,6 @@ impl UnsteadySectionState {
                 "section update produced non-finite lift or moment",
             ));
         }
-        *self = next;
         Ok(SectionChannels {
             cl,
             cm_quarter,

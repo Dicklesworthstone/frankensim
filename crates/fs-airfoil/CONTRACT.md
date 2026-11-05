@@ -82,10 +82,39 @@ exactly at zero elapsed time, including explicit jumps; a varying separation
 target is not integrated exactly. These section models contain no added mass,
 finite-span induction, profile drag or implicit aircraft integration.
 
+`UnsteadySectionState::response(spec, zero_lift_angle_rad)` reads accepted
+history without mutating either circulatory channel or separation. The explicit
+zero-lift offset applies only to the lift law and its pressure-center moment;
+reported effective incidence and separation remain geometric. Consumers supply
+their camber-dependent baseline moment through `spec.cm0`. A zero offset
+preserves the legacy coefficient arithmetic and existing golden digests.
+
+`SectionMidpointInputs` carries actual start/midpoint motion and gust inputs
+and the solved midpoint effective geometric incidence. The transactional
+`advance_midpoint` first rebases the accepted input references with explicit
+jumps, preserving the continuous lag coordinates `a*u-x`. It then integrates
+the exact linear ramp to `midpoint + (midpoint-start)`, using the FULL reduced
+time supplied by the caller from midpoint chordwise convection. Separation
+relaxes over that same full clock toward the actual midpoint incidence's static
+target. The method returns only accepted history: its extrapolated endpoint is
+an integration reference, not a solved endpoint force. The next flow query must
+rebase to its physical inputs before evaluating loads.
+
+This update is second order for smooth inputs and positive, smooth convection;
+the caller's half-step predictor may use the start flow clock, which must not
+be substituted for the accepted full midpoint clock. All state bits freeze at
+zero elapsed reduced time, and every refusal leaves the original history
+unchanged. Discontinuities require explicit input jumps; these routines do not
+claim second-order accuracy through discontinuities or reversed flow.
+
 `tests/unsteady_ramp_battery.rs` checks independent integrated-step references
 for both kernels, unequal partitions and slope reversal, simultaneous channels,
 explicit jumps and held decay, zero/tiny clocks, extreme admitted poles, and
 atomic refusal. The existing unsteady battery pins legacy midpoint arithmetic.
+`tests/unsteady_midpoint_battery.rs` checks immutable camber-aware loads,
+continuous-memory rebasing against an independent lag solution, physical
+midpoint separation, and fourfold error reduction on halving the physical step
+for both circulation and separation under `s(t)=t+t²/4`.
 
 ## Invariants
 
@@ -170,3 +199,4 @@ polar golden. JSONL receipts per case.
   validation) binds every consumer.
 - No aircraft-level claim of any kind: hinge moments, planform effects, and
   biplane interference live in fs-wing (plan §5.2 ownership).
+
