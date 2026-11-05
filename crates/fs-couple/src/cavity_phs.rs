@@ -19,7 +19,7 @@ use crate::air_path::{GasAbsorptionModel, propagate_pressure_history_with_model}
 use crate::thin_plate::certified_radiators;
 use fs_material::gas::GasState;
 use fs_material::relaxation::RelaxationState;
-use fs_phs::linear_exact::{LinearPropagator, LinearSplitBudget, split_quadratic, step_split};
+use fs_phs::linear_exact::{LinearSplitBudget, PreparedExactZoh};
 use fs_phs::{PortHamiltonian, QuadraticStorage, helmholtz_resonator_flow, transformer};
 
 /// Typed refusal of the plate–cavity clock.
@@ -117,6 +117,8 @@ impl PlateCavitySpec {
 ///
 /// `force_n[i]` is the external force at sample `i`. The far-field
 /// observer is the baffled compact sum `ρ A ÿ / (2π r)`.
+/// This observes the plate alone. For both surfaces of a compact vented
+/// enclosure, use [`realize_plate_cavity_compact_with_observer`].
 /// The supplied gas drives cavity storage, radiation and classical
 /// causal Stokes-Kirchhoff propagation. Terrestrial-air ISO absorption requires
 /// [`realize_plate_cavity_in_air`]; an evaluated molecular relaxation law can
@@ -197,6 +199,82 @@ pub fn realize_plate_cavity_with_observer(
     absorption: GasAbsorptionModel,
     relaxation: Option<&RelaxationState>,
 ) -> Result<Vec<f64>, CavityPhsError> {
+    realize_observation(
+        spec,
+        force_n,
+        sample_rate_hz,
+        listener_m,
+        absorption,
+        relaxation,
+        CavityObservation::Plate,
+    )
+}
+
+/// Compact exterior pressure from BOTH the moving plate and its open neck.
+///
+/// The plate and flanged neck radiate into the SAME half-space of one infinite
+/// rigid baffle. Their dimensions and separation must be small compared with
+/// the wavelengths of interest and `listener_m`; this observer neglects their
+/// path difference and directivity. Positive `spec.areas · modal_velocity`
+/// moves the plate OUTWARD from the cavity. Neck outflow is also positive
+/// outward. These signs are fixed by the original reciprocal transformer,
+/// rather than independent observer gains.
+///
+/// The compact Rayleigh limit is `p = ρ d(U_plate + U_neck_out)/dt / (2π r)`;
+/// see Mast & Yu, JASA 118 (2005), Eq. (1),
+/// <https://doi.org/10.1121/1.2108997>. Each returned sample is the interval
+/// mean volume acceleration of the original exact held-force trajectory.
+/// Low-frequency neck inflow therefore cancels the outward plate flow as
+/// required by cavity volume balance; the neck is not a second excitation.
+///
+/// This is the existing small-signal, frozen-gas Helmholtz model. Neck loss
+/// remains pinned at its isolated resonance. Observation adds no radiation
+/// reaction or mutual radiation impedance to the dynamics. The same causal
+/// propagation law, FIR latency and source-time convention as
+/// [`realize_plate_cavity_with_observer`] applies to the combined pressure.
+///
+/// # Errors
+/// All [`realize_plate_cavity_with_observer`] refusals and an unflanged outer
+/// neck, which is incompatible with this common-baffle observation geometry.
+pub fn realize_plate_cavity_compact_with_observer(
+    spec: &PlateCavitySpec,
+    force_n: &[f64],
+    sample_rate_hz: u32,
+    listener_m: f64,
+    absorption: GasAbsorptionModel,
+    relaxation: Option<&RelaxationState>,
+) -> Result<Vec<f64>, CavityPhsError> {
+    if spec.outer_end != fs_scenario::NeckEnd::Flanged {
+        return Err(CavityPhsError::Invalid {
+            what: "compact plate and neck observation requires a common exterior baffle",
+        });
+    }
+    realize_observation(
+        spec,
+        force_n,
+        sample_rate_hz,
+        listener_m,
+        absorption,
+        relaxation,
+        CavityObservation::CompactPlateAndNeck,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum CavityObservation {
+    Plate,
+    CompactPlateAndNeck,
+}
+
+fn realize_observation(
+    spec: &PlateCavitySpec,
+    force_n: &[f64],
+    sample_rate_hz: u32,
+    listener_m: f64,
+    absorption: GasAbsorptionModel,
+    relaxation: Option<&RelaxationState>,
+    observation: CavityObservation,
+) -> Result<Vec<f64>, CavityPhsError> {
     let n_m = spec.omegas.len();
     if n_m == 0 || spec.zetas.len() != n_m || spec.drive.len() != n_m || spec.areas.len() != n_m {
         return Err(CavityPhsError::Invalid {
@@ -240,42 +318,66 @@ pub fn realize_plate_cavity_with_observer(
         crate::cavity_modal::neck_ends(&geometry),
     )
     .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
+    // The native Helmholtz state is [compression volume, neck momentum].
+    // Its momentum gradient is flow INTO the cavity: qdot = U_neck_in + u.
+    // Read that projection from the owner's exact quadratic declaration,
+    // including its original end-correction inertance. No second neck law.
+    let neck_inverse_mass = match observation {
+        CavityObservation::Plate => 0.0,
+        CavityObservation::CompactPlateAndNeck => {
+            match cavity.storage().exact_quadratic_matrix() {
+                Some([_, _, _, inverse_mass])
+                    if inverse_mass.is_finite() && *inverse_mass > 0.0 => *inverse_mass,
+                _ => return Err(CavityPhsError::Invalid {
+                    what: "native neck volume-flow projection is unrepresentable",
+                }),
+            }
+        }
+    };
     // Area is already in the plate's second port. The transformer is
     // the power-conserving F = p A, U = A v join — not a staggered
     // clock.
     let sys =
         transformer(plate, cavity, 1, 0, 1.0).map_err(|e| CavityPhsError::Phs(e.to_string()))?;
     // Prepare the complete coupled operator, not two independently exact
-    // components connected by a trapezoidal reaction.
-    let linear = split_quadratic(
+    // components connected by a trapezoidal reaction. Dense exponentials and
+    // the original heat/work maps are cached once for this fixed audio clock.
+    let dt = 1.0 / f64::from(sample_rate_hz);
+    let mut linear = PreparedExactZoh::new(
         &sys,
+        dt,
         LinearSplitBudget {
             max_modes: sys.state_dim(),
             max_omega_dt: core::f64::consts::PI,
         },
     )
     .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
-    let dt = 1.0 / f64::from(sample_rate_hz);
     let mut x = vec![0.0; sys.state_dim()];
+    let mut next = vec![0.0; sys.state_dim()];
+    let mut average_output = [0.0];
     let mut out = Vec::with_capacity(force_n.len());
     let two_pi = 2.0 * core::f64::consts::PI;
     let n_plate = 2 * n_m;
     for &f_ext in force_n {
-        let rec = step_split(&sys, &linear, LinearPropagator::ExactZoh, &x, &[f_ext], dt)
+        linear
+            .step_into(&x, &[f_ext], &mut next, &mut average_output)
             .map_err(|e| CavityPhsError::Phs(e.to_string()))?;
         let mut p_obs = 0.0;
         for k in 0..n_m {
-            let acc = (rec.x[2 * k + 1] - x[2 * k + 1]) / dt;
+            let acc = (next[2 * k + 1] - x[2 * k + 1]) / dt;
             p_obs += spec.gas.density * spec.areas[k] * acc / (two_pi * listener_m);
         }
-        debug_assert!(rec.x.len() >= n_plate);
-        x = rec.x;
+        if let CavityObservation::CompactPlateAndNeck = observation {
+            let neck_acc = neck_inverse_mass * (next[n_plate + 1] - x[n_plate + 1]) / dt;
+            p_obs -= spec.gas.density * neck_acc / (two_pi * listener_m);
+        }
         if !p_obs.is_finite() {
             return Err(CavityPhsError::Invalid {
                 what: "observer pressure left the finite set",
             });
         }
         out.push(p_obs);
+        core::mem::swap(&mut x, &mut next);
     }
     propagate_pressure_history_with_model(
         &mut out, dt, listener_m, &spec.gas, absorption, relaxation,
@@ -318,9 +420,13 @@ fn plate_force_and_flow(
 }
 
 #[cfg(test)]
+mod compact_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use fs_material::gas::GasSpec;
+    use fs_phs::linear_exact::{LinearPropagator, split_quadratic, step_split};
 
     fn air_at(temperature_k: f64) -> GasState {
         GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature_k, 101_325.0)

@@ -8910,6 +8910,22 @@ clarinet is one filling of those objects.
   remaining receiver delay is not placed on an absolute arrival clock.
   Exterior molecular propagation does not change the finite cavity's existing
   equilibrium lumped gas law.
+  `realize_plate_cavity_compact_with_observer` observes both the plate and the
+  original neck for a compact enclosure on one infinite rigid baffle. Its
+  outward volume flows are summed with the signs of the reciprocal coupling:
+  positive plate flow expands the cavity, and the native neck-momentum gradient
+  is inward flow. Pressure is `rho d(U_plate + U_neck_out)/dt / (2 pi r)`, the
+  compact Rayleigh limit (Mast & Yu 2005, Eq. 1,
+  https://doi.org/10.1121/1.2108997). Dimensions and separation must be small
+  compared with wavelength and observer distance; unequal path delay and
+  directivity are not modeled. An unflanged outer neck refuses this common-baffle
+  path. Existing plate-only observers preserve their semantics. Both paths
+  prepare the existing exact ZOH owner once and reuse state buffers, including
+  its original integrated heat and work checks. Observers do not add plate or
+  mutual radiation reaction, change the resonance-pinned neck loss, or promote
+  the linear cavity to a finite-amplitude gas model. G1/G3 regressions compare
+  independent coupled harmonic equations, low-frequency volume cancellation,
+  density/mass similarity, and the previous exact-ZOH plate trajectory.
   Its modal damping inputs are complete: it never selects aluminum/steel from
   density or takes the solid's temperature from the gas. `PlateCavitySpec::bind_plate`
   uses the ordinary `certified_radiators` owner to rebuild frequency, material
