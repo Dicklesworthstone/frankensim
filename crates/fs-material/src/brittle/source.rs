@@ -16,6 +16,9 @@
 /// Original-source tensile onset and elastic-to-crack-band handoff.
 pub mod initiation;
 
+/// Original density and fracture coefficients for reference-mass dynamics.
+pub mod dynamics;
+
 use super::{
     BrittleCrackBand, BrittleCrackBandParameters, BrittleCrackBandSettings, BrittleError,
     BrittleSmallStrain,

@@ -15870,3 +15870,17 @@ element claim is added. Numerical G0/G3 fixtures cover independent
 hydrostatic volume/storage/heat, all nine tangent columns and potential
 gradient after mixed history, objectivity and exact holds, native J2,
 logarithmic small-strain correspondence, unit scaling and refusals.
+
+## Original density for brittle reference-mass dynamics
+
+`brittle::source::dynamics` resolves original fracture coefficients and positive
+density together through the existing material-state owner. The density getter
+admits only the exact scalar SI bulk-density property at fixed external
+conditions and independently enforces positivity on adopted multiphysics
+bundles. Dynamic consumers bind that snapshot to original reference geometry
+and retain its mass inventory; later density queries do not authorize matter or
+momentum changes. No current-to-reference conversion, porosity evolution or
+mass-transfer law is inferred. Quasistatic brittle resolution keeps its existing
+requirements. Four regression definitions cover complete source ownership,
+quantity/positivity refusals, thermal snapshots and mechanically restricted
+density. New Rust parsed/formatted; compiled execution remains outstanding.

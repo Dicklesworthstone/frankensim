@@ -318,3 +318,6 @@ fn geometric_band_width_preserves_original_source_fracture_energy() {
 
 #[path = "brittle_source/initiation.rs"]
 mod initiation;
+
+#[path = "brittle_source/dynamics.rs"]
+mod dynamics;
