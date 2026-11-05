@@ -43,15 +43,7 @@ fn pair_flow(
     dt: f64,
     core: f64,
 ) -> Result<(), PairFlowError> {
-    // BEM circulation is clockwise-positive; VPM uses counterclockwise.
-    let next = advance_pair(
-        [
-            VortexParticle::new(wake[i].pos, -wake[i].gamma),
-            VortexParticle::new(wake[j].pos, -wake[j].gamma),
-        ],
-        dt,
-        core,
-    )?;
+    let next = advance_pair([wake[i].as_particle(), wake[j].as_particle()], dt, core)?;
     wake[i].pos = next[0].pos;
     wake[j].pos = next[1].pos;
     Ok(())
@@ -67,7 +59,11 @@ fn bound_flow(
     if bound == 0.0 {
         return Ok(());
     }
-    let fixed = VortexParticle::new(quarter, -bound);
+    let fixed = WakeVortex {
+        pos: quarter,
+        gamma: bound,
+    }
+    .as_particle();
     for vortex in wake {
         // A zero-strength tracer leaves the bound source fixed and follows
         // its exact circular streamline at the existing regularized speed.

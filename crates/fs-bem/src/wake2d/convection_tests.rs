@@ -18,6 +18,81 @@ fn moments(wake: &[WakeVortex]) -> [f64; 3] {
     out
 }
 
+/// G0/G3: a representation change must preserve the physical field and
+/// impulse; equal signed numbers would reverse both circulation conventions.
+#[test]
+fn particle_handoff_preserves_induced_velocity_and_impulse() {
+    let wake = [
+        WakeVortex {
+            pos: [-0.9, 0.1],
+            gamma: 0.8,
+        },
+        WakeVortex {
+            pos: [0.5, 0.6],
+            gamma: -1.3,
+        },
+        WakeVortex {
+            pos: [0.9, -0.2],
+            gamma: 0.5,
+        },
+    ];
+    let particles = wake.map(|vortex| vortex.as_particle());
+    let core = 0.2;
+    for point in [[0.0, 0.0], [1.2, -0.8], [-2.3, 0.7]] {
+        let mut expected = [0.0; 2];
+        for vortex in wake {
+            let dx = point[0] - vortex.pos[0];
+            let dy = point[1] - vortex.pos[1];
+            let factor = vortex.gamma / (std::f64::consts::TAU * (dx * dx + dy * dy + core * core));
+            expected[0] += factor * dy;
+            expected[1] -= factor * dx;
+        }
+        let actual = fs_vpm::induced_velocity(&particles, point, core);
+        for axis in 0..2 {
+            close(actual[axis], expected[axis], 2e-15);
+        }
+    }
+    // Planar physical impulse per unit density is (sum Γ*y, -sum Γ*x)
+    // with counterclockwise Γ. BEM's clockwise gamma has the opposite sign.
+    let bem_moments = moments(&wake);
+    let particle_impulse = particles.iter().fold([0.0; 2], |sum, particle| {
+        [
+            sum[0] + particle.circulation * particle.pos[1],
+            sum[1] - particle.circulation * particle.pos[0],
+        ]
+    });
+    close(particle_impulse[0], -bem_moments[1], 2e-15);
+    close(particle_impulse[1], bem_moments[0], 2e-15);
+}
+
+/// G1: a signed translating dipole must continue downstream after handoff.
+#[test]
+fn particle_handoff_preserves_signed_dipole_trajectory() {
+    let mut wake = [
+        WakeVortex {
+            pos: [0.0, 0.5],
+            gamma: -std::f64::consts::TAU,
+        },
+        WakeVortex {
+            pos: [0.0, -0.5],
+            gamma: std::f64::consts::TAU,
+        },
+    ];
+    let mut particles = wake.map(|vortex| vortex.as_particle()).to_vec();
+    let core = 0.2;
+    let dt = 0.04;
+    for _ in 0..100 {
+        advance(&mut wake, [0.0; 2], 0.0, [0.25, 0.0], dt, core).unwrap();
+        particles = fs_vpm::advect(&particles, dt, core);
+    }
+    let expected_x = 100.0 * dt / (1.0 + core * core);
+    for (vortex, particle) in wake.iter().zip(&particles) {
+        close(vortex.pos[0], expected_x, 2e-13);
+        close(particle.pos[0], expected_x, 2e-13);
+        close(particle.pos[1], vortex.pos[1], 2e-13);
+    }
+}
+
 #[test]
 fn co_rotating_wake_has_clockwise_phase_without_spiral_drift() {
     let mut wake = [

@@ -271,7 +271,11 @@ everywhere: this is screening, not a viscous truth source.
   steady equality, and rigid-frame/scale invariance. The wake-history
   similarity tolerance is tightened from 2e-7 to 2e-10.
   Convection uses the original `fs-vpm::pairwise::advance_pair` with the
-  BEM clockwise sign converted explicitly. Forward and reversed exact pair
+  BEM clockwise sign converted by `WakeVortex::as_particle`, the shared handoff
+  to counterclockwise-positive VPM. The conversion preserves the nondimensional
+  positions, induced field and physical planar impulse; it performs no unit or
+  frame conversion. Probe-field, impulse and signed-dipole regressions cover
+  the handoff. Forward and reversed exact pair
   half sweeps are composed symmetrically with uniform translation and exact
   fixed-bound-vortex rotation. Mutual convection preserves first and quadratic
   circulation moments to roundoff; the supported bound source can exchange

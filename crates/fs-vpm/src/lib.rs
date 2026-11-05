@@ -46,7 +46,8 @@ pub const VPM_WORK_CHECKPOINT_STRIDE: u64 = 256;
 pub struct VortexParticle {
     /// The position.
     pub pos: [f64; 2],
-    /// The circulation `Γ` (signed strength).
+    /// The circulation `Γ` (signed strength), positive counterclockwise in
+    /// the `(x, y)` plane.
     pub circulation: f64,
 }
 

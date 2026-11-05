@@ -51,8 +51,22 @@ pub struct WakeVortex {
     /// Position in the section's chord frame: leading edge (0, 0), trailing
     /// edge (1, 0), positive y toward the upper surface. Units are chord lengths.
     pub pos: [f64; 2],
-    /// Nondimensional circulation (unit chord and freestream).
+    /// Nondimensional circulation (unit chord and freestream), positive
+    /// clockwise. This is the opposite sign to [`fs_vpm::VortexParticle`].
     pub gamma: f64,
+}
+
+impl WakeVortex {
+    /// The same vortex in the VPM counterclockwise-positive convention.
+    ///
+    /// Position and circulation retain their unit-chord/unit-freestream
+    /// normalization; this changes only the circulation sign, preserving the
+    /// induced velocity and physical impulse. Dimensional consumers must still
+    /// apply their own chord, speed and frame transformations.
+    #[must_use]
+    pub fn as_particle(&self) -> fs_vpm::VortexParticle {
+        fs_vpm::VortexParticle::new(self.pos, -self.gamma)
+    }
 }
 
 /// One step's ledger row.
