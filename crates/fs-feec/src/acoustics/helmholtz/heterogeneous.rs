@@ -25,7 +25,7 @@
 //! density, speed, or port-area normalization is introduced.
 //!
 //! Scope: linear, isotropic, lossless bulk fluids at a prescribed frozen
-//! equilibrium without mean flow; straight-sided tetrahedra. Passive local
+//! equilibrium without mean flow; original affine or quadratic tetrahedra. Passive local
 //! boundary admittances may dissipate energy. This does not evolve the source
 //! temperature/composition, add thermoviscous or molecular bulk losses, or
 //! turn a homogeneous wall model into a heterogeneous one.
@@ -46,7 +46,7 @@ pub use harmonic::{
 mod observation;
 pub use observation::{
     ElementFace, HarmonicAcousticSample, HarmonicSurfacePower, HeterogeneousProbe,
-    HeterogeneousSurfaceProbe, SurfaceProbeLimits, TransientAcousticSample,
+    HeterogeneousSurfaceProbe, ProbeLocationLimits, SurfaceProbeLimits, TransientAcousticSample,
 };
 
 mod source;
@@ -245,9 +245,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         if geometry.ndof() == 0 || geometry.tetrahedra().is_empty() {
             return Err(invalid("heterogeneous pressure requires a nonempty volume").into());
         }
-        let metrics =
-            crate::whitney::try_element_geometry(geometry.space.complex, &geometry.positions)
-                .map_err(|_| invalid("unrepresentable heterogeneous volume geometry"))?;
+        let metrics = &geometry.affine_geometry;
         let quad = duffy_quadrature(quadrature_order);
         let mut stiffness = Coo::new(geometry.ndof(), geometry.ndof());
         let mut mass = Coo::new(geometry.ndof(), geometry.ndof());
@@ -255,19 +253,33 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             checkpoint(cancelled)?;
             let dofs = geometry.space.element_dofs(element);
             let count = dofs.len();
-            let jacobian = 6.0 * metrics.vol_signed[element].abs();
             let mut local_k = vec![0.0; count * count];
             let mut local_m = vec![0.0; count * count];
             let mut values = vec![0.0; count];
             let mut gradients = vec![[0.0; 3]; count];
             for &(barycentric, weight) in &quad {
                 checkpoint(cancelled)?;
-                let mut point = [0.0; 3];
-                for (&vertex, &bary) in vertices.iter().zip(&barycentric) {
-                    for (axis, coordinate) in point.iter_mut().enumerate() {
-                        *coordinate += bary * geometry.positions[vertex as usize][axis];
+                let (point, jacobian, barycentric_gradients) = if geometry.is_curved() {
+                    let sample = geometry.geometry_point(element, barycentric)?;
+                    (
+                        sample.position_m,
+                        sample.determinant_m3,
+                        sample.barycentric_gradients,
+                    )
+                } else {
+                    // Preserve original affine source sampling and arithmetic.
+                    let mut point = [0.0; 3];
+                    for (&vertex, &bary) in vertices.iter().zip(&barycentric) {
+                        for (axis, coordinate) in point.iter_mut().enumerate() {
+                            *coordinate += bary * geometry.positions[vertex as usize][axis];
+                        }
                     }
-                }
+                    (
+                        point,
+                        6.0 * metrics.vol_signed[element].abs(),
+                        metrics.grads[element],
+                    )
+                };
                 let medium = material_at(element, point)?;
                 let (inverse_density, compressibility) = medium_coefficients(medium)?;
                 let wk = weight * jacobian * inverse_density;
@@ -286,7 +298,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                         .enumerate()
                     {
                         for axis in 0..3 {
-                            gradients[i][axis] += derivative * metrics.grads[element][a][axis];
+                            gradients[i][axis] += derivative * barycentric_gradients[a][axis];
                         }
                     }
                 }
@@ -340,7 +352,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             stiffness,
             mass,
             quadrature_order,
-            barycentric_gradients: metrics.grads,
+            barycentric_gradients: metrics.grads.clone(),
         })
     }
 

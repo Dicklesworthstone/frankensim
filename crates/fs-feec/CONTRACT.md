@@ -2071,3 +2071,67 @@ refusals. Pinned Rust parsing and independent interface algebra were checked;
 native numerical execution remains pending under the environment's upstream
 dependency-memory blocker. Pressure, trace, geometry and exterior discretization
 still require convergence, and no causal exterior realization is implied.
+
+## Original quadratic geometry throughout pressure acoustics (M2.4-W1a)
+
+`HelmholtzFe::new_quadratic` retains one physical midside point per canonical
+mesh edge and the original hierarchical H1 pressure coordinates. Shared edges
+give adjacent elements the same quadratic face map. A nonsingular corner
+tetrahedron is required; the existing `fs-query` interval/Bernstein TET10
+orientation owner must additionally admit the complete closed curved element.
+Sampling only integration points never admits geometry. Stored negative corner
+orientation is reordered for the proof alone. Query work/storage exhaustion,
+unresolved geometry, nonfinite metrics and cancellation refuse explicitly.
+This is local orientation evidence, not global injectivity or mesh-overlap
+certification.
+
+One shared map supplies physical position, pointwise volume determinant and
+inverse-transpose barycentric gradients. The same cofactor supplies pointwise
+outward face normals and surface measures. Original complete stiffness/mass,
+heterogeneous material sampling, linear and prepared quadratic velocity loads,
+Robin conductance, mechanical-wall trace mass and viscous tangential surface
+stiffness all retain this geometry. Tangential forms discard the omitted
+coordinate's normal derivative exactly. Existing modal, harmonic, sparse-time,
+mechanical and complete-field exact solvers consume the resulting original
+forms without a new pressure reduction or propagation engine. Diffusion and
+joint caloric owners likewise reuse these original geometric forms.
+
+Geometric quadrature is explicit in `order+2..=16`; curved default face forms
+honor the same minimum. Geometry, pressure order, material/source quadrature
+and time remain independent convergence axes. Curved stiffness and surface
+measures are generally nonpolynomial, so a quadrature count is not an accuracy
+certificate. The original affine constructor keeps its established assembly
+arithmetic; its original metrics are cached once. The curved constructor does
+not assemble an affine replacement pencil first. Point geometry requires no
+allocation or repeated orientation proof.
+
+Point pressure/velocity/intensity probes and distributed volume sources sample
+the original mapped physical position. Surface observations use the pointwise
+normal and measure, keeping harmonic active/reactive power and transient
+signed flux distinct. `probe_at_position` uses bounded projected Newton trials
+and backtracking with explicit SI residual tolerance in a caller-selected
+original element; failed location publishes no probe or material query.
+Prepared stencils and source columns retain geometry-free repeated evaluation.
+`quadratic_velocity_source_with_quadrature` permits independent source-metric
+refinement. Immutable `support_faces` and `has_nonzero_projection` preserve
+physical support, including zero-valued faces, and distinguish a live signed
+zero-net shape from a zero projected source.
+
+Legacy APIs returning one triangle and one normal admit only genuinely affine
+selected faces, including planar openings in otherwise curved interiors.
+Nonaffine selected faces refuse instead of exporting their corner triangle.
+Standalone resolved LNS geometry remains on its separate affine constructor;
+this increment does not imply curved LNS, curved BEM panels, a curved-mesh
+importer or closed-cylinder/instrument qualification. The broader bead stays
+open.
+
+Twelve native regressions specify analytic volume/gradient moments, all 24
+tetrahedron vertex orders, shared curved-face reciprocity, rigorous fold and
+subdivision-budget refusal, affine recovery through P4, physical material
+sampling, exact-field evolution, bounded physical inverse locations,
+variable-Jacobian source moments and curved surface/source/viscous quadrature
+ladders. Pinned Rust parsing, targeted formatting, dependency-direction checks
+and independent analytical moment/metric/inverse oracles passed. Native Rust
+compilation and tests remain unrun under the existing upstream dependency
+memory failure and full workspace; these source checks do not establish
+numerical test passage.

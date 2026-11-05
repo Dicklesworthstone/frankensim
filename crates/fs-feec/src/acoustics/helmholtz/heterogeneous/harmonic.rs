@@ -284,7 +284,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
     ) -> Result<(Csr, Csr), HeterogeneousError> {
         let mut real = Coo::new(self.ndof(), self.ndof());
         let mut imaginary = Coo::new(self.ndof(), self.ndof());
-        let quad = tri_quadrature(self.geometry.order + 1);
+        let quad = tri_quadrature(self.geometry.face_quadrature_order(self.geometry.order + 1));
         let mut seen = BTreeSet::new();
         for boundary in admittances {
             let y = boundary.admittance_m_pa_s;
@@ -336,7 +336,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         traces: &[VelocityTrace],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Vec<C64>, HeterogeneousError> {
-        let quad = tri_quadrature(self.geometry.order + 1);
+        let quad = tri_quadrature(self.geometry.face_quadrature_order(self.geometry.order + 1));
         let mut load = vec![C64::ZERO; self.ndof()];
         let mut seen = BTreeSet::new();
         for &(face, values) in traces {

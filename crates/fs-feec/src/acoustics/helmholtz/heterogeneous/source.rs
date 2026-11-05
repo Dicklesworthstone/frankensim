@@ -90,8 +90,10 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
     /// The callback receives the original tetrahedron index and SI position,
     /// and returns a finite signed density [m^-3]. Quadrature has its own
     /// explicit order, between `geometry.order()+2` and 16. Localized sources
-    /// require independent source-quadrature and h/p convergence. No material
-    /// is queried or reassembled. Source errors propagate unchanged, and
+    /// require independent source-quadrature and h/p convergence. Curved maps
+    /// use their original physical positions and pointwise Jacobian, so the
+    /// source rule also resolves the geometry. No material is queried or
+    /// reassembled. Source errors propagate unchanged, and
     /// cancellation or nonfinite data publishes no partially prepared source.
     pub fn volume_velocity_source<'m, E: From<HeterogeneousError>>(
         &'m self,
@@ -106,26 +108,36 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             ))
             .into());
         }
-        let metrics = crate::whitney::try_element_geometry(
-            self.geometry.space.complex,
-            &self.geometry.positions,
-        )
-        .map_err(|_| HeterogeneousError::from(invalid("unrepresentable source volume geometry")))?;
+        // Preserve the existing affine projection; a curved element must
+        // never use its corner tetrahedron's constant volume measure.
+        let metrics = if self.geometry.is_curved() {
+            None
+        } else {
+            Some(&self.geometry.affine_geometry)
+        };
         let quadrature = duffy_quadrature(quadrature_order);
         let mut load = vec![Dd::from_f64(0.0); self.ndof()];
         let mut integral = Dd::from_f64(0.0);
         for (element, vertices) in self.geometry.tetrahedra().iter().enumerate() {
             poll(cancelled)?;
             let dofs = self.geometry.space.element_dofs(element);
-            let jacobian = 6.0 * metrics.vol_signed[element].abs();
             for &(barycentric, weight) in &quadrature {
                 poll(cancelled)?;
-                let mut position = [0.0; 3];
-                for (&vertex, &bary) in vertices.iter().zip(&barycentric) {
-                    for (axis, coordinate) in position.iter_mut().enumerate() {
-                        *coordinate += bary * self.geometry.positions[vertex as usize][axis];
+                let (position, jacobian) = if let Some(metrics) = &metrics {
+                    let mut position = [0.0; 3];
+                    for (&vertex, &bary) in vertices.iter().zip(&barycentric) {
+                        for (axis, coordinate) in position.iter_mut().enumerate() {
+                            *coordinate += bary * self.geometry.positions[vertex as usize][axis];
+                        }
                     }
-                }
+                    (position, 6.0 * metrics.vol_signed[element].abs())
+                } else {
+                    let point = self
+                        .geometry
+                        .geometry_point(element, barycentric)
+                        .map_err(HeterogeneousError::from)?;
+                    (point.position_m, point.determinant_m3)
+                };
                 let density = density_per_m3(element, position)?;
                 let weighted = density * weight * jacobian;
                 if !density.is_finite() || !weighted.is_finite() {

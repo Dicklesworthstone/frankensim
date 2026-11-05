@@ -10,7 +10,7 @@
 //! - explicitly selected ideal pressure-release faces (`p = 0`), eliminated exactly by
 //!   [`HelmholtzFe::modes_with_pressure_release`] and the heterogeneous full-pressure owner.
 //!
-//! Weak form on the hierarchical H1 space of [`SimplexSpace`] (order `r`, straight-sided tets):
+//! Weak form on the hierarchical H1 space of [`SimplexSpace`] (order `r`, affine or quadratic geometry):
 //! `(K - k^2 M + j k sum_b y_b C_b) p = j k rho c v_in b_src`, with the stiffness `K`, the mass `M`, the boundary mass matrices
 //! `C_b = int_b phi_i phi_j dS` and the load vectors `b_b = int_b phi_i dS`. Outward volume flow through a loaded boundary is
 //! `U_b = (y_b / (rho c)) b_b . p`; the volume velocity transfer function between two boundaries is the ratio of an outward flow
@@ -22,7 +22,9 @@
 //! a dense `n x n` complex solve per frequency. The static vectors matter: a boundary-forced expansion in Neumann modes alone converges
 //! only like `1/N`, because the loaded boundary is where the modes are least able to represent the field.
 //!
-//! Limits, stated: straight-sided elements (no isoparametric map, so a curved wall has an `O(h^2)` geometric floor), first-order
+//! [`HelmholtzFe::new_quadratic`] preserves the original curved TET10 map in
+//! every volume and surface form; geometry and quadrature refinement remain
+//! independent of pressure order. Limits, stated: first-order
 //! viscothermal boundary layers only inside their explicit thin-layer band, a uniform impedance law per boundary, one-way coupling (an admittance is an
 //! input law, not a radiation solve). Refusals: order above [`MAX_ORDER`], a degenerate tet, a face that is not a boundary face,
 //! a window holding more than [`MAX_MODES`] modes, a reduced basis above [`MAX_REDUCED_DIM`]; never a silent truncation.
@@ -49,6 +51,12 @@ pub mod molecular;
 
 /// Full pressure waves in spatially varying, stationary fluids.
 pub mod heterogeneous;
+
+mod curved;
+/// Admitted quadratic maps and physical volume/surface samples.
+pub mod geometry;
+pub use curved::MAX_GEOMETRY_QUADRATURE_ORDER;
+pub use geometry::QuadraticGeometryControls;
 
 mod pressure_release;
 pub use pressure_release::PressureReleaseModes;
@@ -95,6 +103,13 @@ pub enum AcousticFeError {
     DegenerateTet {
         /// Tet index.
         tet: usize,
+    },
+    /// Whole-element curved-map admission or numerical evaluation refused.
+    CurvedGeometry {
+        /// Original tetrahedron index.
+        tet: usize,
+        /// Original proof, resource, or numerical-range refusal.
+        reason: geometry::QuadraticGeometryRefusal,
     },
     /// A face given as a boundary is not a face of the complex.
     FaceNotInMesh {
@@ -189,6 +204,11 @@ pub struct HelmholtzFe<'c> {
     order: usize,
     stiffness: Csr,
     mass: Csr,
+    /// Shared original affine metrics, also used for inverse-map initial guesses.
+    affine_geometry: crate::whitney::ElementGeometry,
+    /// One admitted conforming TET10 map, never an alternative pressure space.
+    geometry: Option<geometry::QuadraticGeometry>,
+    geometry_quadrature_order: usize,
     /// Per canonical face: (first owning tet, its omitted local vertex, owner count).
     owners: Vec<(u32, u8, u8)>,
 }
@@ -268,6 +288,19 @@ impl<'c> HelmholtzFe<'c> {
         order: usize,
         medium: Medium,
     ) -> Result<Self, AcousticFeError> {
+        let mut model = Self::initialize(complex, positions, order, medium)?;
+        // Keep the established affine arithmetic and assembly path unchanged.
+        model.stiffness = model.space.stiffness(positions);
+        model.mass = model.space.mass(positions);
+        Ok(model)
+    }
+
+    fn initialize(
+        complex: &'c TetComplex,
+        positions: &[[f64; 3]],
+        order: usize,
+        medium: Medium,
+    ) -> Result<Self, AcousticFeError> {
         if !(medium.density_kg_m3.is_finite() && medium.density_kg_m3 > 0.0) {
             return Err(AcousticFeError::InvalidMedium { what: "density" });
         }
@@ -290,22 +323,22 @@ impl<'c> HelmholtzFe<'c> {
                 positions: positions.len(),
             });
         }
-        for (t, tet) in complex.tets.iter().enumerate() {
-            let p0 = positions[tet[0] as usize];
-            let six_v = dot3(
-                sub3(positions[tet[1] as usize], p0),
-                cross3(
-                    sub3(positions[tet[2] as usize], p0),
-                    sub3(positions[tet[3] as usize], p0),
-                ),
-            );
-            if !(six_v.is_finite() && six_v != 0.0) {
-                return Err(AcousticFeError::DegenerateTet { tet: t });
-            }
-        }
+        let affine_geometry = crate::whitney::try_element_geometry(complex, positions).map_err(
+            |error| match error {
+                crate::whitney::ElementGeometryError::Positions => {
+                    AcousticFeError::InvalidPositions {
+                        vertices: complex.vertex_count,
+                        positions: positions.len(),
+                    }
+                }
+                crate::whitney::ElementGeometryError::Cell(tet) => {
+                    AcousticFeError::DegenerateTet { tet }
+                }
+            },
+        )?;
         let space = SimplexSpace::new(complex, order);
-        let stiffness = space.stiffness(positions);
-        let mass = space.mass(positions);
+        let stiffness = Coo::new(space.ndof, space.ndof).assemble();
+        let mass = Coo::new(space.ndof, space.ndof).assemble();
         let mut owners = vec![(0u32, 0u8, 0u8); complex.faces.len()];
         for (t, tet) in complex.tets.iter().enumerate() {
             for omit in 0..4usize {
@@ -330,6 +363,9 @@ impl<'c> HelmholtzFe<'c> {
             order,
             stiffness,
             mass,
+            affine_geometry,
+            geometry: None,
+            geometry_quadrature_order: order + 2,
             owners,
         })
     }
@@ -390,11 +426,35 @@ impl<'c> HelmholtzFe<'c> {
         }
         let tet = self.space.complex.tets[t as usize];
         let local: Vec<usize> = (0..4).filter(|&l| l != omit as usize).collect();
-        let pa = self.positions[tet[local[0]] as usize];
-        let pb = self.positions[tet[local[1]] as usize];
-        let pc = self.positions[tet[local[2]] as usize];
-        let cr = cross3(sub3(pb, pa), sub3(pc, pa));
-        let area = 0.5 * dot3(cr, cr).sqrt();
+        let (weights, area) = if self.is_curved() {
+            let mut weights = Vec::with_capacity(quad.len());
+            let mut area = fs_math::dd::Dd::from_f64(0.0);
+            for &(b, w) in quad {
+                let mut lam = [0.0; 4];
+                for i in 0..3 {
+                    lam[local[i]] = b[i];
+                }
+                let surface = self.geometry_face_point(t as usize, omit as usize, lam)?;
+                let weight = w * surface.surface_jacobian_m2;
+                if !weight.is_finite() || weight <= 0.0 {
+                    return Err(AcousticFeError::DegenerateTet { tet: t as usize });
+                }
+                weights.push(weight);
+                area = area + fs_math::dd::Dd::from_f64(weight);
+            }
+            let area = area.to_f64();
+            if !area.is_finite() || area <= 0.0 {
+                return Err(AcousticFeError::DegenerateTet { tet: t as usize });
+            }
+            (weights, area)
+        } else {
+            let pa = self.positions[tet[local[0]] as usize];
+            let pb = self.positions[tet[local[1]] as usize];
+            let pc = self.positions[tet[local[2]] as usize];
+            let cr = cross3(sub3(pb, pa), sub3(pc, pa));
+            let area = 0.5 * dot3(cr, cr).sqrt();
+            (quad.iter().map(|(_, w)| w * 2.0 * area).collect(), area)
+        };
         let mut dofs = Vec::new();
         let mut phi = Vec::new();
         for (global, f) in self.space.element_dofs(t as usize) {
@@ -413,7 +473,6 @@ impl<'c> HelmholtzFe<'c> {
                 phi.push(vals);
             }
         }
-        let weights = quad.iter().map(|(_, w)| w * 2.0 * area).collect();
         Ok(FaceRule {
             vertices: [tet[local[0]], tet[local[1]], tet[local[2]]],
             dofs,
@@ -429,30 +488,45 @@ impl<'c> HelmholtzFe<'c> {
         self.owners.iter().filter(|owner| owner.2 == 1).count()
     }
 
-    /// Original straight-sided volume geometry; no boundary remeshing is implied.
+    /// Original corner positions. Quadratic midsides are retained separately;
+    /// use `geometry_point` for physical sampling of either geometry order.
     #[must_use]
-    pub fn positions(&self) -> &[[f64; 3]] { &self.positions }
+    pub fn positions(&self) -> &[[f64; 3]] {
+        &self.positions
+    }
 
     /// Original tetrahedra in their supplied vertex order.
     #[must_use]
-    pub fn tetrahedra(&self) -> &[[u32; 4]] { &self.space.complex.tets }
+    pub fn tetrahedra(&self) -> &[[u32; 4]] {
+        &self.space.complex.tets
+    }
 
     /// Original hierarchical polynomial order.
     #[must_use]
-    pub const fn order(&self) -> usize { self.order }
+    pub const fn order(&self) -> usize {
+        self.order
+    }
 
     /// One boundary triangle in the caller's vertex order and its OUTWARD
-    /// unit normal. The owning tetrahedron determines the sign, independently
+    /// unit normal. A nonaffine face refuses; use `geometry_face_point` there.
+    /// The owning tetrahedron determines the sign, independently
     /// of how a caller ordered the three boundary indices.
-    pub fn boundary_geometry(&self, face: [u32; 3])
-        -> Result<([[f64; 3]; 3], [f64; 3], f64), AcousticFeError>
-    {
+    pub fn boundary_geometry(
+        &self,
+        face: [u32; 3],
+    ) -> Result<([[f64; 3]; 3], [f64; 3], f64), AcousticFeError> {
         let mut key = face;
         key.sort_unstable();
-        let fi = self.space.complex.faces.binary_search(&key)
+        let fi = self
+            .space
+            .complex
+            .faces
+            .binary_search(&key)
             .map_err(|_| AcousticFeError::FaceNotInMesh { face })?;
         let (tet, _, count) = self.owners[fi];
-        if count != 1 { return Err(AcousticFeError::FaceNotOnBoundary { face }); }
+        if count != 1 {
+            return Err(AcousticFeError::FaceNotOnBoundary { face });
+        }
         self.element_face_geometry(tet as usize, face)
     }
 
@@ -460,12 +534,21 @@ impl<'c> HelmholtzFe<'c> {
     /// The returned vertices follow the caller's order; the unit normal points
     /// OUTWARD from the explicitly selected tetrahedron, independently of winding.
     /// Selecting the other owner of a shared face reverses the normal.
-    pub fn element_face_geometry(&self, element: usize, face: [u32; 3])
-        -> Result<([[f64; 3]; 3], [f64; 3], f64), AcousticFeError>
-    {
-        let tet = self.space.complex.tets.get(element).ok_or(
-            AcousticFeError::InvalidInput { what: "surface requires an original tetrahedron index" },
-        )?;
+    /// A nonaffine face refuses because a single triangle/normal cannot
+    /// describe its physical geometry. Affine faces of a curved mesh admit.
+    pub fn element_face_geometry(
+        &self,
+        element: usize,
+        face: [u32; 3],
+    ) -> Result<([[f64; 3]; 3], [f64; 3], f64), AcousticFeError> {
+        let tet = self
+            .space
+            .complex
+            .tets
+            .get(element)
+            .ok_or(AcousticFeError::InvalidInput {
+                what: "surface requires an original tetrahedron index",
+            })?;
         let mut key = face;
         key.sort_unstable();
         if key[0] == key[1] || key[1] == key[2] || face.iter().any(|v| !tet.contains(v)) {
@@ -473,18 +556,44 @@ impl<'c> HelmholtzFe<'c> {
                 what: "surface face must contain three distinct vertices of the selected tetrahedron",
             });
         }
-        let opposite = tet.iter().find(|v| !face.contains(v)).ok_or(
-            AcousticFeError::InvalidInput { what: "surface face has no opposite tetrahedron vertex" },
-        )?;
+        if let Some(geometry) = &self.geometry {
+            let omitted = tet.iter().position(|v| !face.contains(v)).ok_or(
+                AcousticFeError::InvalidInput {
+                    what: "surface face has no opposite tetrahedron vertex",
+                },
+            )?;
+            if !geometry.face_is_affine(self.space.complex, &self.positions, element, omitted)? {
+                return Err(AcousticFeError::InvalidInput {
+                    what: "a curved face requires pointwise geometry and cannot be exported as one planar triangle",
+                });
+            }
+        }
+        let opposite =
+            tet.iter()
+                .find(|v| !face.contains(v))
+                .ok_or(AcousticFeError::InvalidInput {
+                    what: "surface face has no opposite tetrahedron vertex",
+                })?;
         let vertices = face.map(|v| self.positions[v as usize]);
-        let area_vector = cross3(sub3(vertices[1], vertices[0]), sub3(vertices[2], vertices[0]));
+        let area_vector = cross3(
+            sub3(vertices[1], vertices[0]),
+            sub3(vertices[2], vertices[0]),
+        );
         let twice_area = fs_math::det::sqrt(dot3(area_vector, area_vector));
         let opposite = self.positions[*opposite as usize];
-        let sign = if dot3(area_vector, sub3(opposite, vertices[0])) < 0.0 { 1.0 } else { -1.0 };
+        let sign = if dot3(area_vector, sub3(opposite, vertices[0])) < 0.0 {
+            1.0
+        } else {
+            -1.0
+        };
         if !twice_area.is_finite() || twice_area <= 0.0 {
             return Err(AcousticFeError::DegenerateTet { tet: element });
         }
-        Ok((vertices, area_vector.map(|v| sign * v / twice_area), 0.5 * twice_area))
+        Ok((
+            vertices,
+            area_vector.map(|v| sign * v / twice_area),
+            0.5 * twice_area,
+        ))
     }
 
     /// Work-conjugate boundary load b_i = integral(phi_i u_n dS) for
@@ -496,10 +605,11 @@ impl<'c> HelmholtzFe<'c> {
     /// nonuniform structural traces therefore couple to nonuniform pressure.
     /// No normal or sign is inferred here; the structural owner supplies an
     /// outward-from-gas trace. Repeated faces and nonfinite traces refuse.
-    pub fn boundary_linear_load(&self, traces: &[([u32; 3], [f64; 3])])
-        -> Result<Vec<f64>, AcousticFeError>
-    {
-        let quad = tri_quadrature(self.order + 1);
+    pub fn boundary_linear_load(
+        &self,
+        traces: &[([u32; 3], [f64; 3])],
+    ) -> Result<Vec<f64>, AcousticFeError> {
+        let quad = tri_quadrature(self.face_quadrature_order(self.order + 1));
         let mut seen = std::collections::BTreeSet::new();
         let mut load = vec![0.0; self.ndof()];
         for &(face, values) in traces {
@@ -513,21 +623,35 @@ impl<'c> HelmholtzFe<'c> {
             let rule = self.face_rule(face, &quad)?;
             let mut local_values = [0.0; 3];
             for (local, vertex) in rule.vertices.iter().enumerate() {
-                let source = face.iter().position(|v| v == vertex)
-                    .ok_or(AcousticFeError::InvalidInput { what: "boundary trace vertex mismatch" })?;
+                let source =
+                    face.iter()
+                        .position(|v| v == vertex)
+                        .ok_or(AcousticFeError::InvalidInput {
+                            what: "boundary trace vertex mismatch",
+                        })?;
                 local_values[local] = values[source];
             }
             for (local, &global) in rule.dofs.iter().enumerate() {
-                let value: f64 = quad.iter().zip(&rule.weights).zip(&rule.phi[local])
+                let value: f64 = quad
+                    .iter()
+                    .zip(&rule.weights)
+                    .zip(&rule.phi[local])
                     .map(|(((barycentric, _), weight), pressure)| {
-                        let normal: f64 = barycentric.iter().zip(local_values).map(|(b,u)| b*u).sum();
+                        let normal: f64 = barycentric
+                            .iter()
+                            .zip(local_values)
+                            .map(|(b, u)| b * u)
+                            .sum();
                         weight * pressure * normal
-                    }).sum();
+                    })
+                    .sum();
                 load[global] += value;
             }
         }
         if load.iter().any(|v| !v.is_finite()) {
-            return Err(AcousticFeError::InvalidInput { what: "boundary trace projection overflow" });
+            return Err(AcousticFeError::InvalidInput {
+                what: "boundary trace projection overflow",
+            });
         }
         Ok(load)
     }
@@ -537,7 +661,7 @@ impl<'c> HelmholtzFe<'c> {
     /// # Errors
     /// A face that is not a boundary face of the complex.
     pub fn boundary_mass(&self, faces: &[[u32; 3]]) -> Result<Csr, AcousticFeError> {
-        let quad = tri_quadrature(self.order + 1);
+        let quad = tri_quadrature(self.face_quadrature_order(self.order + 1));
         let mut coo = Coo::new(self.ndof(), self.ndof());
         for &face in faces {
             let rule = self.face_rule(face, &quad)?;
@@ -561,7 +685,7 @@ impl<'c> HelmholtzFe<'c> {
     /// # Errors
     /// A face that is not a boundary face of the complex.
     pub fn boundary_load(&self, faces: &[[u32; 3]]) -> Result<(Vec<f64>, f64), AcousticFeError> {
-        let quad = tri_quadrature(self.order + 1);
+        let quad = tri_quadrature(self.face_quadrature_order(self.order + 1));
         let mut b = vec![0.0; self.ndof()];
         let mut area = 0.0;
         for &face in faces {
@@ -1264,6 +1388,3 @@ mod tests {
         }
     }
 }
-
-
-

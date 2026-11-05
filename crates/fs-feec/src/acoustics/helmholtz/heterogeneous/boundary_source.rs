@@ -1,4 +1,4 @@
-//! Prepared quadratic normal motion on the original straight boundary faces.
+//! Prepared quadratic normal motion on the original physical boundary faces.
 //!
 //! A dimensionless six-node shape `g` driven by an inward normal velocity
 //! amplitude `u` [m/s] contributes `b_i = integral(phi_i g) u` [m^3/s].
@@ -7,12 +7,12 @@
 //! including edge and face tests, without replacing midside motion by corner
 //! values, dividing by area, or normalizing the signed shape.
 //!
-//! This is prescribed normal excitation on the existing straight geometry.
-//! A quadratic velocity trace does not curve the surface or infer a structural
-//! displacement, normal, material law, or radiation model.
+//! The volume owner's admitted affine or curved map supplies the surface
+//! measure. A quadratic velocity trace does not alter that geometry or infer
+//! a structural displacement, material law, or radiation model.
 
 use super::super::tri_quadrature;
-use super::{HeterogeneousError, HeterogeneousHelmholtzFe, invalid, poll};
+use super::{HeterogeneousError, HeterogeneousHelmholtzFe, MAX_QUADRATURE_ORDER, invalid, poll};
 use fs_math::{c64::C64, dd::Dd};
 use std::collections::BTreeSet;
 
@@ -46,6 +46,23 @@ pub struct BoundaryVelocitySource<'m, 'f, 'c> {
 }
 
 impl BoundaryVelocitySource<'_, '_, '_> {
+    /// Canonically sorted, unique original boundary faces supporting the shape.
+    /// Faces with identically zero supplied values remain present so physical
+    /// boundary-law admission can inspect the complete declared support.
+    #[must_use]
+    pub fn support_faces(&self) -> &[[u32; 3]] {
+        &self.faces
+    }
+
+    /// Whether the original pressure-space projection has any nonzero entry.
+    /// A signed shape can have zero net area integral and still couple to the
+    /// pressure field. This checks the cached load itself, without dividing by
+    /// area or normalizing the shape.
+    #[must_use]
+    pub fn has_nonzero_projection(&self) -> bool {
+        self.load.iter().any(|&weight| weight != 0.0)
+    }
+
     /// Signed area integral of the dimensionless shape [m^2]. This can be zero
     /// for a nonzero source; neither projection nor work uses it as a divisor.
     #[must_use]
@@ -89,14 +106,19 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
     ///
     /// Each entry supplies an original boundary triangle and six dimensionless
     /// values in `corner0, corner1, corner2, edge01, edge12, edge20` order. Edge
-    /// values are the values AT physical edge midpoints, not hierarchical
-    /// coefficients. Positive amplitude means inward velocity; winding does
+    /// values are the values AT the reference-edge midpoints mapped into the
+    /// physical face, not hierarchical coefficients. Positive amplitude means
+    /// inward velocity along the local normal; winding does
     /// not change this scalar convention. All values follow the supplied face
     /// order, including when that order is reversed or cyclically permuted.
     ///
-    /// The original straight-face rule with `pressure_order + 2` Gauss points
-    /// per Duffy axis integrates the quadratic shape against the full pressure
-    /// trace. No material, face-average or corner-only approximation is used.
+    /// The original face rule uses at least `pressure_order + 2` Gauss points
+    /// per Duffy axis, and at least the curved geometry's declared order. This
+    /// integrates the quadratic shape against the full pressure trace and the
+    /// pointwise physical measure. The curved metric needs its own quadrature
+    /// convergence; use [`Self::quadratic_velocity_source_with_quadrature`] to
+    /// vary that axis. No material, face-average or corner-only approximation
+    /// is used.
     /// Faces must be nonempty, unique and on the real exterior boundary. Zero
     /// and signed shapes are allowed. Separate prepared sources may overlap
     /// and interfere; each subsequent solver admits its pressure-release and
@@ -108,11 +130,31 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         traces: &[([u32; 3], [f64; 6])],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<BoundaryVelocitySource<'m, 'f, 'c>, HeterogeneousError> {
+        self.quadratic_velocity_source_with_quadrature(
+            traces,
+            self.geometry.face_quadrature_order(self.geometry.order + 2),
+            cancelled,
+        )
+    }
+
+    /// Prepare the same physical source with an independently selected face
+    /// quadrature order, between `pressure_order + 2` and 16 Gauss points per
+    /// Duffy axis. This varies source/curved-metric integration without changing
+    /// the original pressure basis, geometry, material or source amplitudes.
+    pub fn quadratic_velocity_source_with_quadrature<'m>(
+        &'m self,
+        traces: &[([u32; 3], [f64; 6])],
+        quadrature_order: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<BoundaryVelocitySource<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         if traces.is_empty() {
             return Err(invalid("nonempty quadratic boundary source required").into());
         }
-        let quadrature = tri_quadrature(self.geometry.order + 2);
+        if quadrature_order < self.geometry.order + 2 || quadrature_order > MAX_QUADRATURE_ORDER {
+            return Err(invalid("quadratic source quadrature order outside admitted range").into());
+        }
+        let quadrature = tri_quadrature(quadrature_order);
         let mut load = vec![Dd::from_f64(0.0); self.ndof()];
         let mut integral = Dd::from_f64(0.0);
         let mut faces = BTreeSet::new();

@@ -7,8 +7,8 @@
 use super::super::super::tri_quadrature;
 use super::super::time::HeterogeneousTimeState;
 use super::super::{
-    AcousticFeError, HeterogeneousError, HeterogeneousHelmholtzFe, MAX_QUADRATURE_ORDER,
-    Medium, finite, invalid, poll,
+    AcousticFeError, HeterogeneousError, HeterogeneousHelmholtzFe, MAX_QUADRATURE_ORDER, Medium,
+    finite, invalid, poll,
 };
 use fs_math::{c64::C64, dd::Dd};
 use std::collections::BTreeSet;
@@ -89,8 +89,10 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
     /// All faces and budgets are checked before any source query. The original
     /// triangle Duffy rule uses `quadrature_order` points per axis, between
     /// `geometry.order()+1` and `MAX_QUADRATURE_ORDER`. This integrates the
-    /// pressure-times-gradient polynomial for constant media; smoothly varying
-    /// density requires its own quadrature study. Source errors propagate intact.
+    /// pressure-times-gradient polynomial on affine elements for constant
+    /// media. Curved surface measure, variable physical gradients and smoothly
+    /// varying density require their own quadrature study. Source errors
+    /// propagate intact.
     /// As in `new`, source-generic preparation reports cancellation and invalid
     /// limits through `AcousticFeError::InvalidInput`; no partial probe is returned.
     pub fn surface_probe<'m, E: From<AcousticFeError>>(
@@ -116,9 +118,14 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             || quadrature_order < self.geometry.order + 1
             || quadrature_order > MAX_QUADRATURE_ORDER
         {
-            return Err(invalid("acoustic surface faces, quadrature or limits outside admitted range").into());
+            return Err(invalid(
+                "acoustic surface faces, quadrature or limits outside admitted range",
+            )
+            .into());
         }
-        let point_count = faces.len().checked_mul(quadrature_order * quadrature_order)
+        let point_count = faces
+            .len()
+            .checked_mul(quadrature_order * quadrature_order)
             .ok_or_else(|| invalid("acoustic surface quadrature count overflow"))?;
         if point_count > limits.max_quadrature_points {
             return Err(invalid("acoustic surface exceeds its quadrature-point budget").into());
@@ -130,43 +137,69 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             checkpoint(cancelled)?;
             let mut key = face.vertices;
             key.sort_unstable();
-            if !seen.insert(key) {
+            if key[0] == key[1] || key[1] == key[2] || !seen.insert(key) {
                 return Err(invalid("acoustic surface physical faces must be unique").into());
             }
-            let (_, normal, face_area) = self.geometry.element_face_geometry(face.element, face.vertices)?;
-            let tet = self.geometry.tetrahedra()[face.element];
+            let tet = self
+                .geometry
+                .tetrahedra()
+                .get(face.element)
+                .ok_or_else(|| invalid("acoustic surface element is outside the original mesh"))?;
             let mut local = [0; 3];
             for (i, vertex) in face.vertices.iter().enumerate() {
-                local[i] = tet.iter().position(|v| v == vertex)
-                    .ok_or_else(|| invalid("surface face is not owned by the selected tetrahedron"))?;
+                local[i] = tet.iter().position(|v| v == vertex).ok_or_else(|| {
+                    invalid("surface face is not owned by the selected tetrahedron")
+                })?;
             }
-            area = area + Dd::from_f64(face_area);
-            admitted.push((face, normal, face_area, local));
-        }
-        let area_m2 = area.to_f64();
-        if !area_m2.is_finite() || area_m2 <= 0.0 {
-            return Err(invalid("unrepresentable acoustic surface area").into());
+            let omitted = (0..4)
+                .find(|i| !local.contains(i))
+                .ok_or_else(|| invalid("acoustic surface lacks an opposite vertex"))?;
+            let affine = if self.geometry.is_curved() {
+                None
+            } else {
+                let (_, normal, face_area) = self
+                    .geometry
+                    .element_face_geometry(face.element, face.vertices)?;
+                area = area + Dd::from_f64(face_area);
+                Some((normal, face_area))
+            };
+            admitted.push((face, affine, local, omitted));
         }
         let quadrature = tri_quadrature(quadrature_order);
         let mut samples = Vec::with_capacity(point_count);
-        for (face, normal, face_area, local) in admitted {
+        for (face, affine, local, omitted) in admitted {
             for &(barycentric, weight) in &quadrature {
                 checkpoint(cancelled)?;
                 let mut point = [0.0; 4];
                 for i in 0..3 {
                     point[local[i]] = barycentric[i];
                 }
-                let probe = self.probe(face.element, point, material_at)?;
-                let weight_m2 = (2.0 * weight) * face_area;
+                let (normal, weight_m2) = if let Some((normal, face_area)) = affine {
+                    (normal, (2.0 * weight) * face_area)
+                } else {
+                    let mapped = self
+                        .geometry
+                        .geometry_face_point(face.element, omitted, point)?;
+                    let weight_m2 = weight * mapped.surface_jacobian_m2;
+                    area = area + Dd::from_f64(weight_m2);
+                    (mapped.outward_normal, weight_m2)
+                };
                 if !weight_m2.is_finite() || weight_m2 <= 0.0 {
-                    return Err(invalid("unrepresentable acoustic surface quadrature weight").into());
+                    return Err(
+                        invalid("unrepresentable acoustic surface quadrature weight").into(),
+                    );
                 }
+                let probe = self.probe(face.element, point, material_at)?;
                 let mut shapes = Vec::with_capacity(probe.shapes.len());
                 // Keep zero pressure traces too: their normal derivatives can
                 // contribute to velocity on the face (including interior bubbles).
                 for shape in probe.shapes {
-                    let normal_derivative_m_inv = shape.gradient_m_inv.iter().zip(normal)
-                        .map(|(gradient, n)| gradient * n).sum::<f64>();
+                    let normal_derivative_m_inv = shape
+                        .gradient_m_inv
+                        .iter()
+                        .zip(normal)
+                        .map(|(gradient, n)| gradient * n)
+                        .sum::<f64>();
                     if !normal_derivative_m_inv.is_finite() {
                         return Err(invalid("unrepresentable acoustic surface derivative").into());
                     }
@@ -184,6 +217,10 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             }
         }
         checkpoint(cancelled)?;
+        let area_m2 = area.to_f64();
+        if !area_m2.is_finite() || area_m2 <= 0.0 {
+            return Err(invalid("unrepresentable acoustic surface area").into());
+        }
         Ok(HeterogeneousSurfaceProbe {
             model: self,
             faces: faces.to_vec(),
@@ -231,7 +268,10 @@ impl HeterogeneousSurfaceProbe<'_, '_, '_> {
         poll(cancelled)?;
         let omega = core::f64::consts::TAU * frequency_hz;
         if pressure_pa.len() != self.model.ndof() || !omega.is_finite() || omega <= 0.0 {
-            return Err(invalid("surface power requires original coefficients and a finite positive frequency").into());
+            return Err(invalid(
+                "surface power requires original coefficients and a finite positive frequency",
+            )
+            .into());
         }
         let mut active = Dd::ZERO;
         let mut reactive = Dd::ZERO;
@@ -276,7 +316,9 @@ impl HeterogeneousSurfaceProbe<'_, '_, '_> {
     ) -> Result<f64, HeterogeneousError> {
         poll(cancelled)?;
         if !core::ptr::eq(self.model, state.model) {
-            return Err(invalid("surface state belongs to another spatial/material operator").into());
+            return Err(
+                invalid("surface state belongs to another spatial/material operator").into(),
+            );
         }
         let mut power = Dd::ZERO;
         for sample in &self.samples {
@@ -285,14 +327,15 @@ impl HeterogeneousSurfaceProbe<'_, '_, '_> {
             let mut derivative = 0.0;
             for shape in &sample.shapes {
                 pressure += state.pressure_pa()[shape.dof] * shape.value;
-                derivative += state.pressure_potential_pa_s()[shape.dof] * shape.normal_derivative_m_inv;
+                derivative +=
+                    state.pressure_potential_pa_s()[shape.dof] * shape.normal_derivative_m_inv;
             }
             let velocity = -derivative * sample.inverse_density;
             if !pressure.is_finite() || !derivative.is_finite() || !velocity.is_finite() {
                 return Err(invalid("nonfinite transient acoustic surface field").into());
             }
-            power = power + Dd::from_f64(pressure) * Dd::from_f64(velocity)
-                * Dd::from_f64(sample.weight_m2);
+            power = power
+                + Dd::from_f64(pressure) * Dd::from_f64(velocity) * Dd::from_f64(sample.weight_m2);
         }
         poll(cancelled)?;
         let power = power.to_f64();

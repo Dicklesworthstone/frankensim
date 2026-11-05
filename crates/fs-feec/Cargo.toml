@@ -21,6 +21,8 @@ terminal-relative = ["dep:fs-blake3", "dep:fs-ports"]
 moonshot-integral-topology = ["terminal-relative"]
 
 [dependencies]
+fs-exec = { path = "../fs-exec" }
+fs-query = { path = "../fs-query" }
 fs-blake3 = { path = "../fs-blake3", optional = true }
 fs-io = { path = "../fs-io", optional = true }
 fs-ports = { path = "../fs-ports", optional = true }
@@ -35,6 +37,7 @@ fs-soa = { path = "../fs-soa" }
 fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
+fs-alloc = { path = "../fs-alloc" }
 fs-obs = { path = "../fs-obs" }
 fs-propcheck = { path = "../fs-propcheck" }
 fs-rand = { path = "../fs-rand" }
@@ -57,3 +60,4 @@ required-features = ["dvtd-driver"]
 
 [lints]
 workspace = true
+

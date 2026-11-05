@@ -225,7 +225,7 @@ impl HelmholtzFe<'_> {
         if cancelled() {
             return Err(invalid("boundary tangential stiffness cancelled"));
         }
-        let quad = tri_quadrature(self.order + 1);
+        let quad = tri_quadrature(self.face_quadrature_order(self.order + 1));
         let mut coo = Coo::new(self.ndof(), self.ndof());
         let mut seen = BTreeSet::new();
         for &face in faces {
@@ -247,20 +247,50 @@ impl HelmholtzFe<'_> {
             let (tet_index, omitted, _) = self.owners[fi];
             let tet = self.space.complex.tets[tet_index as usize];
             let local: Vec<usize> = (0..4).filter(|&i| i != omitted as usize).collect();
-            let pa = self.positions[tet[local[0]] as usize];
-            let e1 = sub3(self.positions[tet[local[1]] as usize], pa);
-            let e2 = sub3(self.positions[tet[local[2]] as usize], pa);
-            let twice_area = 2.0 * rule.area;
-            let normal = cross3(e1, e2).map(|v| v / twice_area);
-            let g1 = cross3(e2, normal).map(|v| v / twice_area);
-            let g2 = cross3(normal, e1).map(|v| v / twice_area);
-            let g0 = std::array::from_fn::<_, 3, _>(|i| -g1[i] - g2[i]);
-            let tangent = [g0, g1, g2];
+            let tangents = if self.is_curved() {
+                let mut tangents = Vec::with_capacity(quad.len());
+                for &(barycentric, _) in &quad {
+                    if cancelled() {
+                        return Err(invalid("boundary tangential stiffness cancelled"));
+                    }
+                    let mut lam = [0.0; 4];
+                    for i in 0..3 {
+                        lam[local[i]] = barycentric[i];
+                    }
+                    let surface =
+                        self.geometry_face_point(tet_index as usize, omitted as usize, lam)?;
+                    let normal = surface.outward_normal;
+                    let projected = |i: usize| {
+                        let gradient = surface.point.barycentric_gradients[local[i]];
+                        let component = dot3(gradient, normal);
+                        std::array::from_fn::<_, 3, _>(|axis| {
+                            gradient[axis] - component * normal[axis]
+                        })
+                    };
+                    let g1 = projected(1);
+                    let g2 = projected(2);
+                    let g0 = std::array::from_fn(|axis| -g1[axis] - g2[axis]);
+                    tangents.push([g0, g1, g2]);
+                }
+                tangents
+            } else {
+                // Preserve the established affine triangle arithmetic.
+                let pa = self.positions[tet[local[0]] as usize];
+                let e1 = sub3(self.positions[tet[local[1]] as usize], pa);
+                let e2 = sub3(self.positions[tet[local[2]] as usize], pa);
+                let twice_area = 2.0 * rule.area;
+                let normal = cross3(e1, e2).map(|v| v / twice_area);
+                let g1 = cross3(e2, normal).map(|v| v / twice_area);
+                let g2 = cross3(normal, e1).map(|v| v / twice_area);
+                let g0 = std::array::from_fn::<_, 3, _>(|i| -g1[i] - g2[i]);
+                vec![[g0, g1, g2]; quad.len()]
+            };
             let mut entries = Vec::new();
             for (global, function) in self.space.element_dofs(tet_index as usize) {
                 let gradients: Vec<[f64; 3]> = quad
                     .iter()
-                    .map(|(barycentric, _)| {
+                    .zip(&tangents)
+                    .map(|((barycentric, _), tangent)| {
                         let mut lam = [0.0; 4];
                         for i in 0..3 {
                             lam[local[i]] = barycentric[i];

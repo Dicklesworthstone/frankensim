@@ -1613,7 +1613,9 @@ dependencies = [
 name = "fs-feec"
 version = "0.0.1"
 dependencies = [
+ "fs-alloc",
  "fs-blake3",
+ "fs-exec",
  "fs-io",
  "fs-ivl",
  "fs-la",
@@ -1624,6 +1626,7 @@ dependencies = [
  "fs-ports",
  "fs-propcheck",
  "fs-qty",
+ "fs-query",
  "fs-rand",
  "fs-rep-mesh",
  "fs-roofline",
