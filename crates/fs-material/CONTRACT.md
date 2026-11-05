@@ -2085,7 +2085,7 @@ velocities once per snapshot. Original force balances and
 must close to a relative numerical tolerance of 1e-10. Signed carrier mobility,
 current contributions and complete pair receipts remain inspectable.
 
-Both paths require a prescribed massive neutral background, zero magnetic
+Both static paths require a prescribed massive neutral background, zero magnetic
 field and zero frequency. They are local Maxwellian fluid closures; background
 dynamics, nonlocal transport, Spitzer-Harm kinetic electrical conductivity,
 Hall effects, electrical breakdown, non-Maxwellian distributions, excited-state
@@ -2126,6 +2126,36 @@ analytic inverse, prove that ion-ion drag changes relative motion, and retain
 signed thermal corrections and exact population binding. Cancellation is
 polled per species/pair before publication. There
 is no unsafe code, evolving state, default source, or new runtime dependency.
+
+### Settled harmonic current from the same carrier sources
+
+`IonizedGasConductivity::prepare_harmonic` retains the exact original state,
+background anchors and Coulomb pair moments. For peak phasors with
+`exp(+i omega t)`, it solves `(K+i omega M)u=bE`, where `M_ss=n_s m_s`
+and `b_s=n_s q_s`. Independent carriers keep an O(N) diagonal path;
+coupled transport diagonalizes the mass-normalized symmetric drag once and
+reuses its real spectrum for O(N²) frequency responses, capped at 128 carriers.
+Collision rates remain reciprocal-second rates without a spurious 2*pi factor.
+Original per-carrier momentum and power balances must close within 1e-10.
+
+The response reports three-dimensional peak velocities/current, cycle-mean
+background and pair friction heat, the original signed drift-dependent thermal
+correction, and separate mean drift kinetic storage U. The conventional
+reactive power `Im(sum(E*conj(J)))/2` equals `2*omega*U`; it is not heat.
+No zero-drift thermal exchange is attributed to the electrical drive.
+Actual instantaneous peak speed, including elliptical polarization and every
+pair-relative motion, is checked against the original carrier/source bounds.
+Only positive finite angular frequencies are accepted. Exactly DC uses the
+static owner; the low-frequency sinusoidal mean approaches one half of the
+DC heat at the same peak field.
+
+Populations, temperatures and Markovian rates remain frozen. This supplies no
+Hall response, kinetic/nonlocal conductivity, transient initialization,
+dielectric background, Maxwell propagation or empirical broadband validation.
+Cancellation is polled through species/pair work and around the bounded dense
+preparation. `tests/ionized_gas/harmonic.rs` targets independent Drude and
+two-fluid complex inverses, DC/high-frequency limits, heat/storage separation,
+polarized peak admission, source retention and invalid/cancelled responses.
 
 ## Permanent secondary creep
 

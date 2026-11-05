@@ -69,7 +69,7 @@ mod heat_capacity_state;
 pub mod hyper;
 pub mod identifiability;
 pub mod iso9613;
-/// Equilibrium charge carriers and sourced collisional DC transport.
+/// Equilibrium charge carriers and sourced DC/harmonic collisional transport.
 pub mod ionized_gas;
 pub mod phase;
 /// Source-bound reciprocal longitudinal piezoelectric stress, field and storage.

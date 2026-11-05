@@ -9,6 +9,8 @@ use fs_material::ionized_gas::{IonizedGasConductivity, IonizedGasError};
 mod coulomb;
 #[path = "ionized_gas/frozen.rs"]
 mod frozen;
+#[path = "ionized_gas/harmonic.rs"]
+mod harmonic;
 
 #[test]
 fn g1_saha_populations_and_particle_masses_drive_current_without_neutral_transport() {

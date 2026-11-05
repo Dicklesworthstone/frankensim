@@ -1,4 +1,4 @@
-//! Source-bound collisional DC response of a weakly ionized ideal gas.
+//! Source-bound collisional current response of a weakly ionized ideal gas.
 //!
 //! The original source-bound state supplies every carrier abundance, charge,
 //! mass and temperature, including frozen finite-rate populations. A separately
@@ -9,13 +9,15 @@
 //! or freely moving electron-ion collision frequencies. `with_coulomb_drag`
 //! adds source-bound symmetric friction between every charged pair and solves
 //! their correlated velocities with the original background anchors retained.
-//! Magnetic/Hall response, finite-frequency inertia, sheaths, diffusion currents,
-//! electrical breakdown and radiation require different constitutive models.
+//! `prepare_harmonic` retains those same sources and adds settled-harmonic
+//! carrier inertia, complex current, friction heat and reversible kinetic storage.
+//! Magnetic/Hall response, sheaths, diffusion currents, electrical breakdown,
+//! kinetic/nonlocal response and radiation require different constitutive models.
 //!
 //! Reference for the relaxation law and its frequency dependence: R. Fitzpatrick,
 //! *Dielectric constant of a collisional plasma*, equations 1202–1204,
 //! <https://farside.ph.utexas.edu/teaching/em/lectures/node103.html>.
-//! The DC, local, unmagnetized, weak-drift restriction is part of this law.
+//! All responses remain local, unmagnetized and weak-drift; static methods require DC.
 
 use fs_math::det::{exp, ln, sqrt};
 use fs_qty::{Dims, Volume};
@@ -29,7 +31,9 @@ use fs_thermochem::equilibrium::composition::{
 use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 
 mod coulomb;
+mod harmonic;
 mod relaxation;
+pub use harmonic::{IonizedGasHarmonic, IonizedGasHarmonicResponse};
 pub use relaxation::{
     CarrierMomentumRelaxation, CarrierMomentumSource, ElectronNeutralMomentumContribution,
 };
@@ -150,6 +154,8 @@ impl IonizedGasCarrier {
 
 /// Electrical dissipation supplied to the two thermal pools [W/m³].
 /// The static weak-drift closure has no separately evolved drift kinetic energy.
+/// Harmonic responses use this same partition for cycle-mean friction and
+/// report their reversible drift kinetic storage separately.
 /// Pair friction has nonnegative mass-weighted shares; a signed correction
 /// accounts for the drift dependence of unequal-temperature Coulomb exchange.
 /// Zero-drift electron/heavy thermal exchange remains a separate energy process.
