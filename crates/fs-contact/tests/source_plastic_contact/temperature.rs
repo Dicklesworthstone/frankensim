@@ -2,6 +2,9 @@
 
 use super::*;
 use fs_contact::normal_patch::plastic_source::temperature::SourcePlasticTemperatureError;
+use fs_contact::normal_patch::{
+    FiniteGapPlasticContinuationKind, FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError,
+};
 use fs_matdb::ClaimSet;
 use fs_qty::Temperature;
 
@@ -79,6 +82,305 @@ fn self_compliance(law: &SourcePlasticContact) -> f64 {
     let side = law.model().config().grid.cell_width_m;
     4.0 * side * (1.0 + 2.0_f64.sqrt()).ln()
         / (core::f64::consts::PI * law.normal_source().elastic().reduced_modulus_pa())
+}
+
+fn thermal_load_controls() -> FiniteGapPlasticLoadControls {
+    FiniteGapPlasticLoadControls {
+        minimum_approach_m: -1.0e-4,
+        maximum_approach_m: 1.0e-4,
+        absolute_force_tolerance_n: 1.0e-14,
+        relative_force_tolerance: 1.0e-12,
+        approach_tolerance_m: 1.0e-18,
+        maximum_equilibrium_evaluations: 128,
+    }
+}
+
+#[test]
+fn g1_maintained_load_thermal_modulus_change_retains_dent_and_separates_work() {
+    with_cx(|cx, _| {
+        let (cards, law) = thermal_source(
+            [1.0e6, 2.0e6],
+            [0.75e6, 2.0e6],
+            [1.0e7, 2.0e7],
+            envelope(),
+            cx,
+        );
+        let dented = law.advance(&law.initial_state(), 5.0e-5, cx).unwrap();
+        let force = 0.005;
+        let loaded = law
+            .advance_at_load(&dented.candidate, force, thermal_load_controls(), cx)
+            .unwrap();
+        let before = loaded.candidate;
+        let saved = before.clone();
+        let old = before.contact_state();
+        let old_energy = loaded.receipt.normal.reversible_energy_j;
+        assert!(old.plastic_depth_m()[12] > 0.0);
+
+        let unchanged = law
+            .refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        assert_eq!(unchanged.source(), &law);
+        assert_eq!(unchanged.candidate(), &before);
+        assert_eq!(unchanged.load().equilibrium_evaluations, 0);
+        assert_eq!(unchanged.receipt().normal_work_j, 0.0);
+        assert_eq!(unchanged.receipt().parameter_work_j, 0.0);
+
+        let hot = law
+            .refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [HOT, COLD],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        let next = hot.candidate().contact_state();
+        let account = hot.receipt();
+        assert_eq!(
+            account.kind,
+            FiniteGapPlasticContinuationKind::MaterialRefreshAtLoad
+        );
+        assert_eq!(hot.original_source_identity(), law.identity());
+        assert_eq!(account.predecessor_state_identity, old.identity());
+        assert_eq!(hot.load().predecessor_state_identity, old.identity());
+        assert_eq!(hot.load().response_identity, account.response.identity);
+        common::close(hot.load().achieved_force_n, force);
+        common::close(next.pressure_pa()[12], force / 1.0e-8);
+        common::close(
+            next.approach_m() - old.approach_m(),
+            0.5 * self_compliance(&law) * force / 1.0e-8,
+        );
+        common::close(account.elastic_energy_j, 1.5 * old_energy);
+        common::close(account.elastic_energy_change_j, 0.5 * old_energy);
+        common::close(account.normal_work_j, old_energy);
+        common::close(account.parameter_work_j, -0.5 * old_energy);
+        assert_eq!(account.response.plastic_work_j, 0.0);
+        assert_eq!(next.plastic_depth_m(), old.plastic_depth_m());
+        assert_eq!(next.recession_m(), old.recession_m());
+        assert_eq!(
+            next.cumulative_plastic_work_j(),
+            old.cumulative_plastic_work_j()
+        );
+        common::close(hot.source().hardness_sources()[0].hardness_pa(), 0.75e6);
+        assert_eq!(
+            hot.source().hardness_sources()[1],
+            law.hardness_sources()[1]
+        );
+        for side in 0..2 {
+            assert_eq!(
+                hot.source().hardness_sources()[side].key(),
+                law.hardness_sources()[side].key()
+            );
+            assert_eq!(
+                hot.source().hardness_sources()[side]
+                    .property()
+                    .answer()
+                    .receipt
+                    .selected,
+                law.hardness_sources()[side]
+                    .property()
+                    .answer()
+                    .receipt
+                    .selected,
+            );
+        }
+        assert!(law.advance(hot.candidate(), next.approach_m(), cx).is_err());
+        let cooled = hot
+            .source()
+            .refresh_at_temperatures_at_load(
+                hot.candidate(),
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        common::close(
+            cooled.candidate().contact_state().approach_m(),
+            old.approach_m(),
+        );
+        common::close(cooled.receipt().elastic_energy_j, old_energy);
+        assert_eq!(
+            cooled.candidate().contact_state().plastic_depth_m(),
+            old.plastic_depth_m()
+        );
+        let (source, state, _, load) = cooled.into_parts();
+        common::close(load.achieved_force_n, force);
+        assert!(
+            source
+                .advance_at_load(&state, force, thermal_load_controls(), cx)
+                .is_ok()
+        );
+        assert_eq!(before, saved);
+    });
+}
+
+#[test]
+fn g3_direct_thermal_load_solve_avoids_a_fictitious_held_approach_dent() {
+    with_cx(|cx, _| {
+        // This synthetic modulus/hardness path deliberately makes a held-
+        // approach refresh yield although the maintained-force endpoint is elastic.
+        let (cards, law) =
+            thermal_source([1.0e6, 2.0e6], [0.75e6, 1.5e6], [2.0e8; 2], envelope(), cx);
+        let force = 0.005;
+        let before = law
+            .advance_at_load(&law.initial_state(), force, thermal_load_controls(), cx)
+            .unwrap()
+            .candidate;
+        let held = law
+            .refresh_at_temperatures(&before, cards.each_ref(), [HOT; 2], COLD, cx)
+            .unwrap();
+        assert!(held.receipt().response.plastic_work_j > 0.0);
+        assert!(held.candidate().contact_state().plastic_depth_m()[12] > 0.0);
+
+        let direct = law
+            .refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [HOT; 2],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .unwrap();
+        common::close(direct.load().achieved_force_n, force);
+        common::close(
+            direct.candidate().contact_state().approach_m(),
+            0.1 * before.contact_state().approach_m(),
+        );
+        assert_eq!(
+            direct.candidate().contact_state().plastic_depth_m(),
+            &[0.0; 25]
+        );
+        assert_eq!(direct.receipt().response.plastic_work_j, 0.0);
+        assert!(direct.receipt().normal_work_j < 0.0);
+        assert!(direct.receipt().parameter_work_j > 0.0);
+    });
+}
+
+#[test]
+fn g0_thermal_load_refusals_preserve_original_sources_and_history() {
+    with_cx(|cx, gate| {
+        let (cards, law) =
+            thermal_source([1.0e6, 2.0e6], [0.25e6, 2.0e6], [2.0e7; 2], envelope(), cx);
+        let force = 0.005;
+        let before = law
+            .advance_at_load(&law.initial_state(), force, thermal_load_controls(), cx)
+            .unwrap()
+            .candidate;
+        let saved = before.clone();
+        assert!(matches!(
+            law.refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [HOT, COLD],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            ),
+            Err(SourcePlasticTemperatureError::Load(
+                FiniteGapPlasticLoadError::TargetOutsideApproachBounds { .. }
+            ))
+        ));
+        assert!(matches!(
+            law.refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                0.004,
+                thermal_load_controls(),
+                cx,
+            ),
+            Err(SourcePlasticTemperatureError::Load(
+                FiniteGapPlasticLoadError::PredecessorLoadMismatch { .. }
+            ))
+        ));
+        let outside = FiniteGapPlasticLoadControls {
+            maximum_approach_m: 1.01e-4,
+            ..thermal_load_controls()
+        };
+        assert!(matches!(
+            law.refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                force,
+                outside,
+                cx,
+            ),
+            Err(SourcePlasticTemperatureError::Contact(
+                SourcePlasticContactError::OutsideApplicability { .. }
+            ))
+        ));
+        let revised =
+            MaterialCard::supersede(&cards[0], cards[0].claims().clone(), vec![]).unwrap();
+        assert!(
+            law.refresh_at_temperatures_at_load(
+                &before,
+                [&revised, &cards[1]],
+                [COLD; 2],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .is_err()
+        );
+        assert!(
+            law.refresh_at_temperatures_at_load(
+                &before,
+                [&cards[1], &cards[0]],
+                [COLD; 2],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .is_err()
+        );
+        assert!(
+            law.refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [330.0, COLD],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .is_err()
+        );
+        gate.request();
+        assert!(
+            law.refresh_at_temperatures_at_load(
+                &before,
+                cards.each_ref(),
+                [COLD; 2],
+                COLD,
+                force,
+                thermal_load_controls(),
+                cx,
+            )
+            .is_err()
+        );
+        assert_eq!(before, saved);
+    });
 }
 
 #[test]

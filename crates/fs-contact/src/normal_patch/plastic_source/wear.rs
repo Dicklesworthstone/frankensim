@@ -7,10 +7,14 @@
 //! pressure appreciably. This bounded surface law does not transport debris or
 //! infer local sliding from macroscopic displacement, and it assigns no heat.
 
+/// Wear under an explicitly finite loading-device stiffness.
+pub mod drive;
 /// Adaptive integration of pressure-dependent local surface recession.
 pub mod integration;
 /// Prescribed-load wear without intermediate indentation histories.
 pub mod load;
+/// Prescribed-temperature continuation with both original wear inventories.
+pub mod temperature;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -20,6 +24,7 @@ use fs_material::state_point::{MaterialStatePointError, ResolvedInterfaceStatePo
 use fs_qty::{Dims, QuantitySpec};
 use fs_tribo::{ArchardLaw, TriboError, WearAdvance, WearState};
 
+use super::drive::SourcePlasticDriveError;
 use super::load::SourcePlasticLoadError;
 use super::temperature::SourcePlasticTemperatureError;
 use super::{SourcePlasticContact, SourcePlasticContactError, SourcePlasticContactState};
@@ -37,6 +42,8 @@ pub enum SourcePlasticWearError {
     Contact(SourcePlasticContactError),
     /// The prescribed normal load or original source load envelope refused.
     Load(SourcePlasticLoadError),
+    /// Finite-stiffness device equilibrium or original physical bounds refused.
+    Drive(SourcePlasticDriveError),
     /// Native Archard arithmetic or provenance refusal.
     Tribology(TriboError),
     /// Original normal and pressure-cap sources refused temperature continuation.
@@ -52,6 +59,11 @@ impl From<SourcePlasticContactError> for SourcePlasticWearError {
 impl From<SourcePlasticLoadError> for SourcePlasticWearError {
     fn from(error: SourcePlasticLoadError) -> Self {
         Self::Load(error)
+    }
+}
+impl From<SourcePlasticDriveError> for SourcePlasticWearError {
+    fn from(error: SourcePlasticDriveError) -> Self {
+        Self::Drive(error)
     }
 }
 impl From<TriboError> for SourcePlasticWearError {
@@ -532,75 +544,18 @@ impl SourcePlasticArchardWear {
         interface_temperature_k: f64,
         cx: &Cx<'_>,
     ) -> Result<SourcePlasticWearThermalRefresh, SourcePlasticWearError> {
-        self.admit(before)?;
-        checkpoint(cx)?;
-        if self
-            .coefficients
-            .properties()
-            .iter()
-            .any(|property| !property.has_only_fixed_external_conditions(Some("T"), false))
-            || self.hardness.iter().any(|source| {
-                source
-                    .resolved()
-                    .properties()
-                    .iter()
-                    .any(|property| !property.has_only_fixed_external_conditions(Some("T"), false))
-            })
-        {
-            return Err(invalid(
-                "wear refresh requires one owned temperature and otherwise fixed conditions",
-            ));
-        }
-        let refreshed = self.contact.refresh_at_temperatures(
-            &before.contact,
-            material_cards,
-            bulk_temperatures_k,
-            interface_temperature_k,
-            cx,
-        )?;
-        let normal = refreshed.source().normal_source();
-        let coefficients =
-            if self.coefficients.query_point() == normal.interface_state().query_point() {
-                self.coefficients.clone()
-            } else {
-                self.coefficients.at_query_point(
-                    normal.elastic().interface().card(),
-                    &normal.interface_state().query(),
-                )?
-            };
-        let points = [
-            normal.elastic().surface_a_state().resolved().query(),
-            normal.elastic().surface_b_state().resolved().query(),
-        ];
-        let mut hardness = self.hardness.clone();
-        for side in 0..2 {
-            if self.hardness[side].resolved().state_coordinate("T")
-                != Some(bulk_temperatures_k[side])
-            {
-                hardness[side] =
-                    self.hardness[side].at_query_point(material_cards[side], &points[side])?;
-            }
-        }
-        let (contact, contact_state, receipt) = refreshed.into_parts();
-        let source = Self::new(
-            contact,
-            coefficients,
-            self.coefficient_keys.clone(),
-            hardness,
-            self.maximum_recession_m,
-        )?;
-        source.admit_receded_profile(&contact_state, &before.recession_m, cx)?;
-        let candidate = SourcePlasticWearState {
-            owner: source.identity,
-            contact: contact_state,
-            volumes: before.volumes,
-            recession_m: before.recession_m.clone(),
-        };
-        Ok(SourcePlasticWearThermalRefresh {
-            source,
-            candidate,
-            receipt,
+        self.refresh_temperature_with(before, material_cards, bulk_temperatures_k, cx, || {
+            let refreshed = self.contact.refresh_at_temperatures(
+                &before.contact,
+                material_cards,
+                bulk_temperatures_k,
+                interface_temperature_k,
+                cx,
+            )?;
+            let (contact, state, receipt) = refreshed.into_parts();
+            Ok((contact, state, receipt, ()))
         })
+        .map(|(refresh, ())| refresh)
     }
 
     // A fixed original source may only describe material still within its

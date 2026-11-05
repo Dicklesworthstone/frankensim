@@ -2955,3 +2955,41 @@ experimental validation, a loading-machine dynamic model, or bulk plasticity.
 Source potential change versus signed source work and actual receiver wrench work versus source work have independent acceptance gates. Large rigid-body motion cannot silently replace the relative-gap work check. Original Hertz rate and duration limits remain active; a Hunt–Crossley source with nonzero dissipation is refused because this conservative port has no dissipative work receipt. Undefined branch evaluations remain source refusals rather than clipped force or invented detachment events.
 
 The receiving callback stages downstream state. Time, approach, energy, and accepted-step count publish only after all source, motion, work, callback, and cancellation checks succeed. Force, energy, rate, duration, and step-count budgets are explicit. Stepping uses fixed-size adapter state without a new solver or heap scratch. Frame changes, snap transitions, and frictional or caloric heat evolution require their respective owning protocols.
+
+
+## Original-source thermal hardness and wear under physical loading boundaries
+
+Original-source contact and wear expose maintained-load temperature continuation.
+Each body retains its own selected indentation-hardness test and bulk temperature;
+interface coefficients follow the independently prescribed interface temperature.
+Both normal boundary modes share source resolution. Immutable cards, exact claims,
+non-temperature conditions, both removal inventories and permanent indentation
+remain original. The changed normal equilibrium is solved directly from accepted
+history, without a fictitious held-approach indentation step. Only the complete
+candidate, including all refreshed wear claims and remaining homogeneous-depth
+checks, may be adopted; a late refusal leaves every accepted account unchanged.
+
+Source-bound finite-stiffness loading uses the same original physical envelope.
+The wear owner supports explicit normal loading, local recession at a held device
+position, and adaptive integration of a prescribed sliding path against that
+spring. The same native Archard cell loop and the same adaptive full-versus-two-
+half-step driver serve fixed approach, maintained force and finite stiffness.
+Each body retains its own k/H, removed-volume inventory and recession field.
+Pressure and approach respond to removal; plastic history is never extrapolated
+or borrowed from a rejected coarse trial.
+
+At fixed device position, the normal-work account accumulates spring-to-contact
+energy transfer, not external actuator work. Contact storage and spring storage
+remain separate. Adaptive error estimates cover pressure, both body recessions,
+permanent indentation and rigid approach; only accepted fine steps contribute
+work and removal. These are local estimates, not certified global error bounds.
+Changing the force, device position, temperature or spatial slip pattern requires
+an explicitly supplied new path segment. There is no autonomous heating, inferred
+sliding, empirical hardness conversion, debris transport or bulk-plasticity claim.
+
+Ten source regressions specify independent temperature-dependent k/H wear,
+retained original histories and claim identities, correct maintained-load work,
+finite-stiffness plastic indentation, spring-energy release during wear, exponential
+finite-distance pressure decay, adaptive recovery from oversized steps, and atomic
+source/domain/budget/cancellation refusals. Their analytical fixtures are numerical
+model checks and do not establish experimental accuracy or benchmark performance.

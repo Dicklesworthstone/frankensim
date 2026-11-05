@@ -10,6 +10,8 @@
 //! Material state and external conditions are fixed for each owner. Explicit
 //! thermal and wear continuations retain the original irreversible history.
 
+/// Finite loading-device stiffness with original material and geometry bounds.
+pub mod drive;
 /// Prescribed normal force with original material and applicability bounds.
 pub mod load;
 /// Original temperature-dependent material properties with retained history.

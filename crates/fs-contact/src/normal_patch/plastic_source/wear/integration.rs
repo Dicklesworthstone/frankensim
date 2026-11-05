@@ -15,14 +15,14 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 
 use crate::normal_patch::{
-    FiniteGapContactError, FiniteGapPlasticError, FiniteGapPlasticLoadControls,
-    FiniteGapPlasticLoadError,
+    FiniteGapContactError, FiniteGapPlasticDriveError, FiniteGapPlasticError,
+    FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError,
 };
 
 use super::{
-    SourcePlasticArchardWear, SourcePlasticContactError, SourcePlasticLoadError,
-    SourcePlasticWearAdvance, SourcePlasticWearError, SourcePlasticWearState, add_compensated,
-    checkpoint,
+    SourcePlasticArchardWear, SourcePlasticContactError, SourcePlasticDriveError,
+    SourcePlasticLoadError, SourcePlasticWearAdvance, SourcePlasticWearError,
+    SourcePlasticWearState, add_compensated, checkpoint,
 };
 
 /// Local error thresholds and finite work limits for one complete sliding path.
@@ -104,7 +104,8 @@ pub struct WearIntegrationReceipt {
     pub removed_volume_m3: [f64; 2],
     /// Sum of accepted irreversible plastic work, distinct from wear volume [J].
     pub plastic_work_j: f64,
-    /// Normal actuator work; zero at held approach [J].
+    /// Normal boundary work; zero at held approach [J].
+    /// At held device position this is released spring energy, not actuator work.
     pub normal_work_j: f64,
     /// Sum of accepted elastic-storage changes, using the native stable difference [J].
     pub elastic_energy_change_j: f64,
@@ -390,6 +391,9 @@ fn retryable(error: &SourcePlasticWearError) -> bool {
         })
         | SourcePlasticWearError::Load(SourcePlasticLoadError::Load(
             FiniteGapPlasticLoadError::TargetOutsideApproachBounds { .. },
+        ))
+        | SourcePlasticWearError::Drive(SourcePlasticDriveError::Drive(
+            FiniteGapPlasticDriveError::TargetOutsideApproachBounds { .. },
         )) => true,
         SourcePlasticWearError::Contact(SourcePlasticContactError::Contact(native))
         | SourcePlasticWearError::Load(SourcePlasticLoadError::Contact(
@@ -397,6 +401,12 @@ fn retryable(error: &SourcePlasticWearError) -> bool {
         ))
         | SourcePlasticWearError::Load(SourcePlasticLoadError::Load(
             FiniteGapPlasticLoadError::Contact(native),
+        ))
+        | SourcePlasticWearError::Drive(SourcePlasticDriveError::Contact(
+            SourcePlasticContactError::Contact(native),
+        ))
+        | SourcePlasticWearError::Drive(SourcePlasticDriveError::Drive(
+            FiniteGapPlasticDriveError::Contact(native),
         )) => matches!(
             native,
             FiniteGapPlasticError::Contact(

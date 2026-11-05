@@ -9,6 +9,12 @@ mod load;
 #[path = "source_plastic_wear/integration.rs"]
 mod integration;
 
+#[path = "source_plastic_wear/temperature_load.rs"]
+mod temperature_load;
+
+#[path = "source_plastic_wear/drive.rs"]
+mod drive;
+
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_blake3::hash_domain;
 use fs_contact::interface_binding::{

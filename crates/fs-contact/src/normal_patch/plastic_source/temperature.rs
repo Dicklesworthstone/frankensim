@@ -1,14 +1,16 @@
 //! Prescribed material temperatures with retained indentation and wear history.
 //!
-//! The rigid approach, original sampled geometry, and applicability envelope
-//! stay fixed. Original selected material claims supply E(T), nu(T), and H(T)
+//! The chosen normal boundary, original sampled geometry, and applicability
+//! envelope stay fixed. Original selected material claims supply E(T), nu(T), and H(T)
 //! independently for the two bodies. The pressure field re-equilibrates and a
 //! reduced hardness may produce additional permanent indentation. Cooling does
 //! not heal an existing dent or replace removed material.
 //!
-//! The signed parameter supply is the elastic-energy change plus incremental
-//! plastic work. It is an endpoint account for the prescribed condition change,
-//! not heat, entropy, thermal expansion, or a continuous thermal-path integral.
+//! At held approach the signed parameter supply is the elastic-energy change
+//! plus incremental plastic work. At maintained force it additionally subtracts
+//! normal work `F * delta(approach)`. This is an endpoint account for the prescribed
+//! condition change, not heat, entropy, thermal expansion, or a continuous
+//! thermal-path integral.
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -18,6 +20,7 @@ use fs_material::state_point::MaterialStatePointError;
 use crate::normal_patch::adhesive::temperature::{AdhesiveTemperatureError, AdhesiveTemperatures};
 use crate::normal_patch::{
     FiniteGapContactError, FiniteGapPlasticContinuationReceipt, FiniteGapPlasticError,
+    FiniteGapPlasticLoadControls, FiniteGapPlasticLoadError, FiniteGapPlasticLoadReceipt,
 };
 
 use super::{
@@ -34,6 +37,8 @@ pub enum SourcePlasticTemperatureError {
     HardnessSource(MaterialStatePointError),
     /// Native history transfer or the original physical envelope refused.
     Contact(SourcePlasticContactError),
+    /// The maintained normal force or native load search refused.
+    Load(FiniteGapPlasticLoadError),
 }
 
 impl From<AdhesiveTemperatureError> for SourcePlasticTemperatureError {
@@ -57,6 +62,12 @@ impl From<SourcePlasticContactError> for SourcePlasticTemperatureError {
 impl From<FiniteGapPlasticError> for SourcePlasticTemperatureError {
     fn from(error: FiniteGapPlasticError) -> Self {
         Self::Contact(error.into())
+    }
+}
+
+impl From<FiniteGapPlasticLoadError> for SourcePlasticTemperatureError {
+    fn from(error: FiniteGapPlasticLoadError) -> Self {
+        Self::Load(error)
     }
 }
 
@@ -113,6 +124,53 @@ impl SourcePlasticThermalRefresh {
     }
 }
 
+/// Original-source temperature continuation with a maintained normal resultant.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticThermalLoadRefresh {
+    thermal: SourcePlasticThermalRefresh,
+    load: FiniteGapPlasticLoadReceipt,
+}
+
+impl SourcePlasticThermalLoadRefresh {
+    /// Complete original source owner before changing prescribed temperatures.
+    pub const fn original_source_identity(&self) -> ContentHash {
+        self.thermal.original_source_identity()
+    }
+
+    /// Original selected sources, evaluated at the new independent temperatures.
+    pub const fn source(&self) -> &SourcePlasticContact {
+        self.thermal.source()
+    }
+
+    /// Direct maintained-force equilibrium with retained original physical history.
+    pub const fn candidate(&self) -> &SourcePlasticContactState {
+        self.thermal.candidate()
+    }
+
+    /// Storage, irreversible indentation, normal work, and parameter work.
+    pub const fn receipt(&self) -> &FiniteGapPlasticContinuationReceipt {
+        self.thermal.receipt()
+    }
+
+    /// Native force residual, approach bracket, and bounded work count.
+    pub const fn load(&self) -> &FiniteGapPlasticLoadReceipt {
+        &self.load
+    }
+
+    /// Move the complete original-source continuation without copying fields.
+    pub fn into_parts(
+        self,
+    ) -> (
+        SourcePlasticContact,
+        SourcePlasticContactState,
+        FiniteGapPlasticContinuationReceipt,
+        FiniteGapPlasticLoadReceipt,
+    ) {
+        let (source, candidate, receipt) = self.thermal.into_parts();
+        (source, candidate, receipt, self.load)
+    }
+}
+
 impl SourcePlasticContact {
     /// Change prescribed body and interface temperatures at fixed rigid approach.
     ///
@@ -133,6 +191,92 @@ impl SourcePlasticContact {
         interface_temperature_k: f64,
         cx: &Cx<'_>,
     ) -> Result<SourcePlasticThermalRefresh, SourcePlasticTemperatureError> {
+        let source = self.resolve_temperature_sources(
+            before,
+            material_cards,
+            bulk_temperatures_k,
+            interface_temperature_k,
+            cx,
+        )?;
+        let continuation = source
+            .model
+            .refresh_from(&self.model, &before.contact, cx)?;
+        source.admit_candidate(&continuation.candidate, cx)?;
+        Ok(SourcePlasticThermalRefresh {
+            original_source_identity: self.identity,
+            candidate: SourcePlasticContactState {
+                owner: source.identity,
+                contact: continuation.candidate,
+            },
+            source,
+            receipt: continuation.receipt,
+        })
+    }
+
+    /// Change original prescribed temperatures while retaining the applied force.
+    ///
+    /// The accepted predecessor must already carry `target_force_n` within the
+    /// declared force tolerance. Temperature-dependent E, nu, and hardness are
+    /// resolved once, then the native solver finds the new approach directly
+    /// from the ORIGINAL indentation/recession history. A held-approach thermal
+    /// return map is never used as an intermediate; it could create a spurious
+    /// irreversible dent before the force is restored.
+    ///
+    /// The whole approach bracket must fit the original physical envelope. A
+    /// softened surface that cannot sustain the force, or a force on an
+    /// unresolved plastic plateau, is explicitly refused. The returned normal
+    /// work is `F * delta(approach)`; signed parameter work is an endpoint account
+    /// requiring path refinement, not heat or an autonomous temperature law.
+    pub fn refresh_at_temperatures_at_load(
+        &self,
+        before: &SourcePlasticContactState,
+        material_cards: [&MaterialCard; 2],
+        bulk_temperatures_k: [f64; 2],
+        interface_temperature_k: f64,
+        target_force_n: f64,
+        controls: FiniteGapPlasticLoadControls,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticThermalLoadRefresh, SourcePlasticTemperatureError> {
+        self.admit_load_controls(controls)?;
+        let source = self.resolve_temperature_sources(
+            before,
+            material_cards,
+            bulk_temperatures_k,
+            interface_temperature_k,
+            cx,
+        )?;
+        let next = source.model.refresh_from_at_load(
+            &self.model,
+            &before.contact,
+            target_force_n,
+            controls,
+            cx,
+        )?;
+        source.admit_candidate(&next.continuation.candidate, cx)?;
+        Ok(SourcePlasticThermalLoadRefresh {
+            thermal: SourcePlasticThermalRefresh {
+                original_source_identity: self.identity,
+                candidate: SourcePlasticContactState {
+                    owner: source.identity,
+                    contact: next.continuation.candidate,
+                },
+                source,
+                receipt: next.continuation.receipt,
+            },
+            load: next.load,
+        })
+    }
+
+    // Source selection is independent of the normal boundary condition. Both
+    // continuations retain these exact claims, test contexts, and fixed axes.
+    fn resolve_temperature_sources(
+        &self,
+        before: &SourcePlasticContactState,
+        material_cards: [&MaterialCard; 2],
+        bulk_temperatures_k: [f64; 2],
+        interface_temperature_k: f64,
+        cx: &Cx<'_>,
+    ) -> Result<Self, SourcePlasticTemperatureError> {
         cx.checkpoint()
             .map_err(|_| FiniteGapPlasticError::Contact(FiniteGapContactError::Cancelled))?;
         if before.owner != self.identity {
@@ -177,11 +321,11 @@ impl SourcePlasticContact {
         let unchanged = normal.identity() == self.normal.identity()
             && hardness[0].identity() == self.hardness[0].identity()
             && hardness[1].identity() == self.hardness[1].identity();
-        let source = if unchanged {
-            self.clone()
+        if unchanged {
+            Ok(self.clone())
         } else {
             let config = self.model.config();
-            Self::new(
+            Ok(Self::new(
                 normal,
                 hardness,
                 config.grid,
@@ -193,20 +337,7 @@ impl SourcePlasticContact {
                 },
                 self.envelope,
                 cx,
-            )?
-        };
-        let continuation = source
-            .model
-            .refresh_from(&self.model, &before.contact, cx)?;
-        source.admit_candidate(&continuation.candidate, cx)?;
-        Ok(SourcePlasticThermalRefresh {
-            original_source_identity: self.identity,
-            candidate: SourcePlasticContactState {
-                owner: source.identity,
-                contact: continuation.candidate,
-            },
-            source,
-            receipt: continuation.receipt,
-        })
+            )?)
+        }
     }
 }
