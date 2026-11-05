@@ -16,7 +16,7 @@
 //!
 //! Limits, not hidden: infinite-baffle radiation (no head diffraction), a
 //! plane-wave series tract (no side branches or nasal coupling), a lumped
-//! two-mass or one-mass fold, and a rigid or single-pin yielding wall.
+//! two-mass, body-cover or one-mass fold, and a rigid or single-pin yielding wall.
 //!
 //! ```text
 //! frankensim-voice-performance-v1
@@ -26,10 +26,11 @@
 //! ambient moist_air <temperature_k> <pressure_pa> <relative_humidity>
 //! ambient mixture <temperature_k> <pressure_pa> <mole|mass> <count> <species fraction>...
 //! ambient thermochemical <temperature_k> <pressure_pa> <mole|mass> <count> <id fraction>...
-//! fold <two_mass|one_dof> <m_lower_kg> <m_upper_kg> <k_lower_n_m> <k_upper_n_m>
+//! fold <two_mass|body_cover|one_dof> <m_lower_kg> <m_upper_kg> <k_lower_n_m> <k_upper_n_m>
 //!      <k_couple_n_m> <damping_ratio> <rest_gap_m> <fold_length_m> <thickness_m>
 //!      [<thickness_upper_m>]      (the second viscous section; default 0.05 cm)
-//! fold_damping_upper <open_ratio>                    (required on two_mass, refused on one_dof)
+//! fold_damping_upper <open_ratio>                    (required on two_mass and body_cover, refused on one_dof)
+//! fold_body <m_body_kg> <k_body_n_m> <damping_ratio_body> <rest_gap_upper_m>   (required on body_cover only)
 //! tract_wall <surface_density_kg_m2> <stiffness_n_m3> <resistance_pa_s_m>   (optional)
 //! termination <flanged|unflanged|ideal_open>
 //! tract_source <identifier without spaces>
@@ -133,11 +134,21 @@
 //! (Ishizaka and Flanagan 1972, eq 3 and 4; [`FoldCard::damping_ratio`]). The key has no default: a
 //! `two_mass` card without it is refused by name. It is a key and not a field of the fold line because
 //! that line is positional, and a second ratio there would shift the fields after it.
+//!
+//! `body_cover` is Story and Titze's three-mass fold with its own pressure and flow law (NCVS Status and Progress
+//! Report 6, 1994; [`crate::glottis`], Body-cover fold). The fold line's masses, springs, coupling, damping ratio, rest
+//! gap, length and thicknesses are the cover's, lower first, with the rest gap the lower section's; `fold_damping_upper`
+//! is the upper cover mass's ratio, and `fold_body` gives the body's mass, its spring to the thyroid, its damping ratio
+//! (it does not step at closure) and the upper section's rest gap. All are for one fold, so `fold_mapping bilateral`
+//! halves the body with the cover. A `fold_shape` is refused on it. Tension and its gestures scale the body's spring
+//! with the cover's.
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
 use crate::driving_point::outlet::mouth_flow_line;
-use crate::glottis::{FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GlottalIsland};
+use crate::glottis::{
+    FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GlottalIsland,
+};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
@@ -182,6 +193,8 @@ pub struct VoiceDescription {
     pub fold: FoldCard,
     /// Opt-in shape of a two-mass fold along its length; `None` is the printed island.
     pub fold_shape: Option<FoldShape>,
+    /// The body of a `body_cover` fold, in the island's coordinate; `None` on the other folds.
+    pub fold_body: Option<FoldBody>,
     /// Optional single-pin yielding tract wall.
     pub wall: Option<WallPin>,
     /// Mouth radiation load.
@@ -305,6 +318,7 @@ impl VoiceDescription {
         let mut fold_mapping = None;
         let mut fold_shape = None;
         let mut fold_damping_upper = None;
+        let mut fold_body = None;
         for line in lines {
             let mut tokens = line.split_whitespace();
             let key = tokens.next().unwrap_or_default();
@@ -350,10 +364,11 @@ impl VoiceDescription {
                     if rest.len() != 11 {
                         arity(&rest, 10, key)?;
                     }
-                    let two_mass = match rest[0] {
-                        "two_mass" => true,
-                        "one_dof" => false,
-                        _ => return Err("fold model must be `two_mass` or `one_dof`".into()),
+                    let (two_mass, body_cover) = match rest[0] {
+                        "two_mass" => (true, false),
+                        "body_cover" => (true, true),
+                        "one_dof" => (false, false),
+                        _ => return Err("fold model must be `two_mass`, `body_cover` or `one_dof`".into()),
                     };
                     let card = FoldCard {
                         mass_lower_kg: field(&rest, 1, "lower mass")?,
@@ -374,7 +389,7 @@ impl VoiceDescription {
                         // Per-field provenance lives in the file's comments.
                         source: FoldCardSource::AuthoredEstimate,
                     };
-                    once(&mut fold, (two_mass, card), key)?;
+                    once(&mut fold, (two_mass, body_cover, card), key)?;
                 }
                 "tract_wall" => {
                     arity(&rest, 3, key)?;
@@ -560,14 +575,34 @@ impl VoiceDescription {
                     }
                     once(&mut fold_damping_upper, ratio, key)?;
                 }
+                "fold_body" => {
+                    arity(&rest, 4, key)?;
+                    let body = FoldBody {
+                        mass_kg: field(&rest, 0, "body mass")?,
+                        stiffness_n_m: field(&rest, 1, "body stiffness")?,
+                        damping_ratio: field(&rest, 2, "body damping ratio")?,
+                        rest_gap_upper_m: field(&rest, 3, "upper rest gap")?,
+                    };
+                    once(&mut fold_body, body, key)?;
+                }
                 other => return Err(format!("unknown key {other:?}")),
             }
         }
         let missing = |what: &str| format!("voice performance needs `{what}`");
         let (output_rate_hz, samples, mechanics_per_output) = audio.ok_or_else(|| missing("audio"))?;
-        let (two_mass, mut fold) = fold.ok_or_else(|| missing("fold"))?;
+        let (two_mass, body_cover, mut fold) = fold.ok_or_else(|| missing("fold"))?;
         if fold_mapping.is_some() {
             fold = fold.bilateral();
+        }
+        let fold_body = match (body_cover, fold_body) {
+            (true, Some(body)) if fold_mapping.is_some() => Some(FoldBody::bilateral(body)),
+            (true, Some(body)) => Some(body),
+            (true, None) => return Err(missing("fold_body")),
+            (false, Some(_)) => return Err("fold_body needs a body_cover fold".into()),
+            (false, None) => None,
+        };
+        if body_cover && fold_shape.is_some() {
+            return Err("fold_shape needs a two_mass fold, not body_cover".into());
         }
         match (two_mass, fold_damping_upper) {
             (true, Some(ratio)) => fold.damping_ratio_upper = ratio,
@@ -596,6 +631,7 @@ impl VoiceDescription {
             two_mass,
             fold,
             fold_shape,
+            fold_body,
             wall,
             termination: termination.ok_or_else(|| missing("termination"))?,
             sections,
@@ -651,6 +687,10 @@ impl VoiceDescription {
         )
         .and_then(|island| match self.fold_shape {
             Some(shape) => island.with_fold_shape(shape),
+            None => Ok(island),
+        })
+        .and_then(|island| match self.fold_body {
+            Some(body) => island.with_body(body),
             None => Ok(island),
         })
         .map_err(|e| format!("glottal island refused: {e:?}"))?;
@@ -753,7 +793,7 @@ pub struct VoiceInfo {
     pub samples: u64,
     /// Pascals at PCM full scale.
     pub full_scale_pa: f64,
-    /// Two-mass (`true`) or one-mass fold.
+    /// Two-mass or body-cover (`true`), or one-mass fold.
     pub two_mass: bool,
     /// Tract section count.
     pub sections: usize,
@@ -1585,6 +1625,54 @@ mod tests {
         assert_ne!(plain, render(&other), "the upper ratio must reach the radiated pressure");
         let mapped = render(&fixture("fold_mapping bilateral\n"));
         assert_ne!(plain, mapped, "the mapping must reach the radiated pressure");
+    }
+
+    /// The `body_cover` row: the fold line is the cover and `fold_body` the body, both halved by the mapping; every
+    /// missing, extra or misplaced part is refused by name, a body the island refuses is refused at build, and the
+    /// body's spring reaches the radiated pressure.
+    #[test]
+    fn the_body_cover_row_parses_maps_its_body_and_is_refused_by_name() {
+        let parse = |text: &str| VoiceDescription::from_bytes(text.as_bytes());
+        let body_cover = |extra: &str| fixture(extra).replace("fold two_mass", "fold body_cover");
+        let row = "fold_body 5.0e-5 100 0.2 3.598e-4\n";
+        let body = FoldBody {
+            mass_kg: 5.0e-5,
+            stiffness_n_m: 100.0,
+            damping_ratio: 0.2,
+            rest_gap_upper_m: 3.598e-4,
+        };
+        let plain = parse(&body_cover(row)).expect("parses");
+        assert!(plain.two_mass, "the cover is a two-mass fold");
+        assert_eq!(plain.fold, parse(&fixture("")).expect("parses").fold, "the fold line reads as before");
+        assert_eq!(plain.fold_body, Some(body));
+        assert_eq!(parse(&fixture("")).expect("parses").fold_body, None);
+        let mapped = parse(&body_cover(&format!("fold_mapping bilateral\n{row}"))).expect("parses");
+        assert_eq!(mapped.fold, plain.fold.bilateral());
+        assert_eq!(mapped.fold_body, Some(body.bilateral()));
+        assert_eq!(body.bilateral().mass_kg, 2.5e-5);
+        assert_eq!(body.bilateral().stiffness_n_m, 50.0);
+        assert_eq!(body.bilateral().rest_gap_upper_m, body.rest_gap_upper_m);
+        for (text, needle) in [
+            (body_cover(""), "needs `fold_body`"),
+            (fixture(row), "fold_body needs a body_cover fold"),
+            (body_cover("fold_body 5.0e-5 100 0.2\n"), "takes 4 fields"),
+            (body_cover("fold_body 5.0e-5 x 0.2 3.598e-4\n"), "not a number"),
+            (body_cover(&format!("{row}{row}")), "only appear once"),
+            (body_cover(&format!("{row}fold_shape sine uniform\n")), "not body_cover"),
+            (
+                body_cover(row).replace("fold_damping_upper 0.6\n", ""),
+                "needs `fold_damping_upper`",
+            ),
+            (fixture("").replace("fold two_mass", "fold three_mass"), "`body_cover`"),
+        ] {
+            let error = parse(&text).expect_err(needle);
+            assert!(error.contains(needle), "{needle:?} -> {error}");
+        }
+        let refused = parse(&body_cover("fold_body 5.0e-5 0 0.2 3.598e-4\n")).expect("parses");
+        let error = refused.build().err().expect("a zero body spring is refused");
+        assert!(error.contains("body stiffness"), "{error}");
+        let stiffer = render(&body_cover("fold_body 5.0e-5 300 0.2 3.598e-4\n"));
+        assert_ne!(render(&body_cover(row)), stiffer, "the body must reach the radiated pressure");
     }
 
     #[test]
