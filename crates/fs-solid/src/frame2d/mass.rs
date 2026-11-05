@@ -5,16 +5,18 @@
 //! transverse interpolation integrates supplied cross-section rotary inertia
 //! (Rayleigh beam kinematics). Configuration-dependent mass is not introduced.
 
-use super::{Frame2d, SolidError};
+use super::{Frame2d, FrameElement, SolidError};
 use fs_la::factor::{Cholesky, cholesky};
 
+mod profile;
 mod trace;
+pub use profile::FrameInertiaProfile;
 
 /// Element inertia selected when the frame is constructed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameMassFormulation {
-    /// Half the member mass at each endpoint's translational DOFs and half any
-    /// supplied section spin inertia at its rotational DOF.
+    /// Positive P1 partitions of member mass and section spin at the endpoints.
+    /// Uniform members assign half each inventory to each endpoint.
     Lumped,
     /// Consistent mass in the undeformed reference frame, including supplied
     /// sectional rotary inertia with the Euler–Bernoulli slope kinematics.
@@ -302,8 +304,12 @@ impl Frame2d {
         {
             return Err(invalid("frame masses must be finite and nonnegative"));
         }
+        let has_mass = |e: &FrameElement| {
+            e.reference_inertia_profile
+                .map_or(e.mass_per_length != 0.0, FrameInertiaProfile::has_mass)
+        };
         if self.mass_formulation == FrameMassFormulation::Lumped
-            || self.elements.iter().all(|e| e.mass_per_length == 0.0)
+            || !self.elements.iter().any(has_mass)
         {
             return Ok(MassMatrix::Lumped(self.nodal_mass.clone()));
         }
@@ -316,42 +322,46 @@ impl Frame2d {
             entries[i * n + i] = self.point_mass[i];
         }
         for e in &self.elements {
-            if e.mass_per_length == 0.0 {
+            if !has_mass(e) {
                 continue;
             }
             let l = e.l0;
-            let member_mass = e.mass_per_length * l;
             let mut local = [[0.0; 6]; 6];
-            for (i, j, factor) in [(0, 0, 2.0), (0, 3, 1.0), (3, 0, 1.0), (3, 3, 2.0)] {
-                local[i][j] = member_mass * factor / 6.0;
-            }
-            let bending = [
-                [156.0, 22.0 * l, 54.0, -13.0 * l],
-                [22.0 * l, 4.0 * l * l, 13.0 * l, -3.0 * l * l],
-                [54.0, 13.0 * l, 156.0, -22.0 * l],
-                [-13.0 * l, -3.0 * l * l, -22.0 * l, 4.0 * l * l],
-            ];
-            let transverse = [1, 2, 4, 5];
-            for i in 0..4 {
-                for j in 0..4 {
-                    local[transverse[i]][transverse[j]] = member_mass * bending[i][j] / 420.0;
+            if let Some(profile) = e.reference_inertia_profile {
+                local = profile.consistent_local(l);
+            } else {
+                let member_mass = e.mass_per_length * l;
+                for (i, j, factor) in [(0, 0, 2.0), (0, 3, 1.0), (3, 0, 1.0), (3, 3, 2.0)] {
+                    local[i][j] = member_mass * factor / 6.0;
                 }
-            }
-            if e.rotary_inertia_per_length > 0.0 {
-                // With theta = dv/dx, section spin energy is
-                // 1/2 * integral(rho*I*(d(v_dot)/dx)^2 dx). Integrating the
-                // Hermite derivatives exactly adds this PSD block; diagonal
-                // nodal spin alone would discard its translation cross terms.
-                let rotary = [
-                    [36.0, 3.0 * l, -36.0, 3.0 * l],
-                    [3.0 * l, 4.0 * l * l, -3.0 * l, -l * l],
-                    [-36.0, -3.0 * l, 36.0, -3.0 * l],
-                    [3.0 * l, -l * l, -3.0 * l, 4.0 * l * l],
+                let bending = [
+                    [156.0, 22.0 * l, 54.0, -13.0 * l],
+                    [22.0 * l, 4.0 * l * l, 13.0 * l, -3.0 * l * l],
+                    [54.0, 13.0 * l, 156.0, -22.0 * l],
+                    [-13.0 * l, -3.0 * l * l, -22.0 * l, 4.0 * l * l],
                 ];
+                let transverse = [1, 2, 4, 5];
                 for i in 0..4 {
                     for j in 0..4 {
-                        local[transverse[i]][transverse[j]] +=
-                            (e.rotary_inertia_per_length / l) * rotary[i][j] / 30.0;
+                        local[transverse[i]][transverse[j]] = member_mass * bending[i][j] / 420.0;
+                    }
+                }
+                if e.rotary_inertia_per_length > 0.0 {
+                    // With theta = dv/dx, section spin energy is
+                    // 1/2 * integral(rho*I*(d(v_dot)/dx)^2 dx). Integrating the
+                    // Hermite derivatives exactly adds this PSD block; diagonal
+                    // nodal spin alone would discard its translation cross terms.
+                    let rotary = [
+                        [36.0, 3.0 * l, -36.0, 3.0 * l],
+                        [3.0 * l, 4.0 * l * l, -3.0 * l, -l * l],
+                        [-36.0, -3.0 * l, 36.0, -3.0 * l],
+                        [3.0 * l, -l * l, -3.0 * l, 4.0 * l * l],
+                    ];
+                    for i in 0..4 {
+                        for j in 0..4 {
+                            local[transverse[i]][transverse[j]] +=
+                                (e.rotary_inertia_per_length / l) * rotary[i][j] / 30.0;
+                        }
                     }
                 }
             }

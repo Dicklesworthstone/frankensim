@@ -4427,6 +4427,28 @@ slope (Rayleigh beam kinematics), including its endpoint and translation-spin
 cross terms. Endpoint lumping assigns half the section spin inventory to each
 node. Neither path counts centerline orbital inertia a second time.
 
+`FrameInertiaProfile` and `add_element_with_inertia_profile` retain original
+line mass [kg/m] and centroidal section spin inertia per length [kg m] at both
+member endpoints in i-to-j order. Each moment is interpolated linearly on the
+original reference member; its cross-section mass centroid remains on the
+centerline. Consistent inertia uses closed-form endpoint-weighted Gram matrices
+for the existing linear axial, cubic Hermite transverse and quadratic slope
+velocities. These integrate the complete degree-seven density/velocity and
+degree-five spin/slope products exactly, without runtime quadrature or replacing
+the field by a member mean. The resulting physical rigid mass, first moment
+and angular inertia retain the original density placement.
+
+Uniform profiles dispatch to the original constant-coefficient arithmetic.
+Explicit lumping uses the positive partition `L*(2*value_i+value_j)/6` at
+endpoint i, preserving total inventory and its first axial moment. The complete
+profile is immutable member data, available through `reference_member_inertia`;
+cloning, constitutive history and motion retain it with the original geometry.
+Profile and accumulated-inventory refusal occurs before the frame is changed.
+`tests/frame2d_graded_mass.rs` checks independent rigid spatial moments under
+rotation and endpoint reversal, polynomial kinetic energy, equal-total-mass
+native modes and supported impulses, loaded/base-driven Newmark response under
+time-step refinement, positive lumping, uniform-path bits and refusal atomicity.
+
 One reference mass owner supplies the generalized vibration pencil, the
 initial acceleration solve, every Newmark inertial residual/tangent, Rayleigh
 mass damping, uniform-base excitation, kinetic energy and support reactions.

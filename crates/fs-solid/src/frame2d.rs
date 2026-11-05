@@ -66,7 +66,7 @@ pub mod coupled;
 pub mod relaxation;
 
 mod mass;
-pub use mass::FrameMassFormulation;
+pub use mass::{FrameInertiaProfile, FrameMassFormulation};
 mod impulse;
 pub use impulse::FrameImpulse;
 mod normal_impact;
@@ -198,11 +198,13 @@ pub struct FrameElement {
     pub i: usize,
     /// End node.
     pub j: usize,
-    /// Reference mass per unit length, integrated by the frame mass formulation.
+    /// Mean reference mass per unit length. Graded members retain their complete
+    /// original endpoint profile in the frame mass owner.
     pub mass_per_length: f64,
     /// Cross-section mass moment per length about the out-of-plane centroidal
     /// axis [kg m]. Kept separate from the centerline's orbital inertia.
     rotary_inertia_per_length: f64,
+    reference_inertia_profile: Option<FrameInertiaProfile>,
     material_section: Option<ConcentricElasticSection>,
     viscous_section: Option<FrameViscousSection>,
     sections: Vec<SectionModel>,
@@ -727,6 +729,28 @@ impl Frame2d {
         rotary_inertia_per_length: f64,
         make_section: &dyn Fn() -> SectionModel,
     ) -> Result<usize, SolidError> {
+        self.add_element_with_reference_inertia(
+            i,
+            j,
+            np,
+            mass_per_length,
+            rotary_inertia_per_length,
+            None,
+            make_section,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_element_with_reference_inertia(
+        &mut self,
+        i: usize,
+        j: usize,
+        np: usize,
+        mass_per_length: f64,
+        rotary_inertia_per_length: f64,
+        reference_inertia_profile: Option<FrameInertiaProfile>,
+        make_section: &dyn Fn() -> SectionModel,
+    ) -> Result<usize, SolidError> {
         if i >= self.nodes.len() || j >= self.nodes.len() || i == j {
             return Err(SolidError::InvalidInput {
                 what: format!("element nodes ({i}, {j}) invalid"),
@@ -738,7 +762,9 @@ impl Frame2d {
         if !(mass_per_length.is_finite() && mass_per_length >= 0.0)
             || !rotary_inertia_per_length.is_finite()
             || rotary_inertia_per_length < 0.0
-            || (mass_per_length == 0.0 && rotary_inertia_per_length != 0.0)
+            || (reference_inertia_profile.is_none()
+                && mass_per_length == 0.0
+                && rotary_inertia_per_length != 0.0)
         {
             return Err(SolidError::InvalidInput {
                 what: "line mass and sectional rotary inertia must be finite and nonnegative; spin requires mass".into(),
@@ -752,14 +778,23 @@ impl Frame2d {
                 what: "element length must be finite and positive".into(),
             });
         }
-        let half = 0.5 * mass_per_length * l0;
-        let half_spin = 0.5 * rotary_inertia_per_length * l0;
-        if !half.is_finite()
-            || !half_spin.is_finite()
-            || (mass_per_length > 0.0 && half <= 0.0)
-            || (rotary_inertia_per_length > 0.0 && half_spin <= 0.0)
-            || [i, j].iter().any(|&node| {
-                [half, half, half_spin]
+        let inventory = match reference_inertia_profile {
+            Some(profile) => profile.nodal_inventory(l0)?,
+            None => {
+                let half = 0.5 * mass_per_length * l0;
+                let half_spin = 0.5 * rotary_inertia_per_length * l0;
+                [[half, half_spin]; 2]
+            }
+        };
+        if inventory.iter().any(|&[mass, spin]| {
+            !mass.is_finite()
+                || !spin.is_finite()
+                || (mass_per_length > 0.0 && mass <= 0.0)
+                || (rotary_inertia_per_length > 0.0 && spin <= 0.0)
+        })
+            || [i, j].iter().enumerate().any(|(end, &node)| {
+                let [mass, spin] = inventory[end];
+                [mass, mass, spin]
                     .iter()
                     .enumerate()
                     .any(|(axis, value)| {
@@ -772,16 +807,17 @@ impl Frame2d {
                 what: "member and accumulated nodal inertia must be representable".into(),
             });
         }
-        for node in [i, j] {
-            self.nodal_mass[3 * node] += half;
-            self.nodal_mass[3 * node + 1] += half;
-            self.nodal_mass[3 * node + 2] += half_spin;
+        for (end, node) in [i, j].into_iter().enumerate() {
+            self.nodal_mass[3 * node] += inventory[end][0];
+            self.nodal_mass[3 * node + 1] += inventory[end][0];
+            self.nodal_mass[3 * node + 2] += inventory[end][1];
         }
         self.elements.push(FrameElement {
             i,
             j,
             mass_per_length,
             rotary_inertia_per_length,
+            reference_inertia_profile,
             material_section: None,
             viscous_section: None,
             sections: (0..np).map(|_| make_section()).collect(),
