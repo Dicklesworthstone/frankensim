@@ -79,6 +79,13 @@ evidence. The deferred mixed and curl-curl solve batteries remain the gate.
   centroid-scaled planar mass is not used for an axisymmetric cell. Top forms
   are normalized by the oriented embedded area, not the thickness/radial
   volume. The topology stays two-dimensional.
+  `CellWeight2::AffineScalar` supplies three positive cell-local samples in
+  stored face order. Planar and axisymmetric mass integrate density with the
+  physical measure using exact cubic and quartic barycentric moments,
+  respectively. Axisymmetric top-form normalization retains the same joint
+  density/radius integral. Uniform samples preserve the original scalar path;
+  Cartesian polynomial energy oracles cover all three form degrees and both
+  metrics, with face-order and invalid-density controls.
 - `WeightedMass` retains coefficient dimensions and matrix-entry dimensions
   `coefficient_dims * metre^(3-2k)` for both tetrahedra and the physically
   weighted `Metric2` pairings. `output_dims` checks propagation to a dual

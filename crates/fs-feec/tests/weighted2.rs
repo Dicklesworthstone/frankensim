@@ -49,6 +49,110 @@ fn energy(matrix: &fs_sparse::Csr, values: &[f64]) -> f64 {
 }
 
 #[test]
+fn g1_graded_density_integrates_planar_and_axisymmetric_fields() {
+    for axisymmetric in [false, true] {
+        let offset = if axisymmetric { 1.0 } else { 0.0 };
+        let metric = if axisymmetric {
+            Metric2::axisymmetric(2.0).unwrap()
+        } else {
+            Metric2::planar(2.0).unwrap()
+        };
+        let c = TriComplex2::from_indexed_triangles(
+            "graded-density",
+            vec![[offset, 0.0], [offset + 1.0, 0.0], [offset, 1.0]],
+            vec![[0, 1, 2]],
+            metric,
+        )
+        .unwrap();
+        let density = [CellWeight2::AffineScalar([2.0, 5.0, 7.0])];
+        // Independent Cartesian polynomial integrals on x>=0,y>=0,x+y<=1:
+        // rho=2+3x+5y; scalar=1+2x+3y; vector=(1-y,2+r).
+        // The physical volume measure is 2 dA or 2(1+x) dA.
+        let mass = assemble(&c, 0, &density);
+        let expected_mass = if axisymmetric { 25.0 / 4.0 } else { 14.0 / 3.0 };
+        close(energy(mass.matrix(), &[1.0; 3]), expected_mass);
+        let expected_scalar = if axisymmetric {
+            154.0 / 3.0
+        } else {
+            383.0 / 10.0
+        };
+        close(energy(mass.matrix(), &[1.0, 3.0, 4.0]), expected_scalar);
+        let velocity: Vec<_> = c
+            .edges()
+            .iter()
+            .map(|&[a, b]| {
+                let a = c.vertices()[a as usize];
+                let b = c.vertices()[b as usize];
+                (1.0 - f64::midpoint(a[1], b[1])) * (b[0] - a[0])
+                    + (2.0 + f64::midpoint(a[0], b[0])) * (b[1] - a[1])
+            })
+            .collect();
+        let expected_vector = if axisymmetric {
+            449.0 / 6.0
+        } else {
+            279.0 / 10.0
+        };
+        close(
+            energy(assemble(&c, 1, &density).matrix(), &velocity),
+            expected_vector,
+        );
+        // A unit top-form field has the original embedded area as its dof.
+        close(
+            energy(assemble(&c, 2, &density).matrix(), &[0.5]),
+            expected_mass,
+        );
+        for k in 0..=2 {
+            assert_eq!(
+                assemble(&c, k, &[CellWeight2::AffineScalar([5.0; 3])]).matrix(),
+                assemble(&c, k, &[CellWeight2::Scalar(5.0)]).matrix(),
+            );
+        }
+    }
+}
+
+#[test]
+fn g3_graded_density_face_order_and_admission() {
+    let vertices = vec![[1.0, 0.0], [2.0, 0.0], [1.0, 1.0]];
+    let global_density = [2.0, 5.0, 7.0];
+    let mut reference: [Option<Vec<f64>>; 3] = [None, None, None];
+    for face in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
+        let c = TriComplex2::from_indexed_triangles(
+            "graded-orientation",
+            vertices.clone(),
+            vec![face],
+            Metric2::axisymmetric(2.0).unwrap(),
+        )
+        .unwrap();
+        let density = c.faces()[0].map(|v| global_density[v as usize]);
+        for degree in 0..=2 {
+            let matrix = assemble(&c, degree, &[CellWeight2::AffineScalar(density)])
+                .matrix()
+                .to_dense();
+            if let Some(expected) = &reference[degree as usize] {
+                for (&a, &b) in matrix.iter().zip(expected) {
+                    close(a, b);
+                }
+            } else {
+                reference[degree as usize] = Some(matrix);
+            }
+            for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+                assert!(matches!(
+                    weighted_mass_matrix_2d(
+                        &c,
+                        degree,
+                        &[CellWeight2::AffineScalar([1.0, bad, 2.0])],
+                        Dims::NONE,
+                        LIMITS,
+                        &mut || false,
+                    ),
+                    Err(WeightedError::InvalidCoefficient { cell: 0, .. })
+                ));
+            }
+        }
+    }
+}
+
+#[test]
 fn g0_planar_normalization_and_physical_units() {
     let c = triangle(Metric2::planar(2.0).unwrap());
     let dims = Dims([-1, 1, -2, -1, 0, 0]); // J/(m^3 K).

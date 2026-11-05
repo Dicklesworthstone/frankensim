@@ -3,8 +3,9 @@
 //! The topology remains 2-D. `Metric2` supplies either a physical planar
 //! thickness or the axisymmetric volume measure `angle * radius * dA`.
 //! Barycentric moments integrate that affine radius exactly; multiplying a
-//! planar mass matrix by the centroid radius would not do so. Coefficients
-//! are constant on each cell, in the stored Cartesian/meridian frame.
+//! planar mass matrix by the centroid radius would not do so. Scalar weights
+//! may also vary affinely within each cell; their product with the radius is
+//! integrated together. Tensors are constant in the Cartesian/meridian frame.
 //!
 //! These are bulk Galerkin pairings, not interface laws or a complete
 //! axisymmetric vector PDE. In particular, no cylindrical connection terms,
@@ -21,6 +22,10 @@ use fs_rep_mesh::{Metric2, TriComplex2};
 pub enum CellWeight2 {
     /// Finite, strictly positive scalar; valid for degrees 0, 1, and 2.
     Scalar(f64),
+    /// Positive affine scalar at the three vertices in stored face order.
+    /// Samples are cell-local, permitting independent density jumps across
+    /// interfaces. Reference density belongs on the original reference mesh.
+    AffineScalar([f64; 3]),
     /// Symmetric positive-definite tensor; valid for degree-1 vector proxies.
     /// Its positivity must be established by outward interval principal minors.
     Tensor([[f64; 2]; 2]),
@@ -41,6 +46,16 @@ impl CellWeight2 {
                     return Err(refuse("scalar weight must be finite and positive"));
                 }
             }
+            Self::AffineScalar(values) => {
+                if values
+                    .iter()
+                    .any(|value| !value.is_finite() || *value <= 0.0)
+                {
+                    return Err(refuse(
+                        "affine scalar must be finite and positive at all vertices",
+                    ));
+                }
+            }
             Self::Tensor(tensor) => {
                 if degree != 1 {
                     return Err(refuse("2-D tensor weights require degree 1"));
@@ -54,6 +69,7 @@ impl CellWeight2 {
     fn scalar(self) -> f64 {
         match self {
             Self::Scalar(value) => value,
+            Self::AffineScalar(_) => unreachable!("affine weight integrated into scalar moments"),
             Self::Tensor(_) => unreachable!("tensor admitted only for vector forms"),
         }
     }
@@ -61,6 +77,7 @@ impl CellWeight2 {
     fn pairing(self, left: [f64; 2], right: [f64; 2]) -> f64 {
         match self {
             Self::Scalar(value) => value * left[0].mul_add(right[0], left[1] * right[1]),
+            Self::AffineScalar(_) => unreachable!("affine weight integrated into scalar moments"),
             Self::Tensor(tensor) => left[0].mul_add(
                 tensor[0][0].mul_add(right[0], tensor[0][1] * right[1]),
                 left[1] * tensor[1][0].mul_add(right[0], tensor[1][1] * right[1]),
@@ -71,6 +88,7 @@ impl CellWeight2 {
     fn normalized(self) -> (Self, f64) {
         match self {
             Self::Scalar(value) => (Self::Scalar(1.0), value),
+            Self::AffineScalar(_) => unreachable!("affine weight integrated into scalar moments"),
             Self::Tensor(tensor) => {
                 let scale = tensor.iter().flatten().fold(0.0_f64, |s, x| s.max(x.abs()));
                 (
@@ -148,7 +166,32 @@ pub fn weighted_mass_matrix_2d(
                 reason: "triangle area is not representable",
             });
         }
-        let moments = barycentric_moments(complex.metric(), points, area);
+        let (weight, moments, affine_measure) = match weight {
+            CellWeight2::AffineScalar(values) if values.iter().any(|v| *v != values[0]) => {
+                let scale = values.into_iter().fold(0.0_f64, f64::max);
+                let moments = affine_barycentric_moments(
+                    complex.metric(),
+                    points,
+                    area,
+                    values.map(|v| v / scale),
+                );
+                // Partition of unity: sum_pq lambda_p lambda_q = 1. This is
+                // the density-weighted physical measure, including its radial
+                // covariance; separate mean density and mean radius lose it.
+                let measure = moments.iter().flatten().sum::<f64>();
+                (CellWeight2::Scalar(scale), moments, Some(measure))
+            }
+            CellWeight2::AffineScalar(values) => (
+                CellWeight2::Scalar(values[0]),
+                barycentric_moments(complex.metric(), points, area),
+                None,
+            ),
+            _ => (
+                weight,
+                barycentric_moments(complex.metric(), points, area),
+                None,
+            ),
+        };
         let mut emit = |row, column, value: f64| -> Result<(), WeightedError> {
             if !value.is_finite() {
                 return Err(WeightedError::NonFiniteEntry);
@@ -218,12 +261,15 @@ pub fn weighted_mass_matrix_2d(
             _ => {
                 // The top-form dof is integral over the oriented embedded
                 // triangle, not over its thickness/radial volume measure.
-                let measure = complex
-                    .face_measure(cell)
-                    .ok_or(WeightedError::InvalidGeometry {
-                        cell,
-                        reason: "triangle measure is absent",
-                    })?;
+                let measure = match affine_measure {
+                    Some(measure) => measure,
+                    None => complex
+                        .face_measure(cell)
+                        .ok_or(WeightedError::InvalidGeometry {
+                            cell,
+                            reason: "triangle measure is absent",
+                        })?,
+                };
                 emit(cell, cell, ((measure / area) / area) * weight.scalar())?;
             }
         }
@@ -235,6 +281,52 @@ pub fn weighted_mass_matrix_2d(
         coefficient_dims,
         entry_dims,
     ))
+}
+
+/// Normalized positive density and the metric share one exact moment rule.
+/// Planar mass needs cubic moments; affine density times radius needs quartics.
+fn affine_barycentric_moments(
+    metric: Metric2,
+    points: [[f64; 2]; 3],
+    area: f64,
+    density: [f64; 3],
+) -> [[f64; 3]; 3] {
+    let mut moments = [[0.0; 3]; 3];
+    for p in 0..3 {
+        for q in p..3 {
+            let value = match metric {
+                Metric2::Planar { thickness } => {
+                    let mean: f64 = (0..3)
+                        .map(|a| density[a] * triangle_moment(&[p, q, a]))
+                        .sum();
+                    (area * thickness) * mean
+                }
+                Metric2::Axisymmetric { angular_span } => {
+                    let mut mean = 0.0;
+                    for a in 0..3 {
+                        for b in 0..3 {
+                            mean += density[a] * points[b][0] * triangle_moment(&[p, q, a, b]);
+                        }
+                    }
+                    (area * angular_span) * mean
+                }
+            };
+            moments[p][q] = value;
+            moments[q][p] = value;
+        }
+    }
+    moments
+}
+
+/// Integral of a barycentric monomial divided by triangle area, through degree 4.
+fn triangle_moment(indices: &[usize]) -> f64 {
+    let mut counts = [0; 3];
+    let mut numerator = 2.0;
+    for &a in indices {
+        counts[a] += 1;
+        numerator *= f64::from(counts[a]);
+    }
+    numerator / [2.0, 6.0, 24.0, 120.0, 720.0][indices.len()]
 }
 
 /// Integral of lambda_p lambda_q against the declared physical measure.
