@@ -5,8 +5,11 @@ use fs_aeroac::curle3d::quadrupole::transient::{
     PreparedTransientQuadrupoleObserver, TransientQuadrupoleSource,
 };
 use fs_aeroac::curle3d::quadrupole::{PreparedQuadrupoleObserver, QuadrupolePhasor};
+use fs_aeroac::observation::HarmonicSampleClock;
+use fs_fft::harmonic_window::phase_hz_from_clock_dd;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::c64::C64;
+use fs_math::dd::Dd;
 use std::f64::consts::{PI, TAU};
 
 fn medium(rho: f64, c: f64) -> FluidAcousticState {
@@ -32,6 +35,19 @@ fn harmonic_source(q: [C64; 6], omega: f64, time: f64) -> TransientQuadrupoleSou
         stress_moment_n_m: q.map(|v| real_at(v, omega, time)),
         stress_rate_n_m_s: q.map(|v| real_at(C64::new(omega * v.im, -omega * v.re), omega, time)),
         stress_acceleration_n_m_s2: q.map(|v| real_at(v.scale(-omega * omega), omega, time)),
+    }
+}
+
+fn harmonic_source_clock(q: [C64; 6], frequency: f64, time: Dd) -> TransientQuadrupoleSource {
+    let omega = TAU * frequency;
+    let [real, imaginary] = phase_hz_from_clock_dd(frequency, time).unwrap();
+    let sample =
+        |value: C64| (Dd::from_f64(value.re) * real - Dd::from_f64(value.im) * imaginary).to_f64();
+    TransientQuadrupoleSource {
+        stress_integral_n_m_s: q.map(|v| sample(C64::new(-v.im / omega, v.re / omega))),
+        stress_moment_n_m: q.map(sample),
+        stress_rate_n_m_s: q.map(|v| sample(C64::new(omega * v.im, -omega * v.re))),
+        stress_acceleration_n_m_s2: q.map(|v| sample(v.scale(-omega * omega))),
     }
 }
 
@@ -514,4 +530,203 @@ fn g1_history_callback_preserves_distinct_causal_arrivals_and_refusals() {
         Err(AeroacError::Cancelled { .. })
     ));
     assert!(!invoked);
+}
+
+#[test]
+fn g1_dd_history_preserves_full_fields_under_a_common_clock_epoch_translation() {
+    let acoustic = medium(1.2, 343.0);
+    let positions = [[0.3, 0.0, 0.0], [0.1, 0.2, 0.1]];
+    let observer =
+        PreparedTransientQuadrupoleObserver::new(acoustic, [0.0; 3], &positions, 2).unwrap();
+    let phasors = [
+        tensor().map(|q| C64::new(q * 1e-5, q * 0.4e-5)),
+        [0.2, 0.1, -0.4, 0.13, -0.27, 0.03].map(|q| C64::new(-q * 0.7e-5, q * 1e-5)),
+    ];
+    let frequency = 16_000.0;
+    let epoch = Dd::from_f64(1_073_741_824.0);
+    let offset = Dd::from_f64(0.173 / frequency);
+    let local_clock = HarmonicSampleClock::new(offset, 64_000).unwrap();
+    let translated_clock = HarmonicSampleClock::new(epoch + offset, 64_000).unwrap();
+    for index in 0..8 {
+        let local = observer
+            .evaluate_at_clock_dd(local_clock.time_at(index).unwrap(), |source, time| {
+                Ok(harmonic_source_clock(phasors[source], frequency, time))
+            })
+            .unwrap();
+        let translated = observer
+            .evaluate_at_clock_dd(translated_clock.time_at(index).unwrap(), |source, time| {
+                Ok(harmonic_source_clock(
+                    phasors[source],
+                    frequency,
+                    time - epoch,
+                ))
+            })
+            .unwrap();
+        close(
+            translated.pressure_pa,
+            local.pressure_pa,
+            local.pressure_pa,
+            2e-12,
+        );
+        for axis in 0..3 {
+            close(
+                translated.particle_velocity_m_s[axis],
+                local.particle_velocity_m_s[axis],
+                local.particle_velocity_m_s[axis],
+                2e-12,
+            );
+            close(
+                translated.instantaneous_intensity_w_m2[axis],
+                local.instantaneous_intensity_w_m2[axis],
+                local.instantaneous_intensity_w_m2[axis],
+                4e-12,
+            );
+        }
+        assert_eq!(translated.scope, local.scope);
+    }
+}
+
+#[test]
+fn g3_dd_source_clock_preserves_a_destructive_null_at_a_large_epoch() {
+    let c = 343.0;
+    let ranges = [0.3, 0.5];
+    let observer = PreparedTransientQuadrupoleObserver::new(
+        medium(1.2, c),
+        [0.0; 3],
+        &ranges.map(|r| [r, 0.0, 0.0]),
+        2,
+    )
+    .unwrap();
+    let frequency = 16_000.0;
+    let amplitude = 1e-5;
+    let phase = PI / 4.0;
+    let q = core::array::from_fn::<_, 2, _>(|i| {
+        let sign = if i == 0 { 1.0 } else { -1.0 };
+        let value = C64::new(phase.cos(), phase.sin()).scale(sign * ranges[i] * amplitude);
+        [value, value, value, C64::ZERO, C64::ZERO, C64::ZERO]
+    });
+    // An isotropic Q=q I has p=qddot/(4 pi c^2 r) exactly, including the
+    // near field. The physical source histories below have opposite amplitudes
+    // proportional to r and authored phase advances matching their travel
+    // times. Their received pressures therefore cancel at every receiver time.
+    let history = |source: usize, time: Dd, epoch: Dd| {
+        let source_phase_time =
+            (time - epoch) + Dd::from_f64(observer.source_delay_s(source).unwrap());
+        harmonic_source_clock(q[source], frequency, source_phase_time)
+    };
+    let local = observer
+        .evaluate_at_clock_dd(Dd::ZERO, |source, time| Ok(history(source, time, Dd::ZERO)))
+        .unwrap();
+    let epoch = Dd::from_f64(1_073_741_824.0);
+    let translated = observer
+        .evaluate_at_clock_dd(epoch, |source, time| Ok(history(source, time, epoch)))
+        .unwrap();
+    let single_pressure_scale =
+        (TAU * frequency).powi(2) * amplitude * phase.cos() / (4.0 * PI * c * c);
+    for field in [local, translated] {
+        close(field.pressure_pa, 0.0, single_pressure_scale, 2e-12);
+    }
+    // The pressure null still carries the unequal paths' induction velocity.
+    assert!(local.particle_velocity_m_s[0].abs() > 1e-10);
+    for axis in 0..3 {
+        close(
+            translated.particle_velocity_m_s[axis],
+            local.particle_velocity_m_s[axis],
+            local.particle_velocity_m_s[axis],
+            2e-12,
+        );
+    }
+    // Rounding only the absolute callback timestamp is sufficient to spoil
+    // the null; it must not be reintroduced inside the DD entry point.
+    let rounded = observer
+        .evaluate_at_time(epoch.to_f64(), |source, time| {
+            Ok(history(source, Dd::from_f64(time), epoch))
+        })
+        .unwrap();
+    assert!(rounded.pressure_pa.abs() > single_pressure_scale * 1e-4);
+}
+
+#[test]
+fn g4_dd_history_normalizes_clocks_and_refuses_without_partial_fields() {
+    let observer = PreparedTransientQuadrupoleObserver::new(
+        medium(1.2, 343.0),
+        [0.0; 3],
+        &[[0.3, 0.0, 0.0]; 257],
+        257,
+    )
+    .unwrap();
+    for bad_time in [
+        Dd::from_f64(f64::NAN),
+        Dd {
+            hi: 0.0,
+            lo: f64::INFINITY,
+        },
+        Dd {
+            hi: f64::MAX,
+            lo: f64::MAX,
+        },
+        Dd::from_pair(1e100, 1e60),
+    ] {
+        let mut callbacks = 0;
+        assert!(
+            observer
+                .evaluate_at_clock_dd(bad_time, |_, _| {
+                    callbacks += 1;
+                    Ok(TransientQuadrupoleSource::default())
+                })
+                .is_err()
+        );
+        assert_eq!(callbacks, 0);
+    }
+    let time = Dd::from_f64(0.5);
+    let mut expected_times = Vec::new();
+    let baseline = observer
+        .evaluate_at_clock_dd(time, |source, emission| {
+            expected_times.push((source, emission));
+            Ok(pulse(0.004))
+        })
+        .unwrap();
+    let mut actual_times = Vec::new();
+    assert_eq!(
+        observer
+            .evaluate_at_clock_dd(Dd { hi: 0.0, lo: 0.5 }, |source, emission| {
+                actual_times.push((source, emission));
+                Ok(pulse(0.004))
+            })
+            .unwrap(),
+        baseline
+    );
+    assert_eq!(actual_times, expected_times);
+    let source_error = AeroacError::InvalidParameter {
+        what: "physical DD-clock history has no sample",
+    };
+    assert_eq!(
+        observer.evaluate_at_clock_dd(time, |_, _| Err(source_error.clone())),
+        Err(source_error)
+    );
+    for (cancel_poll, expected_callbacks) in [(1, 0), (3, 256)] {
+        let mut polls = 0;
+        let mut callbacks = 0;
+        assert!(matches!(
+            observer.evaluate_at_clock_dd_cancellable(
+                time,
+                |_, _| {
+                    callbacks += 1;
+                    Ok(pulse(0.004))
+                },
+                || {
+                    polls += 1;
+                    polls == cancel_poll
+                },
+            ),
+            Err(AeroacError::Cancelled { .. })
+        ));
+        assert_eq!(callbacks, expected_callbacks);
+    }
+    assert_eq!(
+        observer
+            .evaluate_at_clock_dd(time, |_, _| Ok(pulse(0.004)))
+            .unwrap(),
+        baseline
+    );
 }

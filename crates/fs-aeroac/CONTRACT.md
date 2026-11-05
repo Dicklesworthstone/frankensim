@@ -2289,6 +2289,18 @@ original derivatives, integral, interpolation and bandwidth; callback/block
 boundaries do not reset physical history. Invalid inputs, unresolved timestamps
 and nonfinite outputs refuse without publishing a partial field.
 
+`evaluate_at_clock_dd` and its cancellable counterpart retain the receiver and
+emission timestamps in double-double seconds through the source-history
+callback. They accept the existing `HarmonicSampleClock::time_at` clock and
+preserve short source-dependent delays under a common large epoch translation.
+Callers retain DD timestamps until subtracting their own history epoch or
+evaluating phase; no phase origin, source alignment or interpolation is inferred.
+The compatible `evaluate_at_time` API rounds callback timestamps to f64: even
+when a rounded delay is positive, its phase accuracy can be insufficient for
+destructive interference. G1/G3 DD-clock regressions exercise full tensor fields
+and an analytic 16 kHz two-source pressure null at a 2^30-second epoch. G4 checks
+normalization, nonfinite/overflow/unresolved times and bounded cancellation.
+
 G1/G3 regressions compare harmonic field/mean-flux parity, independently
 differentiated retarded Green potentials, all three momentum equations, causal
 pulse arrivals, transverse velocity at pressure nulls and coherent interference.

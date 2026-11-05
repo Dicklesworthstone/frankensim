@@ -236,6 +236,12 @@ impl PreparedTransientQuadrupoleObserver {
     /// performs no interpolation, extrapolation, differentiation or source
     /// advancement. Callbacks should only observe history; their own side
     /// effects cannot be undone if a later callback or cancellation refuses.
+    ///
+    /// Emission times are rounded to f64 before invoking the callback. A
+    /// positive rounded delay does not certify phase accuracy: at a large
+    /// epoch, partially resolved timestamps can perturb source interference.
+    /// Use [`Self::evaluate_at_clock_dd`] to retain short path delays and
+    /// sample intervals on the original double-double source clock.
     pub fn evaluate_at_time(
         &self,
         receiver_time_s: f64,
@@ -245,7 +251,9 @@ impl PreparedTransientQuadrupoleObserver {
     }
 
     /// Allocation-free history observation with bounded cancellation polls.
-    /// Unresolved or overflowing retarded timestamps refuse without a field.
+    /// Retarded timestamps that overflow or round back to the receiver time
+    /// refuse without a field. The f64 precision limits of
+    /// [`Self::evaluate_at_time`] still apply to admitted timestamps.
     pub fn evaluate_at_time_cancellable(
         &self,
         receiver_time_s: f64,
@@ -262,6 +270,61 @@ impl PreparedTransientQuadrupoleObserver {
                 if !emission_time_s.is_finite() || emission_time_s >= receiver_time_s {
                     return Err(invalid(
                         "transient quadrupole retarded time is not representable",
+                    ));
+                }
+                source_at(index, emission_time_s)
+            },
+            cancelled,
+        )
+    }
+
+    /// Observe histories on the original double-double source clock.
+    ///
+    /// Both the receiver time and callback emission times retain their low
+    /// components in seconds. This preserves relative propagation phase when
+    /// a short delay or sample interval lies below the f64 spacing of a large
+    /// epoch. It composes directly with `HarmonicSampleClock::time_at`; no
+    /// phase origin, source alignment or history interpolation is inferred.
+    ///
+    /// The callback receives (original source index, receiver time - r/c).
+    /// Keep that timestamp in DD until subtracting its history epoch or
+    /// evaluating its phase; rounding the absolute time to f64 loses the
+    /// information again. Integral, derivatives and all history ownership
+    /// requirements of [`Self::evaluate_at_time`] remain unchanged.
+    pub fn evaluate_at_clock_dd(
+        &self,
+        receiver_time_s: Dd,
+        source_at: impl FnMut(usize, Dd) -> Result<TransientQuadrupoleSource, AeroacError>,
+    ) -> Result<RetardedQuadrupoleField, AeroacError> {
+        self.evaluate_at_clock_dd_cancellable(receiver_time_s, source_at, || false)
+    }
+
+    /// Allocation-free DD-clock observation with the original cancellation
+    /// bounds. Nonfinite or DD-unresolved retarded times refuse without a
+    /// field. As with the f64 callback, user callback side effects cannot be
+    /// undone if a later source fails or cancellation is requested.
+    pub fn evaluate_at_clock_dd_cancellable(
+        &self,
+        receiver_time_s: Dd,
+        mut source_at: impl FnMut(usize, Dd) -> Result<TransientQuadrupoleSource, AeroacError>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RetardedQuadrupoleField, AeroacError> {
+        if !receiver_time_s.hi.is_finite() || !receiver_time_s.lo.is_finite() {
+            return Err(nonfinite("transient quadrupole receiver clock"));
+        }
+        let receiver_time_s = Dd::from_pair(receiver_time_s.hi, receiver_time_s.lo);
+        if !receiver_time_s.hi.is_finite() || !receiver_time_s.lo.is_finite() {
+            return Err(nonfinite("transient quadrupole receiver clock"));
+        }
+        self.evaluate_sources(
+            |index, delay_s| {
+                let emission_time_s = receiver_time_s - Dd::from_f64(delay_s);
+                if !emission_time_s.hi.is_finite()
+                    || !emission_time_s.lo.is_finite()
+                    || !emission_time_s.lt(receiver_time_s)
+                {
+                    return Err(invalid(
+                        "transient quadrupole retarded time is unresolved on the DD clock",
                     ));
                 }
                 source_at(index, emission_time_s)
