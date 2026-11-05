@@ -446,3 +446,243 @@ fn g4_late_failure_and_cancellation_publish_no_partial_crack_growth() {
     ));
     assert_eq!(state_bits(evolution.state()), state_bits(before));
 }
+
+#[test]
+fn g1_forecast_inverts_three_independent_integrals_from_the_accepted_crack() {
+    let target_length = 1.5 * INITIAL_LENGTH_M;
+    for exponent in [1.0, 2.0, 4.0] {
+        let mut evolution = run(exponent);
+        evolution.advance(cycle(250.0)).unwrap();
+        let before = evolution.state();
+        let current = before.crack_length_m;
+        // Independently integrate dN = da / (r_ref (a/a_ref)^(m/2)).
+        let expected_cycles = if exponent == 1.0 {
+            2.0 * INITIAL_LENGTH_M.sqrt() / REFERENCE_RATE_M_PER_CYCLE * (target_length - current)
+                / (target_length.sqrt() + current.sqrt())
+        } else if exponent == 2.0 {
+            INITIAL_LENGTH_M / REFERENCE_RATE_M_PER_CYCLE * (target_length / current).ln()
+        } else {
+            INITIAL_LENGTH_M.powi(2) / REFERENCE_RATE_M_PER_CYCLE * (target_length - current)
+                / (current * target_length)
+        };
+        let forecast = evolution
+            .cycles_to_length(50.0e6, 150.0e6, target_length)
+            .unwrap();
+        assert_eq!(state_bits(evolution.state()), state_bits(before));
+        assert_eq!(state_bits(forecast.before), state_bits(before));
+        assert_eq!(forecast.target_length_m, target_length);
+        close(forecast.additional_cycles, expected_cycles);
+        close(
+            forecast.initial_delta_k_pa_sqrt_m,
+            reference_delta_k() * (current / INITIAL_LENGTH_M).sqrt(),
+        );
+        close(
+            forecast.target_delta_k_pa_sqrt_m,
+            reference_delta_k() * (target_length / INITIAL_LENGTH_M).sqrt(),
+        );
+        close(
+            forecast.initial_maximum_k_pa_sqrt_m,
+            1.5 * reference_delta_k() * (current / INITIAL_LENGTH_M).sqrt(),
+        );
+        close(
+            forecast.target_maximum_k_pa_sqrt_m,
+            1.5 * reference_delta_k() * (target_length / INITIAL_LENGTH_M).sqrt(),
+        );
+        let reached = evolution
+            .advance(cycle(forecast.additional_cycles))
+            .unwrap();
+        close(reached.after.crack_length_m, target_length);
+        assert_eq!(
+            reached.after.cycles,
+            before.cycles + forecast.additional_cycles
+        );
+        assert_eq!(reached.after.blocks, before.blocks + 1);
+    }
+}
+
+#[test]
+fn g1_forecast_preserves_the_near_two_correction_and_adjacent_float_target() {
+    let target_length = 1.5 * INITIAL_LENGTH_M;
+    let log_ratio = (target_length / INITIAL_LENGTH_M).ln();
+    for exponent in [2.0 - 1.0e-8, 2.0, 2.0 + 1.0e-8] {
+        let mut evolution = run(exponent);
+        let before = evolution.state();
+        let q = 1.0 - 0.5 * exponent;
+        // Independent Taylor integral about m=2. The omitted term in the
+        // bracket is below 2e-28, while the first correction is measurable.
+        let expected = INITIAL_LENGTH_M / REFERENCE_RATE_M_PER_CYCLE
+            * (log_ratio + 0.5 * q * log_ratio.powi(2) + q * q * log_ratio.powi(3) / 6.0);
+        let forecast = evolution
+            .cycles_to_length(50.0e6, 150.0e6, target_length)
+            .unwrap();
+        close(forecast.additional_cycles, expected);
+        assert_eq!(state_bits(evolution.state()), state_bits(before));
+        evolution
+            .advance(cycle(forecast.additional_cycles))
+            .unwrap();
+        close(evolution.state().crack_length_m, target_length);
+    }
+
+    let mut evolution = run(2.0);
+    let before = evolution.state();
+    let adjacent_target = f64::from_bits(INITIAL_LENGTH_M.to_bits() + 1);
+    let increment = adjacent_target - INITIAL_LENGTH_M;
+    let relative_increment = increment / INITIAL_LENGTH_M;
+    // For one representable length increment, forming target/current first
+    // loses several percent of the requested cycle count. The independent
+    // log(1+x) series keeps the actual, exactly subtracted length increment.
+    let expected = increment / REFERENCE_RATE_M_PER_CYCLE
+        * (1.0 - 0.5 * relative_increment + relative_increment.powi(2) / 3.0);
+    let forecast = evolution
+        .cycles_to_length(50.0e6, 150.0e6, adjacent_target)
+        .unwrap();
+    assert!(forecast.additional_cycles > 0.0);
+    close(forecast.additional_cycles, expected);
+    assert_eq!(state_bits(evolution.state()), state_bits(before));
+    evolution
+        .advance(cycle(forecast.additional_cycles))
+        .unwrap();
+    assert_eq!(
+        evolution.state().crack_length_m.to_bits(),
+        adjacent_target.to_bits()
+    );
+}
+
+#[test]
+fn g0_forecast_refuses_invalid_targets_and_the_entire_unsupported_growth_interval() {
+    let evolution = run(2.0);
+    let before = evolution.state();
+    for target in [
+        INITIAL_LENGTH_M,
+        0.5 * INITIAL_LENGTH_M,
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+    ] {
+        assert!(evolution.cycles_to_length(50.0e6, 150.0e6, target).is_err());
+        assert_eq!(state_bits(evolution.state()), state_bits(before));
+    }
+    for (minimum, maximum) in [
+        (0.0, 0.0),
+        (75.0e6, 75.0e6),
+        (-1.0, 150.0e6),
+        (150.0e6, 50.0e6),
+        (f64::NAN, 150.0e6),
+        (50.0e6, f64::INFINITY),
+        (5.0e6, 15.0e6),
+        (149.0e6, 150.0e6),
+        (50.0e6, 1.0e12),
+    ] {
+        assert!(
+            evolution
+                .cycles_to_length(minimum, maximum, 1.1 * INITIAL_LENGTH_M)
+                .is_err()
+        );
+        assert_eq!(state_bits(evolution.state()), state_bits(before));
+    }
+
+    let mut bounded_geometry = geometry();
+    bounded_geometry.maximum_length_m = 1.05 * INITIAL_LENGTH_M;
+    let geometry_run =
+        ParisCrackGrowth::new(law(2.0), bounded_geometry, INITIAL_LENGTH_M, limits()).unwrap();
+    assert!(matches!(
+        geometry_run.cycles_to_length(50.0e6, 150.0e6, 1.1 * INITIAL_LENGTH_M),
+        Err(CrackGrowthError::CrackLengthOutsideDomain { .. })
+    ));
+    assert_eq!(state_bits(geometry_run.state()), state_bits(before));
+
+    let mut range_domain = domain();
+    range_domain.maximum_delta_k_pa_sqrt_m = 1.04 * reference_delta_k();
+    let range_law = Arc::new(ParisLaw::new(scope(), parameters(2.0), range_domain).unwrap());
+    let range_run =
+        ParisCrackGrowth::new(range_law, geometry(), INITIAL_LENGTH_M, limits()).unwrap();
+    assert!(matches!(
+        range_run.cycles_to_length(50.0e6, 150.0e6, 1.1 * INITIAL_LENGTH_M),
+        Err(CrackGrowthError::DeltaKOutsideDomain { .. })
+    ));
+    assert_eq!(state_bits(range_run.state()), state_bits(before));
+
+    let mut static_domain = domain();
+    static_domain.maximum_k_pa_sqrt_m = 1.55 * reference_delta_k();
+    let static_law = Arc::new(ParisLaw::new(scope(), parameters(2.0), static_domain).unwrap());
+    let static_run =
+        ParisCrackGrowth::new(static_law, geometry(), INITIAL_LENGTH_M, limits()).unwrap();
+    assert!(matches!(
+        static_run.cycles_to_length(50.0e6, 150.0e6, 1.1 * INITIAL_LENGTH_M),
+        Err(CrackGrowthError::MaximumKExceeded { .. })
+    ));
+    assert_eq!(state_bits(static_run.state()), state_bits(before));
+}
+
+#[test]
+fn g4_forecast_respects_remaining_cycle_block_and_float_resolution_budgets() {
+    let mut exposure_limited = ParisCrackGrowth::new(
+        law(2.0),
+        geometry(),
+        INITIAL_LENGTH_M,
+        CrackGrowthLimits {
+            maximum_blocks: 10,
+            maximum_cycles: 1_000.0,
+        },
+    )
+    .unwrap();
+    exposure_limited.advance(cycle(600.0)).unwrap();
+    let before = exposure_limited.state();
+    let fractional_rate = REFERENCE_RATE_M_PER_CYCLE / INITIAL_LENGTH_M;
+    let target_after_500 = before.crack_length_m * (fractional_rate * 500.0).exp();
+    assert!(matches!(
+        exposure_limited.cycles_to_length(50.0e6, 150.0e6, target_after_500),
+        Err(CrackGrowthError::Budget)
+    ));
+    assert_eq!(state_bits(exposure_limited.state()), state_bits(before));
+    let target_after_200 = before.crack_length_m * (fractional_rate * 200.0).exp();
+    let admitted = exposure_limited
+        .cycles_to_length(50.0e6, 150.0e6, target_after_200)
+        .unwrap();
+    close(admitted.additional_cycles, 200.0);
+    assert_eq!(state_bits(exposure_limited.state()), state_bits(before));
+
+    let mut block_limited = ParisCrackGrowth::new(
+        law(2.0),
+        geometry(),
+        INITIAL_LENGTH_M,
+        CrackGrowthLimits {
+            maximum_blocks: 1,
+            maximum_cycles: 100_000.0,
+        },
+    )
+    .unwrap();
+    block_limited.advance(cycle(100.0)).unwrap();
+    let before = block_limited.state();
+    assert!(matches!(
+        block_limited.cycles_to_length(50.0e6, 150.0e6, 1.1 * before.crack_length_m),
+        Err(CrackGrowthError::Budget)
+    ));
+    assert_eq!(state_bits(block_limited.state()), state_bits(before));
+
+    let mut resolution_limited = ParisCrackGrowth::new(
+        law(2.0),
+        geometry(),
+        INITIAL_LENGTH_M,
+        CrackGrowthLimits {
+            maximum_blocks: 10,
+            maximum_cycles: (1_u64 << 54) as f64,
+        },
+    )
+    .unwrap();
+    resolution_limited
+        .advance(StressCycle {
+            minimum_pa: 0.0,
+            maximum_pa: 0.0,
+            cycles: (1_u64 << 53) as f64,
+        })
+        .unwrap();
+    let before = resolution_limited.state();
+    let adjacent_target = f64::from_bits(INITIAL_LENGTH_M.to_bits() + 1);
+    assert!(matches!(
+        resolution_limited.cycles_to_length(50.0e6, 150.0e6, adjacent_target),
+        Err(CrackGrowthError::Budget)
+    ));
+    assert_eq!(state_bits(resolution_limited.state()), state_bits(before));
+}

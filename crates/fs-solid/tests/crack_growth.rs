@@ -685,6 +685,10 @@ fn g1_declared_repeated_native_cycle_matches_analytical_growth_with_three_sample
         let problem = problem(&material, &fixed);
         let geometry = geometry(cx);
         let mut path = path(&problem, &thermal, vec![gauge()], cx);
+        assert!(matches!(
+            path.cycles_to_length(0, 2.0 * INITIAL_A, cx),
+            Err(TetCrackGrowthError::Cycle { gauge: 0, .. })
+        ));
         for (index, stress) in [2e6, 8e6, 2e6].into_iter().enumerate() {
             path.advance(index as f64, &load(&geometry, stress, cx), cx)
                 .unwrap();
@@ -692,6 +696,14 @@ fn g1_declared_repeated_native_cycle_matches_analytical_growth_with_three_sample
         let before = path.states();
         assert_eq!(before[0].crack_length_m, INITIAL_A);
         assert_eq!(before[0].cycles, 0.0);
+        let forecast = path.cycles_to_length(0, 2.0 * INITIAL_A, cx).unwrap();
+        let expected_exposure = std::f64::consts::LN_2 / (1e-16 * std::f64::consts::PI * 6e6 * 6e6);
+        close(forecast.additional_cycles, expected_exposure, 2e-10);
+        assert_eq!(forecast.before, before[0]);
+        assert_eq!(forecast.target_length_m, 2.0 * INITIAL_A);
+        assert_eq!(path.states(), before);
+        assert_eq!(path.observed_samples(), 3);
+        assert_eq!(path.last_time_s(), Some(2.0));
         let steps = path.close_repeated_cycle(100, cx).unwrap();
         // Independently integrated m=2 law over the declared 100 repetitions:
         // a(N) = a(0) exp((1e-4/1e12) pi (delta_sigma)^2 N).
@@ -705,6 +717,10 @@ fn g1_declared_repeated_native_cycle_matches_analytical_growth_with_three_sample
         assert_eq!(steps[0].after, after[0]);
         assert_eq!(path.observed_samples(), 3);
         assert_eq!(path.last_time_s(), Some(2.0));
+        assert!(matches!(
+            path.cycles_to_length(0, 4.0 * INITIAL_A, cx),
+            Err(TetCrackGrowthError::Cycle { gauge: 0, .. })
+        ));
         assert_eq!(path.finish(cx).unwrap(), after);
     });
 }

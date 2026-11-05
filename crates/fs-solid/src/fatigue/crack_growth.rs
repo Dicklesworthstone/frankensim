@@ -29,8 +29,8 @@ use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_material::fatigue::NormalStressDirection;
 use fs_material::fatigue::crack_growth::{
-    ConstantGeometryCrack, CrackGrowthError, CrackGrowthLimits, CrackGrowthState, CrackGrowthStep,
-    ParisCrackGrowth, ParisLaw, StressCycle,
+    ConstantGeometryCrack, CrackGrowthError, CrackGrowthForecast, CrackGrowthLimits,
+    CrackGrowthState, CrackGrowthStep, ParisCrackGrowth, ParisLaw, StressCycle,
 };
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_math::det;
@@ -302,6 +302,20 @@ impl<'p, 'm> TetCrackGrowthPath<'p, 'm> {
         self.observation.close_repeated_cycle(full_cycles, cx)
     }
 
+    /// Forecast additional cycles to a declared crack length using this gauge's
+    /// fully sampled, still unconsumed cycle. Call before explicitly closing it.
+    /// The result is conditional on identical future stress extrema under the
+    /// frozen model; it neither advances the path nor certifies component life.
+    pub fn cycles_to_length(
+        &self,
+        gauge: usize,
+        target_length_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<CrackGrowthForecast, TetCrackGrowthError> {
+        self.observation
+            .cycles_to_length(gauge, target_length_m, cx)
+    }
+
     /// Require all sampled excursions to have been explicitly closed. A lone
     /// initial/last-closure endpoint contributes no invented partial cycle.
     pub fn finish(&mut self, cx: &Cx<'_>) -> Result<Vec<CrackGrowthState>, TetCrackGrowthError> {
@@ -444,6 +458,33 @@ impl TetCrackGrowthObserver {
         self.gauges
             .get(gauge)
             .and_then(|g| g.material_source.as_deref())
+    }
+
+    pub(crate) fn cycles_to_length(
+        &self,
+        gauge: usize,
+        target_length_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<CrackGrowthForecast, TetCrackGrowthError> {
+        poll(cx)?;
+        if self.finished {
+            return Err(TetCrackGrowthError::Finished);
+        }
+        let observed = self
+            .gauges
+            .get(gauge)
+            .ok_or(TetCrackGrowthError::Invalid("unknown crack-growth gauge"))?;
+        let window = observed.window.ok_or(TetCrackGrowthError::Cycle {
+            gauge,
+            what: "no native stress has been observed",
+        })?;
+        let cycle = window.cycle(observed.closure, gauge)?;
+        let forecast = observed
+            .growth
+            .cycles_to_length(cycle.minimum_pa, cycle.maximum_pa, target_length_m)
+            .map_err(|error| TetCrackGrowthError::Gauge { gauge, error })?;
+        poll(cx)?;
+        Ok(forecast)
     }
 
     pub(crate) fn check_next(&self, time_s: f64, cx: &Cx<'_>) -> Result<(), TetCrackGrowthError> {

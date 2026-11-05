@@ -1046,6 +1046,14 @@ The inertial wrapper intentionally has no repeated-cycle operation. The runnable
 `fatigue_crack_growth --demo CYCLES` example uses three native solves and clearly
 synthetic coefficients, and prints an independent analytical m=2 comparison.
 
+Both native owners expose a read-only `cycles_to_length` forecast for a gauge
+whose representative cycle is fully sampled but not yet explicitly consumed.
+It uses that original nominal stress range and the shared analytical inverse,
+subject to every fit, geometry and remaining-exposure bound. The requested crack
+length is a caller target, not an inferred failure length. Identical future
+extrema are an explicit forecasting assumption; no future dynamics, component
+life, cycle count or mechanical motion is silently accepted by this query.
+
 An endpoint and requested closure publish together only after original
 mechanics, every projection and every crack-growth update accept. A late gauge
 failure or cancellation preserves native motion, physical time, all open

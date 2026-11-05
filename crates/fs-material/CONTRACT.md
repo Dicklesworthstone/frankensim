@@ -220,6 +220,19 @@ Zero-range exposure adds no fatigue growth but still checks static K.
 The lower fit bound is not a threshold: unsupported low loads refuse. Blocks,
 spectra, cancellation and failed endpoint admission publish no partial growth.
 
+`ParisCrackGrowth::cycles_to_length` provides a read-only analytical forecast
+to a caller-declared length strictly above the accepted crack length, under
+fixed tensile stress extrema. It returns fractional additional full cycles and
+both endpoint stress intensities, with constant work and storage. The inverse
+retains the m=2 limit and tiny relative extensions without subtracting nearly
+equal powers. Geometry, R, Delta-K and exclusive maximum-K support must hold
+over the complete interval. One block and the predicted cycles must fit the
+remaining budgets, with a distinct finite cumulative exposure; no budget or
+state is consumed. Zero range, unsupported targets and nonrepresentable inverse
+arithmetic refuse, including rounding to the finite-cycle singularity. The
+selected target is not an inferred critical crack size, service-life estimate
+or failure certificate.
+
 G0/G1/G3 regressions compare independent m=1/2/4 integrals, the m=2 limiting
 case, range/full-cycle conventions, partition/restart behavior, source-scope
 retention, static and evolving-domain refusals, budgets and rollback. The

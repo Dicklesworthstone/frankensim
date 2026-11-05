@@ -13,6 +13,9 @@
 //! independent of its cycle count. No frozen-K/Euler approximation is used.
 //! Blocks stay in physical order; completed rainflow cycles must NOT be used
 //! as a reordered crack-growth spectrum.
+//! A read-only inverse forecasts additional exposure to a declared larger crack
+//! length under fixed tensile extrema, within the same domain and work limits.
+//! The target is not an inferred failure length or a calibrated service life.
 //!
 //! This is the Paris region of long-crack, small-scale-yielding Mode-I LEFM.
 //! Only nonnegative tensile stress ratios within declared support are admitted.
@@ -116,6 +119,20 @@ pub struct CrackGrowthStep {
     pub final_maximum_k_pa_sqrt_m: f64,
 }
 
+/// Read-only analytical exposure to a caller-declared larger crack length.
+/// Fractional full cycles are retained; neither failure nor service life is
+/// inferred. Valid only for the fixed tensile extrema and existing calibration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CrackGrowthForecast {
+    pub before: CrackGrowthState,
+    pub target_length_m: f64,
+    pub additional_cycles: f64,
+    pub initial_delta_k_pa_sqrt_m: f64,
+    pub target_delta_k_pa_sqrt_m: f64,
+    pub initial_maximum_k_pa_sqrt_m: f64,
+    pub target_maximum_k_pa_sqrt_m: f64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum CrackGrowthError {
     Invalid(&'static str),
@@ -159,6 +176,20 @@ impl std::error::Error for CrackGrowthError {}
 
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
+}
+
+fn stress_range(minimum_pa: f64, maximum_pa: f64) -> Result<f64, CrackGrowthError> {
+    if !minimum_pa.is_finite()
+        || !maximum_pa.is_finite()
+        || minimum_pa < 0.0
+        || maximum_pa < minimum_pa
+    {
+        return Err(CrackGrowthError::StressOutsideDomain {
+            minimum_pa,
+            maximum_pa,
+        });
+    }
+    Ok(maximum_pa - minimum_pa)
 }
 
 impl ParisLaw {
@@ -380,6 +411,83 @@ impl ParisCrackGrowth {
         Ok(value)
     }
 
+    /// Additional full-cycle equivalents to a strictly larger declared length,
+    /// assuming these fixed tensile extrema and constant Y throughout.
+    ///
+    /// This read-only O(1) inverse checks both endpoints of the monotone interval
+    /// against the same R, Delta-K, maximum-K and geometry limits as advancement.
+    /// It requires one remaining block and representable cumulative exposure
+    /// within the cycle budget, without consuming either. A zero range refuses
+    /// rather than implying infinite life. Nonrepresentable inverse arithmetic,
+    /// including a rounded finite-cycle singularity, also refuses.
+    pub fn cycles_to_length(
+        &self,
+        minimum_pa: f64,
+        maximum_pa: f64,
+        target_length_m: f64,
+    ) -> Result<CrackGrowthForecast, CrackGrowthError> {
+        self.geometry.check_length(target_length_m)?;
+        let a = self.state.crack_length_m;
+        if target_length_m <= a {
+            return Err(CrackGrowthError::Invalid(
+                "forecast target must exceed the current crack length",
+            ));
+        }
+        let range_pa = stress_range(minimum_pa, maximum_pa)?;
+        if range_pa == 0.0 {
+            return Err(CrackGrowthError::Invalid(
+                "a growth forecast requires a positive tensile stress range",
+            ));
+        }
+        let initial_maximum_k_pa_sqrt_m = self.stress_intensity(maximum_pa)?;
+        let initial_delta_k_pa_sqrt_m = self.geometry.intensity(a, range_pa)?;
+        let rate = self
+            .law
+            .growth_rate(initial_delta_k_pa_sqrt_m, minimum_pa / maximum_pa)?;
+        let target_delta_k_pa_sqrt_m = self.geometry.intensity(target_length_m, range_pa)?;
+        let target_maximum_k_pa_sqrt_m = self.geometry.intensity(target_length_m, maximum_pa)?;
+        self.law.check_delta_k(target_delta_k_pa_sqrt_m)?;
+        self.law.check_maximum_k(target_maximum_k_pa_sqrt_m)?;
+
+        // q=1-m/2 and L=ln(target/a): N=(a/rate)*expm1(q*L)/q.
+        // Corrected log1p retains even a one-ULP extension; expm1 supplies the
+        // continuous m=2 limit without subtracting two nearly equal powers.
+        let extension = (target_length_m - a) / a;
+        let log_growth = if extension.is_finite() {
+            extension * log1p_over_x(extension)
+        } else {
+            det::ln(target_length_m) - det::ln(a)
+        };
+        let q = 1.0 - 0.5 * self.law.parameters.exponent;
+        let normalized_cycles = if q == 0.0 {
+            log_growth
+        } else {
+            det::expm1(q * log_growth) / q
+        };
+        let relative_rate = rate / a;
+        let additional_cycles = normalized_cycles / relative_rate;
+        let forward_time = relative_rate * additional_cycles;
+        let forward_argument = q * forward_time;
+        if !positive(relative_rate)
+            || !positive(additional_cycles)
+            || !positive(forward_time)
+            || !forward_argument.is_finite()
+            || forward_argument <= -1.0
+        {
+            return Err(CrackGrowthError::Arithmetic);
+        }
+        self.checked_exposure(additional_cycles)?;
+        Ok(CrackGrowthForecast {
+            before: self.state,
+            target_length_m,
+            additional_cycles,
+            initial_delta_k_pa_sqrt_m,
+            target_delta_k_pa_sqrt_m,
+            initial_maximum_k_pa_sqrt_m,
+            target_maximum_k_pa_sqrt_m,
+        })
+    }
+
     pub fn advance(&mut self, cycle: StressCycle) -> Result<CrackGrowthStep, CrackGrowthError> {
         self.advance_with_cancel(cycle, &mut || false)
     }
@@ -427,18 +535,8 @@ impl ParisCrackGrowth {
         Ok(self.state)
     }
 
-    fn preview(&self, cycle: StressCycle) -> Result<CrackGrowthStep, CrackGrowthError> {
-        if !cycle.minimum_pa.is_finite()
-            || !cycle.maximum_pa.is_finite()
-            || cycle.minimum_pa < 0.0
-            || cycle.maximum_pa < cycle.minimum_pa
-        {
-            return Err(CrackGrowthError::StressOutsideDomain {
-                minimum_pa: cycle.minimum_pa,
-                maximum_pa: cycle.maximum_pa,
-            });
-        }
-        if !positive(cycle.cycles) {
+    fn checked_exposure(&self, additional_cycles: f64) -> Result<(u64, f64), CrackGrowthError> {
+        if !positive(additional_cycles) {
             return Err(CrackGrowthError::Invalid(
                 "declare a positive finite full-cycle count",
             ));
@@ -448,17 +546,23 @@ impl ParisCrackGrowth {
             .blocks
             .checked_add(1)
             .ok_or(CrackGrowthError::Budget)?;
-        let cycles = self.state.cycles + cycle.cycles;
+        let cycles = self.state.cycles + additional_cycles;
         if blocks > self.limits.maximum_blocks
             || !cycles.is_finite()
             || cycles > self.limits.maximum_cycles
+            || additional_cycles > self.limits.maximum_cycles - self.state.cycles
             || cycles <= self.state.cycles
         {
             return Err(CrackGrowthError::Budget);
         }
+        Ok((blocks, cycles))
+    }
+
+    fn preview(&self, cycle: StressCycle) -> Result<CrackGrowthStep, CrackGrowthError> {
+        let range_pa = stress_range(cycle.minimum_pa, cycle.maximum_pa)?;
+        let (blocks, cycles) = self.checked_exposure(cycle.cycles)?;
         let a = self.state.crack_length_m;
         let initial_maximum_k_pa_sqrt_m = self.stress_intensity(cycle.maximum_pa)?;
-        let range_pa = cycle.maximum_pa - cycle.minimum_pa;
         let initial_delta_k_pa_sqrt_m = self.geometry.intensity(a, range_pa)?;
         let next_length = if range_pa == 0.0 {
             // A static admissible stress is not a fatigue cycle. Still retain

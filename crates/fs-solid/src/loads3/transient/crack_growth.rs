@@ -14,7 +14,9 @@ use crate::fatigue::crack_growth::{
 use crate::loads3::TetLoadCase3;
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
-use fs_material::fatigue::crack_growth::{CrackGrowthState, CrackGrowthStep, ParisLaw};
+use fs_material::fatigue::crack_growth::{
+    CrackGrowthForecast, CrackGrowthState, CrackGrowthStep, ParisLaw,
+};
 use fs_material::state_point::ResolvedMaterialStatePoint;
 
 #[derive(Debug)]
@@ -90,6 +92,19 @@ impl<'g, 'm, 'p, 's> TetTransientCrackGrowthRun3<'g, 'm, 'p, 's> {
     }
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         self.observation.material_source(gauge)
+    }
+
+    /// Conditional exposure forecast from a fully sampled, still unconsumed
+    /// cycle. Identical future extrema are a caller assumption, not a prediction
+    /// of the dynamics. No native step, cycle window or crack state changes.
+    pub fn cycles_to_length(
+        &self,
+        gauge: usize,
+        target_length_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<CrackGrowthForecast, TetCrackGrowthError> {
+        self.observation
+            .cycles_to_length(gauge, target_length_m, cx)
     }
 
     /// Recover current native response without adding an observer sample.
