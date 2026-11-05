@@ -1,4 +1,5 @@
 //! Canonical original-snapshot streams, heat and gross inventory admission.
+use super::boundary::{self, BoundaryAccounts, RealGasSpeciesNetworkBoundary};
 use super::{
     Error, GasEnergySolve, Parcels, SpeciesNetworkExternalHeat, SpeciesNetworkHeatTransfer,
     SpeciesNetworkSolve, SpeciesNetworkTransfer, Sum, check, material,
@@ -21,12 +22,13 @@ pub(super) struct Budget {
     pub heat: Sum,
     pub relative_stream: Sum,
 }
-pub(super) struct Snapshot {
+pub(super) struct Snapshot<'a> {
     pub flows: Vec<SpeciesNetworkTransfer>,
     pub heat: Vec<SpeciesNetworkHeatTransfer>,
     pub external_heat: Vec<SpeciesNetworkExternalHeat>,
     pub budgets: BTreeMap<u64, Budget>,
     pub before: BTreeMap<u64, BTreeMap<SpeciesId, f64>>,
+    pub boundary: BoundaryAccounts<'a>,
 }
 
 // Public entry points call this before building even the borrowed input map.
@@ -35,12 +37,14 @@ pub(super) fn admit_work(
     transfers: usize,
     heat: usize,
     external: usize,
+    boundary: usize,
 ) -> Result<(), Error> {
     if parcels == 0
         || parcels > MAX_SNAPSHOT_PARCELS
         || transfers
             .checked_add(heat)
             .and_then(|n| n.checked_add(external))
+            .and_then(|n| n.checked_add(boundary))
             .is_none_or(|n| n > MAX_SNAPSHOT_TRANSFERS)
     {
         return Err(Error::Invalid(
@@ -51,17 +55,24 @@ pub(super) fn admit_work(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn prepare(
+pub(super) fn prepare<'a>(
     parcels: &Parcels<'_>,
     transfers: &[SpeciesNetworkTransfer],
     heat: &[SpeciesNetworkHeatTransfer],
     external: &[SpeciesNetworkExternalHeat],
+    boundaries: &[RealGasSpeciesNetworkBoundary<'a>],
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<Snapshot, Error> {
+) -> Result<Snapshot<'a>, Error> {
     check(cancelled)?;
-    admit_work(parcels.len(), transfers.len(), heat.len(), external.len())?;
+    admit_work(
+        parcels.len(),
+        transfers.len(),
+        heat.len(),
+        external.len(),
+        boundary::work_count(boundaries)?,
+    )?;
     if !parcels.keys().eq(endpoints.keys())
         || !positive(controls.maximum_species_fraction)
         || controls.maximum_species_fraction >= 1.0
@@ -227,7 +238,9 @@ pub(super) fn prepare(
             .map_err(|e| material(row.parcel, e))?;
         external_heat.push(row.clone());
     }
-    // Admit aggregate ORIGINAL donor inventories before any partial-caloric
+    let boundary = boundary::accumulate(parcels, boundaries, &mut budgets, controls, cancelled)?;
+    // Admit aggregate ORIGINAL donor inventories, including every external
+    // withdrawal, before any partial-caloric
     // query, source mixing or endpoint solve. Inflow cannot fund an outflow.
     let mut before = BTreeMap::new();
     for (&id, budget) in &budgets {
@@ -254,5 +267,6 @@ pub(super) fn prepare(
         external_heat,
         budgets,
         before,
+        boundary,
     })
 }

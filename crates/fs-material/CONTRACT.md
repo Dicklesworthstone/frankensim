@@ -14875,3 +14875,45 @@ temporal refinement, exercise changing mixtures with independent huge formation
 shifts, and verify gross-limit subdivision, canonical paths, short final spans,
 bounded work, source refusal and late cancellation. This owner supplies no
 external heat/species schedule, phase flash, pipe momentum or wave evolution.
+
+### External species and phase energy on real-gas networks
+
+The real-gas selective network now admits explicit external species/phase
+boundaries together with internal species streams and internal/external heat.
+`exchange_candidate_with_boundaries` and
+`exchange_candidate_with_boundaries_and_external_heat` share the original
+snapshot, gross-inventory admission and single finite-PR reconstruction.
+Boundary owners and species consume the same 4096-record work bound. External
+GROSS withdrawal joins every internal outgoing stream before caloric evaluation
+or catalog mixing; incoming external material cannot fund same-interval outflow.
+
+`RealGasSpeciesNetworkBoundary` retains its original PR catalog and the neutral
+`BoundarySpeciesTransfer` chart:
+`E_into = net_mass*h_ideal_species(T_original) + relative_energy`.
+The external owner authors its complete phase or uptake energy. Negative mass
+does not silently acquire a gas departure or latent heat. The source-bound
+`RealGasBoundaryStream::inflow` and `outflow` conveniences instead supply actual
+original gas partial enthalpy: finite NASA enthalpy differences plus the donor's
+analytic PR partial departure, with formation references cancelled before
+arithmetic. Pressure-flow work is included once. The inlet helper's receiving
+original snapshot defines its reference temperature and must be the same node
+subsequently supplied to the network.
+
+Every affected node retains its original source and its actual active incoming
+or external catalogs, including NASA, transport, critical-constant and known
+binary-interaction compatibility checks. Unrelated idle nodes impose no source
+requirements. External net mass/species amounts are subtracted from open-system
+conservation defects; their relative energy enters the same grouped-reference
+caloric target as all internal streams. The neutral boundary report explicitly
+retains the ideal-species reference enthalpy and the complete authored energy.
+Original-density preservation and unrepresentable-inventory refusal remain.
+
+External donor/phase storage, its aggregate inventory allowance, entropy and
+any interfacial kinetic law belong to the enclosing physical owner. The gas
+boundary does not create a reservoir EOS, infer a phase transition or deposit
+latent heat again. Zero rows preserve states; source/domain/work failure and
+late cancellation return no proposed network. Seven focused cases compare
+actual-gas inlet/outlet against the internal PR transfer owner and independent
+stored energy, combine phase uptake with both heat channels, shift independent
+species references, introduce source-bound new species, combine gross depletion,
+and exercise canonical order, work bounds and transactional refusals.

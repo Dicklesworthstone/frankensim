@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 pub(super) fn streams(
     parcels: &Parcels<'_>,
-    snapshot: &mut Snapshot,
+    snapshot: &mut Snapshot<'_>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<SpeciesNetworkFlux>, Error> {
     // Exactly one bounded partial-caloric evaluation per ORIGINAL active donor.
@@ -95,12 +95,13 @@ pub(super) fn streams(
 
 pub(super) fn finish(
     parcels: &Parcels<'_>,
-    snapshot: Snapshot,
+    snapshot: Snapshot<'_>,
     fluxes: Vec<SpeciesNetworkFlux>,
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    let boundaries = snapshot.boundary.fluxes(parcels, cancelled)?;
     let mut next = BTreeMap::new();
     let mut accounts = Vec::with_capacity(parcels.len());
     let (mut total_mass, mut total_energy) = (Sum::default(), Sum::default());
@@ -157,7 +158,8 @@ pub(super) fn finish(
         // This is a catalog join, never an upstream state update. Unrelated
         // nodes and outgoing receivers cannot introduce extra source demands.
         let mut originals = vec![old.model()];
-        let catalog = if budget.incoming.is_empty() {
+        let external_catalogs = snapshot.boundary.catalogs.get(&id);
+        let catalog = if budget.incoming.is_empty() && external_catalogs.is_none() {
             old.model().source().clone()
         } else {
             let mut portions = vec![(old.model().source(), old.mass_kg())];
@@ -170,6 +172,16 @@ pub(super) fn finish(
                 portions.push((upstream.model().source(), upstream.mass_kg()));
                 catalog_mass.add(upstream.mass_kg()).map_err(map)?;
             }
+            if let Some(external_catalogs) = external_catalogs {
+                for catalog in external_catalogs {
+                    check(cancelled)?;
+                    originals.push(catalog);
+                    // Positive catalog weights gather source ownership only;
+                    // the authoritative target inventory sets composition.
+                    portions.push((catalog.source(), old.mass_kg()));
+                    catalog_mass.add(old.mass_kg()).map_err(map)?;
+                }
+            }
             mixed_model_from_portions(&portions, catalog_mass.value).map_err(map)?
         };
         let same_inventory = target == *before;
@@ -178,7 +190,7 @@ pub(super) fn finish(
         } else {
             model_for_inventory(&catalog, &target).map_err(map)?
         };
-        let model = if same_inventory && budget.incoming.is_empty() {
+        let model = if same_inventory && budget.incoming.is_empty() && external_catalogs.is_none() {
             old.model().clone()
         } else {
             mixing::model_for_source(&originals, source).map_err(map)?
@@ -296,6 +308,16 @@ pub(super) fn finish(
         });
         next.insert(id, candidate);
     }
+    total_mass
+        .add(-snapshot.boundary.mass.value)
+        .map_err(|e| material(*parcels.keys().next().expect("admitted nonempty graph"), e))?;
+    for (species, external) in &snapshot.boundary.species {
+        global_species
+            .entry(species.clone())
+            .or_default()
+            .add(-external.value)
+            .map_err(|e| material(*parcels.keys().next().expect("admitted nonempty graph"), e))?;
+    }
     for sum in global_species.into_values() {
         maximum_species_mass_residual_kg = maximum_species_mass_residual_kg.max(sum.value.abs());
     }
@@ -314,6 +336,7 @@ pub(super) fn finish(
             fluxes,
             heat: snapshot.heat,
             external_heat: snapshot.external_heat,
+            boundaries,
             parcels: accounts,
             total_mass_residual_kg: total_mass.value,
             maximum_species_mass_residual_kg,

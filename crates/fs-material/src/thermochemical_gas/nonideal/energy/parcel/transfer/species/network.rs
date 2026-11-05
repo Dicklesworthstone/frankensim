@@ -6,6 +6,7 @@
 //! Prescribed streams/heat do not supply rates, separation work or an entropy
 //! guarantee. A physical transport owner chooses and refines this interval.
 
+pub mod boundary;
 mod caloric;
 mod snapshot;
 
@@ -18,6 +19,7 @@ pub use crate::thermochemical_gas::energy::parcel::transfer::species::network::{
     SpeciesNetworkTransfer,
 };
 use SpeciesNetworkError as Error;
+use boundary::{RealGasSpeciesNetworkBoundary, SpeciesNetworkBoundaryFlux};
 
 /// Complete original-stream and additional-heat accounts, in canonical order.
 /// External heat's opposite finite storage belongs to the enclosing operator.
@@ -26,6 +28,9 @@ pub struct RealGasSpeciesNetworkStep {
     pub fluxes: Vec<SpeciesNetworkFlux>,
     pub heat: Vec<SpeciesNetworkHeatTransfer>,
     pub external_heat: Vec<SpeciesNetworkExternalHeat>,
+    /// External phase streams on the explicitly declared ideal-species
+    /// reference chart. Their complete energy is included once in each node.
+    pub boundaries: Vec<SpeciesNetworkBoundaryFlux>,
     pub parcels: Vec<SpeciesNetworkParcelStep>,
     pub total_mass_residual_kg: f64,
     pub maximum_species_mass_residual_kg: f64,
@@ -130,6 +135,59 @@ pub fn exchange_candidate_with_external_heat(
     external_heat: &[SpeciesNetworkExternalHeat],
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    exchange_candidate_with_boundaries_and_external_heat(
+        parcels,
+        transfers,
+        heat,
+        &[],
+        external_heat,
+        endpoints,
+        controls,
+        cancelled,
+    )
+}
+
+/// External species/phase streams share the original snapshot and its gross
+/// withdrawal limits with every internal edge. Boundary energy is explicitly
+/// authored on the retained NASA species reference, not inferred latent heat.
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_candidate_with_boundaries(
+    parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    boundaries: &[RealGasSpeciesNetworkBoundary<'_>],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    exchange_candidate_with_boundaries_and_external_heat(
+        parcels,
+        transfers,
+        heat,
+        boundaries,
+        &[],
+        endpoints,
+        controls,
+        cancelled,
+    )
+}
+
+/// Joint internal transport, external phase streams, and additional heat, with
+/// one PR endpoint reconstruction per affected node. The external owner must
+/// accept its opposite mass/energy change atomically; no phase law or external
+/// storage is synthesized. Boundary owner IDs and external-heat IDs are each
+/// unique within their own explicitly separate physical channel.
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_candidate_with_boundaries_and_external_heat(
+    parcels: &BTreeMap<u64, IsochoricRealGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    boundaries: &[RealGasSpeciesNetworkBoundary<'_>],
+    external_heat: &[SpeciesNetworkExternalHeat],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<RealGasSpeciesNetworkCandidate, Error> {
     check(&mut cancelled)?;
@@ -138,13 +196,15 @@ pub fn exchange_candidate_with_external_heat(
         transfers.len(),
         heat.len(),
         external_heat.len(),
+        boundary::work_count(boundaries)?,
     )?;
     let borrowed = parcels.iter().map(|(&id, parcel)| (id, parcel)).collect();
-    exchange_borrowed(
+    exchange_borrowed_with_boundaries(
         &borrowed,
         transfers,
         heat,
         external_heat,
+        boundaries,
         endpoints,
         controls,
         &mut cancelled,
@@ -163,11 +223,35 @@ pub(super) fn exchange_borrowed(
     controls: SpeciesNetworkSolve,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<RealGasSpeciesNetworkCandidate, Error> {
+    exchange_borrowed_with_boundaries(
+        parcels,
+        transfers,
+        heat,
+        external_heat,
+        &[],
+        endpoints,
+        controls,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exchange_borrowed_with_boundaries(
+    parcels: &Parcels<'_>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    external_heat: &[SpeciesNetworkExternalHeat],
+    boundaries: &[RealGasSpeciesNetworkBoundary<'_>],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RealGasSpeciesNetworkCandidate, Error> {
     let mut snapshot = snapshot::prepare(
         parcels,
         transfers,
         heat,
         external_heat,
+        boundaries,
         endpoints,
         controls,
         cancelled,
