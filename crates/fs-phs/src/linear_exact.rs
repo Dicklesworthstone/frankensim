@@ -53,7 +53,7 @@ pub use heat_cache::{
 };
 pub use common_flow_zoh::PreparedCommonFlowZoh;
 pub use common_flow::CommonFlowProjection;
-pub use nonlinear::PreparedNonlinearZoh;
+pub use nonlinear::{PreparedNonlinearTones, PreparedNonlinearZoh};
 pub use prepared_zoh::PreparedExactZoh;
 pub use prepared_tones::{PreparedExactTones, PreparedToneObserver};
 pub use source_loss::PreparedSourceLoss;

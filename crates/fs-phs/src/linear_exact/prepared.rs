@@ -167,7 +167,27 @@ impl PreparedQuadraticFlow {
     ) -> Result<Self, PreparedStepError> {
         Self::prepare(
             sys, split, dt, &[], linear_forms, budget, cancelled, None,
-            Some((frequencies, affine)), None,
+            Some((frequencies, affine, sys.m)), None,
+        )
+    }
+
+    // Original physical ports rotate; the remaining shadow ports retain one
+    // held coordinate each. Nonlinear discrete efforts are never replicated
+    // across frequencies or assigned fictitious source/storage energy.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_mixed_tones_controlled(
+        sys: &PortHamiltonian,
+        split: &LinearSplit,
+        dt: f64,
+        frequencies: &[f64],
+        rotating_ports: usize,
+        linear_forms: &[Vec<f64>],
+        budget: DenseExponentialBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(
+            sys, split, dt, &[], linear_forms, budget, cancelled, None,
+            Some((frequencies, false, rotating_ports)), None,
         )
     }
 
@@ -214,14 +234,15 @@ impl PreparedQuadraticFlow {
         budget: DenseExponentialBudget,
         mut cancelled: impl FnMut() -> bool,
         extension: Option<(&[f64], &[f64])>,
-        tones: Option<(&[f64], bool)>,
+        tones: Option<(&[f64], bool, usize)>,
         input_override: Option<&[f64]>,
     ) -> Result<Self, PreparedStepError> {
         check_cancel(&mut cancelled)?;
         let (base_n, ports) = (split.n, split.m);
-        let m = if let Some((frequencies, affine)) = tones {
+        let m = if let Some((frequencies, affine, rotating_ports)) = tones {
             if frequencies.is_empty()
-                || ports == 0
+                || rotating_ports == 0
+                || rotating_ports > ports
                 || extension.is_some()
                 || input_override.is_some()
                 || frequencies.iter().any(|v| !v.is_finite() || *v < 0.0)
@@ -231,8 +252,9 @@ impl PreparedQuadraticFlow {
                     "tone sources require nonempty finite frequencies and physical ports",
                 ).into());
             }
-            ports.checked_mul(frequencies.len())
+            rotating_ports.checked_mul(frequencies.len())
                 .and_then(|v| v.checked_mul(if affine { 4 } else { 2 }))
+                .and_then(|v| v.checked_add(ports - rotating_ports))
                 .ok_or_else(|| refuse("tone source dimension overflow"))?
         } else {
             ports
@@ -451,9 +473,9 @@ impl PreparedQuadraticFlow {
                 }
             }
         }
-        if let Some((frequencies, affine)) = tones {
+        if let Some((frequencies, affine, rotating_ports)) = tones {
             let stride = if affine { 4 } else { 2 };
-            for p in 0..ports {
+            for p in 0..rotating_ports {
                 let magnitude = (0..n)
                     .map(|i| physical_input[i * ports + p].abs())
                     .fold(0.0_f64, f64::max);
@@ -478,6 +500,14 @@ impl PreparedQuadraticFlow {
                         generator[i * d + n + c] = physical_input[i * ports + p] / scale;
                         balanced_input[i * m + c] = generator[i * d + n + c];
                     }
+                }
+            }
+            let rotating = stride * rotating_ports * frequencies.len();
+            for p in rotating_ports..ports {
+                let c = rotating + p - rotating_ports;
+                for i in 0..n {
+                    generator[i * d + n + c] = physical_input[i * ports + p];
+                    balanced_input[i * m + c] = physical_input[i * ports + p];
                 }
             }
         } else {

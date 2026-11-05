@@ -2,7 +2,8 @@
 //! Heat uses the original resistance on the method's discrete effort; only the
 //! quadratic limit is an exact continuous physical trajectory.
 use fs_phs::linear_exact::{
-    LinearSplitBudget, PreparedExactZoh, PreparedNonlinearZoh, QuadraticPart, split_quadratic,
+    DenseExponentialBudget, LinearSplitBudget, PreparedExactTones, PreparedExactZoh,
+    PreparedNonlinearTones, PreparedNonlinearZoh, QuadraticPart, split_quadratic,
 };
 use fs_phs::{PortHamiltonian, QuadraticStorage, RelaxationBranch, Storage, duffing_oscillator};
 
@@ -520,4 +521,179 @@ fn prepared_capacity_path_keeps_raw_structure_and_storage_admission() {
             "{label} must retain its original admission",
         );
     }
+}
+
+fn tone_budget() -> DenseExponentialBudget {
+    DenseExponentialBudget {
+        max_dimension: 256, max_dense_bytes: usize::MAX, max_multiply_terms: u64::MAX,
+    }
+}
+
+struct PureQuartic;
+impl Storage for PureQuartic {
+    fn hamiltonian(&self, x: &[f64]) -> f64 { 0.25 * x[0].powi(4) }
+    fn gradient(&self, x: &[f64], out: &mut [f64]) { out[0] = x[0].powi(3); }
+    fn quadratic_part(&self) -> Option<QuadraticPart> {
+        Some(QuadraticPart { matrix: vec![0.0], exact: false })
+    }
+    fn midpoint_energy_remainder(&self, a: &[f64], b: &[f64], mid: &[f64]) -> Option<f64> {
+        let secant = 0.25 * (a[0] + b[0]) * (a[0] * a[0] + b[0] * b[0]);
+        Some((b[0] - a[0]) * (secant - mid[0].powi(3)))
+    }
+}
+
+#[test]
+fn nonlinear_tones_integrate_original_quartic_work_and_heat_analytically() {
+    let dt = 0.08;
+    let resistance = 0.4;
+    let original = PortHamiltonian::new(
+        1, 1, vec![0.0], vec![resistance], vec![1.0], Box::new(PureQuartic),
+    ).unwrap();
+    let frequencies = [0.0, 3.0, 3.0, 3.0, 7.1];
+    let mut owner = PreparedNonlinearTones::new_owned(
+        original, &frequencies, dt, budget(1), tone_budget(),
+    ).unwrap();
+    let large = 2.0_f64.powi(54);
+    let cosine = [0.2, large, 0.7, -large, -0.3];
+    let sine = [9.0, 0.1, 0.2, 0.3, 0.4]; // The DC sine is identically zero.
+    let initial = [0.7];
+    let step = owner.step(&initial, &cosine, &sine).unwrap();
+    let end = step.x[0];
+    let f = 0.25 * (initial[0] + end) * (initial[0].powi(2) + end * end);
+    let integral = 0.2 * dt
+        + 0.7 * (3.0 * dt).sin() / 3.0 + 0.6 * (1.0 - (3.0 * dt).cos()) / 3.0
+        - 0.3 * (7.1 * dt).sin() / 7.1 + 0.4 * (1.0 - (7.1 * dt).cos()) / 7.1;
+    // With Q=0 the accepted discrete effort is constant, even though the
+    // original storage is quartic and the applied source varies continuously.
+    close(end, initial[0] - dt * resistance * f + integral, 1.0);
+    close(step.y[0], f, 1.0);
+    close(step.dissipated, dt * resistance * f * f, 1.0);
+    close(step.supplied, f * integral, 1.0);
+    close(step.delta_h, 0.25 * (end.powi(4) - initial[0].powi(4)), 1.0);
+    assert!(step.dissipated > 0.0 && step.newton_iters > 0);
+    assert_eq!(owner.angular_frequencies_rad_s(), &frequencies);
+    assert_eq!((owner.state_dim(), owner.port_dim(), owner.tone_count()), (1, 1, 5));
+    let (c, s) = owner.advance_force_phase(4, cosine[4], sine[4]).unwrap();
+    close(c, -0.3 * (7.1 * dt).cos() + 0.4 * (7.1 * dt).sin(), 1.0);
+    close(s, 0.4 * (7.1 * dt).cos() + 0.3 * (7.1 * dt).sin(), 1.0);
+}
+
+#[test]
+fn nonlinear_tone_dc_and_quadratic_limits_reuse_the_original_physics() {
+    let make = || duffing_oscillator(1.0, 4.0, 7.0, 0.2).unwrap();
+    let initial = [0.31, -0.11];
+    let mut held = PreparedNonlinearZoh::new_owned(make(), 0.02, budget(2)).unwrap();
+    let mut dc = PreparedNonlinearTones::new_owned(
+        make(), &[0.0], 0.02, budget(2), tone_budget(),
+    ).unwrap();
+    let reference = held.step(&initial, &[0.4]).unwrap();
+    let actual = dc.step(&initial, &[0.4], &[100.0]).unwrap();
+    for (a, b) in actual.x.iter().zip(&reference.x) { close(*a, *b, 1.0); }
+    close(actual.y[0], reference.y[0], 1.0);
+    close(actual.supplied, reference.supplied, 1.0);
+    close(actual.dissipated, reference.dissipated, 1.0);
+
+    let make = || duffing_oscillator(1.0, 4.0, 0.0, 0.2).unwrap();
+    let frequencies = [0.0, 3.0, 3.00001, 7.0];
+    let mut exact = PreparedExactTones::new_owned(
+        make(), &frequencies, 0.1, budget(2), tone_budget(),
+    ).unwrap();
+    let mut nonlinear = PreparedNonlinearTones::new_owned(
+        make(), &frequencies, 0.1, budget(2), tone_budget(),
+    ).unwrap();
+    let (cosine, sine) = ([0.2, 0.8, -0.4, 0.3], [0.0, -0.1, 0.2, 0.4]);
+    let (mut x, mut y) = ([0.0; 2], [0.0]);
+    let reference = exact.step_into(&initial, &cosine, &sine, &mut x, &mut y).unwrap();
+    let actual = nonlinear.step(&initial, &cosine, &sine).unwrap();
+    for (a, b) in actual.x.iter().zip(&x) { close(*a, *b, 1.0); }
+    close(actual.y[0], y[0], 1.0);
+    close(actual.supplied, reference.supplied, 1.0);
+    close(actual.dissipated, reference.dissipated, 1.0);
+    close(actual.delta_h, reference.delta_h, 1.0);
+    assert_eq!(actual.newton_iters, 0);
+}
+
+#[test]
+fn continuous_tones_refine_original_nonlinear_motion_work_and_heat() {
+    let initial = [0.7, -0.2];
+    let duration = 0.4;
+    // Independent continuous Duffing equations, with original heat and work
+    // integrated alongside the state. Time is the fifth reference coordinate.
+    let reference = rk4([initial[0], initial[1], 0.0, 0.0, 0.0], duration, 8192, |x| {
+        let t = x[4];
+        let u = 0.8 * (2.3 * t).cos() + 0.3 * (2.3 * t).sin()
+            - 0.25 * (4.1 * t).cos() + 0.2 * (4.1 * t).sin();
+        [x[1], -4.0 * x[0] - 7.0 * x[0].powi(3) - 0.2 * x[1] + u,
+            0.2 * x[1] * x[1], u * x[1], 1.0]
+    });
+    let mut errors = Vec::new();
+    for steps in [8, 16, 32] {
+        let mut owner = PreparedNonlinearTones::new_owned(
+            duffing_oscillator(1.0, 4.0, 7.0, 0.2).unwrap(), &[2.3, 4.1],
+            duration / f64::from(steps), budget(2), tone_budget(),
+        ).unwrap();
+        let (mut cosine, mut sine) = ([0.8, -0.25], [0.3, 0.2]);
+        let (mut x, mut next, mut y) = (initial, [0.0; 2], [0.0]);
+        let (mut heat, mut work) = (0.0, 0.0);
+        for _ in 0..steps {
+            let record = owner.step_into(&x, &cosine, &sine, &mut next, &mut y).unwrap();
+            heat += record.dissipated;
+            work += record.supplied;
+            x = next;
+            for tone in 0..2 {
+                (cosine[tone], sine[tone]) = owner.advance_force_phase(
+                    tone, cosine[tone], sine[tone],
+                ).unwrap();
+            }
+        }
+        close(owner.system().hamiltonian(&x) - owner.system().hamiltonian(&initial) + heat,
+            work, 1.0);
+        errors.push([x[0] - reference[0], x[1] - reference[1],
+            heat - reference[2], work - reference[3]].map(f64::abs));
+    }
+    for component in 0..4 {
+        assert!(errors[1][component] < 0.35 * errors[0][component], "{errors:?}");
+        assert!(errors[2][component] < 0.35 * errors[1][component], "{errors:?}");
+    }
+}
+
+#[test]
+fn nonlinear_tone_capacity_covers_work_and_refusals_are_transactional() {
+    assert!(PreparedNonlinearTones::fits_reference_capacity(126, 1, 1));
+    assert!(PreparedNonlinearTones::fits_reference_capacity(1, 85, 1));
+    for (n, m, k) in [(127, 1, 1), (1, 86, 1), (0, 1, 1), (1, 0, 1),
+        (1, 1, 0), (usize::MAX, 1, 1), (1, usize::MAX, 1), (1, 1, usize::MAX)]
+    {
+        assert!(!PreparedNonlinearTones::fits_reference_capacity(n, m, k));
+    }
+    let make = || duffing_oscillator(1.0, 4.0, 7.0, 0.2).unwrap();
+    for denied in [
+        DenseExponentialBudget { max_dimension: 6, ..tone_budget() },
+        DenseExponentialBudget { max_dense_bytes: 0, ..tone_budget() },
+        DenseExponentialBudget { max_multiply_terms: 0, ..tone_budget() },
+    ] {
+        assert!(PreparedNonlinearTones::new_owned(make(), &[3.0], 0.1, budget(2), denied).is_err());
+    }
+    // Repeated authored terms occupy one rotating pair, not 80 pairs.
+    assert!(PreparedNonlinearTones::new_owned(
+        make(), &[3.0; 80], 0.1, budget(2),
+        DenseExponentialBudget { max_dimension: 7, ..tone_budget() },
+    ).is_ok());
+    let mut owner = PreparedNonlinearTones::new_owned(
+        make(), &[3.0], 0.1, budget(2), tone_budget(),
+    ).unwrap();
+    let (mut next, mut output) = ([41.0; 2], [42.0]);
+    assert!(owner.step_into(&[0.8, 0.3], &[f64::NAN], &[0.2], &mut next, &mut output).is_err());
+    let mut polls = 0;
+    assert!(matches!(owner.step_into_controlled(
+        &[0.8, 0.3], &[0.7], &[0.2], &mut next, &mut output,
+        || { polls += 1; polls >= 6 },
+    ), Err(fs_phs::PreparedStepError::Cancelled)));
+    owner.set_max_iterations(0).unwrap();
+    assert!(owner.step_into(&[0.8, 0.3], &[0.7], &[0.2], &mut next, &mut output).is_err());
+    assert_eq!(next, [41.0; 2]);
+    assert_eq!(output, [42.0]);
+    owner.set_max_iterations(50).unwrap();
+    owner.step_into(&[0.8, 0.3], &[0.7], &[0.2], &mut next, &mut output).unwrap();
+    assert!(next.iter().all(|v| v.is_finite()) && output[0].is_finite());
 }
