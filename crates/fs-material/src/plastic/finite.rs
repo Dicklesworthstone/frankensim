@@ -17,6 +17,13 @@
 //! extends the linear hardening through the same metric and tangent owner;
 //! it does not assert cyclic
 //! kinematic hardening, damage, thermal expansion or a mixed-pressure element.
+//!
+//! Near the undeformed metric, strain-sized increments are retained separately
+//! from the identity. A shifted eigensolve resolves small shear; a bounded
+//! matrix-logarithm series preserves its quadratic normal strains. The same
+//! exact logarithm derivative supplies the consistent tangent. This also keeps
+//! second-order volume strain when the reported `det(F)` rounds to one; it
+//! cannot recover deformation already lost when the caller formed `F`.
 
 use core::fmt;
 use fs_math::det;
@@ -25,14 +32,14 @@ use fs_math::det;
 pub mod combined;
 /// Explicit threshold-free Norton creep on the shared finite return owner.
 pub mod creep;
+/// Traction-free thickness/shear relaxation of the original finite return map.
+pub mod plane_stress;
 /// Explicit-time Perzyna kinetics on this same finite return and tangent owner.
 pub mod rate;
 /// Strict, explicit model-card binding for this exact Kirchhoff-yield law.
 pub mod source;
 /// Affine temperature dependence and multiplicative isotropic thermal stretch.
 pub mod thermal;
-/// Traction-free thickness/shear relaxation of the original finite return map.
-pub mod plane_stress;
 /// Energetic Voce saturation on the same finite metric, flow and tangent owner.
 pub mod voce;
 
@@ -805,13 +812,39 @@ impl FiniteJ2 {
             });
         }
         let cp_inv = expand(&state.inverse_plastic_cauchy_green);
-        let be = multiply(&multiply(f, &cp_inv), &transpose(f));
-        let spectrum = Spectrum::spd(&be)?;
-        let logarithm = spectrum.reconstruct(&spectrum.log_values);
-        let deviator = deviator(&logarithm).map(|x| 0.5 * x);
+        // Keep the strain-sized increment separate from the unit metric. In
+        // particular, simple shear stores gamma in F even when 1 + gamma^2
+        // rounds to one. Forming that sum first loses its normal strain.
+        let reference_increment = left_metric_increment(f);
+        let reference_is_small = matrix_norm_inf(&reference_increment) <= SMALL_METRIC;
+        let history_increment = subtract_identity(&cp_inv);
+        let spectrum = if reference_is_small && matrix_norm_inf(&history_increment) <= SMALL_METRIC
+        {
+            // F Cp^-1 F^T - I = (F F^T - I) + F (Cp^-1 - I) F^T.
+            // No unit-sized diagonal enters the second term.
+            let correction = multiply(&multiply(f, &history_increment), &transpose(f));
+            let increment = symmetric(&core::array::from_fn(|i| {
+                reference_increment[i] + correction[i]
+            }));
+            if matrix_norm_inf(&increment) <= SMALL_METRIC {
+                Spectrum::near_identity(&increment)
+            } else {
+                Spectrum::spd(&multiply(&multiply(f, &cp_inv), &transpose(f)))?
+            }
+        } else {
+            Spectrum::spd(&multiply(&multiply(f, &cp_inv), &transpose(f)))?
+        };
+        let log_j = if reference_is_small {
+            // det(I + A) - 1 = tr(A) + I2(A) + det(A). This retains
+            // second-order volume changes even when the reported J rounds to 1.
+            0.5 * log_one_plus(determinant_increment(&reference_increment))
+        } else {
+            det::ln(jacobian)
+        };
+        let deviator = deviator(&spectrum.logarithm).map(|x| 0.5 * x);
         Ok(ElasticEndpoint {
             jacobian,
-            log_j: det::ln(jacobian),
+            log_j,
             spectrum,
             deviator,
         })
@@ -861,7 +894,11 @@ struct Spectrum {
     values: [f64; 3],
     log_values: [f64; 3],
     vectors: [f64; 9],
+    logarithm: [f64; 9],
 }
+
+// A row-sum bound also bounds every eigenvalue of a symmetric increment.
+const SMALL_METRIC: f64 = 1.0 / 16.0;
 
 impl Spectrum {
     fn spd(matrix: &[f64; 9]) -> Result<Self, FiniteJ2Error> {
@@ -869,6 +906,10 @@ impl Spectrum {
             return Err(FiniteJ2Error::Numerical(
                 "elastic or plastic metric must be finite",
             ));
+        }
+        let increment = subtract_identity(matrix);
+        if matrix_norm_inf(&increment) <= SMALL_METRIC {
+            return Ok(Self::near_identity(&increment));
         }
         let (values, vectors) = fs_la::eigen::jacobi_eigh(matrix, 3);
         if values.iter().any(|x| !x.is_finite() || *x <= 0.0)
@@ -878,11 +919,29 @@ impl Spectrum {
                 "elastic or plastic metric must be numerically resolved positive definite",
             ));
         }
-        Ok(Self {
+        let mut spectrum = Self {
             values: [values[0], values[1], values[2]],
             log_values: [det::ln(values[0]), det::ln(values[1]), det::ln(values[2])],
             vectors: core::array::from_fn(|i| vectors[i]),
-        })
+            logarithm: [0.0; 9],
+        };
+        spectrum.logarithm = spectrum.reconstruct(&spectrum.log_values);
+        Ok(spectrum)
+    }
+
+    fn near_identity(increment: &[f64; 9]) -> Self {
+        // Diagonalize A, not I+A: the Jacobi stopping criterion then resolves
+        // small shear relative to the strain instead of the unit diagonal.
+        let (offsets, vectors) = fs_la::eigen::jacobi_eigh(increment, 3);
+        Self {
+            values: core::array::from_fn(|i| 1.0 + offsets[i]),
+            log_values: core::array::from_fn(|i| log_one_plus(offsets[i])),
+            vectors: core::array::from_fn(|i| vectors[i]),
+            // Spectral reconstruction alone can cancel O(strain^2) diagonal
+            // terms between opposite O(strain) eigenvalues. The matrix series
+            // retains those terms and shares the same exact logarithm tangent.
+            logarithm: logarithm_near_identity(increment),
+        }
     }
 
     fn reconstruct(&self, diagonal: &[f64; 3]) -> [f64; 9] {
@@ -905,6 +964,97 @@ impl Spectrum {
         let weighted: [f64; 9] = core::array::from_fn(|i| rotated[i] * divided_differences[i]);
         multiply(&multiply(&self.vectors, &weighted), &vt)
     }
+}
+
+fn subtract_identity(matrix: &[f64; 9]) -> [f64; 9] {
+    core::array::from_fn(|i| matrix[i] - if i % 4 == 0 { 1.0 } else { 0.0 })
+}
+
+fn symmetric(matrix: &[f64; 9]) -> [f64; 9] {
+    core::array::from_fn(|i| {
+        if i % 4 == 0 {
+            matrix[i]
+        } else {
+            0.5 * matrix[i] + 0.5 * matrix[3 * (i % 3) + i / 3]
+        }
+    })
+}
+
+fn matrix_norm_inf(matrix: &[f64; 9]) -> f64 {
+    if matrix.iter().any(|x| !x.is_finite()) {
+        return f64::INFINITY;
+    }
+    (0..3)
+        .map(|i| (0..3).map(|j| matrix[3 * i + j].abs()).sum::<f64>())
+        .fold(0.0, f64::max)
+}
+
+fn left_metric_increment(f: &[f64; 9]) -> [f64; 9] {
+    let mut increment = [0.0; 9];
+    for i in 0..3 {
+        let mut largest = 0;
+        for k in 1..3 {
+            if f[3 * i + k].abs() > f[3 * i + largest].abs() {
+                largest = k;
+            }
+        }
+        // Subtract the unit contribution before adding small squared shears.
+        let major = f[3 * i + largest];
+        let mut diagonal = major.mul_add(major, -1.0);
+        for k in 0..3 {
+            if k != largest {
+                diagonal = f[3 * i + k].mul_add(f[3 * i + k], diagonal);
+            }
+        }
+        increment[3 * i + i] = diagonal;
+        for j in i + 1..3 {
+            let value = (0..3).map(|k| f[3 * i + k] * f[3 * j + k]).sum();
+            increment[3 * i + j] = value;
+            increment[3 * j + i] = value;
+        }
+    }
+    increment
+}
+
+fn determinant_increment(a: &[f64; 9]) -> f64 {
+    let second = a[0] * a[4] + a[4] * a[8] + a[8] * a[0] - a[1] * a[3] - a[5] * a[7] - a[2] * a[6];
+    (a[0] + a[4] + a[8]) + second + determinant(a)
+}
+
+// For |x| <= 1/4, r = x/(2+x) has |r| <= 1/7. The first
+// omitted atanh term (degree 33) is below 1e-29. All callers have
+// |x| <= (1 + SMALL_METRIC)^3 - 1 < 1/4.
+fn log_one_plus(x: f64) -> f64 {
+    let r = x / (2.0 + x);
+    let squared = r * r;
+    let mut power = r;
+    let mut series = r;
+    for n in 1..=15 {
+        power *= squared;
+        series += power / f64::from(2 * n + 1);
+    }
+    2.0 * series
+}
+
+fn logarithm_near_identity(a: &[f64; 9]) -> [f64; 9] {
+    let q = matrix_norm_inf(a);
+    let mut logarithm = *a;
+    let mut power = *a;
+    let mut power_bound = q;
+    for n in 2..=16 {
+        power = multiply(&power, a);
+        power_bound *= q;
+        let coefficient = if n % 2 == 0 { -1.0 } else { 1.0 } / f64::from(n);
+        for i in 0..9 {
+            logarithm[i] = coefficient.mul_add(power[i], logarithm[i]);
+        }
+        // Bound the omitted Frechet derivative by q^n/(1-q). The value
+        // remainder is smaller still. Always retain the quadratic term.
+        if power_bound / (1.0 - q) <= 0.125 * f64::EPSILON {
+            break;
+        }
+    }
+    symmetric(&logarithm)
 }
 
 // Exact coalescence limit and a stable analytic atanh series close to it.

@@ -78,6 +78,128 @@ fn rotation(angle: f64) -> [f64; 9] {
 }
 
 #[test]
+fn g1_resolved_small_shear_preserves_hencky_stress_energy_and_tangent() {
+    let p = FiniteJ2Parameters {
+        yield_stress_pa: 1e12,
+        ..parameters()
+    };
+    let material = FiniteJ2::new(p, limits()).unwrap();
+    let old = material.initial_state();
+    // An exactly representable quarter turn preserves even sub-epsilon shear
+    // entries in F; it must rotate the response without losing that strain.
+    let quarter_turn = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+    for magnitude in [1e-18, 1e-12, 1e-7, 1e-3, 0.02, 0.058, 0.06, 0.07] {
+        for gamma in [-magnitude, magnitude] {
+            let mut f = IDENTITY;
+            f[1] = gamma;
+            let r = material.response(&f, &old).unwrap();
+            // Exact simple-shear logarithm: principal Hencky strains are
+            // +/- asinh(gamma/2), with the eigenvectors eliminated analytically.
+            let a = (0.5_f64 * gamma).asinh();
+            let d = (1.0 + 0.25 * gamma * gamma).sqrt();
+            let shear = 2.0 * p.shear_modulus_pa * a / d;
+            let normal = -0.5 * gamma * shear;
+            near(r.first_piola_pa[0], normal, 0.0, 3e-11);
+            near(r.first_piola_pa[1], shear, 0.0, 3e-12);
+            near(
+                r.first_piola_pa[3],
+                shear * (1.0 + 0.5 * gamma * gamma),
+                0.0,
+                3e-12,
+            );
+            near(r.first_piola_pa[4], normal, 0.0, 3e-11);
+            near(
+                r.stored_energy_j_m3,
+                2.0 * p.shear_modulus_pa * a * a,
+                0.0,
+                3e-12,
+            );
+            let tangent =
+                p.shear_modulus_pa / (d * d) - 0.5 * p.shear_modulus_pa * a * gamma / (d * d * d);
+            near(r.tangent_pa[1][1], tangent, 0.0, 3e-12);
+            assert_eq!(r.state, old);
+            assert_eq!(r.plastic_increment, 0.0);
+            assert_eq!(r.plastic_dissipation_j_m3, 0.0);
+
+            let rotated = material
+                .response(&multiply(&quarter_turn, &f), &old)
+                .unwrap();
+            let expected = multiply(&quarter_turn, &r.first_piola_pa);
+            for (actual, reference) in rotated.first_piola_pa.iter().zip(expected) {
+                near(*actual, reference, 1e-13 * shear.abs(), 3e-12);
+            }
+            near(rotated.stored_energy_j_m3, r.stored_energy_j_m3, 0.0, 3e-12);
+
+            // Perturb the small off-diagonal itself, never the unit diagonal.
+            let step = gamma.abs() * 2e-4;
+            let mut plus = f;
+            let mut minus = f;
+            plus[1] += step;
+            minus[1] -= step;
+            let rp = material.stress_and_potential(&plus, &old).unwrap();
+            let rm = material.stress_and_potential(&minus, &old).unwrap();
+            near((rp.1 - rm.1) / (2.0 * step), shear, 0.0, 3e-8);
+            near(
+                (rp.0[1] - rm.0[1]) / (2.0 * step),
+                r.tangent_pa[1][1],
+                0.0,
+                3e-8,
+            );
+        }
+    }
+    let narrow = FiniteJ2::new(
+        p,
+        FiniteJ2Limits {
+            maximum_elastic_log_strain: 1e-19,
+            ..limits()
+        },
+    )
+    .unwrap();
+    let mut f = IDENTITY;
+    f[1] = 1e-18;
+    assert!(matches!(
+        narrow.response(&f, &old),
+        Err(FiniteJ2Error::Domain {
+            quantity: "elastic logarithmic strain",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn g1_small_skew_displacement_gradient_retains_second_order_volume_strain() {
+    let p = parameters();
+    let material = law();
+    let old = material.initial_state();
+    for gamma in [1e-12_f64, 1e-8, 1e-4] {
+        // I + skew is not a finite rigid rotation: det(F) = 1 + gamma^2.
+        let f = [1.0, gamma, 0.0, -gamma, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let log_j = (gamma * gamma).ln_1p();
+        let r = material.response(&f, &old).unwrap();
+        near(
+            r.kirchhoff_pa[0],
+            (p.bulk_modulus_pa + p.shear_modulus_pa / 3.0) * log_j,
+            0.0,
+            3e-14,
+        );
+        near(r.kirchhoff_pa[4], r.kirchhoff_pa[0], 0.0, 3e-14);
+        near(
+            r.kirchhoff_pa[8],
+            (p.bulk_modulus_pa - 2.0 * p.shear_modulus_pa / 3.0) * log_j,
+            0.0,
+            3e-14,
+        );
+        near(
+            r.stored_energy_j_m3,
+            (0.5 * p.bulk_modulus_pa + p.shear_modulus_pa / 6.0) * log_j * log_j,
+            0.0,
+            3e-14,
+        );
+        assert_eq!(r.state, old);
+    }
+}
+
+#[test]
 fn independent_coaxial_reference_fixes_flow_stress_energy_and_kirchhoff_convention() {
     for hardening in [0.0, 2e9] {
         let p = FiniteJ2Parameters {
