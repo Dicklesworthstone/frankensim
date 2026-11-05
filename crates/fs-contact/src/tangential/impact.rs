@@ -16,6 +16,11 @@
 
 use fs_math::det;
 use fs_tribo::TriboError;
+
+/// Simultaneous scalar friction ports with their complete coupled mobility.
+#[path = "impact/multiple.rs"]
+pub mod multiple;
+
 /// The original constitutive owner and branch labels; no new coefficient law.
 pub use fs_tribo::{FrictionLaw, FrictionRegime};
 

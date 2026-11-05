@@ -1242,6 +1242,38 @@ unequal static/kinetic coefficients, general anisotropic or multicontact
 friction, calibrated material authority, or certified nonintersection is
 claimed by these two primitives.
 
+## Coupled scalar friction impulses
+
+`tangential::impact::multiple::solve_coupled_friction_impulses` resolves up to
+32 scalar friction ports simultaneously. The caller supplies the complete
+positive-definite mobility and one frozen symmetric impulse capacity per port.
+All coordinates are work-conjugate metres/second and newton-seconds; an angular
+consumer retains its authored length when converting rate and torque impulse.
+The candidate minimizes `v_before.p + p.W.p/2` over the original product of
+physical intervals, including every cross-port response.
+
+A bounded deterministic active set solves the free ports together, advances to
+the first physical bound and releases incorrectly active bounds. Diagonal
+normalization changes numerical coordinates only. One original admission factor
+and one cached free-face factor use fixed stack storage, with no heap allocation.
+A repeated free set reuses its factor. Singular or unresolved mobility refuses
+without regularization. Independent per-port clamping is not this coupled law.
+
+Acceptance uses the original supplied matrix's endpoint KKT residual, exact
+box feasibility, support gap, reconstructed impulse and independent
+inverse-mobility kinetic/work closure. Actual endpoint residuals are retained.
+Initially nonzero reacting motion reaches a solve before tolerance admission,
+so the velocity tolerance does not create a zero-impulse dead band. A separate
+numerical impulse budget may refuse a required result but never shrinks its
+physical capacity.
+
+Total midpoint impulse work determines unallocated mechanical dissipation.
+Individual port-work allocations can be signed when relative modes exchange
+energy; they are not local heat shares. The input capacities declare this event's
+set, without automatic static/kinetic history, normal-contact or trajectory
+inference. Empty input is an exact identity. Every bounded matrix/solve pass
+polls cancellation, and refusal publishes no partial candidate.
+
 ## Simultaneous non-associated normal/Coulomb point impacts
 
 `frictional_multicontact::solve_frictional_contacts` solves the complete
