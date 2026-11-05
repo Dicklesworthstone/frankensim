@@ -310,7 +310,7 @@ fn index(a: usize, b: usize) -> usize {
     row * (13 - row) / 2 + column - row
 }
 
-struct Full([Dd; 21]);
+pub(super) struct Full(pub(super) [Dd; 21]);
 impl Accumulator for Full {
     type Output = AngularSpectrumExposureApertureMoments;
     fn add<K: Kernel>(&mut self, kernel: K, a: &FieldParts, b: &FieldParts) {

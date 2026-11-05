@@ -29,6 +29,8 @@ pub use interferometer::{
 mod aperture;
 mod cell;
 pub use aperture::{
+    AngularSpectrumExposureApertureArm, AngularSpectrumApertureInterferenceLimits,
+    PreparedAngularSpectrumApertureInterferometer,
     AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
     AngularSpectrumExposureApertureLimits, AngularSpectrumExposureApertureMoments,
     AngularSpectrumExposureApertureProjection, AngularSpectrumExposureApertureProjectionReading,

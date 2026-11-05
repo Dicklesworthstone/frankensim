@@ -3112,6 +3112,46 @@ Focused regressions compare independent analytic multi-arm delay fringes under
 both shutters, mixed real/proper source moments, original two-face fields,
 sub-ulp modal residuals at a dark port, exact budgets and transactional refusals.
 
+### Prepared broadband interference through a finite physical detector
+
+`AngularSpectrumExposure::prepare_aperture_interferometer` and its ensemble
+counterpart cache the original six-component E/H fields for 1–4096 parallel
+arms in one explicitly selected observation half-space. Each arm supplies an
+outward face distance and transverse translation; it represents
+`F(x+dx, y+dy, depth, t-delay)` in the same medium and Cartesian orientation.
+Every read applies one authored complex amplitude gain and actual-frequency
+delay to E and H together. No splitter geometry, impedance conversion, passive
+throughput, ray rotation or cross-factor coherence is inferred.
+
+The returned existing aperture-moment owner retains all 21 real E/H second
+moments, vector Poynting flux and signed Cartesian z-directed watts through the
+rectangle. Counterpropagating and evanescent fields retain their original
+Maxwell relation; electric mean square is never substituted for transported
+power. Deterministic means and real source factors retain carrier sums and
+differences, while proper factors retain only differences and their original
+one-half normalization. Each independent bank recombines all arms before
+products and adds its moments afterwards.
+
+Preparation uses the original modal reconstructor, aperture kernels and shared
+harmonic-window owner. Its work/storage limits admit original mode-line work,
+six-component cached source entries, separable Gram products and peak logical
+workspace before allocation. Repeated reads allocate nothing, perform no FFT
+or material reconstruction, and reuse a bounded workspace. For N=Nx*Ny and
+bank frequency counts F_r, the Gram application costs
+`sum(N*F_r*(Nx+Ny+F_r))`, rather than forming a dense mode-frequency pair
+table. The real parity calculation is shared with the existing aperture energy
+control; proper products use the corresponding conjugate complex Gram.
+Compensated arm sums preserve weak residuals before spatial/time integration.
+Cancellation leaves the preparation reusable.
+
+G1/G3 regressions in `tests/plane_wave/exposure/aperture_interferometer.rs`
+exercise independent analytic 2D, two-frequency E/H moments, both shutters,
+mixed real/proper factors, signed backward flux, standing-wave cancellation,
+sub-ulp dark-port fields, all preparation budgets and cancellable reuse. This
+remains an ideal observation of the source fields; detector absorption,
+back-action and an optical network implementing the authored arms require
+their own physical owners.
+
 ### Finite exposures of proper complex spectral covariance
 
 `angular_spectrum::AngularSpectrumExposureEnsemble` composes the existing

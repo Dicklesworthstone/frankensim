@@ -11,6 +11,13 @@ use super::*;
 
 type FieldParts = [[Dd; 2]; 6];
 
+mod gram;
+mod interferometer;
+pub use interferometer::{
+    AngularSpectrumExposureApertureArm, AngularSpectrumApertureInterferenceLimits,
+    PreparedAngularSpectrumApertureInterferometer,
+};
+
 mod control;
 mod polarization;
 mod stress;
@@ -628,6 +635,23 @@ fn center_fields_dd(
     window: HarmonicWindow,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), AngularSpectrumError> {
+    center_translated_fields_dd(field, omega, kx, ky, aperture, window, [0.0; 2], cancelled)
+}
+
+// Translate the original field into the common parallel detector plane.
+// Add the displacement in DD before joint aperture/clock phase reduction;
+// rounding a translated rectangle origin would lose a small physical shift.
+#[allow(clippy::too_many_arguments)]
+fn center_translated_fields_dd(
+    field: &mut [FieldParts],
+    omega: f64,
+    kx: impl Fn(usize) -> Dd,
+    ky: impl Fn(usize) -> Dd,
+    aperture: AngularSpectrumAperture,
+    window: HarmonicWindow,
+    translation: [f64; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), AngularSpectrumError> {
     let [x, y] = aperture.origin_m();
     let [width, height] = aperture.extent_m();
     for (i, components) in field.iter_mut().enumerate() {
@@ -635,12 +659,14 @@ fn center_fields_dd(
             poll(cancelled)?;
         }
         let (mut start, mut half_width) = (Dd::ZERO, Dd::ZERO);
-        for (frequency, origin, extent) in [
-            (kx(i), x, width),
-            (ky(i), y, height),
-            (Dd::from_f64(-omega), window.start_s(), window.duration_s()),
+        for (frequency, origin, extent, displacement) in [
+            (kx(i), x, width, translation[0]),
+            (ky(i), y, height, translation[1]),
+            (Dd::from_f64(-omega), window.start_s(), window.duration_s(), 0.0),
         ] {
-            start = start + frequency * Dd::from_f64(origin);
+            let origin = if displacement == 0.0 { Dd::from_f64(origin) }
+                else { Dd::from_f64(origin) + Dd::from_f64(displacement) };
+            start = start + frequency * origin;
             // Halve the larger operand to retain representable products when
             // either the interval or frequency is subnormal.
             half_width = half_width

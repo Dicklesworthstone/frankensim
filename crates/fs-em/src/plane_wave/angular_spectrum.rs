@@ -70,6 +70,8 @@ pub use two_sided::{
 
 mod exposure;
 pub use exposure::{
+    AngularSpectrumExposureApertureArm, AngularSpectrumApertureInterferenceLimits,
+    PreparedAngularSpectrumApertureInterferometer,
     AngularSpectrumApertureControlLimits, AngularSpectrumApertureEnergyGradient,
     AngularSpectrumExposure, AngularSpectrumExposureApertureLimits,
     AngularSpectrumExposureApertureMoments, AngularSpectrumExposureApertureProjection,
