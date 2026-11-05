@@ -1967,15 +1967,20 @@ fn validate_relaxation_modes(
             what: "moving-end relaxation does not support a second polarization",
         });
     }
-    // The fixed sample clock uses the midpoint discrete gradient. For an
-    // isolated pole, h <= 0.1 keeps both phase-rate and relaxation-rate error
-    // below 0.1%; Nyquist alone admits severely warped/stiff transients.
-    // This reference check is not a bound on nonlinear or coupled spectra.
+    // Fixed-end members propagate the complete quadratic block, INCLUDING
+    // these Maxwell coordinates, through PreparedNonlinearZoh. Imposing the
+    // old midpoint limits there would reject audible partials and fast
+    // material relaxation despite exact linear propagation. Moving-end joins
+    // can still use midpoint for their coupled/nonlinear storage, so retain
+    // that path's reference limits in addition to its own coupled-rate gate.
+    // Neither policy bounds nonlinear/contact-generated frequencies.
     let reference_rate_limit = 0.1 * f64::from(sample_rate);
-    if law.branches.iter().any(|branch| {
-        branch.relaxing_stiffness_n_m2 > 0.0
-            && 1.0 / branch.relaxation_time_s > reference_rate_limit
-    }) {
+    if string.moving_end
+        && law.branches.iter().any(|branch| {
+            branch.relaxing_stiffness_n_m2 > 0.0
+                && 1.0 / branch.relaxation_time_s > reference_rate_limit
+        })
+    {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "sample rate does not resolve bending relaxation: require dt/tau <= 0.1; increase sample rate",
         });
@@ -2008,7 +2013,7 @@ fn validate_relaxation_modes(
             {
                 return Err(refuse());
             }
-            if instant > reference_rate_limit {
+            if string.moving_end && instant > reference_rate_limit {
                 return Err(AcousticRealizeError::InvalidDescription {
                     what: "sample rate does not resolve bending reference phase: require dt*omega_instant <= 0.1; increase sample rate",
                 });

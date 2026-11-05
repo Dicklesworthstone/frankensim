@@ -5903,6 +5903,17 @@ band refuses with a typed `TimeResolution` error; nothing is retuned.
 | Circuit/thermal/network piston | First order in general | Observed order 1 +- 0.1 on the four-rung companion ladder (`FS_IRP_NETWORK_AUDIT_LOG`); no exact-linear claim |
 | Live PianoAudio at 1/2/4x | Exact local blocks plus finite-step coupled solves | Companion-measured coupled-board frequency within 1 cent, window discrepancy included, at each factor (`FS_IRP_PIANO_AUDIT_LOG`) |
 
+Fixed-end KC members carry every admitted Prony bending memory coordinate in
+their exact quadratic block. Their material amplitude decay therefore does not
+inherit the former midpoint `dt/tau <= 0.1` or `dt*omega_instant <= 0.1` limits.
+The original material frequency domain, relaxed and instantaneous observer
+Nyquist checks, complete-state resource bounds and nonlinear/contact accuracy
+requirements still apply. Moving-end joins retain their reference clock limits
+and their independent coupled-rate admission. G1 consumer regressions compare
+5/10 kHz modes at 48 kHz with `dt/tau = 16` against independently refined Maxwell
+ODEs, including amplitudes, material history, positive heat and held-force work;
+a public assembly regression carries the admitted decay through to pressure.
+
 The coupled-mode test uses the exact symmetric stiffness eigenproblem and a
 three-rate phase-error ladder. The coupled pencil steps exactly, so the scalar
 midpoint atan oracle does not apply to it. Piston tests reuse the actual

@@ -291,6 +291,191 @@ fn kc_exact_flow_keeps_every_bending_memory_coordinate_and_its_energy() {
     close(physical_energy(&member.x) - initial + heat, work, initial);
 }
 
+fn relaxing_string(frequency_hz: f64, relaxation_time_s: f64) -> PrestressedString {
+    let mut string = string(frequency_hz, 1);
+    string.axial_stiffness_n = 0.0;
+    string.rayleigh = None;
+    let w = omega(&string, 1);
+    let wave = core::f64::consts::PI / string.length_m;
+    string.relaxation_bending = Some(fs_scenario::acoustic::PronyBending {
+        branches: vec![fs_scenario::acoustic::BendingRelaxationBranch {
+            relaxing_stiffness_n_m2: 0.3 * w * w * string.lin_density_kg_m / wave.powi(4),
+            relaxation_time_s,
+        }],
+        omega_band_rad_s: (0.0, 1e6),
+        material_state_identity: None,
+        source_properties: None,
+    });
+    string
+}
+
+#[test]
+fn kc_exact_relaxation_resolves_audible_amplitudes_and_fast_material_decay() {
+    let gas = gas_state(AmbientGas::sea_level()).unwrap();
+    let dt = 1.0 / 48_000.0;
+    // Both the 5/10 kHz partial and dt/tau=16 used to fail the obsolete
+    // midpoint gate, before this complete exact-linear owner could run.
+    for frequency in [5_000.0, 10_000.0] {
+        let tau = dt / 16.0;
+        let string = relaxing_string(frequency, tau);
+        validate_relaxation_modes(&string, 48_000).unwrap();
+        let w = omega(&string, 1);
+        let wave = core::f64::consts::PI / string.length_m;
+        let stiffness = string.relaxation_bending.as_ref().unwrap().branches[0]
+            .relaxing_stiffness_n_m2
+            * wave.powi(4)
+            / string.lin_density_kg_m;
+        let root = stiffness.sqrt();
+        // Retain the actual surrounding-gas viscosity in the independent ODE.
+        let drag = 2.0 * w * mode_zeta(&string, w, wave, &gas).unwrap();
+        let q0 = 1e-5 * mass_scale(&string);
+        let initial = [q0, 0.25 * w * q0, 0.0];
+        let force = 0.1 * w * w * q0;
+        let energy =
+            |x: &[f64]| 0.5 * (x[1] * x[1] + (w * x[0]).powi(2) + (root * x[0] - x[2]).powi(2));
+        // Direct Maxwell equations and continuous power, independent of pHS
+        // matrices, exponential/discrete-gradient stepping and its heat owner.
+        let rhs = |x: [f64; 5]| {
+            let elastic_strain = root * x[0] - x[2];
+            [
+                x[1],
+                force - w * w * x[0] - drag * x[1] - root * elastic_strain,
+                elastic_strain / tau,
+                drag * x[1] * x[1] + elastic_strain * elastic_strain / tau,
+                force * x[1],
+            ]
+        };
+        let reference = |substeps: usize| {
+            let h = dt / substeps as f64;
+            let mut x = [initial[0], initial[1], initial[2], 0.0, 0.0];
+            for _ in 0..24 * substeps {
+                let a = rhs(x);
+                let b = rhs(core::array::from_fn(|i| x[i] + 0.5 * h * a[i]));
+                let c = rhs(core::array::from_fn(|i| x[i] + 0.5 * h * b[i]));
+                let d = rhs(core::array::from_fn(|i| x[i] + h * c[i]));
+                for i in 0..5 {
+                    x[i] += h / 6.0 * (a[i] + 2.0 * b[i] + 2.0 * c[i] + d[i]);
+                }
+            }
+            x
+        };
+        let coarse = reference(512);
+        let expected = reference(1024);
+        let scales = [q0, w * q0, root * q0, energy(&initial), energy(&initial)];
+        for i in 0..5 {
+            assert!((coarse[i] - expected[i]).abs() < 2e-8 * scales[i]);
+        }
+        let mut member = kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0, dt).unwrap();
+        member.x.copy_from_slice(&initial);
+        let (mut heat, mut work) = (0.0, 0.0);
+        for _ in 0..24 {
+            let record = member
+                .flow
+                .step_into(
+                    &member.x,
+                    &[force],
+                    dt,
+                    &mut member.next,
+                    &mut member.average_output,
+                )
+                .unwrap();
+            assert!(record.dissipated >= 0.0);
+            heat += record.dissipated;
+            work += record.supplied;
+            core::mem::swap(&mut member.x, &mut member.next);
+        }
+        let actual = [member.x[0], member.x[1], member.x[2], heat, work];
+        for i in 0..5 {
+            assert!(
+                (actual[i] - expected[i]).abs() < 2e-8 * scales[i],
+                "{frequency} Hz coordinate {i}: exact={} independent={}",
+                actual[i],
+                expected[i]
+            );
+        }
+        assert!(
+            heat > 0.1 * energy(&initial),
+            "the material pole must produce a substantial physical energy loss"
+        );
+        close(
+            energy(&member.x) - energy(&initial) + heat,
+            work,
+            energy(&initial),
+        );
+    }
+}
+
+#[test]
+fn kc_relaxation_keeps_source_observer_and_moving_end_clock_refusals() {
+    let fast = relaxing_string(200.0, 1e-6);
+    validate_relaxation_modes(&fast, 48_000).unwrap();
+    assert!(matches!(
+        validate_relaxation_modes(
+            &PrestressedString {
+                moving_end: true,
+                ..fast
+            },
+            48_000
+        ),
+        Err(AcousticRealizeError::InvalidDescription {
+            what: "sample rate does not resolve bending relaxation: require dt/tau <= 0.1; increase sample rate",
+        })
+    ));
+    let high = relaxing_string(5_000.0, 0.001);
+    validate_relaxation_modes(&high, 48_000).unwrap();
+    assert!(matches!(
+        validate_relaxation_modes(
+            &PrestressedString {
+                moving_end: true,
+                ..high.clone()
+            },
+            48_000
+        ),
+        Err(AcousticRealizeError::InvalidDescription {
+            what: "sample rate does not resolve bending reference phase: require dt*omega_instant <= 0.1; increase sample rate",
+        })
+    ));
+    // The relaxed mode fits 90% of Nyquist here, but its instantaneous
+    // Maxwell stiffness does not. Exact propagation must not waive this band.
+    assert!(validate_relaxation_modes(&high, 12_000).is_err());
+    let mut unsupported = high;
+    unsupported
+        .relaxation_bending
+        .as_mut()
+        .unwrap()
+        .omega_band_rad_s = (0.0, 1_000.0);
+    assert!(validate_relaxation_modes(&unsupported, 48_000).is_err());
+}
+
+#[test]
+fn fixed_end_fast_relaxation_reaches_the_public_pressure_renderer() {
+    let assembly = AcousticAssembly {
+        ambient: AmbientGas::sea_level(),
+        string: Some(relaxing_string(5_000.0, 1e-6)),
+        duct: None,
+        pluck: Some(Pluck {
+            station_frac: 0.5,
+            height_m: 1e-5,
+        }),
+        bow: None,
+        blow: None,
+        reed: None,
+        soundboard: None,
+        body_modes: vec![],
+        plate: None,
+        cavity: None,
+        obstacles: vec![],
+        contact_texture: None,
+        listener: fs_scenario::Listener { distance_m: 1.0 },
+        sample_rate_hz: 48_000,
+        duration_s: 32.0 / 48_000.0,
+    };
+    let actual = realize_assembly(&assembly).unwrap();
+    assert_eq!(actual.pressure_pa.len(), 32);
+    assert!(actual.pressure_pa.iter().all(|p| p.is_finite()));
+    assert!(actual.pressure_pa.iter().any(|p| *p != 0.0));
+}
+
 #[test]
 fn exact_kc_refuses_retained_modes_outside_the_sampled_observer_band() {
     let gas = gas_state(AmbientGas::sea_level()).unwrap();
