@@ -98,7 +98,7 @@ impl NamedMixtureNsfGas {
         if !sensible_energy_lattice.is_finite() {
             return Err(NsfError::Input("unrepresentable sensible mixture energy"));
         }
-        Ok(NsfCellMaterial { state, mu_lattice, sensible_energy_lattice })
+        Ok(NsfCellMaterial { state, mu_lattice, sensible_energy_lattice, bulk: None })
     }
 
     pub(super) fn reconstruct(
@@ -248,6 +248,7 @@ impl ThermochemicalNsfGas {
             state,
             mu_lattice,
             sensible_energy_lattice,
+            bulk: None,
         })
     }
 
@@ -316,6 +317,7 @@ pub(super) struct NsfCellMaterial {
     pub(super) state: GasState,
     pub(super) mu_lattice: f64,
     pub(super) sensible_energy_lattice: f64,
+    pub(super) bulk: Option<super::bulk::BulkTransport>,
 }
 
 fn gas_error(error: impl core::fmt::Display) -> NsfError {

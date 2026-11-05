@@ -13025,3 +13025,42 @@ relaxation memory or compressible total-energy claim is introduced. Native tests
 cover forced pure shear, pure dilation and mixed strain against independent
 tensor power and the original thermal solver, spatial/temperature feedback,
 constant-field bit parity, and source/cancellation rollback.
+
+## Source-local bulk viscosity in compressible NSF
+
+`NsfGrid3::with_bulk_viscosity` retains a cited `NsfBulkViscositySource` on the
+original gas law before the first step. The source sees each query's actual
+absolute temperature, thermodynamic pressure, density and molecular shear
+viscosity in SI units. It returns positive physical bulk viscosity `zeta` in
+Pa s. A cloned characteristic trial shares the same original source. Sources
+must be deterministic functions of the supplied state; predictor queries can
+repeat and may run in parallel. This is an instantaneous molecular law, with
+no inferred eddy bulk viscosity or frequency-dependent molecular memory.
+
+The native D3Q27 trace relation is
+`zeta_lu=(2/3)rho theta0(1/omega_b-1/2)`. The material snapshot retains the
+source response and its converted trace rate. Collision and the existing
+conservative total-energy stress work use that same rate. Shear SGS modifies
+only the shear transport: it is not fed to the molecular source and does not
+augment its returned bulk viscosity. No second viscous heat source is added.
+The dispersion reference uses the source's physical reference-state bulk
+viscosity while retaining the original gas, shear and thermal transport.
+
+Accepted endpoint diagnostics retain the final corrected temperature and
+pressure, including the last caloric energy corrector. Source, range or rate
+refusal leaves the accepted state and material epoch unchanged. The consuming
+cold builder rebuilds only the material, stress and conservative flux history
+required by its source; it preserves the original populations and total
+energy. Without this opt-in source, the existing bulk/shear-ratio route retains
+its original arithmetic and allocation behavior. Source values are never
+floored or clamped, and the existing gas, Mach and temperature envelopes remain
+in force. This extension does not widen the solver's qualified stability range.
+
+Focused native tests exercise local temperature/pressure feedback, accepted
+material epochs, molecular-ratio recovery, nonzero shear SGS, source refusal,
+and characteristic trial accept/drop/cancel. A two-rung acoustic regression
+compares the incremental attenuation caused by added bulk viscosity against
+the exact linearized NSF modes, with relative error below `2e-4` on the finer
+rung and decreasing under refinement. A transverse shear wave checks that
+changing only bulk viscosity does not introduce shear loss. These focused
+checks supplement, rather than replace, the broader NSF qualification matrix.

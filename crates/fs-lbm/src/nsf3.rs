@@ -78,6 +78,8 @@ use material::NsfCellMaterial;
 
 mod material;
 pub use material::{NamedMixtureNsfGas, NsfGasMedium, ThermochemicalNsfGas};
+mod bulk;
+pub use bulk::{NsfBulkViscosityPoint, NsfBulkViscositySample, NsfBulkViscositySource};
 mod sgs;
 pub use sgs::{
     NsfChannelDynamicThermalSgsConfig, NsfDynamicThermalSgsConfig, NsfSgsConfig, NsfSgsTransport,
@@ -296,7 +298,8 @@ pub struct NsfLaw {
     pub dt_s: f64,
     /// Reference temperature [K] (lattice `theta0 = 1/3`).
     pub temperature_ref_k: f64,
-    /// The declared bulk-to-shear viscosity ratio in force.
+    /// Declared legacy bulk-to-shear ratio. An explicitly attached bulk source
+    /// supplies its own local coefficient; this number is not that source's law.
     pub bulk_to_shear_ratio: f64,
     t_low: f64,
     t_high: f64,
@@ -304,6 +307,8 @@ pub struct NsfLaw {
     kappa: Vec<f64>,
     /// Exact source reference coefficients for uniform-state linearization.
     source_reference_transport: Option<[f64; 2]>,
+    bulk_source: Option<NsfBulkViscositySource>,
+    source_reference_bulk_pa_s: Option<f64>,
 }
 
 impl NsfLaw {
@@ -783,6 +788,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     state.thermal_conductivity * sc / r,
                 ]),
             },
+            bulk_source: None,
+            source_reference_bulk_pa_s: None,
         };
         let cv = 1.0 / (law.gamma - 1.0);
         let at = |i: usize| {
@@ -1094,7 +1101,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let nu = mu / (rho * THETA0);
         (
             1.0 / (nu + 0.5),
-            1.0 / (0.5 + 1.5 * self.spec.bulk_to_shear_ratio * nu),
+            material.and_then(|m| m.bulk).map_or_else(
+                || 1.0 / (0.5 + 1.5 * self.spec.bulk_to_shear_ratio * nu),
+                |bulk| bulk.trace_rate,
+            ),
         )
     }
 
@@ -1120,9 +1130,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     high_k,
                 });
             }
-            self.spec.gas.resolve(&self.law, rho[i], theta[i])
+            let material = self.spec.gas.resolve(&self.law, rho[i], theta[i])?;
+            self.material_with_bulk(rho[i], theta[i], material)
         };
-        if matches!(&self.spec.gas, NsfGasMedium::CaloricallyPerfect(_)) {
+        if self.law.bulk_source.is_none()
+            && matches!(&self.spec.gas, NsfGasMedium::CaloricallyPerfect(_)) {
             // Keep the legacy path allocation-free while admitting its
             // actual local kinematic viscosity at each corrector state.
             for i in 0..self.n {
@@ -1693,7 +1705,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             }
             result = Some((f1, u1, e1, div1, wall1, open1, faces1, material_new));
         }
-        let (force1, u1, e1, div1, wall1, open1, faces1, material_new) =
+        let (force1, u1, e1, div1, wall1, open1, faces1, mut material_new) =
             result.expect("at least one coupling pass");
         for i in 0..n {
             if self.solid[i] {
@@ -1726,6 +1738,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 // trial material check. Admit the actual published legacy
                 // endpoint too; source reconstruction already does this.
                 self.spec.gas.resolve(&self.law, rho1[i], th1[i])?;
+            }
+            if self.law.bulk_source.is_some() {
+                // Caloric reconstruction has just changed temperature. Keep
+                // its exact source response and resolve bulk at that accepted
+                // endpoint, before either the next collision or publication.
+                material_new[i] = self.material_with_bulk(rho1[i], th1[i], material_new[i])?;
             }
         }
         // The last corrector changes temperature after faces1 was evaluated.
@@ -2050,7 +2068,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     pub fn law(&self) -> &NsfLaw {
         &self.law
     }
-    /// Retained citation of the bulk/shear viscosity ratio used by this grid.
+    /// Retained citation of the legacy bulk/shear viscosity ratio. An explicit
+    /// bulk source has its own citation in [`Self::bulk_viscosity_source`].
     /// Ownership is independent of the caller's input buffer lifetime.
     #[must_use]
     pub fn bulk_ratio_source(&self) -> &str {

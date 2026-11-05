@@ -57,7 +57,8 @@ impl GasPoint {
         self.gamma * self.gas_constant / (self.gamma - 1.0)
     }
     /// The point of a running grid: reference density and temperature, the receipt transport coefficients at the reference
-    /// temperature converted from lattice units, and the declared bulk-to-shear ratio.
+    /// temperature converted from lattice units, and the explicit source's
+    /// reference bulk viscosity or the original declared bulk-to-shear ratio.
     ///
     /// For a source-driven grid this uses the exact resolved reference coefficients,
     /// rather than interpolating the diagnostic transport table. The result is
@@ -75,7 +76,7 @@ impl GasPoint {
             gas_constant: law.gas_constant,
             gamma: law.gamma,
             mu,
-            mu_bulk: law.bulk_to_shear_ratio * mu,
+            mu_bulk: law.source_reference_bulk_pa_s.unwrap_or(law.bulk_to_shear_ratio * mu),
             kappa: kappa_lattice * law.gas_constant * unit,
         }
     }
