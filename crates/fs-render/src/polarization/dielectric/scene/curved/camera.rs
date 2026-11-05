@@ -384,6 +384,7 @@ impl<'s, 'm> CurvedCameraScene<'s, 'm> {
                 | Interaction::RoughConductor { .. }
                 | Interaction::BrushedConductor { .. }
                 | Interaction::DepolarizingDiffuse { .. }
+                | Interaction::DepolarizingLiftedDiffuse { .. }
                 | Interaction::CoatedDiffuse { .. }
                 | Interaction::Opaque => true,
                 Interaction::Detector { .. } => false,

@@ -21,7 +21,7 @@ use super::transport::{BeamError, BeamMedium, BeamSample, PolarizedBeam};
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics, ConductorSurface};
 use crate::dielectric::{DielectricCoatingStack, DielectricEvent, DielectricGlass, DielectricSurface};
 use crate::instances::{InstanceError, InstanceHit, InstanceScene, RigidTransform};
-use crate::spectral::SpectralReflectance;
+use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, SpectralReflectance};
 
 /// Admission bound on scene bindings and media; not a performance claim.
 pub const MAX_POLARIZED_SCENE_ITEMS: usize = 65_536;
@@ -71,6 +71,10 @@ pub enum Interaction {
     /// surrounding medium. `reflectance` indexes the original borrowed
     /// spectral reflectance table; no emission or subsurface law is inferred.
     DepolarizingDiffuse { medium: usize, reflectance: usize },
+    /// The original tracer's lifted Lambertian spectrum, evaluated directly
+    /// over its native visible band. No knot fitting or RGB conversion occurs.
+    /// Reflection uses the same depolarizing cosine law as tabulated diffuse.
+    DepolarizingLiftedDiffuse { medium: usize, reflectance: LiftedSpectrum },
     /// Smooth lossless dielectric over the original spectral diffuse base.
     /// Its constant exterior index must match the actual local medium. Mirror
     /// and diffuse events share the same surface; internal returns are summed.
@@ -401,17 +405,16 @@ impl<'a> PolarizedScene<'a> {
                     result.termination = PathTermination::Opaque;
                     return finish(cx, result);
                 }
-                Interaction::DepolarizingDiffuse { medium, reflectance } => {
+                interaction @ (Interaction::DepolarizingDiffuse { medium, .. }
+                | Interaction::DepolarizingLiftedDiffuse { medium, .. }) => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
                             object_id: hit.object_id, expected: medium, actual: result.medium,
                         });
                     }
-                    let rho = self.reflectances[reflectance]
-                        .at(result.beam.wavelength_nm())
-                        .map_err(|_| BeamError::Dielectric(
-                            crate::dielectric::DielectricError::InvalidWavelength,
-                        ))?;
+                    let rho = depolarizing_reflectance(
+                        interaction, self.reflectances, result.beam.wavelength_nm(),
+                    )?;
                     if rho == 0.0 {
                         result.termination = PathTermination::Opaque;
                         return finish(cx, result);
@@ -558,6 +561,11 @@ fn admit_bindings(
                     return Err(SceneError::InvalidBindings);
                 }
             }
+            Interaction::DepolarizingLiftedDiffuse { medium, reflectance } => {
+                if medium >= media_count || reflectance.c.iter().any(|c| !c.is_finite()) {
+                    return Err(SceneError::InvalidBindings);
+                }
+            }
             Interaction::BrushedConductor { optics, medium, detail } => {
                 let (alpha_x, alpha_y) = detail.alpha_pair();
                 if optics >= conductor_count || medium >= media_count
@@ -576,6 +584,27 @@ fn admit_bindings(
         }
     }
     Ok(bindings)
+}
+
+// One exact reflectance evaluation for forward walks and reciprocal camera
+// receivers. Tabulated laws retain their original support/error semantics;
+// the tracer's lifted polynomial is never extrapolated outside its native band.
+pub(crate) fn depolarizing_reflectance(
+    interaction: Interaction, reflectances: &[SpectralReflectance], wavelength_nm: f64,
+) -> Result<f64, BeamError> {
+    let invalid_wavelength = || BeamError::Dielectric(crate::dielectric::DielectricError::InvalidWavelength);
+    let rho = match interaction {
+        Interaction::DepolarizingDiffuse { reflectance, .. } => reflectances
+            .get(reflectance).ok_or(BeamError::InvalidDiffuseSample)?
+            .at(wavelength_nm).map_err(|_| invalid_wavelength())?,
+        Interaction::DepolarizingLiftedDiffuse { reflectance, .. } => {
+            if !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) { return Err(invalid_wavelength()); }
+            reflectance.eval(wavelength_nm)
+        }
+        _ => return Err(BeamError::InvalidDiffuseSample),
+    };
+    if !(0.0..=1.0).contains(&rho) { return Err(BeamError::NumericalRange); }
+    Ok(rho)
 }
 
 // Both straight and curved scenes use exactly the same boundary sampler.

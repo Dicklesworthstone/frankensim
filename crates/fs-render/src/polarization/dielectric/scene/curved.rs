@@ -27,7 +27,7 @@ use fs_rand::philox::philox4x32_10;
 use super::super::transport::{BeamError, BeamMedium, PolarizationFrame, PolarizedBeam};
 use super::{
     DielectricStackBinding, Interaction, MAX_POLARIZED_PATH_EVENTS, PathTermination, SceneError,
-    SurfaceBinding, admit_bindings, admit_coating_stacks, sample_boundary,
+    SurfaceBinding, admit_bindings, admit_coating_stacks, depolarizing_reflectance, sample_boundary,
 };
 use crate::charts::Ray;
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
@@ -863,10 +863,8 @@ impl<'a> CurvedPolarizedScene<'a> {
                     result.termination = PathTermination::Opaque;
                     break;
                 }
-                Interaction::DepolarizingDiffuse {
-                    medium,
-                    reflectance,
-                } => {
+                interaction @ (Interaction::DepolarizingDiffuse { medium, .. }
+                | Interaction::DepolarizingLiftedDiffuse { medium, .. }) => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
                             object_id: instance.object_id(),
@@ -875,13 +873,9 @@ impl<'a> CurvedPolarizedScene<'a> {
                         }
                         .into());
                     }
-                    let rho = self.reflectances[reflectance]
-                        .at(result.beam.wavelength_nm())
-                        .map_err(|_| {
-                            BeamError::Dielectric(
-                                crate::dielectric::DielectricError::InvalidWavelength,
-                            )
-                        })?;
+                    let rho = depolarizing_reflectance(
+                        interaction, self.reflectances, result.beam.wavelength_nm(),
+                    )?;
                     if rho == 0.0 {
                         result.termination = PathTermination::Opaque;
                         break;

@@ -167,9 +167,10 @@ impl NativeOpticalScene {
     /// boundary preparation is separately charged by `with_curved_scene`.
     ///
     /// Dielectric, smooth/rough/brushed conductor, spectral diffuse and coated
-    /// diffuse laws are retained exactly. An exactly flat lifted Lambertian is
-    /// also admitted. Other lifted spectra, legacy Schlick GGX and thermal
-    /// materials refuse until the curved owner supports their original law.
+    /// diffuse laws are retained exactly. Lifted Lambertian spectra use their
+    /// original polynomial throughout the native visible band without a table
+    /// fit. Legacy Schlick GGX and thermal materials refuse until the curved
+    /// owner supports their original law.
     /// Animated geometry requires an explicit caller-selected static snapshot.
     pub fn try_from_scene(
         cx: &Cx<'_>,
@@ -204,9 +205,9 @@ impl NativeOpticalScene {
                     Material::Conductor { .. } | Material::BrushedConductor { .. } => {
                         conductor_count += 1
                     }
-                    Material::Lambertian { .. }
-                    | Material::SpectralDiffuse { .. }
-                    | Material::CoatedDiffuse { .. } => reflectance_count += 1,
+                    Material::SpectralDiffuse { .. } | Material::CoatedDiffuse { .. } => {
+                        reflectance_count += 1
+                    }
                     _ => {}
                 }
             }
@@ -356,25 +357,20 @@ impl NativeOpticalScene {
                                 coating,
                             }
                         }
-                        Material::Lambertian { reflectance }
-                            if reflectance.c[0] == 0.0 && reflectance.c[1] == 0.0 =>
-                        {
-                            let table = SpectralReflectance::constant(reflectance.eval(550.0))
-                                .map_err(|_| NativeOpticalSceneError::InvalidMaterial {
+                        Material::Lambertian { reflectance } => {
+                            if reflectance
+                                .c
+                                .iter()
+                                .any(|coefficient| !coefficient.is_finite())
+                            {
+                                return Err(NativeOpticalSceneError::InvalidMaterial {
                                     primitive: index,
-                                })?;
-                            let index = reflectances.len();
-                            reflectances.push(table);
-                            Interaction::DepolarizingDiffuse {
-                                medium,
-                                reflectance: index,
+                                });
                             }
-                        }
-                        Material::Lambertian { .. } => {
-                            return Err(NativeOpticalSceneError::UnsupportedMaterial {
-                                primitive: index,
-                                reason: "nonconstant lifted reflectance has no exact curved material owner",
-                            });
+                            Interaction::DepolarizingLiftedDiffuse {
+                                medium,
+                                reflectance,
+                            }
                         }
                         Material::Ggx { .. } => {
                             return Err(NativeOpticalSceneError::UnsupportedMaterial {

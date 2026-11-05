@@ -514,8 +514,9 @@ fn g0_invalid_topology_materials_and_budgets_refuse_before_observations() {
                 cx,
                 scene(vec![plane(
                     1.0,
-                    Material::Lambertian {
-                        reflectance: LiftedSpectrum { c: [1.0, 0.0, 0.0] }
+                    Material::Ggx {
+                        reflectance: LiftedSpectrum { c: [1.0, 0.0, 0.0] },
+                        alpha: 0.2,
                     }
                 )]),
                 air,
@@ -553,9 +554,13 @@ fn g0_invalid_topology_materials_and_budgets_refuse_before_observations() {
             1,
         )
         .unwrap();
+        assert!(owner.reflectances.is_empty());
         assert_eq!(
-            owner.reflectances[0].at(552.5).unwrap(),
-            LiftedSpectrum { c: [0.0, 0.0, 0.3] }.eval(552.5)
+            owner.surface_binding(0).unwrap().interaction,
+            Interaction::DepolarizingLiftedDiffuse {
+                medium: 0,
+                reflectance: LiftedSpectrum { c: [0.0, 0.0, 0.3] }
+            }
         );
         assert!(matches!(
             owner.with_curved_scene(cx, 0, |_| panic!(
@@ -568,5 +573,77 @@ fn g0_invalid_topology_materials_and_budgets_refuse_before_observations() {
             owner.with_curved_scene(cx, 100_000, |_| ()),
             Err(NativeOpticalSceneError::Cancelled)
         );
+    });
+}
+
+#[test]
+fn g1_original_nonconstant_lambertian_is_shared_without_a_spectral_table_fit() {
+    with_cx(|cx, _| {
+        let reflectance = LiftedSpectrum {
+            c: [2.3, -1.7, 0.2],
+        };
+        let original_material = Material::Lambertian { reflectance };
+        let owner = NativeOpticalScene::try_from_scene(
+            cx,
+            scene(vec![plane(1.0, original_material)]),
+            glass(1.0, 0.0),
+            &[raw(1, material(NativeOpticalMedium::Ambient))],
+            1,
+        )
+        .unwrap();
+        assert!(owner.reflectances.is_empty());
+        assert_eq!(
+            owner.render_scene().primitives[0].material,
+            original_material
+        );
+        assert_eq!(
+            owner.surface_binding(0).unwrap().interaction,
+            Interaction::DepolarizingLiftedDiffuse {
+                medium: 0,
+                reflectance
+            }
+        );
+        owner
+            .with_curved_scene(cx, 100_000, |native| {
+                for wavelength in [387.5, 552.5, 772.5] {
+                    let beam = native
+                        .launch_beam(
+                            Point3::new(0.0, 0.0, 0.0),
+                            frame(),
+                            wavelength,
+                            0,
+                            Stokes::try_new(1.0, 0.2, -0.1, 0.3).unwrap(),
+                        )
+                        .unwrap();
+                    let mut limits = settings();
+                    limits.max_surface_events = 1;
+                    let path = native
+                        .trace_with_samples(cx, beam, 0, limits, |_| [0.0; 3])
+                        .unwrap();
+                    assert_eq!(path.termination(), PathTermination::SurfaceLimit);
+                    close(path.beam().power().i, reflectance.eval(wavelength), 2e-12);
+                    assert_eq!(path.beam().power().q, 0.0);
+                    assert_eq!(path.beam().power().u, 0.0);
+                    assert_eq!(path.beam().power().v, 0.0);
+                }
+            })
+            .unwrap();
+        assert!(matches!(
+            NativeOpticalScene::try_from_scene(
+                cx,
+                scene(vec![plane(
+                    1.0,
+                    Material::Lambertian {
+                        reflectance: LiftedSpectrum {
+                            c: [f64::NAN, 0.0, 0.0]
+                        }
+                    }
+                )]),
+                glass(1.0, 0.0),
+                &[raw(1, material(NativeOpticalMedium::Ambient))],
+                1,
+            ),
+            Err(NativeOpticalSceneError::InvalidMaterial { primitive: 0 })
+        ));
     });
 }

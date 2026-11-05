@@ -235,6 +235,90 @@ fn g1_native_camera_fixture_preserves_calibrated_cosine_beer_and_surface_emissio
 }
 
 #[test]
+fn g1_original_lifted_diffuse_keeps_spectral_camera_reflection_and_connected_fixture_light() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(1, 1.0, 0.0, 2.0), plane(9, -1.0, 0.0, 2.0)]).unwrap();
+        let material = glass(1.3, 0.2);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let reflectance = crate::spectral::LiftedSpectrum { c: [2.3, -1.7, 0.2] };
+        // There is deliberately no reflectance table: the original polynomial
+        // itself must reach both the diffuse walk and its direct-light anchor.
+        let scene = CurvedPolarizedScene::try_new_with_materials(
+            cx, &geometry, &media, &[], &[], &[], vec![
+                SurfaceBinding { object_id: 1, interaction: Interaction::DepolarizingLiftedDiffuse { medium: 0, reflectance } },
+                opaque(9),
+            ], 100_000,
+        ).unwrap();
+        let emitters = [emitter(9, 2.0)];
+        let camera = CurvedCameraScene::try_new(cx, &scene, &emitters, None).unwrap();
+        let lamp = source(Point3::new(0.6, 0.0, 0.0));
+        let branches = [branch(&lamp, 1, Vec3::new(0.0, 0.0, 1.0))];
+        let lit = CurvedPointLightCameraScene::try_new(cx, &camera, &branches).unwrap();
+        let distance = 1.36_f64.sqrt();
+        for wavelength in [387.5, 552.5, 772.5] {
+            let rho = reflectance.eval(wavelength);
+            let ordinary = camera.sample_ray_with_samples(cx, ray(0.0), wavelength, 0, trace_settings(), |_| [0.0; 3]).unwrap();
+            let sample = lit.sample_ray_with_samples(cx, ray(0.0), wavelength, 0, settings(), |_| [0.0; 3]).unwrap();
+            let expected_fixture = rho / core::f64::consts::PI * intensity(&lamp)
+                * (-0.2 * (distance + 1.0)).exp() / distance.powi(3);
+            near(sample.fixture_radiance_w_m2_sr_nm(), expected_fixture);
+            near(ordinary.radiance_w_m2_sr_nm(), 2.0 * rho * (-0.6_f64).exp());
+            near(sample.radiance_sample().radiance_w_m2_sr_nm(), ordinary.radiance_w_m2_sr_nm() + expected_fixture);
+            assert_eq!(sample.radiance_sample().path(), ordinary.path());
+            assert_eq!(sample.connections(), 1);
+        }
+    });
+}
+
+#[test]
+fn g1_lifted_diffuse_straight_power_depolarization_and_black_refusals_use_the_original_law() {
+    use crate::polarization::Stokes;
+    use crate::polarization::dielectric::scene::{PolarizedScene, SceneError, TraceSettings, depolarizing_reflectance};
+    use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, PolarizedBeam};
+    use crate::spectral::LiftedSpectrum;
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(1, 1.0, 0.0, 2.0), plane(9, -1.0, 0.0, 2.0)]).unwrap();
+        let media = [glass(1.3, 0.2)];
+        let reflectance = LiftedSpectrum { c: [2.3, -1.7, 0.2] };
+        let bindings = |reflectance| vec![SurfaceBinding { object_id: 1,
+            interaction: Interaction::DepolarizingLiftedDiffuse { medium: 0, reflectance } }, opaque(9)];
+        let scene = PolarizedScene::try_new(&geometry, &media, bindings(reflectance)).unwrap();
+        let settings = TraceSettings { max_surface_events: 8, max_distance_m: 6.0,
+            surface_epsilon_m: 1e-8, query_offset_m: 1e-7 };
+        let launch = |wavelength| PolarizedBeam::try_new(Point3::new(0.0, 0.0, 0.0),
+            PolarizationFrame::try_new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0)).unwrap(),
+            wavelength, media[0], Stokes::try_new(1.0, 0.2, -0.1, 0.3).unwrap()).unwrap();
+        for wavelength in [387.5, 552.5, 772.5] {
+            let path = scene.trace_with_samples(cx, launch(wavelength), 0, settings, |_| [0.0; 3]).unwrap();
+            assert_eq!(path.termination(), PathTermination::Opaque);
+            assert_eq!(path.last_hit().unwrap().object_id, 9);
+            near(path.beam().power().i, reflectance.eval(wavelength) * (-0.6_f64).exp());
+            assert_eq!(path.beam().power().q, 0.0);
+            assert_eq!(path.beam().power().u, 0.0);
+            assert_eq!(path.beam().power().v, 0.0);
+        }
+        // The original sigmoid can round to exactly zero. Its native opaque
+        // branch must consume no direction or roulette sample.
+        let black = LiftedSpectrum { c: [0.0, 0.0, -1e150] };
+        assert_eq!(black.eval(550.0), 0.0);
+        let scene = PolarizedScene::try_new(&geometry, &media, bindings(black)).unwrap();
+        let path = scene.trace_with_samples(cx, launch(550.0), 0, settings,
+            |_| panic!("exact black consumes no random draw")).unwrap();
+        assert_eq!(path.last_hit().unwrap().object_id, 1);
+        assert_eq!(path.termination(), PathTermination::Opaque);
+        assert!(matches!(PolarizedScene::try_new(&geometry, &media,
+            bindings(LiftedSpectrum { c: [f64::NAN, 0.0, 0.0] })), Err(SceneError::InvalidBindings)));
+        let interaction = Interaction::DepolarizingLiftedDiffuse { medium: 0, reflectance };
+        assert_eq!(depolarizing_reflectance(interaction, &[], 379.0),
+            Err(BeamError::Dielectric(crate::dielectric::DielectricError::InvalidWavelength)));
+        let unrepresentable = Interaction::DepolarizingLiftedDiffuse {
+            medium: 0, reflectance: LiftedSpectrum { c: [f64::MAX; 3] },
+        };
+        assert_eq!(depolarizing_reflectance(unrepresentable, &[], 550.0), Err(BeamError::NumericalRange));
+    });
+}
+
+#[test]
 fn g1_native_camera_fixture_focusing_uses_the_analytic_hessian_bundle_area() {
     with_cx(|cx, _| {
         let distance = 1.2_f64;

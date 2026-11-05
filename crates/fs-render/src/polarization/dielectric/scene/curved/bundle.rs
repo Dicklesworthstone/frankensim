@@ -605,6 +605,7 @@ impl CurvedPolarizedScene<'_> {
                 Interaction::Detector { .. } => return Err(invalid()),
                 Interaction::Opaque => {}
                 Interaction::DepolarizingDiffuse { medium, .. }
+                | Interaction::DepolarizingLiftedDiffuse { medium, .. }
                 | Interaction::CoatedDiffuse { medium, .. }
                 | Interaction::SmoothConductor { medium, .. }
                 | Interaction::RoughConductor { medium, .. }
@@ -851,6 +852,7 @@ impl CurvedPolarizedScene<'_> {
                     }
                     let expected = match interaction {
                         Interaction::DepolarizingDiffuse { medium, .. }
+                        | Interaction::DepolarizingLiftedDiffuse { medium, .. }
                         | Interaction::CoatedDiffuse { medium, .. }
                         | Interaction::BrushedConductor { medium, .. } => medium,
                         Interaction::RoughConductor {
@@ -888,6 +890,7 @@ impl CurvedPolarizedScene<'_> {
                     1
                 }
                 Interaction::DepolarizingDiffuse { medium, .. }
+                | Interaction::DepolarizingLiftedDiffuse { medium, .. }
                     if matches!(receiver, Some(BundleReceiver::Diffuse(id))
                         if id == instance.object_id()) =>
                 {
@@ -909,6 +912,7 @@ impl CurvedPolarizedScene<'_> {
                 Interaction::RoughConductor { .. }
                 | Interaction::BrushedConductor { .. }
                 | Interaction::CoatedDiffuse { .. }
+                | Interaction::DepolarizingLiftedDiffuse { .. }
                 | Interaction::DepolarizingDiffuse { .. } => {
                     return Err(CurvedBundleSceneError::UnsupportedInteraction {
                         object_id: instance.object_id(),

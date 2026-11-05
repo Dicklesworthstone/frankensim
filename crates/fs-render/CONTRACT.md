@@ -7610,8 +7610,9 @@ Original native medium-transition checks still refuse inconsistent paths.
 Dielectric surfaces retain the original dispersion, bulk absorption, roughness,
 anisotropy and compact coherent coating. Smooth/rough/brushed conductors retain
 their optical tables/coatings and body-local detail. Native spectral diffuse and
-coated diffuse laws are unchanged; exactly constant lifted Lambertian reflectance
-is admitted without fitting. Nonconstant lifted Lambertian, legacy Schlick GGX
+coated diffuse laws are unchanged. Lifted Lambertian reflectance is evaluated
+from its original coefficients at each physical wavelength throughout the native
+380–780 nm band, without fitting or a new table allocation. Legacy Schlick GGX
 and thermal materials currently refuse rather than becoming surrogate absorbers.
 Detectors explicitly intercept the chosen original geometry. All other original
 geometry remains present, including physical occluders.
@@ -7627,3 +7628,15 @@ Regressions connect the original dispersive ball chart to independent axial
 ray-transfer/Fresnel/Beer/CIE values, preserve embedded nested absorption even
 at equal phase indices, retain black blockers and shared instance identity, and
 refuse malformed topology, unsupported laws and exhausted build budgets.
+
+`Interaction::DepolarizingLiftedDiffuse` also carries that exact law through
+ordinary polarized paths, curved/participating walks, selected diffuse bundle
+endpoints and reciprocal camera receivers. It shares the native depolarizing
+cosine sampler and the same calibrated point/area-light response and proposal
+PDFs as tabulated diffuse. Finite coefficients are checked at admission;
+out-of-band wavelengths or unrepresentable reflectance refuse at evaluation.
+Exactly black response consumes no direction sample. Thermal Kirchhoff bindings
+still require their existing exact supported thermal curve. Regressions compare
+native straight/curved power and depolarization to the original polynomial, and
+connected fixture/camera radiance to independent cosine/Beer/inverse-square
+values at multiple wavelengths while retaining the same continuation path.

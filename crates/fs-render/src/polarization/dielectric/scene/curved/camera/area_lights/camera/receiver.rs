@@ -9,7 +9,7 @@ use super::{AreaLightCameraError, diffuse_contribution, face_normal};
 use super::super::super::{CameraRadianceError, CurvedCameraScene, phase_index};
 use crate::dielectric::DielectricError;
 use crate::polarization::Stokes;
-use crate::polarization::dielectric::scene::{Interaction, SceneError, bind_dielectric_surface};
+use crate::polarization::dielectric::scene::{Interaction, SceneError, bind_dielectric_surface, depolarizing_reflectance};
 use crate::polarization::dielectric::scene::curved::{CurvedContact, CurvedPathResult, CurvedSceneError};
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
     BundleConnection, BundleConnectionError, BundleConnectionTarget,
@@ -28,6 +28,7 @@ mod anisotropic_tests;
 pub(in super::super::super) fn receiver_media(interaction: Interaction) -> Option<[usize; 2]> {
     match interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::DepolarizingLiftedDiffuse { medium, .. }
         | Interaction::CoatedDiffuse { medium, .. }
         | Interaction::BrushedConductor { medium, .. } => Some([medium, medium]),
         Interaction::RoughConductor { medium, surface, .. } if !surface.is_delta() =>
@@ -81,9 +82,13 @@ impl SurfaceReceiver {
         if arrival_medium(binding.interaction, contact, incoming.ray().dir)? != medium {
             return Err(AreaLightCameraError::NumericalRange);
         }
-        let diffuse = if let Interaction::DepolarizingDiffuse { reflectance, .. } = binding.interaction {
-            let rho = camera.scene.reflectances[reflectance].at(incoming.wavelength_nm())
-                .map_err(|_| CameraRadianceError::Optics(DielectricError::InvalidWavelength))?;
+        let diffuse = if matches!(binding.interaction,
+            Interaction::DepolarizingDiffuse { .. } | Interaction::DepolarizingLiftedDiffuse { .. }) {
+            let rho = depolarizing_reflectance(binding.interaction, camera.scene.reflectances, incoming.wavelength_nm())
+                .map_err(|error| match error {
+                    crate::polarization::dielectric::transport::BeamError::Dielectric(error) => CameraRadianceError::Optics(error),
+                    error => CameraRadianceError::from(CurvedSceneError::from(error)),
+                })?;
             if rho == 0.0 { return Ok(None); }
             Some((face_normal(contact, incoming.ray().dir), rho))
         } else { None };
@@ -243,6 +248,7 @@ fn arrival_medium(interaction: Interaction, contact: CurvedContact, direction: V
     -> Result<usize, AreaLightCameraError> {
     match interaction {
         Interaction::DepolarizingDiffuse { medium, .. }
+        | Interaction::DepolarizingLiftedDiffuse { medium, .. }
         | Interaction::CoatedDiffuse { medium, .. }
         | Interaction::RoughConductor { medium, .. }
         | Interaction::BrushedConductor { medium, .. } => Ok(medium),
