@@ -259,6 +259,9 @@ impl FissionState {
         } else {
             next.remaining_fuel.add(-fissions)?;
         }
+        if !nonnegative(next.remaining_fuel.value()) {
+            return Err(FissionError::Arithmetic);
+        }
         let fuel_residual_nuclei = finite(sum(&[
             next.remaining_fuel.hi, -self.remaining_fuel.hi,
             next.remaining_fuel.lo, -self.remaining_fuel.lo, fissions,
@@ -305,7 +308,10 @@ impl FissionState {
             energy_error.add(accumulator.add(value)?.abs())?;
         }
         let stored_delayed_change_j = storage_change.value();
-        let generated_energy_j = generated.value();
+        // Independently anchor total generation to the same immutable Q and
+        // accepted count, including roundoff in the component products/sum.
+        let generated_energy_j = finite(fissions * self.model.total_energy_per_fission_j)?;
+        energy_error.add((generated.value() - generated_energy_j).abs())?;
         let energy_residual_j = finite(sum(&[
             stored_delayed_change_j, released.total_j(), -generated_energy_j,
         ]))?;

@@ -1350,6 +1350,7 @@ dependencies = [
  "fs-modal",
  "fs-modalid",
  "fs-nlmodal",
+ "fs-nuclear",
  "fs-orbit",
  "fs-phs",
  "fs-plate",
@@ -2241,7 +2242,10 @@ dependencies = [
 name = "fs-nuclear"
 version = "0.0.1"
 dependencies = [
+ "fs-material",
+ "fs-qty",
  "fs-thermal",
+ "fs-thermochem",
 ]
 
 [[package]]

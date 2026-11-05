@@ -48,13 +48,14 @@ an energy residual and accumulated absolute numerical energy defects. The
 energy identity is
 
 ```text
-generated_energy = delta_delayed_storage
-                 + deposited + outward_radiation + nonrecoverable_export.
+Q * accepted_fissions = delta_delayed_storage
+                     + deposited + outward_radiation + nonrecoverable_export.
 ```
 
-Generated energy sums the prompt and delayed yields of the same event count
-that debits fuel. Local group defects cannot cancel one another to satisfy the
-energy budget. Compensated accumulators retain small repeated fuel debits and
+Generated energy is independently anchored to the immutable total yield Q and
+the same event count that debits fuel. Rounding in the sum of individual
+component products is charged against that independent total. Local group
+defects cannot cancel one another to satisfy the energy budget. Compensated accumulators retain small repeated fuel debits and
 lifetime release credits. An unresolved reservoir debit consumes the explicit
 energy allowance; it cannot silently create heat. Nonfinite inputs, negative
 rates/inventories/channels, unrepresentable physical quantities, excess work
@@ -89,7 +90,7 @@ owners. A fixed material caloric law is a declared reduced-model assumption.
 
 ## Evidence and references
 
-The 12 owning source tests cover G0 account closure/admission, G1 independent
+The initial 12 owning source tests cover G0 account closure/admission, G1 independent
 constant-source and shutdown solutions, separated channels, multiple decay
 timescales, short and stiff intervals, finite fuel exhaustion, G3 interval
 partitioning, G4 cancellation/refusal rollback, and G5 identical checkpoint
@@ -157,3 +158,31 @@ cargo test -p fs-nuclear --features thermal --locked
 
 before treating those coupled regressions as executed evidence. DSR and the
 complete constellation/layout checks were not available as successful gates.
+
+## Shared coupling facade and original-water example
+
+Enable `fs-couple/nuclear-thermal` to use `fs_couple::fission`. This facade
+re-exports the same `fs-nuclear` source and thermal types; it introduces no
+second inventory, scheduler, heat solver or source implementation. Its dependency
+is optional, and it composes on the original thermal observer protocol.
+
+The `prescribed_fission_water` example uses the existing
+`fs_material::phase::water::IsobaricWater` IF97 caloric law and native finite-cell
+contact. Water is a thermal receiver; its mass is not interpreted as nuclear
+fuel. Source coefficients and the prescribed history are explicitly synthetic.
+The isobaric caloric chart retains sensible and latent heat, while reference
+geometry and supplied contact conductance retain their original reduced-model
+assumptions. The example runs a source/shutdown/cooling history and checks
+continuing decay heat, fixed post-shutdown fission count, coolant warming and
+total deposited-energy/thermal-storage closure.
+
+```bash
+cargo run -p fs-nuclear --features thermal --example prescribed_fission_water --locked
+cargo check -p fs-couple --features nuclear-thermal --locked
+```
+
+The example, facade check, and a thirteenth core regression for independently
+budgeting total-yield product roundoff were added after the execution environment
+became unavailable. They have not been compiled or executed in this session;
+the final snapshot must be rerun through the native checks above. The previously
+executed 12-test result is not a claim that these later changes passed.

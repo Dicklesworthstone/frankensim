@@ -53,6 +53,7 @@ fs-matdb = { path = "../fs-matdb" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
 fs-nlmodal = { path = "../fs-nlmodal" }
+fs-nuclear = { path = "../fs-nuclear", optional = true, features = ["thermal"] }
 fs-orbit = { path = "../fs-orbit" }
 fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
@@ -90,6 +91,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Prescribed fission and delayed heat on the original material thermal timeline.
+nuclear-thermal = ["dep:fs-nuclear"]
 # Distributed Debye loss coupled to actual finite caloric receivers.
 resolved-dielectric-thermal = ["fs-em/resolved-leaky-dielectric"]
 # Frontier resolved electrostatic field/circuit/body feedback on one time step.

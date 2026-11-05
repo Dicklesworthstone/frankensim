@@ -209,3 +209,22 @@ fn g0_unrepresentable_reservoir_debit_cannot_silently_create_heat() {
     assert_eq!(result, Err(FissionError::Budget("energy accounting roundoff")));
     assert_eq!(state, original);
 }
+
+#[test]
+fn g0_total_yield_roundoff_is_budgeted_independently_of_component_products() {
+    let model = Arc::new(FissionModel::new(
+        "synthetic-roundoff".into(), energy(0.1, 0.2, 0.3), vec![],
+    ).unwrap());
+    let mut state = FissionState::new(model, 10.0, vec![]).unwrap();
+    let before = state.clone();
+    let exact = FissionBudget { max_decay_groups: 0, energy_tolerance_j: 0.0, ..budget() };
+    assert_eq!(
+        state.advance(1.0, 0.1, exact, || Ok(())),
+        Err(FissionError::Budget("energy accounting roundoff")),
+    );
+    assert_eq!(state, before);
+    let report = state.advance(1.0, 0.1, budget(), || Ok(())).unwrap();
+    assert_eq!(report.generated_energy_j, state.model().total_energy_per_fission_j() * report.fissions);
+    assert!(report.energy_roundoff_j > 0.0);
+    assert!(report.energy_residual_j.abs() <= report.energy_roundoff_j);
+}

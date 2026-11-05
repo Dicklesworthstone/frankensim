@@ -31,6 +31,16 @@
 //! [`iterate_aitken`]. Deterministic; depends only on the neutral `fs-iface`
 //! vocabulary and `fs-qty`'s six-base dimension vector.
 
+/// Prescribed nuclear sources and thermal coupling with their original owners.
+#[cfg(feature = "nuclear-thermal")]
+pub mod fission {
+    pub use fs_nuclear::{
+        DecayHeatGroup, EnergyChannels, FissionBudget, FissionError, FissionModel,
+        FissionState, FissionStep,
+    };
+    pub use fs_nuclear::thermal::*;
+}
+
 pub mod acoustic_realize;
 pub mod air_path;
 /// Original admitted frequency-dependent loads on accepted shell assemblies.
