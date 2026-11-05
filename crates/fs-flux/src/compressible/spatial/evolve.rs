@@ -14,79 +14,174 @@ pub(super) fn attempt(
     force_controls: Option<forcing::ForceControl3d>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StageStats, Error> {
-    let first = spatial(
+    let first = rk_stage(
         gas,
         grid,
         boundaries,
-        reservoirs,
+        reservoirs.accepted(),
         states,
-        &mut work.primitive,
-        &mut work.slopes,
-        &mut work.flux,
+        work,
+        dt,
+        cfl,
+        false,
         reconstruction,
         force_controls,
         cancelled,
     )?;
-    check_cfl::<Error>(first.rate * dt, cfl)?;
-    update(
-        gas,
-        grid,
-        states,
-        states,
-        &work.flux,
-        &mut work.stage,
-        dt,
-        false,
-        force_controls,
-        cancelled,
-    )?;
-    capture_boundaries(
-        grid,
-        &work.flux,
-        0.5 * dt,
-        &mut work.boundary_trial,
-        false,
-        cancelled,
-    )?;
-    let second = spatial(
+    let second = rk_stage(
         gas,
         grid,
         boundaries,
-        reservoirs,
-        &work.stage,
-        &mut work.primitive,
-        &mut work.slopes,
-        &mut work.flux,
+        reservoirs.accepted(),
+        states,
+        work,
+        dt,
+        cfl,
+        true,
         reconstruction,
         force_controls,
         cancelled,
     )?;
-    check_cfl::<Error>(second.rate * dt, cfl)?;
-    update(
+    Ok(combine(first, second))
+}
+
+/// The start profile has already been staged for the initial time estimate.
+/// Reuse that same scratch for the endpoint only after its first residual has
+/// been consumed; accepted profiles are never swapped into speculative work.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn attempt_with_reservoir_profiles(
+    gas: &FrozenGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    reservoirs: &mut reservoir::Reservoirs,
+    states: &[State],
+    work: &mut Workspace,
+    source: &mut reservoir::TimedSource<'_>,
+    time: f64,
+    dt: f64,
+    cfl: f64,
+    reconstruction: Reconstruction,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StageStats, Error> {
+    let first_rate = reservoirs
+        .staged()
+        .maximum_rate(gas, grid, states, cancelled)?;
+    check_cfl::<Error>(first_rate * dt, cfl)?;
+    let first = rk_stage(
         gas,
         grid,
+        boundaries,
+        reservoirs.staged(),
         states,
-        &work.stage,
-        &work.flux,
-        &mut work.candidate,
+        work,
         dt,
-        true,
-        force_controls,
+        cfl,
+        false,
+        reconstruction,
+        None,
         cancelled,
     )?;
-    capture_boundaries(
+    source.stage(&mut reservoirs.profiles, gas, grid, time + dt, cancelled)?;
+    // The actual endpoint trace can be much faster or hotter than the start.
+    // Its full unsplit exterior bound and the resulting native face-wave bound
+    // must both admit this same dt, including the final SSP residual.
+    let second_rate = reservoirs
+        .staged()
+        .maximum_rate(gas, grid, &work.stage, cancelled)?;
+    check_cfl::<Error>(second_rate * dt, cfl)?;
+    let second = rk_stage(
+        gas,
         grid,
-        &work.flux,
-        0.5 * dt,
-        &mut work.boundary_trial,
+        boundaries,
+        reservoirs.staged(),
+        states,
+        work,
+        dt,
+        cfl,
         true,
+        reconstruction,
+        None,
         cancelled,
     )?;
-    Ok(StageStats {
+    let mut stats = combine(first, second);
+    stats.rate = stats.rate.max(first_rate).max(second_rate);
+    Ok(stats)
+}
+
+fn combine(first: StageStats, second: StageStats) -> StageStats {
+    StageStats {
         rate: first.rate.max(second.rate),
         fallback: first.fallback + second.fallback,
         limited: first.limited + second.limited,
-    })
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rk_stage(
+    gas: &FrozenGas,
+    grid: &CartesianGrid,
+    boundaries: Boundaries3d,
+    reservoirs: reservoir::View<'_>,
+    states: &[State],
+    work: &mut Workspace,
+    dt: f64,
+    cfl: f64,
+    final_stage: bool,
+    reconstruction: Reconstruction,
+    force_controls: Option<forcing::ForceControl3d>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StageStats, Error> {
+    let input = if final_stage { &work.stage[..] } else { states };
+    let stats = spatial(
+        gas,
+        grid,
+        boundaries,
+        reservoirs,
+        input,
+        &mut work.primitive,
+        &mut work.slopes,
+        &mut work.flux,
+        reconstruction,
+        force_controls,
+        cancelled,
+    )?;
+    check_cfl::<Error>(stats.rate * dt, cfl)?;
+    if final_stage {
+        update(
+            gas,
+            grid,
+            states,
+            &work.stage,
+            &work.flux,
+            &mut work.candidate,
+            dt,
+            true,
+            force_controls,
+            cancelled,
+        )?;
+    } else {
+        update(
+            gas,
+            grid,
+            states,
+            states,
+            &work.flux,
+            &mut work.stage,
+            dt,
+            false,
+            force_controls,
+            cancelled,
+        )?;
+    }
+    capture_boundaries(
+        grid,
+        &work.flux,
+        0.5 * dt,
+        &mut work.boundary_trial,
+        final_stage,
+        cancelled,
+    )?;
+    Ok(stats)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -94,7 +189,7 @@ fn spatial(
     gas: &FrozenGas,
     grid: &CartesianGrid,
     boundaries: Boundaries3d,
-    reservoirs: &reservoir::Reservoirs,
+    reservoirs: reservoir::View<'_>,
     states: &[State],
     primitive: &mut [Primitive],
     slopes: &mut [[[f64; 5]; 3]],

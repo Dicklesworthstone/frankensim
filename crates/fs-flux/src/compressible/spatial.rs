@@ -382,7 +382,8 @@ pub struct StepReport {
     /// Accepted duration [s].
     pub elapsed: Time,
     /// Largest combined face CFL over both RK stages; with forcing, also
-    /// includes the final source endpoint's cell acoustic CFL.
+    /// includes the final source endpoint's cell acoustic CFL. Timed reservoir
+    /// stepping also includes both actual exterior stages' unsplit bounds.
     pub maximum_cfl: f64,
     /// Rejected trials before acceptance.
     pub halvings: usize,
@@ -575,7 +576,7 @@ impl Euler3d {
         controls: StepControl,
         cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
-        self.step_impl(maximum_duration, controls, None, cancelled)
+        self.step_impl(maximum_duration, controls, None, None, cancelled)
     }
 
     /// Symmetric force/advection/force composition on the original transaction.
@@ -604,6 +605,7 @@ impl Euler3d {
             maximum_duration,
             controls,
             Some((force, force_controls, workspace)),
+            None,
             cancelled,
         )
     }
@@ -613,6 +615,7 @@ impl Euler3d {
         maximum_duration: Time,
         controls: StepControl,
         mut forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
+        mut profiles: Option<&mut reservoir::TimedSource<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -623,9 +626,26 @@ impl Euler3d {
         {
             return Err(Error::Invalid("volumetric duration, CFL or retry controls"));
         }
-        let mut rate =
+        if let Some(source) = profiles.as_deref_mut() {
+            source.stage(
+                &mut self.reservoirs.profiles,
+                &self.gas,
+                &self.grid,
+                self.time,
+                &mut cancelled,
+            )?;
+        }
+        let mut rate = if profiles.is_some() {
+            self.reservoirs.staged().maximum_rate(
+                &self.gas,
+                &self.grid,
+                &self.states,
+                &mut cancelled,
+            )?
+        } else {
             self.reservoirs
-                .maximum_rate(&self.gas, &self.grid, &self.states, &mut cancelled)?;
+                .maximum_rate(&self.gas, &self.grid, &self.states, &mut cancelled)?
+        };
         for (p, q) in self.work.primitive.iter_mut().zip(&self.states) {
             *p = q.primitive(&self.gas, &mut cancelled)?;
             if let Some((_, controls, _)) = &forcing {
@@ -644,36 +664,63 @@ impl Euler3d {
             if !positive(dt) || self.time + dt <= self.time || !(self.time + dt).is_finite() {
                 return Err(Error::Invalid("unrepresentable volumetric time increment"));
             }
-            let trial = match forcing.as_mut() {
-                Some((force, force_controls, workspace)) => forcing::attempt(
+            let trial = if let Some(source) = profiles.as_deref_mut() {
+                if halvings != 0 {
+                    source.stage(
+                        &mut self.reservoirs.profiles,
+                        &self.gas,
+                        &self.grid,
+                        self.time,
+                        &mut cancelled,
+                    )?;
+                }
+                evolve::attempt_with_reservoir_profiles(
                     &self.gas,
                     &self.grid,
                     self.boundaries,
-                    &self.reservoirs,
+                    &mut self.reservoirs,
                     &self.states,
                     &mut self.work,
-                    workspace,
-                    *force,
-                    *force_controls,
+                    source,
+                    self.time,
                     dt,
                     controls.cfl,
                     reconstruction,
-                    &mut cancelled,
-                ),
-                None => evolve::attempt(
-                    &self.gas,
-                    &self.grid,
-                    self.boundaries,
-                    &self.reservoirs,
-                    &self.states,
-                    &mut self.work,
-                    dt,
-                    controls.cfl,
-                    reconstruction,
-                    None,
                     &mut cancelled,
                 )
-                .map(|stats| (stats, ForceChange3d::default())),
+                .map(|stats| (stats, ForceChange3d::default()))
+            } else {
+                match forcing.as_mut() {
+                    Some((force, force_controls, workspace)) => forcing::attempt(
+                        &self.gas,
+                        &self.grid,
+                        self.boundaries,
+                        &self.reservoirs,
+                        &self.states,
+                        &mut self.work,
+                        workspace,
+                        *force,
+                        *force_controls,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
+                        &mut cancelled,
+                    ),
+                    None => evolve::attempt(
+                        &self.gas,
+                        &self.grid,
+                        self.boundaries,
+                        &self.reservoirs,
+                        &self.states,
+                        &mut self.work,
+                        dt,
+                        controls.cfl,
+                        reconstruction,
+                        None,
+                        &mut cancelled,
+                    )
+                    .map(|stats| (stats, ForceChange3d::default())),
+                }
             };
             match trial {
                 Ok((stats, source_change)) => {
@@ -725,6 +772,9 @@ impl Euler3d {
                     }
                     poll(&mut cancelled)?;
                     std::mem::swap(&mut self.states, &mut self.work.candidate);
+                    if profiles.is_some() {
+                        self.reservoirs.profiles.publish();
+                    }
                     self.boundary_impulses
                         .copy_from_slice(&self.work.boundary_trial);
                     self.time += dt;
@@ -733,6 +783,9 @@ impl Euler3d {
                 }
                 Err(Error::Cancelled) => return Err(Error::Cancelled),
                 Err(error) => {
+                    if profiles.as_ref().is_some_and(|source| source.failed()) {
+                        return Err(error);
+                    }
                     if halvings == controls.maximum_halvings {
                         return Err(Error::StepRetries {
                             attempts: halvings + 1,

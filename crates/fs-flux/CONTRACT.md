@@ -5327,8 +5327,9 @@ Preparation admits active and candidate cache capacities against the explicit
 additional profile byte budget before sampling. `update_reservoir_profiles`
 visits each prepared face once in canonical side/face order and publishes all
 sides together after source admission and cancellation checks. Updates allocate
-no numerical arrays; callbacks are absent from flow stages and retries. The
-caller owns physical sample time, any stochastic field and temporal refinement.
+no numerical arrays. Ordinary held stepping invokes no profile callbacks;
+the explicit stage-time entry below observes its actual RK times instead.
+The caller owns any stochastic field and its temporal model.
 A failed update preserves active traces, cells, clock, reports and historical
 boundary impulses. A successful update invalidates the old report without
 changing the accepted cells, clock or historical impulses.
@@ -5528,3 +5529,57 @@ Rustfmt passed; these full-owner tests have not executed in this environment.
 Second-order temporal behavior is scoped to smooth prescribed data; no
 nonreflecting boundary, evolving OU interpolation, DNS, turbulent-spectrum or
 experimental validation is asserted.
+
+
+## Stage-time prescribed profiles for native frozen three-dimensional Euler
+
+`spatial::Euler3d::step_with_reservoir_profiles` advances the original HLLC/HLL,
+MUSCL and SSP RK2 owner with complete exterior data at physical times `t` and
+`t + dt`. Profile geometry is prepared through the existing explicit byte
+admission. The first residual consumes the source-admitted start trace; only
+then is the same trial array reused for the endpoint trace and second residual.
+The original frozen gas supplies all conserved energy, calorics and sound
+speeds. The integrated per-face exchange retains both RK weights for mass,
+all Cartesian momenta and referenced energy.
+
+The actual endpoint exterior's unsplit acoustic/advection bound and both
+native face-wave CFL bounds must admit the proposed duration. A CFL retry
+halves that duration without dropping reconstruction order, then samples the
+start and the newly shortened endpoint again. Native cell-admissibility
+failures retain the existing first-order retry rule. Sampling/source refusals
+and exhausted callback budgets are terminal, not numerical retry requests.
+
+`maximum_face_evaluations` is one cumulative budget for the whole call,
+including rejected attempts. Every complete scan must fit before it starts;
+a callback which refuses still consumes its evaluation. Samples visit all
+prepared faces in canonical side/face order. The callback must be a pure,
+deterministic observation of a read-only replayable source. It must not advance
+an RNG, OU clock or external solver. Source time validity and any interpolation
+model remain explicit caller responsibilities.
+
+The existing active/trial profiles are the only face-sized storage. No profile
+clone, new numerical array, replacement EOS or stochastic source is created
+inside stepping. Uniform reservoirs and pressure-only outlets retain their
+bindings. Default held stepping retains its original stage arithmetic.
+Accepted profiles remain unchanged during every trial; the accepted endpoint
+profile is published only at the same final commit as cells, clock, report and
+boundary impulses. Provider failure, exhausted retries, failed admission and
+late cancellation preserve all of that accepted state. Subsequent held
+stepping uses the newly accepted endpoint profile.
+
+Four focused G0/G1/G4 regression groups exercise constant-source equality of
+native field and boundary-account bits; second-order integrated supersonic
+inflow momentum/energy against closed-form time-dependent flux integrals with
+original variable calorics and both reconstructions; actual endpoint-CFL
+halving with exact repeated sample times and a call-wide work budget; and
+provider/source refusal plus final-poll cancellation preserving a previously
+accepted complete transaction. Pinned rustfmt parsing and formatting passed. These full owner regressions
+have not executed in this environment,
+where DSR/RCH and the complete constellation build are unavailable.
+
+The temporal convergence target concerns smooth prescribed boundary data and
+its physical Euler flux, not a calibrated turbulence spectrum, DNS resolution,
+nonreflecting inlet or experimentally qualified flow. This native Euler entry
+point does not implicitly retime forcing, molecular, reacting or evolving
+stochastic-source compositions. Those owners continue using their documented
+held-source methods until an explicit stage-aware composition is supplied.

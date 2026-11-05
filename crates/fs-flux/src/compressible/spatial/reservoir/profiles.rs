@@ -1,13 +1,17 @@
-//! Face-resolved prescribed exterior gas, held through the original SSP step.
+//! Face-resolved prescribed exterior gas on the original SSP time owner.
 //!
 //! These are complete Riemann traces of the original frozen gas. Sampling and
-//! caloric admission occur once per update, outside the flow stages. In
+//! caloric admission occur once per explicit update by default. The opt-in
+//! timed step instead samples its two physical stage times. In
 //! particular, an averaged velocity is not relabeled as an average nonlinear
 //! mass, momentum or energy flux. Time evolution and any turbulent field remain
-//! with the caller; this owner neither advances a random stream nor resamples a
-//! refused flow trial.
+//! with the caller; this owner never advances a random stream. A timed source
+//! must be pure and replayable because rejected trials resample stage data.
 
 use super::*;
+
+mod timed;
+pub(in crate::compressible::spatial) use timed::TimedSource;
 
 /// Complete exterior primitive state on one physical face, in coherent SI.
 /// Density and pressure jointly select temperature through the original gas
@@ -94,6 +98,15 @@ impl Profiles {
     ) -> Option<&AdmittedReservoir> {
         let (start, length) = self.ranges[slot]?;
         (face < length).then(|| &self.values[start + face])
+    }
+
+    pub(in crate::compressible::spatial) fn get_staged(
+        &self,
+        slot: usize,
+        face: usize,
+    ) -> Option<&AdmittedReservoir> {
+        let (start, length) = self.ranges[slot]?;
+        (face < length).then(|| &self.trial[start + face])
     }
 
     pub(in crate::compressible::spatial) fn sides(&self) -> [bool; 6] {
@@ -189,8 +202,24 @@ impl Profiles {
         grid: &CartesianGrid,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
+        Self::rate(&self.values, grid, cancelled)
+    }
+
+    pub(in crate::compressible::spatial) fn maximum_staged_rate(
+        &self,
+        grid: &CartesianGrid,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, Error> {
+        Self::rate(&self.trial, grid, cancelled)
+    }
+
+    fn rate(
+        values: &[AdmittedReservoir],
+        grid: &CartesianGrid,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, Error> {
         let mut rate = 0.0_f64;
-        for chunk in self.values.chunks(64) {
+        for chunk in values.chunks(64) {
             poll(cancelled)?;
             for state in chunk {
                 let p = state.primitive;
@@ -283,7 +312,8 @@ impl Euler3d {
     /// Duplicate, periodic, wall, uniform-reservoir and pressure-outlet sides
     /// refuse. All requested sides bind together or none bind.
     ///
-    /// Profiles remain fixed throughout a complete SSP step and every retry.
+    /// Profiles remain fixed throughout `step` and its retries. The explicit
+    /// [`Self::step_with_reservoir_profiles`] instead samples both stage times.
     /// They describe a prescribed infinite exterior, not finite storage,
     /// nonreflecting boundaries, molecular wall data or temporal interpolation.
     pub fn prepare_reservoir_profiles(

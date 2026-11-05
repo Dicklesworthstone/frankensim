@@ -4,6 +4,7 @@ use super::*;
 
 mod profiles;
 pub use profiles::ReservoirFaceState;
+pub(super) use profiles::TimedSource;
 
 /// Uniform externally maintained gas on one open physical side.
 ///
@@ -67,6 +68,14 @@ pub(super) struct Reservoirs {
     states: [Option<AdmittedReservoir>; 6],
     outlets: [Option<PressureOutletBoundary>; 6],
     pub(super) profiles: profiles::Profiles,
+}
+
+/// Immutable view of one complete exterior stage. Uniform bindings never
+/// change; only prepared face profiles can select uncommitted sample storage.
+#[derive(Clone, Copy)]
+pub(super) struct View<'a> {
+    owner: &'a Reservoirs,
+    staged_profiles: bool,
 }
 
 impl Reservoirs {
@@ -164,13 +173,21 @@ impl Reservoirs {
         sign: f64,
         cell: usize,
     ) -> Option<&AdmittedReservoir> {
-        let slot = 2 * axis + usize::from(sign > 0.0);
-        if let Some(state) = self.states[slot].as_ref() {
-            return Some(state);
+        self.accepted().get_at(grid, axis, sign, cell)
+    }
+
+    pub(super) fn accepted(&self) -> View<'_> {
+        View {
+            owner: self,
+            staged_profiles: false,
         }
-        let [a, b] = tangents(axis);
-        let c = grid.coordinates(cell);
-        self.profiles.get(slot, c[a] + grid.shape[a] * c[b])
+    }
+
+    pub(super) fn staged(&self) -> View<'_> {
+        View {
+            owner: self,
+            staged_profiles: true,
+        }
     }
 
     pub(super) fn try_clone(&self, cancelled: &mut impl FnMut() -> bool) -> Result<Self, Error> {
@@ -192,7 +209,45 @@ impl Reservoirs {
         states: &[State],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
+        self.accepted().maximum_rate(gas, grid, states, cancelled)
+    }
+}
+
+impl<'a> View<'a> {
+    pub(super) fn get_at(
+        self,
+        grid: &CartesianGrid,
+        axis: usize,
+        sign: f64,
+        cell: usize,
+    ) -> Option<&'a AdmittedReservoir> {
+        let slot = 2 * axis + usize::from(sign > 0.0);
+        if let Some(state) = self.owner.states[slot].as_ref() {
+            return Some(state);
+        }
+        let [a, b] = tangents(axis);
+        let c = grid.coordinates(cell);
+        let face = c[a] + grid.shape[a] * c[b];
+        if self.staged_profiles {
+            self.owner.profiles.get_staged(slot, face)
+        } else {
+            self.owner.profiles.get(slot, face)
+        }
+    }
+
+    pub(super) fn outlet(self, axis: usize, sign: f64) -> Option<PressureOutletBoundary> {
+        self.owner.outlet(axis, sign)
+    }
+
+    pub(super) fn maximum_rate(
+        self,
+        gas: &FrozenGas,
+        grid: &CartesianGrid,
+        states: &[State],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, Error> {
         let mut rate = self
+            .owner
             .states
             .iter()
             .flatten()
@@ -205,8 +260,13 @@ impl Reservoirs {
                     .sum::<f64>()
             })
             .fold(0.0, f64::max);
-        rate = rate.max(self.profiles.maximum_rate(grid, cancelled)?);
-        for outlet in self.outlets.iter().flatten() {
+        let profile_rate = if self.staged_profiles {
+            self.owner.profiles.maximum_staged_rate(grid, cancelled)?
+        } else {
+            self.owner.profiles.maximum_rate(grid, cancelled)?
+        };
+        rate = rate.max(profile_rate);
+        for outlet in self.owner.outlets.iter().flatten() {
             let axis = outlet.side.axis();
             let sign = outlet.side.sign();
             let [a, b] = tangents(axis);
