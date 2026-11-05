@@ -2,10 +2,14 @@
 //!
 //! Every transmitted and reflected stream uses one original gas snapshot and
 //! shares the existing gross-withdrawal allowance. Accommodation heat and the
-//! original molecular crossing energy enter ONE caloric solve per gas. Walls
-//! are explicitly prescribed thermostats; their opposite heat and entropy are
-//! retained. Gas plus thermostat energy/entropy is audited before publication.
+//! original molecular crossing energy enter ONE caloric solve per gas. The base
+//! step uses prescribed thermostats with explicit opposite heat and entropy.
+//! Gas plus thermostat energy/entropy is audited before publication. The thermal
+//! submodule instead owns finite material-wall storage and actual entropy.
 //! This is a first-order, quasistatic channel stage; callers refine time.
+
+/// Finite material walls sharing the original fixed-volume caloric owner.
+pub mod thermal;
 
 use super::{EffusionNetworkLink, check, face_error};
 use crate::thermochemical_gas::energy::parcel::transfer::{
@@ -66,7 +70,8 @@ pub struct DiffuseChannelNetworkStep {
     pub total_entropy_change_j_k: f64,
 }
 impl DiffuseChannelNetworkStep {
-    /// Recheck original material and collision domains after enclosing coupling.
+    /// Recheck original gas/collision sources and held-wall caloric domains.
+    /// Newly arriving species must admit the actual wall before publication.
     pub fn admit_endpoint_driving_forces(
         &self,
         parcels: &BTreeMap<u64, ClosedGasParcel>,
@@ -84,7 +89,7 @@ impl DiffuseChannelNetworkStep {
                     "channel endpoint lost an original gas identity",
                 ))?;
                 row.channel
-                    .admit_parcel(parcel, &mut cancelled)
+                    .admit_wall_for_parcel(parcel, row.wall_temperature_k, &mut cancelled)
                     .map_err(|error| face_error(row.id, error))?;
             }
         }

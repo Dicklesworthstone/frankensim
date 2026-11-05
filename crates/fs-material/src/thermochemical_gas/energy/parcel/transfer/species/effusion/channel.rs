@@ -79,6 +79,45 @@ impl DiffuseMolecularChannel {
         )
     }
 
+    /// Re-admit an exposed wall at the actual gas and wall endpoint without
+    /// sampling another molecular beam or spending inventory.
+    ///
+    /// The original gas, collision and species sources remain authoritative.
+    /// Only species present in this parcel need a caloric path from the gas
+    /// temperature to the wall temperature. An absent catalog species does not
+    /// narrow an active source's wall range. A zero-length channel admits its
+    /// gas but never queries an inactive wall; callers skip geometrically
+    /// closed channels entirely.
+    pub fn admit_wall_for_parcel(
+        &self,
+        parcel: &ClosedGasParcel,
+        wall_temperature_k: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), GasEnergyError> {
+        self.admit_parcel(parcel, &mut cancelled)?;
+        if self.geometry.length_m() == 0.0 {
+            return poll(&mut cancelled);
+        }
+        self.admit_wall_temperature(wall_temperature_k)?;
+        let temperature = Temperature::new(parcel.state().state().temperature);
+        let mixture = parcel.model().thermodynamics();
+        for (species, &fraction) in mixture
+            .components()
+            .iter()
+            .zip(mixture.mole_composition().fractions())
+        {
+            poll(&mut cancelled)?;
+            if fraction == 0.0 {
+                continue;
+            }
+            let _ = self
+                .original_species(species.species())?
+                .molar_enthalpy_change(temperature, Temperature::new(wall_temperature_k))
+                .map_err(source_error)?;
+        }
+        poll(&mut cancelled)
+    }
+
     /// Equivalent area for the original thin-aperture mass/energy sampler.
     /// Actual pore diameter and length remain independent of aggregate open area.
     pub fn transmitted_area_m2(&self, area_m2: f64) -> Result<f64, GasEnergyError> {

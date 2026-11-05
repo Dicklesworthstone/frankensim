@@ -316,3 +316,149 @@ fn closure_source_refusal_and_late_cancellation_leave_both_original_gases_unchan
     ));
     assert_eq!(gases, original);
 }
+
+/// Native transport can introduce B into an endpoint that originally contains
+/// only A. The channel retains both original sources, but inactive B does not
+/// constrain its initial wall temperature.
+pub(super) fn arrival_fixture(
+    b_max_temperature_k: f64,
+    length_m: f64,
+) -> (BTreeMap<u64, ClosedGasParcel>, DiffuseMolecularChannel) {
+    use crate::thermochemical_gas::energy::parcel::transfer::species::effusion::{
+        EffusiveInterface, EffusiveSpeciesTransmission,
+    };
+    use crate::thermochemical_gas::{
+        ThermochemicalGasModel,
+        tests::{point, species_in_domain, transport_in_domain},
+    };
+    use fs_thermochem::{Composition, CompositionBasis, mixture::FrozenIdealGasMixtureModelV1};
+    let catalog = ThermochemicalGasModel::new(
+        FrozenIdealGasMixtureModelV1::new(
+            vec![
+                species_in_domain("A", M, 2.5, 0.0, 0.0, [200.0, 1800.0]),
+                species_in_domain("B", M, 2.5, 0.0, 0.0, [200.0, b_max_temperature_k]),
+            ],
+            Composition::new(CompositionBasis::MoleFraction, vec![0.5, 0.5]).unwrap(),
+        )
+        .unwrap(),
+        ["A", "B"]
+            .into_iter()
+            .map(|name| transport_in_domain(name, 1.7e-5, 0.025, [200.0, 2000.0], [1.0, 1e7]))
+            .collect(),
+        None,
+    )
+    .unwrap();
+    let parcel = |fractions| {
+        ClosedGasParcel::new(
+            catalog
+                .with_composition(
+                    Composition::new(CompositionBasis::MoleFraction, fractions).unwrap(),
+                )
+                .unwrap(),
+            point(400.0, 100_000.0),
+            0.001,
+        )
+        .unwrap()
+    };
+    let a = parcel(vec![1.0, 0.0]);
+    let b = parcel(vec![0.0, 1.0]);
+    let original_mouth = interface(0.0);
+    let rows = catalog
+        .thermodynamics()
+        .components()
+        .iter()
+        .map(|species| {
+            EffusiveSpeciesTransmission::try_new(
+                species.species().clone(),
+                1.0,
+                "synthetic incoming-species source qualification",
+            )
+            .unwrap()
+        })
+        .collect();
+    let law = DiffuseMolecularChannel::try_new(
+        EffusiveInterface::try_new(
+            catalog,
+            rows,
+            original_mouth.support(),
+            original_mouth.regime().clone(),
+        )
+        .unwrap(),
+        CylindricalMolecularGeometry::try_new(
+            1e-8,
+            length_m,
+            1e-4,
+            "synthetic incoming-species channel geometry",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    (BTreeMap::from([(0, a.clone()), (1, a), (2, b)]), law)
+}
+
+#[test]
+fn newly_arriving_species_must_support_an_active_held_wall_at_the_final_endpoint() {
+    for (b_max, length, area, accepts) in [
+        (1800.0, 1e-8, AREA, true),
+        (600.0, 1e-8, AREA, false),
+        (600.0, 1e-8, 0.0, true),
+        (600.0, 0.0, AREA, true),
+    ] {
+        let (gases, law) = arrival_fixture(b_max, length);
+        let original = gases.clone();
+        // B is absent from the channel's initial endpoints. Its narrower
+        // source must not prevent the valid original A-only wall sample.
+        law.admit_wall_for_parcel(&gases[&0], 900.0, || false)
+            .unwrap();
+        law.admit_wall_for_parcel(&gases[&1], 900.0, || false)
+            .unwrap();
+        let native = [EffusionNetworkLink {
+            id: 21,
+            parcels: [2, 0],
+            interface: law.mouth(),
+            area_m2: AREA,
+        }];
+        // The caloric owner prepares the whole solve bracket. Keep it within
+        // B's source so only the separate 900 K wall admission can refuse.
+        let solve: BTreeMap<_, _> = gases
+            .keys()
+            .map(|&id| {
+                (
+                    id,
+                    GasEnergySolve {
+                        maximum_temperature_k: 600.0,
+                        ..energy()
+                    },
+                )
+            })
+            .collect();
+        let result = step_candidate(
+            &gases,
+            GasTransportPaths {
+                effusion: &native,
+                ..Default::default()
+            },
+            &[DiffuseChannelNetworkLink {
+                area_m2: area,
+                ..link(&law, 900.0)
+            }],
+            DT,
+            &solve,
+            controls(),
+            || false,
+        );
+        if accepts {
+            let candidate = result.unwrap();
+            let mixture = candidate.parcels()[&0].model().thermodynamics();
+            assert_eq!(mixture.components().len(), 2);
+            assert!(mixture.mole_composition().fractions()[1] > 0.0);
+            assert!(candidate.parcels()[&0].state().state().temperature < 600.0);
+            if area == 0.0 || length == 0.0 {
+                assert_eq!(candidate.step().heat_into_walls_j, 0.0);
+            }
+        } else {
+            assert!(matches!(result, Err(GasTransportError::Effusion(_))));
+        }
+        assert_eq!(gases, original);
+    }
+}
