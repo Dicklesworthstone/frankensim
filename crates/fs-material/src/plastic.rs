@@ -19,6 +19,8 @@ pub mod voce;
 pub mod chaboche;
 /// Multiplicative finite-strain Hencky plasticity with a Kirchhoff J2 surface.
 pub mod finite;
+/// Pressure-sensitive associated flow with retained volumetric plastic strain.
+pub mod porous;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};

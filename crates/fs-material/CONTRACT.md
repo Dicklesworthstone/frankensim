@@ -15606,3 +15606,43 @@ interpretation; it does not convert engineering UTS or supply a damage law.
 Changing conditions requires readmitting both original owners. Tests in
 `tests/tensile_hyperelastic.rs` cover unchanged native response, model/card/query
 mismatches, law-domain refusal and distinct source bindings.
+
+## Pressure-sensitive porous-solid compaction
+
+`plastic::porous::PorousPlasticity` adds the bounded infinitesimal-strain,
+associated Deshpande--Fleck self-similar ellipse
+`phi = sqrt((q^2 + a^2 p^2)/(1 + a^2/9))`. Mean stress is tension-positive;
+the authored initial yield stress is the uniaxial value. Elastic moduli,
+nonnegative energetic hardening `H`, and dimensionless pressure sensitivity
+`a` stay fixed through a load path. Positive sensitivity permits hydrostatic
+yielding and permanent volumetric plastic strain. Explicit `a = 0` recovers
+isotropic-hardening J2, including its isochoric plastic history.
+
+The existing `SmallStrainLaw` owner supplies native solid assembly with a
+fixed-array scalar safeguarded return and its analytic discrete tangent in
+tensor-Voigt coordinates. `response` returns typed refusals without mutating
+input history. It validates publicly mutable coefficients, finite elastic and
+total strain norms within the smaller of the elastic limit and 0.05, and the
+necessary dual-norm bound between retained plastic offset and accumulated
+work-conjugate strain. Unrepresentable or unconverged returns refuse; the
+infallible stress/tangent interface marks a refusal nonfinite and preserves
+history.
+
+`advance_with_energy` validates the old committed elastic stress and the new
+yield/reconstruction residuals against authored allowances. It separates
+elastic and energetic-hardening storage, physical yield heat
+`yield_stress * delta_alpha`, and backward-Euler numerical dissipation.
+Integration loss is never relabeled as physical heat. No parameter-change
+work or thermal feedback is inferred.
+
+This law is symmetric in hydrostatic tension/compression. It does not model
+evolving porosity, large-strain densification, pore-fluid pressure, soil caps,
+asymmetric tensile damage or measured foam calibration. Its reference is
+Deshpande and Fleck (2000), JMPS 48, 1253--1283, equations 2, 3, 11, 13 and 21
+(<https://doi.org/10.1016/S0022-5096(99)00082-4>).
+
+Focused numerical regressions cover hydrostatic and pure-shear closed forms,
+all six tangent columns after mixed history, weighted tangent symmetry, the
+native J2 limit and reversal, rotations, stress-unit scaling, refusal paths,
+and the physical/numerical work split. These are numerical checks, not
+experimental validation.

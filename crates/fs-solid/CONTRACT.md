@@ -7783,3 +7783,19 @@ create cracks or separated topology, infer contact, or convert numerical error
 into heat. The manufactured cases in `tests/brittle_tet_solid.rs` cover softening,
 unloading, complete Gc-times-area loss, compressive reclosure, independent source
 strengths/widths, force/support work and rejected-candidate rollback.
+
+## Native pressure-sensitive porous compression
+
+The existing generic `SmallStrainLaw` assembly and plastic-increment solver
+accept `fs_material::plastic::porous::PorousPlasticity` directly. Its complete
+volumetric plastic strain and accumulated work-conjugate strain remain in the
+native per-quadrature history; no solid-specific return map or constitutive
+parameter copy is introduced.
+
+The focused `porous_compression` regression drives a P1 tetrahedron by a
+hydrostatic force beyond yield, unloads to zero force, and reloads below the
+previous peak. It checks equilibrium, retained permanent compaction and
+elastic reloading against the material's closed-form hydrostatic solution.
+This establishes the intended native interface and small-strain load path;
+it does not extend the material to finite-strain foam crushing, contact or
+densification.
