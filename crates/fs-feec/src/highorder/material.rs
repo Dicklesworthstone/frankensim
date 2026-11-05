@@ -22,6 +22,9 @@ use crate::whitney::ElementGeometry;
 use fs_qty::Dims;
 use fs_sparse::Csr;
 
+mod action;
+pub use action::MaterialAction;
+
 /// Largest admitted polynomial order; at most 84 local basis functions.
 pub const MAX_MATERIAL_ORDER: usize = 6;
 const MAX_LOCAL: usize = 84;

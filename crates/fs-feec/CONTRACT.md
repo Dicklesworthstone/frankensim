@@ -128,6 +128,17 @@ orientation, the exact constant limit and positivity/cancellation refusals.
 `tests/material_highorder.rs` compares the H1 restriction with closed-form
 Whitney integration and checks higher-mode energy using an overintegrated rule.
 
+`MaterialOperator::prepare_action` prepares the same constant/affine scalar or
+tensor H1 pairing without a global sparse matrix. Oriented local descriptors,
+one shared quadrature rule and the consistent diagonal are retained under an
+explicit storage-byte bound. `MaterialAction::apply_into` contracts and projects
+each quadrature field in work linear in local basis size, with caller-owned
+scratch and no warm allocation. Output is published only after complete finite
+evaluation and a final checkpoint. The diagonal supports caller-owned Jacobi
+preconditioning; boundary/gauge restrictions remain the caller's responsibility.
+Focused regressions compare assembled action and diagonal, exact graded mass
+and centroid without triplet storage, repeated use, and atomic refusal.
+
 This includes the constant/affine scalar bulk-operator slice of
 `frankensim-ext-feec-weighted-operators-vxth`. It does not close that bead's
 high-order, nonlinear/quadrature-point, constitutive-history, or full

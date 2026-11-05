@@ -32,6 +32,178 @@ fn tensor_energy(tensor: [[f64; 3]; 3], v: [f64; 3]) -> f64 {
 }
 
 #[test]
+fn prepared_material_action_matches_consistent_graded_and_tensor_operators() {
+    let (complex, positions) = two_tets();
+    let geo = element_geometry(&complex, &positions);
+    for r in [1, 3, 6] {
+        let space = SimplexSpace::new(&complex, r);
+        for (pairing, weights) in [
+            (
+                H1Pairing::Mass,
+                [
+                    CellWeight::AffineScalar([2.0, 5.0, 7.0, 11.0]),
+                    CellWeight::Scalar(13.0),
+                ],
+            ),
+            (
+                H1Pairing::Diffusion,
+                [
+                    CellWeight::AffineScalar([2.0, 5.0, 7.0, 11.0]),
+                    CellWeight::Tensor(TENSOR),
+                ],
+            ),
+        ] {
+            let op = MaterialOperator::new(
+                &space,
+                &geo,
+                pairing,
+                &weights,
+                Dims::NONE,
+                LIMITS,
+                &mut || false,
+            )
+            .unwrap();
+            let assembled = op.assemble(&mut || false).unwrap();
+            let action = op.prepare_action(1_000_000, &mut || false).unwrap();
+            assert_eq!(action.ndof(), space.ndof);
+            let dense = assembled.matrix().to_dense();
+            for (i, &d) in action.diagonal().iter().enumerate() {
+                assert_eq!(d.to_bits(), dense[i * space.ndof + i].to_bits());
+            }
+            let input: Vec<_> = (0..space.ndof)
+                .map(|i| (i % 13) as f64 / 7.0 - 0.8)
+                .collect();
+            let mut expected = vec![0.0; space.ndof];
+            assembled.matrix().spmv(&input, &mut expected);
+            let mut actual = vec![0.0; space.ndof];
+            let mut scratch = vec![0.0; space.ndof];
+            action
+                .apply_into(&input, &mut actual, &mut scratch, &mut || false)
+                .unwrap();
+            for (&a, &b) in actual.iter().zip(&expected) {
+                near(a, b);
+            }
+            // Reuse the same prepared plan and scratch; prior scratch must not
+            // contribute to the next physical load or residual.
+            let first = actual.clone();
+            action
+                .apply_into(&input, &mut actual, &mut scratch, &mut || false)
+                .unwrap();
+            assert_eq!(first, actual);
+        }
+    }
+}
+
+#[test]
+fn matrix_free_density_load_retains_mass_centroid_without_triplet_storage() {
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let space = SimplexSpace::new(&complex, 6);
+    // rho = 3 + 12*x on the unit tetrahedron. Exact inventory is 1 kg;
+    // its centroid is (13/40, 9/40, 9/40), independently of basis order.
+    let weights = [CellWeight::AffineScalar(
+        complex.tets[0].map(|v| 3.0 + 12.0 * positions[v as usize][0]),
+    )];
+    let op = MaterialOperator::new(
+        &space,
+        &geo,
+        H1Pairing::Mass,
+        &weights,
+        Dims([-3, 1, 0, 0, 0, 0]),
+        WeightedAssemblyLimits {
+            max_triplets: 0,
+            ..LIMITS
+        },
+        &mut || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        op.assemble(&mut || false),
+        Err(WeightedError::LimitExceeded {
+            resource: "triplets",
+            ..
+        })
+    ));
+    let action = op.prepare_action(1_000_000, &mut || false).unwrap();
+    let mut constant = vec![0.0; space.ndof];
+    assert_eq!(action.entry_dims(), Dims([0, 1, 0, 0, 0, 0]));
+    assert_eq!(
+        action.output_dims(Dims([1, 0, -2, 0, 0, 0])).unwrap(),
+        Dims([1, 1, -2, 0, 0, 0])
+    );
+    constant[..positions.len()].fill(1.0);
+    let mut load = vec![0.0; space.ndof];
+    let mut scratch = vec![0.0; space.ndof];
+    action
+        .apply_into(&constant, &mut load, &mut scratch, &mut || false)
+        .unwrap();
+    near(load[..positions.len()].iter().sum(), 1.0);
+    for c in 0..3 {
+        let moment: f64 = positions
+            .iter()
+            .enumerate()
+            .map(|(i, p)| p[c] * load[i])
+            .sum();
+        near(moment, [13.0 / 40.0, 9.0 / 40.0, 9.0 / 40.0][c]);
+    }
+}
+
+#[test]
+fn material_action_refusal_is_atomic_and_storage_is_bounded() {
+    let (complex, positions) = single_tet();
+    let geo = element_geometry(&complex, &positions);
+    let space = SimplexSpace::new(&complex, 3);
+    let weights = [CellWeight::AffineScalar([2.0, 5.0, 7.0, 11.0])];
+    let op = MaterialOperator::new(
+        &space,
+        &geo,
+        H1Pairing::Mass,
+        &weights,
+        Dims::NONE,
+        LIMITS,
+        &mut || false,
+    )
+    .unwrap();
+    assert!(matches!(
+        op.prepare_action(0, &mut || false),
+        Err(WeightedError::LimitExceeded {
+            resource: "prepared material action bytes",
+            ..
+        })
+    ));
+    let action = op.prepare_action(1_000_000, &mut || false).unwrap();
+    let mut input = vec![1.0; space.ndof];
+    let mut output = vec![23.0; space.ndof];
+    let mut scratch = vec![0.0; space.ndof];
+    let mut polls = 0;
+    assert!(matches!(
+        action.apply_into(&input, &mut output, &mut scratch, &mut || {
+            polls += 1;
+            polls > 30
+        }),
+        Err(WeightedError::Cancelled)
+    ));
+    assert_eq!(output, vec![23.0; space.ndof]);
+    input[space.ndof / 2] = f64::NAN;
+    assert!(matches!(
+        action.apply_into(&input, &mut output, &mut scratch, &mut || false),
+        Err(WeightedError::NonFiniteEntry)
+    ));
+    assert_eq!(output, vec![23.0; space.ndof]);
+    assert!(
+        action
+            .apply_into(
+                &input[..space.ndof - 1],
+                &mut output,
+                &mut scratch,
+                &mut || false
+            )
+            .is_err()
+    );
+    assert_eq!(output, vec![23.0; space.ndof]);
+}
+
+#[test]
 fn affine_density_highorder_mass_and_diffusion_match_exact_whitney_restriction() {
     use fs_feec::{incidence_to_csr, stiffness, weighted_mass_matrix};
     let (complex, positions) = two_tets();
