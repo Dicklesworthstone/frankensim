@@ -11,6 +11,9 @@ mod spinning;
 #[path = "adhesive_shear/temperature.rs"]
 mod temperature;
 
+#[path = "adhesive_shear/maugis_phase.rs"]
+mod maugis_phase;
+
 use fs_contact::interface_binding::adhesive_shear::*;
 use fs_contact::interface_binding::*;
 use fs_contact::normal_patch::adhesive::{JkrEnvelope, SourceJkrSphereContact};

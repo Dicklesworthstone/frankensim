@@ -1,4 +1,6 @@
 //! Actual source-backed DMT area/load changes in the native mechanical owner.
+mod maugis_phase;
+
 use super::*;
 #[path = "../../../fs-contact/tests/source_point/common.rs"]
 mod common;

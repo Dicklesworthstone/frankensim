@@ -1,6 +1,8 @@
 //! Retain both original source owners while the normal owner supplies geometry.
 use super::*;
-use crate::normal_patch::maugis::MaugisResponse;
+use crate::normal_patch::maugis::{
+    MaugisResponse, SourceMaugisSphereContact, continuation::MaugisEquilibrium,
+};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 use fs_tribo::adhesive::AdhesiveTangentialContact;
@@ -45,6 +47,24 @@ impl SourceAdhesiveContactUpdate {
     pub fn from_maugis(response: &MaugisResponse) -> Result<Self, AdhesiveShearError> {
         Ok(Self {
             normal_identity: response.normal_state_identity(),
+            contact: response.friction_contact_state()?,
+        })
+    }
+    /// Retain the original Maugis phase and its true solid area/repulsive load.
+    /// The complete equilibrium must belong to the supplied normal model.
+    /// Noncontact attraction and detachment both supply zero solid junction;
+    /// the normal owner alone selects their phase and accounts for normal work.
+    pub fn from_maugis_equilibrium(
+        model: &SourceMaugisSphereContact,
+        response: &MaugisEquilibrium,
+    ) -> Result<Self, AdhesiveShearError> {
+        if response.model_identity() != model.identity() {
+            return Err(AdhesiveShearError::Invalid {
+                reason: "Maugis equilibrium must retain its original normal model",
+            });
+        }
+        Ok(Self {
+            normal_identity: model.normal_state().identity(),
             contact: response.friction_contact_state()?,
         })
     }
@@ -125,6 +145,17 @@ impl SourceAdhesiveShear {
             response.friction_contact_state()?,
         )
     }
+    /// Bind a complete original Maugis equilibrium, including zero-area phases.
+    /// Its cohesive annulus carries no solid shear or frictional heat. The
+    /// ordered normal/shear source state is retained even while separated.
+    pub fn bind_maugis_equilibrium(
+        &self,
+        model: &SourceMaugisSphereContact,
+        response: &MaugisEquilibrium,
+    ) -> Result<SourceAdhesiveTangential, AdhesiveShearError> {
+        let update = SourceAdhesiveContactUpdate::from_maugis_equilibrium(model, response)?;
+        self.bind_patch(model.normal_state(), update.normal_identity, update.contact)
+    }
     fn bind_patch(
         &self,
         normal: &BoundNormalInterfaceState,
@@ -176,6 +207,18 @@ impl SourceAdhesiveShear {
             });
         }
         self.evaluate(normal, response.friction_contact_state()?, slip)
+    }
+    /// Evaluate the solid junction of the supplied original Maugis equilibrium.
+    /// An attractive noncontact disk has zero tangential traction and heat;
+    /// its signed normal force must never be used as a friction load.
+    pub fn evaluate_maugis_equilibrium<'a>(
+        &self,
+        model: &'a SourceMaugisSphereContact,
+        response: &MaugisEquilibrium,
+        slip: TangentialSlip,
+    ) -> Result<AdhesiveFrictionResponse<'a>, AdhesiveShearError> {
+        let update = SourceAdhesiveContactUpdate::from_maugis_equilibrium(model, response)?;
+        self.evaluate(model.normal_state(), update.contact, slip)
     }
 }
 impl SourceAdhesiveTangential {
