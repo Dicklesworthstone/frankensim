@@ -934,6 +934,23 @@ does not establish phase/EOS support or bound future external heating. Focused
 `material_buoyancy` tests exercise real 2-D/3-D evolution, pressure/composition
 substitution, signed forces, off-center source temperature and atomic refresh.
 
+The native `ThermalLbm` and `ThermalLbm3` also admit a finite nonzero
+`set_buoyancy_direction` vector, normalized once before stepping. The vector
+points opposite physical gravity; the existing signed `gbeta` and temperature
+coordinate still determine the force magnitude. Defaults remain +y in 2-D
+and +z in 3-D. Inclined layers and heated vertical channels therefore use the
+same thermal populations, material scaling, local/tensor transport and Guo
+force integration as the horizontal slab. Changing direction preserves the
+current physical state; the next step rebinds the half-source frame without
+an additional impulse. Checked source snapshots retain the direction, and
+external-force admission checks every component of the total buoyancy/load.
+The Rayleigh diagnostic retains its full coefficient; multiplying by the
+wall-normal direction component gives its normal projection. The original
+Rayleigh–Bénard onset bracket is not an inclined-channel stability criterion.
+`directional_buoyancy` tests compare vertical-channel counterflow with the
+analytic cubic viscous profile, grid refinement, rotated/reversed force
+directions and exact per-step impulse through checked source advances.
+
 `BoundaryGrid3::rebind_shear_relaxation` extends uniform transport refresh to
 the original tiled boundary/moving-body solver. It delegates to the existing
 `ViscousLattice3` rate owner, preserving the collision family, higher-order

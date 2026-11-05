@@ -50,6 +50,8 @@ pub(crate) fn reframe3(
 /// Thermal force admission or native 3-D flow-step refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ThermalForcingError {
+    /// A buoyancy direction must have finite components and nonzero length.
+    InvalidDirection,
     /// The field must contain one vector per cell, including wall cells.
     Length {
         /// Required number of cell vectors.
@@ -72,6 +74,7 @@ pub enum ThermalForcingError {
 impl core::fmt::Display for ThermalForcingError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidDirection => write!(f, "buoyancy direction must be finite and nonzero"),
             Self::Length { expected, actual } => write!(f, "thermal force field has {actual} cells, expected {expected}"),
             Self::NonFinite { cell, component } => write!(f, "nonfinite thermal force at cell {cell}, component {component}"),
             Self::Layout => write!(f, "invalid thermal force/temperature layout"),
@@ -81,12 +84,30 @@ impl core::fmt::Display for ThermalForcingError {
 }
 impl std::error::Error for ThermalForcingError {}
 
+/// Normalize once at admission, outside the per-cell collision loop. Scaling
+/// first admits both subnormal and near-MAX vectors without norm under/overflow.
+pub(crate) fn normalize_direction<const D: usize>(
+    direction: [f64; D],
+) -> Result<[f64; D], ThermalForcingError> {
+    if direction.iter().any(|value| !value.is_finite()) {
+        return Err(ThermalForcingError::InvalidDirection);
+    }
+    let scale = direction.iter().fold(0.0_f64, |scale, value| scale.max(value.abs()));
+    if scale == 0.0 {
+        return Err(ThermalForcingError::InvalidDirection);
+    }
+    let scaled = direction.map(|value| value / scale);
+    let norm = fs_math::det::sqrt(scaled.iter().map(|value| value * value).sum());
+    Ok(scaled.map(|value| value / norm))
+}
+
 pub(crate) fn validate_external_forces<const D: usize, const Q: usize>(
     forces: &[[f64; D]],
     temperature_populations: &[[f64; Q]],
     wall_plane: usize,
     gbeta: f64,
     reference_temperature: f64,
+    buoyancy_direction: [f64; D],
 ) -> Result<(), ThermalForcingError> {
     let n = temperature_populations.len();
     if forces.len() != n {
@@ -103,9 +124,12 @@ pub(crate) fn validate_external_forces<const D: usize, const Q: usize>(
         }
         if cell >= wall_plane && cell < n - wall_plane {
             let temperature: f64 = temperature_populations[cell].iter().sum();
-            let total = gbeta * (temperature - reference_temperature) + force[D - 1];
-            if !total.is_finite() {
-                return Err(ThermalForcingError::NonFinite { cell, component: D - 1 });
+            let magnitude = gbeta * (temperature - reference_temperature);
+            for component in 0..D {
+                let total = magnitude * buoyancy_direction[component] + force[component];
+                if !total.is_finite() {
+                    return Err(ThermalForcingError::NonFinite { cell, component });
+                }
             }
         }
     }

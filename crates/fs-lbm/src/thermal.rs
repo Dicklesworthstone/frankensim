@@ -38,10 +38,12 @@ pub struct ThermalLbm {
     pub t_bottom: f64,
     /// Top-wall temperature.
     pub t_top: f64,
-    /// Buoyancy coefficient g·β (force = gβ(T − T_ref) ŷ).
+    /// Buoyancy coefficient g·β. Force is gβ(T − T_ref) times
+    /// [`Self::buoyancy_direction`], initially +y.
     pub gbeta: f64,
     /// Reference temperature.
     pub t_ref: f64,
+    pub(crate) buoyancy_direction: [f64; 2],
     pub(crate) wall_boundaries: Option<[ThermalWall; 2]>,
     pub(crate) wall_exchange: Option<[ThermalWallExchange; 2]>,
     advection_history: advection::FluxHistory<2>,
@@ -92,6 +94,7 @@ impl ThermalLbm {
             t_top,
             gbeta,
             t_ref: 0.5,
+            buoyancy_direction: [0.0, 1.0],
             wall_boundaries: None,
             wall_exchange: None,
             advection_history: advection::FluxHistory::default(),
@@ -109,6 +112,26 @@ impl ThermalLbm {
     #[must_use]
     pub fn diffusivity(&self) -> f64 {
         CS2 * (self.tau_g - 0.5)
+    }
+
+    /// Set the direction of positive thermal buoyancy, opposite physical
+    /// gravity for positive expansion. Any finite nonzero vector is normalized;
+    /// its length does not rescale `gbeta` or the material-owned temperature
+    /// coordinate. Tangential directions describe heated vertical channels;
+    /// mixed normal/tangential directions describe inclined layers.
+    ///
+    /// This changes no populations or physical velocity. The next coupled step
+    /// rebinds the Guo source frame before applying the new buoyancy. Invalid
+    /// declarations leave the complete state unchanged.
+    pub fn set_buoyancy_direction(&mut self, direction: [f64; 2]) -> Result<(), ThermalForcingError> {
+        self.buoyancy_direction = forcing::normalize_direction(direction)?;
+        Ok(())
+    }
+
+    /// Unit direction of positive thermal buoyancy (default +y).
+    #[must_use]
+    pub fn buoyancy_direction(&self) -> [f64; 2] {
+        self.buoyancy_direction
     }
 
     /// Set bottom/top thermal laws without changing populations, buoyancy or
@@ -217,7 +240,7 @@ impl ThermalLbm {
     /// Invalid fields or nonfinite sums with buoyancy are refused before any
     /// mutation; ordinary solver-state and stability requirements still apply.
     pub fn step_with_external_forces(&mut self, forces: &[[f64; 2]]) -> Result<(), ThermalForcingError> {
-        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref)?;
+        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
         self.step_with_forces_inner(Some(forces), None, None);
         Ok(())
     }
@@ -226,7 +249,7 @@ impl ThermalLbm {
     pub(crate) fn step_with_local_thermal_relaxation(
         &mut self, forces: &[[f64; 2]], thermal_tau: &[f64],
     ) -> Result<(), ThermalForcingError> {
-        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref)?;
+        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
         self.step_with_forces_inner(Some(forces), Some(thermal_tau), None);
         Ok(())
     }
@@ -234,7 +257,7 @@ impl ThermalLbm {
     pub(crate) fn step_with_tensor_diffusion(
         &mut self, forces: &[[f64; 2]], diffusion: tensor::DiffusivityField<'_, 2>,
     ) -> Result<(), ThermalForcingError> {
-        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref)?;
+        forcing::validate_external_forces(forces, &self.gpop, self.grid.nx, self.gbeta, self.t_ref, self.buoyancy_direction)?;
         self.step_with_forces_inner(Some(forces), None, Some(diffusion));
         Ok(())
     }
@@ -251,7 +274,8 @@ impl ThermalLbm {
             for x in 0..nx {
                 let i = self.grid.idx(x, y);
                 let t: f64 = self.gpop[i].iter().sum();
-                let mut total = [0.0, self.gbeta * (t - self.t_ref)];
+                let magnitude = self.gbeta * (t - self.t_ref);
+                let mut total = self.buoyancy_direction.map(|component| magnitude * component);
                 if let Some(forces) = external {
                     for (total, &load) in total.iter_mut().zip(&forces[i]) {
                         *total += load;
@@ -335,6 +359,9 @@ impl ThermalLbm {
     /// Rayleigh diagnostic based on prescribed or last measured mean wall
     /// contrast and the original background diffusivity. Flux/film walls need
     /// one completed step; before that this returns NaN.
+    /// This uses the full buoyancy coefficient; the wall-normal driving value
+    /// is this number times `buoyancy_direction()[1]`. The Rayleigh–Bénard onset
+    /// interpretation applies to normal buoyancy, not tangential channel flow.
     #[must_use]
     pub fn rayleigh(&self) -> f64 {
         let h = (self.grid.ny - 2) as f64;
