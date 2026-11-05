@@ -106,3 +106,54 @@ supply the ANS coefficient tables. [INL BISON's power and burnup
 documentation](https://mooseframework.inl.gov/bison/theory/power_burnup.html)
 provides context for prescribed fission sources and why energy production,
 fuel history and material evolution are distinct quantities.
+
+## Shared material thermal integration
+
+The opt-in `thermal` feature provides `thermal::FissionHeating` on the existing
+`fs_thermal::enthalpy::DepositionSimulation`. Bind each nuclear inventory to
+an already active `CellId` and its original `MaterialId`. Original material
+calorics, reference mass, geometry, storage basis, contact links and boundary
+reservoirs keep their physical owners. Where the thermal law supplies a full
+caloric identity it is also checked; an absent identity remains unavailable.
+Burnup does not silently change a material chart, thermal mass or phase law.
+
+A validated right-continuous `FissionRateSchedule` supplies total fissions per
+second. Binary-search transition lookup clips the original thermal substep at
+every authored rate change. Source trials run through `step_sources` only after
+CFL, event, transition and target clipping have established the final duration.
+Integrated deposited joules divided by that same duration enter the original
+heat-source path once, in addition to independently authored boundary heat.
+The emitted-radiation and nonrecoverable channels are not credited as heat.
+`requires_step_interval` prevents an instantaneous balance from silently
+omitting this duration-dependent source.
+
+The original thermal step must succeed before its matching nuclear state is
+accepted. The existing deep-cloned observer transaction discards both histories
+on material-domain, budget, numerical or checkpoint refusal. The exact original
+thermal checkpoint error is preserved through source cancellation. Per-advance
+compensated accounts bound accumulated absolute core and thermal-credit defects;
+ordinary thermal storage/transfer admission remains independently mandatory.
+The direct `advance_to` wrapper also validates an idle call's clock and bindings.
+
+The observer composes with other existing physical observers through
+`fs_thermal::observers::CoupledObservers`. It supports the original enthalpy
+and explicitly selected internal-energy storage bases; any sensible/latent
+temperature response comes from the original `ThermalLaw`. Heat-transfer
+accuracy remains the native explicit, fixed-reference-geometry, uniform-cell
+approximation with independent maximum-step refinement. Source integration is
+analytic; that does not make the spatial thermal evolution exact or implicit.
+
+Six owning integration regressions cover analytic shutdown calorimetry with
+additive boundary heat, finite-coolant contact and first-order refinement,
+multiple material/source schedules, identical-partition restart, fuel
+exhaustion, and joint rollback/admission failures. They were written and
+reviewed against the native APIs, but could not be compiled or run in the
+implementation session: the shared filesystems filled and the execution
+environment then became unavailable. Run the real native gate with
+
+```bash
+cargo test -p fs-nuclear --features thermal --locked
+```
+
+before treating those coupled regressions as executed evidence. DSR and the
+complete constellation/layout checks were not available as successful gates.

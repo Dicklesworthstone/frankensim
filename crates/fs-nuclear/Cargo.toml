@@ -5,10 +5,17 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Conservative prescribed fission sources, finite fuel inventory and delayed energy."
+description = "Conservative prescribed fission sources, finite fuel inventory, delayed energy and shared material heat transport."
 
 [package.metadata.frankensim]
 layer = "L3"
+
+[features]
+default = []
+thermal = ["dep:fs-thermal"]
+
+[dependencies]
+fs-thermal = { path = "../fs-thermal", optional = true }
 
 [lints]
 workspace = true

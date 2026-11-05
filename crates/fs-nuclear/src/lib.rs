@@ -18,6 +18,10 @@
 
 use std::sync::Arc;
 
+/// Source coupling on the original material-backed thermal timeline.
+#[cfg(feature = "thermal")]
+pub mod thermal;
+
 /// Disjoint energy destinations, in joules (or joules per fission in a model).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct EnergyChannels {
