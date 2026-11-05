@@ -392,3 +392,6 @@ fn independent_sources_keep_nontriggered_elements_elastic_through_fracture_repla
         assert_eq!(virgin.stored_energy_j(), 0.0);
     });
 }
+
+#[path = "initiation/first_event.rs"]
+mod first_event;

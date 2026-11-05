@@ -15,6 +15,9 @@
 //! increments and any plane sensitivity. No rotating cracks, all-plane mixed-
 //! mode detection, topology change, contact or dynamic fracture is supplied.
 
+/// Native replay toward the first tensile event and an explicit load remainder.
+pub mod first_event;
+
 use fs_exec::Cx;
 use fs_material::brittle::initiation::TensileInitiationSettings;
 use fs_material::brittle::source::ResolvedBrittleCrackBand;
@@ -45,6 +48,7 @@ pub struct TensileElasticTetSolid<'a> {
     solution: SmallStrainTetSolution<()>,
     stored_energy_j: f64,
     supports: Option<Vec<usize>>,
+    nodal_forces_n: Vec<(usize, f64)>,
 }
 
 /// A checked elastic endpoint or a disposable onset prediction.
@@ -70,6 +74,11 @@ pub struct TensileTetOnset<'a> {
     first_fraction: [f64; 2],
     first_candidate: usize,
     settings: TensileInitiationSettings,
+    initial_forces_n: Vec<(usize, f64)>,
+    prescribed_end_m: Vec<(usize, f64)>,
+    nodal_forces_end_n: Vec<(usize, f64)>,
+    solver_settings: IncrementSettings,
+    direction_hints: Option<Vec<Option<[f64; 3]>>>,
 }
 
 /// A change of constitutive representation at the original accepted endpoint.
@@ -155,6 +164,7 @@ impl<'a> TensileElasticTetSolid<'a> {
             solution,
             stored_energy_j: 0.0,
             supports: None,
+            nodal_forces_n: Vec::new(),
         })
     }
 
@@ -173,6 +183,13 @@ impl<'a> TensileElasticTetSolid<'a> {
     #[must_use]
     pub const fn stored_energy_j(&self) -> f64 {
         self.stored_energy_j
+    }
+
+    /// Applied dead-force entries at the accepted elastic endpoint, including
+    /// forces on supports. These are original inputs, not inferred reactions.
+    #[must_use]
+    pub fn nodal_forces_n(&self) -> &[(usize, f64)] {
+        &self.nodal_forces_n
     }
 
     /// Solve a proposed native elastic endpoint and inspect every actual strain.
@@ -293,6 +310,7 @@ impl<'a> TensileElasticTetSolid<'a> {
                 solution,
                 stored_energy_j,
                 supports: Some(supports),
+                nodal_forces_n: nodal_forces_n.to_vec(),
             })),
             Some(first_candidate) => Ok(TensileTetProbe::Onset(TensileTetOnset {
                 geometry: self.geometry,
@@ -305,6 +323,11 @@ impl<'a> TensileElasticTetSolid<'a> {
                 first_fraction,
                 first_candidate,
                 settings: initiation_settings,
+                initial_forces_n: self.nodal_forces_n.clone(),
+                prescribed_end_m: prescribed_m.to_vec(),
+                nodal_forces_end_n: nodal_forces_n.to_vec(),
+                solver_settings,
+                direction_hints: direction_hints.map(|hints| hints.to_vec()),
             })),
         }
     }
