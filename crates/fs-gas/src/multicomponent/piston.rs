@@ -1,7 +1,7 @@
 //! Inertial right-wall motion driven by the original evolving species field.
 
 use super::evolve::totals;
-use super::moving::{attempt, attempt_with_contact, geometry_error, reported_step};
+use super::moving::{attempt_with_contact, geometry_error, reported_step};
 use super::pressure_equilibrium::{
     ContactCorrection, ContactEquilibriumControl, ContactEquilibriumStepReport, ContactWorkspace,
 };

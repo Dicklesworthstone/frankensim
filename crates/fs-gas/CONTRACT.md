@@ -4807,5 +4807,48 @@ gradients, final-trial replay against prescribed corrected motion, exact
 zero-suspension equivalence, large species-energy-reference invariance,
 gas/kinetic/spring/loss/defect closure, budget retries and early/late cancellation.
 This remains the same Estimated constant-area, one-piston, nonreacting model.
-Shared two-chamber pistons, thermal/molecular/reacting composition, shocks,
-fully discrete entropy and general FSI stability are not established here.
+The shared two-chamber extension has the separate entry points below.
+Thermal/molecular/reacting composition, shocks, fully discrete entropy and
+general FSI stability are not established here.
+
+## Independent contact pressure on both sides of an inertial partition
+
+`MixtureEuler1d::step_with_shared_piston_and_contact_equilibrium` and
+`step_with_shared_suspended_piston_and_contact_equilibrium` run both original
+ALE fields with their independently admitted contact policies inside every
+joint midpoint-speed proposal. Each chamber keeps its own species/source,
+resolution, contact pressure and `ContactWorkspace`. The policies preserve
+admitted contacts inside each field; they never equate pressures across the
+impermeable partition. Unequal resolved chamber pressures continue to drive
+the original piston and optional spring/damper.
+
+`SharedPistonGasReport<R = StepReport>` now carries either the original reports
+or one `ContactEquilibriumStepReport<StepReport>` per side. The default APIs
+and the conservative helper used by reacting owners retain their signatures
+and physical arithmetic. The opt-in reports retain both raw gas-energy changes
+and both numerical corrections. Each side enforces its own absolute defect
+budget, even if its signed correction opposes the other side's correction.
+The outer coupled energy account excludes only their compensated signed sum:
+`Delta E_left + Delta E_right + Delta K_piston - W_drive
+ - Delta E_numerical_left - Delta E_numerical_right`.
+Suspension storage and loss retain their original additional accounts.
+Actual interface pressure impulses supply both piston motion and conjugate
+gas work. Neither side receives a fictitious exterior-pressure work term.
+
+Both workspaces reset before each paired speed proposal. A refusal in either
+field restarts both from their accepted states at the shortened common
+duration; a contact-budget retry retains MUSCL. Species, momenta, complete
+meshes, equal clocks and piston velocity publish at one final cancellation
+boundary. The source/RK/geometry/contact buffers are reused without per-trial
+numerical allocation or field cloning. Physical wall cells, resolved gradients
+and fallback stencils retain the original conservative map.
+
+Focused G0/G1/G4 checks use different species axes and resolutions, independently
+shifted energy datums and unequal chamber pressures. They cover pressure
+preservation during motion in both directions, coupled mass/impulse/work/defect
+balance, fine-side CFL shortening and replay of both accepted fields, exact
+zero-suspension and non-contact limits, spring/damper accounting, independent
+budgets with opposing signed defects, and cancellation/refusal of either side
+without partial publication. This remains the bounded constant-area sealed
+two-chamber Euler model. Thermal/molecular/reacting contact correction, shocks,
+fully discrete entropy and general FSI stability remain outside this extension.

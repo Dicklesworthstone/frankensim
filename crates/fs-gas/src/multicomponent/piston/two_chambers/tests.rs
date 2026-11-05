@@ -3,6 +3,7 @@ use crate::multicomponent::tests::{gas, source};
 use crate::multicomponent::{Mesh1d, MixtureGas};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
+mod contact_equilibrium;
 mod suspension;
 
 const AREA: f64 = 0.7;
@@ -61,7 +62,7 @@ fn pair(
 ) -> (MixtureEuler1d, MixtureEuler1d) {
     (
         chamber(left_gas(reference), 0.0, 1.0, 12, AREA, left_pressure),
-        chamber(right_gas(reference), 1.0, 1.0, 20, AREA, 2.0 * right_pressure),
+        chamber(right_gas(reference), 1.0, 1.0, 20, AREA, right_pressure),
     )
 }
 

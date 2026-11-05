@@ -6,14 +6,15 @@ use crate::multicomponent::{Totals, sum};
 /// Original extensive reports on either side of one impermeable piston.
 ///
 /// Each side retains its own species order, caloric source and energy datum.
-/// The interface is `left.right_boundary_change` and
-/// `right.left_boundary_change`; the other two ends are fixed supports.
+/// With native reports, the interface is `left.right_boundary_change` and
+/// `right.left_boundary_change`; the other two ends are fixed supports. The
+/// contact-equilibrium extension wraps each side's native report separately.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SharedPistonGasReport {
+pub struct SharedPistonGasReport<R = StepReport> {
     /// Resolved chamber to the left of the piston, with a fixed left end.
-    pub left: StepReport,
+    pub left: R,
     /// Resolved chamber to the right of the piston, with a fixed right end.
-    pub right: StepReport,
+    pub right: R,
 }
 
 impl MixtureEuler1d {
@@ -67,9 +68,72 @@ impl MixtureEuler1d {
         cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<SharedPistonGasReport>, PistonError> {
         self.step_with_shared_piston_suspension(
-            right, piston, maximum_duration, gas_controls, external_force_n,
-            None, controls, cancelled,
-        ).map(|step| step.piston)
+            right,
+            piston,
+            maximum_duration,
+            gas_controls,
+            external_force_n,
+            None,
+            controls,
+            cancelled,
+        )
+        .map(|step| step.piston)
+    }
+
+    /// Couple independently admitted material contacts to one shared piston.
+    ///
+    /// Both actual ALE pressure fields participate in every midpoint-speed
+    /// proposal. Each chamber retains its own contact pressure, source species
+    /// and caller-authored numerical-defect budget; this never equates pressure
+    /// across the impermeable partition. Each workspace is reset before each
+    /// paired proposal, including bracket trials and duration retries.
+    ///
+    /// The two native reports expose raw gas energy and separate contact
+    /// corrections. The outer total-energy residual subtracts the sum of the
+    /// signed numerical defects, while each side independently enforces its
+    /// absolute budget. Opposite defects cannot cancel a budget. The same
+    /// interface pressure impulses and conjugate works supply the piston; no
+    /// exterior-pressure work is added for an already represented chamber.
+    ///
+    /// Both gas fields, meshes, equal clocks and the wall publish together.
+    /// Physical wall cells, resolved gradients and fallback stencils retain
+    /// their conservative map. This opt-in, nonconservative contact treatment
+    /// has the same source and geometry scope as [`Self::step_with_shared_piston`];
+    /// it adds no chemistry, transport source or general FSI stability claim.
+    ///
+    /// # Errors
+    /// A refusal on either side, exhausted joint trials or cancellation leaves
+    /// both accepted chambers and the piston unchanged.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_shared_piston_and_contact_equilibrium(
+        &mut self,
+        right: &mut MixtureEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        external_force_n: f64,
+        controls: PistonControl,
+        equilibrium: [ContactEquilibriumControl; 2],
+        workspaces: [&mut ContactWorkspace; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        PistonStep<SharedPistonGasReport<ContactEquilibriumStepReport<StepReport>>>,
+        PistonError,
+    > {
+        let [left_workspace, right_workspace] = workspaces;
+        let step = self.advance_shared_piston(
+            right,
+            piston,
+            maximum_duration,
+            gas_controls,
+            external_force_n,
+            None,
+            controls,
+            Some((equilibrium, [&mut *left_workspace, &mut *right_workspace])),
+            cancelled,
+        )?;
+        let corrections = [left_workspace.receipt(), right_workspace.receipt()];
+        Ok(step.piston.map_gas(|gas| contact_reports(gas, corrections)))
     }
 
     /// Couple both resolved pressures to one shared spring-and-damper piston.
@@ -98,9 +162,56 @@ impl MixtureEuler1d {
         cancelled: impl FnMut() -> bool,
     ) -> Result<SuspendedPistonStep<SharedPistonGasReport>, PistonError> {
         self.step_with_shared_piston_suspension(
-            right, piston, maximum_duration, gas_controls, external_force_n,
-            Some(suspension), controls, cancelled,
+            right,
+            piston,
+            maximum_duration,
+            gas_controls,
+            external_force_n,
+            Some(suspension),
+            controls,
+            cancelled,
         )
+    }
+
+    /// Compose two independently corrected pressure fields with a suspension.
+    ///
+    /// The original midpoint spring/damper acts within every joint pressure
+    /// trial. Spring storage, damper loss and both gas pressure works retain
+    /// separate physical accounts. Both outer total-energy residuals exclude
+    /// only the separately reported signed numerical contact defects. Controls,
+    /// workspace reuse and paired publication follow
+    /// [`Self::step_with_shared_piston_and_contact_equilibrium`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_shared_suspended_piston_and_contact_equilibrium(
+        &mut self,
+        right: &mut MixtureEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        external_force_n: f64,
+        suspension: PistonSuspension,
+        controls: PistonControl,
+        equilibrium: [ContactEquilibriumControl; 2],
+        workspaces: [&mut ContactWorkspace; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        SuspendedPistonStep<SharedPistonGasReport<ContactEquilibriumStepReport<StepReport>>>,
+        PistonError,
+    > {
+        let [left_workspace, right_workspace] = workspaces;
+        let step = self.advance_shared_piston(
+            right,
+            piston,
+            maximum_duration,
+            gas_controls,
+            external_force_n,
+            Some(suspension),
+            controls,
+            Some((equilibrium, [&mut *left_workspace, &mut *right_workspace])),
+            cancelled,
+        )?;
+        let corrections = [left_workspace.receipt(), right_workspace.receipt()];
+        Ok(step.map_gas(|gas| contact_reports(gas, corrections)))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -113,6 +224,32 @@ impl MixtureEuler1d {
         external_force_n: f64,
         suspension: Option<PistonSuspension>,
         controls: PistonControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SuspendedPistonStep<SharedPistonGasReport>, PistonError> {
+        self.advance_shared_piston(
+            right,
+            piston,
+            maximum_duration,
+            gas_controls,
+            external_force_n,
+            suspension,
+            controls,
+            None,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_shared_piston(
+        &mut self,
+        right: &mut MixtureEuler1d,
+        piston: &mut Piston,
+        maximum_duration: Time,
+        gas_controls: StepControl,
+        external_force_n: f64,
+        suspension: Option<PistonSuspension>,
+        controls: PistonControl,
+        mut equilibrium: Option<([ContactEquilibriumControl; 2], [&mut ContactWorkspace; 2])>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SuspendedPistonStep<SharedPistonGasReport>, PistonError> {
         poll(&mut cancelled)?;
@@ -121,13 +258,20 @@ impl MixtureEuler1d {
             external_force_n,
         };
         validate(*piston, maximum_duration, gas_controls, load, controls)?;
+        if let Some((control, workspace)) = equilibrium.as_ref() {
+            workspace[0].admit(self.cell_count(), control[0])?;
+            workspace[1].admit(right.cell_count(), control[1])?;
+        }
         let closed = Boundaries::Ends {
             left: Boundary::Reflecting,
             right: Boundary::Reflecting,
         };
-        let area = self.mesh.uniform_cross_section().ok_or(PistonError::Invalid(
-            "shared piston requires constant-area gas chambers",
-        ))?;
+        let area = self
+            .mesh
+            .uniform_cross_section()
+            .ok_or(PistonError::Invalid(
+                "shared piston requires constant-area gas chambers",
+            ))?;
         let interface = self.mesh.positions()[self.mesh.cell_count()];
         if self.boundaries != closed
             || right.boundaries != closed
@@ -175,6 +319,11 @@ impl MixtureEuler1d {
             };
             let result = solve(original_piston.velocity_m_s(), controls, |speed| {
                 gas_trials += 1;
+                if let Some((control, workspace)) = equilibrium.as_mut() {
+                    for (scratch, &control) in workspace.iter_mut().zip(control.iter()) {
+                        scratch.begin_attempt(control)?;
+                    }
+                }
                 let left = trial(
                     self,
                     left_before,
@@ -182,6 +331,9 @@ impl MixtureEuler1d {
                     gas_controls.cfl,
                     reconstruction,
                     [0.0, speed],
+                    equilibrium
+                        .as_mut()
+                        .map(|(_, workspace)| &mut *workspace[0]),
                     &mut cancelled,
                 )?;
                 let right_report = trial(
@@ -191,6 +343,9 @@ impl MixtureEuler1d {
                     gas_controls.cfl,
                     reconstruction,
                     [speed, 0.0],
+                    equilibrium
+                        .as_mut()
+                        .map(|(_, workspace)| &mut *workspace[1]),
                     &mut cancelled,
                 )?;
                 let left_mesh = &self.moving.as_ref().expect("prepared left motion").mesh;
@@ -201,7 +356,7 @@ impl MixtureEuler1d {
                         "shared piston candidate endpoints do not represent one wall",
                     ));
                 }
-                let exchange = MechanicalExchange {
+                let mut exchange = MechanicalExchange {
                     duration_s: dt,
                     momentum_change: sum([
                         left.after.momentum - left.before.momentum,
@@ -224,6 +379,15 @@ impl MixtureEuler1d {
                         right_report.left_boundary_change.energy,
                     ]),
                 };
+                if let Some((_, workspace)) = equilibrium.as_ref() {
+                    // The raw changes remain in the two native reports. Only
+                    // these separately budgeted numerical increments are
+                    // excluded from the coupled physical energy balance.
+                    exchange.energy_change -= sum([
+                        workspace[0].receipt().signed_energy_j,
+                        workspace[1].receipt().signed_energy_j,
+                    ]);
+                }
                 let displacement = next_interface - interface;
                 let trial_load = match suspension {
                     Some(law) => law.load(load, speed, displacement)?,
@@ -241,7 +405,8 @@ impl MixtureEuler1d {
                     displacement,
                     area,
                 )
-            }).and_then(|report| suspension::finish(suspension, report, load, dt, controls));
+            })
+            .and_then(|report| suspension::finish(suspension, report, load, dt, controls));
             match result {
                 Ok(mut step) => {
                     let report = &mut step.piston;
@@ -266,7 +431,8 @@ impl MixtureEuler1d {
                     return Err(PistonError::MixtureGas(Error::Allocation));
                 }
                 Err(error) => {
-                    if matches!(&error, PistonError::MixtureGas(cause) if !matches!(cause, Error::CflExceeded { .. })) {
+                    if matches!(&error, PistonError::MixtureGas(cause) if !matches!(cause, Error::CflExceeded { .. } | Error::ContactEnergyBudget { .. }))
+                    {
                         first_order_retry = true;
                     }
                     last = error;
@@ -293,18 +459,27 @@ fn prepare(
     let area = flow.mesh.face_areas()[0];
     let mut rate = 0.0_f64;
     for (i, q) in flow.states.chunks_exact(n + 2).enumerate() {
-        let p = flow.gas.decode(q, Some(flow.work.primitive[i].temperature), cancelled)?;
+        let p = flow
+            .gas
+            .decode(q, Some(flow.work.primitive[i].temperature), cancelled)?;
         flow.work.primitive[i] = p;
-        let relative = p.velocity.abs()
+        let relative = p
+            .velocity
+            .abs()
             .max((p.velocity - bracket[0]).abs())
             .max((p.velocity - bracket[1]).abs());
         let local = (relative + p.sound_speed) * area / flow.mesh.volumes()[i];
         if !positive(local) {
-            return Err(PistonError::Invalid("shared-piston relative-wave CFL overflow"));
+            return Err(PistonError::Invalid(
+                "shared-piston relative-wave CFL overflow",
+            ));
         }
         rate = rate.max(local);
     }
-    Ok((totals(&flow.states, flow.mesh.volumes(), n, cancelled)?, rate))
+    Ok((
+        totals(&flow.states, flow.mesh.volumes(), n, cancelled)?,
+        rate,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -315,11 +490,14 @@ fn trial(
     cfl: f64,
     reconstruction: Reconstruction,
     wall_velocity: [f64; 2],
+    contact: Option<&mut ContactWorkspace>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StepReport, PistonError> {
     let moving = flow.moving.as_mut().expect("prepared shared-piston motion");
-    moving.prepare_velocities(&flow.mesh, wall_velocity, cancelled).map_err(geometry_error)?;
-    let (a, b) = attempt(
+    moving
+        .prepare_velocities(&flow.mesh, wall_velocity, cancelled)
+        .map_err(geometry_error)?;
+    let (a, b) = attempt_with_contact(
         &flow.gas,
         &flow.states,
         &flow.mesh,
@@ -329,11 +507,29 @@ fn trial(
         reconstruction,
         &mut flow.work,
         moving,
+        contact,
         cancelled,
     )?;
     let n = flow.gas.species_count();
     let after = totals(&flow.work.candidate, moving.mesh.volumes(), n, cancelled)?;
-    Ok(reported_step(before, after, [a, b], dt, flow.mesh.face_areas()[0], n)?)
+    Ok(reported_step(
+        before,
+        after,
+        [a, b],
+        dt,
+        flow.mesh.face_areas()[0],
+        n,
+    )?)
+}
+
+fn contact_reports(
+    gas: SharedPistonGasReport,
+    [left, right]: [ContactCorrection; 2],
+) -> SharedPistonGasReport<ContactEquilibriumStepReport<StepReport>> {
+    SharedPistonGasReport {
+        left: contact_report(gas.left, left),
+        right: contact_report(gas.right, right),
+    }
 }
 
 #[cfg(test)]
