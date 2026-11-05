@@ -2901,6 +2901,17 @@ normal/tangent Delassus matrix. Assembly contracts only shared-body influence
 blocks, avoiding products over unrelated body coordinates. Stable contact IDs
 also canonicalize native impulse accumulation.
 
+`PointKinematics::relative_velocity_world` and
+`velocity_relative_to_world` reconstruct relative motion from the original
+COM velocities, angular velocities and point arms. Double-double products and
+reductions cancel common translation before rounding the final relative
+velocity. Both native impact admission and endpoint verification use this
+query, including directional impacts and material-source callbacks. Absolute
+point-velocity diagnostics can round away a small rotational contribution;
+they are not used to decide whether that contact is approaching or slipping.
+If the resulting required momentum jump cannot be represented, the original
+native impulse and endpoint gates still refuse the complete event.
+
 Dynamic pairs receive equal/opposite original point impulses; translating
 prescribed planes supply an explicit external impulse, angular impulse and
 signed support work. Independently reconstructed native endpoint velocities,

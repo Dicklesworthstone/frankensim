@@ -356,7 +356,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         let a =
             bodies[c.point.body].point_kinematics(properties[c.point.body], c.point.arm_body)?;
         let mut influences = vec![influence(bodies, properties, c.point, axes)];
-        let (other_point, other_velocity, separation) = match c.other {
+        let (other_point, relative, separation) = match c.other {
             RigidImpactCounterpart::Body(point) => {
                 if point.body >= bodies.len() || point.body == c.point.body {
                     return Err(invalid("counterpart must name another valid dynamic body"));
@@ -383,7 +383,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
                     }
                 }
                 influences.push(opposite);
-                (b.point_world, b.point_velocity_world, separation)
+                (b.point_world, a.relative_velocity_world(b)?, separation)
             }
             RigidImpactCounterpart::PrescribedPlane {
                 point_world,
@@ -396,7 +396,7 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
                 }
                 (
                     point_world,
-                    velocity_world,
+                    a.velocity_relative_to_world(velocity_world)?,
                     material_separation(
                         bodies[c.point.body].pose().position_world(),
                         a.arm_world,
@@ -406,7 +406,6 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
                 )
             }
         };
-        let relative = a.point_velocity_world.sub(other_velocity);
         let gap = n.dot(separation);
         let counterpart_point_world = match c.other {
             RigidImpactCounterpart::Body(_) => other_point,
@@ -526,15 +525,16 @@ fn apply_impacts_with<F: Copy, R: ImpactResponse, E>(
         let c = contacts[index];
         let a =
             candidate[c.point.body].point_kinematics(properties[c.point.body], c.point.arm_body)?;
-        let other = match c.other {
+        let relative = match c.other {
             RigidImpactCounterpart::Body(point) => {
-                candidate[point.body]
-                    .point_kinematics(properties[point.body], point.arm_body)?
-                    .point_velocity_world
+                let other = candidate[point.body]
+                    .point_kinematics(properties[point.body], point.arm_body)?;
+                a.relative_velocity_world(other)?
             }
-            RigidImpactCounterpart::PrescribedPlane { velocity_world, .. } => velocity_world,
+            RigidImpactCounterpart::PrescribedPlane { velocity_world, .. } => {
+                a.velocity_relative_to_world(velocity_world)?
+            }
         };
-        let relative = a.point_velocity_world.sub(other);
         for axis in 0..3 {
             let velocity = relative.dot(prepared[slot].axes[axis]);
             endpoint_error = endpoint_error

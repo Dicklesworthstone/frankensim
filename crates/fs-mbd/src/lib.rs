@@ -1208,6 +1208,72 @@ pub struct PointKinematics {
     pub point_velocity_world: Vec3,
 }
 
+impl PointKinematics {
+    /// Velocity of this material point relative to another dynamic point [m/s].
+    ///
+    /// Common centre-of-mass motion cancels before adding either rotational
+    /// contribution. Subtracting the rounded absolute point velocities can
+    /// erase real slip or approach when both bodies translate rapidly.
+    /// The original COM, angular velocity and arm components remain the input;
+    /// no tolerance suppresses a small physical relative motion.
+    pub fn relative_velocity_world(self, other: Self) -> Result<Vec3, DynamicsError> {
+        self.relative_velocity_parts(
+            other.center_of_mass_velocity_world,
+            other.angular_velocity_world,
+            other.arm_world,
+        )
+    }
+
+    /// Material-point velocity relative to an explicitly translating support.
+    ///
+    /// This retains the same rotational contribution as
+    /// [`Self::relative_velocity_world`], even when adding it to the absolute
+    /// COM velocity would round it away. It does not infer a support reaction.
+    pub fn velocity_relative_to_world(self, velocity_world: Vec3) -> Result<Vec3, DynamicsError> {
+        self.relative_velocity_parts(velocity_world, Vec3::ZERO, Vec3::ZERO)
+    }
+
+    fn relative_velocity_parts(
+        self,
+        other_com: Vec3,
+        other_omega: Vec3,
+        other_arm: Vec3,
+    ) -> Result<Vec3, DynamicsError> {
+        if [
+            self.center_of_mass_velocity_world,
+            self.angular_velocity_world,
+            self.arm_world,
+            other_com,
+            other_omega,
+            other_arm,
+        ]
+        .iter()
+        .any(|value| !value.is_finite())
+        {
+            return Err(DynamicsError::NonFinite("relative_point_velocity.inputs"));
+        }
+        let wide = |v: Vec3| [v.x, v.y, v.z].map(Dd::from_f64);
+        let a = wide(self.center_of_mass_velocity_world);
+        let b = wide(other_com);
+        let omega_a = wide(self.angular_velocity_world);
+        let omega_b = wide(other_omega);
+        let arm_a = wide(self.arm_world);
+        let arm_b = wide(other_arm);
+        let mut result = [0.0; 3];
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            let k = (i + 2) % 3;
+            let rotation_a = omega_a[j] * arm_a[k] - omega_a[k] * arm_a[j];
+            let rotation_b = omega_b[j] * arm_b[k] - omega_b[k] * arm_b[j];
+            result[i] = finite_derived(
+                (a[i] - b[i] + rotation_a - rotation_b).to_f64(),
+                "relative_point_velocity_world",
+            )?;
+        }
+        Ok(Vec3::new(result[0], result[1], result[2]))
+    }
+}
+
 /// Directional free-body effective mass at a body point.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DirectionalEffectiveMass {
@@ -2709,6 +2775,47 @@ mod tests {
         assert_close(recovered_arm.x, 1.0, EPSILON);
         assert_close(recovered_arm.y, 0.0, EPSILON);
         assert_close(recovered_arm.z, 0.0, EPSILON);
+    }
+
+    #[test]
+    fn relative_point_motion_retains_spin_beneath_common_translation() {
+        let properties = MassProperties::new(1.0, Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
+        for boost in [0.0, 2.0_f64.powi(54)] {
+            let translation = Vec3::new(boost, 0.0, 0.0);
+            let point = |spin| {
+                RigidBodyState::new(
+                    Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap(),
+                    translation,
+                    Vec3::new(0.0, spin, 0.0),
+                )
+                .unwrap()
+                .point_kinematics(properties, Vec3::new(0.0, 0.0, 1.0))
+                .unwrap()
+            };
+            let a = point(1.0);
+            let b = point(-1.0);
+            assert_eq!(
+                a.velocity_relative_to_world(translation).unwrap(),
+                Vec3::new(1.0, 0.0, 0.0),
+            );
+            assert_eq!(
+                a.relative_velocity_world(b).unwrap(),
+                Vec3::new(2.0, 0.0, 0.0),
+            );
+            assert_eq!(
+                b.relative_velocity_world(a).unwrap(),
+                Vec3::new(-2.0, 0.0, 0.0),
+            );
+            assert_eq!(a.relative_velocity_world(a).unwrap(), Vec3::ZERO);
+            if boost != 0.0 {
+                assert_eq!(a.point_velocity_world, translation);
+                assert_eq!(b.point_velocity_world, translation);
+            }
+            assert!(matches!(
+                a.velocity_relative_to_world(Vec3::new(f64::NAN, 0.0, 0.0)),
+                Err(DynamicsError::NonFinite(_)),
+            ));
+        }
     }
 
     #[test]

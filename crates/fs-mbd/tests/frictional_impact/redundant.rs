@@ -238,11 +238,15 @@ fn g1_rotating_support_and_finite_body_recoil_have_determined_total_work() {
             c.point.arm_body.z = 0.0;
             c.normal_world = q.rotate_body_to_world(Vec3::new(0.0, 0.0, 1.0));
             c.tangent_world = q.rotate_body_to_world(Vec3::new(1.0, 0.0, 0.0));
+            // Give the rounded world witness a positive activation gap. Exact
+            // coincidence in body coordinates can round to penetration after
+            // rotation and translation; that is correctly refused by admission.
             c.other = RigidImpactCounterpart::PrescribedPlane {
                 point_world: initial[0]
                     .pose()
                     .point_world_from_body(c.point.arm_body)
-                    .unwrap(),
+                    .unwrap()
+                    .sub(c.normal_world.scale(1e-12)),
                 velocity_world: boost
                     .add(q.rotate_body_to_world(u.add(omega.cross(c.point.arm_body)))),
             };

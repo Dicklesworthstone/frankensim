@@ -293,6 +293,72 @@ fn g3_contact_balance_retains_small_normal_loss_under_boost_and_origin_shift() {
 }
 
 #[test]
+fn g3_common_translation_cannot_hide_spin_driven_contact() {
+    let properties = [property(1.0, Vec3::new(1.0, 1.0, 1.0)); 2];
+    // Both absolute point velocities round to U. Their original COM and spin
+    // states still resolve approach/separation. A requested sub-ULP momentum
+    // change must refuse atomically, rather than silently declaring no impact.
+    let boost = 2.0_f64.powi(54);
+    for dynamic in [false, true] {
+        for spin in [-1.0, 1.0] {
+            let initial = [
+                RigidBodyState::new(
+                    Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap(),
+                    Vec3::new(boost, 0.0, 0.0),
+                    Vec3::new(0.0, spin, 0.0),
+                )
+                .unwrap(),
+                body(
+                    Vec3::new(0.0, 0.0, 1.0),
+                    UnitQuaternion::IDENTITY,
+                    Vec3::new(boost, 0.0, 0.0),
+                ),
+            ];
+            let mut contact = plane(
+                RigidImpactPoint {
+                    body: 0,
+                    arm_body: Vec3::new(0.0, 0.0, 1.0),
+                },
+                0.0,
+                0.0,
+            );
+            contact.normal_world = Vec3::new(1.0, 0.0, 0.0);
+            contact.tangent_world = Vec3::new(0.0, 1.0, 0.0);
+            contact.other = if dynamic {
+                RigidImpactCounterpart::Body(RigidImpactPoint {
+                    body: 1,
+                    arm_body: Vec3::ZERO,
+                })
+            } else {
+                RigidImpactCounterpart::PrescribedPlane {
+                    point_world: Vec3::new(0.0, 0.0, 1.0),
+                    velocity_world: Vec3::new(boost, 0.0, 0.0),
+                }
+            };
+            let mut bodies = initial;
+            let result = apply_rigid_frictional_impacts(
+                &mut bodies,
+                &properties,
+                &[contact],
+                controls(),
+                &CancelGate::new(),
+            );
+            if spin < 0.0 {
+                assert!(
+                    result.is_err(),
+                    "lost impact: dynamic={dynamic}: {result:?}"
+                );
+            } else {
+                let report = result.unwrap();
+                assert_eq!(report.contact.impulses, [[0.0; 3]]);
+                assert_eq!(report.contact.relative_velocities_after[0], [1.0, 0.0, 0.0]);
+            }
+            assert_eq!(bodies, initial);
+        }
+    }
+}
+
+#[test]
 fn g0_simultaneous_opposing_impulses_retain_existing_central_momentum() {
     // The centre's original small momentum is representable. Updating it once
     // per contact loses it alongside either O(mass) impulse; their RESULTANT
