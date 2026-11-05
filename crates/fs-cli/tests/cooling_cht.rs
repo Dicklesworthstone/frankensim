@@ -73,6 +73,80 @@ const DUCT: &str = r#"{
 }"#;
 
 #[test]
+fn convection_exponential_resolves_the_graded_boundary_layer_in_both_directions() {
+    // Constant U, rho=Cp=k=1: T=300+100*expm1(U*x)/expm1(U).
+    // Prescribe both velocity faces so both thermal endpoints are Dirichlet.
+    let centres = [0.015, 0.115, 0.23, 0.38, 0.75];
+    let probes = centres.iter().enumerate().map(|(i, x)| {
+        format!(r#"{{"name":"p{i}","at_m":[{x},0.1,0.15]}}"#)
+    }).collect::<Vec<_>>().join(",");
+    for speed in [-2.0_f64, 2.0] {
+        let input = format!(r#"{{
+          "schema":"frankensim.cooling-cht.v1",
+          "grid":{{"x":[{{"to_m":0.03,"voxel_m":0.03}},
+            {{"to_m":0.20,"voxel_m":0.17}},{{"to_m":0.26,"voxel_m":0.06}},
+            {{"to_m":0.50,"voxel_m":0.24}},{{"to_m":1,"voxel_m":0.5}}],
+            "y":[{{"to_m":0.2,"voxel_m":0.2}}],"z":[{{"to_m":0.3,"voxel_m":0.3}}]}},
+          "fluid":{{"density_kg_m3":1,"specific_heat_j_kg_k":1,
+            "conductivity_w_m_k":1,"kinematic_viscosity_m2_s":1}},
+          "faces":{{
+            "x-":{{"type":"inlet","velocity_m_s":[{speed},0,0],"temperature_k":300}},
+            "x+":{{"type":"inlet","velocity_m_s":[{speed},0,0],"temperature_k":400}},
+            "y-":{{"type":"symmetry"}},"y+":{{"type":"symmetry"}},
+            "z-":{{"type":"symmetry"}},"z+":{{"type":"symmetry"}}}},
+          "probes":[{probes}],
+          "solver":{{"tolerance":1e-11,"energy_convection":"exponential",
+            "momentum_convection":"minmod"}}
+        }}"#);
+        let (code, fitted, error) = run(&scratch(&format!("convection-exponential-{speed}.json"), &input));
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(fitted.path(&["convection", "energy"]).and_then(J::as_str), Some("exponential"));
+        assert_eq!(fitted.path(&["convection", "momentum"]).and_then(J::as_str), Some("minmod"));
+        let max_error = |result: &J| {
+            result.get("probes").unwrap().as_array().unwrap().iter().zip(centres)
+                .map(|(probe, x)| {
+                    let expected = 300.0 + 100.0 * (speed * x).exp_m1() / speed.exp_m1();
+                    (f(probe, &["temperature_k"]) - expected).abs()
+                }).fold(0.0_f64, f64::max)
+        };
+        assert!(max_error(&fitted) < 2e-6, "{speed}: {}", max_error(&fitted));
+        assert!(f(&fitted, &["energy", "balance_relative_residual"]) < 1e-9);
+        let donor_input = input.replace("\"energy_convection\":\"exponential\"", "\"energy_convection\":\"upwind\"");
+        let (code, donor, error) = run(&scratch(&format!("convection-upwind-{speed}.json"), &donor_input));
+        assert_eq!(code, 0, "{error}");
+        assert!(max_error(&donor) > 0.1, "the real energy operator must change");
+    }
+}
+
+#[test]
+fn convection_admission_refuses_malformed_or_cross_owner_choices() {
+    for (i, fields) in [
+        r#""energy_convection":"enthalpy-minmod""#,
+        r#""energy_convection":"minmod""#,
+        r#""energy_convection":"automatic""#,
+        r#""energy_convection":null"#,
+        r#""energy_convection":42"#,
+        r#""momentum_convection":"enthalpy-minmod""#,
+        r#""momentum_convection":true"#,
+    ].iter().enumerate() {
+        let input = DUCT.replace("\"solver\": {", &format!("\"solver\": {{{fields},"));
+        let (code, refused, error) = run(&scratch(&format!("convection-refusal-{i}.json"), &input));
+        assert_ne!(code, 0, "{fields}");
+        assert_eq!(refused.str_field("code"), Some("cooling-cht-input"), "{error}");
+        assert!(refused.get("flow").is_none());
+        assert!(refused.get("energy").is_none());
+    }
+    let (code, default, error) = run(&scratch("convection-default.json", DUCT));
+    assert_eq!(code, 0, "{error}");
+    let explicit = DUCT.replace("\"solver\": {", r#""solver": {"energy_convection":"power-law","momentum_convection":"power-law","#);
+    let (code, selected, error) = run(&scratch("convection-explicit-default.json", &explicit));
+    assert_eq!(code, 0, "{error}");
+    for field in ["convection", "flow", "energy", "sources", "max_solid_temperature_k"] {
+        assert_eq!(default.get(field), selected.get(field), "{field}");
+    }
+}
+
+#[test]
 fn pressure_opening_scene_drives_the_native_flow_and_thermal_reservoirs() {
     // Pressure alone drives this planar channel: H=1, L=2, depth=1/4,
     // mu=1/4. Missing y faces remain no-slip adiabatic walls.
@@ -551,6 +625,59 @@ mod evolving_materials {
           "solver":{{"tolerance":1e-12}}
         }}"#
         )
+    }
+
+    #[test]
+    fn convection_source_minmod_changes_the_graded_channel_without_changing_its_calorics() {
+        let pack_name = "convection-source-minmod.fsmcdpk";
+        let input = caloric_channel(
+            &CALORIC_LIQUID.replace("PACK", pack_name), CALORIC_POLICY, false,
+        ).replace(r#""size_m":[1,1,1],"voxel_m":1"#, r#""grid":{
+            "x":[{"to_m":0.2,"voxel_m":0.1},{"to_m":0.4,"voxel_m":0.2},
+                 {"to_m":0.65,"voxel_m":0.25},{"to_m":1,"voxel_m":0.35}],
+            "y":[{"to_m":1,"voxel_m":1}],"z":[{"to_m":1,"voxel_m":1}]}"#);
+        let bytes = pack_with_cp_slope(true, 0.0, 310.0, 0.01);
+        let mut results = Vec::new();
+        for (index, choice) in [None, Some("upwind"), Some("enthalpy-minmod")].into_iter().enumerate() {
+            let scene = match choice {
+                None => input.clone(),
+                Some(choice) => input.replace("\"solver\":{",
+                    &format!("\"solver\":{{\"energy_convection\":\"{choice}\",")),
+            };
+            let path = scratch(&format!("convection-source-{index}.json"), &scene);
+            std::fs::write(path.with_file_name(pack_name), &bytes).unwrap();
+            let (code, result, error) = run(&path);
+            assert_eq!(code, 0, "{error}");
+            let caloric = result.path(&["material_feedback", "fluid_enthalpy"]).unwrap();
+            assert_eq!(caloric.str_field("advection"), Some(if index == 2 {
+                "source-enthalpy-minmod"
+            } else { "source-enthalpy-first-order-upwind" }));
+            for defect in ["maximum_face_flux_defect_w", "maximum_cell_flux_defect_w"] {
+                assert!(f(caloric, &[defect]) <= f(caloric, &["flux_tolerance_w"]));
+            }
+            assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-8);
+            let advective = f(&result, &["energy", "advective_outflow_w"]);
+            let boundary = f(&result, &["energy", "boundary_outflow_w"]);
+            // Total boundary heat includes advection, inlet conduction and
+            // the negative supplied wall heat; there is no volumetric source.
+            assert!(advective > 0.0);
+            assert!(boundary.abs() < 1e-6);
+            results.push(result);
+        }
+        for field in ["convection", "flow", "energy", "probes", "material_feedback"] {
+            assert_eq!(results[0].get(field), results[1].get(field), "{field}");
+        }
+        assert_eq!(results[1].get("material_inputs"), results[2].get("material_inputs"));
+        let probe = |result: &J| f(&result.get("probes").unwrap().as_array().unwrap()[0], &["temperature_k"]);
+        assert!((probe(&results[1]) - probe(&results[2])).abs() > 1e-5,
+            "minmod must affect a nonuniform multi-cell heat field");
+        for choice in ["power-law", "exponential"] {
+            let scene = input.replace("\"solver\":{", &format!("\"solver\":{{\"energy_convection\":\"{choice}\","));
+            let (code, refused, error) = run(&scratch(&format!("convection-caloric-refusal-{choice}.json"), &scene));
+            assert_ne!(code, 0);
+            assert_eq!(refused.str_field("code"), Some("cooling-cht-input"), "{error}");
+            assert!(refused.get("material_feedback").is_none());
+        }
     }
 
     #[test]

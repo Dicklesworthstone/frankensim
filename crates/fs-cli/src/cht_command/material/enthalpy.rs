@@ -1,7 +1,7 @@
 //! Explicit source-caloric ingress for the existing CHT energy owner.
 
 use super::{FluidSource, J, Result, bad, fields};
-use fs_lbm::conjugate::AffineSpecificEnthalpy;
+use fs_lbm::conjugate::{AffineSpecificEnthalpy, ConvectionScheme};
 use fs_lbm::material::conjugate::buoyant::enthalpy::{
     ConvectionCaloricLaw, MaterialEnthalpyConfig, MaterialEnthalpyState,
     MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig,
@@ -352,9 +352,10 @@ impl Bound<'_> {
         reference_temperature_k: f64,
         state: &MaterialEnthalpyState,
         records: &[MaterialEnthalpyStepReport],
+        scheme: ConvectionScheme,
     ) -> Result<String> {
         let controls = self.input.transient_controls(reference_temperature_k)?;
-        let mut report = self.report(reference_temperature_k, state)?;
+        let mut report = self.report(reference_temperature_k, state, scheme)?;
         report.pop(); // Extend the existing caloric evidence object.
         let number = super::super::num;
         let worst = |value: fn(&MaterialEnthalpyStepReport) -> f64| {
@@ -384,8 +385,14 @@ impl Bound<'_> {
         &self,
         reference_temperature_k: f64,
         state: &MaterialEnthalpyState,
+        scheme: ConvectionScheme,
     ) -> Result<String> {
         let number = super::super::num;
+        let advection = match scheme {
+            ConvectionScheme::Upwind => "source-enthalpy-first-order-upwind",
+            ConvectionScheme::EnthalpyMinmod => "source-enthalpy-minmod",
+            _ => return Err(bad("source-caloric report requires upwind or enthalpy-minmod transport")),
+        };
         let (identity, exact) = match &self.source {
             Source::Gas(law) => (
                 "null".into(), // Original gas receipts remain in material_inputs.
@@ -409,11 +416,12 @@ impl Bound<'_> {
             .unwrap_or_else(|| "null".into());
         Ok(format!(
             concat!(
-                "{{\"advection\":\"source-enthalpy-first-order-upwind\",",
+                "{{\"advection\":{},",
                 "\"reference_temperature_k\":{},\"minimum_temperature_k\":{},\"maximum_temperature_k\":{},",
                 "\"maximum_interpolation_error_j_kg\":{},\"chart_identity\":{},",
                 "\"flux_tolerance_w\":{},\"maximum_face_flux_defect_w\":{},\"maximum_cell_flux_defect_w\":{}{}}}"
             ),
+            super::super::quote(advection),
             number(reference_temperature_k)?,
             number(self.input.minimum_temperature_k)?,
             number(self.input.maximum_temperature_k)?,

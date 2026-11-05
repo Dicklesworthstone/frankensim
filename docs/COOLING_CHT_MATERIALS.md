@@ -16,6 +16,48 @@ Neither mode introduces compressibility, models melting, or establishes phase
 stability. Source errors, missing properties and out-of-domain reference states
 refuse before solving; the evolving mode also checks every trial and endpoint.
 
+## Choosing convection discretizations
+
+The energy and momentum discretizations can be selected independently:
+
+```json
+{
+  "solver": {
+    "energy_convection": "exponential",
+    "momentum_convection": "minmod"
+  }
+}
+```
+
+| Field | Choices | Default |
+| --- | --- | --- |
+| `solver.energy_convection`, ordinary thermal energy | `power-law`, `upwind`, `exponential` | `power-law` |
+| `solver.energy_convection`, with `fluid_enthalpy` | `upwind`, `enthalpy-minmod` | `upwind` |
+| `solver.momentum_convection` | `power-law`, `upwind`, `exponential`, `minmod` | `power-law` |
+
+Exponential fitting resolves the constant-coefficient, source-free 1-D
+convection–diffusion profile between neighboring cells, including graded
+distances and boundary half cells. It costs an exponential evaluation per
+nonzero fitted face and does not establish general higher-order
+multidimensional accuracy. Power-law is the less expensive approximation;
+it approaches donor transport at large cell Péclet numbers.
+
+Use `enthalpy-minmod` to limit a linear reconstruction of the original source
+specific enthalpy. This requires the `fluid_enthalpy` declaration below; a
+reference heat capacity cannot supply its caloric law. Momentum `minmod`
+independently limits the native advected face velocities using an implicit
+upwind operator. Both keep donor transport where their native boundary
+stencils are incomplete. These choices do not change time integration,
+guarantee a multidimensional maximum principle, or establish resolved
+turbulence accuracy.
+
+The same selection reaches steady, transient, buoyant, radiating, material
+and SGS paths, as well as study and grid-refinement variants. Results expose
+`convection.energy`, `convection.momentum`, and each method's scope. Source
+caloric results also identify `source-enthalpy-minmod` or
+`source-enthalpy-first-order-upwind` in their existing `advection` field.
+Invalid combinations refuse before solving; omitted fields keep the defaults.
+
 ## Atmospheres
 
 Replace the scene's `fluid` field with, for example:
@@ -290,7 +332,9 @@ is introduced. Original temperature domains and humid-air saturation checks
 remain active.
 
 The native heat operator transports donor `h(T)` with conservative first-order
-upwind fluxes on the projected flow faces. Nonlinear acceptance checks the
+upwind fluxes by default. Selecting `solver.energy_convection: "enthalpy-minmod"`
+uses conservative limited source-enthalpy reconstruction on the same projected
+flow faces. Nonlinear acceptance checks the
 source-law heat defect on every face and in every fluid cell; global
 cancellation cannot conceal a local error. This option retains the existing
 fixed-density Boussinesq model and its **5% source density and Cp departure
@@ -348,7 +392,7 @@ and `caloric_identity`, which retains the prepared original source receipts.
 Their `chart_identity` and interpolation tolerance are `null`.
 Original material input and endpoint identities remain unchanged. Exact gas
 results report their basis and held pressure alongside the existing source
-evidence. The same 5% density/Cp bounds, upwind operator and nonlinear heat-flux
+evidence. The same 5% density/Cp bounds, admitted convection operator and nonlinear heat-flux
 acceptance apply.
 
 ### Transient source enthalpy

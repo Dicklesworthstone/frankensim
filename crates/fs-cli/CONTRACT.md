@@ -452,7 +452,9 @@ inlets, potential backflow and every queried trial must remain in the declared
 and original supported domains. Unknown caloric fields refuse.
 
 Steady scenes use the native source-enthalpy material CHT solver with
-first-order upwind donor heat transport. Unsteady scenes additionally require
+first-order upwind donor heat transport by default; explicit
+`solver.energy_convection: "enthalpy-minmod"` selects its conservative limited
+source-enthalpy reconstruction. Unsteady scenes additionally require
 `fluid_enthalpy.transient_controls`: explicit positive per-step nonlinear and
 whole-march energy-solve budgets, unrelaxed temperature/storage/energy-closure
 tolerances, and relaxation in `(0,1]`. The same native momentum history, clock,
@@ -470,6 +472,33 @@ epochs remain available. Reference density, the 5% source rho/Cp bounds,
 laminar/fixed-geometry admission and first-order coupled time accuracy remain;
 omitting the opt-in preserves reference-Cp thermal behavior.
 `docs/COOLING_CHT_MATERIALS.md` specifies the input and reporting fields.
+
+## Native convection selection in cooling scenes
+
+`cooling-cht` admits independent `solver.energy_convection` and
+`solver.momentum_convection` strings. Energy accepts `power-law`, `upwind`,
+`exponential`, and `enthalpy-minmod`; the source-caloric `fluid_enthalpy` owner
+admits only `upwind` or `enthalpy-minmod`. Without that original caloric owner,
+`enthalpy-minmod` refuses. Momentum accepts `power-law`, `upwind`, `exponential`,
+or `minmod`; the last maps to native upwind coefficients with conservative
+limited face-velocity reconstruction, not to the energy-only enthalpy scheme.
+Unknown values and wrong types refuse before executing a solver.
+
+Omission preserves power-law momentum and ordinary energy, and upwind
+source-caloric energy. One admitted selection reaches steady forced and buoyant
+solves, radiation, frozen-flow and mean-flow energy, coupled unsteady/SGS flow,
+and original fluid/solid material feedback. Studies and grid refinement use
+the same scene reader and selection. The CLI introduces no flux operator.
+
+JSON `convection` names the actual energy/momentum choices and their spatial
+scope; text output carries both choices. The caloric report distinguishes
+source-enthalpy upwind and minmod. Exponential fitting retains its
+constant-coefficient one-dimensional scope. Limited reconstructions retain
+their donor boundary fallback and do not claim a general multidimensional
+maximum principle, momentum energy stability, or changed temporal order.
+Real-binary regressions exercise the exact graded 1-D exponential profile in
+both directions, distinct multi-cell source-enthalpy transport with heat
+closure, default parity, invalid combinations, and transient SGS composition.
 
 ## Steady material convection with radiation
 

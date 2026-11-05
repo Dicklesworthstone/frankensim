@@ -8,6 +8,7 @@
 //! declared) and the conservative conjugate energy equation over fluid and
 //! solid cells (fs-lbm `conjugate`).
 
+mod convection;
 mod convergence;
 mod material;
 mod sgs;
@@ -27,7 +28,7 @@ use fs_io::stl::read_stl;
 use fs_lbm::Face3;
 use fs_lbm::conjugate::{
     Boussinesq, ChtError, CompactComponent, CompactHeatStorage, CompactHeatStorageLaw,
-    ContactResistance, EnergyConfig, EnergySolution,
+    ContactResistance, EnergySolution,
     FacePatch, FanCurve, FanInlet, FlowResistance, FluidProperties, FvBoundary, FvBuoyancyConfig,
     FvFlow, FvSgsConfig, InternalFan, RadiationConfig, SimpleConfig, SolidMaterial, ThermalFace,
     ThermalSetup, TimeScheme, TransientConfig, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
@@ -42,7 +43,7 @@ const MAX_CELLS: usize = 4_000_000;
 const MAX_STL_BYTES: u64 = 256 * 1024 * 1024;
 const SCHEMA: &str = "frankensim.cooling-cht.v1";
 const RESULT_SCHEMA: &str = "frankensim.cooling-cht.result.v1";
-const NO_CLAIM: &str = "constant-property incompressible flow (steady, or marched when declared) on a staircase voxel grid, uniform or graded, at one declared resolution (no mesh-convergence claim; a grid_convergence block measures one); Boussinesq buoyancy only when gravity is declared; turbulence through optional equilibrium LVEL or explicit transient Smagorinsky/WALE (exploration only; no resolved turbulent spectrum, transition or turbulent DNS qualification); temperature dependence through declared solid conductivity tables and compact junction heat-capacity tables (fluid properties constant); compact models use one junction temperature and require an explicit total heat_capacity_j_k or bounded heat_capacity_table_j_k for energy marches; tabulated storage integrates the declared heat capacity without extrapolation (occupied cells add no separate volumetric storage); radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); power-law convection is first order at high cell Peclet numbers; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
+const NO_CLAIM: &str = "constant-property incompressible flow (steady, or marched when declared) on a staircase voxel grid, uniform or graded, at one declared resolution (no mesh-convergence claim; a grid_convergence block measures one); Boussinesq buoyancy only when gravity is declared; turbulence through optional equilibrium LVEL or explicit transient Smagorinsky/WALE (exploration only; no resolved turbulent spectrum, transition or turbulent DNS qualification); temperature dependence through declared solid conductivity tables and compact junction heat-capacity tables (fluid properties constant); compact models use one junction temperature and require an explicit total heat_capacity_j_k or bounded heat_capacity_table_j_k for energy marches; tabulated storage integrates the declared heat capacity without extrapolation (occupied cells add no separate volumetric storage); radiation only between gray diffuse exposed solid faces and to the surroundings seen through openings, inlets and fans (Monte Carlo exchange factors on face patches; walls and non-emitting solids reflect perfectly; transparent air); selected spatial convection schemes do not change temporal order or establish general multidimensional accuracy; Estimated numerical evidence, not validated hardware or a ledger-backed .fsim run";
 const HELP: &str = "Usage: frankensim [--json] cooling-cht <scene.json>\n\nSolve steady voxel conjugate heat transfer: finite-volume SIMPLEC airflow\n(forced, or natural/mixed with the Boussinesq force when gravity_m_s2 is\ndeclared) and one conservative energy equation over fluid and solid cells.\nThe scene declares size_m and voxel_m, a fluid (\"dry-air-300k\" or explicit\nproperties), materials (isotropic k or [kx, ky, kz]), contacts (interface\nresistance_m2_k_w between two materials), solids (boxes, or closed STL meshes placed by\nscale and offset_m; later solids override earlier ones),\nheat-source boxes (power spread over the solid cells they cover), and one\nrule per face x-, x+, y-, y+, z-, z+: inlet (velocity_m_s, temperature_k),\nfan (curve [[flow_m3_s, pressure_pa], ...], temperature_k; the flow is the\noperating point against the system), opening (ambient_k, optional signed\nstatic gauge pressure_pa defaulting to zero; flow either way), symmetry, or wall\n(adiabatic, or temperature_k, heat_flux_w_m2, or htc_w_m2_k with ambient_k).\nOpening pressures share one reference, relative to reference hydrostatics\nwhen buoyancy is enabled; they do not set absolute gas pressure or density.\nMissing faces are adiabatic walls. A material emissivity enables gray\nsurface radiation between emitting faces and to the surroundings seen\nthrough openings, inlets and fans (Monte Carlo exchange factors; walls\nand non-emitting solids reflect; radiation {rays_per_face, seed,\nsurface_exchange (default true), patch_size (default 4)}).\nsolver.turbulence \"lvel\" adds the LVEL algebraic eddy viscosity (and its\nturbulent conductivity) for transitional/turbulent fan-driven flow.\ninternal_fans (axis, at_m on an interior voxel face, direction \"+\"/\"-\",\nmin_m/max_m transverse extent, curve) raise the pressure across a plane;\nresistances are grilles (axis, at_m, min_m/max_m, loss_coefficient or\nfree_area_ratio) or porous blocks (min_m/max_m, permeability_m2 and\ninertial_per_m, scalar or per axis).\nA solid may be a plate-fin heatsink (heatsink {base_min_m, base_size_m,\nfin_count, fin_thickness_m, fin_height_m, fins_along}). A study block\n(parameters [{name, path, values}], objective {minimize}, constraints\n[{quantity, min, max}]) evaluates every combination of the values and ranks\nthe variants; quantities are max_solid_temperature_k, source:<name>,\ncomponent:<name>, internal_fan:<name>, fan_flow_m3_s and inflow_m3_s.\nA grid_convergence block {splits: [a, b, c]} solves the scene with every\ncell split a, b and c ways per axis and reports each quantity's observed\norder, Richardson extrapolation and GCI band.\ncomponents are JEDEC two-resistor compact models (min_m/max_m box,\nboard_side, power_w, junction_to_case_k_w, junction_to_board_k_w): the box\nblocks flow and the junction reaches the case top and board through the\ntwo resistors. Transient energy marches require either positive total\nheat_capacity_j_k or heat_capacity_table_j_k, never both. The table declares\n2..4096 [temperature_k, capacity_j_k] pairs with positive finite values and\nincreasing temperatures. Its exact integral owns junction storage only\nwithin the declared temperature span; extrapolation refuses. Without either\ncapacity declaration the model is steady-only.\nOptional transient (time_step_s, steps,\npower_schedule [[time_s, scale], ...], initial_temperature_k) marches the\nenergy equation over the steady forced flow (resolved solid materials\nthen need volumetric_heat_capacity_j_m3_k; compact boxes use their\njunction heat capacity); with flow \"unsteady\" (scheme \"bdf2\" or\n\"backward-euler\", inner_iterations, inner_tolerance, inlet_schedule) the\nflow marches with it from rest, buoyant when gravity is declared; energy\n\"steady-on-mean-flow\" instead solves the steady energy equation (with any\nradiation) on the march's time-averaged fluxes. Request schema: frankensim.cooling-cht.v1.\nResults are Estimated single-resolution numerical evidence.\n";
 
 type Result<T> = std::result::Result<T, Failure>;
@@ -692,6 +693,7 @@ struct Scene {
     expansion: Option<f64>,
     reference: Option<f64>,
     tolerance: f64,
+    convection: convection::Selection,
     turbulence: Turbulence,
     /// One gradient-diffusion heat law shared by flow, heat, exports and studies.
     turbulent_prandtl: f64,
@@ -1555,6 +1557,7 @@ impl Scene {
         let fluid_enthalpy = material::enthalpy::parse(
             root.get("fluid_enthalpy"), fluid_source.as_ref(), transient.is_some(),
         )?;
+        let convection = convection::Selection::parse(solver, fluid_enthalpy.is_some())?;
         Ok(Self {
             dx,
             grid,
@@ -1571,6 +1574,7 @@ impl Scene {
             expansion,
             reference,
             tolerance,
+            convection,
             turbulence,
             turbulent_prandtl,
             sgs,
@@ -1832,7 +1836,7 @@ fn execute_unsteady(
             &initial_temperature,
             |t| interpolate(&options.inlet_schedule, t),
             |t| transient.scale(t),
-            &EnergyConfig::default(),
+            &scene.convection.energy_config(),
             radiation,
             gate,
         ),
@@ -1847,7 +1851,7 @@ fn execute_unsteady(
             &initial_temperature,
             |t| interpolate(&options.inlet_schedule, t),
             |t| transient.scale(t),
-            &EnergyConfig::default(),
+            &scene.convection.energy_config(),
             radiation,
             gate,
         ),
@@ -1955,6 +1959,7 @@ fn execute_unsteady(
             num(scene.dx)?,
             scene.grid.uniform.is_none()
         );
+        scene.convection.append_json(&mut out);
         scene.append_material_inputs(&mut out);
         if let Some(feedback) = &material_feedback {
             let _ = write!(out, ",\"material_feedback\":{feedback}");
@@ -2043,6 +2048,7 @@ fn execute_unsteady(
             records.len(),
             solids_max(&run.temperature)
         );
+        scene.convection.append_text(&mut out);
         if let Some(sgs) = &sgs {
             sgs.text(&mut out);
         }
@@ -2150,6 +2156,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
         source_cells.push(count);
     }
     let mut flow_config = SimpleConfig::new(flow_faces);
+    scene.convection.configure_momentum(&mut flow_config);
     flow_config.tolerance = scene.tolerance;
     flow_config.turbulence = scene.turbulence;
     flow_config.turbulent_prandtl = scene.turbulent_prandtl;
@@ -2242,6 +2249,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                 })?;
             let expansion = scene.expansion.unwrap_or(1.0 / reference);
             let mut config = FvBuoyancyConfig::new(gravity, expansion, reference, flow_config);
+            config.energy = scene.convection.energy_config();
             config.max_couplings = scene.max_iterations;
             config.radiation.clone_from(&radiation);
             let run = fv_natural_convection(
@@ -2294,7 +2302,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                         &scene.materials,
                         &flow.field,
                         &setup,
-                        &EnergyConfig::default(),
+                        &scene.convection.energy_config(),
                         config,
                         gate,
                     )
@@ -2308,7 +2316,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
                     &scene.materials,
                     &flow.field,
                     &setup,
-                    &EnergyConfig::default(),
+                    &scene.convection.energy_config(),
                     gate,
                 )
                 .map_err(|e| solver_failure(&e))?,
@@ -2340,7 +2348,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             let config = TransientConfig {
                 time_step_s: transient.time_step_s,
                 steps: transient.steps,
-                energy: EnergyConfig::default(),
+                energy: scene.convection.energy_config(),
             };
             let solution = march_energy(
                 &domain,
@@ -2449,6 +2457,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             num(scene.dx)?,
             scene.grid.uniform.is_none()
         );
+        scene.convection.append_json(&mut out);
         scene.append_material_inputs(&mut out);
         if let Some(evidence) = &material_feedback {
             let _ = write!(out, ",\"material_feedback\":{evidence}");
@@ -2646,6 +2655,7 @@ fn execute(scene: &Scene, gate: &CancelGate, json_mode: bool) -> Result<String> 
             r.outflow_m3_s,
             b.relative_residual
         );
+        scene.convection.append_text(&mut out);
         if let Some(evidence) = &material_feedback {
             let _ = writeln!(out, "material_feedback={evidence}");
         }
@@ -2763,6 +2773,7 @@ pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
         let mut help = format!(
             "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid; resolved solids may use fixed\nstorage or all evolve with a source storage_temperature_range_k. The latter\nintegrates original Cp at fixed reference mass and solves endpoint conductivity;\ntransient.solid_storage controls nonlinear acceptance. Compact components\nuse authored constant or tabulated junction capacity alongside either\nstorage model; their occupied voxels require no material source or volumetric\ncapacity. Fluid-material\nfeedback is first order even with BDF2 momentum. Liquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
+        help.push_str(convection::HELP);
         help.push_str(sgs::HELP);
         return CommandOutput {
             exit_code: exit::SUCCESS,

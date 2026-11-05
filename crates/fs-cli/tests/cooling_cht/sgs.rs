@@ -23,6 +23,7 @@ fn evolving_gas_sgs_uses_actual_molecular_transport_and_original_calorics() {
             ),
         );
         if caloric {
+            scene = scene.replace("\"solver\":{", r#""solver":{"energy_convection":"enthalpy-minmod","momentum_convection":"minmod","#);
             scene = scene.replacen(
                 '{',
                 r#"{"fluid_enthalpy":{
@@ -84,6 +85,9 @@ fn evolving_gas_sgs_uses_actual_molecular_transport_and_original_calorics() {
             let h = result
                 .path(&["material_feedback", "fluid_enthalpy"])
                 .unwrap();
+            assert_eq!(h.str_field("advection"), Some("source-enthalpy-minmod"));
+            assert_eq!(result.path(&["convection", "energy"]).and_then(J::as_str), Some("enthalpy-minmod"));
+            assert_eq!(result.path(&["convection", "momentum"]).and_then(J::as_str), Some("minmod"));
             assert!(f(h, &["maximum_sgs_heat_flux_defect_w"]) <= f(h, &["flux_tolerance_w"]));
         }
         assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-7);
