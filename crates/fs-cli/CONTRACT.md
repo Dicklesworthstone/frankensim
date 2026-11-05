@@ -1,5 +1,29 @@
 # CONTRACT: fs-cli
 
+## Live contact and ambient-radiation sensitivities — driver 120
+
+Steady `temperature-max-adjoint` and `temperature-max-contact-adjoint` now
+compose source-backed temperature-dependent contact with area-mean ambient
+radiation. The original contact law and heterogeneous K(T), natural-convection
+slopes, radiation secant and weighted reference, and transported-air feedback
+participate in one complete transpose. A radiation-only zero-flux trace retains
+its wall observation but has exactly zero convection controls.
+
+Power, conductivity, whole contact-law scale, emissivity, radiative reservoir,
+natural ambient, air inlet and admitted fan-speed derivatives use that same
+dual. The boundary owner remaps combined numerical Robin controls to the
+original physical reservoirs; radiation never becomes heat into transported air.
+The unchanged accepted field must pass the original contact residual and heat
+gates, and the dual must meet its own residual target. Driver 120 invalidates
+earlier cached producer results.
+
+Focused numerical and imported-project regressions compare independent physical
+re-solves, including vacuum and mixed natural/air cooling, curve/Newton and
+source-surface/Picard contacts, and unchanged primal results. Full native
+execution is still required. Transient ambient/live-contact adjoints and steady
+pointwise radiation remain refused; the next boundary-control extension is
+separate from this feature.
+
 ## Live contact and enclosure sensitivities — driver 118
 
 Steady `temperature-max-adjoint` and `temperature-max-contact-adjoint` now
@@ -21,8 +45,9 @@ Focused native physical re-solves cover closed curve/Newton and open
 source-surface/Picard contact, source power, bath temperature and air inlet.
 Mixed Robin/flux numerical tests additionally check emissivity and stale-field
 refusal. Rust syntax and source review passed; runtime execution remains
-pending. Ambient/pointwise contact-radiation derivatives and steady prescribed-temperature
-controls remain unsupported; driver 119 adds the enclosure trajectory composition below. No
+pending. Driver 120 adds steady ambient contact-radiation derivatives; pointwise
+radiation and steady prescribed-temperature controls remain unsupported here.
+Driver 119 adds the enclosure trajectory composition below. No
 continuum, unique-maximum-at-a-tie or gradient-error certificate is added.
 
 ## Capacity storage in open radiative cavities — driver 117

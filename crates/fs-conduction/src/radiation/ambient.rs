@@ -31,7 +31,7 @@ use fs_exec::Cx;
 use std::collections::BTreeSet;
 
 mod adjoint;
-pub use adjoint::{AmbientRadiationGradient, pullback_ambient_radiation};
+pub use adjoint::{AmbientRadiationGradient, AmbientRadiationLinearization, pullback_ambient_radiation};
 
 /// One immutable material-card-backed ambient patch on a named natural trace.
 #[derive(Debug, Clone, PartialEq)]

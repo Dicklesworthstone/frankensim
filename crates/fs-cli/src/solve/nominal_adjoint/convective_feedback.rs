@@ -16,7 +16,6 @@ use super::{
 pub(super) struct Bound {
     pub boundary: ThermalBoundary,
     pub names: Vec<String>,
-    pub means: Vec<f64>,
     pub natural: mixed_feedback::Bound,
     pub feedback: Vec<f64>,
     air_names: Vec<String>,
@@ -78,6 +77,16 @@ pub(super) fn bind(
             }
             ThermalBc::Robin { .. } =>
                 return Err(bad("native coupled derivatives require uniform Robin traces")),
+            ThermalBc::Neumann { outward_flux: ScalarField::Uniform(flux) }
+                if *flux == 0.0 && data.radiation_patches.iter()
+                    .any(|patch| patch.region() == data.boundary.region_names()[region]) =>
+            {
+                // Ambient radiation also owns vacuum traces. Preserve their
+                // wall means and zero convection rows in the common ordering;
+                // the radiation binder supplies the only physical Robin term.
+                names.push(data.boundary.region_names()[region].clone());
+                regions.push(region);
+            }
             _ => {},
         }
     }
@@ -172,5 +181,5 @@ pub(super) fn bind(
     replacements.extend_from_slice(&natural.replacements);
     let boundary = data.boundary.with_uniform_robin_replacements(&replacements).map_err(lower)?;
     poll(cx)?;
-    Ok(Bound { boundary, names, means, natural, feedback, air_names, air_indices })
+    Ok(Bound { boundary, names, natural, feedback, air_names, air_indices })
 }

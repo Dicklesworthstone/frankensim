@@ -2,11 +2,12 @@
 //! Natural and transported-air feedback share the nominal convection binding;
 //! enclosure reflection shares the core's exact unchanged-field linearization.
 use super::{
-    BTreeSet, ConductionProblem, Cx, ProjectSpec, RungSolved, ScalarField,
-    SolveRefusal, ThermalBc, ThermalBoundary, bad, finite, lower, poll, zeros,
+    BTreeSet, ConductionProblem, Cx, ProjectSpec, RungSolved,
+    SolveRefusal, ThermalBoundary, bad, lower, poll,
 };
 use super::super::{convective_feedback, enclosure_feedback};
 use fs_conduction::adjoint::MeanFluxFeedback;
+use fs_conduction::radiation::AmbientRadiationLinearization;
 
 pub(super) struct Law {
     pub boundary: ThermalBoundary,
@@ -49,22 +50,6 @@ pub(super) fn bind(
             flux_feedback: radiation.flux_feedback().cloned(),
         });
     }
-    let m = bound.names.len();
-    let mut regions = Vec::with_capacity(m);
-    let mut points = Vec::with_capacity(m);
-    for (i, name) in bound.names.iter().enumerate() {
-        poll(cx)?;
-        let region = bound.boundary.region_names().iter().position(|r| r == name)
-            .ok_or_else(|| bad("prescribed lift lost an original convection trace"))?;
-        let ThermalBc::Robin {
-            htc: ScalarField::Uniform(h), t_ref: ScalarField::Uniform(reference),
-        } = &bound.boundary.conditions()[region] else {
-            return Err(bad("prescribed lift requires its original uniform Robin law"));
-        };
-        regions.push(region);
-        points.push([*h, *reference, bound.natural.wall_slopes[i], 0.0]);
-    }
-    let mut feedback = bound.feedback;
     let surfaces = setup.radiation.as_ref().map_or(&[][..], |r| r.surfaces.as_slice());
     if surfaces.len() != data.radiation_patches.len() || surfaces.len() > 64 {
         return Err(bad("prescribed lift lost original radiation patches"));
@@ -79,30 +64,23 @@ pub(super) fn bind(
         {
             return Err(bad("prescribed radiative lift changed its original card or physical law"));
         }
-        let i = bound.names.iter().position(|name| name == patch.region())
-            .ok_or_else(|| bad("prescribed radiative lift has no original convection trace"))?;
-        let [hc, tc, hcs, _] = points[i];
-        let hr = patch.secant_coefficient_w_m2_k(bound.means[i]).map_err(lower)?;
-        let [hrs, _] = patch.secant_partials_w_m2_k2(bound.means[i]).map_err(lower)?;
-        let tr = patch.ambient_temperature_k();
-        let h = finite(hc + hr)?;
-        if h <= 0.0 { return Err(bad("prescribed lift has a nonpositive combined coefficient")); }
-        let reference = finite((hc/h)*tc + (hr/h)*tr)?;
-        points[i] = [h, reference, finite(hcs + hrs)?,
-            finite((hcs/h)*(tc - reference) + (hrs/h)*(tr - reference))?];
-        for entry in &mut feedback[i*m..(i+1)*m] {
-            *entry = finite((hc/h)*(*entry))?;
-        }
     }
-    let replacements: Vec<_> = regions.iter().zip(&points)
-        .map(|(&r, p)| (r, p[0], p[1])).collect();
-    let boundary = bound.boundary.with_uniform_robin_replacements(&replacements).map_err(lower)?;
-    let mut h_slopes = zeros(m)?;
-    let mut reference_slopes = zeros(m)?;
-    for (i, point) in points.iter().enumerate() {
-        h_slopes[i] = point[2];
-        reference_slopes[i] = point[3];
-    }
+    // Use exactly the same coefficient/reference owner as the selected-goal
+    // dual, including genuine radiation-only traces with zero convection.
+    let names: Vec<_> = bound.names.iter().map(String::as_str).collect();
+    let problem = ConductionProblem { mesh: &solved.mesh, boundary: &bound.boundary,
+        material: &data.fallback, element_materials: Some(&data.materials), source: &data.source };
+    let radiation = AmbientRadiationLinearization::bind(cx, problem,
+        &solved.solution.temperature, &names, &bound.natural.wall_slopes,
+        Some(&bound.feedback), &data.radiation_patches, max_entries).map_err(lower)?;
     poll(cx)?;
-    Ok(Law { boundary, names: bound.names, h_slopes, reference_slopes, feedback, flux_feedback: None })
+    Ok(Law {
+        boundary: radiation.boundary().clone(),
+        names: radiation.regions().to_vec(),
+        h_slopes: radiation.coefficient_mean_slopes().to_vec(),
+        reference_slopes: radiation.local_reference_slopes().to_vec(),
+        feedback: radiation.reference_feedback()
+            .ok_or_else(|| bad("prescribed lift lost original reference feedback"))?.to_vec(),
+        flux_feedback: None,
+    })
 }

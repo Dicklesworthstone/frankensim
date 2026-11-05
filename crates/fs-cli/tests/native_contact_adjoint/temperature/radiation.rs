@@ -1,6 +1,8 @@
 //! Real imported bodies retain contact and radiation in the same steady solve.
 
 use super::*;
+#[path = "radiation/adjoint.rs"]
+mod adjoint;
 #[path = "radiation/enclosure.rs"]
 mod enclosure;
 

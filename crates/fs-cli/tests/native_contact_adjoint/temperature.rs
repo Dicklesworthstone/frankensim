@@ -373,7 +373,7 @@ fn temperature_contact_is_rebound_on_each_native_uniform_rung() {
 }
 
 #[test]
-fn temperature_contact_never_substitutes_frozen_derivatives_or_adaptive_goals() {
+fn temperature_contact_never_substitutes_frozen_derivatives_for_adaptive_goals() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let solve_radiating = |f: &Fixture, source: &Path, contact: &Path, ledger: &Path| fs_cli::run(vec![
         "--json".into(),
@@ -389,16 +389,8 @@ fn temperature_contact_never_substitutes_frozen_derivatives_or_adaptive_goals() 
         "--interfaces".into(),
         contact.display().to_string(),
     ]);
-    // Ambient radiation still needs its complete live-contact derivative;
-    // the admitted enclosure tangent cannot substitute for that boundary law.
-    let f = Fixture::new(false, true);
-    let (source, contact, ledger) = prepare(&f, 20, Some(OUTPUT));
-    let result = solve_radiating(&f, &source, &contact, &ledger);
-    assert_ne!(result.exit_code, fs_cli::exit::SUCCESS);
-    assert!(
-        format!("{}{}", result.stdout, result.stderr)
-            .contains("cli-solve-conduction-contact-composition")
-    );
+    // A complete local contact/radiation adjoint does not provide the
+    // goal-error estimate needed by the adaptive spatial controller.
     let mut f = Fixture::new(false, true);
     f.project.solver.as_mut().unwrap().fidelity = "adaptive".into();
     let (source, contact, ledger) = prepare(&f, 21, None);

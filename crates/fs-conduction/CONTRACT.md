@@ -1,5 +1,49 @@
 # CONTRACT: fs-conduction
 
+## Complete steady contact and ambient-radiation adjoints
+
+`AmbientRadiationLinearization` binds the existing area-mean secant at an
+unchanged field and exposes the physical boundary, coefficient/reference slopes,
+and weighted convection-reference feedback separately from the transpose solve.
+The original ambient adjoint entries now use this same binding and remapping.
+
+Rebinding that physical boundary through `linearize_steady_endpoint` retains
+both contact-temperature partials and heterogeneous bulk K'(T). The existing
+contact/Robin feedback owner supplies one complete dual; the ambient owner
+then recovers original convection, absolute emissivity and independent bath
+controls. Radiation-only traces have exactly zero convective derivatives.
+No new primal solve, contact model, radiation solver or field mutation occurs.
+
+Existing source smoothness, domain, cancellation, trace and work allowances
+remain in force. Remapping checks nodal/trace layout, finite controls and the
+dual residual; it does not independently authenticate an arbitrary supplied
+dual. `tests/temperature_contact/radiation/adjoint.rs` compares four physical
+controls against fresh nonlinear solves with and without convection, and checks
+stale endpoints, insufficient work and malformed dual refusals. Native runtime
+execution remains required. This is a local discrete steady derivative, without
+a continuum, unique-maximum or gradient-error certificate.
+
+## Prescribed temperatures through live contact laws
+
+`ContactSteadyLinearization<'a>` retains its exact original conduction problem.
+Its `prescribed_temperature_pullback_with_flux_feedback` contracts the same
+complete nodal dual as the selected goal with all prescribed-temperature
+columns. The result is `w_D - J_FD^T lambda_F`, including the direct fixed-node
+objective, nonlinear bulk conductivity, frozen contact once, both source-law
+temperature partials, and the original Robin/reference and mean-flux feedback.
+Fixed vertices remain in every wall observation. No second primal or dual solve
+or field mutation occurs, and another problem cannot replace the retained one.
+
+The existing static Robin lift shares the checked contraction and keeps its
+public signature. The work cap includes both bulk/contact CSR entries and the
+live-law correction; it is not a peak-memory bound. Source smoothness, physical
+endpoint, shape, fixed-node dual and cancellation gates remain authoritative.
+`tests/temperature_contact_tangent/prescribed.rs` compares fresh bath solves on
+both sides of an asymmetric temperature law with nonlinear conductivity and
+Robin/flux feedback. It checks the direct prescribed-node term and explicitly
+omitted contact/feedback columns. Native execution remains required; the lift
+does not certify the provenance of an arbitrary caller-supplied dual.
+
 ## Fully prescribed steady fields
 
 The steady spatial solver and its initial-field preparation accept meshes with
@@ -46,8 +90,9 @@ The existing source-slope, cancellation, trace-element and feedback-memory gates
 remain in force. `tests/temperature_contact/radiation/enclosure/adjoint.rs`
 compares contact, source, emissivity and bath derivatives with independent
 physical re-solves on mixed Robin/flux surfaces with nonlinear conductivity.
-This is a local discrete steady derivative, with no pointwise/ambient contact
-radiation adjoint, trajectory derivative or continuum error certificate.
+This is a local discrete steady derivative. The ambient composition above and
+capacity trajectory composition below have separate owners; pointwise contact
+radiation and continuum error certificates are not supplied by this entry.
 
 ## Capacity storage with open reflected radiation and live contacts
 

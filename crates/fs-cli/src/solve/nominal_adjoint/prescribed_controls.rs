@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use fs_conduction::{ConductionProblem, ScalarField, ThermalBc, ThermalBoundary};
 use fs_conduction::adjoint::RobinResponse;
-use super::{Cx, ProjectSpec, RungSolved, SolveRefusal, bad, finite, lower, poll, row, unsupported, zeros};
+use super::{Cx, ProjectSpec, RungSolved, SolveRefusal, bad, finite, lower, poll, row, unsupported};
 
 mod law;
 

@@ -256,7 +256,9 @@ pub(super) fn extract(
         live_contact_rows = Some(result.contact_rows);
         natural_ambient = result.natural_ambient;
         inlet_rows = result.air_rows;
-        let mode = if has_natural && !data.air_paths.is_empty() { "nonlinear-contact-natural-full-air-feedback" }
+        radiation_rows = result.radiation_rows;
+        let mode = if setup.radiation.is_some() { "nonlinear-contact-ambient-radiation-full-feedback" }
+            else if has_natural && !data.air_paths.is_empty() { "nonlinear-contact-natural-full-air-feedback" }
             else if !data.air_paths.is_empty() { "nonlinear-contact-full-air-feedback" }
             else if has_natural { "nonlinear-contact-natural-convection-feedback" }
             else { "nonlinear-contact-full-material-feedback" };
