@@ -5,7 +5,7 @@ use crate::sgs3::dynamic::{DynamicSgsConfig, DynamicSgsError, PeriodicDynamicSgs
 use crate::sgs3::{DynamicSgsStepReport, DynamicSgsWorkspace3};
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
-    fn admit_dynamic_topology(
+    pub(super) fn admit_dynamic_topology(
         &self,
         mut checkpoint: impl FnMut() -> Result<(), GridError3<L::Error>>,
     ) -> Result<(), SgsStepError<L::Error>> {

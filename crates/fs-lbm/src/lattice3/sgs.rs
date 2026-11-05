@@ -14,6 +14,7 @@ use fs_exec::{CancelGate, Cx, KernelRunner};
 mod channel;
 mod dynamic;
 mod forced;
+mod lagrangian;
 
 impl<L: SgsLattice3<Q>, const Q: usize> Grid3<L, Q> {
     /// Allocate once for repeated SGS steps. Allocation failure is returned;

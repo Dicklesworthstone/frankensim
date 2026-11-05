@@ -63,6 +63,27 @@ impl<C> DynamicSgsWorkspace3<C> {
     pub fn eddy_viscosities(&self) -> &[f64] { self.filter.viscosities() }
 }
 
+/// Native local collision fields and an accepted Lagrangian turbulence history.
+/// Reuse this owner for one trajectory; history publishes only with a successful
+/// native step. Scratch collisions are consumable only after success.
+pub struct LagrangianSgsWorkspace3<C> {
+    pub(crate) local: SgsWorkspace3<C>,
+    pub(crate) filter: dynamic::lagrangian::LagrangianDynamicSgs,
+}
+
+impl<C> LagrangianSgsWorkspace3<C> {
+    pub fn collisions(&self) -> &[C] { self.local.collisions() }
+    /// Incoming lattice time of the last successfully used fit.
+    pub fn accepted_fit_time(&self) -> Option<f64> { self.filter.accepted_time() }
+    /// Actual numerical storage, excluding fixed metadata and the flow grid.
+    pub fn workspace_bytes(&self) -> usize {
+        (3 * self.local.velocity.capacity() + self.local.density.capacity())
+            * core::mem::size_of::<f64>()
+            + self.local.collisions.capacity() * core::mem::size_of::<C>()
+            + self.filter.workspace_bytes()
+    }
+}
+
 /// Reused native collision/macroscopic fields and the planar-channel filter.
 /// Outputs are consumable only after successful preparation.
 pub struct ChannelDynamicSgsWorkspace3<C> {
