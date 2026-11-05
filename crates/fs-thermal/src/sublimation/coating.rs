@@ -13,6 +13,9 @@
 //! or finite vapor reservoir has the same thermostatted semantics as the
 //! original surface operator.
 
+/// Several supported deposits competing for one finite vapor inventory.
+pub mod chamber;
+
 use super::{
     Endpoint, SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw, SurfaceKinetics,
     SurfaceStep, VaporReservoir, finish_surface_step, finite, nonnegative, positive, properties,

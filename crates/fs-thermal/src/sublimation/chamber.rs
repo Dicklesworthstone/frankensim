@@ -14,8 +14,8 @@
 
 use super::{
     MOLAR_GAS_CONSTANT, SolidSurfaceState, SolverConfig, SublimationError, SublimationLaw,
-    SurfaceKinetics, SurfaceStep, VaporReservoir, advance_surface, coefficients, finite,
-    nonnegative, positive, properties, validate_surface,
+    SublimationProperties, SurfaceKinetics, SurfaceStep, VaporReservoir, advance_surface,
+    coefficients, finite, nonnegative, positive, properties, validate_surface,
 };
 
 /// One pure-solid inventory, exposed area, and its independently selected kinetics.
@@ -69,7 +69,7 @@ pub struct ChamberStep {
     pub pressure_iterations: usize,
 }
 
-fn compensated_add(total: &mut f64, correction: &mut f64, value: f64) {
+pub(crate) fn compensated_add(total: &mut f64, correction: &mut f64, value: f64) {
     let next = *total + value;
     *correction += if total.abs() >= value.abs() {
         (*total - next) + value
@@ -79,16 +79,53 @@ fn compensated_add(total: &mut f64, correction: &mut f64, value: f64) {
     *total = next;
 }
 
-struct Trial {
+pub(crate) struct InitialSurface {
+    pub temperature_k: f64,
+    pub properties: SublimationProperties,
+    pub area_m2: f64,
+    pub kinetics: SurfaceKinetics,
+    /// The predictor must not invent emission from an initially bare substrate.
+    pub has_deposit: bool,
+}
+
+/// Only the physical phase account is shared. A supported deposit also retains
+/// its independent substrate storage in the original local result.
+pub(crate) trait ChamberExchange {
+    fn phase(&self) -> &SurfaceStep;
+    fn phase_mut(&mut self) -> &mut SurfaceStep;
+}
+
+impl ChamberExchange for SurfaceStep {
+    fn phase(&self) -> &SurfaceStep {
+        self
+    }
+    fn phase_mut(&mut self) -> &mut SurfaceStep {
+        self
+    }
+}
+
+pub(crate) struct ChamberSolution<T> {
+    pub surfaces: Vec<T>,
+    pub reservoir: VaporReservoir,
+    pub transferred_mass_kg: f64,
+    pub latent_energy_j: f64,
+    pub vapor_energy_j: f64,
+    pub mass_residual_kg: f64,
+    pub nonlinear_mass_residual_kg: f64,
+    pub energy_residual_j: f64,
+    pub pressure_iterations: usize,
+}
+
+struct Trial<T> {
     pressure_pa: f64,
-    surfaces: Vec<SurfaceStep>,
+    surfaces: Vec<T>,
     transfer_kg: f64,
     transfer_magnitude_kg: f64,
     remaining_vapor_kg: f64,
     residual_kg: f64,
 }
 
-fn admitted(trial: &Trial, initial_mass: f64, config: ChamberSolverConfig) -> bool {
+fn admitted<T>(trial: &Trial<T>, initial_mass: f64, config: ChamberSolverConfig) -> bool {
     let scale = initial_mass
         .max(trial.remaining_vapor_kg.abs())
         .max(trial.transfer_magnitude_kg);
@@ -122,8 +159,72 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
     duration_s: f64,
     config: ChamberSolverConfig,
     temperature: impl Fn(usize, f64) -> Result<f64, SublimationError>,
-    mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
+    checkpoint: impl FnMut() -> Result<(), SublimationError>,
 ) -> Result<ChamberStep, SublimationError> {
+    let solution = solve_chamber(
+        surfaces.len(),
+        reservoir,
+        duration_s,
+        config,
+        |index| {
+            let surface = surfaces[index];
+            validate_surface(surface.solid, duration_s)?;
+            let t = temperature(index, surface.solid.specific_enthalpy_j_kg)?;
+            Ok(InitialSurface {
+                temperature_k: t,
+                properties: properties(law, t)?,
+                area_m2: surface.solid.area_m2,
+                kinetics: surface.kinetics,
+                has_deposit: true,
+            })
+        },
+        |index, reservoir, checkpoint| {
+            let surface = surfaces[index];
+            let value = advance_surface(
+                law,
+                surface.kinetics,
+                surface.solid,
+                reservoir,
+                duration_s,
+                config.surface_solver,
+                |h| temperature(index, h),
+                checkpoint,
+            )?;
+            let molar_mass = properties(law, value.surface_temperature_k)?.molar_mass_kg_mol;
+            Ok((value, molar_mass))
+        },
+        checkpoint,
+    )?;
+    Ok(ChamberStep {
+        surfaces: solution.surfaces,
+        reservoir: solution.reservoir,
+        transferred_mass_kg: solution.transferred_mass_kg,
+        latent_energy_j: solution.latent_energy_j,
+        vapor_energy_j: solution.vapor_energy_j,
+        mass_residual_kg: solution.mass_residual_kg,
+        nonlinear_mass_residual_kg: solution.nonlinear_mass_residual_kg,
+        energy_residual_j: solution.energy_residual_j,
+        pressure_iterations: solution.pressure_iterations,
+    })
+}
+
+/// One bounded pressure closure for free solids and supported deposits. The
+/// local callback owns its original storage law and returns the endpoint molar
+/// mass so a changing species identity cannot pass the shared mass balance.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn solve_chamber<T: ChamberExchange, C: FnMut() -> Result<(), SublimationError>>(
+    surface_count: usize,
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    config: ChamberSolverConfig,
+    initial_surface: impl Fn(usize) -> Result<InitialSurface, SublimationError>,
+    mut evaluate_surface: impl FnMut(
+        usize,
+        VaporReservoir,
+        &mut C,
+    ) -> Result<(T, f64), SublimationError>,
+    mut checkpoint: C,
+) -> Result<ChamberSolution<T>, SublimationError> {
     checkpoint()?;
     if !nonnegative(duration_s)
         || !positive(config.relative_mass_tolerance)
@@ -131,7 +232,7 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
         || !nonnegative(config.absolute_mass_tolerance_kg)
         || config.max_iterations == 0
         || config.max_iterations > 4096
-        || surfaces.len() > config.max_surfaces
+        || surface_count > config.max_surfaces
         || !positive(config.surface_solver.relative_tolerance)
         || config.surface_solver.relative_tolerance >= 1.0
         || !nonnegative(config.surface_solver.absolute_energy_tolerance_j)
@@ -155,9 +256,9 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
     if !nonnegative(initial_mass) || !positive(volume_m3) || !positive(gas_temperature) {
         return Err(SublimationError::Invalid("invalid finite chamber state"));
     }
-    if surfaces.is_empty() {
+    if surface_count == 0 {
         checkpoint()?;
-        return Ok(ChamberStep {
+        return Ok(ChamberSolution {
             surfaces: Vec::new(),
             reservoir,
             transferred_mass_kg: 0.0,
@@ -175,11 +276,11 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
     let mut conductance = 0.0;
     let mut conductance_correction = 0.0;
     let mut maximum_equilibrium_pressure: f64 = 0.0;
-    for (index, surface) in surfaces.iter().enumerate() {
+    for index in 0..surface_count {
         checkpoint()?;
-        validate_surface(surface.solid, duration_s)?;
-        let t = temperature(index, surface.solid.specific_enthalpy_j_kg)?;
-        let p = properties(law, t)?;
+        let surface = initial_surface(index)?;
+        let t = surface.temperature_k;
+        let p = surface.properties;
         if index == 0 {
             molar_mass = p.molar_mass_kg_mol;
         } else if p.molar_mass_kg_mol != molar_mass {
@@ -188,21 +289,23 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
             ));
         }
         let (a, b) = coefficients(p, t, gas_temperature, surface.kinetics)?;
-        if surface.solid.area_m2 > 0.0 && a > 0.0 {
+        if surface.area_m2 > 0.0 && a > 0.0 {
             if b == 0.0 {
                 return Err(SublimationError::Invalid(
                     "underflowed chamber pressure conductance",
                 ));
             }
-            compensated_add(
-                &mut source,
-                &mut source_correction,
-                finite(surface.solid.area_m2 * a * p.saturation_pressure_pa)?,
-            );
+            if surface.has_deposit {
+                compensated_add(
+                    &mut source,
+                    &mut source_correction,
+                    finite(surface.area_m2 * a * p.saturation_pressure_pa)?,
+                );
+            }
             compensated_add(
                 &mut conductance,
                 &mut conductance_correction,
-                finite(surface.solid.area_m2 * b)?,
+                finite(surface.area_m2 * b)?,
             );
             maximum_equilibrium_pressure = maximum_equilibrium_pressure.max(finite(
                 p.saturation_pressure_pa * (gas_temperature / t).sqrt(),
@@ -230,7 +333,7 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
         initial_pressure
     };
     let evaluations = std::cell::Cell::new(0usize);
-    let mut evaluate = |pressure_pa: f64| -> Result<Trial, SublimationError> {
+    let mut evaluate = |pressure_pa: f64| -> Result<Trial<T>, SublimationError> {
         checkpoint()?;
         if evaluations.get() >= config.max_iterations {
             return Err(SublimationError::NonConverged);
@@ -239,31 +342,30 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
         if !nonnegative(pressure_pa) {
             return Err(SublimationError::Invalid("invalid trial chamber pressure"));
         }
-        let mut values = Vec::with_capacity(surfaces.len());
+        let mut values = Vec::with_capacity(surface_count);
         let mut transfer = 0.0;
         let mut correction = 0.0;
         let mut magnitude = 0.0;
-        for (index, surface) in surfaces.iter().enumerate() {
-            let value = advance_surface(
-                law,
-                surface.kinetics,
-                surface.solid,
+        for index in 0..surface_count {
+            let (value, endpoint_molar_mass) = evaluate_surface(
+                index,
                 VaporReservoir::Prescribed {
                     partial_pressure_pa: pressure_pa,
                     temperature_k: gas_temperature,
                 },
-                duration_s,
-                config.surface_solver,
-                |h| temperature(index, h),
                 &mut checkpoint,
             )?;
-            if properties(law, value.surface_temperature_k)?.molar_mass_kg_mol != molar_mass {
+            if endpoint_molar_mass != molar_mass {
                 return Err(SublimationError::Invalid(
                     "volatile molar mass changed during phase exchange",
                 ));
             }
-            compensated_add(&mut transfer, &mut correction, value.transferred_mass_kg);
-            magnitude = finite(magnitude + value.transferred_mass_kg.abs())?;
+            compensated_add(
+                &mut transfer,
+                &mut correction,
+                value.phase().transferred_mass_kg,
+            );
+            magnitude = finite(magnitude + value.phase().transferred_mass_kg.abs())?;
             values.push(value);
         }
         let transfer = finite(transfer + correction)?;
@@ -370,7 +472,8 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
     let mut residual = 0.0;
     let mut residual_correction = 0.0;
     let mut values = endpoint.surfaces;
-    for value in &mut values {
+    for exchange in &mut values {
+        let value = exchange.phase_mut();
         value.reservoir = next_reservoir;
         compensated_add(&mut latent, &mut latent_correction, value.latent_energy_j);
         compensated_add(&mut energy, &mut energy_correction, value.vapor_energy_j);
@@ -380,7 +483,7 @@ pub fn advance_chamber<L: SublimationLaw + ?Sized>(
             value.energy_residual_j,
         );
     }
-    Ok(ChamberStep {
+    Ok(ChamberSolution {
         surfaces: values,
         reservoir: next_reservoir,
         transferred_mass_kg: endpoint.transfer_kg,

@@ -654,6 +654,34 @@ Six focused tests cover seed-free growth, finite-vapor inventory and energy,
 extinction/regrowth, inactive boundaries, independent caloric reference shifts,
 invalid charts/inventories, cancellation and bounded nonlinear work.
 
+### Supported deposits sharing one finite vapor inventory
+
+`sublimation::coating::chamber::advance_supported_chamber` joins bare or coated
+substrates to one finite, thermostatted vapor chamber. It reuses the original
+supported-surface caloric solve and the same bounded scalar pressure closure as
+whole-solid chambers. Every surface sees the common endpoint partial pressure;
+the final gas inventory is reconstructed from the accepted signed transfers.
+Warm coatings can supply colder bare substrates within the same interval,
+without a numerical seed or independent copies of the available vapor.
+
+The original substrate and deposit caloric datums remain distinct. All deposits
+must describe the same volatile and a common transported enthalpy datum; initial
+and endpoint molar masses are checked. Only deposit mass can sublime. Bare
+surfaces contribute no fictitious emission to the pressure predictor. Actual
+mass conservation and nonlinear pressure closure remain separate residuals;
+latent energy is already part of the transported vapor energy. Compensated
+accounts include substrate, deposit and vapor energy. Work is linear in active
+surface count per bounded pressure trial, with no dense coupled matrix.
+
+G0/G1/G3 regressions cover analytical common backpressure with gas-film
+resistance, warm-to-bare transfer from an empty chamber, exhaustion, independent
+caloric reference shifts, live first-order timestep refinement, surface-order
+symmetry, work limits, incompatible molar masses and cancellation. These are
+equation and conservation checks, not experimental deposition validation.
+The existing thin-coating, fixed-area and prescribed-gas-temperature assumptions
+remain; nucleation, porosity, gas sensible heat and resolved through-layer
+transport require their own physical owners.
+
 ### Supported coatings on the native thermal timeline
 
 `sublimation::coating::heat_supported_surface` applies signed heat at fixed
