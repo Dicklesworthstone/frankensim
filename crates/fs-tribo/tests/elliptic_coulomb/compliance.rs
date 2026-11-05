@@ -232,3 +232,89 @@ fn singular_sliding_is_resolved_but_rank_deficient_static_and_invalid_inputs_ref
             .unwrap()
     );
 }
+
+#[test]
+fn rank_one_tangent_line_has_one_static_reaction_and_no_slip_heat() {
+    // The line Fx + Fy = 10 is tangent to (Fx/8)^2 + (Fy/6)^2 = 1.
+    // Lagrange multipliers give the unique reaction (6.4, 3.6), without
+    // selecting an arbitrary null-space component or adding compliance.
+    let l = EllipticCoulomb::new([0.8, 0.6], [0.4, 0.3], [1.0, 0.0]).unwrap();
+    let state = l.initial_state();
+    for scale in [0.000_976_562_5, 1.0, 1024.0] {
+        for sign in [-1.0, 1.0] {
+            let c = response([[scale, scale], [scale, scale]]);
+            let mut x = input([sign * 10.0 * scale; 2], 0.0);
+            let result = l.advance_with_compliance(&state, &x, c).unwrap();
+            assert_eq!(result.regime, FrictionRegime::Sticking);
+            close2(result.traction_n, [sign * 6.4, sign * 3.6], 2e-15);
+            assert_eq!(result.slip_increment_m, [0.0; 2]);
+            assert_eq!(result.state.slip_m(), state.slip_m());
+            assert_eq!(result.dissipated_j, 0.0);
+            assert_eq!(result.closure_residual_j, 0.0);
+            assert_eq!(result.iterations, 0);
+            assert!(
+                result
+                    .compatibility_residual_m
+                    .iter()
+                    .all(|r| r.abs() <= scale * 2e-15)
+            );
+
+            // A moving phase retains the weaker kinetic surface and must slide.
+            let kinetic = l.advance_kinetic_with_compliance(&state, &x, c).unwrap();
+            assert_eq!(kinetic.regime, FrictionRegime::Sliding);
+            assert!(kinetic.dissipated_j > 0.0);
+            close2(kinetic.traction_n, [sign * 3.2, sign * 1.8], 2e-11);
+
+            // An effort budget cannot change the chosen physical branch.
+            x.solve.maximum_force_n = 7.0;
+            assert!(l.advance_with_compliance(&state, &x, c).is_err());
+        }
+    }
+    assert_eq!(state, l.initial_state());
+}
+
+#[test]
+fn rank_one_static_boundary_does_not_capture_neighboring_interior_or_sliding_loads() {
+    let l = law();
+    let c = response([[1.0, 0.0], [0.0, 0.0]]);
+    let state = l.initial_state();
+    let boundary = l
+        .advance_with_compliance(&state, &input([8.0, 0.0], 0.0), c)
+        .unwrap();
+    assert_eq!(boundary.regime, FrictionRegime::Sticking);
+    assert_eq!(boundary.traction_n, [8.0, 0.0]);
+    // Even an interior point one representable number away is nonunique.
+    for demand in [4.0, 8.0_f64.next_down()] {
+        let mut x = input([demand, 0.0], 0.0);
+        x.solve.force_absolute_tolerance_n = 1.0;
+        assert!(l.advance_with_compliance(&state, &x, c).is_err());
+    }
+    let moving = l
+        .advance_with_compliance(&state, &input([8.0_f64.next_up(), 0.0], 0.0), c)
+        .unwrap();
+    assert_eq!(moving.regime, FrictionRegime::Sliding);
+    assert!(moving.slip_increment_m[0] > 0.0);
+    assert!(moving.dissipated_j > 0.0);
+}
+
+#[test]
+fn rank_one_boundary_respects_material_axis_and_signed_coordinate_changes() {
+    for axis in [[1.0, 0.0], [0.0, 1.0], [-1.0, 0.0], [0.0, -1.0]] {
+        let l = EllipticCoulomb::new([0.8, 0.6], [0.4, 0.3], axis).unwrap();
+        for sign in [-1.0, 1.0] {
+            let c = response([[1.0, sign], [sign, 1.0]]);
+            let step = l
+                .advance_with_compliance(&l.initial_state(), &input([10.0, sign * 10.0], 0.0), c)
+                .unwrap();
+            let expected = if axis[0] != 0.0 {
+                [6.4, sign * 3.6]
+            } else {
+                [3.6, sign * 6.4]
+            };
+            close2(step.traction_n, expected, 2e-15);
+            assert_eq!(step.regime, FrictionRegime::Sticking);
+            assert_eq!(step.dissipated_j, 0.0);
+            assert_eq!(step.state.principal_axis(), axis);
+        }
+    }
+}

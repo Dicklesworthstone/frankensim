@@ -113,10 +113,11 @@ impl EllipticCoulomb {
     /// compliance owner. Exactly isotropic matrices use the original scalar
     /// path bit for bit. General SPD matrices have a unique static reaction.
     ///
-    /// Rank-one compliance admits unique sliding and reactions determined by
-    /// a one-axis friction law. Nonzero feasible static demands with two active
-    /// friction axes conservatively refuse, including a boundary solution;
-    /// the method does not choose among possible null-space forces.
+    /// Rank-one compliance admits unique sliding, reactions determined by a
+    /// one-axis friction law, and the unique support point when the static
+    /// load line is tangent to the ellipse. A strictly interior static load
+    /// still refuses: the method does not choose among null-space forces.
+    /// Boundary equality is tested without a force-tolerance capture band.
     /// Zero released motion retains the unloaded zero-force convention. This
     /// local law supplies no body trajectory, normal impulse or arrest decision.
     pub fn advance_with_compliance(
@@ -334,12 +335,36 @@ pub(super) fn resolve_matrix(
             let direction = if pivot == 0 { [1.0, b] } else { [b, 1.0] };
             let direction = to_principal(material_axis, direction)?;
             let capacity = static_caps[0].max(static_caps[1]);
-            let support = capacity
+            let support_limit = capacity
                 * det::hypot(
                     (static_caps[0] / capacity) * direction[0],
                     (static_caps[1] / capacity) * direction[1],
                 );
-            if (g[pivot] / matrix.scale).abs() <= support {
+            let required = g[pivot] / matrix.scale;
+            if required.is_finite() && support_limit > 0.0 && required.abs() == support_limit {
+                // C = scale * d d^T, so sticking requires d dot F = required.
+                // A line tangent to the strictly convex static ellipse has
+                // one intersection: its support point D^2 d / |D d|. Interior
+                // lines have multiple reactions and must continue to refuse.
+                // Do not use the root tolerance to turn those into tangencies.
+                let force = support(static_caps, direction.map(|x| x * required.signum()))?;
+                let original_force = from_principal(material_axis, force)?;
+                let m = matrix.matrix;
+                let consistent = (0..2).all(|i| {
+                    let terms = [m[i][0] * original_force[0], m[i][1] * original_force[1]];
+                    let residual = g[i] - (terms[0] + terms[1]);
+                    residual.is_finite()
+                        && residual.abs()
+                            <= 64.0
+                                * f64::EPSILON
+                                * g[i].abs().max(terms[0].abs()).max(terms[1].abs())
+                });
+                if !consistent {
+                    return Err(invalid("elliptic_rank_one_boundary_compatibility"));
+                }
+                return Ok((force, [0.0; 2], FrictionRegime::Sticking, 0));
+            }
+            if required.abs() < support_limit {
                 return Err(invalid("elliptic_rank_deficient_static_reaction"));
             }
         }

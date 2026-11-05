@@ -493,16 +493,21 @@ throughput improvement is claimed.
 
 Positive-definite compliance admits the unique static reaction. Rank-one
 compliance admits resolved sliding and static reactions determined by a
-one-axis friction law. Nonzero feasible static demands with two active
-friction axes conservatively refuse, including a boundary solution; this
-refusal does not assert that every such reaction is nonunique. Invalid,
+one-axis friction law. With two active axes it also admits the unique support
+point where the static load line is tangent to the ellipse. Boundary equality
+uses the represented support without a force-tolerance capture band, and the
+returned reaction must satisfy the original world-frame compliance to floating
+arithmetic accuracy. Strictly interior static demands remain nonunique and
+refuse; no null-space force or regularizing compliance is invented. Invalid,
 unrepresentable or unresolved cases leave accepted history unchanged.
 The local law supplies no body trajectory, normal impulse or arrest
 localization.
 
 `tests/elliptic_coulomb/compliance.rs` exercises independently constructed
 associated solutions, scalar equivalence, rotated frames, degenerate axes,
-singular response and refusal boundaries.
+singular response and refusal boundaries. Rank-one boundary regressions cover
+oblique reactions, load reversal, signed frame changes, compliance rescaling,
+zero static heat, kinetic continuation and adjacent representable demands.
 
 ### Continuous directional sliding and finite arrest
 
