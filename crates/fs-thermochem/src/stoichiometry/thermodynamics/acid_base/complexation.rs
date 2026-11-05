@@ -25,6 +25,9 @@
 use super::*;
 use fs_math::det;
 
+/// Selected copper(I) sulfide precipitation coupled to the original ligand owner.
+pub mod precipitation;
+
 /// At most eight consecutive association steps in one metal component.
 pub const MAX_ASSOCIATIONS: usize = 8;
 /// At most 32 explicitly declared, mutually disjoint metal components.

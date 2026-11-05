@@ -82,6 +82,9 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
         HydrogenPeroxideDecomposition,
         HydrogenPeroxideDecompositionDissolvedOxygen,
         HydrogenCyanideDissociation,
+        HydrogenSulfideDissociation,
+        CopperSulfideHydrosulfidePrecipitation,
+        CopperCyanideHydrosulfideRecovery,
         HydrogenSulfateDissociation,
         ArsenicAcidDissociation,
         DihydrogenArsenateDissociation,
@@ -145,6 +148,27 @@ fn all_reference_reactions_conserve_and_rebuild_identically() {
                 .all(|a| a.amount.value() == 0.0)
         );
     }
+}
+
+#[test]
+fn copper_sulfide_recovery_preserves_copper_sulfur_cyanide_and_proton_units() {
+    use MineralReaction::*;
+    let phase = CopperSulfideHydrosulfidePrecipitation.build().unwrap();
+    close(amount(&phase, 1.0, "Cu[+](aq)"), 2.0);
+    close(amount(&phase, 1.0, "HS[-](aq)"), 1.0);
+    close(amount(&phase, 1.0, "H+(aq)"), 1.0);
+    close(amount(&phase, 1.0, "Cu2S(s-nbs-alpha)"), 1.0);
+    let recovery = CopperCyanideHydrosulfideRecovery.build().unwrap();
+    close(amount(&recovery, 1.0, "Cu(CN)3[2-](aq)"), 2.0);
+    close(amount(&recovery, 1.0, "H+(aq)"), 5.0);
+    close(amount(&recovery, 1.0, "HCN(aq)"), 6.0);
+    network::ReactionNetwork::new(vec![
+        phase,
+        recovery,
+        HydrogenSulfideDissociation.build().unwrap(),
+        HydrogenCyanideDissociation.build().unwrap(),
+    ])
+    .unwrap();
 }
 
 #[test]

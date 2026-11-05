@@ -332,6 +332,15 @@ pub enum MineralReaction {
     /// HCN(aq) -> H+(aq) + CN[-](aq).
     /// HCN is the neutral undissociated solute, not the ionized source component.
     HydrogenCyanideDissociation,
+    /// H2S(aq) -> H+(aq) + HS-(aq), only the first sulfide proton step.
+    HydrogenSulfideDissociation,
+    /// 2 Cu+(aq) + HS-(aq) -> Cu2S(s, NBS alpha) + H+(aq).
+    /// One selected pure phase; finite partition belongs to the coupled solver.
+    CopperSulfideHydrosulfidePrecipitation,
+    /// 2 Cu(CN)3(2-)(aq) + HS-(aq) + 5 H+(aq)
+    /// -> Cu2S(s, NBS alpha) + 6 HCN(aq).
+    /// Net SART chemistry, not a claim of complete or instantaneous recovery.
+    CopperCyanideHydrosulfideRecovery,
     /// HSO4-(aq) -> H+(aq) + SO4(2-)(aq), the hydrogen-sulfate acid step.
     HydrogenSulfateDissociation,
     /// H3AsO4(aq) -> H+(aq) + H2AsO4-(aq), the first As(V) proton step.
@@ -766,6 +775,36 @@ impl MineralReaction {
                     ("HCN(aq)", &[1, 1, 1], 0, -1),
                     ("H+(aq)", &[1, 0, 0], 1, 1),
                     ("CN[-](aq)", &[0, 1, 1], -1, 1),
+                ],
+            ),
+            Self::HydrogenSulfideDissociation => (
+                "hydrogen-sulfide-dissociation",
+                &["H", "S"],
+                &[
+                    ("H2S(aq)", &[2, 1], 0, -1),
+                    ("H+(aq)", &[1, 0], 1, 1),
+                    ("HS[-](aq)", &[1, 1], -1, 1),
+                ],
+            ),
+            Self::CopperSulfideHydrosulfidePrecipitation => (
+                "copper-sulfide-hydrosulfide-precipitation",
+                &["Cu", "H", "S"],
+                &[
+                    ("Cu[+](aq)", &[1, 0, 0], 1, -2),
+                    ("HS[-](aq)", &[0, 1, 1], -1, -1),
+                    ("Cu2S(s-nbs-alpha)", &[2, 0, 1], 0, 1),
+                    ("H+(aq)", &[0, 1, 0], 1, 1),
+                ],
+            ),
+            Self::CopperCyanideHydrosulfideRecovery => (
+                "copper-cyanide-hydrosulfide-recovery",
+                &["Cu", "C", "N", "H", "S"],
+                &[
+                    ("Cu(CN)3[2-](aq)", &[1, 3, 3, 0, 0], -2, -2),
+                    ("HS[-](aq)", &[0, 0, 0, 1, 1], -1, -1),
+                    ("H+(aq)", &[0, 0, 0, 1, 0], 1, -5),
+                    ("Cu2S(s-nbs-alpha)", &[2, 0, 0, 0, 1], 0, 1),
+                    ("HCN(aq)", &[0, 1, 1, 1, 0], 0, 6),
                 ],
             ),
             Self::CyanidePeroxideOxidation => (

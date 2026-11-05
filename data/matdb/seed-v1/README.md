@@ -4523,3 +4523,17 @@ and all 40 population-balance tests pass in the original-module closure.
 The selected model has instantaneous return, fixed interval coefficients and
 explicit step/work/source limits; it supplies no plant calibration or
 continuous-time error bound.
+
+## Copper sulfide precipitation and cyanide recovery
+
+Three matched source profiles add dissolved molecular H2S, conventional HS-
+and source-specific crystalline Cu2S(alpha), retaining 13 NBS point facts at
+298.15 K and 100000 Pa. The coupled `CopperSulfidePrecipitation` owner reuses
+the original copper/cyanide/pH solver for each finite Cu/S partition and
+preserves dissolved traces. The runnable consumer acidifies, explicitly
+separates primary solid, then re-alkalizes the remaining liquor while retaining
+residual copper demand for cyanide. All 42 focused stoichiometry, coupled-phase
+and actual-source tests pass. See [sources, model limits and runnable recovery
+sequence](MINING_CYANIDE_RECOVERY.md). The selected ideal H2S/HS- assemblage
+admits final pH 2 through 10; it supplies no competing-phase, redox, gas-loss,
+kinetic, filtration, process-heat or calibrated recovery prediction.

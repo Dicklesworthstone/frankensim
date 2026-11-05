@@ -3102,3 +3102,54 @@ original fugacity/Gibbs–Helmholtz derivatives, Euler closure, pure and dilute
 limits, dense/alpha-sign states, negative partial volumes, permutation, exact
 absence, the 64-component bound and physical refusals. Existing scalar-state and
 finite-caloric regressions remain unchanged.
+
+## Source-bound copper sulfide precipitation and cyanide recovery
+
+`acid_base::complexation::precipitation::CopperSulfidePrecipitation` couples
+one selected pure Cu2S phase to the original `IdealLigandSystem`. Construction
+binds the original CN ligand owner, Cu(I) and H2S/HS- families, conserved
+`2 Cu+ + HS- -> Cu2S + H+` equation and identical shared formation-Gibbs
+receipts. Each phase-partition trial reruns the original finite metal/ligand
+and charge solver; free cyanide and pH are not frozen from an earlier state.
+
+Three matched NBS profiles supply 13 original point facts for H2S(aq), HS-(aq)
+and crystalline source-specific Cu2S(alpha), at 298.15 K and 100000 Pa.
+Molecular H2S, the individual-ion convention and the full Cu2S formula unit
+remain explicit. Missing heat capacities and all source uncertainties remain
+unavailable/Unstated. Existing differently evaluated chalcocite is not silently
+substituted. Source links, checksum, exact states and commands are retained in
+`data/matdb/seed-v1/MINING_CYANIDE_RECOVERY.md`.
+
+Cu and sulfide totals include solid at two Cu atoms and one S per formula
+unit; CN stays in the aqueous/complex inventory. A directly retained dissolved
+limiting-component coordinate preserves tiny Cu/S traces even when subtracting
+the precipitate from the total would round to zero. Present solid must satisfy
+the declared log-saturation tolerance; absent solid requires resolved
+undersaturation. Finite Cu/S balances, original ligand/charge checks and bounded
+work/cancellation remain mandatory. Returned phase brackets and inner spreads
+describe numerical resolution, not experimental uncertainty or certificates.
+
+The complete final pH bracket must lie in [2,10], an explicit selected-model
+approximation domain. The assemblage omits S(2-), polysulfides, copper sulfide
+complexes, CuCN/other solids, redox, gas escape and nonideal activities.
+Fixed solvent reference does not constitute a full H/O solvent ledger.
+No reaction rate, filtration efficiency, heat duty or calibrated recovery
+follows from this selected equilibrium calculation.
+
+FACT: direct source sums give phase Delta-r G=-198240 J/mol equation and
+ln(K_precip)=79.9691150886. The net tricyanocuprate recovery endpoint gives
+Delta-r G=-187680 J/mol equation. Its heat refuses because the selected
+copper-cyanide sources lack formation enthalpies. All 29 exact-stoichiometry,
+eight coupled-phase and five actual-source compiler tests pass in the original
+source closure. Independent tests cover both limiting components, absent/empty
+phases, incompatible sources, scaling, finite supply, cancellation and retained
+copper traces near 1e-25 mol.
+
+The `copper_cyanide_recovery` consumer completes feed speciation, declared
+NaHS/HCl additions, explicit primary-solid removal and NaOH addition before
+publishing a result. Its authored example removes 0.000999290419 mol Cu2S;
+free CN rises from 0.00277691 to 0.00732330 mol after re-alkalization while
+retaining residual copper binding and both dissolved Cu/S stocks. Secondary
+solid, if present, stays in the final inventory. Independent sequence balances
+include the removed primary solid. Unsupported final pH refuses with empty
+successful stdout. These constructed checks do not establish plant operation.
