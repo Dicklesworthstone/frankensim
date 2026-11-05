@@ -1931,3 +1931,27 @@ path. Tests specify an exact positive-stiffness spring-balanced wall with an
 accelerating fluid at independent area/amplitude scales, a nonuniform Maxwell
 memory pulse adjoining a release edge with irreversible heat and acoustic
 energy transfer, and full-state/overlap/resource/cancellation refusals.
+
+### Distributed volume excitation of causal mechanical walls
+
+`PreparedMechanicalTime::step_with_volume_sources` composes the existing
+original-volume source loads with boundary velocities and all distributed wall
+and Maxwell-memory coordinates in the same sparse midpoint solve. Held spatial
+source shapes are never collapsed to their net injection, reprojected or
+requeried during a warm step. Amplitudes are midpoint volume flows [m^3/s];
+negative values are admitted. The same full pressure field supplies source
+work, the uncondensed fluid residual and the reciprocal fluid-to-wall exchange.
+`MechanicalTimeWork::volume_source_work_j` is a signed subtotal already included
+once in `input_work_j`, not another energy term. Existing source count, model
+identity, finite-value and transactional cancellation checks apply. Empty source
+sets retain the original wall step and arithmetic; no new factor or dynamic
+state is introduced. Pressure-release constraints also remain active.
+
+Regressions specify an exact continuum polynomial with simultaneous boundary
+forcing, volume injection/extraction and steady Maxwell wall motion, with
+independent area/amplitude scaling and analytical storage/heat/work. A signed
+source with zero net volume excites a resolved pressure field and a wall beside
+a release face; source cancellation and rejected cross-model/nonfinite/cancelled
+inputs exercise reuse of accepted states. These native regressions still need
+execution on a provisioned worker; parser checks and analytical work identities
+do not replace native numerical validation.

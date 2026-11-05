@@ -28,6 +28,7 @@
 //! and their material validity remain caller-owned. Midpoint is passive but
 //! still needs temporal refinement to resolve the declared relaxation times.
 
+use super::super::{VolumeVelocitySource, source::admit_count};
 use super::{
     BoundaryAdmittance, C64, Coo, Csr, Dd, HeterogeneousError, HeterogeneousHelmholtzFe,
     HeterogeneousTimeEnergy, HeterogeneousTimeLimits, HeterogeneousTimeState,
@@ -167,7 +168,10 @@ pub struct MechanicalTimeWork {
     pub delta_energy_j: f64,
     pub acoustic_delta_energy_j: f64,
     pub wall_delta_energy_j: f64,
+    /// Total signed boundary AND volume-source work, counted once.
     pub input_work_j: f64,
+    /// Signed volume-source subtotal already included in `input_work_j`.
+    pub volume_source_work_j: f64,
     /// Dissipation of the original REAL Robin patches only.
     pub boundary_dissipation_j: f64,
     /// Original Kelvin resistance PLUS all original Maxwell arm dissipation,
@@ -595,12 +599,48 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         inward_velocity: &[RealVelocityTrace],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
+        self.step_with_volume_sources(initial, inward_velocity, &[], cancelled)
+    }
+
+    /// Advance the complete fluid/wall state with original distributed sources.
+    /// Boundary velocities [m/s] and volume flows [m^3/s] share the same
+    /// midpoint pressure and sparse solve. Sources retain their frozen spatial
+    /// loads; no material/source callback, extra factor or wall state is added.
+    /// Negative flows extract volume and may do negative signed work.
+    pub fn step_with_volume_sources<'p>(
+        &'p self,
+        initial: &MechanicalTimeState<'_, '_, '_, '_>,
+        inward_velocity: &[RealVelocityTrace],
+        sources: &[(&VolumeVelocitySource<'_, '_, '_>, f64)],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<MechanicalTimeStep<'p, 'm, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         self.validate_state(initial)?;
         let core = &self.condensed;
         core.admit_velocity_faces(inward_velocity, cancelled)?;
+        admit_count(sources.len())?;
+        for &(source, amplitude) in sources {
+            poll(cancelled)?;
+            source.validate(core.model)?;
+            if !amplitude.is_finite() {
+                return Err(invalid("finite midpoint volume-flow amplitude required").into());
+            }
+        }
         let h = self.duration_s();
-        let source = core.model.geometry.boundary_linear_load(inward_velocity)?;
+        let mut source = core.model.geometry.boundary_linear_load(inward_velocity)?;
+        if !sources.is_empty() {
+            for (row, value) in source.iter_mut().enumerate() {
+                poll(cancelled)?;
+                let mut sum = Dd::from_f64(*value);
+                for &(volume, amplitude) in sources {
+                    sum = sum + Dd::from_f64(volume.load[row]) * Dd::from_f64(amplitude);
+                }
+                *value = sum.to_f64();
+                if !value.is_finite() {
+                    return Err(invalid("mechanical acoustic source load overflow").into());
+                }
+            }
+        }
         let mut load = source.clone();
         for (index, wall) in self.walls.iter().enumerate() {
             poll(cancelled)?;
@@ -794,6 +834,17 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
         let (boundary_loss, boundary_roundoff) =
             positive_form(&self.conductance, &midpoint_p, cancelled)?;
         let (input, input_roundoff) = paired_work(h, &midpoint_p, &source);
+        let mut volume_work = Dd::from_f64(0.0);
+        for &(volume, amplitude) in sources {
+            poll(cancelled)?;
+            let pressure = volume.midpoint_pressure(initial.pressure_pa(), next.pressure_pa());
+            volume_work =
+                volume_work + Dd::from_f64(h) * Dd::from_f64(amplitude) * Dd::from_f64(pressure);
+        }
+        let volume_source_work_j = volume_work.to_f64();
+        if !volume_source_work_j.is_finite() {
+            return Err(invalid("mechanical midpoint volume-source work overflow").into());
+        }
         let work = MechanicalTimeWork {
             initial_energy_j: initial_energy.total_j(),
             final_energy_j: final_energy.total_j(),
@@ -801,6 +852,7 @@ impl<'m, 'f, 'c> PreparedMechanicalTime<'m, 'f, 'c> {
             acoustic_delta_energy_j: acoustic.work.delta_energy_j,
             wall_delta_energy_j: wall_change,
             input_work_j: input,
+            volume_source_work_j,
             boundary_dissipation_j: h * boundary_loss,
             wall_dissipation_j: wall_loss,
             wall_relaxation_dissipation_j: relaxation_loss,
@@ -884,3 +936,5 @@ fn balance(
 mod pressure_release_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod volume_source_tests;
