@@ -5,9 +5,15 @@ discrete forged-ball masses, geometry and hardness specifications, plus a
 separate theoretical SAG charge packing-density reference. They support
 media inventories without substituting ball hardness for ore work index.
 
-The [MIBC frother reference](MINING_FLOTATION_REAGENTS.md) supplies product
-density endpoints, minimum purity and separately named saturated-phase mass
-fractions for explicit dosing and material accounting.
+The [flotation-reagent reference](MINING_FLOTATION_REAGENTS.md) supplies MIBC
+frother, solid and liquid PAX, SIBX and copper sulfate pentahydrate profiles.
+Product concentrations, composition bounds, hydrate identity and physical
+property bases remain distinct for explicit dosing and material accounting.
+
+The [drop-weight reference](MINING_DROP_WEIGHT.md) supplies five published ore
+calibrations and a source-bound JK impact-response card with specific-energy
+inversion. It complements the Bond ball-mill model while retaining each
+original specimen and the distinction between t10 and a full product PSD.
 
 The [cassiterite reduction guide](MINING_TIN_REDUCTION.md) connects five
 compatible USGS material packs to CO reduction, graphite gasification and

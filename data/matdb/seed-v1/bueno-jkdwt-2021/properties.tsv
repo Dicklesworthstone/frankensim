@@ -1,0 +1,76 @@
+frankensim.matdb-source.v1
+observation	ore-a	Bueno 2021 ore A; gold mine	JK drop-weight fit; Wardell Armstrong; Table 7 JKDWT columns; preparation in Table 6	Mine identity, test temperature and pressure unreported. A and b jointly fitted; not plant power or a full size distribution.
+observation	ore-b	Bueno 2021 ore B; polymetallic mine	JK drop-weight fit; Wardell Armstrong; Table 7 JKDWT columns; preparation in Table 6	Mine identity, test temperature and pressure unreported. A and b jointly fitted; not plant power or a full size distribution.
+observation	ore-c	Bueno 2021 ore C; nickel-zinc mine	JK drop-weight fit; Wardell Armstrong; Table 7 JKDWT columns; preparation in Table 6	Mine identity, test temperature and pressure unreported. A and b jointly fitted; not plant power or a full size distribution.
+observation	ore-d	Bueno 2021 ore D; polymetallic mine	JK drop-weight fit; Wardell Armstrong; Table 7 JKDWT columns; preparation in Table 6	Mine identity, test temperature and pressure unreported. A and b jointly fitted; not plant power or a full size distribution.
+observation	ore-e	Bueno 2021 ore E; phosphate mine	JK drop-weight fit; Wardell Armstrong; Table 7 JKDWT columns; preparation in Table 6	Mine identity, test temperature and pressure unreported. A and b jointly fitted; not plant power or a full size distribution.
+scalar	ore-a-asymptote	ore-a	asymptote	57.9	%	constant
+uncertainty	ore-a-asymptote	unstated	-	-	-	-
+validity	ore-a-asymptote	ore	1	1	1
+validity	ore-a-asymptote	temperature_known	0	0	1
+validity	ore-a-asymptote	pressure_known	0	0	1
+validity	ore-a-asymptote	operating_ore	0	0	1
+validity	ore-a-asymptote	historical	1	1	1
+scalar	ore-a-sensitivity	ore-a	sensitivity	0.55	Mg/kW/h	constant
+uncertainty	ore-a-sensitivity	unstated	-	-	-	-
+validity	ore-a-sensitivity	ore	1	1	1
+validity	ore-a-sensitivity	temperature_known	0	0	1
+validity	ore-a-sensitivity	pressure_known	0	0	1
+validity	ore-a-sensitivity	operating_ore	0	0	1
+validity	ore-a-sensitivity	historical	1	1	1
+scalar	ore-b-asymptote	ore-b	asymptote	71.2	%	constant
+uncertainty	ore-b-asymptote	unstated	-	-	-	-
+validity	ore-b-asymptote	ore	2	2	1
+validity	ore-b-asymptote	temperature_known	0	0	1
+validity	ore-b-asymptote	pressure_known	0	0	1
+validity	ore-b-asymptote	operating_ore	0	0	1
+validity	ore-b-asymptote	historical	1	1	1
+scalar	ore-b-sensitivity	ore-b	sensitivity	0.49	Mg/kW/h	constant
+uncertainty	ore-b-sensitivity	unstated	-	-	-	-
+validity	ore-b-sensitivity	ore	2	2	1
+validity	ore-b-sensitivity	temperature_known	0	0	1
+validity	ore-b-sensitivity	pressure_known	0	0	1
+validity	ore-b-sensitivity	operating_ore	0	0	1
+validity	ore-b-sensitivity	historical	1	1	1
+scalar	ore-c-asymptote	ore-c	asymptote	78.3	%	constant
+uncertainty	ore-c-asymptote	unstated	-	-	-	-
+validity	ore-c-asymptote	ore	3	3	1
+validity	ore-c-asymptote	temperature_known	0	0	1
+validity	ore-c-asymptote	pressure_known	0	0	1
+validity	ore-c-asymptote	operating_ore	0	0	1
+validity	ore-c-asymptote	historical	1	1	1
+scalar	ore-c-sensitivity	ore-c	sensitivity	0.40	Mg/kW/h	constant
+uncertainty	ore-c-sensitivity	unstated	-	-	-	-
+validity	ore-c-sensitivity	ore	3	3	1
+validity	ore-c-sensitivity	temperature_known	0	0	1
+validity	ore-c-sensitivity	pressure_known	0	0	1
+validity	ore-c-sensitivity	operating_ore	0	0	1
+validity	ore-c-sensitivity	historical	1	1	1
+scalar	ore-d-asymptote	ore-d	asymptote	67.6	%	constant
+uncertainty	ore-d-asymptote	unstated	-	-	-	-
+validity	ore-d-asymptote	ore	4	4	1
+validity	ore-d-asymptote	temperature_known	0	0	1
+validity	ore-d-asymptote	pressure_known	0	0	1
+validity	ore-d-asymptote	operating_ore	0	0	1
+validity	ore-d-asymptote	historical	1	1	1
+scalar	ore-d-sensitivity	ore-d	sensitivity	0.89	Mg/kW/h	constant
+uncertainty	ore-d-sensitivity	unstated	-	-	-	-
+validity	ore-d-sensitivity	ore	4	4	1
+validity	ore-d-sensitivity	temperature_known	0	0	1
+validity	ore-d-sensitivity	pressure_known	0	0	1
+validity	ore-d-sensitivity	operating_ore	0	0	1
+validity	ore-d-sensitivity	historical	1	1	1
+scalar	ore-e-asymptote	ore-e	asymptote	67.8	%	constant
+uncertainty	ore-e-asymptote	unstated	-	-	-	-
+validity	ore-e-asymptote	ore	5	5	1
+validity	ore-e-asymptote	temperature_known	0	0	1
+validity	ore-e-asymptote	pressure_known	0	0	1
+validity	ore-e-asymptote	operating_ore	0	0	1
+validity	ore-e-asymptote	historical	1	1	1
+scalar	ore-e-sensitivity	ore-e	sensitivity	1.31	Mg/kW/h	constant
+uncertainty	ore-e-sensitivity	unstated	-	-	-	-
+validity	ore-e-sensitivity	ore	5	5	1
+validity	ore-e-sensitivity	temperature_known	0	0	1
+validity	ore-e-sensitivity	pressure_known	0	0	1
+validity	ore-e-sensitivity	operating_ore	0	0	1
+validity	ore-e-sensitivity	historical	1	1	1

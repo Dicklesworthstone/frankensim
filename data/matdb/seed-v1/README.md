@@ -22,6 +22,11 @@ sizes and closing screen. The material resolver retains each original test in
 the existing grinding card, making source-backed milling energy, throughput,
 inversion and blends available without substituting a generic ore constant.
 
+The [drop-weight guide](MINING_DROP_WEIGHT.md) supplies five published ore
+calibrations and ten claims for the JK impact-energy response. Its source-bound
+card evaluates t10 and inverts reachable fines targets with explicit energy
+limits, preserving the original specimen and evidence.
+
 The [arsenic reference guide](MINING_ARSENIC_REFERENCE.md) adds six compatible
 NBS aqueous profiles and 24 claims. Exact protonation reactions connect all
 four As(V) forms to the shared-pH solver; As(III) source components also support
@@ -30,9 +35,10 @@ The existing chemistry examples run the new sources without another solver.
 
 The [grinding-media guide](MINING_GRINDING_MEDIA.md) adds discrete
 manufacturer ball specifications and a separately identified apparent charge
-packing reference. The [MIBC guide](MINING_FLOTATION_REAGENTS.md) adds a sourced
-flotation-frother profile with explicit density, purity and phase-composition
-bases. Both use the ordinary compiler and catalog.
+packing reference. The [flotation-reagent guide](MINING_FLOTATION_REAGENTS.md)
+adds MIBC frother, solid and liquid PAX, SIBX and copper sulfate pentahydrate
+profiles with explicit density, composition, concentration and hydrate bases.
+Both use the ordinary compiler and catalog.
 
 The [mineral-processing guide](MINERAL_PROCESSING.md) covers 33 source profiles
 and 104 claims for ore/gangue constituents and processing reagents, with an

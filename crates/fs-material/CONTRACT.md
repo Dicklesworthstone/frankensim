@@ -1541,6 +1541,21 @@ Source-backed test values do not make its energy/throughput outputs measured
 plant performance. Unit regressions and `xtask`'s `mining_bond_sources` exercise
 source preservation, independent energy/throughput answers and refusals.
 
+`comminution::drop_weight::resolve_jk_drop_weight` resolves the independent
+A-fraction and inverse-specific-energy b parameters of the JKDWT impact law
+from one scalar MatDB observation with identical source support. Original
+claims, evidence, uncertainty, observation, query, pack identity and verified
+receipts survive in the returned card. A must be in (0,1] and b positive;
+percent-valued A must be normalized before resolution. Missing or mixed
+parameters and unsupported source conditions refuse. `response` evaluates
+`t10 = A*(1-exp(-b*Ecs))` in coherent SI and preserves the complementary
+retained fraction; `energy_for_t10` inverts reachable targets below A. Both
+honor the explicitly supplied finite nonnegative energy interval, which does
+not establish experimental support. No PSD, abrasion ta, selection rate,
+liberation or SAG power is inferred. The `bueno-jkdwt-2021` material pack supplies
+five published fitted specimens; `drop_weight_reference` and the ordinary
+`mining_drop_weight_sources` compiler integration exercise those source rows.
+
 `comminution` supplies a typed, uncorrected Bond grinding-energy closure,
 dry-solids throughput from net pinion power, and ideal single-ball critical
 speed. Work-index construction distinguishes kWh per dry metric tonne from

@@ -36,6 +36,10 @@ pub mod source;
 #[path = "comminution/breakage.rs"]
 pub mod breakage;
 
+/// Specimen-bound JK drop-weight impact response and specific-energy inversion.
+#[path = "comminution/drop_weight.rs"]
+pub mod drop_weight;
+
 /// Constant selection-rate population balances over the original daughter classes.
 #[path = "comminution/kinetics.rs"]
 pub mod kinetics;
