@@ -9,6 +9,90 @@ use fs_flux::{
 };
 
 #[test]
+fn g1_stiff_radial_drainage_reaches_exact_endpoint_in_bounded_newton_updates() {
+    let mut heat_errors = Vec::new();
+    for cells in [32, 128, 256] {
+        let mut input = fixture(cells);
+        let inner: f64 = 0.005;
+        let left: f64 = 120_000.0;
+        let right: f64 = 100_000.0;
+        let log_span = ((inner + input.grid.length_m) / inner).ln();
+        let h = input.grid.gap_m[0];
+        let mu = input.gas.dynamic_viscosity_pa_s;
+        let rt = input.gas.specific_gas_constant_j_kg_k * input.gas.temperature_k;
+        input.boundary = GasFilmBoundaryTopology::Open {
+            left_absolute_pressure_pa: left,
+            right_absolute_pressure_pa: right,
+        };
+        // The time step is much longer than lateral pressure relaxation, so
+        // independent cell updates are diffusion-stiff. Keep the existing mass
+        // tolerance and require a bounded number of full nonlinear corrections.
+        input.timestep_s = 1.0;
+        input.budget.maximum_iterations = 12;
+        input.budget.relaxation = 1.0;
+        let exact_pressure = (0..cells)
+            .map(|cell| {
+                let radius = inner + (cell as f64 + 0.5) * input.grid.length_m / cells as f64;
+                (left.powi(2) + (right.powi(2) - left.powi(2)) * (radius / inner).ln() / log_span)
+                    .sqrt()
+            })
+            .collect::<Vec<_>>();
+        // Manufacture the endpoint through prescribed gap motion, not the
+        // numerical flux or pressure initial guess. Initial pressure is uniform;
+        // old_gap=h*p_exact/p_initial makes the endpoint storage exactly zero.
+        // The independent continuum logarithmic profile then has constant flow.
+        input.wall_motion.gap_rate_profile_m_per_s = Some(
+            exact_pressure
+                .iter()
+                .map(|pressure| {
+                    (h - h * pressure / input.initial_absolute_pressure_pa) / input.timestep_s
+                })
+                .collect(),
+        );
+        let step = solve_isothermal_axisymmetric_gas_film_1d(&input, inner, None)
+            .expect("stiff radial pressure endpoint within the fixed Newton budget");
+        let pressure_error = step
+            .checkpoint
+            .active_absolute_pressure_pa
+            .iter()
+            .zip(&exact_pressure)
+            .map(|(actual, expected)| (actual / expected - 1.0).abs())
+            .fold(0.0_f64, f64::max);
+        let flow = std::f64::consts::PI * h.powi(3) * (left.powi(2) - right.powi(2))
+            / (12.0 * mu * rt * log_span);
+        let exact_heat = flow * rt * (left / right).ln();
+        let heat_error = (step.receipt.viscous_heat_w / exact_heat - 1.0).abs();
+        eprintln!(
+            "stiff radial {cells} cells: {} Newton corrections, residual {:.3e}, pressure error {:.3e}, heat error {:.3e}",
+            step.receipt.iterations,
+            step.receipt.max_mass_residual_kg_m2_s,
+            pressure_error,
+            heat_error
+        );
+        assert!(step.receipt.iterations <= 8);
+        assert!(pressure_error < 1.0e-9, "{pressure_error:e}");
+        assert!(
+            (step.receipt.outer_boundary_outward_mass_flow_kg_per_s / flow - 1.0).abs() < 1.0e-9
+        );
+        assert!(
+            (-step.receipt.inner_boundary_outward_mass_flow_kg_per_s / flow - 1.0).abs() < 1.0e-9
+        );
+        assert!(step.receipt.mass_closure_residual_kg_per_s.abs() < 1.0e-14);
+        assert!(
+            step.receipt.max_mass_residual_kg_m2_s <= input.budget.mass_residual_tolerance_kg_m2_s
+        );
+        heat_errors.push(heat_error);
+    }
+    assert!(
+        heat_errors
+            .windows(2)
+            .all(|errors| errors[1] < errors[0] / 3.0),
+        "{heat_errors:?}"
+    );
+    assert!(heat_errors[2] < 1.0e-6, "{heat_errors:?}");
+}
+
+#[test]
 fn g1_axisymmetric_sealed_squeeze_integrates_actual_annular_mass_load_and_work() {
     let mut disk_masses = Vec::new();
     for inner in [0.0, 0.005] {

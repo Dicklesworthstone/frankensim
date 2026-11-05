@@ -622,6 +622,49 @@ Exceeding either pressure-dependent applicability envelope refuses the step
 before a checkpoint or receipt is published; no wall-law or compressible-inertia
 correction is silently substituted.
 
+#### Bounded tridiagonal pressure Newton solve
+
+Both strip and radial geometry use the exact tridiagonal Jacobian of the same
+implicit gas-mass residual. With fixed face gap, the compiled no-slip/Maxwell
+mass conductance has the affine form `K(p)=a*p+c`. A face of measure `W` and
+resistance distance `d` therefore has pressure derivatives
+`dF/dp_left = W*(K(p_left)/d + h*U_mean/(2*R*T))` and
+`dF/dp_right = W*(-K(p_right)/d + h*U_mean/(2*R*T))`.
+Storage, prescribed pressure ends, ideal pressure-pinned cells, finite capillary
+conductance and the finite reservoir's reduced Schur derivative all enter this
+same system. The numerical change does not alter the transport law, geometry,
+time discretization, or physical applicability bounds.
+
+Factorization uses the existing native
+`fs_la::tridiagonal::TridiagonalWorkspace` with adjacent partial pivoting;
+gas-film code adds no parallel linear-algebra implementation. Pressure, trial,
+flux, residual, Jacobian and linear-solve storage is allocated once per step
+and reused through all corrections and line-search trials. Each assembly and
+linear solve has O(N) work/storage. No mesh-independent iteration count or
+wall-clock speedup is claimed for arbitrary admitted inputs.
+
+`maximum_iterations` bounds Newton corrections, and `relaxation` remains a
+maximum step fraction in `(0,1]`. Each correction is limited to 99% of the
+distance to zero for decreasing pressures, then tested with at most 32
+successive halvings. The accepted residual either meets the original caller
+tolerance or satisfies a strict decrease with Armijo coefficient `1e-4`.
+All trial and final checks use the same cell mass residual, including the
+finite reservoir storage defect. No pressure floor, artificial diagonal,
+tolerance relaxation or unconverged checkpoint is introduced. Linear-solve,
+line-search and exhausted-iteration failures are typed refusals. An initially
+converged state uses zero corrections. The existing API remains synchronous
+without a cancellation callback.
+
+A focused stiff-drainage regression uses a 1 s step on 32-, 128- and 256-cell
+annuli, a fixed 12-correction cap and the unchanged mass tolerance. The starting
+pressure is uniform; a prescribed smooth gap-motion profile makes the analytic
+logarithmic pressure solution an exact backward-Euler endpoint. Tests compare
+pressure and signed mass flow with that independent solution and refine its
+integrated dissipation. This checks convergence of a stiff numerical step,
+not transient accuracy from using a large timestep or the physical validity
+of unresolved startup flow. Existing squeeze, Maxwell, moving-wall, vent,
+finite-reservoir, admission and restart regressions remain required.
+
 #### Explicit first-order Maxwell slip
 
 `SlipPolicy::MaxwellFirstOrder` admits the classical isothermal Maxwell boundary
@@ -850,7 +893,7 @@ three-storage ODE time refinement, small-capacity stiffness and the large-bath
 limit, squeeze/expansion flow reversal, restart identity and failed-step recovery.
 
 The implementation is bit-deterministic on one ISA by fixed cell/face order and
-bounded Jacobi/Picard sweeps. It has no RNG, no `Cx` cancellation hook, no
+bounded pivoted Newton corrections/backtracking. It has no RNG, no `Cx` cancellation hook, no
 entropy model, and no thermochemical or material-data admission; the
 retained source identities and `GasFilmInputAuthority` state those limits rather
 than minting material/EOS authority.

@@ -21,7 +21,7 @@ pub struct AxisymmetricGasFilmReceipt {
     pub input_authority: GasFilmInputAuthority,
     /// Caller-declared uncertainty, without propagation or certification.
     pub input_uncertainty: GasFilmUncertainty,
-    /// Deterministic pressure sweeps used.
+    /// Deterministic Newton corrections used; zero at initial equilibrium.
     pub iterations: u32,
     /// Maximum local mass-balance residual per annular area [kg m^-2 s^-1].
     pub max_mass_residual_kg_m2_s: f64,

@@ -10,17 +10,21 @@
 
 use core::fmt;
 use core::fmt::Write;
+use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 
 mod axisymmetric;
 mod capillary;
 pub use axisymmetric::{
     AxisymmetricGasFilmReceipt, AxisymmetricGasFilmStep, solve_isothermal_axisymmetric_gas_film_1d,
 };
-use capillary::CapillaryConnection;
+use capillary::{CapillaryConnection, CapillaryExchange};
 pub use capillary::{CapillaryVent, CapillaryVentReport, GasFilmReservoir, GasFilmReservoirReport};
 
 const MODEL_ID: &str = "fs-flux/isothermal-compressible-reynolds-1d-v1";
 const MAX_GEOMETRIC_CELLS: usize = 4_096;
+const MAX_NEWTON_BACKTRACKS: usize = 32;
+const NEWTON_SUFFICIENT_DECREASE: f64 = 1.0e-4;
+const NEWTON_POSITIVE_FRACTION: f64 = 0.99;
 // Classical first-order Maxwell slip is not a transition/molecular-flow model.
 // See Gavasane et al., doi:10.1260/1759-3093.2.2-3.109.
 const MAX_MAXWELL_SLIP_KNUDSEN_NUMBER: f64 = 0.1;
@@ -57,11 +61,24 @@ pub enum GasFilmError {
         /// Non-finite derived field name.
         field: &'static str,
     },
-    /// The deterministic Picard/Jacobi budget ended before the residual gate.
+    /// The deterministic Newton iteration budget ended before the residual gate.
     IterationBudgetExceeded {
         /// Number of completed iterations.
         iterations: u32,
         /// Largest retained cell mass residual [kg m^-2 s^-1].
+        max_mass_residual_kg_m2_s: f64,
+    },
+    /// The native pivoted tridiagonal pressure Jacobian could not be solved.
+    LinearSolveFailure {
+        /// Native linear-algebra refusal; no partial gas-film state is published.
+        source: TridiagonalError,
+    },
+    /// No positive-pressure residual-decreasing trial was found in the bounded
+    /// Newton line search. No pressure floor or unconverged state is substituted.
+    NewtonStepRejected {
+        /// Number of attempted Newton corrections.
+        iterations: u32,
+        /// Last accepted nonlinear mass residual [kg m^-2 s^-1].
         max_mass_residual_kg_m2_s: f64,
     },
 }
@@ -310,11 +327,12 @@ pub enum RoughnessPolicy {
 /// Bounded nonlinear iteration and numerical acceptance controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GasFilmBudget {
-    /// Maximum deterministic sweeps; zero is refused.
+    /// Maximum deterministic Newton corrections; zero is refused.
     pub maximum_iterations: u32,
     /// Maximum cell mass-balance residual [kg m^-2 s^-1].
     pub mass_residual_tolerance_kg_m2_s: f64,
-    /// Damped Jacobi factor in `(0, 1]`.
+    /// Maximum Newton step fraction in `(0, 1]`. Bounded backtracking may reduce
+    /// it further to preserve positive pressure and decrease the mass residual.
     pub relaxation: f64,
 }
 
@@ -392,7 +410,7 @@ pub struct GasFilmReceipt {
     pub model_id: String,
     /// Input authority retained without promotion.
     pub input_authority: GasFilmInputAuthority,
-    /// Number of deterministic sweeps used.
+    /// Number of deterministic Newton corrections used; zero at initial equilibrium.
     pub iterations: u32,
     /// Maximum accepted cell residual [kg m^-2 s^-1].
     pub max_mass_residual_kg_m2_s: f64,
@@ -1588,8 +1606,8 @@ fn face_fluxes(
     input: &GasFilmInput,
     metrics: &FilmMetrics,
     transport: &FilmTransport,
-) -> Result<Vec<f64>, GasFilmError> {
-    let mut flux = vec![0.0; pressure.len() + 1];
+    flux: &mut [f64],
+) -> Result<(), GasFilmError> {
     let (left, right) = boundary_fluxes(pressure, gap, input, metrics, transport)?;
     flux[0] = derived(left, "left_face_mass_rate")?;
     flux[pressure.len()] = derived(right, "right_face_mass_rate")?;
@@ -1607,7 +1625,163 @@ fn face_fluxes(
             "interior_face_mass_rate",
         )?;
     }
-    Ok(flux)
+    Ok(())
+}
+
+// One pressure system owns both the nonlinear residual and its exact Jacobian.
+// Geometry and the compiled wall law are shared with the final receipts.
+struct PressureSystem<'a> {
+    input: &'a GasFilmInput,
+    metrics: &'a FilmMetrics,
+    transport: &'a FilmTransport,
+    capillary: Option<&'a CapillaryConnection>,
+    gap: &'a [f64],
+    old_pressure: &'a [f64],
+    old_gap: &'a [f64],
+}
+
+impl PressureSystem<'_> {
+    fn residual(
+        &self,
+        pressure: &[f64],
+        flux: &mut [f64],
+        residual: &mut [f64],
+    ) -> Result<(f64, Option<CapillaryExchange>), GasFilmError> {
+        face_fluxes(
+            pressure,
+            self.gap,
+            self.input,
+            self.metrics,
+            self.transport,
+            flux,
+        )?;
+        let exchange = self
+            .capillary
+            .map(|vent| vent.exchange(pressure[vent.cell]))
+            .transpose()?;
+        let mut maximum = 0.0_f64;
+        for cell in 0..pressure.len() {
+            let measure = self.metrics.cell_measure(cell);
+            let storage = derived(
+                (pressure[cell] * self.gap[cell] - self.old_pressure[cell] * self.old_gap[cell])
+                    / (self.transport.rt * self.input.timestep_s),
+                "cell_storage_residual",
+            )?;
+            let mut value = derived(
+                storage + (flux[cell + 1] - flux[cell]) / measure,
+                "cell_mass_residual",
+            )?;
+            if self.capillary.is_some_and(|vent| cell == vent.cell) {
+                value = derived(
+                    value + exchange.expect("capillary was compiled").flow_kg_per_m_s / measure,
+                    "vent_cell_mass_residual",
+                )?;
+            }
+            residual[cell] = value;
+            if !matches!(self.input.boundary, GasFilmBoundaryTopology::Vented { cell_index, .. } if cell == cell_index)
+            {
+                maximum = maximum.max(value.abs());
+            }
+        }
+        if let Some(vent) = self.capillary {
+            let value = vent.reservoir_residual(exchange.expect("capillary was compiled"))?;
+            maximum = maximum.max(value.abs() / self.metrics.cell_measure(vent.cell));
+        }
+        Ok((maximum, exchange))
+    }
+
+    fn jacobian(
+        &self,
+        pressure: &[f64],
+        exchange: Option<CapillaryExchange>,
+        lower: &mut [f64],
+        diagonal: &mut [f64],
+        upper: &mut [f64],
+    ) -> Result<(), GasFilmError> {
+        let active = pressure.len();
+        lower.fill(0.0);
+        upper.fill(0.0);
+        for (cell, value) in diagonal.iter_mut().enumerate() {
+            *value = derived(
+                self.gap[cell] / (self.transport.rt * self.input.timestep_s),
+                "pressure_storage_derivative",
+            )?;
+        }
+        let ends = self.input.boundary.end_pressures();
+        for face in 0..=active {
+            let (left_pressure, right_pressure, gap) = if face == 0 {
+                let Some(bath) = ends[0] else { continue };
+                (bath, pressure[0], self.gap[0])
+            } else if face == active {
+                let Some(bath) = ends[1] else { continue };
+                (pressure[active - 1], bath, self.gap[active - 1])
+            } else {
+                (
+                    pressure[face - 1],
+                    pressure[face],
+                    0.5 * (self.gap[face - 1] + self.gap[face]),
+                )
+            };
+            let metric = self.metrics.face(face, active);
+            // K(p)=a*p+c, including Maxwell b*p=constant. Thus the pressure
+            // flux derivatives are +K(p_left)/d and -K(p_right)/d, while
+            // Couette advection contributes h*U_mean/(2*R*T) to both.
+            let advection =
+                gap * self.transport.mean_wall_velocity_m_per_s / (2.0 * self.transport.rt);
+            let left = derived(
+                metric.width
+                    * (self.transport.mass_conductance(left_pressure, gap)? / metric.distance_m
+                        + advection),
+                "left_pressure_flux_derivative",
+            )?;
+            let right = derived(
+                metric.width
+                    * (-self.transport.mass_conductance(right_pressure, gap)? / metric.distance_m
+                        + advection),
+                "right_pressure_flux_derivative",
+            )?;
+            if face > 0 {
+                let measure = self.metrics.cell_measure(face - 1);
+                diagonal[face - 1] = derived(
+                    diagonal[face - 1] + left / measure,
+                    "pressure_jacobian_diagonal",
+                )?;
+                if face < active {
+                    upper[face - 1] = derived(right / measure, "pressure_jacobian_upper")?;
+                }
+            }
+            if face < active {
+                let measure = self.metrics.cell_measure(face);
+                diagonal[face] = derived(
+                    diagonal[face] - right / measure,
+                    "pressure_jacobian_diagonal",
+                )?;
+                if face > 0 {
+                    lower[face - 1] = derived(-left / measure, "pressure_jacobian_lower")?;
+                }
+            }
+        }
+        if let Some(vent) = self.capillary {
+            diagonal[vent.cell] = derived(
+                diagonal[vent.cell]
+                    + exchange.expect("capillary was compiled").derivative
+                        / self.metrics.cell_measure(vent.cell),
+                "capillary_pressure_derivative",
+            )?;
+        }
+        if let GasFilmBoundaryTopology::Vented { cell_index, .. } = self.input.boundary {
+            // The pressure pin has zero Newton correction. Neighbor equations
+            // retain their coupling to this row; no storage equation is invented.
+            diagonal[cell_index] = 1.0;
+            if cell_index > 0 {
+                lower[cell_index - 1] = 0.0;
+            }
+            if cell_index + 1 < active {
+                upper[cell_index] = 0.0;
+            }
+        }
+        Ok(())
+    }
 }
 
 // Integrate pressure-driven mechanics over the same face intervals as the
@@ -1838,130 +2012,89 @@ fn solve_film(
             )
         },
     )?;
+    let system = PressureSystem {
+        input,
+        metrics: &metrics,
+        transport: &transport,
+        capillary: capillary.as_ref(),
+        gap,
+        old_pressure: &old_pressure,
+        old_gap: &old_gap,
+    };
+    // All nonlinear, line-search and pivoted linear-solve storage is retained
+    // through this step. No cell/face vector is allocated inside the iteration.
+    let mut flux = vec![0.0; active + 1];
+    let mut cell_residual = vec![0.0; active];
+    let mut next = pressure.clone();
+    let mut correction = vec![0.0; active];
+    let mut lower = vec![0.0; active - 1];
+    let mut diagonal = vec![0.0; active];
+    let mut upper = vec![0.0; active - 1];
+    let mut linear = TridiagonalWorkspace::new(active)
+        .map_err(|source| GasFilmError::LinearSolveFailure { source })?;
+    let (mut max_residual, mut capillary_exchange) =
+        system.residual(&pressure, &mut flux, &mut cell_residual)?;
     let mut iterations = 0;
-    let mut max_residual: f64;
-    while iterations < input.budget.maximum_iterations {
-        let flux = face_fluxes(&pressure, gap, input, &metrics, &transport)?;
-        let vent_exchange = capillary
-            .as_ref()
-            .map(|vent| vent.exchange(pressure[vent.cell]))
-            .transpose()?;
-        let mut next = pressure.clone();
-        max_residual = 0.0;
-        for cell in 0..active {
-            let measure = metrics.cell_measure(cell);
-            if let GasFilmBoundaryTopology::Vented {
-                cell_index,
-                absolute_pressure_pa,
-            } = input.boundary
-                && cell == cell_index
-            {
-                next[cell] = absolute_pressure_pa;
-                continue;
-            }
-            let storage_coefficient =
-                derived(gap[cell] / (rt * input.timestep_s), "storage_coefficient")?;
-            let rhs = derived(
-                old_pressure[cell] * old_gap[cell] / (rt * input.timestep_s),
-                "previous_mass_storage",
-            )?;
-            let mut residual = derived(
-                storage_coefficient * pressure[cell] - rhs
-                    + (flux[cell + 1] - flux[cell]) / measure,
-                "cell_mass_residual",
-            )?;
-            let mut diagonal = storage_coefficient;
-            if capillary.as_ref().is_some_and(|vent| cell == vent.cell) {
-                let exchange = vent_exchange.expect("capillary was compiled");
-                residual = derived(
-                    residual + exchange.flow_kg_per_m_s / measure,
-                    "vent_cell_mass_residual",
-                )?;
-                diagonal = derived(
-                    diagonal + exchange.derivative / measure,
-                    "vent_cell_diagonal",
-                )?;
-            }
-            max_residual = max_residual.max(residual.abs());
-            let left = if cell > 0 {
-                Some((pressure[cell - 1], gap[cell - 1], cell))
-            } else if let Some(reservoir) = end_pressures[0] {
-                Some((reservoir, gap[cell], cell))
-            } else {
-                None
-            };
-            let right = if cell + 1 < active {
-                Some((pressure[cell + 1], gap[cell + 1], cell + 1))
-            } else if let Some(reservoir) = end_pressures[1] {
-                Some((reservoir, gap[cell], cell + 1))
-            } else {
-                None
-            };
-            for (neighbor_pressure, neighbor_gap, face) in [left, right].into_iter().flatten() {
-                let metric = metrics.face(face, active);
-                let p_face = 0.5 * (pressure[cell] + neighbor_pressure);
-                let h_face = 0.5 * (gap[cell] + neighbor_gap);
-                let k = transport.mass_conductance(p_face, h_face)?;
-                diagonal = derived(
-                    diagonal + k * metric.width / (metric.distance_m * measure),
-                    "cell_diagonal",
-                )?;
-            }
-            positive(diagonal, "cell_diagonal")?;
-            let proposal = derived(
-                pressure[cell] - residual / diagonal,
-                "pressure_iteration_proposal",
-            )?;
-            let updated = derived(
-                pressure[cell] + input.budget.relaxation * (proposal - pressure[cell]),
-                "pressure_iteration_update",
-            )?;
-            positive(updated, "absolute_pressure_pa")?;
-            next[cell] = updated;
+    while max_residual > input.budget.mass_residual_tolerance_kg_m2_s
+        && iterations < input.budget.maximum_iterations
+    {
+        system.jacobian(
+            &pressure,
+            capillary_exchange,
+            &mut lower,
+            &mut diagonal,
+            &mut upper,
+        )?;
+        for (update, residual) in correction.iter_mut().zip(&cell_residual) {
+            *update = -residual;
+        }
+        if let GasFilmBoundaryTopology::Vented { cell_index, .. } = input.boundary {
+            correction[cell_index] = 0.0;
+        }
+        linear
+            .factor(&lower, &diagonal, &upper, || false)
+            .and_then(|()| linear.solve_factored_in_place(&mut correction, || false))
+            .map_err(|source| GasFilmError::LinearSolveFailure { source })?;
+        if let GasFilmBoundaryTopology::Vented { cell_index, .. } = input.boundary {
+            correction[cell_index] = 0.0;
         }
         iterations += 1;
-        pressure = next;
-        if max_residual <= input.budget.mass_residual_tolerance_kg_m2_s {
-            break;
+        let mut fraction = input.budget.relaxation;
+        for (value, update) in pressure.iter().zip(&correction) {
+            if *update < 0.0 {
+                fraction = fraction.min(NEWTON_POSITIVE_FRACTION * (*value / -*update));
+            }
         }
-    }
-    let flux = face_fluxes(&pressure, gap, input, &metrics, &transport)?;
-    let capillary_exchange = capillary
-        .as_ref()
-        .map(|vent| vent.exchange(pressure[vent.cell]))
-        .transpose()?;
-    let mut cell_residual = vec![0.0; active];
-    max_residual = 0.0;
-    for cell in 0..active {
-        let storage = derived(
-            (pressure[cell] * gap[cell] - old_pressure[cell] * old_gap[cell])
-                / (rt * input.timestep_s),
-            "final_storage_residual",
-        )?;
-        let mut residual = derived(
-            storage + (flux[cell + 1] - flux[cell]) / metrics.cell_measure(cell),
-            "final_cell_mass_residual",
-        )?;
-        if capillary.as_ref().is_some_and(|vent| cell == vent.cell) {
-            residual = derived(
-                residual
-                    + capillary_exchange
-                        .expect("capillary was compiled")
-                        .flow_kg_per_m_s
-                        / metrics.cell_measure(cell),
-                "final_vent_cell_mass_residual",
-            )?;
+        let mut accepted = false;
+        for _ in 0..MAX_NEWTON_BACKTRACKS {
+            for ((trial, value), update) in next.iter_mut().zip(&pressure).zip(&correction) {
+                *trial = value + fraction * update;
+            }
+            if fraction > 0.0 && next.iter().all(|value| value.is_finite() && *value > 0.0) {
+                // A nonfinite trial can be shortened; it is never an accepted
+                // state. Every trial uses the original mass/reservoir residual.
+                if let Ok((trial_residual, trial_exchange)) =
+                    system.residual(&next, &mut flux, &mut cell_residual)
+                    && (trial_residual <= input.budget.mass_residual_tolerance_kg_m2_s
+                        || (trial_residual < max_residual
+                            && trial_residual
+                                <= (1.0 - NEWTON_SUFFICIENT_DECREASE * fraction) * max_residual))
+                {
+                    std::mem::swap(&mut pressure, &mut next);
+                    max_residual = trial_residual;
+                    capillary_exchange = trial_exchange;
+                    accepted = true;
+                    break;
+                }
+            }
+            fraction *= 0.5;
         }
-        cell_residual[cell] = residual;
-        if !matches!(input.boundary, GasFilmBoundaryTopology::Vented { cell_index, .. } if cell == cell_index)
-        {
-            max_residual = max_residual.max(residual.abs());
+        if !accepted {
+            return Err(GasFilmError::NewtonStepRejected {
+                iterations,
+                max_mass_residual_kg_m2_s: max_residual,
+            });
         }
-    }
-    if let Some(vent) = &capillary {
-        let residual =
-            vent.reservoir_residual(capillary_exchange.expect("capillary was compiled"))?;
-        max_residual = max_residual.max(residual.abs() / metrics.cell_measure(vent.cell));
     }
     if max_residual > input.budget.mass_residual_tolerance_kg_m2_s {
         return Err(GasFilmError::IterationBudgetExceeded {
