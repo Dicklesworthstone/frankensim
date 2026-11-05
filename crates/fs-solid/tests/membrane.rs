@@ -187,3 +187,6 @@ mod dynamics;
 
 #[path="membrane/density.rs"]
 mod density;
+
+#[path="membrane/sparse_inertia.rs"]
+mod sparse_inertia;

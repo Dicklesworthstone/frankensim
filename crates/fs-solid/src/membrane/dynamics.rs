@@ -20,8 +20,11 @@ use fs_time::{MomentumVerletError, verlet_momentum_step_with_displacement};
 use std::cell::{Cell, RefCell};
 
 mod inertia;
-use inertia::InverseMass;
-pub use inertia::{ConsistentMassBudget, MAX_CONSISTENT_AXIS_NODES};
+pub use inertia::{
+    ConsistentMassBudget, MAX_CONSISTENT_AXIS_NODES, SparseConsistentMassBudget,
+    SparseMassStatistics,
+};
+use inertia::{ConsistentPreparation, InverseMass};
 
 fn kinetic(momentum: &[f64], inverse: &InverseMass, velocity: &[f64]) -> f64 {
     match inverse {
@@ -170,7 +173,49 @@ impl<'a> MembraneMotion<'a> {
             displacement_m,
             velocity_m_s,
             time_s,
-            Some(budget),
+            Some(ConsistentPreparation::Dense(budget)),
+            cancelled,
+        )
+    }
+
+    /// Prepare the SAME consistent reference inertia through the existing
+    /// sparse symmetric direct owner. Exact element mass moments are assembled
+    /// into one scalar sparse block per distinct Cartesian support pattern;
+    /// no dense free-node mass matrix or 512-node dense leaf is required.
+    ///
+    /// Reference row sums scale the solver coordinates. The caller chooses the
+    /// existing `fs_sparse::direct::DirectOrdering`; nested dissection receives
+    /// original reference node coordinates. Each distinct pattern is analyzed
+    /// and factored once. Numeric factors and prepared solve permutations are
+    /// immutable and shared by equal support patterns and cloned checkpoints.
+    /// Warm inverse actions allocate nothing.
+    ///
+    /// Node and assembly caps are checked before sparse construction. Retained
+    /// symbolic bytes, factor fill and estimated work are admitted after the
+    /// original synchronous analysis; numeric payload is gated by its original
+    /// factor owner. These are payload/work limits, not an RSS or symbolic
+    /// construction peak-memory guarantee. Cancellation is checked around those
+    /// synchronous leaves and while assembling; it cannot interrupt a leaf.
+    /// Accepted physical momentum, support impulses and energy use the original
+    /// consistent matrix/inverse and the same nonlinear Verlet map.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_sparse_consistent_inertia(
+        patch: &'a MembranePatch,
+        prescribed: &[(usize, f64)],
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        time_s: f64,
+        budget: SparseConsistentMassBudget,
+        ordering: fs_sparse::direct::DirectOrdering,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MembraneError> {
+        Self::prepare(
+            patch,
+            prescribed,
+            displacement_m,
+            velocity_m_s,
+            time_s,
+            Some(ConsistentPreparation::Sparse(budget, ordering)),
             cancelled,
         )
     }
@@ -182,7 +227,7 @@ impl<'a> MembraneMotion<'a> {
         displacement_m: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         time_s: f64,
-        consistent: Option<ConsistentMassBudget>,
+        consistent: Option<ConsistentPreparation>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, MembraneError> {
         poll(&mut cancelled)?;
@@ -216,6 +261,9 @@ impl<'a> MembraneMotion<'a> {
             let mut free = Vec::with_capacity(fixed.iter().filter(|&&held| !held).count());
             for axis in 0..3 {
                 for node in 0..nodes {
+                    if matches!(consistent, Some(ConsistentPreparation::Sparse(..))) {
+                        poll(&mut cancelled)?;
+                    }
                     let dof = 3 * node + axis;
                     if !fixed[dof] {
                         free.push(dof);
@@ -325,6 +373,12 @@ impl<'a> MembraneMotion<'a> {
     /// Immutable reference mass image used by this motion and its observations.
     pub fn inertia_image(&self) -> MembraneMassImage {
         self.inverse_mass.image()
+    }
+    /// Sparse scalar storage and warm-work accounting, when that inverse was
+    /// explicitly selected. Shared factors are counted once in stored payload
+    /// and once per active component in the inverse-action work count.
+    pub fn sparse_inertia_statistics(&self) -> Option<SparseMassStatistics> {
+        self.inverse_mass.sparse_statistics()
     }
     /// Accepted full-space displacement [m], including exact fixed values.
     pub fn displacement_m(&self) -> &[[f64; 3]] {

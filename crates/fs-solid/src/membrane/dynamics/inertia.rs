@@ -3,11 +3,16 @@
 use super::super::{MembraneError, MembranePatch, inertia::MembraneMassImage, poll};
 use fs_la::factor::{Cholesky, FactorRunError, cholesky_cancellable};
 use fs_solver::op::LinearOp;
+use fs_sparse::direct::{DirectOrdering, LdltFactor};
 use std::{ops::Range, sync::Arc};
 
+mod sparse;
+pub use sparse::{SparseConsistentMassBudget, SparseMassStatistics};
+
 /// Bound on each non-interruptible triangular-solve leaf. Factorization itself
-/// polls the existing cancellable Cholesky owner. Large meshes retain the
-/// original diagonal image; this entry does not silently allocate dense 3N².
+/// polls the existing cancellable Cholesky owner. This dense entry does not
+/// silently allocate dense 3N²; larger meshes can explicitly select sparse
+/// consistent inertia with its separate storage/work allowances.
 pub const MAX_CONSISTENT_AXIS_NODES: usize = 512;
 
 /// Explicit dense work bound for consistent membrane inertia.
@@ -19,12 +24,33 @@ pub struct ConsistentMassBudget {
     pub max_nodes_per_axis: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(super) enum ConsistentPreparation {
+    Dense(ConsistentMassBudget),
+    Sparse(SparseConsistentMassBudget, DirectOrdering),
+}
+
+#[derive(Clone, Debug)]
+enum MassFactor {
+    Dense(Cholesky),
+    Sparse(LdltFactor),
+}
+
+impl MassFactor {
+    fn solve(&self, values: &mut [f64]) {
+        match self {
+            Self::Dense(factor) => factor.solve(values),
+            Self::Sparse(factor) => factor.solve_in_place(values),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct ScaledFactor {
     // M_ff = D^(1/2) C D^(1/2), with D the physical positive row sums.
     // The diagonal changes solver coordinates; it never replaces the mass.
     root_mass: Vec<f64>,
-    factor: Cholesky,
+    factor: MassFactor,
 }
 
 #[derive(Clone, Debug)]
@@ -61,13 +87,21 @@ impl InverseMass {
         patch: &MembranePatch,
         free: &[usize],
         fixed: &[bool],
-        budget: ConsistentMassBudget,
+        preparation: ConsistentPreparation,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, MembraneError> {
         poll(cancelled)?;
         let counts: [usize; 3] =
             std::array::from_fn(|axis| free.iter().filter(|&&dof| dof % 3 == axis).count());
-        let cap = budget.max_nodes_per_axis.min(MAX_CONSISTENT_AXIS_NODES);
+        let cap = match preparation {
+            ConsistentPreparation::Dense(budget) => {
+                budget.max_nodes_per_axis.min(MAX_CONSISTENT_AXIS_NODES)
+            }
+            ConsistentPreparation::Sparse(budget, _) => {
+                budget.admit()?;
+                budget.max_nodes_per_axis
+            }
+        };
         if cap == 0 || counts.iter().any(|&n| n > cap) {
             return Err(MembraneError::Budget(
                 "bounded free scalar nodes per consistent membrane inertia axis",
@@ -91,6 +125,14 @@ impl InverseMass {
             });
             let factor = if let Some(previous) = reused {
                 Arc::clone(&previous.factor)
+            } else if let ConsistentPreparation::Sparse(budget, ordering) = preparation {
+                Arc::new(sparse::factor(
+                    patch,
+                    &free[range.clone()],
+                    budget,
+                    ordering,
+                    cancelled,
+                )?)
             } else {
                 let mut mass = patch.mass_on_dofs(
                     MembraneMassImage::Consistent,
@@ -122,7 +164,10 @@ impl InverseMass {
                             ),
                         },
                     )?;
-                Arc::new(ScaledFactor { root_mass, factor })
+                Arc::new(ScaledFactor {
+                    root_mass,
+                    factor: MassFactor::Dense(factor),
+                })
             };
             axes.push(AxisInverse {
                 axis,
@@ -171,6 +216,13 @@ impl InverseMass {
         match self {
             Self::Lumped(_) => false,
             Self::Consistent { support_mass, .. } => support_mass.iter().any(|&m| m != 0.0),
+        }
+    }
+
+    pub(super) fn sparse_statistics(&self) -> Option<SparseMassStatistics> {
+        match self {
+            Self::Lumped(_) => None,
+            Self::Consistent { axes, .. } => sparse::statistics(axes),
         }
     }
 

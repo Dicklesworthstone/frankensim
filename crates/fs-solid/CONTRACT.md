@@ -262,6 +262,62 @@ mass profiles with different native supported modes; off-diagonal modal
 inertia and pressure work; partition/permutation invariance; original uniform
 bits through modes and nonlinear motion; and typed input/cancellation refusal.
 
+## Sparse consistent reference inertia for nonlinear membrane motion
+
+`MembraneMotion::new_with_sparse_consistent_inertia` extends the existing
+nonlinear momentum-Verlet lane to explicitly admitted sparse mass blocks,
+beyond the dense entry's 512-free-node scalar leaf. The original exact P1
+reference-density element kernel supplies every physical mass contribution;
+deterministic COO assembly preserves element accumulation order before
+reference row sums scale solver coordinates. No density averaging, diagonal
+replacement, resampled inertia or substitute force law enters this path.
+For positive P1 triangle density, the exact quadratic forms obey
+`D/5 <= M <= D`, with D the positive reference row sums; assembly and stationary
+support elimination preserve this bound. This controls the scaled physical
+mass independently of density contrast in exact arithmetic. Nonfinite values
+or a numerical factor without strictly positive inertia refuse.
+
+One original `fs-sparse::direct::SymbolicLdlt` analysis and LDLT factorization
+is prepared per distinct Cartesian support pattern, using the caller's
+existing Natural, AMD or nested-dissection ordering. Nested dissection receives
+the original reference node coordinates. Equal patterns and cloned checkpoints
+share immutable numeric factors and their prepared solve permutations. The
+existing `LdltFactor::solve_in_place` acts directly on the motion's retained
+axis-major output slice; warm inverse actions allocate no mass matrix, gather
+buffer or solve workspace. `sparse_inertia_statistics()` reports distinct
+factor storage and per-inverse factor nonzeros, counting shared factors once
+for storage and once per active axis for work. These are counts and original
+numeric-owner payload bounds, not measured throughput.
+
+`SparseConsistentMassBudget` explicitly admits free nodes and original staged
+element contributions before sparse assembly. Retained symbolic bytes,
+predicted factor nonzeros and the existing no-delay structural flop estimate
+are checked after synchronous analysis and before numeric factorization.
+The original direct owner's strict numeric-payload cap includes its fronts,
+updates, factors, scratch and prepared solve permutations. Actual factor
+nonzeros are checked again before accepting the prepared motion; two
+triangular traversals plus linear permutation/scaling work bound each warm
+inverse action. At most three different factors are retained. These per-factor
+limits are not a whole-process RSS cap, a symbolic-construction peak-memory
+cap, or a wall-clock guarantee. Cancellation polls cover assembly and the
+boundaries of original synchronous COO/ordering/analysis/factor/solve leaves;
+those leaves do not provide mid-operation interruption.
+
+The same physical initial momentum, kinetic energy and polarized energy
+increment remain in use. Stationary support impulses retain the original
+`M_sf * delta_v` contribution and endpoint force kicks. The source force,
+accepted-state publication, checkpoint replay and failure/cancellation
+atomicity retain their original owners. The lumped and bounded dense public
+entries retain their previous arithmetic and selection behavior.
+
+Four focused regressions in `tests/membrane/sparse_inertia.rs` assert
+all-ordering dense parity for graded nonlinear supported motion, full-space
+support impulse balance, sparse factor sharing and uniform acceleration on a
+625-node graded sheet, all explicit allowance refusals, late cancellation and
+checkpoint replay, and finite kinetic energy across 560 orders of reference
+mass ratio. These manufactured cases do not establish measured-material
+fidelity, mesh/time convergence, automatic stability or real-time performance.
+
 ## Consistent reference inertia in nonlinear membrane motion
 
 `MembraneMotion::new_with_consistent_inertia` uses the original nonlinear
@@ -271,8 +327,9 @@ existing cancellable `fs-la` Cholesky owner. Positive reference row sums
 scale solver coordinates before factorization; all off-diagonal physical
 mass terms remain present. Equal support patterns share one immutable
 factor. The explicit `ConsistentMassBudget` and hard 512-node per-axis leaf
-cap bound dense preparation and triangular solves. Large-mesh sparse inversion
-and automatic stability bounds are not claimed.
+cap bound dense preparation and triangular solves. The explicit sparse entry
+above owns larger sparse inverse preparations; automatic stability bounds
+are not claimed by either entry.
 
 Initial velocities become physical nodal momentum through the same original
 consistent matrix, then are recovered with the prepared inverse; factorization
