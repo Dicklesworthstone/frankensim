@@ -3150,6 +3150,15 @@ torque work, prescribed-support work, contact loss and native drift defect
 remain separate. Contact loss is unallocated mechanical dissipation, including
 possible normal timestep loss; it is not automatically friction heat.
 
+Whole-trajectory conservation uses compensated sums of the original native
+kick/contact/drift increment residuals, with one unchanged global tolerance.
+Absolute kinetic energies and orbital momenta do not define this balance by
+subtraction: a large common translation or a distant origin cannot erase a
+small contact loss or support torque. Source/support work, support impulses
+and loss diagnostics also use compensated chronological reductions. Multiple
+locally admitted impulse errors can still exhaust the whole-call allowance
+and refuse the complete trajectory without changing caller-owned bodies.
+
 The caller's maximum step controls the original first-order force/contact/drift
 approximation. Geometry retries do not establish an adaptive time-error
 estimate. This numerical lane supports straight drift of spheres and fixed

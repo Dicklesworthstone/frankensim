@@ -136,6 +136,166 @@ fn balances(report: &SphereSceneReport, duration: f64) {
 }
 
 #[test]
+fn g3_whole_scene_retains_small_impact_loss_under_a_large_tangent_boost() {
+    let properties = [property(1.0)];
+    let duration = 0.125;
+    for boost in [0.0, 1e6] {
+        let mut bodies = [body(
+            Vec3::new(0.0, 0.0, RADIUS + CLEARANCE),
+            Vec3::new(boost, 0.0, -0.3),
+            1.0,
+        )];
+        let report = advance_sphere_scene(
+            &mut bodies,
+            &properties,
+            &[sphere(10)],
+            &[plane(Vec3::new(boost, 0.0, 0.0))],
+            &[Wrench::ZERO],
+            Gravity::ZERO,
+            0.0,
+            duration,
+            controls(1.0 / 32.0),
+            |_| Some(law(0.0, 0.5)),
+            &CancelGate::new(),
+        )
+        .unwrap_or_else(|error| panic!("boost={boost}: {error:?}"));
+        balances(&report, duration);
+        vector(
+            bodies[0].linear_momentum_world(),
+            Vec3::new(boost, 0.0, 0.15),
+            1e-12,
+        );
+        // The normal kinetic-energy loss is independent of tangent motion.
+        close(report.unallocated_contact_loss_j, 0.03375, 1e-12);
+        close(report.support_work_j, 0.0, 1e-12);
+        close(report.force_impulse_work_j, 0.0, 1e-12);
+        vector(report.support_impulse_ns, Vec3::new(0.0, 0.0, 0.45), 1e-12);
+        assert_eq!(report.steps.len(), 4);
+        if boost != 0.0 {
+            // The two diagnostic energies cannot resolve the original loss
+            // to the existing acceptance tolerance. Native increments can.
+            assert!(
+                (report.kinetic_after_j - report.kinetic_before_j
+                    + report.unallocated_contact_loss_j)
+                    .abs()
+                    > controls(1.0 / 32.0).step.work_energy_tolerance_j
+            );
+        }
+    }
+}
+
+#[test]
+fn g3_whole_scene_retains_support_torque_beside_large_orbital_momentum() {
+    let properties = [property(1.0)];
+    let origin = Vec3::new(0.7, -0.4, 1e9);
+    let boost = 1e6;
+    let initial = body(
+        origin.add(Vec3::new(0.0, 0.0, RADIUS)),
+        Vec3::new(boost, 0.0, -0.3),
+        1.0,
+    );
+    let mut bodies = [initial];
+    let mut support = plane(Vec3::new(boost, 0.0, 0.0));
+    support.point_world = origin;
+    let duration = 0.125;
+    let report = advance_sphere_scene(
+        &mut bodies,
+        &properties,
+        &[sphere(10)],
+        &[support],
+        &[Wrench::ZERO],
+        Gravity::ZERO,
+        0.0,
+        duration,
+        controls(1.0 / 32.0),
+        |_| Some(law(0.0, 0.0)),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    balances(&report, duration);
+    vector(
+        bodies[0].linear_momentum_world(),
+        Vec3::new(boost, 0.0, 0.0),
+        1e-12,
+    );
+    close(report.unallocated_contact_loss_j, 0.045, 1e-12);
+    vector(
+        report.support_angular_impulse_nms,
+        Vec3::new(-0.12, -0.21, 0.0),
+        1e-12,
+    );
+    // The actual support couple is smaller than the absolute orbital totals'
+    // resolution. It must still be retained in the whole-call balance.
+    let naive_change = bodies[0]
+        .pose()
+        .position_world()
+        .cross(bodies[0].linear_momentum_world())
+        .sub(
+            initial
+                .pose()
+                .position_world()
+                .cross(initial.linear_momentum_world()),
+        );
+    assert!((naive_change.y - report.support_angular_impulse_nms.y).abs() > 0.01);
+}
+
+#[test]
+fn whole_scene_accumulates_native_impulse_errors_before_atomic_publication() {
+    // Each representable kick misses its command by about 6e-9 N s, inside
+    // the unchanged per-step limit. Four same-sign misses exceed the global
+    // limit even though every individual native step remains admissible.
+    let mass = 2_f64.powi(26);
+    let properties = [property(mass)];
+    let initial = [body(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), mass)];
+    let wrench = Wrench {
+        force_world: Vec3::new(0.1, 0.0, 0.0),
+        torque_body: Vec3::ZERO,
+    };
+    let mut separate = initial;
+    let mut residual = 0.0;
+    for index in 0..4 {
+        let report = advance_sphere_scene(
+            &mut separate,
+            &properties,
+            &[sphere(10)],
+            &[],
+            &[wrench],
+            Gravity::ZERO,
+            f64::from(index),
+            1.0,
+            controls(1.0),
+            |_| None,
+            &CancelGate::new(),
+        )
+        .unwrap();
+        residual += report.linear_momentum_residual_ns.x;
+    }
+    assert!(residual.abs() > controls(1.0).step.linear_momentum_tolerance_ns);
+
+    let mut refused = initial;
+    let failure = advance_sphere_scene(
+        &mut refused,
+        &properties,
+        &[sphere(10)],
+        &[],
+        &[wrench],
+        Gravity::ZERO,
+        0.0,
+        4.0,
+        controls(1.0),
+        |_| None,
+        &CancelGate::new(),
+    );
+    assert!(matches!(
+        failure,
+        Err(SphereSceneError::Audit(
+            "whole-call native momentum or energy"
+        ))
+    ));
+    assert_eq!(refused, initial);
+}
+
+#[test]
 fn automatic_floor_settling_and_resting_support_do_not_create_micro_bounces() {
     let properties = [property(1.0)];
     let spheres = [sphere(10)];

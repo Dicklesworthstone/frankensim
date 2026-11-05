@@ -27,6 +27,7 @@ use fs_contact::broad_phase::{
 use fs_contact::frictional_multicontact::NormalVelocityLaw;
 use fs_contact::swept_sphere::{SweptSphereInput, first_sphere_contact};
 use fs_exec::CancelGate;
+use fs_math::dd::Dd;
 
 /// Infinite plane translating with constant velocity and a fixed normal.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,7 +136,11 @@ pub struct SphereSceneReport {
     /// No friction-heat partition is inferred.
     pub unallocated_contact_loss_j: f64,
     pub drift_energy_defect_j: f64,
+    /// Sum of the actual native kick/contact/drift energy residuals. Absolute
+    /// kinetic totals remain diagnostics, not a subtraction-based balance.
     pub total_energy_residual_j: f64,
+    /// Actual native momentum increments minus the applied/support impulses,
+    /// accumulated over the complete call without subtracting scene totals.
     pub linear_momentum_residual_ns: Vec3,
     pub angular_momentum_residual_nms: Vec3,
 }
@@ -248,17 +253,18 @@ impl Queries {
 }
 #[derive(Default)]
 struct Exchange {
-    force_work: f64,
-    displacement_work: f64,
-    splitting_work: f64,
-    torque_work: f64,
-    support_work: f64,
-    loss: f64,
-    drift_defect: f64,
-    applied_linear: Vec3,
-    applied_angular: Vec3,
-    support_linear: Vec3,
-    support_angular: Vec3,
+    force_work: Dd,
+    displacement_work: Dd,
+    splitting_work: Dd,
+    torque_work: Dd,
+    support_work: Dd,
+    loss: Dd,
+    drift_defect: Dd,
+    energy_residual: Dd,
+    linear_residual: [Dd; 3],
+    angular_residual: [Dd; 3],
+    support_linear: [Dd; 3],
+    support_angular: [Dd; 3],
 }
 
 /// Advance a complete sphere/plane scene through native simultaneous contact.
@@ -281,6 +287,11 @@ struct Exchange {
 /// contact solve and complete path admission. Other
 /// refusals propagate. All accepted intervals remain private until the full
 /// duration and global native momentum/work gates succeed.
+/// The complete-call gates accumulate the original native increment residuals
+/// against one global tolerance. An unrelated large kinetic or orbital-momentum
+/// background cannot erase a small impulse, and locally admitted errors can
+/// still exceed the complete-call budget. Source/support work and impulse
+/// diagnostics use the same compensated chronological reduction.
 ///
 /// The native free attitude integrator retains its asymmetric-body accuracy
 /// limits. This does not provide arbitrary-shape CCD, pose repair, exact
@@ -313,7 +324,7 @@ pub fn advance_sphere_scene(
         controls,
         gate,
     )?;
-    let (before, linear_before, angular_before) = super::totals(bodies, properties, gate)?;
+    let (before, _, _) = super::totals(bodies, properties, gate)?;
     let mut staged = bodies.to_vec();
     let mut steps = Vec::new();
     let mut queries = Queries::default();
@@ -345,9 +356,6 @@ pub fn advance_sphere_scene(
             if h <= 0.0 || elapsed + h == elapsed || time + h == time {
                 return Err(SphereSceneError::NoProgress);
             }
-            let original = &staged;
-            let (applied_linear, applied_angular) =
-                applied_kick(original, properties, wrenches, gravity, h, gate)?;
             let result = step_rigid_frictional_contacts(
                 &mut staged,
                 properties,
@@ -360,11 +368,7 @@ pub fn advance_sphere_scene(
                 gate,
             );
             match result {
-                Ok(report) => {
-                    exchange.applied_linear = exchange.applied_linear.add(applied_linear);
-                    exchange.applied_angular = exchange.applied_angular.add(applied_angular);
-                    break report;
-                }
+                Ok(report) => break report,
                 Err(error) => {
                     if gate.is_requested() {
                         return Err(SphereSceneError::Cancelled);
@@ -404,19 +408,37 @@ pub fn advance_sphere_scene(
             return Err(SphereSceneError::NoProgress);
         }
         minimum_gap = minimum_gap.min(native.path_admission.minimum_path_gap_m);
-        exchange.force_work += native.force_impulse_work_j;
-        exchange.displacement_work += native.force_displacement_work_j;
-        exchange.splitting_work += native.force_splitting_work_j;
-        exchange.torque_work += native.torque_impulse_work_j;
-        exchange.support_work += native.impact.support_work_j;
-        exchange.support_linear = exchange
-            .support_linear
-            .add(native.impact.support_impulse_ns);
-        exchange.support_angular = exchange
-            .support_angular
-            .add(native.impact.support_angular_impulse_nms);
-        exchange.loss += native.impact.contact.dissipated_energy;
-        exchange.drift_defect += native.drift_energy_defect_j;
+        exchange.force_work = exchange.force_work + Dd::from_f64(native.force_impulse_work_j);
+        exchange.displacement_work =
+            exchange.displacement_work + Dd::from_f64(native.force_displacement_work_j);
+        exchange.splitting_work =
+            exchange.splitting_work + Dd::from_f64(native.force_splitting_work_j);
+        exchange.torque_work = exchange.torque_work + Dd::from_f64(native.torque_impulse_work_j);
+        exchange.support_work = exchange.support_work + Dd::from_f64(native.impact.support_work_j);
+        super::add_vector(
+            &mut exchange.support_linear,
+            native.impact.support_impulse_ns,
+        );
+        super::add_vector(
+            &mut exchange.support_angular,
+            native.impact.support_angular_impulse_nms,
+        );
+        exchange.loss = exchange.loss + Dd::from_f64(native.impact.contact.dissipated_energy);
+        exchange.drift_defect = exchange.drift_defect + Dd::from_f64(native.drift_energy_defect_j);
+        // Each native residual measures actual represented kick/contact/drift
+        // increments against the original commands. They telescope because the
+        // next accepted step starts at this exact staged endpoint. Reconstructing
+        // the balance from absolute scene totals would discard those increments.
+        exchange.energy_residual =
+            exchange.energy_residual + Dd::from_f64(native.total_energy_residual_j);
+        super::add_vector(
+            &mut exchange.linear_residual,
+            native.linear_momentum_residual_ns,
+        );
+        super::add_vector(
+            &mut exchange.angular_residual,
+            native.angular_momentum_residual_nms,
+        );
         steps.push(SphereSceneStep {
             elapsed_s: elapsed,
             contact_keys: keys,
@@ -425,32 +447,37 @@ pub fn advance_sphere_scene(
         });
     }
     poll(gate)?;
-    let (after, linear_after, angular_after) = super::totals(&staged, properties, gate)?;
-    let energy_residual =
-        after - before - exchange.force_work - exchange.torque_work - exchange.support_work
-            + exchange.loss;
-    let linear = linear_after
-        .sub(linear_before)
-        .sub(exchange.applied_linear)
-        .sub(exchange.support_linear);
-    let angular = angular_after
-        .sub(angular_before)
-        .sub(exchange.applied_angular)
-        .sub(exchange.support_angular);
+    let (after, _, _) = super::totals(&staged, properties, gate)?;
+    let energy_residual = exchange.energy_residual.to_f64();
+    let linear = super::rounded_vector(exchange.linear_residual);
+    let angular = super::rounded_vector(exchange.angular_residual);
+    let force_work = exchange.force_work.to_f64();
+    let displacement_work = exchange.displacement_work.to_f64();
+    let splitting_work = exchange.splitting_work.to_f64();
+    let torque_work = exchange.torque_work.to_f64();
+    let support_work = exchange.support_work.to_f64();
+    let support_linear = super::rounded_vector(exchange.support_linear);
+    let support_angular = super::rounded_vector(exchange.support_angular);
+    let loss = exchange.loss.to_f64();
+    let drift_defect = exchange.drift_defect.to_f64();
     if [
+        before,
+        after,
         energy_residual,
-        exchange.force_work,
-        exchange.displacement_work,
-        exchange.splitting_work,
-        exchange.torque_work,
-        exchange.support_work,
-        exchange.loss,
-        exchange.drift_defect,
+        force_work,
+        displacement_work,
+        splitting_work,
+        torque_work,
+        support_work,
+        loss,
+        drift_defect,
         super::magnitude(linear),
         super::magnitude(angular),
     ]
     .iter()
     .any(|x| !x.is_finite())
+        || !support_linear.is_finite()
+        || !support_angular.is_finite()
         || energy_residual.abs() > controls.step.work_energy_tolerance_j
         || super::magnitude(linear) > controls.step.linear_momentum_tolerance_ns
         || super::magnitude(angular) > controls.step.angular_momentum_tolerance_nms
@@ -471,15 +498,15 @@ pub fn advance_sphere_scene(
         minimum_path_gap_m: minimum_gap,
         kinetic_before_j: before,
         kinetic_after_j: after,
-        force_impulse_work_j: exchange.force_work,
-        force_displacement_work_j: exchange.displacement_work,
-        force_splitting_work_j: exchange.splitting_work,
-        torque_impulse_work_j: exchange.torque_work,
-        support_work_j: exchange.support_work,
-        support_impulse_ns: exchange.support_linear,
-        support_angular_impulse_nms: exchange.support_angular,
-        unallocated_contact_loss_j: exchange.loss,
-        drift_energy_defect_j: exchange.drift_defect,
+        force_impulse_work_j: force_work,
+        force_displacement_work_j: displacement_work,
+        force_splitting_work_j: splitting_work,
+        torque_impulse_work_j: torque_work,
+        support_work_j: support_work,
+        support_impulse_ns: support_linear,
+        support_angular_impulse_nms: support_angular,
+        unallocated_contact_loss_j: loss,
+        drift_energy_defect_j: drift_defect,
         total_energy_residual_j: energy_residual,
         linear_momentum_residual_ns: linear,
         angular_momentum_residual_nms: angular,
@@ -937,36 +964,6 @@ fn checked_gap(gap: f64, contact: SphereSceneContactKey) -> Result<f64, SphereSc
         });
     }
     Ok(gap)
-}
-fn applied_kick(
-    bodies: &[RigidBodyState],
-    properties: &[MassProperties],
-    wrenches: &[Wrench],
-    gravity: Gravity,
-    h: f64,
-    gate: &CancelGate,
-) -> Result<(Vec3, Vec3), SphereSceneError> {
-    let mut linear = Vec3::ZERO;
-    let mut angular = Vec3::ZERO;
-    for ((body, property), wrench) in bodies.iter().zip(properties).zip(wrenches) {
-        poll(gate)?;
-        let impulse = wrench
-            .force_world
-            .add(gravity.acceleration_world().scale(property.mass()))
-            .scale(h);
-        linear = linear.add(impulse);
-        angular = angular
-            .add(body.pose().position_world().cross(impulse))
-            .add(
-                body.pose()
-                    .orientation()
-                    .rotate_body_to_world(wrench.torque_body.scale(h)),
-            );
-    }
-    if !linear.is_finite() || !angular.is_finite() {
-        return Err(SphereSceneError::Audit("applied kick range"));
-    }
-    Ok((linear, angular))
 }
 fn geometry_poll(gate: &CancelGate) -> Result<(), SphereScenePathError> {
     if gate.is_requested() {
