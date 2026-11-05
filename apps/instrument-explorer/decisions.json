@@ -732,6 +732,17 @@
    "refs": [
     "frankensim-irp-v5-instrument-realism-pexfp.270"
    ]
+  },
+  {
+   "date": "2026-11-05",
+   "kind": "ruling",
+   "title": "The tuba sounds on a bore read off a published figure, with a borrowed trombone mouthpiece",
+   "decided": "The first tuba pages use the tuba profile printed as Fig. 3 of Campbell and Myers (2023, Forum Acusticum, DOI 10.61782/fa.2023.0481, open access under CC BY 3.0), read off the figure to within 5 mm along the tube and 1.5 mm in diameter, with valve loops of our own arithmetic. No tuba mouthpiece profile is printed in the open sources found, so every note carries the tenor trombone card's cup, throat and backbore (Braden 2006, Fig. 5.3), named as borrowed and smaller than a tuba's. Each note is the lowest of seven lip settings that holds it within 60 c; no pitch is an input.",
+   "why": "The family card said no numeric tuba bore had been found and nothing was rendered. With the borrowed cup the harmonic-pattern distance to the recording roughly halves on every note (12.2 to 6.9 on Bb2, 11.7 to 5.9 on B2, 12.5 to 9.5 on G3), so the owner's opt-in-everything order puts it on.",
+   "effect": "Bb2, B2 and G3 now sound, each also rendered without the mouthpiece and the difference stated on its page. C2 stays empty: its derived loop sounds 146 c sharp and no lip setting holds C2. The recordings are Iowa's Mirafone CC tuba, a different instrument; every note is darker and cleaner than its recording.",
+   "refs": [
+    "frankensim-irp-v5-instrument-realism-pexfp.262"
+   ]
   }
  ]
 }

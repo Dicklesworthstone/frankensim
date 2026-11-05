@@ -3,15 +3,25 @@
   "family": "tuba",
   "title": "Tuba",
   "reference_instrument": "University of Iowa MIS tuba (Mirafone 1865U CC tuba, performer D. Spies, per MIStuba.html)",
-  "summary": "Not rendered. The generic lip-valve performer is ready, but no numeric bore profile of the Mirafone 1865U, or of any tuba, was found. What the 11-04 hunt read: Myers (2019) has no open PDF that could be found, and its repository host (core.ac.uk) answered 403, which was not worked around; museum catalogue records for tubas print only overall sizes (length, bell diameter), no profile; Mattéoli (2022) Fig. 8 plots the bore of a euphonium, not a tuba, as a figure, and only to about 65 mm diameter, short of the bell; the one tuba bell profile found earlier is a figure with no numbers. The family stays blocked on geometry, and it is graded from the second harmonic upward until the chamber cutoff is sourced, as the bead states.",
+  "summary": "Limits: a bore read off a raster figure (within 5 mm along the tube and 1.5 mm in diameter, 10 % at the leadpipe) of a tuba of unnamed make; a mouthpiece borrowed from a tenor trombone, smaller than a tuba's; valve loops of our own arithmetic; lip and blowing borrowed from a trombone; the recordings are Iowa's Mirafone CC tuba, a different instrument; every note is darker than its recording and too clean. The bore is the profile in Fig. 3 of Campbell and Myers (2023, CC BY 3.0). Bb2, B2 and G3 sound on it from a lip ladder, with no pitch an input, each also rendered without the mouthpiece; C2 stays empty, since its loop sounds 146 c sharp and no setting holds it. The family is graded from the second harmonic upward.",
   "physics_present": [
-    "the generic lip-valve performer, outlet observer and file format used for the tenor trombone, which would take a tuba bore once one is supplied (a tuba bell needs a far lower mechanics clock, since the flanged radiation ceiling scales with bell radius)"
+    "the bore: one tuba's profile read off Fig. 3 of Campbell and Myers (2023, open access under CC BY 3.0), 3.627 m, 54 cones from x = 20 mm to a bell rim of 273.6 mm, within 5 mm along the tube and 1.5 mm in diameter; the engine's own scan puts its resonances on an F tuba's series from the second to the tenth within 80 c, and nothing was fitted to get that",
+    "a mouthpiece, BORROWED from a tenor trombone: the cup, throat and backbore of the trombone card (Braden 2006, Fig. 5.3, digitised from a figure), a 25.7 mm cup, a 7.8 mm throat, a backbore to 10.3 mm, 9.5 ml for cup and throat; it is not a tuba's, and the flow-noise row takes its cup rim radius, 12.86 mm",
+    "valve loops of our own arithmetic: the bore's 3.627 m times 2^(n/12) - 1 of straight tube (215.7 mm for B2, 444.2 mm for Bb2 and G3), n the open bore's nearest resonance above the note rounded, spliced at the 16.4 mm station nearest 1 m from the mouthpiece; derived, not measured, no bends or ports",
+    "the horn card's lip, blowing and microphone, which are the tenor trombone's: Cullen's (2000) embouchure 19, a flat 6.22 kPa from rest, a flanged modal bell, the receiver 1.524 m on axis with a declared 3.9 kHz band, and the flow-noise row at the lips (Oldham and Ukpoho 1990, extrapolated)",
+    "notes from a lip ladder: seven lip settings per note, and the lowest one that holds a single partial for its last second within 60 c of the note is the page's; no pitch is an input and the lip multiplier is a player's setting that no print gives"
   ],
   "physics_missing": [
-    "the bore, valve tubing and mouthpiece of the Mirafone 1865U: UNKNOWN as numbers; no open source gives a whole tuba bore (Myers 2019: no open PDF found; museum records: overall sizes only; Mattéoli 2022 Fig. 8: euphonium, figure only, to about 65 mm diameter)",
-    "the chamber cutoff of the Iowa recording room below which the tuba's fundamentals are not trustworthy (the pages state absorption down to 60 Hz); the bead already says to grade from the second harmonic",
-    "a same-model impedance pair, and everything the trombone lacks that also applies here"
+    "A tuba's own mouthpiece: none is printed in the open sources we found (Myers 1998 prints tuba cup volumes and shank diameters only; makers' catalogues give cup diameter and throat only). The borrowed trombone cup is 25.7 mm across against tuba cups' 30 to 33.5 mm, and it moves the notes (Bb2 36 c, B2 34 c and G3 22 c lower at the same lip setting) and the noise, so a tuba player's mouthpiece would move them again",
+    "The specimen: the paper does not name the tuba, and its length is F-length, while the recordings are Iowa's Mirafone 1865U CC tuba, so a note's pitch agreeing with a recording is a coincidence, not a check",
+    "Valves: only the loops of the notes shown exist, as straight tube spliced in the narrow leadpipe, which makes the bore's resonances sit above the length arithmetic and more so as the loop grows; every other valve combination, the fourth valve and the tuning slide are absent",
+    "C2: the four-semitone loop puts the bore's second resonance 146 c above C2, and none of seventeen lip settings holds a note within 60 c of it (the closest is 148 c sharp). The rule was fixed before the render and no second loop was tried",
+    "The sound: H2 to H5 are 3 to 26 dB under the recordings, with dips made at the lip, the spectral centroid is 0.56 to 0.72 of the recordings', the floor between the harmonics below 1 kHz is 12 to 38 dB too clean, and the harmonics-to-noise ratio is 5 to 14 dB too high",
+    "A tuba player's lip: the lip is an artificial latex lip measured on a trombone-size mouthpiece, with channel width and rest gap that are not a tuba player's",
+    "The chamber cutoff of the Iowa recording room below which the tuba's fundamentals are not trustworthy (the pages state absorption down to 60 Hz): the family is graded from the second harmonic upward until it is sourced, as the bead states"
   ],
-  "blocked": "No numeric tuba bore found in open literature (the only tuba bell profile located is figure-only; the euphonium bore of Mattéoli 2022 is figure-only and stops short of the bell).",
-  "beads": ["pexfp.262"]
+  "blocked": null,
+  "beads": [
+    "pexfp.262"
+  ]
 }
