@@ -1,5 +1,8 @@
 //! Source-preserving pressure saturation through real material-card resolvers.
 
+#[path = "source_plastic_contact/temperature.rs"]
+mod temperature;
+
 #[path = "source_point/common.rs"]
 mod common;
 
@@ -8,19 +11,15 @@ use fs_blake3::hash_domain;
 use fs_contact::interface_binding::BoundNormalInterfaceState;
 use fs_contact::normal_patch::FiniteGapGrid;
 use fs_contact::normal_patch::plastic_source::{
-    PlasticContactControls, PlasticContactEnvelope, SourcePlasticContact,
-    SourcePlasticContactError,
+    PlasticContactControls, PlasticContactEnvelope, SourcePlasticContact, SourcePlasticContactError,
 };
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_matdb::{
-    HardnessLoadStep, HardnessTestContext, InterpolationPolicy, MaterialCard,
-    ObservationDataset, PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint,
-    UncertaintyModel,
+    HardnessLoadStep, HardnessTestContext, InterpolationPolicy, MaterialCard, ObservationDataset,
+    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel,
 };
-use fs_material::hardness::{
-    INDENTATION_HARDNESS_QUANTITY, IndentationHardnessStatePoint,
-};
+use fs_material::hardness::{INDENTATION_HARDNESS_QUANTITY, IndentationHardnessStatePoint};
 use fs_material::state_point::{
     MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
     resolve_material_state_point,
@@ -105,25 +104,29 @@ fn sources(
     values: [f64; 2],
     test: &str,
     adhesion: f64,
-) -> (BoundNormalInterfaceState, [IndentationHardnessStatePoint; 2]) {
+) -> (
+    BoundNormalInterfaceState,
+    [IndentationHardnessStatePoint; 2],
+) {
     let a = material("A", values[0], test);
     let b = material("B", values[1], test);
     let resolve = |(card, key): &(MaterialCard, PropertyKey)| {
         let state = resolve_material_state_point(
             card,
             &common::query(),
-            &[ScalarPropertyRequirement::try_with_key(
-                key,
-                ScalarAdmissibility::StrictlyPositive,
-            )
-            .unwrap()],
+            &[
+                ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::StrictlyPositive)
+                    .unwrap(),
+            ],
             MaterialPropertySelection::SingleClaimOnly,
         )
         .unwrap();
         IndentationHardnessStatePoint::try_from_resolved(state, key.clone()).unwrap()
     };
     let hardness = [resolve(&a), resolve(&b)];
-    let normal = common::bind(&a.0, &b.0, None, adhesion).normal_state().clone();
+    let normal = common::bind(&a.0, &b.0, None, adhesion)
+        .normal_state()
+        .clone();
     (normal, hardness)
 }
 
@@ -211,8 +214,7 @@ fn equal_numbers_do_not_erase_original_source_or_surface_roles() {
     with_cx(|cx, _| {
         let (normal, hardness) = sources([1.0e6, 2.0e6], "base", 0.0);
         let a = build(normal.clone(), hardness.clone(), envelope(), cx).unwrap();
-        let (other_normal, other_hardness) =
-            sources([1.0e6, 2.0e6], "different-test", 0.0);
+        let (other_normal, other_hardness) = sources([1.0e6, 2.0e6], "different-test", 0.0);
         let b = build(other_normal, other_hardness.clone(), envelope(), cx).unwrap();
         assert_eq!(a.model().identity(), b.model().identity());
         assert_ne!(a.identity(), b.identity());

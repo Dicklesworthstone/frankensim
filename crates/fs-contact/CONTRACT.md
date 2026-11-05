@@ -2790,3 +2790,53 @@ and reload, softening-induced indentation, increased hardness without healing,
 changed elasticity, retained recession during material refresh, no-op history,
 independent work accounts, small parameter work, two-cell pressure redistribution
 and additional yielding, and incompatible-geometry/source refusal.
+
+## Original-source thermal and Archard evolution of the finite contact surface
+
+`plastic_source::SourcePlasticContact::refresh_at_temperatures` reuses the
+existing ordered normal-source temperature resolver and exact hardness adapters.
+Each body retains its own prescribed absolute temperature and the interface
+retains its separately prescribed temperature. Immutable cards, selected claims,
+indentation tests and non-temperature coordinates stay original. The original
+normal source, geometry, approach and physical envelope accompany native
+material continuation. Extra yielding must pass the same permanent-depth and
+footprint limits as mechanical loading. No-op queries preserve source/history
+identity, including the original selection receipts.
+
+`plastic_source::wear::SourcePlasticArchardWear` couples native Archard
+removal to this actual contact field. For each original cell it uses the
+accepted normal pressure p_i and caller-supplied unsigned irreversible local
+sliding distance s_i. Each body has its own original coefficient k and hardness
+H; the pressure cap's minimum hardness is not substituted for either body's
+wear denominator. Initial-pressure quadrature gives
+M = sum(p_i*s_i*cell_area), delta(V_body) = (k_body/H_body)*M, and
+delta(recession_body_i) = (k_body/H_body)*p_i*s_i.
+The aggregate volume update reuses the native Archard owner. No source lookup
+or provenance clone occurs inside the cell loop.
+
+Each body retains a separate removed-volume inventory and recession profile;
+their relative increment drives native held-approach re-equilibration.
+Represented depth increments, integrated removed volume and retained inventory
+must agree within explicit floating arithmetic allowances. A positive update
+that disappears from a retained profile or inventory refuses. Body-specific
+recession bounds and footprint/remaining-homogeneous-depth limits remain active
+after wear and during subsequent loading. Plastic indentation and removed
+volume are distinct physical histories and are never charged twice.
+
+The wear owner also composes prescribed-temperature continuation: original
+interface coefficients and both body hardnesses refresh through pinned claims,
+while both removed-volume inventories, both profiles and the contact history
+remain intact. Its complete candidate includes pressure redistribution,
+elastic-storage changes and any additional plastic work. There is no inferred
+frictional heat, debris destination, bulk mass loss, or global mesh/topology
+update. The local sliding field must come from the actual tangential owner;
+elastic tangential motion does not imply irreversible slip.
+
+This beginning-pressure wear quadrature is first order in sliding distance.
+Refinement is required as pressure redistributes; finite-distance accuracy is
+not inferred from exact endpoint equilibrium. Focused source tests cover
+separate hardnesses, loaded versus unloaded-cell sliding, unloading an existing
+dent by wear, retained reload history, scalar/profile volume agreement, a
+single-cell pressure-decay refinement oracle, late physical-domain refusal,
+and temperature changes after wear. These are numerical/model tests, not
+experimental qualification of a material pair.

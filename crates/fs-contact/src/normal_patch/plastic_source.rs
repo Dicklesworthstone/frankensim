@@ -2,13 +2,18 @@
 //!
 //! This is a quasistatic surface pressure-saturation approximation. The ordered
 //! source pair supplies the elastic modulus, and the softer surface's original
-//! test-specific pressure-valued indentation hardness supplies the pressure cap. Permanent
-//! depth describes the relative surface gap; it is not arbitrarily divided
+//! test-specific pressure-valued indentation hardness supplies the pressure cap.
+//! Permanent depth describes the relative surface gap; it is not arbitrarily divided
 //! between the bodies. No yield-stress or empirical hardness-scale conversion
 //! is inferred.
 //!
-//! Material state and external conditions are fixed for the lifetime of this
-//! owner. Changing them requires an explicit physical history-transfer law.
+//! Material state and external conditions are fixed for each owner. Explicit
+//! thermal and wear continuations retain the original irreversible history.
+
+/// Original temperature-dependent material properties with retained history.
+pub mod temperature;
+/// Local Archard recession and its effect on the original contact pressure.
+pub mod wear;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
@@ -124,7 +129,13 @@ impl SourcePlasticContact {
         cx: &Cx<'_>,
     ) -> Result<Self, SourcePlasticContactError> {
         if normal.adhesion_energy_j_per_m2() != 0.0
-            || normal.elastic().interface().card().context().third_body.is_some()
+            || normal
+                .elastic()
+                .interface()
+                .card()
+                .context()
+                .third_body
+                .is_some()
         {
             return Err(SourcePlasticContactError::Invalid(
                 "pressure saturation requires a nonadhesive dry interface without a third body",
@@ -189,8 +200,7 @@ impl SourcePlasticContact {
             },
             cx,
         )?;
-        let mut hasher =
-            DomainHasher::new("org.frankensim.fs-contact.source-plastic-gap.v1");
+        let mut hasher = DomainHasher::new("org.frankensim.fs-contact.source-plastic-gap.v1");
         hasher.update(normal.identity().as_bytes());
         for source in &hardness {
             hasher.update(source.identity().as_bytes());
@@ -256,14 +266,35 @@ impl SourcePlasticContact {
                 "history belongs to different original material sources",
             ));
         }
+        within("approach [m]", approach_m, self.envelope.maximum_approach_m)?;
+        let advance = self.model.advance(&before.contact, approach_m, cx)?;
+        self.admit_candidate(&advance.candidate, cx)?;
+        Ok(SourcePlasticContactAdvance {
+            source_identity: self.identity,
+            candidate: SourcePlasticContactState {
+                owner: self.identity,
+                contact: advance.candidate,
+            },
+            receipt: advance.receipt,
+        })
+    }
+
+    // Mechanical, thermal and wear candidates face the same physical domain.
+    // A continuation cannot evade a late depth or footprint refusal.
+    fn admit_candidate(
+        &self,
+        candidate: &FiniteGapPlasticState,
+        cx: &Cx<'_>,
+    ) -> Result<(), SourcePlasticContactError> {
+        if candidate.owner_identity() != self.model.identity() {
+            return Err(FiniteGapPlasticError::ForeignState.into());
+        }
         within(
             "approach [m]",
-            approach_m,
+            candidate.approach_m(),
             self.envelope.maximum_approach_m,
         )?;
-        let advance = self.model.advance(&before.contact, approach_m, cx)?;
-        let maximum_depth = advance
-            .candidate
+        let maximum_depth = candidate
             .plastic_depth_m()
             .iter()
             .copied()
@@ -278,12 +309,10 @@ impl SourcePlasticContact {
         // disk would underestimate separated or elongated contact footprints.
         let grid = self.model.config().grid;
         let mut patch_radius = 0.0_f64;
-        for (index, pressure) in advance.candidate.pressure_pa().iter().enumerate() {
+        for (index, pressure) in candidate.pressure_pa().iter().enumerate() {
             if *pressure > 0.0 {
-                let x = (index % grid.cells_x) as f64 + 0.5
-                    - 0.5 * grid.cells_x as f64;
-                let y = (index / grid.cells_x) as f64 + 0.5
-                    - 0.5 * grid.cells_y as f64;
+                let x = (index % grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_x as f64;
+                let y = (index / grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_y as f64;
                 let corner_x = (x.abs() + 0.5) * grid.cell_width_m;
                 let corner_y = (y.abs() + 0.5) * grid.cell_depth_m;
                 patch_radius = patch_radius.max(corner_x.hypot(corner_y));
@@ -296,25 +325,13 @@ impl SourcePlasticContact {
                 self.envelope.maximum_patch_to_depth[side],
             )?;
         }
-        cx.checkpoint().map_err(|_| {
-            FiniteGapPlasticError::Contact(super::FiniteGapContactError::Cancelled)
-        })?;
-        Ok(SourcePlasticContactAdvance {
-            source_identity: self.identity,
-            candidate: SourcePlasticContactState {
-                owner: self.identity,
-                contact: advance.candidate,
-            },
-            receipt: advance.receipt,
-        })
+        cx.checkpoint()
+            .map_err(|_| FiniteGapPlasticError::Contact(super::FiniteGapContactError::Cancelled))?;
+        Ok(())
     }
 }
 
-fn within(
-    quantity: &'static str,
-    value: f64,
-    limit: f64,
-) -> Result<(), SourcePlasticContactError> {
+fn within(quantity: &'static str, value: f64, limit: f64) -> Result<(), SourcePlasticContactError> {
     if !value.is_finite() {
         return Err(SourcePlasticContactError::Invalid(quantity));
     }

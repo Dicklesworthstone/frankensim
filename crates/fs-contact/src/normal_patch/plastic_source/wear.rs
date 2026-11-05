@@ -1,0 +1,648 @@
+//! Local Archard recession of a retained hardness-limited contact patch.
+//!
+//! One update integrates the *initial* equilibrated cell pressure against the
+//! supplied unsigned local sliding distance, holding k/H fixed over the step.
+//! It removes volume from each original body and re-equilibrates the increased
+//! relative gap at held approach. Refine sliding increments when wear changes
+//! pressure appreciably. This bounded surface law does not transport debris or
+//! infer local sliding from macroscopic displacement, and it assigns no heat.
+
+use fs_blake3::{ContentHash, DomainHasher};
+use fs_exec::Cx;
+use fs_matdb::{MaterialCard, PropertyKey};
+use fs_material::hardness::IndentationHardnessStatePoint;
+use fs_material::state_point::{MaterialStatePointError, ResolvedInterfaceStatePoint};
+use fs_qty::{Dims, QuantitySpec};
+use fs_tribo::{ArchardLaw, TriboError, WearAdvance, WearState};
+
+use super::temperature::SourcePlasticTemperatureError;
+use super::{SourcePlasticContact, SourcePlasticContactError, SourcePlasticContactState};
+use crate::normal_patch::{
+    FiniteGapContactError, FiniteGapPlasticContinuationReceipt, FiniteGapPlasticError,
+    FiniteGapPlasticReceipt,
+};
+
+/// Refusal leaves contact history, removed volumes, and recession unchanged.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SourcePlasticWearError {
+    /// Incompatible source ownership, unsupported coordinates, or invalid slip.
+    Invalid(&'static str),
+    /// Original normal-contact applicability or numerical refusal.
+    Contact(SourcePlasticContactError),
+    /// Native Archard arithmetic or provenance refusal.
+    Tribology(TriboError),
+    /// Original normal and pressure-cap sources refused temperature continuation.
+    Temperature(SourcePlasticTemperatureError),
+    /// The original selected wear coefficient or per-body hardness refused refresh.
+    Material(MaterialStatePointError),
+}
+impl From<SourcePlasticContactError> for SourcePlasticWearError {
+    fn from(error: SourcePlasticContactError) -> Self {
+        Self::Contact(error)
+    }
+}
+impl From<TriboError> for SourcePlasticWearError {
+    fn from(error: TriboError) -> Self {
+        Self::Tribology(error)
+    }
+}
+impl From<SourcePlasticTemperatureError> for SourcePlasticWearError {
+    fn from(error: SourcePlasticTemperatureError) -> Self {
+        Self::Temperature(error)
+    }
+}
+impl From<MaterialStatePointError> for SourcePlasticWearError {
+    fn from(error: MaterialStatePointError) -> Self {
+        Self::Material(error)
+    }
+}
+impl core::fmt::Display for SourcePlasticWearError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "source finite-gap Archard wear: {self:?}")
+    }
+}
+impl std::error::Error for SourcePlasticWearError {}
+
+/// Exact fixed-condition interface coefficients and separate body hardness.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticArchardWear {
+    contact: SourcePlasticContact,
+    coefficients: ResolvedInterfaceStatePoint,
+    coefficient_keys: [PropertyKey; 2],
+    hardness: [IndentationHardnessStatePoint; 2],
+    laws: [ArchardLaw; 2],
+    maximum_recession_m: [f64; 2],
+    identity: ContentHash,
+}
+
+/// Contact and removed material are accepted as one immutable candidate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticWearState {
+    owner: ContentHash,
+    contact: SourcePlasticContactState,
+    volumes: [WearState; 2],
+    recession_m: [Vec<f64>; 2],
+}
+impl SourcePlasticWearState {
+    /// Retained source-bound normal history.
+    pub const fn contact_state(&self) -> &SourcePlasticContactState {
+        &self.contact
+    }
+    /// Cumulative removed volume in original body A/B order [m^3].
+    pub fn volumes_m3(&self) -> [f64; 2] {
+        self.volumes.map(|state| state.volume_m3())
+    }
+    /// Cumulative recession at each original grid cell in body A/B order [m].
+    pub fn recession_m(&self) -> [&[f64]; 2] {
+        [&self.recession_m[0], &self.recession_m[1]]
+    }
+}
+
+/// A normal loading step that retains both wear inventories and surface profiles.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticWearNormalAdvance {
+    /// Complete candidate normal and wear state.
+    pub candidate: SourcePlasticWearState,
+    /// Original normal pressure, elastic storage, and plastic work.
+    pub receipt: FiniteGapPlasticReceipt,
+}
+
+/// Local removal and its held-approach normal re-equilibration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticWearAdvance {
+    /// Complete owner of coefficient, hardness, and geometry inputs.
+    pub source_identity: ContentHash,
+    /// Normal history, both wear inventories, and both recession profiles.
+    pub candidate: SourcePlasticWearState,
+    /// Native Archard volumes and retained interface provenance in A/B order.
+    pub wear: [WearAdvance; 2],
+    /// Recession added to each original body at every original grid cell [m].
+    pub recession_increment_m: [Vec<f64>; 2],
+    /// Initial-pressure quadrature `sum(p_old * unsigned_local_slip * area)` [N m].
+    /// This is a sliding measure and has no automatic heat interpretation.
+    pub pressure_weighted_sliding_j: f64,
+    /// Native normal response and old/new storage plus signed parameter work.
+    /// Material removal at held approach may release stored elastic energy;
+    /// the caller must retain this account in its coupled energy balance.
+    pub receipt: FiniteGapPlasticContinuationReceipt,
+}
+
+/// Prescribed temperatures with both original wear inventories retained.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourcePlasticWearThermalRefresh {
+    source: SourcePlasticArchardWear,
+    candidate: SourcePlasticWearState,
+    receipt: FiniteGapPlasticContinuationReceipt,
+}
+impl SourcePlasticWearThermalRefresh {
+    /// Refreshed original normal, coefficient, and separate body-hardness sources.
+    pub const fn source(&self) -> &SourcePlasticArchardWear {
+        &self.source
+    }
+    /// Retained per-body removal and irreversible contact history.
+    pub const fn candidate(&self) -> &SourcePlasticWearState {
+        &self.candidate
+    }
+    /// Native normal endpoint and signed parameter-work account.
+    pub const fn receipt(&self) -> &FiniteGapPlasticContinuationReceipt {
+        &self.receipt
+    }
+    /// Adopt the complete continuation without copying its cell arrays.
+    pub fn into_parts(
+        self,
+    ) -> (
+        SourcePlasticArchardWear,
+        SourcePlasticWearState,
+        FiniteGapPlasticContinuationReceipt,
+    ) {
+        (self.source, self.candidate, self.receipt)
+    }
+}
+
+impl SourcePlasticArchardWear {
+    /// Bind original k_A/k_B and typed indentation hardness at fixed conditions.
+    ///
+    /// The pressure cap's minimum hardness is not substituted for the separate
+    /// per-body wear hardness. Exact selected test keys remain part of identity.
+    /// Each recession limit is a caller-declared physical applicability bound;
+    /// zero admits only a surface with no wear during the attempted update.
+    pub fn new(
+        contact: SourcePlasticContact,
+        coefficients: ResolvedInterfaceStatePoint,
+        coefficient_keys: [PropertyKey; 2],
+        hardness: [IndentationHardnessStatePoint; 2],
+        maximum_recession_m: [f64; 2],
+    ) -> Result<Self, SourcePlasticWearError> {
+        let original = contact.normal_source().interface_state();
+        if coefficients.card_identity() != original.card_identity()
+            || coefficients.surface_materials() != original.surface_materials()
+            || coefficients.query_point() != original.query_point()
+            || coefficients.axis_quantities() != original.axis_quantities()
+        {
+            return Err(invalid(
+                "wear requires the original ordered interface and fixed query",
+            ));
+        }
+        let elastic = contact.normal_source().elastic();
+        let bulk = [
+            elastic.surface_a_state().resolved(),
+            elastic.surface_b_state().resolved(),
+        ];
+        let mut laws = [ArchardLaw {
+            wear_coefficient: 0.0,
+        }; 2];
+        let mut selected = [0_usize; 2];
+        for side in 0..2 {
+            let k = coefficients
+                .property_by_key(&coefficient_keys[side])
+                .ok_or_else(|| invalid("missing exact original wear coefficient"))?;
+            let h = hardness[side].resolved();
+            if coefficient_keys[side].quantity() != QuantitySpec::dimensional(Dims::NONE)
+                || !k.value_si().is_finite()
+                || k.value_si() < 0.0
+                || !k.is_static_at_fixed_external_conditions()
+                || !hardness[side]
+                    .property()
+                    .is_static_at_fixed_external_conditions()
+                || h.card_identity() != bulk[side].card_identity()
+                || h.material() != bulk[side].material()
+                || h.query_point() != bulk[side].query_point()
+                || h.axis_quantities() != bulk[side].axis_quantities()
+            {
+                return Err(invalid(
+                    "wear requires static original k and ordered typed indentation hardness",
+                ));
+            }
+            if !maximum_recession_m[side].is_finite() || maximum_recession_m[side] < 0.0 {
+                return Err(invalid("finite nonnegative per-body recession bound"));
+            }
+            selected[side] = coefficients
+                .properties()
+                .iter()
+                .position(|property| property == k)
+                .ok_or_else(|| {
+                    invalid("wear coefficient is not retained by its original bundle")
+                })?;
+            laws[side].wear_coefficient = k.value_si();
+        }
+        let mut hash = DomainHasher::new("org.frankensim.fs-contact.source-plastic-archard.v1");
+        hash.update(contact.identity().as_bytes());
+        hash.update(coefficients.identity().as_bytes());
+        for side in 0..2 {
+            hash.update(&(selected[side] as u64).to_le_bytes());
+            hash.update(hardness[side].identity().as_bytes());
+            hash.update(&maximum_recession_m[side].to_bits().to_le_bytes());
+        }
+        Ok(Self {
+            contact,
+            coefficients,
+            coefficient_keys,
+            hardness,
+            laws,
+            maximum_recession_m,
+            identity: hash.finalize(),
+        })
+    }
+
+    /// Original hardness-limited normal owner.
+    pub const fn contact(&self) -> &SourcePlasticContact {
+        &self.contact
+    }
+    /// Complete original coefficient receipt.
+    pub const fn coefficient_source(&self) -> &ResolvedInterfaceStatePoint {
+        &self.coefficients
+    }
+    /// Exact selected original A/B coefficient keys.
+    pub const fn coefficient_keys(&self) -> &[PropertyKey; 2] {
+        &self.coefficient_keys
+    }
+    /// Complete strict per-body indentation-hardness receipts.
+    pub const fn hardness_sources(&self) -> &[IndentationHardnessStatePoint; 2] {
+        &self.hardness
+    }
+    /// Identity of all original sources, selected roles, and physical bounds.
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Start without material removal or normal-contact history.
+    pub fn initial_state(&self) -> SourcePlasticWearState {
+        self.zero_wear_state(self.contact.initial_state())
+    }
+
+    /// Start wear from an original loaded contact that has no prior recession.
+    /// Existing residual plastic indentation is retained. A profile already worn
+    /// through another owner cannot be relabelled as unworn material.
+    pub fn state_from_contact(
+        &self,
+        contact: SourcePlasticContactState,
+    ) -> Result<SourcePlasticWearState, SourcePlasticWearError> {
+        if contact.owner != self.contact.identity()
+            || contact.contact_state().owner_identity() != self.contact.model().identity()
+            || contact
+                .contact_state()
+                .recession_m()
+                .iter()
+                .any(|depth| *depth != 0.0)
+        {
+            return Err(invalid(
+                "wear checkpoint requires original contact without existing recession",
+            ));
+        }
+        Ok(self.zero_wear_state(contact))
+    }
+
+    /// Change approach while retaining cumulative recession and removed volumes.
+    pub fn advance_normal(
+        &self,
+        before: &SourcePlasticWearState,
+        approach_m: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearNormalAdvance, SourcePlasticWearError> {
+        self.admit(before)?;
+        let next = self.contact.advance(&before.contact, approach_m, cx)?;
+        self.admit_receded_profile(&next.candidate, &before.recession_m, cx)?;
+        Ok(SourcePlasticWearNormalAdvance {
+            candidate: SourcePlasticWearState {
+                contact: next.candidate,
+                ..before.clone()
+            },
+            receipt: next.receipt,
+        })
+    }
+
+    /// Remove material using the currently equilibrated pressure and local slip.
+    ///
+    /// Slip is unsigned *irreversible local relative sliding*, one distance per
+    /// original cell. Elastic tangential motion is not admitted as sliding by
+    /// implication. This first-order pressure/distance quadrature should be
+    /// refined whenever removal appreciably redistributes contact pressure.
+    /// All sources and approach stay fixed, plastic depth is retained, and no
+    /// removed volume is relabelled as heat or plastic dissipation.
+    pub fn advance_wear(
+        &self,
+        before: &SourcePlasticWearState,
+        local_unsigned_slip_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearAdvance, SourcePlasticWearError> {
+        self.admit(before)?;
+        checkpoint(cx)?;
+        let pressure = before.contact.contact_state().pressure_pa();
+        if local_unsigned_slip_m.len() != pressure.len()
+            || local_unsigned_slip_m
+                .iter()
+                .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(invalid(
+                "finite nonnegative local slip at every original cell",
+            ));
+        }
+        let grid = self.contact.model().config().grid;
+        let area = grid.cell_width_m * grid.cell_depth_m;
+        let mut increment = [vec![0.0; pressure.len()], vec![0.0; pressure.len()]];
+        let mut recession = before.recession_m.clone();
+        let mut relative_increment = vec![0.0; pressure.len()];
+        let mut measure = 0.0;
+        let mut compensation = 0.0;
+        let mut geometric_volume = [0.0; 2];
+        let mut geometric_compensation = [0.0; 2];
+        let mut profile_roundoff_volume = [0.0; 2];
+        for (index, (&p, &slip)) in pressure.iter().zip(local_unsigned_slip_m).enumerate() {
+            if index % 64 == 0 {
+                checkpoint(cx)?;
+            }
+            let cell_measure = (p * area) * slip;
+            if !cell_measure.is_finite() || cell_measure < 0.0 {
+                return Err(invalid("finite pressure-weighted local sliding"));
+            }
+            // Compensated summation protects heterogeneous pressure/sliding
+            // fields without querying source cards or allocating provenance per cell.
+            add_compensated(&mut measure, &mut compensation, cell_measure);
+            for side in 0..2 {
+                let depth = (self.laws[side].wear_coefficient
+                    * (p / self.hardness[side].hardness_pa()))
+                    * slip;
+                let old = recession[side][index];
+                let total = old + depth;
+                let retained_increment = total - old;
+                if !depth.is_finite() || !total.is_finite() || depth < 0.0 {
+                    return Err(invalid("finite nonnegative Archard recession"));
+                }
+                if depth > 0.0 && retained_increment == 0.0 {
+                    return Err(invalid(
+                        "wear increment is below the retained profile resolution",
+                    ));
+                }
+                if total > self.maximum_recession_m[side] {
+                    return Err(SourcePlasticContactError::OutsideApplicability {
+                        quantity: if side == 0 {
+                            "body A cumulative recession [m]"
+                        } else {
+                            "body B cumulative recession [m]"
+                        },
+                        value: total,
+                        limit: self.maximum_recession_m[side],
+                    }
+                    .into());
+                }
+                let cell_volume = retained_increment * area;
+                if !cell_volume.is_finite() || (retained_increment > 0.0 && cell_volume == 0.0) {
+                    return Err(invalid(
+                        "wear increment is outside volume arithmetic resolution",
+                    ));
+                }
+                add_compensated(
+                    &mut geometric_volume[side],
+                    &mut geometric_compensation[side],
+                    cell_volume,
+                );
+                // Four roundoff units cover addition/subtraction of depth and
+                // multiplication by cell area; this is an arithmetic bound.
+                profile_roundoff_volume[side] +=
+                    4.0 * f64::EPSILON * ((old * area).abs() + (total * area).abs());
+                increment[side][index] = retained_increment;
+                recession[side][index] = total;
+            }
+            relative_increment[index] = increment[0][index] + increment[1][index];
+            if !relative_increment[index].is_finite() {
+                return Err(invalid("finite relative recession"));
+            }
+        }
+        let interface = self
+            .contact
+            .normal_source()
+            .elastic()
+            .interface()
+            .interface();
+        let mut volumes = before.volumes;
+        let wear_a = self.laws[0].advance_pressure_weighted_sliding(
+            interface,
+            &mut volumes[0],
+            measure,
+            self.hardness[0].hardness_pa(),
+        )?;
+        let wear_b = self.laws[1].advance_pressure_weighted_sliding(
+            interface,
+            &mut volumes[1],
+            measure,
+            self.hardness[1].hardness_pa(),
+        )?;
+        let wear = [wear_a, wear_b];
+        for side in 0..2 {
+            let scalar = wear[side].increment_m3;
+            let retained_volume = volumes[side].volume_m3() - before.volumes[side].volume_m3();
+            if scalar > 0.0 && retained_volume == 0.0 {
+                return Err(invalid(
+                    "wear increment is below the retained inventory resolution",
+                ));
+            }
+            // Both formulas describe the same k*p*ds/H integral. Allow only
+            // floating arithmetic error (product/division, compensated sums,
+            // and represented profile/inventory additions), never a tunable
+            // physical tolerance that could hide removed-volume inconsistency.
+            let arithmetic_allowance = profile_roundoff_volume[side]
+                + 16.0 * f64::EPSILON * scalar.abs().max(geometric_volume[side].abs());
+            let inventory_allowance = arithmetic_allowance
+                + 4.0
+                    * f64::EPSILON
+                    * (before.volumes[side].volume_m3().abs() + volumes[side].volume_m3().abs());
+            if !arithmetic_allowance.is_finite()
+                || !inventory_allowance.is_finite()
+                || !geometric_volume[side].is_finite()
+                || (scalar - geometric_volume[side]).abs() > arithmetic_allowance
+                || (retained_volume - geometric_volume[side]).abs() > inventory_allowance
+            {
+                return Err(invalid(
+                    "Archard inventory and retained recession disagree beyond roundoff",
+                ));
+            }
+        }
+        let geometry = self
+            .contact
+            .model()
+            .recede(&before.contact.contact, &relative_increment, cx)
+            .map_err(SourcePlasticContactError::from)?;
+        let contact = SourcePlasticContactState {
+            owner: self.contact.identity(),
+            contact: geometry.candidate,
+        };
+        self.admit_receded_profile(&contact, &recession, cx)?;
+        Ok(SourcePlasticWearAdvance {
+            source_identity: self.identity,
+            candidate: SourcePlasticWearState {
+                owner: self.identity,
+                contact,
+                volumes,
+                recession_m: recession,
+            },
+            wear,
+            recession_increment_m: increment,
+            pressure_weighted_sliding_j: measure,
+            receipt: geometry.receipt,
+        })
+    }
+
+    /// Continue prescribed temperatures without resetting either body's wear.
+    ///
+    /// Every k and hardness key remains pinned to its exact original claim and
+    /// test context. Interface k follows the original interface T; the two wear
+    /// hardnesses follow their original bulk temperatures independently. All
+    /// other external conditions stay fixed. This endpoint supplies no heat law.
+    pub fn refresh_at_temperatures(
+        &self,
+        before: &SourcePlasticWearState,
+        material_cards: [&MaterialCard; 2],
+        bulk_temperatures_k: [f64; 2],
+        interface_temperature_k: f64,
+        cx: &Cx<'_>,
+    ) -> Result<SourcePlasticWearThermalRefresh, SourcePlasticWearError> {
+        self.admit(before)?;
+        checkpoint(cx)?;
+        if self
+            .coefficients
+            .properties()
+            .iter()
+            .any(|property| !property.has_only_fixed_external_conditions(Some("T"), false))
+            || self.hardness.iter().any(|source| {
+                source
+                    .resolved()
+                    .properties()
+                    .iter()
+                    .any(|property| !property.has_only_fixed_external_conditions(Some("T"), false))
+            })
+        {
+            return Err(invalid(
+                "wear refresh requires one owned temperature and otherwise fixed conditions",
+            ));
+        }
+        let refreshed = self.contact.refresh_at_temperatures(
+            &before.contact,
+            material_cards,
+            bulk_temperatures_k,
+            interface_temperature_k,
+            cx,
+        )?;
+        let normal = refreshed.source().normal_source();
+        let coefficients =
+            if self.coefficients.query_point() == normal.interface_state().query_point() {
+                self.coefficients.clone()
+            } else {
+                self.coefficients.at_query_point(
+                    normal.elastic().interface().card(),
+                    &normal.interface_state().query(),
+                )?
+            };
+        let points = [
+            normal.elastic().surface_a_state().resolved().query(),
+            normal.elastic().surface_b_state().resolved().query(),
+        ];
+        let mut hardness = self.hardness.clone();
+        for side in 0..2 {
+            if self.hardness[side].resolved().state_coordinate("T")
+                != Some(bulk_temperatures_k[side])
+            {
+                hardness[side] =
+                    self.hardness[side].at_query_point(material_cards[side], &points[side])?;
+            }
+        }
+        let (contact, contact_state, receipt) = refreshed.into_parts();
+        let source = Self::new(
+            contact,
+            coefficients,
+            self.coefficient_keys.clone(),
+            hardness,
+            self.maximum_recession_m,
+        )?;
+        source.admit_receded_profile(&contact_state, &before.recession_m, cx)?;
+        let candidate = SourcePlasticWearState {
+            owner: source.identity,
+            contact: contact_state,
+            volumes: before.volumes,
+            recession_m: before.recession_m.clone(),
+        };
+        Ok(SourcePlasticWearThermalRefresh {
+            source,
+            candidate,
+            receipt,
+        })
+    }
+
+    // A fixed original source may only describe material still within its
+    // declared homogeneous depth after removal. Inspect the farthest loaded-cell
+    // corner exactly as the parent half-space envelope does.
+    fn admit_receded_profile(
+        &self,
+        candidate: &SourcePlasticContactState,
+        recession: &[Vec<f64>; 2],
+        cx: &Cx<'_>,
+    ) -> Result<(), SourcePlasticWearError> {
+        self.contact
+            .admit_candidate(candidate.contact_state(), cx)?;
+        let grid = self.contact.model().config().grid;
+        let mut radius = 0.0_f64;
+        for (index, pressure) in candidate.contact_state().pressure_pa().iter().enumerate() {
+            if *pressure > 0.0 {
+                let x = (index % grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_x as f64;
+                let y = (index / grid.cells_x) as f64 + 0.5 - 0.5 * grid.cells_y as f64;
+                radius = radius.max(
+                    ((x.abs() + 0.5) * grid.cell_width_m)
+                        .hypot((y.abs() + 0.5) * grid.cell_depth_m),
+                );
+            }
+        }
+        for side in 0..2 {
+            let maximum = recession[side].iter().copied().fold(0.0_f64, f64::max);
+            let remaining = self.contact.envelope.half_space_depth_m[side] - maximum;
+            if remaining <= 0.0 {
+                return Err(invalid(
+                    "recession exhausted the original homogeneous material depth",
+                ));
+            }
+            super::within(
+                "patch radius / remaining homogeneous depth",
+                radius / remaining,
+                self.contact.envelope.maximum_patch_to_depth[side],
+            )?;
+        }
+        checkpoint(cx)
+    }
+
+    fn zero_wear_state(&self, contact: SourcePlasticContactState) -> SourcePlasticWearState {
+        let count = self.contact.model().config().undeformed_gap_m.len();
+        SourcePlasticWearState {
+            owner: self.identity,
+            contact,
+            volumes: [WearState::default(); 2],
+            recession_m: [vec![0.0; count], vec![0.0; count]],
+        }
+    }
+
+    fn admit(&self, before: &SourcePlasticWearState) -> Result<(), SourcePlasticWearError> {
+        if before.owner != self.identity || before.contact.owner != self.contact.identity() {
+            return Err(invalid(
+                "wear history requires its original ordered sources",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn invalid(message: &'static str) -> SourcePlasticWearError {
+    SourcePlasticWearError::Invalid(message)
+}
+
+fn checkpoint(cx: &Cx<'_>) -> Result<(), SourcePlasticWearError> {
+    cx.checkpoint().map_err(|_| {
+        SourcePlasticContactError::from(FiniteGapPlasticError::Contact(
+            FiniteGapContactError::Cancelled,
+        ))
+        .into()
+    })
+}
+
+fn add_compensated(sum: &mut f64, compensation: &mut f64, value: f64) {
+    let corrected = value - *compensation;
+    let next = *sum + corrected;
+    *compensation = (next - *sum) - corrected;
+    *sum = next;
+}
