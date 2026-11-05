@@ -2,7 +2,9 @@
 use super::*;
 use fs_ga::{So3, So3Tangent};
 use fs_mbd::{Vec3 as NativeVec3, Wrench};
-use fs_mbd_material::creeping_flow::unsteady::rotation::RotatingStepControls;
+use fs_mbd_material::creeping_flow::unsteady::rotation::{
+    RotatingStepControls, SpinPrehistory,
+};
 use fs_mbd_material::creeping_flow::unsteady::{
     BassetResolution, SlipPrehistory, UnsteadyStepControls,
 };
@@ -35,6 +37,172 @@ fn near(a: f64, b: f64, tolerance: f64) {
 }
 fn vector_near(a: NativeVec3, b: NativeVec3, tolerance: f64) {
     assert!(magnitude(a.sub(b)) <= tolerance, "{a:?} != {b:?}");
+}
+
+#[test]
+fn steady_spin_prehistory_seeds_world_memory_without_changing_native_state() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let pose = Se3::from_parts(
+        So3::exp(So3Tangent::new(Vec3::new(0.2, -0.3, 0.4))).unwrap(),
+        Vec3::new(0.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let state = body
+        .state_from_kinematics(
+            pose,
+            Twist::new(Vec3::new(0.01, -0.02, 0.03), Vec3::default()),
+        )
+        .unwrap();
+    assert!(
+        medium
+            .unsteady_rotating_motion(&body, state, resolution(0.001, 1000.0, 64), || false)
+            .is_err()
+    );
+    let motion = medium
+        .unsteady_rotating_motion_with_spin_prehistory(
+            &body,
+            state,
+            resolution(0.001, 1000.0, 64),
+            SpinPrehistory::SteadySpin,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(motion.state(), state);
+    assert_eq!(motion.time_s(), 0.0);
+    assert!(
+        motion
+            .fluid_velocities_world_m_s()
+            .iter()
+            .all(|v| *v == NativeVec3::ZERO)
+    );
+    let omega_body = body
+        .properties()
+        .angular_velocity_body_checked(state.angular_momentum_body())
+        .unwrap();
+    let omega_world = state.pose().orientation().rotate_body_to_world(omega_body);
+    assert!(
+        motion
+            .fluid_angular_velocities_world_rad_s()
+            .iter()
+            .all(|v| *v == omega_world)
+    );
+    let history = motion
+        .rotational_branches()
+        .iter()
+        .zip(motion.fluid_angular_velocities_world_rad_s())
+        .fold(NativeVec3::ZERO, |torque, (branch, u)| {
+            torque.sub(omega_world.sub(*u).scale(branch.resistance_kg_m2_s))
+        });
+    assert_eq!(history, NativeVec3::ZERO);
+}
+
+#[test]
+fn angular_acceleration_ramp_prepares_exact_rotary_branch_history() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let medium =
+        CreepingSphere::new(&material, RADIUS, Gravity::ZERO, NativeVec3::ZERO, limits()).unwrap();
+    let pose = Se3::from_parts(
+        So3::exp(So3Tangent::new(Vec3::new(-0.4, 0.1, 0.3))).unwrap(),
+        Vec3::new(0.0, 0.0, 0.0),
+    )
+    .unwrap();
+    let state = body
+        .state_from_kinematics(
+            pose,
+            Twist::new(Vec3::new(0.008, -0.006, 0.004), Vec3::default()),
+        )
+        .unwrap();
+    let duration_s = 0.03;
+    let motion = medium
+        .unsteady_rotating_motion_with_spin_prehistory(
+            &body,
+            state,
+            resolution(0.001, 1000.0, 96),
+            SpinPrehistory::LinearRamp { duration_s },
+            || false,
+        )
+        .unwrap();
+    let omega_body = body
+        .properties()
+        .angular_velocity_body_checked(state.angular_momentum_body())
+        .unwrap();
+    let omega_world = state.pose().orientation().rotate_body_to_world(omega_body);
+    for (branch, actual) in motion
+        .rotational_branches()
+        .iter()
+        .zip(motion.fluid_angular_velocities_world_rad_s())
+    {
+        let alpha = branch.rate_per_s * duration_s;
+        let fraction = if alpha < 1e-4 {
+            alpha * (0.5 + alpha * (-1.0 / 6.0 + alpha / 24.0))
+        } else {
+            1.0 + (-alpha).exp_m1() / alpha
+        };
+        vector_near(*actual, omega_world.scale(fraction), 2e-15);
+    }
+}
+
+#[test]
+fn combined_linear_and_angular_prehistory_share_one_native_clock() {
+    let source = sphere(2000.0);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let material = fluid(1000.0, 1.0);
+    let ambient = NativeVec3::new(0.02, -0.01, 0.03);
+    let medium = CreepingSphere::new(&material, RADIUS, Gravity::ZERO, ambient, limits()).unwrap();
+    let state = body
+        .state_from_kinematics(
+            Se3::identity(),
+            Twist::new(
+                Vec3::new(0.01, -0.005, 0.004),
+                Vec3::new(0.021, -0.0104, 0.0302),
+            ),
+        )
+        .unwrap();
+    let motion = medium
+        .unsteady_rotating_motion_with_histories(
+            &body,
+            state,
+            resolution(0.001, 1000.0, 64),
+            Some(SlipPrehistory::LinearRamp { duration_s: 0.05 }),
+            SpinPrehistory::LinearRamp { duration_s: 0.03 },
+            || false,
+        )
+        .unwrap();
+    assert!(
+        motion
+            .fluid_velocities_world_m_s()
+            .iter()
+            .any(|v| magnitude(*v) > 0.0)
+    );
+    assert!(
+        motion
+            .fluid_angular_velocities_world_rad_s()
+            .iter()
+            .any(|v| magnitude(*v) > 0.0)
+    );
+    let applied = Wrench {
+        force_world: NativeVec3::new(1e-5, -2e-5, 3e-5),
+        torque_body: NativeVec3::new(1e-7, -2e-7, 3e-7),
+    };
+    let (next, audit) = motion
+        .step_with_flow_acceleration(
+            applied,
+            NativeVec3::new(0.002, -0.001, 0.003),
+            controls(0.001),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(next.time_s(), 0.001);
+    assert!(audit.rotation.is_some());
+    assert!(audit.viscous_heat_j > 0.0);
+    assert!(magnitude(audit.momentum_residual_ns) < 1e-16);
+    assert!(magnitude(audit.rotation.unwrap().angular_momentum_residual_nms) < 1e-17);
 }
 
 #[test]

@@ -161,7 +161,7 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         resolution: BassetResolution,
         cancelled: impl FnMut() -> bool,
     ) -> Result<UnsteadySphereMotion<'s, 'f, 'b, F>, Error> {
-        self.prepare_unsteady_motion(body, state, resolution, None, cancelled)
+        self.prepare_unsteady_motion(body, state, resolution, None, false, cancelled)
     }
 
     /// Start with explicit translational preparation instead of discarding
@@ -181,7 +181,14 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         prehistory: SlipPrehistory,
         cancelled: impl FnMut() -> bool,
     ) -> Result<UnsteadySphereMotion<'s, 'f, 'b, F>, Error> {
-        self.prepare_unsteady_motion(body, state, resolution, Some(prehistory), cancelled)
+        self.prepare_unsteady_motion(
+            body,
+            state,
+            resolution,
+            Some(prehistory),
+            false,
+            cancelled,
+        )
     }
 
     fn prepare_unsteady_motion<'s, 'b>(
@@ -190,6 +197,7 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         state: RigidBodyState,
         resolution: BassetResolution,
         prehistory: Option<SlipPrehistory>,
+        allow_spin: bool,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<UnsteadySphereMotion<'s, 'f, 'b, F>, Error> {
         poll(&mut cancelled)?;
@@ -210,8 +218,12 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
                 "unsteady sphere needs canonical comoving momentum or explicit slip prehistory",
             ));
         }
-        if state.angular_momentum_body() != Vec3::ZERO
-            || !lo.is_finite()
+        if !allow_spin && state.angular_momentum_body() != Vec3::ZERO {
+            return Err(Error::Invalid(
+                "unsteady translational sphere needs zero spin; use the rotating history owner",
+            ));
+        }
+        if !lo.is_finite()
             || lo <= 0.0
             || !hi.is_finite()
             || hi <= lo

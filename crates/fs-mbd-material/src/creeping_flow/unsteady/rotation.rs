@@ -25,6 +25,35 @@ pub struct RotationalMemoryBranch {
     pub rate_per_s: f64,
 }
 
+/// Physical angular-velocity history preceding the rotating body's time zero.
+///
+/// The endpoint spin is the native body's actual angular velocity, transformed
+/// into world axes. Preparation changes neither body momentum nor pose; it only
+/// initializes the already-existing rotary fluid-memory coordinates. Past
+/// holding torque and work remain outside the subsequent accounting window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpinPrehistory {
+    /// Zero spin before `-duration_s`, then constant angular acceleration to
+    /// the current spin at time zero. Each rotary branch receives its exact
+    /// response to that ramp.
+    LinearRamp { duration_s: f64 },
+    /// The current angular velocity has been maintained throughout the past.
+    /// Every finite rotary branch starts co-rotating with the body, so the
+    /// initial history torque is zero while finite represented storage remains.
+    SteadySpin,
+}
+
+impl SpinPrehistory {
+    fn memory_fraction(self, rate_per_s: f64) -> Option<f64> {
+        match self {
+            Self::LinearRamp { duration_s } => {
+                SlipPrehistory::LinearRamp { duration_s }.memory_fraction(rate_per_s)
+            }
+            Self::SteadySpin => SlipPrehistory::SteadySlip.memory_fraction(rate_per_s),
+        }
+    }
+}
+
 /// Numerical controls for translation, fluid spin history and native attitude.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RotatingStepControls {
@@ -93,7 +122,7 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RotatingSphereMotion<'s, 'f, 'b, F>, Error> {
         let mut inner = self.unsteady_motion(body, state, resolution, &mut cancelled)?;
-        inner.rotation = Some(RotationHistory::prepare(&inner, &mut cancelled)?);
+        inner.rotation = Some(RotationHistory::prepare(&inner, None, &mut cancelled)?);
         poll(&mut cancelled)?;
         Ok(RotatingSphereMotion { inner })
     }
@@ -117,9 +146,62 @@ impl<'f, F: FluidTransport + ?Sized> CreepingSphere<'f, F> {
             prehistory,
             &mut cancelled,
         )?;
-        inner.rotation = Some(RotationHistory::prepare(&inner, &mut cancelled)?);
+        inner.rotation = Some(RotationHistory::prepare(&inner, None, &mut cancelled)?);
         poll(&mut cancelled)?;
         Ok(RotatingSphereMotion { inner })
+    }
+
+    /// Prepare an already-spinning sphere with explicit rotary fluid history.
+    ///
+    /// Translation remains canonically comoving unless `slip_prehistory` is
+    /// supplied. The actual native angular momentum defines the endpoint spin;
+    /// `spin_prehistory` defines how that spin was established. Both spectral
+    /// histories then advance on the same native Cayley body and physical clock.
+    /// No past preparation work is charged to the new accounting window.
+    pub fn unsteady_rotating_motion_with_histories<'s, 'b>(
+        &'s self,
+        body: &'b PrincipalBody<'b>,
+        state: RigidBodyState,
+        resolution: BassetResolution,
+        slip_prehistory: Option<SlipPrehistory>,
+        spin_prehistory: SpinPrehistory,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RotatingSphereMotion<'s, 'f, 'b, F>, Error> {
+        let mut inner = self.prepare_unsteady_motion(
+            body,
+            state,
+            resolution,
+            slip_prehistory,
+            true,
+            &mut cancelled,
+        )?;
+        inner.rotation = Some(RotationHistory::prepare(
+            &inner,
+            Some(spin_prehistory),
+            &mut cancelled,
+        )?);
+        poll(&mut cancelled)?;
+        Ok(RotatingSphereMotion { inner })
+    }
+
+    /// Convenience entry point for canonically comoving translation with
+    /// explicit angular preparation.
+    pub fn unsteady_rotating_motion_with_spin_prehistory<'s, 'b>(
+        &'s self,
+        body: &'b PrincipalBody<'b>,
+        state: RigidBodyState,
+        resolution: BassetResolution,
+        spin_prehistory: SpinPrehistory,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<RotatingSphereMotion<'s, 'f, 'b, F>, Error> {
+        self.unsteady_rotating_motion_with_histories(
+            body,
+            state,
+            resolution,
+            None,
+            spin_prehistory,
+            cancelled,
+        )
     }
 }
 
@@ -260,6 +342,7 @@ pub(super) struct RotationTrial {
 impl RotationHistory {
     fn prepare<F: FluidTransport + ?Sized>(
         motion: &UnsteadySphereMotion<'_, '_, '_, F>,
+        prehistory: Option<SpinPrehistory>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         let r = motion.resolution;
@@ -272,7 +355,25 @@ impl RotationHistory {
         let factor = positive(
             motion.sphere.rotary_resistance_kg_m2_s / (3.0 * motion.sphere.resistance_kg_s),
         )?;
+        let omega_world = match prehistory {
+            None => Vec3::ZERO,
+            Some(_) => {
+                let omega_body = motion
+                    .body
+                    .properties()
+                    .angular_velocity_body_checked(motion.state.angular_momentum_body())?;
+                vector(
+                    motion
+                        .state
+                        .pose()
+                        .orientation()
+                        .rotate_body_to_world(omega_body),
+                )?
+            }
+        };
         let mut branches = Vec::with_capacity(r.intervals);
+        let mut velocities = Vec::with_capacity(r.intervals);
+        let mut storage_j = 0.0;
         for (i, translation) in motion.branches.iter().enumerate() {
             poll(cancelled)?;
             let x = positive((r.minimum_wavenumber_radius.ln() + (i as f64 + 0.5) * width).exp())?;
@@ -283,16 +384,27 @@ impl RotationHistory {
             };
             let resistance = positive(translation.resistance_kg_s * factor * ratio)?;
             let inertia = positive(translation.mass_kg * factor * ratio)?;
+            let rate = positive(resistance / inertia)?;
+            let fraction = match prehistory {
+                None => 0.0,
+                Some(history) => history.memory_fraction(rate).ok_or(Error::Invalid(
+                    "spin prehistory requires a finite positive representable preparation timescale",
+                ))?,
+            };
+            let velocity = vector(omega_world.scale(fraction))?;
+            storage_j = finite(storage_j + 0.5 * inertia * velocity.norm_squared())?;
+            velocities.push(velocity);
             branches.push(RotationalMemoryBranch {
                 resistance_kg_m2_s: resistance,
                 inertia_kg_m2: inertia,
-                rate_per_s: positive(resistance / inertia)?,
+                rate_per_s: rate,
             });
         }
+        finite(storage_j)?;
         poll(cancelled)?;
         Ok(Self {
             branches: branches.into(),
-            velocities: vec![Vec3::ZERO; r.intervals],
+            velocities,
         })
     }
 
