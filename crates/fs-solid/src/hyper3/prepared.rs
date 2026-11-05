@@ -28,6 +28,86 @@ pub struct PreparedHyperTetProblem<'a, L: FiniteStrainPotential = Hyperelastic> 
     elements: Vec<Element>,
 }
 
+/// Exact material tangent at one fixed displacement and constitutive history.
+///
+/// Borrows the original prepared reference geometry and retains one 9-by-9
+/// constitutive Hessian per P1 cell, without a global sparse matrix or element
+/// 12-by-12 matrices. Repeated actions do not reevaluate a material law. Rebuild
+/// this operator when displacement or the held constitutive history changes.
+/// This is the complete derivative of native internal force; the original
+/// Piola Hessian already includes the finite-strain geometric contribution.
+/// No support elimination, follower-load tangent, gravity or inertia is included.
+///
+/// Actions remain explicitly fallible: solver callbacks must propagate refusal
+/// and cancellation rather than interpret an incomplete result as a linear solve.
+#[derive(Debug)]
+pub struct PreparedHyperTetTangent<'a> {
+    elements: &'a [Element],
+    tangents: Vec<[[f64; 9]; 9]>,
+    dofs: usize,
+}
+
+impl PreparedHyperTetTangent<'_> {
+    /// Full node-major xyz dimension; output and scratch each need this length.
+    #[must_use]
+    pub fn dimension(&self) -> usize {
+        self.dofs
+    }
+
+    /// Apply the original tangent to a displacement increment, returning force.
+    ///
+    /// Scratch may change on any call; output changes only on success. Both
+    /// buffers are supplied by the caller and reused without allocation.
+    ///
+    /// # Errors
+    /// Incorrect buffer lengths, nonfinite direction, unrepresentable action,
+    /// or cancellation. No partial output is published.
+    pub fn apply(
+        &self,
+        increment_m: &[f64],
+        force_increment_n: &mut [f64],
+        scratch_n: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), HyperTetError> {
+        self.apply_impl::<false>(increment_m, force_increment_n, scratch_n, cx)
+    }
+
+    /// Apply the actual transpose, retaining every original tangent component.
+    ///
+    /// The constitutive Hessian of a potential is symmetric analytically, but
+    /// this operation transposes its supplied numerical entries explicitly;
+    /// it never silently assumes or repairs symmetry for an adjoint client.
+    /// Buffer and refusal semantics are identical to [`Self::apply`].
+    ///
+    /// # Errors
+    /// Incorrect buffer lengths, nonfinite direction, unrepresentable action,
+    /// or cancellation.
+    pub fn apply_transpose(
+        &self,
+        increment_m: &[f64],
+        force_increment_n: &mut [f64],
+        scratch_n: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), HyperTetError> {
+        self.apply_impl::<true>(increment_m, force_increment_n, scratch_n, cx)
+    }
+
+    fn apply_impl<const TRANSPOSE: bool>(
+        &self,
+        increment_m: &[f64],
+        force_increment_n: &mut [f64],
+        scratch_n: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), HyperTetError> {
+        begin_action(self.dofs, increment_m, force_increment_n, scratch_n, cx)?;
+        for (element, tangent) in self.elements.iter().zip(&self.tangents) {
+            checkpoint(cx)?;
+            element_action::<TRANSPOSE>(element, tangent, increment_m, scratch_n);
+        }
+        finish_action(force_increment_n, scratch_n, cx)
+    }
+}
+
 impl<'a, L: FiniteStrainPotential> HyperTetProblem<'a, L> {
     /// Admit the reference problem once for repeated dynamic evaluations.
     ///
@@ -206,6 +286,104 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         }
         checkpoint(cx)?;
         Ok(tangent)
+    }
+
+    /// Apply the exact current material tangent without assembling a matrix.
+    ///
+    /// Streams the original constitutive Hessian once per cell, computes
+    /// `delta F = sum_a delta u_a tensor grad N_a`, then scatters
+    /// `V (A : delta F) grad N_a`. Relative nodal increments remove rigid
+    /// translation before multiplication; no stiffness, bulk law or material
+    /// field is averaged. All original DOFs remain, including support rows.
+    ///
+    /// The caller supplies two full node-major xyz buffers. Scratch may change
+    /// after refusal; output changes only on success. No workspace or matrix is
+    /// allocated by this action. The original law owns its evaluation costs.
+    /// Use [`Self::linearized_tangent`] to retain local Hessians when many
+    /// actions use the same displacement and held constitutive history.
+    ///
+    /// # Errors
+    /// Invalid displacement/direction or buffer sizes, material-domain exit,
+    /// nonfinite tangent/action, or cancellation. No partial output is published.
+    pub fn tangent_apply(
+        &self,
+        displacement_m: &[f64],
+        increment_m: &[f64],
+        force_increment_n: &mut [f64],
+        scratch_n: &mut [f64],
+        cx: &Cx<'_>,
+    ) -> Result<(), HyperTetError> {
+        checkpoint(cx)?;
+        self.problem.check_len(displacement_m)?;
+        begin_action(
+            displacement_m.len(),
+            increment_m,
+            force_increment_n,
+            scratch_n,
+            cx,
+        )?;
+        for (index, element) in self.elements.iter().enumerate() {
+            checkpoint(cx)?;
+            let tangent = self
+                .problem
+                .element_tangent(index, element, displacement_m)
+                .map_err(|what| HyperTetError::MaterialRefused {
+                    element: index,
+                    what,
+                })?;
+            element_action::<false>(element, &tangent, increment_m, scratch_n);
+        }
+        finish_action(force_increment_n, scratch_n, cx)
+    }
+
+    /// Freeze original point Hessians for repeated matrix-free forward/adjoint
+    /// actions at this displacement and held material history.
+    ///
+    /// `maximum_tangent_bytes` bounds the retained 81-f64-per-element payload;
+    /// existing borrowed geometry and caller-owned action buffers are separate.
+    /// This is a payload allowance, not an OS memory/RSS bound. No global or
+    /// element stiffness matrix is assembled. The original law supplies every
+    /// Hessian through the same seam as [`Self::tangent_matrix`].
+    ///
+    /// # Errors
+    /// Invalid displacement, insufficient payload allowance, material-domain
+    /// refusal, nonfinite tangent or cancellation. No partial operator is returned.
+    pub fn linearized_tangent(
+        &self,
+        displacement_m: &[f64],
+        maximum_tangent_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedHyperTetTangent<'_>, HyperTetError> {
+        checkpoint(cx)?;
+        self.problem.check_len(displacement_m)?;
+        let bytes = self
+            .elements
+            .len()
+            .checked_mul(core::mem::size_of::<[[f64; 9]; 9]>())
+            .ok_or_else(|| action_error("local tangent payload size overflow"))?;
+        if bytes > maximum_tangent_bytes {
+            return Err(action_error(
+                "local tangent payload exceeds its byte allowance",
+            ));
+        }
+        let mut tangents = Vec::with_capacity(self.elements.len());
+        for (index, element) in self.elements.iter().enumerate() {
+            checkpoint(cx)?;
+            tangents.push(
+                self.problem
+                    .element_tangent(index, element, displacement_m)
+                    .map_err(|what| HyperTetError::MaterialRefused {
+                        element: index,
+                        what,
+                    })?,
+            );
+        }
+        checkpoint(cx)?;
+        Ok(PreparedHyperTetTangent {
+            elements: &self.elements,
+            tangents,
+            dofs: displacement_m.len(),
+        })
     }
 
     /// Conservative gravity on current quadrature positions, retaining the
@@ -393,5 +571,90 @@ impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
         }
         checkpoint(cx)?;
         Ok(force)
+    }
+}
+
+fn action_error(what: &str) -> HyperTetError {
+    HyperTetError::InvalidInput {
+        what: format!("matrix-free finite-strain tangent: {what}"),
+    }
+}
+
+fn begin_action(
+    dofs: usize,
+    increment: &[f64],
+    output: &[f64],
+    scratch: &mut [f64],
+    cx: &Cx<'_>,
+) -> Result<(), HyperTetError> {
+    checkpoint(cx)?;
+    if [increment.len(), output.len(), scratch.len()]
+        .iter()
+        .any(|&length| length != dofs)
+    {
+        return Err(action_error(
+            "direction, output and scratch must have the full DOF count",
+        ));
+    }
+    for chunk in increment.chunks(4096) {
+        checkpoint(cx)?;
+        if chunk.iter().any(|value| !value.is_finite()) {
+            return Err(action_error("direction must be finite"));
+        }
+    }
+    for chunk in scratch.chunks_mut(4096) {
+        checkpoint(cx)?;
+        chunk.fill(0.0);
+    }
+    Ok(())
+}
+
+fn finish_action(output: &mut [f64], scratch: &[f64], cx: &Cx<'_>) -> Result<(), HyperTetError> {
+    for chunk in scratch.chunks(4096) {
+        checkpoint(cx)?;
+        if chunk.iter().any(|value| !value.is_finite()) {
+            return Err(action_error("force increment is not representable"));
+        }
+    }
+    checkpoint(cx)?;
+    output.copy_from_slice(scratch);
+    Ok(())
+}
+
+fn element_action<const TRANSPOSE: bool>(
+    element: &Element,
+    tangent: &[[f64; 9]; 9],
+    increment: &[f64],
+    output: &mut [f64],
+) {
+    // Start at zero, not deformation_gradient(increment)-I: the latter loses
+    // increments smaller than the identity's ULP. Relative motion also makes
+    // a constant increment an EXACT null vector before constitutive work.
+    let mut delta_f = [0.0; 9];
+    for (a, &node) in element.nodes.iter().enumerate().skip(1) {
+        for i in 0..3 {
+            let delta_u = increment[3 * node + i] - increment[3 * element.nodes[0] + i];
+            for j in 0..3 {
+                delta_f[3 * i + j] = delta_u.mul_add(element.gradients[a][j], delta_f[3 * i + j]);
+            }
+        }
+    }
+    let delta_p: [f64; 9] = core::array::from_fn(|ij| {
+        (0..9).fold(0.0, |sum, kl| {
+            let a = if TRANSPOSE {
+                tangent[kl][ij]
+            } else {
+                tangent[ij][kl]
+            };
+            a.mul_add(delta_f[kl], sum)
+        })
+    });
+    for (a, &node) in element.nodes.iter().enumerate() {
+        for i in 0..3 {
+            let force = (0..3).fold(0.0, |sum, j| {
+                delta_p[3 * i + j].mul_add(element.gradients[a][j], sum)
+            });
+            output[3 * node + i] = element.volume.mul_add(force, output[3 * node + i]);
+        }
     }
 }

@@ -642,6 +642,27 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         }))
     }
 
+    // The assembled and matrix-free paths retain the SAME original law and
+    // total-reference kinematics, including any held material-history adapter.
+    fn element_tangent(
+        &self,
+        index: usize,
+        element: &Element,
+        u: &[f64],
+    ) -> Result<[[f64; 9]; 9], String> {
+        let f = Self::deformation_gradient(element, u);
+        Self::deformation_jacobian(&f)?;
+        let tangent = self
+            .material
+            .at(index)
+            .consistent_tangent(&f)
+            .map_err(|error| error.to_string())?;
+        if tangent.iter().flatten().any(|value| !value.is_finite()) {
+            return Err("original material tangent is not finite".into());
+        }
+        Ok(tangent)
+    }
+
     fn tangent(
         &self,
         elements: &[Element],
@@ -654,13 +675,9 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             if index % 4096 == 0 {
                 checkpoint(cx)?;
             }
-            let f = Self::deformation_gradient(element, u);
-            if let Err(what) = Self::deformation_jacobian(&f) {
-                return Ok(Err((index, what)));
-            }
-            let a4 = match self.material.at(index).consistent_tangent(&f) {
+            let a4 = match self.element_tangent(index, element, u) {
                 Ok(a4) => a4,
-                Err(error) => return Ok(Err((index, error.to_string()))),
+                Err(what) => return Ok(Err((index, what))),
             };
             let g = &element.gradients;
             for a in 0..4 {

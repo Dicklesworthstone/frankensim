@@ -1,5 +1,29 @@
 # fs-solid CONTRACT
 
+## Exact matrix-free finite-strain tangent actions
+
+`hyper3::prepared::PreparedHyperTetProblem::tangent_apply` streams the original
+per-element constitutive Hessian into `delta F`, `delta P` and nodal force
+increments without assembling element or global stiffness matrices. The caller
+reuses full-DOF output and scratch buffers; cancellation or a domain/arithmetic
+refusal leaves output unchanged. Relative increments retain the exact translation
+null mode and do not subtract identity from a rounded deformation gradient.
+
+`linearized_tangent` freezes the original 9-by-9 Hessian per reference tetrahedron
+under an explicit payload byte allowance. Repeated fallible forward and transpose
+actions do not reevaluate the material. Original heterogeneous, Gent and thermal
+reference laws remain the constitutive owners. The actual numerical transpose is
+applied without silently symmetrizing the material entries. The operator contains
+all original DOFs; support elimination, follower loads, gravity and inertia remain
+separate. No new mesh accuracy, locking, throughput or empirical claim is made.
+
+`tests/hyper3_tangent_action.rs` checks assembled-operator parity, independent force
+differences, exact rigid translation, frame covariance, very small increments,
+thermal-reference response, cached evaluation counts, transpose pairing, Gent
+chain stiffening and transactional refusal. Existing prepared-force tests remain
+the original reference-geometry regression seam.
+
+
 ## Explicit brittle through-seams and conservative fragment transfer
 
 `brittle::topology::TetFractureTopology` lowers explicitly selected internal
