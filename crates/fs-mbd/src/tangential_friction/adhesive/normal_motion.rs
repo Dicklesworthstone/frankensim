@@ -33,9 +33,9 @@ use fs_exec::CancelGate;
 use fs_tribo::partial_slip::TangentFrame;
 
 use super::super::hertz::{
-    RigidHertzError, apply_pair_wrench, points, relative_point, relative_spin,
+    RigidHertzError, apply_pair_wrench, point_response, points, relative_point, relative_spin,
 };
-use super::super::{RigidContactBinding, RigidFrictionError, components, magnitude, poll, vector};
+use super::super::{RigidContactBinding, RigidFrictionError, magnitude, poll, vector};
 
 /// Original source ordering, geometry markers and held contact discretization.
 #[derive(Clone, Copy, Debug)]
@@ -311,7 +311,8 @@ impl<'a> PreparedRigidDmtPair<'a> {
                 "unrepresentable common reaction plane",
             ));
         }
-        let mobility = point_response(before, properties, reaction_arms, axes)?;
+        let mobility = point_response(before, properties, reaction_arms, axes)
+            .map_err(|_| RigidDmtError::Invalid("unrepresentable native DMT mechanics"))?;
         let half_dt_squared = finite(0.5 * dt_s * dt_s)?;
         if half_dt_squared == 0.0 {
             return Err(RigidDmtError::Invalid("unrepresentable midpoint duration"));
@@ -631,39 +632,6 @@ pub fn apply_rigid_dmt_contact(
     Ok(candidate.report)
 }
 
-/// All three rows are POINT forces; the sliding/spin helper's third row is a
-/// free couple and is deliberately not used for normal motion.
-fn point_response(
-    bodies: [RigidBodyState; 2],
-    properties: [MassProperties; 2],
-    arms: [Vec3; 2],
-    axes: [Vec3; 3],
-) -> Result<[[f64; 3]; 3], RigidDmtError> {
-    let mut factor = [[0.0; 12]; 3];
-    for (body, sign) in [(0, 1.0), (1, -1.0)] {
-        let inverse_mass_root = properties[body].mass().sqrt().recip();
-        let orientation = bodies[body].pose().orientation();
-        for i in 0..3 {
-            let translation = components(axes[i].scale(sign * inverse_mass_root));
-            let torque = arms[body]
-                .cross(orientation.rotate_world_to_body(axes[i]))
-                .scale(sign);
-            let rotation = components(properties[body].angular_mobility_factor(torque));
-            for j in 0..3 {
-                factor[i][6 * body + j] = translation[j];
-                factor[i][6 * body + 3 + j] = rotation[j];
-            }
-        }
-    }
-    let mut response = [[0.0; 3]; 3];
-    for i in 0..3 {
-        for j in 0..=i {
-            response[i][j] = finite(factor[i].iter().zip(&factor[j]).map(|(a, b)| a * b).sum())?;
-            response[j][i] = response[i][j];
-        }
-    }
-    Ok(response)
-}
 fn mean(a: Vec3, b: Vec3) -> Vec3 {
     a.scale(0.5).add(b.scale(0.5))
 }

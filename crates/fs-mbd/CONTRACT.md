@@ -4966,6 +4966,50 @@ acquire a thermal solid face. Three groups in
 `tests/adhesive_transient_thermal.rs` cover independent finite-inertia thermal
 arrest/heat, retries and original-API equivalence, full source/geometry refusal,
 cancellation/detachment, and strength-dependent normal-path/budget refusal.
+
+## Native full-stick mixed-mode JKR normal/shear motion
+
+`tangential_friction::adhesive::jkr_mixed_mode::PreparedRigidJkrMixedModePair`
+embeds the original coupled full-stick JKR potential and the original ordered
+static junction strength into actual paired-body motion. The complete three
+point-force Gram matrix retains normal/shear cross response from both masses,
+full inertia tensors and actual reaction arms. The source owner solves all three
+coordinates together using its analytic discrete-path tangent, and bounds the
+entire constant-effort quadratic phase against source, radius and static-slip
+limits. Shear changes real area and normal reaction; no held old disk or diagonal
+effective-mass approximation replaces that coupling. A prepared pair reuses the
+original small LU workspace across trials.
+
+Normal approach is authenticated by collinear geometry markers and an immutable
+normal datum. The two elastic shear coordinates are retained constitutive
+history, driven by actual velocities at a common midpoint reaction plane. They
+are not tangential gaps between separated markers. All three point reactions
+therefore cancel internal force and angular impulse. The native history also
+pins the original tangent frame, normal datum and material marker arms; the
+source token retains its source, static capacity, full mobility, policy, time
+and step count. A changed frame, marker association or mobility requires an
+explicit history-transfer owner, which is not supplied by this phase.
+
+Held actual COM forces and body-frame torques drive the same coupled solve.
+Contact and external impulses are accumulated before each momentum is rounded
+once. Actual midpoint COM/angular travel closes external work for this one
+constant-effort phase. Independent native checks reconcile all three rates and
+coordinate increments, individual impulses, total linear/angular momentum,
+contact work, and kinetic-plus-source storage minus external work. Elastic
+unloading may assist body motion and return stored energy; it produces no
+automatic friction heat. Cancellation or any source, domain, nonlinear or
+native refusal publishes neither body momentum nor elastic history.
+
+This is a fixed-Jacobian, held-pose, full-stick phase. The caller owns pose
+integration and any later contact/frame migration. Relative torsion is screened
+at both endpoints, which bound its affine rate within this phase. Torsion,
+sliding, radius instability and changed mobility refuse without invented spin
+traction, detached landing state, snap energy or heat. The five groups in
+`tests/adhesive_jkr_mixed_mode.rs` cover the original zero-shear normal limit,
+elastic unloading and area recovery, independent full-tensor three-axis recoil,
+external force/torque work, world/body-index covariance, held mixed preload and
+chronology, and atomic frame/source/mobility/geometry/twist/load/cancel refusals
+with retry.
 Source/native execution remains subject to the documented dependency build
 limitation.
 

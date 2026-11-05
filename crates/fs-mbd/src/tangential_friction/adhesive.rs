@@ -32,6 +32,9 @@ pub mod normal_motion;
 /// Native frictionless JKR normal trajectories through attachment and pull-off.
 pub mod jkr_normal_motion;
 
+/// Coupled full-stick JKR normal/shear recoil on the actual finite body pair.
+pub mod jkr_mixed_mode;
+
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_exec::CancelGate;
 use fs_tribo::adhesive::spinning::contact::{

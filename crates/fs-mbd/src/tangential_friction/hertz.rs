@@ -629,6 +629,39 @@ pub(super) fn scaled_response<const N: usize>(
     Ok(result)
 }
 
+/// All three rows are POINT forces; the sliding/spin helper's third row is a
+/// free couple and is deliberately not used for normal motion.
+pub(super) fn point_response(
+    bodies: [RigidBodyState; 2],
+    properties: [MassProperties; 2],
+    arms: [Vec3; 2],
+    axes: [Vec3; 3],
+) -> Result<[[f64; 3]; 3], RigidHertzError> {
+    let mut factor = [[0.0; 12]; 3];
+    for (body, sign) in [(0, 1.0), (1, -1.0)] {
+        let inverse_mass_root = properties[body].mass().sqrt().recip();
+        let orientation = bodies[body].pose().orientation();
+        for i in 0..3 {
+            let translation = components(axes[i].scale(sign * inverse_mass_root));
+            let torque = arms[body]
+                .cross(orientation.rotate_world_to_body(axes[i]))
+                .scale(sign);
+            let rotation = components(properties[body].angular_mobility_factor(torque));
+            for j in 0..3 {
+                factor[i][6 * body + j] = translation[j];
+                factor[i][6 * body + 3 + j] = rotation[j];
+            }
+        }
+    }
+    let mut response = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..=i {
+            response[i][j] = finite(factor[i].iter().zip(&factor[j]).map(|(a, b)| a * b).sum())?;
+            response[j][i] = response[i][j];
+        }
+    }
+    Ok(response)
+}
 /// One native equal/opposite point impulse plus one free angular impulse.
 /// Both contact consumers use this exact original pair-only publication path.
 pub(super) fn apply_pair_wrench(

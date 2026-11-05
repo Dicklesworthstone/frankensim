@@ -293,7 +293,7 @@ fn finite_gap_attraction_drives_actual_recoil_and_geometry_owned_continuation() 
 
 fn potential(normal: &SourceDmtSphereContact, x: f64) -> f64 {
     let pull = 2.0 * PI * normal.effective_radius_m() * ADHESION;
-    let hertz = normal.evaluate(common::Z).unwrap().repulsive_force_n / common::Z.powf(1.5);
+    let hertz = normal.evaluate(common::Z).unwrap().repulsive_normal_force_n / common::Z.powf(1.5);
     if x >= 0.0 {
         0.4 * hertz * x.powf(2.5) - pull * (x + 0.5 * common::Z)
     } else {
