@@ -35,7 +35,7 @@ pub(super) fn admit_emissivity(value: f64) -> Result<(), Error> {
 // One fourth-power kernel for source-backed solid and liquid surfaces. The
 // exact positive secant preserves small fluxes near thermal equilibrium and
 // participates in the same combined thermal CFL as all other heat paths.
-fn radiant_conductance(
+pub(super) fn radiant_conductance(
     emissivity: f64,
     area: f64,
     temperature: f64,

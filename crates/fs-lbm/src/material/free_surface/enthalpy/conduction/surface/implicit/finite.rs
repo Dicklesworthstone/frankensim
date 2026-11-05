@@ -69,7 +69,7 @@ pub(super) fn solve_interval<'t, 'a, 'm>(
     for surface in &observer.body_atmosphere.last {
         check()?;
         gas_scale_kg = environment::finite(
-            gas_scale_kg + dt * surface.conductance_w_k * gas.temperature_slope,
+            gas_scale_kg + dt * surface.gas_decay_conductance_w_k * gas.temperature_slope,
         )?;
     }
     if gas_scale_kg <= 0.0 {

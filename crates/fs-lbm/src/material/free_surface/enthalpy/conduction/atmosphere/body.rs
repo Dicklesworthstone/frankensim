@@ -6,6 +6,7 @@
 
 use super::*;
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use super::super::radiation::FreeSurfaceBodyRadiationFace;
 
 mod convection;
 pub(in super::super) use convection::PreparedBodyGasConvection;
@@ -40,7 +41,11 @@ pub struct FreeSurfaceBodyGasSample {
     /// Gas transport at the actual surface/bulk mean film temperature and
     /// current EOS pressure. A prescribed film uses the solid cell as surface.
     pub gas: ResolvedThermochemicalGasState,
+    /// Material/gas pair conductance after eliminating the common surface.
     pub conductance_w_k: f64,
+    /// Gas row includes both material/gas and gas/radiant-bath exchange.
+    /// This is a frozen secant scale, not a derivative of the original source.
+    pub gas_decay_conductance_w_k: f64,
     /// Positive into the solid; its opposite enters the one gas account [W].
     pub heat_into_solid_w: f64,
     /// Present only for an explicitly selected conducting convection surface.
@@ -58,6 +63,7 @@ pub struct FreeSurfaceBodyGasExchange {
 #[derive(Clone, Default)]
 pub(in super::super) struct BodyAtmosphere {
     pub(in super::super) faces: Vec<(usize, FreeSurfaceBodyGasFace)>,
+    radiation: Vec<Option<FreeSurfaceBodyRadiationFace>>,
     pub(in super::super) reference: Vec<FreeSurfaceBodyGasSample>,
     pub(in super::super) last: Vec<FreeSurfaceBodyGasSample>,
     pub(in super::super) endpoint: Vec<FreeSurfaceBodyGasSample>,
@@ -75,13 +81,15 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     ) -> Result<BodyAtmosphere, Error> {
         let mut timeline = BodyAtmosphere::default();
         let mut faces = BTreeSet::new();
-        let mut radiating = BTreeSet::new();
+        let mut radiating = BTreeMap::new();
         if bodies.iter().any(|body| body.gas_convection().is_some()) {
-            for body in bodies {
+            for (index, body) in bodies.iter().enumerate() {
                 for face in body.radiation_faces() {
                     poll(gate)?;
-                    if face.area_m2 > 0.0 {
-                        radiating.insert((face.wall, face.gas));
+                    if face.area_m2 > 0.0
+                        && radiating.insert((face.wall, face.gas), (index, *face)).is_some()
+                    {
+                        return Err(Error::Invalid("a radiating native wall face needs one owner"));
                     }
                 }
             }
@@ -123,9 +131,12 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
                         "solid film needs the shared finite gas and a unique adjacent exposed wall face",
                     ));
                 }
-                if convective && radiating.contains(&(face.wall, face.gas)) {
+                if convective
+                    && let Some((radiating_body, radiation)) = radiating.get(&(face.wall, face.gas))
+                    && (*radiating_body != index || radiation.area_m2 != face.area_m2)
+                {
                     return Err(Error::Invalid(
-                        "conducting solid convection and cell-temperature radiation need distinct faces",
+                        "a shared conducting surface needs the same body and exact convection/radiation area",
                     ));
                 }
                 timeline.faces.push((index, face));
@@ -134,6 +145,14 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         timeline
             .faces
             .sort_by_key(|(index, face)| (bodies[*index].id(), face.wall, face.gas));
+        for (index, face) in &timeline.faces {
+            poll(gate)?;
+            timeline.radiation.push(if bodies[*index].gas_convection().is_some() {
+                radiating.get(&(face.wall, face.gas)).map(|(_, face)| *face)
+            } else {
+                None
+            });
+        }
         Ok(timeline)
     }
 }
@@ -167,7 +186,7 @@ impl Conduction<'_, '_> {
             }
             let solid = body.resolve(thermal.cells()[&id].specific_h_j_kg)?;
             if let Some(convection) = body.gas_convection() {
-                let sample = convection.sample(body.id(), face, solid,
+                let sample = convection.sample(body, face, self.body_atmosphere.radiation[sample_index], solid,
                     thermal.cells()[&id].specific_h_j_kg, &atmosphere.parcel, check)?;
                 if self.body_atmosphere.reference.get(sample_index)
                     .is_some_and(|start| !environment::same_sources(&start.gas, &sample.gas))
@@ -214,6 +233,7 @@ impl Conduction<'_, '_> {
                 solid,
                 gas,
                 conductance_w_k,
+                gas_decay_conductance_w_k: conductance_w_k,
                 heat_into_solid_w: environment::finite(
                     conductance_w_k * (gas_temperature_k - solid_temperature_k),
                 )?,

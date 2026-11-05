@@ -6,8 +6,8 @@ use super::*;
 ///
 /// The source-bound total hemispherical emissivity belongs to its finite body.
 /// This is the same opaque diffuse-gray, unit-view-factor approximation as the
-/// liquid boundary. Surface T is the body's resolved cell T; callers must
-/// resolve the boundary layer or justify that uniform-temperature approximation.
+/// liquid boundary. A matching conducting convection patch uses its solved
+/// surface; other patches use the cell T and retain that uniform-cell assumption.
 /// No gas absorption, finite radiative reservoir or inferred visibility is added.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceBodyRadiationFace {
@@ -26,10 +26,13 @@ pub struct FreeSurfaceBodyRadiationSample {
     pub body_id: u64,
     pub face: FreeSurfaceBodyRadiationFace,
     pub solid_temperature_k: f64,
+    /// Actual emitting surface; equals cell T only without a coupled face.
+    pub surface_temperature_k: f64,
     pub emissivity: f64,
     pub emissivity_source: ResolvedScalarProperty,
     pub conductance_w_k: f64,
-    /// Positive into the finite solid; never debited from the finite gas [W].
+    /// Radiant supply through this surface [W]. Together with gas exchange it
+    /// enters solid storage; it is never debited from the finite gas account.
     pub heat_into_solid_w: f64,
 }
 
@@ -104,10 +107,18 @@ impl Conduction<'_, '_> {
     pub(in super::super) fn sample_body_radiation(
         &self,
         thermal: &DepositionSimulation<'_>,
+        body_gas: &[atmosphere::FreeSurfaceBodyGasSample],
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<FreeSurfaceBodyRadiationSample>, Error> {
         let mut samples = Vec::with_capacity(self.body_radiation.faces.len());
         let mut covered = BTreeMap::new();
+        let mut shared = BTreeMap::new();
+        for sample in body_gas {
+            check()?;
+            if let Some(radiation) = sample.convection.as_ref().and_then(|s| s.radiation.as_ref()) {
+                shared.insert((radiation.body_id, radiation.face.wall, radiation.face.gas), radiation);
+            }
+        }
         for &(body_index, face) in &self.body_radiation.faces {
             check()?;
             let body = &self.bodies[body_index];
@@ -120,6 +131,13 @@ impl Conduction<'_, '_> {
                 return Err(Error::Invalid(
                     "solid radiation exceeds uncovered solid area",
                 ));
+            }
+            if let Some(sample) = shared.get(&(body.id(), face.wall, face.gas)) {
+                if sample.face != face {
+                    return Err(Error::Invalid("shared conducting radiation changed its original face"));
+                }
+                samples.push((**sample).clone());
+                continue;
             }
             let material = body.resolve(thermal.cells()[&id].specific_h_j_kg)?;
             let emissivity_source =
@@ -140,6 +158,7 @@ impl Conduction<'_, '_> {
                 body_id: body.id(),
                 face,
                 solid_temperature_k,
+                surface_temperature_k: solid_temperature_k,
                 emissivity,
                 emissivity_source: emissivity_source.clone(),
                 conductance_w_k,

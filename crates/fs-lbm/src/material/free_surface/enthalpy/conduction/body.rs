@@ -8,7 +8,7 @@
 use super::*;
 use fs_matdb::PropertyKey;
 use fs_material::state_point::{
-    MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    MaterialPropertySelection, ResolvedMaterialStatePoint, ResolvedScalarProperty, ScalarAdmissibility,
     ScalarPropertyRequirement, THERMAL_CONDUCTIVITY_DIMS, resolve_material_state_point,
 };
 use fs_material::thermal::source::{
@@ -278,9 +278,9 @@ impl<'m> FreeSurfaceThermalBody<'m> {
     /// The shared finite gas owns bulk temperature, EOS pressure and all heat.
     /// Body clones and thermal trials share this prepared source line.
     ///
-    /// A positive radiating patch on the same native face refuses: the existing
-    /// radiation law uses cell temperature, whereas this boundary resolves a
-    /// distinct surface temperature. Radiation on other faces remains available.
+    /// Radiation on the same native face must belong to this body and have the
+    /// exact same area. Both then use one solved surface and original emissivity
+    /// at that surface; radiation on other faces retains its cell-temperature law.
     pub fn with_gas_convection(
         mut self,
         provider: &'m dyn atmosphere::FreeSurfaceBodyGasConvection,
@@ -334,8 +334,8 @@ impl<'m> FreeSurfaceThermalBody<'m> {
     /// zero is a reflecting surface; absent data never becomes a guessed value.
     /// This one-time attachment cannot silently replace an already pinned law.
     /// Geometry and aggregate exposed-area/work budgets are checked by the
-    /// shared timeline. Prescribed gas films may use the same patch in parallel;
-    /// a resolved conducting convection surface requires a distinct face.
+    /// shared timeline. An equal-area convection patch on the same body/face
+    /// shares its solved surface; other patches use the original cell temperature.
     pub fn with_radiation_faces(
         mut self,
         faces: Vec<radiation::FreeSurfaceBodyRadiationFace>,
@@ -465,6 +465,42 @@ impl<'m> FreeSurfaceThermalBody<'m> {
             .property(self.requirements[0].name())
             .expect("required conductivity")
             .value_si()
+    }
+
+    /// Query only the original pinned emissivity at a surface already admitted
+    /// by the prepared pure-solid conductivity span. Do not rebuild k(T) or
+    /// replace the cell's accepted caloric/material state during root trials.
+    pub(super) fn emissivity_at_surface(
+        &self,
+        specific_h_j_kg: f64,
+        temperature_k: f64,
+    ) -> Result<ResolvedScalarProperty, Error> {
+        let phase = self.caloric.state_at_specific_enthalpy(specific_h_j_kg)?;
+        if !phase.is_fully_solid() {
+            return Err(Error::Invalid("conducting radiative wall left its solid phase"));
+        }
+        let requirement = self.requirements.iter()
+            .find(|r| r.name() == SURFACE_EMISSIVITY_PROPERTY)
+            .ok_or(Error::Invalid("conducting radiative wall has no emissivity source"))?;
+        let selected = self.material.property(SURFACE_EMISSIVITY_PROPERTY)
+            .ok_or(Error::Invalid("conducting radiative wall lost its emissivity claim"))?
+            .answer().receipt.selected;
+        let point = self.source.at(phase)?
+            .with(self.source.temperature_axis, temperature_k)
+            .map_err(|_| Error::Invalid("invalid conducting wall surface temperature"))?;
+        let material = resolve_material_state_point(
+            self.source.material,
+            &point,
+            std::slice::from_ref(requirement),
+            MaterialPropertySelection::PinnedByProperty(vec![(
+                requirement.name().to_owned(), selected,
+            )]),
+        )?;
+        let emissivity = material.property(SURFACE_EMISSIVITY_PROPERTY)
+            .ok_or(Error::Invalid("conducting radiative wall lost its surface emissivity"))?;
+        self.source.admit_static(emissivity)?;
+        radiation::admit_emissivity(emissivity.value_si())?;
+        Ok(emissivity.clone())
     }
 }
 

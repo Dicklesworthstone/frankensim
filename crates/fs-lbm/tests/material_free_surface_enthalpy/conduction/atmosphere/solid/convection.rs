@@ -8,6 +8,9 @@ use fs_lbm::material::free_surface::enthalpy::conduction::surface::convection::F
 use fs_material::thermal::conduction::LayerConductionConfig;
 use std::{cell::RefCell, sync::Arc};
 
+#[path = "convection/radiation.rs"]
+mod coupled_radiation;
+
 #[derive(Debug)]
 struct Film {
     h: f64,
@@ -104,7 +107,7 @@ fn integrated_solid_surface_closes_the_same_finite_gas_and_liquid_in_both_direct
             near(exchange.heat_to_solids_j, qs, 2e-10);
             near(report.environment.as_ref().unwrap().heat_to_liquid_j, ql, 2e-10);
             near(report.bodies.as_ref().unwrap().heat_from_gas_j, qs, 2e-10);
-            near(boundary.solid_power_to_gas_w + endpoint.heat_into_solid_w, boundary.surface_heat_residual_w, 1e-13);
+            near(boundary.solid_power_to_surface_w + endpoint.heat_into_solid_w, boundary.surface_heat_residual_w, 1e-13);
             assert!(report.finite_gas.unwrap().combined_thermal_balance_defect_j.abs() < 1e-9);
             assert!(Arc::ptr_eq(&boundary.source_line, &exchange.last_applied[0].convection.as_ref().unwrap().source_line));
             let source = Arc::clone(&boundary.source_line);
@@ -158,8 +161,10 @@ fn geometry_surface_budget_and_late_provider_refusals_roll_back_every_owner() {
         exhausted.max_iterations = 1;
         exhausted.absolute_heat_tolerance_w = 0.0;
         exhausted.relative_heat_tolerance = 0.0;
+        let mut unequal = radiation::radiant_face(450.0);
+        unequal.area_m2 *= 0.5;
         let radiating = original.clone().with_radiation_faces(
-            vec![radiation::radiant_face(450.0)], MaterialPropertySelection::SingleClaimOnly).unwrap();
+            vec![unequal], MaterialPropertySelection::SingleClaimOnly).unwrap();
         let before = thermal.total_enthalpy_j().unwrap();
         let bits = thermal.flow().lattice().grid().state_bits();
         let gas_before = gas.state().clone();

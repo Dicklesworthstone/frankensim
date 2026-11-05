@@ -447,7 +447,7 @@ impl DepositionObserver for Conduction<'_, '_> {
             let watts = powers.entry(id).or_insert(0.0);
             *watts = environment::finite(*watts + sample.heat_into_liquid_w)?;
         }
-        self.body_radiation.last = self.sample_body_radiation(thermal, check)?;
+        self.body_radiation.last = self.sample_body_radiation(thermal, &self.body_atmosphere.last, check)?;
         for (&(index, _), sample) in self.body_radiation.faces.iter()
             .zip(&self.body_radiation.last)
         {
@@ -597,7 +597,7 @@ impl Conduction<'_, '_> {
                 self.body_radiation.absolute_heat_j + heat.abs(),
             )?;
         }
-        self.body_radiation.endpoint = self.sample_body_radiation(thermal, check)?;
+        self.body_radiation.endpoint = self.sample_body_radiation(thermal, &self.body_atmosphere.endpoint, check)?;
         self.surface_endpoint = self.sample_surfaces(thermal, check)?;
         Ok(())
     }

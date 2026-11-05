@@ -359,7 +359,7 @@ impl Conduction<'_, '_> {
             }
             for sample in &self.body_atmosphere.last {
                 check()?;
-                conductance = finite(conductance + sample.conductance_w_k)?;
+                conductance = finite(conductance + sample.gas_decay_conductance_w_k)?;
             }
             let decay = finite(gas.temperature_slope * conductance / gas.parcel.mass_kg())?;
             if decay > 0.0 {

@@ -10368,9 +10368,8 @@ derivative. `FreeSurfaceBodyGasSample::convection` retains surface temperature,
 original coefficient evidence, shared source line, integral-coordinate power,
 heat-continuity residual and iteration count.
 
-The existing body radiation law uses cell temperature. A positive radiating
-patch therefore cannot share a native face with a conducting convection
-surface; distinct faces remain supported. Prescribed gas-film behavior remains
+Radiation sharing the same native face uses the coupled surface owner below.
+Distinct radiating faces retain the original cell-temperature law. Prescribed gas-film behavior remains
 available. This is a fixed-geometry, quasi-steady, pure-solid surface closure
 coupled to the original well-mixed finite gas. Spatial, temporal and correlation
 validity require their existing assessment; no new gas momentum or phase
@@ -10381,6 +10380,38 @@ finite-store energy oracle in both heat directions, source sharing, convection
 feedback into native populations, equilibrium, distinct-face radiation and
 atomic refusal. Source parsing and whitespace checks passed; native compilation
 and execution remain pending the required constellation dependencies.
+
+### Shared convection and radiation on conducting solid faces
+
+A radiating patch with the same original body, native face and exact area as a
+conducting convection patch now shares one solved surface temperature. Unequal
+areas and conflicting body ownership refuse. The two-bath material kernel
+balances the original k(T) integral against separate gas and radiant powers,
+including opposing drives, equal cell/gas temperatures and zero net solid heat.
+Original emissivity is queried at actual surface temperature with its existing
+claim and material context; no new conductivity chart is built during trials.
+
+The gas sample retains the accepted radiant sample. The radiant timeline reuses
+that exact sample at applied and endpoint states, without another surface root.
+Actual gas heat and external radiation enter their original energy accounts
+once. Material/gas and material/radiant pair conductances supply the solid row;
+the gas row additionally includes the gas/radiant-bath relay. Explicit capacity
+limits and implicit gas conditioning both retain that path. These are frozen
+secant scales, not derivatives of changing coefficients.
+
+`FreeSurfaceBodyConvectionSample::solid_power_to_surface_w` retains the signed
+material integral power; it is distinct from either bath's heat. Reports also
+retain actual emitting temperature, original emissivity and coefficient
+evidence, heat-continuity residual and the gas/radiant pair conductance.
+The original fixed geometry, pure-solid profile, well-mixed gas and diffuse-gray
+unit-view-factor radiation assumptions remain explicit.
+
+Three native specifications cover independent affine-k/fourth-power surfaces
+and finite liquid/solid/gas balances in both heat directions, the radiant relay,
+exact equilibrium, actual surface-source refusal and late-provider rollback.
+They passed source/API and syntax review; native compilation/execution remain
+pending an admitted constellation build. The shared numerical kernel's 23-test
+bounded execution is documented separately in fs-material.
 
 ### Independent fragment conservation in tetrahedral liquid ingress
 
