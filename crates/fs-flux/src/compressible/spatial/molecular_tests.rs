@@ -42,6 +42,9 @@ mod walls;
 #[path = "molecular/forcing_tests.rs"]
 mod forcing;
 
+#[path = "molecular/profile_tests.rs"]
+mod reservoir_profiles;
+
 fn law(g: &FrozenGas, mu: f64, bulk: f64, conductivity: f64) -> ConstantTransport {
     let models = g.source().components().to_vec();
     let ids: Vec<_> = models.iter().map(|m| m.species().clone()).collect();

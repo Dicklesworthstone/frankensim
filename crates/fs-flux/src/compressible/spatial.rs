@@ -15,7 +15,7 @@ use fs_qty::Time;
 mod cartesian;
 mod evolve;
 mod reservoir;
-pub use reservoir::{PressureOutletBoundary, ReservoirBoundary};
+pub use reservoir::{PressureOutletBoundary, ReservoirBoundary, ReservoirFaceState};
 /// Conservative body impulse and mechanical work on the original time owner.
 pub mod forcing;
 pub use forcing::{BodyForce3d, ForceChange3d, ForceControl3d, ForcingWorkspace3d};
@@ -528,11 +528,17 @@ impl Euler3d {
     pub const fn boundaries(&self) -> Boundaries3d {
         self.boundaries
     }
-    /// Original immutable exterior state on one physical side, if supplied.
+    /// Original uniform exterior state, if supplied. Face profiles are exposed
+    /// separately by [`Self::reservoir_face`]; no face is chosen as their mean.
     pub fn reservoir(&self, side: BoundarySide) -> Option<ReservoirBoundary> {
         self.reservoirs
             .get(side.axis(), side.sign())
-            .map(|state| state.input)
+            .map(|state| ReservoirBoundary {
+                side,
+                density: state.input.density,
+                velocity: state.input.velocity,
+                pressure_pa: state.input.pressure_pa,
+            })
     }
     /// Original immutable backpressure on one physical side, if supplied.
     pub fn pressure_outlet(&self, side: BoundarySide) -> Option<PressureOutletBoundary> {

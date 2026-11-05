@@ -189,7 +189,7 @@ fn spatial(
                             &mut *cancelled,
                         )?
                     }
-                } else if let Some(exterior) = reservoirs.get(axis, sign) {
+                } else if let Some(exterior) = reservoirs.get_at(grid, axis, sign, k) {
                     if first_order {
                         let inside = states[k].normal(axis);
                         let outside = exterior.state.normal(axis);

@@ -208,6 +208,11 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     }
 
     /// Bind the identical original source while preserving the complete field.
+    /// This owns a second complete Euler field, including any prepared face
+    /// profiles. Each profile copy retains its original per-owner byte limit;
+    /// [`Self::reservoir_profile_workspace_bytes`] reports their combined cost.
+    /// To admit the combined profile storage before allocating it, construct
+    /// from an unprofiled field and use [`Self::prepare_reservoir_profiles`].
     pub fn new(
         flow: Euler3d,
         law: L,
@@ -224,7 +229,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
             flow.boundaries,
             &mut cancelled,
         )?;
-        trial.reservoirs = flow.reservoirs.clone();
+        trial.reservoirs = flow.reservoirs.try_clone(&mut cancelled)?;
         let faces = flow.boundary_impulses.len();
         let result = Self {
             accepted: flow,
@@ -242,6 +247,85 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     /// advective stage; this owner's report and loads cover the complete split.
     pub const fn flow(&self) -> &Euler3d {
         &self.accepted
+    }
+
+    /// Minimum additional profile bytes across both complete Euler owners.
+    pub fn required_reservoir_profile_workspace_bytes(
+        &self,
+        sides: &[BoundarySide],
+    ) -> Result<usize, MolecularError> {
+        self.accepted
+            .required_reservoir_profile_workspace_bytes(sides)?
+            .checked_mul(2)
+            .ok_or(MolecularError::Invalid(
+                "coupled reservoir profile size overflow",
+            ))
+    }
+
+    /// Prepare identical held exterior faces in both accepted and trial fields.
+    /// The byte allowance covers BOTH owners' active and candidate arrays.
+    /// Callbacks run once, on the original grid/source; no resampling occurs
+    /// during molecular halves, Euler stages or retries. Existing molecular
+    /// flux at transmissive ends remains zero: these are advective traces.
+    pub fn prepare_reservoir_profiles(
+        &mut self,
+        sides: &[BoundarySide],
+        maximum_profile_bytes: usize,
+        sample: impl FnMut(BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), MolecularError> {
+        let profiles = self.accepted.reservoirs.prepare_profiles(
+            &self.accepted.gas,
+            &self.accepted.grid,
+            self.accepted.boundaries,
+            sides,
+            maximum_profile_bytes / 2,
+            sample,
+            &mut cancelled,
+        )?;
+        let trial_profiles = profiles.try_clone(&mut cancelled)?;
+        poll(&mut cancelled)?;
+        self.accepted.reservoirs.profiles = profiles;
+        self.trial.reservoirs.profiles = trial_profiles;
+        self.accepted.last_step = None;
+        self.trial.last_step = None;
+        self.last_step = None;
+        Ok(())
+    }
+
+    /// Replace both complete fields' held traces in one control transaction.
+    /// Every face is sampled once into reusable scratch. A failed sample,
+    /// original-source refusal or cancellation preserves both active copies
+    /// and all accepted flow state. Successful updates invalidate old reports
+    /// but leave the physical clock, cells and historical impulses unchanged.
+    pub fn update_reservoir_profiles(
+        &mut self,
+        sample: impl FnMut(BoundarySide, usize, [f64; 3]) -> Result<ReservoirFaceState, Error>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), MolecularError> {
+        self.accepted.reservoirs.profiles.stage(
+            &self.accepted.gas,
+            &self.accepted.grid,
+            sample,
+            &mut cancelled,
+        )?;
+        self.trial
+            .reservoirs
+            .profiles
+            .copy_staged_from(&self.accepted.reservoirs.profiles, &mut cancelled)?;
+        poll(&mut cancelled)?;
+        self.accepted.reservoirs.profiles.publish();
+        self.trial.reservoirs.profiles.publish();
+        self.accepted.last_step = None;
+        self.trial.last_step = None;
+        self.last_step = None;
+        Ok(())
+    }
+
+    /// Actual profile numerical capacity across accepted and trial owners.
+    pub fn reservoir_profile_workspace_bytes(&self) -> usize {
+        self.accepted.reservoir_profile_workspace_bytes()
+            + self.trial.reservoir_profile_workspace_bytes()
     }
 
     /// Exact immutable source law, including retained material/collision data.

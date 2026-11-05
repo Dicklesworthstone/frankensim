@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod profiles;
+pub use profiles::ReservoirFaceState;
+
 /// Uniform externally maintained gas on one open physical side.
 ///
 /// The same source and frozen composition as the field supply temperature,
@@ -40,9 +43,9 @@ pub struct PressureOutletBoundary {
     pub pressure_pa: f64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct AdmittedReservoir {
-    pub(super) input: ReservoirBoundary,
+    pub(super) input: ReservoirFaceState,
     pub(super) state: State,
     primitive: Primitive,
 }
@@ -58,11 +61,12 @@ impl AdmittedReservoir {
     }
 }
 
-/// Fixed six-slot metadata; no face-sized storage or hot-loop allocation.
-#[derive(Clone)]
+/// Uniform sides keep fixed metadata; optional profiles have admitted reusable
+/// face buffers. Neither representation allocates during a flow step.
 pub(super) struct Reservoirs {
     states: [Option<AdmittedReservoir>; 6],
     outlets: [Option<PressureOutletBoundary>; 6],
+    pub(super) profiles: profiles::Profiles,
 }
 
 impl Reservoirs {
@@ -79,6 +83,7 @@ impl Reservoirs {
         let mut result = Self {
             states: [None; 6],
             outlets: [None; 6],
+            profiles: profiles::Profiles::default(),
         };
         for side in BoundarySide::ALL {
             let pair = topology.axis(side.axis());
@@ -113,7 +118,11 @@ impl Reservoirs {
             // uses, so an identical field/reservoir pair keeps exact consistency.
             let primitive = state.primitive(gas, &mut *cancelled)?;
             *slot = Some(AdmittedReservoir {
-                input,
+                input: ReservoirFaceState {
+                    density: input.density,
+                    velocity: input.velocity,
+                    pressure_pa: input.pressure_pa,
+                },
                 state,
                 primitive,
             });
@@ -148,6 +157,30 @@ impl Reservoirs {
         self.states[2 * axis + usize::from(sign > 0.0)].as_ref()
     }
 
+    pub(super) fn get_at(
+        &self,
+        grid: &CartesianGrid,
+        axis: usize,
+        sign: f64,
+        cell: usize,
+    ) -> Option<&AdmittedReservoir> {
+        let slot = 2 * axis + usize::from(sign > 0.0);
+        if let Some(state) = self.states[slot].as_ref() {
+            return Some(state);
+        }
+        let [a, b] = tangents(axis);
+        let c = grid.coordinates(cell);
+        self.profiles.get(slot, c[a] + grid.shape[a] * c[b])
+    }
+
+    pub(super) fn try_clone(&self, cancelled: &mut impl FnMut() -> bool) -> Result<Self, Error> {
+        Ok(Self {
+            states: self.states,
+            outlets: self.outlets,
+            profiles: self.profiles.try_clone(cancelled)?,
+        })
+    }
+
     pub(super) fn outlet(&self, axis: usize, sign: f64) -> Option<PressureOutletBoundary> {
         self.outlets[2 * axis + usize::from(sign > 0.0)]
     }
@@ -172,6 +205,7 @@ impl Reservoirs {
                     .sum::<f64>()
             })
             .fold(0.0, f64::max);
+        rate = rate.max(self.profiles.maximum_rate(grid, cancelled)?);
         for outlet in self.outlets.iter().flatten() {
             let axis = outlet.side.axis();
             let sign = outlet.side.sign();

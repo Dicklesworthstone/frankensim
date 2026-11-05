@@ -5061,3 +5061,44 @@ The default transport's moving unequal-caloric contact limitation remains.
 Hydrostatic/body-force, molecular, reacting, moving-wall, rotor and network
 compositions continue through their existing methods and do not enable
 this contact correction implicitly.
+
+
+## Face-resolved held exterior gas in frozen three-dimensional flow
+
+`spatial::Euler3d::prepare_reservoir_profiles` binds a fixed, unique set of
+otherwise unbound transmissive sides. Each physical face carries its own
+`ReservoirFaceState` density, three Cartesian velocities and absolute pressure.
+The original `FrozenGas` source constructs conservative energy and decodes the
+same calorics as a native cell. Existing MUSCL reconstruction, HLLC/HLL fluxes,
+SSP retries and per-face mass/momentum/enthalpy accounts remain the owners of
+transport; the exterior trace is piecewise constant on each physical face.
+Every cached exterior velocity and sound speed enters the unsplit initial CFL.
+Uniform reservoirs and pressure-only outlets retain their original semantics
+and cannot share a profile side.
+
+Preparation admits active and candidate cache capacities against the explicit
+additional profile byte budget before sampling. `update_reservoir_profiles`
+visits each prepared face once in canonical side/face order and publishes all
+sides together after source admission and cancellation checks. Updates allocate
+no numerical arrays; callbacks are absent from flow stages and retries. The
+caller owns physical sample time, any stochastic field and temporal refinement.
+A failed update preserves active traces, cells, clock, reports and historical
+boundary impulses. A successful update invalidates the old report without
+changing the accepted cells, clock or historical impulses.
+
+`MolecularEuler3d` retains both complete fields' profiles when composing an
+already profiled Euler field. Its explicit prepare budget and workspace-byte
+getter cover both copies; its update stages and synchronizes both candidates
+before either publishes. Profiles survive accepted/trial ownership swaps and
+share the original complete-interval retry. Transmissive molecular flux remains
+zero; these are prescribed infinite advective reservoirs, not viscous/thermal
+bath boundary data, finite storage, nonreflecting outlets, nonlinear averaged
+fluxes or a calibrated turbulence model.
+
+Five focused G0/G1/G4 tests were authored: uniform bit-equivalence and canonical
+sampling; analytical supersonic mass, all momentum components and enthalpy on
+all six orientations; budget/source/conflict/cancellation transactions; the
+hottest individual face's unsplit CFL; and evolving boundary controls through
+molecular ownership swaps with zero-transport equivalence. These tests have not
+yet executed in this environment; formatting passed. No new DNS, turbulence
+spectrum, temporal convergence or experimental accuracy claim is made.
