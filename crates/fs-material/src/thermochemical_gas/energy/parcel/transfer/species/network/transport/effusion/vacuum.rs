@@ -145,6 +145,7 @@ pub fn step_candidate(
         paths.porous.len(),
         paths.membranes.len(),
         paths.dusty_gas.len(),
+        paths.layered_dusty_gas.len(),
         paths.effusion.len(),
         vacuum.len(),
     ]

@@ -240,6 +240,7 @@ pub fn step_candidate_with_drift(
         paths.porous.len(),
         paths.membranes.len(),
         paths.dusty_gas.len(),
+        paths.layered_dusty_gas.len(),
         paths.effusion.len(),
         vacuum_links.len(),
         reservoir_links.len(),

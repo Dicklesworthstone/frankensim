@@ -310,6 +310,7 @@ pub(super) fn row_count(step: &ReservoirEffusionStep) -> usize {
         + rates.porous.len()
         + rates.membranes.len()
         + rates.dusty_gas.len()
+        + rates.layered_dusty_gas.len()
         + rates
             .effusion
             .iter()

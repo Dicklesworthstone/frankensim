@@ -7450,6 +7450,20 @@ The accumulated native caloric residual is retained and checked separately.
 All conservation budgets apply once to the entire interval, without multiplication
 by the number of steps. Open paths make no closed-system entropy claim.
 
+With all external-boundary slices empty, this same trajectory advances closed
+`GasTransportPaths`, including the native `layered_dusty_gas` interfaces and
+separate molecular paths. Every accepted half step retains its original
+laminate source/flux report. Layered interfaces count toward the shared
+connection limit when vacuum or held-reservoir paths are composed, and inactive
+layered reports count toward the retained-history bound. No second controller,
+flux model or energy update is introduced. Independent equal-molar-mass binary
+relaxation through parallel laminate/molecular exposures checks temporal
+refinement, accepted-only throughput and fixed whole-window conservation.
+Native laminate fixtures also check serial Knudsen inventory/enthalpy,
+multicomponent source/reference-energy parity, shared withdrawals, later
+transport of arrivals and transactional source/work/accuracy/cancellation
+refusals. These regressions are authored; native execution remains unverified.
+
 G0/G1/G3/G4 fixtures cover monatomic and diatomic analytic vacuum blowdown over
 three tolerance rungs, shared gross-withdrawal retries, deterministic caloric-
 reference invariance, new-species supply through two finite chambers with vacuum
