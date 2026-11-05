@@ -37,6 +37,10 @@ pub mod scalar;
 #[path = "dynamic/channel.rs"]
 pub mod channel;
 
+/// Pathline averaging of the same Germano contractions with explicit memory.
+#[path = "dynamic/lagrangian.rs"]
+pub mod lagrangian;
+
 use channel::{FilterGeometry, ScalarWall};
 
 /// Numerator and denominator are averaged separately, never their ratio.
@@ -452,6 +456,33 @@ impl PeriodicDynamicSgs {
     ) -> Result<(DynamicSgsReport, InputScales), DynamicSgsError> {
         poll(&mut cancelled, 0)?;
         config.validate()?;
+        let (scales, domain) =
+            self.prepare_contractions(density, velocity, walls, &mut cancelled)?;
+        if scales.velocity == 0.0 {
+            for (tile, values) in self.viscosity.chunks_mut(64).enumerate() {
+                poll(&mut cancelled, tile * 64)?;
+                values.fill(0.0);
+            }
+            poll(&mut cancelled, 0)?;
+            return Ok((DynamicSgsReport {
+                undetermined_cells: self.viscosity.len(),
+                ..DynamicSgsReport::default()
+            }, scales));
+        }
+        let report = self.fit_prepared(config, scales, domain, &mut cancelled)?;
+        Ok((report, scales))
+    }
+
+    // Shared instantaneous Germano identity. Spatial and Lagrangian averaging
+    // act on these two contractions, never on independently computed ratios.
+    fn prepare_contractions(
+        &mut self,
+        density: &[f64],
+        velocity: &[[f64; 3]],
+        walls: [[f64; 3]; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(InputScales, [f64; 2]), DynamicSgsError> {
+        poll(&mut cancelled, 0)?;
         let n = self.viscosity.len();
         if density.len() != n || velocity.len() != n {
             return Err(DynamicSgsError::Invalid(
@@ -502,20 +533,18 @@ impl PeriodicDynamicSgs {
             }
         }
         if velocity_scale == 0.0 {
-            for (tile, values) in self.viscosity.chunks_mut(64).enumerate() {
-                poll(&mut cancelled, tile * 64)?;
-                values.fill(0.0);
+            for cell in 0..n {
+                poll(&mut cancelled, cell)?;
+                self.strain_rate[cell] = 0.0;
+                self.contraction[cell] = [0.0; 2];
             }
             poll(&mut cancelled, 0)?;
             return Ok((
-                DynamicSgsReport {
-                    undetermined_cells: n,
-                    ..DynamicSgsReport::default()
-                },
                 InputScales {
                     density: density_scale,
                     velocity: velocity_scale,
                 },
+                [0.0; 2],
             ));
         }
         for (cell, v) in self.velocity.iter_mut().enumerate() {
@@ -618,9 +647,25 @@ impl PeriodicDynamicSgs {
             numerator.add(pair[0]);
             denominator.add(pair[1]);
         }
+        Ok((
+            InputScales {
+                density: density_scale,
+                velocity: velocity_scale,
+            },
+            [numerator.value, denominator.value],
+        ))
+    }
+
+    fn fit_prepared(
+        &mut self,
+        config: DynamicSgsConfig,
+        scales: InputScales,
+        domain: [f64; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DynamicSgsReport, DynamicSgsError> {
+        let n = self.viscosity.len();
         self.geometry
             .average_planes(self.shape, &mut self.contraction, &mut cancelled)?;
-        let domain = [numerator.value, denominator.value];
         let mut report = DynamicSgsReport {
             minimum_raw_coefficient_squared: f64::INFINITY,
             ..DynamicSgsReport::default()
@@ -681,7 +726,7 @@ impl PeriodicDynamicSgs {
                     maximum: config.maximum_coefficient_squared,
                 });
             }
-            let nu = coefficient * self.strain_rate[cell] * velocity_scale * self.filter_width;
+            let nu = coefficient * self.strain_rate[cell] * scales.velocity * self.filter_width;
             if !nu.is_finite() {
                 return Err(DynamicSgsError::Cell {
                     cell,
@@ -694,13 +739,7 @@ impl PeriodicDynamicSgs {
             report.maximum_eddy_viscosity = report.maximum_eddy_viscosity.max(nu);
         }
         poll(&mut cancelled, 0)?;
-        Ok((
-            report,
-            InputScales {
-                density: density_scale,
-                velocity: velocity_scale,
-            },
-        ))
+        Ok(report)
     }
 }
 
