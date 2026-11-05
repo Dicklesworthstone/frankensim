@@ -490,3 +490,6 @@ fn unsupported_hot_spots_cancellation_and_radiation_blind_adjoints_refuse() {
         ));
     });
 }
+
+#[path = "entropy.rs"]
+mod entropy;

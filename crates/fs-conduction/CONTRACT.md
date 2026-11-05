@@ -4568,7 +4568,7 @@ Bulk, sheet and contact production use the same sparse transport entries as
 energy. The original consistent Robin matrix contributes its actual heat and
 signed entropy separately. Positive constitutive tensors alone do not imply
 nonnegative nodal finite-element entropy production. Admission refuses negative
-bulk/contact or Robin production, negative thermal storage minus inputs, or
+bulk/contact, Robin or admitted radiation production, negative thermal storage minus inputs, or
 unclosed entropy beyond the caller's absolute J/K allowance. It never clips
 matrix entries, lumps Robin faces, or repairs heat from the discrepancy.
 
@@ -4605,7 +4605,7 @@ final physical operators, source-dependent contacts and original film calorics.
 The prior-stage dual-joule carry stays inside the stage equation; it is never
 added as a heat source or evaluated as an extrapolated material history.
 
-Every physical source, bath, bulk/contact and Robin entropy contribution uses
+Every physical source, bath, bulk/contact, Robin and admitted radiation entropy contribution uses
 its actual tableau temperature and the same positive weight as energy. Exact
 material and film entropy storage is counted once, from original to final state.
 The native double-double stage loop supplies prescribed-bath reactions and free
@@ -4618,14 +4618,72 @@ These are tableau-stage terms, not final residual/Tfinal. The temporal defect
 can be negative even during ordinary physical cooling and is never clipped or
 converted to material heating. The combined identity is independently closed.
 
-The optional gate checks each weighted stage's signed bulk/contact and Robin
-production before checking the whole interval's storage-minus-input and closure.
-An energy-conserving coarse prescribed-temperature history can fail this gate;
-no state or partial interval is returned on refusal. Photon entropy requires
-a separate owner and is rejected before the first nonlinear solve. The existing
+The optional gate checks each weighted stage's signed bulk/contact, Robin and
+admitted radiation production before checking the whole interval's
+storage-minus-input and closure. An energy-conserving coarse
+prescribed-temperature history can fail this gate; no state or partial interval
+is returned on refusal. Pointwise ambient radiation admits the closed black-bath
+account below; mean-patch and reflected-enclosure entropy remain explicitly
+unsupported. Photon entropy requires its separate original owner. The existing
 energy-only API takes the same implementation with entropy disabled. Additional
 work consists of scalar accumulation in the existing stage loop and one entropy
 pass per converged stage, with no additional spatial assembly or Newton solve.
 Five focused regression definitions cover an independent uniform Robin ODE,
 latent and film storage, enthalpy-datum shifts, heterogeneous reference masses,
 negative discrete spatial production, and carry-dependent prescribed-bath refusal.
+
+
+## Closed-reservoir entropy of native spatial ambient radiation
+
+Uniform and assigned heterogeneous storage expose
+`advance_with_radiation_and_entropy` and
+`evaluate_endpoint_with_radiation_and_entropy`, using the existing
+`EnthalpyRadiation` selection. `None`, `PointwiseAmbient` and
+`MaterialAmbient` retain the ordinary native residual and nonlinear solver.
+Source-dependent emissivity keeps the exact original material and caloric
+objects, source support, local temperature and latent-phase response.
+The existing SDIRK2 entropy method accepts these same pointwise ambient
+owners at each authentic tableau time.
+
+For native outward nodal heat q_i, original patch heat Q_p and positive
+black-reservoir temperature B_p, radiative entropy input is
+-dt*sum_p(Q_p/B_p). Signed discrete material/field/bath production is
+dt*(sum_p(Q_p/B_p)-sum_i(q_i/T_i)). Every reservoir retains its own B_p.
+The actual final native nodal load and per-patch report are borrowed directly
+from the energy owner; emissivity queries and face quadrature are not repeated
+for entropy. Radiative q_i enters each physical row and prescribed-temperature
+reaction once. Stage weights, free-row residuals and prior-stage carry remain
+those of the native energy equation.
+
+This model encloses the stationary radiation field and the material/black-bath
+exchange, with no net radiation-field storage. Its reservoir transfer and total
+exchange generation are not entropy carried by photons. Total emissivity does
+not determine a photon spectrum or gray occupation law, and no spectral
+entropy is inferred here. The separate photon owner must retain its explicit
+physical assumptions; its emitted entropy must not be added again to this
+closed heat-reservoir balance. Mean-temperature outer radiation iterations and
+reflected enclosures require different entropy accounting and are refused
+before a nonlinear entropy-admitted solve.
+
+Positive radiative material coefficients do not make the P1 receiving-node
+entropy test positive for every nonuniform face. Signed production is retained
+and checked for each positively weighted SDIRK stage and the whole interval.
+Double-double bath and nodal reductions reduce near-equilibrium cancellation,
+but the native heat integrations retain their own floating-point roundoff.
+There is no unconditional relative-accuracy or positivity claim at vanishing
+production. Caloric state entropy, radiative and conductive transport,
+temporal defect, algebraic residual and final closure stay separate.
+
+`thermal_entropy_change_j_k(cx, old_h, new_h)` provides the same exact original
+bulk/film state difference without a solve or transport assembly. It retains
+reference masses, original caloric support and latent integrals, validates both
+history shapes and polls cancellation. It supports accepted interval owners
+that must measure original-to-final storage rather than sum rounded subtotals.
+
+Focused regression definitions cover radiative heating/cooling without changing
+the native energy trajectory; independent simplex moments for multiple baths,
+nonuniform faces and fixed-node reactions; authentic SDIRK quadrature; signed
+negative finite-element production; near-equilibrium heat exchange; original
+material emissivity feedback on a latent plateau and caloric datum shifts; and
+unchanged source/chart/cancellation refusal. They do not assert a photon-flux
+or continuum entropy certificate.

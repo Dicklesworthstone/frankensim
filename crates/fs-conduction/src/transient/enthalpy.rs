@@ -1437,11 +1437,11 @@ impl StepContext<'_, '_, '_, '_> {
         poll(self.cx, h.len())?;
         let dirichlet_in_w = self.prescribed_heat_input_w(&h, &temperature, &system)?;
         let pointwise_radiation = self.pointwise_radiation
-            .map(|radiation| radiation.load_and_report(self.cx, &temperature, &h).map(|(_, report)| report)).transpose()?;
+            .map(|radiation| radiation.load_and_report(self.cx, &temperature, &h)).transpose()?;
         let net =
             finite(energy.source_w + dirichlet_in_w - energy.neumann_out_w - energy.robin_out_w)?;
         let net = match &pointwise_radiation {
-            Some(radiation) => finite(net - radiation.outward_heat_w())?,
+            Some((_, radiation)) => finite(net - radiation.outward_heat_w())?,
             None => net,
         };
         let energy_residual_j = finite(storage - self.dt * net)?;
@@ -1456,13 +1456,15 @@ impl StepContext<'_, '_, '_, '_> {
             None => Vec::new(),
         };
         poll(self.cx, h.len())?;
-        let (pointwise_radiation, pointwise_enclosure_radiation) = pointwise_radiation
-            .map_or((None, None), pointwise::PointwiseBoundaryReport::into_reports);
         let entropy = if with_entropy {
-            Some(entropy::evaluate(self, &h, &system, &temperature, &dofs)?)
+            Some(entropy::evaluate(
+                self, &h, &system, &temperature, &dofs, pointwise_radiation.as_ref(),
+            )?)
         } else {
             None
         };
+        let (pointwise_radiation, pointwise_enclosure_radiation) = pointwise_radiation
+            .map_or((None, None), |(_, report)| report.into_reports());
         Ok((EnthalpyStepSolution {
             specific_enthalpy_j_kg: h,
             temperature,

@@ -128,10 +128,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         for input in inputs {
             self.admit_step(cx, input.problem, old_h, diagonal_dt, config)?;
             if with_entropy {
-                if !matches!(input.radiation, EnthalpyRadiation::None) {
-                    return Err(EnthalpyError::InvalidInput(
-                        "SDIRK2 conductive entropy requires a separate photon entropy owner"));
-                }
+                super::entropy::admit_radiation(input.radiation)?;
                 super::entropy::admit_boundary(cx, input.problem)?;
             }
             self.sdirk_radiation(cx, input)?;
@@ -192,8 +189,15 @@ impl EnthalpyBackwardEuler<'_, '_> {
     pub(super) fn sdirk_radiation<'a>(&self, cx: &Cx<'_>, input: EnthalpySdirk2Input<'a>)
         -> Result<Option<PointwiseBoundary<'a>>, EnthalpyError>
     {
-        let p = input.problem;
-        let (matches, native) = match input.radiation {
+        self.pointwise_radiation_owner(cx, input.problem, input.radiation)
+    }
+
+    // Shared admission for native BE/SDIRK entropy and ordinary SDIRK heat.
+    // The owner identity and original material curves remain authoritative.
+    pub(super) fn pointwise_radiation_owner<'a>(
+        &self, cx: &Cx<'_>, p: ConductionProblem<'_>, radiation: EnthalpyRadiation<'a>,
+    ) -> Result<Option<PointwiseBoundary<'a>>, EnthalpyError> {
+        let (matches, native) = match radiation {
             EnthalpyRadiation::None => return Ok(None),
             EnthalpyRadiation::PointwiseAmbient(owner) =>
                 (owner.matches(p.mesh, p.boundary), PointwiseBoundary::Ambient(owner)),
@@ -209,10 +213,10 @@ impl EnthalpyBackwardEuler<'_, '_> {
                     PointwiseBoundary::MaterialEnclosure(owner)),
             EnthalpyRadiation::Ambient { .. } | EnthalpyRadiation::Enclosure { .. } =>
                 return Err(EnthalpyError::InvalidInput(
-                    "SDIRK2 uses the coupled pointwise radiation owners, not mean-temperature outer iterations")),
+                    "native pointwise radiation excludes mean-temperature outer iterations")),
         };
         if !matches { return Err(EnthalpyError::InvalidInput(
-            "SDIRK2 radiation must retain exact stage mesh, boundary and caloric objects")); }
+            "pointwise radiation must retain exact mesh, boundary and caloric objects")); }
         Ok(Some(native))
     }
 
@@ -323,11 +327,11 @@ fn finish_stage(
     let contact_fluxes = match context.interfaces {
         Some(interfaces) => interfaces.fluxes(&temperature)?, None => Vec::new(),
     };
+    let entropy = entropy_terms.map(|terms| entropy::finish_stage(
+        context, &h, &system, &temperature, &dofs, radiation.as_ref(), terms,
+    )).transpose()?;
     let (pointwise_radiation, pointwise_enclosure_radiation) = radiation
         .map_or((None, None), |(_, report)| report.into_reports());
-    let entropy = entropy_terms.map(|terms| entropy::finish_stage(
-        context, &h, &system, &temperature, &dofs, terms,
-    )).transpose()?;
     poll(context.cx, h.len())?;
     Ok((EnthalpySdirk2Stage { specific_enthalpy_j_kg: h, temperature, liquid_mass_fraction,
         source_w: finite(energy.source_w)?, neumann_out_w: finite(energy.neumann_out_w)?,

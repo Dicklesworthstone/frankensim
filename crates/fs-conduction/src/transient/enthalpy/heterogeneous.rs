@@ -881,6 +881,63 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
             dt_s, config, entropy_tolerance_j_k)
     }
 
+    /// Exact original-chart entropy change, including any retained surface films.
+    /// This evaluates storage only; it does not assemble or solve a heat equation.
+    pub fn thermal_entropy_change_j_k(
+        &self,
+        cx: &Cx<'_>,
+        old_specific_h: &[f64],
+        new_specific_h: &[f64],
+    ) -> Result<f64, EnthalpyError> {
+        self.inner
+            .thermal_entropy_change_j_k(cx, old_specific_h, new_specific_h)
+    }
+
+    /// Advance with the original source-qualified radiation and caloric charts,
+    /// admitting the native endpoint's physical entropy account.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_radiation_and_entropy(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+        entropy_tolerance_j_k: f64,
+    ) -> Result<
+        (EnthalpyStepSolution, super::entropy::EnthalpyEntropyBalance),
+        super::entropy::EnthalpyEntropyError,
+    > {
+        self.inner.advance_with_radiation_and_entropy(
+            cx, problem, interfaces, old_specific_h, dt_s, config,
+            radiation, entropy_tolerance_j_k,
+        )
+    }
+
+    /// Measure a supplied endpoint with the original physical radiation owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_radiation_and_entropy(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+    ) -> Result<
+        (super::EnthalpyEndpointEvaluation, super::entropy::EnthalpyEntropyBalance),
+        EnthalpyError,
+    > {
+        self.inner.evaluate_endpoint_with_radiation_and_entropy(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, radiation,
+        )
+    }
+
     /// Measure a supplied nonradiative endpoint using each original chart.
     /// Signed discrete generation and residuals remain available without a gate.
     #[allow(clippy::too_many_arguments)]

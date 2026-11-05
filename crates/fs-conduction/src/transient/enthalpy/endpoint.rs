@@ -227,9 +227,12 @@ impl EnthalpyBackwardEuler<'_, '_> {
         pointwise_radiation: Option<PointwiseBoundary<'_>>,
         with_entropy: bool,
     ) -> Result<(EnthalpyEndpointEvaluation, Option<super::entropy::EnthalpyEntropyBalance>), EnthalpyError> {
-        if with_entropy && (patches.is_some() || pointwise_radiation.is_some()) {
+        if with_entropy && (patches.is_some() || matches!(
+            pointwise_radiation,
+            Some(PointwiseBoundary::Enclosure(_) | PointwiseBoundary::MaterialEnclosure(_)),
+        )) {
             return Err(EnthalpyError::InvalidInput(
-                "conductive entropy does not assign photon entropy to radiation",
+                "closed reservoir entropy requires an original pointwise ambient radiation owner",
             ));
         }
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
@@ -326,11 +329,11 @@ impl EnthalpyBackwardEuler<'_, '_> {
         } else {
             Vec::new()
         };
-        let mut radiation_out_w = match pointwise_radiation {
-            Some(radiation) => {
-                let (_, report) = radiation.load_and_report(cx, &temperature, candidate_specific_h)?;
-                finite(report.outward_heat_w())?
-            }
+        let radiative_heat = pointwise_radiation
+            .map(|owner| owner.load_and_report(cx, &temperature, candidate_specific_h))
+            .transpose()?;
+        let mut radiation_out_w = match &radiative_heat {
+            Some((_, report)) => finite(report.outward_heat_w())?,
             None => 0.0,
         };
         if let Some(patches) = patches {
@@ -382,6 +385,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
         let entropy = if with_entropy {
             Some(super::entropy::evaluate(
                 &physical, candidate_specific_h, &system, &endpoint.temperature, &dofs,
+                radiative_heat.as_ref(),
             )?)
         } else {
             None

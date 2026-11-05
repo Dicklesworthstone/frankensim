@@ -290,3 +290,6 @@ fn a_foreign_larger_mesh_refuses_before_indexing_heterogeneous_caloric_bindings(
             &[500.0; 8], 0.1, config(), &radiation).is_err());
     });
 }
+
+#[path = "material_ambient_radiation/entropy.rs"]
+mod entropy;

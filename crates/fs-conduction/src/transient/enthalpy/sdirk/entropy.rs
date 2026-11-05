@@ -25,12 +25,16 @@ impl EnthalpyBackwardEuler<'_, '_> {
     /// source or an invalid effective-old enthalpy. The account adds one
     /// entropy pass per converged stage and no entropy work during Newton.
     ///
-    /// Each positively weighted stage must have nonnegative bulk/contact and
-    /// Robin production within the caller's absolute J/K allowance. The whole
+    /// Each positively weighted stage must have nonnegative bulk/contact,
+    /// Robin and radiative closed-reservoir production within the caller's
+    /// absolute J/K allowance. The whole
     /// interval must also pass storage-minus-input and closure admission.
     /// A temporal defect can have either sign; this is an actual-state check,
     /// not an unconditional entropy theorem or a time-accuracy certificate.
-    /// Photon entropy requires a separate owner and is refused before solving.
+    /// Pointwise frozen/material ambient radiation retains each original
+    /// black reservoir and the actual stage nodal heat. This closed account
+    /// does not infer photon entropy. Mean-patch and reflected-enclosure
+    /// entropy are refused before either stage is solved.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_sdirk2_with_entropy(
         &self,
@@ -115,9 +119,12 @@ pub(super) fn finish_stage(
     system: &AssembledSystem,
     temperature: &[f64],
     dofs: &DofMap,
+    radiation: Option<&(Vec<f64>, pointwise::PointwiseBoundaryReport)>,
     terms: StageEntropyTerms,
 ) -> Result<StageEntropy, EnthalpyError> {
-    let mut account = super::super::entropy::evaluate(context, h, system, temperature, dofs)?;
+    let mut account = super::super::entropy::evaluate(
+        context, h, system, temperature, dofs, radiation,
+    )?;
     account.dirichlet_entropy_input_j_k = checked(terms.dirichlet)?;
     account.algebraic_residual_j_k = checked(terms.algebraic)?;
     Ok(StageEntropy {
@@ -129,7 +136,7 @@ pub(super) fn finish_stage(
 pub(super) struct SdirkEntropyEvaluation {
     pub(super) balance: EnthalpyEntropyBalance,
     // The first stage has already been multiplied by the actual w1/tau.
-    generation: [[f64; 2]; 2],
+    generation: [[f64; 3]; 2],
 }
 
 impl SdirkEntropyEvaluation {
@@ -138,10 +145,12 @@ impl SdirkEntropyEvaluation {
             [
                 "SDIRK2 first-stage bulk/surface/contact",
                 "SDIRK2 first-stage Robin",
+                "SDIRK2 first-stage radiation material/field/bath",
             ],
             [
                 "SDIRK2 second-stage bulk/surface/contact",
                 "SDIRK2 second-stage Robin",
+                "SDIRK2 second-stage radiation material/field/bath",
             ],
         ]) {
             for (&value_j_k, account) in stage.iter().zip(labels) {
@@ -175,11 +184,17 @@ pub(super) fn combine(
             b.dirichlet_entropy_input_j_k,
         )?,
         robin_entropy_input_j_k: weight(a.robin_entropy_input_j_k, b.robin_entropy_input_j_k)?,
+        radiation_entropy_input_j_k: weight(
+            a.radiation_entropy_input_j_k, b.radiation_entropy_input_j_k,
+        )?,
         conduction_generation_j_k: weight(
             a.conduction_generation_j_k,
             b.conduction_generation_j_k,
         )?,
         robin_generation_j_k: weight(a.robin_generation_j_k, b.robin_generation_j_k)?,
+        radiation_generation_j_k: weight(
+            a.radiation_generation_j_k, b.radiation_generation_j_k,
+        )?,
         source_at_node_j_k: weight(a.source_at_node_j_k, b.source_at_node_j_k)?,
         neumann_at_node_j_k: weight(a.neumann_at_node_j_k, b.neumann_at_node_j_k)?,
         has_unclassified_inputs: a.has_unclassified_inputs || b.has_unclassified_inputs,
@@ -195,8 +210,10 @@ pub(super) fn combine(
     for term in [
         balance.dirichlet_entropy_input_j_k,
         balance.robin_entropy_input_j_k,
+        balance.radiation_entropy_input_j_k,
         balance.conduction_generation_j_k,
         balance.robin_generation_j_k,
+        balance.radiation_generation_j_k,
         balance.source_at_node_j_k,
         balance.neumann_at_node_j_k,
         balance.temporal_defect_j_k,
@@ -211,8 +228,13 @@ pub(super) fn combine(
             [
                 weight(a.conduction_generation_j_k, 0.0)?,
                 weight(a.robin_generation_j_k, 0.0)?,
+                weight(a.radiation_generation_j_k, 0.0)?,
             ],
-            [b.conduction_generation_j_k, b.robin_generation_j_k],
+            [
+                b.conduction_generation_j_k,
+                b.robin_generation_j_k,
+                b.radiation_generation_j_k,
+            ],
         ],
     })
 }

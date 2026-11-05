@@ -13,7 +13,9 @@
 //!
 //! Each active Robin triangle retains its actual positive affine bath field.
 //! The original h(x), T(x) and B(x) determine its exact rational bath entropy;
-//! no patch mean substitutes. Photon entropy requires its own integration.
+//! no patch mean substitutes. Pointwise ambient radiation retains the native
+//! nodal heat and each original black reservoir. Its closed material/field/bath
+//! exchange is distinct from photon entropy flux, which is not inferred here.
 //! Prescribed heat flux and volumetric watts remain unclassified inputs.
 
 use std::fmt;
@@ -21,10 +23,13 @@ use std::fmt;
 mod robin;
 
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 
 use super::{
     ASSEMBLY_TILE, AssembledSystem, DofMap, EnthalpyBackwardEuler, EnthalpyEndpointEvaluation,
     EnthalpyError, EnthalpyStepConfig, EnthalpyStepSolution, StepContext, finite, poll,
+    heterogeneous::EnthalpyRadiation,
+    pointwise::{PointwiseBoundary, PointwiseBoundaryReport},
 };
 use crate::{
     ConductionProblem, ThermalInterfaces,
@@ -42,12 +47,19 @@ pub struct EnthalpyEntropyBalance {
     pub dirichlet_entropy_input_j_k: f64,
     /// Integral of inward Robin heat divided by the actual affine bath B(x).
     pub robin_entropy_input_j_k: f64,
+    /// Inward pointwise radiative heat divided by each original black-bath T.
+    /// This is reservoir entropy transfer, not entropy carried by photons.
+    pub radiation_entropy_input_j_k: f64,
     /// Signed discrete bulk, surface and contact generation on this state.
     /// General P1 meshes can make this negative even with positive conductivity.
     pub conduction_generation_j_k: f64,
     /// Signed generation of the original consistent Robin face operator.
     /// No diagonal boundary approximation is substituted to enforce a sign.
     pub robin_generation_j_k: f64,
+    /// Signed material/field/black-bath generation of the native nodal heat.
+    /// The stationary radiation field has no net storage in this closed model.
+    /// P1 temperature testing can make this negative; no sign is clipped.
+    pub radiation_generation_j_k: f64,
     /// Original integrated volumetric watts divided by receiving nodal T.
     /// This does not assign entropy to an unspecified heat/work source.
     pub source_at_node_j_k: f64,
@@ -124,8 +136,10 @@ impl EnthalpyEntropyBalance {
             self.thermal_storage_change_j_k,
             self.dirichlet_entropy_input_j_k,
             self.robin_entropy_input_j_k,
+            self.radiation_entropy_input_j_k,
             self.conduction_generation_j_k,
             self.robin_generation_j_k,
+            self.radiation_generation_j_k,
             self.source_at_node_j_k,
             self.neumann_at_node_j_k,
             self.temporal_defect_j_k,
@@ -138,12 +152,14 @@ impl EnthalpyEntropyBalance {
             self.thermal_storage_change_j_k
                 - self.dirichlet_entropy_input_j_k
                 - self.robin_entropy_input_j_k
+                - self.radiation_entropy_input_j_k
                 - self.source_at_node_j_k
                 - self.neumann_at_node_j_k,
         )?;
         for (account, value) in [
             ("bulk/surface/contact", self.conduction_generation_j_k),
             ("Robin", self.robin_generation_j_k),
+            ("radiation material/field/bath", self.radiation_generation_j_k),
             ("thermal storage minus inputs", available),
         ] {
             finite(value)?;
@@ -175,6 +191,49 @@ fn admit_tolerance(tolerance: f64) -> Result<(), EnthalpyError> {
 }
 
 impl EnthalpyBackwardEuler<'_, '_> {
+    /// Exact original-to-final storage entropy in J/K, without solving or
+    /// assembling transport. Original bulk charts, reference masses and bonded
+    /// film caloric integrals are retained, including latent plateaus.
+    pub fn thermal_entropy_change_j_k(
+        &self,
+        cx: &Cx<'_>,
+        old_h: &[f64],
+        new_h: &[f64],
+    ) -> Result<f64, EnthalpyError> {
+        if old_h.len() != self.masses.len() || new_h.len() != self.masses.len() {
+            return Err(EnthalpyError::InvalidInput(
+                "entropy histories must match the original reference mass mesh",
+            ));
+        }
+        let mut total = Sum::default();
+        for (vertex, (&old, &new)) in old_h.iter().zip(new_h).enumerate() {
+            if vertex % ASSEMBLY_TILE == 0 {
+                poll(cx, vertex)?;
+            }
+            let temperature = self.curve_for_vertex(vertex)
+                .values_at_specific_enthalpy(new)
+                .map_err(|source| EnthalpyError::Phase { vertex, source })?
+                .temperature_k;
+            total.add(self.nodal_entropy_change_j_k(vertex, old, new, temperature)?)?;
+        }
+        poll(cx, new_h.len())?;
+        total.total()
+    }
+
+    fn nodal_entropy_change_j_k(
+        &self, vertex: usize, old_h: f64, new_h: f64, temperature: f64,
+    ) -> Result<f64, EnthalpyError> {
+        if !temperature.is_finite() || temperature <= 0.0 {
+            return Err(EnthalpyError::InvalidInput(
+                "entropy requires positive absolute temperatures",
+            ));
+        }
+        let host = finite(self.masses[vertex] * self.curve_for_vertex(vertex)
+            .specific_entropy_change_j_kg_k(old_h, new_h)
+            .map_err(|source| EnthalpyError::Phase { vertex, source })?)?;
+        finite(host + self.film_entropy_change_j_k(vertex, old_h, temperature)?)
+    }
+
     /// Advance the native backward-Euler solve and admit its discrete thermal
     /// entropy before returning either state or account. All existing Newton,
     /// energy, material, boundary and cancellation gates remain in force.
@@ -195,9 +254,42 @@ impl EnthalpyBackwardEuler<'_, '_> {
         config: EnthalpyStepConfig,
         entropy_tolerance_j_k: f64,
     ) -> Result<(EnthalpyStepSolution, EnthalpyEntropyBalance), EnthalpyEntropyError> {
+        self.advance_with_radiation_and_entropy(
+            cx, problem, interfaces, old_specific_h, dt_s, config,
+            EnthalpyRadiation::None, entropy_tolerance_j_k,
+        )
+    }
+
+    /// Advance with an original pointwise ambient radiation owner and admit
+    /// the closed material/field/black-reservoir entropy account.
+    ///
+    /// Frozen and source-dependent material emissivity retain their exact
+    /// mesh, boundary, caloric chart and constitutive-domain checks. Radiation
+    /// enters the original nonlinear residual once; its converged nodal load
+    /// is reused for entropy. Each bath retains its own absolute temperature.
+    ///
+    /// This does not infer a photon spectrum or photon entropy from total
+    /// emissivity. Mean-patch and reflected-enclosure models require distinct
+    /// entropy owners and are refused before solving. `None` uses the ordinary
+    /// conductive account. Signed finite-element radiation production is
+    /// admitted under the same absolute allowance as conduction and Robin.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_radiation_and_entropy(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+        entropy_tolerance_j_k: f64,
+    ) -> Result<(EnthalpyStepSolution, EnthalpyEntropyBalance), EnthalpyEntropyError> {
         admit_tolerance(entropy_tolerance_j_k)?;
         self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
         admit_boundary(cx, problem)?;
+        admit_radiation(radiation)?;
+        let pointwise_radiation = self.pointwise_radiation_owner(cx, problem, radiation)?;
         let context = StepContext {
             storage: self,
             cx,
@@ -205,7 +297,7 @@ impl EnthalpyBackwardEuler<'_, '_> {
             interfaces,
             old: old_specific_h,
             dt: dt_s,
-            pointwise_radiation: None,
+            pointwise_radiation,
         };
         let (h, report) = context.solve_newton(config, None)?;
         let (solution, entropy) =
@@ -231,6 +323,32 @@ impl EnthalpyBackwardEuler<'_, '_> {
         dt_s: f64,
         config: EnthalpyStepConfig,
     ) -> Result<(EnthalpyEndpointEvaluation, EnthalpyEntropyBalance), EnthalpyError> {
+        self.evaluate_endpoint_with_radiation_and_entropy(
+            cx, problem, interfaces, old_specific_h, candidate_specific_h,
+            dt_s, config, EnthalpyRadiation::None,
+        )
+    }
+
+    /// Measure the original pointwise ambient radiative endpoint and its
+    /// closed reservoir entropy without solving or applying an entropy gate.
+    /// The signed native production and true local residual are retained for
+    /// the coupled owner; a heat-only enclosure or mean-patch approximation is
+    /// not silently assigned a photon or black-reservoir entropy account.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_endpoint_with_radiation_and_entropy(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        interfaces: Option<&ThermalInterfaces>,
+        old_specific_h: &[f64],
+        candidate_specific_h: &[f64],
+        dt_s: f64,
+        config: EnthalpyStepConfig,
+        radiation: EnthalpyRadiation<'_>,
+    ) -> Result<(EnthalpyEndpointEvaluation, EnthalpyEntropyBalance), EnthalpyError> {
+        self.admit_step(cx, problem, old_specific_h, dt_s, config)?;
+        admit_radiation(radiation)?;
+        let pointwise_radiation = self.pointwise_radiation_owner(cx, problem, radiation)?;
         let (endpoint, entropy) = self.evaluate_endpoint_and_entropy(
             cx,
             problem,
@@ -240,13 +358,23 @@ impl EnthalpyBackwardEuler<'_, '_> {
             dt_s,
             config,
             None,
-            None,
+            pointwise_radiation,
             true,
         )?;
         Ok((
             endpoint,
             entropy.expect("requested endpoint entropy account"),
         ))
+    }
+}
+
+pub(super) fn admit_radiation(radiation: EnthalpyRadiation<'_>) -> Result<(), EnthalpyError> {
+    match radiation {
+        EnthalpyRadiation::None | EnthalpyRadiation::PointwiseAmbient(_)
+            | EnthalpyRadiation::MaterialAmbient(_) => Ok(()),
+        _ => Err(EnthalpyError::InvalidInput(
+            "closed reservoir entropy requires an original pointwise ambient radiation owner",
+        )),
     }
 }
 
@@ -304,6 +432,12 @@ impl Sum {
     }
 }
 
+fn finite_dd(value: Dd) -> Result<f64, EnthalpyError> {
+    finite(value.hi)?;
+    finite(value.lo)?;
+    finite(value.to_f64())
+}
+
 // -Kij*(Ti-Tj)^2/(Ti*Tj), without squaring a dimensional temperature.
 fn pair_generation(entry: f64, ti: f64, tj: f64) -> Result<f64, EnthalpyError> {
     if entry == 0.0 || ti == tj {
@@ -319,12 +453,21 @@ pub(super) fn evaluate(
     system: &AssembledSystem,
     temperature: &[f64],
     dofs: &DofMap,
+    radiation: Option<&(Vec<f64>, PointwiseBoundaryReport)>,
 ) -> Result<EnthalpyEntropyBalance, EnthalpyError> {
-    if context.pointwise_radiation.is_some() {
-        return Err(EnthalpyError::InvalidInput(
-            "conductive entropy does not assign photon entropy to radiation",
-        ));
-    }
+    // Borrow precisely the native final heat pass. A reflected enclosure
+    // cannot be assigned the independent black-reservoir account below.
+    let radiation = match (context.pointwise_radiation, radiation) {
+        (None, None) => None,
+        (
+            Some(PointwiseBoundary::Ambient(_) | PointwiseBoundary::MaterialAmbient(_)),
+            Some((load, PointwiseBoundaryReport::Ambient(report))),
+        ) if load.len() == h.len() => Some((load, report)),
+        _ => return Err(EnthalpyError::InvalidInput(
+            "entropy requires the complete original pointwise ambient nodal heat and report",
+        )),
+    };
+    let mut radiation_at_node = Dd::ZERO;
     admit_boundary(context.cx, context.problem)?;
     let model = context.storage;
     let source_load = assemble_source_load(context.cx, model.mesh, context.problem.source)?;
@@ -351,14 +494,9 @@ pub(super) fn evaluate(
                 "entropy requires positive absolute temperatures",
             ));
         }
-        let curve = model.curve_for_vertex(vertex);
-        let mut ds = finite(
-            model.masses[vertex]
-                * curve
-                    .specific_entropy_change_j_kg_k(context.old[vertex], h[vertex])
-                    .map_err(|source| EnthalpyError::Phase { vertex, source })?,
+        let ds = model.nodal_entropy_change_j_k(
+            vertex, context.old[vertex], h[vertex], ti,
         )?;
-        ds = finite(ds + model.film_entropy_change_j_k(vertex, context.old[vertex], ti)?)?;
         let de = model.storage_change_j(vertex, h[vertex], context.old[vertex], ti)?;
         state.add(ds)?;
         temporal.add(finite(ds - de / ti)?)?;
@@ -374,6 +512,12 @@ pub(super) fn evaluate(
             if column != vertex {
                 conduction.add(pair_generation(0.5 * entry, ti, temperature[column])?)?;
             }
+        }
+        if let Some((load, _)) = radiation {
+            let out = finite(load[vertex])?;
+            transport = finite(transport + out)?;
+            radiation_at_node = radiation_at_node + Dd::from_f64(out) / Dd::from_f64(ti);
+            finite_dd(radiation_at_node)?;
         }
         let row = finite(de + context.dt * finite(transport - system.load[vertex])?)?;
         if dofs.slot_of(vertex).is_some() {
@@ -443,12 +587,40 @@ pub(super) fn evaluate(
             Some(ThermalBc::Dirichlet { .. }) | None => {}
         }
     }
+    let mut radiation_bath = Dd::ZERO;
+    if let Some((_, report)) = radiation {
+        for (index, patch) in report.patches.iter().enumerate() {
+            if index % ASSEMBLY_TILE == 0 {
+                poll(context.cx, index)?;
+            }
+            let bath_temperature = patch.patch.ambient_temperature_k();
+            if !bath_temperature.is_finite() || bath_temperature <= 0.0 {
+                return Err(EnthalpyError::InvalidInput(
+                    "radiation entropy requires positive original black-reservoir temperatures",
+                ));
+            }
+            radiation_bath = radiation_bath
+                + Dd::from_f64(finite(patch.outward_heat_w)?)
+                    / Dd::from_f64(bath_temperature);
+            finite_dd(radiation_bath)?;
+        }
+    }
+    // Extended reductions limit cancellation near equilibrium. Original
+    // patch/load reduction roundoff remains signed; no universal relative
+    // accuracy or positivity is inferred when production approaches zero.
+    // No extra emissivity query, mean surface T, or photon model is introduced.
+    let radiation_entropy_input_j_k =
+        finite_dd(Dd::from_f64(-context.dt) * radiation_bath)?;
+    let radiation_generation_j_k =
+        finite_dd(Dd::from_f64(context.dt) * (radiation_bath - radiation_at_node))?;
     let mut result = EnthalpyEntropyBalance {
         thermal_storage_change_j_k: state.total()?,
         dirichlet_entropy_input_j_k: fixed.total()?,
         robin_entropy_input_j_k: finite(context.dt * bath.total()?)?,
+        radiation_entropy_input_j_k,
         conduction_generation_j_k: finite(context.dt * conduction.total()?)?,
         robin_generation_j_k: finite(context.dt * robin.total()?)?,
+        radiation_generation_j_k,
         source_at_node_j_k: finite(context.dt * source.total()?)?,
         neumann_at_node_j_k: finite(context.dt * neumann.total()?)?,
         has_unclassified_inputs: has_unclassified,
@@ -461,8 +633,10 @@ pub(super) fn evaluate(
         result.thermal_storage_change_j_k,
         -result.dirichlet_entropy_input_j_k,
         -result.robin_entropy_input_j_k,
+        -result.radiation_entropy_input_j_k,
         -result.conduction_generation_j_k,
         -result.robin_generation_j_k,
+        -result.radiation_generation_j_k,
         -result.source_at_node_j_k,
         -result.neumann_at_node_j_k,
         -result.temporal_defect_j_k,
