@@ -15,6 +15,9 @@
 /// Checked temperature/source transfer followed by native mechanical equilibration.
 pub mod temperature;
 
+/// Adaptive physical load intervals with bounded damage and endpoint-work error.
+pub mod path;
+
 use std::sync::Arc;
 
 use fs_exec::Cx;

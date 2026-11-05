@@ -7933,3 +7933,28 @@ crack direction, crack insertion, geometric contact, erosion or fragment state.
 Directional length scaling and adaptive damage steps do not establish arbitrary-
 mesh fracture objectivity or experimentally calibrated component failure.
 MR63's broader topology/contact/post-failure-transfer requirements remain open.
+
+## Adaptive brittle load intervals
+
+`BrittleTetSolid::advance_path` reuses the original native endpoint solve and
+retained histories across bounded affine physical load intervals. Initial dead
+forces are explicit and must satisfy the original assembled free-force residual
+before continuation. Subdivision limits the largest element damage increment
+and allocates the whole-interval endpoint-work-error budget in proportion to
+attempted interval size. The sum of absolute local defects is checked, so signed
+cancellation cannot conceal numerical work error. Native Newton/linear failures
+and these refinable endpoint gates may subdivide; source/domain/admission errors,
+other work gates and cancellation are terminal. Trials and compact accepted
+records are bounded, aggregate work uses compensated sums, and any failed whole
+request leaves the original solid unchanged even after private partial progress.
+
+The native solution describes the last substep; accepted records retain each
+substep's work while the result reports complete-interval storage, material work,
+fracture loss and external work. This is fixed-condition quasistatic load
+continuation: reversals require separate intervals, and force-controlled limit
+points still require another physical loading/control method. It is not an
+arc-length solver, a physical time integrator or a crack-path convergence claim.
+The focused regression definitions in `tests/brittle_tet_solid/path.rs` cover
+complete Gc-times-area failure, retained unloading/reclosure, force histories and
+transactional refusal. Rust parsing/formatting and independent bilinear arithmetic
+checks passed; native compiled execution remains outstanding.
