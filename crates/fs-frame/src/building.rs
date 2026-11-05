@@ -27,7 +27,9 @@
 //! successor), and the fragility is of the model, not of a real building.
 
 use fs_eproc::GaussianMixtureCs;
-use fs_scenario::ensemble::StochasticEnsemble;
+use fs_scenario::ensemble::{
+    RealizationBudget, SpectralDiscretization, StochasticEnsemble,
+};
 use fs_solid::fiber::material::RcSection;
 use fs_solid::fiber::rc_section;
 use fs_solid::frame2d::{FrameMassFormulation, FrameModalAnalysis, FrameModeStatus};
@@ -505,6 +507,10 @@ pub struct BuildingFragility {
     pub exceedances: u32,
     /// Peak inter-story drift ratio of every consumed member.
     pub peak_drifts: Vec<f64>,
+    /// Exact fixed physical source grid when explicitly requested.
+    pub spectrum: Option<SpectralDiscretization>,
+    /// Last physical source time reached by every consumed member [s].
+    pub end_time_s: f64,
     /// Paired observed-member diagnostics (level 0: story model; level 1:
     /// building minus story). The mean and variance retain cross-level
     /// covariance through the original fine values. Costs use declared
@@ -538,6 +544,41 @@ pub fn building_fragility(
     building_fragility_from_frame(ensemble, &base, story, drift_limit, alpha, margin)
 }
 
+/// Full-tier fragility on one explicit physical frequency grid.
+///
+/// Each consumed member is synthesized exactly once by the native scenario
+/// owner on `spectrum`; that same acceleration history drives both the
+/// distributed-plasticity building and the coarse story model. The grid is
+/// independent of record duration and timestep, so observation-clock
+/// refinement does not silently redefine the stochastic excitation.
+///
+/// # Errors
+/// Invalid spectral discretization/work admission or a failed nonlinear
+/// history is returned as `SolidError`.
+pub fn building_fragility_with_spectrum(
+    ensemble: &StochasticEnsemble,
+    spec: BuildingSpec,
+    story: StoryParams,
+    spectrum: SpectralDiscretization,
+    realization_budget: RealizationBudget,
+    drift_limit: f64,
+    alpha: f64,
+    margin: f64,
+) -> Result<BuildingFragility, SolidError> {
+    assert_ground_motion_ensemble(ensemble);
+    let base = BuildingFrame::new(spec)?;
+    building_fragility_from_frame_with_spectrum(
+        ensemble,
+        &base,
+        story,
+        spectrum,
+        realization_budget,
+        drift_limit,
+        alpha,
+        margin,
+    )
+}
+
 /// Run the building fragility study from one explicitly admitted frame state.
 ///
 /// Every consumed ensemble member starts from a clone of base, preserving
@@ -565,14 +606,66 @@ pub fn building_fragility_from_frame(
     alpha: f64,
     margin: f64,
 ) -> Result<BuildingFragility, SolidError> {
+    building_fragility_study(ensemble, base, story, None, drift_limit, alpha, margin)
+}
+
+/// Explicit-spectrum counterpart of [`building_fragility_from_frame`].
+///
+/// The caller's admitted building state is cloned per member; the exact same
+/// synthesized acceleration member drives the coarse story diagnostic.
+///
+/// # Errors
+/// Native spectral-realization refusal or nonlinear-history failure.
+pub fn building_fragility_from_frame_with_spectrum(
+    ensemble: &StochasticEnsemble,
+    base: &BuildingFrame,
+    story: StoryParams,
+    spectrum: SpectralDiscretization,
+    realization_budget: RealizationBudget,
+    drift_limit: f64,
+    alpha: f64,
+    margin: f64,
+) -> Result<BuildingFragility, SolidError> {
+    building_fragility_study(
+        ensemble,
+        base,
+        story,
+        Some((spectrum, realization_budget)),
+        drift_limit,
+        alpha,
+        margin,
+    )
+}
+
+fn building_fragility_study(
+    ensemble: &StochasticEnsemble,
+    base: &BuildingFrame,
+    story: StoryParams,
+    source: Option<(SpectralDiscretization, RealizationBudget)>,
+    drift_limit: f64,
+    alpha: f64,
+    margin: f64,
+) -> Result<BuildingFragility, SolidError> {
     assert_ground_motion_ensemble(ensemble);
     let dt = ensemble.dt.value;
     let mut cs = GaussianMixtureCs::new(0.5, 8.0, alpha);
     let (mut used, mut exceedances, mut stopped_early) = (0u32, 0u32, false);
     let mut peak_drifts = Vec::new();
     let mut coarse_peaks = Vec::new();
+    let mut end_time_s = 0.0;
     for member in 0..ensemble.members {
-        let real = ensemble.realize(member).expect("ensemble realizes");
+        let real = match source {
+            Some((spectrum, budget)) => ensemble
+                .realize_with_spectrum(member, spectrum, budget)
+                .map_err(|error| SolidError::InvalidInput {
+                    what: format!("building fragility member {member} realization: {error}"),
+                })?,
+            None => ensemble.realize(member).expect("ensemble realizes"),
+        };
+        end_time_s = *real
+            .times
+            .last()
+            .expect("admitted ground-motion realization has time samples");
         let pd = base.clone().run(&real.values, dt)?.peak_drift_ratio;
         let coarse = StoryFrame::new(story)
             .run_from_time_zero(
@@ -601,8 +694,6 @@ pub fn building_fragility_from_frame(
         }
     }
     let (p_hat, radius) = cs.interval().expect("observed at least one member");
-    // Both levels use the same consumed members. The native paired owner
-    // includes their covariance and never reruns an expensive fine history.
     let mlmc = coupled_mlmc_summary(
         coarse_peaks
             .iter()
@@ -620,6 +711,8 @@ pub fn building_fragility_from_frame(
         stopped_early,
         exceedances,
         peak_drifts,
+        spectrum: source.map(|(spectrum, _)| spectrum),
+        end_time_s,
         mlmc,
     })
 }
