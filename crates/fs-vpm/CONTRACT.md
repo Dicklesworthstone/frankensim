@@ -404,6 +404,38 @@ deterministic retry, tolerance/numerical refusals and cancellation throughout
 pair/source trials and final publication. Existing adaptive fixed-site PSE,
 moving-viscous and conservative/affine/viscous/remeshed tests remain applicable.
 
+## Native 2-D transport beside a planar slip wall
+
+`planar_wall::PlanarWall2` declares one stationary infinite wall by a finite
+point and a nonzero normal into the fluid. The normal is normalized once.
+`planar_wall::simulate_with_cx` advances the physical vortices through the
+original checked RK4 owner, evaluating opposite-circulation reflected sources
+at every actual stage, including each vortex's own image. The same algebraic
+velocity core acts on real and image sources. Images enforce zero normal wall
+velocity but never enter the physical particle vector or circulation inventory.
+`PlanarWall2::induced_velocity` exposes this same real-plus-image field without
+an allocated image cloud. A vortex of circulation Gamma a distance h above
+y=0 translates at Gamma*h/[pi*(4*h^2+core^2)], including Gamma/(4*pi*h) at zero
+core; omitting its own image incorrectly leaves it stationary.
+
+Physical input, intermediate and final positions must have strictly positive
+wall clearance, without a dimensional floor or clipping. Crossing or
+unrepresentable geometry refuses the whole run. This is an inviscid slip-wall
+model: no no-slip vorticity generation, viscous wall diffusion, moving geometry,
+corners or mechanical wall-load claim follows. Free-space vortex impulse
+invariants need not hold in the wall-induced field. Circulation values retain
+their bits; numerical core overlap with the wall does not turn that inventory
+into a resolved fluid-circulation measurement. Images add 4*S*N^2 pair/work
+units to the original RK4 plan, for
+8*S*N^2 pair evaluations total, with the same particle/velocity scratch sizes
+and existing cancellation/admission owner. The original free-space and viscous
+entries pass no wall and retain their original arithmetic and accounting.
+
+The native `tests/vpm.rs` regressions exercise analytic single-vortex travel,
+zero normal wall velocity, translated/rotated walls, comparison with the
+original RK4 evolution of an antisymmetric physical-plus-image cloud, physical
+circulation exclusion, stage-crossing refusal and the unchanged scratch bound.
+
 ## Conservative 2-D viscous diffusion
 
 The diffusion-focused implementation adds `diffusion::PseDiffusion` and two

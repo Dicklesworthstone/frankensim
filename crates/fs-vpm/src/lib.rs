@@ -34,6 +34,8 @@ pub mod kinematics2d;
 pub use kinematics2d::{ParticleKinematics2, induced_kinematics};
 /// Allocation-free exact flow for a pair sharing the algebraic velocity core.
 pub mod pairwise;
+/// Boundary-aware native RK4 evolution beside a stationary planar slip wall.
+pub mod planar_wall;
 /// Moment-preserving redistribution onto explicit Cartesian quadrature.
 pub mod remesh;
 
@@ -679,6 +681,7 @@ fn checked_induced_contribution(
 fn checked_velocities(
     particles: &[VortexParticle],
     kernel: VelocityKernel,
+    wall: Option<planar_wall::PlanarWall2>,
     output: &mut Vec<[f64; 2]>,
     pair_evaluations: &mut u64,
     meter: &mut WorkMeter,
@@ -707,6 +710,26 @@ fn checked_velocities(
                 )
             })?;
         }
+        if let Some(wall) = wall {
+            for source in particles {
+                meter.unit(accountant, cx, phase, || {
+                    *pair_evaluations =
+                        pair_evaluations
+                            .checked_add(1)
+                            .ok_or(VpmError::PlanOverflow {
+                                resource: "executed image pair evaluations",
+                            })?;
+                    checked_induced_contribution(
+                        &mut velocity,
+                        &wall.image(source),
+                        particle.pos,
+                        kernel,
+                        phase,
+                        target,
+                    )
+                })?;
+            }
+        }
         output.push(velocity);
     }
     Ok(())
@@ -717,6 +740,7 @@ fn checked_displaced(
     particles: &[VortexParticle],
     velocities: &[[f64; 2]],
     dt: f64,
+    wall: Option<planar_wall::PlanarWall2>,
     output: &mut Vec<VortexParticle>,
     meter: &mut WorkMeter,
     accountant: &mut AdmittedBudget<'_>,
@@ -736,6 +760,9 @@ fn checked_displaced(
                     particle: index,
                 });
             }
+            if let Some(wall) = wall {
+                wall.admit_position(pos, index)?;
+            }
             output.push(VortexParticle::new(pos, particle.circulation));
             Ok(())
         })?;
@@ -747,6 +774,7 @@ fn checked_displaced(
 fn checked_combined(
     particles: &[VortexParticle],
     dt: f64,
+    wall: Option<planar_wall::PlanarWall2>,
     k1: &[[f64; 2]],
     k2: &[[f64; 2]],
     k3: &[[f64; 2]],
@@ -771,6 +799,9 @@ fn checked_combined(
                     phase: PHASE,
                     particle: index,
                 });
+            }
+            if let Some(wall) = wall {
+                wall.admit_position(pos, index)?;
             }
             output.push(VortexParticle::new(pos, particle.circulation));
             Ok(())
@@ -805,7 +836,7 @@ pub fn simulate_with_cx(
     core: f64,
     budget: VpmBudget,
 ) -> Result<VpmRun, VpmError> {
-    simulate_impl(cx, particles, dt, steps, core, budget, None)
+    simulate_impl(cx, particles, dt, steps, core, budget, None, None)
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -817,6 +848,7 @@ fn simulate_impl(
     core: f64,
     budget: VpmBudget,
     diffusion: Option<(&[f64], diffusion::PseDiffusion)>,
+    wall: Option<planar_wall::PlanarWall2>,
 ) -> Result<VpmRun, VpmError> {
     if !dt.is_finite() {
         return Err(invalid_scalar("dt", dt, None));
@@ -834,6 +866,21 @@ fn simulate_impl(
     let active_diffusion =
         diffusion.filter(|(_, law)| law.kinematic_viscosity_m2_s() > 0.0 && dt > 0.0);
     let mut plan = VpmPlan::checked(particles.len(), steps)?;
+    if wall.is_some() {
+        let image_visits = plan.pair_evaluations;
+        plan.pair_evaluations =
+            plan.pair_evaluations
+                .checked_add(image_visits)
+                .ok_or(VpmError::PlanOverflow {
+                    resource: "wall image pair evaluations",
+                })?;
+        plan.work_units =
+            plan.work_units
+                .checked_add(image_visits)
+                .ok_or(VpmError::PlanOverflow {
+                    resource: "wall total work",
+                })?;
+    }
     if active_diffusion.is_some() {
         let visits = diffusion::pair_work(particles.len(), steps, 2)?;
         plan.pair_evaluations =
@@ -871,6 +918,9 @@ fn simulate_impl(
     for (index, particle) in particles.iter().copied().enumerate() {
         meter.unit(&mut accountant, cx, "fs-vpm.input", || {
             validate_particle(particle, index)?;
+            if let Some(wall) = wall {
+                wall.admit_position(particle.pos, index)?;
+            }
             if let Some((areas, _)) = diffusion {
                 diffusion::validate_area(areas[index], index)?;
             }
@@ -898,6 +948,7 @@ fn simulate_impl(
         checked_velocities(
             &state,
             kernel,
+            wall,
             &mut scratch.k1,
             &mut pair_evaluations,
             &mut meter,
@@ -911,6 +962,7 @@ fn simulate_impl(
             &state,
             &scratch.k1,
             0.5 * dt,
+            wall,
             &mut scratch.s2,
             &mut meter,
             &mut accountant,
@@ -921,6 +973,7 @@ fn simulate_impl(
         checked_velocities(
             &scratch.s2,
             kernel,
+            wall,
             &mut scratch.k2,
             &mut pair_evaluations,
             &mut meter,
@@ -934,6 +987,7 @@ fn simulate_impl(
             &state,
             &scratch.k2,
             0.5 * dt,
+            wall,
             &mut scratch.s3,
             &mut meter,
             &mut accountant,
@@ -944,6 +998,7 @@ fn simulate_impl(
         checked_velocities(
             &scratch.s3,
             kernel,
+            wall,
             &mut scratch.k3,
             &mut pair_evaluations,
             &mut meter,
@@ -957,6 +1012,7 @@ fn simulate_impl(
             &state,
             &scratch.k3,
             dt,
+            wall,
             &mut scratch.s4,
             &mut meter,
             &mut accountant,
@@ -967,6 +1023,7 @@ fn simulate_impl(
         checked_velocities(
             &scratch.s4,
             kernel,
+            wall,
             &mut scratch.k4,
             &mut pair_evaluations,
             &mut meter,
@@ -979,6 +1036,7 @@ fn simulate_impl(
         checked_combined(
             &state,
             dt,
+            wall,
             &scratch.k1,
             &scratch.k2,
             &scratch.k3,

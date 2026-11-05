@@ -5,6 +5,7 @@
 
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, BudgetRefusal, CancelGate, Cx, ExecMode, StreamKey, VirtualClock};
+use fs_vpm::planar_wall::{PlanarWall2, simulate_with_cx as simulate_at_wall};
 use fs_vpm::{
     VortexParticle, VpmBudget, VpmError, induced_velocity, simulate, simulate_with_cx,
     total_circulation, vorticity_centroid,
@@ -502,4 +503,284 @@ fn checked_vortex_still_refuses_an_unrepresentable_physical_velocity() {
         })
     );
     assert_particles_bitwise_equal(&start, &original);
+}
+
+#[test]
+fn planar_wall_single_vortex_translates_at_the_exact_regularized_image_speed() {
+    let gate = CancelGate::new_clock_free();
+    let wall = PlanarWall2::new([0.0, -0.5], [0.0, 7.0]).unwrap();
+    let height = 0.7;
+    let steps = 40;
+    let dt = 0.01;
+    for circulation in [-1.3, 2.1] {
+        for core in [0.0, 0.3] {
+            let start = [VortexParticle::new([0.2, height - 0.5], circulation)];
+            let result = with_cx(&gate, Budget::INFINITE, |cx| {
+                simulate_at_wall(cx, &start, dt, steps, core, wall, roomy_budget(1, steps))
+            })
+            .unwrap();
+            // The real source induces no self velocity; its wall image does.
+            let speed = circulation * height / (PI * (4.0 * height * height + core * core));
+            let expected_x = start[0].pos[0] + dt * steps as f64 * speed;
+            assert!((result.particles[0].pos[0] - expected_x).abs() < 2e-14);
+            assert_eq!(result.particles[0].pos[1], start[0].pos[1]);
+            assert_eq!(result.particles.len(), 1);
+            assert_eq!(
+                result.particles[0].circulation.to_bits(),
+                circulation.to_bits()
+            );
+            assert_eq!(result.pair_evaluations, 8 * steps as u64);
+        }
+    }
+}
+
+#[test]
+fn planar_wall_velocity_has_zero_normal_trace_in_translated_rotated_coordinates() {
+    let origin = [1.2, -0.7];
+    let transform = |p: [f64; 2]| {
+        [
+            origin[0] + 0.6 * p[0] - 0.8 * p[1],
+            origin[1] + 0.8 * p[0] + 0.6 * p[1],
+        ]
+    };
+    let wall = PlanarWall2::new(origin, [-8.0, 6.0]).unwrap();
+    let normal = wall.normal_into_fluid();
+    let particles = [
+        VortexParticle::new(transform([-0.5, 0.4]), 1.2),
+        VortexParticle::new(transform([0.8, 1.1]), -0.7),
+        VortexParticle::new(transform([1.6, 0.6]), 0.3),
+    ];
+    let mut free_space_penetrates = false;
+    for core in [0.0, 0.25] {
+        for x in [-1.3, -0.1, 0.6, 1.9] {
+            let point = transform([x, 0.0]);
+            let velocity = wall.induced_velocity(&particles, point, core).unwrap();
+            let un = velocity[0] * normal[0] + velocity[1] * normal[1];
+            assert!(un.abs() < 3e-14, "wall normal velocity {un:e}");
+            let free = induced_velocity(&particles, point, core);
+            free_space_penetrates |= (free[0] * normal[0] + free[1] * normal[1]).abs() > 1e-3;
+        }
+    }
+    assert!(free_space_penetrates, "fixture must detect omitted images");
+}
+
+#[test]
+fn planar_wall_motion_matches_evolving_physical_and_image_sources_in_original_rk4() {
+    let start = [
+        VortexParticle::new([-0.4, 0.6], 0.8),
+        VortexParticle::new([0.5, 0.9], -0.3),
+        VortexParticle::new([1.1, 0.4], 0.5),
+    ];
+    let mut reflected_reference = start.to_vec();
+    reflected_reference.extend(
+        start
+            .iter()
+            .map(|p| VortexParticle::new([p.pos[0], -p.pos[1]], -p.circulation)),
+    );
+    let gate = CancelGate::new_clock_free();
+    let wall = PlanarWall2::new([0.0; 2], [0.0, 1.0]).unwrap();
+    let steps = 30;
+    let dt = 0.01;
+    let core = 0.1;
+    let actual = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_at_wall(cx, &start, dt, steps, core, wall, roomy_budget(3, steps))
+    })
+    .unwrap();
+    // Independently evolve the entire antisymmetric cloud with the original
+    // free-space owner. Its images move; a frozen image field cannot pass.
+    let reference = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_with_cx(
+            cx,
+            &reflected_reference,
+            dt,
+            steps,
+            core,
+            roomy_budget(6, steps),
+        )
+    })
+    .unwrap();
+    assert_eq!(actual.particles.len(), start.len());
+    for (index, particle) in actual.particles.iter().enumerate() {
+        for axis in 0..2 {
+            assert!((particle.pos[axis] - reference.particles[index].pos[axis]).abs() < 2e-13);
+        }
+        assert_eq!(
+            particle.circulation.to_bits(),
+            start[index].circulation.to_bits()
+        );
+    }
+    assert_eq!(
+        total_circulation(&actual.particles),
+        total_circulation(&start)
+    );
+    assert_ne!(
+        total_circulation(&actual.particles),
+        total_circulation(&reference.particles)
+    );
+    let normal_first_moment =
+        |cloud: &[VortexParticle]| cloud.iter().map(|p| p.circulation * p.pos[1]).sum::<f64>();
+    assert!((normal_first_moment(&actual.particles) - normal_first_moment(&start)).abs() < 2e-13);
+}
+
+#[test]
+fn planar_wall_trajectory_rotates_and_translates_with_the_physical_boundary() {
+    let origin = [1.2, -0.7];
+    let transform = |p: [f64; 2]| {
+        [
+            origin[0] + 0.6 * p[0] - 0.8 * p[1],
+            origin[1] + 0.8 * p[0] + 0.6 * p[1],
+        ]
+    };
+    let start = [
+        VortexParticle::new([-0.4, 0.6], 0.8),
+        VortexParticle::new([0.5, 0.9], -0.3),
+    ];
+    let rotated = start.map(|p| VortexParticle::new(transform(p.pos), p.circulation));
+    let gate = CancelGate::new_clock_free();
+    let wall = PlanarWall2::new([0.0; 2], [0.0, 1.0]).unwrap();
+    let rotated_wall = PlanarWall2::new(origin, [-8.0, 6.0]).unwrap();
+    let result = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_at_wall(cx, &start, 0.01, 20, 0.1, wall, roomy_budget(2, 20))
+    })
+    .unwrap();
+    let transformed = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_at_wall(
+            cx,
+            &rotated,
+            0.01,
+            20,
+            0.1,
+            rotated_wall,
+            roomy_budget(2, 20),
+        )
+    })
+    .unwrap();
+    for (particle, actual) in result.particles.iter().zip(&transformed.particles) {
+        let expected = transform(particle.pos);
+        for axis in 0..2 {
+            assert!((actual.pos[axis] - expected[axis]).abs() < 2e-13);
+        }
+    }
+}
+
+#[test]
+fn planar_wall_refuses_contact_and_crossing_stages_without_changing_input() {
+    for normal in [[0.0; 2], [f64::NAN, 1.0], [0.0, f64::INFINITY]] {
+        assert!(PlanarWall2::new([0.0; 2], normal).is_err());
+    }
+    assert!(PlanarWall2::new([f64::NAN, 0.0], [0.0, 1.0]).is_err());
+    let wall = PlanarWall2::new([0.0; 2], [0.0, 1.0]).unwrap();
+    let gate = CancelGate::new_clock_free();
+    for height in [-0.1, -0.0, 0.0] {
+        let start = [VortexParticle::new([0.0, height], 1.0)];
+        let result = with_cx(&gate, Budget::INFINITE, |cx| {
+            simulate_at_wall(cx, &start, 0.0, 0, 0.1, wall, roomy_budget(1, 0))
+        });
+        assert!(matches!(
+            result,
+            Err(VpmError::InvalidScalar {
+                field: "wall clearance",
+                ..
+            })
+        ));
+    }
+    let first_positive = [VortexParticle::new([0.0, f64::from_bits(1)], 1.0)];
+    assert!(
+        wall.induced_velocity(&first_positive, [0.0; 2], 1.0)
+            .is_ok()
+    );
+    assert!(
+        wall.induced_velocity(&first_positive, [f64::NAN, 0.0], 1.0)
+            .is_err()
+    );
+    assert!(
+        wall.induced_velocity(&first_positive, [0.0; 2], -0.1)
+            .is_err()
+    );
+    // Sliding the anchor arbitrarily far along the same wall cannot change
+    // its geometry, including when that irrelevant difference would overflow.
+    let distant_anchor = PlanarWall2::new([f64::MAX, 0.0], [0.0, 1e308]).unwrap();
+    let source = [VortexParticle::new([-f64::MAX, 1.0], 1.0)];
+    let velocity = distant_anchor
+        .induced_velocity(&source, source[0].pos, 0.0)
+        .unwrap();
+    assert!((velocity[0] - 1.0 / (4.0 * PI)).abs() < 1e-15);
+    assert_eq!(velocity[1], 0.0);
+
+    let start = [
+        VortexParticle::new([0.0, 0.1], 1.0),
+        VortexParticle::new([-0.2, 0.1], -1.0),
+    ];
+    let original = start;
+    // Each initial normal speed is -5/(4*pi); the first half stage of dt=1
+    // crosses y=0. All initial positions and velocities are admissible.
+    let result = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_at_wall(cx, &start, 1.0, 1, 0.0, wall, roomy_budget(2, 1))
+    });
+    assert!(matches!(
+        result,
+        Err(VpmError::InvalidScalar {
+            field: "wall clearance",
+            ..
+        })
+    ));
+    assert_particles_bitwise_equal(&start, &original);
+}
+
+#[test]
+fn planar_wall_charges_images_without_extra_buffers_and_preserves_free_space_bits() {
+    let start = [
+        VortexParticle::new([-0.4, 0.6], 0.8),
+        VortexParticle::new([0.5, 0.9], -0.3),
+    ];
+    let gate = CancelGate::new_clock_free();
+    let wall = PlanarWall2::new([0.0; 2], [0.0, 1.0]).unwrap();
+    let steps = 3;
+    let pair_visits = 8 * 2 * 2 * steps as u64;
+    let original = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_with_cx(cx, &start, 0.01, steps, 0.1, roomy_budget(2, steps))
+    })
+    .unwrap();
+    assert_particles_bitwise_equal(&original.particles, &simulate(&start, 0.01, steps, 0.1));
+    let result = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_at_wall(
+            cx,
+            &start,
+            0.01,
+            steps,
+            0.1,
+            wall,
+            VpmBudget::new(2, steps, pair_visits, original.peak_live_bytes),
+        )
+    })
+    .unwrap();
+    assert_eq!(result.peak_live_bytes, original.peak_live_bytes);
+    assert_eq!(result.pair_evaluations, pair_visits);
+    assert_eq!(
+        result.work_units,
+        original.work_units + original.pair_evaluations
+    );
+    let refused = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_at_wall(
+            cx,
+            &start,
+            0.01,
+            steps,
+            0.1,
+            wall,
+            VpmBudget::new(2, steps, pair_visits - 1, original.peak_live_bytes),
+        )
+    });
+    assert!(matches!(
+        refused,
+        Err(VpmError::CapExceeded {
+            resource: "pair evaluations",
+            ..
+        })
+    ));
+    gate.request();
+    let cancelled = with_cx(&gate, Budget::INFINITE, |cx| {
+        simulate_at_wall(cx, &start, 0.01, steps, 0.1, wall, roomy_budget(2, steps))
+    });
+    assert!(matches!(cancelled, Err(VpmError::ExecutionBudget(_))));
 }
