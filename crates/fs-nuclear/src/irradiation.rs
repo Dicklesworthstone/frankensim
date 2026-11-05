@@ -3,8 +3,10 @@
 //! A homogeneous parent inventory obeys `dN/dt = -(k_f + k_c) N`, with
 //! `k_r = sum_g sigma_r,g * phi_g`. The incident scalar flux is prescribed;
 //! there is no transport, multiplication, self-shielding or criticality solve.
-//! Cross sections are fixed over each admitted temperature interval. Their
-//! evaluation, spectrum collapse and applicability remain the caller's work.
+//! Microscopic coefficients are either explicitly fixed or interpolated from
+//! identified temperature tables. The actual material temperature selects the
+//! coefficients frozen for each interval; no Doppler broadening, unresolved
+//! resonance reconstruction or spectrum-dependent self-shielding is inferred.
 //!
 //! Fission and capture debit the same parent inventory. Capture products and
 //! fission fragments leave that tracked inventory but remain material: this is
@@ -16,6 +18,8 @@
 use std::sync::Arc;
 
 use fs_math::decay::{attenuate, decayed_fraction};
+
+use crate::cross_sections::{CrossSectionTable, NeutronReaction};
 
 use super::{
     Accumulator, EnergyChannels, FissionBudget, FissionError, FissionModel, FissionState,
@@ -156,10 +160,32 @@ pub struct IrradiationData {
     pub capture_energy_per_event: EnergyChannels,
 }
 
+/// Temperature-dependent fission and capture data on the same physical parent.
+/// Both tables must cover the entire declared model temperature domain and
+/// carry identical nuclide and energy-group identities. Event energies retain
+/// their original owners; a table does not infer deposition or decay-heat data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabulatedIrradiationData {
+    pub data_id: String,
+    pub fission: Arc<CrossSectionTable>,
+    pub capture: Arc<CrossSectionTable>,
+    pub temperature_min_k: f64,
+    pub temperature_max_k: f64,
+    pub fission_model: Arc<FissionModel>,
+    pub capture_energy_per_event: EnergyChannels,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ReactionTables {
+    fission: Arc<CrossSectionTable>,
+    capture: Arc<CrossSectionTable>,
+}
+
 /// Admitted immutable reaction coefficients. There is no built-in isotope data.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IrradiationModel {
     data: IrradiationData,
+    tables: Option<ReactionTables>,
 }
 
 impl IrradiationModel {
@@ -179,7 +205,56 @@ impl IrradiationModel {
             ));
         }
         data.capture_energy_per_event.validate()?;
-        Ok(Self { data })
+        Ok(Self { data, tables: None })
+    }
+
+    /// Bind processed temperature tables without changing the inventory or
+    /// fission-energy solver. A finite lower-domain reference row is retained
+    /// for the legacy `cross_sections` observation; actual rates ALWAYS evaluate
+    /// the tables at the temperature passed to `rate_constants`.
+    pub fn new_tabulated(data: TabulatedIrradiationData) -> Result<Self, FissionError> {
+        if data.fission.reaction() != NeutronReaction::Fission
+            || data.capture.reaction() != NeutronReaction::Capture
+            || data.fission.nuclide() != data.capture.nuclide()
+            || data.fission.groups() != data.capture.groups()
+            || !positive(data.temperature_min_k)
+            || !positive(data.temperature_max_k)
+            || data.temperature_min_k > data.temperature_max_k
+        {
+            return Err(FissionError::InvalidInput(
+                "inconsistent tabulated irradiation identities or domain",
+            ));
+        }
+        for table in [&data.fission, &data.capture] {
+            table.validate_temperature(data.temperature_min_k)?;
+            table.validate_temperature(data.temperature_max_k)?;
+        }
+        let mut reference = Vec::with_capacity(data.fission.groups().len());
+        for group in 0..data.fission.groups().len() {
+            reference.push(GroupCrossSections {
+                fission_m2: data
+                    .fission
+                    .cross_section_at_group(data.temperature_min_k, group)?,
+                capture_m2: data
+                    .capture
+                    .cross_section_at_group(data.temperature_min_k, group)?,
+            });
+        }
+        let mut model = Self::new(IrradiationData {
+            data_id: data.data_id,
+            nuclide: data.fission.nuclide(),
+            groups: Arc::clone(data.fission.groups()),
+            cross_sections: reference,
+            temperature_min_k: data.temperature_min_k,
+            temperature_max_k: data.temperature_max_k,
+            fission_model: data.fission_model,
+            capture_energy_per_event: data.capture_energy_per_event,
+        })?;
+        model.tables = Some(ReactionTables {
+            fission: data.fission,
+            capture: data.capture,
+        });
+        Ok(model)
     }
 
     #[must_use]
@@ -194,9 +269,26 @@ impl IrradiationModel {
     pub fn groups(&self) -> &Arc<NeutronGroups> {
         &self.data.groups
     }
+    /// Fixed coefficients, or the lower-domain reference row for a tabulated
+    /// model. The reference temperature is exposed separately; actual reaction
+    /// evaluation must use `rate_constants`, which evaluates the current law.
     #[must_use]
     pub fn cross_sections(&self) -> &[GroupCrossSections] {
         &self.data.cross_sections
+    }
+    /// The retained row is temperature-independent for a fixed model. In a
+    /// tabulated model it is the reference at this explicitly reported Kelvin
+    /// temperature; use `rate_constants` for all physical reaction evaluations.
+    #[must_use]
+    pub fn cross_section_reference_temperature_k(&self) -> Option<f64> {
+        self.tables.as_ref().map(|_| self.temperature_min_k())
+    }
+    /// Original immutable fission/capture tables, when this model uses them.
+    #[must_use]
+    pub fn temperature_tables(&self) -> Option<(&Arc<CrossSectionTable>, &Arc<CrossSectionTable>)> {
+        self.tables
+            .as_ref()
+            .map(|tables| (&tables.fission, &tables.capture))
     }
     #[must_use]
     pub const fn temperature_min_k(&self) -> f64 {
@@ -215,7 +307,9 @@ impl IrradiationModel {
         self.data.capture_energy_per_event
     }
 
-    /// Collapse the supplied absolute flux with these fixed microscopic data.
+    /// Evaluate the microscopic law at the actual temperature, then collapse
+    /// it against the supplied absolute group flux. These rates remain frozen
+    /// within one inventory trial; changing thermal histories require refinement.
     /// Grid identity and every edge must match, even for an all-zero flux.
     pub fn rate_constants(
         &self,
@@ -237,13 +331,32 @@ impl IrradiationModel {
             || temperature_k > self.temperature_max_k()
         {
             return Err(FissionError::InvalidInput(
-                "temperature is outside the fixed cross-section data domain",
+                "temperature is outside the cross-section data domain",
             ));
         }
         if !Arc::ptr_eq(&self.data.groups, &flux.groups) && self.data.groups != flux.groups {
             return Err(FissionError::InvalidInput(
                 "neutron flux and cross-section energy groups do not match",
             ));
+        }
+        if let Some(tables) = &self.tables {
+            let result = ReactionRateConstants {
+                fission_s_inv: tables.fission.rate_constant(
+                    flux,
+                    temperature_k,
+                    budget.max_neutron_groups,
+                    &mut checkpoint,
+                )?,
+                capture_s_inv: tables.capture.rate_constant(
+                    flux,
+                    temperature_k,
+                    budget.max_neutron_groups,
+                    &mut checkpoint,
+                )?,
+            };
+            finite(result.total_s_inv())?;
+            checkpoint()?;
+            return Ok(result);
         }
         let mut fission = Accumulator::new(0.0);
         let mut capture = Accumulator::new(0.0);
@@ -695,3 +808,7 @@ fn produced_energy(input: f64, x: f64, y: f64) -> Result<(f64, f64), FissionErro
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "irradiation/temperature_tests.rs"]
+mod temperature_tests;

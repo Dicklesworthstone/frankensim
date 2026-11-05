@@ -853,3 +853,45 @@ cached restart, and analytic constant-amplitude neutron-driven activation with
 late-checkpoint rollback. These preserve the concurrently added full burnup and
 generic kinetics owners; explicit burnup fission products and effective
 fission-energy reservoirs remain distinct model choices.
+
+## Temperature-dependent microscopic reaction tables
+
+`cross_sections::CrossSectionTable` retains identified processed microscopic
+coefficients on an immutable named energy grid and strictly ordered absolute
+temperature knots. Nuclide and reaction identity are explicit. Coefficients
+are nonnegative square metres; rates use absolute group-integrated scalar flux
+in neutrons/m²/s. Interpolation is linear in Kelvin between supplied rows,
+preserves exact knots and constant rows, and refuses temperature extrapolation.
+
+One binary search brackets a temperature, followed by an allocation-free group
+pass. Flattened rows and their temperature/grid data are shared on clone.
+Near-endpoint interpolation computes the two temperature distances separately
+and uses a fused update from the nearer endpoint. This preserves small
+coefficients beside much larger endpoint values. Positive unrepresentable
+interpolants or rate products refuse. Explicit temperature/group/value bounds
+precede retained allocation; construction and rate evaluation poll cancellation.
+Zero flux still requires the complete data-domain and grid checks.
+
+`IrradiationModel::new_tabulated(TabulatedIrradiationData)` binds fission and
+capture tables to the same parent and energy grid, with full coverage of the
+declared model temperature domain. The existing fixed constructor remains.
+All inventory, delayed-energy convolution and capture-activation paths evaluate
+the current temperature through the original `rate_constants` owner. The legacy
+`cross_sections()` observation returns fixed coefficients or a tabulated model's
+lower-domain reference row; `cross_section_reference_temperature_k()` makes
+that reference explicit. Physical evaluations must use `rate_constants`.
+Original tables remain available through `temperature_tables()`.
+
+Supplied rows must already embody the intended processing and within-group
+spectrum assumptions. Linear temperature interpolation does not perform
+resonance reconstruction, Doppler broadening, self-shielding or transport.
+This deterministic multigroup law is distinct from the statistical temperature
+selection described in [OpenMC's cross-section methodology](https://docs.openmc.org/en/latest/methods/cross_sections.html).
+Dataset identity does not certify nuclear-data accuracy.
+
+Nine table regressions and three irradiation/activation regressions passed in
+the actual-owner nuclear build. They cover analytic temperature-dependent rates,
+exact knots, positivity and endpoint scales, limits/identity/range/cancellation,
+actual fuel competition, the original delayed-heat convolution and existing
+capture-product evolution. Full workspace Cargo and empirical nuclear-data
+validation remain separate.

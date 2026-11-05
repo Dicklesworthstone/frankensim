@@ -31,6 +31,9 @@ pub mod thermal;
 /// Multigroup neutron irradiation with competing fission and capture.
 pub mod irradiation;
 
+/// Identified, temperature-dependent microscopic neutron reaction data.
+pub mod cross_sections;
+
 /// Product-forming fission, capture and radioactive transmutation networks.
 pub mod burnup;
 
