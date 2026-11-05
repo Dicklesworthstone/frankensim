@@ -536,3 +536,167 @@ fn signed_source_selection_excludes_unrelated_overflow_and_preserves_retry() {
         100.0,
     );
 }
+
+#[test]
+fn g1_weak_damper_heat_survives_large_lossless_motion_and_rescaling() {
+    // Unit masses with one physical dashpot along g=[1,1,-1]:
+    // v'=-c*g*(g.v), power=c*(g.v)^2. The exact relative velocity
+    // r=g.v obeys r'=-3*c*r while both orthogonal translations are lossless.
+    // No dense eigensolver or production integral supplies this reference.
+    let g = [1.0_f64, 1.0, -1.0];
+    for c in [1.0_f64 / 1024.0, 1.0, 1024.0] {
+        let flow: Vec<_> = g
+            .iter()
+            .flat_map(|a| g.iter().map(move |b| -c * a * b))
+            .collect();
+        let source = g.map(|value| c.sqrt() * value);
+        let dt = 0.125 / c;
+        let prepared =
+            PreparedSourceLoss::new_controlled(3, 0, &flow, &[], &source, dt, budget(), || false)
+                .unwrap();
+        for (background, relative) in [
+            (1.0, 1.0e-12),
+            (1.0, 2.0_f64.powi(-55)),
+            (1.0, -2.0_f64.powi(-55)),
+            (1.0e16, 1.0),
+        ] {
+            let state = [background, relative, background];
+            let expected = relative * relative * (-(-6.0 * c * dt).exp_m1()) / 6.0;
+            let mut scratch = [f64::NAN; 6];
+            let heat = prepared
+                .evaluate_into_controlled(&state, &[], &mut scratch, || false)
+                .unwrap();
+            assert!(
+                heat > 0.0,
+                "a resolved physical velocity difference lost its heat"
+            );
+            close(heat, expected, expected);
+            assert_eq!(
+                heat,
+                prepared.evaluate_controlled(&state, &[], || false).unwrap()
+            );
+        }
+        assert_eq!(
+            prepared
+                .evaluate_controlled(&[1.0, 0.0, 1.0], &[], || false)
+                .unwrap(),
+            0.0
+        );
+    }
+}
+
+#[test]
+fn g1_weak_conservative_coupling_must_reach_the_physical_dashpot() {
+    // H=|x|^2/2; the first three coordinates couple conservatively through
+    // g=[1,1,-1] to the fourth, whose damping rate is one:
+    // r'= -3*y, y'=r-y, r=g.x. Only y^2 is dissipated.
+    // Initially y=0, so all heat must come from the small acceleration that
+    // an ordinary g.x sum can erase between large cancelling coordinates.
+    let flow = [
+        0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, -1.0, -1.0,
+    ];
+    let dt = 1.0_f64;
+    let prepared = PreparedSourceLoss::new_controlled(
+        4,
+        0,
+        &flow,
+        &[],
+        &[0.0, 0.0, 0.0, 1.0],
+        dt,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let frequency = (3.0_f64 - 0.25).sqrt();
+    // y(t)=r0*exp(-t/2)*sin(frequency*t)/frequency. Integrate y^2
+    // analytically; no subtraction of the large conserved background energy.
+    let twice_frequency = 2.0 * frequency;
+    let cosine_integral = (1.0
+        + (-dt).exp()
+            * (-(twice_frequency * dt).cos() + twice_frequency * (twice_frequency * dt).sin()))
+        / (1.0 + twice_frequency * twice_frequency);
+    let unit_heat = 0.5 * (-(-dt).exp_m1() - cosine_integral) / (frequency * frequency);
+    assert!(unit_heat > 0.0);
+    for amplitude in [1.0e-12, 2.0_f64.powi(-55), -2.0_f64.powi(-55)] {
+        let expected = amplitude * amplitude * unit_heat;
+        let heat = prepared
+            .evaluate_into_controlled(&[1.0, amplitude, 1.0, 0.0], &[], &mut [0.0; 8], || false)
+            .unwrap();
+        assert!(
+            heat > 0.0,
+            "conservative cross coupling must drive the actual damper"
+        );
+        close(heat, expected, expected);
+    }
+    assert_eq!(
+        prepared
+            .evaluate_controlled(&[1.0, 0.0, 1.0, 0.0], &[], || false)
+            .unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn g3_state_only_heat_preserves_channel_sums_and_explicit_zero_feedthrough() {
+    // Two physical dashpots share the same g.v, with c1=1/4 and c2=3/4.
+    // Their sum produces A=-g*g^T; each heat is its own c_i times
+    // the same analytic squared-velocity integral.
+    let g = [1.0_f64, 1.0, -1.0];
+    let flow: Vec<_> = g
+        .iter()
+        .flat_map(|a| g.iter().map(move |b| -a * b))
+        .collect();
+    let dt = 0.125_f64;
+    let sources: Vec<_> = [0.25_f64, 0.75]
+        .iter()
+        .flat_map(|c| g.iter().map(move |value| c.sqrt() * value))
+        .collect();
+    let combined =
+        PreparedSourceLoss::new_controlled(3, 1, &flow, &[0.0; 3], &sources, dt, budget(), || {
+            false
+        })
+        .unwrap();
+    let explicit_zero = PreparedSourceLoss::new_with_feedthrough_controlled(
+        3,
+        1,
+        &flow,
+        &[0.0; 3],
+        &sources,
+        &[0.0; 2],
+        dt,
+        budget(),
+        || false,
+    )
+    .unwrap();
+    let relative = 2.0_f64.powi(-55);
+    let state = [1.0, relative, 1.0];
+    let expected = relative * relative * (-(-6.0 * dt).exp_m1()) / 6.0;
+    let heat = combined
+        .evaluate_controlled(&state, &[7.0], || false)
+        .unwrap();
+    close(heat, expected, expected);
+    assert_eq!(
+        heat,
+        explicit_zero
+            .evaluate_controlled(&state, &[7.0], || false)
+            .unwrap()
+    );
+    let mut separate = 0.0;
+    for (index, c) in [0.25_f64, 0.75].into_iter().enumerate() {
+        let channel = PreparedSourceLoss::new_controlled(
+            3,
+            0,
+            &flow,
+            &[],
+            &sources[3 * index..3 * (index + 1)],
+            dt,
+            budget(),
+            || false,
+        )
+        .unwrap();
+        let value = channel.evaluate_controlled(&state, &[], || false).unwrap();
+        close(value, c * expected, c * expected);
+        separate += value;
+    }
+    close(heat, separate, expected);
+}

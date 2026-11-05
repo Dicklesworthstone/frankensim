@@ -235,6 +235,8 @@ impl PreparedSourceLoss {
     /// The identical positive source integral with caller-owned `2*n` scratch
     /// (unused and permitted empty when the source is identically zero).
     /// No allocation or exponential occurs during a successful warm call.
+    /// Initial source and acceleration contractions use compensated products
+    /// and sums, including state-only sources and explicit zero feedthrough.
     /// Scratch can change on refusal; no physical state is retained here.
     pub fn evaluate_into_controlled(
         &self,
@@ -243,7 +245,7 @@ impl PreparedSourceLoss {
         coordinates: &mut [f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, PreparedStepError> {
-        self.initialize_coordinates(initial, held_inputs, coordinates, false, &mut cancelled)?;
+        self.initialize_coordinates(initial, held_inputs, coordinates, &mut cancelled)?;
         if self.root.is_empty() {
             return Ok(0.0);
         }
@@ -292,7 +294,7 @@ impl PreparedSourceLoss {
         if source_row >= self.source_count {
             return Err(refuse("signed source integral requires an original source row").into());
         }
-        self.initialize_coordinates(initial, held_inputs, coordinates, true, &mut cancelled)?;
+        self.initialize_coordinates(initial, held_inputs, coordinates, &mut cancelled)?;
         if self.root.is_empty() {
             return Ok(0.0);
         }
@@ -379,7 +381,6 @@ impl PreparedSourceLoss {
         initial: &[f64],
         held_inputs: &[f64],
         coordinates: &mut [f64],
-        compensated: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), PreparedStepError> {
         poll(cancelled)?;
@@ -401,43 +402,27 @@ impl PreparedSourceLoss {
         let root_rate = det::sqrt(self.rate);
         for i in 0..n {
             poll(cancelled)?;
-            if compensated || !self.feedthrough.is_empty() {
-                let direct = if self.feedthrough.is_empty() {
-                    &[][..]
-                } else {
-                    &self.feedthrough[i * self.m..(i + 1) * self.m]
-                };
-                coordinates[i] = compensated_dot(
-                    &self.source[i * n..(i + 1) * n],
-                    initial,
-                    direct,
-                    held_inputs,
-                ) / root_rate;
-                coordinates[n + i] = compensated_dot(
-                    &self.flow[i * n..(i + 1) * n],
-                    initial,
-                    &self.input[i * self.m..(i + 1) * self.m],
-                    held_inputs,
-                ) / self.rate;
-                continue;
-            }
-            coordinates[i] = self.source[i * n..(i + 1) * n]
-                .iter()
-                .zip(initial)
-                .map(|(a, x)| a * x)
-                .sum::<f64>()
-                / root_rate;
-            let free = self.flow[i * n..(i + 1) * n]
-                .iter()
-                .zip(initial)
-                .map(|(a, x)| a * x)
-                .sum::<f64>();
-            let forcing = self.input[i * self.m..(i + 1) * self.m]
-                .iter()
-                .zip(held_inputs)
-                .map(|(b, u)| b * u)
-                .sum::<f64>();
-            coordinates[n + i] = (free + forcing) / self.rate;
+            // A small dissipative strain or acceleration can lie between
+            // large, exactly cancelling lossless coordinates even with D=0.
+            // Use the same compensated contraction for every source and its
+            // complete derivative BEFORE the positive integral squares it.
+            let direct = if self.feedthrough.is_empty() {
+                &[][..]
+            } else {
+                &self.feedthrough[i * self.m..(i + 1) * self.m]
+            };
+            coordinates[i] = compensated_dot(
+                &self.source[i * n..(i + 1) * n],
+                initial,
+                direct,
+                held_inputs,
+            ) / root_rate;
+            coordinates[n + i] = compensated_dot(
+                &self.flow[i * n..(i + 1) * n],
+                initial,
+                &self.input[i * self.m..(i + 1) * self.m],
+                held_inputs,
+            ) / self.rate;
         }
         if !finite(coordinates) {
             return Err(
