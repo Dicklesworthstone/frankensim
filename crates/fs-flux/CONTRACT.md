@@ -5608,9 +5608,10 @@ Nyquist; transverse periodic axes refuse because arbitrary retained Mann modes
 are not periodic on the CFD section. A checked face-count times mode-count
 budget bounds one complete application. The declared maximum hold duration
 bounds advected spatial phase; it is not a temporal bandlimit for OU noise.
-The caller must refresh the control within that duration. Profiles remain held
-through all SSP stages and retries, so varying boundary data are first order
-in time. Face averaging is a linear velocity observation, not an exact average
+The caller of `apply_*` must refresh the control within that duration. Those
+published traces remain held through SSP stages and retries, so that interface
+uses a first-order hold for varying boundary data. The explicit `step_*`
+interface below instead samples the actual stage times. Face averaging is a linear velocity observation, not an exact average
 of nonlinear mass, momentum or energy flux. These complete-state exterior
 Riemann traces provide no nonreflecting-inlet, wall-layer, turbulent mixing,
 resolved-DNS, measured-spectrum or instrument-acceptance qualification.
@@ -5658,8 +5659,9 @@ Five focused G0/G1/G4 suites cover held-path parity, canonical absolute-time
 sampling, six-side time-varying species/shear/pressure/enthalpy, original variable
 calorics, analytic second-order incoming species integration, shortened CFL
 retries and cumulative sampling, source refusal, and last-poll rollback/replay.
-Rustfmt passed; these full-owner tests have not executed in this environment.
-Second-order temporal behavior is scoped to smooth prescribed data; no
+All five suites pass in the focused native-source build described below;
+pinned rustfmt parsing and formatting also pass. Second-order temporal
+behavior is scoped to smooth prescribed data; no
 nonreflecting boundary, evolving OU interpolation, DNS, turbulent-spectrum or
 experimental validation is asserted.
 
@@ -5706,9 +5708,9 @@ inflow momentum/energy against closed-form time-dependent flux integrals with
 original variable calorics and both reconstructions; actual endpoint-CFL
 halving with exact repeated sample times and a call-wide work budget; and
 provider/source refusal plus final-poll cancellation preserving a previously
-accepted complete transaction. Pinned rustfmt parsing and formatting passed. These full owner regressions
-have not executed in this environment,
-where DSR/RCH and the complete constellation build are unavailable.
+accepted complete transaction. All four regression groups pass in the focused native-source build described
+below. Pinned rustfmt parsing and formatting also pass; a complete constellation
+or DSR/RCH build was not run.
 
 The temporal convergence target concerns smooth prescribed boundary data and
 its physical Euler flux, not a calibrated turbulence spectrum, DNS resolution,
@@ -5762,3 +5764,55 @@ unbound behavior, SSP/RKL conservation and late cancellation/replay, forced
 owner swaps, and active interior SGS with unchanged molecular bath flux. These
 are source/stencil/balance fixtures, not gas-specific turbulence, DNS, wall-law,
 nonreflecting-boundary or experimental validation. Composition remains frozen.
+
+
+## Stage-time coherent Mann forcing of native compressible flow
+
+`MannReservoirInflow3::step_frozen` and `step_mixture` advance the original
+Euler owners with a frozen, coherently advected Mann realization observed at
+the actual SSP RK2 start and endpoint times. Shortened numerical retries
+resample their own endpoint; the atmosphere remains immutable and draws no
+noise. Caller baselines receive the same absolute time and own all density,
+canonical composition, pressure and mean-velocity data. Existing native EOS,
+Riemann fluxes, reconstruction, boundary quadrature and retry admission remain
+in control. Accepted endpoint profiles publish with cells, time and loads.
+
+The same prepared spatial filters serve every stage. One stack-held trace
+caches frame, topology and phase admission for each sampled time; no numerical
+buffer is allocated in either step wrapper. `maximum_mode_samples` bounds the
+complete call, including both stages and rejected attempts. The report exposes
+actual face evaluations and represented-mode work. The adapter clips the
+requested maximum duration to the frozen spatial field's conservative advective
+phase limit; the native face CFL may shorten it further. Fixed-step OU sources
+refuse this interface because an accepted endpoint does not define a continuous
+stochastic bridge at arbitrary adaptive stage times. Their held-trace interface
+remains available. Source callbacks must be deterministic and replayable.
+
+Four focused tests cover independent rotated/advected sampling against the
+native stage-time owner, conservation and source immutability, late endpoint
+rollback and explicit OU refusal, complete-step sampling budgets, and canonical
+mixture profiles at the accepted time. All four tests pass in the focused native-source build; pinned rustfmt parsing
+also passes. This change
+removes the held boundary approximation for this frozen-source Euler path; it
+does not claim general spatial/temporal convergence, retime molecular or
+reactive split stages, or qualify a DNS, nonreflecting boundary or measured
+turbulence spectrum.
+
+### Focused native validation of the reservoir extensions
+
+Twenty focused regression tests pass: four frozen stage-time, five mixture
+stage-time, six molecular bath, four Mann stage-time, and one SGS bath test.
+The original `fs-gas`, `fs-rand` and `fs-atmo` production sources and the
+complete compressible source tree were compiled with the pinned nightly,
+including a second build with `experimental-sgs`. The test dependency slice
+uses original thermal source and solver numerical kernels with unused executor
+adapters excluded. For SGS it exports the original model, Vreman and dynamic
+modules unchanged. No substitute physics or mocked physical owners are used.
+This is focused native-source evidence, not a complete Cargo/constellation or
+DSR/RCH gate, performance benchmark or experimental turbulence calibration.
+
+The native check also verified the held-profile bridge in forced molecular
+composition after the internal stage-time argument was introduced. The fresh
+exterior CFL fixture uses a tangential speed jump to isolate its unsplit bound;
+it does not suppress stronger normal-shock wave speeds or require those shocks
+to bypass the existing retry policy.

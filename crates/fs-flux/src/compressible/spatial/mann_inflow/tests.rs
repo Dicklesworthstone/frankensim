@@ -4,6 +4,8 @@ use fs_atmo::mann::{MANN_TARGET_V1, MannParams};
 use fs_atmo::mann_field::MannQuadrature;
 use fs_qty::Time;
 
+mod stages;
+
 const OPEN: AxisBoundaries = AxisBoundaries::Ends {
     lower: super::super::BoundaryCondition::Transmissive,
     upper: super::super::BoundaryCondition::Transmissive,

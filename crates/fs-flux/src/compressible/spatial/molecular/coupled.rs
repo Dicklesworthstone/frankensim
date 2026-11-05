@@ -555,6 +555,7 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                         Time::new(dt),
                         controls.advection,
                         Some((*force, *force_controls, &mut **workspace)),
+                        None,
                         &mut cancelled,
                     )?,
                     None => self

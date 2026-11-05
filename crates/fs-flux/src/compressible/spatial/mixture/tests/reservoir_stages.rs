@@ -336,8 +336,8 @@ fn g4_endpoint_cfl_resamples_shortened_time_and_all_source_work_is_bounded() {
     assert!(report.maximum_cfl <= StepControl::default().cfl * (1.0 + 2e-14));
     balance(&report);
 
-    // The freshly prescribed initial speed, rather than the previous held
-    // profile, chooses the first interval even when no retry is permitted.
+    // A large prescribed tangential speed bounds the unsplit interval without
+    // adding a stronger normal shock. The previous held trace has no shear.
     let mut hot = retry_fixture();
     let controls = StepControl {
         cfl: 0.1,
@@ -349,7 +349,7 @@ fn g4_endpoint_cfl_resamples_shortened_time_and_all_source_work_is_bounded() {
             Time::new(1.0),
             controls,
             2,
-            |_, _, _, _, rho| Ok(input(rho, [20.0, 0.0, 0.0], 1.0)),
+            |_, _, _, _, rho| Ok(input(rho, [4.0, 20.0, 0.0], 1.0)),
             || false,
         )
         .unwrap();
@@ -359,7 +359,7 @@ fn g4_endpoint_cfl_resamples_shortened_time_and_all_source_work_is_bounded() {
         .unwrap();
     close(
         report.elapsed.value(),
-        controls.cfl / (20.0 + 3.0 * p.sound_speed),
+        controls.cfl / (24.0 + 3.0 * p.sound_speed),
         2e-14,
     );
     assert_eq!(report.halvings, 0);

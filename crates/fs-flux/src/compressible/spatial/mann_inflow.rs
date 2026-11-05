@@ -7,10 +7,12 @@
 //! composition, pressure and mean velocity. No per-face random draws, RMS
 //! restoration, invented thermodynamic fluctuations or flux correction occur.
 //!
-//! A published trace is held through the existing SSP stages and retries. The
-//! observation is exact for the represented spatial field; holding it in time
-//! is a first-order boundary approximation. These are complete-state exterior
-//! Riemann data, not an acoustically nonreflecting or characteristic inlet.
+//! `apply_*` publishes a trace held through the existing SSP stages and retries.
+//! `step_*` instead observes a frozen advected realization at the actual two
+//! SSP stage times, including every retry, and publishes the accepted endpoint
+//! with the fluid. Fixed-clock OU endpoints have no continuous bridge here and
+//! remain available through the held-trace interface. These are complete-state
+//! exterior Riemann data, not nonreflecting or characteristic inlet conditions.
 
 use super::mixture::{
     Error as MixtureError, MixtureEuler3d, ReservoirFaceState as MixtureReservoirFaceState,
@@ -24,6 +26,8 @@ use fs_atmo::mann_field::{HomogeneousMannField, MannSpectralModel};
 
 mod geometry;
 use geometry::{half_edges, rotation_is_proper, speed, to_field, to_grid};
+mod stages;
+pub use stages::MannReservoirStepReport3;
 
 /// The Cartesian grid uses metres already. Its origin is a cell CORNER, unlike
 /// the on-site lattice-node origin used by the D3Q19 adapter.
@@ -33,7 +37,8 @@ pub struct MannReservoirConfig3 {
     pub grid_origin_in_field_m: [f64; 3],
     /// Proper orthonormal rotation: field vectors -> grid vectors.
     pub field_to_grid: [[f64; 3]; 3],
-    /// Maximum total prepared faces times represented wavevectors per apply.
+    /// Maximum face observations times represented wavevectors per apply or
+    /// entire `step_*`, including both SSP stages and all rejected attempts.
     pub maximum_mode_samples: usize,
 }
 
