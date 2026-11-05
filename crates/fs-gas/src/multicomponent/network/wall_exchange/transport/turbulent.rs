@@ -58,8 +58,7 @@ impl CircularGnielinskiWall {
     /// `f = (0.79 ln(Re) - 1.64)^-2`,
     /// `Nu = (f/8)(Re-1000)Pr / [1 + 12.7 sqrt(f/8)(Pr^(2/3)-1)]`.
     /// Reference: Gnielinski (1976), International Chemical Engineering 16(2),
-    /// 359--368; equations (1)--(2) in ORNL/TM-2018/979:
-    /// <https://info.ornl.gov/sites/publications/Files/Pub116516.pdf>.
+    /// 359--368, turbulent pipe-flow heat-transfer correlation.
     /// This allocation-free evaluation shares the smooth-pipe relation used by
     /// `fs-convection` without introducing its FEM dependencies into gas flow.
     pub fn coefficients(

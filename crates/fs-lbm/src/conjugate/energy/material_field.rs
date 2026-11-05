@@ -363,6 +363,9 @@ impl EnergySolution {
         }
         net_defects_w.resize(cells + parts, 0.0);
         net_defects_w.fill(0.0);
+        let endpoint_wall = if setup.eddy_wall_treatment == super::EddyWallTreatment::Molecular {
+            molecular_w_m_k.to_vec()
+        } else { Vec::new() };
         let mut endpoint = molecular_w_m_k.to_vec();
         for (cell, axes) in endpoint.iter_mut().enumerate() {
             if cell.is_multiple_of(256) { super::super::poll(gate)?; }
@@ -374,10 +377,12 @@ impl EnergySolution {
             }
         }
         // Exact constant-Cp/zero-change recovery also avoids the flux walk.
-        if endpoint == self.conductivity { return Ok((0.0, 0.0)); }
-        let context = |k| super::Context {
+        if endpoint == self.conductivity
+            && endpoint_wall == self.molecular_wall_conductivity_w_m_k
+        { return Ok((0.0, 0.0)); }
+        let context = |k, wall_k| super::Context {
             domain, flow, solids, conductivity_temperature: None,
-            faces: setup.faces, k,
+            faces: setup.faces, k, wall_k,
             contacts: setup.contacts.iter().map(|contact| {
                 let (a, b) = contact.materials;
                 ((a.min(b), a.max(b)), contact.resistance_m2_k_w)
@@ -388,12 +393,12 @@ impl EnergySolution {
             enthalpy_reference_j_kg: 0.0,
             scheme: super::ConvectionScheme::Upwind,
         };
-        let before = context(self.conductivity.clone());
-        let after = context(endpoint);
+        let before = context(self.conductivity.clone(), self.molecular_wall_conductivity_w_m_k.clone());
+        let after = context(endpoint, endpoint_wall);
         let owners = super::compact_owners(domain, &setup.compact_components, gate)?;
-        let old_compact = super::Compact::new(domain, solids, &before.k, setup, None,
+        let old_compact = super::Compact::new(domain, solids, before.wall_conductivity(), setup, None,
             owners.clone(), &self.face_contact_resistance_m2_k_w, gate)?;
-        let new_compact = super::Compact::new(domain, solids, &after.k, setup, None,
+        let new_compact = super::Compact::new(domain, solids, after.wall_conductivity(), setup, None,
             owners, &self.face_contact_resistance_m2_k_w, gate)?;
         let mut maximum = 0.0_f64;
         for cell in 0..cells {
@@ -525,6 +530,33 @@ mod tests {
         ).unwrap();
         assert_eq!(solution.conductivity, vec![[3.0, 4.0, 5.0]; 3]);
         assert!(solution.report.balance.relative_residual < 1e-9);
+    }
+
+    #[test]
+    fn g1_sgs_endpoint_audit_retains_molecular_wall_changes_even_at_equal_total_k() {
+        let domain = VoxelDomain::new(3, 1, 1, 1.0).unwrap();
+        let flow = FlowField::quiescent(&domain);
+        let gate = CancelGate::new();
+        let mut setup = boundary();
+        setup.eddy_wall_treatment = super::super::EddyWallTreatment::Molecular;
+        setup.eddy_conductivity_w_m_k = vec![10.0; 3];
+        let solution = EnergyConfig::default().solve_with_conductivity(
+            &domain, &fluid(), &[], &flow, &setup, &[[1.0; 3]; 3], &gate,
+        ).unwrap();
+        assert_eq!(solution.conductivity, vec![[11.0; 3]; 3]);
+        assert!((solution.temperature[2] - 302.0).abs() < 1e-9);
+        // A new source endpoint doubles molecular k while its SGS contribution
+        // falls by one. The interior conductivity is unchanged, but the wall
+        // now removes 8 W at this temperature instead of the accepted 4 W.
+        setup.eddy_conductivity_w_m_k.fill(9.0);
+        let mut defects = Vec::new();
+        let (maximum, outward) = solution.conductivity_flux_defect(
+            &domain, &[], &flow, &setup, &[[2.0; 3]; 3], &mut defects, &gate,
+        ).unwrap();
+        assert!((maximum - 4.0).abs() < 1e-8);
+        assert!((outward - 4.0).abs() < 1e-8);
+        assert!((defects[2] - 4.0).abs() < 1e-8);
+        assert_eq!(&defects[..2], &[0.0, 0.0]);
     }
 
     #[test]

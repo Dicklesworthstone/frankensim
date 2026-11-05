@@ -3328,7 +3328,23 @@ LVEL and transient SGS and reports the actual retained value. The constant
 ratio remains an authored model assumption, not a universal material law;
 see [NASA Wind-US Prandtl controls](https://www.grc.nasa.gov/www/winddocs/user/keywords/prandtl.html).
 A caller-supplied nonzero eddy-conductivity field refuses instead of being
-combined or overwritten. No SGS dissipation heating, turbulent scalar-variance
+combined or overwritten. Resolved-SGS marches select
+`ThermalSetup::eddy_wall_treatment = EddyWallTreatment::Molecular`: fixed and
+film domain walls, ordinary fluid/solid interfaces, compact package surfaces
+and explicit stationary thermal joints retain their molecular fluid half-cell
+resistance. Fluid/fluid mixing and open-face diffusion still use the effective
+conductivity. This is a resolved-wall boundary condition, requiring adequate
+near-wall resolution, not a new coarse-grid heat-transfer correlation. The
+default `EffectiveConductivity` policy preserves existing equilibrium LVEL
+behavior; an explicitly requested equilibrium thermal wall function and the
+resolved molecular policy cannot be combined.
+
+The accepted molecular wall coefficients remain separate from effective cell
+conductivity. Source-contact surface queries, nonlinear solid half-cell laws,
+compact links, heat observers and material endpoint flux corrections all use
+the same accepted wall coefficients. In particular, a molecular conductivity
+change cannot disappear from the endpoint audit merely because an opposing
+eddy-conductivity change keeps their sum constant. No SGS dissipation heating, turbulent scalar-variance
 equation, equilibrium thermal wall law, calibrated turbulent channel profile,
 or resolved turbulent spectrum is claimed. The existing first-order thermal
 coupling and power-law/upwind convection limits still apply; the caller must
@@ -3339,6 +3355,11 @@ quadratic Neumann gradients, native MAC normal derivatives, WALE's pure-shear
 zero, physical Smagorinsky viscosity, exact disabled flow identity, admission
 and cap refusals, and a moving-wall flow/heat step compared against an
 independently supplied turbulent-conductivity energy solve.
+The thermal face-contact battery additionally checks graded molecular wall and
+film resistances, retained interior/open-face mixing, ordinary and compact
+solid interfaces, and source queries at the molecular interface surfaces.
+An endpoint regression retains the changed wall heat at equal total cell
+conductivity; the heated moving-wall transient checks the automatic SGS policy.
 
 `MaterialChtFluid::march_natural_convection_with_sgs` uses the same native
 transient owner with source-dependent molecular viscosity and conductivity.

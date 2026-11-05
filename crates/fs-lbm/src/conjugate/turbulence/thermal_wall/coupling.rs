@@ -132,6 +132,9 @@ pub(in crate::conjugate) fn prepare_wall_heat_fields(
     if !thermal.eddy_conductivity_w_m_k.is_empty() {
         return Err(invalid("wall heat owns turbulent conductivity; use the original unprepared thermal setup"));
     }
+    if thermal.eddy_wall_treatment != crate::conjugate::EddyWallTreatment::EffectiveConductivity {
+        return Err(invalid("resolved molecular walls and the equilibrium thermal wall law are mutually exclusive"));
+    }
     let scale = fluid.volumetric_heat_capacity() / config.turbulent_prandtl;
     if !scale.is_finite() || scale <= 0.0 {
         return Err(invalid("turbulent heat coefficient is not representable"));

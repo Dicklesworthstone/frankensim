@@ -79,6 +79,19 @@ impl ThermalFace {
     }
 }
 
+/// Treatment of modeled conductivity at an impermeable thermal boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EddyWallTreatment {
+    /// Use the effective cell conductivity in the half-cell resistance. This
+    /// preserves the equilibrium LVEL and explicitly authored wall-law paths.
+    EffectiveConductivity,
+    /// Resolve the wall with molecular conduction only. Eddy transport still
+    /// acts between fluid cells and at open boundaries, but not through domain
+    /// walls, solid interfaces, compact surfaces or explicit stationary joints.
+    /// No thermal wall function is inferred from the cell's SGS coefficient.
+    Molecular,
+}
+
 /// Thermal boundary conditions, heat sources, and fixed-temperature cells.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalSetup {
@@ -110,6 +123,9 @@ pub struct ThermalSetup {
     /// Turbulent conductivity added to each FLUID cell, W/(m K) (empty: none;
     /// otherwise one entry per cell, for example `FvFlow::eddy_conductivity`).
     pub eddy_conductivity_w_m_k: Vec<f64>,
+    /// How the modeled conductivity meets impermeable boundaries. Resolved SGS
+    /// marches select `Molecular`; the default preserves equilibrium wall laws.
+    pub eddy_wall_treatment: EddyWallTreatment,
     /// Two-resistor compact thermal models of components.
     pub compact_components: Vec<CompactComponent>,
     /// Optional total C(T) laws, each replacing one component's constant
@@ -223,6 +239,7 @@ impl ThermalSetup {
             source_contact_controls: SourceContactControls::default(),
             cell_sinks: Vec::new(),
             eddy_conductivity_w_m_k: Vec::new(),
+            eddy_wall_treatment: EddyWallTreatment::EffectiveConductivity,
             compact_components: Vec::new(),
             compact_heat_storage: Vec::new(),
             compact_storage_controls: CompactStorageControls::default(),
@@ -344,6 +361,11 @@ pub struct EnergySolution {
     /// material reporting. Authored k(T) tables integrate the bulk half cells;
     /// these local values alone do not reconstruct nonlinear face coefficients.
     pub conductivity: Vec<[f64; 3]>,
+    /// Molecular coefficients used for wall half cells under resolved SGS.
+    /// Empty means walls used `conductivity`. Kept separately so source-contact
+    /// surface recovery and material endpoint audits use the accepted wall law;
+    /// subtracting an eddy coefficient could lose a small molecular contribution.
+    pub molecular_wall_conductivity_w_m_k: Vec<[f64; 3]>,
     /// Canonical `(lower cell, upper cell)` face resistances actually used by
     /// this solve, m² K/W. Kept for consistent downstream heat-flow observers.
     pub face_contact_resistance_m2_k_w: std::collections::BTreeMap<(usize, usize), f64>,
@@ -364,6 +386,17 @@ pub struct EnergySolution {
 }
 
 impl EnergySolution {
+    /// Accepted conductivity for an impermeable half cell, including compact
+    /// interfaces. Interior fluid mixing continues to use `conductivity`.
+    #[must_use]
+    pub fn wall_conductivity(&self) -> &[[f64; 3]] {
+        if self.molecular_wall_conductivity_w_m_k.is_empty() {
+            &self.conductivity
+        } else {
+            &self.molecular_wall_conductivity_w_m_k
+        }
+    }
+
     /// Largest temperature over cells satisfying `select`, with its cell.
     #[must_use]
     pub fn max_where(&self, mut select: impl FnMut(usize) -> bool) -> Option<(usize, f64)> {
@@ -448,6 +481,8 @@ struct Context<'a> {
     faces: [ThermalFace; 6],
     /// Conductivity along x, y, z per cell.
     k: Vec<[f64; 3]>,
+    /// Optional molecular wall field, separate from effective fluid mixing.
+    wall_k: Vec<[f64; 3]>,
     /// Contact resistances keyed by the ordered material pair.
     contacts: Vec<((u16, u16), f64)>,
     face_contacts: std::collections::BTreeMap<(usize, usize), f64>,
@@ -464,6 +499,10 @@ struct Context<'a> {
 }
 
 impl Context<'_> {
+    fn wall_conductivity(&self) -> &[[f64; 3]] {
+        if self.wall_k.is_empty() { &self.k } else { &self.wall_k }
+    }
+
     fn centered_enthalpy(&self, mut value: AffineSpecificEnthalpy) -> AffineSpecificEnthalpy {
         value.enthalpy_j_kg -= self.enthalpy_reference_j_kg;
         value
@@ -504,7 +543,7 @@ impl Context<'_> {
         }
     }
 
-    fn conductivity_curve(&self, c: usize, axis: usize) -> ConductivityCurve<'_> {
+    fn conductivity_curve(&self, c: usize, axis: usize, wall: bool) -> ConductivityCurve<'_> {
         if self.conductivity_temperature.is_some()
             && let Voxel::Solid(m) = self.domain.voxel_at(c)
         {
@@ -519,7 +558,8 @@ impl Context<'_> {
         }
         // Resolved molecular fields and fluid eddy conductivity are already
         // frozen by their owners. No temperature curve is inferred from them.
-        ConductivityCurve::constant(self.k[c][axis])
+        let k = if wall { self.wall_conductivity() } else { &self.k };
+        ConductivityCurve::constant(k[c][axis])
     }
 
     fn diffusive_conductance(&self, c: usize, n: usize, axis: usize) -> f64 {
@@ -527,6 +567,9 @@ impl Context<'_> {
         let half_c = 0.5 * self.domain.widths(c)[axis];
         let half_n = 0.5 * self.domain.widths(n)[axis];
         let contact = self.contact(c, n);
+        let wall = !self.domain.is_fluid(c) || !self.domain.is_fluid(n)
+            || self.face_contacts.contains_key(&(c.min(n), c.max(n)));
+        let k = if wall { self.wall_conductivity() } else { &self.k };
         let has_curve = |cell| match self.domain.voxel_at(cell) {
             Voxel::Solid(m) => !self.solids[usize::from(m)].conductivity_table.is_empty(),
             Voxel::Fluid => false,
@@ -549,14 +592,14 @@ impl Context<'_> {
                 // two surface temperatures retain the declared contact jump.
                 let (a, b) = (c.min(n), c.max(n));
                 area * interface_conductance(
-                    self.conductivity_curve(a, axis), t[a],
+                    self.conductivity_curve(a, axis, wall), t[a],
                     0.5 * self.domain.widths(a)[axis],
-                    self.conductivity_curve(b, axis), t[b],
+                    self.conductivity_curve(b, axis, wall), t[b],
                     0.5 * self.domain.widths(b)[axis], contact,
                 ).unwrap_or(f64::NAN)
             }
         } else {
-            area / (half_c / self.k[c][axis] + contact + half_n / self.k[n][axis])
+            area / (half_c / k[c][axis] + contact + half_n / k[n][axis])
         };
         // A failed or unrepresentable face must not silently become an
         // insulator. checked_term gives it the existing typed refusal.
@@ -585,7 +628,6 @@ impl Context<'_> {
         let area = self.domain.face_area(c, axis);
         let half_c = 0.5 * self.domain.widths(c)[axis];
         let flux = self.rho_c * self.flow.outward(self.domain, c, f);
-        let kc = self.k[c][f / 2];
         if let Some(n) = self.domain.neighbor(c, f) {
             let d = self.diffusive_conductance(c, n, axis);
             if let Some(field) = self.enthalpy {
@@ -620,6 +662,8 @@ impl Context<'_> {
             };
         }
         let solid = !self.domain.is_fluid(c);
+        let kc = if self.faces[f].is_open() { self.k[c][axis] }
+            else { self.wall_conductivity()[c][axis] };
         let half = area * kc / half_c; // A k / (w/2)
         match self.faces[f] {
             ThermalFace::Adiabatic => FaceTerm {
@@ -1070,6 +1114,22 @@ fn solve_energy_field(
             })
             .collect()
     };
+    let wall_k = if setup.eddy_wall_treatment == EddyWallTreatment::Molecular
+        && !setup.eddy_conductivity_w_m_k.is_empty()
+    {
+        let mut molecular = k.clone();
+        for (cell, axes) in molecular.iter_mut().enumerate() {
+            if cell.is_multiple_of(256) { super::poll(gate)?; }
+            if domain.is_fluid(cell) {
+                *axes = molecular_conductivity.map_or(
+                    [fluid.conductivity_w_m_k; 3], |field| field[cell],
+                );
+            }
+        }
+        molecular
+    } else {
+        Vec::new()
+    };
     let mut contacts = Vec::with_capacity(setup.contacts.len());
     for contact in &setup.contacts {
         let (a, b) = contact.materials;
@@ -1095,7 +1155,8 @@ fn solve_energy_field(
     }
     let conductivity_temperature = nonlinear.and_then(|(_, temperature)| temperature);
     let face_contacts = face_contact::prepare(domain, flow, setup, &compact_owner, gate)?;
-    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature,
+    let compact_k = if wall_k.is_empty() { &k } else { &wall_k };
+    let compact = Compact::new(domain, solids, compact_k, setup, conductivity_temperature,
         compact_owner, &face_contacts, gate)?;
     let enthalpy_offsets = if config.scheme == ConvectionScheme::EnthalpyMinmod {
         Some(enthalpy.expect("admitted caloric field").limited_offsets(domain, gate)?)
@@ -1120,6 +1181,7 @@ fn solve_energy_field(
         conductivity_temperature,
         faces: setup.faces,
         k,
+        wall_k,
         contacts,
         face_contacts,
         rho_c: fluid.volumetric_heat_capacity(),
@@ -1558,6 +1620,7 @@ fn solve_energy_field(
     Ok(EnergySolution {
         temperature,
         conductivity: ctx.k,
+        molecular_wall_conductivity_w_m_k: ctx.wall_k,
         face_contact_resistance_m2_k_w: ctx.face_contacts,
         source_contact_states: Vec::new(),
         source_contact_iterations: 0,

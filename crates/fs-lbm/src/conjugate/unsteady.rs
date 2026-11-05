@@ -1190,6 +1190,9 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
             if wall_heat.is_none()
                 && (config.turbulence != Turbulence::Laminar || marcher.solver.has_sgs())
             {
+                if marcher.solver.has_sgs() {
+                    stepped.eddy_wall_treatment = super::EddyWallTreatment::Molecular;
+                }
                 stepped.eddy_conductivity_w_m_k = marcher
                     .solver
                     .heat_eddy_viscosity()

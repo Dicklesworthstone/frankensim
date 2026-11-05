@@ -2877,8 +2877,7 @@ when material wall conduction is bound. No new heat source duplicates the
 existing conversion of relative kinetic energy to sensible energy.
 
 Reference: Gnielinski (1976), *International Chemical Engineering* 16(2),
-359–368; equations (1)–(2) in
-[ORNL/TM-2018/979](https://info.ornl.gov/sites/publications/Files/Pub116516.pdf).
+359–368, turbulent pipe-flow heat-transfer correlation.
 The implemented range is deliberately narrower: authored Re within 1e4..1e6,
 Pr within 0.5..200, and wall-relative Mach at most 0.3. Original circular
 geometry must agree and branch length/diameter must be at least ten. Fully

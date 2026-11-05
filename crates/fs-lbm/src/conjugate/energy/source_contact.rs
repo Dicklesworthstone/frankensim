@@ -194,12 +194,12 @@ pub(super) fn solve(
                             material.axis_conductivity()[axis], &material.conductivity_table);
                     }
                 }
-                ConductivityCurve::constant(next.conductivity[cell][axis])
+                ConductivityCurve::constant(next.wall_conductivity()[cell][axis])
             };
             let applied = fixed.face_contacts[start + index].resistance_m2_k_w;
             let (surfaces, flux, heat) = if let Some(package) = compact_faces[index] {
                 let junction = next.temperature[package.alias];
-                let g = super::compact_link_conductance(domain, solids, &next.conductivity,
+                let g = super::compact_link_conductance(domain, solids, next.wall_conductivity(),
                     native_tables.then_some(next.temperature.as_slice()), package.outside,
                     package.alias, package.axis, package.package_resistance_m2_k_w + applied)
                     .ok_or_else(|| invalid("source-contact compact link is unrepresentable"))?;

@@ -1,7 +1,7 @@
 //! Synthetic checks of the actual spatial energy solver, not material measurements.
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
-    ChtError, CompactComponent, ContactResistance, EnergyConfig, FaceContactResistance,
+    ChtError, CompactComponent, ContactResistance, EddyWallTreatment, EnergyConfig, FaceContactResistance,
     FlowFace, FlowField, FluidProperties, SolidMaterial, ThermalFace, ThermalSetup,
     Voxel, VoxelDomain, solve_energy,
 };
@@ -18,6 +18,77 @@ fn flux_boundary() -> ThermalSetup {
 }
 fn joint(a: usize, b: usize, r: f64) -> FaceContactResistance {
     FaceContactResistance { cells: [a, b], resistance_m2_k_w: r }
+}
+
+#[test]
+fn g1_sgs_wall_heat_is_molecular_while_fluid_mixing_and_open_faces_keep_eddy_transport() {
+    let domain = VoxelDomain::graded([vec![0.5, 1.0, 1.5], vec![1.0], vec![1.0]]).unwrap();
+    let flow = FlowField::quiescent(&domain);
+    for (face, wall_resistance) in [
+        (ThermalFace::Temperature(300.0), 0.75),
+        (ThermalFace::Convective { h: 2.0, ambient: 300.0 }, 1.25),
+        (ThermalFace::Inflow { temperature: 300.0 }, 0.75 / 11.0),
+    ] {
+        let mut setup = flux_boundary();
+        setup.faces[1] = face;
+        setup.eddy_conductivity_w_m_k = vec![10.0; 3];
+        setup.eddy_wall_treatment = EddyWallTreatment::Molecular;
+        let solution = EnergyConfig::default().solve_with_conductivity(
+            &domain, &fluid(), &[], &flow, &setup, &[[1.0, 2.0, 3.0]; 3],
+            &CancelGate::new(),
+        ).unwrap();
+        let resistances = [wall_resistance + 2.0 / 11.0,
+            wall_resistance + 1.25 / 11.0, wall_resistance];
+        for (actual, resistance) in solution.temperature.iter().zip(resistances) {
+            near(*actual, 300.0 + 4.0 * resistance, 1e-8);
+        }
+        assert_eq!(solution.conductivity, vec![[11.0, 12.0, 13.0]; 3]);
+        assert_eq!(solution.wall_conductivity(), &[[1.0, 2.0, 3.0]; 3]);
+        assert!(solution.report.balance.relative_residual < 1e-9);
+    }
+}
+
+#[test]
+fn g1_sgs_solid_interfaces_and_compact_surfaces_keep_the_molecular_half_cell() {
+    let domain = VoxelDomain::from_fn(2, 1, 1, 1.0, |p| {
+        if p[0] < 1.0 { Voxel::Solid(0) } else { Voxel::Fluid }
+    }).unwrap();
+    let flow = FlowField::quiescent(&domain);
+    let mut setup = flux_boundary();
+    setup.eddy_conductivity_w_m_k = vec![0.0, 10.0];
+    setup.eddy_wall_treatment = EddyWallTreatment::Molecular;
+    let solids = [SolidMaterial::new("synthetic solid", 2.0)];
+    let solve = |setup: &ThermalSetup| solve_energy(&domain, &fluid(), &solids,
+        &flow, setup, &EnergyConfig::default(), &CancelGate::new()).unwrap();
+    let result = solve(&setup);
+    near(result.temperature[0], 305.0, 1e-8);
+    near(result.temperature[1], 302.0, 1e-8);
+    near(result.solid_to_fluid_heat_w(&domain), 4.0, 1e-8);
+    setup.eddy_wall_treatment = EddyWallTreatment::EffectiveConductivity;
+    let legacy = solve(&setup);
+    near(legacy.temperature[0], 301.0 + 4.0 / 11.0, 1e-8);
+    near(legacy.temperature[1], 300.0 + 2.0 / 11.0, 1e-8);
+
+    let domain = VoxelDomain::from_fn(3, 1, 1, 1.0, |p| {
+        if p[0] > 1.0 && p[0] < 2.0 { Voxel::Solid(0) } else { Voxel::Fluid }
+    }).unwrap();
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.fixed_temperature = vec![(0, 300.0), (2, 300.0)];
+    setup.eddy_conductivity_w_m_k = vec![10.0, 0.0, 10.0];
+    setup.eddy_wall_treatment = EddyWallTreatment::Molecular;
+    setup.compact_components.push(CompactComponent {
+        lo: [1, 0, 0], hi: [2, 1, 1], board_face: fs_lbm::d3q19::Face3::XMin,
+        power_w: 20.0, junction_to_case_k_w: 1.0, junction_to_board_k_w: 1.0,
+        heat_capacity_j_k: None,
+    });
+    let result = solve_energy(&domain, &fluid(), &solids,
+        &FlowField::quiescent(&domain), &setup, &EnergyConfig::default(),
+        &CancelGate::new()).unwrap();
+    // Two parallel 1 + 0.5 K/W paths, without an invented package bulk leg.
+    near(result.junctions[0].temperature_k, 315.0, 1e-8);
+    near(result.junctions[0].case_w, 10.0, 1e-8);
+    near(result.junctions[0].board_w, 10.0, 1e-8);
+    near(result.solid_to_fluid_heat_w(&domain), 20.0, 1e-8);
 }
 
 #[test]
@@ -211,6 +282,31 @@ fn source_contact(cells: [usize; 2], card: std::sync::Arc<fs_matdb::InterfaceSys
 
 fn near(a: f64, b: f64, tolerance: f64) {
     assert!((a-b).abs() <= tolerance, "{a:.16e} != {b:.16e}, tolerance={tolerance:.3e}");
+}
+
+#[test]
+fn g1_sgs_source_contact_queries_molecular_surfaces_not_eddy_shifted_ones() {
+    let domain = VoxelDomain::new(2, 1, 1, 1.0).unwrap();
+    let surfaces = [350.0, 320.0];
+    let q = 30.0 / source_resistance(surfaces[0], surfaces[1]);
+    let cells = [surfaces[0] + 0.5 * q, surfaces[1] - 0.5 * q];
+    let mut setup = ThermalSetup::new([ThermalFace::Adiabatic; 6]);
+    setup.fixed_temperature = vec![(0, cells[0]), (1, cells[1])];
+    setup.eddy_conductivity_w_m_k = vec![10.0; 2];
+    setup.eddy_wall_treatment = EddyWallTreatment::Molecular;
+    setup.source_face_contacts.push(source_contact([0, 1],
+        source_card([348.0, 352.0], [318.0, 322.0], false),
+        &source_point(350.0, 320.0), false));
+    let result = solve_energy(&domain, &fluid(), &[], &FlowField::quiescent(&domain),
+        &setup, &EnergyConfig::default(), &CancelGate::new()).unwrap();
+    let state = &result.source_contact_states[0];
+    for (actual, expected) in state.surface_temperature_k.iter().zip(surfaces) {
+        near(*actual, expected, 2e-7);
+    }
+    near(state.heat_rate_first_to_second_w, q, 2e-8);
+    near(state.source.state_coordinate("TA").unwrap(), 350.0, 2e-7);
+    near(state.source.state_coordinate("TB").unwrap(), 320.0, 2e-7);
+    assert_eq!(result.conductivity, vec![[11.0; 3]; 2]);
 }
 
 #[test]
