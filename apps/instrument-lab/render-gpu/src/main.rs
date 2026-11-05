@@ -139,6 +139,7 @@ fn use_gpu(o: &Opts) -> bool {
 fn gpu_raw(pieces: &mut [Piece], total: usize, o: &Opts) -> Vec<Vec<Vec<f64>>> {
     let t = Instant::now();
     for p in pieces.iter() {
+        plan::validate_mindlin_export(&p.instrument).unwrap_or_else(|e| die(&e));
         plan::validate_friction_export(&p.instrument.frictions).unwrap_or_else(|e| die(&e));
     }
     let imgs: Vec<_> = pieces.iter_mut().map(|p| p.instrument.image()).collect();

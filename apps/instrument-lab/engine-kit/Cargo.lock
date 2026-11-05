@@ -898,6 +898,7 @@ dependencies = [
  "fs-qty",
  "fs-solver",
  "fs-sparse",
+ "fs-tribo",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 //! Simultaneous compliant normal contact and unregularized Coulomb friction.
 //!
-//! Coordinates are `[normal forces, opposing tangent force pairs]`. The caller
+//! Coordinates are `[normal forces, opposing Coulomb pairs, retained scalar
+//! tangential forces]`. The caller
 //! supplies the fixed Gram response `C = B^T A^-1 B`, with `B = [N, T]`, and
 //! paths `[penetrations, T^T(w_next-w_previous)] = predicted - C q`. Thus the
 //! tangent coordinates oppose slip; their physical traction is `-q_t`.
@@ -11,7 +12,10 @@
 //! The pressure-dependent friction capacity makes this Jacobian nonsymmetric.
 //! No positive-definite contact matrix, smoothing, or tangential spring is
 //! introduced. A successful candidate establishes the stated discrete laws,
-//! not existence or uniqueness of the non-associated friction problem.
+//! not existence or uniqueness of the non-associated friction problem. Retained
+//! scalar laws supply their own signed force and analytic tangent from frozen
+//! history. Their receiving adapter owns the final storage/work/heat check;
+//! elastic energy return is not subjected to a dry-friction work-sign gate.
 
 use std::cell::{Cell, RefCell};
 
@@ -92,12 +96,18 @@ pub struct SolveReport {
     pub compliance_applications: usize,
     pub normal_residual: f64,
     pub friction_residual: f64,
+    /// Original retained-law force residual at the common final path.
+    pub retained_residual: f64,
     /// Signed work on the bodies, recomputed by the adapter from the accepted
     /// rounded nodal centered slip: `-0.5 * q_t dot (w_next-w_previous)`.
     pub friction_work_j: f64,
-    /// Nonnegative dissipated work, filled by the body adapter after its final
-    /// rounded-pose check. Tolerated signed roundoff remains visible above.
+    /// Nonnegative physical dissipation, filled by the body adapter after its
+    /// final rounded-pose check. Retained-law heat comes from its original
+    /// constitutive owner, separately from recoverable interface storage.
     pub dissipated_j: f64,
+    /// Change in recoverable tangential interface storage [J]. A negative
+    /// value can supply positive body work without violating passivity.
+    pub stored_change_j: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -111,11 +121,16 @@ pub enum SolveError {
         friction: usize,
         error: ContactLawError,
     },
+    Mindlin {
+        contact: usize,
+        error: fs_contact::interface_binding::mindlin::SourceMindlinError,
+    },
     Newton(NewtonError),
     NoConvergence {
         newton_iterations: usize,
         normal_residual: f64,
         friction_residual: f64,
+        retained_residual: f64,
         diagnosis: Option<NewtonStallDiagnosis>,
     },
 }
@@ -131,15 +146,19 @@ impl std::fmt::Display for SolveError {
                 write!(f, "joint contact: non-finite body response or residual")
             }
             Self::Coulomb { friction, error } => write!(f, "joint friction {friction}: {error}"),
+            Self::Mindlin { contact, error } => {
+                write!(f, "joint Mindlin contact {contact}: {error}")
+            }
             Self::Newton(error) => write!(f, "joint contact: {error}"),
             Self::NoConvergence {
                 newton_iterations,
                 normal_residual,
                 friction_residual,
+                retained_residual,
                 diagnosis,
             } => write!(
                 f,
-                "joint contact refused after {newton_iterations} Newton attempts: scaled normal {normal_residual:e}, friction {friction_residual:e}, {diagnosis:?}"
+                "joint contact refused after {newton_iterations} Newton attempts: scaled normal {normal_residual:e}, friction {friction_residual:e}, retained {retained_residual:e}, {diagnosis:?}"
             ),
         }
     }
@@ -270,6 +289,8 @@ struct Cache {
     residual: Vec<f64>,
     normal_force: Vec<f64>,
     slope: Vec<f64>,
+    retained_force: Vec<f64>,
+    retained_slope: Vec<f64>,
     tangents: Vec<ContactLinearization>,
 }
 
@@ -319,6 +340,7 @@ fn evaluate(
     steps: &[f64],
     apply: &mut impl FnMut(&[f64], &mut [f64]),
     normal_law: &mut impl FnMut(usize, f64) -> (f64, f64),
+    retained_law: &mut impl FnMut(usize, f64) -> Result<(f64, f64), SolveError>,
     applications: &Cell<usize>,
 ) -> Result<(), SolveError> {
     if cache.valid
@@ -369,6 +391,18 @@ fn evaluate(
         cache.residual[a + 1] = -block.residual_n[2];
         cache.tangents.push(block);
     }
+    let start = normal_count + 2 * tangents.len();
+    for j in 0..cache.retained_force.len() {
+        // The caller returns dF/d(centered path), including any midpoint
+        // conversion. Unlike a unilateral reaction, stored shear can be signed.
+        let (force, slope) = retained_law(j, cache.paths[start + j])?;
+        if !force.is_finite() || !slope.is_finite() || slope < 0.0 {
+            return Err(SolveError::InvalidResponse);
+        }
+        cache.retained_force[j] = force;
+        cache.retained_slope[j] = slope;
+        cache.residual[start + j] = x[start + j] - force;
+    }
     if cache.residual.iter().any(|v| !v.is_finite()) {
         return Err(SolveError::InvalidResponse);
     }
@@ -386,9 +420,10 @@ fn audit(
     normal_count: usize,
     tangents: &[Tangential],
     controls: Controls,
-) -> Result<(f64, f64, bool), SolveError> {
+) -> Result<(f64, f64, f64, bool), SolveError> {
     let mut normal = 0.0_f64;
     let mut friction = 0.0_f64;
+    let mut retained = 0.0_f64;
     let mut feasible = true;
     for i in 0..normal_count {
         let q = cache.point[i];
@@ -415,10 +450,21 @@ fn audit(
         .map_err(|error| SolveError::Coulomb { friction: j, error })?;
         friction = friction.max(checked.residual);
     }
-    Ok((normal, friction, feasible))
+    let start = normal_count + 2 * tangents.len();
+    for (j, &expected) in cache.retained_force.iter().enumerate() {
+        let q = cache.point[start + j];
+        let scale =
+            controls.force_tolerance + controls.relative_tolerance * q.abs().max(expected.abs());
+        let residual = cache.residual[start + j].abs() / scale;
+        if !scale.is_finite() || !residual.is_finite() {
+            return Err(SolveError::InvalidResponse);
+        }
+        retained = retained.max(residual);
+    }
+    Ok((normal, friction, retained, feasible))
 }
 
-struct Problem<'a, F, L> {
+struct Problem<'a, F, L, R> {
     predicted: &'a [f64],
     normal_count: usize,
     tangents: &'a [Tangential],
@@ -427,6 +473,7 @@ struct Problem<'a, F, L> {
     diagonal_bound: &'a [f64],
     apply: RefCell<&'a mut F>,
     normal_law: RefCell<&'a mut L>,
+    retained_law: RefCell<&'a mut R>,
     applications: &'a Cell<usize>,
     linear_iterations: &'a Cell<usize>,
     cache: RefCell<&'a mut Cache>,
@@ -434,10 +481,11 @@ struct Problem<'a, F, L> {
     failure: RefCell<Option<SolveError>>,
 }
 
-impl<F, L> Problem<'_, F, L>
+impl<F, L, R> Problem<'_, F, L, R>
 where
     F: FnMut(&[f64], &mut [f64]),
     L: FnMut(usize, f64) -> (f64, f64),
+    R: FnMut(usize, f64) -> Result<(f64, f64), SolveError>,
 {
     fn fail(&self, error: SolveError) {
         let mut failure = self.failure.borrow_mut();
@@ -463,6 +511,7 @@ where
             self.steps,
             &mut **self.apply.borrow_mut(),
             &mut **self.normal_law.borrow_mut(),
+            &mut **self.retained_law.borrow_mut(),
             self.applications,
         );
         if let Err(error) = result {
@@ -473,7 +522,7 @@ where
         }
     }
 
-    fn physical_residuals(&self, x: &[f64], controls: Controls) -> Option<(f64, f64, bool)> {
+    fn physical_residuals(&self, x: &[f64], controls: Controls) -> Option<(f64, f64, f64, bool)> {
         if !self.ensure(x) {
             return None;
         }
@@ -493,10 +542,11 @@ where
     }
 }
 
-impl<F, L> NonlinearProblem for Problem<'_, F, L>
+impl<F, L, R> NonlinearProblem for Problem<'_, F, L, R>
 where
     F: FnMut(&[f64], &mut [f64]),
     L: FnMut(usize, f64) -> (f64, f64),
+    R: FnMut(usize, f64) -> Result<(f64, f64), SolveError>,
 {
     fn dimension(&self) -> usize {
         self.predicted.len()
@@ -552,6 +602,11 @@ where
                 }
             }
         }
+        let start = self.normal_count + 2 * self.tangents.len();
+        for (j, &slope) in cache.retained_slope.iter().enumerate() {
+            let i = start + j;
+            output[i] = slope.mul_add(response[i], direction[i]) / self.scales[i];
+        }
         if output.iter().any(|v| !v.is_finite()) {
             self.fail(SolveError::InvalidResponse);
         }
@@ -593,6 +648,12 @@ where
                 output[a] = residual[a] * inverse;
             }
         }
+        let start = self.normal_count + 2 * self.tangents.len();
+        for (j, &slope) in cache.retained_slope.iter().enumerate() {
+            let i = start + j;
+            let diagonal = slope.mul_add(self.diagonal_bound[i], 1.0);
+            output[i] = residual[i] * (self.scales[i] / diagonal);
+        }
         if output.iter().any(|v| !v.is_finite()) {
             self.fail(SolveError::InvalidResponse);
         }
@@ -618,9 +679,11 @@ impl Workspace {
         compliance_diagonal_bound: &[f64],
         normal_count: usize,
         tangents: &[Tangential],
+        retained_count: usize,
         controls: Controls,
         mut apply_compliance: impl FnMut(&[f64], &mut [f64]),
         mut normal_law: impl FnMut(usize, f64) -> (f64, f64),
+        mut retained_law: impl FnMut(usize, f64) -> Result<(f64, f64), SolveError>,
     ) -> Result<SolveReport, SolveError> {
         self.accepted = false;
         controls.validate()?;
@@ -628,6 +691,7 @@ impl Workspace {
             .len()
             .checked_mul(2)
             .and_then(|n| n.checked_add(normal_count))
+            .and_then(|n| n.checked_add(retained_count))
             .ok_or(SolveError::InvalidInput("contact dimensions overflow"))?;
         if predicted.len() != dimension
             || previous_force.len() != dimension
@@ -661,6 +725,8 @@ impl Workspace {
         }
         self.cache.normal_force.resize(normal_count, 0.0);
         self.cache.slope.resize(normal_count, 0.0);
+        self.cache.retained_force.resize(retained_count, 0.0);
+        self.cache.retained_slope.resize(retained_count, 0.0);
         self.tangent_steps.resize(tangents.len(), 0.0);
         for (j, step) in self.tangent_steps.iter_mut().enumerate() {
             let a = normal_count + 2 * j;
@@ -702,14 +768,16 @@ impl Workspace {
                 &self.tangent_steps,
                 &mut apply_compliance,
                 &mut normal_law,
+                &mut retained_law,
                 &applications,
             )?;
-            let (normal, friction, feasible) =
+            let (normal, friction, retained, feasible) =
                 audit(&self.cache, predicted, normal_count, tangents, controls)?;
             report.normal_residual = normal;
             report.friction_residual = friction;
+            report.retained_residual = retained;
             report.compliance_applications = applications.get();
-            if feasible && normal <= 1.0 && friction <= 1.0 {
+            if feasible && normal <= 1.0 && friction <= 1.0 && retained <= 1.0 {
                 self.paths.copy_from_slice(&self.cache.paths);
                 self.accepted = true;
                 return Ok(report);
@@ -750,6 +818,14 @@ impl Workspace {
                 self.scales[a] = scale;
                 self.scales[a + 1] = scale;
             }
+            let start = normal_count + 2 * tangents.len();
+            for j in 0..retained_count {
+                let reference = self.force[start + j]
+                    .abs()
+                    .max(self.cache.retained_force[j].abs());
+                self.scales[start + j] =
+                    controls.force_tolerance + controls.relative_tolerance * reference;
+            }
             if self.scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
                 return Err(SolveError::InvalidResponse);
             }
@@ -762,6 +838,7 @@ impl Workspace {
                 diagonal_bound: compliance_diagonal_bound,
                 apply: RefCell::new(&mut apply_compliance),
                 normal_law: RefCell::new(&mut normal_law),
+                retained_law: RefCell::new(&mut retained_law),
                 applications: &applications,
                 linear_iterations: &linear_iterations,
                 cache: RefCell::new(&mut self.cache),
@@ -781,12 +858,13 @@ impl Workspace {
                 report.newton_iterations += 1;
                 let native = state.run(&problem, 1);
                 diagnosis = native.diagnosis;
-                if let Some((normal, friction, feasible)) =
+                if let Some((normal, friction, retained, feasible)) =
                     problem.physical_residuals(&state.x, controls)
                 {
                     report.normal_residual = normal;
                     report.friction_residual = friction;
-                    if feasible && normal <= 1.0 && friction <= 1.0 {
+                    report.retained_residual = retained;
+                    if feasible && normal <= 1.0 && friction <= 1.0 && retained <= 1.0 {
                         break;
                     }
                 }
@@ -830,14 +908,16 @@ impl Workspace {
             &self.tangent_steps,
             &mut apply_compliance,
             &mut normal_law,
+            &mut retained_law,
             &applications,
         )?;
-        let (normal, friction, feasible) =
+        let (normal, friction, retained, feasible) =
             audit(&self.cache, predicted, normal_count, tangents, controls)?;
         report.normal_residual = normal;
         report.friction_residual = friction;
+        report.retained_residual = retained;
         report.compliance_applications = applications.get();
-        if feasible && normal <= 1.0 && friction <= 1.0 {
+        if feasible && normal <= 1.0 && friction <= 1.0 && retained <= 1.0 {
             self.paths.copy_from_slice(&self.cache.paths);
             self.accepted = true;
             Ok(report)
@@ -846,6 +926,7 @@ impl Workspace {
                 newton_iterations: report.newton_iterations,
                 normal_residual: normal,
                 friction_residual: friction,
+                retained_residual: retained,
                 diagnosis,
             })
         }
@@ -877,9 +958,11 @@ mod tests {
                     &[1e-6, 2e-6, 1e-6],
                     1,
                     &[Tangential { normal: 0, mu }],
+                    0,
                     Controls::default(),
                     |q, y| dense(&c, q, y),
                     |_, d| (0.5e6 * (d + 0.001), 0.5e6),
+                    |_, _| unreachable!(),
                 )
                 .unwrap();
             assert!((workspace.forces()[0] - normal).abs() < 2e-7);
@@ -903,6 +986,7 @@ mod tests {
                 &[1e-6, 0.0, 0.0],
                 1,
                 &[Tangential { normal: 0, mu: 0.4 }],
+                0,
                 Controls::default(),
                 |q, y| {
                     y[0] = 1e-6 * q[0];
@@ -910,6 +994,7 @@ mod tests {
                     y[2] = 0.0;
                 },
                 |_, d| (1e6 * d.max(0.0), if d > 0.0 { 1e6 } else { 0.0 }),
+                |_, _| unreachable!(),
             )
             .unwrap();
         assert!((workspace.forces()[0] - 500.0).abs() < 1e-7);
@@ -929,9 +1014,11 @@ mod tests {
                 &[1e-6; 3],
                 1,
                 &t,
+                0,
                 Controls::default(),
                 |q, y| dense(&c, q, y),
                 law,
+                |_, _| unreachable!(),
             )
             .unwrap();
         let refused = workspace.solve(
@@ -940,12 +1027,14 @@ mod tests {
             &[1e-6; 3],
             1,
             &t,
+            0,
             Controls {
                 max_newton_iterations: 0,
                 ..Controls::default()
             },
             |q, y| dense(&c, q, y),
             law,
+            |_, _| unreachable!(),
         );
         assert!(matches!(refused, Err(SolveError::NoConvergence { .. })));
         assert!(workspace.forces().is_empty() && workspace.paths().is_empty());

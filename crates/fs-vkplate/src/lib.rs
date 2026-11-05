@@ -83,6 +83,10 @@ mod friction_island;
 mod friction_response;
 pub use friction_island::{Controls as FrictionSolveControls, SolveError as FrictionSolveError, SolveReport as FrictionSolveReport};
 
+/// Sourced fixed-preload shear memory and microslip loss on the body response.
+pub mod mindlin_contact;
+pub use mindlin_contact::{MindlinContact, MindlinContactReport};
+
 #[cfg(test)]
 mod contact_island_tests;
 
@@ -91,6 +95,9 @@ mod friction_contact_tests;
 
 #[cfg(test)]
 mod friction_joint_tests;
+
+#[cfg(test)]
+mod mindlin_contact_tests;
 
 /// Default environmental datum; all coefficients come from the shared gas law.
 /// Custom atmospheres enter through `Instrument::with_gas`.
@@ -3503,6 +3510,7 @@ pub struct Instrument {
     /// Dry friction on contact faces, solved jointly with all active normal
     /// contacts through the same body response and centered displacement.
     pub frictions: Vec<Friction>,
+    mindlin_contacts: Vec<MindlinContact>,
     pub strikes: Vec<Strike>,
     pub drives: Vec<Drive>,
     pub mics: Vec<Mic>,
@@ -3517,11 +3525,13 @@ pub struct Instrument {
     cq: ContactQueue,
     contact_work: contact_response::Workspace,
     friction_work: friction_response::Workspace,
-    /// Accuracy and work limits for samples without active nonzero friction.
+    /// Accuracy and work limits for samples without active nonzero friction
+    /// or retained Mindlin contacts.
     /// All active normal contacts participate, including separated ones.
     pub contact_solver_controls: ContactSolveControls,
-    /// Accuracy and work limits for the joint normal/Coulomb solve when any
-    /// active contact carries nonzero friction. These govern both force laws.
+    /// Accuracy and work limits for the joint normal/Coulomb/Mindlin solve.
+    /// These govern every force law when any retained contact is attached or
+    /// any active contact carries nonzero dry friction.
     pub friction_solver_controls: FrictionSolveControls,
     contact_report: ContactSolveReport,
     friction_report: FrictionSolveReport,
@@ -3551,8 +3561,31 @@ impl Instrument {
         if !rate.is_finite() || rate <= 0.0 {
             return Err("instrument sample rate must be positive and finite".into());
         }
-        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, mutual_radiation: vec![], links: vec![], contacts: vec![], frictions: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), contact_work: contact_response::Workspace::default(), friction_work: friction_response::Workspace::default(), contact_solver_controls: ContactSolveControls::default(), friction_solver_controls: FrictionSolveControls::default(), contact_report: ContactSolveReport::default(), friction_report: FrictionSolveReport::default(), contact_failure: None, load_on: None })
+        Ok(Instrument { bodies: vec![], cavities: vec![], air_modes: vec![], rads: vec![], rad_dipole: None, mutual_radiation: vec![], links: vec![], contacts: vec![], frictions: vec![], mindlin_contacts: vec![], strikes: vec![], drives: vec![], mics: vec![], rate, step_index: 0, gas, materials: None, prepared: false, cq: ContactQueue::default(), contact_work: contact_response::Workspace::default(), friction_work: friction_response::Workspace::default(), contact_solver_controls: ContactSolveControls::default(), friction_solver_controls: FrictionSolveControls::default(), contact_report: ContactSolveReport::default(), friction_report: FrictionSolveReport::default(), contact_failure: None, load_on: None })
     }
+
+    /// Attach an original fixed-preload, single-tangent Hertz--Mindlin source.
+    /// Its supplied shear checkpoint is referenced to the current midpoint
+    /// body configuration. Normal preload is maintained externally; this port
+    /// adds only tangential effort and does not infer normal constraints.
+    /// Assembly is restricted to before the first step, so loaded history is
+    /// never silently inserted into an already evolving resonance.
+    pub fn attach_mindlin_contact(&mut self, contact: MindlinContact) -> Result<(), String> {
+        if self.step_index != 0 || self.contact_failure.is_some() {
+            return Err("Mindlin contact must be attached to an intact instrument before its first step".into());
+        }
+        for &(body, node, weight) in contact.footprint() {
+            if !weight.is_finite() || self.bodies.get(body).is_none_or(|b| node >= b.n) {
+                return Err("Mindlin footprint contains an invalid body, node or weight".into());
+            }
+        }
+        contact.trial(0.0, self.k()).map_err(|e| e.to_string())?;
+        self.mindlin_contacts.push(contact);
+        Ok(())
+    }
+
+    /// Original sources, accepted histories, and their storage/heat accounts.
+    pub fn mindlin_contacts(&self) -> &[MindlinContact] { &self.mindlin_contacts }
     /// Attach one complete narrowband mutual resistance in its producer's
     /// generalized basis. Each footprint is the dimensionless projection
     /// qdot=P v, also used reciprocally to scatter force -P^T Re(Z) qdot.
@@ -4172,9 +4205,10 @@ impl Instrument {
     /// `friction_solve_report`; its CG iteration count here is zero.
     pub fn contact_solve_report(&self) -> ContactSolveReport { self.contact_report }
 
-    /// The last accepted joint solve, including signed mechanical friction
-    /// work and nonnegative dissipation for that interval [J]. Zero on samples
-    /// without active nonzero friction; no heat state is evolved by this law.
+    /// The last accepted joint solve: signed tangential mechanical work,
+    /// recoverable interface storage change, and physical dissipation [J].
+    /// Retained shear may return stored energy to the bodies. No thermal
+    /// temperature state is inferred from this exported heat account.
     pub fn friction_solve_report(&self) -> FrictionSolveReport { self.friction_report }
 
     /// Last accepted signed tangential reactions [N], indexed like `frictions`.
@@ -4184,7 +4218,8 @@ impl Instrument {
 
     /// Advance one interval, refusing an unconverged contact solution.
     /// A contact refusal leaves microphone output and the accepted step index
-    /// unchanged and publishes no contact forces or contact displacement update.
+    /// unchanged and publishes no contact forces, retained shear history or
+    /// contact displacement update.
     /// Earlier air/material prediction may already have advanced: the instrument
     /// then remains failed, and callers must restore a pre-step clone or rebuild
     /// it. This avoids a full-instrument clone on every successful audio sample.
@@ -4401,11 +4436,12 @@ impl Instrument {
                 crush.deepest = 0.0;
             }
         }
-        // Normal and Coulomb laws see one common final pose through the same
+        // Normal, Coulomb and retained shear laws see one common final pose through the same
         // SAV and acoustic response used by body prediction. Tangential work
         // uses the centered interval; it cannot invalidate a finished normal solve.
         let (normal_report, friction_report) = match friction_response::solve_contacts_with_friction_checked(
             &mut self.bodies, &mut self.contacts, &mut self.frictions,
+            &mut self.mindlin_contacts,
             &mut self.cq, &mut self.contact_work, &mut self.friction_work,
             k, self.contact_solver_controls, self.friction_solver_controls,
         ) {
@@ -4502,7 +4538,8 @@ impl Instrument {
     /// render-gpu's plan refuses a microphone that has one. Nor is a `RadDipole`: the kit attaches one only to
     /// heads carrying a radiation load, which that plan refuses. Mutual radiation
     /// also requires refusal: its presence marker survives export, not its operator.
-    /// Interacting normal contacts and nonzero friction are also refused: the
+    /// Interacting normal contacts, nonzero friction and retained Mindlin
+    /// contacts are also refused: the
     /// exported stepper does not implement their simultaneous solve. These
     /// checks include contacts a scheduled strike may activate later.
     pub fn image(&mut self) -> InstrumentImage {
@@ -4513,6 +4550,8 @@ impl Instrument {
             "the exported stepper does not implement simultaneous interacting normal contacts; use Instrument::try_step");
         assert!(self.frictions.iter().all(|f| f.mu == 0.0),
             "the exported stepper does not implement simultaneous compliant normal contact and centered Coulomb friction; use Instrument::try_step");
+        assert!(self.mindlin_contacts.is_empty(),
+            "the exported stepper does not implement retained Mindlin contact memory; use Instrument::try_step");
         assert!(self.cavities.iter().filter_map(|c| c.port.as_ref()).all(|q|
             !q.has_baffled_radiation() && q.flow_loss_coefficient() == 0.0),
             "the exported stepper does not implement nonlinear or memory vent pressure laws; use Instrument::step");

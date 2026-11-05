@@ -75,6 +75,26 @@ Node count alone does not establish audio-band fidelity.
   tangential elastic memory or thermal state, and acceptance does not establish global uniqueness
   or continuum convergence. Export refuses nonzero friction until the external/GPU stepper
   implements the same joint solve.
+- **Retained contact compliance**: `Instrument::attach_mindlin_contact` attaches a
+  `MindlinContact` built from an original `SourceMindlinContact`, its explicit checkpoint,
+  scalar shear footprint and explicit force budget. The existing material-derived circular
+  Hertz–Mindlin owner supplies reversible shear storage, reversal memory, microslip heat,
+  and exact path-average traction. It participates in the same solve as normal contacts
+  and Coulomb patches, including every cross-response through the body inverse. Newton
+  trials read the frozen history without allocating candidate histories; only the final
+  rounded body pose constructs a candidate checkpoint. State and cumulative heat publish
+  together after all contacts pass their force, kinematic and work checks.
+  The shear state advances on midpoint displacement: `du = T^T(w_next-w_previous)/2`
+  over one sample. Its balance is `Delta H + D = F_average * du`; unloading can therefore
+  return stored energy to a resonator, while the original law supplies nonnegative heat.
+  `mindlin_contacts()` exposes accepted histories, stored energy, cumulative dissipation
+  and interval reports. This opt-in model holds the sourced normal preload and temperature
+  fixed and admits one fixed proportional tangent direction. Normal loading is maintained
+  externally, and the port adds no inferred normal constraint or normal force. Changing
+  loads, contact migration and nonproportional two-axis slip require their own consistent
+  history transport; this is not an automatic replacement for distributed hi-hat rims.
+  The complete existing instrument clone retains these histories. External/GPU export
+  refuses the attachment until that stepper supports its state and joint solve.
 - **Air**: a lumped adiabatic cavity couples a drum's two heads; each head's volume motion
   carries the radiation mass of a baffled piston (`8 rho a^3 / 3`, implicit); a monopole
   radiation resistance acts on the drum's NET volume flow, so two heads moving the same way in

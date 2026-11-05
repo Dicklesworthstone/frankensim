@@ -24,6 +24,7 @@ fs-math = { path = "../fs-math" }
 fs-qty = { path = "../fs-qty" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
+fs-tribo = { path = "../fs-tribo" }
 
 [dev-dependencies]
 fs-blake3 = { path = "../fs-blake3" }

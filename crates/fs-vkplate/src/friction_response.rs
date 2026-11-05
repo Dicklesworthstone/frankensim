@@ -1,4 +1,4 @@
-//! Joint compliant normal contact and centered Coulomb work on the body inverse.
+//! Joint normal, Coulomb and retained shear contact on the same body inverse.
 
 use super::{Body, Contact, ContactQueue, Friction, contact_response};
 use crate::contact_island::{
@@ -7,6 +7,7 @@ use crate::contact_island::{
 use crate::friction_island::{
     Controls, SolveError, SolveReport, Tangential, Workspace as IslandWorkspace, check_friction,
 };
+use crate::mindlin_contact::{Candidate as MindlinCandidate, MindlinContact};
 
 #[derive(Clone, Default)]
 pub(crate) struct Workspace {
@@ -25,6 +26,7 @@ pub(crate) struct Workspace {
     // Signed applied reactions, indexed like Instrument::frictions. These
     // accepted values also warm-start the next solve; trials never change them.
     applied: Vec<[f64; 2]>,
+    mindlin_candidates: Vec<MindlinCandidate>,
 }
 
 impl Workspace {
@@ -46,11 +48,13 @@ fn touch(work: &mut Workspace, bodies: &[Body], queue: &mut ContactQueue, b: usi
 }
 
 /// q contains positive compressive normal forces and opposing tangential
-/// forces. The physical correction is -A^-1 B q for B = [N, T_x, T_y].
+/// forces. The physical correction is -A^-1 B q for normal and all tangential
+/// footprint columns, including the retained scalar shear ports.
 fn apply_response(
     bodies: &mut [Body],
     contacts: &[Contact],
     frictions: &[Friction],
+    mindlin: &[MindlinContact],
     normal_indices: &[usize],
     active: &[usize],
     nonlocal: &[usize],
@@ -86,6 +90,14 @@ fn apply_response(
             }
         }
     }
+    let retained_start = n + 2 * active.len();
+    for (slot, contact) in mindlin.iter().enumerate() {
+        for &(b, i, w) in contact.footprint() {
+            if w != 0.0 {
+                bodies[b].tmp[i] += w * force[retained_start + slot];
+            }
+        }
+    }
     for &b in nonlocal {
         bodies[b].solve_force_response(k);
     }
@@ -113,6 +125,14 @@ fn apply_response(
                 .sum();
         }
     }
+    for (slot, contact) in mindlin.iter().enumerate() {
+        response[retained_start + slot] = contact
+            .footprint()
+            .iter()
+            .filter(|t| t.2 != 0.0)
+            .map(|&(b, i, w)| w * bodies[b].tmp[i])
+            .sum();
+    }
 }
 
 /// Validate every normal and tangential candidate at one common rounded body
@@ -122,6 +142,7 @@ pub(crate) fn solve_contacts_with_friction_checked(
     bodies: &mut [Body],
     contacts: &mut [Contact],
     frictions: &mut [Friction],
+    mindlin: &mut [MindlinContact],
     queue: &mut ContactQueue,
     normal: &mut contact_response::Workspace,
     work: &mut Workspace,
@@ -144,7 +165,7 @@ pub(crate) fn solve_contacts_with_friction_checked(
         }
         has_friction |= c.active && fr.mu > 0.0;
     }
-    if !has_friction {
+    if !has_friction && mindlin.is_empty() {
         let report = contact_response::solve_contacts_checked(
             bodies,
             contacts,
@@ -232,8 +253,40 @@ pub(crate) fn solve_contacts_with_friction_checked(
             work.bound.push(bound);
         }
     }
+    for contact in mindlin.iter() {
+        let (mut slip, mut norm_bound) = (0.0, 0.0);
+        for &(b, i, w) in contact.footprint() {
+            let body = bodies.get(b).ok_or_else(|| {
+                fail(SolveError::InvalidInput(
+                    "Mindlin body index is out of range",
+                ))
+            })?;
+            if i >= body.n || !w.is_finite() {
+                return Err(fail(SolveError::InvalidInput(
+                    "Mindlin node or footprint weight is invalid",
+                )));
+            }
+            let diagonal = body.compliance(i, k);
+            if !diagonal.is_finite() || diagonal <= 0.0 {
+                return Err(fail(SolveError::InvalidResponse));
+            }
+            if w != 0.0 {
+                slip += w * (body.wn[i] - body.wp[i]);
+                norm_bound += w.abs() * diagonal.sqrt();
+                touch(work, bodies, queue, b, i);
+            }
+        }
+        let bound = norm_bound * norm_bound;
+        if !slip.is_finite() || !bound.is_finite() {
+            return Err(fail(SolveError::InvalidResponse));
+        }
+        work.predicted.push(slip);
+        work.previous_force.push(contact.report().traction_n);
+        work.bound.push(bound);
+    }
     work.paths.resize(work.predicted.len(), 0.0);
     work.stuck.resize(work.active.len(), false);
+    work.mindlin_candidates.clear();
     let Workspace {
         core,
         active,
@@ -246,6 +299,7 @@ pub(crate) fn solve_contacts_with_friction_checked(
         nodes,
         stuck,
         applied,
+        mindlin_candidates,
         ..
     } = work;
     let mut report = core
@@ -255,12 +309,14 @@ pub(crate) fn solve_contacts_with_friction_checked(
             bound,
             n,
             tangents,
+            mindlin.len(),
             controls,
             |force, response| {
                 apply_response(
                     bodies,
                     contacts,
                     frictions,
+                    mindlin,
                     &normal.indices,
                     active,
                     nonlocal,
@@ -278,6 +334,14 @@ pub(crate) fn solve_contacts_with_friction_checked(
                     d,
                     k,
                 )
+            },
+            |slot, path| {
+                mindlin[slot]
+                    .trial(path, k)
+                    .map_err(|error| SolveError::Mindlin {
+                        contact: slot,
+                        error,
+                    })
             },
         )
         .map_err(|error| {
@@ -299,6 +363,7 @@ pub(crate) fn solve_contacts_with_friction_checked(
         bodies,
         contacts,
         frictions,
+        mindlin,
         &normal.indices,
         active,
         nonlocal,
@@ -356,6 +421,7 @@ pub(crate) fn solve_contacts_with_friction_checked(
     }
     report.friction_work_j = 0.0;
     report.dissipated_j = 0.0;
+    report.stored_change_j = 0.0;
     for (slot, &fi) in active.iter().enumerate() {
         let fr = &frictions[fi];
         let at = n + 2 * slot;
@@ -395,6 +461,30 @@ pub(crate) fn solve_contacts_with_friction_checked(
         report.dissipated_j += (-check.friction_work_j).max(0.0);
         stuck[slot] = normal_force > 0.0 && slip <= slip_scale;
     }
+    let retained_start = n + 2 * active.len();
+    for (slot, contact) in mindlin.iter().enumerate() {
+        let at = retained_start + slot;
+        let path: f64 = contact
+            .footprint()
+            .iter()
+            .filter(|t| t.2 != 0.0)
+            .map(|&(b, i, w)| w * ((bodies[b].wn[i] - bodies[b].tmp[i]) - bodies[b].wp[i]))
+            .sum();
+        paths[at] = path;
+        let candidate = contact
+            .candidate(0.5 * path, forces[at], k, controls)
+            .map_err(|error| {
+                fail(SolveError::Mindlin {
+                    contact: slot,
+                    error,
+                })
+            })?;
+        report.retained_residual = report.retained_residual.max(candidate.residual);
+        report.friction_work_j += candidate.report.mechanical_work_j;
+        report.stored_change_j += candidate.report.stored_change_j;
+        report.dissipated_j += candidate.report.dissipated_j;
+        mindlin_candidates.push(candidate);
+    }
     for i in 0..paths.len() {
         let scale = controls.displacement_tolerance
             + controls.relative_tolerance
@@ -410,16 +500,20 @@ pub(crate) fn solve_contacts_with_friction_checked(
     }
     if !report.normal_residual.is_finite()
         || !report.friction_residual.is_finite()
+        || !report.retained_residual.is_finite()
         || !report.friction_work_j.is_finite()
         || !report.dissipated_j.is_finite()
+        || !report.stored_change_j.is_finite()
         || report.normal_residual > 1.0
         || report.friction_residual > 1.0
+        || report.retained_residual > 1.0
         || displacement_residual > 1.0
     {
         return Err(fail(SolveError::NoConvergence {
             newton_iterations: report.newton_iterations,
             normal_residual: report.normal_residual.max(displacement_residual),
             friction_residual: report.friction_residual,
+            retained_residual: report.retained_residual,
             diagnosis: None,
         }));
     }
@@ -452,6 +546,9 @@ pub(crate) fn solve_contacts_with_friction_checked(
         applied[fi] = [-forces[at], -forces[at + 1]];
         frictions[fi].force = forces[at].hypot(forces[at + 1]);
         frictions[fi].stuck = stuck[slot];
+    }
+    for (contact, candidate) in mindlin.iter_mut().zip(mindlin_candidates.drain(..)) {
+        contact.publish(candidate);
     }
     Ok((
         NormalReport {

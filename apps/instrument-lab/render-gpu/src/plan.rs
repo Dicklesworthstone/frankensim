@@ -84,6 +84,13 @@ pub fn validate_friction_export(frictions: &[fs_vkplate::Friction]) -> Result<()
     Ok(())
 }
 
+pub fn validate_mindlin_export(ins: &Instrument) -> Result<(), String> {
+    if !ins.mindlin_contacts().is_empty() {
+        return Err("this GPU stepper has no retained Mindlin contact-memory solver; render the instrument natively (--backend cpu)".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod friction_export_tests {
     use super::*;
@@ -407,6 +414,7 @@ impl Plan {
     /// `exact_friction`: retain the CPU's order on all shared nodes (dependency levels)
     /// instead of a coloured sweep; for checks against the CPU.
     pub fn new(img: &InstrumentImage, ins: &Instrument, threads: usize, item: usize, exact_friction: bool) -> Result<Plan, String> {
+        validate_mindlin_export(ins)?;
         validate_friction_export(&ins.frictions)?;
         validate_friction_export(&img.frictions)?;
         let item = item.clamp(32, TPB);
