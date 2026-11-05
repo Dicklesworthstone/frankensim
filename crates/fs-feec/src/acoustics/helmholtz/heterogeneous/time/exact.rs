@@ -1,10 +1,13 @@
-//! Full-space exponential evolution of heterogeneous pressure acoustics.
+//! Complete-field exponential evolution of heterogeneous pressure acoustics.
 //!
 //! Canonical coordinates are pressure potential `psi` and its momentum
 //! `pi = M_beta p`. Their storage is `diag(K_rho, M_beta^-1)`, interconnection
 //! is canonical, and the momentum resistance is the ORIGINAL real boundary
-//! admittance `C_Y`. A diagonal change of units conditions these matrices;
-//! neither the constant-potential gauge nor any other FE coordinate is removed.
+//! admittance `C_Y`. Optional ideal pressure-release traces restrict these
+//! original forms BEFORE the mass inverse: `pi_f = M_ff p_f`. Every remaining
+//! coordinate is evolved, and the complete physical state is recovered by zero
+//! lifting. With no release faces the constant-potential gauge remains present.
+//! A diagonal change of units conditions these same physical matrices.
 //!
 //! The existing pHS exponential and Gramian owner evolves this complete linear
 //! system under held inward-velocity profiles. Source work uses the integrated
@@ -22,8 +25,8 @@
 use super::super::VolumeVelocitySource;
 use super::{
     BoundaryAdmittance, C64, Dd, HeterogeneousError, HeterogeneousHelmholtzFe,
-    HeterogeneousTimeEnergy, HeterogeneousTimeState, RealVelocityTrace, ResistiveBoundary, det,
-    energy_change, invalid, poll, positive_form,
+    HeterogeneousTimeEnergy, HeterogeneousTimeState, PressureReleaseConstraints, RealVelocityTrace,
+    ResistiveBoundary, det, energy_change, invalid, poll, positive_form,
 };
 use fs_la::factor::cholesky;
 use fs_phs::linear_exact::{
@@ -44,8 +47,10 @@ pub struct ExactVelocityPort {
 /// Admission of the complete spatial state and its cached exact trajectory.
 #[derive(Clone, Copy, Debug)]
 pub struct ExactTimeLimits {
-    /// Number of original pressure coordinates; every one retains potential
-    /// and momentum. The existing pHS augmented-state cap applies additionally.
+    /// Number of unconstrained original pressure coordinates; every one retains
+    /// potential and momentum. The existing pHS augmented-state cap applies
+    /// additionally. Original sparse forms and O(original_ndof) constraint maps
+    /// and lifted state/work vectors are additional to the dense cache.
     pub max_dofs: usize,
     /// Existing exponential/Gramian cache, byte and multiply-work limits.
     /// Coordinate maps additionally occupy O(max_dofs^2) storage.
@@ -109,6 +114,7 @@ pub struct PreparedExactTime<'m, 'f, 'c> {
     mass_scale: Vec<f64>,
     normalized_mass: Vec<f64>,
     inverse_mass: Vec<f64>,
+    pressure_release: PressureReleaseConstraints,
     port_count: usize,
     volume_source_count: usize,
     flow: PreparedQuadraticFlow,
@@ -120,6 +126,36 @@ fn propagation(error: PreparedStepError) -> HeterogeneousError {
         PreparedStepError::Cancelled => HeterogeneousError::Cancelled,
         PreparedStepError::Solver(error) => HeterogeneousError::Propagation(error),
     }
+}
+
+fn canonical_extent(
+    dofs: usize,
+    source_count: usize,
+    maximum_dofs: usize,
+) -> Result<usize, HeterogeneousError> {
+    let states = dofs
+        .checked_mul(2)
+        .ok_or_else(|| invalid("exact acoustic state overflow"))?;
+    let augmented = states
+        .checked_add(source_count)
+        .and_then(|v| v.checked_add(1))
+        .and_then(|v| v.checked_mul(2))
+        .ok_or_else(|| invalid("exact acoustic source extent overflow"))?;
+    if dofs > maximum_dofs {
+        return Err(HeterogeneousError::Limit {
+            what: "exact transient pressure degrees of freedom",
+            requested: dofs,
+            maximum: maximum_dofs,
+        });
+    }
+    if augmented > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
+        return Err(HeterogeneousError::Limit {
+            what: "exact transient augmented states",
+            requested: augmented,
+            maximum: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
+        });
+    }
+    Ok(states)
 }
 
 impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
@@ -157,21 +193,54 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         limits: ExactTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedExactTime<'m, 'f, 'c>, HeterogeneousError> {
+        self.prepare_exact_time_with_pressure_release(
+            duration_s,
+            boundaries,
+            ports,
+            sources,
+            &[],
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Prepare exact held-input evolution with ideal zero-pressure faces.
+    /// Every original free pressure/potential coordinate is retained. Original
+    /// mass, stiffness, real boundary loss and both source families are restricted
+    /// before forming the canonical momentum and inverting the consistent mass;
+    /// slicing a full-space inverse would define different fluid inertia.
+    ///
+    /// This path selects `psi = p = 0` on every hierarchical release trace.
+    /// Imported states, including those from another prepared owner on this
+    /// model, must satisfy both exactly; no stationary flow component is erased.
+    /// The boundary law belongs to this preparation, not to a state vector.
+    /// Returned states use complete original coordinates and the existing probes.
+    ///
+    /// Release faces cannot also own a real admittance or a velocity port.
+    /// Adjacent faces may share constrained edge/vertex coordinates. Original
+    /// volume sources are reused without resampling. Source work and passive
+    /// loss use the existing same-trajectory observations and Gramian; the zero
+    /// pressure boundary reactions do no work. Empty faces retain the original
+    /// arithmetic and cheap full-space admission. All dense limits count the
+    /// free canonical state, with no modal truncation or propagator fallback.
+    /// This ideal boundary supplies no radiation or opening end correction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_exact_time_with_pressure_release<'m>(
+        &'m self,
+        duration_s: f64,
+        boundaries: &[ResistiveBoundary],
+        ports: &[ExactVelocityPort],
+        sources: &[&VolumeVelocitySource<'_, '_, '_>],
+        pressure_release_faces: &[[u32; 3]],
+        limits: ExactTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedExactTime<'m, 'f, 'c>, HeterogeneousError> {
         poll(cancelled)?;
         super::super::source::admit_count(sources.len())?;
-        let n = self.ndof();
         let port_count = ports
             .len()
             .checked_add(sources.len())
             .ok_or_else(|| invalid("exact acoustic source count overflow"))?;
-        let states = n
-            .checked_mul(2)
-            .ok_or_else(|| invalid("exact acoustic state overflow"))?;
-        let augmented = states
-            .checked_add(port_count)
-            .and_then(|v| v.checked_add(1))
-            .and_then(|v| v.checked_mul(2))
-            .ok_or_else(|| invalid("exact acoustic source extent overflow"))?;
         if !duration_s.is_finite()
             || duration_s <= 0.0
             || !limits.energy_balance_tolerance.is_finite()
@@ -184,20 +253,16 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             )
             .into());
         }
-        if n > limits.max_dofs {
-            return Err(HeterogeneousError::Limit {
-                what: "exact transient pressure degrees of freedom",
-                requested: n,
-                maximum: limits.max_dofs,
-            });
+        // Refuse an oversized legacy full field before constructing even its
+        // identity map. With release faces, only the true free extent is capped.
+        if pressure_release_faces.is_empty() {
+            canonical_extent(self.ndof(), port_count, limits.max_dofs)?;
         }
-        if augmented > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
-            return Err(HeterogeneousError::Limit {
-                what: "exact transient augmented states",
-                requested: augmented,
-                maximum: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
-            });
-        }
+        let pressure_release = self
+            .geometry
+            .pressure_release_constraints(pressure_release_faces, cancelled)?;
+        let n = pressure_release.free_dofs.len();
+        let states = canonical_extent(n, port_count, limits.max_dofs)?;
         for source in sources {
             poll(cancelled)?;
             source.validate(self)?;
@@ -205,6 +270,19 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         let mut admitted = Vec::with_capacity(boundaries.len());
         for boundary in boundaries {
             poll(cancelled)?;
+            if !pressure_release.faces.is_empty() {
+                for &face in &boundary.faces {
+                    poll(cancelled)?;
+                    let mut key = face;
+                    key.sort_unstable();
+                    if pressure_release.faces.contains(&key) {
+                        return Err(invalid(
+                            "pressure-release and real-admittance faces must not overlap",
+                        )
+                        .into());
+                    }
+                }
+            }
             admitted.push(BoundaryAdmittance {
                 faces: boundary.faces.clone(),
                 admittance_m_pa_s: C64::from_re(boundary.admittance_m_pa_s),
@@ -219,6 +297,19 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                     invalid("exact acoustic source requires a nonempty trace profile").into(),
                 );
             }
+            if !pressure_release.faces.is_empty() {
+                for &(face, _) in &port.profile {
+                    poll(cancelled)?;
+                    let mut key = face;
+                    key.sort_unstable();
+                    if pressure_release.faces.contains(&key) {
+                        return Err(invalid(
+                            "pressure-release and exact velocity-port faces must not overlap",
+                        )
+                        .into());
+                    }
+                }
+            }
             loads.push(self.geometry.boundary_linear_load(&port.profile)?);
         }
         for source in sources {
@@ -226,19 +317,21 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             loads.push(source.load.clone());
         }
 
-        // pi=M p, z=D^-1 pi with D_ii=sqrt(M_ii). Thus H_z=Mhat^-1
-        // where Mhat=D^-1 M D^-1. Cholesky never sees the pressure gauge.
+        // pi_f=M_ff p_f, z=D^-1 pi_f with D_ii=sqrt(M_ff,ii).
+        // Thus H_z=Mhat_ff^-1, where Mhat_ff=D^-1 M_ff D^-1.
+        // Assemble the restricted original entries directly; never invert the
+        // full mass and then slice its inverse. Cholesky sees no pressure gauge.
         let mut mass_scale = Vec::with_capacity(n);
         let mut potential_scale = Vec::with_capacity(n);
-        for row in 0..n {
+        for &original_row in &pressure_release.free_dofs {
             poll(cancelled)?;
             for (matrix, scales) in [
                 (&self.mass, &mut mass_scale),
                 (&self.stiffness, &mut potential_scale),
             ] {
-                let (cols, values) = matrix.row(row);
+                let (cols, values) = matrix.row(original_row);
                 let diagonal = cols
-                    .binary_search(&row)
+                    .binary_search(&original_row)
                     .ok()
                     .map(|i| values[i])
                     .ok_or_else(|| {
@@ -255,11 +348,14 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             }
         }
         let mut mass = vec![0.0; n * n];
-        for row in 0..n {
+        for (row, &original_row) in pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
-            let (cols, values) = self.mass.row(row);
+            let (cols, values) = self.mass.row(original_row);
             for (&col, &value) in cols.iter().zip(values) {
-                mass[row * n + col] = value / mass_scale[row] / mass_scale[col];
+                let free_col = pressure_release.original_to_free[col];
+                if free_col != usize::MAX {
+                    mass[row * n + free_col] = value / mass_scale[row] / mass_scale[free_col];
+                }
             }
         }
         let factor = cholesky(&mass, n).map_err(HeterogeneousError::MassFactor)?;
@@ -274,8 +370,8 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 inverse[row * n + col] = rhs[row];
             }
         }
-        // Test ALL original mass entries; no lower-triangle-only substitution
-        // or post-hoc symmetric/positive projection can change the source form.
+        // Test ALL retained original mass entries; no lower-triangle-only
+        // substitution or post-hoc symmetric/positive projection can change them.
         for row in 0..n {
             poll(cancelled)?;
             for col in 0..n {
@@ -302,11 +398,15 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
         let mut j = vec![0.0; states * states];
         let mut r = vec![0.0; states * states];
         let mut g = vec![0.0; states * port_count];
-        for row in 0..n {
+        for (row, &original_row) in pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
-            let (cols, values) = self.stiffness.row(row);
+            let (cols, values) = self.stiffness.row(original_row);
             for (&col, &value) in cols.iter().zip(values) {
-                q[row * states + col] = value / potential_scale[row] / potential_scale[col];
+                let free_col = pressure_release.original_to_free[col];
+                if free_col != usize::MAX {
+                    q[row * states + free_col] =
+                        value / potential_scale[row] / potential_scale[free_col];
+                }
             }
             for col in 0..n {
                 q[(n + row) * states + n + col] = inverse[row * n + col];
@@ -314,16 +414,20 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             let coupling = potential_scale[row] / mass_scale[row];
             j[row * states + n + row] = coupling;
             j[(n + row) * states + row] = -coupling;
-            let (cols, values) = conductance.row(row);
+            let (cols, values) = conductance.row(original_row);
             for (&col, &value) in cols.iter().zip(values) {
-                r[(n + row) * states + n + col] = value / mass_scale[row] / mass_scale[col];
+                let free_col = pressure_release.original_to_free[col];
+                if free_col != usize::MAX {
+                    r[(n + row) * states + n + free_col] =
+                        value / mass_scale[row] / mass_scale[free_col];
+                }
             }
             for (port, load) in loads.iter().enumerate() {
-                g[(n + row) * port_count + port] = load[row] / mass_scale[row];
+                g[(n + row) * port_count + port] = load[original_row] / mass_scale[row];
             }
         }
-        // Original loss C, pulled back through p=D^-1 Mhat^-1 z. This is
-        // independent of endpoint energy and retains cross-coordinate terms.
+        // Original free loss C_ff pulled back through p_f=D^-1 Mhat_ff^-1 z,
+        // independently of endpoint energy and retaining cross-coordinate terms.
         let mut right = vec![0.0; n * n];
         for row in 0..n {
             poll(cancelled)?;
@@ -351,7 +455,10 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
                 let mut observation = vec![0.0; states];
                 for col in 0..n {
                     observation[n + col] = (0..n)
-                        .map(|row| load[row] / mass_scale[row] * inverse[row * n + col])
+                        .map(|row| {
+                            load[pressure_release.free_dofs[row]] / mass_scale[row]
+                                * inverse[row * n + col]
+                        })
                         .sum();
                 }
                 observation
@@ -387,6 +494,7 @@ impl<'f, 'c> HeterogeneousHelmholtzFe<'f, 'c> {
             mass_scale,
             normalized_mass: mass,
             inverse_mass: inverse,
+            pressure_release,
             port_count: ports.len(),
             volume_source_count: sources.len(),
             flow,
@@ -421,6 +529,7 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
     }
 
     /// Original hierarchical coefficients; no resampling or energy normalization.
+    /// Both potential and pressure must vanish on this owner's release trace.
     pub fn state(
         &self,
         potential: &[f64],
@@ -435,11 +544,31 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
             )
             .into());
         }
+        self.admit_pressure_release_trace(potential, pressure)?;
         Ok(HeterogeneousTimeState {
             model: self.model,
             potential: potential.to_vec(),
             pressure: pressure.to_vec(),
         })
+    }
+
+    fn admit_pressure_release_trace(
+        &self,
+        potential: &[f64],
+        pressure: &[f64],
+    ) -> Result<(), HeterogeneousError> {
+        if self.pressure_release.faces.is_empty() {
+            return Ok(());
+        }
+        for (dof, &fixed) in self.pressure_release.constrained.iter().enumerate() {
+            if fixed && (potential[dof] != 0.0 || pressure[dof] != 0.0) {
+                return Err(invalid(
+                    "exact pressure-release state requires zero potential and pressure on every trace DOF",
+                )
+                .into());
+            }
+        }
+        Ok(())
     }
 
     fn validate(
@@ -452,7 +581,9 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
             )
             .into());
         }
-        Ok(())
+        // Private state constructors already checked full sizes and finite
+        // coefficients. Only compatibility with this boundary law is new.
+        self.admit_pressure_release_trace(&state.potential, &state.pressure)
     }
 
     /// Physical energy evaluated from the original sparse spatial matrices.
@@ -531,17 +662,17 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
             &combined
         };
         let (initial_energy, initial_roundoff) = self.energy_with_roundoff(initial, cancelled)?;
-        let n = self.model.ndof();
+        let n = self.pressure_release.free_dofs.len();
         let mut x = vec![0.0; 2 * n];
-        for row in 0..n {
+        for (row, &original_row) in self.pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
-            x[row] = self.potential_scale[row] * initial.potential[row];
+            x[row] = self.potential_scale[row] * initial.potential[original_row];
             let mut value = Dd::from_f64(0.0);
             for col in 0..n {
                 value = value
                     + Dd::from_f64(self.normalized_mass[row * n + col])
                         * Dd::from_f64(self.mass_scale[col])
-                        * Dd::from_f64(initial.pressure[col]);
+                        * Dd::from_f64(initial.pressure[self.pressure_release.free_dofs[col]]);
             }
             x[n + row] = value.to_f64();
         }
@@ -551,16 +682,16 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
             .map_err(HeterogeneousError::Propagation)?;
         poll(cancelled)?;
         let mut next = self.zero_state();
-        for row in 0..n {
+        for (row, &original_row) in self.pressure_release.free_dofs.iter().enumerate() {
             poll(cancelled)?;
-            next.potential[row] = result.state[row] / self.potential_scale[row];
+            next.potential[original_row] = result.state[row] / self.potential_scale[row];
             let mut value = Dd::from_f64(0.0);
             for col in 0..n {
                 value = value
                     + Dd::from_f64(self.inverse_mass[row * n + col])
                         * Dd::from_f64(result.state[n + col]);
             }
-            next.pressure[row] = value.to_f64() / self.mass_scale[row];
+            next.pressure[original_row] = value.to_f64() / self.mass_scale[row];
         }
         if next
             .potential
@@ -638,5 +769,7 @@ impl<'m, 'f, 'c> PreparedExactTime<'m, 'f, 'c> {
     }
 }
 
+#[cfg(test)]
+mod pressure_release_tests;
 #[cfg(test)]
 mod tests;

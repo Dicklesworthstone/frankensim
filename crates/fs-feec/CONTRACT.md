@@ -1955,3 +1955,32 @@ a release face; source cancellation and rejected cross-model/nonfinite/cancelled
 inputs exercise reuse of accepted states. These native regressions still need
 execution on a provisioned worker; parser checks and analytical work identities
 do not replace native numerical validation.
+
+### Exact trajectories with pressure-release boundaries
+
+`HeterogeneousHelmholtzFe::prepare_exact_time_with_pressure_release` applies the
+shared original hierarchical trace constraints to exact held-input evolution.
+Canonical momentum is `pi_f = M_ff p_f`: the consistent mass, stiffness, real
+boundary conductance and source columns are restricted BEFORE mass inversion.
+Every free coordinate remains, with the existing quadratic-flow, source
+observations and loss Gramian. Complete original pressure/potential fields are
+recovered with exact zeros on the release trace. Physical energy and signed
+boundary/volume-source work use the original forms.
+
+Both pressure and pressure-potential traces must be zero on imported states,
+including states from another preparation on the same model. Conflicting
+admittance or velocity-port faces refuse; adjacent faces may share constrained
+coordinates. Dense pressure and augmented-state limits count free coordinates.
+Empty release sets preserve the original arithmetic and reject oversized full
+fields before allocating the identity map. Cancellation publishes no candidate.
+This remains bounded, frozen-medium propagation with lossless bulk and real
+memoryless boundary admittance. Ideal pressure release supplies no exterior
+radiation or opening correction.
+
+Four native regressions specify heterogeneous P2 mode phase without midpoint
+frequency warping; independent analytical tetrahedron dynamics with boundary
+injection, volume extraction and Robin heat; a P3 field with 64 original/eight
+free coordinates plus strict trace/resource/cancellation refusals; and bitwise
+empty-map compatibility. Pinned Rust parsing and the independent analytical
+heat/work oracle were checked; native execution remains pending because the
+current environment kills the upstream dependency build before fs-feec.
