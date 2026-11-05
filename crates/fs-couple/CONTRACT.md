@@ -33436,3 +33436,42 @@ passed. Native compilation and numerical execution remain unverified under the
 existing upstream dependency-memory and workspace-space blocker. In particular,
 successful numerical admission of the full BEM fitting fixture is pending; no
 fit, causality or passivity gate was relaxed to manufacture it.
+
+## Isothermal moisture slab SDIRK2 diffusion
+
+`MoistureSlab::advance_sdirk2` integrates the original conservative slab flux
+with Alexander's two-stage, second-order L-stable SDIRK method,
+gamma = 1 - 1/sqrt(2). Both stages use the original pinned transport source,
+endpoint-dependent nonlinear iteration and native tridiagonal solve. The
+selected Kirchhoff path retains its exact source-integrated face law, including
+zero dry diffusivity. Ordinary `advance` retains the caller's original method.
+
+The second equation retains the physical original field and adds the first
+stage's explicitly evaluated conservative face transfers with weight
+(1-gamma)*dt. It never reconstructs a flux by subtracting rounded stored
+moisture. The endpoint receipt spans the full physical interval; its signed
+boundary water is the weighted sum of both stage fluxes. The separate
+`first_stage` receipt is diagnostic and must not be added to that account.
+Endpoint nonlinear residual and water conservation checks include the known
+first-stage load.
+
+L-stability does not imply unconditional positivity. A second-stage candidate
+outside the original field/active-reservoir range or admitted moisture domain
+returns `MoistureError::StageRange` before querying unsupported source states.
+A zero-transfer reservoir cannot enlarge that range. Failed stages publish no
+state, clip no moisture and do not fall back to first order.
+
+`advance_sdirk2_adaptive_to` reuses the original whole-duration controller.
+Its full-versus-two-half comparison estimates second-order fine-step error;
+unequal representable fractions u and v use (u^3+v^3)/(3*u*v), equal halves
+giving one third. Accepted state and boundary water come only from the two
+native fine steps. Stage-range refusals permit shorter retries; cancellation,
+source-domain and inventory failures remain transactional. Each attempted
+SDIRK call reserves two stage evaluations, including early refusals, and a
+complete comparison costs six. Ordinary first-order callers retain their
+existing error scaling and work counts.
+
+Temperature and boundary environments remain constant during a call; callers
+split at environmental events. This path covers the native slab only. It does
+not establish second-order finite-reservoir, layered, Cartesian, or
+nonisothermal coupling, nor a global temporal error certificate.

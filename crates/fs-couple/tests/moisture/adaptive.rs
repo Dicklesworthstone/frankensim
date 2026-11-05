@@ -4,6 +4,8 @@ use super::*;
 use fs_blake3::ContentHash;
 use fs_couple::moisture::{adaptive::*, cartesian::*};
 
+#[path = "adaptive/sdirk.rs"]
+mod sdirk;
 #[path = "adaptive/shared.rs"]
 mod shared;
 

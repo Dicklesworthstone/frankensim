@@ -5587,9 +5587,15 @@ The chart provides D(M), the signed Kirchhoff integral and its symmetric
 interval mean. Piecewise-affine source interpolation is integrated exactly up
 to roundoff, without allocating during evaluation or subtracting large
 cumulative potentials. Equal endpoint values use the continuous D(M) limit.
-Preparation inherits the source owner's 4096-knot bound; point lookup is
-logarithmic and integration visits only crossed segments. The retained identity
-binds the source, environment and complete prepared interval.
+Preparation inherits the source owner's 4096-knot bound and stores a balanced
+tree of nonnegative interval means in linear work and memory. Point and interval
+queries require logarithmic work without allocation. Fully covered intervals
+reuse their prepared means; only partial endpoint segments interpolate the
+original source. Positive length-weighted combinations avoid cumulative-potential
+cancellation and absolute-integral overflow. Scaled arithmetic retains a
+representable contribution when its intermediate geometric weight underflows.
+The retained identity binds the source, environment and complete prepared interval.
+This changes evaluation cost, not the admitted physical law or source authority.
 
 This is a constitutive primitive for homogeneous nonlinear diffusion. It lets
 a consuming conservative solver propagate a wetting front through D(0)=0

@@ -35,6 +35,8 @@ mod binding;
 /// Three-dimensional principal-axis transport on actual Cartesian finite volumes.
 pub mod cartesian;
 mod implicit;
+mod sdirk;
+pub use sdirk::MoistureSdirk2Report;
 /// Source-integrated nonlinear Fick fluxes, including degenerate dry fronts.
 mod kirchhoff;
 /// Conservative unlike-material layers with source-owned activity partitioning.
@@ -119,6 +121,13 @@ pub enum MoistureError {
         cell: usize,
         increment: f64,
         maximum: f64,
+    },
+    /// A higher-order implicit stage left the original physical moisture range.
+    /// Retry with a shorter interval; no clipping or partial state is published.
+    StageRange {
+        cell: usize,
+        moisture: f64,
+        bounds: [f64; 2],
     },
     /// Sum of stored water did not match the two measured boundary transfers.
     MassBalance { residual_kg: f64, tolerance_kg: f64 },
@@ -632,6 +641,21 @@ impl MoistureSlab {
         config: MoistureStepConfig,
         cx: &Cx<'_>,
     ) -> Result<(Self, MoistureStepReport), MoistureError> {
+        self.advance_stage(dt_s, dt_s, faces, config, None, cx)
+    }
+
+    /// The physical old state remains `self` for both implicit RK stages.
+    /// Only the load and already-integrated boundary water carry the first rate.
+    #[allow(clippy::too_many_arguments)]
+    fn advance_stage(
+        &self,
+        dt_s: f64,
+        implicit_dt_s: f64,
+        faces: [ResolvedMoistureFace; 2],
+        config: MoistureStepConfig,
+        known: Option<&sdirk::StageLoad>,
+        cx: &Cx<'_>,
+    ) -> Result<(Self, MoistureStepReport), MoistureError> {
         poll(cx)?;
         let end = self.time_s + dt_s;
         if !positive(dt_s)
@@ -661,7 +685,10 @@ impl MoistureSlab {
             .transpose()?;
         let (solution, endpoint, coupling, nonlinear) =
             if let Some(controls) = self.kirchhoff_diffusivity.or(self.implicit_diffusivity) {
-                self.solve_implicit(dt_s, &faces, &start, config, controls, profile.as_ref(), cx)?
+                self.solve_implicit(
+                    implicit_dt_s, &faces, &start, config, controls,
+                    profile.as_ref(), known, cx,
+                )?
             } else {
                 let (operator, rhs, coupling) = self.transport_system(dt_s, &faces, &start, None, cx)?;
                 let mut solution = operator.solve_direct(&rhs, config.linear, cx)?;
@@ -719,7 +746,12 @@ impl MoistureSlab {
                 actual_surface[side] = Some(value);
             }
         }
-        let transfer = self.boundary_transfer(&solution.x, &faces, &coupling);
+        let mut transfer = self.boundary_transfer(&solution.x, &faces, &coupling);
+        if let Some(known) = known {
+            for (total, prior) in transfer.iter_mut().zip(known.boundary_water_kg) {
+                *total += prior;
+            }
+        }
         let water_before = self.water_mass_kg();
         let water_after: f64 = solution
             .x

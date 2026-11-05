@@ -9,7 +9,8 @@
 //! Boundaries and source temperature stay fixed over one call; callers cut
 //! intervals at environmental changes. Every failed call discards the entire
 //! proposed duration, including successful internal prefixes. Only typed
-//! convergence/increment failures and temporal error permit shorter retries.
+//! convergence/increment/stage-range failures and temporal error permit shorter
+//! retries.
 
 mod finite;
 mod layered;
@@ -41,9 +42,11 @@ pub struct MoistureTimeControls {
     /// Largest proposed duration; actual intervals use representable endpoints.
     pub maximum_step_s: f64,
     /// Counts every native field or coupled-reservoir endpoint call, including
-    /// failed/rejected probes. Each comparison uses at most three; each native
-    /// call retains its original scalar/nonlinear/linear work bounds.
-    /// Must lie in 3..=100_000.
+    /// failed/rejected probes. SDIRK2 charges two implicit stages per call,
+    /// reserved before starting even if the call fails in its first stage.
+    /// A complete comparison costs three ordinary calls or six SDIRK2 stages;
+    /// each call retains its original scalar/nonlinear/linear work bounds.
+    /// Must lie in 3..=100_000; SDIRK2 needs at least six to finish a comparison.
     pub maximum_evaluations: usize,
     pub moisture_absolute_tolerance: f64,
     /// Absolute error in dimensionless RH or solution water activity.
@@ -64,8 +67,10 @@ pub struct MoistureAdvanceReport<Step, const FACES: usize> {
     pub interval_s: [f64; 2],
     pub comparisons: usize,
     pub accepted_intervals: usize,
+    /// Accepted physical half intervals, excluding internal RK stages.
     pub accepted_substeps: usize,
     pub rejected_intervals: usize,
+    /// Charged endpoint/stage work, as in `maximum_evaluations`.
     pub evaluations: usize,
     pub minimum_accepted_substep_s: f64,
     pub maximum_accepted_substep_s: f64,
@@ -191,6 +196,7 @@ impl Retryable for MoistureError {
                 | Self::NonlinearNotConverged(_)
                 | Self::SpatialNotConverged { .. }
                 | Self::ContentIncrement { .. }
+                | Self::StageRange { .. }
         )
     }
 }
@@ -202,9 +208,45 @@ impl WaterStep<2> for MoistureStepReport {
         self.boundary_water_kg
     }
 }
+impl WaterStep<2> for MoistureSdirk2Report {
+    fn boundary_water(&self) -> [f64; 2] {
+        self.endpoint.boundary_water_kg
+    }
+}
 impl WaterStep<6> for MoistureCartesianReport {
     fn boundary_water(&self) -> [f64; 6] {
         self.boundary_water_kg
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TimeMethod {
+    FirstOrder,
+    Sdirk2,
+}
+impl TimeMethod {
+    fn evaluation_cost(self) -> usize {
+        match self {
+            Self::FirstOrder => 1,
+            Self::Sdirk2 => 2,
+        }
+    }
+
+    // For local order p+1, the fine error is the full/fine difference times
+    // (u^(p+1)+v^(p+1))/(1-u^(p+1)-v^(p+1)), with u+v=1.
+    fn fine_error_factor(self, u: f64, v: f64) -> f64 {
+        match self {
+            Self::FirstOrder => (u * u + v * v) / (2.0 * u * v),
+            Self::Sdirk2 => (u * u * u + v * v * v) / (3.0 * u * v),
+        }
+    }
+
+    fn doubling_threshold(self) -> f64 {
+        // Doubling a span multiplies its leading local error by 2^(p+1).
+        match self {
+            Self::FirstOrder => 0.25,
+            Self::Sdirk2 => 0.125,
+        }
     }
 }
 
@@ -493,18 +535,19 @@ fn probe<S, R, E>(
     accepted: usize,
     calls: &mut usize,
     maximum: usize,
+    cost: usize,
     propose: &mut impl FnMut(&S, f64) -> Result<(S, R), E>,
     cx: &Cx<'_>,
 ) -> Result<(S, R), MoistureAdvanceError<E>> {
     checkpoint(cx)?;
-    if *calls == maximum {
+    if cost > maximum - *calls {
         return Err(MoistureAdvanceError::WorkLimit {
             time_s: time,
             accepted_intervals: accepted,
             evaluations: *calls,
         });
     }
-    *calls += 1;
+    *calls += cost;
     let result = propose(state, dt);
     checkpoint(cx)?;
     result.map_err(|error| MoistureAdvanceError::Step {
@@ -561,6 +604,29 @@ fn evolve_fields_with_error<S: Clone, R: ReportTransfers<N>, E: Retryable, const
     initial: &S,
     target_s: f64,
     controls: MoistureTimeControls,
+    propose: impl FnMut(&S, f64) -> Result<(S, R), E>,
+    snapshot: impl for<'a> Fn(&'a S) -> Result<Snapshot<'a>, E>,
+    additional_error: impl Fn(&S, &S, &S) -> Result<f64, MoistureAdvanceError<E>>,
+    cx: &Cx<'_>,
+) -> Result<(S, SharedMoistureAdvanceReport<R, N>), MoistureAdvanceError<E>> {
+    evolve_fields_with_method(
+        initial,
+        target_s,
+        controls,
+        TimeMethod::FirstOrder,
+        propose,
+        snapshot,
+        additional_error,
+        cx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evolve_fields_with_method<S: Clone, R: ReportTransfers<N>, E: Retryable, const N: usize>(
+    initial: &S,
+    target_s: f64,
+    controls: MoistureTimeControls,
+    method: TimeMethod,
     mut propose: impl FnMut(&S, f64) -> Result<(S, R), E>,
     snapshot: impl for<'a> Fn(&'a S) -> Result<Snapshot<'a>, E>,
     additional_error: impl Fn(&S, &S, &S) -> Result<f64, MoistureAdvanceError<E>>,
@@ -604,6 +670,7 @@ fn evolve_fields_with_error<S: Clone, R: ReportTransfers<N>, E: Retryable, const
                 accepted,
                 &mut evaluations,
                 controls.maximum_evaluations,
+                method.evaluation_cost(),
                 &mut propose,
                 cx,
             )?;
@@ -614,6 +681,7 @@ fn evolve_fields_with_error<S: Clone, R: ReportTransfers<N>, E: Retryable, const
                 accepted,
                 &mut evaluations,
                 controls.maximum_evaluations,
+                method.evaluation_cost(),
                 &mut propose,
                 cx,
             )?;
@@ -631,6 +699,7 @@ fn evolve_fields_with_error<S: Clone, R: ReportTransfers<N>, E: Retryable, const
                 accepted,
                 &mut evaluations,
                 controls.maximum_evaluations,
+                method.evaluation_cost(),
                 &mut propose,
                 cx,
             )?;
@@ -655,9 +724,9 @@ fn evolve_fields_with_error<S: Clone, R: ReportTransfers<N>, E: Retryable, const
         let b = snapshot(&fine).map_err(MoistureAdvanceError::FinalInventory)?;
         check_clock(&a, end, cx)?;
         check_clock(&b, end, cx)?;
-        // First-order local error for possibly unequal representable halves.
+        // Method-order local error for possibly unequal representable halves.
         let (u, v) = (h1 / span, h2 / span);
-        let factor = (u * u + v * v) / (2.0 * u * v);
+        let factor = method.fine_error_factor(u, v);
         let field_error = distance(&before, &a, &b, controls, &mut field_errors, cx)?;
         let activity_error = optional_error(
             before.activity,
@@ -726,7 +795,7 @@ fn evolve_fields_with_error<S: Clone, R: ReportTransfers<N>, E: Retryable, const
         last = Some(report);
         state = fine;
         time = end;
-        next_dt = if error <= 0.25 {
+        next_dt = if error <= method.doubling_threshold() {
             span + span.min(controls.maximum_step_s - span)
         } else {
             span
@@ -884,6 +953,49 @@ impl MoistureSlab {
             field_snapshot::<Self, 2>,
             cx,
         )
+    }
+
+    /// Evolve a complete duration with the original second-order SDIRK2 stages.
+    /// Faces and source temperature stay fixed. Only the two-half endpoint and
+    /// its RK-weighted water transfers are accepted; failed prefixes stay private.
+    ///
+    /// Equal halves estimate the fine local error as one third of the full/fine
+    /// difference. The dyadic controller uses cubic local-error scaling, with
+    /// the corresponding factor for unequal representable halves. This is an
+    /// asymptotic local estimate, not a global error bound. Physical `StageRange`
+    /// refusals shorten the span without clipping or falling back to first order.
+    ///
+    /// Every attempted SDIRK2 call charges two stages against the work limit,
+    /// including early failures; a complete comparison costs six. Reports count
+    /// accepted physical half intervals separately from those implicit stages.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sdirk2_adaptive_to(
+        &self,
+        target_s: f64,
+        faces: &[MoistureFace; 2],
+        step: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Self, MoistureAdvanceReport<MoistureSdirk2Report, 2>),
+        MoistureAdvanceError<MoistureError>,
+    > {
+        let (state, report) = evolve_fields_with_method(
+            self,
+            target_s,
+            time,
+            TimeMethod::Sdirk2,
+            |state, dt| {
+                state
+                    .advance_sdirk2(dt, faces, step, nonlinear, cx)
+                    .map(|(state, report)| (state, OneReport(report)))
+            },
+            field_snapshot::<Self, 2>,
+            |_, _, _| Ok(0.0),
+            cx,
+        )?;
+        Ok((state, report.summary.map_step(|step| step.0)))
     }
 }
 impl MoistureCartesian {

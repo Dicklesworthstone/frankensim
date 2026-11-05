@@ -42,8 +42,9 @@ pub struct MoistureNonlinearReport {
     /// Endpoint-equation residual normalized by the load for moisture relative
     /// to the minimum initial/active-reservoir content, as in the linear solve.
     pub relative_residual: f64,
-    /// Uses endpoint diffusivity for both surface transfers; never the lagged
-    /// linear solve's flux to make nonlinear conservation appear satisfied.
+    /// Uses endpoint diffusivity for both surface transfers and includes any
+    /// already-integrated RK stage contribution. Never uses a lagged linear
+    /// solve's flux to make nonlinear conservation appear satisfied.
     pub water_balance_residual_kg: f64,
 }
 
@@ -64,6 +65,7 @@ impl MoistureSlab {
         step: MoistureStepConfig,
         controls: MoistureNonlinearConfig,
         profile: Option<&KirchhoffMoistureDiffusivity>,
+        known: Option<&sdirk::StageLoad>,
         cx: &Cx<'_>,
     ) -> Result<
         (
@@ -79,6 +81,9 @@ impl MoistureSlab {
         let mut workspace = TridiagonalWorkspace::new(n).map_err(linear_error)?;
         let mut iterate = self.moisture.clone();
         let mut system = self.transport_system(dt, faces, start, profile, cx)?;
+        if let Some(known) = known {
+            known.add_to(&mut system.1, cx)?;
+        }
         let mut total_solves = 0;
         for iteration in 1..=controls.maximum_iterations {
             poll(cx)?;
@@ -93,8 +98,14 @@ impl MoistureSlab {
             // Re-query the ORIGINAL pinned source at every proposed endpoint.
             // Unsupported intermediate or final states refuse transactionally.
             let candidate: Vec<_> = solution.x.iter().map(|m| m + reference).collect();
+            if let Some(known) = known {
+                known.check_range(&candidate, self.geometry.maximum_moisture, cx)?;
+            }
             let endpoint = self.transport_states(&candidate, cx)?;
-            let endpoint_system = self.transport_system(dt, faces, &endpoint, profile, cx)?;
+            let mut endpoint_system = self.transport_system(dt, faces, &endpoint, profile, cx)?;
+            if let Some(known) = known {
+                known.add_to(&mut endpoint_system.1, cx)?;
+            }
             let (_, relative_residual) =
                 endpoint_system
                     .0
@@ -104,7 +115,10 @@ impl MoistureSlab {
                 .iter()
                 .map(|m| self.dry_mass_per_cell_kg * m)
                 .sum();
-            let water_balance = water_after - self.water_mass_kg() - transfer[0] - transfer[1];
+            let mut water_balance = water_after - self.water_mass_kg() - transfer[0] - transfer[1];
+            if let Some(known) = known {
+                water_balance -= known.boundary_water_kg[0] + known.boundary_water_kg[1];
+            }
             let report = MoistureNonlinearReport {
                 iterations: iteration,
                 tridiagonal_solves: total_solves,
@@ -130,6 +144,9 @@ impl MoistureSlab {
                 }
                 let states = self.transport_states(&iterate, cx)?;
                 system = self.transport_system(dt, faces, &states, profile, cx)?;
+                if let Some(known) = known {
+                    known.add_to(&mut system.1, cx)?;
+                }
             }
         }
         unreachable!("validated positive nonlinear iteration budget")
