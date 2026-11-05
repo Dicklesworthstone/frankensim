@@ -2174,3 +2174,36 @@ medium/receiver/frequency/path/shape/work/cancellation refusals. Window leakage,
 sampling and source-volume limits remain; this is bin-integrated statistics,
 not deterministic cross-frequency phase, inferred independence or calibrated
 turbulence sound.
+
+## Full-wave observations and physical sources inside fluid layers
+
+`curle3d::refraction::full_wave::layer::interior::PreparedLayerInteriorFullWaveMonopole`
+observes an original exterior volume source strictly inside the finite layer.
+The original pressure/normal-velocity transfer equations retain both internal
+traveling directions, every coherent return, evanescence and reactive velocity.
+The existing critical branch maps, bounded quadrature and denominator-resolution
+criterion remain shared with exterior transmission. Scaled cosine/sinc
+numerators cancel their growing factors before physical attenuation is applied;
+near-face fields do not disappear when transmission across the whole layer
+underflows. Independent positive all-evanescent envelopes use the actual
+exterior clearance plus interior depth, with separate pressure and velocity
+bounds. An identical layer/receiving fluid delegates the original interface.
+
+`interior::source::PreparedInteriorSourceFullWaveMonopole` supplies the reciprocal
+physical volume source inside the layer, observed in its incident exterior.
+Pressure reciprocity follows the original variable-density acoustic operator;
+exterior velocity uses the exterior-coordinate derivatives and actual receiving
+density. It is not copied from the interior receiver field. Its tail bounds
+include those exterior derivatives. Explicitly reversing the same layer's
+faces and exterior states observes the other half-space. Both APIs cache four
+complex transfer coefficients, apply physical Q without allocations, and feed
+native harmonic observations on the original source clock without another delay.
+
+Original stationary, lossless, infinite-plane and nontrapping-layer admission
+remains. There is no source loading, force-source interior extension, absorption,
+flow, finite edge or guided-pole solver. Quadrature estimates and analytic
+spectral-tail bounds are not interval certificates or experimental accuracy.
+Focused G1/G3 tests cover original spherical limits, independent two-family
+spherical images, both-face pressure/normal-velocity continuity, receiving-fluid
+momentum, reciprocal pressure, rotation, near-face evanescent survival, native
+clock identity and transactional domain/work/cancellation refusals.

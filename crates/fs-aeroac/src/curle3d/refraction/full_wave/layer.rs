@@ -37,6 +37,7 @@ use fs_math::{c64::C64, det};
 /// Coherent and statistically specified original Q/F arrays around the layer.
 pub mod array;
 mod force;
+pub mod interior;
 pub use force::{
     FULL_WAVE_LAYER_FORCE_SCOPE, FullWaveLayerForceDiagnostics, PreparedLayeredFullWaveForce,
 };
@@ -137,7 +138,7 @@ pub struct FullWaveLayerMonopoleDiagnostics {
     pub velocity_quadrature_error_per_m2: [f64; 2],
     pub pressure_tail_bound_pa_per_m3_s: f64,
     pub velocity_tail_bound_per_m2: [f64; 2],
-    /// An absent or completely identical layer used the original interface owner.
+    /// A physically absent layer or second face used the original interface owner.
     /// Its original unequal-speed interface may still require quadrature.
     pub reduced_to_single_interface: bool,
 }
@@ -532,7 +533,10 @@ impl LayerKernel {
     // Return exp(-Im(delta))*cos(delta), exp(-Im(delta))*h*sinc(delta).
     // Both are real for this lossless layer. No growing hyperbolic quantity is formed.
     fn layer_functions(&self, vertical: C64) -> (f64, f64) {
-        let h = self.layer.thickness_m;
+        Self::layer_functions_at(vertical, self.layer.thickness_m)
+    }
+
+    fn layer_functions_at(vertical: C64, h: f64) -> (f64, f64) {
         if vertical.im > 0.0 {
             let eta = vertical.im * h;
             let decay = det::exp(-2.0 * eta);
@@ -577,6 +581,18 @@ impl LayerKernel {
     }
 
     fn sample_weight(&self, region: usize, x: f64) -> Result<LayerSpectralWeight, AeroacError> {
+        self.sample_weight_at_depth(region, x, self.layer.thickness_m)
+    }
+
+    // Interior numerators use the same scaled full-layer denominator but
+    // cancel only the remaining layer's exponential. Retain the resulting
+    // physical depth here, rather than subtracting two enormous exponents.
+    fn sample_weight_at_depth(
+        &self,
+        region: usize,
+        x: f64,
+        depth_m: f64,
+    ) -> Result<LayerSpectralWeight, AeroacError> {
         let point = self.point(region, x);
         let wave_scale = point.q.max(self.critical[self.critical_count - 1]);
         let mut denominator = self.denominator(point, wave_scale);
@@ -601,7 +617,7 @@ impl LayerKernel {
             + self.coordinates.b * Dd::from_f64(point.zeta[2].re);
         let attenuation = (self.coordinates.a * Dd::from_f64(point.zeta[0].im)
             + self.coordinates.b * Dd::from_f64(point.zeta[2].im)
-            + Dd::from_f64(self.layer.thickness_m) * Dd::from_f64(point.zeta[1].im))
+            + Dd::from_f64(depth_m) * Dd::from_f64(point.zeta[1].im))
         .to_f64();
         if !phase.hi.is_finite()
             || !phase.lo.is_finite()
