@@ -15,7 +15,7 @@
 
 use fs_qty::Temperature;
 
-pub use crate::electron_collision::{BOLTZMANN_J_PER_K, ELECTRONVOLT_J, ELECTRON_MASS_KG};
+pub use crate::electron_collision::{BOLTZMANN_J_PER_K, ELECTRON_MASS_KG, ELECTRONVOLT_J};
 
 /// Explicit binding of a D–T plasma to its original gas thermodynamics.
 pub mod plasma;
@@ -180,7 +180,10 @@ impl FusionReactionV1 {
     #[must_use]
     pub fn temperature_range(self) -> [Temperature; 2] {
         let [min, max] = self.temperature_range_kev();
-        [Temperature::new(min * KELVIN_PER_KEV), Temperature::new(max * KELVIN_PER_KEV)]
+        [
+            Temperature::new(min * KELVIN_PER_KEV),
+            Temperature::new(max * KELVIN_PER_KEV),
+        ]
     }
 
     /// Rest-mass defect converted to nuclear energy release [J/event].
@@ -190,7 +193,8 @@ impl FusionReactionV1 {
         let [a, b] = self.reactants();
         let [c, d] = self.products();
         ((a.mass_kg() + b.mass_kg()) - (c.mass_kg() + d.mass_kg()))
-            * SPEED_OF_LIGHT_M_S * SPEED_OF_LIGHT_M_S
+            * SPEED_OF_LIGHT_M_S
+            * SPEED_OF_LIGHT_M_S
     }
 
     /// Leading nonrelativistic share of relative kinetic energy for each
@@ -225,8 +229,50 @@ impl FusionReactionV1 {
     /// Evaluate the bounded Bosch–Hale Maxwellian fit and analytic derivative.
     /// Temperature is in kelvin; reactivity is m³/s, and its derivative m³/(s K).
     /// Outside the published fit interval evaluation fails, without clipping.
-    pub fn reactivity(self, ion_temperature: Temperature) -> Result<FusionReactivityV1, FusionErrorV1> {
+    pub fn reactivity(
+        self,
+        ion_temperature: Temperature,
+    ) -> Result<FusionReactivityV1, FusionErrorV1> {
         reactivity::evaluate(self, ion_temperature)
+    }
+
+    /// Evaluate the fitted rate and mean kinetic energies of one reacting pair.
+    ///
+    /// Both reactants share the same Maxwellian temperature and have no relative
+    /// bulk drift. Reaction weighting changes their mean relative energy to
+    /// `kT [3/2 + d ln(rate)/d ln(T)]`; their independent center-of-mass
+    /// translation contributes another `3kT/2`. Leading nonrelativistic two-body
+    /// kinematics partitions Q plus relative energy by inverse product mass and
+    /// center-of-mass energy by product mass, neglecting mass-defect boost
+    /// corrections. The product sum is Q plus the removed reacting-ion energy.
+    ///
+    /// These are energies per event: the identical-pair factor remains in event
+    /// counting. No deposition split, charged-product slowing or neutron escape
+    /// closure is supplied. The rate-fit residual is not an error certificate
+    /// for its derivative or these energy moments.
+    pub fn thermal_event(
+        self,
+        ion_temperature: Temperature,
+    ) -> Result<FusionThermalEventV1, FusionErrorV1> {
+        let reactivity = self.reactivity(ion_temperature)?;
+        let relative = reactivity.mean_reacting_relative_energy_j();
+        let translation = 1.5 * BOLTZMANN_J_PER_K * ion_temperature.value();
+        let removed = relative + translation;
+        let fraction = self.product_relative_energy_fractions()[0];
+        let q = self.q_j();
+        let first = fraction * (q + relative) + (1.0 - fraction) * translation;
+        let second = q + removed - first;
+        if [relative, translation, removed, first, second]
+            .iter()
+            .any(|&e| !e.is_finite() || e <= 0.0)
+        {
+            return Err(FusionErrorV1::Arithmetic);
+        }
+        Ok(FusionThermalEventV1 {
+            reactivity,
+            reacting_ion_energy_j: removed,
+            product_kinetic_energies_j: [first, second],
+        })
     }
 }
 
@@ -267,15 +313,21 @@ pub struct FusionReactivityV1 {
 impl FusionReactivityV1 {
     /// Common Maxwellian ion temperature used for this evaluation.
     #[must_use]
-    pub const fn temperature(self) -> Temperature { self.ion_temperature }
+    pub const fn temperature(self) -> Temperature {
+        self.ion_temperature
+    }
 
     /// Particle-pair reactivity `<sigma v>` in m³/s, before pair counting.
     #[must_use]
-    pub const fn value_m3_s(self) -> f64 { self.value_m3_s }
+    pub const fn value_m3_s(self) -> f64 {
+        self.value_m3_s
+    }
 
     /// Analytic `d<sigma v>/dT` in m³/(s K).
     #[must_use]
-    pub const fn derivative_m3_s_k(self) -> f64 { self.derivative_m3_s_k }
+    pub const fn derivative_m3_s_k(self) -> f64 {
+        self.derivative_m3_s_k
+    }
 
     /// Dimensionless `d ln<sigma v>/d ln T` of the original fitted law.
     #[must_use]
@@ -291,7 +343,40 @@ impl FusionReactivityV1 {
     /// error is not bounded by the published rate-fit residual.
     #[must_use]
     pub fn mean_reacting_relative_energy_j(self) -> f64 {
-        BOLTZMANN_J_PER_K * self.ion_temperature.value()
+        BOLTZMANN_J_PER_K
+            * self.ion_temperature.value()
             * (1.5 + self.logarithmic_temperature_derivative)
+    }
+}
+
+/// One allocation-free thermal event from the same original fitted reactivity.
+/// Product kinetic energies include their Q and thermal shares, before any
+/// transport or thermalization. Their order is [`FusionReactionV1::products`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FusionThermalEventV1 {
+    reactivity: FusionReactivityV1,
+    reacting_ion_energy_j: f64,
+    product_kinetic_energies_j: [f64; 2],
+}
+
+impl FusionThermalEventV1 {
+    /// Original Maxwellian reactivity and analytic slope at the requested T.
+    #[must_use]
+    pub const fn reactivity(self) -> FusionReactivityV1 {
+        self.reactivity
+    }
+
+    /// Mean total kinetic energy removed with the two reacting ions [J/event].
+    /// Includes relative motion and center-of-mass translation; it is not the
+    /// unweighted mean kinetic energy of two randomly selected thermal ions.
+    #[must_use]
+    pub const fn reacting_ion_energy_j(self) -> f64 {
+        self.reacting_ion_energy_j
+    }
+
+    /// Mean outgoing kinetic energies [J/event], in the channel's product order.
+    #[must_use]
+    pub const fn product_kinetic_energies_j(self) -> [f64; 2] {
+        self.product_kinetic_energies_j
     }
 }

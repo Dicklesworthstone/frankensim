@@ -1,5 +1,31 @@
 # CONTRACT: fs-thermochem
 
+## Light-ion nuclear source binding and reaction-weighted product energy
+
+`fusion::plasma::LightIonFusionPlasmaV1` binds original p+, D+, T+, He3++,
+He4++ and electron sources in arbitrary canonical order. Isotope associations
+are explicit. Bare-nucleus masses, H/He axes, charge, fixed monatomic sensible
+calorics and zero formation constants are checked before admission. Both
+helium isotopes contribute charge-square four. All potential secondary fuels
+and products require original temperature support even when their amount is
+zero. Shared source and physical-scale kernels retain the four-source D-T API;
+neither binding creates replacement material cards or projects populations.
+
+`FusionReactionV1::thermal_event` is the common allocation-free per-event
+energy owner for all four Bosch-Hale channels. It returns the original
+reactivity, reaction-weighted incoming ion energy and the two product kinetic
+energies. The derivative moment is `Erel=kB*Ti*(3/2+dln<sigma v>/dlnTi)`;
+center-of-mass translation contributes `3*kB*Ti/2`. Product energies sum to
+Q plus the incoming debit using the existing leading nonrelativistic
+inverse-mass relative-energy partition. Common Maxwellian ion temperature,
+no relative drift and neglected mass-defect boost corrections remain explicit;
+the rate-fit residual is not an error bound for its derivative or energy moment.
+
+Twenty-three native fusion tests pass against the actual source crate,
+including six new six-species admission checks and two new all-channel energy
+and independent-derivative checks. The binding evolves no state and chooses
+neither reaction channels nor charged-product deposition fractions.
+
 ## Electron-ion free-free emissive power on original plasma sources
 
 `plasma_radiation::ElectronIonBremsstrahlungV1` evaluates frequency-integrated

@@ -1,12 +1,16 @@
 use super::*;
 
 fn close(actual: f64, expected: f64, relative: f64) {
-    assert!((actual - expected).abs() <= relative * expected.abs(),
-        "actual={actual:.17e}, expected={expected:.17e}");
+    assert!(
+        (actual - expected).abs() <= relative * expected.abs(),
+        "actual={actual:.17e}, expected={expected:.17e}"
+    );
 }
 
 fn at_kev(reaction: FusionReactionV1, kev: f64) -> FusionReactivityV1 {
-    reaction.reactivity(Temperature::new(kev * KELVIN_PER_KEV)).unwrap()
+    reaction
+        .reactivity(Temperature::new(kev * KELVIN_PER_KEV))
+        .unwrap()
 }
 
 #[test]
@@ -26,8 +30,11 @@ fn g2_primary_table_viii_reactivities_and_si_conversion() {
         }
     }
     // The conventional 10 keV DT value is ~1.136e-22 m³/s, not cm³/s.
-    close(at_kev(FusionReactionV1::DeuteriumTritium, 10.0).value_m3_s(),
-        1.1361654705836233e-22, 3.0e-14);
+    close(
+        at_kev(FusionReactionV1::DeuteriumTritium, 10.0).value_m3_s(),
+        1.1361654705836233e-22,
+        3.0e-14,
+    );
 }
 
 #[test]
@@ -37,11 +44,20 @@ fn g3_analytic_temperature_slope_matches_independent_difference() {
             let t = kev * KELVIN_PER_KEV;
             let h = t * 1.0e-5;
             let rate = reaction.reactivity(Temperature::new(t)).unwrap();
-            let plus = reaction.reactivity(Temperature::new(t + h)).unwrap().value_m3_s();
-            let minus = reaction.reactivity(Temperature::new(t - h)).unwrap().value_m3_s();
+            let plus = reaction
+                .reactivity(Temperature::new(t + h))
+                .unwrap()
+                .value_m3_s();
+            let minus = reaction
+                .reactivity(Temperature::new(t - h))
+                .unwrap()
+                .value_m3_s();
             close(rate.derivative_m3_s_k(), (plus - minus) / (2.0 * h), 2.0e-8);
-            close(rate.logarithmic_temperature_derivative(),
-                t * rate.derivative_m3_s_k() / rate.value_m3_s(), 8.0 * f64::EPSILON);
+            close(
+                rate.logarithmic_temperature_derivative(),
+                t * rate.derivative_m3_s_k() / rate.value_m3_s(),
+                8.0 * f64::EPSILON,
+            );
         }
     }
     // DT reactivity turns over; a forced positive derivative is unphysical.
@@ -54,18 +70,38 @@ fn g0_source_temperature_limits_are_inclusive_and_extrapolation_is_refused() {
         let [lower, upper] = reaction.temperature_range();
         assert!(reaction.reactivity(lower).is_ok());
         assert!(reaction.reactivity(upper).is_ok());
+        assert!(reaction.thermal_event(lower).is_ok());
+        assert!(reaction.thermal_event(upper).is_ok());
         for t in [lower.value().next_down(), upper.value().next_up()] {
-            assert!(matches!(reaction.reactivity(Temperature::new(t)),
-                Err(FusionErrorV1::OutsideTemperatureDomain { .. })));
+            assert!(matches!(
+                reaction.reactivity(Temperature::new(t)),
+                Err(FusionErrorV1::OutsideTemperatureDomain { .. })
+            ));
+            assert_eq!(
+                reaction.thermal_event(Temperature::new(t)).unwrap_err(),
+                reaction.reactivity(Temperature::new(t)).unwrap_err()
+            );
         }
         for t in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            assert_eq!(reaction.reactivity(Temperature::new(t)),
-                Err(FusionErrorV1::InvalidTemperature));
+            assert_eq!(
+                reaction.reactivity(Temperature::new(t)),
+                Err(FusionErrorV1::InvalidTemperature)
+            );
+            assert_eq!(
+                reaction.thermal_event(Temperature::new(t)),
+                Err(FusionErrorV1::InvalidTemperature)
+            );
         }
     }
-    assert_eq!(FusionReactionV1::DeuteriumHelium3.temperature_range_kev(), [0.5, 190.0]);
-    assert!(FusionReactionV1::DeuteriumHelium3
-        .reactivity(Temperature::new(0.3 * KELVIN_PER_KEV)).is_err());
+    assert_eq!(
+        FusionReactionV1::DeuteriumHelium3.temperature_range_kev(),
+        [0.5, 190.0]
+    );
+    assert!(
+        FusionReactionV1::DeuteriumHelium3
+            .reactivity(Temperature::new(0.3 * KELVIN_PER_KEV))
+            .is_err()
+    );
 }
 
 #[test]
@@ -83,22 +119,35 @@ fn g0_nuclear_stoichiometry_conserves_baryons_and_charge() {
         assert_eq!(baryons, 0);
         assert_eq!(charge, 0);
         assert!(mass_defect > 0.0);
-        close(reaction.q_j(), mass_defect * SPEED_OF_LIGHT_M_S * SPEED_OF_LIGHT_M_S,
-            2.0e-12);
+        close(
+            reaction.q_j(),
+            mass_defect * SPEED_OF_LIGHT_M_S * SPEED_OF_LIGHT_M_S,
+            2.0e-12,
+        );
     }
 }
 
 #[test]
 fn g0_identical_pair_counting_preserves_two_deuteron_sink_per_event() {
-    for reaction in [FusionReactionV1::DeuteriumDeuteriumNeutron,
-        FusionReactionV1::DeuteriumDeuteriumProton] {
+    for reaction in [
+        FusionReactionV1::DeuteriumDeuteriumNeutron,
+        FusionReactionV1::DeuteriumDeuteriumProton,
+    ] {
         assert_eq!(reaction.reactant_pair_factor(), 0.5);
-        assert_eq!(reaction.stoichiometric_coefficient(NuclearSpeciesV1::Deuterium), -2);
+        assert_eq!(
+            reaction.stoichiometric_coefficient(NuclearSpeciesV1::Deuterium),
+            -2
+        );
         assert_eq!(reaction.reactants(), [NuclearSpeciesV1::Deuterium; 2]);
     }
-    assert_eq!(FusionReactionV1::DeuteriumTritium.reactant_pair_factor(), 1.0);
-    let ratio = |t| at_kev(FusionReactionV1::DeuteriumDeuteriumNeutron, t).value_m3_s()
-        / at_kev(FusionReactionV1::DeuteriumDeuteriumProton, t).value_m3_s();
+    assert_eq!(
+        FusionReactionV1::DeuteriumTritium.reactant_pair_factor(),
+        1.0
+    );
+    let ratio = |t| {
+        at_kev(FusionReactionV1::DeuteriumDeuteriumNeutron, t).value_m3_s()
+            / at_kev(FusionReactionV1::DeuteriumDeuteriumProton, t).value_m3_s()
+    };
     // Neither an assumed equal branch split nor one shared fit reproduces this.
     assert!(ratio(1.0) < 1.0);
     assert!(ratio(50.0) > 1.1);
@@ -109,13 +158,23 @@ fn g0_q_energy_partition_and_reaction_weighted_thermal_energy() {
     let q_mev = [17.5892479, 3.2688570, 4.0326639, 18.3530549];
     for (reaction, expected) in FusionReactionV1::ALL.into_iter().zip(q_mev) {
         close(reaction.q_j() / (1.0e6 * ELECTRONVOLT_J), expected, 2.0e-8);
-        close(reaction.charged_q_j() + reaction.neutron_q_j(), reaction.q_j(), 4.0*f64::EPSILON);
+        close(
+            reaction.charged_q_j() + reaction.neutron_q_j(),
+            reaction.q_j(),
+            4.0 * f64::EPSILON,
+        );
         let fractions = reaction.product_relative_energy_fractions();
         assert_eq!(fractions[0] + fractions[1], 1.0);
         let products = reaction.products();
-        close(fractions[0] * products[0].mass_kg(),
-            fractions[1] * products[1].mass_kg(), 4.0*f64::EPSILON);
-        assert_eq!(reaction.neutron_q_j() > 0.0, products[1] == NuclearSpeciesV1::Neutron);
+        close(
+            fractions[0] * products[0].mass_kg(),
+            fractions[1] * products[1].mass_kg(),
+            4.0 * f64::EPSILON,
+        );
+        assert_eq!(
+            reaction.neutron_q_j() > 0.0,
+            products[1] == NuclearSpeciesV1::Neutron
+        );
         for kev in [1.0, 10.0, 90.0] {
             let rate = at_kev(reaction, kev);
             assert!(rate.mean_reacting_relative_energy_j().is_finite());
@@ -125,8 +184,74 @@ fn g0_q_energy_partition_and_reaction_weighted_thermal_energy() {
     // Reacting pairs preferentially sample the energetic tail at 10 keV;
     // debiting two unweighted average ion energies would undercount this.
     let rate = at_kev(FusionReactionV1::DeuteriumTritium, 10.0);
-    assert!(rate.mean_reacting_relative_energy_j() >
-        1.5 * BOLTZMANN_J_PER_K * rate.temperature().value());
+    assert!(
+        rate.mean_reacting_relative_energy_j()
+            > 1.5 * BOLTZMANN_J_PER_K * rate.temperature().value()
+    );
+}
+
+#[test]
+fn g0_all_channel_thermal_events_conserve_energy_and_relative_momentum_variance() {
+    for reaction in FusionReactionV1::ALL {
+        let [lower, upper] = reaction.temperature_range_kev();
+        for kev in [lower, 1.0, 10.0, 90.0, upper] {
+            let temperature = Temperature::new(kev * KELVIN_PER_KEV);
+            let event = reaction.thermal_event(temperature).unwrap();
+            assert_eq!(
+                event.reactivity(),
+                reaction.reactivity(temperature).unwrap()
+            );
+            let energies = event.product_kinetic_energies_j();
+            let products = reaction.products();
+            let masses = products.map(NuclearSpeciesV1::mass_kg);
+            let total_mass = masses[0] + masses[1];
+            let translation = 1.5 * BOLTZMANN_J_PER_K * temperature.value();
+            close(
+                energies[0] + energies[1],
+                reaction.q_j() + event.reacting_ion_energy_j(),
+                4.0 * f64::EPSILON,
+            );
+            // Remove each product's center-of-mass translation. Equal and
+            // opposite relative momenta require m0*E0_rel = m1*E1_rel.
+            close(
+                (energies[0] - translation * masses[0] / total_mass) * masses[0],
+                (energies[1] - translation * masses[1] / total_mass) * masses[1],
+                2.0e-14,
+            );
+            for (energy, fraction) in energies
+                .into_iter()
+                .zip(reaction.product_relative_energy_fractions())
+            {
+                assert!(energy.is_finite() && energy > fraction * reaction.q_j());
+            }
+        }
+    }
+}
+
+#[test]
+fn g3_thermal_event_ion_debit_matches_independent_rate_difference() {
+    for reaction in FusionReactionV1::ALL {
+        for kev in [1.0, 10.0, 30.0, 90.0] {
+            let t = kev * KELVIN_PER_KEV;
+            let h = t * 1.0e-5;
+            let plus = reaction
+                .reactivity(Temperature::new(t + h))
+                .unwrap()
+                .value_m3_s();
+            let minus = reaction
+                .reactivity(Temperature::new(t - h))
+                .unwrap()
+                .value_m3_s();
+            // Differentiate the rate numerically, independently of its analytic
+            // derivative and the shared event implementation.
+            let logarithmic_slope = (plus / minus).ln() * t / (2.0 * h);
+            let event = reaction.thermal_event(Temperature::new(t)).unwrap();
+            let expected = BOLTZMANN_J_PER_K * t * (3.0 + logarithmic_slope);
+            close(event.reacting_ion_energy_j(), expected, 2.0e-8);
+            let energies = event.product_kinetic_energies_j();
+            assert!(energies[0] + energies[1] > reaction.q_j());
+        }
+    }
 }
 
 #[test]
@@ -135,6 +260,22 @@ fn g5_repeated_evaluations_have_identical_bits() {
         let a = at_kev(reaction, 15.0);
         let b = at_kev(reaction, 15.0);
         assert_eq!(a.value_m3_s().to_bits(), b.value_m3_s().to_bits());
-        assert_eq!(a.derivative_m3_s_k().to_bits(), b.derivative_m3_s_k().to_bits());
+        assert_eq!(
+            a.derivative_m3_s_k().to_bits(),
+            b.derivative_m3_s_k().to_bits()
+        );
+        let first = reaction.thermal_event(a.temperature()).unwrap();
+        let second = reaction.thermal_event(a.temperature()).unwrap();
+        assert_eq!(
+            first.reacting_ion_energy_j().to_bits(),
+            second.reacting_ion_energy_j().to_bits()
+        );
+        for (a, b) in first
+            .product_kinetic_energies_j()
+            .into_iter()
+            .zip(second.product_kinetic_energies_j())
+        {
+            assert_eq!(a.to_bits(), b.to_bits());
+        }
     }
 }

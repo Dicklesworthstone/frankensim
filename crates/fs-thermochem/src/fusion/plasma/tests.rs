@@ -1,5 +1,7 @@
 //! G0/G1 source ownership and independent ideal-plasma scale checks.
 
+mod network;
+
 use super::*;
 use crate::{
     ChargeVector, ElementId, ElementalMatrix, ElementalReferenceIdV1, InitialStatePolicy,
