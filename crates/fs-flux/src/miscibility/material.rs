@@ -2,8 +2,9 @@
 //!
 //! A diffuse-interface cell retains its homogeneous branch, including spinodal
 //! compositions. The field already represents phase separation, so no cell is
-//! independently replaced by a bulk equilibrium split. The borrowed source
-//! binding stays unchanged across every accepted transport interval.
+//! independently replaced by a bulk equilibrium split. The original liquid
+//! sources stay bound across transport and externally prescribed temperature
+//! changes; every accepted field retains its actual active gradient model.
 //!
 //! Source receipt allocations are separate from the numerical graph workspace;
 //! an explicit cell-count budget bounds queries and retained material results.
@@ -11,6 +12,7 @@
 //! liquid consumers. This adapter does not advance momentum or heat feedback.
 
 use super::advection::{BinaryMiscibilityAdvection, BinaryMiscibilityAdvectionControls};
+use super::temperature::BinaryMiscibilityTemperatureChange;
 use super::transport::BinaryMiscibilityTransportStep;
 use super::{
     BinaryMiscibilityError, BinaryMiscibilityNetwork, BinaryMiscibilitySolve,
@@ -20,6 +22,7 @@ use fs_material::liquid::solution::BinaryLiquidError;
 use fs_material::liquid::solution::gradient::{
     BinaryLiquidSquareGradientLaw, ResolvedBinaryLiquidCell,
 };
+use fs_qty::Temperature;
 use std::sync::Arc;
 
 /// Field/source incompatibility, work budget, or an atomic solver/source refusal.
@@ -31,6 +34,8 @@ pub enum BinaryMiscibilityMaterialError {
     CellBudget { required: usize, maximum: usize },
     /// The original numerical field could not produce an admissible candidate.
     Solver(BinaryMiscibilityError),
+    /// The original source binding refused a prescribed temperature.
+    SourceBinding(BinaryLiquidError),
     /// A local source rejected the unchanged accepted paired inventory.
     Source {
         cell: usize,
@@ -50,10 +55,26 @@ impl From<BinaryMiscibilityError> for BinaryMiscibilityMaterialError {
 }
 type Result<T> = core::result::Result<T, BinaryMiscibilityMaterialError>;
 
+// Temperature updates own only a new wrapper around the exact borrowed liquid
+// law. Later transport shares that wrapper, without cloning its thermodynamics.
+#[derive(Clone)]
+enum SourceBinding<'source, 'liquid, 'card> {
+    Borrowed(&'source BinaryLiquidSquareGradientLaw<'liquid, 'card>),
+    Owned(Arc<BinaryLiquidSquareGradientLaw<'liquid, 'card>>),
+}
+impl<'liquid, 'card> SourceBinding<'_, 'liquid, 'card> {
+    fn law(&self) -> &BinaryLiquidSquareGradientLaw<'liquid, 'card> {
+        match self {
+            Self::Borrowed(source) => source,
+            Self::Owned(source) => source.as_ref(),
+        }
+    }
+}
+
 /// One accepted field and its original per-cell material evaluations.
-/// Neither the source reference nor the numerical inventories are replaceable.
+/// The original liquid sources and numerical inventories are not replaceable.
 pub struct ResolvedBinaryMiscibilityField<'source, 'liquid, 'card> {
-    source: &'source BinaryLiquidSquareGradientLaw<'liquid, 'card>,
+    source: SourceBinding<'source, 'liquid, 'card>,
     state: BinaryMiscibilityState,
     cells: Vec<ResolvedBinaryLiquidCell>,
     maximum_resolved_cells: usize,
@@ -97,7 +118,7 @@ impl BinaryMiscibilityNetwork {
         }
         ResolvedBinaryMiscibilityField::resolve_owned(
             state.clone(),
-            source,
+            SourceBinding::Borrowed(source),
             maximum_resolved_cells,
             cancelled,
         )
@@ -111,15 +132,52 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
     pub fn cells(&self) -> &[ResolvedBinaryLiquidCell] {
         &self.cells
     }
-    pub const fn source(&self) -> &'source BinaryLiquidSquareGradientLaw<'liquid, 'card> {
-        self.source
+    /// Active temperature-specific wrapper around the original liquid sources.
+    pub fn source(&self) -> &BinaryLiquidSquareGradientLaw<'liquid, 'card> {
+        self.source.law()
     }
     pub const fn maximum_resolved_cells(&self) -> usize {
         self.maximum_resolved_cells
     }
 
+    /// Share the accepted numerical owner, including its current temperature.
+    /// A prescribed flow can be explicitly rebound through this owner after a
+    /// temperature change without replacing the field's geometry or inventory.
+    pub fn network(&self) -> BinaryMiscibilityNetwork {
+        BinaryMiscibilityNetwork {
+            owner: Arc::clone(&self.state.owner),
+        }
+    }
+
+    /// Impose one uniform temperature and refresh every original cell source.
+    /// Composition, compensated inventories, geometry and clock remain intact.
+    /// Source density must still agree with the fixed site concentration. A
+    /// source-domain/volume refusal or cancellation returns no partial field.
+    /// The reported external free-energy change is not a heat balance.
+    pub fn temperature_candidate(
+        &self,
+        temperature: Temperature,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<BinaryMiscibilityMaterialTemperatureCandidate<'source, 'liquid, 'card>> {
+        let candidate =
+            self.network()
+                .temperature_candidate(&self.state, temperature, &mut cancelled)?;
+        let (_, state, change) = candidate.into_parts();
+        let source = self
+            .source()
+            .at_temperature(temperature)
+            .map_err(BinaryMiscibilityMaterialError::SourceBinding)?;
+        let field = Self::resolve_owned(
+            state,
+            SourceBinding::Owned(Arc::new(source)),
+            self.maximum_resolved_cells,
+            cancelled,
+        )?;
+        Ok(BinaryMiscibilityMaterialTemperatureCandidate { field, change })
+    }
+
     /// Advance advection and molecular/gradient diffusion, then refresh sources.
-    /// The same borrowed liquid binding resolves only the completed numerical
+    /// The same active source binding resolves only the completed numerical
     /// state. Any final source-domain/volume failure or cancellation discards
     /// the whole candidate, preserving this field and all its original receipts.
     pub fn transport_candidate(
@@ -130,9 +188,7 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
         diffusion_controls: BinaryMiscibilitySolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<BinaryMiscibilityMaterialCandidate<'source, 'liquid, 'card>> {
-        let network = BinaryMiscibilityNetwork {
-            owner: Arc::clone(&self.state.owner),
-        };
+        let network = self.network();
         let candidate = network.transport_candidate(
             &self.state,
             flow,
@@ -142,16 +198,20 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
             &mut cancelled,
         )?;
         let (state, step) = candidate.into_parts();
-        let field =
-            Self::resolve_owned(state, self.source, self.maximum_resolved_cells, cancelled)?;
+        let field = Self::resolve_owned(
+            state,
+            self.source.clone(),
+            self.maximum_resolved_cells,
+            cancelled,
+        )?;
         Ok(BinaryMiscibilityMaterialCandidate { field, step })
     }
 
-    // Both callers have already admitted this exact owner and cell-count budget.
+    // Callers have already admitted this exact owner and cell-count budget.
     // Consume the solved state to avoid cloning its numerical vectors again.
     fn resolve_owned(
         state: BinaryMiscibilityState,
-        source: &'source BinaryLiquidSquareGradientLaw<'liquid, 'card>,
+        source: SourceBinding<'source, 'liquid, 'card>,
         maximum_resolved_cells: usize,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self> {
@@ -160,6 +220,7 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
             poll(&mut cancelled)?;
             cells.push(
                 source
+                    .law()
                     .resolve_cell(amounts, &mut cancelled)
                     .map_err(|error| BinaryMiscibilityMaterialError::Source { cell, error })?,
             );
@@ -171,6 +232,31 @@ impl<'source, 'liquid, 'card> ResolvedBinaryMiscibilityField<'source, 'liquid, '
             cells,
             maximum_resolved_cells,
         })
+    }
+}
+
+/// Prescribed uniform temperature and refreshed original material evaluations.
+#[derive(Debug)]
+pub struct BinaryMiscibilityMaterialTemperatureCandidate<'source, 'liquid, 'card> {
+    field: ResolvedBinaryMiscibilityField<'source, 'liquid, 'card>,
+    change: BinaryMiscibilityTemperatureChange,
+}
+impl<'source, 'liquid, 'card>
+    BinaryMiscibilityMaterialTemperatureCandidate<'source, 'liquid, 'card>
+{
+    pub const fn field(&self) -> &ResolvedBinaryMiscibilityField<'source, 'liquid, 'card> {
+        &self.field
+    }
+    pub const fn change(&self) -> &BinaryMiscibilityTemperatureChange {
+        &self.change
+    }
+    pub fn into_parts(
+        self,
+    ) -> (
+        ResolvedBinaryMiscibilityField<'source, 'liquid, 'card>,
+        BinaryMiscibilityTemperatureChange,
+    ) {
+        (self.field, self.change)
     }
 }
 

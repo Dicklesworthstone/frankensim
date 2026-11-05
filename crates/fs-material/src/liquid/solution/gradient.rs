@@ -14,7 +14,7 @@
 use super::{
     BinaryLiquidError, BinaryLiquidSolutionLaw, ResolvedBinaryLiquidPhase, poll, positive_value,
 };
-use fs_qty::Temperature;
+use fs_qty::{AmountConcentration, Temperature};
 use fs_thermochem::solution::BinarySolutionStateV1;
 use fs_thermochem::solution::gradient::BinarySquareGradientV1;
 
@@ -109,6 +109,21 @@ impl<'a, 'card> BinaryLiquidSquareGradientLaw<'a, 'card> {
     }
     pub const fn liquid_law(&self) -> &BinaryLiquidSolutionLaw<'card> {
         self.liquid
+    }
+
+    /// Rebind the same original liquid sources at a prescribed temperature.
+    /// The pair, site concentration, kappa and source-volume allowance stay
+    /// unchanged. No cell is flashed and no heat balance is inferred. Actual
+    /// property-domain and density compatibility are checked by `resolve_cell`
+    /// at each inventory before a spatial consumer accepts the new binding.
+    pub fn at_temperature(&self, temperature: Temperature) -> Result<Self, BinaryLiquidError> {
+        let gradient = BinarySquareGradientV1::new(
+            self.gradient.thermodynamics().clone(),
+            temperature,
+            AmountConcentration::new(self.gradient.molar_concentration_mol_m3()),
+            self.gradient.gradient_coefficient_j_m(),
+        )?;
+        Self::try_new(self.liquid, gradient, self.maximum_relative_volume_mismatch)
     }
 
     /// Materialize one actual field-cell inventory. No bulk split or property

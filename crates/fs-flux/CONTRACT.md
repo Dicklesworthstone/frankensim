@@ -4927,7 +4927,8 @@ around extraction and through the mapping. The frozen prepared flow is reusable.
 of the continuum runtime. `resolve_liquid_field` binds every original cell
 inventory to the SAME `BinaryLiquidSquareGradientLaw`; the full original pair,
 temperature, concentration and gradient coefficient must match. The field
-privately retains that borrowed source across subsequent transport steps.
+privately retains the exact original liquid source across subsequent transport
+and temperature changes.
 Density, viscosity, heat capacity and conductivity come from each cell's
 actual homogeneous composition and original selected material claims. Unstable
 cells remain homogeneous; independently flashing them would erase the spatial
@@ -4988,6 +4989,30 @@ Focused native regressions exercise quench-induced spinodal growth, ideal
 diffusion's temperature cancellation, retained traces/history/clock, exact
 thermal-owner round trips, direct small energy increments, flow rebinding,
 analytic piecewise Cp/CpT calorics and atomic domain/cancellation refusals.
+
+### Source-bound temperature cycles
+
+The resolved material field's `temperature_candidate` applies the same numerical
+temperature change and then refreshes every actual homogeneous cell through
+the original liquid-law reference. `BinaryLiquidSquareGradientLaw::at_temperature`
+retains the original pair, concentration, kappa, complete liquid source binding
+and original volume-mismatch allowance. New wrappers are owned through Arc;
+subsequent transport shares the active wrapper without cloning the pair law
+or replacing source claims. `field.network()` exposes the active immutable
+numerical owner for explicit flow rebinding.
+
+Actual density, viscosity, heat capacity and conductivity are queried at the
+new temperature and unchanged paired inventories. Temperature-dependent
+density must still match the fixed-site model; thermal expansion is not
+silently suppressed or accepted by loosening the original tolerance. Any
+material-domain/volume refusal or cancellation discards the entire numerical
+and material candidate. Cooling retains homogeneous spinodal cells until the
+spatial solver itself evolves them. The external free-energy report remains
+distinct from supplied heat.
+
+Integration regressions use real temperature-dependent property curves and
+two-axis density data to exercise heating, cooling, source identity, continued
+transport, strict density/domain refusal and cancellation throughout refresh.
 
 ## Same-energy binary interface tension in capillary flow
 
