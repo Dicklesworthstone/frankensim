@@ -431,7 +431,8 @@ impl<'law> NetworkWallOperator<'law> {
                                 state,
                                 shape.mesh.volumes()[i],
                                 duration,
-                                contact.drag,
+                                contact,
+                                self.caloric[index].as_ref(),
                                 controls,
                                 cancelled,
                             )?
@@ -444,14 +445,10 @@ impl<'law> NetworkWallOperator<'law> {
                     energy: motion.energy,
                     ..state
                 });
-                let thermal_contact = if motion.is_some() {
-                    WallContact {
-                        drag: WallDrag::None,
-                        ..contact
-                    }
-                } else {
-                    contact
-                };
+                let thermal_contact = motion.map_or(contact, |motion| WallContact {
+                    drag: WallDrag::None,
+                    ..motion.contact
+                });
                 let update = self.exchange_for(
                     index,
                     thermal_state,
@@ -462,7 +459,15 @@ impl<'law> NetworkWallOperator<'law> {
                     &mut *cancelled,
                 )?;
                 let update = match motion {
-                    Some(motion) => recoil::finish(update, motion, controls)?,
+                    Some(motion) => recoil::finish(
+                        update,
+                        motion,
+                        contact,
+                        self.caloric[index].as_ref(),
+                        state.energy,
+                        shape.mesh.volumes()[i],
+                        controls,
+                    )?,
                     None => update,
                 };
                 if let Some(transport) = self.transport.as_mut() {

@@ -4392,19 +4392,33 @@ a full workspace verdict or measured-material validation.
 `NetworkWallOperator::with_finite_supports` binds optional independent
 `SlidingSupport` masses/velocities in the original branch/cell order. Selected
 supports replace prescribed wall motion, retain authored or source-refreshed
-resistance, and use the original exact reduced-mass recoil mechanics. All slip
-loss thermalizes once in gas sensible energy. The existing local,
+resistance, and use the original exact reduced-mass recoil mechanics. By default
+all slip loss thermalizes once in gas sensible energy. The existing local,
 material-caloric, shared-thermal and conduction owner then advances heat with
 drag disabled; no thermal inventory is copied or reconstructed. Both material
 transport endpoint checks use actual support-relative slip, and the accepted
 contact retains the returned support velocity.
 
+`with_finite_support_heat_partition` instead supplies each independent support's
+declared gas fraction. The remainder heats its original finite local wall before
+the existing conduction/heat owner runs. Material capacity uses its exact
+integral and inverse; native internal-energy plateaus retain latent inventory.
+Mechanical closure admits internal energy or explicitly negligible expansion,
+not unqualified enthalpy or generic sensible capacity. The wall's thermal amount
+is already part of the support inertia. Shared thermal inventories require their
+own coupled owner and cannot be duplicated as local frictional heat stores.
+The thermal phase retains the original film and conduction owner, including
+implicit endpoint evaluation when selected. Its receipt uses the complete original-to-returned wall
+storage difference; frictional wall heat is an internal transfer out of gas,
+not an additional source. All-gas partition preserves the existing default.
+
 Support candidates follow the same begin-trial, source-half, retry and publish
 lifecycle as gas and walls. Workspaces allocate at attachment; stepping adds no
 allocations or clock. Read-only support states and per-cell `SupportExchange`
 receipts retain actual complete support endpoint impulse/kinetic change and
-accumulated friction-only gas impulse/energy. Independent dimensional momentum
-and energy budgets reject before publication.
+accumulated friction-only gas impulse/energy and wall heating. Its friction-stage
+energy balance includes gas, support kinetic and wall storage. Independent
+dimensional momentum and energy budgets reject before publication.
 `NetworkWallReport.mechanical_work_to_gas_j` includes finite-support work as
 internal exchange with that support; the support receipt closes this additional
 kinetic storage. Branch axes are not summed.
@@ -4412,14 +4426,14 @@ kinetic storage. Branch axes are not summed.
 Each selected cell has its own mechanical support; identical descriptors do not
 share inertia. Shared thermal storage remains separate. The feature does not
 move geometry, evolve plenum bulk momentum, infer friction coefficients or
-supply multi-cell rigid support dynamics. The all-to-gas slip heat partition is
-explicit; other heat partitions require a jointly coupled thermal owner.
-Five selected-source native tests cover independent analytic recoil/heat
-balance, both halves and endpoint accounting, cancellation/retry,
-material-relative domain checks/Galilean boosts, and unselected identity and
-admission. Two additional full network/shared-thermal source tests were authored
-and parsed but not executed in the delivery environment; no full Cargo,
-material or advection pass is claimed.
+supply multi-cell rigid support dynamics. Seven existing selected-source native
+tests cover analytic recoil/heat balance, both halves, cancellation/retry,
+material-relative domain checks/Galilean boosts, identity, and shared thermal
+composition. Four additional tests cover nonlinear wall heat partitions against
+an independent quadratic heat balance, latent storage, prior accepted-state
+rollback/replay, and physical admission. All eleven passed with the original
+network and mixture implementations; optional material-feature and full Cargo
+verification remain separate.
 
 ### One finite support exchanging momentum with multiple gas amounts
 

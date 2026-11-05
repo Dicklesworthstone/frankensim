@@ -374,6 +374,7 @@ fn thermal_exchange_uses_original_variable_mixture_heat_capacity() {
 mod coupled;
 mod moving_wall;
 mod recoil;
+mod recoil_partition;
 mod shared_recoil;
 mod transport;
 #[cfg(feature = "material")]

@@ -384,6 +384,7 @@ impl BranchSupport {
             gas_energy_change_j: gas_energy,
             kinetic_energy_change_j: kinetic,
             drag_heating_j: heating,
+            wall_slip_heating_j: 0.0,
             momentum_residual_ns: gas_impulse + impulse,
             energy_residual_j: gas_energy + kinetic,
         };
