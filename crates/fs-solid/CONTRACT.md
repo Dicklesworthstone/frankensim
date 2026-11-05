@@ -2995,14 +2995,16 @@ cancellation, budget and late-jump rollback.
   resolution stays with the scenario consumer.
 - `shell` (bead frankensim-b8bxd.9.1): a safe-Rust, deterministic,
   flat, single-patch triangular **estimate-only surrogate** for the Euler-disc
-  base. It combines lumped inertia, edge-spring in-plane resistance, and
-  normal-slope/rotation penalties; it is not a CST plane-stress membrane or a
-  Kirchhoff--Love/isotropic continuum discretisation.
+  base. It combines lumped inertia, CST isotropic plane-stress membrane
+  elasticity, and normal-slope/rotation penalties. The in-plane operator
+  reproduces constant-strain energy and equilibrium with the material's
+  actual Poisson coupling, including auxetic ratios. The bending/rotation
+  terms remain a surrogate, not a Kirchhoff--Love continuum discretisation.
   `ShellPlate::assemble` returns type-separated dense
   `ShellMatrix<Mass>`, `ShellMatrix<Stiffness>`, and optional Rayleigh
   `ShellMatrix<Damping>` operators in node-major `(x,y,z,rx,ry,rz)` order.
-  Each triangle contributes edge-spring, normal-slope, and rotation-gradient
-  surrogate energy; translational and rotary inertia are lumped from the
+  Each triangle contributes exact affine plane-stress membrane energy plus
+  normal-slope and rotation-gradient surrogate energy; translational and rotary inertia are lumped from the
   material card. `ShellSupport` applies three distinct, normal-aligned point
   pinned supports by reducing all translations at those nodes while retaining
   rotations; its normal identifies the plate side and it does not claim a
@@ -3519,7 +3521,13 @@ or experimentally validated material-response claim.
     makes the raw mass array positive-definite. A single free triangular panel has the six
     infinitesimal rigid motions in its stiffness null space; the focused
     `shell_operator` battery verifies this and independently reconstructs the
-    quadratic energy from `Kx`.
+    quadratic energy from `Kx`. Its G1 membrane patch checks compare continuum
+    plane-stress energy on three spatial rungs under normal, biaxial, shear,
+    and combined strains, with positive and negative Poisson ratios and a
+    jointly rotated geometry/displacement frame. Interior forces balance,
+    and prescribed uniaxial extension with Poisson contraction reproduces the
+    independent traction resultant. These checks qualify only the in-plane
+    CST response, not the bending surrogate.
 
 ## Error model
 
@@ -3754,7 +3762,7 @@ preload, modal Rayleigh damping and an 8 s synthetic record (energy balance <
   integration successor); LOBPCG preconditioning hooks.
 - Plate/shell buckling references (needs bending elements — the
   shells bead); the 2D canonical here is the strut.
-- CST plane-stress patch accuracy, Kirchhoff--Love/isotropic-continuum claims,
+- Kirchhoff--Love/bending-continuum claims,
   physical condition-number authority, curved shells, multi-patch/mortar joins,
   NURBS geometry, transverse-shear
   (thick/Reissner--Mindlin) behavior, nonlinear/finite-rotation response,

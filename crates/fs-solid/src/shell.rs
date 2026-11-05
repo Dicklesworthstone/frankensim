@@ -1,10 +1,11 @@
 //! Deterministic, spatial-only flat-plate surrogate assembly.
 //!
-//! This fixture-scale operator assembles lumped inertia, edge-spring in-plane
-//! resistance, and normal-slope/rotation bending penalties on one coplanar,
-//! consistently oriented triangular patch. It is estimate-only: it is neither
-//! a CST plane-stress membrane nor a Kirchhoff--Love/isotropic continuum
-//! discretisation. It is the spatial base used by the Euler-disc ladder; it
+//! This fixture-scale operator assembles lumped inertia, constant-strain
+//! triangle (CST) plane-stress elasticity, and normal-slope/rotation bending
+//! penalties on one coplanar, consistently oriented triangular patch. The
+//! membrane reproduces affine isotropic plane stress, including Poisson
+//! coupling; the bending/rotation model remains an estimate-only surrogate,
+//! not a Kirchhoff--Love continuum. It is the Euler-disc ladder's spatial base; it
 //! does not integrate in time or claim curved, multi-patch IGA shell behavior.
 
 use core::marker::PhantomData;
@@ -605,8 +606,51 @@ impl ShellPlate {
                 );
             }
         }
-        // This is an edge-spring surrogate, not a CST plane-stress membrane.
-        let membrane_scale = self.material.youngs_modulus_pa * thickness * area / 3.0;
+        let positions = triangle.map(|node| self.nodes[node].position_m);
+        let gradients = [
+            scale(
+                cross(normal, sub(positions[2], positions[1])),
+                1.0 / (2.0 * area),
+            ),
+            scale(
+                cross(normal, sub(positions[0], positions[2])),
+                1.0 / (2.0 * area),
+            ),
+            scale(
+                cross(normal, sub(positions[1], positions[0])),
+                1.0 / (2.0 * area),
+            ),
+        ];
+        let tangent = scale(edges[0].0, 1.0 / edges[0].1);
+        let bitangent = cross(normal, tangent);
+        // Exact CST plane stress: decompose the constitutive energy into
+        // trace, normal difference and engineering shear. Every coefficient
+        // is positive for -1 < nu < 0.5, including auxetic materials; the
+        // sum therefore preserves symmetry and positive semidefiniteness.
+        // Unlike edge springs, this includes the actual material's Poisson
+        // coupling and gives the same affine-strain energy on any triangulation.
+        let volume = thickness * area;
+        let e = self.material.youngs_modulus_pa;
+        let nu = self.material.poisson_ratio;
+        for (mode, modulus) in [
+            (0, 0.5 * e / (1.0 - nu)),
+            (1, 0.5 * e / (1.0 + nu)),
+            (2, 0.5 * e / (1.0 + nu)),
+        ] {
+            let entries: [(usize, f64); 9] = core::array::from_fn(|index| {
+                let node = index / 3;
+                let component = index % 3;
+                let gt = dot(gradients[node], tangent);
+                let gb = dot(gradients[node], bitangent);
+                let value = match mode {
+                    0 => gt * tangent[component] + gb * bitangent[component],
+                    1 => gt * tangent[component] - gb * bitangent[component],
+                    _ => gb * tangent[component] + gt * bitangent[component],
+                };
+                (dof(triangle[node], component), value)
+            });
+            add_rank_one(stiffness, self.nodes.len() * 6, &entries, volume * modulus);
+        }
         let bending = self.material.youngs_modulus_pa * thickness.powi(3)
             / (12.0 * (1.0 - self.material.poisson_ratio.powi(2)));
         for ((from, to), (edge, length)) in [
@@ -619,20 +663,6 @@ impl ShellPlate {
         {
             let tangent = scale(edge, 1.0 / length);
             let cross_edge = cross(normal, tangent);
-            let membrane = membrane_scale / (length * length);
-            add_rank_one(
-                stiffness,
-                self.nodes.len() * 6,
-                &[
-                    (dof(from, 0), -tangent[0]),
-                    (dof(from, 1), -tangent[1]),
-                    (dof(from, 2), -tangent[2]),
-                    (dof(to, 0), tangent[0]),
-                    (dof(to, 1), tangent[1]),
-                    (dof(to, 2), tangent[2]),
-                ],
-                membrane,
-            );
             let slope = bending / 3.0;
             add_rank_one(
                 stiffness,
@@ -672,22 +702,6 @@ impl ShellPlate {
         // A triangle-level normal-compatibility term closes the edge-slope
         // rank deficiency without penalizing a rigid motion:
         // grad(w) = n cross omega for w = n dot (omega cross x).
-        let positions = triangle.map(|node| self.nodes[node].position_m);
-        let gradients = [
-            scale(
-                cross(normal, sub(positions[2], positions[1])),
-                1.0 / (2.0 * area),
-            ),
-            scale(
-                cross(normal, sub(positions[0], positions[2])),
-                1.0 / (2.0 * area),
-            ),
-            scale(
-                cross(normal, sub(positions[1], positions[0])),
-                1.0 / (2.0 * area),
-            ),
-        ];
-        let tangent = scale(edges[0].0, 1.0 / edges[0].1);
         for direction in [tangent, cross(normal, tangent)] {
             let mut compatibility = Vec::with_capacity(12);
             for (node, gradient) in triangle.into_iter().zip(gradients) {
@@ -710,7 +724,6 @@ impl ShellPlate {
         // Couple the drilling rotation to the in-plane displacement curl.
         // For a rigid spin omega parallel to n, curl(u) = 2 omega dot n,
         // so this removes only the independent drilling mechanism.
-        let bitangent = cross(normal, tangent);
         let mut drilling = Vec::with_capacity(18);
         for (node, gradient) in triangle.into_iter().zip(gradients) {
             let along_tangent = dot(gradient, tangent);
@@ -726,7 +739,8 @@ impl ShellPlate {
             drilling.push((dof(node, 4), normal[1] / 3.0));
             drilling.push((dof(node, 5), normal[2] / 3.0));
         }
-        add_rank_one(stiffness, self.nodes.len() * 6, &drilling, membrane_scale);
+        let drilling_scale = self.material.youngs_modulus_pa * thickness * area / 3.0;
+        add_rank_one(stiffness, self.nodes.len() * 6, &drilling, drilling_scale);
     }
 
     fn free_dofs(&self, dofs: usize) -> Result<Vec<usize>, ShellError> {
