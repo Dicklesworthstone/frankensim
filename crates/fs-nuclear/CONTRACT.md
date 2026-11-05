@@ -753,3 +753,57 @@ also compiled. The build used actual math, quantity, decay and native thermal
 owners; unrelated thermal module declarations were excluded from that focused
 dependency build. Full workspace Cargo, the complete `fs-couple` crate, examples,
 performance benchmarks and cross-ISA validation were not run for this change.
+
+## Radiative-capture activation on the original irradiation history
+
+`decay::activation::CaptureActivationState` binds an admitted irradiation parent
+to one explicitly identified capture-product node in a `DecayInventory`. The
+binding retains its dataset label and typed `(Z, A, isomer)` identity; admission
+requires the parent's same Z and A+1. Decay-model string identities are never
+parsed or silently matched to an isotope table.
+
+A frozen-flux interval uses the original irradiation removal rate `k_f+k_c` and
+its actual declining parent population. Two private numerical coordinates add
+that parent and a fission-removal sink to the existing positive acyclic decay
+propagator. The capture edge feeds the selected product at `k_c*N_parent(t)`;
+all original daughter half-lives, branches and integrated transformations remain
+active during that interval, including coincident parent-removal/product-decay
+rates. This retains the age distribution of produced nuclei. A uniform mean
+production rate would give a different inventory and heat history.
+
+The original irradiation owner remains authoritative for parent depletion,
+fission and capture counts, prompt release and effective delayed fission-energy
+reservoirs. Its capture energy coefficient must represent prompt capture energy;
+subsequent activation-product decay release belongs to the decay inventory.
+Numerical parent endpoints and capture/fission counts are checked against the
+original irradiation candidate before its actual capture count is entered in
+the product production ledger. Noncancelling discrepancies and existing owner
+roundoff must fit the joint absolute nucleus and energy allowances. Export
+roundoff is charged separately for each energy destination, both in the shared
+decay ledger and when joining irradiation/product release; opposite channel
+errors cannot cancel. Positive defect totals round conservatively at an
+allowance boundary.
+
+Both histories and the prepared-map cache publish together only after the
+complete trial succeeds; any refusal or checkpoint error preserves the accepted
+state. The immutable map is reused for the exact reaction-rate pair, duration
+and propagation limits. The two private coordinates count against node, edge
+and work limits, leaving at most 62 physical product nodes. Zero flux stops new
+production while accepted product populations and fission-energy reservoirs
+continue decaying. Flux, temperature-domain and group-grid admission remain with
+the original irradiation data.
+
+This adapter preserves existing irradiation semantics. It does not infer isotope
+cross sections, fission yields, product recapture, spontaneous decay of the
+irradiation parent, neutron balance or an emitted-particle mass/charge ledger.
+Use an explicitly authored reaction-network owner for those different model
+requirements; this binding does not silently replace either original history.
+
+The separation of prompt capture and subsequent induced-radioactivity emission
+follows the distinction described in the [IAEA neutron activation training
+material](https://nucleus.iaea.org/sites/connect/RRIHpublic/CompendiumDB/Shared%20Documents/Malaysia/Protocols%20in%20PDF/MalaysiaProtocol_NeutronActivationAnalysis.pdf).
+Coefficients and half-lives remain caller-supplied, identified data; synthetic
+verification fixtures are not a calibrated isotope library. Regressions cover
+analytic equal/distinct rates, competing capture/fission energy, shutdown,
+interval composition, restart/cache reuse, channel export and atomic binding,
+budget, range and cancellation refusals.

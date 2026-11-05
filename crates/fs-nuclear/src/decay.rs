@@ -13,8 +13,9 @@
 //! bound to the same immutable model; application is quadratic in node count.
 //!
 //! The base advance is closed and acyclic; [`production`] adds explicitly
-//! prescribed production throughout an interval. Neither operation infers
-//! irradiation, fission yields, rate feedback or radiation transport. One
+//! prescribed production throughout an interval. [`activation`] couples an
+//! explicitly bound capture product to the original irradiation history. These
+//! operations do not infer fission yields, rate feedback or radiation transport. One
 //! retained daughter per event does not assert conservation of nuclear
 //! mass/charge without emitted-particle data.
 
@@ -31,6 +32,9 @@ pub mod thermal;
 
 /// Prescribed production during decay and source-bound production schedules.
 pub mod production;
+
+/// Radiative-capture products on the original neutron-irradiation history.
+pub mod activation;
 
 /// A dataset-owned nuclide identity and its immutable admitted half-life law.
 #[derive(Clone, Debug, PartialEq)]
@@ -416,15 +420,14 @@ impl DecayInventory {
             let error = add(&mut next.produced[index], production)?.abs();
             add(&mut population_error, error)?;
         }
-        let released = channel_values(released);
-        checked(released.total_j())?;
+        let released = export_channels(released, &mut energy_error)?;
         for (total, energy) in next.released.iter_mut().zip(channel_array(released)) {
             let error = add(total, energy)?.abs();
             add(&mut energy_error, error)?;
         }
         checked(channel_values(next.released).total_j())?;
-        let population_roundoff_nuclei = checked(population_error.value())?;
-        let energy_roundoff_j = checked(energy_error.value())?;
+        let population_roundoff_nuclei = defect_bound(population_error)?;
+        let energy_roundoff_j = defect_bound(energy_error)?;
         if population_roundoff_nuclei > budget.nuclei_tolerance {
             return Err(DecayError::Budget("population accounting roundoff"));
         }
@@ -531,6 +534,33 @@ fn product(a: f64, b: f64) -> Result<f64, DecayError> {
 }
 fn add(target: &mut Accumulator, value: f64) -> Result<f64, DecayError> {
     target.add(value).map_err(|_| DecayError::Arithmetic)
+}
+
+// A thermal receiver consumes the exported channel values, so retained low
+// parts lost at this boundary must be charged separately for each destination.
+fn export_channels(
+    channels: [Accumulator; 3],
+    defects: &mut Accumulator,
+) -> Result<EnergyChannels, DecayError> {
+    let released = channel_values(channels);
+    checked(released.total_j())?;
+    for (total, value) in channels.iter().zip(channel_array(released)) {
+        let error = checked(sum(&[total.hi, total.lo, -value]))?.abs();
+        add(defects, error)?;
+    }
+    Ok(released)
+}
+
+// Nonnegative defect totals round upward if an unresolved low part would
+// otherwise disappear exactly at the caller's representable allowance.
+fn defect_bound(total: Accumulator) -> Result<f64, DecayError> {
+    let rounded = checked(total.value())?;
+    let remainder = checked(sum(&[total.hi, total.lo, -rounded]))?;
+    if remainder > 0.0 {
+        checked(rounded.next_up())
+    } else {
+        Ok(rounded)
+    }
 }
 
 #[cfg(test)]
