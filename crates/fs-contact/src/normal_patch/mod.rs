@@ -25,3 +25,6 @@ pub mod maugis;
 
 /// Source-preserving spatial tractions and conservative annular patch transfer.
 pub mod traction;
+
+/// Signed-gap source-law ports with conservative work and atomic receiver admission.
+pub mod source_port;

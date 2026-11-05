@@ -2947,3 +2947,11 @@ cover analytical series compliance, cap softening and redistribution, no spuriou
 intermediate dent, plastic plateau travel, unloading, retained histories, work
 closure and transactional refusals. These are synthetic G1/G3 model checks, not
 experimental validation, a loading-machine dynamic model, or bulk plasticity.
+
+## Conservative signed-gap source normal port
+
+`normal_patch::source_port::SourceNormalPathPort` embeds an original `NormalLawSource` in a fixed spatial normal and moment frame. It retains signed separation for adhesive laws, uses the selected source branch and its exact mean-force/work protocol, and exposes equal-and-opposite force and moment wrenches. Translation and rotation increments must be integrated spatial twists about the same common moment origin; the adapter checks their relative normal displacement against the supplied gap change before receiver admission.
+
+Source potential change versus signed source work and actual receiver wrench work versus source work have independent acceptance gates. Large rigid-body motion cannot silently replace the relative-gap work check. Original Hertz rate and duration limits remain active; a Hunt–Crossley source with nonzero dissipation is refused because this conservative port has no dissipative work receipt. Undefined branch evaluations remain source refusals rather than clipped force or invented detachment events.
+
+The receiving callback stages downstream state. Time, approach, energy, and accepted-step count publish only after all source, motion, work, callback, and cancellation checks succeed. Force, energy, rate, duration, and step-count budgets are explicit. Stepping uses fixed-size adapter state without a new solver or heap scratch. Frame changes, snap transitions, and frictional or caloric heat evolution require their respective owning protocols.
