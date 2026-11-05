@@ -1,5 +1,6 @@
 //! Two finite bodies exchanging heat through one pair of gray gap surfaces.
 
+use super::super::contact::{ImplicitContactLaw, ImplicitContactState};
 use super::super::{ImplicitConductionLaw, ImplicitConductionState};
 use super::{ImplicitLinkLaw, ImplicitLinkState};
 use crate::enthalpy::conduction::ConductiveLink;
@@ -55,6 +56,8 @@ pub struct GrayRadiativeResponse {
 /// reduce to epsilon_eff = 1 / (1/epsilon_A + 1/epsilon_B - 1). See the original
 /// theory at <https://mooseframework.inl.gov/modules/heat_transfer/>.
 /// Fixed emissivities, gap HTC and two coating resistances are explicit inputs.
+/// `with_gap_resistance` can replace the gap HTC with an original two-sided
+/// nonradiative contact law at the ordered bulk enthalpies.
 ///
 /// Each original half-cell retains its own cellwise k(h), including its complete
 /// enthalpy derivative on latent plateaus. Its coating is in series BEFORE its
@@ -68,13 +71,20 @@ pub struct GrayRadiativeResponse {
 /// its original entropy production. No prescribed bath, extra surface storage,
 /// enclosure solver, profile-integrated k(T), source-dependent emissivity,
 /// near-field radiation or participating-medium transport is introduced.
-/// Every successful evaluation is allocation-free.
+/// The face kernel allocates nothing; a supplied source law retains its own
+/// evaluation costs and is queried once per enthalpy trial.
 pub struct GrayRadiativeLink<'a> {
     materials: [&'a dyn ImplicitConductionLaw; 2],
     effective_emissivity: f64,
     gap_htc_w_m2_k: f64,
+    gap_resistance: Option<BoundGapResistance<'a>>,
     coating_resistances_m2_k_w: [f64; 2],
     controls: GrayRadiativeControls,
+}
+
+struct BoundGapResistance<'a> {
+    law: &'a dyn ImplicitContactLaw,
+    bounds_j_kg: [[f64; 2]; 2],
 }
 
 impl<'a> GrayRadiativeLink<'a> {
@@ -112,9 +122,58 @@ impl<'a> GrayRadiativeLink<'a> {
             materials,
             effective_emissivity,
             gap_htc_w_m2_k,
+            gap_resistance: None,
             coating_resistances_m2_k_w,
             controls,
         })
+    }
+
+    /// Compose one original NONRADIATIVE gap resistance with gray radiation.
+    ///
+    /// The source's area-specific R(h_A,h_B) is evaluated at the actual ordered
+    /// BULK enthalpies, using its own temperature/phase chain rules. The solved
+    /// surface temperatures do not replace those source coordinates. Pressure,
+    /// separation and other external source conditions remain explicitly fixed
+    /// by that law. Its entire resistance must describe only the conducting
+    /// gap: do not pass a total transfer coefficient that already includes
+    /// radiation, bulk half cells or the explicit coating resistances.
+    ///
+    /// The constructor's gap HTC must be zero and attachment may occur once.
+    /// Both caloric objects must match the same ordered original materials.
+    /// Actual source states are probed by native link attachment and every
+    /// subsequent trial. Each must have strictly positive finite R; perfect
+    /// contact, extrapolation and unrepresentable reciprocals refuse explicitly.
+    /// Attach the composed link only through `with_link_laws`, not separately
+    /// through `with_contacts`. Both full dR/dh contributions enter the original
+    /// two-surface tangent, including latent-phase resistance feedback.
+    pub fn with_gap_resistance(
+        mut self,
+        law: &'a dyn ImplicitContactLaw,
+    ) -> Result<Self, DepositionError> {
+        if self.gap_resistance.is_some() || self.gap_htc_w_m2_k != 0.0 {
+            return Err(DepositionError::InvalidInput(
+                "gray gap source must uniquely replace zero authored gap HTC",
+            ));
+        }
+        let caloric = law.caloric_laws();
+        let bounds_j_kg = law.enthalpy_bounds_j_kg();
+        for side in 0..2 {
+            let [lo, hi] = bounds_j_kg[side];
+            if !lo.is_finite()
+                || !hi.is_finite()
+                || lo >= hi
+                || !std::ptr::addr_eq(
+                    self.materials[side].caloric_law() as *const dyn ThermalLaw,
+                    caloric[side] as *const dyn ThermalLaw,
+                )
+            {
+                return Err(DepositionError::InvalidInput(
+                    "gray gap source requires finite bounds and original ordered caloric objects",
+                ));
+            }
+        }
+        self.gap_resistance = Some(BoundGapResistance { law, bounds_j_kg });
+        Ok(self)
     }
 
     /// Resolve both surfaces, their original balance and analytic tangents.
@@ -145,7 +204,11 @@ impl<'a> GrayRadiativeLink<'a> {
         ];
         let temperatures = [states[0].temperature_k, states[1].temperature_k];
         let conductivities = [states[0].conductivity_w_m_k, states[1].conductivity_w_m_k];
-        let disconnected = self.effective_emissivity == 0.0 && self.gap_htc_w_m2_k == 0.0;
+        // Query the original gap once, even if a bulk later proves insulating.
+        // Neither an insulation shortcut nor surface Newton may hide source
+        // domain failures or replace the declared bulk-state coordinates.
+        let (gap_htc, gap_state) = self.gap_at(enthalpies_j_kg, checkpoint)?;
+        let disconnected = self.effective_emissivity == 0.0 && gap_htc == 0.0;
         if disconnected || conductivities.contains(&0.0) {
             let surfaces = match (conductivities[0] == 0.0, conductivities[1] == 0.0) {
                 (false, false) => Some(temperatures),
@@ -184,7 +247,7 @@ impl<'a> GrayRadiativeLink<'a> {
         let delta = finite(temperatures[0] - temperatures[1])?;
         // x=(Tsa-Tsb)/(Ta-Tb); never subtract rounded surface temperatures or
         // divide by a small bulk delta. Positive passivity brackets x in [0,1].
-        let mut x = fraction(bulk, self.coefficients(temperatures)?.0);
+        let mut x = fraction(bulk, self.coefficients(temperatures, gap_htc)?.0);
         let (mut lo, mut hi) = (0.0, 1.0);
         for iterations in 1..=self.controls.maximum_iterations {
             checkpoint()?;
@@ -192,11 +255,11 @@ impl<'a> GrayRadiativeLink<'a> {
                 (-weights[0] * (1.0 - x)).mul_add(delta, temperatures[0]),
                 (weights[1] * (1.0 - x)).mul_add(delta, temperatures[1]),
             ];
-            let (surface_g, slopes, radiation_g) = self.coefficients(surfaces)?;
+            let (surface_g, slopes, radiation_g) = self.coefficients(surfaces, gap_htc)?;
             let g = finite(area * series(bulk, surface_g))?;
             let power = finite(g * delta)?;
             let surface_delta = x * delta;
-            let gap = finite(area * self.gap_htc_w_m2_k * surface_delta)?;
+            let gap = finite(area * gap_htc * surface_delta)?;
             let radiation = finite(area * radiation_g * surface_delta)?;
             let surface_power = finite(gap + radiation)?;
             let conducted = finite(area * bulk * ((1.0 - x) * delta))?;
@@ -226,7 +289,7 @@ impl<'a> GrayRadiativeLink<'a> {
                             * (states[1].conductivity_slope_kg_w_m_k_j / conductivities[1]),
                     )?,
                 ];
-                let derivatives = [
+                let mut derivatives = [
                     finite(
                         area * (bulk * (slopes[0] / scale) / denominator)
                             * finite(states[0].temperature_slope_kg_k_j + conductivity_terms[0])?,
@@ -237,6 +300,21 @@ impl<'a> GrayRadiativeLink<'a> {
                             * finite(states[1].temperature_slope_kg_k_j - conductivity_terms[1])?,
                     )?,
                 ];
+                if let Some(state) = gap_state {
+                    // At fixed surfaces dQ/dR = -Q_gap/R. Their response gives
+                    // D=1+ra*F'_a+rb*F'_b, so the additional full derivative is
+                    // -Q_gap * R'_i / (R*D). This normalized 1/(R*D) avoids
+                    // forming R^2, a reciprocal derivative, or an overflowing D.
+                    let factor = finite(bulk * (gap_htc / scale) / denominator)?;
+                    for side in 0..2 {
+                        let feedback = finite(
+                            gap * finite(
+                                factor * state.resistance_enthalpy_derivatives_m2_kg_k_w_j[side],
+                            )?,
+                        )?;
+                        derivatives[side] = finite(derivatives[side] - feedback)?;
+                    }
+                }
                 let link = ImplicitLinkState {
                     conductance_w_k: g,
                     power_enthalpy_derivatives_w_kg_j: derivatives,
@@ -298,9 +376,40 @@ impl<'a> GrayRadiativeLink<'a> {
         Ok(state)
     }
 
-    fn coefficients(&self, t: [f64; 2]) -> Result<(f64, [f64; 2], f64), DepositionError> {
+    fn gap_at(
+        &self,
+        enthalpies: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(f64, Option<ImplicitContactState>), DepositionError> {
+        let Some(bound) = &self.gap_resistance else {
+            return Ok((self.gap_htc_w_m2_k, None));
+        };
+        for (h, [lo, hi]) in enthalpies.into_iter().zip(bound.bounds_j_kg) {
+            if !h.is_finite() || !(lo..=hi).contains(&h) {
+                return Err(DepositionError::MaterialDomain);
+            }
+        }
+        checkpoint()?;
+        let state = bound.law.state_at_specific_enthalpies(enthalpies)?;
+        state.admit()?;
+        if !positive(state.resistance_m2_k_w) {
+            return Err(DepositionError::MaterialDomain);
+        }
+        let htc = finite(state.resistance_m2_k_w.recip())?;
+        if !positive(htc) {
+            return Err(DepositionError::Arithmetic);
+        }
+        checkpoint()?;
+        Ok((htc, Some(state)))
+    }
+
+    fn coefficients(
+        &self,
+        t: [f64; 2],
+        gap_htc: f64,
+    ) -> Result<(f64, [f64; 2], f64), DepositionError> {
         let mut radiation = 0.0;
-        let mut slopes = [self.gap_htc_w_m2_k; 2];
+        let mut slopes = [gap_htc; 2];
         if self.effective_emissivity != 0.0 {
             let scale = self.effective_emissivity * SIGMA;
             radiation = finite(scale * (t[0] + t[1]) * t[0].mul_add(t[0], t[1] * t[1]))?;
@@ -309,7 +418,7 @@ impl<'a> GrayRadiativeLink<'a> {
                     finite(slopes[side] + ((4.0 * scale * t[side]) * t[side]) * t[side])?;
             }
         }
-        Ok((finite(self.gap_htc_w_m2_k + radiation)?, slopes, radiation))
+        Ok((finite(gap_htc + radiation)?, slopes, radiation))
     }
 }
 

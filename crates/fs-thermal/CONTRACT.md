@@ -1917,6 +1917,29 @@ and energy owners remain unchanged. Zero bulk conductivity insulates this link;
 undetermined disconnected massless surface temperatures are reported as `None`.
 Domain, arithmetic, scalar budget and cancellation failures publish no response.
 
+`GrayRadiativeLink::with_gap_resistance` composes an original `ImplicitContactLaw`
+with this same radiative face solve. Its strictly positive area-specific resistance
+must represent only NONRADIATIVE gap transport; bulk half cells, explicit coating
+resistances and radiation must not already be included. The fixed gap HTC must
+be zero, attachment is unique, and the ordered caloric objects must match the
+original bodies. The source is queried once per enthalpy trial at its original
+ordered bulk enthalpies, with its own temperature/phase chain rules and fixed
+external pressure, separation and history coordinates. Solved face temperatures
+are not substituted into that source's coordinates.
+
+The same surfaces exchange `Qgap=A*(Tsa-Tsb)/R(h_a,h_b)` in parallel with gray
+radiation. Both full enthalpy derivatives retain the additional
+`-Qgap*(dR/dh_i)/(R*D)`, where `D=1+ra*dq/dTsa-rb*dq/dTsb` is the positive
+surface-response denominator. Normalized factors avoid squaring R or forming an
+overflowing reciprocal derivative. Latent-phase resistance feedback survives
+when `dT/dh=0`. Source domains and positive finite resistance are checked before
+insulation shortcuts; zero R is explicitly outside this finite-gap composition.
+The native contact and complete-link attachment rules reject a second owner of
+the same face. No extra heat, resistance, reservoir entropy or solver is added.
+Focused regressions compare independent surface/tangent and BE/SDIRK endpoint
+references, recover the original nonradiative source-contact solution, and check
+original source coordinates, query count, identity, domain and cancellation.
+
 The fixed gray/full-view, cellwise-conductivity and fixed-geometry approximation
 is explicit. This does not replace the existing general-enclosure radiosity
 owner or supply source-dependent emissivity, profile-integrated k(T), near-field

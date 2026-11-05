@@ -1,6 +1,8 @@
 //! Two finite stores, independent surface balances and original time quadrature.
+use super::super::contact::{ImplicitContactLaw, ImplicitContactState};
 use super::super::link::{GrayRadiativeControls, GrayRadiativeLink};
 use super::*;
+use std::cell::Cell;
 
 const SIGMA: f64 = 5.670_374_419e-8;
 
@@ -410,6 +412,7 @@ struct Reference<'a> {
     coatings: [f64; 2],
     eps: [f64; 2],
     htc: f64,
+    gap: Option<&'a Gap<'a>>,
     area: f64,
 }
 impl Reference<'_> {
@@ -426,7 +429,8 @@ impl Reference<'_> {
             self.distances[1] / self.materials[1].conductivity_w_m_k(h[1]).unwrap()
                 + self.coatings[1],
         ];
-        self.area * flux(self.temperatures(h), resistance, self.eps, self.htc)
+        let htc = self.gap.map_or(self.htc, |gap| 1.0 / gap.resistance(h));
+        self.area * flux(self.temperatures(h), resistance, self.eps, htc)
     }
     // Reduce the independent endpoint balance to one transferred energy E,
     // preserving the unequal reference masses and both original caloric laws.
@@ -469,6 +473,7 @@ fn finite_unequal_mass_bodies_use_original_be_storage_and_entropy_on_chain_and_g
             coatings: [0.01, 0.02],
             eps: [0.8, 0.6],
             htc: 6.0,
+            gap: None,
             area: 0.7,
         };
         let initial = [800.0, if plateau { 400.0 } else { 250.0 }];
@@ -567,6 +572,7 @@ fn finite_bodies_use_original_sdirk_stages_for_internal_heat_and_entropy() {
             coatings: [0.01, 0.02],
             eps: [0.8, 0.6],
             htc: 6.0,
+            gap: None,
             area: 0.7,
         };
         let initial = [800.0, if plateau { 400.0 } else { 250.0 }];
@@ -711,6 +717,405 @@ fn gray_links_refuse_ambiguous_faces_source_extrapolation_exhaustion_and_cancell
     assert!(
         chain
             .with_link_laws(&thermal, &[(7, &wrong)], || Ok(()))
+            .is_err()
+    );
+    assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, 800.0);
+    assert_eq!(thermal.cells()[&CellId(1)].specific_h_j_kg, 300.0);
+}
+
+// Explicit original bulk-enthalpy resistance, including a phase-sensitive
+// contribution when dT/dh is zero. Counters observe source-query ownership.
+struct Gap<'a> {
+    materials: [&'a Material; 2],
+    bounds: [[f64; 2]; 2],
+    offset: f64,
+    slopes: [f64; 2],
+    queries: Cell<usize>,
+    last_h: Cell<[f64; 2]>,
+}
+impl<'a> Gap<'a> {
+    fn new(materials: [&'a Material; 2]) -> Self {
+        Self {
+            materials,
+            bounds: [[100.0, 1000.0]; 2],
+            offset: 0.01,
+            slopes: [1e-4, -1e-5],
+            queries: Cell::new(0),
+            last_h: Cell::new([0.0; 2]),
+        }
+    }
+    fn resistance(&self, h: [f64; 2]) -> f64 {
+        self.offset + self.slopes[0] * h[0] + self.slopes[1] * h[1]
+    }
+}
+impl ImplicitContactLaw for Gap<'_> {
+    fn caloric_laws(&self) -> [&dyn ThermalLaw; 2] {
+        [self.materials[0], self.materials[1]]
+    }
+    fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
+        self.bounds
+    }
+    fn state_at_specific_enthalpies(
+        &self,
+        h: [f64; 2],
+    ) -> Result<ImplicitContactState, DepositionError> {
+        self.queries.set(self.queries.get() + 1);
+        self.last_h.set(h);
+        if h.into_iter()
+            .zip(self.bounds)
+            .any(|(h, [lo, hi])| !(lo..=hi).contains(&h))
+        {
+            return Err(DepositionError::MaterialDomain);
+        }
+        Ok(ImplicitContactState {
+            resistance_m2_k_w: self.resistance(h),
+            resistance_enthalpy_derivatives_m2_kg_k_w_j: self.slopes,
+        })
+    }
+}
+
+#[test]
+fn source_gap_shares_radiating_surfaces_and_preserves_sensible_and_latent_tangents() {
+    let materials = [material(true, 2.0, 0.0), material(false, 3.0, 0.0)];
+    let laws = [&materials[0], &materials[1]];
+    let gap = Gap::new(laws);
+    let (distances, coatings, area, eps) = ([0.1, 0.07], [0.01, 0.02], 0.8, [0.7, 0.9]);
+    let resistance = [
+        distances[0] / 2.0 + coatings[0],
+        distances[1] / 3.0 + coatings[1],
+    ];
+    let exchange = GrayRadiativeLink::new(
+        laws.map(|m| m as &dyn ImplicitConductionLaw),
+        eps,
+        0.0,
+        coatings,
+        GrayRadiativeControls::default(),
+    )
+    .unwrap()
+    .with_gap_resistance(&gap)
+    .unwrap();
+    let oracle = |h: [f64; 2]| {
+        area * flux(
+            [
+                laws[0].temperature_k(h[0]).unwrap(),
+                laws[1].temperature_k(h[1]).unwrap(),
+            ],
+            resistance,
+            eps,
+            1.0 / gap.resistance(h),
+        )
+    };
+    for h in [[400.0, 650.0], [700.0, 250.0]] {
+        let before = gap.queries.get();
+        let response = exchange
+            .evaluate(h, geometry(distances), patch(area), &mut || Ok(()))
+            .unwrap();
+        assert_eq!(gap.queries.get(), before + 1);
+        assert_eq!(gap.last_h.get(), h);
+        assert!(response.iterations > 1);
+        let q = oracle(h) / area;
+        let t = [
+            laws[0].temperature_k(h[0]).unwrap(),
+            laws[1].temperature_k(h[1]).unwrap(),
+        ];
+        let surfaces = [t[0] - resistance[0] * q, t[1] + resistance[1] * q];
+        near(response.power_w, area * q, 2e-8);
+        for side in 0..2 {
+            near(
+                response.surface_temperatures_k.unwrap()[side],
+                surfaces[side],
+                2e-10,
+            );
+            let (mut plus, mut minus) = (h, h);
+            plus[side] += 0.001;
+            minus[side] -= 0.001;
+            near(
+                response.link.power_enthalpy_derivatives_w_kg_j[side],
+                (oracle(plus) - oracle(minus)) / 0.002,
+                2e-7,
+            );
+        }
+        near(
+            response.gap_power_w,
+            area * (surfaces[0] - surfaces[1]) / gap.resistance(h),
+            2e-8,
+        );
+        near(
+            response.power_w,
+            response.gap_power_w + response.radiation_power_w,
+            2e-8,
+        );
+        if h[0] == 400.0 {
+            assert_eq!(
+                laws[0]
+                    .state_at_specific_enthalpy(h[0])
+                    .unwrap()
+                    .temperature_slope_kg_k_j,
+                0.0
+            );
+            // k is constant here: this derivative can ONLY come from R'(h).
+            assert!(response.link.power_enthalpy_derivatives_w_kg_j[0].abs() > 1e-4);
+        }
+    }
+}
+
+#[test]
+fn variable_gap_updates_original_be_and_sdirk_heat_and_entropy_on_chain_and_graph() {
+    for plateau in [false, true] {
+        let materials = [material(false, 0.8, 0.002), material(plateau, 0.5, 0.002)];
+        let laws = [&materials[0], &materials[1]];
+        let gap = Gap::new(laws);
+        let reference = Reference {
+            materials: laws,
+            masses: [2.0, 3.0],
+            distances: [0.04, 0.08],
+            coatings: [0.01, 0.02],
+            eps: [0.8, 0.6],
+            htc: 0.0,
+            gap: Some(&gap),
+            area: 0.7,
+        };
+        let initial = [800.0, if plateau { 400.0 } else { 250.0 }];
+        let dt = 0.05;
+        let (thermal, observer) = pair(
+            laws,
+            initial,
+            reference.masses,
+            geometry(reference.distances),
+            reference.area,
+        );
+        let exchange = GrayRadiativeLink::new(
+            laws.map(|m| m as &dyn ImplicitConductionLaw),
+            reference.eps,
+            0.0,
+            reference.coatings,
+            GrayRadiativeControls::default(),
+        )
+        .unwrap()
+        .with_gap_resistance(&gap)
+        .unwrap();
+        let bindings: [(MaterialId, &dyn ImplicitConductionLaw); 2] =
+            [(MaterialId(0), laws[0]), (MaterialId(1), laws[1])];
+        let chain = ImplicitConductionChain::new(&thermal, &observer, &bindings, || Ok(()))
+            .unwrap()
+            .with_link_laws(&thermal, &[(7, &exchange)], || Ok(()))
+            .unwrap();
+        let graph = ImplicitConductionGraph::new(
+            &thermal,
+            &observer,
+            &bindings,
+            ImplicitConductionLinearControls::default(),
+            || Ok(()),
+        )
+        .unwrap()
+        .with_link_laws(&thermal, &[(7, &exchange)], || Ok(()))
+        .unwrap();
+        let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+        for sdirk in [false, true] {
+            let (expected, generation) = if sdirk {
+                let gamma = 1.0 - 1.0 / 2.0_f64.sqrt();
+                let first = reference.stage(initial, gamma * dt);
+                let earlier = (1.0 - gamma) * dt * reference.power(first);
+                let base = [
+                    initial[0] - earlier / reference.masses[0],
+                    initial[1] + earlier / reference.masses[1],
+                ];
+                let expected = reference.stage(base, gamma * dt);
+                (
+                    expected,
+                    dt * ((1.0 - gamma) * reference.generation(first)
+                        + gamma * reference.generation(expected)),
+                )
+            } else {
+                let expected = reference.stage(initial, dt);
+                (expected, dt * reference.generation(expected))
+            };
+            let results = if sdirk {
+                [
+                    chain.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())),
+                    graph.advance_sdirk2_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())),
+                ]
+            } else {
+                [
+                    chain.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())),
+                    graph.advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(())),
+                ]
+            };
+            for result in results {
+                let (next, report) = result.unwrap();
+                for side in 0..2 {
+                    near(
+                        next.cells()[&CellId(side as u64)].specific_h_j_kg,
+                        expected[side],
+                        2e-9,
+                    );
+                }
+                near(report.energy.external_heat_j, 0.0, 0.0);
+                near(report.energy.residual_j, 0.0, 1e-9);
+                near(report.entropy.reservoir_entropy_input_j_k, 0.0, 0.0);
+                near(report.entropy.conduction_generation_j_k, generation, 2e-10);
+                assert!(report.entropy.conduction_generation_j_k > 0.0);
+                assert!(!report.entropy.has_unclassified_sources);
+                assert_eq!(report.energy.substeps, 1);
+                if plateau {
+                    assert_eq!(next.temperature_k(CellId(1)).unwrap(), 300.0);
+                }
+            }
+        }
+        assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, initial[0]);
+        assert_eq!(thermal.cells()[&CellId(1)].specific_h_j_kg, initial[1]);
+    }
+}
+
+#[test]
+fn zero_emissivity_recovers_original_source_contact_without_an_extra_bulk_resistance() {
+    let materials = [material(false, 0.8, 0.002), material(true, 0.5, 0.002)];
+    let laws = [&materials[0], &materials[1]];
+    let gap = Gap::new(laws);
+    let (initial, masses, distances, area, dt) =
+        ([800.0, 400.0], [2.0, 3.0], [0.04, 0.08], 0.7, 0.05);
+    let exchange = GrayRadiativeLink::new(
+        laws.map(|m| m as &dyn ImplicitConductionLaw),
+        [0.0; 2],
+        0.0,
+        [0.0; 2],
+        GrayRadiativeControls::default(),
+    )
+    .unwrap()
+    .with_gap_resistance(&gap)
+    .unwrap();
+    let response = exchange
+        .evaluate(initial, geometry(distances), patch(area), &mut || Ok(()))
+        .unwrap();
+    let resistance = distances[0] / laws[0].conductivity_w_m_k(initial[0]).unwrap()
+        + gap.resistance(initial)
+        + distances[1] / laws[1].conductivity_w_m_k(initial[1]).unwrap();
+    near(response.link.conductance_w_k, area / resistance, 1e-12);
+    assert_eq!(response.radiation_power_w, 0.0);
+    let (thermal, observer) = pair(laws, initial, masses, geometry(distances), area);
+    let bindings: [(MaterialId, &dyn ImplicitConductionLaw); 2] =
+        [(MaterialId(0), laws[0]), (MaterialId(1), laws[1])];
+    let legacy = ImplicitConductionChain::new(&thermal, &observer, &bindings, || Ok(()))
+        .unwrap()
+        .with_contacts(&thermal, &[(7, &gap)], || Ok(()))
+        .unwrap();
+    let composed = ImplicitConductionChain::new(&thermal, &observer, &bindings, || Ok(()))
+        .unwrap()
+        .with_link_laws(&thermal, &[(7, &exchange)], || Ok(()))
+        .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (expected, old_report) = legacy
+        .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        .unwrap();
+    let (next, report) = composed
+        .advance_to(&thermal, dt, controls(dt), &mut workspace, || Ok(()))
+        .unwrap();
+    for side in 0..2 {
+        near(
+            next.cells()[&CellId(side as u64)].specific_h_j_kg,
+            expected.cells()[&CellId(side as u64)].specific_h_j_kg,
+            2e-9,
+        );
+    }
+    near(report.energy.residual_j, old_report.energy.residual_j, 1e-9);
+    near(
+        report.entropy.conduction_generation_j_k,
+        old_report.entropy.conduction_generation_j_k,
+        2e-10,
+    );
+    assert!(
+        legacy
+            .with_link_laws(&thermal, &[(7, &exchange)], || Ok(()))
+            .is_err()
+    );
+    assert!(
+        composed
+            .with_contacts(&thermal, &[(7, &gap)], || Ok(()))
+            .is_err()
+    );
+}
+
+#[test]
+fn gap_source_identity_bounds_finite_resistance_and_cancellation_refuse_without_publication() {
+    let materials = [material(false, 2.0, 0.0), material(false, 3.0, 0.0)];
+    let laws = [&materials[0], &materials[1]];
+    let gap = Gap::new(laws);
+    let make = |htc| {
+        GrayRadiativeLink::new(
+            laws.map(|m| m as &dyn ImplicitConductionLaw),
+            [0.8; 2],
+            htc,
+            [0.0; 2],
+            GrayRadiativeControls::default(),
+        )
+        .unwrap()
+    };
+    assert!(make(1.0).with_gap_resistance(&gap).is_err());
+    assert!(
+        make(0.0)
+            .with_gap_resistance(&gap)
+            .unwrap()
+            .with_gap_resistance(&gap)
+            .is_err()
+    );
+    let alien = material(false, 2.0, 0.0);
+    let wrong = Gap::new([&alien, laws[1]]);
+    assert!(make(0.0).with_gap_resistance(&wrong).is_err());
+    let reversed = Gap::new([laws[1], laws[0]]);
+    assert!(make(0.0).with_gap_resistance(&reversed).is_err());
+    let mut narrow = Gap::new(laws);
+    narrow.bounds[0] = [500.0, 900.0];
+    let bounded = make(0.0).with_gap_resistance(&narrow).unwrap();
+    assert_eq!(
+        bounded.evaluate([400.0, 300.0], geometry([0.1; 2]), patch(1.0), &mut || Ok(
+            ()
+        )),
+        Err(DepositionError::MaterialDomain)
+    );
+    assert_eq!(narrow.queries.get(), 0);
+    for resistance in [0.0, -0.1, f64::NAN] {
+        let invalid = Gap {
+            offset: resistance,
+            slopes: [0.0; 2],
+            ..Gap::new(laws)
+        };
+        let law = make(0.0).with_gap_resistance(&invalid).unwrap();
+        assert_eq!(
+            law.evaluate([800.0, 300.0], geometry([0.1; 2]), patch(1.0), &mut || Ok(
+                ()
+            )),
+            Err(DepositionError::MaterialDomain)
+        );
+    }
+    let exchange = make(0.0).with_gap_resistance(&gap).unwrap();
+    let mut calls = 0;
+    assert_eq!(
+        exchange.evaluate([800.0, 300.0], geometry([0.1; 2]), patch(1.0), &mut || {
+            calls += 1;
+            if calls == 5 {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        }),
+        Err(DepositionError::Cancelled)
+    );
+    assert_eq!(gap.queries.get(), 1);
+    assert_eq!(calls, 5);
+
+    let (thermal, observer) = pair(laws, [800.0, 300.0], [2.0, 3.0], geometry([0.1; 2]), 1.0);
+    let bindings: [(MaterialId, &dyn ImplicitConductionLaw); 2] =
+        [(MaterialId(0), laws[0]), (MaterialId(1), laws[1])];
+    let chain = ImplicitConductionChain::new(&thermal, &observer, &bindings, || Ok(()))
+        .unwrap()
+        .with_link_laws(&thermal, &[(7, &exchange)], || Ok(()))
+        .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    assert!(
+        chain
+            .advance_to(&thermal, 0.05, controls(0.05), &mut workspace, || Err(
+                DepositionError::Cancelled
+            ))
             .is_err()
     );
     assert_eq!(thermal.cells()[&CellId(0)].specific_h_j_kg, 800.0);
