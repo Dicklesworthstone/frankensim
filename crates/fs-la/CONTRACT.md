@@ -9,11 +9,13 @@ Dense linear algebra: GEMM, batched small dense, factorizations, eigensolvers. L
 ## Public types and semantics
 - `eigen::symmetric_eigenvalues3` computes ascending eigenvalues of one finite
   symmetric 3x3 matrix using fixed storage, at most 16 cyclic Jacobi sweeps,
-  and fs-math strict square roots. It scales before rotation to avoid squaring
-  dimensional entries, preserves diagonal inputs exactly, and refuses
-  nonfinite/asymmetric input, unrepresentable eigenvalues or nonconvergence.
-  Off-diagonal convergence is 4*f64::EPSILON relative to maximum input entry.
-  G0/G3 tests cover pure shear, repeated roots and extreme scaling. Values are
+  and fs-math strict square roots. It scales each rotation locally, retaining
+  dimensional entries and corrections so a large compression cannot erase a
+  small tensile block. Diagonal inputs remain exact. Pairwise convergence uses
+  4*EPSILON*sqrt(|a_pp|)*sqrt(|a_qq|), with no global stress cutoff. Nonfinite or
+  asymmetric input, unrepresentable required rotations/eigenvalues, and
+  nonconvergence refuse. G0/G3 tests cover pure shear, repeated roots, extreme
+  scaling and small tensile eigenvalues alongside large compression. Values are
   floating-point estimates, not interval enclosures or relative-accuracy
   guarantees for nearly zero eigenvalues; this bounded leaf has no allocation
   or cancellation boundary and leaves the existing batched bit contract intact.

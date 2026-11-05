@@ -220,3 +220,23 @@ fn g0_nonfinite_stress_and_unrepresentable_results_refuse() {
     assert!(principal_stresses(&[f64::MAX; 6]).is_err());
     assert_eq!(limit.assess(&[0.0; 6]).unwrap().utilization(), 0.0);
 }
+
+#[test]
+fn g0_small_tensile_stress_is_not_hidden_by_large_compression() {
+    for (compression, shear) in [(1.0e16, 1.0), (1.0e300, 1.0e-300)] {
+        for (normal, transverse_shear) in [(0, 4), (1, 5), (2, 3)] {
+            let mut stress = [0.0; 6];
+            stress[normal] = -compression;
+            stress[transverse_shear] = shear;
+            let result = limit(shear / 2.0).assess(&stress).unwrap();
+            assert_eq!(result.principal_stresses_pa(), [-compression, -shear, shear]);
+            assert_eq!(result.utilization(), 2.0);
+            assert!(result.reaches_limit());
+        }
+    }
+    let result = limit(5.0e-201)
+        .assess(&[-1.0e300, 0.0, 0.0, 1.0e50, 0.0, 0.0])
+        .unwrap();
+    near(result.utilization(), 2.0, 2.0);
+    assert!(result.reaches_limit());
+}

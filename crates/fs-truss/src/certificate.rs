@@ -1840,10 +1840,12 @@ fn prove_dual(
     let mut counter = PollCounter::new();
     for (variable, slack) in original_slacks.iter().enumerate() {
         counter.step(cx, "certificate dual-scale derivation")?;
-        // `slack - c` encloses A^T y.  Bounding its absolute value gives one
-        // conservative scale valid for both members of each paired column.
+        // `slack - c` encloses A^T y. Only negative activity can violate
+        // c + A^T y >= 0, so its outward lower endpoint bounds the adverse
+        // contribution. Positive activity needs no shrink, even when the
+        // opposite split variable has a much smaller cost.
         let activity = *slack - Interval::point(lp.c()[variable]);
-        let magnitude = activity.abs().hi();
+        let magnitude = (-activity.lo()).max(0.0);
         if !magnitude.is_finite() {
             return refuse(LayoutCertificateRefusal::NonFiniteArithmetic {
                 stage: "dual scale derivation",
