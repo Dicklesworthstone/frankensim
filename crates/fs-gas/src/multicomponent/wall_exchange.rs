@@ -16,11 +16,12 @@ mod gas;
 mod recoil;
 pub use recoil::{
     RecoilControl, RecoilLaw, RecoilUpdate, SharedRecoilCell, SharedRecoilCellUpdate,
-    SharedRecoilControl, SharedRecoilUpdate, SharedRecoilWorkspace, SlidingSupport,
+    SharedRecoilControl, SharedRecoilHeatCell, SharedRecoilHeatUpdate, SharedRecoilHeatWorkspace,
+    SharedRecoilUpdate, SharedRecoilWorkspace, SlidingSupport,
     exchange_cell_with_recoil, exchange_cell_with_recoil_and_heat_storage,
 };
 pub(crate) mod shared;
-pub use shared::{SharedWallControl, SharedWallStorage};
+pub use shared::{SharedWallControl, SharedWallReport, SharedWallStorage};
 use gas::MixtureCaloric;
 pub(crate) use gas::{WallGasCaloric, WallGasState};
 
@@ -484,8 +485,13 @@ pub(crate) fn exchange_caloric(
     let initial = gas.primitive(initial_momentum, initial_energy, &mut cancelled)?;
     let dt = duration.value();
     let drag = drag::advance(
-        contact.drag, initial_momentum, initial_energy, initial.density,
-        initial.velocity, volume_m3, dt,
+        contact.drag,
+        initial_momentum,
+        initial_energy,
+        initial.density,
+        initial.velocity,
+        volume_m3,
+        dt,
     )?;
     let momentum = drag.momentum;
     let kinetic = 0.5 * momentum * (momentum / initial.density);
@@ -531,22 +537,31 @@ pub(crate) fn exchange_caloric(
         if !nonnegative(integrated) {
             return Err(WallExchangeError::Invalid("integrated wall conductance"));
         }
-        if integrated > 0.0 && wall_t != primitive.temperature {
-            let effective = capacity.map_or(integrated, |c| {
-                if integrated <= c {
-                    integrated / (1.0 + integrated / c)
-                } else {
-                    c / (1.0 + c / integrated)
-                }
-            });
-            let target = mechanical_energy - kinetic;
+        let effective = capacity.map_or(integrated, |c| {
+            if integrated <= c {
+                integrated / (1.0 + integrated / c)
+            } else {
+                c / (1.0 + c / integrated)
+            }
+        });
+        let target = mechanical_energy - kinetic;
+        let initial_temperature = refine_caloric_temperature(
+            gas,
+            primitive.temperature,
+            target,
+            volume_m3,
+            effective,
+            wall_t,
+            0.0,
+            control,
+            &mut cancelled,
+        )?;
+        if integrated > 0.0 && wall_t != initial_temperature {
             let domain = gas.domain();
-            let lo = primitive
-                .temperature
+            let lo = initial_temperature
                 .min(wall_t)
                 .max(domain.minimum_temperature);
-            let hi = primitive
-                .temperature
+            let hi = initial_temperature
                 .max(wall_t)
                 .min(domain.maximum_temperature);
             let equation = |t: f64,
@@ -565,7 +580,7 @@ pub(crate) fn exchange_caloric(
             let (temperature, iterations) = solve_scalar(
                 lo,
                 hi,
-                primitive.temperature,
+                initial_temperature,
                 control,
                 equation,
                 &mut cancelled,
@@ -573,8 +588,19 @@ pub(crate) fn exchange_caloric(
             report.iterations = iterations;
             let (thermal, _) = gas.caloric(temperature)?;
             energy = mechanical_energy + (thermal - target);
-            let actual = gas.primitive(momentum, energy, &mut cancelled)?;
             report.heat_to_gas_j = (energy - mechanical_energy) * volume_m3;
+            let mut actual = gas.primitive(momentum, energy, &mut cancelled)?;
+            actual.temperature = refine_caloric_temperature(
+                gas,
+                actual.temperature,
+                energy - kinetic,
+                volume_m3,
+                effective,
+                wall_t,
+                report.heat_to_gas_j.abs(),
+                control,
+                &mut cancelled,
+            )?;
             let actual_wall_t = if let Some(capacity) = capacity {
                 let fraction = effective / capacity;
                 let next = if fraction <= 0.5 {
@@ -630,12 +656,12 @@ pub(crate) fn exchange_caloric(
     {
         return Err(WallExchangeError::Invalid("wall extensive source balance"));
     }
-    let scale = report.mechanical_work_to_gas_j.abs()
+    let scale = report
+        .mechanical_work_to_gas_j
+        .abs()
         .max(report.heat_to_gas_j.abs())
         .max(report.wall_energy_change_j.abs());
-    if report.drag_heating_j < 0.0
-        || report.energy_residual_j.abs() > control.tolerance(scale)
-    {
+    if report.drag_heating_j < 0.0 || report.energy_residual_j.abs() > control.tolerance(scale) {
         return Err(WallExchangeError::Balance {
             energy_residual_j: report.energy_residual_j,
             thermal_residual_j: report.thermal_residual_j,
@@ -648,6 +674,79 @@ pub(crate) fn exchange_caloric(
         contact: updated,
         report,
     })
+}
+
+/// A flow owner's valid temperature estimate may be too coarse for a heat
+/// interface, especially near equilibrium or at large G*dt/Cv. Refine against
+/// its ORIGINAL stored-energy curve without changing its domain or controls.
+/// Only temperature changes; conservative energy is never reprojected here.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn refine_caloric_temperature(
+    gas: &impl WallGasCaloric,
+    temperature: f64,
+    target: f64,
+    volume_m3: f64,
+    integrated: f64,
+    wall_temperature: f64,
+    heat_scale_j: f64,
+    control: WallControl,
+    mut cancelled: &mut dyn FnMut() -> bool,
+) -> Result<f64, WallExchangeError> {
+    if integrated == 0.0 {
+        return Ok(temperature);
+    }
+    poll(&mut cancelled)?;
+    let (energy, cv) = gas.caloric(temperature)?;
+    let capacity = cv * volume_m3;
+    let predicted_heat = integrated * (wall_temperature - temperature);
+    if !positive(capacity) || !nonnegative(integrated) || !predicted_heat.is_finite() {
+        return Err(WallExchangeError::Invalid("caloric heat precision scale"));
+    }
+    if energy == target {
+        return Ok(temperature);
+    }
+    // Temperature error enters the heat equation through G*dt. Scale by the
+    // actual/trial exchange, not the gas's unrelated total sensible inventory.
+    let sensitivity = if integrated <= capacity {
+        1.0 / (1.0 + integrated / capacity)
+    } else {
+        let ratio = capacity / integrated;
+        ratio / (1.0 + ratio)
+    };
+    let allowance = 0.125 * control.tolerance(heat_scale_j.max(predicted_heat.abs())) * sensitivity;
+    if !positive(allowance) {
+        return Err(WallExchangeError::Invalid(
+            "unrepresentable caloric heat precision",
+        ));
+    }
+    if ((energy - target) * volume_m3).abs() <= allowance {
+        return Ok(temperature);
+    }
+    let domain = gas.domain();
+    let precision = WallControl {
+        absolute_energy_tolerance_j: allowance,
+        ..control
+    };
+    let (temperature, _) = solve_scalar(
+        domain.minimum_temperature,
+        domain.maximum_temperature,
+        temperature,
+        precision,
+        |t, _| {
+            let (energy, cv) = gas.caloric(t)?;
+            let residual = (energy - target) * volume_m3;
+            let slope = cv * volume_m3;
+            if !residual.is_finite() || !positive(slope) {
+                return Err(WallExchangeError::Invalid(
+                    "caloric heat precision equation",
+                ));
+            }
+            // The allowance above already includes the physical heat scale.
+            Ok((residual, Some(slope), 0.0))
+        },
+        &mut cancelled,
+    )?;
+    Ok(temperature)
 }
 
 /// One safeguarded bracketed equation owner for authored and original-source

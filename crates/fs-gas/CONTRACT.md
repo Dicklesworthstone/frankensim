@@ -2841,6 +2841,23 @@ Original source-domain exits and cancellation return neither endpoint. Focused
 regressions cover analytic variable-capacity slip heating, variable-Cv mixture
 exchange, a latent plateau, the constant-capacity limit, and atomic refusals.
 
+`SharedRecoilHeatWorkspace` couples several original gas amounts to one finite
+support and one original `MaterialWallCaloric` inventory. Each contact supplies
+its frozen resistance, gas/wall frictional heat fraction and conductance. The
+existing shared mechanical solver advances one common inertia; the combined
+wall share is deposited once through original nonlinear or latent storage.
+The existing shared-wall scalar solve then exchanges heat simultaneously with
+every original gas composition against that one wall endpoint. Whole returned
+gas, support kinetic and material energy changes must close the original
+budget. The result retains separate mechanical and thermal-stage reports,
+per-cell work, heat and wall shares, and the admitted storage interpretation.
+Allocation occurs at preparation; bounded stepping borrows all gas species and
+publishes no caller state. Cancellation or refusal permits exact retry from
+the supplied gas, support and wall inputs. The same internal-energy or explicit
+negligible-expansion requirement applies. Frozen coefficients, fixed geometry
+and first-order thermal splitting remain explicit; network bindings continue
+to own their separate source transactions.
+
 Thermal contacts may be adiabatic, a prescribed-temperature reservoir, or a
 finite lumped wall with explicit heat capacity in J/K. A contact's conductance
 is the complete exposed h*A in W/K. A safeguarded backward-Euler temperature
@@ -2850,6 +2867,15 @@ and its actual represented temperature change is included in the energy audit.
 Reservoir heat is external; gas/finite-wall exchange is internal. The step
 refuses source-domain or residual-budget violations rather than clipping gas
 temperature or creating heat.
+
+The common wall caloric path locally refines gas temperature when the flow
+inverse is too coarse for the heat equation. It uses the original energy and
+Cv queries with the actual or predicted heat scale and `G*dt/Cv` sensitivity,
+both before forming a passive bracket and at the returned thermal endpoint.
+Original source domains, energy references, conservative states and caller EOS
+controls are unchanged. The wall's own iteration limit bounds refinement;
+shared exchanges charge these queries to their existing nested source budget.
+Zero conductance and exact caloric states need no additional inversion.
 
 `network::wall_exchange::NetworkWallOperator` binds one distinct contact to
 every branch cell and finite plenum. It stages all momentum/energy and wall

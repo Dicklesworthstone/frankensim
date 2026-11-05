@@ -14,8 +14,8 @@ use super::{
 mod mechanics;
 mod shared;
 pub use shared::{
-    SharedRecoilCell, SharedRecoilCellUpdate, SharedRecoilControl, SharedRecoilUpdate,
-    SharedRecoilWorkspace,
+    SharedRecoilCell, SharedRecoilCellUpdate, SharedRecoilControl, SharedRecoilHeatCell,
+    SharedRecoilHeatUpdate, SharedRecoilHeatWorkspace, SharedRecoilUpdate, SharedRecoilWorkspace,
 };
 
 /// Finite translating support, with no prescribed drive or moving gas volume.

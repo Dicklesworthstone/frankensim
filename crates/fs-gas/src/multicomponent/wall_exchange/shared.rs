@@ -411,14 +411,23 @@ impl Group<'_> {
         if initial.0.abs() > control.tolerance(initial.2) {
             let mut minimum = wall_initial;
             let mut maximum = wall_initial;
-            for (port, state) in self.accepted.ports.iter().zip(&self.initial) {
+            for (i, (port, state)) in self.accepted.ports.iter().zip(&self.initial).enumerate() {
                 let original = MeteredGas {
                     original: gas(port.gas, wall_initial),
                     work,
                 };
-                let t = original
-                    .primitive(state[0], state[1], cancelled)?
-                    .temperature;
+                let primitive = original.primitive(state[0], state[1], cancelled)?;
+                let t = refine_caloric_temperature(
+                    &original,
+                    primitive.temperature,
+                    state[1] - 0.5 * state[0] * primitive.velocity,
+                    self.volumes[i],
+                    port.conductance_w_per_k * duration.value(),
+                    wall_initial,
+                    0.0,
+                    control,
+                    cancelled,
+                )?;
                 minimum = minimum.min(t);
                 maximum = maximum.max(t);
             }

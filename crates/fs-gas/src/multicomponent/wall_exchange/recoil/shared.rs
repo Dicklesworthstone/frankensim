@@ -10,6 +10,8 @@ use super::{nonnegative, poll, positive};
 
 mod collective_linear;
 mod collective_uniform;
+mod heat;
+pub use heat::{SharedRecoilHeatCell, SharedRecoilHeatUpdate, SharedRecoilHeatWorkspace};
 
 /// One fixed gas amount and its frozen acceleration law against the support.
 /// Coefficients are active even when this cell initially has zero slip.

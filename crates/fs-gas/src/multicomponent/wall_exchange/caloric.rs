@@ -458,16 +458,29 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         &mut cancelled,
     )?;
     update.contact = with_conductance(contact, conductance_w_per_k);
-    let gas_at = |energy, cancelled: &mut dyn FnMut() -> bool| {
-        gas.primitive(update.momentum, energy, cancelled)
-    };
-    let initial_gas = gas_at(update.energy, &mut cancelled)?;
     let integrated = conductance_w_per_k * duration.value();
     if !nonnegative(integrated) {
         return Err(WallExchangeError::Invalid(
             "integrated material wall conductance",
         ));
     }
+    let gas_at =
+        |energy, wall_temperature, integrated, heat_scale, cancelled: &mut dyn FnMut() -> bool| {
+            let mut state = gas.primitive(update.momentum, energy, &mut *cancelled)?;
+            state.temperature = refine_caloric_temperature(
+                gas,
+                state.temperature,
+                energy - 0.5 * update.momentum * state.velocity,
+                volume_m3,
+                integrated,
+                wall_temperature,
+                heat_scale,
+                control,
+                cancelled,
+            )?;
+            Ok::<_, WallExchangeError>(state)
+        };
+    let initial_gas = gas_at(update.energy, initial_wall, integrated, 0.0, &mut cancelled)?;
     if integrated == 0.0 || initial_wall == initial_gas.temperature {
         poll(&mut cancelled)?;
         return Ok(update);
@@ -531,10 +544,16 @@ pub(crate) fn exchange_caloric_with_heat_storage(
         ));
     }
     let equation = |heat: f64, cancelled: &mut dyn FnMut() -> bool| {
-        let gas_state = gas_at(update.energy + heat / volume_m3, cancelled)?;
         let wall_state = wall.after(contact, -heat)?;
-        let gas_capacity = gas.caloric(gas_state.temperature)?.1 * volume_m3;
         let endpoint_integrated = conductance_at(wall_state.contact)? * duration.value();
+        let gas_state = gas_at(
+            update.energy + heat / volume_m3,
+            wall_state.temperature_k,
+            endpoint_integrated,
+            heat.abs(),
+            cancelled,
+        )?;
+        let gas_capacity = gas.caloric(gas_state.temperature)?.1 * volume_m3;
         let flux = endpoint_integrated * (wall_state.temperature_k - gas_state.temperature);
         let residual = heat - flux;
         // A material source supplies values, not an exact derivative of G.
@@ -564,10 +583,16 @@ pub(crate) fn exchange_caloric_with_heat_storage(
             "material wall heat is unrepresentable",
         ));
     }
-    let actual_gas = gas_at(energy, &mut cancelled)?;
     let actual_wall = wall.after(contact, -actual_heat)?;
     let actual_conductance = conductance_at(actual_wall.contact)?;
     let actual_integrated = actual_conductance * duration.value();
+    let actual_gas = gas_at(
+        energy,
+        actual_wall.temperature_k,
+        actual_integrated,
+        actual_heat.abs(),
+        &mut cancelled,
+    )?;
     let wall_change = actual_wall.energy_change_j;
     let energy_residual = update.report.energy_residual_j + actual_heat + wall_change;
     let thermal_residual =
