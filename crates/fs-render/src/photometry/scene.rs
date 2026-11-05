@@ -56,7 +56,9 @@ pub use camera::{NativeCameraError, NativeRadianceCalibration};
 #[cfg(feature = "material-state")]
 mod fields;
 #[cfg(feature = "material-state")]
-pub use fields::{NativeGasAmbient, NativeGasOpticalScene, NativeThermoOpticBinding};
+pub use fields::{
+    NativeGasAmbient, NativeGasOpticalScene, NativeMaterialFieldBinding, NativeThermoOpticBinding,
+};
 
 /// Stable identity for geometry that an ordinary tracer scene has not placed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,6 +147,14 @@ pub enum NativeOpticalSceneError {
         medium: NativeOpticalMedium,
     },
     ReferenceGlassMismatch {
+        medium: NativeOpticalMedium,
+    },
+    /// Water fields require the original IAPWS water law, not an equal index fit.
+    WaterReferenceRequired {
+        medium: NativeOpticalMedium,
+    },
+    /// The field must retain the original independent water absorption law.
+    WaterAbsorptionMismatch {
         medium: NativeOpticalMedium,
     },
     /// A source-backed gas ambient requires its original material field.

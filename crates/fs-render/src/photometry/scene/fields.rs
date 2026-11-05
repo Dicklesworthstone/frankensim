@@ -11,7 +11,7 @@ use super::{
     NativeOpticalBinding, NativeOpticalMedium, NativeOpticalScene, NativeOpticalSceneError,
     NativeReferenceMedium, reserved,
 };
-use crate::dielectric::{DielectricGlass, DielectricSurface};
+use crate::dielectric::{DielectricGlass, DielectricIor, DielectricSurface};
 use crate::gradient_index::GradientIndexField;
 use crate::gradient_index::bundle::SecondOrderIndexField;
 use crate::instances::InstanceScene;
@@ -22,6 +22,10 @@ use crate::material_state::gas_scattering::{
 };
 use crate::material_state::thermo_optic::{
     MaterialThermoOpticField, TemperatureGradientField, TemperatureSecondOrderField,
+};
+use crate::material_state::water_refraction::{
+    MaterialWaterRefractiveField, PreparedMaterialWaterRefractiveField, WaterStateGradientField,
+    WaterStateSecondOrderField,
 };
 use crate::polarization::dielectric::scene::curved::{CurvedPolarizedScene, SceneMedium};
 use crate::tracer::{Material, Scene};
@@ -43,15 +47,15 @@ impl<'a> Field<'a> {
     }
 }
 
-/// An explicitly selected original medium and one immutable thermal/material
+/// An explicitly selected original medium and one immutable source-backed
 /// field. Positions are world metres, temperature is kelvin, absorption is per
 /// metre, and wavelength is vacuum nanometres, as in the original field owner.
 /// The snapshot must remain fixed for the entire observation batch; no time
 /// interpolation, heat step, moving geometry or unsupported constitutive law
 /// is inferred. The ordinary `render_scene()` remains the reference-glass view;
-/// thermal-field observations use the explicitly selected native entry points.
+/// material-field observations use the explicitly selected native entry points.
 #[derive(Clone, Copy)]
-pub struct NativeThermoOpticBinding<'a> {
+pub struct NativeMaterialFieldBinding<'a> {
     medium: NativeOpticalMedium,
     reference: &'a DielectricGlass,
     field: Field<'a>,
@@ -59,7 +63,10 @@ pub struct NativeThermoOpticBinding<'a> {
     field_identity: ContentHash,
 }
 
-impl<'a> NativeThermoOpticBinding<'a> {
+/// Backward-compatible name for the same typed original material-field binding.
+pub type NativeThermoOpticBinding<'a> = NativeMaterialFieldBinding<'a>;
+
+impl<'a> NativeMaterialFieldBinding<'a> {
     /// Retain an original first-order field for native ray/camera transport.
     /// Differentiated bundle queries deliberately refuse this capability.
     pub fn from_gradient_field<F: TemperatureGradientField + Sync + ?Sized>(
@@ -90,18 +97,101 @@ impl<'a> NativeThermoOpticBinding<'a> {
         }
     }
 
+    /// Bind an actual original IAPWS water medium to its accepted temperature/
+    /// density reconstruction. The reference must retain that released water
+    /// law and exactly the field's independent absorption model. It is matched
+    /// in full to the original scene medium when observing; a fitted glass with
+    /// an equal index at one wavelength is not an original water reference.
+    ///
+    /// The field evaluates the actual local state, including an original IF97
+    /// pressure/temperature or isobaric provider. The frozen reference state's
+    /// temperature/density are never added as an index correction or substituted
+    /// for the actual source. State, phase and source domains remain authoritative.
+    pub fn from_water_field<F: WaterStateGradientField + Sync + ?Sized>(
+        medium: NativeOpticalMedium,
+        reference: &'a DielectricGlass,
+        field: &'a MaterialWaterRefractiveField<'_, F>,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        let law_identity = field.law_identity();
+        if !matches!(reference.ior(), DielectricIor::Water(water) if water.source_identity() == law_identity)
+        {
+            return Err(NativeOpticalSceneError::WaterReferenceRequired { medium });
+        }
+        if reference.absorption_ref() != field.absorption_source() {
+            return Err(NativeOpticalSceneError::WaterAbsorptionMismatch { medium });
+        }
+        let mut hash = DomainHasher::new("org.frankensim.render.native-water-medium.v1");
+        let original = Material::Dielectric {
+            glass: *reference,
+            surface: DielectricSurface::SMOOTH,
+        }
+        .content_identity();
+        hash.update(original.as_bytes());
+        hash.update(law_identity.as_bytes());
+        hash.update(field.snapshot_identity().as_bytes());
+        Ok(Self {
+            medium,
+            reference,
+            field: Field::Gradient(field),
+            snapshot_identity: field.snapshot_identity(),
+            field_identity: hash.finalize(),
+        })
+    }
+
+    /// Retain both state Hessians and the complete optical/EOS chain rule.
+    /// A zero local gradient never supplies this second-order capability.
+    pub fn from_differentiable_water_field<F: WaterStateSecondOrderField + Sync + ?Sized>(
+        medium: NativeOpticalMedium,
+        reference: &'a DielectricGlass,
+        field: &'a MaterialWaterRefractiveField<'_, F>,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        Ok(Self {
+            field: Field::Differentiable(field),
+            ..Self::from_water_field(medium, reference, field)?
+        })
+    }
+
+    /// Reuse the original prepared wavelength coefficients across all native
+    /// stages and connection trials. Admission reads the prepared field's actual
+    /// source owner, including absorption, rather than trusting only a snapshot
+    /// hash. A different queried wavelength retains the original explicit error.
+    pub fn from_prepared_water_field<F: WaterStateGradientField + Sync + ?Sized>(
+        medium: NativeOpticalMedium,
+        reference: &'a DielectricGlass,
+        prepared: &'a PreparedMaterialWaterRefractiveField<'_, '_, F>,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        Ok(Self {
+            field: Field::Gradient(prepared),
+            ..Self::from_water_field(medium, reference, prepared.source_field())?
+        })
+    }
+
+    /// The same spectral preparation with the original analytic state Hessians.
+    pub fn from_prepared_differentiable_water_field<
+        F: WaterStateSecondOrderField + Sync + ?Sized,
+    >(
+        medium: NativeOpticalMedium,
+        reference: &'a DielectricGlass,
+        prepared: &'a PreparedMaterialWaterRefractiveField<'_, '_, F>,
+    ) -> Result<Self, NativeOpticalSceneError> {
+        Ok(Self {
+            field: Field::Differentiable(prepared),
+            ..Self::from_prepared_water_field(medium, reference, prepared)?
+        })
+    }
+
     pub const fn medium(&self) -> NativeOpticalMedium {
         self.medium
     }
 
-    /// Original accepted temperature/reconstruction snapshot supplied to the
+    /// Original accepted physical-state/reconstruction snapshot supplied to the
     /// material field, without promoting that identity to measured authority.
     pub const fn source_snapshot_identity(&self) -> ContentHash {
         self.snapshot_identity
     }
 
-    /// Native medium identity binds the reference optics, complete thermo-optic
-    /// constitutive law and original frozen temperature/reconstruction identity.
+    /// Native medium identity binds the reference optics, complete constitutive
+    /// law and original frozen state/reconstruction identity.
     /// Choosing first- or second-order capability does not change the physics.
     pub const fn field_identity(&self) -> ContentHash {
         self.field_identity
@@ -130,7 +220,7 @@ fn identity<F: TemperatureGradientField + ?Sized>(
 }
 
 impl NativeOpticalScene {
-    /// Observe accepted thermo-optic states over original geometry and media.
+    /// Observe accepted thermal-glass or water states over original geometry and media.
     /// Each selected medium's complete reference glass must match the original
     /// scene. Unlisted media keep their original homogeneous law. At most one
     /// field may bind a medium, including the ambient; primitive references
@@ -150,19 +240,19 @@ impl NativeOpticalScene {
         &self,
         cx: &Cx<'_>,
         max_build_work: u64,
-        bindings: &[NativeThermoOpticBinding<'_>],
+        bindings: &[NativeMaterialFieldBinding<'_>],
         observe: impl FnOnce(&CurvedPolarizedScene<'_>) -> R,
     ) -> Result<R, NativeOpticalSceneError> {
         let mut media = self.native_media(cx)?;
-        self.bind_thermal_media(cx, &mut media, bindings)?;
+        self.bind_material_media(cx, &mut media, bindings)?;
         self.with_native_media(cx, max_build_work, &media, observe)
     }
 
-    fn bind_thermal_media<'a>(
+    fn bind_material_media<'a>(
         &self,
         cx: &Cx<'_>,
         media: &mut [SceneMedium<'a>],
-        bindings: &[NativeThermoOpticBinding<'a>],
+        bindings: &[NativeMaterialFieldBinding<'a>],
     ) -> Result<(), NativeOpticalSceneError> {
         cx.checkpoint()?;
         if bindings.len() > self.media.len() {
@@ -360,7 +450,7 @@ impl NativeGasOpticalScene {
         self.scene.medium(index)
     }
 
-    /// Observe gas refraction and optional original interior thermo-optic
+    /// Observe gas refraction and optional original interior material
     /// fields through the same native geometry and local boundary optics.
     /// The ambient argument is mandatory; an ambient thermal binding would
     /// duplicate its ownership and refuses. Original molecular material/band
@@ -378,7 +468,7 @@ impl NativeGasOpticalScene {
         cx: &Cx<'_>,
         max_build_work: u64,
         ambient: NativeGasAmbient<'_>,
-        thermal: &[NativeThermoOpticBinding<'_>],
+        material_fields: &[NativeMaterialFieldBinding<'_>],
         observe: impl FnOnce(&CurvedPolarizedScene<'_>) -> R,
     ) -> Result<R, NativeOpticalSceneError> {
         cx.checkpoint()?;
@@ -400,7 +490,8 @@ impl NativeGasOpticalScene {
                     .ok_or(NativeOpticalSceneError::MissingGasAmbient)?,
             ));
         }
-        self.scene.bind_thermal_media(cx, &mut media, thermal)?;
+        self.scene
+            .bind_material_media(cx, &mut media, material_fields)?;
         self.scene
             .with_native_media(cx, max_build_work, &media, observe)
     }
@@ -410,3 +501,5 @@ impl NativeGasOpticalScene {
 mod gas_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod water_tests;

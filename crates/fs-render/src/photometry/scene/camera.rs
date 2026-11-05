@@ -6,7 +6,7 @@
 //! from the returned camera owner with their existing geometric and image budgets.
 
 #[cfg(feature = "material-state")]
-use super::{NativeGasAmbient, NativeGasOpticalScene, NativeThermoOpticBinding};
+use super::{NativeGasAmbient, NativeGasOpticalScene, NativeMaterialFieldBinding};
 use super::{NativeOpticalScene, NativeOpticalSceneError, reserved};
 use crate::camera::{Aperture, CameraError, PhysicalCamera};
 use crate::lighting::{AdmittedLighting, LightingError};
@@ -110,7 +110,7 @@ struct CameraSources<'a> {
 #[cfg(feature = "material-state")]
 impl NativeGasOpticalScene {
     /// Original camera/source radiance through the explicitly selected accepted
-    /// molecular ambient, with optional original interior thermal-index fields.
+    /// molecular ambient, with optional original interior material-state fields.
     /// Source calibration, geometry and reflection are shared with the ordinary
     /// native camera; the gas field supplies the actual wavelength-dependent
     /// phase/group law and spatial derivatives. It never supplies an absorption
@@ -128,11 +128,11 @@ impl NativeGasOpticalScene {
         max_build_work: u64,
         calibration: NativeRadianceCalibration,
         ambient: NativeGasAmbient<'_>,
-        thermal: &[NativeThermoOpticBinding<'_>],
+        material_fields: &[NativeMaterialFieldBinding<'_>],
         observe: impl FnOnce(&CurvedCameraScene<'_, '_>, &PhysicalCamera) -> R,
     ) -> Result<R, NativeCameraError> {
         let sources = self.scene.camera_sources(cx, calibration)?;
-        self.with_curved_scene(cx, max_build_work, ambient, thermal, |scene| {
+        self.with_curved_scene(cx, max_build_work, ambient, material_fields, |scene| {
             self.scene.observe_camera(cx, scene, &sources, observe)
         })?
     }
@@ -184,8 +184,8 @@ impl NativeOpticalScene {
         })?
     }
 
-    /// Observe the original camera and sources through accepted thermal-index
-    /// fields bound to original media. Every wavelength retains its actual
+    /// Observe the original camera and sources through accepted material-state
+    /// fields bound to original thermal glass or water media. Every wavelength retains its actual
     /// local phase/group law, gradient and absorption. Differentiable bindings
     /// also serve native point/area-light bundle connections in this callback.
     ///
@@ -199,7 +199,7 @@ impl NativeOpticalScene {
         cx: &Cx<'_>,
         max_build_work: u64,
         calibration: NativeRadianceCalibration,
-        bindings: &[NativeThermoOpticBinding<'_>],
+        bindings: &[NativeMaterialFieldBinding<'_>],
         observe: impl FnOnce(&CurvedCameraScene<'_, '_>, &PhysicalCamera) -> R,
     ) -> Result<R, NativeCameraError> {
         let sources = self.camera_sources(cx, calibration)?;

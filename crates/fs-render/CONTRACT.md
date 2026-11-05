@@ -7992,3 +7992,53 @@ add no pressure solve, flow coupling, phase-equilibrium claim or scattered radia
 Four G1/G3 regressions compare an unsplit analytic thermal field, pressure-jump
 bundle variations, correlated p/T constant-index transport and source/contact/work
 refusals. Native execution is reported separately from source and format checks.
+
+## Original water scene media driven by accepted thermodynamic state
+
+With `photometry` and `material-state`, `NativeMaterialFieldBinding` connects an
+original IAPWS water medium to its existing `MaterialWaterRefractiveField`.
+`NativeThermoOpticBinding` remains a direct alias with its existing thermal-glass
+constructors. The same original scene, gas-ambient scene and camera entry points
+now accept either material owner; medium topology, original geometry, authored
+radiance calibration and exact thermal sources retain their existing handling.
+
+Water admission requires an actual original `DielectricIor::Water` reference
+with the released IAPWS law and exactly the field's independently owned
+absorption. The complete reference, including its state and provenance, must
+match the selected original medium. A fitted equal-index glass, changed
+absorption or second binding to the same slot refuses. Native identity includes
+that complete original reference, optical law and accepted source snapshot.
+Prepared fields expose their actual source owner for this admission; equal
+snapshot labels cannot conceal different absorption. Prepared and unprepared
+bindings have the same physical identity, while prepared queries retain their
+one exact vacuum wavelength and reuse the original wavelength coefficients.
+
+The original field supplies the actual local temperature and density, or the
+original IF97 isobaric/joint pressure-temperature reconstruction and its selected
+single-phase branch. Reference state values are never substituted or added as
+an index correction. The existing optical and EOS chain rules supply phase and
+group indices, spatial gradients and, for explicitly differentiated bindings,
+complete state Hessians. Pressure and temperature curvature both contribute to
+native bundle focusing and boundary Snell/Fresnel maps. First-order bindings
+support rays and cameras and explicitly refuse differentiated bundle queries;
+a locally zero gradient does not imply a zero Hessian.
+
+Positions remain world metres, pressure absolute pascals, temperature kelvin,
+density kilograms per cubic metre, absorption inverse metres and vacuum
+wavelength nanometres. The source stays frozen throughout the observation.
+Original optical, EOS, spatial, spectral and contact-collar domains remain
+authoritative. No absorption, phase crossing, fluid motion, thermal deformation
+or source emission is inferred from water refraction. Unsupported local states
+refuse instead of falling back to the reference. Existing bounded medium
+preparation and native ray, event, bundle and camera solvers are reused without
+an additional propagation solver or field copies.
+
+Four focused regression groups exercise joint pressure/temperature focusing
+through the original spherical water interface against its analytic paraxial
+area map; an isobaric temperature gradient bending the original camera onto an
+off-axis original source against independent conserved-momentum quadrature,
+including phase/group paths, Beer depth and immersed radiance; water interiors
+and an actual molecular ambient in the same camera; and original reference,
+absorption, prepared wavelength, capability, domain and work refusals. Native
+Rust execution is unavailable in this environment; these authored regressions
+are distinguished from scoped parser/format checks and source/math review.

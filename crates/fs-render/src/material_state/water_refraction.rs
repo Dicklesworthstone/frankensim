@@ -172,6 +172,12 @@ pub struct PreparedMaterialWaterRefractiveField<
 }
 
 impl<F: WaterStateGradientField + ?Sized> PreparedMaterialWaterRefractiveField<'_, '_, F> {
+    /// The actual original state/absorption owner. Snapshot identity alone
+    /// cannot distinguish prepared fields with different independent absorption.
+    pub const fn source_field(&self) -> &MaterialWaterRefractiveField<'_, F> {
+        self.field
+    }
+
     pub fn wavelength_nm(&self) -> f64 {
         self.prepared.wavelength_nm()
     }
