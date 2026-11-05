@@ -423,6 +423,7 @@ impl<'a> MixedViscoTetMotion<'a> {
             solid: endpoint.solid,
             velocity_mps: self.velocity_mps.clone(),
             reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+            reference_corner_density_kg_m3: self.reference_corner_density_kg_m3.clone(),
             mass: Arc::clone(&self.mass),
         };
         checkpoint(cx)?;

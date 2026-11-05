@@ -32,6 +32,7 @@ use super::{
     MixedViscoTetEnergy, MixedViscoTetError, MixedViscoTetSolid, checkpoint, gate, invalid,
 };
 use crate::inertia::{BackwardEulerInertia, ReferenceMass};
+use crate::linear3::tet10::TET10_EDGES;
 
 pub use crate::hyper3::mixed::impulse::{MixedImpulseControls, MixedImpulseReport};
 pub use crate::hyper3::visco::dynamics::FiniteViscoMotionControls;
@@ -57,6 +58,7 @@ pub struct MixedViscoTetMotion<'a> {
     solid: MixedViscoTetSolid<'a>,
     velocity_mps: Vec<[f64; 3]>,
     reference_density_kg_m3: Arc<[f64]>,
+    reference_corner_density_kg_m3: Option<Arc<[[f64; 4]]>>,
     mass: Arc<ReferenceMass>,
 }
 
@@ -111,6 +113,118 @@ impl<'a> MixedViscoTetMotion<'a> {
             solid,
             velocity_mps: velocity_mps.to_vec(),
             reference_density_kg_m3: Arc::from(reference_density_kg_m3),
+            reference_corner_density_kg_m3: None,
+            mass: Arc::new(mass),
+        })
+    }
+
+    /// Bind a positive P1 reference-density field to the original P2 inertia.
+    ///
+    /// Four densities [kg/m³] per element follow its corner connectivity. P1
+    /// interpolation remains positive between corners; unconstrained quadratic
+    /// density interpolation would not. Material, pressure and viscous memory
+    /// are retained, and density is never re-queried on the deformed geometry.
+    /// Four Duffy points per direction integrate affine graded P2 mass exactly;
+    /// a varying profile on a curved map requires at least six. The cached
+    /// reference quadrature supplies both inertia and acceleration loads.
+    ///
+    /// # Errors
+    /// Refuses nonpositive/nonfinite or incomplete density, insufficient curved
+    /// quadrature, unrepresentable mass, assembly-budget excess or cancellation.
+    pub fn try_new_with_reference_density(
+        solid: MixedViscoTetSolid<'a>,
+        corner_density_kg_m3: &[[f64; 4]],
+        velocity_mps: &[[f64; 3]],
+        maximum_mass_assembly_bytes: usize,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MixedViscoTetError> {
+        checkpoint(cx)?;
+        if velocity_mps.len() != solid.displacement_m.len()
+            || velocity_mps.iter().flatten().any(|v| !v.is_finite())
+        {
+            return Err(invalid(
+                "one finite initial velocity per original quadratic node required",
+            )
+            .into());
+        }
+        if corner_density_kg_m3.len() != solid.mesh.elements.len()
+            || corner_density_kg_m3
+                .iter()
+                .flatten()
+                .any(|rho| !rho.is_finite() || *rho <= 0.0)
+        {
+            return Err(
+                invalid("four positive reference densities per original Tet10 required").into(),
+            );
+        }
+        for (element, density) in solid.mesh.elements.iter().zip(corner_density_kg_m3) {
+            checkpoint(cx)?;
+            if density.iter().all(|rho| *rho == density[0]) {
+                continue;
+            }
+            let nodes = &element.connectivity;
+            let affine = TET10_EDGES.iter().enumerate().all(|(edge, &[a, b])| {
+                (0..3).all(|c| {
+                    solid.nodes_m[nodes[edge + 4]][c]
+                        == f64::midpoint(solid.nodes_m[nodes[a]][c], solid.nodes_m[nodes[b]][c])
+                })
+            });
+            if !affine && solid.quadrature_points_per_dir < 6 {
+                return Err(invalid(
+                    "curved Tet10 graded reference density requires at least six Duffy points",
+                )
+                .into());
+            }
+        }
+        let mass = ReferenceMass::from_tet10_density_quadrature(
+            solid
+                .mesh
+                .elements
+                .iter()
+                .zip(corner_density_kg_m3)
+                .map(|(element, &density)| {
+                    (
+                        element.connectivity,
+                        element.points.iter().map(move |q| {
+                            (
+                                q.shapes,
+                                q.weight_m3,
+                                corner_density_at(density, q.pressure_shapes),
+                            )
+                        }),
+                    )
+                }),
+            solid.displacement_m.as_flattened().len(),
+            maximum_mass_assembly_bytes,
+            cx,
+        )
+        .map_err(inertia_error)?;
+        let mut means = Vec::with_capacity(corner_density_kg_m3.len());
+        for (element, &density) in solid.mesh.elements.iter().zip(corner_density_kg_m3) {
+            checkpoint(cx)?;
+            let mean = if density.iter().all(|rho| *rho == density[0]) {
+                density[0]
+            } else {
+                element
+                    .points
+                    .iter()
+                    .map(|q| {
+                        corner_density_at(density, q.pressure_shapes)
+                            * (q.weight_m3 / element.reference_volume_m3)
+                    })
+                    .sum::<f64>()
+            };
+            if !mean.is_finite() || mean <= 0.0 {
+                return Err(invalid("reference-volume mean density is unrepresentable").into());
+            }
+            means.push(mean);
+        }
+        checkpoint(cx)?;
+        Ok(Self {
+            solid,
+            velocity_mps: velocity_mps.to_vec(),
+            reference_density_kg_m3: means.into(),
+            reference_corner_density_kg_m3: Some(Arc::from(corner_density_kg_m3)),
             mass: Arc::new(mass),
         })
     }
@@ -121,11 +235,53 @@ impl<'a> MixedViscoTetMotion<'a> {
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
         &self.velocity_mps
     }
+    /// Original reference-volume mean densities. Reporting only: graded
+    /// inertia and acceleration loads never substitute these for the field.
     pub fn reference_density_kg_m3(&self) -> &[f64] {
         &self.reference_density_kg_m3
     }
+    /// Original positive corner profiles, retained by all motion transitions.
+    pub fn reference_corner_density_kg_m3(&self) -> Option<&[[f64; 4]]> {
+        self.reference_corner_density_kg_m3.as_deref()
+    }
     pub fn reference_mass_kg(&self) -> f64 {
         self.mass.reference_mass_kg()
+    }
+    /// Project a P2 reference acceleration [m/s²] through the retained mass.
+    ///
+    /// Supply the returned original nodal forces [N] as dead loads exactly
+    /// once. Signed corner and edge contributions, supported coordinates and
+    /// density-weighted moments are preserved. A constant acceleration gives
+    /// constant free-body acceleration for graded and curved elements alike.
+    /// This does not introduce a current-position-dependent gravity potential.
+    pub fn reference_acceleration_load_n(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<(usize, f64)>, MixedViscoTetError> {
+        checkpoint(cx)?;
+        if acceleration_m_s2.len() != self.solid.nodes_m.len()
+            || acceleration_m_s2.iter().flatten().any(|a| !a.is_finite())
+        {
+            return Err(
+                invalid("one finite acceleration vector per original node required").into(),
+            );
+        }
+        let forces = self
+            .mass
+            .action(acceleration_m_s2.as_flattened(), cx)
+            .map_err(inertia_error)?;
+        let mut loads = Vec::with_capacity(forces.len());
+        for (dof, force) in forces.into_iter().enumerate() {
+            if dof % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            if force != 0.0 {
+                loads.push((dof, force));
+            }
+        }
+        checkpoint(cx)?;
+        Ok(loads)
     }
     /// Original pressure treatment retained by every accepted native interval.
     pub fn volumetric_treatment(&self) -> VolumetricTreatment {
@@ -270,6 +426,7 @@ impl<'a> MixedViscoTetMotion<'a> {
                     solid: step.solid,
                     velocity_mps,
                     reference_density_kg_m3: Arc::clone(&self.reference_density_kg_m3),
+                    reference_corner_density_kg_m3: self.reference_corner_density_kg_m3.clone(),
                     mass: Arc::clone(&self.mass),
                 },
                 equilibrium: step.equilibrium,
@@ -279,5 +436,13 @@ impl<'a> MixedViscoTetMotion<'a> {
             },
             force,
         ))
+    }
+}
+
+fn corner_density_at(density: [f64; 4], lambda: [f64; 4]) -> f64 {
+    if density.iter().all(|rho| *rho == density[0]) {
+        density[0]
+    } else {
+        (0..4).map(|a| lambda[a] * density[a]).sum()
     }
 }

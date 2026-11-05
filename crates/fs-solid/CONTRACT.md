@@ -335,6 +335,31 @@ signed supported quadratic loads on a deformed body and one retained Maxwell
 history update. Independent polynomial moment arithmetic and source formatting
 were checked; native Rust execution remains unverified under the resource blocker.
 
+## Graded inventory in quadratic Maxwell motion
+
+`MixedViscoTetMotion::try_new_with_reference_density` binds four positive P1
+corner densities per original tetrahedron to the native signed consistent P2
+mass. The original cached quadrature supplies geometry, displacement shapes and
+barycentric density samples. Density and mass remain immutable across native
+finite-compliance and exact-incompressible motion, impulses, force kicks and
+drift. Graded affine maps require the existing four-point Duffy rule; graded
+curved maps require six points per direction. Constant profiles preserve the
+original scalar mass path's arithmetic.
+
+`reference_corner_density_kg_m3` returns the complete retained profile.
+`reference_density_kg_m3` reports reference-volume-weighted cell means; it does
+not replace the density field in physical inertia. `reference_acceleration_load_n`
+applies the same full consistent mass to authored nodal acceleration, including
+held coordinates and signed corner entries. A held gravity or acceleration load
+therefore preserves the original body's force resultant and torque without
+changing material inventory as the body deforms. Evolving force fields still
+require their own force-law owner.
+
+Independent barycentric polynomial integrals check every affine and curved
+mass coefficient. Focused native fixtures exercise the graded centroid,
+finite-compliance and exact-pressure acceleration, momentum balance, retained
+Maxwell history through impulse, scalar equality and explicit admission refusals.
+
 ## Current-area pressure on finite-deformation membranes
 
 Source-bound hyperelastic sheets can explicitly select exact incompressibility
