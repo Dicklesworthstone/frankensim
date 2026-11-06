@@ -27,6 +27,9 @@ pub mod bank;
 /// Dynamic material-derived axial strain in the original playable bank.
 pub mod longitudinal;
 
+/// Source-bound tensile admission on the existing nonlinear string storage.
+mod strength;
+
 fn invalid(what: &'static str) -> ImpactError { ImpactError::Invalid(what) }
 fn poll(cx: &Cx<'_>, gate: &CancelGate) -> Result<(), ImpactError> {
     if gate.is_requested() { return Err(ImpactError::Cancelled); }

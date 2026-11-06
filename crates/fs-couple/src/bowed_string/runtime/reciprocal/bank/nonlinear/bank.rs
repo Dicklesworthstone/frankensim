@@ -166,7 +166,7 @@ impl ReciprocalStringBank {
             bindings.push(ModalPotentialBinding {
                 component: index,
                 coordinate_start: 0,
-                potential: Box::new(GeometricStorage(potential.geometric_remainder())),
+                potential: Box::new(GeometricStorage(potential.geometric_remainder()?)),
             });
             potentials.push(potential);
         }

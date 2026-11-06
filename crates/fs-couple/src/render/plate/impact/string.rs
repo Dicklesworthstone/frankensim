@@ -13,6 +13,10 @@ use super::{BodyPotential, ImpactBody, ImpactError, MAX_IMPACT_MODES, invalid};
 use super::linear::wire::WireSpan;
 use crate::modal_acoustic_time::ModalAcousticState;
 
+mod strength;
+pub use strength::StringTensileAssessment;
+use strength::StringTensileGuard;
+
 /// An explicit constitutive input and moderate-slope validity bound.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StringStretching {
@@ -62,6 +66,7 @@ pub struct StringPotential {
     // Private potential-only lift coordinate in metres, never a new unit-mass
     // oscillator. SupportedStrings applies its physical kinetic transformation.
     affine_endpoint: bool,
+    tensile: Option<Arc<StringTensileGuard>>,
 }
 impl core::fmt::Debug for StringPotential {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -99,7 +104,8 @@ impl WireSpan {
             return Err(invalid("derived string stretching channel is unrepresentable"));
         }
         let potential = StringPotential { storage: Arc::new(storage), stretching,
-            rest_tension_n: self.tension_n, transverse_planes: 1, affine_endpoint: false };
+            rest_tension_n: self.tension_n, transverse_planes: 1, affine_endpoint: false,
+            tensile: None };
         let mut q = [0.0; MAX_IMPACT_MODES];
         for (i, s) in body.initial.iter().enumerate() { q[i] = s.displacement_m_sqrt_kg; }
         potential.observe(&q[..n])?;
@@ -163,12 +169,15 @@ impl StringPotential {
     /// Used only when the original exact linear owner already carries that
     /// storage and inertia. Zeroing the separate frequency list avoids both
     /// double stiffness and cancellation from subtracting two large energies.
-    pub(crate) fn geometric_remainder(&self) -> Self {
+    pub(crate) fn geometric_remainder(&self) -> Result<Self, ImpactError> {
+        if self.tensile.is_some() {
+            return Err(invalid("string bank tensile admission must include its own axial material histories"));
+        }
         let storage = SosModalStorage {
             omegas: vec![0.0; self.mode_count()],
             channels: self.storage.channels.clone(),
         };
-        Self { storage: Arc::new(storage), ..self.clone() }
+        Ok(Self { storage: Arc::new(storage), ..self.clone() })
     }
 
     pub fn mode_count(&self) -> usize { self.storage.omegas.len() }
@@ -261,7 +270,24 @@ impl StringPotential {
     /// Observe and enforce the admitted continuous-span slope bound. It can
     /// conservatively refuse cancelling modal shapes; it never misses a peak
     /// between quadrature stations. This is a validity limit, not error control.
+    /// A selected material tensile envelope is checked on the SAME tension and
+    /// coordinates before the native host accepts initial or candidate state.
     pub fn observe(&self, q: &[f64]) -> Result<StringObservation, ImpactError> {
+        let observation = self.observe_kinematics(q)?;
+        if let Some(guard) = &self.tensile {
+            let assessment = guard.assess(q, self.transverse_planes, observation.tension_n)?;
+            if assessment.exceeds_limit() {
+                return Err(ImpactError::Owner(format!(
+                    "string tensile envelope exceeds '{}' in layer {}: {} Pa, utilization {}",
+                    guard.capacity.limit_property(), assessment.governing_layer,
+                    assessment.governing_tensile_stress_bound_pa, assessment.utilization,
+                )));
+            }
+        }
+        Ok(observation)
+    }
+
+    fn observe_kinematics(&self, q: &[f64]) -> Result<StringObservation, ImpactError> {
         if !self.valid_coordinates(q) { return Err(invalid("string observation needs every finite modal coordinate")); }
         let n = self.mode_count(); let ch = &self.storage.channels[0];
         let mut s = 0.0; let mut slope_bound = 0.0;

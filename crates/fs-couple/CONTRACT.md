@@ -1169,3 +1169,49 @@ f64 clock domain. No source evolution, interpolation, particle velocity or
 directional/reflected moving field is inferred.
 `tests/moving_quadrupole_pcm.rs` covers history/bandwidth/clearance refusal,
 coherent cancellation, block invariance, atomic failure and native WAV parity.
+
+## Material tensile admission on nonlinear acoustic strings
+
+`NonlinearMaterialString::with_tensile_limit` explicitly binds one named static
+strength claim per original homogeneous or perfectly bonded concentric layer.
+The shared `AxialTensileCapacity` retains every source receipt, modulus and
+annular geometry. No default strength, safety factor or allowable is inferred.
+Missing, nonstatic or invalid strength refuses; measured whole-string and
+helical winding sources require an explicit constituent stress model. Prony
+sections and homogeneous hereditary bending sources refuse until their actual
+layer memory stresses are included.
+
+The existing Kirchhoff--Carrier storage supplies the actual common tension,
+including geometric stretching from both transverse polarizations. Its exact
+modal normalization supplies a continuous-span curvature envelope
+`K = sum_n k_n^2 sqrt(2/(mu L)) hypot(q_xn, q_yn)`. Each layer is assessed using
+`sigma_i <= E_i (T/EA + r_outer_i K)`, with the first maximum-utilization layer
+governing. A single sine mode attains its curvature envelope; multimode
+cancellation can make the envelope conservative. The two-plane norm keeps
+this criterion independent of the transverse coordinate frame. The quantity
+is a floating-point elastic model estimate, not an interval certificate.
+
+Selected limits enter the original initial-state and candidate acceptance
+checks. A crossed envelope refuses before physical state, material histories,
+energy accounts or accepted time publish. Forces and stored energy remain the
+original laws. Successful checks allocate nothing; preparation retains the
+bounded modal factors and original capacity. Native reference, prepared and
+pressure-rendering paths share the same check. Transversely moving supported
+strings retain the guard through their original kinetic transformation: the
+affine endpoint adds its actual stretching but has zero curvature. Conversion
+to local longitudinal-wave support refuses a selected guard until that
+owner's nonuniform axial stress is included. Transfer of a guarded potential
+to the bow bank's geometric-only storage also refuses: that owner can add
+independent axial material histories. Independently constructed bow banks do
+not acquire this opt-in through source-property presence alone.
+
+`tensile_assessment` exposes the selected elastic demand without enforcing its
+limit, allowing diagnosis of overlimit candidates. This is a small-strain
+normal-stress criterion at fixed material conditions and accepted temporal
+endpoints. It supplies no viscous stress, torsional/shear failure, rate effects,
+necking, fatigue, fracture energy, rupture topology or guarantee between time
+samples. G0/G1/G3 regressions in `tests/material_string_nonlinear/tensile.rs`
+specify axial-plus-bending demand, per-layer load sharing, transverse-frame
+invariance, source refusals, unchanged admitted mechanics and native rollback,
+including supported conversion. Native execution is a separate verification
+obligation.

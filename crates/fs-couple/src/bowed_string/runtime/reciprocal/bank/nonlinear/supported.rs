@@ -192,6 +192,8 @@ impl SupportedMaterialStrings {
                 &geometry,&axial,support)?
         } else {SupportedStrings::with_transverse_motion(&wires,&laws,
             motion.unwrap_or(&default_ends),&transverse,support)?};
+        let capacities: Vec<_> = sources.iter().map(NonlinearMaterialString::tensile_capacity).collect();
+        let supported = supported.with_tensile_capacities(&capacities)?;
         for (index,band) in bands.iter().enumerate() {
             if supported.axial_angular_frequencies(index)?.iter().any(|&omega|
                 band.is_some_and(|(lo,hi)|omega<lo || omega>hi)) {

@@ -7,6 +7,8 @@ mod pressure;
 mod support;
 #[path = "material_string_nonlinear/bank.rs"]
 mod bank;
+#[path = "material_string_nonlinear/tensile.rs"]
+mod tensile;
 use support::*;
 use fs_couple::bowed_string::BowedStringCard;
 use fs_couple::bowed_string::runtime::reciprocal::bank::MaterialStringSource;

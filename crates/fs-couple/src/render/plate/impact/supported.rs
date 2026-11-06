@@ -191,6 +191,30 @@ impl SupportedPotential {
 #[derive(Clone, Debug)]
 pub struct SupportedStrings(Rc<Data>);
 impl SupportedStrings {
+    // Retain independently selected material limits across the native kinetic
+    // transformation. The relative sine basis and curvature stay unchanged;
+    // an affine transverse endpoint adds tension but no bending curvature.
+    pub(crate) fn with_tensile_capacities(
+        mut self,
+        capacities: &[Option<&fs_material::section::strength::AxialTensileCapacity>],
+    ) -> Result<Self, ImpactError> {
+        if capacities.len() != self.wire_count() {
+            return Err(invalid("one original tensile selection per supported wire"));
+        }
+        if capacities.iter().all(Option::is_none) { return Ok(self); }
+        let data = Rc::make_mut(&mut self.0);
+        for (index, capacity) in capacities.iter().copied().enumerate() {
+            let Some(capacity) = capacity else { continue; };
+            let SupportedPotential::Transverse(potential) = &mut data.potentials[index] else {
+                return Err(invalid("longitudinal support waves require their own local tensile stress assessment"));
+            };
+            *potential = potential.clone().with_tensile_capacity(
+                capacity.clone(), data.wires[index].length_m(),
+            )?;
+        }
+        Ok(self)
+    }
+
     pub fn new(wires: &[WireSpan], stretching: Option<StringStretching>, support: TranslatingSupport)
         -> Result<Self, ImpactError>
     {
