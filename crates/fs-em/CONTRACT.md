@@ -366,6 +366,43 @@ broadband qualification. Finite films and their beam/exposure consumers
 explicitly refuse this law until whole-field drift admission covers their
 standing-wave enhancement.
 
+## Magnetized plasma Faraday rotation and circular absorption
+
+`plane_wave::plasma::magnetized::MagnetizedIonizedGasInterface` binds the original
+prepared Hall/cyclotron transport, explicit bound-charge epsilon/mu and a
+lossless incident source. Normal incidence must be parallel or antiparallel to
+the prescribed static B; zero B admits any normal. The original gas/background
+condition checks are shared with the unmagnetized owner. Circular labels refer
+to the outgoing normal, so reversing B swaps the two signed responses.
+
+Each circular eigenmode uses its original conductivity and
+`epsilon_background - i*sigma/omega`, with the existing passive Fresnel kernel.
+Arbitrary transverse complex incident E produces actual reflected fields and
+two transmitted waves with distinct phase/attenuation: Faraday rotation and
+circular dichroism. No gyrotropic tensor is cast into a scalar material law.
+
+`prepare_wave` validates the original transport at the complete surface field.
+For normalized circular amplitudes, a carrier's instantaneous peak speed is
+`(|u_plus|+|u_minus|)/sqrt(2)`, independent of relative phase. Both magnitudes
+decay, so this bounds every deeper carrier and Coulomb pair-relative drift.
+Admitting two separate modes would not establish the combined-field bound.
+
+Retained modal responses provide allocation-free depth fields, currents,
+carrier velocities, source-owned signed thermal partitions and kinetic storage.
+Their circular orthogonality removes cycle-mean quadratic cross terms. Native
+Maxwell residuals, interface power and attenuation/friction balance are checked;
+integrated physical heat uses expm1. Background field energy stays separate
+from carrier kinetic energy. Signed gyroscopic reactive power is retained,
+and static magnetic no-work is never deposited as heat.
+
+G1/G3/G0 regressions cover independent signed Drude/Fresnel modes and resonance,
+zero-B native parity, spatial Maxwell/Poynting closure, Coulomb heat partitions,
+Faraday rotation/dichroism, B reversal, frame rotation, combined drift refusal,
+source conditions and cancellation. These are analytical implementation checks,
+not experimental qualification. The model remains frozen, local and classical,
+with normal-incidence homogeneous half-spaces only: no oblique/longitudinal
+modes, finite films, kinetic spatial response, pulses or nonlinear wave force.
+
 ## Conduction at independent common-voltage references
 
 The planar static, material-response and prescribed-motion current paths retain

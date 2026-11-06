@@ -3,6 +3,9 @@
 #[path = "../../fs-material/tests/common/ionized_gas.rs"]
 mod fixture;
 
+#[path = "plane_wave_plasma/magnetized.rs"]
+mod magnetized;
+
 #[path = "plane_wave_plasma/layers.rs"]
 mod layer_fields;
 

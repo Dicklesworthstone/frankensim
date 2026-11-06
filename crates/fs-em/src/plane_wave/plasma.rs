@@ -23,7 +23,9 @@ use super::{
 };
 use fs_material::{
     field_storage::{linear_electric_permittivity, linear_magnetic_permeability},
-    ionized_gas::{IonizedGasError, IonizedGasHarmonic, IonizedGasHarmonicResponse},
+    ionized_gas::{
+        IonizedGasConductivity, IonizedGasError, IonizedGasHarmonic, IonizedGasHarmonicResponse,
+    },
     state_point::ResolvedMaterialStatePoint,
 };
 use fs_math::{c64::C64, dd::Dd, det};
@@ -31,6 +33,9 @@ use fs_qty::{
     QuantitySpec, Temperature,
     semantic::{QuantityKind, ValueForm},
 };
+
+/// Original Hall/cyclotron transport in circularly birefringent half-space waves.
+pub mod magnetized;
 
 /// One frequency of the original collisional transport plus an explicit
 /// lossless bound-charge background. Both complete sources remain borrowed.
@@ -66,7 +71,7 @@ impl<'a> IonizedGasWaveResponse<'a> {
         let omega = positive(omega_rad_s)?;
         let epsilon_background = linear_electric_permittivity(background)?;
         let permeability = linear_magnetic_permeability(background)?;
-        admit_background(transport, background)?;
+        admit_background(transport.source(), background)?;
         let response = transport.response(omega, [C64::ZERO; 3], &mut cancelled)?;
         let sigma = response.conductivity_s_m;
         // Retain the small real part around the plasma cutoff after division.
@@ -460,10 +465,9 @@ fn positive_scale(value: f64) -> Option<f64> {
 }
 
 fn admit_background(
-    transport: &IonizedGasHarmonic<'_>,
+    source: &IonizedGasConductivity,
     background: &ResolvedMaterialStatePoint,
 ) -> Result<(), ReflectionError> {
-    let source = transport.source();
     let state = source.state();
     let pressure = source
         .equilibrium()
