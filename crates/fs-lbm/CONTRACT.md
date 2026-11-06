@@ -1948,6 +1948,18 @@ it does not add solved-interface latent feedback or relax wetting restrictions.
   streaming owns the selected-wall impulse. All face candidates are admitted
   before publication using O(ny) reusable scratch. Scratch retains the original
   collision-field extent on success or refusal.
+  `core2::PressureX2` and `Grid::step_pressure_x` prescribe pressure densities
+  at both x faces, so the pressure head determines the flow in either direction.
+  Both faces use the same first-interior physical Guo velocity/stress and
+  destination half-source reconstruction; neither imposes an inlet velocity.
+  The measured variant retains the original stationary-wall impulse, separate
+  from open-face transport. Face densities represent isothermal lattice
+  pressure `p = CS2*rho`; SI inputs use the material pressure-perturbation
+  conversion, not absolute thermodynamic pressure. The native battery checks
+  uniform pressure stationarity, barotropic hydrostatic gravity balance,
+  reversed pressure-head flow around an obstacle, and exact discrete momentum
+  balance between open-face transport and wall drag. Prescribed-density force
+  overflow is refused before collision; late source refusal remains atomic.
 - `rheology::Rheology`, `rheology::update_tau`, and
   `rheology::channel_flow` — local apparent-viscosity laws with a shared,
   self-consistent constitutive solve in D2Q9 and D3Q19 `update_tau3`.
@@ -4290,7 +4302,7 @@ Their presence does not claim native execution or empirical gas validation.
   explicitly ignored release lane is executed green on the combined batch
   snapshot, the crate still makes no completed Re=100 cylinder validation
   claim.
-- `VelocityPressureX2` is a low-Mach regularized fixture boundary with periodic
+- `VelocityPressureX2` and `PressureX2` are low-Mach regularized fixture boundaries with periodic
   lateral closure. It is not a characteristic or non-reflecting far-field
   condition and makes no unbounded-domain or blockage
   claim. The cylinder battery must disclose its domain, resolution, warm-up,

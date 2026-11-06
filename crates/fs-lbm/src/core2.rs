@@ -774,6 +774,69 @@ pub struct VelocityPressureX2 {
     outlet_density: f64,
 }
 
+/// Two low-Mach isothermal pressure boundaries on the x faces.
+///
+/// Each face prescribes density (`p = CS2 * rho`) and copies physical velocity
+/// and non-equilibrium stress from its first-interior column. The pressure
+/// difference therefore determines the flow, including reversal: neither face
+/// imposes an inlet velocity. The grid requires non-periodic x, periodic y,
+/// and fluid-only face and first-interior columns, as for [`VelocityPressureX2`].
+///
+/// These are lattice pressure densities, not absolute thermodynamic pressures.
+/// Use [`crate::material::MaterialScaling::density_lattice_from_pressure_perturbation`]
+/// to convert an SI pressure perturbation with the selected material scaling.
+/// Like the other regularized boundaries, a fixed pressure reflects acoustic
+/// waves; this is not a characteristic radiation boundary.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PressureX2 {
+    min_density: f64,
+    max_density: f64,
+}
+
+impl PressureX2 {
+    /// Construct checked pressure densities at `x = 0` and `x = nx - 1`.
+    #[must_use]
+    pub fn new(min_density: f64, max_density: f64) -> Self {
+        assert!(
+            [min_density, max_density]
+                .iter()
+                .all(|rho| rho.is_finite() && *rho > 0.0),
+            "D2Q9 pressure-face densities must be positive and finite"
+        );
+        Self {
+            min_density,
+            max_density,
+        }
+    }
+
+    /// Prescribed density at the x-min face in lattice units.
+    #[must_use]
+    pub const fn min_density(self) -> f64 {
+        self.min_density
+    }
+
+    /// Prescribed density at the x-max face in lattice units.
+    #[must_use]
+    pub const fn max_density(self) -> f64 {
+        self.max_density
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RegularizedX2 {
+    VelocityPressure(VelocityPressureX2),
+    Pressure(PressureX2),
+}
+
+impl RegularizedX2 {
+    fn max_density(self) -> f64 {
+        match self {
+            Self::VelocityPressure(boundary) => boundary.outlet_density,
+            Self::Pressure(boundary) => boundary.max_density,
+        }
+    }
+}
+
 // Face candidates occupy reusable capacity after the collision field, but
 // callers always recover exactly the original collision-buffer extent.
 struct RegularizedScratch2<'a> {
@@ -2079,7 +2142,7 @@ impl Grid {
         }
     }
 
-    fn validate_velocity_pressure_x(&self, boundary: VelocityPressureX2) {
+    fn validate_regularized_x(&self, boundary: RegularizedX2) {
         assert!(
             self.nx >= 3,
             "D2Q9 x-open flow requires at least three columns"
@@ -2107,7 +2170,10 @@ impl Grid {
             }
         }
         for y in 0..self.ny {
-            self.regularized_force(self.idx(self.nx - 1, y), boundary.outlet_density);
+            self.regularized_force(self.idx(self.nx - 1, y), boundary.max_density());
+            if let RegularizedX2::Pressure(pressure) = boundary {
+                self.regularized_force(self.idx(0, y), pressure.min_density);
+            }
             for x in [0, 1, self.nx - 2, self.nx - 1] {
                 assert_eq!(
                     self.flags[self.idx(x, y)],
@@ -2177,7 +2243,7 @@ impl Grid {
         populations
     }
 
-    fn prepare_velocity_pressure_x(&self, post: &mut Vec<[f64; Q]>, boundary: VelocityPressureX2) {
+    fn prepare_regularized_x(&self, post: &mut Vec<[f64; Q]>, boundary: RegularizedX2) {
         // Read the same native pulls that streaming will publish. Appended
         // face candidates reuse collision scratch and admit every row before
         // any accepted population is changed, including a late-row refusal.
@@ -2192,19 +2258,23 @@ impl Grid {
                     self.stationary_pull_population(post, index, q, self.source(x, y, q))
                 })
             };
-            let (inlet_density, _, inlet_stress) =
+            let (inlet_density, inlet_velocity, inlet_stress) =
                 self.regularized_source(inlet_source, &pulled(1, inlet_source));
             let (_, outlet_velocity, outlet_stress) =
                 self.regularized_source(outlet_source, &pulled(self.nx - 2, outlet_source));
+            let (inlet_density, inlet_velocity) = match boundary {
+                RegularizedX2::VelocityPressure(pair) => (inlet_density, pair.inlet_velocity),
+                RegularizedX2::Pressure(pair) => (pair.min_density, inlet_velocity),
+            };
             let inlet_populations = self.regularized_face_populations(
                 inlet,
                 inlet_density,
-                boundary.inlet_velocity,
+                inlet_velocity,
                 inlet_stress,
             );
             let outlet_populations = self.regularized_face_populations(
                 outlet,
-                boundary.outlet_density,
+                boundary.max_density(),
                 outlet_velocity,
                 outlet_stress,
             );
@@ -2651,10 +2721,10 @@ impl Grid {
         receipt
     }
 
-    fn step_velocity_pressure_x_inner(
+    fn step_regularized_x_inner(
         &mut self,
         scratch: &mut Vec<[f64; Q]>,
-        boundary: VelocityPressureX2,
+        boundary: RegularizedX2,
         measured_walls: Option<&[bool]>,
     ) -> MomentumExchange2 {
         self.collide_into(scratch);
@@ -2663,7 +2733,7 @@ impl Grid {
             post: scratch,
             cells: count,
         };
-        self.prepare_velocity_pressure_x(scratch.post, boundary);
+        self.prepare_regularized_x(scratch.post, boundary);
         let receipt = self.stream_from_inner(scratch.post, measured_walls);
         for y in 0..self.ny {
             let inlet = self.idx(0, y);
@@ -2684,8 +2754,9 @@ impl Grid {
         scratch: &mut Vec<[f64; Q]>,
         boundary: VelocityPressureX2,
     ) {
-        self.validate_velocity_pressure_x(boundary);
-        let _ = self.step_velocity_pressure_x_inner(scratch, boundary, None);
+        let boundary = RegularizedX2::VelocityPressure(boundary);
+        self.validate_regularized_x(boundary);
+        let _ = self.step_regularized_x_inner(scratch, boundary, None);
     }
 
     /// Regularized x-flow step plus a selected-wall momentum receipt.
@@ -2699,8 +2770,39 @@ impl Grid {
         measured_walls: &[bool],
     ) -> MomentumExchange2 {
         self.validate_measured_walls(measured_walls);
-        self.validate_velocity_pressure_x(boundary);
-        self.step_velocity_pressure_x_inner(scratch, boundary, Some(measured_walls))
+        let boundary = RegularizedX2::VelocityPressure(boundary);
+        self.validate_regularized_x(boundary);
+        self.step_regularized_x_inner(scratch, boundary, Some(measured_walls))
+    }
+
+    /// Advance flow driven by the two prescribed face pressures.
+    ///
+    /// Both faces copy the physical Guo velocity and stress from their interior
+    /// neighbor and restore their own `rho*g + fext` half-source. Collision
+    /// applies forcing once. All face candidates are admitted before streaming;
+    /// refusal leaves the grid unchanged. Collision scratch is reused, with
+    /// O(ny) additional capacity and its original field extent on return.
+    pub fn step_pressure_x(&mut self, scratch: &mut Vec<[f64; Q]>, boundary: PressureX2) {
+        let boundary = RegularizedX2::Pressure(boundary);
+        self.validate_regularized_x(boundary);
+        let _ = self.step_regularized_x_inner(scratch, boundary, None);
+    }
+
+    /// Pressure-driven x-flow step with the original selected-wall impulse.
+    ///
+    /// The wall mask and prescribed-pressure forcing are admitted before
+    /// collision. The receipt measures only selected stationary wall links;
+    /// prescribed-pressure faces are separate open boundaries.
+    pub fn step_pressure_x_with_wall_momentum(
+        &mut self,
+        scratch: &mut Vec<[f64; Q]>,
+        boundary: PressureX2,
+        measured_walls: &[bool],
+    ) -> MomentumExchange2 {
+        self.validate_measured_walls(measured_walls);
+        let boundary = RegularizedX2::Pressure(boundary);
+        self.validate_regularized_x(boundary);
+        self.step_regularized_x_inner(scratch, boundary, Some(measured_walls))
     }
 }
 
