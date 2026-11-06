@@ -25,6 +25,7 @@ use fs_qty::{Temperature, Time};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 mod reservoir;
+mod stabilized;
 use reservoir::ReservoirEntropyAccount;
 
 /// Absolute entropy and relative species-continuity allowances.
@@ -81,7 +82,8 @@ pub struct MolecularEntropyReport {
     /// T* is the original first-cell temperature and rho_i* the original
     /// volume-mean density (a positive original trace if that mean underflows).
     pub reference_entropy_residual_j_k: f64,
-    /// Smallest admitted substep entropy change [J/K]; zero for zero duration.
+    /// Smallest admitted physical substep or RKL2 macrostep entropy change [J/K].
+    /// Zero for zero duration; internal Legendre stages are not physical steps.
     pub minimum_step_entropy_change_j_k: f64,
     /// Largest per-species relative inventory defect over accepted substeps
     /// and the complete interval. This is not an element-only mass check.

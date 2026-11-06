@@ -5639,3 +5639,48 @@ For the declared hot-bath/cold-cell fixture, the initial entropy rate changes
 from -0.1758153103431 to +0.0675891418055 W/K. At dt=1e-4 s the body entropy
 decreases while the source-aware total generation is positive, so a closed-body
 entropy test would be the wrong admission criterion.
+
+
+### Source-conjugate RKL2 molecular evolution
+
+`advance_stabilized_entropy_consistent_for` combines the native RKL2
+super-time-stepping recurrence with the original-source conjugate molecular
+faces. The same original caloric models, barycentric Maxwell-Stefan solve,
+Fourier heat, longitudinal stress and authored reciprocal Soret/Dufour terms
+remain responsible for the trajectory. Compile-time face selection in the
+existing native recurrence preserves the original stabilized entry points;
+there is no parallel time integrator or added operator state.
+
+Every native intermediate and final stage retains the original species,
+caloric, source-domain and parabolic-scale admission. Actual state entropy
+and each species inventory are additionally checked at every physical
+macrostep endpoint. Internal Legendre stages are algebraic auxiliaries,
+not sequential physical timesteps; stage-by-stage entropy monotonicity is
+not asserted. A failed endpoint uses the existing bounded halving retry.
+
+The endpoint account reuses temperatures already inverted by the final native
+RHS admission. There is no additional EOS inversion, constitutive evaluation,
+per-stage allocation or additional persistent temperature buffer. Candidate
+temperatures replace the entropy anchor only after admission, so a rejected
+endpoint cannot contaminate a retry. The direct original-to-final entropy and
+species account must satisfy the same single allowance before publication.
+Cancellation, exhausted work or final refusal leaves the complete field and
+clock unchanged; no accepted prefix is published.
+
+This remains an Estimated nonlinear transport lane. The RKL2 negative-real
+stability interval does not establish nonlinear positivity, entropy stability
+or temporal accuracy for the coupled system. The caller retains the physical
+macrostep accuracy control and bounded stage/RHS budgets. Admitted species
+have common support at each face, and boundaries are periodic or stationary
+with zero heat/species exchange. Reservoir, moving, advective and reactive
+evolution remain separate entry points.
+
+Four focused regression definitions cover independent Legendre heat spectra
+and actual source entropy, actual RHS counts against SSP, the repaired
+unequal-caloric face and its two-stage Butcher trajectory, source-reference
+shifts and common absence, and late cancellation/work refusal with reuse.
+A positive smooth conductivity fixture stays within native caloric and
+parabolic limits yet yields a negative-entropy long RKL2 endpoint; the new
+gate rejects it, retains the correct retry anchor, and accepts shorter
+physical macrosteps. This is a concrete counterexample to inferring nonlinear
+entropy admission from the linear stability interval alone.

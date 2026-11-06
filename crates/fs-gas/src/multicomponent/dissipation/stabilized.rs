@@ -8,7 +8,8 @@
 
 use super::super::evolve::totals;
 use super::super::{Mesh1d, MixtureEuler1d, MixtureGas, Totals, allocated, sum};
-use super::evolve::{forward, spatial};
+use super::entropy::EntropyTracker;
+use super::evolve::{forward, spatial_with_wall_motion};
 use super::reservoir::ReservoirEnds;
 use super::{
     DissipationControl, DissipationError, DissipationOperator, DissipationReport, MAX_COMPONENTS,
@@ -303,6 +304,37 @@ pub(super) fn advance<L: TransportLaw>(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<StabilizedDissipationReport, DissipationError> {
+    advance_inner::<false, L>(
+        owner, flow, duration, controls, reservoirs, evaluations, None, cancelled,
+    )
+}
+
+/// The same RKL2 recurrence with source-conjugate faces and measured endpoint
+/// entropy. Intermediate Legendre states are not independent physical steps.
+pub(super) fn advance_entropy_consistent<L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: StabilizedDissipationControl,
+    account: &mut EntropyTracker,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StabilizedDissipationReport, DissipationError> {
+    advance_inner::<true, L>(
+        owner, flow, duration, controls, [None; 2], &mut 0, Some(account), cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_inner<const ENTROPY_FACES: bool, L: TransportLaw>(
+    owner: &mut DissipationOperator<L>,
+    flow: &mut MixtureEuler1d,
+    duration: Time,
+    controls: StabilizedDissipationControl,
+    reservoirs: ReservoirEnds<'_>,
+    evaluations: &mut usize,
+    mut entropy: Option<&mut EntropyTracker>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<StabilizedDissipationReport, DissipationError> {
     poll(cancelled)?;
     controls.validate()?;
     if !duration.value().is_finite() || duration.value() < 0.0 {
@@ -382,7 +414,7 @@ pub(super) fn advance<L: TransportLaw>(
             });
         }
         reserve_evaluation(evaluations, controls.maximum_operator_evaluations, elapsed)?;
-        let a = spatial(
+        let a = spatial_with_wall_motion::<ENTROPY_FACES, _>(
             gas,
             mesh,
             *boundaries,
@@ -399,8 +431,12 @@ pub(super) fn advance<L: TransportLaw>(
             &mut work.binary_diffusivities,
             &mut work.diffusion,
             base.diffusion,
+            [0.0; 2],
             cancelled,
         )?;
+        if let Some(account) = &mut entropy {
+            account.begin_attempt(&work.primitive);
+        }
         work.stabilized_faces.copy_from_slice(&work.faces);
         let remaining = duration.value() - elapsed;
         let mut step = remaining.min(base.maximum_step_s);
@@ -463,7 +499,7 @@ pub(super) fn advance<L: TransportLaw>(
                         controls.maximum_operator_evaluations,
                         elapsed,
                     )?;
-                    let evaluated = spatial(
+                    let evaluated = spatial_with_wall_motion::<ENTROPY_FACES, _>(
                         gas,
                         mesh,
                         *boundaries,
@@ -480,6 +516,7 @@ pub(super) fn advance<L: TransportLaw>(
                         &mut work.binary_diffusivities,
                         &mut work.diffusion,
                         base.diffusion,
+                        [0.0; 2],
                         cancelled,
                     )?;
                     check_rate(step, evaluated.rate, limit)?;
@@ -521,10 +558,22 @@ pub(super) fn advance<L: TransportLaw>(
                     }
                     core::mem::swap(&mut work.stage, &mut work.candidate);
                 }
+                if let Some(account) = &mut entropy {
+                    // The final native RHS admission already inverted this
+                    // exact endpoint. No extra constitutive or EOS query is
+                    // needed, and refused endpoints cannot alter the anchor.
+                    account.check_stabilized_candidate(
+                        gas, mesh.volumes(), &work.current, &work.stage,
+                        &work.primitive, cancelled,
+                    )?;
+                }
                 Ok::<_, DissipationError>(())
             })();
             match attempt {
                 Ok(()) => {
+                    if let Some(account) = &mut entropy {
+                        account.accept_stabilized_candidate(n, &work.primitive)?;
+                    }
                     for k in 0..m {
                         accumulate(
                             &mut boundary[k],
@@ -596,6 +645,11 @@ pub(super) fn advance<L: TransportLaw>(
         return Err(DissipationError::Invalid(
             "non-finite stabilized molecular extensive balance",
         ));
+    }
+    if let Some(account) = &mut entropy {
+        // One allowance applies to the complete requested interval as well
+        // as each accepted macrostep; rejected work cannot publish a prefix.
+        account.finish(gas, mesh.volumes(), &flow.states, &work.current, cancelled)?;
     }
     poll(cancelled)?;
     flow.states.copy_from_slice(&work.current);
