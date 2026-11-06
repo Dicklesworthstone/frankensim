@@ -5,7 +5,8 @@
 //! the explicitly frictionless limit instead uses N times actual travel.
 //! Source wear is k_i I / H_i for each original ordered surface. Elastic
 //! displacement and recoverable work never enter I. This is a small-removal,
-//! fixed-geometry diagnostic, not profile recession, debris or damage energy.
+//! fixed-geometry diagnostic. Local depth increments do not update the Hertz
+//! geometry or supply debris transport or damage energy.
 //!
 //! The local Archard/constant-Coulomb equivalence is described by Willert
 //! (2021), section 2: <https://doi.org/10.3390/sym13091582>.
@@ -24,6 +25,7 @@ pub mod loading;
 /// A single admitted source step, retaining its exact native sliding path.
 /// The borrowed original state prevents an observation from silently spanning
 /// several reversals; consume this receipt to obtain the source-bound candidate.
+#[derive(Debug)]
 pub struct SourceMindlinSurfaceAdvance<'a> {
     source: &'a SourceMindlinContact,
     native: MindlinSurfaceAdvance<'a>,
@@ -152,6 +154,108 @@ pub struct SourceMindlinWearAdvance {
     pub wear: [WearAdvance; 2],
     /// Integral of actual unsigned local sliding weighted by pressure [N m].
     pub pressure_weighted_sliding_j: f64,
+}
+
+/// Local irreversible sliding and predicted removal in the unchanged patch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceMindlinSurfaceWear {
+    /// Original local pressure, signed sliding and frictional work per area.
+    pub sliding: MindlinSurfaceSliding,
+    /// Nonnegative recession increments into original surfaces A and B [m].
+    /// Each is `k_i * p(r) * abs(ds(r)) / H_i`, with the same exact source
+    /// claims as the integrated volumes. These are increments, not cumulative
+    /// profiles, and do not change the contact geometry or its stored energy.
+    pub depth_increment_m: [f64; 2],
+}
+
+/// One original contact solve with source-bound total and local wear results.
+///
+/// The borrowed accepted checkpoint pins this observer to one monotone scalar
+/// segment. Sampling allocates no history, performs no new contact solve and
+/// makes no source query. Consuming the observer returns the complete original
+/// contact candidate and both already-validated wear inventories.
+#[derive(Debug)]
+pub struct SourceMindlinSurfaceWearAdvance<'a> {
+    source: &'a SourceMindlinWear,
+    phase: SourceMindlinSurfaceAdvance<'a>,
+    volumes: [WearState; 2],
+    wear: [WearAdvance; 2],
+}
+
+impl SourceMindlinSurfaceWearAdvance<'_> {
+    /// Original solved native motion, effort, stored energy and dissipation.
+    pub fn tangential_step(&self) -> &TangentialStep<MindlinState> {
+        self.phase.tangential_step()
+    }
+
+    /// The same pressure-weighted unsigned sliding integral as the volume result.
+    pub fn pressure_weighted_sliding_j(&self) -> f64 {
+        self.phase.pressure_weighted_sliding_j()
+    }
+
+    /// Validated volume increments and cumulative totals in original A/B order.
+    pub const fn wear(&self) -> &[WearAdvance; 2] {
+        &self.wear
+    }
+
+    /// Evaluate removal at radius `r` in the original fixed contact patch.
+    ///
+    /// Sticking material has exactly zero removal even while its elastic
+    /// displacement changes. The zero-pressure edge also has zero removal.
+    /// The original finite-radius and local-sliding checks apply; either
+    /// surface's unrepresentable depth refuses the whole sample. Observing
+    /// depths neither advances histories nor subtracts a second energy loss.
+    pub fn surface_wear(
+        &self,
+        radius_m: f64,
+    ) -> Result<SourceMindlinSurfaceWear, SourceFrettingError> {
+        let sliding = self.phase.surface_sliding(radius_m)?;
+        // Local Archard volume per unit area is a depth. The native observer
+        // already validates this pressure/sliding product as finite.
+        let measure = sliding.normal_pressure_pa * sliding.sliding_distance_m;
+        let depth_increment_m = [0, 1].map(|side| {
+            self.source.laws[side].wear_coefficient * measure / self.source.hardness_pa[side]
+        });
+        if !depth_increment_m
+            .iter()
+            .all(|depth| depth.is_finite() && *depth >= 0.0)
+        {
+            return Err(invalid(
+                "finite nonnegative original local wear depths required",
+            ));
+        }
+        Ok(SourceMindlinSurfaceWear {
+            sliding,
+            depth_increment_m,
+        })
+    }
+
+    /// Consume these observations and return the unchanged native candidate.
+    /// Both wear inventories were checked before this observer was returned;
+    /// no additional solve, source refresh, allocation or fallible work occurs.
+    pub fn into_candidate(self) -> SourceMindlinWearAdvance {
+        let measure = self.phase.pressure_weighted_sliding_j();
+        let candidate = self.phase.into_tangential_step();
+        SourceMindlinWearAdvance {
+            tangential: TangentialStep {
+                traction_n: candidate.traction_n,
+                slip_increment_m: candidate.slip_increment_m,
+                state: SourceMindlinWearState {
+                    owner: self.source.owner,
+                    contact: candidate.state,
+                    volumes: self.volumes,
+                },
+                regime: candidate.regime,
+                stored_change_j: candidate.stored_change_j,
+                dissipated_j: candidate.dissipated_j,
+                closure_residual_j: candidate.closure_residual_j,
+                compatibility_residual_m: candidate.compatibility_residual_m,
+                iterations: candidate.iterations,
+            },
+            wear: self.wear,
+            pressure_weighted_sliding_j: measure,
+        }
+    }
 }
 
 impl SourceMindlinWear {
@@ -284,6 +388,24 @@ impl SourceMindlinWear {
         input: &TangentialStepInput,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SourceMindlinWearAdvance, SourceFrettingError> {
+        Ok(self
+            .advance_with_surface_wear(state, input, cancelled)?
+            .into_candidate())
+    }
+
+    /// Solve contact once and retain its local hardness-dependent wear pattern.
+    ///
+    /// The original fixed-load, isothermal and monotone-segment assumptions
+    /// apply. Each radius uses actual local sliding from the same solution;
+    /// total volumes use its analytic pressure-weighted sliding integral.
+    /// The original source and both inventories are checked before returning.
+    /// Local profiles remain observations of small removal on fixed geometry.
+    pub fn advance_with_surface_wear<'a>(
+        &'a self,
+        state: &'a SourceMindlinWearState,
+        input: &TangentialStepInput,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SourceMindlinSurfaceWearAdvance<'a>, SourceFrettingError> {
         poll(cancelled)?;
         if state.owner != self.owner {
             return Err(invalid(
@@ -296,26 +418,12 @@ impl SourceMindlinWear {
         let measure = phase.pressure_weighted_sliding_j();
         poll(cancelled)?;
         let (volumes, wear) = self.advance_volumes(state.volumes, measure)?;
-        let candidate = phase.into_tangential_step();
         poll(cancelled)?;
-        Ok(SourceMindlinWearAdvance {
-            tangential: TangentialStep {
-                traction_n: candidate.traction_n,
-                slip_increment_m: candidate.slip_increment_m,
-                state: SourceMindlinWearState {
-                    owner: self.owner,
-                    contact: candidate.state,
-                    volumes,
-                },
-                regime: candidate.regime,
-                stored_change_j: candidate.stored_change_j,
-                dissipated_j: candidate.dissipated_j,
-                closure_residual_j: candidate.closure_residual_j,
-                compatibility_residual_m: candidate.compatibility_residual_m,
-                iterations: candidate.iterations,
-            },
+        Ok(SourceMindlinSurfaceWearAdvance {
+            source: self,
+            phase,
+            volumes,
             wear,
-            pressure_weighted_sliding_j: measure,
         })
     }
 

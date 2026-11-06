@@ -3358,3 +3358,27 @@ partial release, interior speed extrema, ambiguity in both port orders,
 work-conjugate scaling, exact legacy equivalence, all 729 six-port candidates,
 budget exhaustion and cancellation. The eight existing continuous-flow tests
 also pass against the shared implementation.
+
+## Original-source local fretting depth
+
+`mindlin::fretting::SourceMindlinWear::advance_with_surface_wear` retains the
+original fixed-load Mindlin solution together with both validated Archard
+inventories. Its borrowed observer exposes local pressure, signed irreversible
+sliding and separate A/B removal depths `delta_h_i(r)=k_i*p(r)*abs(ds(r))/H_i`.
+The original selected wear coefficients, hardness tests and material identities
+remain pinned. Sticking material removes nothing despite elastic motion; the
+zero-pressure patch edge removes nothing despite sliding. Radius queries reuse
+the native analytic sliding observer, allocate no additional history and perform
+no contact solve or source lookup. `into_candidate` returns the same complete
+contact/wear candidate as the existing volume-only API.
+
+Depths are small-removal increments on the unchanged Hertz patch. They do not
+evolve geometry, accumulate a spatial profile, remove mass, infer debris energy,
+or change the original heat account. Frozen load, temperature, k/H and monotone
+scalar-segment assumptions remain; changing-load paths cannot substitute their
+endpoints into this observer. A local depth can refuse as unrepresentable even
+when its area-integrated volume is finite, without altering either accepted
+state or the already validated volume candidate. Three G0/G1/G3 regression groups
+cover the sticking disk and sliding annulus, independent A/B hardness scaling,
+convergent spatial integrals through reversal and gross sliding, the frictionless
+Hertz limit, and local-radius/depth refusals.

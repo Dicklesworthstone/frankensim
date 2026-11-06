@@ -1,8 +1,11 @@
 //! Original source-bound local fretting, Archard limits and joint acceptance.
 use super::*;
-use fs_contact::interface_binding::mindlin::fretting::{SourceFrettingError, SourceMindlinWear};
+use fs_contact::interface_binding::mindlin::fretting::{
+    SourceFrettingError, SourceMindlinSurfaceWearAdvance, SourceMindlinWear,
+};
 use fs_matdb::{
-    HardnessLoadStep, HardnessTestContext, MaterialCard, ObservationDataset, ObservationId, QueryPoint,
+    HardnessLoadStep, HardnessTestContext, MaterialCard, ObservationDataset, ObservationId,
+    QueryPoint,
 };
 use fs_material::hardness::INDENTATION_HARDNESS_QUANTITY;
 use fs_material::state_point::{ResolvedMaterialStatePoint, resolve_material_state_point};
@@ -423,4 +426,165 @@ fn original_sources_fixed_temperature_and_late_wear_refusals_preserve_exact_retr
         .unwrap();
     assert_eq!(zero.tangential.state, before);
     assert_eq!(zero.wear.map(|w| w.increment_m3), [0.0; 2]);
+}
+
+#[test]
+fn g1_g3_local_wear_retains_sticking_core_and_each_original_surface_hardness() {
+    let f = fixture(0.6, COEFFICIENTS, HARDNESS);
+    let harder = fixture(0.6, COEFFICIENTS, [2.0 * HARDNESS[0], 4.0 * HARDNESS[1]]);
+    let initial = f.wear.initial_state();
+    let harder_initial = harder.wear.initial_state();
+    let law = f.wear.contact();
+    let radius = law.law().parameters().contact_radius_m;
+    let input = step(law, 0.4 * law.law().gross_slip_displacement_m());
+    let observed = f
+        .wear
+        .advance_with_surface_wear(&initial, &input, &mut || false)
+        .unwrap();
+    let hard = harder
+        .wear
+        .advance_with_surface_wear(&harder_initial, &input, &mut || false)
+        .unwrap();
+    // Virgin Cattaneo--Mindlin loading has c/a = sqrt(1 - du/d_gross).
+    // Local removal must preserve that sticking disk, not smear total volume
+    // over the nominal patch or charge recoverable displacement as sliding.
+    for normalized in [0.0, 0.3, 0.7] {
+        let local = observed.surface_wear(normalized * radius).unwrap();
+        assert!(local.sliding.normal_pressure_pa > 0.0);
+        assert_eq!(local.depth_increment_m, [0.0; 2]);
+    }
+    for normalized in [0.8, 0.9, 0.99] {
+        let local = observed.surface_wear(normalized * radius).unwrap();
+        let resistant = hard.surface_wear(normalized * radius).unwrap();
+        assert!(local.depth_increment_m.into_iter().all(|depth| depth > 0.0));
+        assert_eq!(local.sliding, resistant.sliding);
+        near(
+            resistant.depth_increment_m[0],
+            0.5 * local.depth_increment_m[0],
+        );
+        near(
+            resistant.depth_increment_m[1],
+            0.25 * local.depth_increment_m[1],
+        );
+        near(
+            local.depth_increment_m[1] / local.depth_increment_m[0],
+            (COEFFICIENTS[1] / HARDNESS[1]) / (COEFFICIENTS[0] / HARDNESS[0]),
+        );
+    }
+    let edge = observed.surface_wear(radius).unwrap();
+    assert!(edge.sliding.sliding_distance_m > 0.0);
+    assert_eq!(edge.depth_increment_m, [0.0; 2]);
+    assert_eq!(
+        observed.tangential_step().dissipated_j,
+        hard.tangential_step().dissipated_j
+    );
+    assert_eq!(
+        observed.into_candidate(),
+        f.wear
+            .advance_candidate(&initial, &input, &mut || false)
+            .unwrap()
+    );
+}
+
+fn integrated_local_depth(
+    observed: &SourceMindlinSurfaceWearAdvance<'_>,
+    radius_m: f64,
+    cells: usize,
+) -> [f64; 2] {
+    // Independent equal-area annuli: integrate actual returned depth, not the
+    // native pressure/sliding integral used by the total-volume calculation.
+    let mut volume = [0.0; 2];
+    for i in 0..cells {
+        let r = radius_m * ((i as f64 + 0.5) / cells as f64).sqrt();
+        let local = observed.surface_wear(r).unwrap();
+        for (total, depth) in volume.iter_mut().zip(local.depth_increment_m) {
+            *total += depth;
+        }
+    }
+    volume.map(|sum| core::f64::consts::PI * radius_m * radius_m * sum / cells as f64)
+}
+
+#[test]
+fn g1_local_depth_integrals_recover_analytic_volumes_through_reversal_and_gross_slip() {
+    let f = fixture(0.6, COEFFICIENTS, HARDNESS);
+    let law = f.wear.contact();
+    let radius = law.law().parameters().contact_radius_m;
+    let limit = law.law().gross_slip_displacement_m();
+    let mut state = f.wear.initial_state();
+    for fraction in [0.7, -0.5, 1.6, 0.3, -3.0] {
+        let input = step(law, fraction * limit);
+        let native = law.advance(state.contact_state(), &input).unwrap();
+        let observed = f
+            .wear
+            .advance_with_surface_wear(&state, &input, &mut || false)
+            .unwrap();
+        let exact = observed.wear().each_ref().map(|wear| wear.increment_m3);
+        let volumes =
+            [512, 2048, 8192].map(|cells| integrated_local_depth(&observed, radius, cells));
+        for side in 0..2 {
+            let errors = volumes.map(|volume| (volume[side] - exact[side]).abs());
+            assert!(errors[2] < 0.2 * errors[0], "{fraction}: {errors:?}");
+            assert!(errors[2] < 3e-5 * exact[side], "{fraction}: {errors:?}");
+        }
+        near(
+            observed.pressure_weighted_sliding_j(),
+            native.dissipated_j / 0.6,
+        );
+        let candidate = observed.into_candidate();
+        assert_eq!(candidate.tangential.state.contact_state(), &native.state);
+        assert_eq!(candidate.tangential.dissipated_j, native.dissipated_j);
+        assert_eq!(candidate.tangential.stored_change_j, native.stored_change_j);
+        state = candidate.tangential.state;
+    }
+}
+
+#[test]
+fn g0_g1_local_wear_has_frictionless_hertz_limit_and_refuses_invalid_samples() {
+    let f = fixture(0.0, [0.0, COEFFICIENTS[1]], HARDNESS);
+    let law = f.wear.contact();
+    let radius = law.law().parameters().contact_radius_m;
+    let normal_n = law.normal_response().normal_force_n;
+    let initial = f.wear.initial_state();
+    let distance = 1e-6;
+    let observed = f
+        .wear
+        .advance_with_surface_wear(&initial, &step(law, -distance), &mut || false)
+        .unwrap();
+    assert_eq!(observed.tangential_step().dissipated_j, 0.0);
+    for normalized in [0.0_f64, 0.5, 0.9, 1.0] {
+        let local = observed.surface_wear(normalized * radius).unwrap();
+        let pressure = 1.5 * normal_n / (core::f64::consts::PI * radius * radius)
+            * (1.0 - normalized * normalized).sqrt();
+        assert_eq!(local.depth_increment_m[0], 0.0);
+        near(local.sliding.signed_sliding_increment_m, -distance);
+        near(
+            local.depth_increment_m[1],
+            COEFFICIENTS[1] * pressure * distance / HARDNESS[1],
+        );
+    }
+    let centre = observed.surface_wear(0.0).unwrap();
+    for invalid_radius in [-radius, 1.1 * radius, f64::NAN, f64::INFINITY] {
+        assert!(observed.surface_wear(invalid_radius).is_err());
+    }
+    assert_eq!(observed.surface_wear(0.0).unwrap(), centre);
+    let volume = observed.into_candidate();
+    near(
+        volume.wear[1].increment_m3,
+        COEFFICIENTS[1] * normal_n * distance / HARDNESS[1],
+    );
+    // A finite area-integrated volume does not guarantee a representable local
+    // depth. Refusing one sample leaves the already validated candidate intact.
+    let extreme = fixture(0.0, [0.0, 1e10], [HARDNESS[0], 1e-300]);
+    let initial = extreme.wear.initial_state();
+    let observed = extreme
+        .wear
+        .advance_with_surface_wear(
+            &initial,
+            &step(extreme.wear.contact(), distance),
+            &mut || false,
+        )
+        .unwrap();
+    assert!(observed.wear()[1].increment_m3.is_finite());
+    assert!(observed.surface_wear(0.0).is_err());
+    assert!(observed.into_candidate().wear[1].increment_m3.is_finite());
 }
