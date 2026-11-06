@@ -588,6 +588,42 @@ and cooling, reduction to the original binary caloric owner, all 128 species
 with exact absences and a retained dilute inventory, an entropy-decreasing
 constrained homogeneous endpoint, source identity and atomic refusal.
 
+### Multicomponent local equilibrium heat capacity
+
+`solution::multicomponent::equilibrium::caloric` differentiates the SAME
+accepted phase candidate at fixed pressure and conserved species inventory.
+Explicitly ordered original `PureLiquidHeatCapacityV1` curves must share one
+datum and support the actual temperature. Their sum `sum(n_i Cp_i)` supplies
+the frozen capacity. For the retained `chi_ij=A_ij+B_ij/T` law, fixed-composition
+excess enthalpy has zero temperature derivative; additional capacity comes
+from changing phase amounts and compositions.
+
+The existing entropy-scaled extensive-Gibbs Hessian and original partial
+molar excess enthalpies supply that redistribution analytically. One
+unregularized Cholesky solve yields the local thermal response, its scaled
+linear residual and a nonnegative quadratic-form heat-capacity contribution.
+Log-temperature scaling avoids forming T squared; a scaled Cholesky norm
+avoids cancellation between opposing species heat contributions. No perturbed
+temperature flash or independently fitted mixture Cp is used. Each species'
+anchor derivative is reconstructed from its paired transfers, preserving
+the conserved inventory and exact absent species.
+
+The borrowed response retains the original candidate, ordered pure sources,
+common temperature support, total/frozen/redistribution capacities, and every
+phase's component and total mole derivatives. This remains a smooth, seeded
+LOCAL fixed-phase-count response with the original candidate's numerical
+accuracy. Singular or unresolved joint curvature refuses even if every
+individual phase is locally stable; regularization is never substituted for
+physical Cp. It does not certify global equilibrium, cross phase onset or
+supply an enthalpy inverse. Scratch is admitted before allocation, work is
+O(d cubed) for d=(phases-1)*present_species, and cancellation is atomic.
+
+Focused native tests compare binary closed-form and independent symmetric
+ternary common-tangent responses, independently differenced equilibrium
+enthalpy/entropy and changing phase inventories, extensive scaling, species
+permutations, exact absences and positive traces. Source, budget, cancellation
+and genuinely unresolved near-critical joint-response cases refuse explicitly.
+
 ### Closed isobaric liquid calorics
 
 `solution::caloric` combines that SAME pair law with explicitly ordered

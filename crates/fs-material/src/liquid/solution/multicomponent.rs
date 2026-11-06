@@ -6,15 +6,16 @@
 //! The same homogeneous composition supplies regular-solution thermodynamics
 //! and every pinned transport claim, including in a spinodal region. This is
 //! not a multicomponent flash or a mixing rule for pure-fluid properties.
-//! The separate caloric adapter binds explicit pure-liquid source curves.
+//! The caloric adapter binds explicit pure-liquid sources for homogeneous
+//! thermal mixing and the response of an accepted local phase candidate.
 //! Pressure and all other source coordinates remain fixed.
 
 use std::sync::Arc;
 
+/// Original pure-liquid Cp sources for heating, mixing and local phase response.
+pub mod caloric;
 /// Original material properties resolved separately for accepted liquid phases.
 pub mod equilibrium;
-/// Original pure-liquid Cp sources and conserved homogeneous thermal mixing.
-pub mod caloric;
 
 use crate::MaterialError;
 use crate::fluid_transport::{

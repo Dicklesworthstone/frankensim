@@ -17897,6 +17897,35 @@ one-phase parity and closed supports, original-owner and source refusals,
 dependent-coordinate trace refusal, an all-explicit trace-sensitive source,
 and cancellation at every observed polling boundary.
 
+### Source-bound multicomponent equilibrium heat capacity
+
+`liquid::solution::multicomponent::caloric::MulticomponentLiquidCaloricLaw`
+binds that original liquid owner to one explicitly qualified pure-liquid
+`IsobaricHeatCapacityLaw` per species. Named inputs are canonicalized together;
+each original molar mass converts its own complete Cp knot sequence to molar
+units without resampling. Original source laws and receipts remain retained.
+The common datum, positive static pressure and intersected original temperature
+support must agree. A species label alone does not establish pure-liquid
+source qualification.
+
+`isobaric_caloric_response` accepts only a resolved equilibrium belonging to
+the SAME complete material and thermodynamic owner, including original source
+bindings, component molar masses and coordinate roles. It borrows the exact
+accepted phases and delegates once to the original thermochemical candidate's
+analytic response. Total equilibrium Cp divided by the original finite mass
+is exposed in J/(kg K), alongside frozen/redistribution capacities and
+species-conserving phase derivatives. A singular branch, invalid source,
+exhausted response budget or cancellation publishes no result.
+
+This is a local differential response qualified by the retained seeded
+candidate and its numerical report. Phase transport Cp is not replaced or
+declared consistent with the independently supplied free-energy law. No
+effective transport property, global-minimum certificate, phase-onset
+continuation or enthalpy inversion is inferred. Native integration cases
+check complete source retention and ordered mass conversion, an independent
+three-phase enthalpy derivative, extensive scaling, complete foreign-owner
+refusal and cancellation.
+
 ### Full three-dimensional piezoelectric thermal storage
 
 `piezoelectric::thermal::ThermalTensorPiezoelectric` binds complete affine original stress-charge stiffness, signed coupling and clamped-permittivity source tensors over a positive absolute-temperature interval with constant reference density. It preserves full source selections, nonthermal context and the fixed frame transformation. At fixed full Mandel strain and Cartesian electric displacement, the native tensor/factor owner supplies Helmholtz energy, exact entropy, internal energy and nonpositive field heat capacity, without scalar projection or fresh response-time factorization. Complete endpoint tensor admission establishes affine-source stability. A rotation-invariant norm bound supplies a conservative whole-interval capacity floor under explicit strain/displacement envelopes; consuming caloric owners must add their actual capacity and enforce those bounds. Reversible thermal exchange is separate from material loss. No pyroelectric offset, expansion, hysteresis, phase transition, depoling or measured-material validation is implied. Focused synthetic G0/G1/G3 regression sources cover independent diagonal/dense potentials, co-rotation and domain refusal; native execution remains a separate verification obligation.

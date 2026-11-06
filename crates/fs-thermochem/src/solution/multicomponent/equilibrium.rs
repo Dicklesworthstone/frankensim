@@ -14,6 +14,9 @@
 //! is no concentration floor, automatic phase insertion, phase disappearance,
 //! interfacial energy, nucleation law or spatial transport in this API.
 
+/// Original pure-liquid Cp and the coupled response of an accepted local branch.
+pub mod caloric;
+
 use super::stability::{
     MulticomponentLocalStabilityKindV1, MulticomponentLocalStabilityV1,
     MulticomponentStabilityControlV1, MulticomponentStabilityErrorV1,

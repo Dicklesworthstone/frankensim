@@ -1,6 +1,9 @@
 //! Finite phase inventories resolve their own original mixture-property sources.
 //! Numerical fixtures are authored regular solutions, not measured solvent data.
 
+#[path = "liquid_multicomponent_equilibrium/caloric.rs"]
+mod caloric;
+
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
     ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,

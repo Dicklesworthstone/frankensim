@@ -1,8 +1,13 @@
-//! Source-qualified homogeneous multicomponent liquid heating and mixing.
+//! Source-qualified multicomponent liquid heating, mixing and phase response.
 //!
 //! Every species retains its original pure-liquid Cp source. The shared L1
 //! owner closes energy and entropy; only a completed thermal endpoint refreshes
 //! actual mixture material properties at its temperature and composition.
+//! The same original source binding supplies the differential isobaric heat
+//! capacity of an already accepted local equilibrium phase candidate.
+
+mod response;
+pub use response::ResolvedMulticomponentLiquidCaloricResponse;
 
 use super::{
     MulticomponentLiquidError, MulticomponentLiquidSolutionLaw, ResolvedMulticomponentLiquidCell,
@@ -16,6 +21,7 @@ use fs_thermochem::solution::multicomponent::caloric::{
     MulticomponentCaloricBalanceV1, MulticomponentCaloricErrorV1, MulticomponentCaloricSolveV1,
     MulticomponentCaloricStateV1, MulticomponentLiquidCaloricModelV1,
 };
+use fs_thermochem::solution::multicomponent::equilibrium::caloric::MulticomponentCaloricResponseErrorV1;
 use fs_thermochem::{MolarThermalQuantityV1, SpeciesId};
 use std::sync::Arc;
 
@@ -24,6 +30,7 @@ use std::sync::Arc;
 pub enum MulticomponentLiquidCaloricError {
     Invalid(&'static str),
     Caloric(MulticomponentCaloricErrorV1),
+    CoreResponse(MulticomponentCaloricResponseErrorV1),
     Material(MulticomponentLiquidError),
     Cancelled,
 }
@@ -41,6 +48,11 @@ impl From<MulticomponentCaloricErrorV1> for MulticomponentLiquidCaloricError {
 impl From<MulticomponentLiquidError> for MulticomponentLiquidCaloricError {
     fn from(error: MulticomponentLiquidError) -> Self {
         Self::Material(error)
+    }
+}
+impl From<MulticomponentCaloricResponseErrorV1> for MulticomponentLiquidCaloricError {
+    fn from(error: MulticomponentCaloricResponseErrorV1) -> Self {
+        Self::CoreResponse(error)
     }
 }
 type Result<T> = core::result::Result<T, MulticomponentLiquidCaloricError>;
