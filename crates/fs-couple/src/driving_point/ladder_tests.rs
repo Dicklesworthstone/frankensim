@@ -19,6 +19,7 @@ use super::{
     DrivingPointError, LineLadder, PoleState, analyze_reflectance_ir, impedance_line,
     realize_impedance_line, realize_line,
 };
+use crate::glottis::GLOTTAL_LINE_MAX_TAPS;
 use crate::tract::TractChart;
 
 const RATE_HZ: u32 = 48_000;
@@ -599,6 +600,106 @@ fn line_ladder_refuses_at_ceiling() {
         t0.elapsed().as_micros()
     );
     assert!(pass, "unexpected refusal diagnostics: {msg}");
+}
+
+/// A broad first resonance passes or fails the default ceiling by where its peak
+/// lands on the FFT grid, not by anything in the tract: tail and passivity stay
+/// clean across these lengths, and in a Python copy of this ladder a 0.6 % change
+/// in length moved the shift at 65536 taps from 0.075 to 0.005 cents, with F1
+/// moving 1.2 Hz. One more rung settles every length, and a line that already
+/// converges keeps its rung and its taps. The tract is the DVTD s1-05 tense /u/
+/// cut, coarsened to eight sections with volume and length kept; the wall is the
+/// voice cards' pin.
+#[test]
+fn glottal_ceiling_settles_a_broad_first_resonance_and_moves_no_converged_line() {
+    const AREA_CM2: [f64; 8] = [2.50, 8.90, 9.22, 3.46, 1.12, 1.87, 8.44, 1.72];
+    const RATE: u32 = 192_000;
+    let gas = air20();
+    let wall = WallPin {
+        surface_density: 15.0,
+        stiffness_per_area: 1.48e6,
+        resistance: 1.6e4,
+    };
+    let raised = LineLadder {
+        max_taps: GLOTTAL_LINE_MAX_TAPS,
+        ..LineLadder::default()
+    };
+    let zc = gas.characteristic_impedance / (AREA_CM2[0] * 1.0e-4);
+    let taps = |line: &DelayedFilter| -> Vec<u64> {
+        let (_, fir) = line.quiescent_fir().expect("a plain FIR line");
+        fir.iter().map(|h| h.to_bits()).collect()
+    };
+    let (mut refused, mut converged) = (0, 0);
+    for scale in [0.994, 0.996, 0.998, 1.0, 1.002, 1.004, 1.006] {
+        let segments = AREA_CM2
+            .iter()
+            .map(|&area| Segment::Cylinder {
+                radius: (area * 1.0e-4 / core::f64::consts::PI).sqrt(),
+                length: 0.029_86 * scale,
+            })
+            .collect();
+        let duct = Duct { segments };
+        let run = |ladder: &LineLadder| {
+            realize_line(
+                &duct,
+                &gas,
+                Termination::FlangedOpen,
+                RATE,
+                zc,
+                Some(&wall),
+                ladder,
+            )
+        };
+        let (line, receipt) = run(&raised).expect("one more rung settles every length");
+        assert!(receipt.peak_shift_cents < raised.peak_tol_cents);
+        match run(&LineLadder::default()) {
+            Ok((plain, plain_receipt)) => {
+                converged += 1;
+                assert_eq!(plain_receipt.n_fft, receipt.n_fft);
+                assert_eq!(taps(&plain), taps(&line), "scale {scale}");
+            }
+            Err(DrivingPointError::LadderUnconverged {
+                tail_energy,
+                peak_shift_cents,
+                ..
+            }) => {
+                refused += 1;
+                assert_eq!(receipt.n_fft, GLOTTAL_LINE_MAX_TAPS);
+                assert!(
+                    tail_energy < raised.tail_tol,
+                    "scale {scale} refused on the tail"
+                );
+                assert!(peak_shift_cents >= raised.peak_tol_cents);
+            }
+            Err(other) => panic!("scale {scale}: {other:?}"),
+        }
+    }
+    assert!(
+        refused > 0 && converged > 0,
+        "the sweep must straddle: {refused} refused, {converged} converged"
+    );
+    let over = LineLadder {
+        max_taps: 2 * GLOTTAL_LINE_MAX_TAPS,
+        ..LineLadder::default()
+    };
+    let duct = Duct {
+        segments: vec![Segment::Cylinder {
+            radius: 0.01,
+            length: 0.17,
+        }],
+    };
+    assert!(matches!(
+        realize_line(
+            &duct,
+            &gas,
+            Termination::FlangedOpen,
+            RATE,
+            zc,
+            None,
+            &over
+        ),
+        Err(DrivingPointError::Invalid { .. })
+    ));
 }
 
 /// (f) G0/G2: For the vocal tract (`tract.rs`), glottis line (`glottis.rs`),

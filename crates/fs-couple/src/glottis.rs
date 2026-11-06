@@ -157,7 +157,9 @@
 //! BOUNDARY: no formant filters, no vocoder, no glottal-waveform
 //! playback — the waveform must EMERGE from the valve + tract loop.
 
-use crate::driving_point::{DrivingPointError, characteristic_line};
+use crate::driving_point::{
+    DrivingPointError, LineLadder, characteristic_line_realized_with_ladder,
+};
 use crate::unilateral_contact::slit_contact_force;
 use fs_dcontact::{DContactError, Obstacle};
 use fs_duct::{Duct, Termination};
@@ -1300,6 +1302,12 @@ fn section_pressures(channel: &If72Channel, p_sub: f64, flow: f64, dp_dt: f64) -
 /// frequency by an octave either way (f ~ sqrt(k)), far beyond any vibrato.
 const TENSION_RANGE: core::ops::RangeInclusive<f64> = 0.25..=4.0;
 
+/// Ceiling of the glottal line's convergence ladder, one rung over the default. A broad first resonance (tense /u/ of
+/// DVTD s1-05: 255 Hz, 77 Hz wide at half power) reads over or under the peak tolerance at 65536 taps by where the peak
+/// lands on the FFT grid, with tail and passivity clean. The tolerances stay the default's, and a line that converges
+/// sooner stops at the same rung with the same taps.
+pub(crate) const GLOTTAL_LINE_MAX_TAPS: usize = 131_072;
+
 /// The stiffness-dependent parts of an island at fold tension `tension`: the pHS, its exact linear split and the
 /// collision law. Tension is one common factor on the card's lower, upper and coupling stiffnesses, which is what a
 /// card's pitch trim already applies once; here it may also vary in time. Damping follows as `2 zeta sqrt(k m)`,
@@ -1443,7 +1451,11 @@ impl GlottalIsland {
         // fs/256). The convergence ladder sizes the line until its tail and
         // peaks converge and refuses a converged line that is not passive
         // on the 4x-oversampled grid, so nothing is clipped here (DEF-02).
-        let line = characteristic_line(
+        let ladder = LineLadder {
+            max_taps: GLOTTAL_LINE_MAX_TAPS,
+            ..LineLadder::default()
+        };
+        let (line, _) = characteristic_line_realized_with_ladder(
             tract,
             gas,
             termination,
@@ -1453,6 +1465,8 @@ impl GlottalIsland {
             // returns volume impedance; the specific rho*c here
             // flattened R toward +1 (found via the tract lane)
             wall,
+            None,
+            Some(&ladder),
         )?;
         let TensionedFold {
             phs,

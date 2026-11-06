@@ -45,9 +45,12 @@ pub struct LineLadder {
     pub tail_tol: f64,
     /// Maximum resonance-peak shift between adjacent rungs (`default = 0.05` cents).
     pub peak_tol_cents: f64,
-    /// Hard upper bound on DFT length (`default = 65_536`).
+    /// Hard upper bound on DFT length (`default = 65_536`, at most `131_072`).
     pub max_taps: usize,
 }
+
+/// Largest ceiling a caller may declare for a line ladder; the default stays lower.
+const MAX_LINE_TAPS: usize = 131_072;
 
 impl Default for LineLadder {
     fn default() -> Self {
@@ -267,9 +270,9 @@ fn validate_ladder(ladder: &LineLadder) -> Result<usize, DrivingPointError> {
             what: "line ladder tolerances must be positive and finite",
         });
     }
-    if !(256..=65_536).contains(&ladder.max_taps) || !ladder.max_taps.is_power_of_two() {
+    if !(256..=MAX_LINE_TAPS).contains(&ladder.max_taps) || !ladder.max_taps.is_power_of_two() {
         return Err(DrivingPointError::Invalid {
-            what: "line ladder max_taps must be a power of two in [256, 65536]",
+            what: "line ladder max_taps must be a power of two in [256, 131072]",
         });
     }
     Ok(ladder.max_taps)
