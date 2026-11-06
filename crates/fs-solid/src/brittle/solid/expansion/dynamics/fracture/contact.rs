@@ -7,12 +7,15 @@
 //! kinetic storage; it does not advance temperature, physical time or the
 //! physical-step allowance, and it does not infer impact heat.
 //!
-//! These are paired, fixed-reference, frictionless normal events. Collision
-//! location, persistent contact forces and finite sliding remain separate
-//! physical problems.
+//! These are paired, fixed-reference, frictionless normal events. The approach
+//! and time children compose native motion and impacts at a held thermal state.
+//! Persistent thermal contact forces and finite sliding remain separate problems.
 
 /// Bounded native midpoint prefixes at the admitted thermal state.
 pub mod approach;
+
+/// Complete native physical intervals through localized thermal-fragment impacts.
+pub mod time;
 
 use std::sync::Arc;
 

@@ -11,6 +11,8 @@ use fs_solver::CheckedCgConfig;
 
 #[path = "motion/approach.rs"]
 mod approach;
+#[path = "motion/time.rs"]
+mod time;
 
 const SPEED: f64 = 1.0 / 16.0;
 const DRIFT: [f64; 2] = [1.0 / 32.0, -1.0 / 64.0];

@@ -314,21 +314,6 @@ pub(crate) fn approach_released_faces<Step: NativeFaceApproachTrial>(
     }
 }
 
-/// Original native-motion entry, retained for contact-time mode composition.
-pub(super) fn scan_released_faces(
-    motion: &BrittleTetMotion<'_>,
-    activation_tolerance_m: f64,
-    velocity_tolerance_mps: f64,
-    cx: &Cx<'_>,
-) -> Result<Option<BrittleFaceContactLocation>, BrittleFaceApproachError> {
-    scan_released_face_motion(
-        motion.released_face_motion_view(),
-        activation_tolerance_m,
-        velocity_tolerance_mps,
-        cx,
-    )
-}
-
 /// Scan every non-tied pair before returning the first ordered witness.
 /// A later negative pair cannot be hidden by an earlier active approach.
 pub(crate) fn scan_released_face_motion(
