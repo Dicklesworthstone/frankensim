@@ -24,6 +24,9 @@ pub mod reactive;
 /// Reciprocal finite-body enthalpy/phase exchange on the same gas/momentum step.
 pub mod thermal;
 
+/// Entropy-compatible source-law gas work on the same inertial wall.
+pub mod discrete_gradient;
+
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::{GasEnergyError, GasEnergySolve};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
