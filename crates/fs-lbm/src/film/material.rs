@@ -7,7 +7,7 @@
 
 use fs_material::liquid::surface::ResolvedLiquidSurfaceState;
 
-use super::{FilmError, FilmMaterial, NusseltFilm};
+use super::{FilmError, FilmMaterial, NusseltFilm, ShearedFilm};
 
 /// A frozen Newtonian liquid binding for repeated local film evaluations.
 ///
@@ -75,6 +75,23 @@ impl<'a> MaterialFilmLiquid<'a> {
             flow_per_width_m2_s,
             tangential_acceleration_m_s2,
             normal_acceleration_m_s2,
+        )
+    }
+
+    /// Drive a film of prescribed thickness with signed surface traction,
+    /// retaining this same frozen source viscosity and density. Traction must
+    /// come from the caller's gas or interface law; no new source is inferred.
+    pub fn sheared_film(
+        self,
+        thickness_m: f64,
+        tangential_acceleration_m_s2: f64,
+        surface_shear_pa: f64,
+    ) -> Result<ShearedFilm, FilmError> {
+        ShearedFilm::new(
+            self.coefficients(),
+            thickness_m,
+            tangential_acceleration_m_s2,
+            surface_shear_pa,
         )
     }
 }

@@ -13,6 +13,9 @@
 
 /// Original liquid-source coefficients for the same Newtonian film owner.
 pub mod material;
+/// Signed surface traction driving the same planar Newtonian base flow.
+pub mod sheared;
+pub use sheared::{FilmPower, ShearedFilm};
 
 /// Prescribed uniform Newtonian liquid properties; no material calibration.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -181,6 +184,14 @@ impl NusseltFilm {
     #[must_use]
     pub fn wall_shear_pa(self) -> f64 {
         self.wall_shear
+    }
+
+    /// Apply prescribed tangential surface traction at this film's thickness.
+    /// Positive traction acts downstream. The resulting flux and profile are
+    /// recomputed; this does not preserve the original supplied flow rate.
+    /// The shear-free Benney screen is not carried into the sheared owner.
+    pub fn with_surface_shear(self, surface_shear_pa: f64) -> Result<ShearedFilm, FilmError> {
+        ShearedFilm::new(self.material, self.thickness, self.tangent, surface_shear_pa)
     }
 
     /// Velocity at wall-normal distance y in [0,h], in m/s.

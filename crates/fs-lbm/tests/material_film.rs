@@ -195,6 +195,24 @@ fn both_original_viscosity_bases_drive_dimensional_film_and_keep_receipts() {
             film.long_wave_mode(k, LIMITS).unwrap().growth_per_s,
             expected,
         );
+        let surface_traction = -0.25;
+        let driven = bound.sheared_film(h, 4.0, surface_traction).unwrap();
+        let mu = source.density_kg_m3() * source.kinematic_viscosity_m2_s();
+        near(
+            driven.flow_per_width_m2_s(),
+            2e-6 + surface_traction * h * h / (2.0 * mu),
+        );
+        near(
+            driven.surface_velocity_m_s(),
+            film.surface_velocity_m_s() + surface_traction * h / mu,
+        );
+        near(driven.wall_shear_pa(), film.wall_shear_pa() + surface_traction);
+        let power = driven.power();
+        near(
+            power.viscous_dissipation_w_m2,
+            power.body_work_w_m2 + power.surface_work_w_m2,
+        );
+        assert!(core::ptr::eq(bound.material(), &source));
     }
 }
 
@@ -223,6 +241,17 @@ fn pinned_temperature_update_changes_all_coefficients_without_losing_context() {
     let b = second.film(2e-6, 4.0, 3.0).unwrap();
     near(b.thickness_m().powi(3) / a.thickness_m().powi(3), 2.5);
     near(b.reynolds() / a.reynolds(), 0.4);
+    let cold_shear = first.sheared_film(1e-3, 0.0, 0.25).unwrap();
+    let hot_shear = second.sheared_film(1e-3, 0.0, 0.25).unwrap();
+    near(
+        hot_shear.flow_per_width_m2_s() / cold_shear.flow_per_width_m2_s(),
+        0.5,
+    );
+    near(
+        hot_shear.power().viscous_dissipation_w_m2
+            / cold_shear.power().viscous_dissipation_w_m2,
+        0.5,
+    );
     assert!(a.long_wave_mode(10.0, LIMITS).unwrap().growth_per_s > 0.0);
     assert!(b.long_wave_mode(10.0, LIMITS).unwrap().growth_per_s < 0.0);
     for old in cold.material().properties() {
