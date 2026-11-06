@@ -27,6 +27,9 @@
 mod laminate;
 pub use laminate::LaminateThermalField;
 
+/// Source-bound directional strength on the complete native layer strain field.
+pub mod strength;
+
 /// Signed transverse initial-stress stiffness on admitted planar panels.
 pub mod prestress;
 

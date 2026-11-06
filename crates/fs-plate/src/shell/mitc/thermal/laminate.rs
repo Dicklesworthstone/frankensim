@@ -174,7 +174,7 @@ impl LaminateThermalField {
         })
     }
 
-    fn to_section(&self, strain: [f64; 3]) -> [f64; 3] {
+    pub(super) fn to_section(&self, strain: [f64; 3]) -> [f64; 3] {
         std::array::from_fn(|i| {
             (0..3)
                 .map(|j| self.strain_to_section[i][j] * strain[j])

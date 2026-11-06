@@ -1873,3 +1873,35 @@ floor or subtraction from large physical energy. The native implementation is
 allocation-free for one facet. A sixth focused regression covers a low-density
 nearly rigid transition with gauge energy over 25 orders of magnitude below
 physical energy and checks every product against the original mass matrices.
+
+## Source-bound strength on native thermal shells
+
+`thermal::strength` connects the original laminate maximum-stress and coupled
+Tsai-Wu criteria to `PreparedThermalShell` at an actual nodal snapshot. The facet
+must retain the same shared `PreparedLaminateThermal` as the selected strength
+object; equal aggregate stiffness cannot substitute for source, layer,
+temperature, reference-surface or free-strain identity. A cloned source snapshot
+remains compatible; a refreshed snapshot requires native thermal preparation.
+
+`laminate_strength_bound` recovers the original condensed strain polynomial,
+rotates engineering membrane and director-gradient strain to section axes, and
+uses the material owner for both faces of every layer in its elastic material
+axes. It includes bending and thermal self-stress even when section force and
+moment resultants cancel. The six Bernstein controls and two layer faces bound
+the complete represented triangle/thickness because stress is affine and both
+admitted utilization functions are convex. This is a conservative spatial bound,
+not a peak location: an edge control is not an edge midpoint and a bound reaching
+one does not prove local failure. `laminate_strength_at` assesses a physical
+barycentric point separately.
+
+The observation adds no solve, source query, hot allocation, stiffness change
+or damage evolution. Explicit face-evaluation budgets bound 12 evaluations per
+layer for a whole facet and two per layer at a point; cancellation is polled
+before publication. Inputs and accepted mechanics remain immutable. The scope is
+fixed-condition infinitesimal-strain elastic in-plane strength, excluding
+interlaminar failure, delamination, time-interval bounds and numerical/model-error
+certificates. No missing strength or interaction is inferred.
+
+`laminate_strength_shell` contains analytical rotated-membrane/interaction and
+zero-resultant thermal-bilayer oracles, spatial envelope coverage, and original
+source/temperature, budget, nonfinite and cancellation refusal regressions.

@@ -42,6 +42,13 @@ fn resultants(
 }
 
 impl PreparedThermalFacet {
+    pub(in crate::shell::mitc) fn laminate(&self) -> Option<&LaminateThermalField> {
+        match &self.loading {
+            ThermalLoading::Laminate(source) => Some(source),
+            ThermalLoading::Strain(_) => None,
+        }
+    }
+
     pub(in crate::shell::mitc) const fn equilibrium_bubble(&self) -> [f64; 2] {
         self.bubble_offset
     }
