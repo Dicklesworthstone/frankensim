@@ -6,6 +6,9 @@
 //! momentum and work before publishing bodies and source histories together.
 //! Collision loss remains unallocated; no finite-area heat route is inferred.
 
+/// Explicit fractions of the same admitted impact loss into original caloric cells.
+pub mod heat;
+
 use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
 use fs_contact::interface_binding::thermal_friction::elliptic::impulse::{
     SourceImpulseCoefficientRole, SourceImpulseError, SourceImpulseSample,

@@ -1,4 +1,7 @@
 //! G1/G3/G4: original interface claims through a simultaneous native body event.
+#[path = "impacts/heat.rs"]
+mod heat;
+
 use super::sphere_plane::{original_claims, source_fixture};
 use super::*;
 use fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactError;
