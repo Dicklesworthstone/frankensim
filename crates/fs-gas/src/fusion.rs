@@ -1,4 +1,11 @@
-//! Finite D–T burn in the existing two-temperature ionized-gas state.
+//! Finite light-ion burn and explicitly selected plasma-energy closures.
+//!
+//! The original D–T entrypoints below evolve a two-temperature thermal state;
+//! [`network`] adds competing light-ion channels and prescribed compression.
+//! [`kinetic`] retains a separate isotropic alpha distribution with finite-time
+//! energy drift, diffusion, pressure and reciprocal thermal-pool heating.
+//!
+//! The following closure describes the original D–T thermal entrypoints.
 //!
 //! This is a homogeneous, rigid, quasineutral Maxwellian parcel. Its admitted
 //! monatomic source bank supplies D+, T+, He4++ and electrons. Nuclear charge
@@ -43,6 +50,8 @@ use fs_thermochem::plasma_radiation::{BremsstrahlungErrorV1, ElectronIonBremsstr
 mod solve;
 mod thermal;
 
+/// Finite-time alpha slowing and diffusion with separate kinetic storage.
+pub mod kinetic;
 /// Competing D–T, D–D and D–He3 reactions on the same material state.
 pub mod network;
 pub mod volume;

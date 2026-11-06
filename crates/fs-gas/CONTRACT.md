@@ -1,5 +1,76 @@
 # fs-gas contract
 
+## Finite-time kinetic alpha heating in the light-ion network
+
+`fusion::kinetic::advance_kinetic_fusion` couples the existing four-channel
+thermal burn to a separately retained isotropic He4 energy distribution.
+D-T and D-He3 births enter that distribution with their complete original
+reaction-weighted product energy. Neither their energy nor their heat capacity
+is assigned prematurely to the Maxwellian background. Canonical total amounts
+still include their charge and baryons; thermal He4 stock is retained directly
+through restarts rather than recovered by subtracting nearly equal inventories.
+DD products and the D-He3 proton retain explicitly authored prompt deposition.
+Alpha prompt-deposition fractions must be zero; the collision source determines
+their electron/ion energy partition.
+
+Each Maxwellian bath supplies the original finite-mass test-particle diffusion
+law. A Scharfetter-Gummel birth/death generator satisfies separate discrete
+detailed balance against `cell_width * sqrt(E) * exp(-E/kT_b)`. Positive
+uniformization advances the frozen generator and both signed heat rewards with
+the same bounded Poisson polynomial. Particles persist through their thermal
+tail, with no absorbing zero-energy sink, terminal handoff, population clipping
+or renormalization. Fixed-size trial storage supports 2–256 authored centers;
+uniform-speed and logarithmic constructors preserve explicit endpoints. Birth
+interpolation preserves number and mean energy. Both energy faces reflect.
+Each channel's birth spectrum is collapsed to its original source event's mean
+product energy; a resolved thermal/Doppler birth-energy spectrum is not supplied.
+
+Midpoint coefficient refresh and symmetric reaction/collision composition use
+step doubling over both thermal pools, all reaction accounts, each alpha bin,
+alpha energy and both deposited-heat increments. This controls temporal error
+on the authored grid, not energy-grid or physical-model error. Uniform speed
+avoids the severe uniformization stiffness of tiny logarithmic low-energy bins.
+An explicit upper-bin fraction screens inadequate high-energy support; it is
+not a distribution-error bound. Grid refinement remains necessary, especially
+for the width of an initially narrow birth distribution.
+
+`KineticFusionState` publishes actual thermal energies, retained alpha energy,
+total source amounts, and `p = 2*(Uh+Ue+Ualpha)/(3*V)`. It is not exposed as an
+all-thermal gas state. Independent publication accounts check alpha number,
+`delta(Ualpha)+Halpha_h+Halpha_e-Ealpha_born`, both original-source thermal
+energies, every species, baryons, charge, and the full nuclear/escaping-energy
+balance including alpha storage. Source objects, controls and distribution
+are retained; cancellation or refusal publishes no partial result.
+
+Fourteen focused new checks bring the native gas-fusion suite to 52 passing
+tests. Exact two-cell collision/reward references and discrete Maxwellian
+refinement check the kernel. Independent 128-cell Radau integrations check
+seeded-alpha slowing and continuous DT births with finite thermal backreaction;
+fixed-step refinement approaches that same-grid reference at second order.
+Restart, all-channel Coulomb/radiation coupling, original-source and radiation
+motion gates, positivity, cancellation and bounded collision-work retries are
+also exercised. These native checks use the actual crates and dependencies;
+the workspace DSR gate remains unavailable without DSR and sibling checkouts.
+
+This rigid homogeneous owner requires explicitly dilute alpha number and energy
+fractions, original He4/source identities, nonrelativistic grid support and
+electron-Debye screening. Optional background Coulomb exchange excludes kinetic
+alphas. Optional free-free radiation includes their ion charge only after a
+separate fastest-represented-alpha velocity-variance check. No alpha self-collision,
+anisotropic transport, confinement, fast-secondary reactions, kinetic compression
+or neutron transport is supplied. Original source/charge-reference admission
+treats total He4 at the background temperature;
+it does not certify classical occupation of an arbitrary authored alpha
+distribution. Classical dilute test alphas are assumed, and the declared
+number/energy limits do not quantify neglected alpha self-collisions. The frozen
+thermal-reference leading-log approximation is distinct from a velocity-dependent
+or sub-leading-order quantum
+collision law. The thermal tail and separate two-temperature partition follow
+the Fokker-Planck treatment discussed by Brown, Preston and Singleton,
+<https://arxiv.org/abs/1106.1463>; their higher-order collision coefficients are
+not claimed here. The `kinetic_fusion` example compares an explicitly prescribed
+80% prompt electron split with finite-time alpha heating from the same sources.
+
 ## Prescribed fusion compression and separate thermal pressure work
 
 `fusion::volume::advance_adiabatic_fusion_volume` moves either original D-T or

@@ -1,5 +1,33 @@
 # CONTRACT: fs-thermochem
 
+## Original-source isotropic test-ion energy drift and diffusion
+
+`coulomb::test_particle::TestParticleCoulombV1` binds a positive heavy projectile
+by its original source index and an explicit kinetic/rest-energy limit. Prepared
+backgrounds refresh actual populations, temperatures, density and screening in
+fixed-size storage. Source identity, mass, charge, weak coupling, nondegeneracy,
+cutoff and thermal support retain the original Coulomb owner's admission.
+The raw-point caller owns total hybrid charge and energy closure.
+
+The finite-mass Landau energy moments include drift `A=<dE>/dt`, diffusion
+`D=<dE*dE>/(2*dt)`, and velocity drag separately for heavy/electron baths.
+Velocity slowing is not mistaken for loss of mean particle kinetic energy.
+Stable small-speed series retain finite heating at E=0, where diffusion
+vanishes; high-speed energy loss retains the finite target-mass factor.
+Each target freezes its Coulomb logarithm at the parent's declared thermal
+relative-velocity convention, so `A = D' + D*(1/(2E)-1/(kT_b))` and the
+equal-temperature stationary energy density is proportional to
+`sqrt(E)*exp(-E/kT)`. Same-species background collisions are included.
+
+Six focused source checks cover independent SI/incomplete-gamma coefficient
+anchors, per-bath detailed balance, thermal-tail signs and limits, source refresh,
+admission and cancellation. The coefficients follow *NRL Plasma Formulary 2023*,
+Collisions and Transport, pp. 31–35:
+<https://homepage.physics.uiowa.edu/~ghowes/teach/phys4731/resources/NRL_Plasma_Formulary_2023.pdf>.
+This is a dilute, isotropic, nonrelativistic leading-log source law; it owns no
+distribution evolution and supplies no neutral stopping, velocity-dependent
+screening, quantum collision integral or collective instability model.
+
 ## Light-ion nuclear source binding and reaction-weighted product energy
 
 `fusion::plasma::LightIonFusionPlasmaV1` binds original p+, D+, T+, He3++,

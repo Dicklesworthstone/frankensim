@@ -26,10 +26,24 @@ pub(super) fn evaluate(
     temperatures: [f64; 2],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ThermalSources, DtFusionError> {
+    evaluate_components(transport, amounts, amounts, volume, temperatures, cancelled)
+}
+
+/// Separate thermal collision populations from the ion populations contributing
+/// to radiation. A hybrid owner must independently admit nonthermal ion motion
+/// before including those ions in the stationary-ion radiation approximation.
+pub(super) fn evaluate_components(
+    transport: &DtFusionTransport,
+    thermal_amounts: &[Amount],
+    radiation_amounts: &[Amount],
+    volume: Volume,
+    temperatures: [f64; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ThermalSources, DtFusionError> {
     let [th, te] = temperatures.map(Temperature::new);
     let conductance_w_k = if let Some(model) = &transport.coulomb {
         model
-            .evaluate_point(amounts, volume, th, te, &mut *cancelled)
+            .evaluate_point(thermal_amounts, volume, th, te, &mut *cancelled)
             .map_err(coulomb_error)?
             .electron_heavy_thermal_conductance_w_m3_k()
             * volume.value()
@@ -38,7 +52,7 @@ pub(super) fn evaluate(
     };
     let radiation_w_per_sqrt_k = if let Some(model) = &transport.bremsstrahlung {
         model
-            .evaluate_point(amounts, volume, th, te, &mut *cancelled)
+            .evaluate_point(radiation_amounts, volume, th, te, &mut *cancelled)
             .map_err(radiation_error)?
             .total_power_over_sqrt_temperature_w_k_sqrt()
     } else {

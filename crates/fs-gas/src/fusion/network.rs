@@ -28,6 +28,7 @@ pub use super::DtFusionSolve as FusionNetworkSolve;
 /// Shared optional Coulomb and optically thin radiation source owners.
 pub use super::DtFusionTransport as FusionNetworkTransport;
 
+pub(crate) mod kinetic;
 mod solve;
 
 /// Explicit subset of the four published channels, in `FusionReactionV1::ALL` order.

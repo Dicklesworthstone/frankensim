@@ -12,12 +12,14 @@ use fs_thermochem::plasma_radiation::BremsstrahlungErrorV1;
 
 #[derive(Clone, Copy)]
 pub(super) struct Point {
-    time: f64,
-    volume: Volume,
+    pub(super) time: f64,
+    pub(super) volume: Volume,
     // Moving-volume states carry the positive thermal survivor directly.
     // Reconstructing it as U_initial + W can erase it after deep expansion.
     thermal_energy: [Sum; 2],
     work_on_pools: [Sum; 2],
+    pub(super) kinetic_alpha_amount: Sum,
+    pub(super) alpha_deposited: [Sum; 2],
     amounts: [Sum; 6],
     extents: [Sum; 4],
     products: [[Sum; 2]; 4],
@@ -29,9 +31,9 @@ pub(super) struct Point {
 }
 
 #[derive(Clone, Copy)]
-struct Sources {
+pub(super) struct Sources {
     thermal: ThermalSources,
-    events: [Option<FusionThermalEventV1>; 4],
+    pub(super) events: [Option<FusionThermalEventV1>; 4],
 }
 
 pub(super) struct Problem<'a> {
@@ -45,6 +47,9 @@ pub(super) struct Problem<'a> {
     initial_amounts: [f64; 6],
     initial_energy: [f64; 2],
     q_molar: [f64; 4],
+    kinetic_alphas: bool,
+    initial_alpha_amount: f64,
+    thermal_helium4_amount: f64,
 }
 
 impl<'a> Problem<'a> {
@@ -109,17 +114,54 @@ impl<'a> Problem<'a> {
                 initial.electron_internal_energy().value(),
             ],
             q_molar: FusionReactionV1::ALL.map(|r| r.q_j() * AVOGADRO),
+            kinetic_alphas: false,
+            initial_alpha_amount: 0.0,
+            thermal_helium4_amount: initial.amounts()[plasma.indices()[4]].value(),
         };
         result.sources(result.start(), cancelled)?;
         Ok(result)
     }
 
-    fn start(&self) -> Point {
+    /// Activate the separate alpha inventory after the original bank has been
+    /// admitted. The reference state supplies source identity, total inventories
+    /// and temperatures; it is not published as the hybrid physical state.
+    pub(super) fn with_kinetic_alphas(
+        mut self,
+        alpha_amount: f64,
+        thermal_helium4_amount: f64,
+        thermal_energy: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, FusionNetworkError> {
+        let helium4 = self.initial.amounts()[self.plasma.indices()[4]].value();
+        if self.volume_history.is_some()
+            || !alpha_amount.is_finite()
+            || alpha_amount < 0.0
+            || !thermal_helium4_amount.is_finite()
+            || thermal_helium4_amount < 0.0
+            || (helium4 - alpha_amount - thermal_helium4_amount).abs()
+                > 64.0 * f64::EPSILON * helium4.max(alpha_amount)
+            || thermal_energy.iter().any(|&u| !positive(u))
+        {
+            return Err(FusionNetworkError::Invalid(
+                "rigid kinetic-alpha component and positive thermal stores",
+            ));
+        }
+        self.kinetic_alphas = true;
+        self.initial_alpha_amount = alpha_amount;
+        self.thermal_helium4_amount = thermal_helium4_amount;
+        self.initial_energy = thermal_energy;
+        self.sources(self.start(), cancelled)?;
+        Ok(self)
+    }
+
+    pub(super) fn start(&self) -> Point {
         Point {
             time: 0.0,
             volume: self.initial.volume(),
             thermal_energy: self.initial_energy.map(sum),
             work_on_pools: [Sum::default(); 2],
+            kinetic_alpha_amount: sum(self.initial_alpha_amount),
+            alpha_deposited: [Sum::default(); 2],
             amounts: self.initial_amounts.map(sum),
             extents: [Sum::default(); 4],
             products: [[Sum::default(); 2]; 4],
@@ -130,8 +172,17 @@ impl<'a> Problem<'a> {
             photons: Sum::default(),
         }
     }
-    fn amounts(&self, point: Point) -> [Amount; 6] {
+    pub(super) fn amounts(&self, point: Point) -> [Amount; 6] {
         point.amounts.map(|n| Amount::new(n.value))
+    }
+    pub(super) fn thermal_amounts(&self, point: Point) -> [Amount; 6] {
+        let mut amounts = self.amounts(point);
+        if self.kinetic_alphas {
+            // He4 is not a reactant. Retain the original thermal stock directly
+            // rather than subtracting two large nearly equal alpha inventories.
+            amounts[self.plasma.indices()[4]] = Amount::new(self.thermal_helium4_amount);
+        }
+        amounts
     }
     fn capacities(&self, point: Point) -> [f64; 2] {
         [
@@ -140,13 +191,19 @@ impl<'a> Problem<'a> {
                     .plasma
                     .indices()
                     .iter()
-                    .map(|&i| point.amounts[i].value)
+                    .map(|&i| {
+                        if self.kinetic_alphas && i == self.plasma.indices()[4] {
+                            self.thermal_helium4_amount
+                        } else {
+                            point.amounts[i].value
+                        }
+                    })
                     .sum::<f64>(),
             CV_MOLAR * point.amounts[self.plasma.electron_index()].value,
         ]
     }
-    fn pool_energy(&self, point: Point) -> [f64; 2] {
-        if self.volume_history.is_some() {
+    pub(super) fn pool_energy(&self, point: Point) -> [f64; 2] {
+        if self.volume_history.is_some() || self.kinetic_alphas {
             return point.thermal_energy.map(|x| x.value);
         }
         self.accounted_energy(point)
@@ -159,29 +216,32 @@ impl<'a> Problem<'a> {
                 + self.heating.heavy_power.value() * point.time
                 + (point.deposited[0].value - point.ion_removal.value)
                 + point.exchange.value
-                + point.work_on_pools[0].value,
+                + point.work_on_pools[0].value
+                + point.alpha_deposited[0].value,
             self.initial_energy[1]
                 + self.heating.electron_power.value() * point.time
                 + point.deposited[1].value
                 - point.exchange.value
                 - point.photons.value
-                + point.work_on_pools[1].value,
+                + point.work_on_pools[1].value
+                + point.alpha_deposited[1].value,
         ]
     }
     fn add_pool_energy(&self, point: &mut Point, increments: [f64; 2]) {
-        if self.volume_history.is_some() {
+        if self.volume_history.is_some() || self.kinetic_alphas {
             for (energy, increment) in point.thermal_energy.iter_mut().zip(increments) {
                 energy.add(increment);
             }
         }
     }
-    fn temperatures(&self, point: Point) -> Result<[f64; 2], FusionNetworkError> {
+    pub(super) fn temperatures(&self, point: Point) -> Result<[f64; 2], FusionNetworkError> {
         // Keep exact authored endpoints when no physical transfer has occurred.
         // A thermal substep can act at t=0, so elapsed time alone is insufficient.
         if point.extents.iter().all(|x| x.value == 0.0)
             && point.exchange.value == 0.0
             && point.photons.value == 0.0
             && point.work_on_pools.iter().all(|x| x.value == 0.0)
+            && point.alpha_deposited.iter().all(|x| x.value == 0.0)
             && point.volume == self.initial.volume()
             && (point.time == 0.0
                 || (self.heating.heavy_power.value() == 0.0
@@ -200,7 +260,7 @@ impl<'a> Problem<'a> {
         }
         Ok(result)
     }
-    fn admit(
+    pub(super) fn admit(
         &self,
         point: Point,
         cancelled: &mut impl FnMut() -> bool,
@@ -211,7 +271,10 @@ impl<'a> Problem<'a> {
             || !point.exchange.value.is_finite()
             || !positive(point.volume.value())
             || point.work_on_pools.iter().any(|x| !x.value.is_finite())
-            || (self.volume_history.is_some()
+            || point.alpha_deposited.iter().any(|x| !x.value.is_finite())
+            || !point.kinetic_alpha_amount.value.is_finite()
+            || point.kinetic_alpha_amount.value < 0.0
+            || ((self.volume_history.is_some() || self.kinetic_alphas)
                 && point.thermal_energy.iter().any(|x| !x.value.is_finite()))
             || point
                 .amounts
@@ -247,7 +310,7 @@ impl<'a> Problem<'a> {
             .map_err(plasma_error)?;
         Ok([th, te])
     }
-    fn sources(
+    pub(super) fn sources(
         &self,
         point: Point,
         cancelled: &mut impl FnMut() -> bool,
@@ -264,8 +327,9 @@ impl<'a> Problem<'a> {
                 );
             }
         }
-        let thermal = thermal::evaluate(
+        let thermal = thermal::evaluate_components(
             self.transport,
+            &self.thermal_amounts(point),
             &self.amounts(point),
             point.volume,
             temperatures,
@@ -282,13 +346,13 @@ impl<'a> Problem<'a> {
         r: usize,
         dt: f64,
         event: FusionThermalEventV1,
-    ) -> Result<Point, FusionNetworkError> {
+    ) -> Result<(Point, f64), FusionNetworkError> {
         let reaction = FusionReactionV1::ALL[r];
         let indices = self.plasma.indices();
         let [a, b] = reaction.reactants().map(|s| indices[species_slot(s)]);
         let (na, nb) = (old.amounts[a].value, old.amounts[b].value);
         if na == 0.0 || nb == 0.0 || dt == 0.0 {
-            return Ok(old);
+            return Ok((old, 0.0));
         }
         let rate = event.reactivity().value_m3_s();
         let volume = old.volume.value();
@@ -316,6 +380,10 @@ impl<'a> Problem<'a> {
                 next.neutrons.add(energy);
             } else {
                 next.amounts[indices[species_slot(*product)]].add(extent);
+                if self.kinetic_alphas && *product == NuclearSpeciesV1::Helium4 {
+                    next.kinetic_alpha_amount.add(extent);
+                    continue;
+                }
                 let f = self.heating.product_electron_fractions[r][p];
                 next.deposited[0].add((1.0 - f) * energy);
                 next.deposited[1].add(f * energy);
@@ -324,7 +392,7 @@ impl<'a> Problem<'a> {
             }
         }
         self.add_pool_energy(&mut next, thermal_increment);
-        Ok(next)
+        Ok((next, extent))
     }
 
     fn radiate(&self, old: Point, dt: f64, coefficient: f64) -> Result<Point, FusionNetworkError> {
@@ -376,20 +444,44 @@ impl<'a> Problem<'a> {
         sources: Sources,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, FusionNetworkError> {
+        self.frozen_step_with_births(old, dt, sources, cancelled)
+            .map(|(point, _)| point)
+    }
+
+    /// Shared source step with independently accumulated DT/DHe3 alpha birth
+    /// amounts. The kinetic owner injects those particles at the retained
+    /// channel energy without differencing large cumulative event accounts.
+    pub(super) fn frozen_step_with_births(
+        &self,
+        old: Point,
+        dt: f64,
+        sources: Sources,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Point, [f64; 2]), FusionNetworkError> {
+        let mut births = [Sum::default(); 2];
         let mut next = self.thermal_step(old, 0.5 * dt, sources.thermal, cancelled)?;
         // Palindromic channel composition: each selected binary map is exact
         // at fixed T. Products can feed later maps without an overdraw or seed.
         for r in 0..4 {
             if let Some(event) = sources.events[r] {
                 poll(cancelled)?;
-                next = self.reaction_step(next, r, if r == 3 { dt } else { 0.5 * dt }, event)?;
+                let (updated, extent) =
+                    self.reaction_step(next, r, if r == 3 { dt } else { 0.5 * dt }, event)?;
+                next = updated;
+                if self.kinetic_alphas && (r == 0 || r == 3) {
+                    births[usize::from(r == 3)].add(extent);
+                }
                 self.admit(next, cancelled)?;
             }
         }
         for r in (0..3).rev() {
             if let Some(event) = sources.events[r] {
                 poll(cancelled)?;
-                next = self.reaction_step(next, r, 0.5 * dt, event)?;
+                let (updated, extent) = self.reaction_step(next, r, 0.5 * dt, event)?;
+                next = updated;
+                if self.kinetic_alphas && r == 0 {
+                    births[0].add(extent);
+                }
                 self.admit(next, cancelled)?;
             }
         }
@@ -404,7 +496,14 @@ impl<'a> Problem<'a> {
         self.admit(next, cancelled)?;
         let next = self.thermal_step(next, 0.5 * dt, sources.thermal, cancelled)?;
         self.admit(next, cancelled)?;
-        Ok(next)
+        Ok((next, births.map(|n| n.value)))
+    }
+
+    pub(super) fn deposit_alpha_energy(&self, point: &mut Point, deposited: [f64; 2]) {
+        self.add_pool_energy(point, deposited);
+        for (account, energy) in point.alpha_deposited.iter_mut().zip(deposited) {
+            account.add(energy);
+        }
     }
     fn midpoint(
         &self,
@@ -464,7 +563,12 @@ impl<'a> Problem<'a> {
         Ok(next)
     }
 
-    fn error(&self, old: Point, full: Point, fine: Point) -> Result<f64, FusionNetworkError> {
+    pub(super) fn error(
+        &self,
+        old: Point,
+        full: Point,
+        fine: Point,
+    ) -> Result<f64, FusionNetworkError> {
         let c = self.controls;
         let mut norm = 0.0_f64;
         let mut add = |a: f64, b: f64, absolute: f64| {
@@ -504,6 +608,16 @@ impl<'a> Problem<'a> {
             (full.ion_removal, fine.ion_removal, old.ion_removal),
             (full.exchange, fine.exchange, old.exchange),
             (full.photons, fine.photons, old.photons),
+            (
+                full.alpha_deposited[0],
+                fine.alpha_deposited[0],
+                old.alpha_deposited[0],
+            ),
+            (
+                full.alpha_deposited[1],
+                fine.alpha_deposited[1],
+                old.alpha_deposited[1],
+            ),
             (
                 full.work_on_pools[0],
                 fine.work_on_pools[0],
@@ -638,6 +752,30 @@ impl<'a> Problem<'a> {
                 e => FusionNetworkError::State(e),
             })?
         };
+        self.balance_at(
+            point,
+            [
+                state.heavy_internal_energy().value(),
+                state.electron_internal_energy().value(),
+            ],
+            0.0,
+            balance,
+            cancelled,
+        )?;
+        Ok(state)
+    }
+
+    /// Complete nuclear/source accounts with an independently evaluated thermal
+    /// state and, for a hybrid owner, its additional kinetic storage change.
+    pub(super) fn balance_at(
+        &self,
+        point: Point,
+        thermal_energy: [f64; 2],
+        kinetic_energy_change_j: f64,
+        balance: &mut FusionNetworkBalance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FusionNetworkError> {
+        let amounts = self.amounts(point);
         let extents = point.extents.map(|x| x.value);
         let mut released = Sum::default();
         for (q, extent) in self.q_molar.iter().zip(extents) {
@@ -645,12 +783,13 @@ impl<'a> Problem<'a> {
         }
         let neutron_amount = extents[0] + extents[1];
         let expected = self.accounted_energy(point);
-        let heavy_residual = state.heavy_internal_energy().value() - expected[0];
-        let electron_residual = state.electron_internal_energy().value() - expected[1];
+        let heavy_residual = thermal_energy[0] - expected[0];
+        let electron_residual = thermal_energy[1] - expected[1];
         let external_heavy = self.heating.heavy_power.value() * point.time;
         let external_electron = self.heating.electron_power.value() * point.time;
-        let change = (state.heavy_internal_energy().value() - self.initial_energy[0])
-            + (state.electron_internal_energy().value() - self.initial_energy[1]);
+        let change = (thermal_energy[0] - self.initial_energy[0])
+            + (thermal_energy[1] - self.initial_energy[1])
+            + kinetic_energy_change_j;
         let total_residual = change + point.neutrons.value + point.photons.value
             - released.value
             - external_heavy
@@ -702,6 +841,7 @@ impl<'a> Problem<'a> {
                     + external_electron.abs()
                     + point.work_on_pools[0].value.abs()
                     + point.work_on_pools[1].value.abs()
+                    + kinetic_energy_change_j.abs()
                     + self.initial_energy[0].abs()
                     + self.initial_energy[1].abs());
         if [
@@ -747,7 +887,7 @@ impl<'a> Problem<'a> {
             ..*balance
         };
         poll(cancelled)?;
-        Ok(state)
+        Ok(())
     }
 }
 
