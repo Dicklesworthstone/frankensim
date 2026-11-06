@@ -1,5 +1,5 @@
-//! Held spatial acceleration on the original compressible force/energy owner.
-//! The field is prescribed in SI at cell centers and held during native steps.
+//! Prescribed spatial acceleration on the original compressible force/energy owner.
+//! SI cell-center fields may be held or supplied at the next native time level.
 //! Its momentum supply is rho*a; its mechanical power is rho*a.u.
 
 use super::{
@@ -46,7 +46,54 @@ impl BodyAcceleration {
     }
 }
 
-fn checkpoint(cancelled: &mut impl FnMut() -> bool) -> Result<(), NsfError> {
+// Borrows the accepted OLD field and, for an unsteady step, the independently
+// admitted NEW field. Collision still uses the accepted self.force; only
+// endpoint correctors consume field(). No callback or solver copy is involved.
+pub(super) struct BodyForceStep<'a> {
+    old: &'a [BodyAcceleration],
+    new: Option<&'a [BodyAcceleration]>,
+}
+
+impl<'a> BodyForceStep<'a> {
+    pub(super) fn new(
+        old: &'a [BodyAcceleration],
+        new: Option<&'a [BodyAcceleration]>,
+    ) -> Self {
+        Self { old, new }
+    }
+
+    pub(super) fn field(&self) -> &'a [BodyAcceleration] {
+        self.new.unwrap_or(self.old)
+    }
+
+    pub(super) fn active(&self) -> bool {
+        !self.old.is_empty() || !self.field().is_empty()
+    }
+
+    pub(super) fn work(&self, cell: usize, rho0: f64, u0: [f64; 3], rho1: f64, u1: [f64; 3]) -> f64 {
+        let old = self.old.get(cell);
+        let Some(new) = self.new else {
+            // Keep every operation of the held route, including signed zero.
+            return old.map_or(0.0, |a| a.work(rho0, u0, rho1, u1));
+        };
+        let a0 = old.map_or([0.0; 3], |a| a.acceleration_lattice);
+        let a1 = new.get(cell).map_or([0.0; 3], |a| a.acceleration_lattice);
+        // Power is acceleration dotted with physical momentum, rho*u.
+        // Center the two factors separately: a_bar . (m0 + m1)/2.
+        // For constant rho, the native Guo impulse is rho*(a0+a1)/2,
+        // so this is exactly its kinetic work, including force reversal.
+        // An endpoint-power trapezoid instead adds Delta(a).Delta(m)/4
+        // as spurious heat. This centered quadrature is second order and
+        // continuously reduces to the original held-field work.
+        let acceleration: [f64; 3] = core::array::from_fn(|a| 0.5 * a0[a] + 0.5 * a1[a]);
+        let power = |rho: f64, u: [f64; 3]| {
+            rho * (acceleration[0] * u[0] + acceleration[1] * u[1] + acceleration[2] * u[2])
+        };
+        0.5 * (power(rho0, u0) + power(rho1, u1))
+    }
+}
+
+pub(super) fn checkpoint(cancelled: &mut impl FnMut() -> bool) -> Result<(), NsfError> {
     if cancelled() {
         Err(NsfError::Input("body acceleration update cancelled"))
     } else {
@@ -69,10 +116,12 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// and manufactured sources retain their own supplies; do not duplicate
     /// this field in those controls. There is no separate vorticity forcing.
     ///
-    /// This is an externally prescribed, held field, not an implicit
-    /// velocity-dependent force or a rotating-frame integrator. Call the
-    /// setter between steps to change it. Spatial curl naturally generates
-    /// vorticity through the original momentum update.
+    /// This is an externally prescribed field, not an implicit
+    /// velocity-dependent force or a rotating-frame integrator. Use the
+    /// setter to rebind it at fixed physical state; use
+    /// [`Self::step_with_body_acceleration_si`] to advance a time-varying
+    /// drive with distinct old/new force epochs. Spatial curl naturally
+    /// generates vorticity through the original momentum update.
     pub fn with_body_acceleration_si(
         mut self,
         acceleration_m_s2: &[[f64; 3]],
@@ -98,37 +147,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         acceleration_m_s2: &[[f64; 3]],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<(), NsfError> {
-        checkpoint(&mut cancelled)?;
-        if !acceleration_m_s2.is_empty() && acceleration_m_s2.len() != self.n {
-            return Err(NsfError::Input(
-                "body acceleration field length differs from the grid",
-            ));
-        }
-        let mut staged = Vec::new();
-        if !acceleration_m_s2.is_empty() {
-            staged
-                .try_reserve_exact(self.n)
-                .map_err(|_| NsfError::Input("body acceleration field allocation failed"))?;
-            let mut active = false;
-            for (i, &acceleration) in acceleration_m_s2.iter().enumerate() {
-                if i % 64 == 0 {
-                    checkpoint(&mut cancelled)?;
-                }
-                let value = BodyAcceleration::resolve(
-                    &self.law,
-                    if self.solid[i] {
-                        [0.0; 3]
-                    } else {
-                        acceleration
-                    },
-                )?;
-                active |= value.acceleration_lattice != [0.0; 3];
-                staged.push(value);
-            }
-            if !active {
-                staged = Vec::new();
-            }
-        }
+        let staged = self.resolve_body_acceleration(acceleration_m_s2, &mut cancelled)?;
         if staged == self.body_acceleration {
             checkpoint(&mut cancelled)?;
             return Ok(());
@@ -146,6 +165,89 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         )?;
         self.body_acceleration = staged;
         Ok(())
+    }
+
+    /// Advance one native step using the prescribed acceleration at its endpoint.
+    ///
+    /// The accepted field is the OLD acceleration and `acceleration_m_s2`
+    /// is the NEW one, one vector per cell in x-fastest order. Empty/all-zero
+    /// fluid fields mean zero acceleration; solid entries are ignored.
+    /// The native collision retains the OLD force, while every endpoint
+    /// thermal/SGS/contact corrector uses NEW `rho*a`. After acceptance the
+    /// NEW field remains bound for subsequent held steps. Identical endpoint
+    /// fields execute the original held arithmetic exactly.
+    ///
+    /// Total energy receives `(a_old+a_new).(rho_old*u_old+rho_new*u_new)/4`
+    /// in lattice units, using physical half-force velocities. This
+    /// second-order centered mechanical work reduces to the held quadrature
+    /// and equals the kinetic change for uniform constant-density forcing,
+    /// without artificial heating under a changing or reversing drive.
+    /// It is reported once in `EnergyLedger::body_force_work_j`.
+    ///
+    /// The input is admitted once; there are no acceleration callbacks,
+    /// extra source samples, grid copies or separate vorticity integrators.
+    /// Gravity and manufactured sources retain their existing supplies.
+    /// Time samples must resolve the prescribed drive; discontinuities,
+    /// implicit velocity dependence and rotating-frame dynamics require
+    /// their own integration treatment.
+    ///
+    /// # Errors
+    /// Field-length, SI conversion, allocation, cancellation and all native
+    /// step refusals leave the accepted state and acceleration unchanged.
+    /// Cancellation is polled through field admission, native step stages,
+    /// corrector cells and immediately before publication. As for `step`,
+    /// an external source callback's own side effects cannot be rolled back.
+    pub fn step_with_body_acceleration_si(
+        &mut self,
+        acceleration_m_s2: &[[f64; 3]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::EnergyLedger, NsfError> {
+        let next = self.resolve_body_acceleration(acceleration_m_s2, &mut cancelled)?;
+        let next = if next == self.body_acceleration {
+            None
+        } else {
+            Some(next)
+        };
+        self.step_body_acceleration(next, &mut cancelled)
+    }
+
+    fn resolve_body_acceleration(
+        &self,
+        acceleration_m_s2: &[[f64; 3]],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Vec<BodyAcceleration>, NsfError> {
+        checkpoint(cancelled)?;
+        if !acceleration_m_s2.is_empty() && acceleration_m_s2.len() != self.n {
+            return Err(NsfError::Input(
+                "body acceleration field length differs from the grid",
+            ));
+        }
+        let mut staged = Vec::new();
+        if !acceleration_m_s2.is_empty() {
+            staged
+                .try_reserve_exact(self.n)
+                .map_err(|_| NsfError::Input("body acceleration field allocation failed"))?;
+            let mut active = false;
+            for (i, &acceleration) in acceleration_m_s2.iter().enumerate() {
+                if i % 64 == 0 {
+                    checkpoint(cancelled)?;
+                }
+                let value = BodyAcceleration::resolve(
+                    &self.law,
+                    if self.solid[i] {
+                        [0.0; 3]
+                    } else {
+                        acceleration
+                    },
+                )?;
+                active |= value.acceleration_lattice != [0.0; 3];
+                staged.push(value);
+            }
+            if !active {
+                staged = Vec::new();
+            }
+        }
+        Ok(staged)
     }
 
     /// The original held SI value at a fluid cell; zero when disabled.

@@ -615,6 +615,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         theta: &[f64],
         material: &[Option<NsfCellMaterial>],
         initial_velocity: &[[f64; 3]],
+        body_acceleration: &[super::body_force::BodyAcceleration],
     ) -> Result<SgsContactPredictor, NsfError> {
         let mut velocity = initial_velocity.to_vec();
         for _ in 0..32 {
@@ -624,7 +625,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 self.characteristic_patch,
                 rho, &velocity, theta, material,
             )?;
-            let force = self.force_field(rho, theta, faces.as_ref());
+            let force = self.force_field_with_body_acceleration(
+                rho, theta, faces.as_ref(), body_acceleration,
+            );
             let corrected = self.velocity_field(rho, momentum, &force);
             let converged = corrected.iter().zip(&velocity).all(|(a, b)| {
                 a.iter().zip(b).all(|(&a, &b)| a.is_finite() && b.is_finite()

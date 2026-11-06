@@ -204,7 +204,9 @@ fn g1_force_predictor_closes_velocity_and_matches_the_face_sgs_coefficient() {
         velocity[0] += 0.0001;
     }
     let result = grid
-        .sgs_contact_predictor(&rho, &momentum, &grid.theta, &grid.material, &guess)
+        .sgs_contact_predictor(
+            &rho, &momentum, &grid.theta, &grid.material, &guess, &grid.body_acceleration,
+        )
         .unwrap();
     assert_eq!(
         result.velocity,
@@ -435,4 +437,52 @@ fn g0_zero_sgs_enthalpy_contacts_preserve_molecular_trajectories() {
             assert_eq!(molecular.step().unwrap(), zero.step().unwrap());
         }
     }
+}
+
+#[test]
+fn g1_unsteady_body_acceleration_reaches_the_coupled_enthalpy_sgs_predictor() {
+    let mut serial = contact_grid(0, false, 1, SgsModel::Wale { cw: 0.5 }, true, false);
+    let mut pooled = contact_grid(0, false, 3, SgsModel::Wale { cw: 0.5 }, true, false);
+    assert!(serial.coupled_sgs_contact());
+    let field: Vec<_> = (0..serial.n).map(|i| [
+        500.0,
+        2000.0 * (core::f64::consts::TAU * (serial.at(i)[0] as f64 + 0.5)
+            / serial.spec.dims[0] as f64).sin(),
+        -300.0,
+    ]).collect();
+    let before: Vec<_> = (0..serial.n).map(|i| serial.cell(serial.at(i))).collect();
+    let scale = serial.law.dt_s * (serial.law.dt_s / serial.law.dx_m);
+    let old_energy = serial.total_energy_j();
+    let ledger = serial.step_with_body_acceleration_si(&field, || false).unwrap();
+    let parallel = pooled.step_with_body_acceleration_si(&field, || false).unwrap();
+    assert_eq!(serial.state_hash(), pooled.state_hash());
+    assert_eq!(serial.force, pooled.force);
+    assert_eq!(ledger, parallel);
+    let expected = (0..serial.n).map(|i| {
+        let after = serial.cell(serial.at(i));
+        0.25 * (0..3).map(|a| field[i][a] * scale
+            * (before[i].0 * before[i].1[a] + after.0 * after.1[a])).sum::<f64>()
+    }).sum::<f64>() * serial.law.energy_unit_j();
+    assert!((ledger.body_force_work_j - expected).abs()
+        < 3e-12 * expected.abs().max(1e-20));
+    assert!((serial.total_energy_j() - old_energy - ledger.body_force_work_j
+        - ledger.wall_heat_j - ledger.wall_work_j - ledger.open_boundary_energy_j).abs()
+        < 3e-12 * old_energy);
+    assert!(ledger.residual_rel < 3e-12);
+    for i in 0..serial.n {
+        assert_eq!(serial.body_acceleration_m_s2(serial.at(i)).unwrap(), field[i]);
+    }
+    // At a fixed thermal predictor, explicitly removing the endpoint body
+    // field must change the coupled force/velocity closure. This catches a
+    // stale held-field path even if ledger accounting alone still closes.
+    let (rho, momentum) = serial.macro_fields(&serial.f);
+    let guess = serial.velocity_field(&rho, &momentum, &serial.force);
+    let with = serial.sgs_contact_predictor(
+        &rho, &momentum, &serial.theta, &serial.material, &guess, &serial.body_acceleration,
+    ).unwrap();
+    let without = serial.sgs_contact_predictor(
+        &rho, &momentum, &serial.theta, &serial.material, &guess, &[],
+    ).unwrap();
+    assert!(with.velocity.iter().zip(&without.velocity).any(|(a, b)|
+        a.iter().zip(b).any(|(a, b)| (a - b).abs() > 1e-9)));
 }

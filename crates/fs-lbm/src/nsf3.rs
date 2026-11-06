@@ -402,9 +402,9 @@ pub struct EnergyLedger {
     /// endpoint trapezoid of rho*g.u used by the total-energy equation.
     /// This mechanical supply is neither heat nor manufactured source energy.
     pub gravity_work_j: f64,
-    /// Work supplied by the held spatial body acceleration during this step [J].
-    /// The same endpoint trapezoid of rho*a.u used by total energy; excludes
-    /// gravity, manufactured sources and heat.
+    /// Work supplied by the prescribed spatial body acceleration [J].
+    /// Uses the same held or time-centered mechanical quadrature as total
+    /// energy; excludes gravity, manufactured sources and heat.
     pub body_force_work_j: f64,
     /// `|change of total energy - wall heat - wall work - open energy - source energy - gravity work - body-force work| / total energy`.
     pub residual_rel: f64,
@@ -1170,6 +1170,16 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// `F = -grad p'`, `p' = rho (theta - theta0)`, in conservative face form: fourth-order face values where the four
     /// stencil cells are fluid, the two-point value beside a solid cell, the cell's own value at a wall face.
     fn force_field(&self, rho: &[f64], theta: &[f64], faces: Option<&OpenFaces>) -> Vec<[f64; 3]> {
+        self.force_field_with_body_acceleration(rho, theta, faces, &self.body_acceleration)
+    }
+
+    fn force_field_with_body_acceleration(
+        &self,
+        rho: &[f64],
+        theta: &[f64],
+        faces: Option<&OpenFaces>,
+        body_acceleration: &[body_force::BodyAcceleration],
+    ) -> Vec<[f64; 3]> {
         let pp: Vec<f64> = (0..self.n)
             .map(|i| {
                 if self.solid[i] {
@@ -1217,7 +1227,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     force[a] += rho[i] * gravity.acceleration_lattice[a];
                 }
             }
-            if let Some(body) = self.body_acceleration.get(i) {
+            if let Some(body) = body_acceleration.get(i) {
                 for a in 0..3 {
                     force[a] += rho[i] * body.acceleration_lattice[a];
                 }
@@ -1554,6 +1564,23 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
     /// [`NsfError`] when the new state leaves the declared Mach, temperature-ratio, window or finite domain; the
     /// published state is unchanged.
     pub fn step(&mut self) -> Result<EnergyLedger, NsfError> {
+        self.step_body_acceleration(None, &mut || false)
+    }
+
+    // One native step owner: OLD accepted force drives collision; the
+    // optional admitted endpoint field supplies every NEW force corrector.
+    // Neither the field nor any evolved state publishes before the last
+    // fallible operation and cancellation checkpoint.
+    fn step_body_acceleration(
+        &mut self,
+        next_body_acceleration: Option<Vec<body_force::BodyAcceleration>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EnergyLedger, NsfError> {
+        body_force::checkpoint(cancelled)?;
+        let body_force = body_force::BodyForceStep::new(
+            &self.body_acceleration,
+            next_body_acceleration.as_deref(),
+        );
         let caloric_branch = match &self.spec.gas {
             NsfGasMedium::Thermochemical(source) => Some(source.prepare_caloric_branch()?),
             _ => None,
@@ -1583,6 +1610,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             });
         }
+        body_force::checkpoint(cancelled)?;
         let have_sources = self.sources.is_some();
         // The mass increment of the step is injected half before and half after the stream: the stream's pressure gradient then
         // sees the mid-step density, as the momentum source (the average of the two levels) does. All of it before the stream
@@ -1624,6 +1652,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 }
             }
         }
+        body_force::checkpoint(cancelled)?;
         let (rho1, mom1) = self.macro_fields(&next);
         let mut th1 = self.theta.clone();
         let mut u_guess = if self.open.is_some() {
@@ -1633,10 +1662,13 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         };
         let mut result = None;
         for _ in 0..COUPLING_PASSES {
+            body_force::checkpoint(cancelled)?;
             let (faces1, f1, u1, trial_material, trial_transport) = if self.coupled_sgs_contact() {
                 let material = self.material_field(&rho1, &th1)?;
                 let contact =
-                    self.sgs_contact_predictor(&rho1, &mom1, &th1, &material, &u_guess)?;
+                    self.sgs_contact_predictor(
+                        &rho1, &mom1, &th1, &material, &u_guess, body_force.field(),
+                    )?;
                 (
                     contact.faces,
                     contact.force,
@@ -1657,7 +1689,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                     &th1,
                     &[],
                 )?;
-                let mut force = self.force_field(&rho1, &th1, faces.as_ref());
+                let mut force = self.force_field_with_body_acceleration(
+                    &rho1, &th1, faces.as_ref(), body_force.field(),
+                );
                 if have_sources {
                     for i in 0..n {
                         if !self.solid[i] {
@@ -1699,6 +1733,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             let mut e1 = self.e.clone();
             let mut th_new = th1.clone();
             for i in 0..n {
+                if i % 64 == 0 {
+                    body_force::checkpoint(cancelled)?;
+                }
                 if self.solid[i] {
                     continue;
                 }
@@ -1709,8 +1746,8 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
                 if let Some(gravity) = self.gravity {
                     e1[i] += gravity.work(rho0[i], u0[i], rho1[i], u1[i]);
                 }
-                if let Some(body) = self.body_acceleration.get(i) {
-                    e1[i] += body.work(rho0[i], u0[i], rho1[i], u1[i]);
+                if body_force.active() {
+                    e1[i] += body_force.work(i, rho0[i], u0[i], rho1[i], u1[i]);
                 }
                 let ke = 0.5
                     * rho1[i]
@@ -1745,6 +1782,9 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let (force1, u1, e1, div1, wall1, open1, faces1, mut material_new) =
             result.expect("at least one coupling pass");
         for i in 0..n {
+            if i % 64 == 0 {
+                body_force::checkpoint(cancelled)?;
+            }
             if self.solid[i] {
                 continue;
             }
@@ -1801,6 +1841,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         // velocity and source state, after the final temperature corrector.
         let transport_new =
             self.sgs_field(&rho1, &u1, &th1, &material_new, endpoint_faces.as_ref())?;
+        body_force::checkpoint(cancelled)?;
         let unit = self.law.energy_unit_j();
         let (mut ke0, mut ke1, mut e_old, mut e_new, mut pw) = (0.0, 0.0, 0.0, 0.0, 0.0);
         let mut gravity_work = 0.0;
@@ -1818,11 +1859,11 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             if let Some(gravity) = self.gravity {
                 gravity_work += gravity.work(rho0[i], u0[i], rho1[i], u1[i]);
             }
-            if let Some(body) = self.body_acceleration.get(i) {
-                body_force_work += body.work(rho0[i], u0[i], rho1[i], u1[i]);
+            if body_force.active() {
+                body_force_work += body_force.work(i, rho0[i], u0[i], rho1[i], u1[i]);
             }
         }
-        if !self.body_acceleration.is_empty()
+        if body_force.active()
             && (!body_force_work.is_finite() || !(unit * body_force_work).is_finite())
         {
             return Err(NsfError::Input("body-force work overflowed"));
@@ -1865,7 +1906,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         let d_total = e_new - e_old;
         let d_kin = ke1 - ke0;
         let d_int = d_total - d_kin;
-        // Gravity and held body acceleration supply mechanical energy. Their
+        // Gravity and prescribed body acceleration supply mechanical energy. Their
         // work already cancels the kinetic change in d_int; subtracting it
         // again would manufacture heat in uniformly accelerating gas.
         let pressure_work = -pw;
@@ -1919,10 +1960,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         } else {
             balance
         };
-        let balance = if self.body_acceleration.is_empty() {
-            balance
-        } else {
+        let balance = if body_force.active() {
             balance - body_force_work
+        } else {
+            balance
         };
         let ledger = EnergyLedger {
             internal_j: unit * (e_new - ke1),
@@ -1936,7 +1977,7 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
             open_energy_j: unit * prescribed_in,
             source_energy_j: unit * source_in,
             gravity_work_j: if self.gravity.is_some() { unit * gravity_work } else { 0.0 },
-            body_force_work_j: if self.body_acceleration.is_empty() { 0.0 } else { unit * body_force_work },
+            body_force_work_j: if body_force.active() { unit * body_force_work } else { 0.0 },
             residual_rel: balance.abs() / e_new.abs().max(f64::MIN_POSITIVE),
         };
         let boundary_exchange = self.finish_boundary_exchange(
@@ -1958,6 +1999,10 @@ impl<L: Lattice3<27>> NsfGrid3<L> {
         }
         let reservoir_exchanges = self.finish_reservoir_exchanges(
             open1, &reservoir_flows, &reservoir_mass_by_aperture)?;
+        body_force::checkpoint(cancelled)?;
+        if let Some(field) = next_body_acceleration {
+            self.body_acceleration = field;
+        }
         self.f = next;
         self.e = e1;
         self.material = material_new;

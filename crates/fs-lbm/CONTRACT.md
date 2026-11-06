@@ -14139,3 +14139,42 @@ models, an independently derived quadratic rate/viscosity root that changes
 the native collision, and late source-domain refusal preserving flow and
 prior receipts. These are synthetic constitutive checks, not measurements
 or a whole-scheme nonlinear stability certificate.
+
+### Time-dependent spatial body acceleration on native NSF steps
+
+`NsfGrid3::step_with_body_acceleration_si` accepts the prescribed SI field at
+the NEXT native time level. Collision, OLD velocity and incoming population
+history retain the accepted force. Every NEW thermal/characteristic/SGS
+corrector instead uses the endpoint field multiplied by its actual NEW
+density. Acceptance retains that field for ordinary subsequent steps. This
+is distinct from `set_body_acceleration_si`, which rebinds the force chart
+at fixed physical state without advancing time or applying an impulse.
+
+For physical momentum `m=rho*u`, the original total-energy corrector and
+`body_force_work_j` both use the second-order centered work
+`(a_old+a_new).(m_old+m_new)/4` in lattice units. This continuously reduces
+to the held quadrature. For a spatially uniform drive in uniform constant-density flow,
+the original Guo update supplies `Delta(m)=rho*(a_old+a_new)/2`, so the work equals the kinetic
+change even for unequal reversal, enabling or disabling. A trapezoid of
+endpoint powers would instead add `Delta(a).Delta(m)/4` as artificial heat.
+Variable-density transport and manufactured mass/momentum sources retain the
+original unresolved mechanical/internal partition; no exact local kinetic
+partition is claimed for those cases. Gravity and source energy remain
+separate, included once with the same accepted endpoint velocities.
+
+Input conversion/admission occurs once. The existing force and energy owners
+receive borrowed OLD/NEW slices; no solver copy, acceleration callback or
+extra manufactured-source sample is introduced. One admitted endpoint vector
+is staged until publication; the old field is then replaced. Identical
+endpoints use the original held arithmetic, and two disabled fields retain
+the original zero-field path. Cancellation polls input chunks, native step
+stages and corrector cells, with a final poll after all native refusals and
+before any state/control publication. External callback side effects are
+not rollback state. The caller must resolve temporal variation on the native
+step; this is not an implicit velocity-dependent or rotating-frame solver.
+
+G0/G1/G3 regressions cover per-step kinetic work/no heat, force reversal and
+enable/disable, unchanged held bits, quadratic-time second-order refinement,
+actual spatial vortical onset and retained vorticity after disabling,
+evolving density and source sampling, enthalpy/SGS closure and worker parity,
+and endpoint refusal/cancellation followed by deterministic retry.
