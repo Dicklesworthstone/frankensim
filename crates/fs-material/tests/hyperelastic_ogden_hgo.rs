@@ -190,14 +190,107 @@ fn g0_hgo_without_fibres_is_neo_hookean() {
         FibreInvariants::Isochoric,
         5e6 / C10,
     );
-    if let HyperelasticModel::HolzapfelGasserOgden { k1, .. } = &mut zero.model {
+    if let HyperelasticModel::HolzapfelGasserOgden { k1, k2, .. } = &mut zero.model {
         *k1 = 0.0;
+        // A disabled fibre must not evaluate an overflowing exponential.
+        *k2 = 1e6;
     }
     equal_laws(&zero, &nh, &f, 5e6, 1e-14);
     for invariants in [FibreInvariants::Full, FibreInvariants::Isochoric] {
         let a = hgo(vec![[1., 0., 0.]], 1. / 3., invariants, 5e6 / C10);
         let b = hgo(vec![[0., 1., 0.]], 1. / 3., invariants, 5e6 / C10);
         equal_laws(&a, &b, &f, 5e6, 1e-12);
+    }
+}
+
+#[test]
+fn g0_hgo_weak_stiffening_retains_quadratic_fibre_storage_and_derivatives() {
+    let matrix_only = hgo(vec![], 0.0, FibreInvariants::Full, 10.0);
+    let states: [[f64; 9]; 2] = [
+        [1.2, 0.08, 0.0, 0.2, 0.9, 0.03, 0.1, 0.0, 1.1],
+        [1.0 + 1e-8, 0.0, 0.0, 2e-9, 1.0, 0.0, 0.0, 0.0, 1.0],
+    ];
+    for f in states {
+        // Independent polynomial limit for one full-invariant axial family:
+        // E = |F a|²-1, W = k1 E²/2, P = 2 k1 E (F a) tensor a.
+        // Factor the unit-square subtraction to retain acoustic-scale E.
+        let e = (f[0] - 1.0).mul_add(f[0] + 1.0, f[3].mul_add(f[3], f[6] * f[6]));
+        let expected_energy = 0.5 * K1 * e * e;
+        let matrix_energy = matrix_only.energy(&f);
+        let matrix_stress = matrix_only.piola(&f).unwrap();
+        let matrix_tangent = matrix_only.tangent(&f).unwrap();
+        for k2 in [1e-16, 1e-200, f64::MIN_POSITIVE, f64::from_bits(1)] {
+            let law = Hyperelastic::new(
+                HyperelasticModel::HolzapfelGasserOgden {
+                    c10: C10,
+                    k1: K1,
+                    k2,
+                    dispersion: 0.0,
+                    fibres: vec![[1.0, 0.0, 0.0]],
+                    invariants: FibreInvariants::Full,
+                    volumetric: Volumetric::Quadratic { kappa: 10.0 * C10 },
+                },
+                8.0,
+            )
+            .unwrap();
+            close(
+                law.energy(&f) - matrix_energy,
+                expected_energy,
+                expected_energy,
+                5e-12,
+            );
+            let stress = law.piola(&f).unwrap();
+            let tangent = law.tangent(&f).unwrap();
+            for i in 0..9 {
+                let expected_stress = if i % 3 == 0 { 2.0 * K1 * e * f[i] } else { 0.0 };
+                close(stress[i] - matrix_stress[i], expected_stress, K1, 5e-13);
+                for j in 0..9 {
+                    let expected_tangent = if i % 3 == 0 && j % 3 == 0 {
+                        2.0 * K1 * (e * f64::from(u8::from(i == j)) + 2.0 * f[i] * f[j])
+                    } else {
+                        0.0
+                    };
+                    close(
+                        tangent[i][j] - matrix_tangent[i][j],
+                        expected_tangent,
+                        K1,
+                        5e-13,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_hgo_weak_stiffening_preserves_full_and_isochoric_fibre_limits() {
+    let f = [1.2, 0.08, 0.0, 0.2, 0.9, 0.03, 0.1, 0.0, 1.1];
+    for invariants in [FibreInvariants::Full, FibreInvariants::Isochoric] {
+        for dispersion in [0.0, 0.15, 1.0 / 3.0] {
+            let make_law = |k2| {
+                Hyperelastic::new(
+                    HyperelasticModel::HolzapfelGasserOgden {
+                        c10: C10,
+                        k1: K1,
+                        k2,
+                        dispersion,
+                        fibres: vec![[1.0, 0.0, 0.0], [0.6, 0.8, 0.0]],
+                        invariants,
+                        volumetric: Volumetric::Quadratic { kappa: 10.0 * C10 },
+                    },
+                    8.0,
+                )
+                .unwrap()
+            };
+            // At this finite strain, k2 E² is below roundoff already for
+            // k2=1e-16. Subnormal k2 must give the same finite material law.
+            let reference = make_law(1e-16);
+            for k2 in [f64::MIN_POSITIVE, f64::from_bits(1)] {
+                let law = make_law(k2);
+                equal_laws(&law, &reference, &f, 10.0 * C10, 5e-13);
+                fd_tangent(&law, f);
+            }
+        }
     }
 }
 

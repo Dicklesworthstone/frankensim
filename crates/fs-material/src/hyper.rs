@@ -163,6 +163,8 @@ pub enum HyperelasticModel {
     /// (1-3*dispersion)*(I4star-1)`. At zero dispersion the fibres are
     /// exactly inactive for `I4star <= 1`. At nonzero dispersion tension
     /// refers to the distributed structural strain E, not the mean direction.
+    /// Positive `k2` approaching zero retains the quadratic fibre limit
+    /// `k1 <E>_+^2 / 2`, including its stress and consistent tangent.
     HolzapfelGasserOgden {
         c10: f64,
         k1: f64,
@@ -279,13 +281,21 @@ fn exp_minus_one<T: Real>(x: T) -> T {
     if x.value().abs() > 0.125 {
         return x.exp() - T::one();
     }
+    x * small_exp_relative(x)
+}
+
+// The analytic continuation of (exp(x)-1)/x, including at zero. Keep the
+// constant term separate so a vanishing exponent still retains finite
+// quadratic fibre storage and the derivatives of that same potential.
+// Only called for |x| <= 1/8, with the same series budget as exp_minus_one.
+fn small_exp_relative<T: Real>(x: T) -> T {
     let mut factorial = 20_922_789_888_000.0; // 16!, exactly representable.
     let mut tail = T::from_f64(1.0 / factorial);
     for degree in (2..16).rev() {
         factorial /= f64::from(degree + 1);
         tail = tail.mul_add(x, T::from_f64(1.0 / factorial));
     }
-    x * (T::one() + x * tail)
+    T::one() + x * tail
 }
 
 struct IsochoricStrain<T> {
@@ -395,8 +405,17 @@ fn structural_invariant_shift<T: Real>(strain: &[T; 9], direction: &[f64; 3]) ->
 }
 
 fn hgo_fibre_energy<T: Real>(strain: T, k1: f64, k2: f64) -> T {
-    if strain.value() > 0.0 {
-        T::from_f64(k1 / (2.0 * k2)) * exp_minus_one(T::from_f64(k2) * strain * strain)
+    // Absent fibres store exactly zero even if their exponent would overflow.
+    if k1 != 0.0 && strain.value() > 0.0 {
+        let exponent = T::from_f64(k2) * strain * strain;
+        if exponent.value() <= 0.125 {
+            // W = k1 E²/2 * exprel(k2 E²). Dividing by k2 first can
+            // overflow or erase energy when the exponent underflows, although
+            // W, its stress and its tangent have a finite quadratic limit.
+            T::from_f64(0.5 * k1) * strain * strain * small_exp_relative(exponent)
+        } else {
+            T::from_f64(k1 / (2.0 * k2)) * exp_minus_one(exponent)
+        }
     } else {
         T::zero()
     }

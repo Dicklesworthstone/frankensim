@@ -3845,6 +3845,16 @@ homogenization, the P2 milestone.
   two-sided Hessian there is not claimed. A single aligned family supplies
   `2 k1 (lambda²-1) exp(k2 (lambda²-1)²) lambda²` incompressible Cauchy
   stress; two identical families supply twice this value.
+  For `k2 E² <= 1/8`, the fibre potential factors as
+  `k1 E²/2 * exprel(k2 E²)`, with the analytic `exprel(0)=1` extension
+  evaluated by the original scalar-generic exponential series. This retains
+  finite quadratic fibre storage, stress and tangent as positive `k2` tends
+  to zero, including subnormal exponents, without constructing `k1/k2`.
+  Zero-strength fibres return zero before the exponential. Focused regressions
+  in `hyperelastic_ogden_hgo.rs` compare the quadratic energy, all stress
+  components and the full tangent against an independent polynomial oracle
+  at finite and acoustic-scale strains, exercise both invariant formulations
+  and dispersion, and check tangents by finite differences.
   All four variants enforce all principal stretches in `[1/limit,limit]` in
   stress and tangent evaluation, with eight-EPSILON eigensolver boundary
   roundoff; limit*(1+1e-12) refuses. The limit must be finite and at least one,
