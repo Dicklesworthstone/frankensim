@@ -63,9 +63,10 @@ thermal temperature. The CLI's existing nonlinear heat iteration also resolves
 conductivity at local temperature. It refuses unsupported states rather than
 clamping or extending a material table.
 
-The existing energy solver transports `rho * Q * h(T_upstream)` using the
-prescribed face volume flux and the original source-integrated heat capacity.
-Both steady and transient scenes use first-order upwind enthalpy transport.
+The existing energy solver transports `rho * Q * h_face` using the prescribed
+face volume flux and the original source-integrated heat capacity. Both steady
+and transient scenes select either first-order upwind or limited source-enthalpy
+reconstruction; omission selects upwind.
 Steady scenes prepare one exact chart over the common explicitly bounded
 temperature support of the original Cp and density claims, clipped to actual
 curve support. Density must remain constant throughout that interval; Cp may
@@ -85,6 +86,38 @@ through current, Joule heating and the temperature field. The result contains a
 `fluid_reference` object with its source-state identity, temperature, density,
 heat capacity, kinematic viscosity, velocity and measured volume divergence;
 local thermal/electrical state identities remain in `source_states`.
+
+## Selecting enthalpy advection
+
+Add `energy_convection` to the scene's existing `numerics` object, retaining
+its other solve budgets and tolerances. This excerpt selects the native minmod
+enthalpy reconstruction for either command:
+
+```json
+"numerics": {
+  "energy_convection": "enthalpy-minmod"
+}
+```
+
+The accepted values are `"upwind"` and `"enthalpy-minmod"`. Upwind uses the
+upstream cell's source enthalpy. Minmod limits slopes of neighboring source
+enthalpies and reconstructs a single shared value at each interior face. The
+native paired assembly transfers that heat with equal and opposite signs,
+including when neighboring heat capacities differ. Where boundary or solid
+neighbors leave no complete reconstruction stencil, the upstream value is
+retained.
+
+Both steady and transient JSON and text reports identify the selected scheme
+as `fluid_advection`, with value `"source-enthalpy-first-order-upwind"` or
+`"source-enthalpy-minmod"`. JSON reports `null` for all-solid scenes. Explicitly
+setting `numerics.energy_convection` on an all-solid scene refuses, as do other
+scheme names on this source-caloric fluid path.
+
+This setting changes the spatial enthalpy reconstruction. It does not change
+the prescribed constant-density flow or the transient method's first-order
+backward-Euler time accuracy. A limited face reconstruction is not a universal
+multidimensional maximum-principle guarantee; spatial and timestep refinement
+remain necessary for the particular scene.
 
 ## Explicit model limits
 
@@ -128,28 +161,28 @@ or inlet/backflow temperatures outside the interval refuse.
 
 The same original bounded enthalpy chart owns both cell storage
 `m * [h(T_new) - h(T_old)]` and conservative face transport
-`rho * Q * h(T_upstream)`. Each nonlinear pass supplies the existing native
-finite-volume operator with per-cell caloric tangents. Both sides of an
-interior face use the SAME upstream value and slope, including the enthalpy
-offset. They therefore exchange equal and opposite energy even when local Cp
-differs. Incoming and backflow enthalpy are evaluated directly on that same
-chart at the boundary temperature; outgoing enthalpy follows the fluid cell.
-
-Both commands use **first-order upwind enthalpy transport**. A transient result
-identifies its scheme as `"fluid_advection":"source-enthalpy-first-order-upwind"`
-(`null` for all-solid scenes). The native field API refuses a power-law scheme
-for nonlinear enthalpy because its reference-Cp blend is a different numerical
-model. No source data or physics implementation changes are needed when an
-admitted material's Cp curve changes.
+`rho * Q * h_face`. Each nonlinear pass supplies the existing native
+finite-volume operator with per-cell caloric tangents and the selected
+reconstruction. Both sides of an interior face share the same upstream tangent,
+enthalpy offset and any limited reconstruction. They therefore exchange equal
+and opposite energy even when local Cp differs. Incoming and backflow enthalpy
+are evaluated directly on that same chart at the boundary temperature; outgoing
+enthalpy follows the fluid cell. No source data or physics implementation
+changes are needed when an admitted material's Cp curve changes.
 
 The original backward-Euler operator handles conduction, storage, prescribed
-advection, local Joule heat, contacts and exterior radiation together. The outer
-material iteration rechecks true chart storage and sums absolute face-local
-advective linearization errors, so compensating local errors cannot hide in a
-global balance. Each accepted time record independently uses true boundary
-enthalpy, rather than the frozen tangent's flux, along with native conduction
-and physical heat exchange. Source-chart interpolation error remains separate
-from numerical energy closure and material uncertainty.
+advection, local Joule heat, contacts and exterior radiation together. Before
+acceptance, the native operator reassembles the local physical heat residual at
+the unchanged candidate. It uses exact chart storage secants from the immutable
+old time level, actual source enthalpy, freshly limited traces when selected,
+and endpoint conductivity, contacts and radiation. This audit performs no extra
+Krylov solve. A failed local residual continues the bounded material iteration
+with tighter linear tolerances. Small iterate changes or compensating errors
+in a global balance cannot bypass this admission.
+
+Accepted time records use that same endpoint's native boundary and physical
+heat accounting together with chart enthalpy changes and Joule heat. Source-chart
+error remains separate from numerical energy closure and material uncertainty.
 
 Cell masses remain fixed while equal incoming and outgoing mass transports
 enthalpy through each control volume. A common enthalpy datum cancels because
@@ -170,7 +203,8 @@ geometry. The fluid role assumes one stable phase; it does not discover phase
 boundaries. Reference viscosity remains frozen and flow remains prescribed.
 Pressure/momentum evolution, density-driven volume change and phase transition
 require their corresponding owners. Spatial and timestep refinement are needed
-to establish upwind/backward-Euler accuracy.
+to establish the selected enthalpy scheme's accuracy with backward-Euler time
+integration.
 
 ## Focused checks
 

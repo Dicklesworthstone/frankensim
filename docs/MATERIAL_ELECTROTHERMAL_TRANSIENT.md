@@ -77,9 +77,9 @@ m_c [h_c(T_new) - h_c(T_old)] / dt
 
 The thermal iteration uses the chart's conservative positive secant
 `C_c = m_c * [h(T_iter)-h(T_old)]/[T_iter-T_old]`, with a declared one-sided
-chord slope when the temperatures coincide. `T_old` and mass are immutable
+source Cp when the temperatures coincide. `T_old` and mass are immutable
 throughout every nonlinear iteration. Signed enthalpy increments integrate
-crossed chart slopes, avoiding cancellation against large reference enthalpies.
+the original source intervals, avoiding cancellation against large reference enthalpies.
 
 `EnergyConfig::step_with_conductivity` lowers `C/dt*(T_new-T_old)` into the
 existing cell-diagonal exchange assembly and calls the same conservative
@@ -87,16 +87,29 @@ conductivity-field solver. Geometry, material IDs, physical thermal contacts,
 spatial conductivity and boundary assembly are unchanged. Insulated domains
 are anchored by storage, not by an invented fixed-temperature cell.
 
+Before accepting a step, the native heat operator re-evaluates that same
+temperature field with the original caloric storage secants and the candidate's
+conductivity, enthalpy, contacts and refreshed radiation. Selected limited
+enthalpy traces are refreshed at this same endpoint. Both solid and fluid
+scenes must satisfy the local physical heat residual. This endpoint audit
+performs no temperature update or extra Krylov solve. A failed heat residual
+continues the bounded material iteration with tighter linear-solve tolerances;
+small iterate changes or loose global energy allowances cannot admit it.
+
 An optional fluid role uses this same path with its existing prescribed,
 volume-conservative face flow. Source density must remain constant throughout
 the complete interval; fluid and solid Cp may vary. The fluid's ONE sourced
-enthalpy chart drives both native first-order upwind `rho*Q*h(T_upstream)`
-transport and `m*delta(h)` storage. The original source-line owner checks all
+enthalpy chart drives both native conservative `rho*Q*h_face` transport and
+`m*delta(h)` storage. The original source-line owner checks all
 crossed breakpoints, not just endpoints. Inlet and backflow temperatures must
 lie inside the chart. Local volume conservation cancels the common enthalpy
-datum. Nonlinear acceptance checks absolute face-local transport defects as
-well as storage; time records independently evaluate true boundary enthalpy.
-See `MATERIAL_ELECTROTHERMAL_FLUID.md` for admission and physical boundaries.
+datum. The scene's optional `numerics.energy_convection` selects `"upwind"`
+(the default) or `"enthalpy-minmod"` for both steady and transient commands.
+Minmod uses the existing conservative paired source-enthalpy reconstruction;
+the endpoint audit checks its freshly reconstructed fluxes together with storage.
+An explicit convection setting requires a fluid role. See
+[Selecting enthalpy advection](MATERIAL_ELECTROTHERMAL_FLUID.md#selecting-enthalpy-advection)
+for a scene excerpt, scheme reporting and physical boundaries.
 
 The steady and transient command paths share the material/electrical/thermal
 coupling driver. The transient path additionally checks actual chart storage
@@ -113,6 +126,9 @@ contains final temperatures, potentials, local Joule heat, final resolved
 conductivities, invariant cell masses, work count, material/chart identities,
 initial mass-source identities and final local material-state identities.
 Fluid scenes also retain the original `fluid_reference` transport state.
+JSON and text output identify the selected scheme through `fluid_advection`:
+`"source-enthalpy-first-order-upwind"` or `"source-enthalpy-minmod"`. All-solid
+JSON reports `null`.
 `records` contains each accepted endpoint time, peak temperature, signed stored
 energy change, deposited source energy, physical outward heat and energy defect.
 A failed run emits a diagnostic and nonzero exit, with no partial trajectory on
@@ -120,11 +136,13 @@ stdout; neither scene nor material files are modified. Memory stores the current
 spatial state and per-step summaries, not a full spatial field at every step.
 
 The low-level step API returns both an `EnergySolution` and a `TransientRecord`.
-The solution's balance describes the **storage-augmented linear system**, so its
-sink total includes the storage diagonal. The record separately reports physical
-outflow; storage must not be counted again as heat lost to an environment. The
-command independently recomputes chart enthalpy changes and endpoint Joule heat
-rather than promoting that linearization record to exact nonlinear authority.
+An inner linear solve's balance describes the **storage-augmented linear
+system**, so its sink total includes the storage diagonal. The record separately
+reports physical outflow; storage must not be counted again as heat lost to an
+environment. Before publication, the command obtains the native accounting at
+the unchanged, freshly evaluated caloric endpoint. It combines that physical
+outflow with independently recomputed chart enthalpy changes and endpoint Joule
+heat for the accepted step's complete energy balance.
 
 The per-step final energy tolerance is `absolute_j + relative * scale`, with
 scale equal to the sum of absolute cell enthalpy changes plus absolute source
@@ -139,9 +157,10 @@ insulated heating, cooling/time refinement, heterogeneous contact/capacity,
 signed and reference-independent enthalpy, drive switch-off, data-only density
 swaps, variable Cp, source limits, cancellation and unchanged-input replay.
 
-These Rust tests have **not** been compiled or executed in the implementation
-environment: Cargo/rustc are unavailable. Focused selectors, under the normal
-repository execution policy, are:
+The Rust regressions remain **unexecuted** for the current extension; resource-
+limited dependency builds have not reached the affected tests. Syntax and
+whitespace checks do not establish a passing native test result. Focused
+selectors, under the normal repository execution policy, are:
 
 ```sh
 cargo test -p fs-lbm --lib conjugate::energy::material_field::tests
@@ -168,7 +187,9 @@ Exterior gray radiation uses its existing explicitly admitted source-backed
 owner. The declared single phase is a caller assumption,
 not a phase-boundary discovery. Generated-chart interpolation and source error
 remain separate, and tighter chart tolerance can exhaust the existing knot cap.
-Finite time-step accuracy requires its own refinement study. No arbitrary-law
+The selected enthalpy reconstruction does not change first-order backward-Euler
+time accuracy or establish a universal multidimensional maximum principle.
+Spatial and timestep accuracy require refinement studies. No arbitrary-law
 Picard convergence, automatic timestep reduction or checkpoint/resume is claimed.
 
 ## Directional solid heat transport

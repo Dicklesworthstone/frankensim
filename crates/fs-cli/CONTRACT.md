@@ -3730,13 +3730,13 @@ anytime-valid statistical claims retain their existing owners.
 the same native electrical, conductivity, face-flux and backward-Euler storage
 owners used by solid scenes. Native source-line admission checks every crossed
 breakpoint of the original density and heat-capacity laws over the complete
-requested temperature interval. Both must remain constant and match their
-original reference claims. Equal endpoint values cannot conceal an interior
-variation; support holes and claim switching refuse. Solid heat capacity may
-retain its existing variable source chart.
+requested temperature interval. Fluid density must remain constant and match
+its original reference claim; fluid and solid heat capacities may vary.
+Equal endpoint densities cannot conceal an interior variation; support holes
+and claim switching refuse.
 
-The prescribed volume-conservative flow's rho*Cp*Q*T flux and fluid rho*V*Cp
-temperature storage therefore share one material law. Local conductivity and
+The prescribed volume-conservative flow's rho*Q*h_face flux and fluid
+m*delta(h) storage therefore share one material law. Local conductivity and
 resistivity still refresh at every nonlinear endpoint. Cell mass stays fixed;
 physical outflow includes actual boundary advection/conduction and admitted
 surface exchange, excluding the temporary storage diagonal. The same scene
@@ -3752,10 +3752,10 @@ temperatures must lie within the admitted source interval. The file-driven
 regression uses nonzero through-flow for both steady and transient commands.
 
 This remains prescribed incompressible flow with one fixed-phase fluid,
-constant source-supported fluid density/Cp, frozen reference viscosity and
-fixed geometry. No momentum/pressure solve, variable-Cp enthalpy advection,
-phase transition or thermal-expansion work is inferred. Single-phase charts
-are scene assumptions, not phase-stability proofs; timestep refinement is
+constant source-supported fluid density, frozen reference viscosity and fixed
+geometry. No momentum/pressure solve, phase transition or thermal-expansion
+work is inferred. Single-phase charts are scene assumptions, not phase-stability
+proofs; timestep refinement is
 required. Three new G1/G3/G4 regressions cover an independent control-volume
 transient, shared solid/fluid storage, and interior-law/late-state refusals.
 
@@ -3769,20 +3769,31 @@ must remain constant throughout every crossed segment; positive Cp may vary.
 Inlet/backflow temperatures must lie within the same source interval.
 
 The existing ResolvedHeatCapacityCurve supplies BOTH m*delta(h) storage and
-rho*Q*h_upstream transport through the original native heat operator. Each outer
+rho*Q*h_face transport through the original native heat operator. Each outer
 material pass refreshes conductivity/resistivity, storage secants and advective
-caloric tangents. Acceptance sums absolute local storage and incident-face
-enthalpy defects, so opposite errors cannot cancel. Final time records replace
-frozen boundary advection with true chart enthalpy while retaining native
-conduction, physical sinks/radiation and accepted endpoint Joule heat.
+caloric tangents. Acceptance reassembles the native local storage-and-flux heat
+residual at the unchanged candidate, including refreshed limited enthalpy traces
+when selected. Final time records retain that same endpoint's native boundary
+conduction/advection and physical sinks/radiation with actual chart storage and
+accepted Joule heat.
 
-All fluid transients explicitly use first-order upwind enthalpy, reported as
-fluid_advection="source-enthalpy-first-order-upwind" (null for all-solid scenes).
+Both steady and transient fluid scenes accept optional
+`numerics.energy_convection: "upwind"` (the default) or `"enthalpy-minmod"`.
+The latter uses the existing fs-lbm conservative paired source-enthalpy
+reconstruction. Each interior face supplies equal and opposite heat to its
+two cells. Explicit convection selection on an all-solid scene, or any other
+scheme name on this source-caloric path, refuses. JSON and text output identify
+the actual choice through `fluid_advection` as
+`"source-enthalpy-first-order-upwind"` or `"source-enthalpy-minmod"`; JSON uses
+`null` for all-solid scenes.
+
 Source interpolation error, numerical closure and source uncertainty remain
-distinct. This adds neither
-variable-density mass transport, momentum/pressure evolution, phase change nor
-thermal deformation. Prescribed-flow and stable-single-phase assumptions remain
-explicit; mesh/time refinement is still required.
+distinct. Flow remains prescribed and constant-density with one assumed stable
+phase. Time integration remains first-order backward Euler; the spatial limiter
+alone does not establish a universal multidimensional maximum principle.
+Variable-density mass transport, momentum/pressure evolution, phase change and
+thermal deformation remain outside this model; mesh/time refinement is still
+required.
 
 Two new source-Cp regressions compare continuing driven/cooling fields and energy
 with independent analytic three-cell equations, check complete source/boundary
@@ -3795,10 +3806,11 @@ memory when the local disk filled, then published through GitHub.
 
 ### Steady source-caloric electrothermal cooling
 
-Steady conducting-fluid scenes now use the same original Cp/enthalpy law in the
-existing first-order upwind heat operator. One compact exact chart is prepared
-over the common explicitly bounded temperature support of the original Cp and
-density claims, clipped to their actual source-curve knots. Missing support,
+Steady conducting-fluid scenes now use the same original Cp/enthalpy law and
+selected upwind or minmod reconstruction in the native heat operator. One compact
+exact chart is prepared over the common explicitly bounded temperature support
+of the original Cp and density claims, clipped to their actual source-curve
+knots. Missing support,
 interior holes or claim switching refuse; density must remain constant over the
 whole interval and every inlet/backflow state must be admitted. No numerical
 temperature span or reference-Cp replacement is inferred.
@@ -3814,6 +3826,28 @@ boundary accounting therefore describe the same accepted state. The prescribed
 flow, reference viscosity and single-phase restrictions remain unchanged.
 Focused `steady_source_cp` regressions compare an independent three-cell heat
 balance for sources sharing one reference Cp and exercise support/density refusal.
+
+### Transient caloric endpoint acceptance
+
+Solid and conducting-fluid electrothermal steps now reassemble the native
+backward-Euler heat residual at the unchanged candidate temperature. The
+original source chart supplies exact mass-weighted storage secants relative to
+the immutable accepted old time level; conductivity, enthalpy face values,
+selected limited reconstructions, contact coefficients and radiation are
+refreshed at the candidate. Original local physical heat admission must pass
+before the outer material solve returns. This audit performs no additional
+Krylov solve. An endpoint residual failure
+continues the bounded material iteration with tighter linear tolerances, while
+the requested final heat tolerance is preserved. The focused
+`transient_caloric_endpoint` regression uses deliberately loose iterate and
+integrated-energy allowances and still requires the independent nonlinear
+three-cell heating/cooling balance.
+
+The `source_cp_minmod` regression supplies independent five-cell steady and
+transient heat balances with nonzero limited face corrections, compares the
+upwind field, and checks unchanged-input replay. File-driven coverage exercises
+scheme selection, reporting and input refusal. These new endpoint/minmod
+regressions are source/syntax checked but unexecuted in the current workspace.
 
 ## Source-defined orthotropic electrothermal transport
 

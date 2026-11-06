@@ -24,7 +24,7 @@ use crate::{CommandOutput, exit};
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::material_coupling::MaterialCouplingConfig;
 use fs_lbm::conjugate::{
-    ChtError, ContactResistance, ElectricSetup, Electrode, ElectrodeDrive,
+    ChtError, ContactResistance, ConvectionScheme, ElectricSetup, Electrode, ElectrodeDrive,
     EnergyConfig, ThermalFace, ThermalSetup, Voxel, VoxelDomain,
 };
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
@@ -39,7 +39,7 @@ const MAX_SCENE_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PACK_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_PACK_BYTES: u64 = 64 * 1024 * 1024;
 const NO_CLAIM: &str = "steady fixed-geometry all-solid scalar ohmic and isotropic or grid-aligned orthotropic thermal conduction; source nominal values, not propagated uncertainty or experimental qualification; optional source-backed exterior gray radiation to black isothermal unit-view reservoirs; zero-thickness electrical interfaces use explicit heat partition, thermal interfaces use independently sourced resistance; no phase change, thermal deformation, fluid flow, microscopic contact-area model or AC effects";
-const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code. Optional\nelectrical_interfaces and thermal_interfaces bind canonical FSINTPK ordered\ninterface cards to voxel faces. Electrical heating and thermal resistance\nremain independent responses, evaluated at the same local temperatures.\n\nAn optional fluid object assigns one material to prescribed conservative flow,\nwith source-integrated Cp/enthalpy and admitted constant density.\nSee docs/MATERIAL_ELECTROTHERMAL_FLUID.md.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md,\ndocs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md, docs/ELECTRICAL_CONTACTS.md and\ndocs/THERMAL_FACE_CONTACTS.md. For source-backed exterior radiation see docs/ELECTROTHERMAL_RADIATION.md.\nAll lengths are metres, temperatures kelvin,\ncurrent amperes and power watts. --json includes fields, source identities\nand coupling/energy defects.\n";
+const HELP: &str = "Usage: frankensim [--json] electrothermal <scene.json> [--transient <time.json>]\n\nLoad canonical FSMCDPK material-card packs and solve spatial current, Joule\nheating and temperature together. Both resistivity and conductivity are\nre-resolved at every changed local temperature; unsupported states refuse.\nMaterial substitutions change pack data, not solver code. Optional\nelectrical_interfaces and thermal_interfaces bind canonical FSINTPK ordered\ninterface cards to voxel faces. Electrical heating and thermal resistance\nremain independent responses, evaluated at the same local temperatures.\n\nAn optional fluid object assigns one material to prescribed conservative flow,\nwith source-integrated Cp/enthalpy and admitted constant density.\nSet numerics.energy_convection to \"enthalpy-minmod\" for limited enthalpy\nreconstruction; \"upwind\" is the default for both steady and transient flow.\nSee docs/MATERIAL_ELECTROTHERMAL_FLUID.md.\n\n--transient additionally requires sourced density and heat capacity over an\nexplicit temperature interval, and advances stored energy with scheduled\nelectrode drives and authored heat sources. Cell mass remains fixed.\n\nScene schema: frankensim.electrothermal.v1. Time request schema:\nfrankensim.electrothermal.transient.v1. See docs/MATERIAL_ELECTROTHERMAL.md,\ndocs/MATERIAL_ELECTROTHERMAL_TRANSIENT.md, docs/ELECTRICAL_CONTACTS.md and\ndocs/THERMAL_FACE_CONTACTS.md. For source-backed exterior radiation see docs/ELECTROTHERMAL_RADIATION.md.\nAll lengths are metres, temperatures kelvin,\ncurrent amperes and power watts. --json includes fields, source identities\nand coupling/energy defects.\n";
 
 pub fn run(args: &[OsString], json: bool) -> CommandOutput {
     if args.len() == 1 && matches!(args[0].to_str(), Some("--help" | "-h")) {
@@ -251,7 +251,7 @@ fn load(path: &Path) -> Result<Problem, String> {
     let n = required(&root, "numerics")?;
     fields(n, &["max_passes", "max_thermal_passes", "temperature_tolerance_k", "power_tolerance_w",
         "relative_tolerance", "conductivity_relative_tolerance", "energy_tolerance", "energy_max_iterations",
-        "thermal_contact_relative_tolerance"])?;
+        "thermal_contact_relative_tolerance", "energy_convection"])?;
     let coupling = MaterialCouplingConfig {
         max_passes: budget(n, "max_passes", 1000)?,
         temperature_tolerance_k: positive(n, "temperature_tolerance_k")?,
@@ -267,10 +267,22 @@ fn load(path: &Path) -> Result<Problem, String> {
         // No thermal interface is present, so this tolerance is not consumed.
         conductivity_tolerance
     };
+    let scheme = match n.get("energy_convection") {
+        None if fluid.is_some() => ConvectionScheme::Upwind,
+        None => ConvectionScheme::PowerLaw,
+        Some(_) if fluid.is_none() => {
+            return Err("numerics.energy_convection requires a fluid material".into());
+        }
+        Some(value) => match value.as_str() {
+            Some("upwind") => ConvectionScheme::Upwind,
+            Some("enthalpy-minmod") => ConvectionScheme::EnthalpyMinmod,
+            _ => return Err("numerics.energy_convection must be upwind or enthalpy-minmod for source enthalpy".into()),
+        },
+    };
     let energy = EnergyConfig {
+        scheme,
         tolerance: positive(n, "energy_tolerance")?,
         max_iterations: budget(n, "energy_max_iterations", 1_000_000)?,
-        ..EnergyConfig::default()
     };
     if coupling.power_tolerance_w < 0.0 || !(0.0..1.0).contains(&coupling.relative_tolerance)
         || conductivity_tolerance >= 1.0 || energy.tolerance >= 1.0 || thermal_contact_tolerance >= 1.0
@@ -308,12 +320,14 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
     let r = &result.coupled;
     let no_claim = if problem.fluid.is_some() { source::FLUID_NO_CLAIM } else { NO_CLAIM };
     if !json {
-        return format!("Electrothermal solve: {} cells, {} coupling passes, {} thermal solves\nPeak temperature: {} K\nJoule power: {} W; electrode power: {} W\nTemperature defect: {} K; Joule-source defect: {} W/cell; conductivity relative defect: {}; thermal-contact relative defect: {}\n{}\n",
+        let advection = problem.fluid_advection_name().map_or_else(String::new,
+            |name| format!("Fluid advection: {name}\n"));
+        return format!("Electrothermal solve: {} cells, {} coupling passes, {} thermal solves\nPeak temperature: {} K\nJoule power: {} W; electrode power: {} W\nTemperature defect: {} K; Joule-source defect: {} W/cell; conductivity relative defect: {}; thermal-contact relative defect: {}\n{}{}\n",
             problem.domain.cell_count(), r.report.passes, result.thermal_solves,
             r.thermal.temperature.iter().copied().fold(f64::NEG_INFINITY, f64::max),
             r.electric.total_joule_w, r.electric.delivered_w, r.report.temperature_change_k,
             r.report.joule_source_change_w, result.conductivity_relative_defect,
-            result.thermal_contact_relative_defect, no_claim);
+            result.thermal_contact_relative_defect, advection, no_claim);
     }
     let materials = problem.materials.iter().map(|m| format!(
         "{{\"pack\":{},\"pack_identity\":{},\"card_identity\":{},\"thermal_conductivity\":{}}}",
@@ -338,7 +352,7 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
         "\"total_joule_w\":{},\"electrode_power_w\":{},\"thermal_balance_residual_w\":{},",
         "\"thermal_balance_relative_residual\":{},\"passes\":{},\"thermal_solves\":{},",
         "\"temperature_defect_k\":{},\"joule_source_defect_w\":{},\"conductivity_relative_defect\":{},",
-        "\"materials\":[{}],\"source_states\":[{}],\"electrodes\":[{}],\"fluid_reference\":{},",
+        "\"materials\":[{}],\"source_states\":[{}],\"electrodes\":[{}],\"fluid_reference\":{},\"fluid_advection\":{},",
         "\"electrical_interfaces\":{},\"thermal_interfaces\":{},",
         "\"thermal_contact_relative_defect\":{},\"radiation\":{},\"no_claim\":{}}}\n"),
         problem.domain.dims(), problem.domain.dx(), values(r.thermal.temperature.iter().copied()),
@@ -349,6 +363,7 @@ fn render(problem: &Problem, result: &ResultField, json: bool) -> String {
         r.thermal.report.balance.relative_residual, r.report.passes, result.thermal_solves,
         r.report.temperature_change_k, r.report.joule_source_change_w, result.conductivity_relative_defect,
         materials, sources, electrodes, problem.fluid.as_ref().map_or_else(|| "null".into(), |f| f.render()),
+        problem.fluid_advection_name().map_or_else(|| "null".into(), quote),
         interfaces::render(problem, &result.interfaces), interfaces::render_thermal(problem, result),
         result.thermal_contact_relative_defect, radiation::render(&result.radiation), quote(no_claim))
 }

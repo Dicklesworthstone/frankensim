@@ -15,7 +15,7 @@ use fs_lbm::conjugate::material_coupling::interfaces::{
     MaterialContact, solve as solve_material_interfaces,
 };
 use fs_lbm::conjugate::{
-    ChtError, ElectricSetup, EnergyConfig, EnergySolution, FlowField,
+    ChtError, ConvectionScheme, ElectricSetup, EnergyConfig, EnergySolution, FlowField,
     FluidProperties, SolidMaterial, ThermalSetup, VoxelDomain,
 };
 use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
@@ -144,6 +144,20 @@ pub(super) struct ResultField {
 }
 
 impl Problem {
+    fn caloric_convection(&self) -> ConvectionScheme {
+        match self.energy.scheme {
+            ConvectionScheme::EnthalpyMinmod => ConvectionScheme::EnthalpyMinmod,
+            _ => ConvectionScheme::Upwind,
+        }
+    }
+
+    pub(super) fn fluid_advection_name(&self) -> Option<&'static str> {
+        self.fluid.as_ref().map(|_| match self.caloric_convection() {
+            ConvectionScheme::EnthalpyMinmod => "source-enthalpy-minmod",
+            _ => "source-enthalpy-first-order-upwind",
+        })
+    }
+
     fn states(&self, temperatures: &[f64], gate: &CancelGate) -> Result<Vec<CellState>, ChtError> {
         if temperatures.len() != self.domain.cell_count() {
             return Err(invalid("material.temperature", "one temperature per cell is required"));
@@ -269,9 +283,10 @@ impl Problem {
         let mut defect = f64::INFINITY;
         let mut radiation_defect = 0.0;
         let enthalpy_energy = EnergyConfig {
-            scheme: fs_lbm::conjugate::ConvectionScheme::Upwind,
+            scheme: self.caloric_convection(),
             ..self.energy
         };
+        let mut linear_energy = self.energy;
         let mut linear_enthalpy_energy = enthalpy_energy;
         let mut caloric_endpoint_error = None;
         let passes = self.radiation.as_ref().map_or(self.max_thermal_passes,
@@ -294,14 +309,14 @@ impl Problem {
             };
             let mut solution = match (storage, &capacity, &advection) {
                 (Some(s), Some(capacity), Some(advection)) => {
-                    // Variable-Cp transport is conservative upwind enthalpy;
+                    // Variable-Cp transport uses the selected enthalpy traces;
                     // the reference-Cp Patankar blend is not its constitutive law.
-                    enthalpy_energy.step_with_enthalpy(
+                    linear_enthalpy_energy.step_with_enthalpy(
                         &self.domain, fluid, solids, flow, with_boundary, &field,
                         advection.field(), capacity, s.previous, s.dt, gate,
                     )?.0
                 }
-                (Some(s), Some(capacity), None) => self.energy.step_with_conductivity(
+                (Some(s), Some(capacity), None) => linear_energy.step_with_conductivity(
                     &self.domain, fluid, solids, flow, with_boundary, &field,
                     capacity, s.previous, s.dt, gate,
                 )?.0,
@@ -328,10 +343,6 @@ impl Problem {
                 (Some(s), Some(capacity)) => s.consistent(&solution.temperature, capacity, gate)?,
                 _ => true,
             };
-            let advection_consistent = match (storage, &advection) {
-                (Some(s), Some(a)) => s.advection_consistent(self, &solution.temperature, a, gate)?,
-                _ => true,
-            };
             let conductivity_defect = conductivity_defect(&next, &solution.conductivity);
             defect = conductivity_defect.max(contact_defect);
             let change = previous.iter().zip(&solution.temperature)
@@ -339,10 +350,10 @@ impl Problem {
             if conductivity_defect <= self.conductivity_tolerance
                 && contact_defect <= self.thermal_contact_tolerance
                 && change <= self.coupling.temperature_tolerance_k && storage_consistent
-                && advection_consistent && radiation_defect <= 1.0
+                && radiation_defect <= 1.0
             {
                 let mut accepted = true;
-                if let Some(curve) = steady_caloric {
+                if storage.is_some() || steady_caloric.is_some() {
                     let endpoint_field: Vec<[f64; 3]> = next.iter().map(|state| state.k).collect();
                     let mut endpoint_setup = setup.clone();
                     endpoint_setup.face_contacts.extend(next_joints.iter().map(ThermalInterfaceState::face));
@@ -350,15 +361,35 @@ impl Problem {
                     let endpoint_boundary = self.radiation.as_ref().map(|r|
                         r.prepare(self, &endpoint_setup, &endpoint_field, &endpoint_surfaces, gate)).transpose()?;
                     let endpoint_setup = endpoint_boundary.as_ref().map_or(&endpoint_setup, PreparedBoundaryExchange::setup);
-                    let actual = Advection::resolve(curve, self, &solution.temperature, endpoint_setup, gate)?;
                     // The original heat owner reassembles at this unchanged
-                    // endpoint with source enthalpy, conductivity and contacts.
-                    // Small iterate changes cannot hide a local physical heat
-                    // defect; radiation retains its original surface audit.
-                    match enthalpy_energy.evaluate_with_enthalpy(
-                        &self.domain, fluid, solids, flow, endpoint_setup, &endpoint_field,
-                        actual.field(), &solution.temperature, gate,
-                    ) {
+                    // endpoint with source storage, enthalpy, conductivity and
+                    // contacts. The accepted old time level remains immutable;
+                    // radiation retains its original physical surface audit.
+                    let evaluated = if let Some(storage) = storage {
+                        let capacity = storage.capacities(&solution.temperature, gate)?;
+                        let actual = storage.advection(self, &solution.temperature, endpoint_setup, gate)?;
+                        match actual {
+                            Some(actual) => enthalpy_energy.evaluate_step_with_enthalpy(
+                                &self.domain, fluid, solids, flow, endpoint_setup, &endpoint_field,
+                                actual.field(), &capacity, storage.previous, storage.dt,
+                                &solution.temperature, gate,
+                            ).map(|(solution, _)| solution),
+                            None => self.energy.evaluate_step_with_conductivity(
+                                &self.domain, fluid, solids, flow, endpoint_setup, &endpoint_field,
+                                &capacity, storage.previous, storage.dt, &solution.temperature, gate,
+                            ).map(|(solution, _)| solution),
+                        }
+                    } else {
+                        let actual = Advection::resolve(
+                            steady_caloric.expect("steady fluid caloric audit"), self,
+                            &solution.temperature, endpoint_setup, gate,
+                        )?;
+                        enthalpy_energy.evaluate_with_enthalpy(
+                            &self.domain, fluid, solids, flow, endpoint_setup, &endpoint_field,
+                            actual.field(), &solution.temperature, gate,
+                        )
+                    };
+                    match evaluated {
                         Ok(mut evaluated) => {
                             caloric_endpoint_error = None;
                             if let (Some(r), Some(b)) = (&self.radiation, &endpoint_boundary) {
@@ -374,8 +405,10 @@ impl Problem {
                         }) => {
                             accepted = false;
                             caloric_endpoint_error = Some(error);
-                            let tighter = 0.1 * linear_enthalpy_energy.tolerance;
-                            if tighter > 0.0 { linear_enthalpy_energy.tolerance = tighter; }
+                            for linear in [&mut linear_energy, &mut linear_enthalpy_energy] {
+                                let tighter = 0.1 * linear.tolerance;
+                                if tighter > 0.0 { linear.tolerance = tighter; }
+                            }
                         }
                         Err(error) => return Err(error),
                     }

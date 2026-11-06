@@ -77,6 +77,86 @@ fn g1_g3_steady_source_cp_uses_actual_enthalpy_flux_and_preserves_reference_flow
 }
 
 #[test]
+fn g1_source_cp_minmod_closes_manufactured_steady_and_transient_cell_balances() {
+    // Independent five-cell balance, with unit density, volume, k and flow.
+    // h(theta)=theta+0.04*theta^2. The monotone profile has nonzero, unequal
+    // limited face corrections; an upwind-only implementation cannot pass.
+    let theta: [f64; 5] = [1.0, 2.0, 4.0, 7.0, 8.0];
+    let h = theta.map(|t| t + 0.04 * t * t);
+    let face_h = [h[0], h[1] + 0.56, h[2] + 1.24, h[3] + 0.8, h[4]];
+    let mut steady_power = [0.0; 5];
+    for cell in 0..5 {
+        let conduction = if cell == 0 {
+            2.0 * theta[0] + theta[0] - theta[1]
+        } else if cell == 4 {
+            theta[4] - theta[3]
+        } else {
+            2.0 * theta[cell] - theta[cell - 1] - theta[cell + 1]
+        };
+        let inflow = if cell == 0 { 0.0 } else { face_h[cell - 1] };
+        steady_power[cell] = conduction + face_h[cell] - inflow;
+    }
+    assert!((steady_power.iter().sum::<f64>() - 12.56).abs() < 1e-13);
+
+    for transient in [false, true] {
+        let mut p = variable_cp_problem(0.08);
+        p.domain = VoxelDomain::from_fn(5, 1, 1, 1.0, |_| Voxel::Solid(0)).unwrap();
+        p.material_indices = vec![0; 5];
+        p.initial_temperature = vec![300.0; 5];
+        p.fluid = load_fluid(&input(1.0), &mut p.domain, &p.material_indices, &p.materials).unwrap();
+        p.electric.electrodes[1].lo = [4, 0, 0];
+        p.electric.electrodes[1].hi = [5, 1, 1];
+        p.electric.electrodes[1].drive = ElectrodeDrive::Voltage(0.0);
+        p.energy.scheme = ConvectionScheme::EnthalpyMinmod;
+        p.energy.tolerance = 1e-11;
+        p.thermal.power_w = (0..5).map(|cell| {
+            steady_power[cell] + if transient { 10.0 * h[cell] } else { 0.0 }
+        }).collect();
+        let original = p.materials[0].pack.to_bytes();
+        let flow = p.fluid.as_ref().unwrap().flow.clone();
+        if transient {
+            let text = request_text().replace("\"steps\":8", "\"steps\":1")
+                .replace("[[1,1,1],[5,0,1]]", "[[1,1,1]]");
+            let r = request(&text, 5);
+            let result = march(&p, &r, &CancelGate::new()).unwrap();
+            let output = render(&p, &result, true);
+            let value = J::parse(&output).unwrap();
+            assert_eq!(value.str_field("fluid_advection"), Some("source-enthalpy-minmod"));
+            for (actual, expected) in temperatures(&value).into_iter().zip(theta) {
+                assert!((actual - 300.0 - expected).abs() < 2e-7);
+            }
+            let rows = value.get("records").unwrap().as_array().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!((rows[0].f64_field("stored_energy_change_j").unwrap() - 27.36).abs() < 2e-7);
+            assert!((rows[0].f64_field("physical_outflow_j").unwrap() - 1.256).abs() < 2e-7);
+            assert!((rows[0].f64_field("source_j").unwrap() - 28.616).abs() < 2e-7);
+            assert!(rows[0].f64_field("closure_j").unwrap().abs() < 2e-7);
+            assert_eq!(output, render(&p, &march(&p, &r, &CancelGate::new()).unwrap(), true));
+        } else {
+            let result = p.solve(&CancelGate::new()).unwrap();
+            let energy = &result.coupled.thermal;
+            assert_eq!(energy.report.scheme, ConvectionScheme::EnthalpyMinmod);
+            for (actual, expected) in energy.temperature.iter().zip(theta) {
+                assert!((actual - 300.0 - expected).abs() < 2e-7);
+            }
+            assert_eq!(result.coupled.electric.total_joule_w, 0.0);
+            assert!((energy.report.balance.advective_outflow_w - 10.56).abs() < 2e-7);
+            assert!((energy.report.balance.boundary_outflow_w - 12.56).abs() < 2e-7);
+            assert!(energy.report.balance.residual_w.abs() < 2e-7);
+            p.energy.scheme = ConvectionScheme::Upwind;
+            let upwind = p.solve(&CancelGate::new()).unwrap();
+            let difference = upwind.coupled.thermal.temperature.iter().zip(theta)
+                .map(|(actual, expected)| (actual - 300.0 - expected).abs())
+                .fold(0.0, f64::max);
+            assert!(difference > 0.05);
+        }
+        assert_eq!(p.materials[0].pack.to_bytes(), original);
+        assert_eq!(p.fluid.as_ref().unwrap().flow, flow);
+        assert_eq!(p.initial_temperature, vec![300.0; 5]);
+    }
+}
+
+#[test]
 fn g0_steady_source_cp_requires_complete_support_and_constant_density() {
     for refusal in ["unbounded", "discrete", "density", "narrow"] {
         let mut p = variable_cp_problem(0.08);
@@ -178,6 +258,36 @@ fn analytic_step(old: [f64; 3], beta: f64, power: f64) -> ([f64; 3], f64, f64) {
     let stored = (0..3).map(|i| h(t[i]) - h(old[i])).sum::<f64>();
     let outflow = 0.1 * (2.0 * t[0] + h(t[2]));
     (t, stored, outflow)
+}
+
+#[test]
+fn g1_transient_caloric_endpoint_requires_local_heat_with_loose_iteration_controls() {
+    let mut p = variable_cp_problem(0.08);
+    // Loose iteration-change and integrated-energy allowances must not admit
+    // a stale Cp tangent that fails the requested local native heat tolerance.
+    p.coupling.temperature_tolerance_k = 100.0;
+    p.energy.tolerance = 1e-11;
+    let text = request_text()
+        .replace("\"energy_absolute_tolerance_j\":0.0000001", "\"energy_absolute_tolerance_j\":1000")
+        .replace("\"energy_relative_tolerance\":0.000000001", "\"energy_relative_tolerance\":0");
+    let r = request(&text, 3);
+    let bytes = p.materials[0].pack.to_bytes();
+    let trajectory = march(&p, &r, &CancelGate::new()).unwrap();
+    let value = J::parse(&render(&p, &trajectory, true)).unwrap();
+    let mut theta = [0.0; 3];
+    for (step, row) in value.get("records").unwrap().as_array().unwrap().iter().enumerate() {
+        let power = if step < 4 { 4.5 } else { 0.0 };
+        let (next, stored, outflow) = analytic_step(theta, 0.08, power);
+        assert!((row.f64_field("stored_energy_change_j").unwrap() - stored).abs() < 2e-7);
+        assert!((row.f64_field("physical_outflow_j").unwrap() - outflow).abs() < 2e-7);
+        assert!(row.f64_field("closure_j").unwrap().abs() < 2e-7);
+        theta = next;
+    }
+    for (actual, expected) in temperatures(&value).into_iter().zip(theta) {
+        assert!((actual - 300.0 - expected).abs() < 2e-7);
+    }
+    assert_eq!(p.materials[0].pack.to_bytes(), bytes);
+    assert_eq!(p.initial_temperature, vec![300.0; 3]);
 }
 
 #[test]

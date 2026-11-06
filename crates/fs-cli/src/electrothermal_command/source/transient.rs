@@ -225,7 +225,9 @@ pub(crate) fn march(problem: &Problem, request: &Request, gate: &CancelGate) -> 
         // Audit its independently re-evaluated physical flux, not storage sinks.
         let surface_w: f64 = result.radiation.iter().map(|r| r.outward_w()).sum();
         let radiated_w: f64 = result.radiation.iter().map(|r| r.radiated_w).sum();
-        let boundary_w = storage.physical_boundary_outflow_w(problem, &thermal, next, gate)?;
+        // The accepted native endpoint already contains the actual source
+        // enthalpy and refreshed face reconstruction at this temperature.
+        let boundary_w = next.report.balance.boundary_outflow_w;
         let outflow_j = request.dt * (boundary_w + physical_sink + surface_w);
         let closure_j = stored + outflow_j - source_j;
         let tolerance = request.absolute_j + request.relative * (stored_scale + source_j.abs() + outflow_j.abs());
@@ -258,11 +260,13 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
     let record = trajectory.records.last().expect("a completed trajectory has steps");
     let no_claim = if problem.fluid.is_some() { super::fluid::TRANSIENT_NO_CLAIM } else { NO_CLAIM };
     if !json {
-        return format!("Electrothermal transient: {} steps, {} s, {} thermal solves\nPeak temperature: {} K; final Joule power: {} W\nLast stored-energy increment: {} J; energy defect: {} J\nThermal-contact relative defect: {}\n{}\n",
+        let advection = problem.fluid_advection_name().map_or_else(String::new,
+            |name| format!("Fluid advection: {name}\n"));
+        return format!("Electrothermal transient: {} steps, {} s, {} thermal solves\nPeak temperature: {} K; final Joule power: {} W\nLast stored-energy increment: {} J; energy defect: {} J\nThermal-contact relative defect: {}\n{}{}\n",
             trajectory.records.len(), record.time_s, trajectory.thermal_solves,
             record.max_temperature_k, last.electric.total_joule_w,
             record.stored_energy_change_j, record.closure_j,
-            trajectory.last.thermal_contact_relative_defect, no_claim);
+            trajectory.last.thermal_contact_relative_defect, advection, no_claim);
     }
     let records = trajectory.records.iter().map(|r| format!(
         "{{\"time_s\":{},\"max_temperature_k\":{},\"stored_energy_change_j\":{},\"source_j\":{},\"physical_outflow_j\":{},\"closure_j\":{},\"radiated_w\":{}}}",
@@ -298,5 +302,5 @@ pub(crate) fn render(problem: &Problem, trajectory: &Trajectory, json: bool) -> 
         trajectory.last.thermal_contact_relative_defect,
         super::super::radiation::render(&trajectory.last.radiation),
         problem.fluid.as_ref().map_or_else(|| "null".into(), super::Fluid::render),
-        if problem.fluid.is_some() { quote("source-enthalpy-first-order-upwind") } else { "null".into() }, quote(no_claim))
+        problem.fluid_advection_name().map_or_else(|| "null".into(), quote), quote(no_claim))
 }

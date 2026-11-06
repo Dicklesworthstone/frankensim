@@ -17,9 +17,9 @@ use fs_qty::Density;
 use super::{Source, invalid, poll};
 use super::super::{J, array, fields, integer, number, positive, quote, required, values};
 
-pub(crate) const NO_CLAIM: &str = "steady fixed-geometry scalar ohmic and isotropic or grid-aligned orthotropic solid thermal conduction with prescribed volume-conservative isotropic fluid transport; density verified constant over the shared original Cp/density source interval, source-integrated Cp/enthalpy in first-order upwind face transport, viscosity frozen at the explicit sourced reference, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
+pub(crate) const NO_CLAIM: &str = "steady fixed-geometry scalar ohmic and isotropic or grid-aligned orthotropic solid thermal conduction with prescribed volume-conservative isotropic fluid transport; density verified constant over the shared original Cp/density source interval, source-integrated Cp/enthalpy with the reported conservative face reconstruction, viscosity frozen at the explicit sourced reference, local conductivity and resistivity re-resolved; no momentum/pressure solve, variable-density enthalpy transport, phase change, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification";
 
-pub(super) const TRANSIENT_NO_CLAIM: &str = "fixed-geometry backward-Euler electrothermal evolution with prescribed volume-conservative fluid velocity; fluid density verified constant over the complete source interval, one sourced Cp/enthalpy chart for storage and first-order upwind face transport, viscosity frozen at the sourced reference, local conductivity and resistivity re-resolved; single-phase fixed cell masses, sourced fluid and solid Cp and exterior gray radiation; no momentum/pressure solve, variable-density fluid transport, phase change, deformation, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification; temporal accuracy requires time-step refinement";
+pub(super) const TRANSIENT_NO_CLAIM: &str = "fixed-geometry backward-Euler electrothermal evolution with prescribed volume-conservative fluid velocity; fluid density verified constant over the complete source interval, one sourced Cp/enthalpy chart for storage and the reported conservative face reconstruction, viscosity frozen at the sourced reference, local conductivity and resistivity re-resolved; single-phase fixed cell masses, sourced fluid and solid Cp and exterior gray radiation; no momentum/pressure solve, variable-density fluid transport, phase change, deformation, electrochemistry, Lorentz force, AC effects, propagated uncertainty or experimental qualification; temporal accuracy requires time-step refinement";
 
 /// One fluid material, its exact reference receipt and the actual energy fluxes.
 /// No material identity is inferred from a mechanical occupancy or phase name.
@@ -272,7 +272,7 @@ mod tests {
     use fs_blake3::hash_bytes;
     use fs_evidence::ValidityDomain;
     use fs_exec::CancelGate;
-    use fs_lbm::conjugate::{ElectricSetup, Electrode, ElectrodeDrive, EnergyConfig, ThermalFace, ThermalSetup};
+    use fs_lbm::conjugate::{ConvectionScheme, ElectricSetup, Electrode, ElectrodeDrive, EnergyConfig, ThermalFace, ThermalSetup};
     use fs_lbm::conjugate::material_coupling::MaterialCouplingConfig;
     use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, NormalizedPack,
         NormalizedMaterialCardPack, PropertyClaim, PropertyKey, PropertyValue, Provenance,
@@ -423,32 +423,54 @@ mod tests {
                 "power_tolerance_w":1e-9,"relative_tolerance":1e-10,"conductivity_relative_tolerance":1e-10,
                 "energy_tolerance":1e-12,"energy_max_iterations":2000}}"#;
         let path = dir.join("scene.json");
-        std::fs::write(&path, scene).unwrap();
         let run = crate::electrothermal_command::run;
-        let result = run(&[path.as_os_str().to_owned()], true);
-        assert_eq!(result.exit_code, crate::exit::SUCCESS, "{}", result.stderr);
-        let value = J::parse(&result.stdout).unwrap();
-        assert!((value.f64_field("total_joule_w").unwrap() - 4.5).abs() < 1e-8);
-        assert!(value.get("fluid_reference").unwrap().str_field("material_state").is_some());
-        assert!(value.str_field("no_claim").unwrap().contains("prescribed"));
-        let temperatures = value.get("temperature_k").unwrap().as_array().unwrap();
-        assert!(temperatures[2].as_f64().unwrap() > temperatures[0].as_f64().unwrap());
-        assert_eq!(result, run(&[path.as_os_str().to_owned()], true));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), scene);
-        assert_eq!(std::fs::read(dir.join("fluid.fsmcdpk")).unwrap(), bytes);
         let time_path = dir.join("time.json");
         std::fs::write(&time_path, transient::request_text()).unwrap();
-        let args = [path.as_os_str().to_owned(), "--transient".into(), time_path.into_os_string()];
-        let transient = run(&args, true);
-        assert_eq!(transient.exit_code, crate::exit::SUCCESS, "{}", transient.stderr);
-        let value = J::parse(&transient.stdout).unwrap();
-        assert_eq!(value.f64_field("steps"), Some(8.0));
-        assert_eq!(value.f64_field("total_joule_w"), Some(0.0));
-        assert!(value.get("fluid_reference").unwrap().str_field("material_state").is_some());
-        assert!(value.str_field("no_claim").unwrap().contains("verified constant"));
-        assert_eq!(transient, run(&args, true));
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), scene);
-        assert_eq!(std::fs::read(dir.join("fluid.fsmcdpk")).unwrap(), bytes);
+        let args = [path.as_os_str().to_owned(), "--transient".into(), time_path.as_os_str().to_owned()];
+        let with_convection = |value: &str| scene.replace("\"energy_tolerance\":",
+            &format!("\"energy_convection\":{value},\"energy_tolerance\":"));
+        for (selection, scheme, name) in [
+            (None, ConvectionScheme::Upwind, "source-enthalpy-first-order-upwind"),
+            (Some("enthalpy-minmod"), ConvectionScheme::EnthalpyMinmod, "source-enthalpy-minmod"),
+        ] {
+            let selected_scene = selection.map_or_else(|| scene.to_owned(),
+                |value| with_convection(&quote(value)));
+            std::fs::write(&path, &selected_scene).unwrap();
+            let admitted = crate::electrothermal_command::load(&path).unwrap();
+            assert_eq!(admitted.energy.scheme, scheme);
+            let result = run(&[path.as_os_str().to_owned()], true);
+            assert_eq!(result.exit_code, crate::exit::SUCCESS, "{}", result.stderr);
+            let value = J::parse(&result.stdout).unwrap();
+            assert!((value.f64_field("total_joule_w").unwrap() - 4.5).abs() < 1e-8);
+            assert!(value.get("fluid_reference").unwrap().str_field("material_state").is_some());
+            assert_eq!(value.str_field("fluid_advection"), Some(name));
+            assert!(value.str_field("no_claim").unwrap().contains("prescribed"));
+            let temperatures = value.get("temperature_k").unwrap().as_array().unwrap();
+            assert!(temperatures[2].as_f64().unwrap() > temperatures[0].as_f64().unwrap());
+            assert_eq!(result, run(&[path.as_os_str().to_owned()], true));
+            let transient = run(&args, true);
+            assert_eq!(transient.exit_code, crate::exit::SUCCESS, "{}", transient.stderr);
+            let value = J::parse(&transient.stdout).unwrap();
+            assert_eq!(value.f64_field("steps"), Some(8.0));
+            assert_eq!(value.f64_field("total_joule_w"), Some(0.0));
+            assert!(value.get("fluid_reference").unwrap().str_field("material_state").is_some());
+            assert_eq!(value.str_field("fluid_advection"), Some(name));
+            assert!(value.str_field("no_claim").unwrap().contains("verified constant"));
+            assert_eq!(transient, run(&args, true));
+            if selection.is_some() {
+                for command in [&args[..1], &args[..]] {
+                    let text = run(command, false);
+                    assert_eq!(text.exit_code, crate::exit::SUCCESS, "{}", text.stderr);
+                    assert!(text.stdout.contains(&format!("Fluid advection: {name}\n")));
+                }
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), selected_scene);
+            assert_eq!(std::fs::read(dir.join("fluid.fsmcdpk")).unwrap(), bytes);
+        }
+        let upwind_path = dir.join("explicit-upwind.json");
+        std::fs::write(&upwind_path, with_convection("\"upwind\"")).unwrap();
+        assert_eq!(crate::electrothermal_command::load(&upwind_path).unwrap().energy.scheme,
+            ConvectionScheme::Upwind);
         let bad_path = dir.join("bad-boundary.json");
         for bad in [
             scene.replace("\"inflow_temperature_k\":300", "\"inflow_temperature_k\":0"),
@@ -458,6 +480,20 @@ mod tests {
             let refused = run(&[bad_path.as_os_str().to_owned()], true);
             assert_eq!(refused.exit_code, crate::exit::INPUT);
             assert!(refused.stdout.is_empty());
+        }
+        for invalid in ["\"power-law\"", "\"exponential\"", "\"minmod\"", "1", "true", "null", "[]", "{}"] {
+            let bad = with_convection(invalid);
+            std::fs::write(&bad_path, &bad).unwrap();
+            let bad_args = [bad_path.as_os_str().to_owned(), "--transient".into(), time_path.as_os_str().to_owned()];
+            for command in [&bad_args[..1], &bad_args[..]] {
+                let refused = run(command, true);
+                assert_eq!(refused.exit_code, crate::exit::INPUT);
+                assert!(refused.stdout.is_empty());
+                let diagnostic = J::parse(&refused.stderr).unwrap();
+                assert_eq!(diagnostic.str_field("code"), Some("electrothermal-input"));
+                assert!(diagnostic.str_field("message").unwrap().contains("numerics.energy_convection"));
+            }
+            assert_eq!(std::fs::read_to_string(&bad_path).unwrap(), bad);
         }
     }
 
