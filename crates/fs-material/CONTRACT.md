@@ -16839,3 +16839,36 @@ passed. The new tests check original low/high-pressure density and endpoints,
 complex-response and energy-flux coherence, independent native ramp histories
 with refinement, time/frequency scaling and input refusals. Rustfmt passed.
 This is a native source-module validation, not a whole-workspace Cargo/DSR pass.
+
+### Exact finite-rate compression histories with density and heat
+
+WaterCompressionHistory uses the same retained RelaxingRegionalWater and the
+existing visco::PronyRamp to advance prescribed linear volume-compression
+ramps, including frozen jumps, holds, reversals and recovery. Its Maxwell
+memory follows qdot=edot-q/tau, pressure perturbation is K_eq*e+delta_K*q,
+and independent arm heat is the integral of delta_K*q^2/tau. Every accepted
+step reports work, stored-energy change, heat and the floating-point balance.
+
+For fixed parcel mass, V/V0=1-e and rho=rho0/(1-e). A separately evaluated
+density increment preserves small signals lost in subtraction of absolute
+densities. The explicit compression bound is positive and less than one;
+it guarantees positive parcel volume, while the caller remains responsible
+for the stricter phase and linearization regime. This geometric conservation
+identity is not a nonlinear IF97 constitutive claim. Coefficients, phase
+inventory and the original thermal state remain fixed, and all energy
+densities are perturbation quantities per original volume.
+
+PreparedWaterCompressionRamp shares the original exponential coefficients
+among histories with equal relaxation time. Accepted application needs no
+allocation, exponentials or EOS evaluation. Invalid state, amplitude,
+duration, time-ratio representation or incompatible preparation leaves
+history unchanged. The hosting system owns thermal deposition and background
+pressure work; the history introduces no spatial transport or split solver.
+
+Four focused native Rust regressions passed against the exact source and
+genuine existing PronyRamp: frozen jumps and analytic relaxation heat,
+fixed-mass geometry, independent Simpson pressure-work/heat integration,
+exact-ramp subdivision, periodic loss versus the harmonic response, atomic
+refusals and retained sub-ulp density increments. Rustfmt passed. Combined
+with the source response and prior water/molecular regressions, 21 focused
+material tests passed. This is not a whole-workspace Cargo/DSR pass.

@@ -24,6 +24,9 @@
 //! viscothermal or wall losses are added. Source fit/root defects remain with
 //! the original endpoint owners and are never converted into dissipation.
 
+/// Exact compression histories with fixed-mass density and physical arm heat.
+pub mod transient;
+
 use super::super::regional::RegionalWaterState;
 use super::thermal::{CoexistenceAcousticClosure, RegionalWaterAcoustics};
 use crate::MaterialError;
