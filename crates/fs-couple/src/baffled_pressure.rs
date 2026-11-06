@@ -67,6 +67,10 @@ pub mod tiles;
 #[path = "baffled_pressure_modal.rs"]
 pub mod modal;
 
+/// The mouth as a cap on a rigid sphere: a causal FIR from the baffle's pressure to the sphere's (opt-in).
+#[path = "baffled_pressure_head.rs"]
+pub mod head;
+
 /// Largest retained input basis (the established observer/decimator limit).
 pub const MAX_RAYLEIGH_INPUTS: usize = 128;
 

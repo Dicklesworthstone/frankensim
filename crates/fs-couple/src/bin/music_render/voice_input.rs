@@ -83,6 +83,21 @@ pub(super) fn run_with_gas_sources(
             c.open_gate(), c.whole, c.truncated, c.silent
         )
     });
+    // Only a performance with the `head_sphere` row writes this block and the sphere's scope; without it the sidecar is byte
+    // for byte what it was. `filter_delay_samples` is the microphone's whole filter latency, the head's FIR included.
+    let (head, scope) = match &description.head_sphere {
+        Some(card) => (
+            format!(
+                "\"head_sphere\":{{\"radius_m\":{:e},\"source\":{},\"filter_delay_samples\":{:e}}},",
+                card.radius_m, json_string(&card.source), performance.filter_delay_samples()
+            ),
+            "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow observed as a cap of the opening's area on a rigid sphere (the baffled opening's pressure through the sphere's causal FIR, the baffle's image kept above the resolved band; the lips' radiation load is still the declared one), no torso, nasal branch or side cavity; the supraglottal pressure is never the output",
+        ),
+        None => (
+            String::new(),
+            "lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output",
+        ),
+    };
     let provenance = format!(
         "{{\"schema\":\"frankensim-music-render-provenance-v1\",\"fixture\":\"voice-input\",\
          \"sample_rate_hz\":{RATE},\"samples\":{samples},\"block\":{block},\
@@ -96,8 +111,8 @@ pub(super) fn run_with_gas_sources(
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"min_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
-         \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}\
-         \"model_scope\":\"lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output\"}}{gas_sources}}}",
+         \"max_force_passes\":{},\"mean_force_passes\":{:e},{jet_band}{head}\
+         \"model_scope\":\"{scope}\"}}{gas_sources}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
         info.glottal_radius_m, info.mouth_radius_m, info.sound_speed_m_s,

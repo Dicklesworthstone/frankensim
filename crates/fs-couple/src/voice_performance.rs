@@ -14,9 +14,10 @@
 //! gain is the opt-in `pulse_shimmer` below, and the supraglottal pressure is never
 //! the output.
 //!
-//! Limits, not hidden: infinite-baffle radiation (no head diffraction), a
-//! plane-wave series tract (no side branches or nasal coupling), a lumped
-//! two-mass, body-cover or one-mass fold, and a rigid or single-pin yielding wall.
+//! Limits, not hidden: infinite-baffle radiation (no head diffraction) unless the
+//! opt-in `head_sphere` row puts the mouth on a rigid sphere, a plane-wave series
+//! tract (no side branches or nasal coupling), a lumped two-mass, body-cover or
+//! one-mass fold, and a rigid or single-pin yielding wall.
 //!
 //! ```text
 //! frankensim-voice-performance-v1
@@ -47,7 +48,15 @@
 //! jet_noise <seed> <gain> <st_lo> <st_hi> <re_on>         (optional; constriction noise of the glottal jet, Verge's fraction)
 //! constriction_noise <seed> <duct_radius_m>               (optional; Oldham and Ukpoho's printed constriction noise)
 //! pulse_shimmer <seed> <sd_rel>                           (optional; a per-cycle gain on the wave the tract receives)
+//! head_sphere <radius_m> <radius source without spaces>   (optional; the mouth as a cap on a rigid sphere)
 //! ```
+//!
+//! `head_sphere` observes the mouth as a cap of its own area on a rigid sphere of that radius, centred `radius` behind
+//! the mouth plane, instead of a disk in an infinite baffle ([`crate::pcm_wav::baffled::head::HeadSphere`]: the
+//! baffled receiver's pressure through a causal FIR, `S / B`, blended to 1 above the microphone's resolved band). Only
+//! the observed pressure changes: the lips' radiation load is still the `termination` row's, which a page using it must
+//! state as a limit. The second field names where the radius is printed. The FIR's latency joins
+//! [`VoicePerformance::filter_delay_samples`].
 //!
 //! `constriction_noise` is an opt-in glottal source on the printed duct-constriction law of Oldham and Ukpoho (J. Sound Vib.
 //! 140(2), 1990; Guedel, AIVC Contributed Report 02, eq. 3 and Fig. 10; [`crate::turbulence_noise::ConstrictionNoise`]): a
@@ -149,6 +158,7 @@ use crate::driving_point::outlet::mouth_flow_line;
 use crate::glottis::{
     FoldBody, FoldCard, FoldCardSource, FoldMode, FoldRestGap, FoldShape, GlottalIsland,
 };
+use crate::pcm_wav::baffled::head::HeadSphere;
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver, RayleighMedium};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
@@ -227,6 +237,17 @@ pub struct VoiceDescription {
     pub constriction_noise: Option<ConstrictionNoiseCard>,
     /// Opt-in per-cycle gain on the wave the tract receives ([`PulseShimmerCard`]); `None` multiplies nothing.
     pub pulse_shimmer: Option<PulseShimmerCard>,
+    /// Opt-in head: the mouth as a cap on a rigid sphere ([`HeadSphereCard`]); `None` keeps the infinite baffle.
+    pub head_sphere: Option<HeadSphereCard>,
+}
+
+/// A `head_sphere` row: the sphere's radius and where it is printed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeadSphereCard {
+    /// Head radius [m].
+    pub radius_m: f64,
+    /// Where the radius is printed (an identifier without spaces).
+    pub source: String,
 }
 
 fn field(rest: &[&str], i: usize, what: &str) -> Result<f64, String> {
@@ -315,6 +336,7 @@ impl VoiceDescription {
         let mut jet_noise = None;
         let mut constriction_noise = None;
         let mut pulse_shimmer = None;
+        let mut head_sphere = None;
         let mut fold_mapping = None;
         let mut fold_shape = None;
         let mut fold_damping_upper = None;
@@ -546,6 +568,15 @@ impl VoiceDescription {
                     card.validate()?;
                     once(&mut pulse_shimmer, card, key)?;
                 }
+                "head_sphere" => {
+                    arity(&rest, 2, key)?;
+                    let radius_m = field(&rest, 0, "head radius")?;
+                    if radius_m <= 0.0 {
+                        return Err("the head radius must be positive".into());
+                    }
+                    let card = HeadSphereCard { radius_m, source: rest[1].to_string() };
+                    once(&mut head_sphere, card, key)?;
+                }
                 "fold_mapping" => {
                     arity(&rest, 1, key)?;
                     if rest[0] != "bilateral" {
@@ -646,6 +677,7 @@ impl VoiceDescription {
             jet_noise,
             constriction_noise,
             pulse_shimmer,
+            head_sphere,
         })
     }
 
@@ -717,6 +749,13 @@ impl VoiceDescription {
             self.microphone,
             medium,
         )?;
+        let head = match &self.head_sphere {
+            Some(card) => Some(
+                HeadSphere::new(card.radius_m, mouth_radius_m, self.microphone, medium, self.output_rate_hz)
+                    .map_err(|e| format!("head sphere refused: {e}"))?,
+            ),
+            None => None,
+        };
         let passive_formants_hz = chart
             .tmm_formants_terminated(gas, self.wall.as_ref(), self.termination, 4)
             .map_err(|e| format!("{e:?}"));
@@ -735,6 +774,7 @@ impl VoiceDescription {
             mouth_flow_taps: receipt.n_fft,
             mouth_flow_rungs: receipt.rungs.len(),
             passive_formants_hz,
+            head_sphere_radius_m: self.head_sphere.as_ref().map(|card| card.radius_m),
         };
         let aspiration = match self.aspiration_noise {
             Some(card) => Some(GlottalAspiration::new(card).map_err(str::to_string)?),
@@ -752,6 +792,7 @@ impl VoiceDescription {
             island,
             mouth,
             receiver,
+            head,
             aspiration,
             jet_noise,
             constriction_noise,
@@ -818,6 +859,8 @@ pub struct VoiceInfo {
     /// formants of the radiated sound are compared with, not a prediction of
     /// them.
     pub passive_formants_hz: Result<Vec<f64>, String>,
+    /// The `head_sphere` row's radius [m]; `None` on an infinite baffle.
+    pub head_sphere_radius_m: Option<f64>,
 }
 
 /// Source-side summaries over the physical substeps rendered so far.
@@ -1007,6 +1050,8 @@ pub struct VoicePerformance {
     island: GlottalIsland,
     mouth: DelayedFilter,
     receiver: BaffledPressure,
+    /// Opt-in head: the baffled pressure through the rigid sphere's causal FIR.
+    head: Option<HeadSphere>,
     schedule: Schedule,
     tension_modulation: Option<(f64, f64)>,
     tension_flutter: Option<TensionFlutter>,
@@ -1045,11 +1090,12 @@ impl VoicePerformance {
         &self.info
     }
 
-    /// Existing microphone filter latency, in output samples. Physical
+    /// Existing microphone filter latency, in output samples, with the head
+    /// FIR's when the `head_sphere` row is present. Physical
     /// source-to-listener travel remains in the pressure and is not included.
     #[must_use]
     pub fn filter_delay_samples(&self) -> f64 {
-        self.receiver.filter_delay_samples()
+        self.receiver.filter_delay_samples() + self.head.as_ref().map_or(0.0, |head| head.latency_samples() as f64)
     }
 
     /// The opt-in glottal jet noise's open-gate mechanics steps so far by how much of the band each could represent at the
@@ -1177,6 +1223,11 @@ impl VoicePerformance {
             self.steps += 1;
         }
         let pressure = self.receiver.step_trace(&self.trace)?;
+        // The head filters the baffle's pressure into the sphere's; without the row the pressure is what it was.
+        let pressure = match self.head.as_mut() {
+            Some(head) => head.step(pressure),
+            None => pressure,
+        };
         self.completed += 1;
         Ok(pressure)
     }
@@ -2146,6 +2197,42 @@ mod tests {
         let jet = render(&fixture("jet_noise 7 1.3e-3 0.045 0.115 300\n"));
         assert_ne!(both, aspiration, "the jet row must add to a card that has aspiration");
         assert_ne!(both, jet, "the aspiration row must add to a card that has the jet row");
+    }
+
+    /// The head is the baffled pressure through the sphere's FIR and nothing else: the tract, the fold and the
+    /// receiver are the plain card's, and the head's latency joins the reported filter latency.
+    #[test]
+    fn head_sphere_filters_the_baffled_pressure_and_nothing_else() {
+        let plain = VoiceDescription::from_bytes(fixture("").as_bytes()).unwrap();
+        let headed = VoiceDescription::from_bytes(fixture("head_sphere 0.0875 brown-duda-1998\n").as_bytes()).unwrap();
+        assert_eq!(headed.head_sphere, Some(HeadSphereCard { radius_m: 0.0875, source: "brown-duda-1998".into() }));
+        let (a, b) = (plain.build().unwrap(), headed.build().unwrap());
+        assert_eq!(b.filter_delay_samples(), a.filter_delay_samples() + 64.0);
+        assert_eq!(a.info().head_sphere_radius_m, None);
+        assert_eq!(b.info().head_sphere_radius_m, Some(0.0875));
+        let gas = plain.ambient_gas();
+        let medium = RayleighMedium { density: gas.density, sound_speed: gas.sound_speed };
+        let mut head = HeadSphere::new(0.0875, a.info().mouth_radius_m, plain.microphone, medium, 48_000).unwrap();
+        let by_hand: Vec<f64> = pressure(&plain).into_iter().map(|p| head.step(p)).collect();
+        assert_eq!(pressure(&headed), by_hand);
+    }
+
+    #[test]
+    fn head_sphere_rows_are_refused_by_name() {
+        for (row, why) in [
+            ("head_sphere 0.0875\n", "takes 2 fields"),
+            ("head_sphere 0 src\n", "must be positive"),
+            ("head_sphere -0.1 src\n", "must be positive"),
+            ("head_sphere nan src\n", "must be finite"),
+            ("head_sphere 0.0875 a\nhead_sphere 0.0875 b\n", "only appear once"),
+        ] {
+            let err = VoiceDescription::from_bytes(fixture(row).as_bytes()).unwrap_err();
+            assert!(err.contains(why), "{row}: {err}");
+        }
+        // A head no larger than the mouth (radius 8 mm here) is refused when the performance is built.
+        let small = VoiceDescription::from_bytes(fixture("head_sphere 0.005 src\n").as_bytes()).unwrap();
+        let err = small.build().err().expect("refused");
+        assert!(err.contains("smaller than the head"), "{err}");
     }
 
     #[test]
