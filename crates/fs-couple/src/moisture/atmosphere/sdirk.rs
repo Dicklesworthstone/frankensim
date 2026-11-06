@@ -7,8 +7,8 @@
 
 use super::*;
 use crate::moisture::cartesian::MoistureCartesianSdirk2Report;
-use crate::moisture::sdirk::{GAMMA, StageLoad};
-use std::borrow::Cow;
+use crate::moisture::reservoir::CartesianSdirkStage;
+use crate::moisture::sdirk::GAMMA;
 
 /// Original-to-final finite-vapor account with both spatial stage receipts.
 pub type CartesianAtmosphereSdirk2Step = AtmosphereMoistureStep<MoistureCartesianSdirk2Report, 6>;
@@ -18,48 +18,6 @@ pub type CartesianAtmosphereSdirk2Candidate =
 /// Multiple original Cartesian fields sharing one second-order vapor account.
 pub type SharedCartesianAtmosphereSdirk2Candidate =
     SharedAtmosphereMoistureCandidate<MoistureCartesian, MoistureCartesianSdirk2Report>;
-
-// Borrow the original field/load during scalar trials. Only a successful native
-// solve owns a proposed field; neither storage nor the load is copied per trial.
-struct CartesianStage<'a> {
-    field: Cow<'a, MoistureCartesian>,
-    known: &'a StageLoad<6>,
-    implicit_dt_s: f64,
-}
-impl ReservoirField<6> for CartesianStage<'_> {
-    type Report = MoistureCartesianReport;
-    type Controls = (MoistureStepConfig, MoistureNonlinearConfig);
-
-    fn inventory(&self) -> super::super::binding::MoistureField<'_> {
-        self.field.field()
-    }
-
-    fn advance_resolved(
-        &self,
-        dt_s: f64,
-        boundaries: [ResolvedMoistureFace; 6],
-        controls: Self::Controls,
-        cx: &Cx<'_>,
-    ) -> Result<(Self, Self::Report), MoistureError> {
-        let (field, report) = self.field.advance_stage(
-            dt_s,
-            self.implicit_dt_s,
-            boundaries,
-            controls.0,
-            controls.1,
-            Some(self.known),
-            cx,
-        )?;
-        Ok((
-            Self {
-                field: Cow::Owned(field),
-                known: self.known,
-                implicit_dt_s: self.implicit_dt_s,
-            },
-            report,
-        ))
-    }
-}
 
 impl FiniteMoistureAtmosphere {
     /// Second-order Cartesian diffusion coupled to the actual finite vapor.
@@ -189,11 +147,7 @@ impl FiniteMoistureAtmosphere {
         let fields: Vec<_> = ordered
             .iter()
             .zip(&loads)
-            .map(|(body, known)| CartesianStage {
-                field: Cow::Borrowed(body.moisture),
-                known,
-                implicit_dt_s,
-            })
+            .map(|(body, known)| CartesianSdirkStage::new(body.moisture, known, implicit_dt_s))
             .collect();
         let staged: Vec<_> = ordered
             .iter()
@@ -221,7 +175,7 @@ impl FiniteMoistureAtmosphere {
                 debug_assert_eq!(last.id, first.id);
                 SharedMoistureSolid {
                     id: last.id,
-                    moisture: last.moisture.field.into_owned(),
+                    moisture: last.moisture.into_field(),
                     transport: MoistureCartesianSdirk2Report {
                         endpoint: last.transport,
                         first_stage: first.transport,

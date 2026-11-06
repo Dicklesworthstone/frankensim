@@ -8,8 +8,8 @@ use crate::moisture::{
         FiniteMoistureAtmosphere,
     },
     solution::{
-        CartesianSolutionMoistureStep, FiniteMoistureSolution, SolutionMoistureError,
-        SolutionMoistureSolve, SolutionMoistureStep,
+        CartesianSolutionMoistureStep, CartesianSolutionSdirk2Step, FiniteMoistureSolution,
+        SolutionMoistureError, SolutionMoistureSolve, SolutionMoistureStep,
     },
 };
 
@@ -332,5 +332,57 @@ impl FiniteMoistureSolution {
             cx,
         )?;
         Ok((reservoir, field, report))
+    }
+
+    /// Complete a duration with second-order diffusion and finite solution
+    /// feedback at every implicit stage. Content, solvent mass and water
+    /// activity have independent local error scales; the accepted field and
+    /// finite bath retain one fixed original-to-final water budget.
+    ///
+    /// The existing controller uses second-order step-doubling and charges
+    /// both implicit stages, including rejected probes. Only accepted physical
+    /// half intervals enter the cumulative face ledger. Native source support,
+    /// phase admissibility and the equal-pressure, prescribed-temperature
+    /// model scope remain unchanged. Kinetic phase inventories are refused by
+    /// the native two-stage owner. No partial duration is published on failure.
+    pub fn advance_cartesian_sdirk2_adaptive_to(
+        &self,
+        moisture: &MoistureCartesian,
+        target_s: f64,
+        faces: &[Option<DryBasisSorption>; 6],
+        transport: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        physical: SolutionMoistureSolve,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (
+            Self,
+            MoistureCartesian,
+            MoistureAdvanceReport<CartesianSolutionSdirk2Step, 6>,
+        ),
+        MoistureAdvanceError<SolutionMoistureError>,
+    > {
+        checkpoint(cx)?;
+        let initial = (self.clone(), moisture.clone());
+        let ((reservoir, field), report) = evolve_fields_with_method(
+            &initial,
+            target_s,
+            time,
+            TimeMethod::Sdirk2,
+            |state, dt| {
+                let (bath, field, step) = state
+                    .0
+                    .advance_cartesian_sdirk2(
+                        &state.1, dt, faces, transport, nonlinear, physical, cx,
+                    )?
+                    .into_parts();
+                Ok(((bath, field), OneReport(step)))
+            },
+            solution_snapshot::<MoistureCartesian, 6>,
+            |_, _, _| Ok(0.0),
+            cx,
+        )?;
+        Ok((reservoir, field, report.summary.map_step(|step| step.0)))
     }
 }

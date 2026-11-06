@@ -51,8 +51,9 @@ pub use super::atmosphere::{
     CartesianMoistureParticipant, MoistureParticipant, SharedMoistureSolid,
 };
 pub use shared::{
-    SharedCartesianSolutionMoistureCandidate, SharedSolutionMoistureCandidate,
-    SharedSolutionMoistureStep,
+    CartesianSolutionSdirk2Candidate, CartesianSolutionSdirk2Step,
+    SharedCartesianSolutionMoistureCandidate, SharedCartesianSolutionSdirk2Candidate,
+    SharedSolutionMoistureCandidate, SharedSolutionMoistureStep,
 };
 
 use super::{

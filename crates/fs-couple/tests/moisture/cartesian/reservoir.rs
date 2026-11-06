@@ -6,6 +6,8 @@ use fs_couple::moisture::atmosphere::{CartesianMoistureParticipant, DryBasisSorp
 
 #[path = "reservoir/sdirk.rs"]
 mod sdirk;
+#[path = "reservoir/solution_sdirk.rs"]
+mod solution_sdirk;
 
 fn participant<'a>(
     id: u64,

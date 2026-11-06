@@ -871,3 +871,37 @@ linear drops equals the network built from the realized kernels to 1e-14 and the
 grid; the general solver run as one port follows the first-hole line through a strongly nonlinear drive to 1e-6);
 card level `reed::orifice_tests` (an absent row and `open_hole_orifice 1` are bit-identical in audio and reed state, a
 one-hole duct ignores the count, 2 and 3 differ from 1 and from each other, bad counts refuse).
+
+## Second-order diffusion coupled to finite solution activity
+
+`FiniteMoistureSolution::advance_cartesian_sdirk2` and
+`advance_shared_cartesian_sdirk2` solve native Cartesian moisture fields and
+the same finite solvent inventory at both implicit stages. Actual water uptake
+concentrates the solution; desorption dilutes it. Every trial refreshes solution
+activity, original sorption and surface transfer, and nonlinear principal
+diffusivity. Original-to-final compensated water increments close the reservoir
+once. Stage-one fluxes enter the second-stage load exactly once; the retained
+first-stage receipts are diagnostic, never additional solvent debits.
+
+Dissolved ideal/nonideal solutions, neutral equilibrium solubility and ionic
+equilibrium keep their original thermodynamic and total-component owners.
+Second-order accuracy assumes a smooth constitutive/phase branch. Kinetic
+solubility is explicitly refused because its endpoint-frozen phase update does
+not supply the required coupled RK equations. Equal prescribed temperature and
+pressure, negligible vapor storage and the original source domain remain in
+force; no liquid-immersion permeability, ion transport, thermal evolution or
+mechanical feedback is inferred. Shared participants retain unique stable IDs,
+native geometry, source laws and aggregate cell admission. Borrowed original
+fields and loads avoid cloning either for each scalar reservoir trial.
+
+`advance_cartesian_sdirk2_adaptive_to` completes one requested duration with
+the original temporal controller. Native content, solvent mass and activity
+receive independent error scales; both stages spend work even in rejected
+probes. Only accepted physical half-interval transfers enter the face ledger.
+One fixed whole-duration water budget admits both endpoints together; a failed
+duration returns no partial bath or field.
+
+G1/G4 regression definitions cover independently integrated finite-bath
+relaxation/refinement, equilibrium phase buffering and solute conservation,
+opposing shared specimen transfers, kinetic/cancellation refusals, and adaptive
+whole-duration accuracy and work limits.

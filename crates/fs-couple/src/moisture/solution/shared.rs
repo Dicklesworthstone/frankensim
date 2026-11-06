@@ -3,6 +3,12 @@
 use super::*;
 use crate::moisture::reservoir::water_sum;
 
+mod sdirk;
+pub use sdirk::{
+    CartesianSolutionSdirk2Candidate, CartesianSolutionSdirk2Step,
+    SharedCartesianSolutionSdirk2Candidate,
+};
+
 /// One common solution debit, with all signed specimen transfers retained in
 /// their original native reports. Total solute amounts are unchanged, including
 /// finite solid stocks when selected, even when opposing adsorption/desorption
