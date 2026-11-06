@@ -326,3 +326,30 @@ authoritative. Regression definitions in tests/piezoelectric/circuit/charge_scal
 compare subfemtocoulomb response with independently eliminated loaded-rod
 equations, both poling signs, zero coupling, domain refusal and retry.
 These authored ceramic-scale fixtures are not measured material calibration.
+
+
+### Prepared exact longitudinal current drive
+
+`piezoelectric::prepared::PreparedPiezoelectricCurrent` prepares the original
+three-coordinate [extension, momentum, free charge] system with the shared
+`fs-phs::linear_exact::prepared::PreparedQuadraticFlow`. It retains every
+reciprocal material entry and consistent rod inertia. Cold preparation has
+explicit dimension, work and memory budgets; warm steps reuse fixed scratch
+and the cached full flow and voltage integral. They perform no owner allocation,
+Newton iteration, source clone or new matrix exponential.
+
+Held force/current steps include the open-circuit case at zero current.
+Mechanical supply is force times actual extension change; electrical supply
+is current times the integrated trajectory voltage. The mean sensor voltage
+is not an endpoint trapezoid. A computed conservative full-window energy bound
+checks both original strain and field limits, including excursions between
+equal endpoints. Independent charge/work acceptance and final cancellation
+precede the sole physical state publication. The bound may refuse a physically
+admissible step conservatively; it is not an interval-arithmetic certificate.
+
+Synthetic G1/G4 definitions in tests/piezoelectric/prepared.rs compare an
+independent held-current forced oscillator and its exact voltage integral,
+repeated open-circuit frequency/charge, hidden interior excursions, and atomic
+cancellation/retry. Exactness applies to the fixed linear held-input model
+up to floating-point error; the existing spatial rod reduction, material
+validity and absence of a hard real-time benchmark remain explicit limits.

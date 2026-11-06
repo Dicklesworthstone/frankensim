@@ -16,6 +16,8 @@ use fs_phs::{
     Storage, step_descriptor,
 };
 
+/// Reusable exact held-current evolution and integrated sensor/actuator work.
+pub mod prepared;
 /// Spatial tensor electromechanics on the native solid and dielectric operators.
 pub mod spatial;
 

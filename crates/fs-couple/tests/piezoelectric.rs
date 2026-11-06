@@ -14,6 +14,9 @@ use fs_qty::Density;
 #[path = "piezoelectric/circuit.rs"]
 mod circuit_tests;
 
+#[path = "piezoelectric/prepared.rs"]
+mod prepared_tests;
+
 fn rod(d: f64, density: f64) -> PiezoelectricRod {
     let mut claims = ClaimSet::new();
     for (name, dims, value) in [
