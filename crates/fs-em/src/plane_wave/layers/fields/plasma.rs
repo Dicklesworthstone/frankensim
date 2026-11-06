@@ -1,12 +1,14 @@
 //! Amplitude-admitted coherent films containing original collisional gases.
 //!
-//! The native two-port Maxwell solution supplies both field traces and positive
+//! The native Maxwell layer solution supplies both field traces and positive
 //! integrated loss. An analytic whole-film electric envelope is admitted by the
 //! original carrier owner before any wave is published. This retains standing
 //! waves, longitudinal TM fields and all pair-relative drift limits; testing
 //! only an incoming amplitude or a few depths would not establish that domain.
 
 use super::*;
+
+mod one_sided;
 use fs_material::{
     field_storage::linear_electric_permittivity,
     ionized_gas::{IonizedGasError, IonizedGasHarmonicResponse},
@@ -47,8 +49,9 @@ struct AdmittedLayer<'m> {
 
 /// One admitted finite-layer wave with fixed original physical face sources.
 ///
-/// The two exterior ports must be lossless and propagating. Finite films may
-/// retain their original ionized gas, Debye, Ohmic or optical owners. Every
+/// Simultaneous sources require two lossless propagating exterior ports. The
+/// one-sided constructor also admits an absorbing or evanescent exit. Finite
+/// films retain their original ionized gas, Debye, Ohmic or optical owners. Every
 /// positive-thickness gas film is admitted at a conservative analytic bound
 /// on its full vector field, including coherent counterpropagating sources.
 /// A bound may reject an actually admissible field; it never substitutes a
@@ -68,6 +71,7 @@ pub struct PreparedIonizedGasLayerIllumination<'m> {
     excitation: IonizedGasLayerExcitation,
     boundary: CoherentLayerIllumination,
     layers: Vec<AdmittedLayer<'m>>,
+    one_sided_exit: Option<one_sided::ExitWave>,
 }
 
 /// Native local Maxwell fields plus the original free-carrier response.
@@ -129,95 +133,50 @@ impl<'m> PreparedIonizedGasLayerIllumination<'m> {
             .map_err(|_| bad("plasma layer field storage is unavailable"))?;
         for (index, selected) in stack.layers.iter().enumerate() {
             poll(&mut cancelled)?;
-            let source = selected.source;
-            let thickness = source.thickness_m;
-            let epsilon = selected.wave.epsilon_f_m;
-            let mu = linear_magnetic_permeability(source.response.material())?;
-            let longitudinal = match polarization {
-                Polarization::Te => C64::from_re(parallel_over_omega / mu),
-                Polarization::Tm => C64::from_re(-parallel_over_omega) / epsilon,
-            };
-            let root_loss =
-                det::sqrt(omega_rad_s) * det::sqrt(-epsilon.im) * core::f64::consts::FRAC_1_SQRT_2;
-            if !finite(longitudinal) || !root_loss.is_finite() {
-                return Err(bad("plasma layer field scale is unrepresentable"));
-            }
-            let mut layer = AdmittedLayer {
-                source,
-                kernel: None,
-                longitudinal,
-                root_loss,
-                permeability_h_m: mu,
-                background_permittivity_f_m: None,
-                electric_envelope_v_m: None,
-                carriers: None,
-                absorbed_w_m2: heat[index],
-                carrier_heating: None,
-            };
-            if thickness == 0.0 {
-                if matches!(source.response, DielectricResponse::IonizedGas(_)) {
-                    layer.carrier_heating = Some(IonizedGasLayerHeating::default());
-                }
-                admitted.push(layer);
-                continue;
-            }
-            let trace = |depth| -> Result<[C64; 2], ReflectionError> {
-                let point = illumination
-                    .prepare_point(index, depth)?
-                    .evaluate(excitation.incoming_tangential_e_v_m)?;
-                Ok(match polarization {
-                    Polarization::Te => [point.electric_v_m[1], -point.magnetic_a_m[0]],
-                    Polarization::Tm => [point.electric_v_m[0], point.magnetic_a_m[1]],
-                })
-            };
-            let normal = selected.wave.normal(c)?;
-            let kz = normal.scale(stack.wave_number);
-            let omega_mu = positive(omega_rad_s * mu)?;
-            let omega_epsilon = epsilon.scale(omega_rad_s);
-            let (a, b) = match polarization {
-                Polarization::Te => (C64::from_re(omega_mu), (kz * kz).scale(1.0 / omega_mu)),
-                Polarization::Tm => ((kz * kz) / omega_epsilon, omega_epsilon),
-            };
-            let kernel = LayerFieldKernel::new(
-                thickness,
-                kz,
-                Dd::from_f64(normal.re) * Dd::from_f64(stack.wave_number),
-                a,
-                b,
-                trace(0.0)?,
-                trace(thickness)?,
-            )
-            .ok_or_else(|| bad("plasma layer field is unrepresentable"))?;
-            if let DielectricResponse::IonizedGas(plasma) = source.response {
-                let [e, h] = kernel
-                    .amplitude_bounds()
-                    .ok_or_else(|| bad("plasma layer field envelope is unrepresentable"))?;
-                let envelope = match polarization {
-                    Polarization::Te => e,
-                    Polarization::Tm => det::hypot(e, longitudinal.abs() * h),
+            let thickness = selected.source.thickness_m;
+            let kernel = if thickness == 0.0 {
+                None
+            } else {
+                let trace = |depth| -> Result<[C64; 2], ReflectionError> {
+                    let point = illumination
+                        .prepare_point(index, depth)?
+                        .evaluate(excitation.incoming_tangential_e_v_m)?;
+                    Ok(match polarization {
+                        Polarization::Te => [point.electric_v_m[1], -point.magnetic_a_m[0]],
+                        Polarization::Tm => [point.electric_v_m[0], point.magnetic_a_m[1]],
+                    })
                 };
-                if !envelope.is_finite() {
-                    return Err(bad("plasma vector field envelope is unrepresentable"));
-                }
-                // ||E||_complex bounds every instantaneous vector norm. The
-                // unmagnetized response is isotropic, so this real-axis field
-                // bounds every original carrier and pair-relative drift.
-                let carriers = plasma.transport().response(
-                    omega_rad_s,
-                    [C64::from_re(envelope), C64::ZERO, C64::ZERO],
-                    &mut cancelled,
-                )?;
-                if carriers.conductivity_s_m != plasma.conductivity_s_m() {
-                    return Err(bad("plasma film changed its original carrier response"));
-                }
-                layer.carrier_heating = Some(partition_heat(&carriers, heat[index])?);
-                layer.background_permittivity_f_m =
-                    Some(linear_electric_permittivity(plasma.material())?);
-                layer.electric_envelope_v_m = Some(envelope);
-                layer.carriers = Some(carriers);
-            }
-            layer.kernel = Some(kernel);
-            admitted.push(layer);
+                let mu = linear_magnetic_permeability(selected.source.response.material())?;
+                let normal = selected.wave.normal(c)?;
+                let kz = normal.scale(stack.wave_number);
+                let omega_mu = positive(omega_rad_s * mu)?;
+                let omega_epsilon = selected.wave.epsilon_f_m.scale(omega_rad_s);
+                let (a, b) = match polarization {
+                    Polarization::Te => (C64::from_re(omega_mu), (kz * kz).scale(1.0 / omega_mu)),
+                    Polarization::Tm => ((kz * kz) / omega_epsilon, omega_epsilon),
+                };
+                Some(
+                    LayerFieldKernel::new(
+                        thickness,
+                        kz,
+                        Dd::from_f64(normal.re) * Dd::from_f64(stack.wave_number),
+                        a,
+                        b,
+                        trace(0.0)?,
+                        trace(thickness)?,
+                    )
+                    .ok_or_else(|| bad("plasma layer field is unrepresentable"))?,
+                )
+            };
+            admitted.push(admit_layer(
+                &stack,
+                index,
+                polarization,
+                parallel_over_omega,
+                kernel,
+                heat[index],
+                &mut cancelled,
+            )?);
         }
         poll(&mut cancelled)?;
         Ok(Self {
@@ -227,6 +186,7 @@ impl<'m> PreparedIonizedGasLayerIllumination<'m> {
             excitation,
             boundary,
             layers: admitted,
+            one_sided_exit: None,
         })
     }
 
@@ -343,6 +303,80 @@ impl<'m> PreparedIonizedGasLayerIllumination<'m> {
             current_density_a_m2: current,
         })
     }
+}
+
+// Both physical source configurations pass their actual whole-film fields
+// through the same original carrier domain and thermal partition admission.
+fn admit_layer<'m>(
+    stack: &PlanarDielectricLayers<'m>,
+    index: usize,
+    polarization: Polarization,
+    parallel_over_omega: f64,
+    kernel: Option<LayerFieldKernel>,
+    absorbed_w_m2: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<AdmittedLayer<'m>, ReflectionError> {
+    let selected = stack.layers[index];
+    let source = selected.source;
+    let epsilon = selected.wave.epsilon_f_m;
+    let mu = linear_magnetic_permeability(source.response.material())?;
+    let longitudinal = match polarization {
+        Polarization::Te => C64::from_re(parallel_over_omega / mu),
+        Polarization::Tm => C64::from_re(-parallel_over_omega) / epsilon,
+    };
+    let root_loss =
+        det::sqrt(stack.omega) * det::sqrt(-epsilon.im) * core::f64::consts::FRAC_1_SQRT_2;
+    if !finite(longitudinal)
+        || !root_loss.is_finite()
+        || !absorbed_w_m2.is_finite()
+        || absorbed_w_m2 < 0.0
+    {
+        return Err(bad("plasma layer field scale or power is unrepresentable"));
+    }
+    let mut layer = AdmittedLayer {
+        source,
+        kernel,
+        longitudinal,
+        root_loss,
+        permeability_h_m: mu,
+        background_permittivity_f_m: None,
+        electric_envelope_v_m: None,
+        carriers: None,
+        absorbed_w_m2,
+        carrier_heating: None,
+    };
+    if let DielectricResponse::IonizedGas(plasma) = source.response {
+        let Some(kernel) = kernel else {
+            layer.carrier_heating = Some(IonizedGasLayerHeating::default());
+            return Ok(layer);
+        };
+        let [e, h] = kernel
+            .amplitude_bounds()
+            .ok_or_else(|| bad("plasma layer field envelope is unrepresentable"))?;
+        let envelope = match polarization {
+            Polarization::Te => e,
+            Polarization::Tm => det::hypot(e, longitudinal.abs() * h),
+        };
+        if !envelope.is_finite() {
+            return Err(bad("plasma vector field envelope is unrepresentable"));
+        }
+        // The complex vector norm bounds every instantaneous vector norm.
+        // Isotropy makes this real-axis drive conservative for every original
+        // carrier and pair-relative drift, including longitudinal TM fields.
+        let carriers = plasma.transport().response(
+            stack.omega,
+            [C64::from_re(envelope), C64::ZERO, C64::ZERO],
+            cancelled,
+        )?;
+        if carriers.conductivity_s_m != plasma.conductivity_s_m() {
+            return Err(bad("plasma film changed its original carrier response"));
+        }
+        layer.carrier_heating = Some(partition_heat(&carriers, absorbed_w_m2)?);
+        layer.background_permittivity_f_m = Some(linear_electric_permittivity(plasma.material())?);
+        layer.electric_envelope_v_m = Some(envelope);
+        layer.carriers = Some(carriers);
+    }
+    Ok(layer)
 }
 
 impl<'w, 'm> IonizedGasLayerPoint<'w, 'm> {

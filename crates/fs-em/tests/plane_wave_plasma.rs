@@ -6,6 +6,9 @@ mod fixture;
 #[path = "plane_wave_plasma/layers.rs"]
 mod layer_fields;
 
+#[path = "plane_wave_plasma/one_sided.rs"]
+mod one_sided;
+
 use fs_em::plane_wave::{
     DielectricResponse, IonizedGasWaveResponse, PlanarDielectricInterface, Polarization,
     ReflectionError,
@@ -48,6 +51,17 @@ fn gas() -> IonizedGasConductivity {
 }
 
 fn background_at(th: f64, te: f64, pressure: f64, include_mu: bool) -> ResolvedMaterialStatePoint {
+    background_with_properties(th, te, pressure, include_mu, EPSILON, None)
+}
+
+fn background_with_properties(
+    th: f64,
+    te: f64,
+    pressure: f64,
+    include_mu: bool,
+    epsilon: f64,
+    conductivity: Option<f64>,
+) -> ResolvedMaterialStatePoint {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -71,7 +85,7 @@ fn background_at(th: f64, te: f64, pressure: f64, include_mu: bool) -> ResolvedM
         (
             ELECTRIC_PERMITTIVITY_PROPERTY,
             ELECTRIC_PERMITTIVITY_DIMS,
-            EPSILON,
+            epsilon,
         ),
         (
             MAGNETIC_PERMEABILITY_PROPERTY,
@@ -81,6 +95,13 @@ fn background_at(th: f64, te: f64, pressure: f64, include_mu: bool) -> ResolvedM
     ]
     .into_iter()
     .take(if include_mu { 2 } else { 1 })
+    .chain(conductivity.map(|value| {
+        (
+            fs_material::conductor::ELECTRICAL_CONDUCTIVITY_PROPERTY,
+            fs_material::conductor::ELECTRICAL_CONDUCTIVITY_DIMS,
+            value,
+        )
+    }))
     {
         claims
             .insert_claim(PropertyClaim {
@@ -91,8 +112,7 @@ fn background_at(th: f64, te: f64, pressure: f64, include_mu: bool) -> ResolvedM
                 uncertainty: UncertaintyModel::Unstated,
                 observations: vec![],
                 provenance: Provenance {
-                    source: "synthetic lossless background, explicitly excluding free carriers"
-                        .into(),
+                    source: "synthetic linear material fixture; optional Ohmic conductivity is separately authored".into(),
                     license: "analytic test fixture".into(),
                     artifact: None,
                 },

@@ -4719,9 +4719,9 @@ charge-relaxation times as well as the spatial mesh.
 
 ## Whole-film admitted original ionized-gas illumination
 
-`PreparedIonizedGasLayerIllumination` binds the original finite dielectric
+`PreparedIonizedGasLayerIllumination::try_new` binds the original finite dielectric
 stack to fixed simultaneous complex peak tangential electric inputs at its
-two faces. Exterior ports must be lossless, propagating and non-ionized;
+two faces. Its exterior ports must be lossless, propagating and non-ionized;
 finite films may retain original ionized-gas, lossless, Ohmic, Debye or optical
 material responses. The existing unrestricted normalized layer constructors
 continue to refuse ionized gas. Their private construction seam is accessible
@@ -4774,3 +4774,43 @@ exceeds the original drift domain. Kernel regressions cover analytic field
 bounds through standing-wave, critical, evanescent and branch-transition
 limits. Pinned formatter/parser checks passed; native Rust regressions were
 added but were not executed in the shared editing environment.
+
+## One-sided ionized films with passive exit half-spaces
+
+`PreparedIonizedGasLayerIllumination::try_new_one_sided` binds one actual
+finite left-face drive and requires the right input to be exactly zero.
+The incident medium remains original and lossless; the original non-ionized
+exit may be absorbing, evanescent or exactly critical. This adds no fictitious
+incoming channel in a lossy medium and preserves the simultaneous-source
+constructor's lossless propagating port rule.
+
+The selected-film and whole-stack owners now share one native bounded field
+preparation. Its backward and forward sweeps cost O(layers), followed by O(1)
+field-kernel selection per film. Each actual amplitude-scaled film passes the
+same whole-vector analytic carrier envelope and original thermal partitions.
+No normalized ionized layer solver or replacement source amplitude escapes.
+Native positive slab losses supply film heat, and physical boundary powers
+must satisfy the original Poynting balance.
+
+The exit cache retains independent electric and power-conjugate magnetic
+traces. At exact TM critical refraction, vanishing tangential E and normal
+wave number do not erase finite tangential H or longitudinal E. `exit_field`
+continues this actual outgoing field with the original passive complex phase.
+`absorbed_exit_power_to_depth_w_m2` integrates the same attenuation stably
+with expm1; finite-film heat remains separate and a lossless evanescent or
+critical exit has exactly zero absorbed power. Repeated field and depth-heat
+queries allocate nothing and perform no material, layer or carrier solve.
+
+The original frozen-population, unmagnetized weak-drift, homogeneous finite
+film and prescribed-plane-wave scope remains. Ionized exterior half-spaces
+are not admitted by this finite-film owner. All query depths must be finite
+and nonnegative; cancellation or admission failure returns no partial wave.
+
+Three focused regression groups specify original multi-film/two-port parity;
+independent dimensional Maxwell/Fabry-Perot amplitudes for absorbing,
+evanescent and critical TE/TM exits, local Joule loss and shallow/opaque
+substrate heat; and standing-wave drift rejection, identity/silence,
+cancellation and source/depth/port restrictions. Pinned Rust formatting/parser,
+bounded API/physics review and independent fixture-based power-balance
+calculations passed. Native Rust regressions were authored but not executed
+in the shared editing environment.

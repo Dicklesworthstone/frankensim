@@ -83,6 +83,44 @@ impl LayerFieldKernel {
         })
     }
 
+    /// Bind this original linear solution to one actual coherent amplitude.
+    /// Material coefficients, physical phases and both face locations stay fixed.
+    pub(super) fn scaled(self, amplitude: C64) -> Option<Self> {
+        if !finite(amplitude) {
+            return None;
+        }
+        let left = self.left.map(|value| value * amplitude);
+        let right = self.right.map(|value| value * amplitude);
+        let interior = match self.interior {
+            Interior::Entire { a, b } => Interior::Entire { a, b },
+            Interior::Decaying {
+                admittance,
+                forward,
+                backward,
+            } => {
+                let forward = forward * amplitude;
+                let backward = backward * amplitude;
+                if !finite(forward) || !finite(backward) {
+                    return None;
+                }
+                Interior::Decaying {
+                    admittance,
+                    forward,
+                    backward,
+                }
+            }
+        };
+        left.iter()
+            .chain(&right)
+            .all(|&value| finite(value))
+            .then_some(Self {
+                left,
+                right,
+                interior,
+                ..self
+            })
+    }
+
     /// Conservative whole-film magnitudes of the original tangential E/H.
     /// This analytic envelope is for material-domain admission, not an
     /// interval certificate or a claim that its maximum is attained.
@@ -188,7 +226,12 @@ fn entire(z: C64) -> (C64, C64) {
     (cosine, sinc)
 }
 
-fn decay(kz: C64, phase_wavenumber: Dd, distance: f64, phase_distance: Dd) -> Option<C64> {
+pub(super) fn decay(
+    kz: C64,
+    phase_wavenumber: Dd,
+    distance: f64,
+    phase_distance: Dd,
+) -> Option<C64> {
     let amplitude = det::exp(kz.im * distance);
     if amplitude == 0.0 {
         return Some(C64::ZERO);
