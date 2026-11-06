@@ -41,9 +41,11 @@ struct Model<const M: usize> {
 }
 
 /// An open, index-one, fixed optical environment whose emission-band
-/// absorption is explicitly passive. This can model host/substrate absorption
+/// absorption is passive by default. This can model host/substrate absorption
 /// and nonradiative spectral channels in the emitting material. It is not a
 /// declaration that all absorption by a fluorophore is passive.
+/// The native luminescence owner's explicit resonant-recycling opt-in may
+/// instead use the same directed transport to populate equal-energy stores.
 #[derive(Clone, Debug)]
 pub struct AbsorbingLuminescenceEnvironment<const M: usize> {
     model: Arc<Model<M>>,
@@ -213,6 +215,13 @@ impl<const M: usize> AbsorbingLuminescenceEnvironment<M> {
 
     pub fn tolerance(&self) -> LuminescenceAbsorptionTolerance {
         self.model.tolerance
+    }
+
+    pub(super) fn bindings(&self) -> impl Iterator<Item = (usize, CellId)> + '_ {
+        self.model
+            .bindings
+            .iter()
+            .map(|(&grid, &thermal)| (grid, thermal))
     }
 
     pub(super) fn check_emitter(

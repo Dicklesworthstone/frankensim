@@ -14,7 +14,8 @@
 //! is `1/(kr+knr)`. Adding a nonradiative channel changes BOTH consistently.
 //! No material constants, saturation or stimulated emission are inferred.
 //! [`transfer`] adds explicitly authored singlet/triplet crossing and reverse
-//! crossing with separate thermal exchanges. Coefficients must remain fixed
+//! crossing with separate thermal exchanges; [`recycling`] integrates repeated
+//! equal-energy photon absorption between stores. Coefficients must remain fixed
 //! over each step; a thermal owner must resolve changing-temperature rates.
 //!
 //! Scalar work is bounded and allocation-free. Elementary functions use the
@@ -26,6 +27,10 @@ use fs_math::{decay, eft::two_sum};
 /// Positive singlet/triplet kinetics, delayed emission and transfer heat.
 #[path = "luminescence_transfer.rs"]
 pub mod transfer;
+
+/// Transient equal-energy photon recycling and explicit escape/heat accounts.
+#[path = "luminescence_recycling.rs"]
+pub mod recycling;
 
 /// Invalid physical inputs or an unrepresentable candidate leave state untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

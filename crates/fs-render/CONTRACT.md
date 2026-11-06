@@ -8820,3 +8820,41 @@ aberrated emitting sides and the original QE rate path. This route supplies
 neither scene visibility/surface intersection nor apparent projected areas,
 finite-source geometry, accelerated source motion, moving dielectric transport,
 gravitational shifts, polarization or a second debit to thermal storage.
+
+
+## Coupled resonant photon recycling on the native excitation timeline
+
+`LuminescentOpticalHeating<N,1>::with_resonant_recycling` explicitly changes
+emission-band absorption from passive heat to fresh equal-energy excitation.
+The sole emission wavelength must equal the stored-state wavelength and lie
+inside the original source's excitation domain. Every positive-density material
+cell receives a state and a directed emission row, including cells never reached
+by the pump. No excitation band is broadened and no forbidden spectrum is clipped.
+
+The original `fs-thermal` positive reaction/source propagator evolves all stores
+simultaneously over the accepted thermal interval. It retains repeated self-return
+and cross-cell reemission without delayed next-step injection, a generation cap,
+a steady-state inverse or an artificial leakage floor. Quenching uses each native
+start temperature. Prepared topology and interval maps are shared across observer
+clones; identical decay parameters and duration reuse the cached map even when
+pumping or stored excitation changes. The existing limits bound the complete
+network to 64 states and 4,096 directed edges, with explicit numerical work limits.
+
+Local accounts include incoming recycled energy, while global accounts exclude
+internal emission/reabsorption from external energy sinks. Resolved recycling
+never also enters the passive heat route. `recycled_excitation_j` exposes internal
+circulation; the emitted/recycled totals can exceed external pump input. Dark
+heat, escape, unresolved radiation, primary Stokes heat and current excitation
+remain separate. Candidate local/global energy defects and cumulative unresolved
+energy retain the original explicit allowances. Pulse boundaries, implicit retry
+replacement, native temperature domains and complete rollback remain binding.
+
+Six integration regression groups specify a one-cell effective-lifetime solution,
+two-cell pulse/dark eigenmodes, asymmetric source/receiver orientation, a closed
+unit-return system, supported-source/row/budget admission and transactional replay.
+The closed fixture retains 32 J of excitation while recording 256 J of internal
+emission/reabsorption. These are analytical regression expectations, not executed
+results. Pinned formatter/parser checks and independent source review passed;
+native execution was blocked by dependency-build storage exhaustion. General
+wavelength-changing recycling, saturation and finite photon flight delays remain
+outside this explicitly resonant, linear, quasistatic model.

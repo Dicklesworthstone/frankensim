@@ -2743,3 +2743,34 @@ refuse, including counts whose later energy rescaling would be representable.
 Pinned formatter/parser checks and independent physics/API review passed. Eleven
 focused tests are authored; native test execution was unavailable in the shared
 editing environment.
+
+
+### Resonant photon recycling
+
+`luminescence::recycling::ResonantRecyclingPlan` evolves equal-energy excitation
+stores with the existing positive `fs-la` reaction/source owner. Each cell has an
+authored `ExcitationDecay`; directed absorption fractions, escape and unresolved
+transport close each emission partition within an explicit caller-supplied
+roundoff allowance, without normalization. Feedback yields are `phi_i * R_ij`.
+All receiving material cells must be represented, including unpumped receivers.
+The caller enforces the common photon/excitation energy, resolves changing rates
+and transport, and owns any primary pump relaxation. Optical flight times are
+neglected on this kinetic clock; wavelength conversion and saturation are absent.
+
+The prepared transient includes self-return and arbitrary recycling cycles,
+constant pumping and integrated emissions/reabsorptions; it does not require a
+steady state or truncate a bounce series. Perfect closed unit-yield recycling
+conserves total stored energy and gains only external pump energy. The final
+energy admission excludes internal photon traffic from its residual scale.
+Positive losses erased by represented feedback and positive weight/channel
+underflow refuse. Escape, unresolved outgoing energy and nonradiative heat stay
+separate, with an uncorrected residual. `RecyclingLimits` re-exports the existing
+numerical work/accuracy limits and 64-cell bound. Independent closed-form tests
+cover closed self-return, two-cell exchange and lossy pumping; split-step tests
+cover every integrated channel, with explicit fraction, range and cancellation
+refusal regressions.
+
+Seven focused core regression groups are authored. Pinned formatter/parser and
+independent numerical/API review passed. A native Cargo test attempt stopped
+during dependency compilation with `No space left on device`; no luminescence
+tests executed in that attempt.

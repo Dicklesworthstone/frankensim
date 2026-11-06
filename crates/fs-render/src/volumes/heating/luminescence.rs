@@ -11,11 +11,16 @@
 //! requires transparent emission-band escape. An explicitly supplied directed
 //! transport operator also supports passive secondary absorption and elastic
 //! multiple scattering in an open, index-one medium. Unresolved photons remain
-//! separate from heat and escape. Supplied rates/spectra require their own
+//! separate from heat and escape. Explicit single-line resonant recycling
+//! returns absorbed photons to equal-energy stores and evolves the coupled
+//! network within the same interval. Supplied rates/spectra require their own
 //! source support; a long lifetime alone does not establish phosphorescence.
 
 pub mod absorption;
 pub use absorption::{AbsorbingLuminescenceEnvironment, LuminescenceAbsorptionTolerance};
+mod recycling;
+pub use fs_thermal::luminescence::recycling::RecyclingLimits;
+use recycling::ResonantFeedback;
 
 use super::feedback::OpticalFeedbackError;
 use super::fluorescence::{FluorescenceSource, ratio_power, validate_fluorescent_medium};
@@ -30,7 +35,7 @@ use crate::volumes::transport::scattering::ScatteringGrid;
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
 };
-use fs_thermal::luminescence::{ArrheniusQuenching, ExcitationDecay};
+use fs_thermal::luminescence::{ArrheniusQuenching, ExcitationDecay, ExcitationStep};
 use std::collections::BTreeMap;
 
 /// One sourced emitting state, with a discrete photon spectrum.
@@ -125,7 +130,8 @@ pub struct LuminescenceEnergy<const M: usize> {
     /// Escaped joules in the supplied discrete emission-node order.
     pub escaped_j: [f64; M],
     /// Total radiation produced before propagation, including subsequently
-    /// absorbed light. This diagnostic is not an additional energy sink.
+    /// absorbed light and repeated recycling. Internal emission can exceed
+    /// external pump input; this diagnostic is not an additional energy sink.
     pub emitted_j: [f64; M],
     /// Unassigned radiant energy from admitted transport cutoffs, joules.
     /// It is not a physical excitation store or escaped radiation.
@@ -138,6 +144,9 @@ pub struct LuminescenceEnergy<const M: usize> {
     pub relaxation_heat_j: f64,
     /// Emitted radiation absorbed by explicitly passive receivers, joules.
     pub secondary_absorption_heat_j: f64,
+    /// Emitted radiation returned to resonant excitation stores, joules.
+    /// This internal circulation is neither extra pump input nor heat.
+    pub recycled_excitation_j: f64,
     /// Current nonthermal emitting-state store, joules.
     pub stored_excitation_j: f64,
     /// Absorbed pump minus escape, unresolved light, all heat and excitation.
@@ -170,6 +179,7 @@ struct Accounts<const N: usize, const M: usize> {
     dark: CheckedSum,
     relaxation: CheckedSum,
     secondary: CheckedSum,
+    recycled: CheckedSum,
     roundoff: CheckedSum,
 }
 
@@ -188,6 +198,7 @@ impl<const N: usize, const M: usize> Default for Accounts<N, M> {
             dark: CheckedSum::default(),
             relaxation: CheckedSum::default(),
             secondary: CheckedSum::default(),
+            recycled: CheckedSum::default(),
             roundoff: CheckedSum::default(),
         }
     }
@@ -205,14 +216,17 @@ struct Pending<const N: usize, const M: usize> {
 
 /// Optical pumping, delayed emission and local heat on one native timeline.
 /// Cloning retains excitation; a refused advance publishes no partial state.
-/// The prepared Beer absorption remains linear and fixed. Decay takes constant
-/// work per cell/node even when a thermal step is many lifetimes long.
+/// The prepared Beer absorption remains linear and fixed. Independent decay
+/// takes constant work per cell/node. Explicit resonant recycling uses the
+/// existing bounded positive network propagator, cached for unchanged rates
+/// and duration, without lifetime-sized thermal steps or photon generations.
 #[derive(Clone, Debug)]
 pub struct LuminescentOpticalHeating<const N: usize, const M: usize> {
     source: LuminescenceSource<M>,
     reference: OpticalPowerBudget<N>,
     cells: Vec<Cell<N>>,
     emission_transport: Option<AbsorbingLuminescenceEnvironment<M>>,
+    recycling: Option<ResonantFeedback>,
     schedule: Option<SpectralPowerSchedule<N>>,
     time_s: f64,
     energy_tolerance_j: f64,
@@ -411,6 +425,7 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
             reference: *pump.power(),
             cells,
             emission_transport,
+            recycling: None,
             schedule: None,
             time_s: thermal.time_s(),
             energy_tolerance_j,
@@ -472,6 +487,12 @@ impl<const N: usize, const M: usize> LuminescentOpticalHeating<N, M> {
     /// allowances. `None` denotes the validated transparent-escape fast path.
     pub fn emission_transport(&self) -> Option<&AbsorbingLuminescenceEnvironment<M>> {
         self.emission_transport.as_ref()
+    }
+
+    /// Whether emitted-photon absorption creates equal-energy excitation
+    /// instead of following the default passive absorption-to-heat channel.
+    pub const fn has_resonant_recycling(&self) -> bool {
+        self.recycling.is_some()
     }
 
     /// Emitted integrated watts per original grid cell at the accepted endpoint.
@@ -611,11 +632,19 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
         let mut sources = BTreeMap::<CellId, CheckedSum>::new();
         let mut stored_j = Vec::with_capacity(self.cells.len());
         let mut mean_cell_emission_w = Vec::with_capacity(self.cells.len());
-        for cell in &self.cells {
+        let recycled = match &mut self.recycling {
+            Some(feedback) => Some(feedback.advance(
+                &self.source,
+                &self.cells,
+                &scale,
+                duration_s,
+                thermal,
+                checkpoint,
+            )?),
+            None => None,
+        };
+        for (index, cell) in self.cells.iter().enumerate() {
             checkpoint()?;
-            let decay = self
-                .source
-                .decay_at_temperature(thermal.temperature_k(cell.thermal_cell)?)?;
             let mut pump = CheckedSum::default();
             let mut prompt = CheckedSum::default();
             let mut absorbed = CheckedSum::default();
@@ -624,9 +653,22 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
                 prompt.add(finite(cell.prompt_heat_w[lane] * factor * duration_s)?)?;
                 absorbed.add(finite(cell.absorbed_w[lane] * factor * duration_s)?)?;
             }
-            let step = decay
-                .advance(cell.stored_j, pump.value()?, duration_s)
-                .map_err(|_| invalid("luminescence reservoir advance refused"))?;
+            let step = match &recycled {
+                Some(step) => ExcitationStep {
+                    stored_energy_j: step.stored_energy_j[index],
+                    pumped_energy_j: step.pumped_energy_j[index],
+                    radiative_decay_energy_j: step.emitted_energy_j[index],
+                    nonradiative_heat_j: step.nonradiative_heat_j[index],
+                    // Local physical closure is checked below, including the
+                    // independently retained incoming recycled photon energy.
+                    residual_j: 0.0,
+                },
+                None => self
+                    .source
+                    .decay_at_temperature(thermal.temperature_k(cell.thermal_cell)?)?
+                    .advance(cell.stored_j, pump.value()?, duration_s)
+                    .map_err(|_| invalid("luminescence reservoir advance refused"))?,
+            };
             let prompt = prompt.value()?;
             let (emitted, relaxation) = partition(&self.source, step.radiative_decay_energy_j)?;
             let mut heat = CheckedSum::default();
@@ -647,13 +689,20 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             ] {
                 balance.add(value)?;
             }
+            if let Some(step) = &recycled {
+                balance.add(step.reabsorbed_energy_j[index])?;
+                accounts.recycled.add(step.reabsorbed_energy_j[index])?;
+            }
             let mut mean = [0.0; M];
             for bin in 0..M {
                 accounts.emitted[bin].add(emitted[bin])?;
                 balance.add(-emitted[bin])?;
                 mean[bin] = finite(emitted[bin] / duration_s)?;
             }
-            if let Some(environment) = &self.emission_transport {
+            if recycled.is_some() {
+                // All resolved absorption already entered the coupled stores.
+                // External escape/tail totals are reduced once after this loop.
+            } else if let Some(environment) = &self.emission_transport {
                 let routed = environment.route(
                     cell.grid_cell,
                     emitted,
@@ -678,6 +727,11 @@ impl<const N: usize, const M: usize> DepositionObserver for LuminescentOpticalHe
             accounts.relaxation.add(relaxation)?;
             stored_j.push(step.stored_energy_j);
             mean_cell_emission_w.push((cell.grid_cell, mean));
+        }
+        if let Some(step) = &recycled {
+            // Recycling is admitted only by the single-line constructor.
+            accounts.escaped[0].add(step.escaped_energy_j)?;
+            accounts.unresolved[0].add(step.unresolved_energy_j)?;
         }
         if let Some(environment) = &self.emission_transport {
             let mut unresolved = CheckedSum::default();
@@ -789,6 +843,7 @@ impl<const N: usize, const M: usize> Accounts<N, M> {
             nonradiative_heat_j: self.dark.value()?,
             relaxation_heat_j: self.relaxation.value()?,
             secondary_absorption_heat_j: self.secondary.value()?,
+            recycled_excitation_j: self.recycled.value()?,
             stored_excitation_j: stored_j,
             residual_j: 0.0,
             absolute_roundoff_j: self.roundoff.value()?,

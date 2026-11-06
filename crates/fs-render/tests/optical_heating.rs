@@ -1,5 +1,8 @@
 //! Incident optical absorption reaches the original conservative enthalpy cells.
 
+#[path = "optical_heating/luminescence_recycling.rs"]
+mod luminescence_recycling;
+
 #[path = "optical_heating/luminescence_absorption.rs"]
 mod luminescence_absorption;
 
