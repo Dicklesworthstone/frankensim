@@ -8,6 +8,9 @@ use fs_lbm::sgs3::dynamic::{DynamicSgsError, PeriodicDynamicSgs};
 #[path = "dynamic/channel_tests.rs"]
 mod channel;
 
+#[path = "dynamic/lagrangian_tests.rs"]
+mod lagrangian;
+
 fn config(averaging: DynamicAveraging) -> DynamicSubgridConfig {
     DynamicSubgridConfig {
         model: DynamicSgsConfig {

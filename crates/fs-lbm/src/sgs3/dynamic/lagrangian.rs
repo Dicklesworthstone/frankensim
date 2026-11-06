@@ -96,6 +96,13 @@ impl LagrangianSgsTrial<'_> {
         self.owner.flow.viscosities()
     }
 
+    /// Nonnegative fitted C_s squared, independently of centered cell strain.
+    /// Conservative face consumers must combine it with their own face strain.
+    /// This iterator is available only on a fully admitted history trial.
+    pub fn coefficients_squared(&self) -> impl ExactSizeIterator<Item = f64> + '_ {
+        self.owner.flow.coefficients_squared()
+    }
+
     pub const fn report(&self) -> DynamicSgsReport {
         self.report
     }
@@ -159,6 +166,11 @@ impl LagrangianDynamicSgs {
 
     pub const fn shape(&self) -> [usize; 3] {
         self.flow.shape()
+    }
+
+    /// Physical grid-filter width used by the Germano model.
+    pub const fn filter_width(&self) -> f64 {
+        self.flow.filter_width()
     }
 
     /// Time of the last committed fit, not the consuming solver's endpoint.

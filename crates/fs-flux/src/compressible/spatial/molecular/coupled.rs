@@ -165,6 +165,77 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         self.molecular.dynamic_subgrid_config()
     }
 
+    /// Minimum additional numerical payload for Lagrangian SGS: 208 bytes/cell.
+    /// Includes both history banks, physical-field staging and held coefficients;
+    /// excludes the original flow/molecular workspaces and allocator metadata.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn required_lagrangian_dynamic_sgs_workspace_bytes(
+        flow: &Euler3d,
+    ) -> Result<usize, MolecularError> {
+        sgs::SubgridTransport::required_lagrangian_bytes(flow)
+    }
+
+    /// Add periodic Lagrangian Favre--Germano stress and fixed-Prandtl heat.
+    ///
+    /// One fit samples the accepted physical START state and is held through
+    /// both molecular halves, all SSP/RKL stages and every coupling retry. The
+    /// fit uses physical seconds, and its history commits only when the whole
+    /// step accepts. Rejected steps cannot age or replace accepted memory.
+    /// Face density/strain and all transport stability/ratio checks remain
+    /// stage-local. The held coefficient and pathline update are first order
+    /// in time, including when the underlying flow integrator is second order.
+    ///
+    /// The budget covers all additional SGS Vec capacities. No filter/history
+    /// allocation occurs during stepping. This constructor starts a fresh
+    /// history on the supplied trajectory; it does not import earlier memory.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_lagrangian_dynamic_sgs(
+        flow: Euler3d,
+        law: L,
+        config: sgs::LagrangianSubgridConfig,
+        maximum_subgrid_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MolecularError> {
+        poll(&mut cancelled)?;
+        let sgs =
+            sgs::SubgridTransport::new_lagrangian(&flow, config, maximum_subgrid_workspace_bytes)?;
+        poll(&mut cancelled)?;
+        let mut result = Self::new(flow, law, &mut cancelled)?;
+        result.molecular.sgs = Some(sgs);
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Exact Lagrangian controls; other closure choices return None.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_dynamic_subgrid_config(&self) -> Option<sgs::LagrangianSubgridConfig> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_config)
+    }
+
+    /// Last committed history SAMPLE time, at the start of the accepted step.
+    /// This is not the flow endpoint. None before the first successful step or
+    /// when the selected closure does not use Lagrangian history.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_subgrid_sample_time(&self) -> Option<Time> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_sample_time)
+    }
+
+    /// Last committed start-state fit. Cell-viscosity diagnostics describe that
+    /// sample; actual face viscosities and bounds use each stage's face strain.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn lagrangian_subgrid_report(&self) -> Option<sgs::DynamicSgsReport> {
+        self.molecular
+            .sgs
+            .as_ref()
+            .and_then(sgs::SubgridTransport::lagrangian_report)
+    }
+
     /// Fit momentum and temperature transport independently through both
     /// molecular halves of the existing atomic conservative composition.
     /// The byte budget covers additional SGS arrays, excluding original flow
@@ -392,11 +463,44 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     ///
     /// Includes held wall and enabled reservoir traction; imposed body-force
     /// curl remains excluded. No accepted state, clock or step load is changed.
+    /// A Lagrangian closure evaluates an uncommitted sample at this endpoint:
+    /// observations neither age accepted history nor replace its public report.
     pub fn vorticity<'a>(
         &mut self,
         work: &'a mut StressVorticityWorkspace3d,
-        cancelled: impl FnMut() -> bool,
+        mut cancelled: impl FnMut() -> bool,
     ) -> Result<&'a [StressVorticityBudget3d], MolecularError> {
+        poll(&mut cancelled)?;
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(mut filter) = self
+            .molecular
+            .sgs
+            .as_mut()
+            .and_then(sgs::SubgridTransport::take_lagrangian_filter)
+        {
+            let result = match self
+                .molecular
+                .sgs
+                .as_mut()
+                .expect("the Lagrangian SGS owner was just selected")
+                .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)
+            {
+                Ok(trial) => {
+                    let observation =
+                        self.molecular
+                            .vorticity(&self.accepted, work, &mut cancelled);
+                    drop(trial);
+                    observation
+                }
+                Err(error) => Err(error),
+            };
+            self.molecular
+                .sgs
+                .as_mut()
+                .expect("an observation retains its original SGS owner")
+                .restore_lagrangian_filter(filter, None);
+            return result;
+        }
         self.molecular.vorticity(&self.accepted, work, cancelled)
     }
 
@@ -722,9 +826,9 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         &mut self,
         maximum_duration: Time,
         controls: MolecularStepControl,
-        mut forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
-        mut stabilization: Option<&mut StepWork>,
-        mut profiles: Option<&mut timed::TimedSource<'_>>,
+        forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
+        stabilization: Option<&mut StepWork>,
+        profiles: Option<&mut timed::TimedSource<'_>>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MolecularStepReport3d, MolecularError> {
         poll(&mut cancelled)?;
@@ -739,6 +843,63 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
                 "coupled molecular duration or controls",
             ));
         }
+        #[cfg(feature = "experimental-sgs")]
+        if let Some(mut filter) = self
+            .molecular
+            .sgs
+            .as_mut()
+            .and_then(sgs::SubgridTransport::take_lagrangian_filter)
+        {
+            // The borrowed history trial outlives every internal split retry.
+            // Detaching only its owner leaves the held face cache usable and
+            // requires no history copy or allocation. No fallible operation
+            // follows acceptance of the complete flow and memory transaction.
+            let result = (|| {
+                let trial = self
+                    .molecular
+                    .sgs
+                    .as_mut()
+                    .expect("the Lagrangian SGS owner was just selected")
+                    .prepare_lagrangian(&mut filter, &self.accepted, &mut cancelled)?;
+                let fit = trial.report();
+                let report = self.step_prepared(
+                    maximum_duration,
+                    controls,
+                    forcing,
+                    stabilization,
+                    profiles,
+                    &mut cancelled,
+                )?;
+                trial.commit();
+                Ok((report, fit))
+            })();
+            let committed_fit = result.as_ref().ok().map(|(_, fit)| *fit);
+            self.molecular
+                .sgs
+                .as_mut()
+                .expect("a coupled step retains its original SGS owner")
+                .restore_lagrangian_filter(filter, committed_fit);
+            return result.map(|(report, _)| report);
+        }
+        self.step_prepared(
+            maximum_duration,
+            controls,
+            forcing,
+            stabilization,
+            profiles,
+            cancelled,
+        )
+    }
+
+    fn step_prepared(
+        &mut self,
+        maximum_duration: Time,
+        controls: MolecularStepControl,
+        mut forcing: Option<(BodyForce3d<'_>, ForceControl3d, &mut ForcingWorkspace3d)>,
+        mut stabilization: Option<&mut StepWork>,
+        mut profiles: Option<&mut timed::TimedSource<'_>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MolecularStepReport3d, MolecularError> {
         if let Some(work) = stabilization.as_deref() {
             work.controls.controller(controls.molecular)?;
             self.molecular

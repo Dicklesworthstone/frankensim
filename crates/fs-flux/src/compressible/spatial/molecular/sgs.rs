@@ -10,6 +10,10 @@
 //! evaluate `mu_t = rho_face C_s_face^2 Delta^2 |S_face|` on this same face
 //! tensor. Density and the nonnegative coefficient are interpolated separately;
 //! a zero centered strain therefore cannot erase a resolved face shear.
+//! The opt-in Lagrangian fit samples each accepted physical step's start state,
+//! holds its coefficient through the complete split, and commits its history
+//! only with that step. Its pathline/coefficient time integration is first order;
+//! internal SSP/RKL stages and coupling retries never age the memory.
 //! Face stress adds `mu_t = rho nu_t` only to the
 //! deviatoric viscosity; bulk viscosity remains the original molecular law.
 //! Gradient-diffusion heat adds `k_t = mu_t cp(T)/Pr_t`, using the original
@@ -37,8 +41,11 @@ pub use wall::EquilibriumWallConfig;
 
 mod dynamic;
 pub use dynamic::DynamicSubgridConfig;
+mod lagrangian;
+pub use fs_lbm::sgs3::dynamic::lagrangian::LagrangianSgsConfig;
 pub use fs_lbm::sgs3::dynamic::scalar::DynamicScalarConfig;
 pub use fs_lbm::sgs3::dynamic::{DynamicAveraging, DynamicSgsConfig, DynamicSgsReport};
+pub use lagrangian::LagrangianSubgridConfig;
 mod thermal;
 pub use thermal::DynamicThermalSubgridConfig;
 mod channel;
@@ -122,6 +129,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
         self.sgs.as_ref().and_then(|s| match &s.closure {
             SubgridClosure::Local { config, .. } => Some(*config),
             SubgridClosure::Dynamic(_)
+            | SubgridClosure::Lagrangian(_)
             | SubgridClosure::DynamicThermal(_)
             | SubgridClosure::ChannelDynamicThermal(_) => None,
         })
@@ -143,6 +151,7 @@ enum SubgridClosure {
         filter_width: f64,
     },
     Dynamic(dynamic::DynamicTransport),
+    Lagrangian(lagrangian::LagrangianTransport),
     DynamicThermal(thermal::DynamicThermalTransport),
     ChannelDynamicThermal(channel::ChannelDynamicThermalTransport),
 }
@@ -182,12 +191,16 @@ impl SubgridTransport {
             SubgridClosure::Dynamic(dynamic) => {
                 dynamic.prepare(primitive, &mut self.dynamic_coefficient_squared, cancelled)
             }
+            SubgridClosure::Lagrangian(dynamic) => dynamic.admit_prepared_step(),
             SubgridClosure::DynamicThermal(dynamic) => {
                 dynamic.prepare(primitive, &mut self.dynamic_coefficient_squared, cancelled)
             }
-            SubgridClosure::ChannelDynamicThermal(dynamic) => {
-                dynamic.prepare(primitive, walls, &mut self.dynamic_coefficient_squared, cancelled)
-            }
+            SubgridClosure::ChannelDynamicThermal(dynamic) => dynamic.prepare(
+                primitive,
+                walls,
+                &mut self.dynamic_coefficient_squared,
+                cancelled,
+            ),
         }
     }
 
@@ -239,6 +252,7 @@ impl SubgridTransport {
                 let width = match &self.closure {
                     SubgridClosure::Local { filter_width, .. } => *filter_width,
                     SubgridClosure::Dynamic(dynamic) => dynamic.filter_width(),
+                    SubgridClosure::Lagrangian(dynamic) => dynamic.filter_width(),
                     SubgridClosure::DynamicThermal(dynamic) => dynamic.filter_width(),
                     SubgridClosure::ChannelDynamicThermal(dynamic) => dynamic.filter_width(),
                 };
@@ -266,6 +280,10 @@ impl SubgridTransport {
                 (config.turbulent_prandtl, config.maximum_eddy_to_molecular)
             }
             SubgridClosure::Dynamic(dynamic) => (
+                dynamic.config.turbulent_prandtl,
+                dynamic.config.model.maximum_eddy_to_molecular,
+            ),
+            SubgridClosure::Lagrangian(dynamic) => (
                 dynamic.config.turbulent_prandtl,
                 dynamic.config.model.maximum_eddy_to_molecular,
             ),

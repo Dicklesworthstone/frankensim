@@ -7222,3 +7222,29 @@ asymptote, turbulent cascade or transition validation. The native SGS
 regressions distinguish equal-strain gradients with different rotation, check
 the actual planar wall limits, and extend mixed-traction BDF1/BDF2 endpoint
 and disabled-closure comparisons across all three models.
+
+### Physical-time Lagrangian dynamic gas SGS
+
+The experimental periodic molecular/Euler composition now accepts a caller-authored
+Lagrangian Favre--Germano stress model. The shared signed numerator/denominator
+history is sampled from the accepted physical start state, with memory time in
+seconds, and its fitted nonnegative coefficient is held across both molecular
+halves, SSP/RKL stages and whole-split retries. Conservative faces still use their
+actual stage density and face strain, fixed authored turbulent Prandtl heat
+transport, and the existing viscosity-ratio, stability and conservation admission.
+Only a completely accepted interval commits history and its public fit report;
+failed or cancelled intervals preserve the accepted sample, and the next fit uses
+the actual elapsed sample time after any shortened interval. Coupled stress-vorticity
+observations evaluate an uncommitted endpoint trial and restore the same accepted
+history/report on success or failure.
+
+The additional numerical payload is 208 bytes/cell (including both history banks,
+physical-field staging and held coefficients), with prepared storage reused during
+stepping. This is first-order pathline/coefficient time integration on a fully
+periodic Cartesian grid with at least three cells per axis. It does not supply
+wall/inflow memory, dynamic scalar history, backscatter energy, isotropic SGS
+energy, shock closure, adaptive memory calibration, or benchmark validation.
+
+Validation in this change is limited to rustfmt parsing/formatting and focused
+source review; the added Rust regressions have not been compiled or executed in
+this environment.
