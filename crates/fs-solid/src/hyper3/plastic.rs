@@ -40,6 +40,8 @@ use crate::linear3::TetAssemblyBudget;
 pub mod dynamics;
 /// Fully integrated finite Hex8 plasticity with optional mean dilatation.
 pub mod hex;
+/// Retained pressure-sensitive finite compaction on the same tetrahedral owner.
+pub mod porous;
 /// Retained finite plastic history with evolving thermal coefficients and stretch.
 pub mod thermal;
 
@@ -134,17 +136,17 @@ pub struct FinitePlasticTetSolid<'a, L: FiniteJ2Material = FiniteJ2> {
     state: FinitePlasticTetState<'a>,
 }
 
-/// Numerical history shared by fixed-temperature and thermal material owners.
+/// Numerical history shared by fixed-temperature, porous and thermal owners.
 /// No constitutive source is stored or reinterpreted by this common kernel.
 #[derive(Debug)]
-struct FinitePlasticTetState<'a> {
+struct FinitePlasticTetState<'a, S = FiniteJ2State> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
     elements: Arc<Vec<Element>>,
     budget: TetAssemblyBudget,
     displacement_m: Vec<[f64; 3]>,
     element_deformation: Vec<[f64; 9]>,
-    element_states: Vec<FiniteJ2State>,
+    element_states: Vec<S>,
     element_first_piola_pa: Vec<[f64; 9]>,
     stored_energy_j: f64,
 }
@@ -219,7 +221,9 @@ impl<'a> FinitePlasticTetState<'a> {
         checkpoint(cx)?;
         Ok(Arc::new(elements))
     }
+}
 
+impl<S> FinitePlasticTetState<'_, S> {
     #[allow(clippy::too_many_arguments)]
     fn solve_endpoint<L: FiniteStrainPotential>(
         &self,

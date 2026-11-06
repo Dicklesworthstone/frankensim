@@ -8783,8 +8783,9 @@ It compresses to stretch 0.8 in all directions, unloads to retain permanent
 volume loss, and reloads elastically. Independent hydrostatic formulas check
 deformation, Piola/Cauchy stress, current/plastic volume, storage and physical
 heat. This uses the original geometry, constitutive adapter and nonlinear
-solver. It does not provide automatic retained-body stepping, contact,
-remeshing, finite-porosity densification or a locking-free mixed element.
+solver. Retained body stepping is supplied by `FinitePorousTetSolid` below;
+the adapter adds no contact, remeshing, finite-porosity densification or
+locking-free mixed element.
 
 ## Elastic prehistory and source-bound brittle initialization
 
@@ -9052,3 +9053,30 @@ successfully with rustfmt. Independent arithmetic checks compared clipped
 moments with divided differences and checked discrete work/reversal. Native
 Cargo compilation and regression execution remain outstanding: DSR/RCH are
 unavailable and the shared filesystem is full.
+
+## Retained finite porous solids
+
+`hyper3::plastic::porous::FinitePorousTetSolid` retains original per-element
+`FinitePorous` laws, non-isochoric plastic metrics, accumulated work-conjugate
+flow, configuration and Piola stress. Virgin reference preparation and every
+absolute load/support endpoint reuse the existing tetrahedral geometry,
+Newton, line search and prepared-element storage. Both porous and J2 owners
+use the same mechanical endpoint/work implementation; neither infers plastic
+volume from total volume nor normalizes the porous metric to unit determinant.
+
+Every trial borrows the old accepted history. A candidate is published only
+after all material-domain/yield, independent storage/potential, equilibrium
+work and signed endpoint-work-defect gates pass. Rejection or cancellation
+preserves the complete old solid. Original reference volume integrates energy;
+physical `yield_stress * delta_alpha` loss remains separate from hardening
+storage and the signed numerical endpoint defect. Prestressed finite rotations
+can have negative endpoint-work defect without generating plastic heat.
+
+The `hyper_porous_retained` regressions specify force-driven compression,
+permanent volume loss on unloading, elastic reload against independent
+hydrostatic formulas, heterogeneous pressure sensitivity, rigid-motion
+covariance, physical work closure, refused-step retry and cancellation.
+This is bounded fixed-temperature, rate-independent associated porous
+plasticity on displacement P1 tetrahedra. It does not infer evolving porosity,
+cell-wall densification, asymmetric yield, damage, contact, pore-fluid pressure,
+thermal coupling, inertia, locking-free accuracy or experimental calibration.
