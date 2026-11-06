@@ -1706,14 +1706,18 @@ native plastic loading path with deliberately synthetic CMB parameters.
 
 ## Critical-plane strain-life at original plastic shell material points
 
-`plastic_shell::fatigue::ShellFatiguePath` binds a native source-resolved J2
-CST/DKT shell to finite-plane variable-amplitude strain-life gauges. A gauge
+`plastic_shell::fatigue::ShellFatiguePath<L>` binds a native source-resolved
+CST/DKT shell to finite-plane variable-amplitude strain-life gauges. The default
+law is `ResolvedJ2Plasticity`; original Voce and one-through-eight-branch
+Chaboche laws retain their complete native states through the same owner. A gauge
 names an original element, one of its three surface quadrature points, and one
 original layer/thickness quadrature point. Plane normals are fixed in that
 facet's material frame. The complete accepted plane-stress strain, including
 transverse contraction and signed plastic strain, is retained. Stress recovery
 applies the original elastic map to accepted elastic strain; it performs no
-return mapping or extra constitutive update. Membrane force and bending moment
+return mapping or extra constitutive update, and does not subtract backstress
+from physical fatigue stress. Native history admission checks every retained
+branch at the observed material point. Membrane force and bending moment
 resultants never replace the local tensor histories.
 
 The existing critical-plane Miner owner counts each declared plane throughout
@@ -1736,6 +1740,15 @@ source, solver, late-gauge and cancellation failures preserve the accepted step.
 `preview_finish` evaluates a prefix without consuming it, while `finish`
 requires completion of the declared path. Fixed source conditions, small
 strain/rotation and native shell/reduction limits remain authoritative.
+
+Three nonlinear regressions in `tests/plastic_shell_fatigue/cyclic.rs` exercise
+borrowed Voce and one/two/eight-branch Chaboche sources against native exact
+free-sided axial histories, including each tensor backstress and Morrow/SWT
+damage. Original backward-Euler motion, physical energy, prefix continuation
+and late-gauge rollback retain the full nonlinear history. Changing a branch
+source refuses even when material labels, modulus and temperature match.
+These synthetic comparisons establish implementation references, not measured
+cyclic calibration or service-life qualification.
 
 ## Fatigue at fixed material points in spatial rods
 

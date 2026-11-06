@@ -7,7 +7,10 @@
 //! no return map or additional material update. Normals use the fixed local
 //! facet frame, not global coordinates or a thickness-averaged resultant.
 //!
-//! The native source-bound J2 law and its external conditions remain fixed.
+//! Source-bound J2, Voce and finite-branch Chaboche laws retain their original
+//! accepted histories, including every backstress branch. Backstress translates
+//! the yield surface; it is not subtracted from the physical fatigue stress.
+//! The material law and its external conditions remain fixed.
 //! Thermal eigenstrain, changing-temperature calibration and time-dependent
 //! constitutive laws are outside this adapter. A finite plane bank uses the
 //! existing bounded rainflow/Miner owner and explicit uncorrected, Morrow or
@@ -19,13 +22,12 @@ use std::sync::Arc;
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
-use fs_material::SmallStrainLaw;
 use fs_material::fatigue::critical_plane::TensorFatigueSample;
 use fs_material::fatigue::critical_plane::miner::{
     CriticalPlaneMiner, CriticalPlaneMinerError, CriticalPlaneMinerLimits, CriticalPlaneMinerResult,
 };
+use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
 use fs_material::fatigue::strain_life::{StrainLifeCurve, StrainLifeMeanStress, StrainLifeSummary};
-use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
 use fs_material::state_point::{ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY};
 use fs_qty::semantic::{QuantityKind, ValueForm};
@@ -112,10 +114,10 @@ struct GaugeState {
 /// callers must resolve physical reversals with those targets. A failed native
 /// solve or any later gauge refusal leaves the entire accepted step unchanged.
 #[derive(Clone)]
-pub struct ShellFatiguePath<'p, 'm> {
-    problem: &'p SmallStrainShellProblem<'m, ResolvedJ2Plasticity>,
+pub struct ShellFatiguePath<'p, 'm, L: SourceBoundFatigueLaw = ResolvedJ2Plasticity> {
+    problem: &'p SmallStrainShellProblem<'m, L>,
     elements: Arc<Vec<Element>>,
-    solution: SmallStrainShellSolution<J2State>,
+    solution: SmallStrainShellSolution<L::State>,
     velocity: Vec<[f64; 6]>,
     gauges: Vec<GaugeState>,
     samples: Vec<TensorFatigueSample>,
@@ -124,7 +126,7 @@ pub struct ShellFatiguePath<'p, 'm> {
     elapsed_time_s: f64,
     finished: bool,
 }
-impl core::fmt::Debug for ShellFatiguePath<'_, '_> {
+impl<L: SourceBoundFatigueLaw> core::fmt::Debug for ShellFatiguePath<'_, '_, L> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ShellFatiguePath")
             .field("accepted_increments", &self.accepted_increments)
@@ -135,12 +137,12 @@ impl core::fmt::Debug for ShellFatiguePath<'_, '_> {
     }
 }
 
-impl<'p, 'm> ShellFatiguePath<'p, 'm> {
+impl<'p, 'm, L: SourceBoundFatigueLaw> ShellFatiguePath<'p, 'm, L> {
     /// Observe the native virgin zero-load solution once, before the declared
     /// path. The shell retains its original material sources throughout; no
     /// external tensor history or unverified preload is imported.
     pub fn new(
-        problem: &'p SmallStrainShellProblem<'m, ResolvedJ2Plasticity>,
+        problem: &'p SmallStrainShellProblem<'m, L>,
         gauges: Vec<ShellFatigueGauge>,
         config: ShellFatigueConfig,
         cx: &Cx<'_>,
@@ -218,7 +220,7 @@ impl<'p, 'm> ShellFatiguePath<'p, 'm> {
         })
     }
 
-    pub fn solution(&self) -> &SmallStrainShellSolution<J2State> {
+    pub fn solution(&self) -> &SmallStrainShellSolution<L::State> {
         &self.solution
     }
     pub fn velocity(&self) -> &[[f64; 6]] {
@@ -249,7 +251,7 @@ impl<'p, 'm> ShellFatiguePath<'p, 'm> {
     }
     pub fn material_source(&self, gauge: usize) -> Option<&ResolvedMaterialStatePoint> {
         let gauge = self.gauges.get(gauge)?;
-        Some(point_law(self.problem, gauge).material())
+        Some(point_law(self.problem, gauge).fatigue_source())
     }
     /// Closed-cycle damage accumulated so far, before unresolved endpoint halves.
     pub fn plane_summaries(&self, gauge: usize) -> Option<Vec<StrainLifeSummary>> {
@@ -428,12 +430,12 @@ fn gauge_error(gauge: usize, error: CriticalPlaneMinerError) -> ShellFatigueErro
     }
 }
 
-fn endpoint<'a>(
-    problem: &'a SmallStrainShellProblem<'_, ResolvedJ2Plasticity>,
+fn endpoint<'a, L: SourceBoundFatigueLaw>(
+    problem: &'a SmallStrainShellProblem<'_, L>,
     prescribed: &'a [(usize, f64)],
     nodal_loads: &'a [(usize, f64)],
     load_path: &'a [f64],
-) -> SmallStrainShellProblem<'a, ResolvedJ2Plasticity> {
+) -> SmallStrainShellProblem<'a, L> {
     SmallStrainShellProblem {
         mesh: problem.mesh,
         sections: match &problem.sections {
@@ -456,17 +458,17 @@ fn endpoint<'a>(
     }
 }
 
-fn point_law<'a>(
-    problem: &'a SmallStrainShellProblem<'_, ResolvedJ2Plasticity>,
+fn point_law<'a, L: SourceBoundFatigueLaw>(
+    problem: &'a SmallStrainShellProblem<'_, L>,
     gauge: &GaugeState,
-) -> &'a ResolvedJ2Plasticity {
+) -> &'a L {
     let section = problem.sections.at(gauge.element);
     &section.layers()[section.points()[gauge.thickness_point].layer].law
 }
 
-fn observe(
-    problem: &SmallStrainShellProblem<'_, ResolvedJ2Plasticity>,
-    solution: &SmallStrainShellSolution<J2State>,
+fn observe<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainShellProblem<'_, L>,
+    solution: &SmallStrainShellSolution<L::State>,
     gauges: &mut [GaugeState],
     cx: &Cx<'_>,
 ) -> Result<Vec<TensorFatigueSample>, ShellFatigueError> {
@@ -475,14 +477,11 @@ fn observe(
         poll(cx)?;
         let point = &solution.section_states[3 * gauge.element + gauge.surface_point].points
             [gauge.thickness_point];
-        let elastic = core::array::from_fn(|c| point.strain[c] - point.history.plastic_strain[c]);
-        let sample = TensorFatigueSample {
-            stress_pa: point_law(problem, gauge)
-                .law()
-                .elastic
-                .stress(&elastic, &()),
-            total_mechanical_strain: point.strain,
-        };
+        let sample = point_law(problem, gauge)
+            .accepted_fatigue_sample(&point.strain, &point.history)
+            .map_err(|error| SmallStrainTetError::InvalidInput {
+                what: format!("shell fatigue gauge {index} accepted history: {error}"),
+            })?;
         gauge
             .counter
             .push_with_cancel(sample, &mut || cx.checkpoint().is_err())
@@ -492,8 +491,8 @@ fn observe(
     Ok(samples)
 }
 
-fn bind_curve(
-    problem: &SmallStrainShellProblem<'_, ResolvedJ2Plasticity>,
+fn bind_curve<L: SourceBoundFatigueLaw>(
+    problem: &SmallStrainShellProblem<'_, L>,
     index: usize,
     gauge: &ShellFatigueGauge,
 ) -> Result<(), ShellFatigueError> {
@@ -510,7 +509,7 @@ fn bind_curve(
             "gauge is outside the original shell thickness quadrature",
         ))?;
     let law = &section.layers()[point.layer].law;
-    let material = law.material();
+    let material = law.fatigue_source();
     let scope = gauge.curve.scope();
     let mismatch = |what| ShellFatigueError::SourceMismatch { gauge: index, what };
     if gauge.material_state_identity != material.identity()
@@ -537,7 +536,7 @@ fn bind_curve(
         });
     if !absolute_temperature
         || material.state_coordinate(axis) != Some(scope.temperature_k)
-        || gauge.curve.parameters().youngs_modulus_pa != law.law().elastic.youngs
+        || gauge.curve.parameters().youngs_modulus_pa != law.fatigue_backbone().elastic.youngs
     {
         return Err(mismatch(
             "CMB absolute temperature/modulus differs from the frozen shell law",

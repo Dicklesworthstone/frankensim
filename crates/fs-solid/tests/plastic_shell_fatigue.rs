@@ -12,6 +12,7 @@ use fs_matdb::{
     PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_material::fatigue::critical_plane::miner::CriticalPlaneMinerLimits;
+use fs_material::fatigue::cyclic::SourceBoundFatigueLaw;
 use fs_material::fatigue::strain_life::source::{
     CmbPowerBasis, CmbProperty, CmbSourceRequest, resolve_cmb,
 };
@@ -86,6 +87,13 @@ fn request() -> CmbSourceRequest {
     }
 }
 fn card(revision: u32, quantity: QuantitySpec) -> MaterialCard {
+    card_with_properties(revision, quantity, &[])
+}
+fn card_with_properties(
+    revision: u32,
+    quantity: QuantitySpec,
+    additional: &[(&str, Dims, f64)],
+) -> MaterialCard {
     let thermal = ValidityDomain::unconstrained().with_quantity("T", quantity, 300.0, 300.0);
     let mut claims = ClaimSet::new();
     let request = request();
@@ -139,7 +147,10 @@ fn card(revision: u32, quantity: QuantitySpec) -> MaterialCard {
         ("yield_stress", Pressure::DIMS, 1.0),
         ("isotropic_hardening_modulus", Pressure::DIMS, 20.0),
         ("kinematic_hardening_modulus", Pressure::DIMS, 80.0),
-    ] {
+    ]
+    .into_iter()
+    .chain(additional.iter().copied())
+    {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
@@ -228,7 +239,7 @@ fn curve(minimum_cycles: f64) -> Arc<StrainLifeCurve> {
         .unwrap(),
     )
 }
-fn section(law: ResolvedJ2Plasticity) -> LayeredPlaneStressSection<ResolvedJ2Plasticity> {
+fn section<L: SourceBoundFatigueLaw>(law: L) -> LayeredPlaneStressSection<L> {
     LayeredPlaneStressSection::new(
         vec![PlaneStressLayer {
             bottom_z_m: -0.5 * THICKNESS,
@@ -256,13 +267,13 @@ fn mesh() -> ShellMesh {
     )
     .unwrap()
 }
-fn problem<'a>(
+fn problem<'a, L: SourceBoundFatigueLaw>(
     mesh: &'a ShellMesh,
-    section: &'a LayeredPlaneStressSection<ResolvedJ2Plasticity>,
+    section: &'a LayeredPlaneStressSection<L>,
     prescribed: &'a [(usize, f64)],
     loads: &'a [(usize, f64)],
     factors: &'a [f64],
-) -> SmallStrainShellProblem<'a, ResolvedJ2Plasticity> {
+) -> SmallStrainShellProblem<'a, L> {
     SmallStrainShellProblem {
         mesh,
         sections: PlasticShellSections::Uniform(section),
@@ -296,8 +307,8 @@ fn config() -> ShellFatigueConfig {
         maximum_total_projection_work: 4096,
     }
 }
-fn gauge(
-    law: &ResolvedJ2Plasticity,
+fn gauge<L: SourceBoundFatigueLaw>(
+    law: &L,
     point: usize,
     policy: StrainLifeMeanStress,
 ) -> ShellFatigueGauge {
@@ -305,13 +316,16 @@ fn gauge(
         element: 0,
         surface_point: 0,
         thickness_point: point,
-        material_state_identity: law.material().identity(),
+        material_state_identity: law.fatigue_source().identity(),
         curve: curve(0.5),
         mean_stress: policy,
         normals_in_facet_frame: vec![[1.0, 0.0, 0.0]],
         limits: limits(),
     }
 }
+
+#[path = "plastic_shell_fatigue/cyclic.rs"]
+mod cyclic;
 fn membrane_prescribed() -> Vec<(usize, f64)> {
     // epsilon_x is prescribed, but the free y translation supplies the actual
     // uniaxial Poisson/plastic contraction through native shell equilibrium.
