@@ -1213,3 +1213,40 @@ fission facade, then passed all 188 nuclear tests, including concurrent
 uniform-production additions. The merged numerical owner separately passed all
 50 tests. Full workspace Cargo, large-scale transport performance and evaluated
 reactor benchmarks were not established by these focused source builds.
+
+## Evaluated radioactive-decay records
+
+`endf::decay::DecayEvaluation::parse` imports one explicit MAT and
+nuclide/isomer from caller-supplied ENDF-6 MF8/MT457 text, using the original
+bounded ENDF scanner. NST distinguishes explicit stability from a finite
+half-life. Radioactive half-lives enter the shared `DecayLawV1`, retaining
+the supplied seconds. The format follows
+[ENDF-102 (2023), §§8.4–8.4.2](https://www.nndc.bnl.gov/endfdocs/ENDF-102-2023.pdf).
+
+NC3/NC17 mean emitted energies, their uncertainties, mode RTYP/RFS/Q and
+branching probabilities are retained in SI. The unknown-energy sentinel
+becomes `None`. Detailed components in the seventeen-entry form overlap
+the first three aggregate categories; they are not additional heat.
+Parent-wide means do not supply branch-conditional spectra. Q values and
+emitted energies imply no local deposition. Source uncertainties remain
+data, not certified intervals or assumed distributions.
+
+Raw branching probabilities and their compensated sum are never normalized;
+physical assembly must still admit complete branch closure and daughter data.
+The caller's source label and MF8 identity are retained declarations, with no
+claim of independently verified MF1 library provenance or an isotope catalogue.
+
+Discrete, continuum and covariance records are traversed by their LIST/TAB1
+counts through SEND without allocating spectral arrays or interpreting their
+radiation transport. Input bytes, all scanned records and retained modes have
+explicit ceilings checked before data-dependent allocation. Energy storage is
+bounded by seventeen pairs; checkpoints preserve the caller's original error.
+
+Seven regressions cover the pinned published ENDF/B-VIII.0 tritium/helium-3
+files, unknown NC17 components, spectral/covariance traversal, malformed
+identity/count/padding/SEND, exact resource and cancellation limits, and
+unrepresentable input. The default-feature actual-root native nuclear gate
+passed all 126 tests. The fixture source and exact original Git blobs are
+recorded in `tests/data/endf_b_viii_0/README.md`. These checks establish
+import interoperability and numerical behavior, not empirical nuclear-data
+validation.

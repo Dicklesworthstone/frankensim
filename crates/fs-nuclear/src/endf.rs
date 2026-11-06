@@ -20,6 +20,9 @@ use std::sync::Arc;
 /// Explicit incident spectra and reaction-rate-preserving group collapse.
 pub mod spectrum;
 
+/// Evaluated half-lives, decay modes and aggregate emitted energies.
+pub mod decay;
+
 use crate::cross_sections::{
     CrossSectionData, CrossSectionLimits, CrossSectionTable, NeutronReaction,
 };
