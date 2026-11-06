@@ -3,23 +3,24 @@
   "family": "xylophone",
   "title": "Xylophone",
   "reference_instrument": "Iowa MIS xylophone (model NA; bar material not stated). Ab4 and Eb5 are compared with its hard-rubber files, Db5 with its rosewood file",
-  "summary": "Three solid padouk bars, Ab4, Db5 and Eb5, with no resonator and no neighbouring bars, so each note is cleaner and has less early first partial than a real one. Their undercuts are solved, not printed, and Iowa's bars aren't known to be padouk. Each is Bar No. 5 of Chaigne and Doutaut 1997, with the undercut solved in the engine so the first partial sits at equal temperament and f2 = 3 f1. Eb5's is a narrow groove that we don't know a maker would cut, and it isn't converged in mesh. Ab4 and Eb5 take the paper's hard rubber mallet and Db5 its boxwood, at printed speeds, struck at the mesh point nearest the printed spot. We read the wood's loss from the paper's Fig. 4, 4.22 times its Table I, and we can't say why they differ. B5 and G6 are recordings only.",
+  "summary": "Three solid padouk bars, Ab4, Db5 and Eb5, with no resonator and no neighbouring bars, so each note is cleaner and has less early first partial than a real one. Their undercuts are solved, not printed, and Iowa's bars aren't known to be padouk. Each is Bar No. 5 of Chaigne and Doutaut 1997, with the undercut solved in the engine so the first partial sits at equal temperament and f2 = 3 f1. Eb5's is a narrow groove that we don't know a maker would cut, and it isn't shown converged in mesh. Ab4 and Eb5 take the paper's hard rubber mallet and Db5 its boxwood, at printed speeds, struck at the mesh point nearest the printed spot. We read the wood's loss from the paper's Fig. 4, 4.22 times its Table I, and we can't say why they differ. B5 and G6 are recordings only.",
   "physics_present": [
     "A three-dimensional bar with the outline of Bar No. 5 of Chaigne and Doutaut 1997 (JASA 101, Table I): padouk, 29.3 x 3.7 x 1.9 cm, with their modulus and density. The other elastic ratios are Honduras mahogany's, a stand-in (USDA Wood Handbook)",
     "A circular-arc undercut solved in the engine for each note, so the first partial sits at equal temperament and f2 = 3 f1. The 1:3 target is xylophone tuning practice in print, not taken from the recording",
     "A Hertz mallet from the same paper's Table I: hard rubber at 1.0 m/s on Ab4 and Eb5, boxwood at 0.474 m/s on Db5",
     "The wood's loss: the card keeps Table I's gamma_B and takes eta 3.86e-7 s (read error +-0.03e-7), which we read from their Fig. 4, alpha = 6.11 + 7.62e-6 f^2. No constant was fitted to the recording",
-    "Burton-Miller boundary-element radiation to 7.5 kHz on a 56 x 6 x 3 bar mesh, and Db5 on 56 x 8 x 4"
+    "Burton-Miller boundary-element radiation to 7.5 kHz on a 56 x 8 x 4 bar mesh, and Eb5 on 112 x 6 x 5"
   ],
   "physics_missing": [
     "A resonator: no box is in any render. In our model a box takes Ab4's first partial from -56.7 dB/s to about -142 at half the patch and -460 to -516 at the card's own rule, where Part II of the same paper says a tube has no appreciable effect on a wooden bar. So it's left out, which costs the 22 to 28 dB of early first partial a resonator gives, measured on Ab4 with an earlier mallet. We think the reason is that in this model the bar is a wall of the cavity and feels its full pressure; that hasn't been tested on its own",
-    "Neighbouring bars. Iowa recorded its bars in an anechoic chamber, so the recordings have no room either. Harmonics-to-noise reads 63.9, 71.4 and 74.7 dB on Ab4, Db5 and Eb5, against 54.5, 52.6 and 57.9 dB in the recordings",
-    "A printed undercut: the printed bar is tuned about 1:4 at 397 Hz, and no cut for these notes is printed. Eb5's solved groove is 32 mm wide and 6.1 mm deep, against 145 mm and 5.6 mm on Db5, and we don't know that a maker would cut it",
-    "Mesh convergence on Eb5: at 112 x 6 x 4 its first partial falls 5.9 c, so the posted cut isn't converged",
+    "Neighbouring bars. Iowa recorded its bars in an anechoic chamber, so the recordings have no room either. Harmonics-to-noise reads 63.8, 71.2 and 74.5 dB on Ab4, Db5 and Eb5, against 54.5, 52.6 and 57.9 dB in the recordings",
+    "A printed undercut: the printed bar is tuned about 1:4 at 397 Hz, and no cut for these notes is printed. Eb5's solved groove is 30.7 mm wide and 6.1 mm deep, against 144.4 mm and 5.6 mm on Db5, and we don't know that a maker would cut it",
+    "Mesh convergence on Eb5: the old cut's first partial fell 5.9 c at 112 x 6 x 4 and 7.83 c at 112 x 6 x 5, so the posted cut, solved on 112 x 6 x 5, isn't shown converged",
+    "The first millisecond isn't settled in mesh: it is the contact force passing through the receiver, and a finer mesh moved it by up to 3 dB while everything after it moved under 0.1 dB",
     "Why Fig. 4 and Table I differ: Fig. 4's eta is 4.22 times Table I's 9.16e-8, and they may not be the same bar. We looked at the figure because the upper partials decayed too slowly against the recording, so it was found after the gap was seen. On Ab4 its cost is the first partial going from 2.0 under the recording to 6.7 over",
     "The recorded instrument's wood and bars, and on Db5 its mallet: the recording names rosewood mallets, and the render uses boxwood",
-    "Lines not explained: Ab4's 2424.8 Hz line is 21 dB too strong and 6 % low against the recording's 2580 Hz. Db5's recording has a line at 3545 Hz with nothing to match it here",
-    "Eb5's pitch and cepstral envelope stay outside the ruler. Db5's pitch passes by .04 c, against a ruler whose widest take is a roll read on one tooth of its comb. Eb5's attack is 3.2 ms against 18.5 ms",
+    "Lines not explained: Ab4's 2423.8 Hz line is 21 dB too strong and 6 % low against the recording's 2580 Hz. Db5's recording has a line at 3545 Hz with nothing to match it here",
+    "Eb5's pitch and cepstral envelope stay outside the ruler. Db5's pitch passes by .16 c, against a ruler whose widest take is a roll read on one tooth of its comb. Eb5's attack is 3.3 ms against 18.5 ms",
     "Any note beyond these three"
   ],
   "blocked": null,
