@@ -14,6 +14,9 @@
 //! remain unchanged. No inertia, bending, wrinkling, contact, damage or evolving
 //! temperature is inferred by the quasistatic methods.
 
+/// Native inertial intervals with physical relaxation and separate numerical loss.
+pub mod dynamics;
+
 use std::cell::RefCell;
 use std::sync::Arc;
 

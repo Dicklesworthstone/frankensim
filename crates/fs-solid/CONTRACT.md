@@ -1,5 +1,25 @@
 # fs-solid CONTRACT
 
+## Inertial motion of finite-strain viscoelastic membranes
+
+`membrane::visco::dynamics::FiniteViscoMembraneMotion` advances the original
+membrane configuration and every Maxwell branch with one backward-Euler
+physical interval. The same matrix-free Newton equation combines the native
+frozen-history material potential with reference inertia. Explicit lumped or
+consistent P1 mass retains the original per-triangle corner areal density;
+neither deformation nor transverse thickness changes inventory. Consistent
+mass keeps moving-support cross terms without a global dense mass or tangent.
+
+Velocity follows the actual accepted displacement increment. The complete
+candidate reports physical relaxation heat separately from signed material
+endpoint-work error and nonnegative numerical kinetic loss. Their independent
+budgets can refuse a converged step without changing accepted motion or history.
+Current-area pressure retains the existing prescribed-perimeter requirement.
+This is first-order isothermal motion; time refinement remains necessary.
+`tests/visco_membrane_dynamics.rs` covers graded-mass translation/acceleration,
+held-strain relaxation, moving-support inertia, rejection atomicity and a
+three-rung trajectory/kinetic-loss time refinement.
+
 ## Retained finite-strain membrane loading, creep and relaxation
 
 `membrane::visco::FiniteViscoMembrane` binds original per-triangle Maxwell laws
