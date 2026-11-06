@@ -184,10 +184,66 @@ fn the_card_word_is_refused_outside_its_scope() {
     assert!(parse(&with_word).is_ok());
     // Needs the compact per-outlet reaction.
     assert!(parse(&with_word.replace("radiation compact-baffled", "radiation prescribed")).is_err());
-    // The primary row takes no word; unknown or doubled words refuse.
-    assert!(parse(&base.replace("outlets 24 2\n", "outlets 24 2 unflanged\n")).is_err());
+    // Unknown or doubled words refuse, on the additional rows and on the primary one.
     assert!(parse(&base.replace(HOLE_ROWS[0], "outlet 19 -0.1199000 0 flanged\n")).is_err());
     assert!(parse(&base.replace(HOLE_ROWS[0], "outlet 19 -0.1199000 0 unflanged unflanged\n")).is_err());
+    assert!(parse(&base.replace("outlets 24 2\n", "outlets 24 2 flanged\n")).is_err());
+    assert!(parse(&base.replace("outlets 24 2\n", "outlets 24 2 unflanged unflanged\n")).is_err());
+}
+
+const PRIMARY_ROW: &str = "outlets 24 2\n";
+fn unflanged_primary(text: &str) -> String {
+    assert!(text.contains(PRIMARY_ROW), "the recorder a1 primary row changed; update this test");
+    text.replace(PRIMARY_ROW, "outlets 24 2 unflanged\n")
+}
+
+#[test]
+fn the_primary_word_binds_the_bare_open_end_alone_and_needs_the_compact_reaction() {
+    let base = recorder_a1();
+    let plain = parse(&base).unwrap();
+    let option = parse(&unflanged_primary(&base)).unwrap();
+    let flanges = |file: &FlueFilePerformance| file.radiation_bindings().iter()
+        .map(|b| (b.opening().node, b.load().flange())).collect::<Vec<_>>();
+    assert_eq!(flanges(&option), [(24, RadiationFlange::Unflanged), (19, RadiationFlange::Baffled),
+        (21, RadiationFlange::Baffled)]);
+    // Only the primary node's termination changes; sections, chimney lengths and the other nodes stay.
+    let nodes = |file: &FlueFilePerformance| file.renderer().voice().network().unwrap().source().graph.nodes.clone();
+    let (a, b) = (nodes(&plain), nodes(&option));
+    assert_eq!(a.len(), b.len());
+    for (index, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert_eq!(x == y, index != 24, "node {index}");
+    }
+    let sections = |file: &FlueFilePerformance|
+        format!("{:?}", file.renderer().voice().network().unwrap().source().graph.sections);
+    assert_eq!(sections(&plain), sections(&option));
+    let primary = option.radiation_bindings().iter().find(|b| b.opening().node == 24).unwrap().load();
+    assert_eq!(b[24], primary.termination());
+    // The load is the one the unflanged constructor builds at the binding's own radius, gas and band.
+    assert_eq!(*primary, BaffledRadiationLoad::with_flange(primary.radius_m(), primary.density_kg_m3(),
+        primary.sound_speed_m_s(), primary.time_step_s(), primary.maximum_frequency_hz(),
+        RadiationFlange::Unflanged, &gate()).unwrap());
+    // Both words together bind all three openings; the primary word alone needs `radiation compact-baffled`.
+    let both = parse(&unflanged_primary(&unflanged_holes(&base))).unwrap();
+    assert_eq!(flanges(&both), [(24, RadiationFlange::Unflanged), (19, RadiationFlange::Unflanged),
+        (21, RadiationFlange::Unflanged)]);
+    assert!(parse(&unflanged_primary(&base).replace("radiation compact-baffled", "radiation prescribed")).is_err());
+}
+
+#[test]
+fn planted_negative_the_primary_word_changes_the_rendered_pressure_and_the_holes_word_differs() {
+    let base = recorder_a1();
+    let render = |text: &str| {
+        let mut renderer = parse(text).unwrap().into_renderer();
+        let mut pressure = vec![0.0; 1024];
+        for block in pressure.chunks_mut(256) { renderer.block(block).unwrap(); }
+        assert!(pressure.iter().all(|p| p.is_finite()));
+        assert!(pressure.iter().any(|p| p.abs() > 1e-10));
+        pressure
+    };
+    let plain = render(&base);
+    let primary = render(&unflanged_primary(&base));
+    assert_ne!(plain, primary);
+    assert_ne!(primary, render(&unflanged_holes(&base)), "the two words select different openings");
 }
 
 #[test]

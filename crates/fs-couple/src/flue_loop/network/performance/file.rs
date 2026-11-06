@@ -362,8 +362,9 @@ impl FlueFilePerformance {
     /// thin-wall UNFLANGED pipe end instead of the baffled piston (Garcia Mayen 2021,
     /// Eq. 14's "tube without flange" via Silva et al. 2009, Eqs. 10-11). Reaction
     /// unflanged, observation baffled half-space: only the terminal REACTION changes;
-    /// the microphone model of that opening is still the baffled monopole. Absent the
-    /// word, the card produces exactly the same network as before.
+    /// the microphone model of that opening is still the baffled monopole. The same word may end
+    /// the `outlets PRIMARY ADDITIONAL` row, selecting it for the PRIMARY opening (a bare open
+    /// end). Absent the word, the card produces exactly the same network as before.
     /// `radiation mimo ARTIFACT MAX_STATES MAX_MEMORY_BYTES PASSIVITY_POINTS`
     /// instead loads one explicit reciprocal rational operator for all declared
     /// outlets, in their original order. The shared artifact decoder retains its

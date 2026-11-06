@@ -303,14 +303,15 @@ impl Input {
         }
     }
 
-    /// The outlet rows: `outlets PRIMARY ADDITIONAL`, then per additional opening
+    /// The outlet rows: `outlets PRIMARY ADDITIONAL [unflanged]`, then per additional opening
     /// `outlet NODE X_M Y_M [unflanged]`. The optional trailing word selects the
     /// compact unflanged-pipe REACTION for that opening (Garcia Mayen 2021, Eq. 14's
     /// "tube without flange", via Silva et al. 2009); it needs `radiation compact-baffled`
-    /// (`compact_reaction`) because only that selection installs a per-outlet load, and
-    /// the primary row takes no such word. The microphone model of the opening stays the
-    /// baffled half-space monopole. The returned flange list is empty when no row selects
-    /// one, and otherwise has one entry per opening in observed order (primary first).
+    /// (`compact_reaction`) because only that selection installs a per-outlet load. On the
+    /// `outlets` row it applies to the PRIMARY opening, a bare open end such as a whistle's
+    /// bore end; on an `outlet` row, to that additional opening. The microphone model of an
+    /// opening stays the baffled half-space monopole. The returned flange list is empty when no
+    /// row selects one, and otherwise has one entry per opening in observed order (primary first).
     pub fn read_outlets(&self, rows: &mut Rows<'_>, compact_reaction: bool)
         -> Result<(usize, Vec<FlueRadiatingOutlet>, Vec<RadiationFlange>), FlueInputError>
     {
@@ -318,6 +319,14 @@ impl Input {
         let mut row = rows.row("outlets")?;
         let primary: usize = row.number()?;
         let additional: usize = row.number()?;
+        let primary_flange = if row.fields.clone().next() == Some("unflanged") {
+            row.fields.next();
+            if !compact_reaction {
+                return Err(bad(row.line,
+                    "outlets unflanged selects a compact open-end reaction; declare radiation compact-baffled"));
+            }
+            RadiationFlange::Unflanged
+        } else { RadiationFlange::Baffled };
         row.end()?;
         if primary >= self.graph.nodes.len()
             || additional >= crate::pcm_wav::baffled::MAX_RAYLEIGH_INPUTS {
@@ -347,8 +356,9 @@ impl Input {
         }
         // The shared DuctPressure owner validates terminal degree, overlap,
         // common-pressure exterior and the geometry/band of every aperture.
-        let flanges = if selected.contains(&RadiationFlange::Unflanged) {
-            core::iter::once(RadiationFlange::Baffled).chain(selected).collect()
+        let flanges = if primary_flange == RadiationFlange::Unflanged
+            || selected.contains(&RadiationFlange::Unflanged) {
+            core::iter::once(primary_flange).chain(selected).collect()
         } else { Vec::new() };
         Ok((primary, outlets, flanges))
     }
