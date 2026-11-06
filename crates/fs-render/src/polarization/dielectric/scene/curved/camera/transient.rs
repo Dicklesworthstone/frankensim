@@ -38,6 +38,9 @@ use fs_math::dd::Dd;
 
 const LIGHT_M_S: f64 = 299_792_458.0;
 
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 /// Original surface encounter and its retarded physical clock. Position is the
 /// integrated native endpoint within the original contact-resolution envelope;
 /// it has not been snapped to an independently computed surface point.

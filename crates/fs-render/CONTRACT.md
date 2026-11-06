@@ -8236,3 +8236,31 @@ fixed raster fixture's native Philox first-flight variates were independently
 checked to include an interior collision. Formatter/parser checks passed;
 these native Rust regressions were added but were not executed in the shared
 editing environment.
+
+
+## Retarded finite emitters on refracted molecular-scattering paths
+
+With `volumes`, `camera::transient::participating::TransientCurvedRayleighCameraScene`
+composes the original admitted surface histories with the native curved Rayleigh
+and depolarized-Rayleigh walk. Both borrow the same original scene. Each actual
+emitting encounter queries its source at the observation clock minus that
+encounter's accumulated group path divided by c, including all preceding curved
+legs and real molecular turns. Rejected tracking candidates preserve that clock.
+
+The original free-flight, delta-acceptance and surface streams, full Mueller
+weights, Beer absorption, endpoint index conversion, thermal emission, work
+limits and cancellation remain authoritative. History queries consume no random
+variates and introduce no additional collision, extinction or albedo factor.
+Seeded, uniform-density custom and heterogeneous-tracking custom paths retain
+their original sampling contracts. Source failure or an unresolved native path
+refuses the complete sample; finite-source histories remain separate from steady
+volume and environment emission. Geometry and media remain frozen, molecular
+events instantaneous, and spectral envelopes incoherent under the original
+group-delay approximation.
+
+Four G1/G3/G4 regression groups specify two molecular turns with an independent
+polarization/absorption/chromatic-delay reference, the analytic curved group
+integral through a rejected tracking candidate, static and zero-scattering
+replay, scene identity and history/domain/work/cancellation refusals. Pinned
+Rust formatting/parser checks passed. The native Rust regressions were authored
+but not executed in the shared editing environment.
