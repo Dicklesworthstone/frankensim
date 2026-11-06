@@ -3,6 +3,8 @@
 mod common;
 #[path = "adhesive_dmt_modal/temperature.rs"]
 mod temperature;
+#[path = "adhesive_dmt_modal/admission.rs"]
+mod admission;
 
 use common::{Z, close, config, free, sources};
 use fs_contact::normal_patch::dmt::coupled::{DmtCoupledLoadLine, DmtCoupledRegime};

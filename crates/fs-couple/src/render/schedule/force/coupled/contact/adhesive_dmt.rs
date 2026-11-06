@@ -30,6 +30,7 @@ use fs_contact::normal_patch::dmt::coupled::{
 use fs_contact::normal_patch::dmt::{DmtError, SourceDmtSphereContact};
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
+use fs_math::dd::Dd;
 
 /// Failed steps publish neither native motion nor contact history.
 #[derive(Debug)]
@@ -40,6 +41,11 @@ pub enum AdhesiveDmtModalError {
         component: usize,
         residual_m: f64,
         tolerance_m: f64,
+    },
+    /// Contact work is checked independently of unrelated native stored energy.
+    ContactWork {
+        residual_j: f64,
+        tolerance_j: f64,
     },
 }
 impl core::fmt::Display for AdhesiveDmtModalError {
@@ -52,7 +58,7 @@ impl std::error::Error for AdhesiveDmtModalError {
         match self {
             Self::Network(error) => Some(error),
             Self::Contact(error) => Some(error),
-            Self::CoordinateMismatch { .. } => None,
+            Self::CoordinateMismatch { .. } | Self::ContactWork { .. } => None,
         }
     }
 }
@@ -87,6 +93,15 @@ pub struct AdhesiveDmtModalFrame {
     /// Sourced kinetic junction strength times integrated real area and slip.
     /// Its eventual thermal recipient remains an explicit downstream decision.
     pub friction_dissipation_j: f64,
+    /// Work of the contact correction actually represented in native forcing.
+    pub contact_work_on_network_j: f64,
+    /// Original normal-potential change plus junction loss and native contact
+    /// work, minus work supplied through prescribed contact motion.
+    pub contact_work_residual_j: f64,
+    /// Original force-accuracy budget times actual travel, plus contact-sized
+    /// arithmetic allowance. Unrelated native energy never enlarges this gate.
+    pub contact_work_tolerance_j: f64,
+    /// Complete native plus contact storage and dissipation balance.
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
     /// Held efforts actually applied to the complete original modal network.
@@ -115,6 +130,8 @@ pub struct AdhesiveDmtSourceRefreshReport {
     pub surface_energy_after_j: f64,
     /// Signed external coefficient work, distinct from slip work and heat.
     pub parameter_work_j: f64,
+    /// Contact-potential change minus parameter work, computed without
+    /// subtracting the possibly much larger native energy observations.
     pub energy_residual_j: f64,
     pub energy_tolerance_j: f64,
 }
@@ -263,6 +280,49 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
         next_shear: &'a SourceAdhesiveShear,
         gate: &CancelGate,
     ) -> Result<AdhesiveDmtSourceRefreshReport, AdhesiveDmtModalError> {
+        self.apply_source_refresh_with_admission(refreshed, next_shear, gate, |report, _| {
+            Ok(*report)
+        })
+    }
+
+    /// Stage the receiving source/history owner before publishing either local
+    /// source replacement. The callback returns an infallibly installable
+    /// candidate; refusal or late cancellation retains every accepted owner.
+    pub fn apply_source_refresh_with_admission<R, E>(
+        &mut self,
+        refreshed: &'a SourceDmtThermalRefresh,
+        next_shear: &'a SourceAdhesiveShear,
+        gate: &CancelGate,
+        admit: impl FnOnce(&AdhesiveDmtSourceRefreshReport, DmtCoupledState) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<AdhesiveDmtModalError>,
+    {
+        let (next, state, report) = self
+            .prepare_source_refresh(refreshed, next_shear, gate)
+            .map_err(E::from)?;
+        let receiving = admit(&report, state)?;
+        poll(Some(gate))
+            .map_err(AdhesiveDmtModalError::from)
+            .map_err(E::from)?;
+        self.load_line = next;
+        self.state = state;
+        Ok(receiving)
+    }
+
+    fn prepare_source_refresh(
+        &self,
+        refreshed: &'a SourceDmtThermalRefresh,
+        next_shear: &'a SourceAdhesiveShear,
+        gate: &CancelGate,
+    ) -> Result<
+        (
+            DmtCoupledLoadLine<'a>,
+            DmtCoupledState,
+            AdhesiveDmtSourceRefreshReport,
+        ),
+        AdhesiveDmtModalError,
+    > {
         poll(Some(gate))?;
         let before = self.total_energy_j()?;
         let surface_before = self
@@ -283,24 +343,23 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
             after.abs(),
             self.network.config.maximum_total_energy_j,
         )?;
-        let residual = finite(after - before - work)?;
-        let scale = before
-            .abs()
-            .max(after.abs())
-            .max(work.abs())
-            .max(surface_before.abs())
-            .max(surface_after.abs());
+        let change = Dd::from_f64(surface_after) - Dd::from_f64(surface_before);
+        let residual = finite((change - Dd::from_f64(work)).to_f64())?;
+        // The sealed source has no mechanical solve error at held geometry.
+        // Only original potential/parameter arithmetic enters this allowance.
         let tolerance = finite(
-            self.network.config.energy_absolute_tolerance_j
-                + self.network.config.energy_relative_tolerance * scale,
+            128.0
+                * f64::EPSILON
+                * surface_before
+                    .abs()
+                    .max(surface_after.abs())
+                    .max(work.abs()),
         )?;
-        if residual.abs() > tolerance {
-            return Err(ModalCouplingError::EnergyBalance {
-                residual_j: residual,
-                tolerance_j: tolerance,
-            }
-            .into());
-        }
+        check_contact_work(residual, tolerance)?;
+        check_contact_work(
+            finite((change - Dd::from_f64(refreshed.potential_change_j())).to_f64())?,
+            tolerance,
+        )?;
         let report = AdhesiveDmtSourceRefreshReport {
             sample: self.samples_rendered(),
             energy_before_j: before,
@@ -312,9 +371,7 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
             energy_tolerance_j: tolerance,
         };
         poll(Some(gate))?;
-        self.load_line = next;
-        self.state = state;
-        Ok(report)
+        Ok((next, state, report))
     }
 
     /// Advance held modal forces and a prescribed local coordinate rate [m/s].
@@ -334,9 +391,49 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
         prescribed_rate_m_s: [f64; 3],
         gate: &CancelGate,
     ) -> Result<&AdhesiveDmtModalFrame, AdhesiveDmtModalError> {
+        let (state, accepted) = self.prepare_step(external, prescribed_rate_m_s, gate)?;
+        self.network.publish_staged();
+        self.state = state;
+        Ok(self.last.insert(accepted))
+    }
+
+    /// Stage another physical owner's candidate against the original contact
+    /// account and actual native endpoint. Install that candidate only after
+    /// success. No native state, source branch, clock or frame publishes on
+    /// receiver refusal or cancellation, including a late callback request.
+    pub fn step_with_admission<R, E>(
+        &mut self,
+        external: &[f64],
+        prescribed_rate_m_s: [f64; 3],
+        gate: &CancelGate,
+        admit: impl FnOnce(&AdhesiveDmtModalFrame, &[ModalAcousticTimeModel]) -> Result<R, E>,
+    ) -> Result<R, E>
+    where
+        E: From<AdhesiveDmtModalError>,
+    {
+        let (state, accepted) = self
+            .prepare_step(external, prescribed_rate_m_s, gate)
+            .map_err(E::from)?;
+        let receiving = admit(&accepted, self.network.staged_components())?;
+        poll(Some(gate))
+            .map_err(AdhesiveDmtModalError::from)
+            .map_err(E::from)?;
+        self.network.publish_staged();
+        self.state = state;
+        self.last = Some(accepted);
+        Ok(receiving)
+    }
+
+    fn prepare_step(
+        &mut self,
+        external: &[f64],
+        prescribed_rate_m_s: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(DmtCoupledState, AdhesiveDmtModalFrame), AdhesiveDmtModalError> {
         poll(Some(gate))?;
         let before = self.total_energy_j()?;
         let old = self.state.position_m();
+        let surface_before = self.normal().evaluate(old[0])?.reversible_energy_j;
         let dt = self.network.dt;
         let mut prescribed = [0.0; 3];
         for i in 0..3 {
@@ -359,13 +456,32 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
                 finite(old[i] + prescribed[i] + dot(&self.columns[i], &self.network.free_delta)?)?;
         }
         let solved = self.load_line.trial(previous, free, dt, gate)?;
-        self.forces.copy_from_slice(external);
-        for i in 0..3 {
-            for (force, &weight) in self.forces.iter_mut().zip(&self.columns[i]) {
-                *force = finite(*force - weight * solved.mean_force_n[i])?;
+        for (j, (force, input)) in self.forces.iter_mut().zip(external).enumerate() {
+            if j % 256 == 0 {
+                poll(Some(gate))?;
             }
+            let mut sum = Dd::from_f64(*input);
+            for i in 0..3 {
+                sum = sum - Dd::from_f64(self.columns[i][j]) * Dd::from_f64(solved.mean_force_n[i]);
+            }
+            *force = finite(sum.to_f64())?;
         }
         self.network.stage_inner(&self.forces, Some(gate))?;
+        // Reconstruct material motion from accepted and staged native states.
+        // This also keeps the original scratch's actual-increment semantics.
+        for (j, ((change, end), start)) in self
+            .network
+            .free_delta
+            .iter_mut()
+            .zip(self.network.candidates.iter().flat_map(|m| m.states()))
+            .zip(self.network.models.iter().flat_map(|m| m.states()))
+            .enumerate()
+        {
+            if j % 256 == 0 {
+                poll(Some(gate))?;
+            }
+            *change = finite(end.displacement_m_sqrt_kg - start.displacement_m_sqrt_kg)?;
+        }
         let mut actual_position = [0.0; 3];
         let mut compatibility = [0.0; 3];
         for i in 0..3 {
@@ -402,6 +518,61 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
         let loss = finite(network_loss + friction)?;
         let external_work = dot(external, &self.network.free_delta)?;
         let prescribed_work = dot(&solved.mean_force_n, &prescribed)?;
+        let mut represented_work = Dd::ZERO;
+        for (j, ((held, input), change)) in self
+            .forces
+            .iter()
+            .zip(external)
+            .zip(&self.network.free_delta)
+            .enumerate()
+        {
+            if j % 256 == 0 {
+                poll(Some(gate))?;
+            }
+            represented_work = represented_work
+                + (Dd::from_f64(*held) - Dd::from_f64(*input)) * Dd::from_f64(*change);
+        }
+        let contact_work = finite(represented_work.to_f64())?;
+        let mut transpose_work = Dd::ZERO;
+        for i in 0..3 {
+            transpose_work = transpose_work
+                + Dd::from_f64(solved.mean_force_n[i])
+                    * Dd::from_f64(dot(&self.columns[i], &self.network.free_delta)?);
+        }
+        let storage_change = Dd::from_f64(surface_energy) - Dd::from_f64(surface_before);
+        let work_scale = surface_before
+            .abs()
+            .max(surface_energy.abs())
+            .max(contact_work.abs())
+            .max(prescribed_work.abs())
+            .max(actual.path.normal_work_j.abs())
+            .max(friction.abs());
+        let contact_tolerance = contact_work_tolerance(
+            self.config,
+            old,
+            actual_position,
+            core::array::from_fn(|i| {
+                solved.mean_force_n[i]
+                    .abs()
+                    .max(actual.mean_force_n[i].abs())
+            }),
+            solved.regime,
+            work_scale,
+        )?;
+        check_contact_work(
+            finite((represented_work + transpose_work).to_f64())?,
+            contact_tolerance,
+        )?;
+        check_contact_work(
+            finite((storage_change - Dd::from_f64(actual.path.normal_work_j)).to_f64())?,
+            contact_tolerance,
+        )?;
+        let contact_residual = finite(
+            (storage_change + Dd::from_f64(friction) + represented_work
+                - Dd::from_f64(prescribed_work))
+            .to_f64(),
+        )?;
+        check_contact_work(contact_residual, contact_tolerance)?;
         let residual = finite((after - before) + loss - external_work - prescribed_work)?;
         let scale = before
             .abs()
@@ -433,6 +604,9 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
             prescribed_work_j: prescribed_work,
             network_dissipation_j: network_loss,
             friction_dissipation_j: friction,
+            contact_work_on_network_j: contact_work,
+            contact_work_residual_j: contact_residual,
+            contact_work_tolerance_j: contact_tolerance,
             energy_residual_j: residual,
             energy_tolerance_j: tolerance,
             mean_force_n: solved.mean_force_n,
@@ -455,9 +629,47 @@ impl<'a> AdhesiveDmtModalSystem<'a> {
         )?;
         self.network.validate_staged_material_points(Some(gate))?;
         poll(Some(gate))?;
-        self.network.publish_staged();
-        self.state = state;
-        Ok(self.last.insert(accepted))
+        Ok((state, accepted))
+    }
+}
+
+// A constitutive force error performs at most its admitted magnitude times
+// actual coordinate travel. A sticking path additionally admits its original
+// small coordinate residual, whose maximum work is shear magnitude times that
+// residual. Add only contact-sized roundoff, never a fraction of unrelated
+// native storage or background work. All terms have units of J.
+fn contact_work_tolerance(
+    config: DmtCoupledConfig,
+    from: [f64; 3],
+    to: [f64; 3],
+    force: [f64; 3],
+    regime: DmtCoupledRegime,
+    scale_j: f64,
+) -> Result<f64, ModalCouplingError> {
+    let mut tolerance = Dd::from_f64(128.0 * f64::EPSILON * scale_j);
+    for i in 0..3 {
+        let force_error =
+            config.force_absolute_tolerance_n + config.force_relative_tolerance * force[i].abs();
+        tolerance =
+            tolerance + Dd::from_f64(force_error) * Dd::from_f64(finite(to[i] - from[i])?.abs());
+    }
+    if regime == DmtCoupledRegime::Sticking {
+        let coordinate_error = config.coordinate_absolute_tolerance_m
+            + config.coordinate_relative_tolerance * finite(to[0] - from[0])?.abs();
+        tolerance =
+            tolerance + Dd::from_f64(coordinate_error) * Dd::from_f64(force[1].hypot(force[2]));
+    }
+    finite(tolerance.to_f64())
+}
+
+fn check_contact_work(residual_j: f64, tolerance_j: f64) -> Result<(), AdhesiveDmtModalError> {
+    if residual_j.abs() > tolerance_j {
+        Err(AdhesiveDmtModalError::ContactWork {
+            residual_j,
+            tolerance_j,
+        })
+    } else {
+        Ok(())
     }
 }
 
