@@ -30,6 +30,8 @@ pub mod heat;
 pub mod ionization;
 /// Photon-conserving ionization of a rigid uniformly mixed column.
 pub mod photoionization;
+/// Reciprocal atomic capture with escaping photon and electron-energy accounting.
+pub mod radiative_recombination;
 /// Constant-pressure evolution through the shared extent integrator.
 pub mod isobaric;
 mod prepared;

@@ -6241,3 +6241,36 @@ unconditional positivity, global temporal order or combustion validation.
 Regressions cover variable Cp/nonzero species entropy references, independently
 reconstructed complete boundary supply, both-half and discarded-attempt work
 limits, closed compatibility, moving-bath refusal and atomic cancellation.
+
+## Radiative capture with escaping photon energy
+
+`chemistry::radiative_recombination::advance_radiative_recombination`
+advances the original atom/ion/electron bank at fixed volume using reciprocal
+photoionization-derived rate and captured-energy moments. Each event removes
+one ion and one electron, creates one neutral, and emits one escaping photon.
+The photon receives the original chemical energy plus the captured electron's
+kinetic energy. Heavy temperature and spectator inventories remain unchanged.
+
+The electron energy account includes the changing electron population.
+Preferential capture can raise the temperature of the remaining electrons
+while electron sensible energy and total gas energy decrease. Chemical
+release is not deposited into the electron pool. Conserved elemental/charge
+formation references cancel before evaluating the gas-plus-radiation balance.
+
+A midpoint prediction evaluates both moments at the same stage temperature.
+The ensuing exact binary-reactant update preserves finite reactants and has
+a continuous equal-population limit. Full/two-half-step comparison controls
+the second-order method for smooth coefficients. Stages allocate no species
+vectors; final publication uses the existing frozen ionized-gas state.
+Every changed source temperature requalifies its numerical moments and
+conditional tails. Explicit work, positivity, temperature and energy limits
+refuse without mutating the inputs. Empty reactants and zero duration retain
+the exact original state.
+
+Regression cases compare coupled population, temperature and escaping-energy
+evolution with independent DOP853 references, including increasing electron
+temperature during radiative cooling, refinement, source-reference invariance,
+exact depletion limits, cancellation and bounded-work refusal. The model
+assumes immediate electron thermalization and escaping recombination photons;
+it supplies no trapped-radiation transport, stimulated capture, complete
+multilevel recombination or closed-gas entropy inequality.

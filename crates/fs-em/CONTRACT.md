@@ -4955,3 +4955,13 @@ All changed source/test files passed native rustfmt. The shared end kernel's
 11 native tests remain the executed numerical evidence. The enclosing 3D and
 planar field/circuit tests could not run because the available fs-em dependency
 graph failed to load its production mesh/material/FEEC/solver crates.
+
+## Escaping recombination radiation and carrier feedback
+
+The source-bound ionization feedback regression now continues the original
+photo-created and collision-evolved gas through spontaneous radiative capture.
+The shared frozen gas publishes the depleted electron population to the existing
+collision material, lowering electrical conductivity. Gas energy retained since
+photoionization plus escaping recombination photons closes the original absorbed
+photon account. This composes the existing owners for successive prescribed
+intervals; it does not claim simultaneous radiation/field/chemistry integration.

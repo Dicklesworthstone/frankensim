@@ -335,3 +335,4 @@ fn recombination_at_the_closed_electron_source_minimum_heats_into_the_domain() {
 }
 
 mod photoionization;
+mod radiative_recombination;

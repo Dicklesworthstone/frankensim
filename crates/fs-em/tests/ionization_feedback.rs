@@ -274,4 +274,41 @@ fn g1_photons_seed_a_neutral_gas_and_feed_existing_current_and_impact_owners() {
     assert_eq!(reacted.state().amounts()[1], reacted.state().amounts()[2]);
     let total_gain = reacted.state().internal_energy().value() - initial.internal_energy().value();
     assert!((total_gain - photo.balance().absorbed_energy_j).abs() < 2e-7);
+
+    // Radiation subsequently removes carriers and chemical energy from the
+    // same original gas; the existing material owner sees their actual loss.
+    use fs_gas::chemistry::radiative_recombination::{
+        RadiativeRecombinationSolve, advance_radiative_recombination,
+    };
+    use fs_thermochem::kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1;
+    let reciprocal = AtomicRadiativeRecombinationV1::new(
+        photon_source.clone(),
+        Area::new(6.4e-22),
+        fs_matdb::Provenance {
+            source: "test-declared global hydrogen cross-section envelope".into(),
+            license: "analytic test envelope assumption".into(),
+            artifact: None,
+        },
+    )
+    .unwrap();
+    let conductivity_before_capture = material(reacted.state()).conductivity_s_m();
+    let capture = advance_radiative_recombination(
+        reacted.state(),
+        &reciprocal,
+        Time::new(1e-5),
+        RadiativeRecombinationSolve::new(Temperature::new(2000.0), Temperature::new(20000.0)),
+        || false,
+    )
+    .unwrap();
+    assert!(capture.recombination_extent().value() > 0.0);
+    assert!(capture.state().amounts()[2].value() < reacted.state().amounts()[2].value());
+    assert_eq!(capture.state().amounts()[1], capture.state().amounts()[2]);
+    assert!(material(capture.state()).conductivity_s_m() < conductivity_before_capture);
+    let retained = capture.state().internal_energy().value() - initial.internal_energy().value();
+    assert!(
+        (retained + capture.balance().emitted_radiation_energy_j
+            - photo.balance().absorbed_energy_j)
+            .abs()
+            < 3e-7
+    );
 }
