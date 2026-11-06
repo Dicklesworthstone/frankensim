@@ -25,7 +25,8 @@ pub use cell::CellChemistry;
 mod entropy;
 pub use entropy::{
     ReactiveEntropyReport, ReactiveEntropyStepReport, ReactiveExteriorEntropyReport,
-    ReactiveExteriorEntropyStepReport, SplitMolecularEntropyReport,
+    ReactiveExteriorEntropyStepReport, SplitExteriorMolecularEntropyReport,
+    StabilizedReactiveExteriorEntropyStepReport, SplitMolecularEntropyReport,
 };
 mod reservoir;
 mod stabilized;
@@ -423,9 +424,9 @@ impl ReactingEuler1d {
             // Only the dedicated entropy entry interprets these borrowed cells
             // as moving exterior traces. Legacy reservoir admission is unchanged.
             if operator.is_some() {
-                return Err(ReactiveError::Invalid(
-                    "exterior reacting entropy does not admit molecular half steps",
-                ));
+                // Molecular ports retain the existing stationary bath model.
+                // The same source-compatible states feed both D halves and A.
+                reservoir::admit(&self.accepted, reservoirs, &mut cancelled)?;
             }
         } else {
             reservoir::admit(&self.accepted, reservoirs, &mut cancelled)?;
@@ -470,6 +471,7 @@ impl ReactingEuler1d {
                         &mut self.trial,
                         Time::new(0.5 * duration),
                         reservoirs,
+                        entropy.as_deref_mut(),
                         &mut cancelled,
                     )?),
                     None => None,
@@ -520,6 +522,7 @@ impl ReactingEuler1d {
                         &mut self.trial,
                         Time::new(0.5 * duration),
                         reservoirs,
+                        entropy.as_deref_mut(),
                         &mut cancelled,
                     )?),
                     None => None,
@@ -558,6 +561,10 @@ impl ReactingEuler1d {
                             &self.accepted,
                             &self.trial,
                             temperature_bounds,
+                            [
+                                first.as_ref().and_then(|half| half.exterior_entropy),
+                                second.as_ref().and_then(|half| half.exterior_entropy),
+                            ],
                             &mut cancelled,
                         )?;
                     } else {

@@ -89,8 +89,52 @@ impl<L: TransportLaw> DissipationOperator<L> {
         controls: StabilizedDissipationControl,
         entropy: MolecularEntropyControl,
         reservoirs: [Option<super::super::super::Cell<'_>>; 2],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<(StabilizedDissipationReport, ReservoirMolecularEntropyReport), DissipationError> {
+        let (report, measured, _) = self.advance_stabilized_reservoir_entropy(
+            flow, duration, controls, entropy, reservoirs, None, cancelled,
+        )?;
+        Ok((report, measured))
+    }
+
+    /// Retain the original RHS budget across molecular halves and abandoned
+    /// coupled attempts, while exporting actual accepted end transfers and
+    /// absolute signed-tableau throughput for the complete source account.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent) fn advance_stabilized_entropy_consistent_with_reservoir_inventory_budget(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: StabilizedDissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::super::Cell<'_>>; 2],
+        evaluations: &mut usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(
+        StabilizedDissipationReport,
+        ReservoirMolecularEntropyReport,
+        ExteriorTransportInventory,
+    ), DissipationError> {
+        self.advance_stabilized_reservoir_entropy(
+            flow, duration, controls, entropy, reservoirs, Some(evaluations), cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_stabilized_reservoir_entropy(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: StabilizedDissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::super::Cell<'_>>; 2],
+        evaluations: Option<&mut usize>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(
+        StabilizedDissipationReport,
+        ReservoirMolecularEntropyReport,
+        ExteriorTransportInventory,
+    ), DissipationError> {
         controls.validate()?;
         entropy.validate()?;
         let reservoirs = if reservoirs.iter().all(Option::is_none) {
@@ -105,11 +149,26 @@ impl<L: TransportLaw> DissipationOperator<L> {
             &self.gas, account.reference_temperature, &account.reference_density,
             &account.reference_entropy, reservoirs, &mut cancelled,
         )?);
-        let report = crate::multicomponent::dissipation::stabilized::advance_entropy_consistent(
-            self, flow, duration, controls, reservoirs, &mut account, &mut cancelled,
-        )?;
+        let report = if let Some(evaluations) = evaluations {
+            crate::multicomponent::dissipation::stabilized::advance_entropy_consistent_budget(
+                self, flow, duration, controls, reservoirs, evaluations,
+                &mut account, &mut cancelled,
+            )?
+        } else {
+            // Preserve the standalone public owner's original local counter.
+            crate::multicomponent::dissipation::stabilized::advance_entropy_consistent(
+                self, flow, duration, controls, reservoirs, &mut account, &mut cancelled,
+            )?
+        };
+        // Native publication and all fallible gates have completed. Only copy
+        // the actual signed end transfers and admitted absolute stage throughput.
+        let boundary = account.boundary.as_ref()
+            .expect("native RKL2 reservoir interval retained its admitted bath account");
+        let inventory = ExteriorTransportInventory::from_molecular_report(
+            &report.transport, boundary.total.throughput,
+        );
         Ok((report, account.completed_reservoir_report
-            .expect("native RKL2 final admission retained reservoir entropy")))
+            .expect("native RKL2 final admission retained reservoir entropy"), inventory))
     }
 }
 

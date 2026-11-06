@@ -233,6 +233,28 @@ impl<L: TransportLaw> DissipationOperator<L> {
         )
     }
 
+    /// Original source-conjugate SSP owner with its actual complete boundary
+    /// inventory for source compositions. The caller receives no reconstructed
+    /// entropy or approximate transfer in place of the accepted native axes.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::multicomponent) fn advance_entropy_consistent_with_reservoir_inventory_for(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::Cell<'_>>; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<(
+        DissipationReport,
+        ReservoirMolecularEntropyReport,
+        ExteriorTransportInventory,
+    ), DissipationError> {
+        self.advance_reservoir_entropy_with_inventory::<true>(
+            flow, duration, controls, entropy, reservoirs, cancelled,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn advance_reservoir_entropy<const ENTROPY_FACES: bool>(
         &mut self,
@@ -241,8 +263,28 @@ impl<L: TransportLaw> DissipationOperator<L> {
         controls: DissipationControl,
         entropy: MolecularEntropyControl,
         reservoirs: [Option<super::super::Cell<'_>>; 2],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<(DissipationReport, ReservoirMolecularEntropyReport), DissipationError> {
+        let (report, measured, _) = self.advance_reservoir_entropy_with_inventory::<ENTROPY_FACES>(
+            flow, duration, controls, entropy, reservoirs, cancelled,
+        )?;
+        Ok((report, measured))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn advance_reservoir_entropy_with_inventory<const ENTROPY_FACES: bool>(
+        &mut self,
+        flow: &mut MixtureEuler1d,
+        duration: Time,
+        controls: DissipationControl,
+        entropy: MolecularEntropyControl,
+        reservoirs: [Option<super::super::Cell<'_>>; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(
+        DissipationReport,
+        ReservoirMolecularEntropyReport,
+        ExteriorTransportInventory,
+    ), DissipationError> {
         controls.validate()?;
         entropy.validate()?;
         let reservoirs = if reservoirs.iter().all(Option::is_none) {
@@ -258,8 +300,15 @@ impl<L: TransportLaw> DissipationOperator<L> {
         let report = super::evolve::advance_with_reservoirs_and_entropy::<ENTROPY_FACES, L>(
             self, flow, duration, controls, reservoirs, &mut account, &mut cancelled,
         )?;
+        // All physical/source checks precede the original publication above.
+        // Export only already-admitted native transfers and stage throughput.
+        let boundary = account.boundary.as_ref()
+            .expect("native reservoir interval retained its admitted bath account");
+        let inventory = ExteriorTransportInventory::from_molecular_report(
+            &report, boundary.total.throughput,
+        );
         Ok((report, account.completed_reservoir_report
-            .expect("native final admission retained reservoir entropy")))
+            .expect("native final admission retained reservoir entropy"), inventory))
     }
 
     /// Evolve the existing molecular operator with an additional closed-system

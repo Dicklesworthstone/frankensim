@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::multicomponent::dissipation::{
-    MolecularEntropyControl, MolecularEntropyReport,
+    MolecularEntropyControl, MolecularEntropyReport, ReservoirMolecularEntropyReport,
     StabilizedDissipationControl, StabilizedDissipationReport,
 };
 
@@ -149,14 +149,17 @@ pub(super) struct MolecularHalf {
     physical: DissipationReport,
     stabilized: Option<StabilizedDissipationReport>,
     pub(super) entropy: Option<MolecularEntropyReport>,
+    pub(super) exterior_entropy: Option<ReservoirMolecularEntropyReport>,
 }
 impl MolecularMethod<'_> {
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn advance<L: TransportLaw>(
         &mut self,
         operator: &mut DissipationOperator<L>,
         flow: &mut MixtureEuler1d,
         duration: Time,
         reservoirs: [Option<Cell<'_>>; 2],
+        coupled: Option<&mut super::entropy::CoupledEntropy>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<MolecularHalf, ReactiveError> {
         match self {
@@ -166,12 +169,27 @@ impl MolecularMethod<'_> {
                 )?,
                 stabilized: None,
                 entropy: None,
+                exterior_entropy: None,
             }),
             Self::EntropyExplicit { controls, entropy } => {
                 if reservoirs.iter().any(Option::is_some) {
-                    return Err(ReactiveError::Invalid(
-                        "entropy-consistent composition requires closed molecular boundaries",
-                    ));
+                    let account = coupled.ok_or(ReactiveError::Invalid(
+                        "open molecular entropy requires its complete reacting account",
+                    ))?;
+                    if !account.has_exterior_states() {
+                        return Err(ReactiveError::Invalid(
+                            "open molecular entropy requires prescribed exterior accounting",
+                        ));
+                    }
+                    let (physical, report, inventory) =
+                        operator.advance_entropy_consistent_with_reservoir_inventory_for(
+                            flow, duration, *controls, *entropy, reservoirs, &mut *cancelled,
+                        )?;
+                    account.observe_molecular_inventory(flow.gas(), &inventory, cancelled)?;
+                    return Ok(MolecularHalf {
+                        physical, stabilized: None, entropy: None,
+                        exterior_entropy: Some(report),
+                    });
                 }
                 let (physical, report) = operator.advance_entropy_consistent_for(
                     flow, duration, *controls, *entropy, cancelled,
@@ -180,13 +198,29 @@ impl MolecularMethod<'_> {
                     physical,
                     stabilized: None,
                     entropy: Some(report),
+                    exterior_entropy: None,
                 })
             }
             Self::EntropyStabilized { controls, entropy, evaluations } => {
                 if reservoirs.iter().any(Option::is_some) {
-                    return Err(ReactiveError::Invalid(
-                        "entropy-consistent composition requires closed molecular boundaries",
-                    ));
+                    let account = coupled.ok_or(ReactiveError::Invalid(
+                        "open stabilized entropy requires its complete reacting account",
+                    ))?;
+                    if !account.has_exterior_states() {
+                        return Err(ReactiveError::Invalid(
+                            "open stabilized entropy requires prescribed exterior accounting",
+                        ));
+                    }
+                    let (report, measured, inventory) =
+                        operator.advance_stabilized_entropy_consistent_with_reservoir_inventory_budget(
+                            flow, duration, *controls, *entropy, reservoirs, evaluations,
+                            &mut *cancelled,
+                        )?;
+                    account.observe_molecular_inventory(flow.gas(), &inventory, cancelled)?;
+                    return Ok(MolecularHalf {
+                        physical: report.transport, stabilized: Some(report), entropy: None,
+                        exterior_entropy: Some(measured),
+                    });
                 }
                 let (report, entropy_report) =
                     operator.advance_stabilized_entropy_consistent_budget(
@@ -196,6 +230,7 @@ impl MolecularMethod<'_> {
                     physical: report.transport,
                     stabilized: Some(report),
                     entropy: Some(entropy_report),
+                    exterior_entropy: None,
                 })
             }
             Self::Stabilized {
@@ -214,11 +249,13 @@ impl MolecularMethod<'_> {
                     physical: report.transport,
                     stabilized: Some(report),
                     entropy: None,
+                    exterior_entropy: None,
                 })
             }
         }
     }
 }
+
 pub(super) fn split_halves(
     first: Option<MolecularHalf>,
     second: Option<MolecularHalf>,
@@ -365,7 +402,7 @@ impl ReactingEuler1d {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn stabilized_step_inner<L: TransportLaw>(
+    pub(super) fn stabilized_step_inner<L: TransportLaw>(
         &mut self,
         operator: &mut DissipationOperator<L>,
         maximum_duration: Time,

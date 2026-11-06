@@ -1,17 +1,18 @@
 //! Complete reacting state entropy with prescribed exterior transport.
 //!
-//! The immutable pre-chemistry basis is S=F+sum(alpha_i*m_i/M_i). Actual
-//! chemistry changes Q_i and actual exterior transfers B_i are independent
+//! The immutable pre-composition basis is S=F+sum(alpha_i*m_i/M_i). Actual
+//! chemistry changes Q_i and actual advective/molecular exterior transfers B_i are independent
 //! physical sources. Admit Delta F + sum(alpha_i*Q_i/M_i) - I_normalized,
 //! where I_normalized is reconstructed from the accepted native transport
 //! inventory in THIS original basis. The numerical continuity defect is
 //! Delta m_i-Q_i-B_i; neither physical source is removed with that defect.
 
 use super::{
-    ExteriorEntropyAccount, FlowError, MixtureEuler1d, MolecularEntropyControl,
-    ReactiveEntropyAccount, poll, scalar,
+    FlowError, MixtureEuler1d, MolecularEntropyControl, ReactiveEntropyAccount, poll, scalar,
 };
-use super::super::ExteriorTransportInventory;
+use super::super::{ExteriorTransportInventory, MixtureGas};
+use super::super::advection::ExteriorEntropyAccount;
+use super::super::reservoir::EntropyExchange;
 use crate::multicomponent::Cell;
 
 /// Direct original-to-final entropy of one complete open reacting step.
@@ -22,8 +23,9 @@ pub struct ReactiveExteriorEntropyReport {
     /// thermal, mixing and real chemical conversion contributions.
     pub source_entropy_change_j_k: f64,
     /// Entropy supplied at the left and right fixed exterior states [J/K].
-    /// Derived from the actual accepted transport stage/end transfers, including
-    /// momentum/kinetic efforts and the advective entropy potential.
+    /// Derived from all actual accepted advective and molecular stage/end transfers,
+    /// including momentum/kinetic efforts and the advective entropy potential.
+    /// Molecular transfer contributes no advective entropy potential.
     pub boundary_entropy_input_j_k: [f64; 2],
     /// Complete state change minus exterior input, with only numerical
     /// species-source continuity reference defects removed [J/K]. This is admitted.
@@ -37,13 +39,55 @@ pub struct ReactiveExteriorEntropyReport {
     /// an exactly zero residual.
     pub maximum_relative_species_residual: f64,
     /// Whole-composition attempts refused by entropy or species-source admission.
-    /// Internal chemistry and middle transport retries keep their original counters.
+    /// Internal chemistry, molecular and inviscid retries keep their original counters.
     pub rejected_entropy_steps: usize,
+}
+
+/// One optional allocation holds the immutable original efforts and accepted
+/// molecular transfers of this whole-composition attempt. Closed calls are empty.
+pub(super) struct ReactiveExteriorAccount {
+    efforts: ExteriorEntropyAccount,
+    molecular_exchange: EntropyExchange,
+}
+
+impl ReactiveExteriorAccount {
+    pub(super) fn reset_molecular(&mut self) {
+        self.molecular_exchange = EntropyExchange::default();
+    }
+
+    /// A local copy keeps accumulation transactional on finite-arithmetic or
+    /// cancellation refusal. Only physical transfer accounts share this basis;
+    /// separately normalized component entropy reports never enter this sum.
+    fn merge_exchange(
+        &self,
+        incoming: &EntropyExchange,
+        species_count: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<EntropyExchange, FlowError> {
+        let mut combined = self.molecular_exchange;
+        combined.input = combined.input + incoming.input;
+        scalar(combined.input)?;
+        for end in 0..2 {
+            poll(cancelled)?;
+            combined.source_input[end] = combined.source_input[end] + incoming.source_input[end];
+            scalar(combined.source_input[end])?;
+        }
+        for k in 0..species_count {
+            poll(cancelled)?;
+            combined.species[k] = combined.species[k] + incoming.species[k];
+            combined.throughput[k] = combined.throughput[k] + incoming.throughput[k];
+            scalar(combined.species[k])?;
+            scalar(combined.throughput[k])?;
+        }
+        poll(cancelled)?;
+        Ok(combined)
+    }
 }
 
 impl ReactiveEntropyAccount {
     /// Retain one original state/source account and cache exterior efforts in its
-    /// immutable pre-chemistry basis. No second flow field or endpoint owner exists.
+    /// immutable pre-composition basis, before either molecular or chemical half.
+    /// No second flow field or endpoint owner exists.
     pub(in crate::multicomponent) fn new_with_exterior_states(
         initial: &MixtureEuler1d,
         controls: MolecularEntropyControl,
@@ -66,16 +110,45 @@ impl ReactiveEntropyAccount {
             }
         }
         account.exterior.try_reserve_exact(1).map_err(|_| FlowError::Allocation)?;
-        account.exterior.push(ExteriorEntropyAccount::new(
-            gas, account.state.reference_temperature, &account.state.reference_density,
-            admitted, cancelled,
-        )?);
+        account.exterior.push(ReactiveExteriorAccount {
+            efforts: ExteriorEntropyAccount::new(
+                gas, account.state.reference_temperature, &account.state.reference_density,
+                admitted, cancelled,
+            )?,
+            molecular_exchange: EntropyExchange::default(),
+        });
         Ok(account)
     }
 
-    /// Admit both actual chemical halves and the actual middle transport against
-    /// the ORIGINAL complete-step state. Rounded component entropy reports and
-    /// the middle step's reference basis never enter this reduction.
+    /// Recontract one completely admitted molecular half in the ORIGINAL
+    /// pre-split entropy basis. Its opaque inventory carries the actual signed
+    /// end transfers and accepted absolute stage throughput, including RKL2's
+    /// signed weights; it has no advective time-area potential contribution.
+    /// Cancellation/refusal leaves all previously observed halves intact.
+    pub(in crate::multicomponent) fn observe_molecular_inventory(
+        &mut self,
+        gas: &MixtureGas,
+        inventory: &ExteriorTransportInventory,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), FlowError> {
+        poll(cancelled)?;
+        if gas.species_count() != self.species_count {
+            return Err(FlowError::EntropyDomain("reacting molecular entropy source species axis"));
+        }
+        let exterior = self.exterior.first_mut().ok_or(FlowError::EntropyDomain(
+            "missing original reacting exterior entropy efforts",
+        ))?;
+        let incoming = exterior.efforts.exchange_from_inventory(
+            gas, inventory, &self.state.reference_entropy, cancelled,
+        )?;
+        let combined = exterior.merge_exchange(&incoming, self.species_count, cancelled)?;
+        exterior.molecular_exchange = combined;
+        Ok(())
+    }
+
+    /// Admit both actual chemical/molecular halves and the middle transport
+    /// against the ORIGINAL complete-step state. Rounded component entropy
+    /// reports and the middle step's reference basis never enter this reduction.
     pub(in crate::multicomponent) fn check_candidate_with_exterior(
         &mut self,
         initial: &MixtureEuler1d,
@@ -115,9 +188,10 @@ impl ReactiveEntropyAccount {
         let exterior = self.exterior.first().ok_or(FlowError::EntropyDomain(
             "missing original reacting exterior entropy efforts",
         ))?;
-        let exchange = exterior.exchange_from_inventory(
+        let advective = exterior.efforts.exchange_from_inventory(
             gas, transport, &self.state.reference_entropy, cancelled,
         )?;
+        let exchange = exterior.merge_exchange(&advective, self.species_count, cancelled)?;
 
         let mut physical_change = self.chemical_change;
         let mut throughput = self.chemical_throughput;

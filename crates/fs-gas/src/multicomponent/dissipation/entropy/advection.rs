@@ -39,14 +39,48 @@ pub struct ExteriorMixtureEntropyReport {
 }
 
 /// Actual accepted native end transfers, independent of the entropy basis.
-/// Only this module constructs the inventory after checking BOTH SSP stages;
-/// coupled owners can contract it in their own immutable original-state basis.
+/// Constructed only from native admitted advection stages or complete molecular
+/// reports and accepted-stage throughput. Coupled owners contract the transfers
+/// in their own immutable original-state basis.
 #[derive(Clone, Copy)]
 pub(in crate::multicomponent) struct ExteriorTransportInventory {
     species_count: usize,
     transfers: [[f64; MAX_COMPONENTS]; 2],
     signed_measure: [f64; 2],
     throughput: [Dd; MAX_SPECIES],
+}
+
+impl ExteriorTransportInventory {
+    /// Copy a complete molecular interval after its native state, end-transfer
+    /// and bath-entropy gates have succeeded. The report owns the actual signed
+    /// conservative transfers; throughput retains every accepted SSP or signed
+    /// RKL stage's absolute species contribution. Neither is reconstructed from
+    /// a rounded entropy report or a net species change.
+    ///
+    /// This infallible adapter performs only copies after native publication:
+    /// all source axes, finite transfers and throughput were already admitted.
+    /// Molecular transport has NO advective entropy-potential contribution.
+    pub(super) fn from_molecular_report(
+        report: &super::DissipationReport,
+        throughput: [Dd; MAX_SPECIES],
+    ) -> Self {
+        let n = report.before.species_count;
+        let mut transfers = [[0.0; MAX_COMPONENTS]; 2];
+        for (end, total) in [
+            &report.left_boundary_change,
+            &report.right_boundary_change,
+        ].into_iter().enumerate() {
+            transfers[end][..n].copy_from_slice(&total.species_masses[..n]);
+            transfers[end][n] = total.momentum;
+            transfers[end][n + 1] = total.energy;
+        }
+        Self {
+            species_count: n,
+            transfers,
+            signed_measure: [0.0; 2],
+            throughput,
+        }
+    }
 }
 
 /// Fixed efforts and the last completely admitted native transport inventory.

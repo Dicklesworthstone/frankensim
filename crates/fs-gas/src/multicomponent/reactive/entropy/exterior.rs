@@ -1,9 +1,19 @@
-//! Prescribed exterior transport inside the original atomic C-A-C composition.
+//! Prescribed exterior entropy in the original atomic reacting composition.
 
 use super::*;
-use crate::multicomponent::ExteriorMixtureEntropyReport;
+use crate::multicomponent::{ExteriorMixtureEntropyReport, MixtureGas};
+use crate::multicomponent::dissipation::ReservoirMolecularEntropyReport;
 use crate::multicomponent::dissipation::entropy::ExteriorTransportInventory;
 pub use crate::multicomponent::dissipation::entropy::reactive::ReactiveExteriorEntropyReport;
+
+/// Original-source entropy receipts of both complete molecular bath intervals.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SplitExteriorMolecularEntropyReport {
+    /// Molecular evolution before chemistry and inviscid transport.
+    pub first: ReservoirMolecularEntropyReport,
+    /// Molecular evolution after chemistry and inviscid transport.
+    pub second: ReservoirMolecularEntropyReport,
+}
 
 /// Complete reacting evolution with actual prescribed-exterior entropy supply.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -16,6 +26,57 @@ pub struct ReactiveExteriorEntropyStepReport {
     /// The middle inviscid update in its own initial-state entropy basis.
     /// This component receipt does not replace complete-composition admission.
     pub transport_entropy: ExteriorMixtureEntropyReport,
+    /// Actual complete molecular halves when explicitly selected. These
+    /// component receipts do not replace the original-to-final entropy gate.
+    pub dissipation_entropy: Option<SplitExteriorMolecularEntropyReport>,
+}
+
+impl ReactiveExteriorEntropyStepReport {
+    /// Closed entry points keep their original algorithms and exact reports.
+    /// Only their report shape changes; there is no external entropy input.
+    pub(super) fn from_closed(closed: ReactiveEntropyStepReport) -> Self {
+        Self {
+            coupled: closed.coupled,
+            entropy: ReactiveExteriorEntropyReport {
+                source_entropy_change_j_k: closed.entropy.source_entropy_change_j_k,
+                boundary_entropy_input_j_k: [0.0; 2],
+                entropy_generation_j_k: closed.entropy.entropy_change_j_k,
+                source_entropy_generation_j_k: closed.entropy.source_entropy_change_j_k,
+                reference_entropy_residual_j_k: closed.entropy.reference_entropy_residual_j_k,
+                maximum_relative_species_residual: closed.entropy.maximum_relative_species_residual,
+                rejected_entropy_steps: closed.entropy.rejected_entropy_steps,
+            },
+            transport_entropy: ExteriorMixtureEntropyReport {
+                source_entropy_change_j_k: closed.transport_entropy.source_entropy_change_j_k,
+                boundary_entropy_input_j_k: [0.0; 2],
+                entropy_generation_j_k: closed.transport_entropy.entropy_change_j_k,
+                source_entropy_generation_j_k: closed.transport_entropy.source_entropy_change_j_k,
+                reference_entropy_residual_j_k: closed.transport_entropy.reference_entropy_residual_j_k,
+                minimum_step_entropy_generation_j_k: closed.transport_entropy.minimum_step_entropy_change_j_k,
+                maximum_relative_species_residual: closed.transport_entropy.maximum_relative_species_residual,
+                rejected_entropy_steps: closed.transport_entropy.rejected_entropy_steps,
+            },
+            dissipation_entropy: closed.dissipation_entropy.map(|halves| {
+                SplitExteriorMolecularEntropyReport {
+                    first: closed_molecular_report(halves.first),
+                    second: closed_molecular_report(halves.second),
+                }
+            }),
+        }
+    }
+}
+
+fn closed_molecular_report(report: MixtureEntropyReport) -> ReservoirMolecularEntropyReport {
+    ReservoirMolecularEntropyReport {
+        source_entropy_change_j_k: report.source_entropy_change_j_k,
+        boundary_entropy_input_j_k: [0.0; 2],
+        entropy_generation_j_k: report.entropy_change_j_k,
+        source_entropy_generation_j_k: report.source_entropy_change_j_k,
+        reference_entropy_residual_j_k: report.reference_entropy_residual_j_k,
+        minimum_step_entropy_generation_j_k: report.minimum_step_entropy_change_j_k,
+        maximum_relative_species_residual: report.maximum_relative_species_residual,
+        rejected_entropy_steps: report.rejected_entropy_steps,
+    }
 }
 
 impl ReactingEuler1d {
@@ -69,28 +130,7 @@ impl ReactingEuler1d {
             let closed = self.step_entropy_consistent(
                 maximum_duration, controls, entropy, cancelled,
             )?;
-            return Ok(ReactiveExteriorEntropyStepReport {
-                coupled: closed.coupled,
-                entropy: ReactiveExteriorEntropyReport {
-                    source_entropy_change_j_k: closed.entropy.source_entropy_change_j_k,
-                    boundary_entropy_input_j_k: [0.0; 2],
-                    entropy_generation_j_k: closed.entropy.entropy_change_j_k,
-                    source_entropy_generation_j_k: closed.entropy.source_entropy_change_j_k,
-                    reference_entropy_residual_j_k: closed.entropy.reference_entropy_residual_j_k,
-                    maximum_relative_species_residual: closed.entropy.maximum_relative_species_residual,
-                    rejected_entropy_steps: closed.entropy.rejected_entropy_steps,
-                },
-                transport_entropy: ExteriorMixtureEntropyReport {
-                    source_entropy_change_j_k: closed.transport_entropy.source_entropy_change_j_k,
-                    boundary_entropy_input_j_k: [0.0; 2],
-                    entropy_generation_j_k: closed.transport_entropy.entropy_change_j_k,
-                    source_entropy_generation_j_k: closed.transport_entropy.source_entropy_change_j_k,
-                    reference_entropy_residual_j_k: closed.transport_entropy.reference_entropy_residual_j_k,
-                    minimum_step_entropy_generation_j_k: closed.transport_entropy.minimum_step_entropy_change_j_k,
-                    maximum_relative_species_residual: closed.transport_entropy.maximum_relative_species_residual,
-                    rejected_entropy_steps: closed.transport_entropy.rejected_entropy_steps,
-                },
-            });
+            return Ok(ReactiveExteriorEntropyStepReport::from_closed(closed));
         }
         let mut account = CoupledEntropy::new_with_exterior_states(
             &self.accepted, controls.transport, entropy, exterior_states, &mut cancelled,
@@ -114,7 +154,11 @@ impl ReactingEuler1d {
 /// is constructed only by the native SSP boundary-quadrature owner.
 pub(super) struct ExteriorCoupling {
     transport: Option<(ExteriorMixtureEntropyReport, ExteriorTransportInventory)>,
-    completed: Option<(ReactiveExteriorEntropyReport, ExteriorMixtureEntropyReport)>,
+    completed: Option<(
+        ReactiveExteriorEntropyReport,
+        ExteriorMixtureEntropyReport,
+        Option<SplitExteriorMolecularEntropyReport>,
+    )>,
 }
 
 impl ExteriorCoupling {
@@ -125,7 +169,7 @@ impl ExteriorCoupling {
 }
 
 impl CoupledEntropy {
-    fn new_with_exterior_states(
+    pub(super) fn new_with_exterior_states(
         flow: &MixtureEuler1d,
         transport: StepControl,
         controls: MixtureEntropyControl,
@@ -197,13 +241,36 @@ impl CoupledEntropy {
         }
     }
 
+    /// Observe one complete accepted molecular half without retaining a second
+    /// opaque stage inventory. The whole source account owns transactional
+    /// accumulation in its immutable pre-split basis.
+    pub(in crate::multicomponent::reactive) fn observe_molecular_inventory(
+        &mut self,
+        gas: &MixtureGas,
+        inventory: &ExteriorTransportInventory,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), ReactiveError> {
+        self.account.observe_molecular_inventory(gas, inventory, cancelled)?;
+        Ok(())
+    }
+
     pub(in crate::multicomponent::reactive) fn check_exterior_candidate(
         &mut self,
         initial: &MixtureEuler1d,
         candidate: &MixtureEuler1d,
         temperature_bounds: Option<[f64; 2]>,
+        molecular: [Option<ReservoirMolecularEntropyReport>; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), ReactiveError> {
+        let dissipation_entropy = match molecular {
+            [None, None] => None,
+            [Some(first), Some(second)] => Some(SplitExteriorMolecularEntropyReport {
+                first, second,
+            }),
+            _ => return Err(ReactiveError::Invalid(
+                "incomplete reacting exterior molecular entropy receipts",
+            )),
+        };
         let exterior = self.exterior.first_mut().ok_or(ReactiveError::Invalid(
             "missing reacting exterior entropy account",
         ))?;
@@ -213,15 +280,15 @@ impl CoupledEntropy {
         let entropy = self.account.check_candidate_with_exterior(
             initial, candidate, temperature_bounds, inventory, cancelled,
         )?;
-        exterior.completed = Some((entropy, *transport));
+        exterior.completed = Some((entropy, *transport, dissipation_entropy));
         Ok(())
     }
 
     /// Every fallible contraction and report reduction precedes native swap.
-    fn complete_exterior(self, coupled: ReactiveStepReport) -> ReactiveExteriorEntropyStepReport {
-        let (entropy, transport_entropy) = self.exterior.into_iter().next()
+    pub(super) fn complete_exterior(self, coupled: ReactiveStepReport) -> ReactiveExteriorEntropyStepReport {
+        let (entropy, transport_entropy, dissipation_entropy) = self.exterior.into_iter().next()
             .and_then(|exterior| exterior.completed)
             .expect("accepted reacting exterior step retained complete entropy admission");
-        ReactiveExteriorEntropyStepReport { coupled, entropy, transport_entropy }
+        ReactiveExteriorEntropyStepReport { coupled, entropy, transport_entropy, dissipation_entropy }
     }
 }

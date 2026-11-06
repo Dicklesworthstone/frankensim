@@ -9,7 +9,6 @@
 mod exterior;
 pub use exterior::ReactiveExteriorEntropyReport;
 
-use super::advection::ExteriorEntropyAccount;
 use super::{
     Dd, EntropyTracker, FlowError, MAX_SPECIES, MixtureEuler1d, MolecularEntropyControl,
     poll, positive, scalar,
@@ -62,9 +61,9 @@ pub(in crate::multicomponent) struct ReactiveEntropyAccount {
     chemical_change: [Dd; MAX_SPECIES],
     chemical_throughput: [Dd; MAX_SPECIES],
     rejected_entropy_steps: usize,
-    // Optional fixed exterior efforts in the ORIGINAL pre-chemistry basis.
+    // Optional exterior efforts and molecular exchange in the ORIGINAL pre-split basis.
     // Length is zero or one; closed accounts incur no additional allocation.
-    exterior: Vec<ExteriorEntropyAccount>,
+    exterior: Vec<exterior::ReactiveExteriorAccount>,
 }
 
 impl ReactiveEntropyAccount {
@@ -89,6 +88,9 @@ impl ReactiveEntropyAccount {
         self.reset_endpoint();
         self.chemical_change.fill(Dd::ZERO);
         self.chemical_throughput.fill(Dd::ZERO);
+        if let Some(exterior) = self.exterior.first_mut() {
+            exterior.reset_molecular();
+        }
     }
 
     fn reset_endpoint(&mut self) {

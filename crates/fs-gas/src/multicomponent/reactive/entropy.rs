@@ -6,7 +6,12 @@
 //! arbitrary-reference effect of numerical species-source drift is separated.
 
 mod exterior;
-pub use exterior::{ReactiveExteriorEntropyReport, ReactiveExteriorEntropyStepReport};
+mod molecular;
+pub use exterior::{
+    ReactiveExteriorEntropyReport, ReactiveExteriorEntropyStepReport,
+    SplitExteriorMolecularEntropyReport,
+};
+pub use molecular::StabilizedReactiveExteriorEntropyStepReport;
 
 use super::*;
 use crate::multicomponent::dissipation::entropy::reactive::ReactiveEntropyAccount;

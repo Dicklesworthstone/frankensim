@@ -6201,3 +6201,43 @@ intervals or a general positivity/order/combustion-validity theorem. Focused
 regressions cover variable Cp and nonzero species entropy constants, independent
 complete state-minus-boundary reconstruction, accepted-duration retry replay,
 chemical-plus-boundary continuity, closed dispatch and late cancellation.
+
+### Open reacting molecular transport with complete entropy admission
+
+`ReactingEuler1d::step_entropy_consistent_with_dissipation_and_exterior_states`
+and `step_entropy_consistent_with_stabilized_dissipation_and_exterior_states`
+connect the ORIGINAL source-conjugate molecular, chemistry and inviscid owners
+in D-C-A-C-D with the same prescribed stationary exterior states. Both molecular
+halves retain their Maxwell--Stefan, heat-conduction, viscous and supplied
+constitutive cross-effect fluxes and their native entropy/source gates. No
+separate reaction or viscous heat source is added. Moving molecular exteriors
+refuse under the existing stationary-bath model; the inviscid-only exterior
+entry retains its separate moving-trace support.
+
+Each completed molecular half exports only already-admitted actual signed end
+species/momentum/energy transfers and double-double absolute stage throughput.
+Its advective time-area measure is zero: molecular exchange does not receive an
+Euler entropy-potential term. The whole composition contracts D1, A and D2 in
+one immutable pre-D source entropy basis. It admits actual final state entropy
+minus ALL external supply while retaining real chemical entropy. Individual
+species satisfy reaction-plus-boundary continuity with both absolute chemical
+and boundary throughput. Component entropy reports remain available but are
+not summed into complete-state admission.
+
+Original accepted/trial storage, common-duration restart and final temperature,
+conservative-report and cancellation checks remain authoritative. Rejected or
+shortened attempts clear all physical exchange receipts. RKL2 retains one
+actual RHS counter across both halves and every discarded whole attempt;
+work exhaustion remains terminal. Its signed boundary quadrature and absolute
+negative-weight throughput remain owned by the original recurrence. Exporting
+an accepted inventory introduces no fallible operation after molecular
+publication and no additional EOS or constitutive evaluation.
+
+Two absent exterior states delegate to the original closed SSP/RKL paths and
+map their exact reports to zero-boundary form. This entry covers one accepted
+first-order, fixed constant-area reacting step with prescribed stationary baths;
+it does not establish finite-bath feedback, a full-duration open window,
+unconditional positivity, global temporal order or combustion validation.
+Regressions cover variable Cp/nonzero species entropy references, independently
+reconstructed complete boundary supply, both-half and discarded-attempt work
+limits, closed compatibility, moving-bath refusal and atomic cancellation.
