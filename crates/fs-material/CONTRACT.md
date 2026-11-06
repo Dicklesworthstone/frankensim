@@ -12229,6 +12229,26 @@ take over. The original frozen-rate step bounds and fixed gas/reference geometry
 remain in force. This reduction does not infer mushy alloys, pressure-dependent
 phase diagrams, separate constituent temperatures or moving-interface geometry.
 
+`evaporation::gas::equilibrium::boundary::advance_to_freezing` consumes at most
+the requested phase-only interval and returns the conservative all-solid fusion
+endpoint when reached, together with accepted and unconsumed physical time.
+The event uses the original bulk/constituent energy difference and frozen film
+rate, including cooling by sufficiently cold condensing vapor. It locates an
+early endpoint before full-horizon exposure or donor admission, then retains
+the original accepted-duration inventory, temperature and equilibrium gates.
+The physical-rate mass request and represented terminal mass remain distinct
+and share the original mass allowance. Exact source-knot selection must pass
+the sum of absolute condensed and original-gas energy defects under one joule
+budget. There is one gas reconstruction and no residual liquid or latent energy
+is discarded. The ordinary scalar API continues to require a liquid seed.
+
+The terminal state does not select a new exposed interface or switch from
+continuum film transport to a molecular sublimation law. That handoff remains
+explicit. If network or reciprocal gas heat is split over the same interval,
+the complete heat/phase proposal must be retried at the shortened event time;
+a full-duration heat state cannot be relabeled with the earlier phase clock.
+Frozen-rate event times still require physical timestep refinement.
+
 `evaporation::gas::equilibrium::heat::advance_equilibrium_surface_with_heat`
 adds reciprocal gas-film heat through the existing implicit heat owner, evaluated
 on that same bulk enthalpy chart. Fusion plateaus require neither apparent heat

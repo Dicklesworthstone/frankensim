@@ -357,6 +357,8 @@ fn admit_liquid_source<L: EvaporationLaw + ?Sized>(
 struct PreparedGasLiquidSurface {
     original: LiquidSurfaceState,
     liquid: LiquidSurfaceState,
+    duration_s: f64,
+    terminal_enthalpy_j_kg: Option<f64>,
     requested_dm: f64,
     dm: f64,
     surface_temperature_k: [f64; 2],
@@ -384,13 +386,15 @@ impl LiquidCaloricState {
     fn admit_phase(
         &self,
         phase: fs_thermal::evaporation::EvaporationProperties,
+        allow_completed: bool,
     ) -> Result<(), GasEvaporationError> {
         if !self.liquid_enthalpy_j_kg.is_finite()
-            || !positive(self.liquid_mass_fraction)
+            || !nonnegative(self.liquid_mass_fraction)
+            || (!allow_completed && self.liquid_mass_fraction == 0.0)
             || self.liquid_mass_fraction > 1.0
         {
             return Err(GasEvaporationError::Invalid(
-                "original caloric state requires a finite liquid constituent and positive liquid fraction",
+                "original caloric state requires a finite liquid constituent and an admitted liquid fraction",
             ));
         }
         if let Some(density) = self.liquid_density_kg_m3 {
@@ -456,6 +460,81 @@ fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
     duration_s: f64,
     controls: GasEvaporationSolve,
     select_mass: impl FnOnce(f64) -> Result<f64, GasEvaporationError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<PreparedGasLiquidSurface, GasEvaporationError> {
+    prepare_surface_with_boundary(
+        law,
+        binding,
+        liquid,
+        gas,
+        catalog,
+        caloric_at_enthalpy,
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        controls,
+        select_mass,
+        None,
+        cancelled,
+    )
+}
+
+fn requested_surface_mass(
+    area_m2: f64,
+    duration_s: f64,
+    flux_kg_m2_s: f64,
+) -> Result<f64, GasEvaporationError> {
+    let exposure = area_m2 * duration_s;
+    let mass = exposure * flux_kg_m2_s;
+    if !nonnegative(exposure)
+        || !mass.is_finite()
+        || (duration_s > 0.0 && area_m2 > 0.0 && exposure == 0.0)
+        || (exposure > 0.0 && flux_kg_m2_s != 0.0 && mass == 0.0)
+    {
+        return Err(GasEvaporationError::Invalid(
+            "exposure or nonzero transferred mass is unrepresentable",
+        ));
+    }
+    Ok(mass)
+}
+
+// Terminal intervals can be much shorter than the requested horizon. Preserve
+// legacy arithmetic when representable, otherwise change only multiplication
+// order so an intermediate exposure cannot hide a finite event transfer.
+fn requested_event_mass(
+    area_m2: f64,
+    duration_s: f64,
+    flux_kg_m2_s: f64,
+) -> Result<f64, GasEvaporationError> {
+    match requested_surface_mass(area_m2, duration_s, flux_kg_m2_s) {
+        Ok(mass) => Ok(mass),
+        Err(error) => {
+            let rate = area_m2 * flux_kg_m2_s;
+            let mass = rate * duration_s;
+            if rate.is_finite() && mass.is_finite() && rate != 0.0 && mass != 0.0 {
+                Ok(mass)
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+
+/// The same storage/film owner, optionally ending at an original caloric
+/// boundary. Event mass and time are solved analytically for the frozen rate;
+/// every actual endpoint still passes the original mass and energy budgets.
+#[allow(clippy::too_many_arguments)]
+fn prepare_surface_with_boundary<L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    liquid: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &ThermochemicalGasModel,
+    caloric_at_enthalpy: impl Fn(f64) -> Result<LiquidCaloricState, GasEvaporationError>,
+    mass_transfer_coefficient_m_s: f64,
+    mut duration_s: f64,
+    controls: GasEvaporationSolve,
+    select_mass: impl FnOnce(f64) -> Result<f64, GasEvaporationError>,
+    lower_enthalpy_boundary_j_kg: Option<f64>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PreparedGasLiquidSurface, GasEvaporationError> {
     use GasEvaporationError as Error;
@@ -471,6 +550,11 @@ fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
         ));
     }
     let initial_caloric = caloric_at_enthalpy(liquid.specific_enthalpy_j_kg)?;
+    if !positive(initial_caloric.liquid_mass_fraction) {
+        return Err(Error::Invalid(
+            "a liquid-interface interval requires an initial liquid seed",
+        ));
+    }
     let surface_t = initial_caloric.temperature_k;
     let gas_t = gas.state().state().temperature;
     let partial_pressure = gas.species_partial_pressure_pa(&binding.species)?;
@@ -490,21 +574,93 @@ fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
         controls,
     )?;
     let phase = source.phase;
-    initial_caloric.admit_phase(phase)?;
+    initial_caloric.admit_phase(phase, false)?;
     let molecular_mass = source.molecular_mass;
     let alignment = source.alignment;
-    let exposure = liquid.area_m2 * duration_s;
-    let requested_dm = exposure * flux.mass_flux_kg_m2_s;
-    if !nonnegative(exposure)
-        || !requested_dm.is_finite()
-        || (duration_s > 0.0 && liquid.area_m2 > 0.0 && exposure == 0.0)
-        || (exposure > 0.0 && flux.mass_flux_kg_m2_s != 0.0 && requested_dm == 0.0)
-    {
-        return Err(Error::Invalid(
-            "exposure or nonzero transferred mass is unrepresentable",
-        ));
+    // Use original source increments so a large formation datum cannot erase
+    // carried sensible heat. Legacy paths evaluate this after mass selection,
+    // exactly as before; an event also needs it to locate its stopping time.
+    let carried_energy = |dm: f64| -> Result<(f64, f64), Error> {
+        let vapor_h_difference = if dm == 0.0 {
+            0.0
+        } else {
+            catalog.species_specific_enthalpy_change_j_kg(&binding.species, gas_t, surface_t)?
+        };
+        let gap = phase.latent_heat_j_kg
+            + alignment
+            + (initial_caloric.liquid_enthalpy_j_kg - liquid.specific_enthalpy_j_kg)
+            - if dm < 0.0 { vapor_h_difference } else { 0.0 };
+        Ok((vapor_h_difference, gap))
+    };
+    let mut cached_energy = None;
+    let mut terminal_enthalpy_j_kg = None;
+    let mut terminal_mass_kg = None;
+    let mut later_boundary_mass_kg = None;
+    if let Some(boundary_h) = lower_enthalpy_boundary_j_kg {
+        let gap_to_boundary = liquid.specific_enthalpy_j_kg - boundary_h;
+        if !boundary_h.is_finite() || !positive(gap_to_boundary) {
+            return Err(Error::Invalid(
+                "terminal enthalpy must be an original boundary below the active state",
+            ));
+        }
+        if duration_s > 0.0 && liquid.area_m2 > 0.0 && flux.mass_flux_kg_m2_s != 0.0 {
+            // Only direction enters the stream calorics. Locate an early event
+            // before multiplying area by the possibly enormous full horizon.
+            let energy = carried_energy(flux.mass_flux_kg_m2_s)?;
+            cached_energy = Some(energy);
+            // m1*(h_boundary-h0) = -dm*g, m1=m0-dm. This signed root
+            // also covers condensation whose upstream vapor cools the body.
+            let denominator = gap_to_boundary + energy.1;
+            if !denominator.is_finite() {
+                return Err(Error::Invalid(
+                    "terminal enthalpy balance is unrepresentable",
+                ));
+            }
+            if denominator != 0.0 {
+                let boundary_dm = liquid.mass_kg * (gap_to_boundary / denominator);
+                if boundary_dm.is_finite()
+                    && boundary_dm != 0.0
+                    && boundary_dm.is_sign_negative() == flux.mass_flux_kg_m2_s.is_sign_negative()
+                {
+                    let rate = liquid.area_m2 * flux.mass_flux_kg_m2_s;
+                    let event_time = if rate.is_finite() && rate != 0.0 {
+                        boundary_dm / rate
+                    } else {
+                        (boundary_dm / flux.mass_flux_kg_m2_s) / liquid.area_m2
+                    };
+                    if event_time == 0.0 {
+                        return Err(Error::Invalid("terminal phase duration is unrepresentable"));
+                    }
+                    if positive(event_time) {
+                        if event_time <= duration_s {
+                            duration_s = event_time;
+                            terminal_enthalpy_j_kg = Some(boundary_h);
+                            terminal_mass_kg = Some(boundary_dm);
+                        } else {
+                            later_boundary_mass_kg = Some(boundary_dm);
+                        }
+                    }
+                }
+            }
+        }
     }
-    let dm = select_mass(requested_dm)?;
+    let requested_dm = if terminal_enthalpy_j_kg.is_some() {
+        requested_event_mass(liquid.area_m2, duration_s, flux.mass_flux_kg_m2_s)?
+    } else {
+        requested_surface_mass(liquid.area_m2, duration_s, flux.mass_flux_kg_m2_s)?
+    };
+    // A root rounding just beyond the requested endpoint may use that endpoint
+    // only within the ORIGINAL absolute mass budget. Keep the physical-rate
+    // request in the receipt, so this small selection is never hidden.
+    if let Some(boundary_dm) = later_boundary_mass_kg {
+        if requested_dm != 0.0
+            && boundary_dm.abs() - requested_dm.abs() <= controls.gas.mass_tolerance_kg
+        {
+            terminal_enthalpy_j_kg = lower_enthalpy_boundary_j_kg;
+            terminal_mass_kg = Some(boundary_dm);
+        }
+    }
+    let dm = select_mass(terminal_mass_kg.unwrap_or(requested_dm))?;
     if !dm.is_finite()
         || (requested_dm == 0.0 && dm != 0.0)
         || (requested_dm != 0.0
@@ -541,24 +697,19 @@ fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
     {
         return Err(Error::Invalid("liquid inventory change is unrepresentable"));
     }
-    // Use the original source increment: formation constants cannot erase
-    // sensible heat when either source's absolute h has a large datum.
-    let vapor_h_difference = if dm == 0.0 {
-        0.0
-    } else {
-        catalog.species_specific_enthalpy_change_j_kg(&binding.species, gas_t, surface_t)?
+    let (vapor_h_difference, carried_gap) = match cached_energy {
+        Some(energy) => energy,
+        None => carried_energy(dm)?,
     };
-    // Vaporization uses pure liquid h, whereas the original storage coordinate
-    // is bulk h. Their difference retains fusion without a second heat source.
-    let carried_gap = phase.latent_heat_j_kg
-        + alignment
-        + (initial_caloric.liquid_enthalpy_j_kg - liquid.specific_enthalpy_j_kg)
-        - if dm < 0.0 { vapor_h_difference } else { 0.0 };
     let liquid_thermal_target = -dm * carried_gap;
     let delta_h = liquid_thermal_target / next_mass;
-    let next_h = liquid.specific_enthalpy_j_kg + delta_h;
+    let computed_h = liquid.specific_enthalpy_j_kg + delta_h;
+    // A terminal event uses the exact ORIGINAL chart knot. Its represented
+    // extensive defect is measured below and must fit the same energy budget.
+    let next_h = terminal_enthalpy_j_kg.unwrap_or(computed_h);
     if !liquid_thermal_target.is_finite()
         || !delta_h.is_finite()
+        || !computed_h.is_finite()
         || !next_h.is_finite()
         || (liquid_thermal_target != 0.0 && delta_h == 0.0)
         || (delta_h != 0.0 && next_h == liquid.specific_enthalpy_j_kg)
@@ -570,7 +721,7 @@ fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
     let final_caloric = caloric_at_enthalpy(next_h)?;
     let final_surface_t = final_caloric.temperature_k;
     let final_phase = properties(law, final_surface_t)?;
-    final_caloric.admit_phase(final_phase)?;
+    final_caloric.admit_phase(final_phase, terminal_enthalpy_j_kg.is_some())?;
     compatibility(
         catalog.species_specific_enthalpy_j_kg(&binding.species, final_surface_t)?,
         final_caloric.liquid_enthalpy_j_kg,
@@ -589,6 +740,14 @@ fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
     }
     let liquid_thermal_change = next_mass * (next_h - liquid.specific_enthalpy_j_kg);
     let liquid_residual = liquid_thermal_change - liquid_thermal_target;
+    if terminal_enthalpy_j_kg.is_some()
+        && (!liquid_residual.is_finite() || liquid_residual.abs() > controls.gas.energy_tolerance_j)
+    {
+        return Err(Error::EnergyBalance {
+            residual_j: liquid_residual,
+            tolerance_j: controls.gas.energy_tolerance_j,
+        });
+    }
     let relative_energy = if dm > 0.0 {
         dm * vapor_h_difference
     } else {
@@ -618,6 +777,8 @@ fn prepare_surface_with_caloric<L: EvaporationLaw + ?Sized>(
     }
     Ok(PreparedGasLiquidSurface {
         original: liquid,
+        duration_s,
+        terminal_enthalpy_j_kg,
         liquid: LiquidSurfaceState {
             mass_kg: next_mass,
             specific_enthalpy_j_kg: next_h,

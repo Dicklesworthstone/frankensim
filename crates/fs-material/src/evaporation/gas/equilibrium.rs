@@ -11,8 +11,9 @@
 //! formed later within vapor transfer cannot finance that frozen rate.
 //! The caller supplies exposed LIQUID area;
 //! phase mass fraction does not determine surface coverage. A remaining liquid
-//! seed is required at both endpoints; complete freezing needs a surrounding
-//! interface event owner before sublimation or nucleation can take over.
+//! seed is required by the default stepping path. The opt-in [`boundary`]
+//! owner can return exact freezing completion and unconsumed physical time;
+//! selecting the subsequent interface and transport regime remains explicit.
 //!
 //! This is a sharp, pure-substance, local-equilibrium reduction on the original
 //! chart. Its liquid sensible branch remains available after complete melting.
@@ -20,6 +21,8 @@
 //! pressure-dependent phase boundaries are outside this reduction. The parent
 //! film's frozen-rate, fixed-gas-volume and caloric-account assumptions apply.
 
+/// Conservative completion of the liquid interface at its original fusion knot.
+pub mod boundary;
 /// Reciprocal gas-film sensible heat on the same original fusion inventory.
 pub mod heat;
 
@@ -39,6 +42,7 @@ fn invalid(message: &'static str) -> GasEvaporationError {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumEvaporation<'a> {
     source: SharpMeltingCaloric<'a>,
+    solid_at_melting_h_j_kg: f64,
     liquid_at_melting_h_j_kg: f64,
     liquid_at_melting_density_kg_m3: f64,
 }
@@ -86,6 +90,11 @@ impl<'a> EquilibriumEvaporation<'a> {
             .ok_or(invalid(
                 "sharp fusion requires its original liquid endpoint",
             ))?;
+        let solid_at_melting_h_j_kg = knots[..end]
+            .iter()
+            .rfind(|knot| knot.liquid_mass_fraction == 0.0)
+            .ok_or(invalid("sharp fusion requires its original solid endpoint"))?
+            .specific_enthalpy_j_kg;
         for pair in knots[end..].windows(2) {
             if pair[0].liquid_mass_fraction != 1.0
                 || pair[1].liquid_mass_fraction != 1.0
@@ -98,6 +107,7 @@ impl<'a> EquilibriumEvaporation<'a> {
         }
         Ok(Self {
             source,
+            solid_at_melting_h_j_kg,
             liquid_at_melting_h_j_kg: knots[end].specific_enthalpy_j_kg,
             liquid_at_melting_density_kg_m3: knots[end].bulk_density_kg_m3,
         })
@@ -121,10 +131,22 @@ impl<'a> EquilibriumEvaporation<'a> {
         self,
         h: f64,
     ) -> Result<LiquidCaloricState, GasEvaporationError> {
+        self.caloric_with_completion(h, false)
+    }
+
+    // Only an event-owned endpoint may use the exact original solid fusion
+    // knot; the liquid constituent still supplies the limiting vaporization h.
+    fn caloric_with_completion(
+        self,
+        h: f64,
+        allow_completed: bool,
+    ) -> Result<LiquidCaloricState, GasEvaporationError> {
         let state = self.curve().values_at_specific_enthalpy(h).map_err(|_| {
             invalid("original solid/liquid enthalpy chart refused the evaporation state")
         })?;
-        if state.liquid_mass_fraction == 0.0 {
+        if state.liquid_mass_fraction == 0.0
+            && !(allow_completed && h == self.solid_at_melting_h_j_kg)
+        {
             return Err(invalid(
                 "no liquid interface remains; freezing completion requires its own event owner",
             ));
@@ -153,6 +175,14 @@ impl<'a> EquilibriumEvaporation<'a> {
         self,
         bulk: LiquidSurfaceState,
     ) -> Result<PhaseInventoryState, GasEvaporationError> {
+        self.state_with_completion(bulk, false)
+    }
+
+    fn state_with_completion(
+        self,
+        bulk: LiquidSurfaceState,
+        allow_completed: bool,
+    ) -> Result<PhaseInventoryState, GasEvaporationError> {
         if !positive(bulk.mass_kg) || !nonnegative(bulk.area_m2) {
             return Err(invalid(
                 "positive total condensed mass and nonnegative exposed liquid area required",
@@ -164,7 +194,12 @@ impl<'a> EquilibriumEvaporation<'a> {
             .map_err(|_| invalid("original solid/liquid caloric state refused"))?;
         let solid_mass_kg = bulk.mass_kg * equilibrium.solid_mass_fraction();
         let liquid_mass_kg = bulk.mass_kg * equilibrium.liquid_mass_fraction();
-        if !positive(liquid_mass_kg)
+        let completed = allow_completed
+            && bulk.specific_enthalpy_j_kg == self.solid_at_melting_h_j_kg
+            && equilibrium.is_fully_solid();
+        if !nonnegative(liquid_mass_kg)
+            || (liquid_mass_kg == 0.0 && !completed)
+            || (equilibrium.liquid_mass_fraction() > 0.0 && liquid_mass_kg == 0.0)
             || !nonnegative(solid_mass_kg)
             || (equilibrium.solid_mass_fraction() > 0.0 && solid_mass_kg == 0.0)
         {
@@ -188,13 +223,30 @@ impl<'a> EquilibriumEvaporation<'a> {
         transferred_mass_kg: f64,
         mass_tolerance_kg: f64,
     ) -> Result<PhaseInventoryStep, GasEvaporationError> {
+        self.partition_step_with_completion(
+            initial,
+            final_bulk,
+            transferred_mass_kg,
+            mass_tolerance_kg,
+            false,
+        )
+    }
+
+    fn partition_step_with_completion(
+        self,
+        initial: LiquidSurfaceState,
+        final_bulk: LiquidSurfaceState,
+        transferred_mass_kg: f64,
+        mass_tolerance_kg: f64,
+        allow_completed: bool,
+    ) -> Result<PhaseInventoryStep, GasEvaporationError> {
         if !positive(mass_tolerance_kg) || !transferred_mass_kg.is_finite() {
             return Err(invalid(
                 "finite transfer and positive phase-partition mass tolerance required",
             ));
         }
         let initial = self.state(initial)?;
-        let final_state = self.state(final_bulk)?;
+        let final_state = self.state_with_completion(final_bulk, allow_completed)?;
         let freezing_mass_kg = final_state.solid_mass_kg - initial.solid_mass_kg;
         let residual = (final_state.liquid_mass_kg - initial.liquid_mass_kg)
             + transferred_mass_kg
