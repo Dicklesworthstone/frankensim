@@ -18,12 +18,47 @@ impl CoupledModalSystem {
     /// their already-zero initial displacements are retained as position gauges.
     /// These coordinates remain dynamically free; no tether or general singular
     /// solve is introduced. The support solve uses at most max_connections rows.
+    /// Free assemblies with balanced loads may instead use
+    /// [`Self::initialize_static_equilibrium_with_gauges`] with explicit null directions.
     pub fn initialize_static_equilibrium(&mut self, external: &[f64], gate: &CancelGate)
         -> Result<f64, ModalCouplingError>
     {
         poll(Some(gate))?;
         self.require_static_initialization(external)?;
         let response = StaticResponse::new(self, gate)?;
+        let q = response.solve(self, external, true, true, gate)?;
+        let energy = self.stage_static_equilibrium(&q, external, gate)?;
+        poll(Some(gate))?;
+        std::mem::swap(&mut self.models, &mut self.candidates);
+        std::mem::swap(&mut self.material_memory, &mut self.candidate_material_memory);
+        Ok(energy)
+    }
+
+    /// Settle a free spring-connected assembly with explicit zero-displacement
+    /// gauges. Each vector is an orthonormal null direction in the COMPLETE
+    /// mass-normalized modal coordinate order, not a fixed node or a support.
+    /// For translating masses, a vector proportional to their square-root
+    /// masses selects zero center-of-mass displacement.
+    ///
+    /// Every vector must have zero entries on positive-frequency modes and
+    /// annihilate every positive-stiffness connection within roundoff. The
+    /// original external forces must be orthogonal to every vector; incompatible
+    /// forces are refused, never projected away. Missing independent gauges
+    /// refuse through the original free-block rank screen. Uncoupled free
+    /// coordinates also need a declared gauge when this list is nonempty.
+    ///
+    /// A nullspace augmentation selects the pose only inside the small Schur
+    /// solve. Original springs, stored energy, force balances and subsequent
+    /// dynamics are unchanged. Final physical residuals and gauge residuals
+    /// must pass before publication. An empty list uses the ordinary supported
+    /// solve. This is a floating-point nullspace admission, not a rank or
+    /// stability certificate, and does not add a contact-only support solve.
+    pub fn initialize_static_equilibrium_with_gauges(
+        &mut self, external: &[f64], nullspace: &[Vec<f64>], gate: &CancelGate,
+    ) -> Result<f64, ModalCouplingError> {
+        poll(Some(gate))?;
+        self.require_static_initialization(external)?;
+        let response = StaticResponse::new_with_gauges(self, nullspace, gate)?;
         let q = response.solve(self, external, true, true, gate)?;
         let energy = self.stage_static_equilibrium(&q, external, gate)?;
         poll(Some(gate))?;
@@ -170,6 +205,12 @@ pub(super) struct StaticResponse {
 }
 impl StaticResponse {
     pub(super) fn new(network: &CoupledModalSystem, gate: &CancelGate) -> Result<Self, ModalCouplingError> {
+        Self::new_with_gauges(network, &[], gate)
+    }
+
+    fn new_with_gauges(network: &CoupledModalSystem, nullspace: &[Vec<f64>], gate: &CancelGate)
+        -> Result<Self, ModalCouplingError>
+    {
         let free_count = network.models.iter().flat_map(|m| m.modes())
             .filter(|m| m.angular_frequency_rad_s == 0.0).count();
         let mut indices = Vec::with_capacity(free_count);
@@ -184,7 +225,7 @@ impl StaticResponse {
                     // exactly zero iff it has no participation in ANY positive
                     // spring. A dashpot contributes no static force. Do not
                     // classify small or linearly dependent support as a gauge.
-                    if network.columns.iter().zip(&network.connections)
+                    if !nullspace.is_empty() || network.columns.iter().zip(&network.connections)
                         .any(|(column, link)| link.stiffness_n_m > 0.0 && column[index] != 0.0) {
                         indices.push(index);
                     } else {
@@ -198,12 +239,12 @@ impl StaticResponse {
                 }
             }
         }
-        FreeResponse::admit(network, indices.len())?;
+        FreeResponse::admit(network, indices.len(), nullspace.len())?;
         let roots: Vec<f64> = network.connections.iter().map(|c| c.stiffness_n_m.sqrt()).collect();
         let matrix = connection_matrix(&network.columns, &compliance, &roots, Some(gate))?;
         let factor = cholesky(&matrix, roots.len()).map_err(ModalCouplingError::Factor)?;
         let free = if indices.is_empty() { None } else {
-            Some(FreeResponse::new(network, indices, &roots, &matrix, &factor, gate)?)
+            Some(FreeResponse::new(network, indices, &roots, &matrix, &factor, nullspace, gate)?)
         };
         Ok(Self { compliance, roots, matrix, factor, free, gauges })
     }

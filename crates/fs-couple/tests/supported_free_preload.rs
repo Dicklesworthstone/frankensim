@@ -3,7 +3,8 @@ use fs_couple::modal_acoustic_time::{
     ModalAcousticMode, ModalAcousticState, ModalAcousticTimeBudget, ModalAcousticTimeModel,
 };
 use fs_couple::render::schedule::force::coupled::{
-    CoupledModalSystem, ModalAttachment, ModalConnection, ModalCouplingConfig, ModalCouplingError,
+    CoupledModalSystem, ModalAttachment, ModalColumnConnection, ModalConnection,
+    ModalCouplingConfig, ModalCouplingError,
 };
 use fs_couple::render::schedule::force::coupled::contact::{
     ContactModalSystem, ModalContact, ModalContactConfig,
@@ -223,4 +224,193 @@ fn dashpot_memory_positions_do_not_block_preload_or_receive_an_artificial_spring
     }
     assert!(moving);
     assert!(s.total_energy_j().unwrap()<energy);
+}
+
+fn free_pair(rate: u32, masses: [f64;2], rest: f64, config: ModalCouplingConfig)
+    -> CoupledModalSystem
+{
+    CoupledModalSystem::new(vec![mass(rate,masses[0]),mass(rate,masses[1])],
+        vec![spring(0,1.0/masses[0].sqrt(),1,1.0/masses[1].sqrt(),1000.0,rest)],
+        config,&CancelGate::new()).unwrap()
+}
+fn translation_gauge(masses: &[f64]) -> Vec<f64> {
+    let total_root = masses.iter().sum::<f64>().sqrt();
+    masses.iter().map(|m|m.sqrt()/total_root).collect()
+}
+
+#[test]
+fn g1_balanced_free_assembly_has_analytic_extension_and_zero_center_of_mass() {
+    for (rate,masses) in [(24000,[0.04_f64,0.09_f64]),(48000,[0.09,0.04]),(96000,[0.04,0.16])] {
+        let roots = masses.map(f64::sqrt);
+        let rest = 0.002;let force = 1.2;
+        let loads = [force/roots[0],-force/roots[1]];
+        let mut s = free_pair(rate,masses,rest,budget());
+        // The old entry point cannot silently invent a gauge.
+        assert!(s.initialize_static_equilibrium(&loads,&CancelGate::new()).is_err());
+        let energy = s.initialize_static_equilibrium_with_gauges(
+            &loads,&[translation_gauge(&masses)],&CancelGate::new()).unwrap();
+        let d = rest+force/1000.0;
+        let total_mass = masses[0]+masses[1];
+        let expected = [masses[1]*d/total_mass,-masses[0]*d/total_mass];
+        let q = states(&s);
+        let x = [q[0].displacement_m_sqrt_kg/roots[0],q[1].displacement_m_sqrt_kg/roots[1]];
+        for i in 0..2 { close(x[i],expected[i],2e-15); }
+        close(masses[0]*x[0]+masses[1]*x[1],0.0,1e-16);
+        let reaction = 1000.0*(x[0]-x[1]-rest);
+        // Independent ORIGINAL equations; no gauge reaction may balance load.
+        for residual in [loads[0]-reaction/roots[0],loads[1]+reaction/roots[1]] {
+            close(residual,0.0,1e-11);
+        }
+        close(energy,force*force/2000.0,1e-14);
+        assert_eq!(s.samples_rendered(),0);assert!(s.last_frame().is_none());
+        for _ in 0..32 {
+            s.step(&loads).unwrap();
+            for value in states(&s) { assert!(value.velocity_m_sqrt_kg_per_s.abs()<1e-10); }
+        }
+    }
+}
+
+#[test]
+fn g1_declared_rigid_gauge_retains_the_elastic_schur_response() {
+    let masses = [0.04_f64,0.09_f64];
+    let roots = masses.map(f64::sqrt);
+    let force = 0.7;let rest = 0.001;
+    let mut s = CoupledModalSystem::new_with_columns(
+        vec![mass(48000,masses[0]),mass(48000,masses[1]),resonator(48000)],
+        vec![ModalColumnConnection { column:vec![1.0/roots[0],-1.0/roots[1],2.0],
+            stiffness_n_m:1000.0,damping_n_s_m:0.0,rest_extension_m:rest }],
+        budget(),&CancelGate::new()).unwrap();
+    let mut gauge = translation_gauge(&masses);gauge.push(0.0);
+    let loads = [force/roots[0],-force/roots[1],0.0];
+    let energy = s.initialize_static_equilibrium_with_gauges(
+        &loads,&[gauge],&CancelGate::new()).unwrap();
+    let elastic = -2.0*force/800.0_f64.powi(2);
+    let separation = rest+force/1000.0-2.0*elastic;
+    let q = states(&s);
+    close(q[2].displacement_m_sqrt_kg,elastic,1e-17);
+    close(q[0].displacement_m_sqrt_kg/roots[0],masses[1]*separation/(masses[0]+masses[1]),1e-15);
+    close(q[1].displacement_m_sqrt_kg/roots[1],-masses[0]*separation/(masses[0]+masses[1]),1e-15);
+    let reaction = 1000.0*(q[0].displacement_m_sqrt_kg/roots[0]
+        -q[1].displacement_m_sqrt_kg/roots[1]+2.0*q[2].displacement_m_sqrt_kg-rest);
+    close(800.0_f64.powi(2)*q[2].displacement_m_sqrt_kg+2.0*reaction,0.0,1e-11);
+    close(energy,force*force/2000.0+0.5*800.0_f64.powi(2)*elastic*elastic,1e-14);
+}
+
+#[test]
+fn g3_static_gauge_does_not_tether_subsequent_common_translation() {
+    let masses = [0.04_f64,0.09_f64];let roots = masses.map(f64::sqrt);
+    let mut s = free_pair(48000,masses,0.002,budget());
+    s.initialize_static_equilibrium_with_gauges(
+        &[1.0/roots[0],-1.0/roots[1]],&[translation_gauge(&masses)],&CancelGate::new()).unwrap();
+    let force_on_each = 0.4;
+    for _ in 0..64 { s.step(&[force_on_each/roots[0],force_on_each/roots[1]]).unwrap(); }
+    let q = states(&s);let t = 64.0/48000.0;
+    let center = (roots[0]*q[0].displacement_m_sqrt_kg
+        +roots[1]*q[1].displacement_m_sqrt_kg)/(masses[0]+masses[1]);
+    let momentum = roots[0]*q[0].velocity_m_sqrt_kg_per_s
+        +roots[1]*q[1].velocity_m_sqrt_kg_per_s;
+    close(center,force_on_each*t*t/(masses[0]+masses[1]),1e-13);
+    close(momentum,2.0*force_on_each*t,1e-12);
+}
+
+#[test]
+fn g1_free_rest_length_and_unattached_gauges_add_no_storage() {
+    let masses = [0.04_f64,0.09_f64];
+    let mut s = free_pair(48000,masses,0.002,budget());
+    let energy = s.initialize_static_equilibrium_with_gauges(
+        &[0.0,0.0],&[translation_gauge(&masses)],&CancelGate::new()).unwrap();
+    close(energy,0.0,1e-20);
+    let q = states(&s);
+    close(q[0].displacement_m_sqrt_kg/masses[0].sqrt()
+        -q[1].displacement_m_sqrt_kg/masses[1].sqrt(),0.002,1e-15);
+    let mut free = CoupledModalSystem::new(vec![mass(48000,0.04)],vec![],
+        budget(),&CancelGate::new()).unwrap();
+    assert_eq!(free.initialize_static_equilibrium_with_gauges(
+        &[0.0],&[vec![1.0]],&CancelGate::new()).unwrap(),0.0);
+    free.step(&[5.0]).unwrap();
+    close(states(&free)[0].velocity_m_sqrt_kg_per_s,5.0/48000.0,1e-18);
+}
+
+#[test]
+fn g0_false_incomplete_or_dependent_static_gauges_refuse_without_mutation() {
+    let masses = [0.04_f64,0.09_f64];let gauge = translation_gauge(&masses);
+    let mut s = free_pair(48000,masses,0.002,budget());let initial = states(&s);
+    for basis in [vec![],vec![vec![1.0,0.0]],vec![vec![f64::NAN,0.0]],
+        vec![vec![1.0]],vec![gauge.iter().map(|v|2.0*v).collect()],
+        vec![gauge.clone(),gauge.clone()]] {
+        assert!(s.initialize_static_equilibrium_with_gauges(
+            &[5.0,-1.0/0.3],&basis,&CancelGate::new()).is_err());
+        assert_eq!(states(&s),initial);assert_eq!(s.samples_rendered(),0);assert!(s.last_frame().is_none());
+    }
+    // A weak real support still breaks translation symmetry. Gauges cannot
+    // remove its stiffness merely because another spring is much stronger.
+    let mut anchored = CoupledModalSystem::new(
+        vec![mass(48000,0.04),mass(48000,0.09)],vec![
+            spring(0,5.0,1,1.0/0.3,1000.0,0.002),
+            spring(0,5.0,0,0.0,1e-12,0.0),
+        ],budget(),&CancelGate::new()).unwrap();
+    assert!(anchored.initialize_static_equilibrium_with_gauges(
+        &[0.0,0.0],&[gauge],&CancelGate::new()).is_err());
+    let mut elastic = CoupledModalSystem::new(vec![resonator(48000),mass(48000,0.04)],
+        vec![],budget(),&CancelGate::new()).unwrap();
+    assert!(elastic.initialize_static_equilibrium_with_gauges(
+        &[0.0,0.0],&[vec![1.0,0.0]],&CancelGate::new()).is_err());
+}
+
+#[test]
+fn g0_gauge_force_compatibility_budgets_and_cancellation_are_transactional() {
+    let masses = [0.04_f64,0.09_f64];let gauge = translation_gauge(&masses);
+    let mut s = free_pair(48000,masses,0.002,budget());let initial = states(&s);
+    for loads in [[5.0,-3.0],[f64::MIN_POSITIVE,0.0],[f64::from_bits(1),0.0]] {
+        assert!(s.initialize_static_equilibrium_with_gauges(
+            &loads,std::slice::from_ref(&gauge),&CancelGate::new()).is_err());
+        assert_eq!(states(&s),initial);
+    }
+    let gate = CancelGate::new();gate.request();
+    assert!(matches!(s.initialize_static_equilibrium_with_gauges(
+        &[5.0,-1.0/0.3],std::slice::from_ref(&gauge),&gate),Err(ModalCouplingError::Cancelled)));
+    assert_eq!(states(&s),initial);
+    s.initialize_static_equilibrium_with_gauges(
+        &[5.0,-1.0/0.3],std::slice::from_ref(&gauge),&CancelGate::new()).unwrap();
+    // The original two-coordinate/one-link setup is 8 terms. Schur and
+    // declared-nullspace work adds 30; admit before allocating its dense block.
+    let mut c = budget();c.max_setup_terms = 37;
+    let mut short = free_pair(48000,masses,0.002,c);
+    assert!(short.initialize_static_equilibrium_with_gauges(
+        &[5.0,-1.0/0.3],std::slice::from_ref(&gauge),&CancelGate::new()).is_err());
+    assert_eq!(states(&short),initial);
+    c.max_setup_terms = 38;
+    free_pair(48000,masses,0.002,c).initialize_static_equilibrium_with_gauges(
+        &[5.0,-1.0/0.3],&[gauge],&CancelGate::new()).unwrap();
+}
+
+#[test]
+fn g3_rotating_a_complete_null_basis_preserves_disconnected_assembly_equilibrium() {
+    let masses = [0.04_f64,0.09,0.16,0.25];
+    let roots = masses.map(f64::sqrt);
+    let make = || CoupledModalSystem::new(masses.iter().map(|&m|mass(48000,m)).collect(),
+        vec![spring(0,1.0/roots[0],1,1.0/roots[1],1000.0,0.001),
+            spring(2,1.0/roots[2],3,1.0/roots[3],2000.0,-0.002)],
+        budget(),&CancelGate::new()).unwrap();
+    let a = (masses[0]+masses[1]).sqrt();let b = (masses[2]+masses[3]).sqrt();
+    let first = vec![roots[0]/a,roots[1]/a,0.0,0.0];
+    let second = vec![0.0,0.0,roots[2]/b,roots[3]/b];
+    let rotated = vec![
+        first.iter().zip(&second).map(|(x,y)|(x+y)/2.0_f64.sqrt()).collect(),
+        first.iter().zip(&second).map(|(x,y)|(x-y)/2.0_f64.sqrt()).collect(),
+    ];
+    let loads = [1.0/roots[0],-1.0/roots[1],-0.5/roots[2],0.5/roots[3]];
+    let mut original = make();let mut alternate = make();
+    let energy = original.initialize_static_equilibrium_with_gauges(
+        &loads,&[first.clone(),second],&CancelGate::new()).unwrap();
+    let other = alternate.initialize_static_equilibrium_with_gauges(
+        &loads,&rotated,&CancelGate::new()).unwrap();
+    close(energy,other,1e-14);
+    for (a,b) in states(&original).iter().zip(states(&alternate)) {
+        close(a.displacement_m_sqrt_kg,b.displacement_m_sqrt_kg,1e-15);
+    }
+    let mut incomplete = make();let initial = states(&incomplete);
+    assert!(incomplete.initialize_static_equilibrium_with_gauges(
+        &loads,&[first],&CancelGate::new()).is_err());
+    assert_eq!(states(&incomplete),initial);
 }
