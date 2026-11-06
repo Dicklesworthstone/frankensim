@@ -8907,3 +8907,39 @@ single-layer limits, budgets and cancellation. Native rustfmt parsed the
 changed implementation and new regression source. Independent numerical
 reference arithmetic was checked, but Cargo/DSR execution was unavailable;
 no passing native regression or benchmark result is claimed here.
+
+## Continuous density gradients in deformable-solid hydrostatics
+
+`StratifiedHydrostaticPressure::with_density_gradient(beta)` adds or replaces
+a nonnegative SI density slope on the admitted base layers:
+`rho(d) = rho_layer(d) + beta*d`. Its gauge pressure is the existing sum of
+layer ramps plus `|g|*beta*max(d,0)^2/2`, with depth measured along unit gravity.
+Density drops between base layers remain prescribed data. Negative slopes are
+refused for this unbounded reservoir; no fluid stability or mixing is inferred.
+`density_at_depth_kg_m3` exposes the same physical density, and all sampled
+columns are admitted before force, work or discrete-gradient publication.
+
+The original closed tetrahedral surface remains the geometry owner. Exact
+positive clipped-simplex quadratic moments supply traction and its consistent
+follower tangent, including partial immersion. No wet-fraction sampling,
+auxiliary volume mesh or per-layer material query is introduced. Static
+equilibrium, load continuation and native energy-momentum integration consume
+the same pressure field. The native discrete gradient differentiates the same
+quadratic volume potential, including fully wet and coplanar limits, with its
+after-endpoint tangent. Fully wet endpoint work uses polarized depth increments
+to retain small motions without subtracting large absolute potentials.
+
+A zero slope keeps the prepared piecewise-constant path, and force-only calls
+skip tangent work. The existing layer budget, mesh admission, load scaling and
+cancellation boundaries remain in force. The reservoir is prescribed: this
+extension supplies neither evolving fluid density nor fluid inertia.
+
+Five regressions in `tests/hyper3_pressure/stratified/gradient.rs` define
+analytic Archimedes force, density-weighted torque and heave stiffness;
+independent potential/force/tangent/work checks through changing immersion;
+native finite-step work and endpoint tangents; exact coplanar emergence; and
+zero, overflow and cancellation limits. All seven changed Rust files parsed
+successfully with rustfmt. Independent arithmetic checks compared clipped
+moments with divided differences and checked discrete work/reversal. Native
+Cargo compilation and regression execution remain outstanding: DSR/RCH are
+unavailable and the shared filesystem is full.

@@ -12,8 +12,9 @@ use super::{HyperTetError, HyperTetProblem, PreparedHyperTetProblem, checkpoint}
 mod stress;
 
 struct SpatialPressure<'p> {
-    // For a stratified field these store q=g dot (x-surface), and the shared
-    // gradient is gravity; the exact mean inserts the physical density.
+    // For a stratified field these store physical downward depth and the
+    // shared gradient is the unit down direction. The exact mean supplies
+    // gravity and fluid density, including any continuous density gradient.
     before_pa: Vec<f64>,
     after_pa: Vec<f64>,
     gradient_pa_m: [f64; 3],
@@ -207,10 +208,10 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
                     profile,
                     load_factor,
                 } => {
-                    if load_factor == 0.0 || profile.gravity_m_s2() == [0.0; 3] {
+                    if load_factor == 0.0 || profile.depth_gradient() == [0.0; 3] {
                         0.0
                     } else {
-                        let gradient_pa_m = profile.gravity_m_s2();
+                        let gradient_pa_m = profile.depth_gradient();
                         let origin_m = profile.surface_point_m();
                         let mut before_pa = Vec::with_capacity(self.problem.nodes_m.len());
                         let mut after_pa = Vec::with_capacity(self.problem.nodes_m.len());

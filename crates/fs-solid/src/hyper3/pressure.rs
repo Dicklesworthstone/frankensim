@@ -397,7 +397,7 @@ impl ClosedTetPressureSurface {
                 TetPressure::Stratified {
                     profile,
                     load_factor,
-                } if load_factor != 0.0 => profile.gravity_m_s2(),
+                } if load_factor != 0.0 => profile.depth_gradient(),
                 _ => [0.0; 3],
             };
             let [a, b, c] = face.map(|node| positions[node]);

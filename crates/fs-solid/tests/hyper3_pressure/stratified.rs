@@ -1,4 +1,6 @@
 //! G0/G3: stratified fluid loading through native solid pressure owners.
+#[path = "stratified/gradient.rs"]
+mod gradient;
 use super::*;
 use fs_solid::hyper3::pressure::{HydrostaticDensityLayer, StratifiedHydrostaticPressure};
 
