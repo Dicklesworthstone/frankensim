@@ -62,7 +62,7 @@ impl Default for FluxSpectrumLimits {
 /// no temperature-dependent shape or nuclear-data accuracy is inferred.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FluxSpectrum {
-    data_id: Arc<str>,
+    pub(super) data_id: Arc<str>,
     energies_j: Arc<[f64]>,
     flux_density_m2_s_j: Arc<[f64]>,
     interpolation_regions: Arc<[EndfInterpolationRegion]>,
@@ -180,7 +180,7 @@ impl FluxSpectrum {
         self.segment_value(cursor, energy_j)
     }
 
-    fn check_domain(&self, lower: f64, upper: f64) -> Result<(), EndfError> {
+    pub(super) fn check_domain(&self, lower: f64, upper: f64) -> Result<(), EndfError> {
         if !nonnegative(lower)
             || !nonnegative(upper)
             || lower < self.energies_j[0]
@@ -191,7 +191,7 @@ impl FluxSpectrum {
         Ok(())
     }
 
-    fn segment_value(&self, cursor: Cursor, energy: f64) -> Result<f64, EndfError> {
+    pub(super) fn segment_value(&self, cursor: Cursor, energy: f64) -> Result<f64, EndfError> {
         let lower = self.flux_density_m2_s_j[cursor.point];
         if self.interpolation_regions[cursor.region].interpolation == EndfInterpolation::Histogram {
             return Ok(lower);
@@ -214,7 +214,7 @@ impl FluxSpectrum {
         )
     }
 
-    fn integrate_groups(
+    pub(super) fn integrate_groups(
         &self,
         groups: Arc<NeutronGroups>,
         limits: EndfCollapseLimits,
@@ -301,6 +301,48 @@ impl PointwiseCrossSection {
         visits: &mut usize,
         checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
     ) -> Result<Vec<f64>, EndfError> {
+        self.weighted_map(
+            spectrum,
+            integrated,
+            limits,
+            visits,
+            checkpoint,
+            |group, reaction| weighted_coefficient(reaction, integrated, group),
+        )
+    }
+
+    /// Retain the same reaction integrals for multiple reaction-weighted
+    /// quantities. Ordinary cross-section collapse retains no extra matrix.
+    pub(super) fn weighted_integrals(
+        &self,
+        spectrum: &FluxSpectrum,
+        integrated: &IntegratedSpectrum,
+        limits: EndfCollapseLimits,
+        visits: &mut usize,
+        checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+    ) -> Result<Vec<PositiveIntegral>, EndfError> {
+        self.weighted_map(
+            spectrum,
+            integrated,
+            limits,
+            visits,
+            checkpoint,
+            |_, reaction| {
+                reaction.value()?;
+                Ok(reaction)
+            },
+        )
+    }
+
+    fn weighted_map<T>(
+        &self,
+        spectrum: &FluxSpectrum,
+        integrated: &IntegratedSpectrum,
+        limits: EndfCollapseLimits,
+        visits: &mut usize,
+        checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
+        mut value: impl FnMut(usize, PositiveIntegral) -> Result<T, EndfError>,
+    ) -> Result<Vec<T>, EndfError> {
         checkpoint()?;
         let groups = integrated.flux.groups();
         let edges = groups.edges_j();
@@ -365,19 +407,27 @@ impl PointwiseCrossSection {
                 reaction.add_product(width, s1, f1, 3.0)?;
                 left = right;
             }
-            // Admit both the original integral and the returned coefficient /
-            // flux pair: an unrepresentable positive hazard cannot become zero.
-            reaction.value()?;
-            let coefficient = reaction.ratio(integrated.integrals[group])?;
-            let rate = coefficient * integrated.flux.values_m2_s()[group];
-            if !nonnegative(rate) || (reaction.nonzero && rate == 0.0) {
-                return Err(FissionError::Arithmetic.into());
-            }
-            row.push(coefficient);
+            row.push(value(group, reaction)?);
         }
         checkpoint()?;
         Ok(row)
     }
+}
+
+pub(super) fn weighted_coefficient(
+    reaction: PositiveIntegral,
+    integrated: &IntegratedSpectrum,
+    group: usize,
+) -> Result<f64, EndfError> {
+    // Admit both the original integral and the returned coefficient/flux pair:
+    // an unrepresentable positive hazard cannot become zero.
+    reaction.value()?;
+    let coefficient = reaction.ratio(integrated.integrals[group])?;
+    let rate = coefficient * integrated.flux.values_m2_s()[group];
+    if !nonnegative(rate) || (reaction.nonzero && rate == 0.0) {
+        return Err(FissionError::Arithmetic.into());
+    }
+    Ok(coefficient)
 }
 
 /// Assemble processed temperature rows using ONE identified spectrum shape
@@ -492,7 +542,7 @@ fn invalid(reason: &'static str) -> EndfError {
     FissionError::InvalidInput(reason).into()
 }
 
-fn visit(
+pub(super) fn visit(
     visits: &mut usize,
     limits: EndfCollapseLimits,
     checkpoint: &mut impl FnMut() -> Result<(), FissionError>,
@@ -506,13 +556,13 @@ fn visit(
 }
 
 #[derive(Clone, Copy)]
-struct Cursor {
-    point: usize,
-    region: usize,
+pub(super) struct Cursor {
+    pub(super) point: usize,
+    pub(super) region: usize,
 }
 
 impl Cursor {
-    fn new(energies: &[f64], regions: &[EndfInterpolationRegion], energy: f64) -> Self {
+    pub(super) fn new(energies: &[f64], regions: &[EndfInterpolationRegion], energy: f64) -> Self {
         let point = energies.partition_point(|&e| e <= energy) - 1;
         let region = regions.partition_point(|r| r.end_point <= point + 1);
         Self { point, region }
@@ -520,7 +570,7 @@ impl Cursor {
 
     // Called only while left is below the admitted group's upper edge. There
     // must therefore be a subsequent knot in each fully covering input domain.
-    fn advance(
+    pub(super) fn advance(
         &mut self,
         energies: &[f64],
         regions: &[EndfInterpolationRegion],
@@ -537,9 +587,9 @@ impl Cursor {
     }
 }
 
-struct IntegratedSpectrum {
-    flux: GroupFlux,
-    integrals: Vec<PositiveIntegral>,
+pub(super) struct IntegratedSpectrum {
+    pub(super) flux: GroupFlux,
+    pub(super) integrals: Vec<PositiveIntegral>,
 }
 
 // Keep binary scale separate while integrating positive polynomial terms.
@@ -547,14 +597,14 @@ struct IntegratedSpectrum {
 // integral representable; likewise tiny positive basis terms can sum to a
 // representable subnormal result. No signed slopes or cancellation are needed.
 #[derive(Clone, Copy)]
-struct PositiveIntegral {
+pub(super) struct PositiveIntegral {
     sum: Accumulator,
     exponent: i32,
-    nonzero: bool,
+    pub(super) nonzero: bool,
 }
 
 impl PositiveIntegral {
-    const fn new() -> Self {
+    pub(super) const fn new() -> Self {
         Self {
             sum: Accumulator::new(0.0),
             exponent: 0,
@@ -562,7 +612,13 @@ impl PositiveIntegral {
         }
     }
 
-    fn add_product(&mut self, width: f64, a: f64, b: f64, divisor: f64) -> Result<(), EndfError> {
+    pub(super) fn add_product(
+        &mut self,
+        width: f64,
+        a: f64,
+        b: f64,
+        divisor: f64,
+    ) -> Result<(), EndfError> {
         if a == 0.0 || b == 0.0 {
             return Ok(());
         }
@@ -571,6 +627,32 @@ impl PositiveIntegral {
         let (b, be) = binary_parts(b);
         let (term, te) = binary_parts(w * a * b / divisor);
         let exponent = we + ae + be + te;
+        self.add_scaled_term(term, exponent)
+    }
+
+    /// Positive cubic basis term, with the same binary scaling as σφ. Keeping
+    /// the yield factor separate avoids overflowing σ*φ*y before a small ΔE
+    /// makes the physically required production integral representable.
+    pub(super) fn add_triple_product(
+        &mut self,
+        width: f64,
+        a: f64,
+        b: f64,
+        c: f64,
+        divisor: f64,
+    ) -> Result<(), EndfError> {
+        if a == 0.0 || b == 0.0 || c == 0.0 {
+            return Ok(());
+        }
+        let (w, we) = binary_parts(width);
+        let (a, ae) = binary_parts(a);
+        let (b, be) = binary_parts(b);
+        let (c, ce) = binary_parts(c);
+        let (term, te) = binary_parts(w * a * b * c / divisor);
+        self.add_scaled_term(term, we + ae + be + ce + te)
+    }
+
+    fn add_scaled_term(&mut self, term: f64, exponent: i32) -> Result<(), EndfError> {
         if !self.nonzero {
             self.sum = Accumulator::new(term);
             self.exponent = exponent;
@@ -589,7 +671,7 @@ impl PositiveIntegral {
         Ok(())
     }
 
-    fn value(self) -> Result<f64, EndfError> {
+    pub(super) fn value(self) -> Result<f64, EndfError> {
         if !self.nonzero {
             return Ok(0.0);
         }
@@ -600,7 +682,7 @@ impl PositiveIntegral {
         Ok(value)
     }
 
-    fn ratio(self, denominator: Self) -> Result<f64, EndfError> {
+    pub(super) fn ratio(self, denominator: Self) -> Result<f64, EndfError> {
         if !self.nonzero {
             return Ok(0.0);
         }

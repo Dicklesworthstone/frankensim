@@ -1472,3 +1472,21 @@ independent two-volume analytic solution over two physical half-lives.
 
 The default-feature production-source integration gate passed all 174 nuclear
 tests; the evaluated circulation example compiled and executed successfully.
+
+## Reaction-rate-weighted fission observables
+
+`endf::reaction_weighted` admits immutable nonnegative dimensionless incident-
+energy curves and condenses them with y_g = integral(sigma*phi*y) /
+integral(sigma*phi). The returned original sigma_g and absolute group flux
+preserve the supplied pointwise production integral. Positive cubic basis
+integration follows the union of histogram/linear knots and discontinuities;
+scaled positive accumulation reuses the existing spectrum owner. A batch shares
+its flux and reaction denominator passes across all yield curves.
+
+Multiplicities above one remain unnormalized. Zero reaction groups return None;
+a defined zero yield remains Some(0). There is no representative-energy lookup,
+extrapolation or zero-flux fallback. Source IDs, processed cross-section metadata
+and reaction identity remain explicit. Original work/range/cancellation bounds
+apply, with separate output-curve/value limits. This is condensation of supplied
+laws under one declared spectrum and processed state, not spectrum evolution,
+resonance reconstruction, self-shielding or a data-accuracy certificate.

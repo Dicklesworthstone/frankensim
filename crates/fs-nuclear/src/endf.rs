@@ -23,6 +23,9 @@ pub mod spectrum;
 /// Evaluated half-lives, decay modes and aggregate emitted energies.
 pub mod decay;
 
+/// Dimensionless reaction observables condensed with their production rates.
+pub mod reaction_weighted;
+
 use crate::cross_sections::{
     CrossSectionData, CrossSectionLimits, CrossSectionTable, NeutronReaction,
 };
