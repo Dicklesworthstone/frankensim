@@ -18,12 +18,15 @@
 //! powers may act on either pool. A power sampled from an electrical solve is
 //! held over this explicit interval; it is not a continuous voltage solve.
 //!
-//! Adaptive backward Euler with step doubling solves only ONE scalar extent.
-//! Analytic constrained derivatives, positivity and source-domain brackets,
-//! actual two-pool entropy, and source energy balances gate publication. No
-//! nonlinear trial allocates. Collision coefficients are refreshed at each
-//! substep's actual populations and temperatures, then held in its implicit
-//! solve; step doubling controls this first-order approximation. Radiative
+//! Adaptive backward Euler with step doubling uses bounded scalar reaction
+//! and conductance solves. Analytic fixed-conductance derivatives, positivity
+//! and source-domain brackets retain the original constrained reaction solve.
+//! The outer collision solve closes heat transfer at the actual endpoint
+//! populations and temperatures; observed sign brackets and safeguarded
+//! secants make no monotonicity claim for that source law. Actual two-pool
+//! entropy and source energy balances gate publication. No nonlinear trial
+//! allocates, and accepted source coefficients are reused without reevaluation.
+//! Step doubling controls an estimated first-order time error. Radiative
 //! recombination, excited states, secondary-electron spectra and spatial
 //! transport remain outside this channel. Estimated local errors are not
 //! empirical or global error certificates.
@@ -71,7 +74,7 @@ pub struct AtomicIonizationSolve {
     pub maximum_step_s: f64,
     /// Maximum accepted plus rejected attempts.
     pub maximum_steps: usize,
-    /// Maximum safeguarded scalar or caloric iterations per solve.
+    /// Maximum iterations in each scalar reaction, conductance and caloric solve.
     pub maximum_iterations: usize,
 }
 impl AtomicIonizationSolve {
@@ -374,13 +377,10 @@ fn advance(
             return Err(AtomicIonizationError::StepBudget);
         }
         let attempt = (|| {
-            let full = problem.step(&point, end, coupling, &mut cancelled)?;
-            let half = problem.step(&point, middle, coupling, &mut cancelled)?;
-            let middle_coupling = problem.coupling(&half, &mut cancelled)?;
-            let final_point = problem.step(&half, end, middle_coupling, &mut cancelled)?;
-            // Admission uses the endpoint's real abundances, not the lagged
-            // state that supplied this first-order substep's conductance.
-            let endpoint_coupling = problem.coupling(&final_point, &mut cancelled)?;
+            let (full, _) = problem.step(&point, end, coupling, &mut cancelled)?;
+            let (half, middle_coupling) = problem.step(&point, middle, coupling, &mut cancelled)?;
+            let (final_point, endpoint_coupling) =
+                problem.step(&half, end, middle_coupling, &mut cancelled)?;
             let error = problem.error(&full, &final_point);
             let entropy = problem.entropy_change(&point, &final_point, &mut cancelled)?;
             // For backward Euler, concavity gives Delta S >= sum(h*P/T_end)

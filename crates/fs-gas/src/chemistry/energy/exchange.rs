@@ -1,6 +1,7 @@
 //! Shared collision inputs and the original neutral thermal moment.
 
 use super::*;
+use fs_qty::{Amount, Volume};
 
 /// Original collision laws and explicit physical domains for reactive thermal
 /// evolution. Numerical time integration remains the reacting solver's owner.
@@ -141,11 +142,48 @@ impl<'a> PreparedExchange<'a> {
                 "collision source bank changed",
             ));
         }
+        self.coupling_at_point(
+            state.amounts(),
+            state.volume(),
+            state.heavy_temperature().value(),
+            state.electron_temperature().value(),
+            cancelled,
+        )
+    }
+
+    /// Evaluate canonical trial populations against the retained source bank
+    /// without allocating a gas state. The evolution owner admits caloric and
+    /// charge balances; this method checks the actual collision populations,
+    /// charged fraction, source moments and physical collision domains.
+    pub fn coupling_at_point(
+        &self,
+        amounts: &[Amount],
+        volume: Volume,
+        th: f64,
+        te: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<ExchangeConductance, ElectronHeavyEnergyError> {
+        poll(cancelled)?;
+        if amounts.len() != self.original.amounts().len()
+            || !positive(volume.value())
+            || !positive(th)
+            || !positive(te)
+        {
+            return Err(ElectronHeavyEnergyError::Invalid(
+                "canonical collision amounts, positive volume and temperatures",
+            ));
+        }
         let mut total = 0.0;
         let mut charged = 0.0;
-        for (i, amount) in state.amounts().iter().enumerate() {
+        for (i, amount) in amounts.iter().enumerate() {
+            poll(cancelled)?;
+            if !amount.value().is_finite() || amount.value() < 0.0 {
+                return Err(ElectronHeavyEnergyError::Invalid(
+                    "finite nonnegative collision amounts",
+                ));
+            }
             total += amount.value();
-            if state.thermodynamics().charge_vector().get(i) != Some(0) {
+            if self.original.thermodynamics().charge_vector().get(i) != Some(0) {
                 charged += amount.value();
             }
         }
@@ -154,18 +192,24 @@ impl<'a> PreparedExchange<'a> {
         }
         let coulomb = if let Some(source) = &self.inputs.coulomb {
             source
-                .evaluate_at_state(state, &mut *cancelled)
+                .evaluate_point(
+                    amounts,
+                    volume,
+                    Temperature::new(th),
+                    Temperature::new(te),
+                    &mut *cancelled,
+                )
                 .map_err(coulomb_error)?
                 .electron_heavy_thermal_conductance_w_m3_k()
-                * state.volume().value()
+                * volume.value()
         } else {
             0.0
         };
-        let neutral = neutral_conductance(
-            state,
+        let neutral = neutral_conductance_at_point(
+            self.original,
+            (amounts, volume),
             &self.targets,
-            state.heavy_temperature().value(),
-            state.electron_temperature().value(),
+            [th, te],
             self.inputs.maximum_target_thermal_speed_ratio,
             self.inputs.rate_controls,
             cancelled,
@@ -190,16 +234,40 @@ pub(super) fn neutral_conductance(
     rate_controls: MaxwellianRateControlsV1,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<f64, ElectronHeavyEnergyError> {
+    neutral_conductance_at_point(
+        state,
+        (state.amounts(), state.volume()),
+        sources,
+        [th, te],
+        maximum_target_ratio,
+        rate_controls,
+        cancelled,
+    )
+}
+
+/// The shared source moment with borrowed populations and immutable source
+/// identity. Callers have already admitted the canonical nonnegative amounts.
+fn neutral_conductance_at_point(
+    state: &FrozenIonizedGasStateV1,
+    populations: (&[Amount], Volume),
+    sources: &[Option<&ElectronCrossSectionV1>; MAX_EQUILIBRIUM_SPECIES_V1],
+    temperatures: [f64; 2],
+    maximum_target_ratio: f64,
+    rate_controls: MaxwellianRateControlsV1,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, ElectronHeavyEnergyError> {
+    let (amounts, volume) = populations;
+    let [th, te] = temperatures;
     let Some(electron) = state.electron_index() else {
         return Ok(0.0);
     };
-    let electron_amount = state.amounts()[electron].value();
+    let electron_amount = amounts[electron].value();
     if electron_amount == 0.0 {
         return Ok(0.0);
     }
     let mut frequency = 0.0;
     let mut correction = 0.0;
-    for (i, amount) in state.amounts().iter().enumerate() {
+    for (i, amount) in amounts.iter().enumerate() {
         if amount.value() == 0.0 || state.thermodynamics().charge_vector().get(i) != Some(0) {
             continue;
         }
@@ -237,9 +305,12 @@ pub(super) fn neutral_conductance(
                 .ok_or(ElectronHeavyEnergyError::Arithmetic(
                     "unrepresentable elastic momentum coefficient",
                 ))?;
-        let density = state
-            .number_density_per_m3(i)
-            .expect("canonical source target");
+        let density = (amount.value() / volume.value()) * AVOGADRO_PER_MOL;
+        if !positive(density) {
+            return Err(ElectronHeavyEnergyError::Arithmetic(
+                "neutral collision target density",
+            ));
+        }
         let increment = (density * coefficient) * (ELECTRON_MASS_KG / mass) - correction;
         let next = frequency + increment;
         correction = (next - frequency) - increment;

@@ -368,10 +368,21 @@ impl<'a> Problem<'a> {
         end: f64,
         coupling: ExchangeConductance,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Point, AtomicIonizationError> {
+    ) -> Result<(Point, ExchangeConductance), AtomicIonizationError> {
         if self.exchange.is_some() && self.amounts[2] > 0.0 {
             return self.step_with_exchange(start, end, coupling, cancelled);
         }
+        let point = self.step_without_exchange(start, end, cancelled)?;
+        let endpoint_coupling = self.coupling(&point, cancelled)?;
+        Ok((point, endpoint_coupling))
+    }
+
+    fn step_without_exchange(
+        &self,
+        start: &Point,
+        end: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Point, AtomicIonizationError> {
         let th = self.heavy_temperature(end, start.heavy_temperature, cancelled)?;
         if self.amounts[2] == 0.0 {
             // Electron impact and its three-body reverse both require electrons.

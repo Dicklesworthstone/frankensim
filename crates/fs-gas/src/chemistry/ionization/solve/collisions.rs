@@ -1,11 +1,13 @@
-//! Simultaneous reaction and thermal exchange with lagged positive conductance.
+//! Simultaneous reaction and thermal exchange at actual endpoint populations.
 //!
-//! For a trial extent, Ce=3R/2*(ne0+xi), alpha=h*G, and
-//! A=Ue0+Pe*t-chi*xi-Qstart. Eliminate Te=(A+alpha*Th)/(Ce+alpha).
-//! The remaining thermal residual has derivative Ch+alpha*Ce/(Ce+alpha)>0.
-//! Thus only the existing scalar reaction Newton solve remains outside one
-//! monotone caloric solve. No population vector or state is allocated in either
-//! nonlinear loop; source snapshots are refreshed only between substeps.
+//! A bounded scalar conductance iteration surrounds the original constrained
+//! reaction solve. For each positive trial G, Ce=3R/2*(ne0+xi), alpha=h*G, and
+//! A=Ue0+Pe*t-chi*xi-Qstart give Te=(A+alpha*Th)/(Ce+alpha).
+//! The inner thermal residual has derivative Ch+alpha*Ce/(Ce+alpha)>0.
+//! These fixed-G derivatives are used only inside that constrained subsolve;
+//! no monotonicity of the population-dependent source conductance is assumed.
+//! Publication requires Q-Qstart=h*G(endpoint)*(Te-Th) within the declared
+//! energy/temperature controls. No nonlinear trial allocates a gas state.
 
 use super::*;
 use fs_thermochem::equilibrium::composition::MAX_EQUILIBRIUM_SPECIES_V1;
@@ -48,12 +50,64 @@ impl Problem<'_> {
         point: &Point,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ExchangeConductance, AtomicIonizationError> {
-        match &self.exchange {
-            Some(exchange) => exchange
-                .coupling(&self.state_at(point, cancelled)?, cancelled)
-                .map_err(collision_error),
-            None => Ok(ExchangeConductance::default()),
+        let Some(exchange) = &self.exchange else {
+            return Ok(ExchangeConductance::default());
+        };
+        let len = self.initial.amounts().len();
+        let mut amounts = [Amount::new(0.0); MAX_EQUILIBRIUM_SPECIES_V1];
+        amounts[..len].copy_from_slice(self.initial.amounts());
+        for (index, amount) in self.indices.into_iter().zip(self.amounts_at(point.extent)) {
+            amounts[index] = Amount::new(amount);
         }
+        // Retain the former frozen-state carrier-scaled charge admission,
+        // using the same normalization and compensated summation. Neutral
+        // background cannot dilute an imbalance as recombination removes
+        // carriers. Only the final accepted state needs allocated ownership.
+        let charges = self.initial.thermodynamics().charge_vector();
+        let mut scale = 0.0_f64;
+        for (index, amount) in amounts[..len].iter().enumerate() {
+            if charges.get(index) != Some(0) {
+                scale = scale.max(amount.value());
+            }
+        }
+        if scale > 0.0 {
+            let mut sums = [0.0_f64; 2];
+            let mut corrections = [0.0_f64; 2];
+            for (index, amount) in amounts[..len].iter().enumerate() {
+                poll(cancelled)?;
+                let charge = charges.get(index).expect("canonical charge axis") as f64;
+                if charge == 0.0 {
+                    continue;
+                }
+                let q = (amount.value() / scale) * charge;
+                for (slot, value) in [q, q.abs()].into_iter().enumerate() {
+                    let sum = sums[slot] + value;
+                    corrections[slot] += if sums[slot].abs() >= value.abs() {
+                        (sums[slot] - sum) + value
+                    } else {
+                        (value - sum) + sums[slot]
+                    };
+                    sums[slot] = sum;
+                }
+            }
+            let relative = (sums[0] + corrections[0]).abs() / (sums[1] + corrections[1]);
+            if !relative.is_finite() || relative > self.controls.relative_charge_tolerance {
+                return Err(AtomicIonizationError::State(
+                    FrozenIonizedGasStateErrorV1::ChargeImbalance {
+                        relative_residual: relative,
+                    },
+                ));
+            }
+        }
+        exchange
+            .coupling_at_point(
+                &amounts[..len],
+                self.initial.volume(),
+                point.heavy_temperature,
+                point.electron_temperature,
+                cancelled,
+            )
+            .map_err(collision_error)
     }
 
     fn thermal_trial(
@@ -61,7 +115,7 @@ impl Problem<'_> {
         start: &Point,
         end: f64,
         extent: f64,
-        coupling: ExchangeConductance,
+        conductance: f64,
         minimum_ratio: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<ThermalTrial, AtomicIonizationError> {
@@ -70,7 +124,7 @@ impl Problem<'_> {
             return Err(AtomicIonizationError::OutsideDomain);
         }
         let ce = CV * amounts[2];
-        let alpha = (end - start.time) * coupling.total();
+        let alpha = (end - start.time) * conductance;
         let denominator = ce + alpha;
         if !positive(ce) || !alpha.is_finite() || alpha < 0.0 || !positive(denominator) {
             return Err(AtomicIonizationError::Arithmetic(
@@ -150,18 +204,15 @@ impl Problem<'_> {
                 // heat capacity and the thermal response of the heavy pool.
                 let effective_capacity = ce + (alpha / (ch + alpha)) * ch;
                 let dte = -(chi + CV * te) / effective_capacity;
-                let coulomb_fraction = if coupling.total() == 0.0 {
-                    0.0
-                } else {
-                    coupling.coulomb / coupling.total()
-                };
                 let point = Point {
                     time: end,
                     extent,
                     heavy_temperature: th,
                     electron_temperature: te,
                     exchange: start.exchange + transfer,
-                    coulomb_exchange: start.coulomb_exchange + transfer * coulomb_fraction,
+                    // The outer source-consistency solve assigns the actual
+                    // neutral/Coulomb partition only after it converges.
+                    coulomb_exchange: start.coulomb_exchange,
                     electron_temperature_extent_derivative: dte,
                 };
                 if !dte.is_finite()
@@ -204,11 +255,129 @@ impl Problem<'_> {
         residual.abs() <= tolerance * derivative.abs().max(1.0)
     }
 
+    /// Close the original endpoint collision law around the constrained
+    /// reaction/energy subsolve. The bracket, when available, consists only of
+    /// observed opposite source residuals; its orientation is not assumed.
+    /// Before finding one, a bounded positive secant or source update supplies
+    /// the next conductance. Failure to converge requests adaptive refinement.
     pub(super) fn step_with_exchange(
         &self,
         start: &Point,
         end: f64,
         coupling: ExchangeConductance,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Point, ExchangeConductance), AtomicIonizationError> {
+        let dt = end - start.time;
+        if !positive(dt) {
+            return Err(AtomicIonizationError::Arithmetic(
+                "positive finite coupled time step",
+            ));
+        }
+        let mut conductance = coupling.total();
+        let mut extent_guess = start.extent;
+        let mut previous: Option<(f64, f64)> = None;
+        let mut bracket: Option<[(f64, f64); 2]> = None;
+        for _ in 0..self.controls.maximum_iterations {
+            poll(cancelled)?;
+            let mut point =
+                self.step_at_conductance(start, end, conductance, extent_guess, cancelled)?;
+            let actual = self.coupling(&point, cancelled)?;
+            let increment = point.exchange - start.exchange;
+            let difference = point.electron_temperature - point.heavy_temperature;
+            let expected = (dt * actual.total()) * difference;
+            let residual = increment - expected;
+            let ce = CV * self.amounts_at(point.extent)[2];
+            let ch = self.heavy_calorics(point.heavy_temperature, cancelled)?.1;
+            let temperature_scale = self.controls.temperature_tolerance_k
+                + self.controls.relative_tolerance
+                    * point.heavy_temperature.min(point.electron_temperature);
+            let tolerance = (self.controls.energy_tolerance_j / 16.0)
+                .min(ch.min(ce) * temperature_scale / 64.0);
+            if !expected.is_finite() || !residual.is_finite() || !positive(tolerance) {
+                return Err(AtomicIonizationError::Arithmetic(
+                    "endpoint collision residual or tolerance",
+                ));
+            }
+            if residual.abs() <= tolerance {
+                if (increment > tolerance && difference < 0.0)
+                    || (increment < -tolerance && difference > 0.0)
+                {
+                    return Err(AtomicIonizationError::Balance(
+                        "endpoint heat transfer against temperature difference",
+                    ));
+                }
+                point.coulomb_exchange = start.coulomb_exchange
+                    + if actual.total() == 0.0 {
+                        0.0
+                    } else {
+                        increment * (actual.coulomb / actual.total())
+                    };
+                if !point.coulomb_exchange.is_finite() {
+                    return Err(AtomicIonizationError::Arithmetic(
+                        "endpoint Coulomb transfer",
+                    ));
+                }
+                return Ok((point, actual));
+            }
+            let source_residual = conductance - actual.total();
+            if source_residual == 0.0 {
+                return Err(AtomicIonizationError::Nonconvergence);
+            }
+            if let Some([lower, upper]) = bracket {
+                bracket = if source_residual.is_sign_negative() == lower.1.is_sign_negative() {
+                    Some([(conductance, source_residual), upper])
+                } else {
+                    Some([lower, (conductance, source_residual)])
+                };
+            } else if let Some(old) = previous
+                && old.1.is_sign_negative() != source_residual.is_sign_negative()
+            {
+                let current = (conductance, source_residual);
+                bracket = Some(if old.0 < conductance {
+                    [old, current]
+                } else {
+                    [current, old]
+                });
+            }
+            let secant = previous.map(|(old_g, old_residual)| {
+                conductance
+                    - source_residual * (conductance - old_g) / (source_residual - old_residual)
+            });
+            let reducing = previous
+                .is_none_or(|(_, old_residual)| source_residual.abs() < 0.75 * old_residual.abs());
+            let next = if let Some([lower, upper]) = bracket {
+                match secant {
+                    Some(next) if reducing && next > lower.0 && next < upper.0 => next,
+                    _ => 0.5 * lower.0 + 0.5 * upper.0,
+                }
+            } else {
+                match secant {
+                    Some(next)
+                        if next.is_finite()
+                            && next >= 0.0
+                            && next <= 4.0 * conductance.max(actual.total()) =>
+                    {
+                        next
+                    }
+                    _ => actual.total(),
+                }
+            };
+            if !next.is_finite() || next < 0.0 || next == conductance {
+                return Err(AtomicIonizationError::Nonconvergence);
+            }
+            previous = Some((conductance, source_residual));
+            extent_guess = point.extent;
+            conductance = next;
+        }
+        Err(AtomicIonizationError::Nonconvergence)
+    }
+
+    fn step_at_conductance(
+        &self,
+        start: &Point,
+        end: f64,
+        conductance: f64,
+        initial_extent: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, AtomicIonizationError> {
         let mut minimum_ratio = self
@@ -237,11 +406,11 @@ impl Problem<'_> {
         let physical_hi = self.amounts[0];
         let mut lo = physical_lo;
         let mut hi = physical_hi;
-        let mut extent = start.extent.max(lo).min(hi);
+        let mut extent = initial_extent.max(lo).min(hi);
         let mut seed = None;
         for _ in 0..self.controls.maximum_iterations {
             poll(cancelled)?;
-            match self.thermal_trial(start, end, extent, coupling, minimum_ratio, cancelled)? {
+            match self.thermal_trial(start, end, extent, conductance, minimum_ratio, cancelled)? {
                 ThermalTrial::Admitted(point) => {
                     seed = Some(point);
                     break;
@@ -271,7 +440,7 @@ impl Problem<'_> {
         let mut opposite = None;
         for _ in 0..self.controls.maximum_iterations {
             poll(cancelled)?;
-            match self.thermal_trial(start, end, trial, coupling, minimum_ratio, cancelled)? {
+            match self.thermal_trial(start, end, trial, conductance, minimum_ratio, cancelled)? {
                 ThermalTrial::Admitted(candidate) => {
                     // Detailed balance can certify the endpoint sign without
                     // an unnecessary Maxwellian impact quadrature.
@@ -325,7 +494,7 @@ impl Problem<'_> {
                 start,
                 end,
                 candidate,
-                coupling,
+                conductance,
                 minimum_ratio,
                 cancelled,
             )? {

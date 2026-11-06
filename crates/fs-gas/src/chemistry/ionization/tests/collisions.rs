@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::chemistry::energy::{ElectronHeavyCollisionSources, ElectronHeavyEnergyError};
+use crate::chemistry::ionization::solve::{Point, Problem};
 use fs_qty::Area;
 use fs_thermochem::coulomb::{CoulombLimitsV1, CoulombModelV1, CoulombScreeningV1};
 use fs_thermochem::electron_collision::{
@@ -199,6 +200,124 @@ fn coupled_transient_refines_to_independent_beb_landau_and_neutral_oracle() {
     assert!(errors[2][1] < 0.5 && errors[2][2] < 0.5, "{errors:?}");
     assert!(errors[2][3] < 0.02 && errors[2][4] < 0.5, "{errors:?}");
     assert!(errors[2][5] < 5e-5, "{errors:?}");
+}
+
+fn initial_point(state: &FrozenIonizedGasStateV1) -> Point {
+    Point {
+        time: 0.0,
+        extent: 0.0,
+        heavy_temperature: state.heavy_temperature().value(),
+        electron_temperature: state.electron_temperature().value(),
+        exchange: 0.0,
+        coulomb_exchange: 0.0,
+        electron_temperature_extent_derivative: 0.0,
+    }
+}
+
+#[test]
+fn coupled_endpoint_uses_the_new_electron_inventory_in_both_collision_channels() {
+    // Independent coherent-SI construction using the same NIST BEB, finite-
+    // mass Landau and constant-neutral-cross-section equations as the oracle
+    // above. Fixed-interval Gauss-Legendre integration with 24 and 40 nodes
+    // agrees in the BEB rate to 3e-15 relative at the target temperature.
+    //
+    // Choose x: .001 -> .002 with unchanged endpoint Te=30000 K, Th=4000 K.
+    // The source reaction rate at that endpoint is 61.00023656802614 mol/s;
+    // dt=Delta x/rate. Choose held powers from the exact changing-population
+    // energy budgets and endpoint collision law. These constants prescribe a
+    // backward-Euler root, not a constant-temperature continuous trajectory.
+    let dt = 1.639_337_904_673_241_4e-5;
+    let pe = 114_187_026.836_310_57;
+    let ph = -11_328_409.847_133_312;
+    let (state, channel) = parcel(0.001, 30000.0, 4000.0, 0.0, 0.0);
+    let collision_sources = sources(&state);
+    let mut c = coupled_controls();
+    c.relative_tolerance = 1e-8;
+    let problem = Problem::new(
+        &state,
+        &channel,
+        Some(&collision_sources),
+        [ph, pe],
+        c,
+        &mut || false,
+    )
+    .unwrap();
+    let start = initial_point(&state);
+    let beginning = problem.coupling(&start, &mut || false).unwrap();
+    let (end, actual) = problem.step(&start, dt, beginning, &mut || false).unwrap();
+    let electron_amount = state.amounts()[2].value() + end.extent;
+    assert!((electron_amount - 0.002).abs() < 2e-9);
+    assert!((end.electron_temperature - 30000.0).abs() < 0.01);
+    assert!((end.heavy_temperature - 4000.0).abs() < 1e-4);
+    assert!((end.exchange - 185.710_916_620_792_4).abs() < 2e-5);
+    assert!((end.coulomb_exchange - 85.911_035_707_729_03).abs() < 2e-5);
+    assert!(actual.total() > 2.5 * beginning.total());
+
+    let difference = end.electron_temperature - end.heavy_temperature;
+    assert!((end.exchange - dt * actual.total() * difference).abs() < c.energy_tolerance_j / 8.0);
+    assert!(
+        (end.coulomb_exchange - dt * actual.coulomb * difference).abs()
+            < c.energy_tolerance_j / 8.0
+    );
+    // The old population coefficient would miss more than 100 J of this
+    // accepted endpoint's heat transfer, despite closing total energy.
+    assert!((end.exchange - dt * beginning.total() * difference).abs() > 100.0);
+    let cv = 1.5 * R;
+    let heavy = cv * (end.heavy_temperature - 4000.0);
+    let electron = cv * (electron_amount * end.electron_temperature - 0.001 * 30000.0);
+    assert!((heavy - ph * dt - end.exchange).abs() < c.energy_tolerance_j);
+    assert!(
+        (electron + channel.ionization_energy_j_mol() * end.extent + end.exchange - pe * dt).abs()
+            < 2.0 * c.energy_tolerance_j
+    );
+    let entropy = problem.entropy_change(&start, &end, &mut || false).unwrap();
+    assert!(entropy - problem.entropy_supply(dt, &end) >= -c.entropy_tolerance_j_k);
+}
+
+#[test]
+fn newly_recombined_neutrals_exchange_heat_in_the_same_implicit_step() {
+    let (state, channel) = parcel(1.0, 10000.0, 12000.0, 0.0, 0.0);
+    let collision_sources = sources(&state);
+    let c = coupled_controls();
+    let problem = Problem::new(
+        &state,
+        &channel,
+        Some(&collision_sources),
+        [0.0; 2],
+        c,
+        &mut || false,
+    )
+    .unwrap();
+    let start = initial_point(&state);
+    let beginning = problem.coupling(&start, &mut || false).unwrap();
+    assert_eq!(beginning.neutral, 0.0);
+    let dt = 1e-7;
+    let (end, actual) = problem.step(&start, dt, beginning, &mut || false).unwrap();
+    assert!(end.extent < -1e-9);
+    assert!(actual.neutral > 0.0);
+    let neutral_amount = -end.extent;
+    let electron_amount = 1.0 + end.extent;
+    let mean_speed = (8.0 * KB * end.electron_temperature / (core::f64::consts::PI * ME)).sqrt();
+    let independent_neutral = 3.0
+        * R
+        * electron_amount
+        * (neutral_amount * NA / state.volume().value())
+        * (ME / (MP + ME))
+        * (4.0 / 3.0)
+        * 1e-20
+        * mean_speed;
+    assert!((actual.neutral / independent_neutral - 1.0).abs() < 2e-9);
+    let transfer = end.exchange - end.coulomb_exchange;
+    let expected = dt * independent_neutral * (end.electron_temperature - end.heavy_temperature);
+    assert!(transfer < -1e-8);
+    assert!((transfer - expected).abs() < 2e-11 + 1e-4 * expected.abs());
+    assert!(
+        (end.exchange - dt * actual.total() * (end.electron_temperature - end.heavy_temperature))
+            .abs()
+            < c.energy_tolerance_j / 8.0
+    );
+    let entropy = problem.entropy_change(&start, &end, &mut || false).unwrap();
+    assert!(entropy >= -c.entropy_tolerance_j_k);
 }
 
 #[test]
