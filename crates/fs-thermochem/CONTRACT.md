@@ -464,6 +464,36 @@ the partial excess enthalpies in a full diffusive-energy account. The model is
 the symmetric-pair specialization of the multicomponent Margules formulation:
 <https://cantera.org/stable/cxx/d7/dfe/classCantera_1_1MargulesVPSSTP.html>.
 
+### Complete local miscibility stability and tangent planes
+
+`solution::multicomponent::stability` examines the entire present-species
+composition simplex. The entropy congruence
+`I + diag(sqrt(x)) chi diag(sqrt(x))`, restricted perpendicular to `sqrt(x)`,
+preserves curvature signs while avoiding an overflowing `1/x` matrix.
+A deterministic Householder basis and bounded cyclic Jacobi solve report the
+sorted spectrum, a smallest-mode composition tangent, negative-mode count,
+completed work and numerical uncertainty. Eigenvalues use the ideal-entropy
+metric; the returned tangent has unit `sum(d_i^2/x_i)`. Explicit scratch and
+sweep budgets admit O(N²) storage and bounded O(sweeps*N³) work. Cancellation
+or exhausted work returns no partial assessment. Pure supports have no modes.
+
+Positive local curvature does not rule out metastability. The separate
+`tangent_plane_distance` evaluates a finite trial using the original model,
+common temperature and closed species support. A negative distance is an
+instability witness; finitely many nonnegative trials are not a global
+miscibility certificate. The local numerical uncertainty is not an interval
+proof. No concentration floor, absent-species inventory, interaction fit or
+phase-count inference is introduced. Directional curvature also forms its
+physical ideal-entropy norm before interaction rescaling, retaining finite
+curvatures for subnormal trace fractions.
+
+G0/G1/G3/G4 tests cover binary analytic spinodals, collective ternary instability
+despite positive pairwise exchanges, a locally stable but globally demixing
+ternary witness, all 128 components with a subnormal trace, pure/absent supports,
+relative-entropy tangent planes, species relabeling and atomic budget/cancellation
+refusal. The thermodynamic tangent-plane criterion follows Michelsen (1982):
+<https://doi.org/10.1016/0378-3812(82)85001-2>.
+
 ### Closed isobaric liquid calorics
 
 `solution::caloric` combines that SAME pair law with explicitly ordered

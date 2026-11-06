@@ -21,9 +21,12 @@ use crate::transport::maxwell_stefan::{
     MaxwellStefanV1, MaxwellStefanWorkspaceV1,
 };
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
-use fs_math::det::ln;
+use fs_math::det::{ln, sqrt};
 use fs_qty::{AmountConcentration, Temperature};
 use std::sync::Arc;
+
+/// Full-simplex local stability and finite tangent-plane comparisons.
+pub mod stability;
 
 /// Shared finite species bound; evaluation and forces use bounded stack arrays.
 pub const MAX_REGULAR_SOLUTION_SPECIES_V1: usize = MAX_MAXWELL_STEFAN_SPECIES_V1;
@@ -343,7 +346,8 @@ impl MulticomponentSolutionStateV1 {
             return Ok(0.0);
         }
         let n = direction.len();
-        let mut value = Sum::default();
+        let mut ideal = Sum::default();
+        let mut excess = Sum::default();
         for i in 0..n {
             if self.fractions[i] == 0.0 {
                 if direction[i] != 0.0 {
@@ -354,12 +358,19 @@ impl MulticomponentSolutionStateV1 {
                 continue;
             }
             let vi = direction[i] / scale;
-            value.add((vi / self.fractions[i]) * vi);
+            // Form the physical entropy norm before scaling the interaction
+            // term. v_i≈sqrt(x_i) has finite ideal curvature even for a
+            // subnormal x_i, where (v_i/max(v))/x_i would overflow.
+            let entropy_direction = direction[i] / sqrt(self.fractions[i]);
+            ideal.add(entropy_direction * entropy_direction);
             for j in i + 1..n {
-                value.add((2.0 * vi * self.chi(i, j)) * (direction[j] / scale));
+                excess.add((2.0 * vi * self.chi(i, j)) * (direction[j] / scale));
             }
         }
-        finite((value.value() * scale) * scale, "simplex curvature")
+        finite(
+            ideal.value() + (excess.value() * scale) * scale,
+            "simplex curvature",
+        )
     }
 
     /// Isothermal/isobaric `d_i = x_i grad(mu_i)/(RT)` [1/m]. The full
