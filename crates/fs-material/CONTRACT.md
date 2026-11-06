@@ -16916,3 +16916,40 @@ closed faces and transactional work/source/cancellation refusal.
 ### Affine stress-charge piezoelectric thermal sources
 
 `ThermalLongitudinalPiezoelectric::from_stress_charge_tensor` admits complete affine C^E(T), e(T), epsilon^S(T) source tensors over a positive absolute-temperature interval with constant reference density. It preserves source selections, fixed frame/direction, and native transverse relaxation, differentiates the resulting non-affine longitudinal inverse exactly through second order, and supplies the existing rod/circuit thermal owner with consistent Helmholtz energy, entropy, internal energy, and fixed-coordinate field capacity. Complete source endpoint SPD establishes source-interval stability; a whole-interval inverse bound supplies conservative field-capacity admission. This is analytic model admission with roundoff padding, not an interval-arithmetic certificate. Synthetic G0/G1/G3 checks do not establish measured-material accuracy. No pyroelectric offset, thermal expansion, phase transition, depoling, or hysteresis is inferred.
+
+## Regional fixed-volume liquid-vapor density and energy
+
+`IsochoricWater::new_regional_coexistence` reuses the original fixed-specific-volume
+internal-energy inverse and heat transaction with a retained
+`If97FluidSaturationPair`, including Region 3. The domain is
+273.16 <= T < 647.096 K. Each bounded temperature window must have either
+maximum <= 623.15 K or minimum > 623.15 K; this entry does not stitch the
+separately fitted Gibbs and Helmholtz source equations.
+
+Every evaluated original pair must bracket the fixed specific volume and lie
+inside the declared pressure bounds. Exact phase endpoints retain their pair;
+departure from coexistence refuses. The original dense pressure owner retains
+its controls, work and cancellation. `rebind_specific_volume` preserves the
+source mode and dense controls when a finite inventory changes V/M.
+
+The analytic fixed-volume heat capacity differentiates each original phase's
+u using that phase's actual EOS pressure. Declared saturation pressure and the
+two root-pressure residuals remain separate. Raw h, u and s are unchanged:
+`pressure_closure_defect_j_kg` and the heat report's endpoint joule defects
+expose h-u-p_pair*v without crediting it as heat or repairing a source value.
+Density is 1/v_source; the requested fixed volume and recovery residual remain
+independently visible. Existing original heat/enthalpy balance budgets still
+apply to every accepted step.
+
+No single-phase crossover, finite-rate phase conversion, critical-state
+extrapolation or global heat-capacity enclosure is claimed. The existing
+finite-cell owner remains responsible for conserved mass, energy, stream
+enthalpy and reciprocal boundary work.
+
+Five added native tests check legacy Gibbs bit parity, original Region 3 pair
+retention and density, an independent raw-u finite-difference Cv oracle at
+630/640/646 K, energy inversion and finite-inventory heat/cool balances,
+source-preserving rebinding, exact endpoints, bounded-domain refusal and
+cancellation. The exact source module passed all 11 native tests: these five
+plus six unchanged original isochoric regressions. This is a focused native
+module check against genuine dependencies, not a full workspace Cargo/DSR gate.
