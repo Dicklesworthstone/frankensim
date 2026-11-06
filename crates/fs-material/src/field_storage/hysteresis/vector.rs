@@ -257,6 +257,25 @@ fn unconstrained(old: Vector, h: Vector, a: f64, hc: f64) -> Result<(Vector, Mat
     Ok((z, tangent))
 }
 
+fn stationarity_residual(
+    old: Vector,
+    h: Vector,
+    z: Vector,
+    chi: f64,
+    hc: f64,
+    lambda: f64,
+) -> Result<f64> {
+    let increment = sub(z, old);
+    let distance = finite(norm(increment))?;
+    Ok(if distance == 0.0 {
+        (norm(std::array::from_fn(|i| h[i] - z[i] / chi - lambda * z[i])) - hc).max(0.0)
+    } else {
+        norm(std::array::from_fn(|i| {
+            h[i] - z[i] / chi - lambda * z[i] - hc * increment[i] / distance
+        }))
+    })
+}
+
 fn branch_response(
     branch: &HysteresisBranch,
     old: Vector,
@@ -347,20 +366,27 @@ fn branch_response(
             let defect = radius - zs;
             // Radius error converted through the local inverse scale to A/m.
             if defect.abs() * a <= target && radius > 0.0 {
-                // Only a converged multiplier is normalized for roundoff.
-                z = point.map(|x| x * (zs / radius));
-                let (_, d) = unconstrained(old, h, a, hc)?;
-                let dz = mv(d, z);
-                let denominator = finite(dot(z, dz))?;
-                if denominator <= 0.0 {
-                    return Err(invalid(
-                        "saturated vector tangent lost its positive radial compliance",
-                    ));
+                let normalized = point.map(|x| x * (zs / radius));
+                let candidate_lambda = a - a0;
+                // Radial normalization also rotates the pinning direction.
+                // Its inverse scale hc/|delta z| can exceed a greatly, so a
+                // small radius defect alone does not establish stationarity.
+                // Keep refining this SAME multiplier/bracket until the actual
+                // retained point passes the original field residual as well.
+                if stationarity_residual(old, h, normalized, chi, hc, candidate_lambda)? <= target {
+                    z = normalized;
+                    let dz = mv(d, z);
+                    let denominator = finite(dot(z, dz))?;
+                    if denominator <= 0.0 {
+                        return Err(invalid(
+                            "saturated vector tangent lost its positive radial compliance",
+                        ));
+                    }
+                    tangent = symmetric_matrix(|i, j| d[i][j] - dz[i] * dz[j] / denominator);
+                    lambda = candidate_lambda;
+                    accepted = true;
+                    break;
                 }
-                tangent = symmetric_matrix(|i, j| d[i][j] - dz[i] * dz[j] / denominator);
-                lambda = a - a0;
-                accepted = true;
-                break;
             }
             if defect > 0.0 {
                 lo = a;
@@ -394,15 +420,7 @@ fn branch_response(
             });
         }
     }
-    let increment = sub(z, old);
-    let distance = finite(norm(increment))?;
-    let residual = if distance == 0.0 {
-        (norm(std::array::from_fn(|i| h[i] - z[i] / chi - lambda * z[i])) - hc).max(0.0)
-    } else {
-        norm(std::array::from_fn(|i| {
-            h[i] - z[i] / chi - lambda * z[i] - hc * increment[i] / distance
-        }))
-    };
+    let residual = stationarity_residual(old, h, z, chi, hc, lambda)?;
     if !residual.is_finite() || residual > target || norm(z) > zs * (1.0 + 8.0 * f64::EPSILON) {
         return Err(invalid(
             "vector branch failed its original stationarity or saturation constraint",

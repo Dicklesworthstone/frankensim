@@ -245,6 +245,48 @@ fn saturated_rotating_response_matches_independent_angular_stationarity_and_inve
 }
 
 #[test]
+fn saturation_refines_the_multiplier_until_normalized_polarization_is_stationary() {
+    let (chi, pinning, saturation) = (2e-10, 1e5, 4e-5);
+    let material =
+        VectorDielectricHysteresis::new(1e-10, 2e6, vec![branch(chi, pinning, saturation)])
+            .unwrap();
+    let mut c = controls();
+    c.absolute_field_tolerance_v_m = 1e-8;
+    c.absolute_displacement_tolerance_c_m2 = 1e-18;
+    c.work_tolerance_j_m3 = 1e-10;
+    // A measured native field failure crossed the saturation sphere from this
+    // nearly saturated polarization. Prepare it through its actual radial path.
+    let desired = [-1.3468200776545038e-5, 3.760213640346896e-5, 0.0];
+    let radius = norm(desired);
+    let poling = desired.map(|p| p / chi + pinning * p / radius);
+    let old = material
+        .candidate_field(&material.initial_state(), poling, c, &mut || false)
+        .unwrap()
+        .state;
+    vector_near(old.polarizations_c_m2()[0], desired, 3e-20);
+    let field = [-116499.58259412982, 275709.80254681705, 0.0];
+    let response = material
+        .candidate_field(&old, field, c, &mut || false)
+        .unwrap();
+    let p = response.state.polarizations_c_m2()[0];
+    let delta = sub(p, old.polarizations_c_m2()[0]);
+    let distance = norm(delta);
+    let target = c.absolute_field_tolerance_v_m.max(
+        c.relative_tolerance * (norm(field) + norm(old.polarizations_c_m2()[0]) / chi + pinning),
+    );
+    // Normal reaction and quadratic restoring force are radial. Their cross
+    // product vanishes, giving this independent tangential KKT check in V/m.
+    let drive = std::array::from_fn::<_, 3, _>(|i| field[i] - pinning * delta[i] / distance);
+    let tangential = (p[0] * drive[1] - p[1] * drive[0]).abs() / saturation;
+    assert!(tangential <= target, "{tangential:e} > {target:e}");
+    assert!(response.maximum_constitutive_residual_v_m <= target);
+    near(norm(p), saturation, 3e-20);
+    near(response.energy_residual_j_m3, 0.0, c.work_tolerance_j_m3);
+    assert!(response.irreversible_heat_j_m3 > 0.0);
+    assert!(response.numerical_dissipation_j_m3 >= 0.0);
+}
+
+#[test]
 fn frozen_electric_potentials_and_tangents_are_work_conjugate() {
     let material = law();
     let old = step(&material, &material.initial_state(), [5.0, 0.0, 0.0]).state;

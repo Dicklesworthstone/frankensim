@@ -18440,6 +18440,15 @@ tangents, tiny trial changes about a large bias, cycling/refinement and source
 continuation/refusal. `tests/dielectric_hysteresis.rs` also exercises explicit
 temperature coverage and history-preserving source refresh.
 
+The shared magnetic/electric vector saturation return refines its original
+safeguarded multiplier until the normalized polarization also satisfies the
+original full stationarity allowance. Radius convergence alone is insufficient
+when radial normalization changes the direction of a small switching increment.
+The same iteration budget, pinning norm, spherical bound, constitutive residual
+and physical work gates remain active. An independent tangential-equilibrium
+regression covers a finite rotating slip that previously passed the radial
+criterion and then failed the final stationarity check.
+
 ## Three-dimensional orthotropic strength interaction
 
 `strength::OrthotropicTsaiWu` admits the original nine positive strength

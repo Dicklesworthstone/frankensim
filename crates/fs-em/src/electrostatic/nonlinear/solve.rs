@@ -167,6 +167,17 @@ pub(super) fn solve<'m>(
                         accepted = true;
                         break;
                     }
+                    // Near stationarity the objective difference can lose the
+                    // final decrement to constitutive/roundoff cancellation.
+                    // A trial that already satisfies the ORIGINAL physical
+                    // Gauss target needs no Armijo decrease. Reuse scratch
+                    // residual storage; final charge and energy gates still
+                    // independently re-evaluate the accepted native response.
+                    dofs.residual(&trial, &rhs, &mut residual, &mut correction)?;
+                    if finite(norm(&residual))? <= target {
+                        accepted = true;
+                        break;
+                    }
                 }
                 Err(Error::FieldRange { .. }) => {}
                 Err(error) => return Err(error),
