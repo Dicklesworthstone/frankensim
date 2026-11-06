@@ -1,5 +1,31 @@
 # fs-material — CONTRACT
 
+## Linear kinematic hardening of anisotropic Hill shear
+
+`plastic::hill::Hill48::with_linear_kinematic_hardening` explicitly adds the
+Prager backstress X=C*eps_p in fixed material axes to the existing Hill owner.
+C is a nonnegative Pa coefficient on tensor plastic strain; the J2 uniaxial
+hardening convention would use C=2*H_k/3. Existing constructors and material
+source adapters retain C=0. Callers select independent kinematic data on the
+native law before retaining history. The original five-mode return and
+HillState are reused; no independent backstress fit or second solver is added.
+
+Yielding uses q(sigma-X), while observations return physical Cauchy stress.
+The consistent tangent retains the physical elastic driving modulus and the
+same original orientation transforms. The backstress shifts reverse shear
+yielding in all three material directions. Recoverable Prager storage is
+C*eps_p:eps_p/2; physical dissipation remains Y*delta_alpha, separate from
+both hardening storage and backward-Euler numerical loss. This is an energetic
+model interpretation, not a calibrated heat fraction, nonlinear cyclic
+hardening, saturation, ratcheting law or finite-strain texture evolution.
+
+Seven focused tests in `tests/hill_kinematic.rs` check directional reverse-yield
+thresholds and closed-form tangents, nonzero pure-kinematic shear stiffness,
+all 36 mixed-loading tangent entries, cyclic energy closure, exact C=0
+compatibility, the original oriented owner and invalid-modulus refusal.
+The convention follows LAME's elastic-plastic model, equation 4.27:
+<https://www.sandia.gov/files/sierra/SM_LAME_5_28/main/models/elastic_plastic.html>.
+
 ## Bounded circular torsion and exact layer resultants
 
 `ConcentricShearSection::torsional_stress_at_twist_bounded` extends the

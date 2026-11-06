@@ -4,7 +4,8 @@
 //! `q² = F(syy-szz)² + G(szz-sxx)² + H(sxx-syy)²`
 //! `     + 2L syz² + 2M szx² + 2N sxy²`.
 //! The yield radius is `yield_stress + hardening * alpha`. Here `alpha` is
-//! the accumulated work-conjugate multiplier: `sigma:d(eps_p) = q d(alpha)`.
+//! the accumulated work-conjugate multiplier: `(sigma-X):d(eps_p) = q d(alpha)`
+//! with backstress X=0 unless linear kinematic hardening is explicitly selected.
 //! It is NOT generally the von Mises equivalent plastic strain. Individual
 //! F/G/H coefficients may be negative provided the quadratic form is positive
 //! definite on deviatoric stresses. Plastic flow preserves volume; hydrostatic
@@ -19,8 +20,16 @@
 //! coordinates; this is a small-strain, small-rotation law, not texture evolution
 //! or finite-strain forming. It supplies neither fracture nor forming limits.
 //!
+//! Optional energetic linear kinematic hardening translates this same surface
+//! by `X = C * eps_p`: yielding uses `q(sigma-X) = yield_stress + H*alpha`.
+//! C multiplies TENSOR plastic strain, not engineering shear or a uniaxial
+//! tangent modulus. Its recoverable storage is `C eps_p:eps_p / 2`.
+//! Existing constructors select C=0; opt in before retaining any history.
+//!
 //! References: Hill (1948), doi:10.1098/rspa.1948.0045; Sandia LAME,
 //! <https://www.sandia.gov/files/sierra/SM_LAME_5_28/main/models/hill.html>.
+//! The Prager coefficient convention follows LAME's elastic-plastic model,
+//! equation 4.27: <https://www.sandia.gov/files/sierra/SM_LAME_5_28/main/models/elastic_plastic.html>.
 
 mod calibration;
 /// Fixed material orientation without changing the local history convention.
@@ -108,9 +117,11 @@ pub struct Hill48 {
     elastic: IsotropicElastic,
     yield_stress: f64,
     hardening: f64,
+    kinematic: f64,
     coefficients: Hill48Coefficients,
     bulk: f64,
     twice_shear: f64,
+    return_twice_shear: f64,
     modes: Modes,
     return_scale: f64,
     return_ratios: [f64; 5],
@@ -127,7 +138,7 @@ pub struct HillResponse {
     pub state: HillState,
     /// Increment of the Hill work-conjugate accumulated strain.
     pub plastic_increment: f64,
-    /// Signed endpoint `q - yield_stress - hardening*alpha`, in Pa.
+    /// Signed endpoint `q(sigma-X) - yield_stress - hardening*alpha`, in Pa.
     pub yield_residual_pa: f64,
 }
 
@@ -404,13 +415,58 @@ impl Hill48 {
             elastic,
             yield_stress: yield_stress_pa,
             hardening: hardening_modulus_pa,
+            kinematic: 0.0,
             coefficients,
             bulk,
             twice_shear,
+            return_twice_shear: twice_shear,
             modes,
             return_scale,
             return_ratios,
         })
+    }
+
+    /// Select energetic linear Prager hardening before retaining any history.
+    /// The backstress is `X=C*eps_p` in tensor coordinates and its storage is
+    /// `C*eps_p:eps_p/2`. C is finite and nonnegative [Pa]; it is NOT the J2
+    /// uniaxial hardening slope (that convention uses C=2*H_k/3). No saturation,
+    /// dynamic recovery, pre-existing backstress or history rebinding is supplied.
+    /// The original anisotropic metric and scalar return solver are retained.
+    pub fn with_linear_kinematic_hardening(mut self, modulus_pa: f64) -> Result<Self, HillError> {
+        if !modulus_pa.is_finite() || modulus_pa < 0.0 {
+            return Err(HillError::Parameters(
+                "kinematic modulus C must be finite and nonnegative",
+            ));
+        }
+        let effective = self.twice_shear + modulus_pa;
+        let returns = self
+            .modes
+            .eigenvalues
+            .map(|value| self.hardening + effective * value);
+        if !positive(effective)
+            || returns.iter().any(|value| !positive(*value))
+            || self
+                .modes
+                .eigenvalues
+                .iter()
+                .any(|value| !positive(effective * value))
+        {
+            return Err(HillError::Parameters(
+                "kinematic return moduli are not representable",
+            ));
+        }
+        let scale = returns.iter().copied().fold(0.0_f64, f64::max);
+        let ratios = returns.map(|value| value / scale);
+        if ratios.iter().any(|value| !positive(*value)) {
+            return Err(HillError::Parameters(
+                "kinematic return modulus ratios are not representable",
+            ));
+        }
+        self.kinematic = modulus_pa;
+        self.return_twice_shear = effective;
+        self.return_scale = scale;
+        self.return_ratios = ratios;
+        Ok(self)
     }
 
     /// Original fixed isotropic elastic coefficients and strain domain.
@@ -425,6 +481,10 @@ impl Hill48 {
     pub const fn hardening_modulus_pa(&self) -> f64 {
         self.hardening
     }
+    /// C [Pa] in `X=C*eps_p`; zero retains the original isotropic-hardening law.
+    pub const fn kinematic_modulus_pa(&self) -> f64 {
+        self.kinematic
+    }
     /// Original dimensionless quadratic coefficients in the material axes.
     pub const fn coefficients(&self) -> &Hill48Coefficients {
         &self.coefficients
@@ -435,7 +495,9 @@ impl Hill48 {
         HillState::default()
     }
 
-    /// Equivalent stress in the fixed material axes, including tensor shear.
+    /// Equivalent stress of the supplied tensor in fixed material axes.
+    /// With kinematic hardening, yielding uses the relative tensor sigma-X;
+    /// this state-free observation does not subtract a backstress implicitly.
     pub fn equivalent_stress_pa(&self, stress: &Voigt) -> Result<f64, HillError> {
         if stress.iter().any(|v| !v.is_finite()) {
             return Err(HillError::State("stress must be finite"));
@@ -526,6 +588,20 @@ impl Hill48 {
         stress
     }
 
+    fn relative_modes(&self, elastic: &Voigt, state: &HillState) -> [f64; 5] {
+        let mut modes = self
+            .modes
+            .coordinates(elastic)
+            .map(|value| self.twice_shear * value);
+        if self.kinematic > 0.0 {
+            let plastic = self.modes.coordinates(&state.plastic_strain);
+            for i in 0..5 {
+                modes[i] -= self.kinematic * plastic[i];
+            }
+        }
+        modes
+    }
+
     /// Check one accepted state without projecting it or advancing its history.
     pub fn validate_committed_history(
         &self,
@@ -539,8 +615,15 @@ impl Hill48 {
             ));
         }
         let elastic = self.admit(strain, state)?;
-        let residual = self.equivalent_stress_pa(&self.stress_at_fixed_history(&elastic))?
-            - self.radius(state.alpha)?;
+        let equivalent = if self.kinematic == 0.0 {
+            self.equivalent_stress_pa(&self.stress_at_fixed_history(&elastic))?
+        } else {
+            self.modes.equivalent(&self.relative_modes(&elastic, state))
+        };
+        if !equivalent.is_finite() {
+            return Err(HillError::Numerical("relative stress is not representable"));
+        }
+        let residual = equivalent - self.radius(state.alpha)?;
         if residual > yield_tolerance_pa {
             return Err(HillError::YieldResidual {
                 residual_pa: residual,
@@ -552,10 +635,7 @@ impl Hill48 {
 
     fn returned(&self, strain: &Voigt, state: &HillState) -> Result<HillTrial, HillError> {
         let elastic = self.admit(strain, state)?;
-        let trial = self
-            .modes
-            .coordinates(&elastic)
-            .map(|v| self.twice_shear * v);
+        let trial = self.relative_modes(&elastic, state);
         let q_trial = self.modes.equivalent(&trial);
         let y0 = self.radius(state.alpha)?;
         let pressure = self.bulk * trace(&elastic);
@@ -563,8 +643,13 @@ impl Hill48 {
             return Err(HillError::Numerical("trial stress is not representable"));
         }
         let largest_root = self.modes.roots.iter().copied().fold(0.0_f64, f64::max);
-        let subtraction_scale = (self.twice_shear * largest_root)
-            * (frobenius_norm(strain) + frobenius_norm(&state.plastic_strain));
+        let subtraction_scale = if self.kinematic == 0.0 {
+            (self.twice_shear * largest_root)
+                * (frobenius_norm(strain) + frobenius_norm(&state.plastic_strain))
+        } else {
+            (self.twice_shear * largest_root) * frobenius_norm(strain)
+                + (self.return_twice_shear * largest_root) * frobenius_norm(&state.plastic_strain)
+        };
         let yield_roundoff = 64.0 * f64::EPSILON * q_trial.max(y0).max(subtraction_scale);
         if q_trial - y0 <= yield_roundoff {
             let stress = self.stress_at_fixed_history(&elastic);
@@ -580,8 +665,8 @@ impl Hill48 {
             });
         }
 
-        // In mode i, s_i = y*s_trial_i / (y0 + (H+2mu*lambda_i)*dl).
-        // Thus sum_i [sqrt(lambda_i)*s_trial_i/denominator_i]^2 = 1.
+        // In mode i, xi_i = y*xi_trial_i / (y0 + (H+(2mu+C)*lambda_i)*dl).
+        // Thus sum_i [sqrt(lambda_i)*xi_trial_i/denominator_i]^2 = 1.
         // Normalize stresses and moduli independently before solving for
         // z = return_scale*dl/q_trial. This retains stress-unit covariance.
         let unit: [f64; 5] = core::array::from_fn(|i| self.modes.roots[i] * trial[i] / q_trial);
@@ -667,6 +752,11 @@ impl Hill48 {
         };
         self.admit(strain, &candidate)?;
         let mut stress = self.modes.tensor(&returned);
+        if self.kinematic > 0.0 {
+            for (value, plastic) in stress.iter_mut().zip(candidate.plastic_strain) {
+                *value += self.kinematic * plastic;
+            }
+        }
         for component in &mut stress[..3] {
             *component += pressure;
         }
@@ -724,10 +814,21 @@ impl Hill48 {
         });
         let direction: Voigt =
             core::array::from_fn(|i| (0..5).map(|k| w[k] * self.modes.vectors[k][i]).sum());
+        // xi=2mu*eps_dev-(2mu+C)*eps_p. Reconstructing physical stress
+        // adds C*eps_p; its derivative modifies only the modal diagonal.
+        // The rank term already retains the physical driving modulus 2mu.
+        let diagonal = if self.kinematic == 0.0 {
+            *ratios
+        } else {
+            ratios.map(|ratio| {
+                self.kinematic / self.return_twice_shear
+                    + (self.twice_shear / self.return_twice_shear) * ratio
+            })
+        };
         let mandel: Tangent6 = core::array::from_fn(|i| {
             core::array::from_fn(|j| {
                 let dev = (0..5)
-                    .map(|k| ratios[k] * self.modes.vectors[k][i] * self.modes.vectors[k][j])
+                    .map(|k| diagonal[k] * self.modes.vectors[k][i] * self.modes.vectors[k][j])
                     .sum::<f64>()
                     - direction[i] * direction[j];
                 (if i < 3 && j < 3 { self.bulk } else { 0.0 }) + self.twice_shear * dev
@@ -760,7 +861,8 @@ impl Hill48 {
         })
     }
 
-    /// Recoverable elastic and explicitly ENERGETIC isotropic hardening storage.
+    /// Recoverable elastic and explicitly ENERGETIC isotropic/kinematic storage.
+    /// The Prager contribution is C*eps_p:eps_p/2; it is never plastic heat.
     /// This thermodynamic interpretation does not calibrate a real heat fraction.
     pub fn stored_energy(
         &self,
@@ -773,7 +875,11 @@ impl Hill48 {
             elastic_j_m3: 0.5 * self.bulk * trace(&elastic).powi(2)
                 + 0.5 * self.twice_shear * modes.iter().map(|v| v * v).sum::<f64>(),
             hardening_j_m3: 0.5 * self.hardening * state.alpha * state.alpha,
-            kinematic_hardening_j_m3: 0.0,
+            kinematic_hardening_j_m3: if self.kinematic == 0.0 {
+                0.0
+            } else {
+                0.5 * self.kinematic * contract(&state.plastic_strain, &state.plastic_strain)
+            },
         };
         if !value.total_j_m3().is_finite() {
             return Err(HillError::Numerical("stored energy is not representable"));
@@ -822,6 +928,14 @@ impl Hill48 {
         let total: Voigt = core::array::from_fn(|i| strain[i] - old_strain[i]);
         let modes = self.modes.coordinates(&de);
         let da = response.plastic_increment;
+        let kinematic_loss = if self.kinematic == 0.0 {
+            0.0
+        } else {
+            let dp = core::array::from_fn(|i| {
+                response.state.plastic_strain[i] - old_state.plastic_strain[i]
+            });
+            0.5 * self.kinematic * contract(&dp, &dp)
+        };
         let mut energy = IncrementEnergy {
             initial: self.stored_energy(old_strain, old_state)?,
             final_state: self.stored_energy(strain, &response.state)?,
@@ -829,7 +943,8 @@ impl Hill48 {
             physical_dissipation_j_m3: self.yield_stress * da,
             numerical_dissipation_j_m3: 0.5 * self.bulk * trace(&de).powi(2)
                 + 0.5 * self.twice_shear * modes.iter().map(|v| v * v).sum::<f64>()
-                + 0.5 * self.hardening * da * da,
+                + 0.5 * self.hardening * da * da
+                + kinematic_loss,
             residual_j_m3: 0.0,
         };
         energy.residual_j_m3 = energy.mechanical_work_j_m3
@@ -885,7 +1000,7 @@ impl SmallStrainLaw for Hill48 {
             vec![
                 "small strain and rotation; fixed material axes".into(),
                 "associative orthotropic pressure-independent yielding".into(),
-                "isotropic elasticity and linear energetic isotropic hardening".into(),
+                "isotropic elasticity and explicitly selected energetic linear isotropic/Prager hardening".into(),
             ],
             ValidityDomain::unconstrained().with(
                 "strain-magnitude",
