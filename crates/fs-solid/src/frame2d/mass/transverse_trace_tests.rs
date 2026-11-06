@@ -1,5 +1,12 @@
 use super::*;
 use crate::frame2d::{Geometry, SectionModel};
+use fs_evidence::ValidityDomain;
+use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
+use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
+use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility,
+    ScalarPropertyRequirement, resolve_material_state_point};
+use fs_qty::{Density, Pressure};
 
 fn frame(length: f64, angle: f64) -> Frame2d {
     let mut frame = Frame2d::with_mass_formulation(Geometry::Linear, FrameMassFormulation::ConsistentReference);
@@ -10,6 +17,119 @@ fn frame(length: f64, angle: f64) -> Frame2d {
 }
 fn near(a: f64, b: f64) {
     assert!((a-b).abs() < 2e-12*(1.0+a.abs()+b.abs()), "{a:e} != {b:e}");
+}
+
+fn shear_frame(length: f64, angle: f64, shear_modulus: f64) -> Frame2d {
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (name, value, dims) in [("density", 1000.0, Density::DIMS),
+        ("young_modulus", 2e6, Pressure::DIMS), ("shear_modulus", shear_modulus, Pressure::DIMS)]
+    {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained(),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance { source: "manufactured frame trace".into(),
+                license: "test-only".into(), artifact: None },
+        }).unwrap();
+        requirements.push(ScalarPropertyRequirement::try_new(
+            name, dims, ScalarAdmissibility::StrictlyPositive,
+        ).unwrap());
+    }
+    let card = MaterialCard::assemble(MaterialStateId {
+        chemistry: "synthetic shear beam".into(), phase: "solid".into(),
+        process: "test".into(), revision: 0,
+    }, claims, vec![]).unwrap();
+    let material = resolve_material_state_point(
+        &card, &QueryPoint::new(), &requirements, MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let section = ConcentricElasticSection::try_new(0.0, vec![ConcentricMaterialLayer {
+        outer_radius_m: 0.02, material,
+    }]).unwrap().with_shear_modulus("shear_modulus", 0.8).unwrap();
+    let mut frame = Frame2d::with_mass_formulation(
+        Geometry::Linear, FrameMassFormulation::ConsistentReference,
+    );
+    frame.add_node(0.0, 0.0);
+    frame.add_node(length * angle.cos(), length * angle.sin());
+    frame.add_material_shear_element(0, 1, 3, section).unwrap();
+    frame
+}
+
+#[test]
+fn timoshenko_trace_preserves_native_interpolation_rigid_motion_and_point_work() {
+    for modulus in [200.0, 2000.0, 2e6] {
+        for length in [0.3, 2.7] {
+            for angle in [0.0_f64, 0.37, 1.2] {
+                let frame = shear_frame(length, angle, modulus);
+                let section = frame.material_shear_section(0).unwrap();
+                let phi = 12.0 * section.elastic().bending_stiffness_n_m2()
+                    / (section.shear_stiffness_n() * length * length);
+                let beta = 1.0 / (1.0 + phi);
+                let fraction = phi / (1.0 + phi);
+                let local = [0.3, -0.2, -0.4, 0.17];
+                let velocity = [-angle.sin() * local[0], angle.cos() * local[0], local[1],
+                    -angle.sin() * local[2], angle.cos() * local[2], local[3]];
+                let delta = local[2] - local[0] - 0.5 * length * (local[1] + local[3]);
+                // Independent polynomial solution of constant-section
+                // Timoshenko kinematics with the four authored endpoint DOFs.
+                let coefficients = [local[0], length * local[1] + fraction * delta,
+                    0.5 * length * (local[3] - local[1]) + 3.0 * beta * delta,
+                    -2.0 * beta * delta];
+                for xi in [0.0, 0.13, 0.5, 0.91, 1.0] {
+                    let (dofs, weights, actual_length) = frame.reference_transverse_trace(0, xi).unwrap();
+                    assert_eq!(dofs, [0, 1, 2, 3, 4, 5]);
+                    near(actual_length, length);
+                    let expected = coefficients.iter().rev().fold(0.0, |sum, coefficient| sum * xi + coefficient);
+                    let observed = weights.iter().zip(velocity).map(|(b, v)| b * v).sum::<f64>();
+                    near(observed, expected);
+                    let force = -2.3;
+                    near(weights.iter().zip(velocity).map(|(b, v)| (force * b) * v).sum(), force * expected);
+                    let rotation = 0.012;
+                    let rigid = [0.0, 0.0, rotation, -angle.sin() * rotation * length,
+                        angle.cos() * rotation * length, rotation];
+                    near(weights.iter().zip(rigid).map(|(b, v)| b * v).sum(), rotation * length * xi);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn timoshenko_trace_and_independent_section_rotation_recover_native_inertia() {
+    let points = [0.06943184420297371, 0.33000947820757187, 0.6699905217924281, 0.9305681557970262];
+    let weights = [0.17392742256872693, 0.32607257743127307, 0.32607257743127307, 0.17392742256872693];
+    for modulus in [200.0, 2000.0, 2e6] {
+        for length in [0.3, 1.0, 2.7] {
+            for angle in [0.0_f64, 0.37, 1.2] {
+                let frame = shear_frame(length, angle, modulus);
+                let section = frame.material_shear_section(0).unwrap();
+                let phi = 12.0 * section.elastic().bending_stiffness_n_m2()
+                    / (section.shear_stiffness_n() * length * length);
+                let beta = 1.0 / (1.0 + phi);
+                let line_mass = section.elastic().line_density_kg_m();
+                let spin = section.elastic().layer_integrals().iter()
+                    .map(|layer| layer.density_kg_m3() * layer.second_moment_m4()).sum::<f64>();
+                let local = [0.3, -0.2, -0.4, 0.17];
+                let velocity = [-angle.sin() * local[0], angle.cos() * local[0], local[1],
+                    -angle.sin() * local[2], angle.cos() * local[2], local[3]];
+                let delta = local[2] - local[0] - 0.5 * length * (local[1] + local[3]);
+                let mut energy = 0.0;
+                for (xi, weight) in points.into_iter().zip(weights) {
+                    let (_, b, _) = frame.reference_transverse_trace(0, xi).unwrap();
+                    let speed = b.iter().zip(velocity).map(|(b, v)| b * v).sum::<f64>();
+                    // Section spin is not the centerline slope: shear contributes
+                    // to translation while this independent rotation stays quadratic.
+                    let turning = local[1] + (local[3] - local[1]) * xi
+                        + (6.0 * beta * delta / length) * xi * (1.0 - xi);
+                    energy += 0.5 * length * weight * (line_mass * speed * speed + spin * turning * turning);
+                }
+                near(energy, frame.reference_mass().unwrap().kinetic_energy(&velocity));
+            }
+        }
+    }
 }
 
 #[test]

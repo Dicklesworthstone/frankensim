@@ -36,6 +36,34 @@ fn invalid(what: &str) -> SolidError {
     SolidError::InvalidInput { what: what.into() }
 }
 
+// Reference kinematics on admitted length/compliance fractions. Keeping this
+// scalar owner independent of material queries makes both inertia and trace
+// consumers use the same fixed interpolation with no per-point allocation.
+#[inline]
+fn reference_transverse_shapes(
+    length: f64,
+    x: f64,
+    bending_fraction: f64,
+    shear_fraction: f64,
+) -> ([f64; 4], [f64; 4]) {
+    let beta = bending_fraction;
+    let h = beta * x * x * (3.0 - 2.0 * x) + shear_fraction * x;
+    let displacement = [
+        1.0 - h,
+        length * (x - 0.5 * x * x - 0.5 * h),
+        h,
+        0.5 * length * (x * x - h),
+    ];
+    let turning = 6.0 * beta * x * (1.0 - x);
+    let rotation = [
+        -turning / length,
+        1.0 - x - 0.5 * turning,
+        turning / length,
+        x - 0.5 * turning,
+    ];
+    (displacement, rotation)
+}
+
 impl ShearElement {
     fn try_new(source: ConcentricShearSection, length: f64) -> Result<Self, SolidError> {
         for layer in 0..source.elastic().layer_integrals().len() {
@@ -105,6 +133,14 @@ impl ShearElement {
         Ok((flexibility, bending_fraction, shear_fraction))
     }
 
+    // One reference interpolation for native inertia and physical point-load
+    // traces. Local weights act on [w_i, theta_i, w_j, theta_j]. The section
+    // rotation is independent of the centerline slope when shear is present.
+    #[inline]
+    pub(super) fn transverse_shapes(&self, length: f64, x: f64) -> ([f64; 4], [f64; 4]) {
+        reference_transverse_shapes(length, x, self.bending_fraction, self.shear_fraction)
+    }
+
     pub(super) fn consistent_mass(
         &self,
         length: f64,
@@ -120,26 +156,10 @@ impl ShearElement {
             (0.930_568_155_797_026_2, 0.173_927_422_568_726_93),
         ];
         let mut result = [[0.0; 6]; 6];
-        let beta = self.bending_fraction;
         for (x, weight) in POINTS {
-            let h = beta * x * x * (3.0 - 2.0 * x) + self.shear_fraction * x;
-            let v = [
-                0.0,
-                1.0 - h,
-                length * (x - 0.5 * x * x - 0.5 * h),
-                0.0,
-                h,
-                0.5 * length * (x * x - h),
-            ];
-            let turning = 6.0 * beta * x * (1.0 - x);
-            let theta = [
-                0.0,
-                -turning / length,
-                1.0 - x - 0.5 * turning,
-                0.0,
-                turning / length,
-                x - 0.5 * turning,
-            ];
+            let (v, theta) = self.transverse_shapes(length, x);
+            let v = [0.0, v[0], v[1], 0.0, v[2], v[3]];
+            let theta = [0.0, theta[0], theta[1], 0.0, theta[2], theta[3]];
             let u = [1.0 - x, 0.0, 0.0, x, 0.0, 0.0];
             let mass = weight * (line_mass * length);
             let spin = weight * (section_spin * length);

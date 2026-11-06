@@ -27,9 +27,12 @@ impl Frame2d {
     /// these SAME weights by a transverse point force returns nodal forces and
     /// moments, so virtual work is unchanged. Rotation weights have metres.
     ///
-    /// This is the cubic Hermite interpolation of `ConsistentReference` inertia,
-    /// along the member's reference normal (-sin,cos). The selected dry inertia
-    /// formulation is not changed. Quadrature weights/areas belong to the caller;
+    /// This is the SAME interpolation as `ConsistentReference` inertia, along
+    /// the member's reference normal (-sin,cos). Euler–Bernoulli members use
+    /// cubic Hermite weights; shear-enabled members retain their original
+    /// Timoshenko bending/shear compliance fractions and independent section
+    /// rotation. The selected dry inertia formulation is not changed.
+    /// Quadrature weights/areas belong to the caller;
     /// this method supplies neither fluid forces nor a material law. Only linear
     /// reference geometry is admitted; finite-rotation follower loads need their
     /// own current-geometry trace. No allocation or accepted-state change occurs.
@@ -48,11 +51,17 @@ impl Frame2d {
         if !e.l0.is_finite() || e.l0 <= 0.0 || !e.cos0.is_finite() || !e.sin0.is_finite() {
             return Err(invalid("transverse trace reference geometry is not finite"));
         }
-        let one_minus = 1.0 - xi;
-        let h0 = one_minus * one_minus * (1.0 + 2.0 * xi);
-        let h1 = e.l0 * xi * one_minus * one_minus;
-        let h2 = xi * xi * (3.0 - 2.0 * xi);
-        let h3 = -e.l0 * xi * xi * one_minus;
+        let [h0, h1, h2, h3] = match &e.transverse_shear {
+            Some(shear) => shear.transverse_shapes(e.l0, xi).0,
+            None => {
+                // Preserve the original Euler–Bernoulli operation tree.
+                let one_minus = 1.0 - xi;
+                [one_minus * one_minus * (1.0 + 2.0 * xi),
+                    e.l0 * xi * one_minus * one_minus,
+                    xi * xi * (3.0 - 2.0 * xi),
+                    -e.l0 * xi * xi * one_minus]
+            }
+        };
         let weights = [-e.sin0*h0, e.cos0*h0, h1, -e.sin0*h2, e.cos0*h2, h3];
         if weights.iter().any(|x| !x.is_finite()) {
             return Err(invalid("transverse trace weights are unrepresentable"));

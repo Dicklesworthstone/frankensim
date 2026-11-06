@@ -11,11 +11,17 @@ use fs_qty::{Density, DynViscosity, Pressure};
 use fs_solid::frame2d::{FrameMassFormulation, FrameViscousSection, Geometry, SectionModel};
 
 fn section(rho: f64, young: f64, radius: f64, eta: f64) -> ConcentricElasticSection {
+    section_with_shear_property(rho, young, radius, eta, None)
+}
+fn section_with_shear_property(rho: f64, young: f64, radius: f64, eta: f64,
+    shear: Option<f64>) -> ConcentricElasticSection {
     let mut claims = ClaimSet::new();
     let mut requirements = Vec::new();
-    for (name, value, dims) in [("density",rho,Density::DIMS),
+    let mut properties = vec![("density",rho,Density::DIMS),
         ("young_modulus",young,Pressure::DIMS), ("axial_eta",eta,DynViscosity::DIMS),
-        ("bending_eta",eta,DynViscosity::DIMS)] {
+        ("bending_eta",eta,DynViscosity::DIMS)];
+    if let Some(shear) = shear { properties.push(("shear_modulus", shear, Pressure::DIMS)); }
+    for (name, value, dims) in properties {
         let mut validity = ValidityDomain::unconstrained().with("T",300.0,400.0);
         if name.ends_with("_eta") { validity = validity.with("omega",0.0,1e7); }
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name,dims),
@@ -142,6 +148,80 @@ fn original_material_geometry_drives_all_added_inertia_and_fluid_sources_survive
     assert_eq!(sim.memory_masses_kg().len(),12);
     assert_eq!(sim.system().state_dim(),14);
     assert!(sim.mass_inverse_residual() < 1e-12);
+}
+
+#[test]
+fn timoshenko_fluid_loading_and_point_ports_use_the_native_shear_shape() {
+    use super::harmonic_ports::FrameHarmonicPortBudget;
+
+    for shear_modulus in [200.0, 2000.0, 2e6] {
+        for length in [0.35, 1.0] {
+            let section = section_with_shear_property(
+                1000.0, 2e6, 0.02, 0.0, Some(shear_modulus),
+            ).with_shear_modulus("shear_modulus", 0.8).unwrap();
+            let phi_shear = 12.0 * section.elastic().bending_stiffness_n_m2()
+                / (section.shear_stiffness_n() * length * length);
+            let beta = 1.0 / (1.0 + phi_shear);
+            let fraction = phi_shear / (1.0 + phi_shear);
+            // A guided tip has w/y_tip = fraction*xi + beta*(3xi²-2xi³).
+            // Section rotation/y_tip = 6beta*xi*(1-xi)/L, independently of w'.
+            let translation = [0.0, fraction, 3.0 * beta, -2.0 * beta];
+            let rotation = [0.0, 6.0 * beta / length, -6.0 * beta / length];
+            let integral = unit_integral(&poly_mul(&translation, &translation));
+            let spin_integral = unit_integral(&poly_mul(&rotation, &rotation));
+            let dry_mass = section.elastic().line_density_kg_m() * length * integral
+                + section.elastic().layer_integrals().iter()
+                    .map(|layer| layer.density_kg_m3() * layer.second_moment_m4())
+                    .sum::<f64>() * length * spin_integral;
+            let mut frame = Frame2d::with_mass_formulation(
+                Geometry::Linear, FrameMassFormulation::ConsistentReference,
+            );
+            frame.add_node(0.0, 0.0);
+            frame.add_node(length, 0.0);
+            frame.fix(0, [true; 3]);
+            frame.fix(1, [true, false, true]);
+            frame.add_material_shear_element(0, 1, 3, section).unwrap();
+            let sim = model(&frame, 1, 0, 400.0, 0.1);
+            let phi = sim.basis().modes()[0].displacement[4];
+            near(phi * phi * dry_mass, 1.0, 2e-12);
+            let flow = sim.members()[0].flow();
+            let fluid_mass = flow.added_mass_per_length_kg_m() * length * phi * phi * integral;
+            near(sim.modal_mass_matrix()[0], 1.0 + fluid_mass, 2e-11);
+            if shear_modulus <= 2000.0 {
+                let old_hermite = 1.0 + flow.added_mass_per_length_kg_m()
+                    * length * phi * phi * guided_n2();
+                assert!((sim.modal_mass_matrix()[0] - old_hermite).abs() > 1e-3);
+            }
+            // The physical viscous resistance and each memory slip use the
+            // same corrected trace as added inertia, including its cross term.
+            let n = sim.system().state_dim();
+            let (_, resistance, _) = sim.system().structure();
+            let per_length = flow.low_tail_resistance_per_length_n_s_m2()
+                + flow.branches().iter().map(|branch| branch.resistance_per_length_n_s_m2).sum::<f64>();
+            near(resistance[n + 1], per_length * length * phi * phi * integral, 2e-11);
+            for (station, (xi, weight)) in sim.stations.iter().zip(GAUSS) {
+                let shape = translation.iter().rev().fold(0.0, |sum, value| sum * xi + value);
+                near(station.projection[0], phi * shape, 2e-12);
+                for (branch, material) in flow.branches().iter().enumerate() {
+                    let memory = 2 + station.first_memory + branch;
+                    near(resistance[n + memory],
+                        -weight * length * material.resistance_per_length_n_s_m2 * phi * shape, 2e-11);
+                }
+            }
+            let xi = 0.23;
+            let ports = sim.harmonic_transverse_ports(&[(0, xi)], FrameHarmonicPortBudget {
+                max_ports: 1, max_projection_terms: 6, max_mobility_entries: 1,
+                power_absolute_tolerance_w: 1e-12, power_relative_tolerance: 1e-10,
+            }, &CancelGate::new_clock_free()).unwrap();
+            let h = translation.iter().rev().fold(0.0, |sum, value| sum * xi + value);
+            let expected = [0.0, 1.0 - h, length * (xi - 0.5 * xi * xi - 0.5 * h),
+                0.0, h, 0.5 * length * (xi * xi - h)];
+            for (actual, expected) in ports.nodal_columns()[0].iter().zip(expected) {
+                near(*actual, expected, 2e-12);
+            }
+            near(ports.modal_columns()[0][0], phi * h, 2e-12);
+        }
+    }
 }
 
 #[test]
