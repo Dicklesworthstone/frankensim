@@ -186,6 +186,20 @@ fn sub(a: Vector, b: Vector) -> Vector {
 fn mv(a: Matrix, x: Vector) -> Vector {
     a.map(|row| dot(row, x))
 }
+// These analytic Hessians are symmetric. Evaluate each pair only once so
+// floating-point association cannot violate the native assembly's exact
+// symmetry contract; do not average or repair an arbitrary input tensor.
+fn symmetric_matrix(value: impl Fn(usize, usize) -> f64) -> Matrix {
+    let mut result = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..=i {
+            let entry = value(i, j);
+            result[i][j] = entry;
+            result[j][i] = entry;
+        }
+    }
+    result
+}
 fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<()> {
     if cancelled() {
         Err(VectorHysteresisError::Cancelled)
@@ -234,11 +248,8 @@ fn unconstrained(old: Vector, h: Vector, a: f64, hc: f64) -> Result<(Vector, Mat
     let direction = r.map(|x| x / length);
     let fraction = hc / length;
     let z = std::array::from_fn(|i| ((1.0 - fraction) / a).mul_add(r[i], old[i]));
-    let tangent = std::array::from_fn(|i| {
-        std::array::from_fn(|j| {
-            ((if i == j { 1.0 - fraction } else { 0.0 }) + fraction * direction[i] * direction[j])
-                / a
-        })
+    let tangent = symmetric_matrix(|i, j| {
+        ((if i == j { 1.0 - fraction } else { 0.0 }) + fraction * direction[i] * direction[j]) / a
     });
     for value in z.into_iter().chain(tangent.into_iter().flatten()) {
         finite(value)?;
@@ -268,16 +279,14 @@ fn branch_response(
         let saturated = magnitude > 0.0 && chi * magnitude >= zs;
         let scale = if saturated { zs / magnitude } else { chi };
         let z = h.map(|v| scale * v);
-        let tangent = std::array::from_fn(|i| {
-            std::array::from_fn(|j| {
-                scale
-                    * ((if i == j { 1.0 } else { 0.0 })
-                        - if saturated {
-                            (h[i] / magnitude) * (h[j] / magnitude)
-                        } else {
-                            0.0
-                        })
-            })
+        let tangent = symmetric_matrix(|i, j| {
+            scale
+                * ((if i == j { 1.0 } else { 0.0 })
+                    - if saturated {
+                        (h[i] / magnitude) * (h[j] / magnitude)
+                    } else {
+                        0.0
+                    })
         });
         let multiplier = if saturated { magnitude / zs - a0 } else { 0.0 };
         let residual = norm(std::array::from_fn(|i| {
@@ -348,9 +357,7 @@ fn branch_response(
                         "saturated vector tangent lost its positive radial compliance",
                     ));
                 }
-                tangent = std::array::from_fn(|i| {
-                    std::array::from_fn(|j| d[i][j] - dz[i] * dz[j] / denominator)
-                });
+                tangent = symmetric_matrix(|i, j| d[i][j] - dz[i] * dz[j] / denominator);
                 lambda = a - a0;
                 accepted = true;
                 break;

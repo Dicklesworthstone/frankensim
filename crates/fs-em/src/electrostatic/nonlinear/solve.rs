@@ -233,8 +233,9 @@ pub(super) fn solve<'m>(
         }
     }
     let charge_balance_residual_c = finite(total + ct)?;
-    let energy_identity_residual_j =
-        finite(evaluation.energy + evaluation.coenergy - (pairing + cp))?;
+    let energy_identity_residual_j = finite(
+        evaluation.energy + evaluation.coenergy + evaluation.switching_heat_j() - (pairing + cp),
+    )?;
     if charge_balance_residual_c.abs() > settings.charge_tolerance_c
         || maximum_free_charge_residual_c > settings.charge_tolerance_c
         || maximum_floating_charge_residual_c > settings.charge_tolerance_c

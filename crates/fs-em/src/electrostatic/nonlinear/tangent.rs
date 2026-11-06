@@ -294,6 +294,12 @@ impl<'m> NonlinearElectricField<'m> {
         }
         for (cell, material) in self.problem.materials.iter().enumerate() {
             poll(cancelled)?;
+            #[cfg(feature = "dielectric-hysteresis")]
+            if matches!(material, DielectricMaterial::Hysteretic(_)) {
+                return Err(invalid(
+                    "terminal differential capacitance at retained switching corners needs an explicit active-set admission",
+                ));
+            }
             let DielectricMaterial::Reversible(law) = material else {
                 continue;
             };

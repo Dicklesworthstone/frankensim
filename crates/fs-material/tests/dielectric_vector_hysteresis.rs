@@ -181,6 +181,10 @@ fn rotation_changes_vector_coordinates_without_changing_memory_losses() {
                     }
                 }
                 near(rotated.incremental_permittivity_f_m[i][j], expected, 2e-10);
+                assert_eq!(
+                    rotated.incremental_permittivity_f_m[i][j],
+                    rotated.incremental_permittivity_f_m[j][i]
+                );
             }
         }
         a = original.state;
@@ -270,6 +274,10 @@ fn frozen_electric_potentials_and_tangents_are_work_conjugate() {
                     .map(|k| response.incremental_permittivity_f_m[i][k] * inverse[k][j])
                     .sum();
                 near(product, if i == j { 1.0 } else { 0.0 }, 3e-13);
+                assert_eq!(
+                    response.incremental_permittivity_f_m[i][j],
+                    response.incremental_permittivity_f_m[j][i]
+                );
                 assert_eq!(inverse[i][j], inverse[j][i]);
             }
             let delta = 1e-5;

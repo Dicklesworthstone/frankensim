@@ -5372,3 +5372,43 @@ an exact isotropic constitutive limit. It does not extend the existing isotropic
 film, angular-spectrum or rendering owners to arbitrary anisotropic media.
 Out-of-plane axes, biaxial crystals, absorbing anisotropy, mode-coupled films
 and dispersive group-delay magnitudes require separate capabilities.
+
+
+### Retained vector polarization on the native planar Gauss solve
+
+The default-off `dielectric-hysteresis` feature exposes
+`electrostatic::nonlinear::hysteretic::PlanarHystereticElectrostatics` and
+`FrozenHystereticDielectric`. Explicit original per-cell fits reuse the native
+coupled vector play/spherical saturation law. The existing planar P1 geometry,
+electrode reduction, mixed voltage/total-charge controls, matrix-free Newton
+tangent, checked CG and backtracking remain the sole field solver. Prepared
+geometry and electrode layout are shared across accepted increments.
+
+Every Newton trial freezes the SAME accepted polarization. The voltage
+objective is `Phi(E;P0) = E.D - W - Q`, with gradient `D` and native symmetric
+positive tangent `dD/dE`. Stable pairwise objective differences retain that
+history and avoid subtracting large absolute field energies. Physical stored
+energy, per-cell switching heat and endpoint numerical loss remain separate.
+The source-work check independently pairs final electrode potentials with
+charge changes and final nodal potentials with actual volume-charge changes.
+Charge, field work, source work and physical energy gates all precede publication
+of the complete new field and memory; cancellation, work budgets and source
+domain refusals leave the accepted history replayable. Relative voltages retain
+small fields beneath large common electrode biases.
+
+Zero switching branches give ordinary linear cells. The whole-field owner
+starts from a compatible virgin zero-field state; poled specimens are prepared
+through accepted increments. The lower-level frozen cell adapter also admits
+existing native memories but leaves prior global consistency with its caller.
+Out-of-plane memory refuses planar binding. Reversible-only force shortcuts and
+smooth differential-capacitance extraction refuse hysteretic cells unless their
+original admission permits a separate reversible exterior.
+
+This is fixed-geometry, fixed-fit isotropic quasistatics. Finite increments use
+endpoint electrical work; the nonnegative numerical remainder is never heat.
+Resolve reversals and rotations and refine the path. This lane supplies no time
+kinetics, spatial thermal deposition, changing switching coefficients, leakage,
+breakdown, switching strain, measured calibration or continuum error estimate.
+`tests/hysteretic_electrostatic.rs` compares analytical linear, volume-charge,
+floating-conductor and scalar-play accounts, rotated geometry and immutable
+refusal/retry behavior through the actual native field owner.

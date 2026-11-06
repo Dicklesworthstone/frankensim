@@ -1,4 +1,4 @@
-//! Reversible nonlinear electrostatics on the original planar P1 complex.
+//! Nonlinear electrostatics on the original planar P1 complex.
 //!
 //! The voltage functional uses integral D.dE; physical field storage uses
 //! integral E.dD. They coincide only for linear response. Floating electrodes
@@ -8,11 +8,17 @@
 //! Geometry is prepared once. The analytic material tangent is applied cell by
 //! cell through the original checked-CG owner, with diagonal equilibration and
 //! bounded coenergy backtracking. No global tangent matrix is assembled.
-//! These are fixed-source electrostatics and discrete balance checks, not
-//! dielectric memory, thermal evolution, electrostriction or spatial error bounds.
+//! The default laws are reversible. The opt-in `dielectric-hysteresis` extension
+//! freezes retained polarization throughout each solve and uses the incremental
+//! potential E.D-W-Q, with physical storage and switching heat kept separate.
+//! These fixed-source discrete balances supply no thermal evolution,
+//! electrostriction or spatial error bounds.
 
 mod electrodes;
 pub mod force;
+/// Retained vector polarization on the same prepared geometry and Gauss solver.
+#[cfg(feature = "dielectric-hysteresis")]
+pub mod hysteretic;
 mod solve;
 pub mod tangent;
 
@@ -44,6 +50,9 @@ pub enum DielectricMaterial {
         law: PlanarDielectricLaw,
     },
     Reversible(ReversibleDielectricMaterial),
+    /// Every nonlinear trial uses this SAME accepted polarization history.
+    #[cfg(feature = "dielectric-hysteresis")]
+    Hysteretic(hysteretic::FrozenHystereticDielectric),
 }
 impl DielectricMaterial {
     pub fn isotropic(material: ResolvedMaterialStatePoint) -> Self {
@@ -56,6 +65,8 @@ impl DielectricMaterial {
         match self {
             Self::Linear { material, .. } => material,
             Self::Reversible(law) => law.material(),
+            #[cfg(feature = "dielectric-hysteresis")]
+            Self::Hysteretic(law) => law.source().material(),
         }
     }
 }
@@ -95,6 +106,11 @@ pub enum NonlinearElectrostaticError {
     },
     Nonconvergence(NonlinearElectrostaticReport),
     OperatorBudget,
+    #[cfg(feature = "dielectric-hysteresis")]
+    Hysteresis {
+        cell: usize,
+        error: fs_material::field_storage::dielectric::hysteresis::vector::VectorDielectricHysteresisError,
+    },
 }
 impl From<ElectrostaticError> for NonlinearElectrostaticError {
     fn from(error: ElectrostaticError) -> Self {
@@ -177,11 +193,12 @@ impl Element {
 }
 
 /// Prepared original mesh and source laws; cloned material curves share tables.
+#[derive(Clone)]
 pub struct PlanarNonlinearElectrostatics {
-    mesh: TriComplex2,
+    mesh: Arc<TriComplex2>,
     materials: Vec<DielectricMaterial>,
-    linear: Vec<Option<PlanarPermittivity>>,
-    elements: Vec<Element>,
+    linear: Arc<[Option<PlanarPermittivity>]>,
+    elements: Arc<[Element]>,
 }
 
 struct Evaluation {
@@ -194,6 +211,10 @@ struct Evaluation {
     correction: Vec<f64>,
     energy: f64,
     coenergy: f64,
+    #[cfg(feature = "dielectric-hysteresis")]
+    switching: Vec<Option<fs_material::field_storage::dielectric::hysteresis::vector::VectorDielectricHysteresisStep>>,
+    #[cfg(feature = "dielectric-hysteresis")]
+    switching_heat: f64,
 }
 impl Evaluation {
     fn new(problem: &PlanarNonlinearElectrostatics) -> Self {
@@ -209,6 +230,21 @@ impl Evaluation {
             correction: vec![0.0; n],
             energy: 0.0,
             coenergy: 0.0,
+            #[cfg(feature = "dielectric-hysteresis")]
+            switching: vec![None; c],
+            #[cfg(feature = "dielectric-hysteresis")]
+            switching_heat: 0.0,
+        }
+    }
+
+    fn switching_heat_j(&self) -> f64 {
+        #[cfg(feature = "dielectric-hysteresis")]
+        {
+            self.switching_heat
+        }
+        #[cfg(not(feature = "dielectric-hysteresis"))]
+        {
+            0.0
         }
     }
 }
@@ -270,6 +306,14 @@ impl PlanarNonlinearElectrostatics {
                         .map_err(weighted)?;
                     None
                 }
+                #[cfg(feature = "dielectric-hysteresis")]
+                DielectricMaterial::Hysteretic(law) => {
+                    law.admit_planar(cell, cancelled)?;
+                    CellWeight2::Scalar(law.source().law().background_permittivity_f_m())
+                        .validate(cell, 1)
+                        .map_err(weighted)?;
+                    None
+                }
             };
             if let Some(epsilon) = coefficient {
                 match epsilon {
@@ -295,10 +339,10 @@ impl PlanarNonlinearElectrostatics {
         }
         poll(cancelled)?;
         Ok(Self {
-            mesh,
+            mesh: Arc::new(mesh),
             materials,
-            linear,
-            elements,
+            linear: linear.into(),
+            elements: elements.into(),
         })
     }
     pub fn mesh(&self) -> &TriComplex2 {
@@ -316,7 +360,14 @@ impl PlanarNonlinearElectrostatics {
     ) -> Result<(), Error> {
         out.nodal.fill(0.0);
         out.correction.fill(0.0);
+        #[cfg(feature = "dielectric-hysteresis")]
+        {
+            out.switching.fill(None);
+            out.switching_heat = 0.0;
+        }
         let (mut energy, mut ce, mut coenergy, mut cc) = (0.0, 0.0, 0.0, 0.0);
+        #[cfg(feature = "dielectric-hysteresis")]
+        let mut switching_correction = 0.0;
         for (cell, element) in self.elements.iter().enumerate() {
             poll(cancelled)?;
             let e = element.field(potential)?;
@@ -327,49 +378,74 @@ impl PlanarNonlinearElectrostatics {
                 let u = finite(0.5 * e[0].mul_add(d[0], e[1] * d[1]))?;
                 (d, linear.matrix_f_m(), u, u)
             } else {
-                let DielectricMaterial::Reversible(law) = &self.materials[cell] else {
-                    unreachable!()
-                };
-                if magnitude > law.maximum_field_strength_v_m() {
-                    return Err(Error::FieldRange {
-                        cell,
-                        observed_v_m: magnitude,
-                        maximum_v_m: law.maximum_field_strength_v_m(),
-                    });
+                match &self.materials[cell] {
+                    DielectricMaterial::Reversible(law) => {
+                        if magnitude > law.maximum_field_strength_v_m() {
+                            return Err(Error::FieldRange {
+                                cell,
+                                observed_v_m: magnitude,
+                                maximum_v_m: law.maximum_field_strength_v_m(),
+                            });
+                        }
+                        let response = law
+                            .evaluate(magnitude)
+                            .map_err(ElectrostaticError::Material)?;
+                        let s = response.secant_permittivity_f_m;
+                        let p = response.differential_permittivity_f_m;
+                        let (d, t) = if magnitude == 0.0 {
+                            ([0.0; 2], [[p, 0.0], [0.0, p]])
+                        } else {
+                            let n = [e[0] / magnitude, e[1] / magnitude];
+                            let xy = (p - s) * n[0] * n[1];
+                            (
+                                [
+                                    finite(response.displacement_c_m2 * n[0])?,
+                                    finite(response.displacement_c_m2 * n[1])?,
+                                ],
+                                [
+                                    [p * n[0] * n[0] + s * n[1] * n[1], xy],
+                                    [xy, p * n[1] * n[1] + s * n[0] * n[0]],
+                                ],
+                            )
+                        };
+                        (
+                            d,
+                            t,
+                            response.energy_density_j_m3,
+                            response.coenergy_density_j_m3,
+                        )
+                    }
+                    #[cfg(feature = "dielectric-hysteresis")]
+                    DielectricMaterial::Hysteretic(law) => {
+                        let response = law.evaluate(cell, e, cancelled)?;
+                        let displacement = response.state.displacement_c_m2();
+                        let tangent = response.incremental_permittivity_f_m;
+                        let result = (
+                            [displacement[0], displacement[1]],
+                            [
+                                [tangent[0][0], tangent[0][1]],
+                                [tangent[1][0], tangent[1][1]],
+                            ],
+                            response.state.stored_energy_j_m3(),
+                            law.coenergy(cell, &response)?,
+                        );
+                        add(
+                            &mut out.switching_heat,
+                            &mut switching_correction,
+                            element.volume_m3 * response.irreversible_heat_j_m3,
+                        )?;
+                        out.switching[cell] = Some(response);
+                        result
+                    }
+                    DielectricMaterial::Linear { .. } => unreachable!(),
                 }
-                let response = law
-                    .evaluate(magnitude)
-                    .map_err(ElectrostaticError::Material)?;
-                let s = response.secant_permittivity_f_m;
-                let p = response.differential_permittivity_f_m;
-                let (d, t) = if magnitude == 0.0 {
-                    ([0.0; 2], [[p, 0.0], [0.0, p]])
-                } else {
-                    let n = [e[0] / magnitude, e[1] / magnitude];
-                    let xy = (p - s) * n[0] * n[1];
-                    (
-                        [
-                            finite(response.displacement_c_m2 * n[0])?,
-                            finite(response.displacement_c_m2 * n[1])?,
-                        ],
-                        [
-                            [p * n[0] * n[0] + s * n[1] * n[1], xy],
-                            [xy, p * n[1] * n[1] + s * n[0] * n[0]],
-                        ],
-                    )
-                };
-                (
-                    d,
-                    t,
-                    response.energy_density_j_m3,
-                    response.coenergy_density_j_m3,
-                )
             };
             let u = finite(element.volume_m3 * u)?;
             let w = finite(element.volume_m3 * w)?;
+            let reversible = self.linear[cell].is_some()
+                || matches!(self.materials[cell], DielectricMaterial::Reversible(_));
             if u < 0.0
-                || w < 0.0
-                || (magnitude > 0.0 && (u == 0.0 || w == 0.0))
+                || (reversible && (w < 0.0 || (magnitude > 0.0 && (u == 0.0 || w == 0.0))))
                 || tangent.iter().flatten().any(|v| !v.is_finite())
             {
                 return Err(invalid(
@@ -392,6 +468,10 @@ impl PlanarNonlinearElectrostatics {
         }
         out.energy = finite(energy + ce)?;
         out.coenergy = finite(coenergy + cc)?;
+        #[cfg(feature = "dielectric-hysteresis")]
+        {
+            out.switching_heat = finite(out.switching_heat + switching_correction)?;
+        }
         Ok(())
     }
 
@@ -420,11 +500,22 @@ impl PlanarNonlinearElectrostatics {
                 value += delta[0].mul_add(rounding[0], delta[1] * rounding[1]);
                 finite(value)?
             } else {
-                let DielectricMaterial::Reversible(law) = &self.materials[cell] else {
-                    unreachable!()
-                };
-                law.coenergy_change_vector_density_j_m3(a, b)
-                    .map_err(ElectrostaticError::Material)?
+                match &self.materials[cell] {
+                    DielectricMaterial::Reversible(law) => law
+                        .coenergy_change_vector_density_j_m3(a, b)
+                        .map_err(ElectrostaticError::Material)?,
+                    #[cfg(feature = "dielectric-hysteresis")]
+                    DielectricMaterial::Hysteretic(law) => law.coenergy_change(
+                        cell,
+                        before.switching[cell]
+                            .as_ref()
+                            .ok_or_else(|| invalid("missing original polarization trial"))?,
+                        after.switching[cell]
+                            .as_ref()
+                            .ok_or_else(|| invalid("missing proposed polarization trial"))?,
+                    )?,
+                    DielectricMaterial::Linear { .. } => unreachable!(),
+                }
             };
             add(&mut sum, &mut correction, element.volume_m3 * change)?;
         }
@@ -501,8 +592,16 @@ impl<'m> NonlinearElectricField<'m> {
     pub fn energy_j(&self) -> f64 {
         self.evaluation.energy
     }
+    /// Voltage objective: reversible coenergy for ordinary cells, incremental
+    /// E.D-W-Q for cells with frozen polarization. It is not extra storage.
     pub fn coenergy_j(&self) -> f64 {
         self.evaluation.coenergy
+    }
+    /// Physical switching loss of the frozen-history increment [J]. For a
+    /// hysteretic law, coenergy is the incremental voltage potential: W+Phi+Q=E.D.
+    #[cfg(feature = "dielectric-hysteresis")]
+    pub fn switching_heat_j(&self) -> f64 {
+        self.evaluation.switching_heat
     }
     pub fn volume_charge_c(&self) -> f64 {
         self.volume_charge_c
