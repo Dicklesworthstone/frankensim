@@ -23,7 +23,7 @@
 //! Scalar work is explicitly bounded. Cancellation is polled by the spatial
 //! owner at its quadrature boundary; one query performs at most 128 iterations.
 
-use fs_math::det;
+use fs_math::{dd::Dd, det};
 
 use super::super::mixed::{MixedFiniteStrainPotential, original_volume, pressure_potential};
 use super::super::reference::ReferenceDeformation;
@@ -94,7 +94,7 @@ pub struct DiscreteBulkResponse {
     pub pressure_residual_pa: f64,
     pub work_pa: f64,
     pub work_defect_pa: f64,
-    /// Zero for the analytic quadratic inverse or an unchanged exact endpoint.
+    /// Zero for the analytic quadratic inverse or an admitted unchanged endpoint.
     pub iterations: usize,
 }
 
@@ -447,11 +447,43 @@ impl DiscreteBulkPoint {
         if !pressure_pa.is_finite() {
             return Err(state_error("interval pressure must be finite"));
         }
+        // Retained volume is the first scalar candidate for every family.
+        // Interpolating a held pressure can change its last bits; repeatedly
+        // inverting those bits must not create bulk work when the unchanged
+        // physical endpoint already satisfies BOTH caller-declared gates.
+        let (held, admitted) = self.candidate(pressure_pa, self.accepted_volume_ratio, 0)?;
+        if admitted {
+            // A loose pressure allowance does not extend the original branch.
+            // Monotonicity needs only the bound in the requested direction.
+            // Keep the original exact endpoint-pressure path at equality.
+            if pressure_pa != held.endpoint_pressure_pa && held.pressure_residual_pa != 0.0 {
+                let lower = held.pressure_residual_pa > 0.0;
+                let bound = self.reference_volume_ratio
+                    * if lower {
+                        self.settings.minimum_volume_ratio
+                    } else {
+                        self.settings.maximum_volume_ratio
+                    };
+                let bound_pressure = self.volume.kappa() * self.normalized_pair(bound).0;
+                if (lower && pressure_pa < bound_pressure)
+                    || (!lower && pressure_pa > bound_pressure)
+                {
+                    return Err(state_error(
+                        "interval pressure has no endpoint in the admitted volume bracket",
+                    ));
+                }
+            }
+            return Ok(held);
+        }
         if matches!(self.volume, Volumetric::Quadratic { .. }) {
-            let b = self.reference_volume_ratio
-                * (1.0
-                    + (2.0 * (pressure_pa / self.volume.kappa())
-                        - (self.accepted_volume_ratio / self.reference_volume_ratio - 1.0)));
+            // The exact original inverse is b = a + 2*(Jg - a + Jg*p/kappa).
+            // Resolve its increment before rounding the TOTAL volume, instead
+            // of cancelling rounded elastic-volume and pressure ratios.
+            let a = Dd::from_f64(self.accepted_volume_ratio);
+            let reference = Dd::from_f64(self.reference_volume_ratio);
+            let pressure = Dd::from_f64(pressure_pa) / Dd::from_f64(self.volume.kappa());
+            let increment = Dd::from_f64(2.0) * (reference - a + reference * pressure);
+            let b = (a + increment).to_f64();
             let (result, admitted) = self.candidate(pressure_pa, b, 0)?;
             return if admitted {
                 Ok(result)
@@ -460,12 +492,6 @@ impl DiscreteBulkPoint {
                     "analytic quadratic inverse exceeds pressure or work allowance",
                 ))
             };
-        }
-        if pressure_pa == self.endpoint_pressure_pa() {
-            let (result, admitted) = self.candidate(pressure_pa, self.accepted_volume_ratio, 0)?;
-            if admitted {
-                return Ok(result);
-            }
         }
         let (mut lo, mut hi) = (
             self.reference_volume_ratio * self.settings.minimum_volume_ratio,

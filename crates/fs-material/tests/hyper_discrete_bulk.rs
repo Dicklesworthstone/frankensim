@@ -122,6 +122,80 @@ fn g0_quadratic_original_storage_and_twice_endpoint_compliance_are_exact() {
 }
 
 #[test]
+fn g0_held_bulk_is_a_fixed_point_only_within_the_actual_pressure_allowance() {
+    let kappa = 1e12;
+    for volume in [
+        Volumetric::Quadratic { kappa },
+        Volumetric::LogSquared { kappa },
+        Volumetric::SimoTaylor { kappa },
+    ] {
+        let material = law(volume);
+        let point = DiscreteBulkPoint::try_new(&material, 2.0, settings(kappa)).unwrap();
+        let requested = point.endpoint_pressure_pa().next_up();
+        assert_ne!(requested, point.endpoint_pressure_pa());
+        let held = point.response(requested).unwrap();
+        assert_eq!(held.volume_ratio_after, point.accepted_volume_ratio());
+        assert_eq!(held.energy_after_pa, point.energy_before_pa());
+        assert_eq!(held.energy_change_pa, 0.0);
+        assert_eq!(held.work_pa, 0.0);
+        assert_eq!(held.work_defect_pa, 0.0);
+        assert_eq!(held.iterations, 0);
+        let allowance = settings(kappa).absolute_pressure_tolerance_pa
+            + settings(kappa).relative_pressure_tolerance * requested.abs();
+        assert!(held.pressure_residual_pa.abs() <= allowance);
+        // A physically resolved pressure increment must still move the volume.
+        let loaded = point.response(point.endpoint_pressure_pa() + 1e6).unwrap();
+        assert!(loaded.volume_ratio_after > point.accepted_volume_ratio());
+        assert!(loaded.energy_change_pa > 0.0);
+        close(
+            loaded.work_pa,
+            loaded.energy_change_pa,
+            settings(kappa).absolute_work_tolerance_pa,
+        );
+        let broad = DiscreteBulkSettings {
+            absolute_pressure_tolerance_pa: 1e6,
+            ..settings(kappa)
+        };
+        for (bound, pressure_delta) in [
+            (broad.minimum_volume_ratio, -1e3),
+            (broad.maximum_volume_ratio, 1e3),
+        ] {
+            let edge = DiscreteBulkPoint::try_new(&material, bound, broad).unwrap();
+            // A held candidate's loose pressure residual does not authorize
+            // an original-law solution beyond the explicit volume branch.
+            assert!(
+                edge.response(edge.endpoint_pressure_pa() + pressure_delta)
+                    .is_err()
+            );
+        }
+    }
+    let material = law(Volumetric::Quadratic { kappa });
+    let mut exact_pressure = settings(kappa);
+    exact_pressure.absolute_pressure_tolerance_pa = 0.0;
+    exact_pressure.relative_pressure_tolerance = 0.0;
+    let point = DiscreteBulkPoint::try_new(&material, 2.0, exact_pressure).unwrap();
+    let before = (point.accepted_volume_ratio(), point.energy_before_pa());
+    // At this state the next representable J changes the secant pressure by
+    // two pressure ulps. One pressure ulp has no exact representable inverse.
+    assert!(
+        point
+            .response(point.endpoint_pressure_pa().next_up())
+            .is_err()
+    );
+    assert_eq!(
+        point
+            .response(point.endpoint_pressure_pa())
+            .unwrap()
+            .work_pa,
+        0.0
+    );
+    assert_eq!(
+        before,
+        (point.accepted_volume_ratio(), point.energy_before_pa())
+    );
+}
+
+#[test]
 fn g1_log_bulk_recovers_original_energy_and_independent_pressure_integral() {
     for kappa in [7.0, 9e5] {
         let volume = Volumetric::LogSquared { kappa };
@@ -197,7 +271,19 @@ fn g0_consistent_compliance_matches_pressure_finite_differences_and_small_pair_l
             );
         }
         for a in [0.83_f64, 1.0, 1.9, 2.5] {
-            let point = DiscreteBulkPoint::try_new(&material, a, settings(kappa)).unwrap();
+            // Resolve the requested 1e-12 volume changes even near the soft
+            // log-fold curvature; a coarser pressure allowance legitimately
+            // admits the unchanged physical endpoint.
+            let point = DiscreteBulkPoint::try_new(
+                &material,
+                a,
+                DiscreteBulkSettings {
+                    absolute_pressure_tolerance_pa: 2e-16 * kappa,
+                    relative_pressure_tolerance: 2e-16,
+                    ..settings(kappa)
+                },
+            )
+            .unwrap();
             let equal = point.response(point.endpoint_pressure_pa()).unwrap();
             let compliance = match volume {
                 Volumetric::Quadratic { .. } => 2.0 / kappa,
@@ -338,7 +424,9 @@ fn g0_invalid_domains_exhausted_scalar_work_and_insufficient_work_allowances_ref
         0.73,
         DiscreteBulkSettings {
             maximum_iterations: 1,
-            absolute_pressure_tolerance_pa: 1e6,
+            // The original volume must fail pressure admission so that a
+            // genuine finite change reaches the independent zero-work gate.
+            absolute_pressure_tolerance_pa: 0.25 * (pressure - point.endpoint_pressure_pa()).abs(),
             absolute_work_tolerance_pa: 0.0,
             relative_work_tolerance: 0.0,
             ..controls

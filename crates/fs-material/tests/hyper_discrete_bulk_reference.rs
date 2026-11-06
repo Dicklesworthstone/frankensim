@@ -69,6 +69,65 @@ fn pressure(volume: Volumetric, je: f64) -> f64 {
 }
 
 #[test]
+fn held_reference_bulk_keeps_total_volume_under_admitted_pressure_roundoff() {
+    let reference =
+        ReferenceDeformation::try_new([1.25, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
+    let total_volume = 2.0 * reference.volume_ratio();
+    for volume in [
+        Volumetric::Quadratic { kappa: 1e12 },
+        Volumetric::LogSquared { kappa: 1e12 },
+        Volumetric::SimoTaylor { kappa: 1e12 },
+    ] {
+        let material = law(volume);
+        let mut point = DiscreteBulkPoint::try_new_with_reference(
+            &material,
+            &reference,
+            total_volume,
+            settings(volume.kappa()),
+        )
+        .unwrap();
+        let before = point.energy_before_pa();
+        let requested = point.endpoint_pressure_pa().next_up();
+        for _ in 0..4 {
+            let held = point.response(requested).unwrap();
+            assert_eq!(held.volume_ratio_after, total_volume);
+            assert_eq!(held.energy_after_pa, before);
+            assert_eq!(held.energy_change_pa, 0.0);
+            assert_eq!(held.work_pa, 0.0);
+            assert_eq!(held.work_defect_pa, 0.0);
+            assert_eq!(held.iterations, 0);
+            point = point.rebind(held.volume_ratio_after).unwrap();
+        }
+        let loaded = point.response(point.endpoint_pressure_pa() + 1e6).unwrap();
+        assert!(loaded.volume_ratio_after > total_volume);
+        close(
+            loaded.work_pa,
+            loaded.energy_change_pa,
+            reference.volume_ratio() * settings(volume.kappa()).absolute_work_tolerance_pa,
+        );
+    }
+}
+
+#[test]
+fn quadratic_reference_inverse_preserves_the_total_volume_reflection() {
+    let reference =
+        ReferenceDeformation::try_new([1.7, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
+    let kappa = 1e12;
+    let material = law(Volumetric::Quadratic { kappa });
+    let accepted = 1.42;
+    let point =
+        DiscreteBulkPoint::try_new_with_reference(&material, &reference, accepted, settings(kappa))
+            .unwrap();
+    // U is quadratic in TOTAL J-Jg. Zero interval pressure reflects J about
+    // Jg. This direct identity avoids separately rounding two elastic ratios.
+    let reflected = 2.0 * reference.volume_ratio() - accepted;
+    let response = point.response(0.0).unwrap();
+    assert_eq!(response.volume_ratio_after, reflected);
+    assert_eq!(response.work_pa, 0.0);
+    assert_eq!(response.iterations, 0);
+}
+
+#[test]
 fn g0_reference_and_modulus_work_resolves_second_order_change_under_large_preload() {
     // At retained J=2, U0=k/2. Prescribe g1=1+h and k1=k(1+3h).
     // Exact rational reduction gives

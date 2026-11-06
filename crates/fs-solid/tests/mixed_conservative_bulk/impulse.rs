@@ -32,17 +32,6 @@ fn controls() -> MixedImpulseControls {
 fn small_impulse_work_survives_large_elastic_storage_and_following_interval() {
     with_cx(false, |cx| {
         let (nodes, elements) = mesh(cx);
-        let material = Hyperelastic::new(
-            HyperelasticModel::Ogden {
-                terms: vec![OgdenTerm {
-                    mu_pa: 1e12,
-                    alpha: 2.0,
-                }],
-                volumetric: Volumetric::Quadratic { kappa: KAPPA },
-            },
-            4.0,
-        )
-        .unwrap();
         let densities = [DENSITY];
         let initial: Vec<_> = nodes.iter().map(|x| [x[0], 0.0, 0.0]).collect();
         let zero = vec![[0.0; 3]; nodes.len()];
@@ -56,7 +45,23 @@ fn small_impulse_work_survives_large_elastic_storage_and_following_interval() {
             })
             .collect();
         let held: Vec<_> = initial.as_flattened().iter().copied().enumerate().collect();
-        for full in [false, true] {
+        // Both a stiff shear baseline and a stiff bulk baseline retain the
+        // same small impulse. Held pressure interpolation must not create a
+        // volume update or bulk work during the following fixed-F interval.
+        for (full, mu_pa, kappa) in [
+            (false, 1e12, KAPPA),
+            (true, 1e12, KAPPA),
+            (false, 12.0, 1e12),
+            (true, 12.0, 1e12),
+        ] {
+            let material = Hyperelastic::new(
+                HyperelasticModel::Ogden {
+                    terms: vec![OgdenTerm { mu_pa, alpha: 2.0 }],
+                    volumetric: Volumetric::Quadratic { kappa },
+                },
+                4.0,
+            )
+            .unwrap();
             let mut source = definition(
                 &nodes,
                 &elements,
@@ -66,9 +71,16 @@ fn small_impulse_work_survives_large_elastic_storage_and_following_interval() {
             if full {
                 source.formulation = ConservativeFormulation::FullMaterial;
             }
+            let initial_pressure = [kappa; 4];
             let solid = source
-                .prepare_with_pressure(&initial, &zero, if full { &[] } else { &[KAPPA; 4] }, cx)
+                .prepare_with_pressure(
+                    &initial,
+                    &zero,
+                    if full { &[] } else { &initial_pressure },
+                    cx,
+                )
                 .unwrap();
+            assert!(solid.stored_energy_j() > 1e10);
             let event = solid
                 .impulse_candidate(&[], &impulses, None, [0.0; 3], controls(), cx)
                 .unwrap();
@@ -81,7 +93,8 @@ fn small_impulse_work_survives_large_elastic_storage_and_following_interval() {
                 .solid
                 .advance(0.01, &held, &[], [0.0; 3], settings(), 1e-10, cx)
                 .unwrap();
-            near(step.energy.stored_change_j, 0.0, 1e-15);
+            assert_eq!(step.energy.stored_change_j, 0.0);
+            assert_eq!(step.solid.bulk_volume_ratios(), solid.bulk_volume_ratios());
             near(step.energy.cumulative_balance_error_j, 0.0, 1e-10);
             near(step.solid.kinetic_energy_j(), expected, 1e-20);
         }

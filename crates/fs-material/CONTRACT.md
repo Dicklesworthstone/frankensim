@@ -6749,6 +6749,20 @@ branch. Focused original-owner tests retain second-order reference/modulus work
 under a `2^80 Pa` bulk preload, small work at fixed elastic strain, finite family
 changes and finite storage across opposing `1e200`/`1e-200` source scales.
 
+All three discrete bulk families test the retained total volume before scalar
+inversion. That candidate is returned only when the original pressure and work
+allowances admit it; perturbed pressure must still lie in the monotone range
+of the original declared volume bracket. Thus interpolation roundoff in a held
+pressure does not create volume motion or stored energy. Resolved loads still
+use the native inverse, and the quadratic branch forms its total-volume
+increment in double-double precision before rounding the endpoint. No new
+pressure threshold or production tolerance is introduced. Tests distinguish
+an admitted one-ulp pressure perturbation from a resolved load, strict
+zero-pressure-tolerance refusal, and an out-of-branch pressure despite a loose
+allowance. The original mixed-solid `1e12 Pa` bulk-preload fixture now retains
+volumes bitwise with zero stored change through an unchanged-geometry interval;
+its nonlinear bulk time-convergence ladder remains covered separately.
+
 Native finite-pair arithmetic carries small changes separately from absolute
 storage, using symmetric product/quotient identities, log1p/expm1 identities and
 the shared double-double invariant arithmetic. It retains the original
