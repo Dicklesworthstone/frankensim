@@ -37,7 +37,24 @@ fn weighted_mass(area: f64, rho: f64, c: f64) -> Result<f64, MembraneError> {
     Ok(value)
 }
 
-fn row_masses(area: f64, density: [f64; 3]) -> Result<[f64; 3], MembraneError> {
+/// Positive row sums of the exact P1 reference-density mass on a triangle.
+///
+/// `area` is its positive reference area [m²], independent of facet winding.
+/// `density` contains reference areal density [kg/m²] at its three corners,
+/// in the same order as the velocity shapes. Shared vertices may carry different
+/// values on adjacent facets; no material-interface averaging occurs here.
+/// These are the original membrane load/lumping weights, not nodal samples
+/// multiplied by one third of the area. Their sum and first moment integrate
+/// the complete linear density. No current geometry or constitutive law enters.
+///
+/// # Errors
+/// Nonpositive/nonfinite area or corner density, or an unrepresentable moment.
+pub fn p1_reference_row_masses(area: f64, density: [f64; 3]) -> Result<[f64; 3], MembraneError> {
+    if !area.is_finite() || area <= 0.0 {
+        return Err(MembraneError::Invalid(
+            "positive finite reference triangle area required",
+        ));
+    }
     if density.iter().any(|x| !x.is_finite() || *x <= 0.0) {
         return Err(MembraneError::Invalid(
             "positive finite corner reference areal density required",
@@ -61,6 +78,42 @@ fn row_masses(area: f64, density: [f64; 3]) -> Result<[f64; 3], MembraneError> {
         masses[a] = weighted_mass(area, scale, (sum + r[a]) / 12.0)?;
     }
     Ok(masses)
+}
+
+/// Exact scalar P1 translational inertia for one reference triangle [kg].
+///
+/// The same area/corner convention as [`p1_reference_row_masses`] applies.
+/// `M_ab = integral rho0 N_a N_b dA` retains all cubic density/velocity
+/// moments. Reuse this same 3-by-3 block independently for each Cartesian
+/// component. Supports restrict both matrix axes after this physical block is
+/// formed; fixed nodes never donate mass to free nodes. Density is reference
+/// areal inventory, so this function never multiplies thickness again.
+///
+/// # Errors
+/// Nonpositive/nonfinite area or corner density, or an unrepresentable moment.
+pub fn p1_reference_consistent_mass(
+    area: f64,
+    density: [f64; 3],
+) -> Result<[[f64; 3]; 3], MembraneError> {
+    if !area.is_finite() || area <= 0.0 || density.iter().any(|rho| !rho.is_finite() || *rho <= 0.0)
+    {
+        return Err(MembraneError::Invalid(
+            "positive finite reference triangle area and corner areal density required",
+        ));
+    }
+    let scale = density.into_iter().fold(0.0_f64, f64::max);
+    let r = density.map(|x| x / scale);
+    let sum = r[0] + r[1] + r[2];
+    let mut mass = [[0.0; 3]; 3];
+    for a in 0..3 {
+        mass[a][a] = weighted_mass(area, scale, (sum + 2.0 * r[a]) / 30.0)?;
+        for b in a + 1..3 {
+            let value = weighted_mass(area, scale, (sum + r[a] + r[b]) / 60.0)?;
+            mass[a][b] = value;
+            mass[b][a] = value;
+        }
+    }
+    Ok(mass)
 }
 
 impl MembranePatch {
@@ -90,7 +143,7 @@ impl MembranePatch {
         let mut masses = vec![0.0; self.mesh.nodes.len()];
         for (element, &density) in self.elements.iter().zip(&density_kg_m2) {
             poll(&mut cancelled)?;
-            let local = row_masses(element.area, density)?;
+            let local = p1_reference_row_masses(element.area, density)?;
             for a in 0..3 {
                 masses[element.nodes[a]] += local[a];
             }
@@ -211,21 +264,10 @@ impl MembranePatch {
         &self,
         index: usize,
     ) -> Result<[[f64; 3]; 3], MembraneError> {
-        let area = self.elements[index].area;
-        let density = self.reference_areal_density_kg_m2[index];
-        let scale = density.into_iter().fold(0.0_f64, f64::max);
-        let r = density.map(|x| x / scale);
-        let sum = r[0] + r[1] + r[2];
-        let mut mass = [[0.0; 3]; 3];
-        for a in 0..3 {
-            mass[a][a] = weighted_mass(area, scale, (sum + 2.0 * r[a]) / 30.0)?;
-            for b in a + 1..3 {
-                let value = weighted_mass(area, scale, (sum + r[a] + r[b]) / 60.0)?;
-                mass[a][b] = value;
-                mass[b][a] = value;
-            }
-        }
-        Ok(mass)
+        p1_reference_consistent_mass(
+            self.elements[index].area,
+            self.reference_areal_density_kg_m2[index],
+        )
     }
 
     // Callers own the dense work cap. Both native modes and prepared dynamics

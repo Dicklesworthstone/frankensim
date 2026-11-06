@@ -4,8 +4,10 @@
 //! Each triangle has one exact constant-strain quadrature point through a
 //! homogeneous thickness, and the original plane-stress history supplies its
 //! stress/force response. Translational inertia can retain the exact P1 triangle
-//! mass or use explicit row-sum lumping, rho*h*A/3 per vertex. No elastic
-//! stiffness is assembled a second time.
+//! mass or use explicit row-sum lumping, rho*h*A/3 per vertex. An explicit
+//! corner reference-inventory field instead retains the same P1 density
+//! moments as the native solid membrane. No elastic stiffness is assembled
+//! a second time.
 //!
 //! This is a MEMBRANE discretization: no bending, drilling rotations, geometric
 //! stiffness, prestress, finite deformation, or acoustic radiation is supplied.
@@ -20,6 +22,7 @@ use std::collections::BTreeSet;
 
 mod loading;
 pub use loading::MembraneEdgeTraction;
+mod reference_inertia;
 /// Same-card hereditary material and inertia in explicit physical frames.
 pub mod source;
 
@@ -32,6 +35,7 @@ pub struct MembraneFacetMaterial {
     /// Positive thickness [m]; no geometry-dependent default or averaging.
     pub thickness_m: f64,
     /// Positive volumetric density [kg/m^3], supplied independently of stiffness.
+    /// An explicit reference areal-density field replaces only this inertial input.
     pub density_kg_m3: f64,
 }
 
@@ -42,6 +46,8 @@ pub enum MembraneError {
     Invalid(&'static str),
     /// Original facet geometry refusal, including its element/node diagnosis.
     Geometry(fs_plate::PlateError),
+    /// Original shared reference-density triangle inertia refusal.
+    Inertia(fs_solid::membrane::MembraneError),
     /// Original material, exact propagation, or cancellation refusal.
     Dynamics(TensorMaterialError),
     /// Original same-card material or explicit material-frame admission.
@@ -52,6 +58,7 @@ impl core::fmt::Display for MembraneError {
         match self {
             Self::Invalid(what) => write!(f, "tensor membrane: {what}"),
             Self::Geometry(e) => write!(f, "tensor membrane geometry: {e}"),
+            Self::Inertia(e) => write!(f, "tensor membrane inertia: {e}"),
             Self::Dynamics(e) => write!(f, "tensor membrane dynamics: {e}"),
             Self::MaterialSource(e) => write!(f, "tensor membrane material: {e}"),
         }
@@ -72,6 +79,7 @@ pub struct TensorMembrane {
     facets: Vec<FacetGeometry>,
     dof_map: Vec<Option<usize>>,
     nodal_mass: Vec<f64>,
+    reference_areal_density: Option<Vec<[f64; 3]>>,
     body: TensorMaterialBody,
     material_sources: Option<Vec<source::MembraneMaterialSource>>,
 }
@@ -111,6 +119,15 @@ impl TensorMembrane {
         projection:TensorProjectionBudget,dynamics:TensorMaterialBudget,gate:&CancelGate,
         consistent:bool)->Result<Self>
     {
+        Self::assemble_with_reference_density(mesh,materials,fixed_dofs,projection,dynamics,
+            gate,consistent,None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_with_reference_density(mesh:ShellMesh,materials:Vec<MembraneFacetMaterial>,
+        fixed_dofs:&[usize],projection:TensorProjectionBudget,dynamics:TensorMaterialBudget,
+        gate:&CancelGate,consistent:bool,reference_areal_density:Option<Vec<[f64;3]>>)->Result<Self>
+    {
         poll(gate)?;
         let nodes = mesh.nodes.len(); let elements = mesh.tris.len();
         if !(3..=4096).contains(&nodes) || elements == 0 || elements != materials.len()
@@ -120,6 +137,9 @@ impl TensorMembrane {
             || !(1..=256).contains(&projection.max_coordinates)
             || mesh.nodes.iter().flatten().any(|v| !v.is_finite()) {
             return Err(bad("bounded nonempty mesh, complete per-facet materials and valid budgets required"));
+        }
+        if reference_areal_density.as_ref().is_some_and(|density| density.len() != elements) {
+            return Err(bad("one reference areal-density triple per original membrane facet required"));
         }
         let mut fixed = vec![false; 3*nodes];
         for &dof in fixed_dofs {
@@ -155,14 +175,9 @@ impl TensorMembrane {
             let facet = mesh.facet(e).map_err(MembraneError::Geometry)?;
             let mut key = *tri; key.sort_unstable();
             if !unique.insert(key) { return Err(bad("duplicate membrane triangle")); }
-            let volume = material.thickness_m*facet.area_m2;
-            let mass = material.density_kg_m3*volume/3.0;
-            if !material.thickness_m.is_finite() || material.thickness_m <= 0.0
-                || !material.density_kg_m3.is_finite() || material.density_kg_m3 <= 0.0
-                || !volume.is_finite() || volume <= 0.0 || !mass.is_finite() || mass <= 0.0 {
-                return Err(bad("each facet needs finite positive thickness, density, volume and nodal mass"));
-            }
-            for &node in tri { nodal_mass[node] += mass; }
+            let local = reference_inertia::row_masses(facet.area_m2, material,
+                reference_areal_density.as_ref().map(|density| density[e]))?;
+            for (a,&node) in tri.iter().enumerate() { nodal_mass[node] += local[a]; }
             facets.push(facet);
         }
         if nodal_mass.iter().any(|m| !m.is_finite() || *m <= 0.0)
@@ -186,17 +201,18 @@ impl TensorMembrane {
                 material.thickness_m*facet.area_m2, per_point, gate).map_err(MembraneError::Dynamics)?);
         }
         let body = if consistent {
-            // The same constant density/thickness used by the material quadrature
-            // makes this degree-two velocity integral exact on each P1 triangle.
+            // The original scalar arithmetic and the explicit reference field
+            // feed the same complete physical inertia owner.
             let mut mass=vec![0.0;free*free];
-            for ((tri,facet),material) in mesh.tris.iter().zip(&facets).zip(&materials) {
+            for (e,((tri,facet),material)) in mesh.tris.iter().zip(&facets).zip(&materials).enumerate() {
                 poll(gate)?;
-                let weight=material.density_kg_m3*(material.thickness_m*facet.area_m2)/12.0;
+                let local=reference_inertia::consistent_mass(facet.area_m2,material,
+                    reference_areal_density.as_ref().map(|density|density[e]))?;
                 for (a,&node_a) in tri.iter().enumerate() {
                     for (b,&node_b) in tri.iter().enumerate() {
                         for axis in 0..3 {
                             if let (Some(i),Some(j))=(dof_map[3*node_a+axis],dof_map[3*node_b+axis]) {
-                                mass[i*free+j]+=if a==b {2.0*weight} else {weight};
+                                mass[i*free+j]+=local[a][b];
                             }
                         }
                     }
@@ -209,7 +225,8 @@ impl TensorMembrane {
             TensorMaterialBody::from_plane_stress(masses,points,dynamics,gate)
         }.map_err(MembraneError::Dynamics)?;
         poll(gate)?;
-        Ok(Self { mesh, materials, facets, dof_map, nodal_mass, body, material_sources: None })
+        Ok(Self { mesh, materials, facets, dof_map, nodal_mass, reference_areal_density,
+            body, material_sources: None })
     }
     /// Original mesh; it cannot change after the strain maps have been prepared.
     pub fn mesh(&self) -> &ShellMesh { &self.mesh }
