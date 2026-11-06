@@ -21,12 +21,15 @@
 //! spectrum can retain unsteady transverse normal-profile memory and its
 //! additional kinetic energy. Both losses are exported as heat
 //! once; they are not injected into the linear temperature perturbation.
-//! Reported storage is wave availability, not absolute internal energy.
+//! An optional local Vinen tangle evolves one vortex-line density per interior
+//! dual volume. Its authored line energy joins the represented storage, so
+//! tangle growth stores energy and tangle decay releases heat exactly once.
+//! Wave storage is availability, not absolute internal energy.
 //! The boundary thermal wave work is `T' q/T0`, distinct from transported heat.
 //! The scalar permeability option is quasisteady; the spectral option resolves
 //! an authored number of transverse laminar modes with an explicit passive
 //! high-mode approximation. Neither includes local radial vortex friction,
-//! nonlinear heating/phase feedback, vortex geometry/evolution, critical
+//! nonlinear heating/phase feedback, vortex geometry/transport, critical
 //! velocities, longitudinal/second viscosities, Kapitza resistance, entrance
 //! effects or arbitrary transverse geometry.
 
@@ -38,6 +41,7 @@ mod boundary;
 mod modes;
 mod momentum;
 mod step;
+mod tangle;
 mod viscosity;
 pub use boundary::{
     ChannelEnd, CounterflowEndsResponse, ImpermeableEndResponse, ImpermeableEndsResponse,
@@ -175,6 +179,10 @@ pub enum MutualFriction {
         line_density_per_m2: f64,
         dissipative_b: f64,
     },
+    /// Evolve the explicitly configured local Vinen tangle and its line energy.
+    /// Required when a tangle is configured; other friction laws then refuse
+    /// rather than freeze its history or add a second drag mechanism.
+    EvolvingVinenTangle,
 }
 
 /// One accepted interval. Heat and small-signal boundary work have distinct roles.
@@ -184,6 +192,10 @@ pub struct ChannelStep {
     /// Includes the positive excess kinetic energy of any transverse profile.
     pub wave_energy_before_j: f64,
     pub wave_energy_after_j: f64,
+    /// Authored vortex-line energy on interior dual volumes, separate from the
+    /// quadratic wave energy. Zero when no evolving tangle is configured.
+    pub vortex_energy_before_j: f64,
+    pub vortex_energy_after_j: f64,
     pub boundary_wave_work_j: f64,
     /// Signed work supplied by authored body forces; friction heat is separate.
     pub body_force_work_j: f64,
@@ -204,10 +216,14 @@ pub struct ChannelStep {
     pub interior_wall_impulse_n_s: f64,
     /// Actual resolved momentum change minus pressure, body and wall impulses.
     pub resolved_momentum_defect_n_s: f64,
+    /// Mutual-friction heat including any configured vortex-energy release.
+    /// Energy stored by tangle growth is excluded from this heat account.
     pub mutual_friction_heat_j: f64,
     /// Normal-fluid kinetic energy dissipated by the stationary viscous walls.
     /// Exported separately from mutual friction, with the same cell heat route.
     pub normal_viscous_heat_j: f64,
+    /// Change in wave plus vortex storage, minus boundary/body work, plus
+    /// exported dissipative heat. With no tangle this is the wave-only balance.
     pub wave_balance_defect_j: f64,
     /// First-order mass imported through the two explicit ports.
     pub boundary_mass_kg: f64,
@@ -270,6 +286,7 @@ pub struct TwoFluidChannel {
     normal_wall: Option<NormalViscousWall>,
     normal_wall_rate_s_inv: f64,
     normal_profile: Option<viscosity::NormalProfileMemory>,
+    vinen_tangle: Option<tangle::VinenTangleMemory>,
     length_m: f64,
     area_m2: f64,
     dx: f64,
@@ -333,6 +350,7 @@ impl TwoFluidChannel {
             normal_wall: None,
             normal_wall_rate_s_inv: 0.0,
             normal_profile: None,
+            vinen_tangle: None,
             length_m,
             area_m2,
             dx,
@@ -410,6 +428,7 @@ impl TwoFluidChannel {
     /// There are N cell values and N+1 face values. Allowed only before stepping.
     /// A configured normal profile starts with every modal velocity equal to
     /// the authored section mean: there is no initial excess profile energy.
+    /// A configured tangle's authored line density is preserved.
     /// Refusal/cancellation leaves the original fields and profile intact.
     pub fn initialize(
         &mut self,
@@ -451,7 +470,14 @@ impl TwoFluidChannel {
             profile.initialize_pending(normal_m_s, &mut cancelled)?;
         }
         self.validate_pending(&mut cancelled)?;
-        self.energy_with_profile(true, &mut cancelled)?;
+        let wave_energy = self.energy_with_profile(true, &mut cancelled)?;
+        if self.vinen_tangle.is_some()
+            && !(wave_energy + self.vortex_energy_with(false, &mut cancelled)?).is_finite()
+        {
+            return Err(ChannelError::Invalid(
+                "initial wave and vortex storage is not representable",
+            ));
+        }
         poll(&mut cancelled)?;
         core::mem::swap(&mut self.accepted, &mut self.pending);
         if let Some(profile) = &mut self.normal_profile {
@@ -479,6 +505,7 @@ impl TwoFluidChannel {
             ));
         }
         let speed_limit = self.profile_speed_limit();
+        let vortex_energy = self.vortex_energy_with(false, &mut cancelled)?;
         let profile = self.normal_profile.as_mut().ok_or(ChannelError::Invalid(
             "steady normal initialization requires a transverse spectrum",
         ))?;
@@ -492,9 +519,9 @@ impl TwoFluidChannel {
         )?;
         let storage = energy(&self.accepted, self.cell_volume, &mut cancelled)?
             + profile.excess_energy(true, self.cell_volume, &mut cancelled)?;
-        if !storage.is_finite() {
+        if !storage.is_finite() || !(storage + vortex_energy).is_finite() {
             return Err(ChannelError::Invalid(
-                "steady normal profile energy is not representable",
+                "steady normal profile and vortex energy is not representable",
             ));
         }
         poll(&mut cancelled)?;
@@ -596,6 +623,23 @@ impl TwoFluidChannel {
         self.energy_with_profile(false, &mut || false)
     }
 
+    /// Wave availability plus the authored vortex-line energy. This retains
+    /// both represented stores; it is not absolute helium internal energy.
+    pub fn represented_energy_j(&self) -> Result<f64, ChannelError> {
+        let wave = self.wave_energy_j()?;
+        if self.vinen_tangle.is_none() {
+            return Ok(wave);
+        }
+        let total = wave + self.vortex_energy_j()?;
+        if total.is_finite() {
+            Ok(total)
+        } else {
+            Err(ChannelError::Invalid(
+                "wave and vortex storage is not representable",
+            ))
+        }
+    }
+
     /// Advance both sound modes, honoring imposed component flows at both ends.
     /// Callers can bridge the cancellation callback to their existing execution Cx.
     pub fn step(
@@ -646,6 +690,9 @@ impl TwoFluidChannel {
         );
         if let Some(profile) = &mut self.normal_profile {
             profile.publish();
+        }
+        if let Some(tangle) = &mut self.vinen_tangle {
+            tangle.publish();
         }
         self.time_s = report.time_s;
         self.total_heat_j += report.mutual_friction_heat_j;

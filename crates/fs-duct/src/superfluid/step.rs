@@ -36,8 +36,13 @@ impl TwoFluidChannel {
                 "step must advance a finite clock and satisfy the declared wave Courant <= 1 policy",
             ));
         }
+        if self.vinen_tangle.is_some() != (friction == MutualFriction::EvolvingVinenTangle) {
+            return Err(ChannelError::Invalid(
+                "an evolving Vinen tangle requires its configured model and exclusive friction selector",
+            ));
+        }
         let friction = match friction {
-            MutualFriction::None => friction,
+            MutualFriction::None | MutualFriction::EvolvingVinenTangle => friction,
             MutualFriction::Linear { gamma_kg_m3_s: k }
             | MutualFriction::GorterMellink { a_m_s_kg: k } => {
                 if !k.is_finite() || k < 0.0 {
@@ -86,6 +91,7 @@ impl TwoFluidChannel {
         let n = self.cells();
         force.validate(n + 1, &self.material, cancelled)?;
         let before = self.energy_with_profile(false, cancelled)?;
+        let vortex_before = self.vortex_energy_with(false, cancelled)?;
         for i in 0..=n {
             if i % 128 == 0 {
                 poll(cancelled)?;
@@ -108,6 +114,9 @@ impl TwoFluidChannel {
         }
         if let Some(profile) = &mut self.normal_profile {
             profile.copy_pending(cancelled)?;
+        }
+        if let Some(tangle) = &mut self.vinen_tangle {
+            tangle.copy_pending(cancelled)?;
         }
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
         let (source_work, residual, wall_impulse) = if self.uses_viscous_wave_operator() {
@@ -154,6 +163,7 @@ impl TwoFluidChannel {
         self.friction_half_step(friction, dt / 2.0, cancelled)?;
         self.validate_pending_with_limits(physical_limits, cancelled)?;
         let after = self.energy_with_profile(true, cancelled)?;
+        let vortex_after = self.vortex_energy_with(true, cancelled)?;
         let mut heat = 0.0;
         let mut correction = 0.0;
         let mut viscous_heat = 0.0;
@@ -181,8 +191,25 @@ impl TwoFluidChannel {
         let total_viscous_heat = self.total_viscous_heat_j + viscous_heat;
         let dissipated = heat + viscous_heat;
         let total_dissipated = total_heat + total_viscous_heat;
-        let defect = (after - before) - work - source_work + dissipated;
-        let scale = before + after + work.abs() + source_work.abs() + dissipated;
+        let (defect, scale) = if self.vinen_tangle.is_some() {
+            (
+                (after - before) + (vortex_after - vortex_before) - work - source_work + dissipated,
+                before
+                    + after
+                    + vortex_before
+                    + vortex_after
+                    + work.abs()
+                    + source_work.abs()
+                    + dissipated,
+            )
+        } else {
+            // Preserve the original no-tangle arithmetic, including its signed
+            // zero and rounding behavior, for every existing friction closure.
+            (
+                (after - before) - work - source_work + dissipated,
+                before + after + work.abs() + source_work.abs() + dissipated,
+            )
+        };
         let tolerance = 32768.0 * f64::EPSILON * scale;
         if ![
             heat,
@@ -255,6 +282,8 @@ impl TwoFluidChannel {
             time_s: next_time,
             wave_energy_before_j: before,
             wave_energy_after_j: after,
+            vortex_energy_before_j: vortex_before,
+            vortex_energy_after_j: vortex_after,
             boundary_wave_work_j: work,
             body_force_work_j: source_work,
             boundary_pressure_impulse_n_s: pressure_impulse,
@@ -306,22 +335,34 @@ impl TwoFluidChannel {
                 MutualFriction::GorterMellink { a_m_s_kg } => self
                     .material
                     .relax_gorter_mellink(velocities, a_m_s_kg, dt)?,
+                MutualFriction::EvolvingVinenTangle => self
+                    .vinen_tangle
+                    .as_mut()
+                    .ok_or(ChannelError::Invalid(
+                        "evolving Vinen friction requires configured tangle memory",
+                    ))?
+                    .advance(i, velocities, dt, cancelled)?,
             };
-            let v = self.material.barycentric_velocity_m_s(change.velocity)?[0];
-            let w = self.material.counterflow_velocity_m_s(change.velocity)?[0];
-            let next = self.modes.face_to_modes(v, w);
-            if let Some(profile) = &mut self.normal_profile {
-                // This authored closure acts on the section mean. Its uniform
-                // acceleration changes all normal modes equally, preserving
-                // their deviations and excess kinetic energy. A local radial
-                // vortex-drag law would require a different physical model.
-                profile.lift_mean(
-                    i,
-                    change.velocity.normal_m_s[0] - sample.normal_velocity_m_s,
-                );
+            if friction != MutualFriction::EvolvingVinenTangle || change.velocity != velocities {
+                // An empty tangle (or pure line decay with no relative flow)
+                // changes no velocity. Avoid an extra modal round trip in that
+                // identity limit so a zero seed retains the original wave path.
+                let v = self.material.barycentric_velocity_m_s(change.velocity)?[0];
+                let w = self.material.counterflow_velocity_m_s(change.velocity)?[0];
+                let next = self.modes.face_to_modes(v, w);
+                if let Some(profile) = &mut self.normal_profile {
+                    // This authored closure acts on the section mean. Its uniform
+                    // acceleration changes all normal modes equally, preserving
+                    // their deviations and excess kinetic energy. A local radial
+                    // vortex-drag law would require a different physical model.
+                    profile.lift_mean(
+                        i,
+                        change.velocity.normal_m_s[0] - sample.normal_velocity_m_s,
+                    );
+                }
+                self.pending[0].faces[i] = next[0];
+                self.pending[1].faces[i] = next[1];
             }
-            self.pending[0].faces[i] = next[0];
-            self.pending[1].faces[i] = next[1];
             let heat = change.dissipated_energy_j_m3 * self.cell_volume * 0.5;
             self.pending_heat_j[i - 1] += heat;
             self.pending_heat_j[i] += heat;

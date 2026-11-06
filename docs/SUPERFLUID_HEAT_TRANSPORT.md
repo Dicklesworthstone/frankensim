@@ -329,13 +329,124 @@ The helium reference and B/alpha convention follow
 The latter source documents frequency and velocity dependence; the API therefore
 does not silently assign a universal B value to a material name.
 
+## Evolving vortex tangles with represented line energy
+
+The optional `fs_material::superfluid::vinen::VinenTangle` advances an
+unpolarized, unresolved local population instead of holding its density fixed:
+
+```text
+dL/dt = a |v_n-v_s| L^(3/2) - b L^2
+d(v_n-v_s)/dt = -(B kappa/3) L (v_n-v_s)
+```
+
+Here L is line length per total volume [1/m²], a is dimensionless, and b has
+units m²/s and already includes circulation. All coefficients are authored.
+The homogeneous law requires a remanent seed: L=0 remains exactly zero. It
+does not supply a critical velocity or an automatic nucleation law.
+
+A constant effective line energy e [J/m] is REQUIRED. Represented storage is
+`mu |v_n-v_s|²/2 + e L`, where `mu=rho_n*rho_s/rho`. Growth reserves its
+line-energy increase from the lost relative kinetic energy; decay releases
+line energy. Only the remaining nonnegative heat reaches a caloric owner.
+Admission requires `e a² <= 4 mu (B kappa/3) b`, the condition making the
+closure's heat-production quadratic nonnegative at every state. Incompatible
+coefficients refuse rather than clipping production or inventing energy.
+
+The numerical source uses the exposure `tau=integral(L dt)`. In that
+coordinate the relative speed and sqrt(L) satisfy a constant triangular linear
+system, advanced by a positive exponential map. Physical-clock integration is
+second order, with explicit fractional-rate and substep budgets. Production-
+free decay uses its exact physical-time solution, including drag integrated
+over the changing L. Weak impulses, coincident decay rates and representable
+strongly attenuated tails are retained. Source updates allocate no memory.
+
+Configure one line density on each INTERIOR face of an existing channel before
+the first step. This example uses demonstration coefficients, not measured
+vortex-growth or line-energy calibration:
+
+```rust
+use fs_material::superfluid::vinen::{
+    VinenParameters, VinenStepControls, VinenTangle,
+};
+use fs_duct::superfluid::MutualFriction;
+
+let tangle = VinenTangle::try_new(
+    *channel.material(),
+    VinenParameters {
+        circulation_quantum_m2_s: 9.97e-8,
+        dissipative_b: 1.0,
+        production_coefficient: 0.05,
+        decay_coefficient_m2_s: 1e-8,
+        line_energy_j_m: 1e-12,
+    },
+    VinenStepControls {
+        maximum_fractional_step: 0.05,
+        maximum_substeps: 512,
+    },
+)?;
+let seeds = vec![1e6; channel.cells() - 1];
+channel.configure_vinen_tangle(tangle, &seeds, || false)?;
+let friction = MutualFriction::EvolvingVinenTangle;
+```
+
+Pass this selector to the existing channel or `fs-couple` stepping operation.
+Once configured, other friction selectors refuse: they would silently freeze
+the tangle or apply another drag law. Density is accepted/pending state alongside
+the original wave and transverse normal-profile memory. Endpoint response
+queries never publish it. A source-budget refusal, failed heat acceptance or
+cancellation leaves the accepted density, velocity, heat and clock unchanged.
+
+`vortex_line_density_per_m2(face)` observes interior faces 1..N-1.
+`vortex_energy_j()` returns their line store; `represented_energy_j()`
+adds it to the original `wave_energy_j()`. Reports keep wave-only fields
+and expose separate `vortex_energy_before_j` / `vortex_energy_after_j`.
+When configured, `wave_balance_defect_j` includes the line-storage change.
+The original thermal callbacks receive heat after line growth or decay has
+been accounted for, through the existing per-cell route.
+
+This is a frozen-reference, constant-effective-line-energy closure. It does
+not resolve line geometry, tension, reconnections, polarization, line transport,
+radial variations in vortex drag, or the core/spacing dependence of a vortex
+equation of state. Heat deposition does not relinearize helium properties or
+supply phase-transition feedback. The represented balance is not a theorem for
+the full nonlinear internal energy of helium.
+
+The Vinen convention is equation (1.3) of
+[Sciacca, Mongiovi and Jou](https://cab.unime.it/mus/501/1/C1S0801017.pdf).
+The need to couple evolving lines to thermodynamics is discussed by
+[Sciacca](https://arxiv.org/abs/1008.4390); the restricted effective-energy
+closure and coefficient inequality above specify this implementation.
+
+## Discrete sourced helium reference temperatures
+
+`HeliumSvpReference::at_temperature_k` now admits exactly 1.4, 1.6, 1.8 and
+2.0 K at saturated vapor pressure. `SUPPORTED_TEMPERATURES_K` lists the
+available points, `raw()` retains the selected published row, and
+`at_1_8_k()` retains the original constructor. The existing channel examples
+continue to use their declared 1.8 K point.
+
+Density, superfluid density, entropy, heat capacity, expansion, sound and
+viscosity come from [Donnelly and Barenghi](https://srd.nist.gov/jpcrdreprint/1.556028.pdf).
+The original conversion from saturation-path derivatives to the isobaric
+two-fluid inputs remains in use. The independently fitted tables are not
+exactly mutually consistent: the predicted second-sound discrepancy is about
+2.8% at 1.4 K, below 0.8% at 1.6/1.8 K, and below 0.1% at 2.0 K. These
+discrepancies are retained and tested; entropy or density is not retuned to
+hide them. Predicted fourth sound agrees within 0.5% at all retained points.
+
+Intermediate temperatures and extrapolation refuse. Selecting another
+equilibrium reference does not create a temperature-dependent EOS or
+conservatively reinitialize a running channel.
+
 ## Focused regression targets
 
 ```bash
 cargo test -p fs-material --test superfluid
+cargo test -p fs-material --test superfluid_vinen
 cargo test -p fs-material --test superfluid_viscosity
 cargo test -p fs-material --test superfluid_normal_spectrum
 cargo test -p fs-duct --features superfluid --test superfluid_channel --test superfluid_ports
+cargo test -p fs-duct --features superfluid --test superfluid_vinen
 cargo test -p fs-duct --features superfluid --test superfluid_viscosity
 cargo test -p fs-duct --features superfluid --test superfluid_normal_profile
 cargo test -p fs-couple --features superfluid --test superfluid_counterflow --test superfluid_heat
