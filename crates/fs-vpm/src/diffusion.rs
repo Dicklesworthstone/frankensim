@@ -57,6 +57,8 @@ pub use material::{MaterialPseDiffusion, MaterialPseError};
 pub mod sparse;
 pub use sparse::{PreparationBudget, PreparationReport, PreparedPse};
 
+mod wall;
+
 /// Spatial kernel with unit-coordinate second moment 2 in each direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PseKernel {
@@ -223,12 +225,26 @@ pub fn diffuse_with_cx(
     law: PseDiffusion,
     budget: VpmBudget,
 ) -> Result<VpmRun, VpmError> {
+    diffuse_impl(cx, particles, areas_m2, dt, steps, law, budget, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn diffuse_impl(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    areas_m2: &[f64],
+    dt: f64,
+    steps: usize,
+    law: PseDiffusion,
+    budget: VpmBudget,
+    wall: Option<planar_wall::PlanarWall2>,
+) -> Result<VpmRun, VpmError> {
     validate_inputs(particles.len(), areas_m2, dt)?;
     admit_cap("particles", particles.len(), budget.max_particles)?;
     admit_cap("steps", steps, budget.max_steps)?;
     let active = dt > 0.0 && law.viscosity > 0.0;
     let pair_evaluations = if active {
-        pair_work(particles.len(), steps, 1)?
+        boundary_pair_work(particles.len(), steps, 1, wall)?
     } else {
         0
     };
@@ -260,6 +276,9 @@ pub fn diffuse_with_cx(
         meter.unit(&mut accountant, cx, "fs-vpm.diffusion-input", || {
             validate_particle(particle, index)?;
             validate_area(areas_m2[index], index)?;
+            if let Some(wall) = wall {
+                wall.admit_position(particle.pos, index)?;
+            }
             state.push(particle);
             Ok(())
         })?;
@@ -268,7 +287,7 @@ pub fn diffuse_with_cx(
     let mut completed_pairs = 0;
     for _ in 0..steps {
         if active {
-            symmetric_sweep(
+            boundary_sweep(
                 &mut state,
                 areas_m2,
                 law,
@@ -278,6 +297,7 @@ pub fn diffuse_with_cx(
                 &mut meter,
                 &mut accountant,
                 cx,
+                wall,
             )?;
         }
         meter.unit(&mut accountant, cx, "fs-vpm.diffusion-step", || Ok(()))?;
@@ -337,6 +357,60 @@ pub fn simulate_viscous_with_cx(
         Some((areas_m2, law)),
         None,
     )
+}
+
+pub(super) fn boundary_pair_work(
+    n: usize,
+    steps: usize,
+    sweeps: u64,
+    wall: Option<planar_wall::PlanarWall2>,
+) -> Result<u64, VpmError> {
+    if wall.is_some() {
+        wall::pair_work(n, steps, sweeps)
+    } else {
+        pair_work(n, steps, sweeps)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn boundary_sweep(
+    state: &mut [VortexParticle],
+    areas: &[f64],
+    law: PseDiffusion,
+    dt: f64,
+    pair_fraction: f64,
+    visits: &mut u64,
+    meter: &mut WorkMeter,
+    accountant: &mut AdmittedBudget<'_>,
+    cx: &Cx<'_>,
+    wall: Option<planar_wall::PlanarWall2>,
+) -> Result<(), VpmError> {
+    if let Some(wall) = wall {
+        wall::symmetric_sweep(
+            state,
+            areas,
+            law,
+            dt,
+            pair_fraction,
+            visits,
+            meter,
+            accountant,
+            cx,
+            wall,
+        )
+    } else {
+        symmetric_sweep(
+            state,
+            areas,
+            law,
+            dt,
+            pair_fraction,
+            visits,
+            meter,
+            accountant,
+            cx,
+        )
+    }
 }
 
 // dt and fraction stay separate: a tiny representable dt must not disappear
@@ -456,22 +530,28 @@ impl PairKernel {
                 (square * square * (1.0 + 4.0 * radius), edge, radius)
             }
         };
+        -det::expm1(-self.exponent_weight(areas, weight, || match self.shape {
+            PseKernel::Gaussian => -r2,
+            PseKernel::CompactWendland => 4.0 * det::ln(edge) + det::ln(1.0 + 4.0 * radius),
+        }))
+    }
+
+    fn exponent_weight(
+        &self,
+        areas: [f64; 2],
+        weight: f64,
+        log_weight: impl FnOnce() -> f64,
+    ) -> f64 {
         let mut exponent =
             self.rate_time * (areas[0] / self.width2 + areas[1] / self.width2) * weight;
         if !exponent.is_normal() {
-            // Avoid inf*0, lost narrow-kernel factors, and underflowed Gaussian
-            // tails times large rates. The usual physical-scale path uses no logs.
+            // Avoid inf*0, lost narrow-kernel factors, and underflowed tails
+            // times large rates. The ordinary path needs no logarithms.
             let scale = areas[0].max(areas[1]);
             let log_area = det::ln(scale) + det::ln(areas[0] / scale + areas[1] / scale);
-            let log_weight = match self.shape {
-                PseKernel::Gaussian => -r2,
-                PseKernel::CompactWendland => 4.0 * det::ln(edge) + det::ln(1.0 + 4.0 * radius),
-            };
-            exponent = det::exp(self.log_rate_time + log_area + log_weight);
+            exponent = det::exp(self.log_rate_time + log_area + log_weight());
         }
-        // expm1 retains weak diffusion and tends to exact equilibration at
-        // unrepresentably large rates; it never introduces a negative weight.
-        -det::expm1(-exponent)
+        exponent
     }
 }
 

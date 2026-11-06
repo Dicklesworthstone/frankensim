@@ -882,7 +882,7 @@ fn simulate_impl(
                 })?;
     }
     if active_diffusion.is_some() {
-        let visits = diffusion::pair_work(particles.len(), steps, 2)?;
+        let visits = diffusion::boundary_pair_work(particles.len(), steps, 2, wall)?;
         plan.pair_evaluations =
             plan.pair_evaluations
                 .checked_add(visits)
@@ -933,7 +933,7 @@ fn simulate_impl(
     let mut pair_evaluations = 0_u64;
     for _ in 0..steps {
         if let Some((areas, law)) = active_diffusion {
-            diffusion::symmetric_sweep(
+            diffusion::boundary_sweep(
                 &mut state,
                 areas,
                 law,
@@ -943,6 +943,7 @@ fn simulate_impl(
                 &mut meter,
                 &mut accountant,
                 cx,
+                wall,
             )?;
         }
         checked_velocities(
@@ -1051,7 +1052,7 @@ fn simulate_impl(
         core::mem::swap(&mut state, &mut scratch.next);
         scratch.next.clear();
         if let Some((areas, law)) = active_diffusion {
-            diffusion::symmetric_sweep(
+            diffusion::boundary_sweep(
                 &mut state,
                 areas,
                 law,
@@ -1061,6 +1062,7 @@ fn simulate_impl(
                 &mut meter,
                 &mut accountant,
                 cx,
+                wall,
             )?;
         }
         meter.boundary(&mut accountant, cx, "fs-vpm.step-complete")?;

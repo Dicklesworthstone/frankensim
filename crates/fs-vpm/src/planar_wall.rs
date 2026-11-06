@@ -6,9 +6,10 @@
 //! source positions at every RK4 stage, including a vortex's own image. They
 //! never become physical particles or enter the returned circulation inventory.
 //!
-//! This is an inviscid slip boundary: tangential velocity remains free. It does
-//! not supply no-slip vorticity generation, viscous wall diffusion, wall motion,
-//! corners or a mechanical wall-load model.
+//! Tangential velocity remains free. The viscous entries below add odd-image
+//! PSE transport with zero vorticity at a stationary flat stress-free wall.
+//! They do not supply no-slip vorticity generation, wall motion, corners or a
+//! mechanical wall-load model.
 //! The algebraic core remains numerical regularization; core overlap with the
 //! wall does not resolve a viscous boundary layer or certify fluid circulation
 //! from the particle-strength inventory alone.
@@ -209,7 +210,7 @@ impl PlanarWall2 {
         VortexParticle::new(self.reflection(particle.pos).1, -particle.circulation)
     }
 
-    fn reflection(self, point: [f64; 2]) -> (f64, [f64; 2]) {
+    pub(super) fn reflection(self, point: [f64; 2]) -> (f64, [f64; 2]) {
         let mut distance = 0.0;
         for (axis, &coordinate) in point.iter().enumerate() {
             // A tangential wall-anchor coordinate is irrelevant; do not form
@@ -254,4 +255,78 @@ pub fn simulate_with_cx(
     budget: VpmBudget,
 ) -> Result<VpmRun, VpmError> {
     crate::simulate_impl(cx, particles, dt, steps, core, budget, None, Some(wall))
+}
+
+/// Diffuse bulk vorticity on fixed sites beside this flat stress-free wall.
+///
+/// The odd vorticity extension enforces zero wall vorticity. The same physical
+/// particles and positive areas define real and reflected quadrature; images
+/// never enter the returned cloud. Signed bulk circulation can change through
+/// diffusion at the wall. This entry does not retain a boundary vortex sheet
+/// or assert conservation for the combined fluid-plus-interface circulation.
+///
+/// Gaussian and compact PSE laws retain their original bulk normalization.
+/// Exact positive exchange/loss maps contract the physical vorticity range
+/// toward zero and area-weighted enstrophy without a diffusion CFL. Time,
+/// kernel and cloud refinement remain necessary. The original algebraic
+/// velocity core is a separate regularization, not this diffusion profile.
+///
+/// Each active step charges 2*N*N pair/work units, including self images,
+/// with one particle buffer and the original admission/cancellation owner.
+///
+/// # Errors
+/// Original diffusion refusals, invalid wall clearance or reflected geometry.
+/// No partial state is returned. Even zero-time/zero-viscosity inputs must
+/// supply positive areas and physical particles strictly inside the fluid.
+#[allow(clippy::too_many_arguments)]
+pub fn diffuse_with_cx(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    areas_m2: &[f64],
+    dt: f64,
+    steps: usize,
+    law: crate::diffusion::PseDiffusion,
+    wall: PlanarWall2,
+    budget: VpmBudget,
+) -> Result<VpmRun, VpmError> {
+    crate::diffusion::diffuse_impl(cx, particles, areas_m2, dt, steps, law, budget, Some(wall))
+}
+
+/// Advect and diffuse the original physical cloud at a flat stress-free wall.
+///
+/// Each step composes wall-aware D(dt/2), the original real-plus-image RK4
+/// advection, and wall-aware D(dt/2). Areas follow their incompressible material
+/// particles. Image geometry and diffusion weights are evaluated at the
+/// current particle positions. Zero viscosity retains the original inviscid
+/// wall trajectory and work receipt exactly for nonnegative time.
+///
+/// Active diffusion adds 4*N*N*steps pair/work units to wall RK4 without
+/// another particle or velocity buffer. All stages remain private until the
+/// original final checkpoint. There is no no-slip vorticity generation.
+///
+/// # Errors
+/// The original wall and viscous numerical/resource/execution refusals,
+/// including negative diffusion time and any stage crossing the wall.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_viscous_with_cx(
+    cx: &Cx<'_>,
+    particles: &[VortexParticle],
+    areas_m2: &[f64],
+    dt: f64,
+    steps: usize,
+    core: f64,
+    law: crate::diffusion::PseDiffusion,
+    wall: PlanarWall2,
+    budget: VpmBudget,
+) -> Result<VpmRun, VpmError> {
+    crate::simulate_impl(
+        cx,
+        particles,
+        dt,
+        steps,
+        core,
+        budget,
+        Some((areas_m2, law)),
+        Some(wall),
+    )
 }

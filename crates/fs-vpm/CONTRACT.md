@@ -1783,3 +1783,52 @@ integrated unit geometry over length scales `1e-150..1e150`; zero-core
 velocities cover `1e-300..1e300`. Separate analytic cases retain a tiny
 short-segment axis rotation and the representable subnormal derivatives of
 a large zero-core segment.
+
+## Viscous transport at a planar stress-free wall
+
+`planar_wall::diffuse_with_cx` evolves fixed physical quadrature sites and
+`planar_wall::simulate_viscous_with_cx` composes the same diffusion with
+the original real-plus-image RK4 advection. These entries admit constant
+nonnegative kinematic viscosity in an incompressible half-plane with a fixed
+flat stress-free wall. The wall condition is zero bulk vorticity, implemented
+by an odd reflected extension. This is the flat-boundary specialization of
+the stress-free condition; curved interfaces and no-slip vorticity generation
+require different boundary physics (Brøns et al., JFM 758, 2014, 63–93,
+DOI 10.1017/jfm.2014.520).
+
+For each physical pair, write r=K(x_i-x_j) and m=K(x_i-x_j*). Both supported
+radial kernels are decreasing, so r-m is nonnegative. The odd-extension
+operator is a conservative exchange with coefficient r-m plus diagonal
+losses 2m A_j Gamma_i and 2m A_i Gamma_j. Each particle additionally has its
+own image loss 2 K(x_i-x_i*) A_i Gamma_i. A forward/reversed palindrome
+integrates the exchange and diagonal-loss maps exactly, giving a second-order
+fixed-site splitting. Each map preserves a nonnegative cloud, contracts
+signed vorticity bounds toward zero and contracts area-weighted enstrophy,
+up to floating-point roundoff, without a diffusion CFL or clipping.
+Gaussian differences use expm1; compact differences use a positive polynomial
+integral rather than subtraction of nearly equal kernel weights.
+
+The returned inventory contains physical particles only. Bulk signed
+circulation can change through wall diffusion; no image is counted as a
+physical particle and no boundary vortex sheet is stored. Conservation of
+the combined fluid-plus-interface circulation is not asserted. The original
+algebraic velocity core remains independent of the diffusion kernel. Finite
+cloud support, quadrature resolution, kernel consistency and temporal
+splitting errors still require refinement.
+
+The fixed-site path uses one particle buffer and charges 2*S*N*N pair/work
+units for active diffusion, including self images. The moving path adds
+4*S*N*N such units to wall RK4 and reuses its existing scratch. There is no
+image cloud, dense matrix or per-step allocation. Both paths retain the
+original local and ambient admission, bounded cancellation and private
+publication; all physical input and advection-stage positions must remain
+strictly inside the fluid. Zero viscosity recovers the original inviscid
+wall trajectory and work receipt for nonnegative time.
+
+`tests/planar_wall_diffusion.rs` covers exact self-image decay, the full
+unequal-area two-site odd-extension generator and temporal order, signed and
+stiff enstrophy contraction, odd Gaussian heat-equation refinement, weak
+near-wall transfer, analytically decaying image-vortex translation, compact
+bulk and zero-viscosity parity, work caps and transactional boundary/poll
+refusals. These are resolved model checks, not a no-slip boundary layer,
+interface-reaction or measured-fluid validation claim.
