@@ -4,6 +4,7 @@
 //! frozen and evolving mixtures. This adapter forms the original source-gauged
 //! flux and preserves the public frozen reservoir API.
 
+mod acoustic;
 pub(crate) mod shared;
 mod wave;
 
@@ -13,6 +14,75 @@ use crate::dynamics::wall::shared::WallError;
 use wave::pressure_wave;
 
 impl FrozenGas {
+    /// Acoustic characteristic outlet with reference absolute pressure [Pa]
+    /// and signed axial velocity [m/s].
+    ///
+    /// For subsonic outflow, only the incoming acoustic characteristic is
+    /// prescribed. The outgoing characteristic and entropy come from the
+    /// interior. Pressure is free to fluctuate: a smooth outgoing isentropic
+    /// simple wave and an outgoing constant-pressure entropy contact pass
+    /// without reflection by this local closure. The original Cp(T) supplies
+    /// the characteristic integral; no constant-gamma replacement is used.
+    ///
+    /// The reference pressure is continued along the interior isentrope, so
+    /// it does not impose a remote temperature or erase an entropy contact.
+    /// Both velocities use the increasing duct coordinate; `outward_normal`
+    /// is -1 at a left end and +1 at a right end. Supersonic outflow uses the
+    /// interior flux and an expansion crossing sonic speed is sampled at its
+    /// sonic state. Backflow and unsupported caloric paths refuse. This is a
+    /// one-dimensional smooth-wave condition, not a nonreflection guarantee
+    /// for shocks or interactions with spatial entropy gradients.
+    pub fn characteristic_outlet_flux(
+        &self,
+        interior: Conserved,
+        outward_normal: f64,
+        reference_pressure: f64,
+        reference_velocity: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<FaceFlux, Error> {
+        let inside = self.decode(interior, None, &mut cancelled)?;
+        let (face, signal) = self.characteristic_outlet_state(
+            inside,
+            outward_normal,
+            reference_pressure,
+            reference_velocity,
+            &mut cancelled,
+        )?;
+        self.face_flux(face, signal)
+    }
+
+    pub(super) fn characteristic_outlet_state(
+        &self,
+        inside: Primitive,
+        outward_normal: f64,
+        reference_pressure: f64,
+        reference_velocity: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Primitive, f64), Error> {
+        poll(cancelled)?;
+        if !matches!(outward_normal, -1.0 | 1.0) {
+            return Err(Error::Invalid("characteristic outlet outward normal"));
+        }
+        let (face, signal) = acoustic::outlet(
+            self,
+            Primitive {
+                velocity: outward_normal * inside.velocity,
+                ..inside
+            },
+            reference_pressure,
+            outward_normal * reference_velocity,
+            cancelled,
+        )
+        .map_err(wave_error)?;
+        Ok((
+            Primitive {
+                velocity: outward_normal * face.velocity,
+                ..face
+            },
+            signal,
+        ))
+    }
+
     /// Outgoing Euler flux selected by a positive absolute backpressure [Pa].
     ///
     /// The original caloric source supplies compression shocks and isentropic

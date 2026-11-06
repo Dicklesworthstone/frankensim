@@ -18,6 +18,17 @@ pub enum Boundary {
     /// Backflow refuses because pressure alone supplies no entering gas state.
     /// This boundary is not nonreflecting; use a reservoir when inflow is needed.
     PressureOutlet { pressure_pa: f64 },
+    /// Incoming acoustic characteristic relative to a mean pressure [Pa] and
+    /// signed axial velocity [m/s]. Outgoing sound and entropy are taken from
+    /// the interior, so the instantaneous face pressure may fluctuate. This
+    /// passes smooth outgoing simple waves and entropy contacts; it does not
+    /// assert nonreflection for shocks or entropy-gradient interactions.
+    /// Reference and interior flow must point outward. See
+    /// [`FrozenGas::characteristic_outlet_flux`] for sonic/source-path policy.
+    CharacteristicOutlet {
+        pressure_pa: f64,
+        velocity_m_per_s: f64,
+    },
     /// Fixed, stationary reservoir state in this gas owner's energy reference.
     /// Its pressure and temperature are stagnation conditions for inflow and
     /// its pressure is the backpressure for outflow. Momentum must be zero.
@@ -921,6 +932,26 @@ pub(super) fn operator_with_face_motion(
                     )?;
                     continue;
                 }
+                if let Boundary::CharacteristicOutlet {
+                    pressure_pa,
+                    velocity_m_per_s,
+                } = if face == 0 { left } else { right }
+                {
+                    let inner = if face == 0 {
+                        reconstruct(0, -0.5)?
+                    } else {
+                        reconstruct(n - 1, 0.5)?
+                    };
+                    let (state, signal) = gas.characteristic_outlet_state(
+                        inner.1,
+                        if face == 0 { -1.0 } else { 1.0 },
+                        pressure_pa,
+                        velocity_m_per_s,
+                        cancelled,
+                    )?;
+                    faces[face] = gas.face_flux(state, signal)?;
+                    continue;
+                }
             }
         }
         if face == n && boundaries == Boundaries::Periodic {
@@ -1087,7 +1118,7 @@ fn validate_reservoirs(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), Error> {
     if let Boundaries::Ends { left, right } = boundaries {
-        for boundary in [left, right] {
+        for (boundary, normal) in [(left, -1.0), (right, 1.0)] {
             poll(cancelled)?;
             if let Boundary::PressureOutlet { pressure_pa } = boundary {
                 if !positive(pressure_pa) {
@@ -1101,6 +1132,20 @@ fn validate_reservoirs(
                     return Err(Error::Invalid("stationary reservoir has nonzero momentum"));
                 }
                 gas.decode(state, None, cancelled)?;
+            }
+            if let Boundary::CharacteristicOutlet {
+                pressure_pa,
+                velocity_m_per_s,
+            } = boundary
+            {
+                if !positive(pressure_pa)
+                    || !velocity_m_per_s.is_finite()
+                    || normal * velocity_m_per_s < 0.0
+                {
+                    return Err(Error::Invalid(
+                        "characteristic outlet needs positive pressure and outward reference velocity",
+                    ));
+                }
             }
         }
     }

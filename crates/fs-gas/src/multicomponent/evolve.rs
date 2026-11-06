@@ -121,6 +121,8 @@ pub(super) struct Workspace {
 /// Periodic, reflecting, transmissive and pressure-outlet boundaries are supported. The shared
 /// frozen-gas `Boundary::Reservoir` variant refuses because it cannot specify
 /// the required species masses and their separate formation-energy references.
+/// `Boundary::CharacteristicOutlet` also refuses until its composition-aware
+/// acoustic closure is supported; it never falls back to a transmissive face.
 /// Prescribed species-bearing reservoirs use [`Self::step_with_reservoirs`].
 pub struct MixtureEuler1d {
     pub(super) gas: MixtureGas,
@@ -691,6 +693,11 @@ impl MixtureEuler1d {
 fn admit_boundaries(boundaries: Boundaries) -> Result<(), Error> {
     if let Boundaries::Ends { left, right } = boundaries {
         for boundary in [left, right] {
+            if matches!(boundary, Boundary::CharacteristicOutlet { .. }) {
+                return Err(Error::Invalid(
+                    "characteristic outlet is not yet supported for evolving mixtures",
+                ));
+            }
             if let Boundary::PressureOutlet { pressure_pa } = boundary {
                 if !positive(pressure_pa) {
                     return Err(Error::Invalid(

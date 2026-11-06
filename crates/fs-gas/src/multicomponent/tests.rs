@@ -192,6 +192,59 @@ fn frozen_reservoir_cannot_silently_become_a_transmissive_mixture_boundary() {
 }
 
 #[test]
+fn characteristic_outlet_cannot_silently_become_a_transmissive_mixture_boundary() {
+    let gas = standard(0.0);
+    let q = gas.conserved(&[0.7, 0.3], 0.0, 1.0).unwrap();
+    let original = Boundaries::Ends {
+        left: Boundary::Reflecting,
+        right: Boundary::Reflecting,
+    };
+    let mut flow = MixtureEuler1d::new(
+        gas.clone(),
+        Length::new(0.1),
+        1.0,
+        vec![q.clone(), q.clone()],
+        original,
+        || false,
+    )
+    .unwrap();
+    let expected =
+        Error::Invalid("characteristic outlet is not yet supported for evolving mixtures");
+    for normal in [-1.0, 1.0] {
+        let acoustic = Boundary::CharacteristicOutlet {
+            pressure_pa: 1.0,
+            velocity_m_per_s: normal * 0.2,
+        };
+        let boundaries = Boundaries::Ends {
+            left: if normal < 0.0 {
+                acoustic
+            } else {
+                Boundary::Reflecting
+            },
+            right: if normal > 0.0 {
+                acoustic
+            } else {
+                Boundary::Reflecting
+            },
+        };
+        let constructed = MixtureEuler1d::new(
+            gas.clone(),
+            Length::new(0.1),
+            1.0,
+            vec![q.clone(), q.clone()],
+            boundaries,
+            || false,
+        );
+        assert_eq!(constructed.err(), Some(expected.clone()));
+        assert_eq!(
+            flow.set_boundaries(boundaries, || false),
+            Err(expected.clone())
+        );
+        assert_eq!(flow.boundaries(), original);
+    }
+}
+
+#[test]
 fn caloric_mixture_uses_species_masses_variable_cp_and_frozen_sound_speed() {
     let gas = gas(vec![
         source("A", R, 3.5, 0.25, 7.0),
