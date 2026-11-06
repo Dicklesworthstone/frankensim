@@ -6270,6 +6270,41 @@ numerically non-SPD, nonrepresentable, cancelled, over-budget and unresolved
 events refuse without changing borrowed states. Numerical effort bounds never
 replace or shrink the authored physical friction capacities.
 
+## Finite-time friction in native articulated mechanisms
+
+`joint_friction::relaxation::advance_joint_friction` evolves original hinge and
+slider velocities over a declared duration under held axial torques/forces and
+Coulomb capacities. It consumes the shared continuous `fs-contact` flow with
+equal static and kinetic bounds, including coupled slowing, isolated arrest,
+holding and renewed motion. Successive declared load segments may change the
+drives or capacities. The entire original graph participates through one
+bilateral factorization and the full projected port mobility; the exact moving
+rail Jacobian, original full inertia and finite carrier recoil are preserved.
+
+Preparation and native impulse application are shared with the instantaneous
+joint-friction owner. The physical acceptance tests remain distinct: continuous
+flow checks its whole velocity path and work, while the impulse API retains its
+endpoint support/KKT law. Integrated force/couple actions update the original
+momenta, then actual native endpoints are checked against both the original
+mobility response and the resolved flow endpoint. Original bilateral closure,
+linear/angular momentum, native kinetic change, physical capacity residuals and
+continuous drive/friction work must all pass before a candidate is returned.
+
+Signed and absolute hinge rotation or slider travel are physical path
+integrals. Each continuous friction port has nonpositive path work, even when
+its net impulse and the two outer endpoint velocities would suggest otherwise.
+Drive work is integrated over that same path; bilateral residual work remains
+separate. Floating capacity/drive-conversion residuals are reported and bounded,
+never clipped into authored actions or relabeled heat.
+
+Geometry, inertia and constraint Jacobians are fixed during this phase, and
+poses are unchanged. The surrounding trajectory owner must transport poses and
+re-admit changed geometry. Normal bearing loads, different static/kinetic
+history, wear and thermal allocation are not inferred. The existing six-port
+and 32-bilateral-row limits, native resource gates and atomic cancellation
+semantics remain in force. Existing single-hinge, single-slider and simultaneous
+impulse APIs retain their original physical laws.
+
 ## Driven distance actuators inside finite ball-and-hinge mechanisms
 
 `rigid_rattle::distance::graph::advance_driven_joint_graph` accepts a single

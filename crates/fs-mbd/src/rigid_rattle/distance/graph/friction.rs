@@ -31,6 +31,10 @@ use fs_contact::tangential::impact::{
 };
 use fs_math::dd::Dd;
 
+/// Finite-time Coulomb motion through the same native constrained response.
+#[path = "friction/relaxation.rs"]
+pub mod relaxation;
+
 /// Each distinct supported joint consumes five of the original bilateral rows.
 pub const MAX_JOINT_FRICTION_PORTS: usize = MAX_DISTANCE_ROWS / 5;
 
@@ -528,17 +532,54 @@ impl Port {
     }
 }
 
+// Geometry and the complete native Schur response are shared by instantaneous
+// impulse laws and finite-time force laws. Their constitutive endpoint tests
+// remain separate: an integrated force history is not an impact projection.
+struct Prepared {
+    bank: [Row; MAX_DISTANCE_ROWS],
+    row_count: usize,
+    before: Vec<Geometry>,
+    count: usize,
+    order: [usize; MAX_JOINT_FRICTION_PORTS],
+    ports: [Port; MAX_JOINT_FRICTION_PORTS],
+    velocity: [f64; MAX_JOINT_FRICTION_PORTS],
+    capacity: [f64; MAX_JOINT_FRICTION_PORTS],
+    response: [[f64; MAX_DISTANCE_ROWS]; MAX_JOINT_FRICTION_PORTS],
+    matrix: [f64; MAX_JOINT_FRICTION_PORTS * MAX_JOINT_FRICTION_PORTS],
+    published_matrix: [[f64; MAX_JOINT_FRICTION_PORTS]; MAX_JOINT_FRICTION_PORTS],
+    bytes: usize,
+}
+impl Prepared {
+    fn problem<'a>(
+        &'a self,
+        states: &'a [RigidBodyState],
+        properties: &'a [MassProperties],
+        controls: DistanceGraphControls,
+    ) -> Problem<'a, &'static [Wrench]> {
+        Problem {
+            states,
+            properties,
+            links: Rows::Mixed(&self.bank[..self.row_count]),
+            integrator: RigidBodyIntegrator::new(Gravity::ZERO),
+            flow: &[],
+            duration_s: 0.0,
+            controls,
+            targets: None,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn run(
+fn prepare(
     states: &[RigidBodyState],
     properties: &[MassProperties],
     joints: &[ArticulatedJoint],
     sources: &[JointFrictionPort],
     controls: JointFrictionControls,
-    single: Option<PrismaticFrictionInput>,
-    mut cancelled: impl FnMut() -> bool,
-) -> Result<JointFrictionReport, JointFrictionError> {
-    poll(&mut cancelled)?;
+    port_report_bytes: usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Prepared, JointFrictionError> {
+    poll(cancelled)?;
     validate_controls(controls)?;
     let graph = controls.graph;
     let n = sources.len();
@@ -572,7 +613,7 @@ fn run(
     let mut bank = [Row::EMPTY; MAX_DISTANCE_ROWS];
     let mut count = 0;
     for &joint in joints {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         let width = joint.row_count();
         limit("constraints", (count + width) as u128, maximum_rows as u128)?;
         joint.write_rows(&mut bank[count..count + width]);
@@ -580,10 +621,10 @@ fn run(
     }
     let rows = Rows::Mixed(&bank[..count]);
     let bytes = planned_bytes_for::<JointReactionImpulse>(states.len(), count)
-        + n as u128 * core::mem::size_of::<JointFrictionPortReport>() as u128;
+        + n as u128 * port_report_bytes as u128;
     limit("live bytes", bytes, graph.maximum_live_bytes as u128)?;
     for (&state, &property) in states.iter().zip(properties) {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         state.validate()?;
         property.validate()?;
     }
@@ -599,7 +640,7 @@ fn run(
     };
     let mut before: Vec<Geometry> = reserved(count)?;
     for (i, row) in rows.iter().enumerate() {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         if row.bodies[0] == row.bodies[1] || row.bodies.iter().any(|&b| b >= states.len()) {
             return Err(JointFrictionError::Invalid(
                 "distinct existing joint bodies",
@@ -625,24 +666,18 @@ fn run(
     let mut velocity = [0.0; MAX_JOINT_FRICTION_PORTS];
     let mut capacity = [0.0; MAX_JOINT_FRICTION_PORTS];
     for i in 0..n {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         ports[i] = Port::prepare(sources[order[i]], joints, &problem)?;
         velocity[i] = ports[i].geometry.rate;
         capacity[i] = ports[i].capacity;
     }
-    if matches!(single, Some(PrismaticFrictionInput::RestingDrive { .. })) && velocity[0] != 0.0 {
-        return Err(JointFrictionError::NotResting {
-            joint_index: ports[0].source.joint_index(),
-            velocity_m_s: velocity[0],
-        });
-    }
     let mut coupling = [[0.0; MAX_DISTANCE_ROWS]; MAX_JOINT_FRICTION_PORTS];
     let mut response = [[0.0; MAX_DISTANCE_ROWS]; MAX_JOINT_FRICTION_PORTS];
     if n != 0 {
-        let factor = Mobility::new(&problem, states, &before, &mut cancelled)?;
+        let factor = Mobility::new(&problem, states, &before, cancelled)?;
         for i in 0..n {
             for (k, (row, geometry)) in rows.iter().zip(&before).enumerate() {
-                poll(&mut cancelled)?;
+                poll(cancelled)?;
                 let b = response_rate(row.bodies, row.is_angular(), *geometry, ports[i], states)
                     .to_f64();
                 coupling[i][k] = b;
@@ -654,7 +689,7 @@ fn run(
     let mut matrix = [0.0; MAX_JOINT_FRICTION_PORTS * MAX_JOINT_FRICTION_PORTS];
     let mut published_matrix = [[0.0; MAX_JOINT_FRICTION_PORTS]; MAX_JOINT_FRICTION_PORTS];
     for i in 0..n {
-        poll(&mut cancelled)?;
+        poll(cancelled)?;
         for j in 0..n {
             let raw = response_rate(
                 ports[i].bodies,
@@ -682,6 +717,52 @@ fn run(
             matrix[i * n + j] = value;
             published_matrix[i][j] = value;
         }
+    }
+    Ok(Prepared {
+        bank,
+        row_count: count,
+        before,
+        count: n,
+        order,
+        ports,
+        velocity,
+        capacity,
+        response,
+        matrix,
+        published_matrix,
+        bytes: bytes as usize,
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run(
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    joints: &[ArticulatedJoint],
+    sources: &[JointFrictionPort],
+    controls: JointFrictionControls,
+    single: Option<PrismaticFrictionInput>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<JointFrictionReport, JointFrictionError> {
+    let prepared = prepare(
+        states,
+        properties,
+        joints,
+        sources,
+        controls,
+        core::mem::size_of::<JointFrictionPortReport>(),
+        &mut cancelled,
+    )?;
+    let n = prepared.count;
+    let ports = &prepared.ports;
+    let velocity = &prepared.velocity;
+    let capacity = &prepared.capacity;
+    let matrix = &prepared.matrix;
+    if matches!(single, Some(PrismaticFrictionInput::RestingDrive { .. })) && velocity[0] != 0.0 {
+        return Err(JointFrictionError::NotResting {
+            joint_index: ports[0].source.joint_index(),
+            velocity_m_s: velocity[0],
+        });
     }
     let mut friction = [0.0; MAX_JOINT_FRICTION_PORTS];
     let mut drive = [0.0; MAX_JOINT_FRICTION_PORTS];
@@ -738,72 +819,25 @@ fn run(
         friction[..n].copy_from_slice(&projected.impulse_ns[..n]);
         Some(projected)
     };
-    let mut total = [0.0; MAX_JOINT_FRICTION_PORTS];
-    for i in 0..n {
-        total[i] = (Dd::from_f64(friction[i]) + Dd::from_f64(drive[i])).to_f64();
-        let physical = friction[i] * ports[i].length;
-        if [friction[i], drive[i], total[i]]
-            .iter()
-            .any(|x| !x.is_finite() || x.abs() > controls.solve.maximum_impulse_ns)
-            || friction[i].abs() > capacity[i]
-            || !physical.is_finite()
-            || physical.abs() > ports[i].source.capacity()
-            || (friction[i] != 0.0 && physical == 0.0)
-        {
-            return Err(JointFrictionError::Unresolved(
-                "physical axial impulse bounds",
-            ));
-        }
-    }
-    let mut reactions = zeros(count)?;
-    for (k, reaction) in reactions.iter_mut().enumerate() {
-        *reaction = (0..n)
-            .fold(Dd::ZERO, |sum, i| {
-                sum + Dd::from_f64(response[i][k]) * Dd::from_f64(total[i])
-            })
-            .to_f64();
-    }
-    if !rows.admits_impulses(&reactions, &before, graph.step.maximum_impulse_ns) {
-        return Err(JointFrictionError::Unresolved("bilateral reaction bound"));
-    }
-    let mut after_states = reserved(states.len())?;
-    after_states.extend_from_slice(states);
-    let mut reports: Vec<JointFrictionPortReport> = reserved(n)?;
-    for i in 0..n {
-        poll(&mut cancelled)?;
-        let event = ports[i].action(&after_states, properties, total[i])?;
-        let after = event.states_after();
-        for side in 0..2 {
-            after_states[ports[i].bodies[side]] = after[side];
-        }
-        reports.push(JointFrictionPortReport {
-            joint_index: ports[i].source.joint_index(),
-            axis_world: ports[i].axis,
-            motion: ports[i].motion(ports[i].rate_before, friction[i], drive[i]),
-            native_axial_impulse: event,
-            scaled_velocity_residual_m_s: 0.0,
-            drive_work_j: 0.0,
-            friction_work_j: 0.0,
-        });
-    }
-    let mut native_constraints = reserved(count)?;
-    problem.apply(
-        &mut after_states,
-        &reactions,
-        &before,
-        &mut native_constraints,
+    let applied = apply_native(
+        &prepared,
+        states,
+        properties,
+        &friction,
+        &drive,
+        controls,
+        0.0,
         &mut cancelled,
     )?;
+    let mut reports: Vec<JointFrictionPortReport> = reserved(n)?;
     let mut drive_work = Dd::ZERO;
     let mut friction_work = Dd::ZERO;
     let mut gap = Dd::ZERO;
     for i in 0..n {
         poll(&mut cancelled)?;
-        let (physical_rate, actual) = ports[i].velocity(&after_states, properties, &problem)?;
-        let target = (0..n).fold(Dd::from_f64(velocity[i]), |sum, j| {
-            sum + Dd::from_f64(matrix[i * n + j]) * Dd::from_f64(total[j])
-        });
-        let residual = (Dd::from_f64(actual) - target).to_f64();
+        let physical_rate = applied.physical_rate_after[i];
+        let actual = applied.velocity_after[i];
+        let residual = applied.velocity_residual[i];
         let stationarity = if capacity[i] == 0.0 {
             0.0
         } else if friction[i] == -capacity[i] {
@@ -830,38 +864,20 @@ fn run(
         let fw = Dd::from_f64(friction[i]) * midpoint;
         drive_work = drive_work + dw;
         friction_work = friction_work + fw;
-        reports[i].motion = ports[i].motion(physical_rate, friction[i], drive[i]);
-        reports[i].scaled_velocity_residual_m_s = residual;
-        reports[i].drive_work_j = dw.to_f64();
-        reports[i].friction_work_j = fw.to_f64();
+        reports.push(JointFrictionPortReport {
+            joint_index: ports[i].source.joint_index(),
+            axis_world: ports[i].axis,
+            motion: ports[i].motion(physical_rate, friction[i], drive[i]),
+            native_axial_impulse: applied.axial_events[i].ok_or(JointFrictionError::Unresolved(
+                "missing native axial update",
+            ))?,
+            scaled_velocity_residual_m_s: residual,
+            drive_work_j: dw.to_f64(),
+            friction_work_j: fw.to_f64(),
+        });
     }
-    let mut constraint_work = Dd::ZERO;
-    let mut after = reserved(count)?;
-    for (i, row) in rows.iter().enumerate() {
-        poll(&mut cancelled)?;
-        let g = problem.geometry(row, row.bodies.map(|b| after_states[b]), None)?;
-        constraint_work = constraint_work
-            + Dd::from_f64(reactions[i])
-                * (Dd::from_f64(before[i].rate) + Dd::from_f64(g.rate))
-                * Dd::from_f64(0.5);
-        after.push(g);
-    }
-    if rows
-        .grouped_violation(
-            &after,
-            graph.position_tolerance_m,
-            graph.velocity_tolerance_mps,
-        )
-        .is_some()
-        || after
-            .iter()
-            .any(|g| !g.rate.is_finite() || g.rate.abs() > graph.velocity_tolerance_mps)
-    {
-        return Err(JointFrictionError::Unresolved(
-            "actual native bilateral endpoint",
-        ));
-    }
-    let (energy, linear, angular) = account(states, &after_states, properties, &mut cancelled)?;
+    let constraint_work = applied.constraint_work;
+    let (energy, linear, angular) = (applied.energy, applied.linear, applied.angular);
     let work_residual = (energy - drive_work - friction_work - constraint_work).to_f64();
     if [
         energy.to_f64(),
@@ -891,13 +907,13 @@ fn run(
     }
     poll(&mut cancelled)?;
     Ok(JointFrictionReport {
-        states_after: after_states,
+        states_after: applied.states_after,
         phase,
         ports: reports,
-        scaled_mobility_per_kg: published_matrix,
+        scaled_mobility_per_kg: prepared.published_matrix,
         projection,
-        constraint_impulses_ns: reactions,
-        native_constraint_impulses: native_constraints,
+        constraint_impulses_ns: applied.reactions,
+        native_constraint_impulses: applied.native_constraints,
         drive_work_j: drive_work.to_f64(),
         friction_work_j: friction_work.to_f64(),
         constraint_work_j: constraint_work.to_f64(),
@@ -906,7 +922,190 @@ fn run(
         native_duality_gap_j: gap.to_f64(),
         linear_momentum_change_ns: linear,
         angular_momentum_change_nms: angular,
-        planned_live_bytes: bytes as usize,
+        planned_live_bytes: prepared.bytes,
+    })
+}
+
+struct NativeApplied {
+    states_after: Vec<RigidBodyState>,
+    axial_events: [Option<JointReactionImpulse>; MAX_JOINT_FRICTION_PORTS],
+    reactions: Vec<f64>,
+    native_constraints: Vec<JointReactionImpulse>,
+    physical_rate_after: [f64; MAX_JOINT_FRICTION_PORTS],
+    velocity_after: [f64; MAX_JOINT_FRICTION_PORTS],
+    velocity_residual: [f64; MAX_JOINT_FRICTION_PORTS],
+    capacity_residual: [f64; MAX_JOINT_FRICTION_PORTS],
+    constraint_work: Dd,
+    impulse_work: Dd,
+    energy: Dd,
+    linear: Vec3,
+    angular: Vec3,
+}
+
+// Apply the supplied integrated actions exactly once through the original body
+// owners. This knows no friction phase: each physical law separately audits its
+// own path/work or endpoint optimality after these native mechanics checks.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn apply_native(
+    prepared: &Prepared,
+    states: &[RigidBodyState],
+    properties: &[MassProperties],
+    friction: &[f64; MAX_JOINT_FRICTION_PORTS],
+    drive: &[f64; MAX_JOINT_FRICTION_PORTS],
+    controls: JointFrictionControls,
+    capacity_tolerance_ns: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<NativeApplied, JointFrictionError> {
+    let n = prepared.count;
+    let ports = &prepared.ports;
+    let graph = controls.graph;
+    let problem = prepared.problem(states, properties, graph);
+    let rows = problem.links;
+    let mut total = [0.0; MAX_JOINT_FRICTION_PORTS];
+    let mut capacity_residual = [0.0; MAX_JOINT_FRICTION_PORTS];
+    for i in 0..n {
+        poll(cancelled)?;
+        total[i] = (Dd::from_f64(friction[i]) + Dd::from_f64(drive[i])).to_f64();
+        let physical = friction[i] * ports[i].length;
+        capacity_residual[i] = (friction[i].abs() - prepared.capacity[i])
+            .max((physical.abs() - ports[i].source.capacity()) / ports[i].length)
+            .max(0.0);
+        if [friction[i], drive[i], total[i]]
+            .iter()
+            .any(|x| !x.is_finite() || x.abs() > controls.solve.maximum_impulse_ns)
+            || !physical.is_finite()
+            || (friction[i] != 0.0 && physical == 0.0)
+            || (capacity_tolerance_ns == 0.0
+                && (friction[i].abs() > prepared.capacity[i]
+                    || physical.abs() > ports[i].source.capacity()))
+            || !capacity_residual[i].is_finite()
+            || capacity_residual[i] > capacity_tolerance_ns
+        {
+            return Err(JointFrictionError::Unresolved(
+                "physical axial impulse bounds",
+            ));
+        }
+    }
+    let mut reactions = zeros(prepared.row_count)?;
+    for (k, reaction) in reactions.iter_mut().enumerate() {
+        *reaction = (0..n)
+            .fold(Dd::ZERO, |sum, i| {
+                sum + Dd::from_f64(prepared.response[i][k]) * Dd::from_f64(total[i])
+            })
+            .to_f64();
+    }
+    if !rows.admits_impulses(&reactions, &prepared.before, graph.step.maximum_impulse_ns) {
+        return Err(JointFrictionError::Unresolved("bilateral reaction bound"));
+    }
+    let mut after_states = reserved(states.len())?;
+    after_states.extend_from_slice(states);
+    let mut axial_events = [None; MAX_JOINT_FRICTION_PORTS];
+    for i in 0..n {
+        poll(cancelled)?;
+        let event = ports[i].action(&after_states, properties, total[i])?;
+        let after = event.states_after();
+        for side in 0..2 {
+            after_states[ports[i].bodies[side]] = after[side];
+        }
+        axial_events[i] = Some(event);
+    }
+    let mut native_constraints = reserved(prepared.row_count)?;
+    problem.apply(
+        &mut after_states,
+        &reactions,
+        &prepared.before,
+        &mut native_constraints,
+        cancelled,
+    )?;
+    let mut physical_rate_after = [0.0; MAX_JOINT_FRICTION_PORTS];
+    let mut velocity_after = [0.0; MAX_JOINT_FRICTION_PORTS];
+    let mut velocity_residual = [0.0; MAX_JOINT_FRICTION_PORTS];
+    let mut impulse_work = Dd::ZERO;
+    for i in 0..n {
+        poll(cancelled)?;
+        let (physical_rate, actual) = ports[i].velocity(&after_states, properties, &problem)?;
+        let target = (0..n).fold(Dd::from_f64(prepared.velocity[i]), |sum, j| {
+            sum + Dd::from_f64(prepared.matrix[i * n + j]) * Dd::from_f64(total[j])
+        });
+        let residual = (Dd::from_f64(actual) - target).to_f64();
+        if !residual.is_finite()
+            || !actual.is_finite()
+            || residual.abs() > controls.solve.velocity_tolerance_m_s
+        {
+            return Err(JointFrictionError::Unresolved(
+                "actual native axial endpoint",
+            ));
+        }
+        physical_rate_after[i] = physical_rate;
+        velocity_after[i] = actual;
+        velocity_residual[i] = residual;
+        impulse_work = impulse_work
+            + Dd::from_f64(total[i])
+                * (Dd::from_f64(prepared.velocity[i]) + Dd::from_f64(actual))
+                * Dd::from_f64(0.5);
+    }
+    let mut constraint_work = Dd::ZERO;
+    let mut after = reserved(prepared.row_count)?;
+    for (i, row) in rows.iter().enumerate() {
+        poll(cancelled)?;
+        let g = problem.geometry(row, row.bodies.map(|b| after_states[b]), None)?;
+        constraint_work = constraint_work
+            + Dd::from_f64(reactions[i])
+                * (Dd::from_f64(prepared.before[i].rate) + Dd::from_f64(g.rate))
+                * Dd::from_f64(0.5);
+        after.push(g);
+    }
+    if rows
+        .grouped_violation(
+            &after,
+            graph.position_tolerance_m,
+            graph.velocity_tolerance_mps,
+        )
+        .is_some()
+        || after
+            .iter()
+            .any(|g| !g.rate.is_finite() || g.rate.abs() > graph.velocity_tolerance_mps)
+    {
+        return Err(JointFrictionError::Unresolved(
+            "actual native bilateral endpoint",
+        ));
+    }
+    let (energy, linear, angular) = account(states, &after_states, properties, cancelled)?;
+    let residual = (energy - impulse_work - constraint_work).to_f64();
+    if [
+        energy.to_f64(),
+        impulse_work.to_f64(),
+        constraint_work.to_f64(),
+        residual,
+    ]
+    .iter()
+    .any(|x| !x.is_finite())
+        || !linear.is_finite()
+        || !angular.is_finite()
+        || residual.abs() > controls.work_tolerance_j
+        || constraint_work.to_f64().abs() > controls.work_tolerance_j
+    {
+        return Err(JointFrictionError::Unresolved("native impulse work"));
+    }
+    if norm(linear) > controls.linear_impulse_tolerance_ns
+        || norm(angular) > controls.angular_impulse_tolerance_nms
+    {
+        return Err(JointFrictionError::Unresolved("native total momentum"));
+    }
+    Ok(NativeApplied {
+        states_after: after_states,
+        axial_events,
+        reactions,
+        native_constraints,
+        physical_rate_after,
+        velocity_after,
+        velocity_residual,
+        capacity_residual,
+        constraint_work,
+        impulse_work,
+        energy,
+        linear,
+        angular,
     })
 }
 
