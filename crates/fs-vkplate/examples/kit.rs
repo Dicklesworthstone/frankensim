@@ -16,6 +16,10 @@
 //! `--mic-first-order ALPHA FX FY FZ` declares an ideal pressure/velocity pattern
 //! and its unit front axis (toward the source). ALPHA=0.5 is cardioid, 0 figure eight.
 //! This is not measured capsule data; pressure-only closed-body tables refuse it.
+//! `--head-mode-damping skrodzka2006`, on snare-off only, adds Skrodzka, Hojan and Proksza's
+//! (2006, Table 1) measured damping ratios of another snare's batter modes to this batter's
+//! matching shapes (`kit::SKRODZKA_2006_TABLE_1`). It is an upper bound: the measured ratios
+//! already contain loss paths this model carries. It is refused on `--preset-heads`.
 //!
 //! The drums' heads and stick come from sourced material cards, and no piece keeps a value fitted
 //! to a recording (see `drum_cards`); `--preset-heads` renders the recording-fitted presets
@@ -41,6 +45,8 @@ const PORT_FLAG: &str = "--port";
 const PORT_FLOW_LOSS_FLAG: &str = "--port-flow-loss";
 const PORT_RADIATION_FLAG: &str = "--port-radiation";
 const MIC_FIRST_ORDER_FLAG: &str = "--mic-first-order";
+/// Opt-in (MB 7247), snare-off only: `--head-mode-damping skrodzka2006`.
+const HEAD_MODE_DAMPING_FLAG: &str = "--head-mode-damping";
 
 fn main() {
     let preset_heads = std::env::args().any(|a| a == drum_cards::PRESET_HEADS_FLAG);
@@ -93,6 +99,13 @@ fn main() {
             std::process::exit(2)
         }
     });
+    let head_mode_damping = all.iter().position(|a| a == HEAD_MODE_DAMPING_FLAG).map(|i| match all.get(i + 1).map(String::as_str) {
+        Some("skrodzka2006") => (),
+        _ => {
+            eprintln!("usage: {HEAD_MODE_DAMPING_FLAG} skrodzka2006");
+            std::process::exit(2);
+        }
+    });
     let wall_loss = all.iter().any(|a| a == CAVITY_WALL_LOSS_FLAG);
     if wall_loss && cavity_modes.is_none() {
         eprintln!("refused: {CAVITY_WALL_LOSS_FLAG} is the loss of the air modes; give {CAVITY_MODES_FLAG} F_MAX_HZ too");
@@ -111,18 +124,18 @@ fn main() {
                 std::process::exit(1)
             })
     });
-    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG))
+    let valued = |i: usize| (i > 0 && (all[i - 1] == OBSERVER_FLAG || all[i - 1] == CAVITY_MODES_FLAG || all[i - 1] == WIRE_CONTACT_FLAG || all[i - 1] == PORT_FLAG || all[i - 1] == PORT_FLOW_LOSS_FLAG || all[i - 1] == HEAD_MODE_DAMPING_FLAG))
         || mic_index.is_some_and(|j| i > j && i <= j + 4);
     let a: Vec<String> = all
         .iter()
         .enumerate()
         .filter(|(i, a)| {
-            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && !valued(*i)
+            *a != drum_cards::PRESET_HEADS_FLAG && *a != OBSERVER_FLAG && *a != CAVITY_MODES_FLAG && *a != WIRE_CONTACT_FLAG && *a != CAVITY_WALL_LOSS_FLAG && *a != HEAD_DIPOLE_FLAG && *a != PORT_FLAG && *a != PORT_FLOW_LOSS_FLAG && *a != PORT_RADIATION_FLAG && *a != MIC_FIRST_ORDER_FLAG && *a != HEAD_MODE_DAMPING_FLAG && !valued(*i)
         })
         .map(|(_, a)| a.clone())
         .collect();
     if a.len() < 3 {
-        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ]");
+        eprintln!("usage: kit PIECE OUT.wav [SPEED_M_S] [SECONDS] [--preset-heads] [--observer TABLE.tsv] [--port RADIUS_M [--port-flow-loss K] [--port-radiation]] [--mic-first-order ALPHA FX FY FZ] [--head-mode-damping skrodzka2006]");
         std::process::exit(2);
     }
     if port_radius.is_some() && (!matches!(a[1].as_str(), "kick" | "snare" | "snare-off" | "tom-12" | "tom-14") || observer.is_some()) {
@@ -238,6 +251,19 @@ fn main() {
             std::process::exit(1)
         }
         match kit::attach_viscoelastic_wires(&mut p, &kit::snare()) {
+            Ok(receipt) => p.notes.push(receipt),
+            Err(e) => {
+                eprintln!("refused: {e}");
+                std::process::exit(1)
+            }
+        }
+    }
+    if head_mode_damping.is_some() {
+        if a[1] != "snare-off" || preset_heads {
+            eprintln!("refused: {HEAD_MODE_DAMPING_FLAG} skrodzka2006 is a snare batter's measured damping, offered on snare-off's card heads only");
+            std::process::exit(1)
+        }
+        match kit::attach_skrodzka_2006_batter_damping(&mut p, &kit::snare_wires_off()) {
             Ok(receipt) => p.notes.push(receipt),
             Err(e) => {
                 eprintln!("refused: {e}");

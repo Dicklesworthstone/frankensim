@@ -137,6 +137,9 @@ mod film_tests;
 #[cfg(test)]
 mod flux_tests;
 
+#[cfg(test)]
+mod shape_damping_tests;
+
 /// Four quarter-cell quadrature points, each with three tensor-root rows.
 /// Shared with consumers of `BodyImage::viscous_root`.
 pub const BENDING_ROOT_ROWS_PER_NODE: usize = 12;
@@ -639,6 +642,8 @@ pub struct Body {
     stiff: Csr,
     viscosity: Option<ViscousBending>,
     modal: Option<ModalLoss>,
+    /// Measured damping on named head shapes (`attach_shape_damping`), if attached.
+    shape_damping: Option<ShapeDamping>,
     tension: f64,
     berger: f64,
     vk: Option<VonKarman>,
@@ -713,6 +718,44 @@ struct ModalLoss {
     c: Csr,
     rate_bound: f64,
     dissipated_j: f64,
+}
+
+/// A measured per-mode loss on named clamped-membrane shapes of a head
+/// (`Body::attach_shape_damping`): C = sum_j 2 sigma_j (M phi_j)(M phi_j)', each
+/// phi_j a `radiation::ModeShape` sampled on the nodes and mass-normalised,
+/// applied explicitly to the backward velocity like `ModalLoss`. It is kept
+/// low-rank, one vector per shape, not an n x n matrix. The sampled shapes are
+/// not exact grid modes, so C also reaches their neighbours through the overlap;
+/// it is positive semidefinite either way, so it only removes energy.
+#[derive(Clone)]
+struct ShapeDamping {
+    /// M phi_j for each shape, with phi_j' M phi_j = 1.
+    mphi: Vec<Vec<f64>>,
+    two_sigma: Vec<f64>,
+    /// An upper bound on the largest eigenvalue of M^-1 C: Gershgorin over the
+    /// shapes' Gram matrix scaled by sqrt(2 sigma_i 2 sigma_j).
+    rate_bound: f64,
+    dissipated_j: f64,
+}
+
+impl ShapeDamping {
+    /// v' C v.
+    fn quad(&self, v: &[f64]) -> f64 {
+        self.mphi.iter().zip(&self.two_sigma).map(|(p, s)| {
+            let a = dot(p, v);
+            s * a * a
+        }).sum()
+    }
+
+    /// out += scale C v.
+    fn mul_add(&self, v: &[f64], scale: f64, out: &mut [f64]) {
+        for (p, s) in self.mphi.iter().zip(&self.two_sigma) {
+            let a = scale * s * dot(p, v);
+            for (o, x) in out.iter_mut().zip(p) {
+                *o += a * x;
+            }
+        }
+    }
 }
 
 fn sigmas(t60: [(f64, f64); 2], beta2: &dyn Fn(f64) -> f64) -> (f64, f64) {
@@ -1056,7 +1099,7 @@ impl Body {
             None
         };
         Ok(Body {
-            name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, tension: s.tension, berger, vk,
+            name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, shape_damping: None, tension: s.tension, berger, vk,
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
             film: None, support_springs: s.support.is_some(), surface_t60: s0 > 0.0 || s1 > 0.0,
@@ -1076,7 +1119,7 @@ impl Body {
         let xy = (0..n).map(|k| [x0 + k as f64 * h, y]).collect();
         Body {
             name: name.into(), h, n, xy, rest_z: vec![0.0; n], grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
-            s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None, modal: None,
+            s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None, modal: None, shape_damping: None,
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
             w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
@@ -1148,11 +1191,104 @@ impl Body {
         self.modal.as_ref().map_or(0.0, |m| m.dissipated_j)
     }
 
+    /// Add a measured damping ratio to named clamped-membrane shapes of this
+    /// clamped full circular head of `radius` (its nodes centred on the rim's
+    /// centre). One row `(m, n, zeta)` per mode: m nodal diameters and n nodal
+    /// circles counting the rim, `radiation::ModeShape::new(m, n)`, in both
+    /// parities for m >= 1. Each shape takes the extra decay rate zeta * omega,
+    /// omega its in-vacuo frequency on this head's own linear operator (the
+    /// Rayleigh quotient the head radiation's receipt uses). The loss adds to
+    /// every loss the head already carries and replaces none: it is positive
+    /// semidefinite, so it only removes energy. `source` names the rows in the
+    /// receipt. A shell, a second attach, no rows, a repeated or n = 0 row, a
+    /// ratio outside (0, 1) and a shape this grid does not resolve refuse.
+    /// Returns the receipt lines.
+    pub fn attach_shape_damping(&mut self, radius: f64, rows: &[(usize, usize, f64)], source: &str) -> Result<Vec<String>, String> {
+        if self.vk.is_some() || self.n < 2 || !(self.tension > 0.0) {
+            return Err(format!("{}: shape damping applies to clamped tensioned heads, not shells", self.name));
+        }
+        if self.shape_damping.is_some() {
+            return Err(format!("{}: shape damping attaches once", self.name));
+        }
+        if rows.is_empty() || !(radius > 0.0 && radius.is_finite()) {
+            return Err(format!("{}: shape damping needs rows and a positive finite radius", self.name));
+        }
+        let limit = 2.0 * PI * radius / (radiation::NODES_PER_WAVELENGTH * self.h);
+        let (mut mphi, mut unit, mut two_sigma) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut names, mut lines) = (Vec::new(), Vec::new());
+        for (index, &(m, n, zeta)) in rows.iter().enumerate() {
+            if !(zeta > 0.0 && zeta < 1.0) {
+                return Err(format!("{}: shape damping ratio {zeta} of ({m},{n}) is not in (0, 1)", self.name));
+            }
+            if n == 0 || rows[..index].iter().any(|r| r.0 == m && r.1 == n) {
+                return Err(format!("{}: shape damping row ({m},{n}) has no nodal circle or is repeated", self.name));
+            }
+            let shape = radiation::ModeShape::new(m, n);
+            if shape.zero > limit || m as f64 > limit {
+                return Err(format!("{}: this grid cannot resolve the ({m},{n}) shape (j_mn {:.3} > {limit:.3})", self.name, shape.zero));
+            }
+            for &sine in if m == 0 { &[false][..] } else { &[false, true][..] } {
+                let phi: Vec<f64> = self.xy.iter().map(|p| shape.value(p[0] / radius, p[1] / radius, sine)).collect();
+                let mut k_phi = vec![0.0; self.n];
+                self.stiff.mul_add(&phi, 1.0, &mut k_phi);
+                self.lap.mul_add(&phi, self.tension, &mut k_phi);
+                let num = dot(&phi, &k_phi);
+                let den: f64 = phi.iter().zip(&self.mass).map(|(a, w)| a * a * w).sum();
+                if !(num > 0.0 && den > 0.0 && num.is_finite() && den.is_finite()) {
+                    return Err(format!("{}: the ({m},{n}) shape has no positive in-vacuo frequency on this head", self.name));
+                }
+                let omega = (num / den).sqrt();
+                let norm = den.sqrt();
+                let u: Vec<f64> = phi.iter().map(|a| a / norm).collect();
+                mphi.push(u.iter().zip(&self.mass).map(|(a, w)| a * w).collect::<Vec<f64>>());
+                unit.push(u);
+                two_sigma.push(2.0 * zeta * omega);
+                let name = format!("({m},{n}){}", if m == 0 { "" } else if sine { "s" } else { "c" });
+                lines.push(format!("{name} {:.1} Hz {:.2} % -> {:.2} 1/s", omega / (2.0 * PI), 100.0 * zeta, zeta * omega));
+                names.push(name);
+            }
+        }
+        // The Gram matrix of the mass-normalised shapes has a unit diagonal;
+        // M^-1 C has the eigenvalues of D^1/2 G D^1/2, D = diag(2 sigma).
+        let count = unit.len();
+        let (mut overlap, mut pair, mut bound) = (0.0_f64, (0, 0), 0.0_f64);
+        for i in 0..count {
+            let mut row = 0.0;
+            for j in 0..count {
+                let g = dot(&mphi[i], &unit[j]);
+                row += (two_sigma[i] * two_sigma[j]).sqrt() * g.abs();
+                if i != j && g.abs() > overlap {
+                    overlap = g.abs();
+                    pair = (i, j);
+                }
+            }
+            bound = bound.max(row);
+        }
+        let largest = two_sigma.iter().cloned().fold(0.0_f64, f64::max);
+        let receipt = vec![
+            format!(
+                "shape damping ({source}): measured damping ratios on {count} clamped-membrane shapes of this head, each adding ratio x its in-vacuo frequency on this head to its decay rate, on top of every loss the head already carries: {}",
+                lines.join("; ")
+            ),
+            format!(
+                "shape damping overlap: the sampled shapes are not exact grid modes; largest off-diagonal Gram term {overlap:.2e} ({} with {}); rate bound {bound:.2} 1/s (Gershgorin over the {count}x{count} Gram matrix) against 2 max sigma {largest:.2} 1/s",
+                names[pair.0], names[pair.1]
+            ),
+        ];
+        self.shape_damping = Some(ShapeDamping { mphi, two_sigma, rate_bound: bound, dissipated_j: 0.0 });
+        Ok(receipt)
+    }
+
+    /// Energy the shape damping removed at centred velocity [J].
+    pub fn shape_damping_dissipated_j(&self) -> f64 {
+        self.shape_damping.as_ref().map_or(0.0, |s| s.dissipated_j)
+    }
+
     /// A lumped rigid mass (stick, beater, hi-hat rod).
     pub fn point(name: &str, mass: f64) -> Body {
         Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], rest_z: vec![0.0], grid_index: BTreeMap::new(), mass: vec![mass],
-            s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None, modal: None,
+            s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None, modal: None, shape_damping: None,
             tension: 0.0, berger: 0.0, vk: None,
             w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
@@ -1594,6 +1730,11 @@ impl Body {
             for i in 0..n { self.tmp[i] = self.w[i] - self.wp[i]; }
             modal.c.mul_add(&self.tmp, -1.0 / k, &mut self.f);
         }
+        if let Some(shape) = &self.shape_damping {
+            // the same backward velocity and admission as the modal loss
+            for i in 0..n { self.tmp[i] = self.w[i] - self.wp[i]; }
+            shape.mul_add(&self.tmp[..n], -1.0 / k, &mut self.f[..n]);
+        }
         if self.s1 > 0.0 {
             // div(m grad velocity), not m Lap(velocity): the latter is not
             // symmetric when thickness varies and can create mechanical energy.
@@ -1701,6 +1842,13 @@ impl Body {
             // dt v_center' C v_center, v_center = (wn - wp)/(2 dt); C is positive semidefinite
             let loss = modal.c.quad(&self.tmp) / (4.0 * k);
             modal.dissipated_j += loss;
+            bending_loss += loss;
+        }
+        if let Some(shape) = &mut self.shape_damping {
+            for i in 0..self.n { self.tmp[i] = self.wn[i] - self.wp[i]; }
+            // dt v_center' C v_center, v_center = (wn - wp)/(2 dt); C is positive semidefinite
+            let loss = shape.quad(&self.tmp[..self.n]) / (4.0 * k);
+            shape.dissipated_j += loss;
             bending_loss += loss;
         }
         if let Some(load) = self.head_radiation.as_deref_mut() {
@@ -1997,6 +2145,7 @@ impl Body {
         } else { 0.0 };
         let correction = self.viscosity.as_ref().map_or(0.0, |v| k * v.c.quad(&velocity) / 4.0)
             + self.modal.as_ref().map_or(0.0, |m| k * m.c.quad(&velocity) / 4.0)
+            + self.shape_damping.as_ref().map_or(0.0, |s| k * s.quad(&velocity) / 4.0)
             + if self.s1 > 0.0 {
                 k * self.s1 / (2.0 * self.h * self.h)
                     * self.lap.mass_flux_quadratic(&velocity, &self.mass)
@@ -3912,6 +4061,8 @@ impl Instrument {
                 " + material bending viscosity"
             } else if self.bodies.iter().any(|b| b.modal.is_some()) {
                 " + coil modal loss"
+            } else if self.bodies.iter().any(|b| b.shape_damping.is_some()) {
+                " + shape damping"
             } else {
                 " + gradient loss"
             });
@@ -3994,6 +4145,7 @@ impl Instrument {
             }
             gradient + b.viscosity.as_ref().map_or(0.0, |v| v.rate_bound)
                 + b.modal.as_ref().map_or(0.0, |m| m.rate_bound)
+                + b.shape_damping.as_ref().map_or(0.0, |s| s.rate_bound)
         }).fold(0.0_f64, f64::max);
         2.0 * rate * bound
     }
@@ -4568,7 +4720,8 @@ impl Instrument {
     /// Interacting normal contacts, nonzero friction and retained Mindlin
     /// contacts are also refused: the
     /// exported stepper does not implement their simultaneous solve. These
-    /// checks include contacts a scheduled strike may activate later.
+    /// checks include contacts a scheduled strike may activate later. A head's
+    /// measured shape damping (`Body::attach_shape_damping`) is refused too.
     pub fn image(&mut self) -> InstrumentImage {
         assert!(self.contact_failure.is_none(), "cannot export an instrument after a refused contact step");
         assert!(self.mics.iter().all(|m| m.pressure_fraction == 1.0),
@@ -4579,6 +4732,8 @@ impl Instrument {
             "the exported stepper does not implement simultaneous compliant normal contact and centered Coulomb friction; use Instrument::try_step");
         assert!(self.mindlin_contacts.is_empty(),
             "the exported stepper does not implement retained Mindlin contact memory; use Instrument::try_step");
+        assert!(self.bodies.iter().all(|b| b.shape_damping.is_none()),
+            "the exported stepper does not implement measured shape damping; use Instrument::step");
         assert!(self.cavities.iter().filter_map(|c| c.port.as_ref()).all(|q|
             !q.has_baffled_radiation() && q.flow_loss_coefficient() == 0.0),
             "the exported stepper does not implement nonlinear or memory vent pressure laws; use Instrument::step");

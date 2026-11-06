@@ -664,6 +664,31 @@ upper bounds. Every admitted
 shape must be below coincidence. This is a gas-owned loss, not a decay-time
 fit; live keeps its existing installed decays.
 
+### Measured shape damping (opt-in, snare-off)
+
+`Body::attach_shape_damping(radius, rows, source)` adds a measured damping ratio to
+named clamped-membrane shapes of a head: one row `(m, n, zeta)` per mode (m nodal
+diameters, n nodal circles counting the rim), sampled on the nodes as
+`radiation::ModeShape::new(m, n)` in both parities for m >= 1 and mass-normalised.
+Each shape takes the extra decay rate `zeta * omega`, omega its in-vacuo Rayleigh
+quotient on the head's own linear operator. The loss
+`C = sum_j 2 sigma_j (M phi_j)(M phi_j)'` is kept low-rank, is applied explicitly to the
+backward velocity like the coils' modal loss, and is positive semidefinite, so it only
+removes energy; it adds to every loss the head carries and replaces none. The sampled
+shapes are not exact grid modes: the receipt prints their largest off-diagonal Gram
+term and the rate bound (Gershgorin over the shapes' Gram matrix). The exported
+stepper refuses it.
+
+`kit snare-off ... --head-mode-damping skrodzka2006` puts
+`kit::SKRODZKA_2006_TABLE_1` on the batter: Skrodzka, Hojan and Proksza (Archives of
+Acoustics 31(3) 289-297, 2006, Table 1), a 36 cm steel snare drum with Powerstroke 3
+heads on both sides, snare state unprinted: (0,1) 5.07 %, (1,1) 1.10 %, (2,1) 1.07 %,
+(0,2) 1.16 %, (3,2) 1.24 %, (3,1) 0.77 % of critical. It is an upper bound: the printed
+ratios already contain the two-head coupling and radiation this model also carries, and
+the row adds on top of them. The printed (3,2) at 616 Hz lies below the (3,1) at 734 Hz,
+the reverse of a membrane's order; it is kept as printed, by shape. It is refused on
+every other piece and on `--preset-heads`.
+
 ### Snare wires
 
 On the card route (`examples/drum_cards`, the offline examples' default) each

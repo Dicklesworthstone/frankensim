@@ -1660,6 +1660,40 @@ pub fn wire_retardation(m_turn: f64, k_turn: f64, v_ref: f64, tan_delta_contact:
     (f_ref, tan_delta_contact / (2.0 * PI * f_ref))
 }
 
+/// Measured modal damping of a snare drum's batter head, as a fraction of critical, by mode
+/// shape `(m, n, zeta)`: m nodal diameters, n nodal circles counting the rim (the paper's own
+/// labels). Skrodzka, Hojan and Proksza, "Vibroacoustic investigation of a batter head of a
+/// snare drum", Archives of Acoustics 31(3) 289-297 (2006), Table 1, p. 292: a 36 cm steel snare
+/// drum, REMO Weatherking Coated Powerstroke 3 heads on both sides, a worn batter, impact-hammer
+/// modal analysis with the drum on a steel tripod; the snare wires' state is not printed ("The
+/// snare has not been damped"). The printed (3,2) at 616 Hz lies below the (3,1) at 734 Hz, the
+/// reverse of a membrane's order (j_31 < j_32); the rows are kept as printed, by shape.
+pub const SKRODZKA_2006_TABLE_1: [(usize, usize, f64); 6] = [
+    (0, 1, 0.0507),
+    (1, 1, 0.0110),
+    (2, 1, 0.0107),
+    (0, 2, 0.0116),
+    (3, 2, 0.0124),
+    (3, 1, 0.0077),
+];
+
+/// Opt-in (MB 7247): SKRODZKA_2006_TABLE_1 on a drum's batter head
+/// (`Body::attach_shape_damping`), another drum's measured ratios mapped by shape, not by
+/// frequency. It is an upper bound: the printed ratios already contain the two-head coupling and
+/// radiation this model also carries, and the row adds on top of them. The kit binary offers it
+/// on the snare without wires only. Returns the receipt line.
+pub fn attach_skrodzka_2006_batter_damping(p: &mut Piece, spec: &DrumSpec) -> Result<String, String> {
+    let name = format!("{} batter", spec.name);
+    let body = p.instrument.bodies.iter_mut().find(|b| b.name == name)
+        .ok_or_else(|| format!("batter shape damping: no body named {name:?}"))?;
+    let lines = body.attach_shape_damping(spec.radius, &SKRODZKA_2006_TABLE_1,
+        "Skrodzka, Hojan and Proksza 2006, Archives of Acoustics 31(3), Table 1: a 36 cm steel snare drum, Powerstroke 3 heads both sides, snare state unprinted")?;
+    Ok(format!(
+        "{}; {}; an UPPER BOUND: the printed ratios, the (0,1)'s 5.07 % above all, already contain the two-head coupling and radiation this model also carries, and this row adds on top of them; the printed (3,2) at 616 Hz lies below the (3,1) at 734 Hz, the reverse of a membrane's order, and is kept as printed, by shape",
+        lines[0], lines[1]
+    ))
+}
+
 /// Opt-in (ALL-IN, MB 14741; .372 rulings 14513): the snare wires' contacts take the viscoelastic Hertz
 /// loss (`Contact::retardation_s`) instead of the declared Hunt-Crossley 2 s/m. A comes from the cards
 /// (`wire_retardation`): the coil's turn mass and Hertz stiffness, the film card's loss tangent at its
