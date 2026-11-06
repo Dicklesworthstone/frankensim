@@ -262,6 +262,25 @@ impl RainflowMiner {
             maximum_corrected_amplitude_pa: self.history.tally.maximum_amplitude, finished: self.history.finished }
     }
 
+    /// Damage if the accepted history ended now, including its endpoint half
+    /// cycles. The returned summary has `finished = true`; this counter remains
+    /// unchanged and may continue accepting samples. Provisional damage is not
+    /// committed damage and must not be added to later observations.
+    pub fn preview_finish(&self) -> Result<FatigueSummary, FatigueError> {
+        self.preview_finish_with_cancel(&mut || false)
+    }
+
+    /// Read-only, allocation-free endpoint reduction, bounded by the current
+    /// residue. Every candidate cycle polls cancellation and uses the original
+    /// curve, mean-stress policy and support rules, exactly as `finish` does.
+    pub fn preview_finish_with_cancel(&self, cancelled: &mut impl FnMut() -> bool) -> Result<FatigueSummary, FatigueError> {
+        let law = StressLife { curve: &self.curve, correction: self.correction };
+        let tally = self.history.preview_finish(&law, cancelled)?;
+        Ok(FatigueSummary { samples: self.history.samples, full_cycles: tally.full,
+            half_cycles: tally.half, miner_damage: tally.damage,
+            maximum_corrected_amplitude_pa: tally.maximum_amplitude, finished: true })
+    }
+
     pub fn push(&mut self, stress_pa: f64) -> Result<(), FatigueError> {
         self.push_with_cancel(stress_pa, &mut || false)
     }
@@ -395,22 +414,33 @@ impl<A: Copy> RainflowHistory<A> {
     }
 
     fn finish(&mut self, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+        let tally = self.preview_finish(law, cancelled)?;
+        self.tally = tally;
+        self.residue.clear();
+        self.pending = None;
+        self.finished = true;
+        Ok(())
+    }
+
+    // Virtual endpoint append: existing prefix, optional starting half-cycle
+    // endpoint, then the current extreme. Nothing is copied or published.
+    fn preview_finish(&self, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<Tally, FatigueError> {
         if cancelled() { return Err(FatigueError::Cancelled); }
-        if self.finished { return Ok(()); }
-        let mut candidate = self.clone();
-        if let Some(last) = candidate.pending { candidate.append_reversal(last, law, cancelled)?; }
-        let mut tally = candidate.tally;
-        for pair in candidate.residue.windows(2) {
-            if cancelled() { return Err(FatigueError::Cancelled); }
-            tally = candidate.count_cycle(tally, pair[0], pair[1], false, law)?;
+        if self.finished { return Ok(self.tally); }
+        let (keep, start_half, mut tally) = match self.pending {
+            Some(last) => self.preview_reversal(last, law, cancelled)?,
+            None => (self.residue.len(), None, self.tally),
+        };
+        let mut points = self.residue[..keep].iter().copied().chain(start_half).chain(self.pending);
+        if let Some(mut previous) = points.next() {
+            for point in points {
+                if cancelled() { return Err(FatigueError::Cancelled); }
+                tally = self.count_cycle(tally, previous, point, false, law)?;
+                previous = point;
+            }
         }
         if cancelled() { return Err(FatigueError::Cancelled); }
-        candidate.tally = tally;
-        candidate.residue.clear();
-        candidate.pending = None;
-        candidate.finished = true;
-        *self = candidate;
-        Ok(())
+        Ok(tally)
     }
 
     fn count_cycle(&self, mut tally: Tally, a: TurningPoint<A>, b: TurningPoint<A>, full: bool, law: &impl CycleLife<A>) -> Result<Tally, FatigueError> {
@@ -434,8 +464,8 @@ impl<A: Copy> RainflowHistory<A> {
 
     // Preview reductions and damage without mutating the accepted stack. A new
     // extreme can remove arbitrarily many nested pairs, but at most the explicit
-    // residue limit. No clone/allocation proportional to trace length is needed.
-    fn append_reversal(&mut self, point: TurningPoint<A>, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+    // residue limit. Return the remaining prefix and any starting half cycle.
+    fn preview_reversal(&self, point: TurningPoint<A>, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(usize, Option<TurningPoint<A>>, Tally), FatigueError> {
         let mut keep = self.residue.len();
         let mut start_half = None;
         let mut tally = self.tally;
@@ -455,6 +485,12 @@ impl<A: Copy> RainflowHistory<A> {
             return Err(FatigueError::ResidueLimit { limit: self.limits.maximum_residue });
         }
         if cancelled() { return Err(FatigueError::Cancelled); }
+        Ok((keep, start_half, tally))
+    }
+
+    fn append_reversal(&mut self, point: TurningPoint<A>, law: &impl CycleLife<A>, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+        let (keep, start_half, tally) = self.preview_reversal(point, law, cancelled)?;
+        let required = if start_half.is_some() { 2 } else { keep + 1 };
         if required > self.residue.capacity() {
             self.residue.try_reserve_exact(required - self.residue.len()).map_err(|_| FatigueError::Allocation)?;
         }
@@ -562,6 +598,75 @@ mod tests {
         let summary = ramp.finish().unwrap();
         assert_eq!((summary.full_cycles, summary.half_cycles), (0, 1));
         close(summary.miner_damage, 0.001);
+    }
+
+    #[test]
+    fn g1_preview_includes_the_live_excursion_without_finishing_it() {
+        let mut c = counter();
+        let empty = c.clone();
+        assert_eq!(c.preview_finish().unwrap().miner_damage, 0.0);
+        assert_eq!(c, empty);
+        c.push_block(&[-2.0, 2.0], &mut || false).unwrap();
+        assert_eq!(c.summary().miner_damage, 0.0);
+        let before = c.clone();
+        let preview = c.preview_finish().unwrap();
+        assert_eq!((preview.samples, preview.full_cycles, preview.half_cycles), (2, 0, 1));
+        close(preview.miner_damage, 0.5 / 500.0);
+        assert!(preview.finished);
+        assert!(!c.summary().finished);
+        assert_eq!(c.preview_finish().unwrap(), preview);
+        assert_eq!(c, before);
+        c.push(-2.0).unwrap();
+        let completed = c.finish().unwrap();
+        close(completed.miner_damage, 1.0 / 500.0);
+        assert_eq!(c.preview_finish().unwrap(), completed);
+    }
+
+    #[test]
+    fn g3_preview_at_every_nested_prefix_preserves_continuation_and_count_order() {
+        let samples = [-2.0, 1.0, -3.0, 5.0, -1.0, 3.0, -4.0, 4.0, -2.0];
+        let mut c = counter();
+        for sample in samples {
+            c.push(sample).unwrap();
+            let before = c.clone();
+            let preview = c.preview_finish().unwrap();
+            assert_eq!(preview, before.clone().finish().unwrap());
+            assert_eq!(c, before);
+            let mut polls = 0;
+            c.preview_finish_with_cancel(&mut || { polls += 1; false }).unwrap();
+            for stop in 1..=polls {
+                let mut calls = 0;
+                assert_eq!(c.preview_finish_with_cancel(&mut || { calls += 1; calls == stop }),
+                    Err(FatigueError::Cancelled));
+                assert_eq!(c, before);
+            }
+        }
+        let mut uninterrupted = counter();
+        uninterrupted.push_block(&samples, &mut || false).unwrap();
+        let result = c.finish().unwrap();
+        assert_eq!(result, uninterrupted.finish().unwrap());
+        assert_eq!((result.full_cycles, result.half_cycles), (1, 6));
+        close(result.miner_damage, 0.0115);
+    }
+
+    #[test]
+    fn g0_preview_domain_and_residue_refusals_leave_the_live_endpoint_reusable() {
+        let mut c = counter();
+        c.push_block(&[0.0, 0.5], &mut || false).unwrap();
+        let before = c.clone();
+        assert!(matches!(c.preview_finish(), Err(FatigueError::AmplitudeOutsideCurve { .. })));
+        assert_eq!(c, before);
+        // Continuing the same monotone excursion resolves an admitted range.
+        c.push(4.0).unwrap();
+        close(c.preview_finish().unwrap().miner_damage, 0.001);
+        let mut limited = RainflowMiner::new(curve(), MeanStressCorrection::Uncorrected,
+            RainflowLimits { maximum_samples: 10, maximum_residue: 2 }).unwrap();
+        limited.push_block(&[-5.0, 5.0, -4.0], &mut || false).unwrap();
+        let before = limited.clone();
+        assert_eq!(limited.preview_finish(), Err(FatigueError::ResidueLimit { limit: 2 }));
+        assert_eq!(limited, before);
+        limited.push(-5.0).unwrap();
+        close(limited.preview_finish().unwrap().miner_damage, 0.005);
     }
 
     #[test]

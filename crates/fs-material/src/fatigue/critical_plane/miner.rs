@@ -114,6 +114,16 @@ impl PlaneCounter {
             Self::Paired(counter) => counter.summary(),
         }
     }
+
+    fn preview_finish(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StrainLifeSummary, FatigueError> {
+        match self {
+            Self::Scalar(counter) => counter.preview_finish_with_cancel(cancelled),
+            Self::Paired(counter) => counter.preview_finish_with_cancel(cancelled),
+        }
+    }
 }
 
 /// Streaming finite-plane variable-amplitude Miner owner.
@@ -334,6 +344,52 @@ impl CriticalPlaneMiner {
         Ok(())
     }
 
+    /// Select the greatest accumulated damage if the accepted tensor prefix
+    /// ended now, including endpoint half cycles on EVERY declared plane.
+    /// The original counters, unresolved residues and work budgets are unchanged.
+    /// The returned summary's `finished` flag describes the hypothetical prefix;
+    /// `result()` stays `None` until the live observation is actually finished.
+    pub fn preview_finish(&self) -> Result<CriticalPlaneMinerResult, CriticalPlaneMinerError> {
+        self.preview_finish_with_cancel(&mut || false)
+    }
+
+    /// Read-only bounded-residue search. No tensor history, counter bank or
+    /// provisional result is copied into the accepted observation. A refusal on
+    /// any plane aborts the entire query without hiding that plane's damage.
+    pub fn preview_finish_with_cancel(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<CriticalPlaneMinerResult, CriticalPlaneMinerError> {
+        if cancelled() {
+            return Err(CriticalPlaneMinerError::Cancelled);
+        }
+        if let Some(result) = &self.result {
+            return Ok(result.clone());
+        }
+        if self.samples == 0 {
+            return Err(CriticalPlaneMinerError::Invalid(
+                "at least one tensor observation is required",
+            ));
+        }
+        let mut selected = None;
+        for (index, counter) in self.counters.iter().enumerate() {
+            if cancelled() {
+                return Err(CriticalPlaneMinerError::Cancelled);
+            }
+            let summary = counter.preview_finish(cancelled).map_err(|error| {
+                CriticalPlaneMinerError::Fatigue {
+                    plane: index,
+                    error,
+                }
+            })?;
+            select_damage(&mut selected, index, summary);
+        }
+        if cancelled() {
+            return Err(CriticalPlaneMinerError::Cancelled);
+        }
+        self.result_from_selection(selected)
+    }
+
     pub fn finish(&mut self) -> Result<CriticalPlaneMinerResult, CriticalPlaneMinerError> {
         self.finish_with_cancel(&mut || false)
     }
@@ -367,30 +423,47 @@ impl CriticalPlaneMiner {
                         plane: index,
                         error,
                     })?;
-            if selected.as_ref().is_none_or(|(_, best)| {
-                summary.miner_damage > best.miner_damage
-                    || (summary.miner_damage == best.miner_damage
-                        && summary.maximum_strain_amplitude > best.maximum_strain_amplitude)
-            }) {
-                selected = Some((index, summary));
-            }
+            select_damage(&mut selected, index, summary);
         }
         if cancelled() {
             return Err(CriticalPlaneMinerError::Cancelled);
         }
+        let result = self.result_from_selection(selected)?;
+        self.counters = candidate;
+        self.result = Some(result.clone());
+        Ok(result)
+    }
+
+    fn result_from_selection(
+        &self,
+        selected: Option<(usize, StrainLifeSummary)>,
+    ) -> Result<CriticalPlaneMinerResult, CriticalPlaneMinerError> {
         let (selected_plane, summary) =
             selected.ok_or(CriticalPlaneMinerError::Invalid("missing search planes"))?;
-        let result = CriticalPlaneMinerResult {
+        Ok(CriticalPlaneMinerResult {
             samples: self.samples,
             evaluated_planes: self.planes.len(),
             selected_plane,
             normal_in_frame: self.planes[selected_plane].normal,
             summary,
             projection_work: self.projection_work,
-        };
-        self.counters = candidate;
-        self.result = Some(result.clone());
-        Ok(result)
+        })
+    }
+}
+
+// Select total damage, then maximum amplitude, then the earliest plane. Shared
+// by provisional and committed results so query timing cannot change the rule.
+fn select_damage(
+    selected: &mut Option<(usize, StrainLifeSummary)>,
+    index: usize,
+    summary: StrainLifeSummary,
+) {
+    if selected.as_ref().is_none_or(|(_, best)| {
+        summary.miner_damage > best.miner_damage
+            || (summary.miner_damage == best.miner_damage
+                && summary.maximum_strain_amplitude > best.maximum_strain_amplitude)
+    }) {
+        *selected = Some((index, summary));
     }
 }
 
@@ -449,6 +522,51 @@ mod tests {
             (a - b).abs() <= 8e-12 * a.abs().max(b.abs()).max(1e-30),
             "{a:e} != {b:e}"
         );
+    }
+
+    #[test]
+    fn g1_provisional_plane_selection_includes_each_open_excursion() {
+        let mut miner = CriticalPlaneMiner::new(
+            curve(),
+            StrainLifeMeanStress::Uncorrected,
+            vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            limits(32, 2),
+        ).unwrap();
+        for (x, y) in [(-0.001, 0.0), (0.001, 0.002), (-0.001, 0.004), (0.001, 0.006)] {
+            miner.push(TensorFatigueSample {
+                stress_pa: [0.0; 6],
+                total_mechanical_strain: [x, y, 0.0, 0.0, 0.0, 0.0],
+            }).unwrap();
+        }
+        let before = miner.clone();
+        let committed = miner.plane_summaries();
+        assert!(committed[0].miner_damage > committed[1].miner_damage);
+        let preview = miner.preview_finish().unwrap();
+        assert_eq!(preview.selected_plane, 1);
+        close(preview.summary.miner_damage, 0.5 / (0.5 * (0.007_f64 / 0.003).powi(2)));
+        assert!(preview.summary.finished);
+        assert_eq!(miner.plane_summaries(), committed);
+        assert_eq!(miner.counters, before.counters);
+        assert_eq!(miner.sample_count(), before.sample_count());
+        assert_eq!(miner.projection_work(), before.projection_work());
+        assert!(miner.result().is_none());
+        assert_eq!(preview, before.clone().finish().unwrap());
+        let mut polls = 0;
+        miner.preview_finish_with_cancel(&mut || { polls += 1; false }).unwrap();
+        for stop in 1..=polls {
+            let mut calls = 0;
+            assert!(miner.preview_finish_with_cancel(&mut || { calls += 1; calls == stop }).is_err());
+            assert_eq!(miner.counters, before.counters);
+            assert!(miner.result().is_none());
+        }
+        let next = TensorFatigueSample {
+            stress_pa: [0.0; 6],
+            total_mechanical_strain: [-0.001, 0.0, 0.0, 0.0, 0.0, 0.0],
+        };
+        miner.push(next).unwrap();
+        let mut uninterrupted = before;
+        uninterrupted.push(next).unwrap();
+        assert_eq!(miner.finish().unwrap(), uninterrupted.finish().unwrap());
     }
 
     #[test]

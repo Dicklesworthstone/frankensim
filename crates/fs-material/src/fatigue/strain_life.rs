@@ -289,6 +289,30 @@ impl StrainLifeMiner {
             finished: self.history.finished,
         }
     }
+    /// Evaluate the accepted prefix including unresolved endpoint half cycles,
+    /// without finishing or changing this counter. `finished = true` describes
+    /// the hypothetical completed prefix, not the still-live observation.
+    /// Repeated previews are alternatives, never additive damage increments.
+    pub fn preview_finish(&self) -> Result<StrainLifeSummary, FatigueError> {
+        self.preview_finish_with_cancel(&mut || false)
+    }
+    /// Allocation-free, cancellation-aware reduction of the bounded residue.
+    /// Original calibration-domain failures remain explicit and do not prevent
+    /// this live counter from accepting subsequent supported samples.
+    pub fn preview_finish_with_cancel(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StrainLifeSummary, FatigueError> {
+        let tally = self.history.preview_finish(self.curve.as_ref(), cancelled)?;
+        Ok(StrainLifeSummary {
+            samples: self.history.samples,
+            full_cycles: tally.full,
+            half_cycles: tally.half,
+            miner_damage: tally.damage,
+            maximum_strain_amplitude: tally.maximum_amplitude,
+            finished: true,
+        })
+    }
     pub fn push(&mut self, mechanical_strain: f64) -> Result<(), FatigueError> {
         self.push_with_cancel(mechanical_strain, &mut || false)
     }
@@ -433,8 +457,16 @@ mod tests {
             );
         }
         let mut flow = counter(Arc::new(c));
-        flow.push_block(&[-0.01, 0.01, -0.01], &mut || false)
-            .unwrap();
+        flow.push_block(&[-0.01, 0.01], &mut || false).unwrap();
+        let before = flow.clone();
+        let preview = flow.preview_finish().unwrap();
+        close(preview.miner_damage, 0.5 / (0.5 * (0.505_f64 / 0.01).powi(2)));
+        assert_eq!((preview.full_cycles, preview.half_cycles), (0, 1));
+        assert!(preview.finished);
+        assert_eq!(flow, before);
+        assert_eq!(flow.preview_finish_with_cancel(&mut || true), Err(FatigueError::Cancelled));
+        assert_eq!(flow, before);
+        flow.push(-0.01).unwrap();
         let result = flow.finish().unwrap();
         assert_eq!((result.full_cycles, result.half_cycles), (0, 2));
         assert_eq!(result.maximum_strain_amplitude, 0.01);

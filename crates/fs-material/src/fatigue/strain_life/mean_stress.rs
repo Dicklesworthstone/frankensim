@@ -281,6 +281,33 @@ impl PairedStrainLifeMiner {
             finished: self.history.finished,
         }
     }
+    /// Mean-stress-corrected damage if the accepted paired history ended now.
+    /// Includes endpoint half cycles without changing the actual live history.
+    /// `finished = true` belongs to this hypothetical result; repeated previews
+    /// must not be accumulated as additional damage.
+    pub fn preview_finish(&self) -> Result<StrainLifeSummary, FatigueError> {
+        self.preview_finish_with_cancel(&mut || false)
+    }
+    /// Allocation-free bounded-residue preview with the same paired-history,
+    /// calibration and cancellation checks as finalization.
+    pub fn preview_finish_with_cancel(
+        &self,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<StrainLifeSummary, FatigueError> {
+        let law = PairedLife {
+            curve: &self.curve,
+            correction: self.correction,
+        };
+        let tally = self.history.preview_finish(&law, cancelled)?;
+        Ok(StrainLifeSummary {
+            samples: self.history.samples,
+            full_cycles: tally.full,
+            half_cycles: tally.half,
+            miner_damage: tally.damage,
+            maximum_strain_amplitude: tally.maximum_amplitude,
+            finished: true,
+        })
+    }
     pub fn push(&mut self, sample: StrainStressSample) -> Result<(), FatigueError> {
         self.push_with_cancel(sample, &mut || false)
     }
@@ -376,6 +403,30 @@ mod tests {
             (actual - expected).abs() <= 4e-12 * expected.abs().max(1e-20),
             "{actual} != {expected}"
         );
+    }
+
+    #[test]
+    fn g1_paired_preview_retains_actual_mean_stress_without_committing_half_cycles() {
+        let amplitude = 0.001;
+        for (policy, life) in [
+            (StrainLifeMeanStress::Morrow, 0.5 * (0.006_f64 / amplitude).powi(2)),
+            (StrainLifeMeanStress::SmithWatsonTopper, 7e6 / (2.0 * amplitude * 300e6)),
+        ] {
+            let mut c = counter(policy);
+            c.push_block(&[sample(-amplitude, 100e6), sample(amplitude, 300e6)], &mut || false)
+                .unwrap();
+            let before = c.clone();
+            let preview = c.preview_finish().unwrap();
+            close(preview.miner_damage, 0.5 / life);
+            assert_eq!(preview.half_cycles, 1);
+            assert!(preview.finished);
+            assert_eq!(c.summary().miner_damage, 0.0);
+            assert_eq!(c, before);
+            assert_eq!(c.preview_finish_with_cancel(&mut || true), Err(FatigueError::Cancelled));
+            assert_eq!(c, before);
+            c.push(sample(-amplitude, 100e6)).unwrap();
+            close(c.finish().unwrap().miner_damage, 1.0 / life);
+        }
     }
 
     #[test]
