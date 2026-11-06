@@ -123,16 +123,48 @@ impl FlowField {
         input: ThermalVolumeMomentumInput<'_>,
         controls: ResistiveThermalVolumeMomentumControls,
         gate: &CancelGate,
-        mut resolve: impl FnMut(
+        resolve: impl FnMut(
             usize,
             &EquilibriumPhaseState,
         ) -> Result<ResolvedPhaseTransportState, ChtError>,
     ) -> Result<ResolvedResistiveThermalVolumeMomentumStep, ChtError> {
+        self.advance_resolved_phase_resistance_thermal_volume_with_heat(
+            domain,
+            faces,
+            boundary_pressure,
+            law,
+            input,
+            controls,
+            gate,
+            resolve,
+            |heat| Ok((heat, 0.0, ())),
+        )
+        .map(|(step, ())| step)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(in crate::conjugate::flow) fn advance_resolved_phase_resistance_thermal_volume_with_heat<
+        H,
+    >(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: Option<BoundaryPressure<'_>>,
+        law: &MushyPhaseLaw<'_>,
+        input: ThermalVolumeMomentumInput<'_>,
+        controls: ResistiveThermalVolumeMomentumControls,
+        gate: &CancelGate,
+        mut resolve: impl FnMut(
+            usize,
+            &EquilibriumPhaseState,
+        ) -> Result<ResolvedPhaseTransportState, ChtError>,
+        transform_heat: impl FnMut(Vec<f64>) -> Result<(Vec<f64>, f64, H), ChtError>,
+    ) -> Result<(ResolvedResistiveThermalVolumeMomentumStep, H), ChtError> {
         poll(gate)?;
         for phase in input.volume.boundary_inflow.into_iter().flatten() {
             admit_mobile_phase(law, &phase)?;
         }
-        let (evolution, endpoint_sources) = self.advance_thermal_volume_resistance_with_response(
+        let (evolution, endpoint_sources, accepted_heat, heat_receipt) = self.advance_thermal_volume_resistance_with_response_and_heat(
             domain,
             faces,
             boundary_pressure,
@@ -199,6 +231,7 @@ impl FlowField {
                     sources,
                 })
             },
+            transform_heat,
         )?;
         // The accepted caloric split can differ from its transported endpoint.
         // Admit that state too, without spending another source query or
@@ -210,24 +243,20 @@ impl FlowField {
             }
             let original = input.volume.phase_states[cell]
                 .ok_or_else(|| refuse("mobile thermal resistance needs its original phase"))?;
-            let external = input.volume.net_enthalpy_increment_j[cell];
-            let heat = evolution.caloric_resistance_heat_j[cell];
-            let increment = if heat == 0.0 {
-                external
-            } else {
-                external + heat
-            };
             let heated = law
                 .curve()
-                .advance_specific_energy(original, increment / input.volume.mass_kg[cell])
+                .advance_specific_energy(original, accepted_heat[cell] / input.volume.mass_kg[cell])
                 .map_err(|error| refuse(error.to_string()))?;
             admit_mobile_phase(law, &heated)?;
         }
         poll(gate)?;
-        Ok(ResolvedResistiveThermalVolumeMomentumStep {
-            evolution,
-            endpoint_sources,
-        })
+        Ok((
+            ResolvedResistiveThermalVolumeMomentumStep {
+                evolution,
+                endpoint_sources,
+            },
+            heat_receipt,
+        ))
     }
 }
 

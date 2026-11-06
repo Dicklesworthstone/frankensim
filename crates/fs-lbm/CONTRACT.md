@@ -13416,3 +13416,46 @@ substep refinement and original source identity, exercise Newtonian conduction a
 constant-viscosity native-population parity, and verify complete rollback and
 exact retry after source and late thermal-budget refusals. These are synthetic
 constitutive coupling checks, not experimental validation of a liquid.
+
+## Implicit conduction inside phase-resistance heat/volume coupling
+
+With `implicit-enthalpy-coupling`,
+`FlowField::advance_isotropic_implicit_conductive_phase_resistance_thermal_volume_momentum_with_baths`
+solves source-owned Fourier/bath heat within every existing bounded physical
+drag/phase/pressure trial. Each trial starts from the same original M, h and P.
+Authored net heat plus that trial's physical Darcy-heat guess drives one native
+backward-Euler caloric interval; its independently reconstructed endpoint face
+heat then drives the original chart, pressure, volume and material transport.
+The returned phase resolves molecular viscosity and permeability through the
+original material source. Physical-versus-used drag heat and endpoint
+constitutive impulse/heat must pass the original coupling gates together.
+
+Only the accepted trial's conductive increments, bath account, nonlinear report,
+phase sources, applied resistance and pressure readback are returned. Its native
+pressure/drag impulse is scattered once and the accepted mass routes carry
+momentum once. Numerical mechanical damping and pressure/source work retain
+their separate accounts. Implicit endpoint/assembly defects, native caloric
+transport and drag/constitutive heat residuals share both the original enthalpy
+and mechanical-energy defect budgets. Initial, incoming, accepted pre-transport
+and final transported states retain original source/chart and mobile-phase
+admission; fixed-solid voxels own no fluid inventory.
+
+The existing implicit residual-evaluation and total Krylov-iteration ceilings
+cover all outer trials, including rejected guesses. Per-direction Krylov cycles
+and per-trial Newton/backtrack bounds retain their native meanings, while the
+original resistance controls bound the number of trials. The result reports
+aggregate thermal work separately from the accepted physical interval. There
+is no hidden thermal subcycling or accumulated physical time across trials.
+Source, budget, native-solver or cancellation refusal publishes no candidate.
+Legacy resistance entries use an identity caloric transform and retain their
+existing arithmetic and physical accounts.
+
+This remains the original first-order caloric/flow split: k(T,f) is implicit at
+the pre-advection heat endpoint, and phase resistance uses the transported
+endpoint. It does not assert simultaneous advection-diffusion, finite bath
+storage, exact-solid locking, or a complete fluid-plus-bath entropy audit.
+The focused regression source manufactures a mobile latent cell with equal
+phase densities, k(f), a nonzero throughflow, physical drag and a one-sided bath.
+Independent Fourier, Darcy, material-energy and momentum formulas distinguish
+heat inside the implicit endpoint from a late heat deposit; the fixture also
+checks whole-call work exhaustion, late source/cancellation refusal and retry.

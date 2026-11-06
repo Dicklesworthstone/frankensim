@@ -167,10 +167,46 @@ impl FlowField {
         input: ThermalVolumeMomentumInput<'_>,
         controls: ResistiveThermalVolumeMomentumControls,
         gate: &CancelGate,
-        mut resolve: impl FnMut(
+        resolve: impl FnMut(
             &[Option<EquilibriumPhaseState>],
         ) -> Result<ResistanceResponse<'a, T>, ChtError>,
     ) -> Result<(ResistiveThermalVolumeMomentumStep, T), ChtError> {
+        self.advance_thermal_volume_resistance_with_response_and_heat(
+            domain,
+            faces,
+            boundary_pressure,
+            curve,
+            input,
+            controls,
+            gate,
+            resolve,
+            |heat| Ok((heat, 0.0, ())),
+        )
+        .map(|(step, sources, _, ())| (step, sources))
+    }
+
+    /// Transform each original authored-plus-drag heat guess before the SAME
+    /// native chart/pressure trial. Only its accepted increment and receipt
+    /// escape; rejected heat never accumulates or scatters momentum.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    pub(super) fn advance_thermal_volume_resistance_with_response_and_heat<'a, T, H>(
+        &self,
+        domain: &VoxelDomain,
+        faces: [FlowFace; 6],
+        boundary_pressure: Option<BoundaryPressure<'_>>,
+        curve: &EquilibriumEnthalpyPhaseCurve,
+        input: ThermalVolumeMomentumInput<'_>,
+        controls: ResistiveThermalVolumeMomentumControls,
+        gate: &CancelGate,
+        mut resolve: impl FnMut(
+            &[Option<EquilibriumPhaseState>],
+        ) -> Result<ResistanceResponse<'a, T>, ChtError>,
+        mut transform_heat: impl FnMut(Vec<f64>) -> Result<(Vec<f64>, f64, H), ChtError>,
+    ) -> Result<(ResistiveThermalVolumeMomentumStep, T, Vec<f64>, H), ChtError> {
         poll(gate)?;
         let mechanical = controls.thermal.mechanics;
         let volume = controls.thermal.volume;
@@ -240,6 +276,16 @@ impl FlowField {
                 .to_f64()
                 .abs();
             }
+            let (transformed, transformed_heat_defect, heat_receipt) =
+                transform_heat(total_increment)?;
+            finite(
+                "flow.resistance_thermal_transformed_heat_defect",
+                transformed_heat_defect,
+            )?;
+            if transformed.len() != n || transformed_heat_defect < 0.0 {
+                return Err(refuse("invalid resistance caloric transformation"));
+            }
+            total_increment = transformed;
             // The existing owner performs all chart, material, incoming-state,
             // caloric representation, mixing and final occupied-volume checks.
             let (thermal, (native, pressure_readback)) =
@@ -295,8 +341,9 @@ impl FlowField {
             let heat_defect = Dd::from_f64(coupling.absolute_heat_coupling_defect_j);
             let coupling_defect =
                 heat_defect + Dd::from_f64(coupling.absolute_constitutive_heat_defect_j);
-            let caloric_defect =
-                coupling_defect + Dd::from_f64(thermal.volume.report.absolute_enthalpy_defect_j);
+            let caloric_defect = coupling_defect
+                + Dd::from_f64(thermal.volume.report.absolute_enthalpy_defect_j)
+                + Dd::from_f64(transformed_heat_defect);
             let energy_defect = caloric_defect + Dd::from_f64(native.absolute_energy_defect_j);
             let impulse_defect = Dd::from_f64(native.absolute_impulse_defect_kg_m_s)
                 + Dd::from_f64(coupling.absolute_constitutive_impulse_defect_kg_m_s);
@@ -354,6 +401,8 @@ impl FlowField {
                         coupling,
                     },
                     endpoint.sources,
+                    total_increment,
+                    heat_receipt,
                 ));
             }
             if coupling_iterations == controls.max_coupling_iterations {

@@ -46,6 +46,7 @@ pub use material_momentum::{
 mod phase_volume;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use phase_volume::{
+    ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,

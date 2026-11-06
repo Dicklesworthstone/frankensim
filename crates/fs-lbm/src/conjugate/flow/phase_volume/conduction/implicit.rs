@@ -25,6 +25,10 @@ mod momentum;
 pub use momentum::ImplicitConductiveThermalVolumeMomentumStep;
 mod viscous;
 pub use viscous::ImplicitConductiveViscousThermalVolumeMomentumStep;
+mod resistance;
+pub use resistance::{
+    ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
+};
 
 /// Bounded native analytic Newton/Krylov work for ONE backward-Euler interval.
 /// The existing flow duration and shared enthalpy-defect budget own the clock
@@ -84,6 +88,13 @@ pub struct ImplicitConductiveThermalVolumeStep {
 
 struct ImplicitAdvance<T> {
     evolution: T,
+    increments: Vec<f64>,
+    report: ImplicitConductiveThermalVolumeReport,
+}
+
+/// Original-state heat interval, before any pressure/material-flow trial.
+struct PreparedImplicitHeat {
+    combined: Vec<f64>,
     increments: Vec<f64>,
     report: ImplicitConductiveThermalVolumeReport,
 }
@@ -162,6 +173,68 @@ impl FlowField {
         advance: impl FnOnce(CoexistenceVolumeInput<'_>) -> Result<T, ChtError>,
         thermal: impl Fn(&T) -> &ThermalVolumeStep,
     ) -> Result<ImplicitAdvance<T>, ChtError> {
+        let PreparedImplicitHeat {
+            combined,
+            increments,
+            mut report,
+        } = self.prepare_implicit_conductive_heat(
+            domain,
+            conductivity,
+            baths,
+            input,
+            controls,
+            solve,
+            workspace,
+            gate,
+        )?;
+        poll(gate)?;
+        let evolution = advance(CoexistenceVolumeInput {
+            net_enthalpy_increment_j: &combined,
+            ..input
+        })?;
+        let native = thermal(&evolution);
+        let total =
+            report.absolute_enthalpy_defect_j + native.volume.report.absolute_enthalpy_defect_j;
+        finite("flow.implicit_total_enthalpy_defect", total)?;
+        if total
+            > controls
+                .volume
+                .thermal
+                .volume
+                .transport
+                .maximum_enthalpy_defect_j
+        {
+            return Err(refuse(
+                "implicit conduction and volume transport exceed shared enthalpy budget",
+            ));
+        }
+        for (cell, state) in native.volume.phase_states.iter().enumerate() {
+            poll_every(gate, cell)?;
+            if let Some(state) = state {
+                admit_state(conductivity, *state)?;
+            }
+        }
+        poll(gate)?;
+        report.absolute_enthalpy_defect_j = total;
+        Ok(ImplicitAdvance {
+            evolution,
+            increments,
+            report,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_implicit_conductive_heat(
+        &self,
+        domain: &VoxelDomain,
+        conductivity: &PreparedPhaseConductivity<'_>,
+        baths: &[ThermalVolumeBathFace],
+        input: CoexistenceVolumeInput<'_>,
+        controls: ConductiveThermalVolumeControls,
+        solve: ImplicitThermalVolumeSolveControls,
+        workspace: &mut ImplicitThermalVolumeWorkspace,
+        gate: &CancelGate,
+    ) -> Result<PreparedImplicitHeat, ChtError> {
         let PreparedInput { samples, baths } =
             prepare_input(domain, conductivity, baths, input, controls, gate)?;
         let transport = controls.volume.thermal.volume.transport;
@@ -472,27 +545,8 @@ impl FlowField {
             ));
         }
         poll(gate)?;
-        let evolution = advance(CoexistenceVolumeInput {
-            net_enthalpy_increment_j: &combined,
-            ..input
-        })?;
-        let native = thermal(&evolution);
-        let total = extra_defect + native.volume.report.absolute_enthalpy_defect_j;
-        finite("flow.implicit_total_enthalpy_defect", total)?;
-        if total > budget {
-            return Err(refuse(
-                "implicit conduction and volume transport exceed shared enthalpy budget",
-            ));
-        }
-        for (cell, state) in native.volume.phase_states.iter().enumerate() {
-            poll_every(gate, cell)?;
-            if let Some(state) = state {
-                admit_state(conductivity, *state)?;
-            }
-        }
-        poll(gate)?;
-        Ok(ImplicitAdvance {
-            evolution,
+        Ok(PreparedImplicitHeat {
+            combined,
             increments,
             report: ImplicitConductiveThermalVolumeReport {
                 conductivity_source_identity: conductivity.identity(),
@@ -504,7 +558,7 @@ impl FlowField {
                 conduction_balance_defect_j: balance.value.abs(),
                 increment_assembly_defect_j: assembly.value,
                 endpoint_heat_defect_j: endpoint_defect.value,
-                absolute_enthalpy_defect_j: total,
+                absolute_enthalpy_defect_j: extra_defect,
                 solve,
             },
         })

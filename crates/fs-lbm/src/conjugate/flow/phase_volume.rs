@@ -3,6 +3,7 @@
 mod conduction;
 #[cfg(feature = "implicit-enthalpy-coupling")]
 pub use conduction::{
+    ImplicitConductiveResistiveThermalVolumeMomentumStep, ImplicitResistanceHeatWork,
     ImplicitConductiveThermalVolumeMomentumStep, ImplicitConductiveThermalVolumeReport,
     ImplicitConductiveThermalVolumeStep, ImplicitConductiveViscousThermalVolumeMomentumStep,
     ImplicitThermalVolumeLinearControls, ImplicitThermalVolumeSolveControls,
