@@ -425,13 +425,11 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                     )?;
                 }
             }
-            let kinetic_change =
-                finite(candidate.state.kinetic_energy_j() - self.state.kinetic_energy_j())?;
-            gate(
-                kinetic_change - candidate.report.kinetic_energy_change_j,
-                controls.energy_tolerance_j,
-                "native kinetic storage change differs from accepted history",
-            )?;
+            // The original midpoint owner evaluates the accepted endpoint
+            // increment on the unchanged full reference mass. Re-subtracting
+            // rounded totals here would discard small physical stress work
+            // beside an unchanged large kinetic inventory.
+            let kinetic_change = finite(candidate.report.kinetic_energy_change_j)?;
             let thermoelastic = account(
                 old,
                 &proposal,

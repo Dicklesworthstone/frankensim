@@ -218,9 +218,9 @@ pub fn step_thermal_candidate<'p, 'a, 't, O: DepositionObserver>(
     }
     balance(total - heat, config.energy_tolerance_j)?;
     let change = number(
-        (next.kinetic_energy_j() - solid.kinetic_energy_j())
-            + (next.material_history().energy().stored_j
-                - solid.material_history().energy().stored_j),
+        (fs_math::dd::Dd::from_f64(step.kinetic_energy_change_j)
+            + fs_math::dd::Dd::from_f64(step.material_stored_energy_change_j))
+        .to_f64(),
     )?;
     let work = number(
         step.external_work_j + step.support_work_j + step.constitutive.step_eigenstrain_work_j,

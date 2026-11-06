@@ -3664,6 +3664,16 @@ large cumulative counters. Explicit step/free-DOF/iteration budgets, source
 strain limits, finite arithmetic, cancellation and energy allowances are
 checked before publishing motion, memory, work or clock changes.
 
+The step also retains `kinetic_energy_change_j` through the shared original-mass
+quadratic increment and `material_stored_energy_change_j` through the original
+per-element constitutive increments. Applied and support work retain their
+displacement/product tails through the independent residual. Relative energy
+admission scales against interval work, storage changes and physical heat;
+unchanged kinetic or material inventories cannot hide a local imbalance.
+The finite-cell thermal consumer uses these same accepted increments. Focused
+regressions include supported acceleration and Kelvin strain heating beside
+large unchanged translation; full coupled execution is separately required.
+
 Ordinary `start`/`advance` retain stationary supports and zero support work.
 `ViscoElements::new_with_full_reference_mass` additionally retains the original
 full consistent mass, including support rows and free/support couplings, for

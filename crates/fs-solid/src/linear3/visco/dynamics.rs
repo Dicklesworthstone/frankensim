@@ -16,6 +16,8 @@ use super::quasistatic::{assemble_tangents, check_residual, solve_linear};
 use super::*;
 use crate::linear::Jacobi;
 use crate::linear3::{TetStaticSolveConfig, euclidean_norm};
+use fs_math::dd::Dd;
+use fs_math::quadratic::{QuadraticError, increment};
 use fs_solver::op::CsrOp;
 
 mod source;
@@ -41,7 +43,8 @@ pub struct ViscoDynamicConfig {
     pub solve: TetStaticSolveConfig,
     /// Numerical work-balance allowance; never converted into material heat.
     pub absolute_energy_tolerance_j: f64,
-    /// Relative allowance against actual work, stored energy and heat.
+    /// Relative allowance against interval work, storage increments and heat.
+    /// An unchanged kinetic or material inventory cannot enlarge this allowance.
     pub relative_energy_tolerance: f64,
 }
 impl Default for ViscoDynamicConfig {
@@ -93,6 +96,12 @@ pub struct ViscoDynamicStep {
     pub force_residual_n: f64,
     /// Endpoint kinetic energy from the original consistent mass [J].
     pub kinetic_energy_j: f64,
+    /// Signed kinetic storage increment from the actual endpoint velocities
+    /// and original consistent mass [J], including moving-support cross terms.
+    pub kinetic_energy_change_j: f64,
+    /// Signed material storage increment, reduced from the original per-element
+    /// constitutive increments [J]. Unchanged stored inventories cancel locally.
+    pub material_stored_energy_change_j: f64,
     /// Actual interval-mean applied nodal force times actual displacement [J].
     pub external_work_j: f64,
     /// Signed mean support-reaction work over the actual displacement [J].
@@ -120,8 +129,12 @@ fn finite(value: f64) -> Result<f64, ViscoElementError> {
 }
 fn mass_action(system: &ViscoElements, velocity: &[f64]) -> Vec<f64> {
     let mut momentum = vec![0.0; velocity.len()];
+    mass_action_into(system, velocity, &mut momentum);
+    momentum
+}
+fn mass_action_into(system: &ViscoElements, velocity: &[f64], momentum: &mut [f64]) {
     if let Some(mass) = system.full_reference_mass() {
-        mass.spmv(velocity, &mut momentum);
+        mass.spmv(velocity, momentum);
     } else {
         // Legacy stationary supports need only the existing reduced matrix.
         // These zero support rows are never published as full reactions.
@@ -129,11 +142,11 @@ fn mass_action(system: &ViscoElements, velocity: &[f64]) -> Vec<f64> {
         let reduced: Vec<_> = free.iter().map(|&d| velocity[d]).collect();
         let mut result = vec![0.0; free.len()];
         system.equilibrium.mass.spmv(&reduced, &mut result);
+        momentum.fill(0.0);
         for (&d, value) in free.iter().zip(result) {
             momentum[d] = value;
         }
     }
-    momentum
 }
 fn kinetic(system: &ViscoElements, velocity: &[f64]) -> Result<f64, ViscoElementError> {
     let momentum = mass_action(system, velocity);
@@ -625,29 +638,55 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
         } else {
             None
         };
-        let support_work_j = if let Some(reaction) = &mean_reaction_force_n {
-            finite(
-                (0..system.full_dofs)
-                    .filter(|&d| prepared.reduced[d].is_none())
-                    .map(|d| reaction[d] * (displacement[d] - self.material.displacement_m[d]))
-                    .sum(),
-            )?
-        } else {
-            0.0
-        };
+        let kinetic_change = increment(
+            &self.velocity_mps,
+            &next_velocity,
+            |velocity, momentum, _| {
+                mass_action_into(system, velocity, momentum);
+                Ok::<(), ViscoElementError>(())
+            },
+            &mut || cx.checkpoint().is_err(),
+        )
+        .map_err(|error| match error {
+            QuadraticError::Cancelled => TetElasticError::Cancelled.into(),
+            QuadraticError::Operator(error) => error,
+            QuadraticError::Dimension | QuadraticError::NonFinite => {
+                ViscoElementError::NonFiniteResult
+            }
+        })?
+        .change;
+        let kinetic_energy_change_j = finite(kinetic_change.to_f64())?;
+        let mut load_work = Dd::ZERO;
+        let mut support_work = Dd::ZERO;
+        for d in 0..system.full_dofs {
+            if d % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let displacement_change = Dd::from_f64(displacement[d])
+                - Dd::from_f64(self.material.displacement_m[d]);
+            load_work = load_work + Dd::from_f64(mean_force_n[d]) * displacement_change;
+            if prepared.reduced[d].is_none() {
+                if let Some(reaction) = &mean_reaction_force_n {
+                    support_work = support_work
+                        + Dd::from_f64(reaction[d]) * displacement_change;
+                }
+            }
+        }
+        let support_work_j = finite(support_work.to_f64())?;
         let kinetic_j = kinetic(system, &next_velocity)?;
-        let work = finite(
-            mean_force_n
-                .iter()
-                .zip(displacement.iter().zip(&self.material.displacement_m))
-                .map(|(f, (new, old))| f * (new - old))
-                .sum(),
-        )?;
+        let work = finite(load_work.to_f64())?;
+        let mut material_change = Dd::ZERO;
+        for element in &constitutive.element_steps {
+            checkpoint(cx)?;
+            material_change = material_change
+                + Dd::from_f64(element.stored_energy_change_j);
+        }
+        let material_stored_energy_change_j = finite(material_change.to_f64())?;
         let defect = finite(
-            work + support_work_j + constitutive.step_eigenstrain_work_j
-                - (kinetic_j - self.kinetic_j)
-                - (constitutive.energy.stored_j - self.material.energy.stored_j)
-                - constitutive.step_dissipated_j,
+            (load_work + support_work + Dd::from_f64(constitutive.step_eigenstrain_work_j)
+                - kinetic_change - material_change
+                - Dd::from_f64(constitutive.step_dissipated_j))
+                .to_f64(),
         )?;
         let allowance = finite(
             prepared.config.absolute_energy_tolerance_j
@@ -655,10 +694,8 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
                     * (work.abs()
                         + support_work_j.abs()
                         + constitutive.step_eigenstrain_work_j.abs()
-                        + kinetic_j
-                        + self.kinetic_j
-                        + constitutive.energy.stored_j.abs()
-                        + self.material.energy.stored_j.abs()
+                        + kinetic_energy_change_j.abs()
+                        + material_stored_energy_change_j.abs()
                         + constitutive.step_dissipated_j.abs()),
         )?;
         if defect.abs() > allowance {
@@ -700,6 +737,8 @@ impl<'p, 'a> ViscoDynamicState<'p, 'a> {
                 iterations,
                 force_residual_n,
                 kinetic_energy_j: kinetic_j,
+                kinetic_energy_change_j,
+                material_stored_energy_change_j,
                 external_work_j: work,
                 support_work_j,
                 mean_reaction_force_n,

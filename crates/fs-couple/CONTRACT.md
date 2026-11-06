@@ -120,6 +120,27 @@ G3 regression definitions carry actual rigid-layer heat/temperature feedback and
 deformable bond-viscosity heat through large unchanged kinetic inventories.
 Arithmetic-leaf tests alone do not qualify the complete coupled integrations.
 
+## Native kinetic increments through spatial heat and thermal shells
+
+The spatial viscoelastic thermal owner consumes the accepted native
+`ViscoDynamicStep::kinetic_energy_change_j` and
+`material_stored_energy_change_j`. These come from the original full or
+supported consistent mass and original per-element constitutive increments.
+Explicit support and eigenstrain work remain separate, and only independently
+integrated Kelvin/Maxwell loss enters the original finite caloric cells.
+Unchanged background translation cannot hide a small physical heat transfer
+or enlarge the native interval energy allowance.
+
+The reciprocal dynamic laminate owner consumes the original enriched MITC
+midpoint's retained kinetic increment directly. Its original director mass,
+nodal/director cross terms, material stress work, finite heat cells and launch
+coordinate basis remain shared across temperature trials. Reconstructed
+absolute kinetic totals cannot reject or erase the original small exchange.
+These remain fixed-reference, fixed-mass models with the existing material and
+time-resolution obligations. Focused regression definitions cover supported
+spatial strain heat and independent director motion beside dominant unchanged
+kinetic storage; isolated arithmetic checks do not execute those integrations.
+
 ## Original specific heat in coupled capacity admission
 
 Electrical, dielectric, magnetic, piezoelectric, thermoelastic, creep and

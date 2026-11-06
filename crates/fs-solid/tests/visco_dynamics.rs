@@ -642,6 +642,39 @@ fn g1_fully_prescribed_acceleration_accounts_for_all_support_mass_and_work() {
 }
 
 #[test]
+fn g3_small_support_acceleration_retains_work_beside_unchanged_translation() {
+    with_cx(|cx, _| {
+        let law = material(
+            TensorProny::new_mandel(diagonal([1200.0; 6]), vec![], 0.02).unwrap(),
+        );
+        let solid = supported_system(&law, &[], cx);
+        let prepared = solid.dynamic_operator(1.0 / 64.0, config(), cx).unwrap();
+        let expected = 0.5 * (law.density_kg_m3 / 6.0) * 0.25_f64.powi(2);
+        for boost in [0.0, 2.0_f64.powi(30)] {
+            // All nodes share the y translation. The independent x acceleration
+            // causes no strain and is supplied entirely by the real supports.
+            let before: Vec<_> = (0..4).flat_map(|_| [0.0, boost, 0.0]).collect();
+            let after: Vec<_> = (0..4).flat_map(|_| [0.25, boost, 0.0]).collect();
+            let mut state = prepared
+                .start_with_support_motion(solid.state(cx).unwrap(), &before, cx)
+                .unwrap();
+            let initial_kinetic = state.kinetic_energy_j();
+            let step = state
+                .advance_with_support_velocity(&[0.0; 12], &after, cx)
+                .unwrap();
+            close(step.kinetic_energy_change_j, expected, 2e-12);
+            close(step.support_work_j, expected, 2e-12);
+            assert_eq!(step.material_stored_energy_change_j, 0.0);
+            assert_eq!(step.constitutive.step_dissipated_j, 0.0);
+            assert!(step.balance_residual_j.abs() < 1e-12);
+            if boost != 0.0 {
+                assert_eq!(step.kinetic_energy_j, initial_kinetic);
+            }
+        }
+    });
+}
+
+#[test]
 fn g0_moving_support_thermal_memory_keeps_separate_work_and_physical_heat() {
     use fs_qty::ContentHash;
     use fs_solid::linear3::{TetThermalStrainField, TetThermalStrainState};

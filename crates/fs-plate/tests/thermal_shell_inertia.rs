@@ -154,6 +154,32 @@ fn g1_exact_enriched_inertia_retains_cross_moment_and_original_nodal_stiffness()
 }
 
 #[test]
+fn g3_original_director_increment_survives_an_unchanged_dominant_mode() {
+    let shell = EnrichedMitcShell::try_new(
+        make_model(true, ShellMass::Consistent), || false,
+    ).unwrap();
+    let large = 2.0_f64.powi(54);
+    let before = shell.state(
+        0.0, &[0.0; 18], &[0.0; 18], &[[0.0; 2]], &[[large, 1.0]], || false,
+    ).unwrap();
+    let after = shell.state(
+        0.0, &[0.0; 18], &[0.0; 18], &[[0.0; 2]], &[[large, 2.0]], || false,
+    ).unwrap();
+    // The independent physical bubble inertias are diagonal and equal to
+    // I2*area*mean(b²), with mean(b²)=81/280. No numerical drilling mass enters.
+    let expected = 1.5 * AREA * I2 * 81.0 / 280.0;
+    assert_eq!(before.kinetic_energy_j(), after.kinetic_energy_j());
+    near(shell.kinetic_energy_change_j(&before, &after, || false).unwrap(),
+        expected, 3e-14, 1e-16);
+    near(shell.kinetic_energy_change_j(&after, &before, || false).unwrap(),
+        -expected, 3e-14, 1e-16);
+    assert!(matches!(
+        shell.kinetic_energy_change_j(&before, &after, || true),
+        Err(PlateError::Cancelled)
+    ));
+}
+
+#[test]
 fn g1_heated_internal_rotations_obey_momentum_instead_of_jumping_to_static_lift() {
     let model = make_model(true, ShellMass::Consistent);
     let enriched = EnrichedMitcShell::try_new(Arc::clone(&model), || false).unwrap();

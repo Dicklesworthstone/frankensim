@@ -1367,6 +1367,16 @@ State/operator identity,
 stationary support compatibility, finite arithmetic and final cancellation
 are admitted before returning immutable proposals.
 
+`EnrichedMitcShell::kinetic_energy_change_j` evaluates actual endpoint velocities
+on the original full physical mass. The shared `fs-math::quadratic` reduction
+retains endpoint difference/mean low words before the original compensated
+sparse action and final contraction. The midpoint owner compares retained
+kinetic and work reductions before rounding its report; absolute kinetic
+totals remain observations. This keeps small director exchange beside an
+unchanged dominant mode and supplies the same increment to thermal consumers.
+The operator's symmetry, numerical accuracy and fixed-reference assumptions
+remain required; this arithmetic is not a trajectory or interval certificate.
+
 `with_material_model` changes the physical constitutive operator while retaining
 the original FULL `T0` basis, physical mass, support map and numerical drilling
 stiffness. It assembles `K(T)=Kref+T0^T[Kphysical(T)-Kphysical(ref)]T0` on each

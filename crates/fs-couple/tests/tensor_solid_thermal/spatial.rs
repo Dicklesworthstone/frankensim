@@ -94,6 +94,70 @@ fn sparse_kelvin_midpoint_motion_deposits_analytic_heat_and_continues() {
 }
 
 #[test]
+fn supported_strain_heat_survives_large_unchanged_kinetic_inventory() {
+    scope(|cx, _| {
+        let mat = material(0.01, 0.0);
+        let fixed: Vec<_> = (0..12).collect();
+        let solid = ViscoElements::new_with_full_reference_mass(
+            SolidMeshRef::Tet4 { nodes_m: &NODES, elements: &TETS },
+            TetViscoField::Uniform(&mat),
+            &fixed,
+            TetAssemblyBudget::standard(),
+            ViscoStateBudget { max_internal_variables: 1000 },
+            cx,
+        ).unwrap();
+        let dt = 1.0 / 64.0;
+        let op = solid.dynamic_operator(dt, dynamic_controls(), cx).unwrap();
+        let chart = curve(1.0);
+        let initial_heat = thermal(&chart, &[30], vec![], 16);
+        let bindings = cells(&chart, &[30]);
+        let rate = 0.25_f64;
+        let q = 0.5 * dt * rate;
+        let expected_kinetic = 0.5 * (1.0 / 30.0) * rate * rate;
+        let expected_storage = 0.5 * 20.0 * q * q;
+        let expected_heat = dt * 0.2 * (0.5 * rate).powi(2);
+        for boost in [0.0, 2.0_f64.powi(30)] {
+            // The orthogonal common translation carries energy but no strain.
+            // All support velocities are explicit, so no large-velocity sparse
+            // solve or inferred thermal source is involved in this comparison.
+            let before: Vec<_> = (0..4).flat_map(|_| [boost, 0.0, 0.0]).collect();
+            let mut after = before.clone();
+            after[11] = rate;
+            let motion = op.start_with_support_motion(
+                solid.state(cx).unwrap(), &before, cx,
+            ).unwrap();
+            let accepted = step_thermal_candidate(
+                &motion,
+                &initial_heat,
+                &(),
+                SpatialViscoLoading {
+                    mean_force_n: &[0.0; 12],
+                    support_velocity_mps: Some(&after),
+                    eigenstrain: None,
+                },
+                &bindings,
+                controls(),
+                cx,
+            ).unwrap();
+            let report = accepted.report();
+            near(report.mechanical.kinetic_energy_change_j, expected_kinetic, 1e-12);
+            near(report.mechanical.material_stored_energy_change_j, expected_storage, 1e-12);
+            near(report.energy.material_heat_j, expected_heat, 1e-12);
+            near(report.mechanical.support_work_j,
+                expected_kinetic + expected_storage + expected_heat, 1e-12);
+            near(accepted.thermal().temperature_k(CellId(30)).unwrap(),
+                300.0 + expected_heat / MASS, 1e-9);
+            near(report.energy.combined_residual_j, 0.0, 1e-10);
+            if boost != 0.0 {
+                assert_eq!(accepted.solid().kinetic_energy_j(), motion.kinetic_energy_j());
+            }
+            assert_eq!(motion.steps(), 0);
+            assert_eq!(initial_heat.time_s(), 0.0);
+        }
+    });
+}
+
+#[test]
 fn original_regional_maxwell_heat_survives_thermal_events_and_all_transport_hooks() {
     scope(|cx, _| {
         let mut nodes = NODES.to_vec();

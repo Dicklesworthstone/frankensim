@@ -7,9 +7,11 @@
 
 use super::{
     EnrichedMitcShell, MitcTransientReport, MitcTransientState, MitcTransientStep,
-    PreparedMitcMidpoint, action, check, finite, invalid, product, row_check,
+    PreparedMitcMidpoint, action, check, finite, invalid, product, product_retained,
+    row_check,
 };
 use crate::PlateError;
+use fs_math::dd::Dd;
 use std::sync::Arc;
 
 impl PreparedMitcMidpoint {
@@ -113,7 +115,7 @@ impl PreparedMitcMidpoint {
             .zip(k1q1)
             .map(|(a, b)| 0.5 * a + 0.5 * b)
             .collect();
-        let stiffness_work = product(&displacement, &mean_stiffness_force)?;
+        let stiffness_work = product_retained(&displacement, &mean_stiffness_force)?;
         let stiffness_parameter_work_j = if let Some(next) = k1q0 {
             let delta_force: Vec<_> = next.iter().zip(&k0q0).map(|(b, a)| b - a).collect();
             finite(0.5 * product(&state.coordinates, &delta_force)?)?
@@ -123,28 +125,20 @@ impl PreparedMitcMidpoint {
         // Polarization avoids subtracting two large quadratic energy datums.
         // The parameter work comes from the operator difference independently;
         // no mechanical residual is relabeled as a source or as material heat.
-        let quadratic_energy_change_j = finite(stiffness_work + stiffness_parameter_work_j)?;
-        let load_work_j = product(&displacement, &force)?;
-        let velocity_change: Vec<_> = state
-            .velocity
-            .iter()
-            .zip(&initial.velocity)
-            .map(|(b, a)| b - a)
-            .collect();
-        let mean_velocity: Vec<_> = state
-            .velocity
-            .iter()
-            .zip(&initial.velocity)
-            .map(|(b, a)| 0.5 * a + 0.5 * b)
-            .collect();
-        let mean_momentum = action(&after.mass, &mean_velocity, &mut cancelled)?;
-        let kinetic_energy_change_j = product(&velocity_change, &mean_momentum)?;
+        let quadratic_energy_change_j =
+            finite((stiffness_work + Dd::from_f64(stiffness_parameter_work_j)).to_f64())?;
+        let load_work = product_retained(&displacement, &force)?;
+        let load_work_j = load_work.to_f64();
+        let kinetic_change = after.kinetic_increment(initial, &state, &mut cancelled)?;
+        let kinetic_energy_change_j = finite(kinetic_change.to_f64())?;
         let (dissipated_energy_j, facet_dissipated_energy_j) =
             after.material_dissipation(&midpoint_velocity, self.dt_s, &mut cancelled)?;
         // This is ΔKE+Δ(qKq/2)+heat-W_parameter-W_load, evaluated without an
         // avoidable cancellation of the same parameter work twice.
         let energy_residual_j = finite(
-            kinetic_energy_change_j + stiffness_work + dissipated_energy_j - load_work_j,
+            (kinetic_change + stiffness_work + Dd::from_f64(dissipated_energy_j)
+                - load_work)
+                .to_f64(),
         )?;
         check(&mut cancelled)?;
         Ok(MitcTransientStep {

@@ -30,6 +30,8 @@ use crate::shell::mitc::element::PreparedStrainField;
 use crate::shell::mitc::static_solver::StaticFactor;
 use crate::shell::mitc::strain::RealElementStrain;
 use crate::shell::mitc::{MitcShellModel, ShellMass, dd_add, two_prod};
+use fs_math::dd::Dd;
+use fs_math::quadratic::{QuadraticError, increment};
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -278,6 +280,44 @@ impl EnrichedMitcShell {
     /// Number of free nodal coordinates plus two retained rotations per facet.
     pub fn dimension(&self) -> usize {
         self.mass.nrows()
+    }
+
+    /// Physical kinetic storage change between two states in the original
+    /// reference basis. All nodal/director cross inertia remains represented.
+    /// Small transfers survive a large unchanged kinetic inventory; the
+    /// descriptive endpoint totals are not subtracted to obtain this value.
+    pub fn kinetic_energy_change_j(
+        &self,
+        before: &MitcTransientState,
+        after: &MitcTransientState,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, PlateError> {
+        finite(self.kinetic_increment(before, after, &mut cancelled)?.to_f64())
+    }
+
+    fn kinetic_increment(
+        &self,
+        before: &MitcTransientState,
+        after: &MitcTransientState,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Dd, PlateError> {
+        check(cancelled)?;
+        self.admit_state(before)?;
+        self.admit_state(after)?;
+        increment(
+            &before.velocity,
+            &after.velocity,
+            |x, out, cancelled| action_into(&self.mass, x, out, cancelled),
+            cancelled,
+        )
+        .map(|value| value.change)
+        .map_err(|error| match error {
+            QuadraticError::Cancelled => PlateError::Cancelled,
+            QuadraticError::Operator(error) => error,
+            QuadraticError::Dimension | QuadraticError::NonFinite => {
+                invalid("unrepresentable original shell kinetic increment")
+            }
+        })
     }
 
     /// Admit an explicit complete state. Nodal values must already obey the
@@ -672,6 +712,15 @@ fn action(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<f64>, PlateError> {
     let mut out = vec![0.0; matrix.nrows()];
+    action_into(matrix, x, &mut out, cancelled)?;
+    Ok(out)
+}
+fn action_into(
+    matrix: &Csr,
+    x: &[f64],
+    out: &mut [f64],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), PlateError> {
     for (row, value) in out.iter_mut().enumerate() {
         row_check(row, cancelled)?;
         let (cols, vals) = matrix.row(row);
@@ -681,14 +730,17 @@ fn action(
         }
         *value = finite(sum.0 + sum.1)?;
     }
-    Ok(out)
+    Ok(())
 }
 fn product(a: &[f64], b: &[f64]) -> Result<f64, PlateError> {
+    Ok(product_retained(a, b)?.to_f64())
+}
+fn product_retained(a: &[f64], b: &[f64]) -> Result<Dd, PlateError> {
     let mut sum = (0.0, 0.0);
     for (&a, &b) in a.iter().zip(b) {
         sum = dd_add(sum, two_prod(a, b));
     }
-    finite(sum.0 + sum.1)
+    Ok(Dd::from_pair(finite(sum.0)?, finite(sum.1)?))
 }
 fn finite(value: f64) -> Result<f64, PlateError> {
     if value.is_finite() {
