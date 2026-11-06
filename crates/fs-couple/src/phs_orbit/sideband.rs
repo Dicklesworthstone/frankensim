@@ -27,8 +27,9 @@ use fs_phs::PortHamiltonian;
 
 mod prepared;
 pub use prepared::{
-    AdaptivePhsPortSidebandCarrierDerivativeResponse, AdaptivePhsPortSidebandResponse,
-    FactoredPhsPortSidebands, PhsPortResonanceRequest, PhsPortResonanceResponse,
+    AdaptivePhsPortResonanceResponse, AdaptivePhsPortSidebandCarrierDerivativeResponse,
+    AdaptivePhsPortSidebandResponse, FactoredPhsPortSidebands, PhsPortAdaptiveResonanceRequest,
+    PhsPortResonanceRefinementCheck, PhsPortResonanceRequest, PhsPortResonanceResponse,
     PhsPortSidebandCarrierDerivativeResponse, PhsPortSidebandSource, PreparedPhsPortSidebands,
     solve_forced_feedback_port_sideband_response,
     solve_forced_feedback_port_sideband_response_analytic,
@@ -117,6 +118,11 @@ pub enum PhsPortSidebandError {
     /// last norms are in physical output units per angular frequency.
     DerivativeObservationUnresolved {
         last: PhsPortSidebandCheck,
+    },
+    /// Maximum common state order was reached before all physical pair and
+    /// independently measured peak/linewidth changes resolved.
+    ResonanceUnresolved {
+        last: PhsPortResonanceRefinementCheck,
     },
 }
 impl core::fmt::Display for PhsPortSidebandError {
@@ -569,7 +575,13 @@ fn observe_with_budget(
     loop {
         poll(cancelled)?;
         admit_storage_with_retained(n, m, c, samples, budget.retained_bytes)?;
-        budget.actions += 2 * samples;
+        budget.actions =
+            budget
+                .actions
+                .checked_add(2 * samples)
+                .ok_or(PhsPortSidebandError::Budget(
+                    "physical output Hessian-action count overflow",
+                ))?;
         if budget.actions > c.max_hessian_actions {
             return Err(PhsPortSidebandError::Budget(
                 "physical output Hessian-action cap exhausted",

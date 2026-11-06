@@ -24,7 +24,10 @@ use fs_orbit::{
 mod adaptive;
 mod resonance;
 mod sensitivity;
-pub use adaptive::AdaptivePhsPortSidebandCarrierDerivativeResponse;
+pub use adaptive::{
+    AdaptivePhsPortResonanceResponse, AdaptivePhsPortSidebandCarrierDerivativeResponse,
+    PhsPortAdaptiveResonanceRequest, PhsPortResonanceRefinementCheck,
+};
 pub use resonance::{PhsPortResonanceRequest, PhsPortResonanceResponse};
 pub use sensitivity::PhsPortSidebandCarrierDerivativeResponse;
 

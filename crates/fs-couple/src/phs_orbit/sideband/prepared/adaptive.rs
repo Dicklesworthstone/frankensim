@@ -18,6 +18,12 @@ use fs_orbit::sideband::sensitivity::{
     },
 };
 
+mod resonance;
+pub use resonance::{
+    AdaptivePhsPortResonanceResponse, PhsPortAdaptiveResonanceRequest,
+    PhsPortResonanceRefinementCheck,
+};
+
 /// A complete physical pair whose original state equations and carrier
 /// derivatives passed independent sampled and actual inter-order checks.
 #[derive(Clone, Debug)]
