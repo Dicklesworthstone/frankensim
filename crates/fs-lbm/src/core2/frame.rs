@@ -23,6 +23,48 @@ pub struct RigidFrame2 {
     pub origin_acceleration: [f64; 2],
 }
 
+/// Local rotating-plane source with effective body acceleration.
+///
+/// Retains only `-2 * angular_velocity cross u`. Centrifugal acceleration
+/// must already be absorbed in the caller's effective gravity/potential.
+/// This spatially uniform model admits periodic domains; it is not the
+/// complete accelerating-vessel model supplied by [`RigidFrame2`].
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Coriolis2 {
+    /// Right-handed spin about +z [rad/lattice time]; the f parameter is 2*spin.
+    pub angular_velocity: f64,
+}
+
+impl Coriolis2 {
+    /// Prepare `du/dt = acceleration - 2*omega cross u` for one native step.
+    ///
+    /// `acceleration` is the effective non-Coriolis acceleration [dx/dt²].
+    /// Pressure and viscous terms stay in the native flow operator. This
+    /// replaces both held force fields, preserving current physical velocity
+    /// and stress through the same Guo reframe as [`RigidFrame2::prepare_step`].
+    /// Preparation advances no time; refresh before every native step.
+    ///
+    /// The midpoint source does no Coriolis work and preserves a homogeneous
+    /// geostrophic state when `acceleration = 2*omega cross u`. Its isolated
+    /// rotation angle is `-2*atan(omega)` per tick: phase is second order,
+    /// not exact. Spatial transport and boundaries have their original errors.
+    ///
+    /// # Errors
+    /// Nonfinite/unrepresentable input, invalid storage, or a nonphysical cell;
+    /// refusal leaves accepted populations and forces unchanged.
+    pub fn prepare_step(
+        self,
+        grid: &mut Grid,
+        acceleration: [f64; 2],
+    ) -> Result<(), FrameForcingError2> {
+        RigidFrame2 {
+            angular_velocity: self.angular_velocity,
+            ..RigidFrame2::default()
+        }
+        .prepare_step_inner::<true>(grid, acceleration)
+    }
+}
+
 /// Refusal before changing populations or forces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameForcingError2 {
@@ -76,6 +118,14 @@ impl RigidFrame2 {
         grid: &mut Grid,
         acceleration: [f64; 2],
     ) -> Result<(), FrameForcingError2> {
+        self.prepare_step_inner::<false>(grid, acceleration)
+    }
+
+    fn prepare_step_inner<const CORIOLIS_ONLY: bool>(
+        self,
+        grid: &mut Grid,
+        acceleration: [f64; 2],
+    ) -> Result<(), FrameForcingError2> {
         if !self
             .origin
             .into_iter()
@@ -102,12 +152,13 @@ impl RigidFrame2 {
         }
         for cell in 0..count {
             if matches!(grid.flags[cell], Cell::Fluid | Cell::Interface) {
-                self.cell_force(grid, cell, acceleration)?;
+                self.cell_force::<CORIOLIS_ONLY>(grid, cell, acceleration)?;
             }
         }
         for cell in 0..count {
             if matches!(grid.flags[cell], Cell::Fluid | Cell::Interface) {
-                let (force, populations) = self.cell_force(grid, cell, acceleration)?;
+                let (force, populations) =
+                    self.cell_force::<CORIOLIS_ONLY>(grid, cell, acceleration)?;
                 grid.f[cell] = populations;
                 grid.fext[cell] = force;
             } else {
@@ -118,7 +169,7 @@ impl RigidFrame2 {
         Ok(())
     }
 
-    fn cell_force(
+    fn cell_force<const CORIOLIS_ONLY: bool>(
         self,
         grid: &Grid,
         cell: usize,
@@ -137,14 +188,18 @@ impl RigidFrame2 {
         }
         let velocity = grid.moments(cell).u;
         let previous = core::array::from_fn(|d| grid.g[d].mul_add(rho, grid.fext[cell][d]));
-        let position = [(cell % grid.nx) as f64, (cell / grid.nx) as f64];
-        let r = [position[0] - self.origin[0], position[1] - self.origin[1]];
         let omega = self.angular_velocity;
-        let alpha = self.angular_acceleration;
-        let base = [
-            acceleration[0] - self.origin_acceleration[0] + omega * (omega * r[0]) + alpha * r[1],
-            acceleration[1] - self.origin_acceleration[1] + omega * (omega * r[1]) - alpha * r[0],
-        ];
+        let base = if CORIOLIS_ONLY {
+            acceleration
+        } else {
+            let position = [(cell % grid.nx) as f64, (cell / grid.nx) as f64];
+            let r = [position[0] - self.origin[0], position[1] - self.origin[1]];
+            let alpha = self.angular_acceleration;
+            [
+                acceleration[0] - self.origin_acceleration[0] + omega * (omega * r[0]) + alpha * r[1],
+                acceleration[1] - self.origin_acceleration[1] + omega * (omega * r[1]) - alpha * r[0],
+            ]
+        };
         // (I + omega J) u_mid = u_start + a_non_coriolis / 2.
         // No iteration or velocity clipping; the skew source does no midpoint work.
         let b = [velocity[0] + 0.5 * base[0], velocity[1] + 0.5 * base[1]];

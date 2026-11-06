@@ -3,7 +3,7 @@
 use super::*;
 
 mod frame;
-pub use frame::RigidFrame3;
+pub use frame::{Coriolis3, RigidFrame3};
 mod acceleration;
 mod forchheimer;
 mod impulse;

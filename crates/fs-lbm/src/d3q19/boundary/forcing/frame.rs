@@ -24,6 +24,52 @@ pub struct RigidFrame3 {
     pub origin_acceleration: [f64; 3],
 }
 
+/// Uniform local rotating-flow source, with centrifugal potential absorbed
+/// into the caller's effective body acceleration.
+///
+/// Unlike [`RigidFrame3`], this is a local Coriolis model, not the kinematics
+/// of a complete accelerating vessel. It supports arbitrary-axis spin on
+/// fully periodic boxes as well as closed domains.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Coriolis3 {
+    /// Right-handed angular velocity [rad/lattice time], resolved in grid axes.
+    /// In east/north/up axes a planet's spin is `[0, Omega*cos(phi), Omega*sin(phi)]`.
+    /// Retain only the up component for the traditional horizontal f-plane.
+    pub angular_velocity: [f64; 3],
+}
+
+impl Coriolis3 {
+    /// Prepare one native step with `a = acceleration - 2*omega cross u`.
+    ///
+    /// The effective non-Coriolis acceleration [dx/dt²] is held for this tick.
+    /// Pressure, viscosity and wall reactions remain in the native operator.
+    /// Refresh before each step. All original Guo source-frame, atomicity and
+    /// collision admission guarantees of [`RigidFrame3::prepare_step`] apply.
+    /// Open pressure/velocity faces remain unsupported.
+    ///
+    /// The isolated midpoint source preserves kinetic energy and axial velocity
+    /// for zero effective acceleration, and preserves geostrophic equilibrium
+    /// `acceleration = 2*omega cross u`. Its angle is `-2*atan(|omega|)`:
+    /// no-work preservation is exact to roundoff, phase is second order.
+    /// This makes no full-flow energy or global spherical-geometry claim.
+    pub fn prepare_step(
+        self,
+        grid: &mut BoundaryGrid3,
+        acceleration: [f64; 3],
+        gate: &CancelGate,
+    ) -> Result<(), BoundaryForcingError3> {
+        self.frame()
+            .prepare_step_inner::<true>(grid, acceleration, gate, false)
+    }
+
+    pub(crate) fn frame(self) -> RigidFrame3 {
+        RigidFrame3 {
+            angular_velocity: self.angular_velocity,
+            ..RigidFrame3::default()
+        }
+    }
+}
+
 impl RigidFrame3 {
     /// Replace the owned force field for the next original lattice step.
     ///
@@ -61,7 +107,7 @@ impl RigidFrame3 {
         acceleration: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(), BoundaryForcingError3> {
-        self.prepare_step_inner(grid, acceleration, gate, false)
+        self.prepare_step_inner::<false>(grid, acceleration, gate, false)
     }
 
     // The prescribed-acceleration owner shares this atomic Guo reframe, but
@@ -72,10 +118,10 @@ impl RigidFrame3 {
         acceleration: [f64; 3],
         gate: &CancelGate,
     ) -> Result<(), BoundaryForcingError3> {
-        Self::default().prepare_step_inner(grid, acceleration, gate, true)
+        Self::default().prepare_step_inner::<false>(grid, acceleration, gate, true)
     }
 
-    fn prepare_step_inner(
+    fn prepare_step_inner<const CORIOLIS_ONLY: bool>(
         self,
         grid: &mut BoundaryGrid3,
         acceleration: [f64; 3],
@@ -83,7 +129,8 @@ impl RigidFrame3 {
         acceleration_open_faces: bool,
     ) -> Result<(), BoundaryForcingError3> {
         poll(gate)?;
-        let denominator = self.admit(grid, acceleration, acceleration_open_faces)?;
+        let denominator =
+            self.admit::<CORIOLIS_ONLY>(grid, acceleration, acceleration_open_faces)?;
         let mut initial_force_field = if grid.force_field.is_none() {
             Some(vec![[0.0; 3]; grid.f[0].len() * TILE_CELLS])
         } else {
@@ -97,7 +144,7 @@ impl RigidFrame3 {
                     let cell = grid.coords(tile, lane);
                     admit_populations(&populations, cell)?;
                     let (previous, next, velocity) =
-                        self.cell_force(grid, tile, lane, acceleration, denominator)?;
+                        self.cell_force::<CORIOLIS_ONLY>(grid, tile, lane, acceleration, denominator)?;
                     if previous != next {
                         crate::thermal::forcing::reframe3(
                             &mut populations,
@@ -122,7 +169,7 @@ impl RigidFrame3 {
         for tile in 0..grid.f[0].len() {
             for lane in 0..TILE_CELLS {
                 let next = if grid.solid[tile] & (1u64 << lane) == 0 {
-                    self.cell_force(grid, tile, lane, acceleration, denominator)
+                    self.cell_force::<CORIOLIS_ONLY>(grid, tile, lane, acceleration, denominator)
                         .expect("rigid-frame cell was admitted against unchanged local state")
                         .1
                 } else {
@@ -145,7 +192,7 @@ impl RigidFrame3 {
         Ok(())
     }
 
-    fn admit(
+    fn admit<const CORIOLIS_ONLY: bool>(
         self,
         grid: &BoundaryGrid3,
         acceleration: [f64; 3],
@@ -165,7 +212,7 @@ impl RigidFrame3 {
                     "rigid-frame flow requires closed or compatible periodic boundaries",
                 ));
             }
-            if boundary.is_periodic() {
+            if !CORIOLIS_ONLY && boundary.is_periodic() {
                 let axis = face.axis();
                 if (0..3).any(|other| {
                     other != axis
@@ -181,7 +228,7 @@ impl RigidFrame3 {
         Ok(denominator)
     }
 
-    fn cell_force(
+    fn cell_force<const CORIOLIS_ONLY: bool>(
         self,
         grid: &BoundaryGrid3,
         tile: usize,
@@ -196,7 +243,8 @@ impl RigidFrame3 {
         let previous = cell_force(grid.force, grid.force_field.as_deref(), tile, lane);
         let velocity = core::array::from_fn(|axis| (momentum[axis] + 0.5 * previous[axis]) / rho);
         let position = cell.map(|coordinate| coordinate as f64 + 0.5);
-        let effective = self.effective_acceleration(position, velocity, acceleration, denominator);
+        let effective =
+            self.source_acceleration::<CORIOLIS_ONLY>(position, velocity, acceleration, denominator);
         let next = effective.map(|value| rho * value);
         if !previous
             .into_iter()
@@ -226,6 +274,22 @@ impl RigidFrame3 {
             return Err("rigid-frame motion must be finite and representable");
         }
         Ok(denominator)
+    }
+
+    // The constant selector removes position-dependent work from local-source
+    // kernels while preserving the existing rigid-frame arithmetic verbatim.
+    pub(crate) fn source_acceleration<const CORIOLIS_ONLY: bool>(
+        self,
+        position: [f64; 3],
+        velocity: [f64; 3],
+        acceleration: [f64; 3],
+        denominator: f64,
+    ) -> [f64; 3] {
+        if CORIOLIS_ONLY {
+            midpoint_acceleration(self.angular_velocity, velocity, acceleration, denominator)
+        } else {
+            self.effective_acceleration(position, velocity, acceleration, denominator)
+        }
     }
 
     pub(crate) fn effective_acceleration(

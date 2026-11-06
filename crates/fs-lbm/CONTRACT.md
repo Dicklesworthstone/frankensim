@@ -11635,6 +11635,36 @@ actual closed-box collision/stream/wall linear and angular impulse account.
 The runnable
 `rotating_tank3` example supplies a smooth spin-up schedule to this same owner.
 
+### Local Coriolis flow on periodic domains
+
+`core2::frame::Coriolis2` and `d3q19::Coriolis3` select the local source
+`a_effective - 2*omega cross u` explicitly. Centrifugal acceleration is already
+absorbed into the authored effective potential/gravity; Euler and origin
+acceleration are not inferred. The two-dimensional f parameter is twice the
+out-of-plane angular velocity. Three-dimensional angular velocity may have
+any direction, including the horizontal component of planetary rotation.
+
+The original two-/three-dimensional midpoint inverse supplies the source,
+with the same physical Guo reframe and atomic field publication. The local
+source is translation invariant and therefore admits arbitrary periodic axes;
+the full `RigidFrame3` owner retains its incompatible-periodicity refusal.
+Open density/velocity faces remain unsupported. Constant specialization removes
+the unused position-dependent rigid-frame terms without adding an iterative
+solve, per-cell trigonometry or a second dense scratch allocation.
+
+Refresh before every native step. A homogeneous force-free inertial oscillation
+preserves kinetic energy and axial velocity to roundoff; its per-step angle is
+`-2*atan(|omega|)`, so phase is second order rather than exact. The homogeneous
+geostrophic state `a_effective = 2*omega cross u` is stationary. This does not
+claim exact energy conservation for transport/walls, spherical geometry,
+beta-plane variation, or resolved atmospheric thermodynamics. Parameters use
+the existing lattice units, with `omega_lattice = omega_SI * dt`.
+
+`tests/coriolis.rs` covers both spin signs, zero spin, arbitrary-axis periodic
+collision/streaming in all four admitted D3Q19 collision models, independent
+Rodrigues phase, geostrophic balance, current-velocity preservation, full-frame
+periodicity refusal, closed/open faces, invalid cells and cancellation.
+
 ### Acceleration of sparse free surfaces and material-owned vessels
 
 `RigidFrame3::prepare_free_surface_step` applies the SAME admitted rigid-frame
