@@ -273,6 +273,85 @@ struct Element {
     volume: f64,
 }
 
+/// Scope-local reuse of the native reference geometry during a nonlinear path.
+/// Histories remain explicit inputs: preparation cannot freeze trial damage or
+/// commit an internal variable. No alternate constitutive/assembly kernel exists.
+pub(crate) struct PreparedSmallStrainTet<'p, 'a, L: SmallStrainLaw> {
+    problem: &'p SmallStrainTetProblem<'a, L>,
+    elements: Vec<Element>,
+}
+
+impl<'a, L: SmallStrainLaw> SmallStrainTetProblem<'a, L> {
+    pub(crate) fn prepare_evaluator(
+        &self,
+        cx: &Cx<'_>,
+    ) -> Result<PreparedSmallStrainTet<'_, 'a, L>, SmallStrainTetError> {
+        checkpoint(cx)?;
+        let elements = self.validate()?;
+        checkpoint(cx)?;
+        Ok(PreparedSmallStrainTet {
+            problem: self,
+            elements,
+        })
+    }
+}
+
+impl<L: SmallStrainLaw> PreparedSmallStrainTet<'_, '_, L> {
+    pub(crate) fn internal_force(
+        &self,
+        displacement_m: &[f64],
+        states: &[L::State],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, SmallStrainTetError> {
+        checkpoint(cx)?;
+        self.problem.check(displacement_m, states)?;
+        self.problem
+            .internal(&self.elements, states, displacement_m, None, cx)
+            .map(|(force, _)| force)
+    }
+
+    pub(crate) fn tangent_matrix(
+        &self,
+        displacement_m: &[f64],
+        states: &[L::State],
+        cx: &Cx<'_>,
+    ) -> Result<Csr, SmallStrainTetError> {
+        checkpoint(cx)?;
+        self.problem.check(displacement_m, states)?;
+        self.problem
+            .tangent(&self.elements, states, displacement_m, None, None, cx)
+    }
+
+    pub(crate) fn strain_field(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Vec<Voigt>, SmallStrainTetError> {
+        checkpoint(cx)?;
+        if displacement_m.len() != 3 * self.problem.nodes_m.len()
+            || displacement_m.iter().any(|value| !value.is_finite())
+        {
+            return Err(SmallStrainTetError::InvalidInput {
+                what: "invalid prepared displacement field".into(),
+            });
+        }
+        let mut strains = Vec::with_capacity(self.elements.len());
+        for (index, element) in self.elements.iter().enumerate() {
+            if index % 256 == 0 {
+                checkpoint(cx)?;
+            }
+            let strain = SmallStrainTetProblem::<L>::strain(element, displacement_m);
+            if strain.iter().any(|value| !value.is_finite()) {
+                return Err(SmallStrainTetError::InvalidInput {
+                    what: "nonfinite prepared element strain".into(),
+                });
+            }
+            strains.push(strain);
+        }
+        Ok(strains)
+    }
+}
+
 const WEIGHT: [f64; 6] = [1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {

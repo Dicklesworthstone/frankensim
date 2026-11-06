@@ -9050,6 +9050,47 @@ into heat. The manufactured cases in `tests/brittle_tet_solid.rs` cover softenin
 unloading, complete Gc-times-area loss, compressive reclosure, independent source
 strengths/widths, force/support work and rejected-candidate rollback.
 
+## History-preserving brittle arclength continuation
+
+`brittle::solid::continuation::BrittleTetContinuation` binds an accepted
+source-defined P1 brittle solid to fixed support coordinates, a proportional
+dead-force pattern, explicit SI displacement/force scales, and bounded step and
+assembly work. The existing Keller bordered solver advances free normalized
+coordinates and the load multiplier together, so the force multiplier may
+decrease while tensile damage grows. Supports may retain a nonzero preload but
+cannot move along this path. Original forces on supports remain in reactions;
+duplicate nodal forces add in their input order.
+
+Every residual and Jacobian evaluates the original material trial from the
+same accepted damage history, including the native evolving-damage tangent.
+A crate-private P1 evaluator retains the native reference geometry through all
+corrector evaluations; no second constitutive or assembly kernel is introduced.
+The native material selects unloading stiffness at its accepted envelope, so
+subsequent predictors preserve the actual accepted secant direction. An explicit
+physical direction can enter a damaged branch or request unloading. This
+numerical direction never changes material state. Sharp constitutive corners
+may need a smaller arc step or a supplied direction; no unique branch selection
+or automatic event localization is claimed.
+
+The final free-force residual is checked independently. Candidate strains,
+stresses and histories then pass the same original material-work, cumulative
+fracture, endpoint-work and released-face gates as ordinary `BrittleTetSolid`
+equilibrium. A separate damage-increment allowance limits accepted jumps.
+Refusal, exhausted assembly/step work and cancellation return no partial
+history. Lowering the explicit maximum step permits a retry from the identical
+checkpoint. The load-factor/deflection trace retains at most the admitted
+step count plus its initial observation.
+
+This is quasistatic, small-strain, fixed-plane equilibrium with immutable
+material conditions and topology. Arc length supplies no physical time or
+dynamic stability proof. Endpoint quadrature error is neither heat nor fracture
+loss. Four regression groups in `tests/brittle_tet_solid/continuation.rs`
+check the independent bilinear tensile response through the descending branch
+and complete `Gc*A` loss, original-history unloading and replay, rejected
+energy/damage/budget/cancelled proposals, and initial-force/support/scale
+admission. Measured material validation and performance benchmarking remain
+outside these manufactured implementation checks.
+
 ## Native pressure-sensitive porous compression
 
 The existing generic `SmallStrainLaw` assembly and plastic-increment solver

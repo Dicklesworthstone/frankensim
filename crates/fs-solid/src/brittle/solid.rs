@@ -13,9 +13,10 @@
 //! path retains reference mass and velocity through physical-time fracture.
 //! The [`fracture`] path releases explicitly completed traction-free faces and
 //! retains their history through native continuation. Fixed planes do not
-//! rotate; closing released faces require an explicit contact response. Finite
-//! kinematics and limit-load tracking are absent. The caller resolves loading
-//! reversals and softening with physical endpoints.
+//! rotate; closing released faces require an explicit contact response. The
+//! [`continuation`] path follows proportional-force equilibrium branches through
+//! tensile softening. Finite kinematics remain absent. The caller resolves
+//! loading reversals and softening with physical endpoints.
 
 /// Checked temperature/source transfer followed by native mechanical equilibration.
 pub mod temperature;
@@ -34,6 +35,9 @@ pub mod expansion;
 
 /// Traction-free release of completed crack bands into retained physical fragments.
 pub mod fracture;
+
+/// History-preserving pseudo-arclength paths through tensile softening.
+pub mod continuation;
 
 use std::sync::Arc;
 
@@ -341,6 +345,32 @@ impl<'a> BrittleTetSolid<'a> {
             settings,
         };
         let solution = problem.solve_from(old_u, &self.solution.element_states, cx)?;
+        self.accept_equilibrium(solution, prescribed_m, nodal_forces_n, controls, cx)
+    }
+
+    /// Shared complete publication gate for native load and arclength solves.
+    /// The caller must already have checked the actual free-force equation.
+    fn accept_equilibrium(
+        &self,
+        solution: SmallStrainTetSolution<BrittleState<'a>>,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        controls: BrittleTetControls,
+        cx: &Cx<'_>,
+    ) -> Result<BrittleTetStep<'a>, BrittleTetError> {
+        if [
+            controls.material_energy_tolerance_j,
+            controls.equilibrium_work_tolerance_j,
+            controls.maximum_endpoint_work_defect_j,
+        ]
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            return Err(BrittleTetError::Invalid(
+                "finite nonnegative work tolerances required",
+            ));
+        }
+        let old_u = self.solution.displacement_m.as_flattened();
         self.require_released_faces(&solution.displacement_m, cx)?;
         let (mut energy, element_energy, cumulative_loss) = self.material_energy(&solution, cx)?;
         let new_u = solution.displacement_m.as_flattened();
