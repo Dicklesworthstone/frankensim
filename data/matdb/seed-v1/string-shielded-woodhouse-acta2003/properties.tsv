@@ -1,0 +1,11 @@
+frankensim.matdb-source.v1
+observation	w2003-table-i-string	Effective thermal solid of a bowed string's surface, not a material specimen: the "String" column of Table I (p. 358), the stationary surface of the paper's bowed-string simulations, which take a rosin-coated perspex rod bowing a string whose outer layer is metal but is thermally shielded by a transferred layer of rosin (Section 2.1); the same column prints the Eq. (3) thermal parameter sqrt(K rho c) as 2050	Chosen by the author, not measured: taken "somewhat arbitrarily" as the geometric mean of values for a typical steel and a typical polymer, neither named; the paper calls some Table I values quite uncertain and expects them to be adjusted against experiment	Temperature not stated for Table I (a simulation input at ambient)
+scalar	density	w2003-table-i-string	density	3000	kg/m^3	constant
+uncertainty	density	unstated	-	-	-	-
+validity	density	temperature_known	0	0	1
+scalar	thermal-conductivity	w2003-table-i-string	thermal_conductivity	1.4	W/m/K	constant
+uncertainty	thermal-conductivity	unstated	-	-	-	-
+validity	thermal-conductivity	temperature_known	0	0	1
+scalar	specific-heat-capacity	w2003-table-i-string	specific_heat_capacity	1000	J/kg/K	constant
+uncertainty	specific-heat-capacity	unstated	-	-	-	-
+validity	specific-heat-capacity	temperature_known	0	0	1

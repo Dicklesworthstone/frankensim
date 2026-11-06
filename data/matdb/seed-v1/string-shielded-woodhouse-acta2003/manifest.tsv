@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	string-shielded-woodhouse-acta2003
+redistribution	permitted	Numerical simulation inputs retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Woodhouse J. (2003), Bowed string simulation using a thermal friction model, Acta Acustica united with Acustica 89:355-368; Section 2.1, Eq. (3) and Table I (p. 358) read on the author's copy hosted by the author (https://euphonics.org/wp-content/uploads/2022/03/Thermal_bowing.pdf); Galluzzo, Woodhouse and Mansour (2017), Acta Acustica united with Acustica 103:1080-1099, Table 2 caption, state that their thermal-model simulations used these values unchanged
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	properties.tsv	material-tsv-v1
