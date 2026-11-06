@@ -520,6 +520,110 @@ fn parallel_paths_thickness_voltage_reversal_and_gauge_preserve_power() {
 }
 
 #[test]
+fn prepared_current_drive_reuses_the_spatial_resistance_and_preserves_local_heat() {
+    let problem = slab(
+        conductor(4.0, ElectricalPropertyBasis::Conductivity),
+        conductor(2.0, ElectricalPropertyBasis::Resistivity),
+        0.2,
+    );
+    let expected_resistance = (0.5 / 4.0 + 0.5 / 2.0) / 0.2;
+    for reference_voltage in [0.125, 1.0, 2.0] {
+        let response = problem
+            .resistance_at_reference_voltage(
+                &[2, 5],
+                &[0, 3],
+                reference_voltage,
+                controls(),
+                &mut || false,
+            )
+            .unwrap();
+        near(response.resistance_ohm(), expected_resistance);
+        let original_reference = response.reference_field().voltage_v().to_vec();
+        for current in [-0.6, 0.0, 0.6, 1.2] {
+            let field = response
+                .field_at_current(current, 1e-10, 1e-10, &mut || false)
+                .unwrap();
+            let independently_driven = problem
+                .solve(
+                    &ends(current * expected_resistance),
+                    controls(),
+                    &mut || false,
+                )
+                .unwrap();
+            assert!(field.report().is_none());
+            near(field.voltage_v()[2], current * expected_resistance);
+            near(field.power_w(), current * current * expected_resistance);
+            let reactions = field.nodal_boundary_current_a();
+            near(reactions[2].unwrap() + reactions[5].unwrap(), current);
+            near(reactions[0].unwrap() + reactions[3].unwrap(), -current);
+            for cell in 0..4 {
+                let conductivity = if cell < 2 { 4.0 } else { 2.0 };
+                near(field.current_density_a_m2()[cell][0], -current / 0.2);
+                near(
+                    field.electric_field_v_m()[cell][0],
+                    -current / (0.2 * conductivity),
+                );
+                near(
+                    field.cell_power_w()[cell],
+                    0.05 * (current / 0.2).powi(2) / conductivity,
+                );
+                near(
+                    field.cell_power_w()[cell],
+                    independently_driven.cell_power_w()[cell],
+                );
+            }
+            assert_eq!(response.reference_field().voltage_v(), original_reference);
+        }
+    }
+}
+
+#[test]
+fn prepared_current_drive_cancellation_and_invalid_amplitudes_preserve_reuse() {
+    let problem = slab(
+        conductor(4.0, ElectricalPropertyBasis::Conductivity),
+        conductor(2.0, ElectricalPropertyBasis::Resistivity),
+        0.2,
+    );
+    let response = problem
+        .resistance(&[2, 5], &[0, 3], controls(), &mut || false)
+        .unwrap();
+    let mut polls = 0;
+    let expected = response
+        .field_at_current(0.6, 1e-10, 1e-10, &mut || {
+            polls += 1;
+            false
+        })
+        .unwrap();
+    let mut calls = 0;
+    assert!(matches!(
+        response.field_at_current(0.6, 1e-10, 1e-10, &mut || {
+            calls += 1;
+            calls == polls
+        }),
+        Err(ConductionError::Cancelled)
+    ));
+    for current in [f64::NAN, f64::INFINITY, f64::MAX, f64::MIN_POSITIVE] {
+        assert!(
+            response
+                .field_at_current(current, 1e-10, 1e-10, &mut || false)
+                .is_err()
+        );
+    }
+    for (current_tolerance, power_tolerance) in [(0.0, 1e-10), (1e-10, f64::NAN)] {
+        assert!(
+            response
+                .field_at_current(0.6, current_tolerance, power_tolerance, &mut || false)
+                .is_err()
+        );
+    }
+    let actual = response
+        .field_at_current(0.6, 1e-10, 1e-10, &mut || false)
+        .unwrap();
+    assert_eq!(actual.voltage_v(), expected.voltage_v());
+    assert_eq!(actual.cell_power_w(), expected.cell_power_w());
+}
+
+#[test]
 fn common_voltage_shift_preserves_a_free_interior_node_current_and_heat() {
     let mesh = TriComplex2::from_indexed_triangles(
         "conductor-free-interior-gauge",

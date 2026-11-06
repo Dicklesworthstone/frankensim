@@ -288,13 +288,27 @@ fn contact_connectivity_anchors_current_driven_otherwise_floating_body() {
         ),
         Err(ConductionError::Invalid(_))
     ));
+    let response = problem
+        .resistance_at_reference_voltage(&[5, 6], &[0, 3], 0.25, controls(), &mut || false)
+        .unwrap();
     for current in [-0.6, 0.0, 0.6] {
         let field = problem
             .solve_current(&[5, 6], &[0, 3], current, controls(), &mut || false)
             .unwrap();
+        let recovered = response
+            .field_at_current(current, 1e-10, 1e-10, &mut || false)
+            .unwrap();
         near(field.voltage_v()[5], current * 1.25 / 0.2);
         near(field.contact_response()[0].current_a, -current);
         near(field.power_w(), current * current * 1.25 / 0.2);
+        near(recovered.voltage_v()[5], field.voltage_v()[5]);
+        near(recovered.contact_response()[0].current_a, -current);
+        near(
+            recovered.contact_response()[0].power_w,
+            field.contact_response()[0].power_w,
+        );
+        near(recovered.power_w(), current * current * 1.25 / 0.2);
+        assert!(recovered.report().is_none());
     }
 }
 
