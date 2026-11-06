@@ -83,6 +83,53 @@ impl LayerFieldKernel {
         })
     }
 
+    /// Conservative whole-film magnitudes of the original tangential E/H.
+    /// This analytic envelope is for material-domain admission, not an
+    /// interval certificate or a claim that its maximum is attained.
+    pub(super) fn amplitude_bounds(self) -> Option<[f64; 2]> {
+        let endpoints =
+            core::array::from_fn::<_, 2, _>(|i| self.left[i].abs().max(self.right[i].abs()));
+        let values = if self.thickness == 0.0 || self.kz == C64::ZERO {
+            // At criticality the entire field is affine, so its norm is
+            // convex and is bounded by its two original endpoint norms.
+            endpoints
+        } else {
+            match self.interior {
+                Interior::Entire { a, b } => {
+                    // |cos(kz*z)| and |sinc(kz*z)| <= exp(|Im(kz)|*d).
+                    // Propagate from either original endpoint; both bounds
+                    // are valid, so the smaller one retains tighter admission.
+                    let growth = det::exp(-self.kz.im * self.thickness);
+                    let coupling = [a.abs(), b.abs()];
+                    core::array::from_fn(|i| {
+                        let bound = |trace: [C64; 2]| {
+                            growth
+                                * (trace[i].abs()
+                                    + (coupling[i] * self.thickness) * trace[1 - i].abs())
+                        };
+                        bound(self.left).min(bound(self.right)).max(endpoints[i])
+                    })
+                }
+                Interior::Decaying {
+                    admittance,
+                    forward,
+                    backward,
+                } => {
+                    // Each wave decays from its own face throughout the film.
+                    let electric = forward.abs() + backward.abs();
+                    [
+                        electric.max(endpoints[0]),
+                        (admittance.abs() * electric).max(endpoints[1]),
+                    ]
+                }
+            }
+        };
+        values
+            .iter()
+            .all(|v| v.is_finite() && *v >= 0.0)
+            .then_some(values)
+    }
+
     pub(super) fn field(self, depth: f64) -> Option<[C64; 2]> {
         if !depth.is_finite() || depth < 0.0 || depth > self.thickness {
             return None;

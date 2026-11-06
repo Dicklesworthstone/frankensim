@@ -40,7 +40,10 @@ pub use illumination::{
 
 mod fields;
 pub(super) use fields::PREPARATION_WORKSPACE_BYTES as FIELD_PREPARATION_WORKSPACE_BYTES;
-pub use fields::{LayerTangentialField, PreparedLayerField};
+pub use fields::{
+    IonizedGasLayerExcitation, IonizedGasLayerHeating, IonizedGasLayerPoint, LayerTangentialField,
+    PreparedIonizedGasLayerIllumination, PreparedLayerField,
+};
 
 /// Preparation storage and allocation-free angle work are bounded by this cap.
 pub const MAX_LAYERS: usize = 64;
@@ -121,14 +124,28 @@ impl<'a> PlanarDielectricLayers<'a> {
         omega_rad_s: f64,
         layers: &[DielectricLayer<'a>],
     ) -> Result<Self, ReflectionError> {
+        Self::try_new_for_fields(incident, exit, omega_rad_s, layers, false)
+    }
+
+    // Only the amplitude-bound plasma field owner may request ionized films.
+    // It admits every actual internal field before publishing any response,
+    // and never exposes this unrestricted normalized stack to its caller.
+    fn try_new_for_fields(
+        incident: DielectricResponse<'a>,
+        exit: DielectricResponse<'a>,
+        omega_rad_s: f64,
+        layers: &[DielectricLayer<'a>],
+        admit_ionized_films: bool,
+    ) -> Result<Self, ReflectionError> {
         // The half-space plasma owner checks the actual maximum surface drift.
         // Standing waves and beams require their own complete-field domain
         // admission; an unrestricted film power API must not bypass it.
         if matches!(incident, DielectricResponse::IonizedGas(_))
             || matches!(exit, DielectricResponse::IonizedGas(_))
-            || layers
-                .iter()
-                .any(|l| matches!(l.response, DielectricResponse::IonizedGas(_)))
+            || !admit_ionized_films
+                && layers
+                    .iter()
+                    .any(|l| matches!(l.response, DielectricResponse::IonizedGas(_)))
         {
             return Err(bad(
                 "ionized-gas films require whole-field drift admission; use the half-space wave owner",

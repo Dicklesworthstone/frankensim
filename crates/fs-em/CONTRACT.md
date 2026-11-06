@@ -4716,3 +4716,61 @@ transport, anisotropic dispersion/leakage, breakdown and moving geometry are
 outside this owner. Passive second-order midpoint does not guarantee monotone
 relaxation for unresolved time steps; refine against the physical pole and
 charge-relaxation times as well as the spatial mesh.
+
+## Whole-film admitted original ionized-gas illumination
+
+`PreparedIonizedGasLayerIllumination` binds the original finite dielectric
+stack to fixed simultaneous complex peak tangential electric inputs at its
+two faces. Exterior ports must be lossless, propagating and non-ionized;
+finite films may retain original ionized-gas, lossless, Ohmic, Debye or optical
+material responses. The existing unrestricted normalized layer constructors
+continue to refuse ionized gas. Their private construction seam is accessible
+only to the admitted owner and never escapes in its public results.
+
+The original coherent Maxwell solution supplies both boundary traces and
+positive integrated film loss. Each positive-thickness gas film then receives
+an analytic conservative envelope for its complete vector electric field.
+Counterpropagating waves decay from their respective faces; near the critical
+normal wavenumber the existing entire E/H propagator provides a bounded
+continuation. TM admission includes its longitudinal electric component.
+This admits the original weak carrier drift and Coulomb pair-relative drift
+for the whole film, including interior standing-wave antinodes. Separate
+admission of the incident beams, endpoint-only checks and sampled-depth checks
+do not replace this condition. The envelope is conservative and may refuse an
+actually admissible field; it is not an interval certificate or a claim that
+its bound is attained.
+
+Each admitted film retains its original source descriptor, physical two-face
+field kernel and original isotropic harmonic carrier response. Local queries
+return peak E/H, RMS squares, signed complex Poynting flux, positive absorbed
+power, free-carrier current, every original carrier velocity and the original
+electron/heavy thermal partition. Original signed exchange corrections are
+included once. Drift kinetic energy, reactive carrier power and lossless
+background field storage remain separate; a complex effective permittivity
+is not interpreted as stored energy. Local field access is read-only so the
+validated field cannot be replaced before cached carrier rescaling.
+
+Integrated carrier heating uses the original positive slab-loss result and
+the original material's thermal fractions, including coherent source
+interference. It does not subtract nearly equal boundary fluxes or introduce
+depth quadrature. Repeated point and heat queries allocate nothing, perform
+no stack solve and solve no carrier modes. The prepared wave cannot accept a
+new source amplitude without fresh whole-film admission. Zero-thickness films
+retain source identity and zero integrated heat but have no interior volume.
+Cancellation and any source/material/domain failure publish no partial wave.
+
+The physical domain remains frozen populations with local unmagnetized
+collisions and the original source applicability bounds. This is a coherent
+plane-wave film capability, without evolving ionization, sheath dynamics,
+magnetized response, transient reservoirs, arbitrary angular beams or lossy
+and evanescent exterior input ports.
+
+Focused regressions specify independent bidirectional Fabry-Perot amplitudes
+and closed-form volume heating for TE/TM below, near and above the original
+plasma frequency; pointwise original carrier responses and energy storage;
+multiple films with Coulomb heat partitions and zero-thickness identity; and
+coherent inputs whose individual amplitudes pass but combined internal field
+exceeds the original drift domain. Kernel regressions cover analytic field
+bounds through standing-wave, critical, evanescent and branch-transition
+limits. Pinned formatter/parser checks passed; native Rust regressions were
+added but were not executed in the shared editing environment.

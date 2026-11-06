@@ -12,6 +12,12 @@ use super::*;
 mod kernel;
 use kernel::LayerFieldKernel;
 
+mod plasma;
+pub use plasma::{
+    IonizedGasLayerExcitation, IonizedGasLayerHeating, IonizedGasLayerPoint,
+    PreparedIonizedGasLayerIllumination,
+};
+
 pub(in crate::plane_wave) const PREPARATION_WORKSPACE_BYTES: usize =
     core::mem::size_of::<[Slab; MAX_LAYERS]>()
         + core::mem::size_of::<[[C64; 2]; MAX_LAYERS + 1]>()

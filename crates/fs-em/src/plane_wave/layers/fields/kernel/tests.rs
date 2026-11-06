@@ -1,5 +1,56 @@
 use super::*;
 
+#[test]
+fn whole_film_envelopes_cover_standing_critical_and_evanescent_fields() {
+    for kz in [
+        C64::from_re(core::f64::consts::TAU),
+        C64::new(1.1, -0.4),
+        C64::new(0.0, -800.0),
+        C64::new(1e-5, -1e-6),
+        C64::from_re(0.499),
+        C64::from_re(0.501),
+    ] {
+        for tm in [false, true] {
+            let (a, b, y) = if tm {
+                let b = C64::new(2.2, -0.5);
+                ((kz * kz) / b, b, b / kz)
+            } else {
+                (C64::ONE, kz * kz, kz)
+            };
+            let forward = C64::ONE;
+            let backward = C64::from_re(-1.0);
+            let left = reference(kz, y, forward, backward, 1.0, 0.0);
+            let right = reference(kz, y, forward, backward, 1.0, 1.0);
+            let kernel =
+                LayerFieldKernel::new(1.0, kz, Dd::from_f64(kz.re), a, b, left, right).unwrap();
+            let bound = kernel.amplitude_bounds().unwrap();
+            for i in 0..=128 {
+                let exact = reference(kz, y, forward, backward, 1.0, i as f64 / 128.0);
+                for component in 0..2 {
+                    assert!(exact[component].abs() <= bound[component] * (1.0 + 2e-13));
+                }
+            }
+            if kz == C64::from_re(core::f64::consts::TAU) {
+                // Both face E fields vanish while an internal antinode is 2.
+                assert!(left[0].abs() < 1e-14 && right[0].abs() < 1e-14);
+                assert!(reference(kz, y, forward, backward, 1.0, 0.25)[0].abs() > 1.99);
+                assert!(bound[0] >= 1.99);
+            }
+        }
+    }
+    let left = [C64::new(0.2, 0.1), C64::new(0.3, -0.2)];
+    let right = [left[0] - C64::new(0.0, 3.0) * left[1], left[1]];
+    let critical =
+        LayerFieldKernel::new(3.0, C64::ZERO, Dd::ZERO, C64::ONE, C64::ZERO, left, right).unwrap();
+    assert_eq!(
+        critical.amplitude_bounds(),
+        Some([left[0].abs().max(right[0].abs()), left[1].abs()])
+    );
+    let identity =
+        LayerFieldKernel::new(0.0, C64::ONE, Dd::ONE, C64::ONE, C64::ONE, left, left).unwrap();
+    assert_eq!(identity.amplitude_bounds(), Some(left.map(C64::abs)));
+}
+
 fn close(a: C64, b: C64, tolerance: f64) {
     assert!(
         (a - b).abs() < tolerance * (1.0 + a.abs() + b.abs()),
