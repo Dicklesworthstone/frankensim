@@ -1,4 +1,4 @@
-//! Retained shaft locks: original kinetic form, carrier recoil and native drift.
+//! G1/G3 retained shaft locks: analytic drive work, recoil and frame-covariant motion.
 use fs_ga::{Mat3, Quat, So3, So3Tangent, Vec3};
 use fs_time::lie::gyrostat::rotors::{AxialRotor, RotorBank, RotorState};
 use fs_time::lie::gyrostat::{HeldTorque, InertiaTensor3};
@@ -253,16 +253,25 @@ fn reference(
     locks: [bool; 3],
     duration: f64,
 ) -> [f64; 10] {
+    driven_reference(
+        bank,
+        state,
+        locks,
+        duration,
+        [0.0; 3],
+        HeldTorque::Body(Vec3::default()),
+    )
+}
+
+fn driven_reference(
+    bank: &RotorBank<3>,
+    state: &RotorState<3>,
+    locks: [bool; 3],
+    duration: f64,
+    drive: [f64; 3],
+    external: HeldTorque,
+) -> [f64; 10] {
     let inv = inverse(mode_tensor(bank, locks));
-    let mut stored = Vec3::default();
-    for i in 0..3 {
-        if !locks[i] {
-            stored = stored
-                + bank.rotors()[i]
-                    .axis_body()
-                    .scale(state.axial_momentum_nms[i]);
-        }
-    }
     let q = state.rotation.as_quat();
     let l = state.total_momentum_body;
     let mut y = [
@@ -277,15 +286,34 @@ fn reference(
         state.relative_angle_rad[1],
         state.relative_angle_rad[2],
     ];
-    let rhs = |s: [f64; 10]| {
+    let rhs = |time: f64, s: [f64; 10]| {
+        // Held free-shaft effort has the exact absolute momentum p(t)=p0+tau*t.
+        // Locked axial momenta are algebraically carried by the mode tensor.
+        let mut stored = Vec3::default();
+        for i in 0..3 {
+            if !locks[i] {
+                stored = stored
+                    + bank.rotors()[i]
+                        .axis_body()
+                        .scale(state.axial_momentum_nms[i] + drive[i] * time);
+            }
+        }
         let momentum = Vec3::new(s[4], s[5], s[6]);
         let w = inv.apply(momentum - stored);
-        let dl = momentum.cross(w);
+        let torque = match external {
+            HeldTorque::Body(value) => value,
+            HeldTorque::Space(value) => {
+                let v = Vec3::new(s[1], s[2], s[3]);
+                value + v.cross(v.cross(value) - value.scale(s[0])).scale(2.0)
+            }
+        };
+        let dl = momentum.cross(w) + torque;
         let phase = core::array::from_fn::<_, 3, _>(|i| {
             if locks[i] {
                 0.0
             } else {
-                state.axial_momentum_nms[i] / bank.rotors()[i].axial_inertia_kg_m2()
+                (state.axial_momentum_nms[i] + drive[i] * time)
+                    / bank.rotors()[i].axial_inertia_kg_m2()
                     - bank.rotors()[i].axis_body().dot(w)
             }
         });
@@ -303,11 +331,18 @@ fn reference(
         ]
     };
     let h = duration / 8192.0;
-    for _ in 0..8192 {
-        let k1 = rhs(y);
-        let k2 = rhs(core::array::from_fn(|i| y[i] + 0.5 * h * k1[i]));
-        let k3 = rhs(core::array::from_fn(|i| y[i] + 0.5 * h * k2[i]));
-        let k4 = rhs(core::array::from_fn(|i| y[i] + h * k3[i]));
+    for step in 0..8192 {
+        let time = step as f64 * h;
+        let k1 = rhs(time, y);
+        let k2 = rhs(
+            time + 0.5 * h,
+            core::array::from_fn(|i| y[i] + 0.5 * h * k1[i]),
+        );
+        let k3 = rhs(
+            time + 0.5 * h,
+            core::array::from_fn(|i| y[i] + 0.5 * h * k2[i]),
+        );
+        let k4 = rhs(time + h, core::array::from_fn(|i| y[i] + h * k3[i]));
         for i in 0..10 {
             y[i] += (h / 6.0) * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]);
         }
@@ -481,4 +516,258 @@ fn empty_mode_reduces_to_native_free_motion_and_unresolved_engagement_is_atomic(
     );
     assert_eq!(unresolved, saved);
     assert_eq!(start, fixture().1);
+}
+
+
+#[test]
+fn driven_coaxial_lock_retains_recoil_and_analytic_motor_work() {
+    let axis = Vec3::new(0.0, 0.0, 1.0);
+    let bank = RotorBank::from_reduced(
+        InertiaTensor3::from_principal(Vec3::new(3.0, 3.0, 3.0), So3::identity()).unwrap(),
+        [
+            AxialRotor::new(axis, 1.0).unwrap(),
+            AxialRotor::new(axis, 0.5).unwrap(),
+        ],
+    )
+    .unwrap();
+    let start = bank
+        .state_from_velocities(
+            rotation(Vec3::new(0.2, -0.3, 0.4)),
+            axis.scale(0.25),
+            [0.0, 2.0],
+            [123.0, 0.2],
+        )
+        .unwrap();
+    let mode = bank.lock_mode([true, false]).unwrap();
+    let duration = 0.4;
+    let drive = 2.0;
+    let external = 0.8;
+    let step = mode
+        .step(
+            &start,
+            [0.0, drive],
+            HeldTorque::Body(axis.scale(external)),
+            duration,
+        )
+        .unwrap();
+    let after = step.motion.state_after;
+    // Locked carrier I=3+1=4. The free rotor has J=0.5:
+    // omega_dot=(0.8-2)/4=-0.3, relative_dot=2/0.5-omega_dot=4.3.
+    let carrier_phase = 0.25 * duration - 0.15 * duration * duration;
+    let shaft_phase = 2.0 * duration + 2.15 * duration * duration;
+    vector(bank.angular_velocity(&after).unwrap(), axis.scale(0.13), 2e-14);
+    close(bank.relative_rates(&after).unwrap()[1], 3.72, 3e-14);
+    close(after.axial_momentum_nms[0], 0.13, 2e-14);
+    close(after.axial_momentum_nms[1], 1.925, 2e-14);
+    assert_eq!(after.relative_angle_rad[0].to_bits(), start.relative_angle_rad[0].to_bits());
+    close(after.relative_angle_rad[1] - start.relative_angle_rad[1], shaft_phase, 3e-14);
+    attitude(
+        after.rotation,
+        start.rotation.compose(rotation(axis.scale(carrier_phase))).unwrap(),
+        2e-14,
+    );
+    close(step.drive_work_j, drive * shaft_phase, 3e-14);
+    close(step.motion.external_work_j, external * carrier_phase, 3e-14);
+    close(step.reaction_work_j, 0.0, 3e-14);
+    close(step.motion.kinetic_energy_change_j, 2.3488, 5e-14);
+    close(step.motion.drift_energy_defect_j, 0.0, 3e-14);
+    close(step.work_energy_residual_j, 0.0, 5e-14);
+    vector(
+        step.motion.external_angular_impulse_world,
+        start.rotation.rotate(axis.scale(external * duration)).unwrap(),
+        3e-14,
+    );
+    vector(step.motion.angular_momentum_residual_world, Vec3::default(), 3e-14);
+
+    let reverse = mode
+        .step(
+            &after,
+            [0.0, drive],
+            HeldTorque::Body(axis.scale(external)),
+            -duration,
+        )
+        .unwrap()
+        .motion
+        .state_after;
+    attitude(reverse.rotation, start.rotation, 4e-14);
+    vector(reverse.total_momentum_body, start.total_momentum_body, 4e-14);
+    for i in 0..2 {
+        close(reverse.axial_momentum_nms[i], start.axial_momentum_nms[i], 4e-14);
+        close(reverse.relative_angle_rad[i], start.relative_angle_rad[i], 4e-14);
+    }
+}
+
+#[test]
+fn driven_full_tensor_locks_refine_against_independent_euler_equations() {
+    let (bank, moving) = fixture();
+    let locks = [true, false, true];
+    let mode = bank.lock_mode(locks).unwrap();
+    let start = mode.engage(&moving).unwrap().impulse.state_after;
+    let drive = [0.0, 0.7, 0.0];
+    let external = Vec3::new(0.3, -0.2, 0.4);
+    let duration = 0.4;
+    let oracle = driven_reference(
+        &bank,
+        &start,
+        locks,
+        duration,
+        drive,
+        HeldTorque::Space(external),
+    );
+    let expected_rotation = So3::try_from_quat(Quat {
+        w: oracle[0],
+        x: oracle[1],
+        y: oracle[2],
+        z: oracle[3],
+    })
+    .unwrap();
+    let expected_momentum = Vec3::new(oracle[4], oracle[5], oracle[6]);
+    let mut errors = Vec::new();
+    for count in [20, 40, 80] {
+        let mut state = start;
+        let mut drive_work = 0.0;
+        for _ in 0..count {
+            let step = mode
+                .step(&state, drive, HeldTorque::Space(external), duration / count as f64)
+                .unwrap();
+            drive_work += step.drive_work_j;
+            vector(
+                step.motion.external_angular_impulse_world,
+                external.scale(duration / count as f64),
+                4e-14,
+            );
+            assert!(step.motion.angular_momentum_residual_world.norm() < 4e-14);
+            assert!(step.reaction_work_j.abs() < 4e-14);
+            assert!(step.work_energy_residual_j.abs() < 4e-13);
+            state = step.motion.state_after;
+            for i in [0, 2] {
+                assert_eq!(
+                    state.relative_angle_rad[i].to_bits(),
+                    start.relative_angle_rad[i].to_bits(),
+                );
+                close(bank.relative_rates(&state).unwrap()[i], 0.0, 5e-14);
+            }
+        }
+        vector(
+            state.rotation.rotate(state.total_momentum_body).unwrap(),
+            start.rotation.rotate(start.total_momentum_body).unwrap() + external.scale(duration),
+            2e-12,
+        );
+        close(
+            state.axial_momentum_nms[1],
+            start.axial_momentum_nms[1] + drive[1] * duration,
+            3e-14,
+        );
+        close(
+            drive_work,
+            drive[1] * (state.relative_angle_rad[1] - start.relative_angle_rad[1]),
+            3e-13,
+        );
+        let error = state.rotation.body_minus(expected_rotation).unwrap().angular.norm()
+            + (state.total_momentum_body - expected_momentum).norm()
+            + (state.relative_angle_rad[1] - oracle[8]).abs();
+        errors.push(error);
+    }
+    assert!(errors[1] < 0.28 * errors[0], "{errors:?}");
+    assert!(errors[2] < 0.28 * errors[1], "{errors:?}");
+}
+
+#[test]
+fn driven_lock_mode_preserves_spatial_covariance_and_native_zero_lock_limits() {
+    let (bank, moving) = fixture();
+    let external = Vec3::new(0.3, -0.2, 0.4);
+    let no_locks = bank.lock_mode([false; 3]).unwrap();
+    let drive = [0.2, -0.3, 0.4];
+    let original = bank.step(&moving, drive, HeldTorque::Space(external), 0.03).unwrap();
+    let unchanged = no_locks
+        .step(&moving, drive, HeldTorque::Space(external), 0.03)
+        .unwrap();
+    assert_eq!(unchanged.motion, original);
+    assert_eq!(unchanged.reaction_work_j, 0.0);
+
+    let mode = bank.lock_mode([true, false, true]).unwrap();
+    let start = mode.engage(&moving).unwrap().impulse.state_after;
+    let free = mode.drift(&start, 0.03).unwrap();
+    let zero = mode
+        .step(&start, [0.0; 3], HeldTorque::Body(Vec3::default()), 0.03)
+        .unwrap();
+    assert_eq!(zero.motion.state_after, free.state_after);
+    assert_eq!(zero.motion.drift_energy_defect_j, free.drift_energy_defect_j);
+    assert_eq!(zero.drive_work_j, 0.0);
+
+    let drive = [0.0, 0.7, 0.0];
+    let first = mode.step(&start, drive, HeldTorque::Space(external), 0.03).unwrap();
+    let world = rotation(Vec3::new(0.7, -0.4, 0.2));
+    let transformed = RotorState {
+        rotation: world.compose(start.rotation).unwrap(),
+        ..start
+    };
+    let second = mode
+        .step(
+            &transformed,
+            drive,
+            HeldTorque::Space(world.rotate(external).unwrap()),
+            0.03,
+        )
+        .unwrap();
+    attitude(
+        second.motion.state_after.rotation,
+        world.compose(first.motion.state_after.rotation).unwrap(),
+        5e-14,
+    );
+    vector(
+        second.motion.state_after.total_momentum_body,
+        first.motion.state_after.total_momentum_body,
+        5e-14,
+    );
+    vector(
+        second.motion.external_angular_impulse_world,
+        world.rotate(first.motion.external_angular_impulse_world).unwrap(),
+        5e-14,
+    );
+    close(first.drive_work_j, second.drive_work_j, 5e-14);
+    close(first.motion.external_work_j, second.motion.external_work_j, 5e-14);
+    for i in 0..3 {
+        close(
+            first.motion.state_after.axial_momentum_nms[i],
+            second.motion.state_after.axial_momentum_nms[i],
+            5e-14,
+        );
+        close(
+            first.motion.state_after.relative_angle_rad[i],
+            second.motion.state_after.relative_angle_rad[i],
+            5e-14,
+        );
+    }
+}
+
+#[test]
+fn driven_lock_refusals_leave_canonical_state_unchanged() {
+    let (bank, moving) = fixture();
+    let mode = bank.lock_mode([true, false, true]).unwrap();
+    let state = mode.engage(&moving).unwrap().impulse.state_after;
+    let saved = state;
+    let zero = HeldTorque::Body(Vec3::default());
+    assert!(mode.step(&moving, [0.0, 0.7, 0.0], zero, 0.1).is_err());
+    for duration in [0.0, f64::NAN, f64::INFINITY, f64::from_bits(1)] {
+        assert!(mode.step(&state, [0.0, 0.7, 0.0], zero, duration).is_err());
+    }
+    assert!(mode.step(&state, [0.1, 0.0, 0.0], zero, 0.1).is_err());
+    assert!(mode.step(&state, [0.0, f64::INFINITY, 0.0], zero, 0.1).is_err());
+    assert!(mode.step(&state, [0.0, f64::from_bits(1), 0.0], zero, 0.1).is_err());
+    assert!(mode
+        .step(
+            &state,
+            [0.0; 3],
+            HeldTorque::Space(Vec3::new(f64::NAN, 0.0, 0.0)),
+            0.1,
+        )
+        .is_err());
+    let unresolved = RotorState {
+        relative_angle_rad: [state.relative_angle_rad[0], 1e300, state.relative_angle_rad[2]],
+        ..state
+    };
+    assert!(mode.step(&unresolved, [0.0, 0.7, 0.0], zero, 0.1).is_err());
+    assert_eq!(state, saved);
+    assert_eq!(unresolved.relative_angle_rad[1], 1e300);
 }

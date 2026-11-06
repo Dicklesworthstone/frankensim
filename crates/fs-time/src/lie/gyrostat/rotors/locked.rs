@@ -8,8 +8,9 @@
 //! coefficient, actuator dynamics or thermal destination is inferred.
 
 use super::{
-    InertiaTensor3, LieStepError, Mat3, RotorBank, RotorImpulse, RotorState, Vec3, components, dd,
-    dot_dd, increment, invalid, product, scalar, subtract3, vector,
+    HeldTorque, InertiaTensor3, LieStepError, Mat3, RotorBank, RotorImpulse, RotorState,
+    RotorStep, So3, Vec3, components, dd, dot_dd, increment, invalid, product, scalar,
+    subtract3, vector, work_residual,
 };
 
 const ROUNDING: f64 = 8192.0 * f64::EPSILON;
@@ -51,6 +52,22 @@ pub struct LockedRotorImpulse<const N: usize> {
     /// Measured ideal-reaction work, admitted as a rounding residual, not heat.
     pub reaction_work_j: f64,
     /// Kinetic increment minus drive/external work, excluding no physical loss.
+    pub work_energy_residual_j: f64,
+}
+
+/// Driven finite motion with the selected ideal shaft locks retained.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LockedRotorStep<const N: usize> {
+    /// Complete original rotor-bank trajectory. Locked axial-momentum changes
+    /// include the reactions during both impulses and free precession.
+    pub motion: RotorStep<N>,
+    /// Signed work of the unlocked drives, excluding ideal lock reactions, J.
+    pub drive_work_j: f64,
+    /// Measured endpoint-kick reaction work, admitted as rounding, not heat.
+    /// The free-mode reconstruction residual remains in the energy balance.
+    pub reaction_work_j: f64,
+    /// Kinetic change minus drive/external work and the native drift defect, J.
+    /// This measured rounding residual does not reclassify a reaction as a source.
     pub work_energy_residual_j: f64,
 }
 
@@ -212,6 +229,133 @@ impl<const N: usize> RotorLock<N> {
         })
     }
 
+    /// Advance held unlocked-shaft drives and a body- or space-held external torque.
+    ///
+    /// Two original constrained half-impulses surround one retained-mode drift.
+    /// The selected axial inertias stay in the cached carrier tensor throughout
+    /// precession; their reaction impulses are solved, never supplied as drives.
+    /// The input must already satisfy the locks, and selected shaft torques must
+    /// be exactly zero. Engagement and its inelastic loss remain explicit.
+    ///
+    /// A spatial torque is transformed at both actual endpoint attitudes.
+    /// Locked relative phases remain bit-for-bit fixed. Unlocked phases use the
+    /// same kick-endpoint rate quadrature as shaft work, so a representable held
+    /// drive obeys work = torque times its phase increment to rounding precision.
+    /// The drift's native energy defect and canonical reconstruction roundoff
+    /// remain numerical errors, never brake heat or unreported drive work.
+    ///
+    /// This is a symmetric second-order fixed-inertia approximation; resolve
+    /// gyroscopic motion and phase by timestep refinement. Signed nonzero steps
+    /// permit reversal checks. There is no finite brake capacity, state-dependent
+    /// drive law, implicit engagement, allocation, or new equation solver.
+    /// With no selected locks this delegates to the original bank step exactly.
+    /// All native finite-value, reaction, work and phase refusals remain atomic.
+    pub fn step(
+        &self,
+        state: &RotorState<N>,
+        unlocked_torque_nm: [f64; N],
+        external_torque: HeldTorque,
+        duration_s: f64,
+    ) -> Result<LockedRotorStep<N>, LieStepError> {
+        if !self.locked.iter().any(|&locked| locked) {
+            return self.step_receipt(self.bank.step(
+                state,
+                unlocked_torque_nm,
+                external_torque,
+                duration_s,
+            )?);
+        }
+        scalar(duration_s, "retained-mode driven duration")?;
+        let half = 0.5 * duration_s;
+        if duration_s == 0.0 || half == 0.0 {
+            return Err(invalid("nonzero resolved retained-mode driven duration"));
+        }
+        let mut shaft_impulse = [0.0; N];
+        for i in 0..N {
+            scalar(unlocked_torque_nm[i], "unlocked shaft torque")?;
+            if self.locked[i] && unlocked_torque_nm[i] != 0.0 {
+                return Err(invalid("prescribed torque on a locked shaft"));
+            }
+            shaft_impulse[i] = product(unlocked_torque_nm[i], half, "unlocked torque impulse")?;
+        }
+        let impulse_at = |rotation: So3| -> Result<Vec3, LieStepError> {
+            let torque = match external_torque {
+                HeldTorque::Body(value) => vector(value, "external body torque")?,
+                HeldTorque::Space(value) => rotation.inverse().rotate(value)?,
+            };
+            Ok(Vec3::new(
+                product(torque.x, half, "external torque impulse")?,
+                product(torque.y, half, "external torque impulse")?,
+                product(torque.z, half, "external torque impulse")?,
+            ))
+        };
+        let first = self.apply_impulse(state, shaft_impulse, impulse_at(state.rotation)?)?;
+        // The composing step owns phase quadrature. Do not round or admit an
+        // unused drift-only phase before evaluating its actual drive-work rate.
+        let drift = self.drift_momenta(&first.impulse.state_after, duration_s)?;
+        let drifted = drift.state_after;
+        let second = self.apply_impulse(
+            &drifted,
+            shaft_impulse,
+            impulse_at(drifted.rotation)?,
+        )?;
+        let mut phase = state.relative_angle_rad;
+        for i in 0..N {
+            if !self.locked[i] {
+                let rate = 0.5 * first.impulse.mean_relative_rate_rad_s[i]
+                    + 0.5 * second.impulse.mean_relative_rate_rad_s[i];
+                let angle = product(duration_s, rate, "driven unlocked phase increment")?;
+                phase[i] = increment(phase[i], angle, "driven retained-mode relative phase")?;
+            }
+        }
+        let mut motion = self.bank.finish_step(
+            state,
+            &first.impulse,
+            &drifted,
+            &second.impulse,
+            duration_s,
+            Some(phase),
+        )?;
+        // Keep the reduced native defect distinct from reconstructing the
+        // original rotor/carrier kinetic form, as in the standalone lock drift.
+        motion.drift_energy_defect_j = drift.drift_energy_defect_j;
+        motion.work_energy_residual_j = work_residual(
+            motion.kinetic_energy_change_j,
+            &motion.shaft_work_j,
+            motion.external_work_j,
+            motion.drift_energy_defect_j,
+        )?;
+        self.step_receipt(motion)
+    }
+
+    fn step_receipt(&self, motion: RotorStep<N>) -> Result<LockedRotorStep<N>, LieStepError> {
+        let mut drive = dd(0.0);
+        let mut reaction = dd(0.0);
+        for i in 0..N {
+            if self.locked[i] {
+                reaction = reaction + dd(motion.shaft_work_j[i]);
+            } else {
+                drive = drive + dd(motion.shaft_work_j[i]);
+            }
+        }
+        let drive_work_j = scalar(drive.to_f64(), "retained-mode drive work")?;
+        let reaction_work_j = scalar(reaction.to_f64(), "retained-mode reaction work")?;
+        let work_energy_residual_j = scalar(
+            (dd(motion.kinetic_energy_change_j)
+                - dd(drive_work_j)
+                - dd(motion.external_work_j)
+                - dd(motion.drift_energy_defect_j))
+            .to_f64(),
+            "retained-mode driven work",
+        )?;
+        Ok(LockedRotorStep {
+            motion,
+            drive_work_j,
+            reaction_work_j,
+            work_energy_residual_j,
+        })
+    }
+
     /// Advance torque-free constrained motion with the original gyrostat map.
     ///
     /// Selected axial inertia travels with the carrier; selected p therefore
@@ -226,6 +370,31 @@ impl<const N: usize> RotorLock<N> {
         state: &RotorState<N>,
         duration_s: f64,
     ) -> Result<LockedRotorDrift<N>, LieStepError> {
+        let mut drift = self.drift_momenta(state, duration_s)?;
+        let before_rates = self.bank.relative_rates(state)?;
+        let after_rates = self.bank.relative_rates(&drift.state_after)?;
+        for i in 0..N {
+            if !self.locked[i] {
+                let delta = product(
+                    duration_s,
+                    0.5 * before_rates[i] + 0.5 * after_rates[i],
+                    "unlocked phase increment",
+                )?;
+                drift.state_after.relative_angle_rad[i] = increment(
+                    state.relative_angle_rad[i],
+                    delta,
+                    "retained-mode relative phase",
+                )?;
+            }
+        }
+        Ok(drift)
+    }
+
+    fn drift_momenta(
+        &self,
+        state: &RotorState<N>,
+        duration_s: f64,
+    ) -> Result<LockedRotorDrift<N>, LieStepError> {
         self.admit_locked(state)?;
         let stored = self.unlocked_momentum(state)?;
         let mut after = *state;
@@ -236,7 +405,6 @@ impl<const N: usize> RotorLock<N> {
             duration_s,
         )?;
         let omega = self.inertia.velocity(after.total_momentum_body - stored)?;
-        let before_rates = self.bank.relative_rates(state)?;
         for i in 0..N {
             if self.locked[i] {
                 after.axial_momentum_nms[i] = product(
@@ -247,21 +415,6 @@ impl<const N: usize> RotorLock<N> {
             }
         }
         self.admit_locked(&after)?;
-        let after_rates = self.bank.relative_rates(&after)?;
-        for i in 0..N {
-            if !self.locked[i] {
-                let delta = product(
-                    duration_s,
-                    0.5 * before_rates[i] + 0.5 * after_rates[i],
-                    "unlocked phase increment",
-                )?;
-                after.relative_angle_rad[i] = increment(
-                    state.relative_angle_rad[i],
-                    delta,
-                    "retained-mode relative phase",
-                )?;
-            }
-        }
         let change =
             core::array::from_fn(|i| after.axial_momentum_nms[i] - state.axial_momentum_nms[i]);
         self.bank.admit_recoil(

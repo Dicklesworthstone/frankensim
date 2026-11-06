@@ -313,6 +313,22 @@ where claimed below.
   errors 8.00266e-5/2.00061e-5/5.00150e-6, demonstrating second-order
   refinement in that fixture. Pinned formatting passes; the complete Cargo
   target remains unavailable with missing constellation runtime siblings.
+- `RotorLock::step` advances held unlocked-shaft drives and a body- or
+  space-held external torque while selected ideal shaft locks remain engaged.
+  Two native constrained half-impulses surround the original retained-mode
+  gyrostat drift. Locked inertia stays in the cached full carrier tensor;
+  spatial torque is transformed at both actual endpoint attitudes. Selected
+  shaft drives must be zero, and the input must already satisfy the locks;
+  engagement remains a separate dissipative event. Locked phases stay
+  bit-for-bit fixed. Unlocked phase uses the same rate quadrature as drive
+  work. `LockedRotorStep` separates drive, ideal-reaction and external work,
+  native drift error and the complete energy residual. This symmetric
+  fixed-inertia approximation is second order, O(N), allocation-free and
+  subject to the original 64-rotor bound and numerical admission. No brake
+  capacity or state-dependent drive law is inferred. G1/G3 regressions in
+  `tests/gyrostat_locked.rs` specify analytic coaxial recoil/work, independent
+  Euler-equation refinement, spatial covariance, empty-selection and zero-drive
+  parity, reversal and atomic refusal.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
