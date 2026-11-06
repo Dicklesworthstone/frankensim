@@ -9,6 +9,10 @@
 //! or a nonlinear mean-flow/jet model.
 
 mod multiple;
+mod field;
+#[doc(hidden)]
+pub use field::{ThermoviscousDgFieldBinding, ThermoviscousDgFields};
+pub use field::ThermoviscousDgVolumeObservations;
 
 /// A complete field/duct assembly presented at an external acoustic flow port.
 pub mod load;
@@ -19,7 +23,7 @@ use crate::dg_port::{DgPortLoad, sum_terminal_work};
 use fs_duct::dg::DgStepOutput;
 use fs_exec::CancelGate;
 use fs_feec::acoustics::thermoviscous::time::{
-    PreparedThermoviscousTime, ThermoviscousTimeError, ThermoviscousTimeState,
+    PreparedThermoviscousTime, PreparedThermoviscousVolumeTime, ThermoviscousTimeError, ThermoviscousTimeState,
     ThermoviscousTimeStep,
 };
 
@@ -118,7 +122,8 @@ pub struct ThermoviscousDgFrame {
     /// Complete resolved field plus every original duct, branch and gap.
     pub stored_energy_j: f64,
     pub storage_change_j: f64,
-    /// Authored external FE tractions and structural forces only.
+    /// Authored external FE traction, structural-force, body-force and heat work.
+    /// Internally solved FE/DG interface work is excluded.
     pub authored_external_work_j: f64,
     /// Independently integrated FE heat plus the original DG loss receipt,
     /// including any matched-boundary absorption. DG loss may be inferred by
@@ -144,9 +149,9 @@ pub struct ThermoviscousDgPortFrame {
 }
 
 /// One immutable source/preparation and privately owned accepted histories.
-pub struct ThermoviscousDg<'a, 'c> {
+pub struct ThermoviscousDg<'a, 'c, P = PreparedThermoviscousTime<'a, 'c>> {
     source: &'a ThermoviscousInterior<'c>,
-    prepared: PreparedThermoviscousTime<'a, 'c>,
+    prepared: P,
     initial_state: ThermoviscousTimeState,
     load: DgPortLoad,
     port: usize,
@@ -157,8 +162,14 @@ pub struct ThermoviscousDg<'a, 'c> {
     limits: ThermoviscousDgLimits,
     accepted_steps: u64,
     frame: Option<ThermoviscousDgFrame>,
+    volume_observations: Option<ThermoviscousDgVolumeObservations>,
 }
-impl<'a, 'c> ThermoviscousDg<'a, 'c> {
+
+/// Complete resolved field/DG coupling with original distributed volume inputs.
+pub type ThermoviscousVolumeDg<'a, 'c> =
+    ThermoviscousDg<'a, 'c, PreparedThermoviscousVolumeTime<'a, 'c>>;
+
+impl<'a, 'c, P: ThermoviscousDgFields<'c>> ThermoviscousDg<'a, 'c, P> {
     /// Connect an original unit-pressure FE port to an additional DG inlet.
     /// The prepared fields must borrow this exact source FE. Gas, clock and
     /// planar interface area must agree; no material, end correction or direct
@@ -167,7 +178,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     /// owned by the supplied original duct.
     pub fn new(
         source: &'a ThermoviscousInterior<'c>,
-        prepared: PreparedThermoviscousTime<'a, 'c>,
+        prepared: P,
         load: DgPortLoad,
         port: usize,
         limits: ThermoviscousDgLimits,
@@ -175,6 +186,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     ) -> Result<Self, ThermoviscousDgError> {
         poll(gate)?;
         limits.validate()?;
+        let binding = prepared.binding();
         let area = source.inner().plane_wave_port_area_m2(port)
             .ok_or_else(|| invalid("DG connection requires an exclusive planar unit-pressure FE port"))?;
         // Pointer identity alone does not prove material identity: a caller can
@@ -182,32 +194,32 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         // the actual frozen calorics and every original source process here.
         let calorics_match = match source.relaxation() {
             Some(original) => {
-                prepared.frozen_cp_j_kg_k().to_bits()
+                binding.frozen_cp_j_kg_k.to_bits()
                     == (original.frozen_cv_j_kg_k() + source.gas().specific_gas_constant).to_bits()
-                    && prepared.caloric_reservoirs().len() == original.processes().len()
-                    && prepared.caloric_reservoirs().iter().zip(original.processes()).all(|(a, b)| {
+                    && binding.reservoirs.len() == original.processes().len()
+                    && binding.reservoirs.iter().zip(original.processes()).all(|(a, b)| {
                         a.heat_capacity_j_kg_k.to_bits() == b.heat_capacity_j_kg_k.to_bits()
                             && a.relaxation_time_s.to_bits() == b.relaxation_time_s.to_bits()
                     })
             }
-            None => prepared.caloric_reservoirs().is_empty()
-                && prepared.frozen_cp_j_kg_k().to_bits() == source.inner().medium().cp_j_kg_k.to_bits(),
+            None => binding.reservoirs.is_empty()
+                && binding.frozen_cp_j_kg_k.to_bits() == source.inner().medium().cp_j_kg_k.to_bits(),
         };
-        let tangential_match = prepared.tangential_wall_conductivity().map_or_else(
+        let tangential_match = binding.tangential_wall_conductivity.map_or_else(
             || source.wall_tangential_sources().is_empty(),
             |transport| transport.len() == source.wall_tangential_sources().len()
                 && transport.iter().zip(source.wall_tangential_sources()).all(|(a, b)|
                     a.isotropic_w_m_k.to_bits() == b.conductivity_w_m_k().to_bits()),
         );
-        if !core::ptr::eq(source.inner(), prepared.inner())
+        if !core::ptr::eq(source.inner(), binding.model)
             || !calorics_match
             || !tangential_match
-            || prepared.duration_s() * source.band_hz()[1] > 0.5
-            || prepared.conductive_wall_layouts().len() != source.wall_sources().len()
-            || prepared.maximum_wall_frequency_hz().is_some_and(|frequency|
+            || binding.duration_s * source.band_hz()[1] > 0.5
+            || binding.conductive_wall_count != source.wall_sources().len()
+            || binding.maximum_wall_frequency_hz.is_some_and(|frequency|
                 frequency.to_bits() != source.band_hz()[1].to_bits())
             || source.gas() != load.duct().inlet_gas()
-            || prepared.duration_s().to_bits() != load.propagator().dt().to_bits()
+            || binding.duration_s.to_bits() != load.propagator().dt().to_bits()
             || load.state().step_count() != 0 || load.has_driven_mouth()
             || (area - load.duct().inlet_area_m2()).abs() > 64.0 * f64::EPSILON * area
         {
@@ -216,8 +228,10 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         let initial_state = prepared.zero_state();
         let pressure = vec![0.0; source.inner().port_mode_count()];
         let forces = vec![0.0; initial_state.wall_velocity_m_sqrt_kg_per_s.len()];
+        let volume_forces = vec![0.0; binding.body_force_count];
+        let heat = vec![0.0; binding.heat_count];
         let (free, mobility_m3_pa_s) = prepared.average_relation(
-            &initial_state, &pressure, &forces, port, &mut || gate.is_requested(),
+            &initial_state, &pressure, &forces, &volume_forces, &heat, port, &mut || gate.is_requested(),
         )?;
         let relation = load.port_response()?;
         if free != 0.0 || !mobility_m3_pa_s.is_finite() || mobility_m3_pa_s <= 0.0
@@ -227,7 +241,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         }
         let result = Self { source, prepared, initial_state, load, port,
             ports: vec![port], additional: Vec::new(), multiple: None, mobility_m3_pa_s,
-            limits, accepted_steps: 0, frame: None };
+            limits, accepted_steps: 0, frame: None, volume_observations: None };
         result.admit_state(result.state(), result.load.stored_energy_j())?;
         poll(gate)?;
         Ok(result)
@@ -247,7 +261,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     }
 
     pub const fn source(&self) -> &'a ThermoviscousInterior<'c> { self.source }
-    pub const fn prepared(&self) -> &PreparedThermoviscousTime<'a, 'c> { &self.prepared }
+    pub const fn prepared(&self) -> &P { &self.prepared }
     pub const fn load(&self) -> &DgPortLoad { &self.load }
     /// All internal pressure slots, primary first. Every authored drive in
     /// these slots must be zero; their simultaneous reactions are solved here.
@@ -266,6 +280,11 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     pub const fn limits(&self) -> ThermoviscousDgLimits { self.limits }
     pub const fn accepted_steps(&self) -> u64 { self.accepted_steps }
     pub const fn last_frame(&self) -> Option<&ThermoviscousDgFrame> { self.frame.as_ref() }
+    /// Source means and signed work from exactly the last accepted frame.
+    /// Absent before a first step and on the original passive field path.
+    pub const fn last_volume_observations(&self) -> Option<&ThermoviscousDgVolumeObservations> {
+        self.volume_observations.as_ref()
+    }
     pub fn stored_energy_j(&self) -> Result<f64, ThermoviscousDgError> {
         Ok(self.prepared.stored_energy_j(self.state())? + self.duct_storage_j())
     }
@@ -291,14 +310,17 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
     /// connected pressure slots MUST be zero: their reactions are solved here.
     /// No participant or accepted frame changes after any refusal, including
     /// cancellation after any original candidate is propagated.
-    pub fn step(
+    fn step_fields(
         &mut self,
         traction_pa: &[f64],
         wall_forces_n_per_sqrt_kg: &[f64],
+        force_drive_n: &[f64],
+        heat_drive_w: &[f64],
         gate: &CancelGate,
     ) -> Result<&ThermoviscousDgFrame, ThermoviscousDgError> {
         if !self.additional.is_empty() {
-            return self.step_multiple(traction_pa, wall_forces_n_per_sqrt_kg, gate);
+            return self.step_multiple(traction_pa, wall_forces_n_per_sqrt_kg,
+                force_drive_n, heat_drive_w, gate);
         }
         poll(gate)?;
         if self.accepted_steps >= self.limits.maximum_steps
@@ -310,7 +332,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         }
         let (free, mobility) = self.prepared.average_relation(
             self.state(), traction_pa, wall_forces_n_per_sqrt_kg,
-            self.port, &mut || gate.is_requested(),
+            force_drive_n, heat_drive_w, self.port, &mut || gate.is_requested(),
         )?;
         if mobility.to_bits() != self.mobility_m3_pa_s.to_bits() {
             return Err(invalid("original resolved port mobility changed"));
@@ -327,17 +349,22 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         }
         let mut applied = traction_pa.to_vec();
         applied[self.port] = pressure;
-        let field = self.prepared.step(self.state(), &applied, wall_forces_n_per_sqrt_kg,
+        let (field, volume_observations) = self.prepared.step_fields(
+            self.state(), &applied, wall_forces_n_per_sqrt_kg, force_drive_n, heat_drive_w,
             &mut || gate.is_requested())?;
         let actual_flow = -field.mean_inward_flow_m3_s[self.port];
         let flow_scale = free.abs() + (mobility * pressure).abs() + actual_flow.abs();
         if (actual_flow - flow).abs() > self.limits.interface_relative_tolerance * flow_scale.max(1e-300) {
             return Err(invalid("resolved field and original port map disagree on swept volume"));
         }
-        let dt = self.prepared.duration_s();
+        let dt = self.prepared.binding().duration_s;
         let external_pressure_work: f64 = traction_pa.iter().zip(&field.mean_inward_flow_m3_s)
             .map(|(p, q)| p * (q * dt)).sum();
-        let authored_external_work_j = external_pressure_work + field.work.structural_work_j;
+        let mut authored_external_work_j = external_pressure_work + field.work.structural_work_j;
+        if volume_observations.is_some() {
+            authored_external_work_j += field.work.body_force_work_j;
+            authored_external_work_j += field.work.heat_source_work_j;
+        }
         let inlet = self.load.inlet();
         let trial = self.load.preview_step(actual_flow)?;
         let duct = trial.output();
@@ -385,6 +412,39 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
             mean_pressure_pa: pressure, mean_flow_m3_s: actual_flow, stored_energy_j,
             storage_change_j, authored_external_work_j, material_dissipation_j, terminal_work_j,
             interface_work_residual_j, balance_residual_j, balance_tolerance_j });
+        self.volume_observations = volume_observations;
         Ok(self.frame.as_ref().expect("joint field/DG step accepted"))
+    }
+}
+
+impl<'a, 'c> ThermoviscousDg<'a, 'c> {
+    /// Advance the original passive field with complete held mechanical drives.
+    /// Connected traction slots must be zero; their reactions are solved here.
+    pub fn step(
+        &mut self,
+        traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: &[f64],
+        gate: &CancelGate,
+    ) -> Result<&ThermoviscousDgFrame, ThermoviscousDgError> {
+        self.step_fields(traction_pa, wall_forces_n_per_sqrt_kg, &[], &[], gate)
+    }
+}
+
+impl<'a, 'c> ThermoviscousDg<'a, 'c, PreparedThermoviscousVolumeTime<'a, 'c>> {
+    /// Drive original body forces [N] and heating [W] INSIDE the reciprocal
+    /// field/duct step. Each amplitude multiplies its retained signed profile.
+    /// All connected reactions use the same source-dependent mean-port map.
+    /// Source observations publish only with the complete accepted trajectory.
+    pub fn step_with_volume_sources(
+        &mut self,
+        traction_pa: &[f64],
+        wall_forces_n_per_sqrt_kg: &[f64],
+        force_drive_n: &[f64],
+        heat_drive_w: &[f64],
+        gate: &CancelGate,
+    ) -> Result<&ThermoviscousDgFrame, ThermoviscousDgError> {
+        self.step_fields(
+            traction_pa, wall_forces_n_per_sqrt_kg, force_drive_n, heat_drive_w, gate,
+        )
     }
 }

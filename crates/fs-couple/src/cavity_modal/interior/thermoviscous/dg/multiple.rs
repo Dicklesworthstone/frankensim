@@ -81,7 +81,7 @@ impl PreparedMultipleDg {
     }
 }
 
-impl<'a, 'c> ThermoviscousDg<'a, 'c> {
+impl<'a, 'c, P: ThermoviscousDgFields<'c>> ThermoviscousDg<'a, 'c, P> {
     /// Attach another original finite duct to an exclusive planar FE port.
     /// Attachment is cold: all ducts keep their authored initial states and
     /// no accepted trajectory may be reconfigured. The complete off-diagonal
@@ -96,7 +96,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         if self.accepted_steps != 0 || self.ports.contains(&port)
             || load.state().step_count() != 0 || load.has_driven_mouth()
             || self.source.gas() != load.duct().inlet_gas()
-            || self.prepared.duration_s().to_bits() != load.propagator().dt().to_bits()
+            || self.prepared.binding().duration_s.to_bits() != load.propagator().dt().to_bits()
             || (area - load.duct().inlet_area_m2()).abs() > 64.0 * f64::EPSILON * area
         {
             return Err(invalid("additional field/DG connection requires a distinct cold ordinary inlet and equal gas/area/clock"));
@@ -106,8 +106,11 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         let zero = self.prepared.zero_state();
         let traction = vec![0.0; self.source.inner().port_mode_count()];
         let forces = vec![0.0; zero.wall_velocity_m_sqrt_kg_per_s.len()];
+        let binding = self.prepared.binding();
+        let volume_forces = vec![0.0; binding.body_force_count];
+        let heat = vec![0.0; binding.heat_count];
         let (free, mobility) = self.prepared.average_relations(
-            &zero, &traction, &forces, &self.ports, &mut || gate.is_requested(),
+            &zero, &traction, &forces, &volume_forces, &heat, &self.ports, &mut || gate.is_requested(),
         )?;
         if free.iter().any(|value| *value != 0.0) {
             return Err(invalid("unforced original field has nonzero mean port flow"));
@@ -121,7 +124,8 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         Ok(self)
     }
 
-    pub(super) fn step_multiple(&mut self, traction_pa: &[f64], forces: &[f64], gate: &CancelGate)
+    pub(super) fn step_multiple(&mut self, traction_pa: &[f64], forces: &[f64],
+        force_drive_n: &[f64], heat_drive_w: &[f64], gate: &CancelGate)
         -> Result<&ThermoviscousDgFrame, ThermoviscousDgError>
     {
         poll(gate)?;
@@ -133,7 +137,8 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
             return Err(invalid("bounded coupled clock and complete external tractions with zero internal pressure slots required"));
         }
         let (free, mobility) = self.prepared.average_relations(
-            self.state(), traction_pa, forces, &self.ports, &mut || gate.is_requested(),
+            self.state(), traction_pa, forces, force_drive_n, heat_drive_w,
+            &self.ports, &mut || gate.is_requested(),
         )?;
         let relations = std::iter::once(&self.load).chain(&self.additional)
             .map(|load| load.port_response().map(|r| (r.history_pressure_pa, r.impedance_pa_s_m3)))
@@ -146,7 +151,9 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
         }
         let mut applied = traction_pa.to_vec();
         for (&port, &pressure) in self.ports.iter().zip(&pressure) { applied[port] = pressure; }
-        let field = self.prepared.step(self.state(), &applied, forces, &mut || gate.is_requested())?;
+        let (field, volume_observations) = self.prepared.step_fields(
+            self.state(), &applied, forces, force_drive_n, heat_drive_w, &mut || gate.is_requested(),
+        )?;
         let n = self.ports.len();
         let actual_flow: Vec<_> = self.ports.iter().map(|&port| -field.mean_inward_flow_m3_s[port]).collect();
         for (i, row) in mobility.chunks_exact(n).enumerate() {
@@ -159,9 +166,13 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
                 return Err(invalid("resolved field and original multiport map disagree on swept volume"));
             }
         }
-        let dt = self.prepared.duration_s();
-        let authored_external_work_j = traction_pa.iter().zip(&field.mean_inward_flow_m3_s)
+        let dt = self.prepared.binding().duration_s;
+        let mut authored_external_work_j = traction_pa.iter().zip(&field.mean_inward_flow_m3_s)
             .map(|(p, q)| p * (q * dt)).sum::<f64>() + field.work.structural_work_j;
+        if volume_observations.is_some() {
+            authored_external_work_j += field.work.body_force_work_j;
+            authored_external_work_j += field.work.heat_source_work_j;
+        }
         let inlets: Vec<_> = std::iter::once(&self.load).chain(&self.additional).map(DgPortLoad::inlet).collect();
         // Every trial borrows a distinct original owner. An error while making
         // or checking any trial drops all of them without publishing a state.
@@ -242,6 +253,7 @@ impl<'a, 'c> ThermoviscousDg<'a, 'c> {
             additional_ducts, mean_pressure_pa: pressure[0], mean_flow_m3_s: actual_flow[0],
             stored_energy_j, storage_change_j, authored_external_work_j, material_dissipation_j,
             terminal_work_j, interface_work_residual_j, balance_residual_j, balance_tolerance_j });
+        self.volume_observations = volume_observations;
         Ok(self.frame.as_ref().expect("joint field/multiple DG step accepted"))
     }
 }

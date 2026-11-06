@@ -1,12 +1,15 @@
 //! Continuing physical-pressure playback of the complete resolved field and bore.
 //!
-//! Every control is a held physical traction or generalized structural force on
-//! the original clock. The field's molecular temperatures, finite conductive
+//! Every control is a held physical traction, generalized structural force or
+//! original distributed body-force/heat amplitude on the original clock. The field's molecular temperatures, finite conductive
 //! walls and moving structure continue through the same reciprocal DG step.
 //! The shared pressure, decimation, ensemble and PCM owners consume this stream;
 //! observation never substitutes an independent sound source or wall-loss law.
 
-use super::{ThermoviscousDg, ThermoviscousDgFrame};
+use super::{
+    PreparedThermoviscousTime, PreparedThermoviscousVolumeTime, ThermoviscousDg,
+    ThermoviscousDgFields, ThermoviscousDgFrame, ThermoviscousDgVolumeObservations,
+};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::baffled::BaffledPressure;
@@ -26,6 +29,49 @@ pub struct ThermoviscousDgControl {
     pub wall_forces_n_per_sqrt_kg: Vec<f64>,
 }
 
+/// One original interval's mechanical and distributed volume-source drives.
+/// All values are signed physical amplitudes. No force or heat is added to the
+/// output pressure: they excite the complete reciprocal field/duct trajectory.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThermoviscousDgVolumeControl {
+    /// Held FE tractions [Pa]; all attached duct slots must be zero.
+    pub traction_pa: Vec<f64>,
+    pub wall_forces_n_per_sqrt_kg: Vec<f64>,
+    /// Force amplitudes [N], in the prepared body-source profile order.
+    pub force_drive_n: Vec<f64>,
+    /// Heat amplitudes [W], in the prepared heat-source profile order.
+    pub heat_drive_w: Vec<f64>,
+}
+
+mod control_sealed {
+    pub trait Sealed {}
+    impl Sealed for super::ThermoviscousDgControl {}
+    impl Sealed for super::ThermoviscousDgVolumeControl {}
+}
+
+/// Read-only controls for the two original native playback paths.
+#[doc(hidden)]
+pub trait ThermoviscousDgControlValues: control_sealed::Sealed {
+    fn traction_pa(&self) -> &[f64];
+    fn wall_forces_n_per_sqrt_kg(&self) -> &[f64];
+    fn force_drive_n(&self) -> &[f64];
+    fn heat_drive_w(&self) -> &[f64];
+}
+
+impl ThermoviscousDgControlValues for ThermoviscousDgControl {
+    fn traction_pa(&self) -> &[f64] { &self.traction_pa }
+    fn wall_forces_n_per_sqrt_kg(&self) -> &[f64] { &self.wall_forces_n_per_sqrt_kg }
+    fn force_drive_n(&self) -> &[f64] { &[] }
+    fn heat_drive_w(&self) -> &[f64] { &[] }
+}
+
+impl ThermoviscousDgControlValues for ThermoviscousDgVolumeControl {
+    fn traction_pa(&self) -> &[f64] { &self.traction_pa }
+    fn wall_forces_n_per_sqrt_kg(&self) -> &[f64] { &self.wall_forces_n_per_sqrt_kg }
+    fn force_drive_n(&self) -> &[f64] { &self.force_drive_n }
+    fn heat_drive_w(&self) -> &[f64] { &self.heat_drive_w }
+}
+
 /// Explicit finite playback storage and callback bounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThermoviscousDgPerformanceConfig {
@@ -34,7 +80,7 @@ pub struct ThermoviscousDgPerformanceConfig {
     pub sample_rate_hz: u32,
     /// Largest callback, in 1..=65_536 samples.
     pub maximum_block: usize,
-    /// Total stored scalar traction and force values across the whole history.
+    /// Total stored scalar traction, structural, body-force and heat controls.
     /// This bounds authored input storage, separately from FE preparation limits.
     pub maximum_control_values: usize,
 }
@@ -46,9 +92,11 @@ pub struct ThermoviscousDgPerformanceConfig {
 /// A failed physical step leaves all owners at their preceding accepted state;
 /// an observation failure retains the accepted physical step. Either failure
 /// poisons the stream, preserving the completed output prefix for inspection.
-pub struct ThermoviscousDgPerformance<'a, 'c> {
-    system: ThermoviscousDg<'a, 'c>,
-    controls: Vec<ThermoviscousDgControl>,
+pub struct ThermoviscousDgPerformance<
+    'a, 'c, P = PreparedThermoviscousTime<'a, 'c>, C = ThermoviscousDgControl,
+> {
+    system: ThermoviscousDg<'a, 'c, P>,
+    controls: Vec<C>,
     config: ThermoviscousDgPerformanceConfig,
     observation: ApertureObservation,
     observation_port: usize,
@@ -60,11 +108,17 @@ pub struct ThermoviscousDgPerformance<'a, 'c> {
     poisoned: bool,
 }
 
+/// Physical-pressure renderer driven by complete original volume-source controls.
+pub type ThermoviscousVolumeDgPerformance<'a, 'c> = ThermoviscousDgPerformance<
+    'a, 'c, PreparedThermoviscousVolumeTime<'a, 'c>, ThermoviscousDgVolumeControl,
+>;
+
 fn sizing(what: &'static str) -> RenderError {
     RenderError::Sizing { what }
 }
 
-impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
+impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues>
+    ThermoviscousDgPerformance<'a, 'c, P, C> {
     /// Bind complete physical controls to an unadvanced coupled system.
     /// Nonzero admitted initial field or wall motion is retained. The input
     /// window is finite and shares the original coupling step budget.
@@ -73,8 +127,8 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
     /// existing DG computed-baffle microphone, using every actual terminal's
     /// outward flow. Other aperture/network observation variants refuse.
     pub fn new(
-        system: ThermoviscousDg<'a, 'c>,
-        controls: Vec<ThermoviscousDgControl>,
+        system: ThermoviscousDg<'a, 'c, P>,
+        controls: Vec<C>,
         observation: ApertureObservation,
         config: ThermoviscousDgPerformanceConfig,
         gate: Arc<CancelGate>,
@@ -92,9 +146,9 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
     /// each reaction is solved jointly. Unconnected pressure modes and original
     /// structural forces remain independent physical inputs.
     pub fn new_at_port(
-        system: ThermoviscousDg<'a, 'c>,
+        system: ThermoviscousDg<'a, 'c, P>,
         port: usize,
-        controls: Vec<ThermoviscousDgControl>,
+        controls: Vec<C>,
         observation: ApertureObservation,
         config: ThermoviscousDgPerformanceConfig,
         gate: Arc<CancelGate>,
@@ -104,7 +158,7 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
         }
         if system.accepted_steps() != 0
             || config.sample_rate_hz == 0
-            || system.prepared().duration_s().to_bits()
+            || system.prepared().binding().duration_s.to_bits()
                 != (1.0 / f64::from(config.sample_rate_hz)).to_bits()
             || !(1..=65_536).contains(&config.maximum_block)
             || controls.is_empty()
@@ -116,8 +170,11 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
         }
         let pressures = system.source().inner().port_mode_count();
         let forces = system.state().wall_velocity_m_sqrt_kg_per_s.len();
+        let binding = system.prepared().binding();
         let values = pressures
             .checked_add(forces)
+            .and_then(|per_step| per_step.checked_add(binding.body_force_count))
+            .and_then(|per_step| per_step.checked_add(binding.heat_count))
             .and_then(|per_step| per_step.checked_mul(controls.len()))
             .ok_or_else(|| sizing("resolved field control storage overflow"))?;
         if values > config.maximum_control_values {
@@ -127,13 +184,17 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
             if gate.is_requested() {
                 return Err(RenderError::Voice(AcousticRealizeError::Cancelled));
             }
-            if control.traction_pa.len() != pressures
-                || control.wall_forces_n_per_sqrt_kg.len() != forces
-                || system.coupled_ports().iter().any(|&port| control.traction_pa[port] != 0.0)
+            if control.traction_pa().len() != pressures
+                || control.wall_forces_n_per_sqrt_kg().len() != forces
+                || control.force_drive_n().len() != binding.body_force_count
+                || control.heat_drive_w().len() != binding.heat_count
+                || system.coupled_ports().iter().any(|&port| control.traction_pa()[port] != 0.0)
                 || control
-                    .traction_pa
+                    .traction_pa()
                     .iter()
-                    .chain(&control.wall_forces_n_per_sqrt_kg)
+                    .chain(control.wall_forces_n_per_sqrt_kg())
+                    .chain(control.force_drive_n())
+                    .chain(control.heat_drive_w())
                     .any(|value| !value.is_finite())
             {
                 return Err(sizing(
@@ -209,11 +270,11 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
         Ok(self)
     }
 
-    pub const fn system(&self) -> &ThermoviscousDg<'a, 'c> {
+    pub const fn system(&self) -> &ThermoviscousDg<'a, 'c, P> {
         &self.system
     }
 
-    pub fn controls(&self) -> &[ThermoviscousDgControl] {
+    pub fn controls(&self) -> &[C] {
         &self.controls
     }
 
@@ -232,6 +293,11 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
 
     pub fn last_frame(&self) -> Option<&ThermoviscousDgFrame> {
         self.system.last_frame()
+    }
+
+    /// Source means/work associated with exactly the last accepted physical frame.
+    pub fn last_volume_observations(&self) -> Option<&ThermoviscousDgVolumeObservations> {
+        self.system.last_volume_observations()
     }
 
     pub fn baffled_receiver(&self) -> Option<&BaffledPressure> {
@@ -258,9 +324,11 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
         let primary_port = self.system.port();
         let frame = self
             .system
-            .step(
-                &control.traction_pa,
-                &control.wall_forces_n_per_sqrt_kg,
+            .step_fields(
+                control.traction_pa(),
+                control.wall_forces_n_per_sqrt_kg(),
+                control.force_drive_n(),
+                control.heat_drive_w(),
                 &self.gate,
             )
             .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?;
@@ -295,7 +363,8 @@ impl<'a, 'c> ThermoviscousDgPerformance<'a, 'c> {
     }
 }
 
-impl PressureRenderer for ThermoviscousDgPerformance<'_, '_> {
+impl<'a, 'c, P: ThermoviscousDgFields<'c>, C: ThermoviscousDgControlValues> PressureRenderer
+    for ThermoviscousDgPerformance<'a, 'c, P, C> {
     fn samples_rendered(&self) -> u64 {
         self.rendered
     }
