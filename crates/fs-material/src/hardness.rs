@@ -9,6 +9,9 @@
 /// Original hardness evaluated along the native accumulated plastic history.
 pub mod plastic_history;
 
+/// Original hardness at accepted native thermoplastic temperature/history.
+pub mod thermal_history;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};

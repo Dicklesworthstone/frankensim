@@ -365,6 +365,20 @@ material qualification.
 
 ## Source indentation hardness for contact and wear
 
+`hardness::thermal_history::ThermoplasticHardnessSource` observes an independent
+original H(T, accumulated-equivalent-plastic-strain) test at accepted native
+`CaloricPoint` states. J2, Voce/viscous and complete N-branch Chaboche histories
+retain their original return maps, thermal coefficient transport and work/heat
+accounts. The adapter returns the unchanged native feedback report and typed
+hardness together, refusing foreign mechanical/caloric sources, changed tests,
+missing endpoint coverage, unowned conditions and nonpositive hardness without
+advancing the input point. Hardness is sampled at old/accepted endpoints; this
+does not certify support or integrate hardness between those states, and supplies
+no annealing kinetics, yield-to-hardness conversion or additional heat. Focused
+`hardness_thermal_history` tests compare the complete native histories and energy
+reports under heating, reversal and viscous cyclic loading, and exercise source,
+coverage and cancellation refusals. These are synthetic regressions.
+
 `hardness::IndentationHardnessStatePoint` selects a positive static
 pressure-valued `IndentationHardness` claim from an original material bundle.
 It retains the exact apparatus, load/dwell, protocol, specimen and source

@@ -901,6 +901,14 @@ impl<'a> CaloricPoint<'a> {
 }
 
 impl<'a, S: ThermoplasticSourceFamily<'a>> CaloricPoint<'a, S> {
+    /// Immutable original thermal source, including pinned mechanical and caloric
+    /// claims. Readouts can share its actual temperature and fixed environment
+    /// without reconstructing a constitutive law or transporting history.
+    #[must_use]
+    pub fn thermal_source(&self) -> &ThermoplasticSource<'a> {
+        self.binding.thermal_source()
+    }
+
     /// Original complete source snapshot at the accepted temperature.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedJ2Plasticity {
