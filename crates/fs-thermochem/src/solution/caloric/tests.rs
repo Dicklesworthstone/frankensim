@@ -258,6 +258,147 @@ fn g1_equilibrium_heat_capacity_includes_moving_coexistence_compositions() {
 }
 
 #[test]
+fn g2_source_cp_accelerates_variable_capacity_heating_without_relaxing_budgets() {
+    let pair = model(0.0, 0.0, [100.0; 2]).thermodynamics().clone();
+    let capacities = ["A", "B"].map(|name| {
+        PureLiquidHeatCapacityV1::new(
+            SpeciesId::new(name).unwrap(),
+            Temperature::new(100.0),
+            vec![
+                (Temperature::new(100.0), MolarThermalQuantityV1::new(10.0)),
+                (Temperature::new(1000.0), MolarThermalQuantityV1::new(100.0)),
+            ],
+        )
+        .unwrap()
+    });
+    let model = BinaryLiquidCaloricModelV1::new(pair, capacities).unwrap();
+    let initial = pure(&model, 300.0, [1.0, 0.0]);
+    let heat = 4321.123;
+    let mut policy = controls();
+    policy.maximum_iterations = 16;
+    let result = model.add_heat(&initial, heat, policy, || false).unwrap();
+    // The original Cp=0.1*T source gives an independent quadratic energy
+    // inverse and a linear entropy change. A frozen initial Cp is incorrect.
+    let expected_temperature = (300.0_f64.powi(2) + 20.0 * heat).sqrt();
+    near(
+        result.final_state().temperature().value(),
+        expected_temperature,
+        1e-9,
+    );
+    near(
+        result.entropy_change_j_per_k(),
+        0.1 * (expected_temperature - 300.0),
+        1e-10,
+    );
+    assert_original_heat_bracket(&model, &initial, heat, policy, &result);
+    eprintln!(
+        "variable-Cp heating: {} thermal samples",
+        result.iterations()
+    );
+    assert!(
+        result.iterations() <= 12,
+        "source Cp should avoid the roughly 40 bisections otherwise needed: {} steps",
+        result.iterations(),
+    );
+}
+
+#[test]
+fn g2_source_cp_accelerates_heating_and_cooling_across_miscibility() {
+    let model = model(0.0, 1000.0, [80.0, 120.0]);
+    let mut policy = controls();
+    policy.maximum_iterations = 16;
+    for (initial_temperature, target_temperature) in [(321.123, 571.234), (600.123, 347.123)] {
+        let initial = pure(&model, initial_temperature, [2.0, 3.0]);
+        let target = pure(&model, target_temperature, [2.0, 3.0]);
+        assert_ne!(
+            initial.equilibrium().unwrap().phases().len(),
+            target.equilibrium().unwrap().phases().len(),
+        );
+        let heat = model.enthalpy_change_j(&initial, &target).unwrap();
+        let result = model.add_heat(&initial, heat, policy, || false).unwrap();
+        near(
+            result.final_state().temperature().value(),
+            target_temperature,
+            1e-9,
+        );
+        near(
+            result.entropy_change_j_per_k(),
+            model.entropy_change_j_per_k(&initial, &target).unwrap(),
+            2e-9,
+        );
+        assert_original_heat_bracket(&model, &initial, heat, policy, &result);
+        eprintln!(
+            "miscibility {initial_temperature} -> {target_temperature} K: {} thermal samples",
+            result.iterations()
+        );
+        assert!(
+            result.iterations() <= 12,
+            "equilibrium Cp should accelerate {initial_temperature} -> {target_temperature} K: {} steps",
+            result.iterations(),
+        );
+    }
+}
+
+#[test]
+fn g3_exterior_cp_proposal_keeps_the_original_single_sample_bisection_budget() {
+    let pair = model(0.0, 0.0, [100.0; 2]).thermodynamics().clone();
+    let capacities = ["A", "B"].map(|name| {
+        PureLiquidHeatCapacityV1::new(
+            SpeciesId::new(name).unwrap(),
+            Temperature::new(100.0),
+            [(100.0, 1.0), (200.0, 1.0), (800.0, 100.0), (1000.0, 100.0)]
+                .map(|(t, cp)| (Temperature::new(t), MolarThermalQuantityV1::new(cp)))
+                .to_vec(),
+        )
+        .unwrap()
+    });
+    let model = BinaryLiquidCaloricModelV1::new(pair, capacities).unwrap();
+    let initial = pure(&model, 200.0, [1.0, 0.0]);
+    let target = pure(&model, 350.0, [1.0, 0.0]);
+    let heat = model.enthalpy_change_j(&initial, &target).unwrap();
+    let mut policy = controls();
+    policy.maximum_iterations = 2;
+    // First midpoint is 500 K. The lower endpoint is then the closest in
+    // energy, but its Cp=1 tangent proposes a point beyond the sign bracket.
+    // The sole second sample must be the original 350 K bisection.
+    let result = model.add_heat(&initial, heat, policy, || false).unwrap();
+    assert_eq!(result.iterations(), 2);
+    assert_eq!(result.final_state().temperature().value(), 350.0);
+    assert_eq!(result.energy_residual_j(), 0.0);
+    assert_original_heat_bracket(&model, &initial, heat, policy, &result);
+}
+
+fn assert_original_heat_bracket(
+    model: &BinaryLiquidCaloricModelV1,
+    initial: &BinaryCaloricStateV1,
+    heat: f64,
+    policy: BinaryCaloricSolveV1,
+    result: &BinaryCaloricBalanceV1,
+) {
+    let [low, high] = result.temperature_bracket();
+    // The published endpoints must be actual original-law samples with their
+    // original residual signs. A Newton estimate is not a bracket certificate.
+    let residual = |temperature| {
+        let state = model
+            .equilibrate(
+                temperature,
+                initial.component_moles(),
+                policy.coexistence,
+                || false,
+            )
+            .unwrap();
+        model.enthalpy_change_j(initial, &state).unwrap() - heat
+    };
+    assert!(residual(low) <= 0.0);
+    assert!(residual(high) >= 0.0);
+    assert!(
+        result.energy_residual_j() == 0.0
+            || ((high.value() - low.value()) <= policy.temperature_tolerance_k
+                && result.energy_residual_j().abs() <= policy.energy_tolerance_j)
+    );
+}
+
+#[test]
 fn g0_heat_balance_retains_a_small_input_against_a_large_reference_energy() {
     let model = model(0.0, 0.0, [100.0; 2]);
     let initial = pure(&model, 700.0, [1e15, 1e15]);

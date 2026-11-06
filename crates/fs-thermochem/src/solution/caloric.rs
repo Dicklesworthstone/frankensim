@@ -112,7 +112,8 @@ pub struct BinaryCaloricSolveV1 {
     pub temperature_bracket: [Temperature; 2],
     pub temperature_tolerance_k: f64,
     pub energy_tolerance_j: f64,
-    /// Maximum temperature bisections, 1..=256; each has a bounded phase solve.
+    /// Maximum safeguarded Newton/bisection steps, 1..=256; each samples one
+    /// temperature with a bounded phase solve, after the two bracket endpoints.
     pub maximum_iterations: usize,
     pub coexistence: BinaryCoexistenceOptionsV1,
 }
@@ -359,6 +360,10 @@ impl BinaryLiquidCaloricModelV1 {
                 residuals_j: [lower.2, upper.2],
             });
         }
+        // Start with the original midpoint, then allow at most two consecutive
+        // source-Cp proposals before another bisection. The far sign endpoint
+        // must keep advancing even when a local tangent is a poor predictor.
+        let mut consecutive_newton_steps = 2;
         for iterations in 0..=controls.maximum_iterations {
             let best = if lower.2.abs() <= upper.2.abs() {
                 &lower
@@ -388,14 +393,58 @@ impl BinaryLiquidCaloricModelV1 {
             if midpoint == lo || midpoint == hi {
                 break;
             }
-            let middle = sample(midpoint)?;
-            if middle.2 <= 0.0 {
-                lo = midpoint;
-                lower = middle;
-            } else {
-                hi = midpoint;
-                upper = middle;
+            let old_width = hi - lo;
+            let old_residual = best.2.abs();
+            let mut next = midpoint;
+            if consecutive_newton_steps < 2
+                && let Ok(response) = best.0.isobaric_heat_capacity_response()
+            {
+                let temperature = best.0.temperature.value();
+                let correction = -best.2 / response.heat_capacity_j_per_k();
+                let mut proposal = temperature + correction;
+                if correction.is_finite()
+                    && correction.abs() <= 0.25 * controls.temperature_tolerance_k
+                    && old_residual <= controls.energy_tolerance_j
+                {
+                    // Newton can approach one sign endpoint while leaving a
+                    // wide bracket. Once its original residual is acceptable,
+                    // sample just past the predicted root to establish an
+                    // actual narrow sign bracket. Only the sampled residual
+                    // may move either endpoint or establish convergence.
+                    let distance = 0.5 * controls.temperature_tolerance_k;
+                    proposal = if best.2 < 0.0 {
+                        (temperature + distance).max(temperature.next_up())
+                    } else {
+                        (temperature - distance).min(temperature.next_down())
+                    };
+                }
+                // A tangent is optional acceleration. Unsupported or rounded,
+                // exterior/nonfinite proposals retain the original bisection;
+                // no source/phase trial is spent on a rejected proposal.
+                if proposal.is_finite() && proposal > lo && proposal < hi {
+                    next = proposal;
+                }
             }
+            let next_sample = sample(next)?;
+            if next_sample.2 <= 0.0 {
+                lo = next;
+                lower = next_sample;
+            } else {
+                hi = next;
+                upper = next_sample;
+            }
+            consecutive_newton_steps = if next == midpoint {
+                0
+            } else if hi - lo <= 0.5 * old_width
+                || lower.2.abs().min(upper.2.abs()) <= 0.5 * old_residual
+            {
+                consecutive_newton_steps + 1
+            } else {
+                // A source tangent may be inaccurate across a phase/source
+                // corner or within a loose numerical binodal bracket. Do not
+                // repeat a step that improves neither bracket nor residual.
+                2
+            };
         }
         Err(BinaryCaloricErrorV1::IterationLimit)
     }
