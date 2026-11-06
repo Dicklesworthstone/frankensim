@@ -36,6 +36,8 @@ use super::{
 };
 use crate::linear3::TetAssemblyBudget;
 
+/// Progressive ductile softening through the shared nonpotential Newton owner.
+pub mod ductile;
 /// Consistent reference inertia with atomic finite-plastic motion acceptance.
 pub mod dynamics;
 /// Fully integrated finite Hex8 plasticity with optional mean dilatation.
@@ -266,6 +268,30 @@ impl<S> FinitePlasticTetState<'_, S> {
         inertial_work_j: Option<f64>,
         cx: &Cx<'_>,
     ) -> Result<EndpointWork, FinitePlasticTetError> {
+        self.endpoint_work_fields(
+            equilibrium.displacement_m.as_flattened(),
+            equilibrium.reactions_n.iter().copied(),
+            force,
+            deformation,
+            stress,
+            inertial_work_j,
+            cx,
+        )
+    }
+
+    /// Shared physical work for potential and nonpotential endpoint solvers.
+    /// No scalar material potential is inferred from an accepted force field.
+    #[allow(clippy::too_many_arguments)]
+    fn endpoint_work_fields(
+        &self,
+        new_u: &[f64],
+        reactions_n: impl IntoIterator<Item = (usize, f64)>,
+        force: &[f64],
+        deformation: &[[f64; 9]],
+        stress: &[[f64; 9]],
+        inertial_work_j: Option<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<EndpointWork, FinitePlasticTetError> {
         let mut internal_j = 0.0;
         for (index, element) in self.elements.iter().enumerate() {
             if index % 1024 == 0 {
@@ -280,19 +306,15 @@ impl<S> FinitePlasticTetState<'_, S> {
             internal_j = element.volume.mul_add(density, internal_j);
         }
         let old_u = self.displacement_m.as_flattened();
-        let new_u = equilibrium.displacement_m.as_flattened();
         let dead_load_j = force
             .iter()
             .zip(new_u.iter().zip(old_u))
             .fold(0.0, |sum, (force, (after, before))| {
                 force.mul_add(after - before, sum)
             });
-        let support_j = equilibrium
-            .reactions_n
-            .iter()
-            .fold(0.0, |sum, (dof, force)| {
-                force.mul_add(new_u[*dof] - old_u[*dof], sum)
-            });
+        let support_j = reactions_n.into_iter().fold(0.0, |sum, (dof, force)| {
+            force.mul_add(new_u[dof] - old_u[dof], sum)
+        });
         let mut residual_j = dead_load_j + support_j - internal_j;
         if let Some(inertial_work_j) = inertial_work_j {
             residual_j -= inertial_work_j;

@@ -9291,6 +9291,50 @@ held-temperature continuation with fixed reference geometry and directional
 length; it adds no finite-deformation damage, caloric feedback, crack topology,
 contact or fragment transfer. Loss budgets do not certify trajectory accuracy.
 
+## Finite-deformation ductile tetrahedra
+
+`hyper3::plastic::ductile::FiniteDuctileTetSolid` carries the original
+multiplicative finite-J2 metric, accumulated plastic strain and shared ductile
+history through progressive softening. The native reference tetrahedron,
+deformation-gradient operator and dead/body-force assembly remain authoritative.
+The original directional `TetCrackBandGeometry` fixes the reference length;
+admission checks connectivity, volume, projected area and the material width.
+Prepared material owners are borrowed, and reference elements are shared across
+accepted states. Original source-bound finite laws retain their explicit
+Kirchhoff-plastic-work-per-reference-area meaning and source receipts.
+
+The damaged first-Piola response and its complete analytic 9-by-9 derivative
+enter the existing nonpotential increment operator, Newton iteration and
+nonsymmetric FGMRES solve. Geometry preparation uses the original finite
+reference owner; no scalar potential or symmetric tangent is invented for the
+damage response. Every trial starts from the same accepted finite plastic and
+damage histories. Stress-only backtracking avoids full derivative assembly.
+One physical duration and actual uniform or per-element held temperature reach
+both native flow and initiation. Material, work, geometry or cancellation refusal
+publishes none of the proposed displacement or histories.
+
+Native forces and support reactions independently establish external work;
+reference volumes and endpoint Piola stress establish internal material work.
+Compensated accounts retain storage, nonnegative plastic dissipation and damage
+release separately from signed finite-step work defects. The explicit defect
+budget bounds the SUM of absolute element defects, so opposite rotation-induced
+errors cannot cancel. Constitutive work consistency, assembled work, equilibrium
+work and physical balance receive independent gates. Numerical work defects
+never become physical heat or fracture energy. Exact held-deformation replay
+retains the accepted history without repeating plastic flow or physical time.
+
+All four focused regressions in `tests/finite_ductile.rs` pass in the bounded
+actual-source build: independent affine reaction decay and work, a nonlinear
+free-coordinate equilibrium through active damage, restart, proper finite
+rotations with opposing signed defects, and geometric/damage/cancellation
+refusals. The build executes the original material, reference geometry,
+Newton/FGMRES, allocation and cancellation owners; unrelated modules and unused
+hyperelastic generic defaults are omitted. This is not the full workspace
+Cargo or constellation gate. This owner advances one quasistatic interval;
+callers refine refused increments. It does not yet supply finite ductile
+inertia, evolving caloric feedback, crack topology, erosion or fragment/contact
+transfer. MR63's post-failure topology requirements remain open.
+
 ## Adaptive brittle load intervals
 
 `BrittleTetSolid::advance_path` reuses the original native endpoint solve and
