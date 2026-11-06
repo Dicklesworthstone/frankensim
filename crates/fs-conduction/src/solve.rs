@@ -67,6 +67,9 @@ use crate::mesh::ConductionMesh;
 mod maximum;
 pub use maximum::{LinearMaximumPolish, MaximumPhysicalGateRefusal, polish_linear_maximum};
 
+mod neumann;
+pub use neumann::{MeanTemperatureConfig, solve_mean_temperature};
+
 /// The pieces a conduction solve needs, borrowed together.
 #[derive(Debug, Clone, Copy)]
 pub struct ConductionProblem<'m> {
