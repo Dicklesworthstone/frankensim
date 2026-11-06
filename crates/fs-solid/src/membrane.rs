@@ -335,3 +335,6 @@ pub mod inertia;
 
 /// Prestressed vibration and work-conjugate force/volume ports.
 pub mod vibration;
+
+/// Source-bound objective strain-rate loss and full modal material resistance.
+pub mod viscosity;

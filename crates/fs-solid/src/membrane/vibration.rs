@@ -88,6 +88,9 @@ pub struct MembraneModes<'a> {
     modes: Vec<ModePair>,
     pressure_load_per_pa: Vec<[f64;3]>,
     volume_coupling: Vec<f64>,
+    // Material damping and other geometry-dependent operators must use this
+    // same admitted linearization, never a caller-supplied replacement shape.
+    linearization_displacement_m: Vec<[f64;3]>,
 }
 
 impl MembranePatch {
@@ -243,14 +246,17 @@ impl MembranePatch {
         }
         let pressure_load_per_pa=self.pressure_load_n(displacement_m,1.0,&mut cancelled)?;
         let mut result=MembraneModes {patch:self,inertia,free_dofs:free_dofs.to_vec(),modes,
-            pressure_load_per_pa,volume_coupling:vec![]};
+            pressure_load_per_pa,volume_coupling:vec![],
+            linearization_displacement_m:displacement_m.to_vec()};
         result.volume_coupling=result.project_nodal_force(&result.pressure_load_per_pa)?;
         poll(&mut cancelled)?;
         Ok(result)
     }
 }
 
-impl MembraneVibration<'_> {
+impl<'a> MembraneVibration<'a> {
+    /// Complete modal owner at this same accepted equilibrium.
+    pub fn basis(&self) -> &MembraneModes<'a> { &self.basis }
     /// Original immutable geometry, grain, source bundles and reference masses.
     pub fn patch(&self) -> &MembranePatch {self.basis.patch()}
     /// Reference inertia used for every modal normalization and projection.
@@ -286,6 +292,11 @@ impl MembraneModes<'_> {
     pub fn free_dofs(&self) -> &[usize] {&self.free_dofs}
     /// Complete mass-normalized positive discrete spectrum from `fs-modal`.
     pub fn modes(&self) -> &[ModePair] {&self.modes}
+    /// The exact admitted geometry used for this basis and its pressure port.
+    /// Geometry-dependent damping must be projected here, not at a new shape.
+    pub fn linearization_displacement_m(&self) -> &[[f64;3]] {
+        &self.linearization_displacement_m
+    }
     /// Current-area signed pressure traction per pascal [m2].
     pub fn pressure_load_per_pa(&self) -> &[[f64;3]] {&self.pressure_load_per_pa}
     /// B [m2/sqrt(kg)]: volume change is B.q, flow is B.qdot, force is B*p.

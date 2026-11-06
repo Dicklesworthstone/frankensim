@@ -1,0 +1,388 @@
+//! Objective material loss on the original total-Lagrangian membrane.
+//!
+//! This is an explicit reference-volume Kelvin--Voigt extension: second-Piola
+//! viscous stress is conjugate to engineering Green-strain rate. The existing
+//! reduced material tensor supplies its coefficients, in the original
+//! warp/weft axes. This objective extension does not turn a small-strain source
+//! into a calibrated finite-strain law. Source validity and the membrane's
+//! original geometric/strain envelope both remain necessary.
+//!
+//! Reference area times reference thickness integrates power. Neither current
+//! area, inertia, geometric prestress nor an invented decay rate is damped.
+//! In particular, a flat prestretched sheet has ZERO linear transverse loss
+//! from this mechanism; curved geometry or in-plane strain rate enables loss.
+
+use super::vibration::MembraneModes;
+use super::{Element, MembraneError, MembranePatch, dot, finite_vectors, poll};
+use fs_material::plane_stress_viscosity::{
+    MaterialPlane, PlaneStressViscosity, factor_passive_resultant,
+};
+use fs_material::sheet::MembraneLaw;
+
+/// Original membrane/source refusal or an incompatible material binding.
+#[derive(Debug)]
+pub enum MembraneViscosityError {
+    /// Original geometry, material, work-limit or cancellation refusal.
+    Membrane(MembraneError),
+    /// Original dissipative constitutive refusal with element attribution.
+    Material {
+        /// Original triangle index.
+        element: usize,
+        /// Original material-law error.
+        source: fs_material::MaterialError,
+    },
+    /// Source identity, axes, band or finite-value admission failed.
+    Invalid(&'static str),
+}
+
+impl From<MembraneError> for MembraneViscosityError {
+    fn from(error: MembraneError) -> Self {
+        Self::Membrane(error)
+    }
+}
+
+impl core::fmt::Display for MembraneViscosityError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "membrane viscosity: {self:?}")
+    }
+}
+
+impl std::error::Error for MembraneViscosityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Membrane(error) => Some(error),
+            Self::Material { source, .. } => Some(source),
+            Self::Invalid(_) => None,
+        }
+    }
+}
+
+type Result<T> = core::result::Result<T, MembraneViscosityError>;
+
+fn invalid(what: &'static str) -> MembraneViscosityError {
+    MembraneViscosityError::Invalid(what)
+}
+
+/// Physical full-space damping and independently integrated irreversible power.
+#[derive(Clone, Debug)]
+pub struct MembraneViscousResponse {
+    /// The resisting term C(u)v [N] on the LEFT of the momentum equation.
+    /// Actual viscous nodal force is its negative; v dot C(u)v equals power.
+    pub resisting_force_n: Vec<[f64; 3]>,
+    /// Nonnegative irreversible power [W], without numerical integration error.
+    pub power_w: f64,
+    /// Same power by original reference triangle [W], with no nodal heat split.
+    pub element_power_w: Vec<f64>,
+}
+
+/// Frozen original sources and their physical strain-rate geometry owner.
+#[derive(Clone, Debug)]
+pub struct MembraneViscosity<'a> {
+    patch: &'a MembranePatch,
+    laws: Vec<PlaneStressViscosity>,
+    volumes_m3: Vec<f64>,
+    factors: Vec<[[f64; 6]; 3]>,
+    resolved_band_rad_s: (f64, f64),
+}
+
+/// Complete modal material resistance, with source rows proving its PSD form.
+/// No modes or off-diagonal couplings are discarded.
+#[derive(Clone, Debug)]
+pub struct MembraneModalViscosity {
+    matrix_per_s: Vec<f64>,
+    dissipation_rows: Vec<f64>,
+    mode_count: usize,
+    row_count: usize,
+}
+
+impl MembraneModalViscosity {
+    /// Row-major full C for mass-normalized coordinates, in inverse seconds.
+    pub fn matrix_per_s(&self) -> &[f64] {
+        &self.matrix_per_s
+    }
+
+    /// Row-major S, row_count by mode_count, with C = S transpose S.
+    /// Each original facet contributes six material-factor rows in fixed order.
+    /// Their squared action on modal velocity is physical power [W].
+    pub fn dissipation_rows(&self) -> &[f64] {
+        &self.dissipation_rows
+    }
+
+    /// Number of retained source rows, including exact zero rows.
+    pub const fn row_count(&self) -> usize {
+        self.row_count
+    }
+
+    /// Complete original mode count.
+    pub const fn mode_count(&self) -> usize {
+        self.mode_count
+    }
+}
+
+// Difference-based gradients annihilate rigid translation algebraically.
+fn rate(element: &Element, f: [[f64; 3]; 2], velocity: [[f64; 3]; 3]) -> [f64; 3] {
+    let mut fdot = [[0.0; 3]; 2];
+    for a in 1..3 {
+        for axis in 0..3 {
+            let difference = velocity[a][axis] - velocity[0][axis];
+            for (alpha, column) in fdot.iter_mut().enumerate() {
+                column[axis] += difference * element.gradients[a][alpha];
+            }
+        }
+    }
+    [
+        dot(f[0], fdot[0]),
+        dot(f[1], fdot[1]),
+        dot(f[0], fdot[1]) + dot(f[1], fdot[0]),
+    ]
+}
+
+impl<'a> MembraneViscosity<'a> {
+    /// Bind one source tensor per original triangle, without inventing losses.
+    ///
+    /// Resolve sheet and viscosity properties together in ONE complete material
+    /// state bundle, then derive both owners from that bundle. Exact equality
+    /// includes the query, source selections and fixed environment. Axes12
+    /// means the sheet's ordered warp/weft axes; the element already rotates
+    /// its gradients into this frame, so viscosity is not rotated a second time.
+    ///
+    /// This constructor explicitly selects reference Green-rate Kelvin--Voigt
+    /// damping. Shifted natural/thermal hyperelastic references refuse because
+    /// they require a constitutive pullback and endpoint source refresh.
+    /// Reference thickness comes from the original sheet, independently of mass.
+    ///
+    /// The finite ordered resolved band must lie inside EVERY source band.
+    /// It is a declared applicability interval, not a signal bandwidth proof.
+    /// Transient consumers must separately admit their forcing and sampling.
+    pub fn new(
+        patch: &'a MembranePatch,
+        laws: Vec<PlaneStressViscosity>,
+        resolved_band_rad_s: (f64, f64),
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self> {
+        poll(&mut cancelled)?;
+        let (lo, hi) = resolved_band_rad_s;
+        if !lo.is_finite() || !hi.is_finite() || lo < 0.0 || hi < lo {
+            return Err(invalid("finite ordered membrane viscosity band required"));
+        }
+        if laws.len() != patch.elements.len() {
+            return Err(invalid("one source viscosity per original triangle required"));
+        }
+        let mut volumes_m3 = Vec::with_capacity(laws.len());
+        let mut factors = Vec::with_capacity(laws.len());
+        for (index, ((element, sheet), law)) in
+            patch.elements.iter().zip(&patch.sheets).zip(&laws).enumerate()
+        {
+            poll(&mut cancelled)?;
+            if law.source() != sheet.material() || law.plane() != MaterialPlane::Axes12 {
+                return Err(invalid("viscosity needs the identical sheet source and warp/weft axes"));
+            }
+            if let MembraneLaw::Hyperelastic(elastic) = &element.law {
+                if elastic.reference_stretches() != [1.0; 3]
+                    || elastic.mean_thermal_expansion().is_some()
+                {
+                    return Err(invalid("shifted membrane material references need a viscosity pullback"));
+                }
+            }
+            for omega in [lo, hi] {
+                law.validate_frequency(omega)
+                    .map_err(|source| MembraneViscosityError::Material { element: index, source })?;
+            }
+            let volume = element.area * sheet.thickness_m();
+            if !volume.is_finite() || volume <= 0.0 {
+                return Err(invalid("unrepresentable reference membrane volume"));
+            }
+            let factor = factor_passive_resultant(law.matrix_pa_s())
+                .map_err(|source| MembraneViscosityError::Material { element: index, source })?;
+            volumes_m3.push(volume);
+            factors.push(factor);
+        }
+        poll(&mut cancelled)?;
+        Ok(Self { patch, laws, volumes_m3, factors, resolved_band_rad_s })
+    }
+
+    /// Exact original geometry, material and reference-inertia owner.
+    pub const fn patch(&self) -> &'a MembranePatch {
+        self.patch
+    }
+
+    /// Original immutable selected loss laws in reference triangle order.
+    pub fn laws(&self) -> &[PlaneStressViscosity] {
+        &self.laws
+    }
+
+    /// Declared resolved applicability interval [rad/s].
+    pub const fn resolved_band_rad_s(&self) -> (f64, f64) {
+        self.resolved_band_rad_s
+    }
+
+    /// Evaluate objective damping and its physical power at the original state.
+    /// Outputs allocate O(nodes + elements); failure publishes no partial result.
+    /// The declared frequency band is NOT inferred from one instantaneous state.
+    pub fn evaluate(
+        &self,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MembraneViscousResponse> {
+        poll(&mut cancelled)?;
+        let mut resisting_force_n = vec![[0.0; 3]; self.patch.mesh.nodes.len()];
+        let mut element_power_w = vec![0.0; self.laws.len()];
+        let power_w = self.evaluate_into(
+            displacement_m, velocity_m_s, &mut resisting_force_n,
+            &mut element_power_w, &mut cancelled,
+        )?;
+        Ok(MembraneViscousResponse { resisting_force_n, power_w, element_power_w })
+    }
+
+    // Only private trial arrays may be partially changed on refusal. Fixed-q
+    // time/linear-system consumers can reuse these arrays without allocations.
+    pub(super) fn evaluate_into(
+        &self,
+        displacement_m: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        force_n: &mut [[f64; 3]],
+        element_power_w: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64> {
+        poll(cancelled)?;
+        let nodes = self.patch.mesh.nodes.len();
+        if !finite_vectors(displacement_m, nodes) || !finite_vectors(velocity_m_s, nodes)
+            || force_n.len() != nodes || element_power_w.len() != self.laws.len()
+        {
+            return Err(invalid("complete finite membrane state and work arrays required"));
+        }
+        force_n.fill([0.0; 3]);
+        let mut power_w = 0.0;
+        for (index, element) in self.patch.elements.iter().enumerate() {
+            poll(cancelled)?;
+            let f = self.patch.deformation(element, displacement_m);
+            self.patch.response(index, f)?;
+            let local_velocity = element.nodes.map(|node| velocity_m_s[node]);
+            let strain_rate = rate(element, f, local_velocity);
+            let ([s11, s22, s12], power) = self.laws[index].stress_and_power(strain_rate)
+                .map_err(|source| MembraneViscosityError::Material { element: index, source })?;
+            let volume = self.volumes_m3[index];
+            let heat = volume * power;
+            if !heat.is_finite() || (power != 0.0 && heat == 0.0) {
+                return Err(invalid("unrepresentable membrane dissipation"));
+            }
+            element_power_w[index] = heat;
+            power_w += heat;
+            for (a, &node) in element.nodes.iter().enumerate() {
+                let [gx, gy] = element.gradients[a];
+                for axis in 0..3 {
+                    force_n[node][axis] += volume * (
+                        (s11 * gx + s12 * gy) * f[0][axis]
+                        + (s12 * gx + s22 * gy) * f[1][axis]
+                    );
+                }
+            }
+        }
+        if !power_w.is_finite() || !finite_vectors(force_n, nodes) {
+            return Err(invalid("unrepresentable membrane damping force or power"));
+        }
+        poll(cancelled)?;
+        Ok(power_w)
+    }
+
+    /// Project full material resistance through the ORIGINAL complete basis.
+    ///
+    /// Geometry is retained by the modal owner; foreign patches refuse.
+    /// Every retained eigenfrequency enclosure must lie in the declared source band.
+    /// This does not qualify arbitrary transients, unresolved loading or tails.
+    ///
+    /// The source Gram rows preserve directional and geometric nullspaces and
+    /// retain every cross-mode term. They reuse the material owner's passive
+    /// factorization tolerance; no new positive floor or modal fit is introduced.
+    /// `max_terms` bounds projection contractions/storage before allocation.
+    /// Constitutive state admission retains the original law's own iteration
+    /// controls; hyperelastic local solves are outside this term count.
+    pub fn project_modes(
+        &self,
+        modes: &MembraneModes<'_>,
+        max_terms: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MembraneModalViscosity> {
+        poll(&mut cancelled)?;
+        if !core::ptr::eq(self.patch, modes.patch()) {
+            return Err(invalid("viscosity and modes must share the original membrane"));
+        }
+        let n = modes.modes().len();
+        let full = self.patch.mesh.nodes.len().checked_mul(3);
+        let rows = self.laws.len().checked_mul(6);
+        let square = n.checked_mul(n);
+        let entries = rows.and_then(|rows| rows.checked_mul(n));
+        let terms = full.and_then(|full| {
+            self.laws.len().checked_mul(n.checked_mul(96)?)
+                .and_then(|v| v.checked_add(rows?.checked_mul(square?)?))
+                .and_then(|v| v.checked_add(entries?))
+                .and_then(|v| v.checked_add(full))
+                .and_then(|v| v.checked_add(square?))
+        });
+        if terms.is_none_or(|work| work > max_terms) {
+            return Err(MembraneError::Budget("membrane viscosity projection").into());
+        }
+        let (full, rows, square, entries) = (
+            full.unwrap(), rows.unwrap(), square.unwrap(), entries.unwrap(),
+        );
+        let (lo, hi) = self.resolved_band_rad_s;
+        for mode in modes.modes() {
+            poll(&mut cancelled)?;
+            for lambda in [mode.interval.0, mode.lambda, mode.interval.1] {
+                let omega = lambda.sqrt();
+                if !omega.is_finite() || omega < lo || omega > hi {
+                    return Err(invalid("membrane frequency enclosure exceeds the declared viscosity band"));
+                }
+            }
+        }
+        let mut index = vec![usize::MAX; full];
+        for (position, &dof) in modes.free_dofs().iter().enumerate() {
+            index[dof] = position;
+        }
+        let mut dissipation_rows = vec![0.0; entries];
+        let displacement = modes.linearization_displacement_m();
+        for (element_index, element) in self.patch.elements.iter().enumerate() {
+            poll(&mut cancelled)?;
+            let f = self.patch.deformation(element, displacement);
+            self.patch.response(element_index, f)?;
+            let scale = self.volumes_m3[element_index].sqrt();
+            for (column, mode) in modes.modes().iter().enumerate() {
+                let local = element.nodes.map(|node| core::array::from_fn(|axis| {
+                    let dof = index[3 * node + axis];
+                    if dof == usize::MAX { 0.0 } else { mode.phi[dof] }
+                }));
+                let strain_rate = rate(element, f, local);
+                if strain_rate.iter().any(|value| !value.is_finite()) {
+                    return Err(invalid("unrepresentable modal membrane strain rate"));
+                }
+                for k in 0..6 {
+                    let value: f64 = (0..3).map(|a|
+                        self.factors[element_index][a][k] * strain_rate[a]).sum();
+                    let scaled = scale * value;
+                    if !scaled.is_finite() || (value != 0.0 && scaled == 0.0) {
+                        return Err(invalid("unrepresentable modal membrane dissipation row"));
+                    }
+                    dissipation_rows[(6 * element_index + k) * n + column] = scaled;
+                }
+            }
+        }
+        let mut matrix_per_s = vec![0.0; square];
+        for i in 0..n {
+            for j in i..n {
+                let mut value = 0.0;
+                for row in 0..rows {
+                    if row % 256 == 0 { poll(&mut cancelled)?; }
+                    value += dissipation_rows[row * n + i] * dissipation_rows[row * n + j];
+                }
+                if !value.is_finite() {
+                    return Err(invalid("unrepresentable modal membrane resistance"));
+                }
+                matrix_per_s[i * n + j] = value;
+                matrix_per_s[j * n + i] = value;
+            }
+        }
+        poll(&mut cancelled)?;
+        Ok(MembraneModalViscosity { matrix_per_s, dissipation_rows, mode_count: n, row_count: rows })
+    }
+}
