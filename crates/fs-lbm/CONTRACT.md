@@ -13708,3 +13708,34 @@ uniform-flow preparation clears the coefficient cache. Regression sources
 compare the coefficients against the existing independent full-tensor Germano
 oracle and check that scalar preparation preserves them without extra storage.
 The coefficient remains an exploratory model estimate, not DNS validation.
+
+## Resolved inviscid vorticity production
+
+`FlowKinematics3::inviscid_vorticity_budget` retains the separate stretching
+`G omega`, compressible dilatation `-omega div(u)`, and baroclinic
+`grad(rho) cross grad(p) / rho^2` contributions. Pressure is thermodynamic
+pressure in the same coherent units as density and velocity, never p/rho.
+`VorticityBudget3` exposes their sum and the corresponding local inviscid
+enstrophy rate. Physical conversion uses the actual timestep: curl scales
+with 1/dt, the three rates with 1/dt^2, and enstrophy production with 1/dt^3.
+No reference density or guessed cell spacing enters that conversion.
+
+`NsfGrid3::vorticity_budget` samples the original accepted populations,
+current half-force velocity and accepted p=rho*theta. Seven fixed-size
+population reductions supply the centered fluid stencil without allocation,
+source requery or state mutation. Periodic neighbors wrap through the native
+grid. A solid or nonperiodic face interrupting the scalar stencil refuses;
+the ordinary boundary-aware kinematics field remains available there. This
+query supplies no invented pressure/density wall condition.
+
+These are resolved inviscid material-rate terms, not an additional momentum
+force or a complete vorticity transport discretization. Viscous stress curl,
+nonconservative applied-force curl, explicit source injection, and subgrid
+terms are not included. Local bulk enstrophy is not a global boundary flux
+balance or an uncertainty certificate.
+
+The module tests cover expansion/rotation, barotropic cancellation,
+pressure-density misalignment, mass-unit invariance, SI conversion, invalid
+data, periodic agreement with native force-centered curl, and incomplete
+thermodynamic stencils (G0/G1/G3). Independent analytic checks were performed;
+native Rust execution was unavailable when this extension was introduced.

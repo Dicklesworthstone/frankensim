@@ -7,6 +7,9 @@
 
 use fs_exec::CancelGate;
 
+mod budget;
+pub use budget::VorticityBudget3;
+
 /// A full velocity gradient `gradient[velocity_component][spatial_axis]`.
 /// Native grids return lattice units. [`Self::to_physical`] converts a lattice
 /// gradient to SI using the actual timestep of the isotropic lattice:

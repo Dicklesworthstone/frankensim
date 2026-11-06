@@ -81,6 +81,7 @@ pub use material::{NamedMixtureNsfGas, NsfGasMedium, ThermochemicalNsfGas};
 mod bulk;
 pub use bulk::{NsfBulkViscosityPoint, NsfBulkViscositySample, NsfBulkViscositySource};
 mod sgs;
+mod vorticity;
 pub use sgs::{
     NsfChannelDynamicThermalSgsConfig, NsfDynamicThermalSgsConfig, NsfSgsConfig, NsfSgsTransport,
 };
