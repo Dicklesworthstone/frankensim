@@ -18026,3 +18026,29 @@ coupled spherical stationarity, rotation covariance, inverse and variational
 tangents, tiny trial changes about a large bias, cycling/refinement and source
 continuation/refusal. `tests/dielectric_hysteresis.rs` also exercises explicit
 temperature coverage and history-preserving source refresh.
+
+## Three-dimensional orthotropic strength interaction
+
+`strength::OrthotropicTsaiWu` admits the original nine positive strength
+magnitudes `[X1t,X1c,X2t,X2c,X3t,X3c,S12,S23,S31]` in Pa and three explicitly
+selected normalized interactions `[f12,f23,f31]`. All twelve named claims
+retain the same card, complete typed conditions and selection receipts. Missing
+compression, transverse, shear or biaxial data never receives a default. Source
+refresh preserves these exact choices and rechecks the complete surface.
+
+The full normal interaction matrix must be positive definite. Three separate
+pair bounds do not establish that condition; open or singular surfaces refuse.
+The fixed material-frame tensor-shear stress drives the original 3-D Tsai--Wu
+polynomial. A cached Cholesky factor, scaled norm and stable quadratic root
+return a nonnegative homogeneous utilization without squared dimensional
+stresses, eigensolves, allocation or source queries during assessment. Its
+reciprocal scales every component of the current stress, including thermal or
+residual stress, and is not a load factor with those components held fixed.
+
+`tests/orthotropic_tsai_wu.rs` checks every normal/shear intercept, an independent
+dimensional polynomial, combined tensile/shear crossings, three-axis convexity,
+stress scaling over 560 orders of magnitude, compressive asymmetry, source
+refresh and unsupported data. These are manufactured G0/G1/G3 checks, not
+measured-material qualification. The criterion supplies no failure-mode
+decomposition, automatic stiffness loss, fracture energy, progressive damage,
+finite-strain stress conversion or experimental calibration.
