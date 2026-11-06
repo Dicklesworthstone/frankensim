@@ -559,8 +559,13 @@ fn retryable<E>(error: &JointFrictionTrajectoryError<E>) -> bool {
 /// so the raw one-versus-two difference is used without an assumed-order factor.
 /// Only the two-half-step candidate is accumulated. All refusals, including a
 /// late source failure or cancellation, preserve the original accepted bodies.
-/// Mechanical loss and numerical constraint/balance work remain separate; this
-/// function supplies no thermal partition, wear or static/kinetic hysteresis.
+/// Mechanical loss and numerical constraint/balance work remain separate. The
+/// supplied axial model may declare distinct static and kinetic capacities; it
+/// is an ideal discontinuous force law, not compliant presliding history. Each
+/// phase holds only an exact resting input or an isolated zero event. Finite
+/// native roundoff or source-created nonzero velocity is not silently classified
+/// as sticking. Persistent geometric locking needs its constraint/history owner.
+/// No thermal partition, wear or unprovided friction history is inferred.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn advance_joint_friction_trajectory<E>(
     states: &[RigidBodyState],

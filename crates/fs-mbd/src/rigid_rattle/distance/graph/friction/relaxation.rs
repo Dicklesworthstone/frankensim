@@ -16,13 +16,25 @@ use super::{
     MAX_JOINT_FRICTION_PORTS, MassProperties, RigidBodyState, Vec3, apply_native, limit, poll,
     prepare, reserved, scaled_capacity,
 };
+use fs_contact::tangential::impact::multiple::relaxation::stiction::{
+    CoupledStictionFlowControls, CoupledStictionFlowDiagnostics, CoupledStictionFlowError,
+    CoupledStictionFlowInput, MAX_STICTION_MODES_PER_PHASE, advance_coupled_stiction,
+};
 use fs_contact::tangential::impact::multiple::relaxation::{
     CoupledFrictionFlowControls, CoupledFrictionFlowError, CoupledFrictionFlowInput,
     CoupledFrictionFlowReport, advance_coupled_friction,
 };
 
-/// A held physical drive and a common static/kinetic force bound at one joint.
-/// The capacities are declared inputs, not inferred bearing loads or materials.
+/// Complete six-port static/release mode inventory per isolated phase.
+/// The whole native flow admits at most this value times its segment limit.
+pub const MAX_JOINT_STICTION_MODES_PER_PHASE: usize = MAX_STICTION_MODES_PER_PHASE;
+
+/// A held physical drive and source-declared friction capacities at one joint.
+///
+/// The original variants retain a common static/kinetic bound. The explicit
+/// stiction variants use a larger static bound and lower moving bound, with the
+/// shared contact owner's maximal-sticking continuation and ambiguity refusal.
+/// These are declared physical inputs, not inferred bearing loads or materials.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum JointFrictionFlowPort {
     /// Positive torque acts on the second body along the original hinge axis.
@@ -43,32 +55,80 @@ pub enum JointFrictionFlowPort {
         /// Signed held drive force [N].
         drive_n: f64,
     },
+    /// Axial hinge friction with an independently declared breakaway capacity.
+    RevoluteStiction {
+        /// Index of an original revolute joint.
+        joint_index: usize,
+        /// Nonnegative static torque capacity, at least the kinetic value [N m].
+        static_capacity_nm: f64,
+        /// Nonnegative sliding torque capacity [N m].
+        kinetic_capacity_nm: f64,
+        /// Signed held torque on the second body along the hinge axis [N m].
+        drive_nm: f64,
+    },
+    /// Axial carriage friction with an independently declared breakaway force.
+    PrismaticStiction {
+        /// Index of an original prismatic joint.
+        joint_index: usize,
+        /// Nonnegative static force capacity, at least the kinetic value [N].
+        static_capacity_n: f64,
+        /// Nonnegative sliding force capacity [N].
+        kinetic_capacity_n: f64,
+        /// Signed held force on the carriage along the carrier's joint Z [N].
+        drive_n: f64,
+    },
 }
 impl JointFrictionFlowPort {
     /// Original joint index; caller ordering has no physical effect.
     #[must_use]
     pub const fn joint_index(self) -> usize {
         match self {
-            Self::Revolute { joint_index, .. } | Self::Prismatic { joint_index, .. } => joint_index,
+            Self::Revolute { joint_index, .. }
+            | Self::Prismatic { joint_index, .. }
+            | Self::RevoluteStiction { joint_index, .. }
+            | Self::PrismaticStiction { joint_index, .. } => joint_index,
         }
     }
     fn capacity(self) -> f64 {
         match self {
             Self::Revolute { capacity_nm, .. } => capacity_nm,
             Self::Prismatic { capacity_n, .. } => capacity_n,
+            Self::RevoluteStiction {
+                static_capacity_nm, ..
+            } => static_capacity_nm,
+            Self::PrismaticStiction {
+                static_capacity_n, ..
+            } => static_capacity_n,
+        }
+    }
+    fn kinetic_capacity(self) -> f64 {
+        match self {
+            Self::Revolute { capacity_nm, .. } => capacity_nm,
+            Self::Prismatic { capacity_n, .. } => capacity_n,
+            Self::RevoluteStiction {
+                kinetic_capacity_nm,
+                ..
+            } => kinetic_capacity_nm,
+            Self::PrismaticStiction {
+                kinetic_capacity_n, ..
+            } => kinetic_capacity_n,
         }
     }
     fn drive(self) -> f64 {
         match self {
-            Self::Revolute { drive_nm, .. } => drive_nm,
-            Self::Prismatic { drive_n, .. } => drive_n,
+            Self::Revolute { drive_nm, .. } | Self::RevoluteStiction { drive_nm, .. } => drive_nm,
+            Self::Prismatic { drive_n, .. } | Self::PrismaticStiction { drive_n, .. } => drive_n,
         }
     }
     fn impulse_bound(self, duration_s: f64) -> Result<JointFrictionPort, JointFrictionFlowError> {
         let capacity = self.capacity();
+        let kinetic = self.kinetic_capacity();
         let bound = capacity * duration_s;
         if !capacity.is_finite()
             || capacity < 0.0
+            || !kinetic.is_finite()
+            || kinetic < 0.0
+            || kinetic > capacity
             || !self.drive().is_finite()
             || !bound.is_finite()
             || (capacity != 0.0 && bound == 0.0)
@@ -78,14 +138,18 @@ impl JointFrictionFlowPort {
             ));
         }
         Ok(match self {
-            Self::Revolute { joint_index, .. } => JointFrictionPort::Revolute {
-                joint_index,
-                capacity_nms: bound,
-            },
-            Self::Prismatic { joint_index, .. } => JointFrictionPort::Prismatic {
-                joint_index,
-                capacity_ns: bound,
-            },
+            Self::Revolute { joint_index, .. } | Self::RevoluteStiction { joint_index, .. } => {
+                JointFrictionPort::Revolute {
+                    joint_index,
+                    capacity_nms: bound,
+                }
+            }
+            Self::Prismatic { joint_index, .. } | Self::PrismaticStiction { joint_index, .. } => {
+                JointFrictionPort::Prismatic {
+                    joint_index,
+                    capacity_ns: bound,
+                }
+            }
         })
     }
 }
@@ -164,6 +228,13 @@ pub struct JointFrictionFlowPortReport {
     pub axis_world: Vec3,
     /// Physical native endpoint, impulses and time-integrated coordinate travel.
     pub motion: JointFrictionFlowMotion,
+    /// Minimum nonnegative speed over the integrated phase, also enclosing the
+    /// measured native start/end speeds [m/s]. A hinge uses `L*|omega|`, where
+    /// L is its reported angular length, not an inferred physical rubbing radius.
+    pub minimum_scaled_speed_m_s: f64,
+    /// Maximum nonnegative speed over that same complete phase [m/s]. These
+    /// computed extrema are not a validated trajectory tube.
+    pub maximum_scaled_speed_m_s: f64,
     /// Native momentum application of the summed drive and friction action.
     /// Its stage-local work is distinct from the path work below.
     pub native_axial_impulse: JointReactionImpulse,
@@ -197,6 +268,9 @@ pub struct JointFrictionFlowReport {
     pub scaled_mobility_per_kg: [[f64; MAX_JOINT_FRICTION_PORTS]; MAX_JOINT_FRICTION_PORTS],
     /// Shared flow in the same canonical radius/length-scaled coordinates.
     pub flow: CoupledFrictionFlowReport,
+    /// Distinct static/kinetic continuation diagnostics in canonical port order.
+    /// Absent when all bounds are equal and the original flow path is used.
+    pub stiction: Option<CoupledStictionFlowDiagnostics>,
     /// Summed original bilateral impulses in authored row order [N s].
     pub constraint_impulses_ns: Vec<f64>,
     /// Original native point/couple receipts for the bilateral reactions.
@@ -229,6 +303,8 @@ pub enum JointFrictionFlowError {
     Native(JointFrictionError),
     /// Original continuous Coulomb owner refusal.
     Flow(CoupledFrictionFlowError),
+    /// Larger-static continuation refused, including ambiguous coupled modes.
+    Stiction(CoupledStictionFlowError),
     /// Invalid or unrepresentable physical input.
     Invalid(&'static str),
     /// Actual native response failed a named physical residual.
@@ -254,6 +330,16 @@ impl From<CoupledFrictionFlowError> for JointFrictionFlowError {
         Self::Flow(error)
     }
 }
+impl From<CoupledStictionFlowError> for JointFrictionFlowError {
+    fn from(error: CoupledStictionFlowError) -> Self {
+        match error {
+            // Existing trajectory owners may refine an interval after a flow
+            // impulse/segment budget refusal. Preserve that shared error path.
+            CoupledStictionFlowError::Flow(flow) => Self::Flow(flow),
+            mode => Self::Stiction(mode),
+        }
+    }
+}
 impl core::fmt::Display for JointFrictionFlowError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "native joint friction flow: {self:?}")
@@ -263,11 +349,21 @@ impl std::error::Error for JointFrictionFlowError {}
 
 /// Advance coupled axial Coulomb motion under held physical efforts.
 ///
-/// The shared force law resolves real arrest times and zero-speed holding under
-/// one common static/kinetic bound. No numerical speed capture, inferred normal
-/// loads, separate larger-static history, pose advance or thermal partition is
-/// supplied. Successive calls can change declared loads/drives. The original
-/// graph's geometry must be re-admitted whenever the surrounding owner moves it.
+/// The shared force law resolves real arrest times and zero-speed holding.
+/// Original equal-bound ports retain the original algorithm. Explicit stiction
+/// ports use their larger static and lower kinetic bounds, preserving maximal
+/// admissible sticking sets; multiple undominated continuations refuse instead
+/// of selecting a mode by joint order. Each phase has at most 3^6 mode candidates,
+/// and the segment limit bounds the complete continuation work. The original
+/// full constrained mobility is shared across every selected joint.
+///
+/// No numerical speed capture, inferred bearing pressure, pose advance or thermal
+/// partition is supplied. Rest is an exact input velocity or a resolved zero
+/// event within this phase. Native endpoint roundoff remains visible; it is not
+/// silently replaced by a remembered stick state on the next call. A persistent
+/// geometrically locked trajectory needs its surrounding constraint/history
+/// owner. Successive calls can change declared loads/drives, and moved geometry
+/// must be re-admitted by the original native graph.
 ///
 /// Unlike an impact projection, continuous work integrates the whole velocity
 /// path. This function therefore audits actual native endpoint and path energy,
@@ -303,6 +399,7 @@ pub fn advance_joint_friction(
     for i in 0..n {
         bounds[i] = sources[i].impulse_bound(duration_s)?;
     }
+    let has_stiction = sources.iter().any(|s| s.capacity() > s.kinetic_capacity());
     let native = controls.native();
     let prepared = prepare(
         states,
@@ -314,11 +411,36 @@ pub fn advance_joint_friction(
         &mut cancelled,
     )?;
     let mut capacities = [0.0; MAX_JOINT_FRICTION_PORTS];
+    let mut kinetic = [0.0; MAX_JOINT_FRICTION_PORTS];
     let mut drives = [0.0; MAX_JOINT_FRICTION_PORTS];
     for i in 0..n {
         let source = sources[prepared.order[i]];
         let length = prepared.ports[i].length;
-        capacities[i] = scaled_capacity(source.capacity(), length)?;
+        if has_stiction {
+            // The static threshold and drive must use the same conversion.
+            // Conservatively rounding only Cs down would cause an artificial
+            // finite breakaway when the authored drive is exactly Cs. Native
+            // integrated impulse bounds remain independently audited below.
+            capacities[i] = source.capacity() / length;
+            kinetic[i] = source.kinetic_capacity() / length;
+            if !capacities[i].is_finite()
+                || !kinetic[i].is_finite()
+                || (source.capacity() != 0.0 && capacities[i] == 0.0)
+                || (source.kinetic_capacity() != 0.0 && kinetic[i] == 0.0)
+            {
+                return Err(JointFrictionFlowError::Invalid(
+                    "representable scaled static/kinetic capacities",
+                ));
+            }
+        } else {
+            capacities[i] = scaled_capacity(source.capacity(), length)?;
+            kinetic[i] = capacities[i];
+        }
+        if source.capacity() > source.kinetic_capacity() && capacities[i] == kinetic[i] {
+            return Err(JointFrictionFlowError::Invalid(
+                "representable static/kinetic capacity gap",
+            ));
+        }
         drives[i] = source.drive() / length;
         if !drives[i].is_finite() || (source.drive() != 0.0 && drives[i] == 0.0) {
             return Err(JointFrictionFlowError::Invalid(
@@ -326,17 +448,40 @@ pub fn advance_joint_friction(
             ));
         }
     }
-    let flow = advance_coupled_friction(
-        &CoupledFrictionFlowInput {
-            velocity_before_m_s: &prepared.velocity[..n],
-            mobility_per_kg: &prepared.matrix[..n * n],
-            capacity_n: &capacities[..n],
-            drive_n: &drives[..n],
-            duration_s,
-        },
-        controls.flow,
-        &mut cancelled,
-    )?;
+    let (flow, stiction) = if has_stiction {
+        let maximum_mode_evaluations = MAX_JOINT_STICTION_MODES_PER_PHASE
+            .checked_mul(controls.flow.maximum_segments)
+            .ok_or(JointFrictionFlowError::Invalid("stiction mode work bound"))?;
+        let resolved = advance_coupled_stiction(
+            &CoupledStictionFlowInput {
+                velocity_before_m_s: &prepared.velocity[..n],
+                mobility_per_kg: &prepared.matrix[..n * n],
+                static_capacity_n: &capacities[..n],
+                kinetic_capacity_n: &kinetic[..n],
+                drive_n: &drives[..n],
+                duration_s,
+            },
+            CoupledStictionFlowControls {
+                flow: controls.flow,
+                maximum_mode_evaluations,
+            },
+            &mut cancelled,
+        )?;
+        (resolved.flow, Some(resolved.diagnostics))
+    } else {
+        let flow = advance_coupled_friction(
+            &CoupledFrictionFlowInput {
+                velocity_before_m_s: &prepared.velocity[..n],
+                mobility_per_kg: &prepared.matrix[..n * n],
+                capacity_n: &capacities[..n],
+                drive_n: &drives[..n],
+                duration_s,
+            },
+            controls.flow,
+            &mut cancelled,
+        )?;
+        (flow, None)
+    };
     let mut friction = [0.0; MAX_JOINT_FRICTION_PORTS];
     let mut drive = [0.0; MAX_JOINT_FRICTION_PORTS];
     friction[..n].copy_from_slice(&flow.friction_impulse_ns[..n]);
@@ -420,6 +565,12 @@ pub fn advance_joint_friction(
             joint_index: source.joint_index(),
             axis_world: port.axis,
             motion,
+            minimum_scaled_speed_m_s: flow.minimum_speed_m_s[i]
+                .min(prepared.velocity[i].abs())
+                .min(endpoint.abs()),
+            maximum_scaled_speed_m_s: flow.maximum_speed_m_s[i]
+                .max(prepared.velocity[i].abs())
+                .max(endpoint.abs()),
             native_axial_impulse: applied.axial_events[i].ok_or(
                 JointFrictionFlowError::Unresolved("missing native axial update"),
             )?,
@@ -463,6 +614,7 @@ pub fn advance_joint_friction(
         ports,
         scaled_mobility_per_kg: prepared.published_matrix,
         flow,
+        stiction,
         constraint_impulses_ns: applied.reactions,
         native_constraint_impulses: applied.native_constraints,
         drive_work_j: drive_work.to_f64(),

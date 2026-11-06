@@ -7510,3 +7510,34 @@ One-split versus two-half-split differences control positions, orientation, worl
 The final receipt retains original mechanical energy including uniform-gravity potential, original free-step force/displacement and body-torque/midpoint work, physical axial drive work, nonnegative friction loss, signed constraint work and its absolute accepted-step sum, and the raw balance residual. These independent accounts remain separately gated. Exact static balance belongs in the axial drive ports: splitting separately authored body wrenches can require further refinement or refuse at the configured limit. There is no inferred heat/wear partition or distinct static/kinetic coefficient in this owner.
 
 Nine direct regressions cover finite-carrier stopping distance, reversal poses/work, analytical coupled-rotor attitudes, authored short pulses, pose-dependent spring drive, a rotating rail with rotated full body inertias against an independent centrifugal/friction ODE, gravity and external work, large-epoch represented time, and atomic late-source/cancellation/refinement refusals.
+
+## Native joint breakaway and sliding friction
+
+The continuous joint flow now accepts `RevoluteStiction` and
+`PrismaticStiction` sources with independently authored static and kinetic
+capacities. Their complete constrained mobility, bilateral reactions,
+full-tensor inertia response and native momentum application remain with the
+original graph owners. Legacy sources and explicitly equal bounds retain the
+original common-bound path. The six-port distinct-bound path uses the shared
+contact mode resolver, with a checked total bound of 729 mode evaluations per
+allowed affine segment.
+
+Static and kinetic force/torque conversion uses the same work-conjugate scale as
+drive. In particular, exact authored static balance is not broken by rounding
+the static force downward alone. Conservative integrated-impulse admission and
+actual native residual audits remain in force. Reports expose mode diagnostics
+and complete path speed extrema including measured native endpoints. Coupled
+mode ambiguity remains an explicit refusal. Underlying segment and impulse
+budget refusals preserve their original error identity so adaptive trajectory
+refinement continues to operate.
+
+Existing motion source callbacks can now hold a joint, trigger breakaway, and
+continue at the lower sliding force. The law recognizes exact rest and isolated
+resolved stopping events; it does not silently capture a small nonzero native
+velocity or supply persistent geometric locking or compliant presliding state.
+
+Eight tests exercise static versus moving response, tiny real slip, exact
+thresholds across nonbinary hinge scales, recapture and reversal, coupled rotor
+reactions above the kinetic limit, source permutation, full-inertia eccentric
+recoil and frame/boost covariance, exact legacy equivalence, existing adaptive
+motion and segment-budget refinement, invalid sources, budgets and cancellation.
