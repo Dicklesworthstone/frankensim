@@ -48,6 +48,7 @@ fn native_startup_separates_physical_heat_kinetic_storage_and_be_loss() {
         near(power.supplied_body_power_w, 4.0 * force * a);
         near(step.initial_kinetic_energy_j, 0.0);
         near(step.final_kinetic_energy_j, 2.0 * a * a);
+        near(step.kinetic_energy_change_j, 2.0 * a * a);
         near(step.backward_euler_loss_j, 2.0 * a * a);
         assert!(step.backward_euler_loss_j > 0.0);
         near(step.residual_j, 0.0);
@@ -130,6 +131,7 @@ fn actuator_shutoff_preserves_motion_and_does_not_thermalize_numerical_loss() {
     assert!(a1 > 0.0 && a1 < a0);
     near(audit.initial_kinetic_energy_j, 2.0 * a0 * a0);
     near(audit.final_kinetic_energy_j, 2.0 * a1 * a1);
+    near(audit.kinetic_energy_change_j, 2.0 * (a1 - a0) * (a1 + a0));
     near(audit.backward_euler_loss_j, 2.0 * (a1 - a0).powi(2));
     near(audit.generated_heat_j, 0.001 * 2400.0 * a1 * a1);
     near(audit.supplied_wall_work_j, 0.0);

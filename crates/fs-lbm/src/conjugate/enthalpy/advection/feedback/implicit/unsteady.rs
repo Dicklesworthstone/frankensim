@@ -213,7 +213,7 @@ where
         let other_thermal_input_j = finite(dt * endpoint.other_w)?;
         let combined_residual_j = finite(
             thermal_audit.stored_energy_change_j
-                + finite(mechanical.final_kinetic_energy_j - mechanical.initial_kinetic_energy_j)?
+                + mechanical.kinetic_energy_change_j
                 + mechanical.backward_euler_loss_j
                 - net_stream_enthalpy_j
                 - other_thermal_input_j

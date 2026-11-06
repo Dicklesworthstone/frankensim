@@ -204,7 +204,8 @@ impl MaterialMomentum {
         let (state, report) = original.supported_phase_capture(target, supported, gate)?;
         let mut audit = heating.audit;
         audit.accept_support_capture(report.initial_kinetic_energy_j,
-            report.final_kinetic_energy_j, report.heat_j, heating.controls)?;
+            report.final_kinetic_energy_j, report.kinetic_energy_change,
+            report.heat_j, heating.controls)?;
         if report.captured_faces == 0 {
             // Retain the original material-resolved field and report exactly
             // when only the already-supported zero-speed constraints change.
@@ -351,7 +352,10 @@ impl MaterialMomentum {
             supplied_buoyancy_power_w: 0.0,
             initial_kinetic_energy_j: 0.0,
             final_kinetic_energy_j: 0.0,
+            kinetic_energy_change_j: 0.0,
+            kinetic_energy_change: fs_math::dd::Dd::ZERO,
             backward_euler_loss_j: 0.0,
+            backward_euler_loss: fs_math::dd::Dd::ZERO,
             residual_j: 0.0,
         });
         poll(gate)?;

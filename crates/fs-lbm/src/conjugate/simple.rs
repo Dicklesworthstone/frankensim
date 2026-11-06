@@ -111,6 +111,10 @@ pub(in crate::conjugate) mod forchheimer;
 use forchheimer::ForchheimerResistance;
 #[cfg(feature = "enthalpy-coupling")]
 pub(in crate::conjugate) mod phase_capture;
+#[cfg(feature = "enthalpy-coupling")]
+mod kinetic;
+#[cfg(feature = "enthalpy-coupling")]
+use kinetic::FaceKineticIncrement;
 
 /// Flow rule on one domain face.
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -9,6 +9,9 @@ use fs_material::state_point::{
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
 };
 
+#[path = "locking/kinetic.rs"]
+mod kinetic;
+
 fn capture() -> SupportedFreezingControls {
     SupportedFreezingControls {
         cell_energy_tolerance_j: 1e-10,
@@ -178,6 +181,7 @@ fn supported_cavity_freezes_with_native_kinetic_heat_and_frame_angular_impulse_t
         let physical = dt * 24.0 * mu * q1 * q1;
         let numerical = 2.0 * (q1 - q0).powi(2);
         near(report.capture_heat_j, kinetic);
+        near(report.capture_kinetic_energy_change_j, -kinetic);
         near(report.initial_capture_kinetic_energy_j, kinetic);
         assert_eq!(report.final_capture_kinetic_energy_j, 0.0);
         assert_eq!(report.captured_faces, 4);
@@ -213,6 +217,7 @@ fn supported_cavity_freezes_with_native_kinetic_heat_and_frame_angular_impulse_t
         near(mechanical.support_capture_heat_j, kinetic);
         near(mechanical.generated_heat_j, physical + kinetic);
         near(mechanical.backward_euler_loss_j, numerical);
+        near(mechanical.kinetic_energy_change_j, -2.0 * q0 * q0);
         assert_eq!(mechanical.final_kinetic_energy_j, 0.0);
         near(
             report.thermal.external_heat_j,

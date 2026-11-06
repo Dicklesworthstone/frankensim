@@ -9,6 +9,7 @@
 //! subset is attributed separately, without a gravitational-potential store.
 
 use super::*;
+use fs_math::dd::Dd;
 
 /// One accepted-duration native unsteady-Stokes mechanical account.
 ///
@@ -16,8 +17,9 @@ use super::*;
 /// material epoch. Explicit coupling selects the source-start epoch; implicit
 /// material coupling independently closes the actual source endpoint epoch.
 /// The original thermal owner deposits only power.cell_heat_w.
-/// K is the native face mass norm, distinct from FlowStepRecord's cell-centred
-/// diagnostic. This is a first-order discrete balance, not an error certificate.
+/// K uses the native face mass norm. Its increment is retained directly from
+/// the accepted face speeds, independently of rounded absolute diagnostics.
+/// This is a first-order discrete balance, not an error certificate.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnsteadyMechanicalStep {
     pub start_s: f64,
@@ -35,8 +37,13 @@ pub struct UnsteadyMechanicalStep {
     pub supplied_buoyancy_power_w: f64,
     pub initial_kinetic_energy_j: f64,
     pub final_kinetic_energy_j: f64,
+    /// Actual accepted native kinetic increment, without total subtraction [J].
+    pub kinetic_energy_change_j: f64,
+    // Carry face-reduction tails into the accepted multi-interval account.
+    pub(in crate::conjugate) kinetic_energy_change: Dd,
     /// Nonnegative backward-Euler loss, outside physical heat.
     pub backward_euler_loss_j: f64,
+    pub(in crate::conjugate) backward_euler_loss: Dd,
     /// Supply + pressure - heat - kinetic change - numerical loss [J].
     pub residual_j: f64,
 }
@@ -68,6 +75,10 @@ pub struct UnsteadyHeatingAudit {
     pub substeps: usize,
     pub initial_kinetic_energy_j: f64,
     pub final_kinetic_energy_j: f64,
+    /// Sum of actual native increments, including supported phase capture [J].
+    /// Rounded absolute endpoint energies need not resolve this value.
+    pub kinetic_energy_change_j: f64,
+    kinetic_energy_change: Dd,
     pub wall_work_j: [f64; 6],
     pub supplied_wall_work_j: f64,
     /// TOTAL signed work of buoyancy and external body forces.
@@ -83,6 +94,7 @@ pub struct UnsteadyHeatingAudit {
     /// Separate from molecular/Darcy viscosity and numerical time loss.
     pub support_capture_heat_j: f64,
     pub backward_euler_loss_j: f64,
+    backward_euler_loss: Dd,
     /// Bounded pressure-constraint defect; never heat.
     pub pressure_constraint_work_j: f64,
     pub residual_j: f64,
@@ -118,6 +130,11 @@ impl UnsteadyHeatingAudit {
             .checked_add(1)
             .ok_or_else(|| invalid_power("transient heat substep count overflow"))?;
         next.final_kinetic_energy_j = step.final_kinetic_energy_j;
+        next.kinetic_energy_change = next.kinetic_energy_change + step.kinetic_energy_change;
+        next.kinetic_energy_change_j = finite_value(
+            "unsteady_heat.kinetic_change",
+            next.kinetic_energy_change.to_f64(),
+        )?;
         for (sum, power) in next.wall_work_j.iter_mut().zip(step.power.wall_power_w) {
             add(sum, step.duration_s * power)?;
         }
@@ -145,15 +162,21 @@ impl UnsteadyHeatingAudit {
         ] {
             add(sum, step.duration_s * power)?;
         }
-        add(&mut next.backward_euler_loss_j, step.backward_euler_loss_j)?;
+        next.backward_euler_loss = next.backward_euler_loss + step.backward_euler_loss;
+        next.backward_euler_loss_j = finite_value(
+            "unsteady_heat.numerical_loss", next.backward_euler_loss.to_f64(),
+        )?;
         // Recompute the total from independent extensive accounts. Never
         // adjust a heat entry to make this residual vanish.
         next.residual_j = finite_value(
             "unsteady_heat.residual",
-            next.supplied_wall_work_j + next.supplied_body_work_j + next.pressure_constraint_work_j
-                - next.generated_heat_j
-                - (next.final_kinetic_energy_j - next.initial_kinetic_energy_j)
-                - next.backward_euler_loss_j,
+            (Dd::from_f64(next.supplied_wall_work_j)
+                + Dd::from_f64(next.supplied_body_work_j)
+                + Dd::from_f64(next.pressure_constraint_work_j)
+                - Dd::from_f64(next.generated_heat_j)
+                - next.kinetic_energy_change
+                - next.backward_euler_loss)
+            .to_f64(),
         )?;
         let allowance = finite_value(
             "unsteady_heat.allowance",
@@ -178,25 +201,34 @@ impl UnsteadyHeatingAudit {
         &mut self,
         before_j: f64,
         after_j: f64,
+        kinetic_energy_change: Dd,
         heat_j: f64,
         controls: ViscousHeatControls,
     ) -> Result<(), ChtError> {
         if before_j.to_bits() != self.final_kinetic_energy_j.to_bits()
             || !after_j.is_finite() || after_j < 0.0 || !heat_j.is_finite() || heat_j < 0.0
+            || !kinetic_energy_change.to_f64().is_finite()
+            || kinetic_energy_change.to_f64() > 0.0
         {
             return Err(invalid_power("phase capture must retain the actual native kinetic history"));
         }
         let mut next = *self;
         next.final_kinetic_energy_j = after_j;
+        next.kinetic_energy_change = next.kinetic_energy_change + kinetic_energy_change;
+        next.kinetic_energy_change_j = finite_value(
+            "capture.kinetic_change", next.kinetic_energy_change.to_f64(),
+        )?;
         next.generated_heat_j = finite_value("capture.heat", next.generated_heat_j + heat_j)?;
         next.support_capture_heat_j = finite_value("capture.heat", next.support_capture_heat_j + heat_j)?;
         next.residual_j = finite_value("capture.residual",
-            next.supplied_wall_work_j + next.supplied_body_work_j + next.pressure_constraint_work_j
-                - next.generated_heat_j
-                - (next.final_kinetic_energy_j - next.initial_kinetic_energy_j)
-                - next.backward_euler_loss_j)?;
+            (Dd::from_f64(next.supplied_wall_work_j)
+                + Dd::from_f64(next.supplied_body_work_j)
+                + Dd::from_f64(next.pressure_constraint_work_j)
+                - Dd::from_f64(next.generated_heat_j)
+                - next.kinetic_energy_change
+                - next.backward_euler_loss).to_f64())?;
         let allowance = finite_value("capture.allowance", controls.power_tolerance_w * next.duration_s)?;
-        if (before_j - after_j - heat_j).abs() > allowance
+        if (kinetic_energy_change + Dd::from_f64(heat_j)).to_f64().abs() > allowance
             || next.residual_j.abs() > allowance
         {
             return Err(invalid_power("supported capture does not close native kinetic and heat storage"));
@@ -279,7 +311,8 @@ impl Solver<'_> {
         }
         let mut initial = 0.0;
         let mut final_energy = 0.0;
-        let mut numerical_loss = 0.0;
+        let mut numerical_loss = Dd::ZERO;
+        let mut kinetic_energy_change = Dd::ZERO;
         for a in 0..3 {
             for &index in &self.comps[a].unknowns {
                 poll(gate)?;
@@ -295,16 +328,21 @@ impl Solver<'_> {
                     "unsteady_heat.final_kinetic",
                     final_energy + 0.5 * mass * new * new,
                 )?;
-                let difference = new - old;
-                numerical_loss = finite_value(
-                    "unsteady_heat.numerical_loss",
-                    numerical_loss + 0.5 * mass * difference * difference,
-                )?;
+                let increment = FaceKineticIncrement::new(mass, old, new);
+                kinetic_energy_change = kinetic_energy_change + increment.stored_j();
+                numerical_loss = numerical_loss + increment.backward_euler_loss_j();
             }
         }
+        let kinetic_energy_change_j = finite_value(
+            "unsteady_heat.kinetic_change", kinetic_energy_change.to_f64(),
+        )?;
+        let backward_euler_loss_j = finite_value(
+            "unsteady_heat.numerical_loss", numerical_loss.to_f64(),
+        )?;
         let residual_j = finite_value(
             "unsteady_heat.step_residual",
-            time.dt * power.residual_w - (final_energy - initial) - numerical_loss,
+            (Dd::from_f64(time.dt) * Dd::from_f64(power.residual_w)
+                - kinetic_energy_change - numerical_loss).to_f64(),
         )?;
         poll(gate)?;
         Ok(UnsteadyMechanicalStep {
@@ -316,7 +354,10 @@ impl Solver<'_> {
             supplied_buoyancy_power_w,
             initial_kinetic_energy_j: initial,
             final_kinetic_energy_j: final_energy,
-            backward_euler_loss_j: numerical_loss,
+            kinetic_energy_change_j,
+            kinetic_energy_change,
+            backward_euler_loss_j,
+            backward_euler_loss: numerical_loss,
             residual_j,
         })
     }

@@ -7094,7 +7094,24 @@ Their addition does not establish an executed native test pass.
 
 The shared thermal owner chooses the actual combined conductive/advective CFL and event-clipped interval first. Its `step_sources` hook then prepares exactly one native momentum solve and the existing stress/Darcy quadratures supply endpoint physical heat over that duration. Accepted old flow still advects total h; material coefficients are frozen at the source start, and all endpoint material checks see the generated heat. This first-order split requires time and space refinement. `applied().flow` remains the old advection field; `unsteady_mechanical_step` separately exposes the endpoint power and exact native face-mass kinetic account.
 
-The discrete account is `W_wall + W_body + W_pressure = Q_molecular + Q_Darcy + (K_end-K_start) + N_BE`, where `K=sum(M_face*u_face^2)/2` uses exactly the inertia row's staggered half-cell volumes, and `N_BE=sum(M_face*(u_end-u_start)^2)/2`. The nonnegative backward-Euler numerical loss is reported, never turned into heat. Pressure-constraint work must independently remain negligible; it is not heat or a residual correction. Only physical molecular/Darcy watts enter the original caloric kernel, once. `UnsteadyHeatingAudit` accumulates that physical heat, signed supplies, native kinetic change, numerical loss and residual over the accepted advance; generated heat is already inside the original thermal audit. The older cell-centred kinetic diagnostic is not substituted for native mechanical storage.
+The discrete account is `W_wall + W_body + W_pressure = Q_molecular + Q_Darcy + (K_end-K_start) + N_BE`, where `K=sum(M_face*u_face^2)/2` uses exactly the inertia row's staggered half-cell volumes, and `N_BE=sum(M_face*(u_end-u_start)^2)/2`. The nonnegative backward-Euler numerical loss is reported, never turned into heat. Pressure-constraint work must independently remain negligible; it is not heat or a residual correction. Only physical molecular/Darcy watts enter the original caloric kernel, once. `UnsteadyHeatingAudit` accumulates that physical heat, signed supplies, native kinetic change, numerical loss and residual over the accepted advance; generated heat is already inside the original thermal audit. Flow diagnostics use the same native face mass norm, while work/heat balances retain its actual increments.
+
+`UnsteadyMechanicalStep::kinetic_energy_change_j` retains the actual native
+face increment `sum(M*(u1-u0)*(u1+u0)/2)` with compensated endpoint differences,
+products and face reduction. The independently evaluated backward-Euler loss
+uses that same represented difference, retaining a small starting speed even
+when native `u1-u0` would round it away. Both quantities retain their reduction
+tails through accepted substeps. `UnsteadyHeatingAudit::kinetic_energy_change_j`
+also includes actual removed-face storage during stationary-support capture.
+Absolute initial/final K remains a descriptive, bit-matched history; subtracting
+those rounded totals is not the work/heat gate. The existing implicit caloric
+and MHD combined balances consume the retained increment. Physical stress,
+porous and capture heat keep their independent original laws and partitions;
+no numerical loss or residual is thermalized. Scalar native regressions cover
+the endpoint kinetic/BE identity and opposite large transfers. The supported
+freezing regression advances the original thermal owner beside an unchanged
+large circulation, retaining the small cavity's decay and capture heat even
+when its absolute total kinetic diagnostics are identical.
 
 Source-derived Boussinesq forcing also composes with this retained-momentum heat mode. The same applied material epoch supplies density departures, viscosity and conductivity; its buoyancy field adds to any prescribed actuator field in the native momentum equation. The original staggered body-work quadrature evaluates both total force and the buoyancy component on the same endpoint faces. `UnsteadyMechanicalStep::supplied_buoyancy_power_w` and `cell_buoyancy_power_w` retain that signed component; `UnsteadyHeatingAudit::supplied_buoyancy_work_j` accumulates it over accepted intervals. Buoyancy is a SUBSET of total body work, never an additional supply or heat source. Actuator work is total body work minus that subset. Physical molecular/Darcy losses alone enter enthalpy, while numerical loss remains separate.
 

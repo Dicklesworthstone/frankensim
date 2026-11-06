@@ -944,8 +944,7 @@ where
     let other_thermal_input_j =
         finite(thermal_audit.external_heat_j - work.mapped_j - mechanical.generated_heat_j)?;
     let combined_residual_j = finite(
-        thermal_audit.stored_energy_change_j + mechanical.final_kinetic_energy_j
-            - mechanical.initial_kinetic_energy_j
+        thermal_audit.stored_energy_change_j + mechanical.kinetic_energy_change_j
             + mechanical.backward_euler_loss_j
             - thermal_audit.incoming_energy_j
             - other_thermal_input_j

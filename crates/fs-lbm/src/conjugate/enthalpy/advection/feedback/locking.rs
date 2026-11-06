@@ -83,6 +83,8 @@ pub struct SupportedFreezingReport {
     /// Native face-mass kinetic energies immediately before/after capture.
     pub initial_capture_kinetic_energy_j: f64,
     pub final_capture_kinetic_energy_j: f64,
+    /// Native removed-face storage, retained beside surviving motion [J].
+    pub capture_kinetic_energy_change_j: f64,
     pub capture_heat_j: f64,
     pub captured_faces: usize,
     pub cell_capture_heat_j: BTreeMap<CellId, f64>,
@@ -296,6 +298,7 @@ where
             thermal: thermal_audit,
             initial_capture_kinetic_energy_j: native.initial_kinetic_energy_j,
             final_capture_kinetic_energy_j: native.final_kinetic_energy_j,
+            capture_kinetic_energy_change_j: native.kinetic_energy_change.to_f64(),
             capture_heat_j: native.heat_j,
             captured_faces: native.captured_faces,
             cell_capture_heat_j: heat,

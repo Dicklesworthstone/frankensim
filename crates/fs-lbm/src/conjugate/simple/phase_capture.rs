@@ -6,6 +6,8 @@ use super::*;
 pub(in crate::conjugate) struct NativePhaseCapture {
     pub initial_kinetic_energy_j: f64,
     pub final_kinetic_energy_j: f64,
+    /// Actual removed-face storage, independently of its heat partition.
+    pub kinetic_energy_change: fs_math::dd::Dd,
     pub heat_j: f64,
     pub cell_heat_j: Vec<f64>,
     pub cell_support_impulse_n_s: Vec<[f64; 3]>,
@@ -17,6 +19,7 @@ impl NativePhaseCapture {
         Self {
             initial_kinetic_energy_j: 0.0,
             final_kinetic_energy_j: 0.0,
+            kinetic_energy_change: fs_math::dd::Dd::ZERO,
             heat_j: 0.0,
             cell_heat_j: vec![0.0; cells],
             cell_support_impulse_n_s: vec![[0.0; 3]; cells],
@@ -117,6 +120,8 @@ impl Solver<'_> {
                     )?;
                 }
                 report.heat_j += energy;
+                report.kinetic_energy_change =
+                    report.kinetic_energy_change + FaceKineticIncrement::new(mass, speed, 0.0).stored_j();
                 report.captured_faces += 1;
                 next.velocity[axis][index] = 0.0;
             }
@@ -125,6 +130,7 @@ impl Solver<'_> {
             report.initial_kinetic_energy_j,
             report.final_kinetic_energy_j,
             report.heat_j,
+            report.kinetic_energy_change.to_f64(),
         ] {
             finite("capture.energy", value)?;
         }
