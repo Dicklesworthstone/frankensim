@@ -25,7 +25,7 @@ impl ImplicitConductionChain<'_> {
         target_s: f64,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), ImplicitConductionError> {
-        // A prepared implicit flow has fixed mass rates and inlet enthalpies.
+        // A prescribed flow is sampled at the actual time of EACH stage.
         // Its original endpoint owner admits continuity/calorics at EACH stage,
         // and StageHeat retains its paired transfers and external stream power
         // with the same quadrature as conduction. No flow history is advanced.
@@ -153,7 +153,8 @@ impl ImplicitConductionChain<'_> {
     /// Attached prescribed implicit advection remains active, including limited
     /// reconstruction on the graph path. Both stages transport their actual
     /// endpoint enthalpy with the original flow, continuity and caloric admission;
-    /// mass rates and inlet enthalpies remain fixed throughout the call.
+    /// rates/inlet enthalpies are fixed unless a continuous advection schedule
+    /// is attached; scheduled values use each stage's actual time.
     /// External observers, moving mass and all other scheduled events through
     /// the target refuse before stage work. Boundary events retain
     /// authored order and the same whole-call nonlinear and accepted-step budgets.
@@ -232,10 +233,13 @@ impl ImplicitConductionChain<'_> {
                 return Err(DepositionError::Budget("implicit thermal intervals").into());
             }
             let start = next.time_s;
-            let stop = next
+            let mut stop = next
                 .schedule
                 .get(next.cursor)
                 .map_or(target_s, |event| event.time_s.min(target_s));
+            if let Some(transition) = self.next_advection_transition_time_s(start) {
+                stop = stop.min(transition);
+            }
             let remaining = finite(stop - start)?;
             let mut dt = controls.maximum_dt_s.min(remaining);
             let mut halvings = 0;

@@ -489,3 +489,57 @@ fn implicit_stationary_species_keep_caloric_bindings_and_refuse_chemical_entropy
         assert_eq!(flow.audit().substeps, 0);
     }
 }
+
+#[test]
+fn scheduled_pump_retains_frozen_species_and_original_inlet_calorics() {
+    use crate::enthalpy::advection::schedule::{AdvectionSchedule, AdvectionScheduleKnot};
+    for datum in [0.0, 1_099_511_627_776.0] {
+        let (laws, flow) = single_mixer(datum);
+        let (thermal, conduction) = prepare_mixtures(&laws, &[280.0], &[2.0], false);
+        let knots = vec![
+            AdvectionScheduleKnot {
+                time_s: 0.0, flow_multiplier: 0.0,
+                inlet_enthalpies_j_kg: BTreeMap::from([
+                    (10, laws[1].h(400.0)), (11, laws[2].h(300.0)),
+                ]),
+            },
+            AdvectionScheduleKnot {
+                time_s: 1.0, flow_multiplier: 2.0,
+                inlet_enthalpies_j_kg: BTreeMap::from([
+                    (10, laws[1].h(600.0)), (11, laws[2].h(200.0)),
+                ]),
+            },
+        ];
+        let schedule = AdvectionSchedule::new(knots.clone(), 2, 2, || Ok(())).unwrap();
+        let stopped = schedule.flow_at(&flow, 0.0, &mut || Ok(())).unwrap().0;
+        assert_eq!(stopped.stationary_species().unwrap().cells(),
+            flow.stationary_species().unwrap().cells());
+        assert!(stopped.endpoint_transport(&thermal, || Ok(())).unwrap().heat.bulk.sources_w.is_empty());
+        let system = ImplicitConductionChain::new(
+            &thermal, &conduction, &bindings(&laws), || Ok(()),
+        ).unwrap().with_scheduled_implicit_advection(&thermal, &flow, &schedule, || Ok(())).unwrap();
+        let (next, report) = system.advance_to(
+            &thermal, 1.0, controls(1.0), &mut ImplicitConductionWorkspace::new(1).unwrap(), || Ok(()),
+        ).unwrap();
+        // Final original inlet enthalpies mix to h=1150+datum; BE with
+        // mass=2 and total mdot=2 gives h=(1350+1150)/2 = 1250+datum.
+        near(next.temperature_k(CellId(0)).unwrap(), 260.0, 1e-10);
+        near(report.energy.external_heat_j, -200.0, 1e-9);
+        near(report.energy.residual_j, 0.0, 1e-9);
+        assert!(report.entropy.has_unclassified_sources);
+        assert!(report.entropy.advection.is_none());
+        assert_eq!(flow.audit().substeps, 0);
+        assert_eq!(flow.stationary_species().unwrap().cells()[&CellId(0)], vec![0.25, 0.75]);
+
+        // This value is inside the receiving mixture's h-domain but outside
+        // species A's original inlet law. A schedule must reject the latter.
+        let mut bad_knots = knots;
+        bad_knots[1].inlet_enthalpies_j_kg.insert(10, laws[1].h(1050.0));
+        let bad = AdvectionSchedule::new(bad_knots, 2, 2, || Ok(())).unwrap();
+        assert!(matches!(ImplicitConductionChain::new(
+            &thermal, &conduction, &bindings(&laws), || Ok(()),
+        ).unwrap().with_scheduled_implicit_advection(&thermal, &flow, &bad, || Ok(())),
+            Err(ImplicitConductionError::Thermal(DepositionError::MaterialDomain))));
+        assert_eq!(thermal.time_s(), 0.0);
+    }
+}

@@ -154,6 +154,9 @@ impl ImplicitConductionChain<'_> {
                 .schedule
                 .get(next.cursor)
                 .map_or(target_s, |e| e.time_s.min(target_s));
+            if let Some(transition) = self.next_advection_transition_time_s(start) {
+                stop = stop.min(transition);
+            }
             if let Some(transition) = source
                 .next_transition_time_s(&next, &mut checkpoint)
                 .map_err(Observer)?

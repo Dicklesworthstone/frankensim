@@ -72,7 +72,7 @@ use boundary::{ImplicitBoundaryGeometry, ImplicitBoundaryLaw, ImplicitBoundarySt
 /// Endpoint upwind enthalpy in the same conservative nonlinear solve.
 #[path = "implicit/advection.rs"]
 mod advection;
-use advection::{ClassifiedAdvectionEntropy, ImplicitAdvection};
+use advection::{ClassifiedAdvectionEntropy, ImplicitAdvection, ImplicitAdvectionStage};
 
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
@@ -275,6 +275,7 @@ struct Endpoint {
     ambient_exchange_states: BTreeMap<CellId, ImplicitBoundaryExchangeState>,
     heat_source_states: BTreeMap<CellId, ImplicitHeatSourceState>,
     transport_tangent: Vec<(usize, usize, f64)>,
+    advection_multiplier: f64,
     advection_entropy: Option<ClassifiedAdvectionEntropy>,
 }
 
@@ -697,6 +698,7 @@ impl<'a> ImplicitConductionChain<'a> {
             ambient_exchange_states,
             heat_source_states,
             transport_tangent: Vec::new(),
+            advection_multiplier: 1.0,
             advection_entropy: None,
         })
     }
@@ -713,8 +715,12 @@ impl<'a> ImplicitConductionChain<'a> {
         report: &mut ImplicitConductionReport,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, Endpoint>, ImplicitConductionError> {
+        let advection_stage = self.advection.as_ref()
+            .map(|advection| advection.stage(step.target_s(), checkpoint))
+            .transpose()?;
         self.evaluate_stage(
-            step, energy, sources_w, transfers, entropy, None, controls, report, checkpoint,
+            step, energy, sources_w, transfers, entropy, None,
+            advection_stage.as_ref(), controls, report, checkpoint,
         )
     }
 
@@ -726,6 +732,7 @@ impl<'a> ImplicitConductionChain<'a> {
         transfers: &[HeatTransfer],
         entropy: bool,
         quadrature: Option<StageQuadrature<'_>>,
+        advection_stage: Option<&ImplicitAdvectionStage<'_>>,
         controls: ImplicitConductionControls,
         report: &mut ImplicitConductionReport,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
@@ -750,8 +757,10 @@ impl<'a> ImplicitConductionChain<'a> {
             }
             let mut transfers = transfers.to_vec();
             if let Some(advection) = &self.advection {
+                let stage = advection_stage.ok_or(DepositionError::Arithmetic)?;
+                endpoint.advection_multiplier = stage.multiplier;
                 let (transport, tangent, flow_entropy) = advection.endpoint(
-                    thermal, &self.index, entropy, &mut || (checkpoint.borrow_mut())(),
+                    thermal, stage, &self.index, entropy, &mut || (checkpoint.borrow_mut())(),
                 )?;
                 endpoint.transport_tangent = tangent;
                 if let Some(flow_entropy) = flow_entropy {
@@ -938,9 +947,14 @@ impl<'a> ImplicitConductionChain<'a> {
             add_entry(workspace, i, i, -dt * derivative / cell.mass_kg)?;
         }
         if let Some(advection) = &self.advection {
-            for &(row, col, derivative) in advection.tangent.iter()
-                .chain(&endpoint.transport_tangent)
-            {
+            for &(row, col, derivative) in &advection.tangent {
+                checkpoint()?;
+                let derivative = advection::scaled_tangent(derivative, endpoint.advection_multiplier)?;
+                add_entry(workspace, row, col, -dt * derivative)?;
+            }
+            // Liquid/reconstruction entries were evaluated from this same
+            // stage's scaled rates and must not be multiplied a second time.
+            for &(row, col, derivative) in &endpoint.transport_tangent {
                 checkpoint()?;
                 add_entry(workspace, row, col, -dt * derivative)?;
             }
@@ -1005,6 +1019,9 @@ impl<'a> ImplicitConductionChain<'a> {
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<BackwardEulerTrial<'m, Endpoint>, ImplicitConductionError> {
         let step = BackwardEulerStep::new(thermal, target_s, &mut *checkpoint)?;
+        let advection_stage = self.advection.as_ref()
+            .map(|advection| advection.stage(target_s, &mut *checkpoint))
+            .transpose()?;
         let implicit_dt_s = quadrature.map_or(step.duration_s(), |stage| stage.implicit_dt_s);
         workspace.energy.fill(0.0);
         let mut trial = self.evaluate_stage(
@@ -1014,6 +1031,7 @@ impl<'a> ImplicitConductionChain<'a> {
             transfers,
             false,
             quadrature,
+            advection_stage.as_ref(),
             controls,
             report,
             checkpoint,
@@ -1031,6 +1049,7 @@ impl<'a> ImplicitConductionChain<'a> {
                     transfers,
                     true,
                     quadrature,
+                    advection_stage.as_ref(),
                     controls,
                     report,
                     checkpoint,
@@ -1108,6 +1127,7 @@ impl<'a> ImplicitConductionChain<'a> {
                         transfers,
                         false,
                         quadrature,
+                        advection_stage.as_ref(),
                         controls,
                         report,
                         checkpoint,

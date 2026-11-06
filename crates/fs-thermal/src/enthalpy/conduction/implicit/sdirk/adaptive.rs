@@ -26,6 +26,10 @@ impl<'s, 'law> AdaptiveConductionStepper for Sdirk2Stepper<'s, 'law> {
         self.solver.conduction.clone()
     }
 
+    fn next_transition_time_s(&self, after_s: f64) -> Option<f64> {
+        self.solver.next_advection_transition_time_s(after_s)
+    }
+
     fn time_order(&self) -> ConductionTimeOrder {
         ConductionTimeOrder::Second
     }

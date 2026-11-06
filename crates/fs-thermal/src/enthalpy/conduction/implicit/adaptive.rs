@@ -124,6 +124,12 @@ pub trait AdaptiveConductionStepper: Sized {
     fn workspace_cells(workspace: &Self::Workspace) -> usize;
     fn observer(&self) -> Self::Observer;
 
+    /// Optional source-owned slope change. It must be finite and strictly
+    /// later than the current accepted time; default adapters have none.
+    fn next_transition_time_s(&self, _after_s: f64) -> Option<f64> {
+        None
+    }
+
     /// Local error order of the supplied native endpoint method. Existing
     /// backward-Euler adapters retain their original estimator and controller.
     fn time_order(&self) -> ConductionTimeOrder {
@@ -251,10 +257,18 @@ pub trait AdaptiveConductionStepper: Sized {
                 return Err(AdaptiveImplicitConductionError::TrialBudget);
             }
             let start = next.time_s;
-            let stop = next
+            let mut stop = next
                 .schedule
                 .get(next.cursor)
                 .map_or(target_s, |event| event.time_s.min(target_s));
+            if let Some(transition) = self.next_transition_time_s(start) {
+                if !transition.is_finite() || transition <= start {
+                    return Err(AdaptiveImplicitConductionError::Invalid(
+                        "source transition must be finite and strictly future",
+                    ));
+                }
+                stop = stop.min(transition);
+            }
             let end = if span >= stop - start {
                 stop
             } else {
@@ -512,6 +526,10 @@ impl<'a> AdaptiveConductionStepper for ImplicitConductionChain<'a> {
     }
     fn observer(&self) -> Self::Observer {
         self.conduction.clone()
+    }
+
+    fn next_transition_time_s(&self, after_s: f64) -> Option<f64> {
+        self.next_advection_transition_time_s(after_s)
     }
 
     fn admit(

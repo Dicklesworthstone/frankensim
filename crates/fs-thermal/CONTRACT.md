@@ -2632,3 +2632,42 @@ event in that order. Five source regressions cover reduced heat capacity, signed
 caloric-datum invariance, complete incident coverage, atomic late refusal and
 original endpoint-event ordering. These tests were authored and pinned-formatted;
 resource constraints prevented native execution in this session.
+
+### Prescribed pump and inlet histories in implicit enthalpy transport
+
+`AdvectionSchedule` supplies bounded, strictly time-ordered, continuous
+piecewise-linear inlet enthalpies and a common nonnegative mass-flow multiplier.
+Each knot names the same subset of original inlet boundary IDs; unlisted inlet
+enthalpies remain unchanged and values remain constant outside the knot range.
+The chain/graph `with_scheduled_implicit_advection` attachment binds the original
+flow and schedule together. `with_implicit_advection_schedule` adds a history to
+an already bound upwind or limited-reconstruction flow.
+
+The existing backward-Euler/SDIRK owner samples one immutable flow snapshot at
+each actual implicit stage time, then reuses it throughout that stage's Newton
+and line-search work. Native sources, paired transfers, liquid carriage and
+entropy evaluation remain authoritative. The full reference-coordinate tangent
+scales with the same mass rates; liquid/limited-face derivatives are evaluated
+from those actual stage rates without double scaling. BE, SDIRK2 and both shared
+adaptive paths clip to the next knot before solving or comparing trajectories.
+All original residual/linear/interval budgets, checkpoints and transactional
+acceptance rules remain in force. The supplied flow's observer history is never
+advanced.
+
+Common scaling retains cell masses, directions and an admitted frozen species
+solution, including at zero flow. It does not re-solve an underdetermined stopped
+species graph or approximate changing composition/density. Inlet knots are
+admitted using each inlet's own original caloric law and datum; actual moving
+stage fluxes retain native material, continuity and source-domain checks.
+At zero scale there is no boundary mass carriage and no liquid mobility or
+reconstruction derivative. A stopped pump can therefore coexist with solid
+inventory; every later nonzero stage still requires native liquid support and
+fixed-mass balance. A schedule does not supply momentum, arbitrary independent
+edge rates, reversed flow, selective streams, discontinuous jumps or a chemical
+mixing-entropy closure. Temporal and spatial refinement remain independent.
+
+Focused regressions cover analytic non-autonomous BE/SDIRK inlet/flow states and
+entropy quadrature, common-datum shifts, clipping in all four time paths,
+first/second temporal refinement, stopped-liquid heating and restart refusal,
+the limited-face exact Jacobian, frozen stationary mixtures with distinct inlet
+laws, malformed histories, shared work ceilings and late cancellation.

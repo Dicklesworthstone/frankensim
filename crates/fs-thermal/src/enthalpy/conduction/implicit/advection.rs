@@ -3,6 +3,8 @@ use super::*;
 use crate::enthalpy::advection::Advected;
 use crate::enthalpy::advection::entropy::EndpointAdvectionEntropy;
 use crate::enthalpy::advection::reconstruction::LimitedEnthalpyReconstruction;
+use crate::enthalpy::advection::schedule::AdvectionSchedule;
+use std::borrow::Cow;
 use crate::enthalpy::entropy::AdvectiveEntropyContribution;
 
 #[derive(Clone, Copy)]
@@ -61,12 +63,36 @@ pub(super) struct ImplicitAdvection {
     liquid_tangent: Vec<(usize, CellId, f64)>,
     reconstruction: Option<LimitedEnthalpyReconstruction>,
     entropy: bool,
+    schedule: Option<AdvectionSchedule>,
+}
+
+pub(super) struct ImplicitAdvectionStage<'a> {
+    flow: Cow<'a, Advected<()>>,
+    pub(super) multiplier: f64,
 }
 
 impl ImplicitAdvection {
+    pub(super) fn stage(
+        &self,
+        time_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitAdvectionStage<'_>, DepositionError> {
+        if let Some(schedule) = &self.schedule {
+            let (flow, multiplier) = schedule.flow_at(&self.flow, time_s, checkpoint)?;
+            Ok(ImplicitAdvectionStage { flow: Cow::Owned(flow), multiplier })
+        } else {
+            Ok(ImplicitAdvectionStage { flow: Cow::Borrowed(&self.flow), multiplier: 1.0 })
+        }
+    }
+
+    pub(super) fn next_transition_time_s(&self, after_s: f64) -> Option<f64> {
+        self.schedule.as_ref().and_then(|schedule| schedule.next_transition_time_s(after_s))
+    }
+
     pub(super) fn endpoint(
         &self,
         thermal: &DepositionSimulation<'_>,
+        stage: &ImplicitAdvectionStage<'_>,
         index: &BTreeMap<CellId, usize>,
         with_entropy: bool,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
@@ -75,6 +101,7 @@ impl ImplicitAdvection {
         ImplicitConductionError,
     >
     {
+        let flow = stage.flow.as_ref();
         // Liquid upwind columns remain dynamic with or without reconstruction.
         // Face corrections below augment this same carrier tangent; they must
         // neither discard it nor reintroduce the bulk-storage derivative.
@@ -82,28 +109,31 @@ impl ImplicitAdvection {
         tangent
             .try_reserve_exact(self.liquid_tangent.len())
             .map_err(|_| TridiagonalError::Capacity)?;
-        for &(row, cell, coefficient) in &self.liquid_tangent {
-            checkpoint()?;
-            let slope = self.flow.implicit_carried_enthalpy_slope(&thermal.cells[&cell])?;
-            if slope != 0.0 {
-                tangent.push((row, index[&cell], finite(coefficient * slope)?));
+        if stage.multiplier != 0.0 {
+            for &(row, cell, coefficient) in &self.liquid_tangent {
+                checkpoint()?;
+                let slope = flow.implicit_carried_enthalpy_slope(&thermal.cells[&cell])?;
+                if slope != 0.0 {
+                    let derivative = scaled_tangent(finite(coefficient * slope)?, stage.multiplier)?;
+                    tangent.push((row, index[&cell], derivative));
+                }
             }
         }
-        let Some(reconstruction) = &self.reconstruction else {
+        let reconstruction = self.reconstruction.as_ref().filter(|_| stage.multiplier != 0.0);
+        let Some(reconstruction) = reconstruction else {
             if self.entropy && with_entropy {
                 let (transport, entropy) =
-                    self.flow.endpoint_transport_entropy_state(thermal, checkpoint)?;
+                    flow.endpoint_transport_entropy_state(thermal, checkpoint)?;
                 return Ok((transport, tangent, Some(entropy)));
             }
             return Ok((
-                self.flow.endpoint_transport(thermal, checkpoint)?,
+                flow.endpoint_transport(thermal, checkpoint)?,
                 tangent,
                 None,
             ));
         };
         let (transport, rates) =
-            self.flow
-                .reconstructed_endpoint(thermal, reconstruction, true, &mut checkpoint)?;
+            flow.reconstructed_endpoint(thermal, reconstruction, true, &mut checkpoint)?;
         tangent
             .try_reserve_exact(rates.len())
             .map_err(|_| TridiagonalError::Capacity)?;
@@ -120,6 +150,10 @@ impl ImplicitAdvection {
 }
 
 impl ImplicitConductionChain<'_> {
+    pub(super) fn next_advection_transition_time_s(&self, after_s: f64) -> Option<f64> {
+        self.advection.as_ref().and_then(|flow| flow.next_transition_time_s(after_s))
+    }
+
     /// Solve prescribed upwind enthalpy and nonlinear conduction together.
     ///
     /// This binds an immutable snapshot of the original `Advected` graph. Its
@@ -158,9 +192,67 @@ impl ImplicitConductionChain<'_> {
     /// refine these same endpoints. SDIRK2 re-evaluates transport at both stages.
     /// Other observed sources retain all their original timestep restrictions.
     pub fn with_implicit_advection(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        flow: &Advected<()>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        self.bind_advection(thermal, flow, None, checkpoint)
+    }
+
+    /// Bind a prescribed pump and inlet history to the same native flow.
+    ///
+    /// One immutable flow snapshot is sampled at each actual BE or SDIRK stage,
+    /// then reused by every Newton/line-search trial. A common nonnegative flow
+    /// multiplier preserves topology, cell masses and frozen stationary species.
+    /// Inlet values retain their original caloric law and common enthalpy datum.
+    /// The native time owners clip to schedule knots, including adaptive trials.
+    ///
+    /// Zero-flow stages carry no mass and require no liquid mobility. Later
+    /// nonzero stages still require native per-cell continuity, original liquid
+    /// support and source-domain admission. This does not infer a pump momentum
+    /// law or silently evolve composition/density. The base flow is not also
+    /// supplied as an explicit source observer.
+    pub fn with_scheduled_implicit_advection(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        flow: &Advected<()>,
+        schedule: &AdvectionSchedule,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        self.bind_advection(thermal, flow, Some(schedule.clone()), checkpoint)
+    }
+
+    /// Add a history to an already attached upwind or reconstructed flow.
+    /// Existing entropy/reconstruction selections retain their original rules.
+    pub fn with_implicit_advection_schedule(
+        mut self,
+        thermal: &DepositionSimulation<'_>,
+        schedule: &AdvectionSchedule,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        checkpoint()?;
+        self.admit(thermal, &mut checkpoint)?;
+        let advection = self.advection.as_mut().ok_or(ImplicitConductionError::Invalid(
+            "advection schedule requires an attached implicit flow",
+        ))?;
+        if advection.schedule.is_some() {
+            return Err(ImplicitConductionError::Invalid("implicit advection already has a schedule"));
+        }
+        schedule.admit(&advection.flow, thermal, &mut checkpoint)?;
+        advection.schedule = Some(schedule.clone());
+        let stage = advection.stage(thermal.time_s(), &mut checkpoint)?;
+        advection.endpoint(thermal, &stage, &self.index, advection.entropy, &mut checkpoint)?;
+        drop(stage);
+        checkpoint()?;
+        Ok(self)
+    }
+
+    fn bind_advection(
         mut self,
         thermal: &DepositionSimulation<'_>,
         flow: &Advected<()>,
+        schedule: Option<AdvectionSchedule>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         checkpoint()?;
@@ -171,14 +263,24 @@ impl ImplicitConductionChain<'_> {
         }
         self.admit(thermal, &mut checkpoint)?;
         let rates = flow.implicit_enthalpy_tangent(&mut checkpoint)?;
-        // The original physical owner performs complete mass, source, storage
-        // and law admission before any compiled tangent becomes usable.
-        flow.endpoint_transport(thermal, &mut checkpoint)?;
+        // Admit the actual initial prescribed flow with its original owner.
+        // A stopped liquid pump does not require mobile liquid at preparation.
+        if let Some(schedule) = &schedule {
+            schedule.admit(flow, thermal, &mut checkpoint)?;
+            let (initial, _) = schedule.flow_at(flow, thermal.time_s(), &mut checkpoint)?;
+            initial.endpoint_transport(thermal, &mut checkpoint)?;
+        } else {
+            flow.endpoint_transport(thermal, &mut checkpoint)?;
+        }
         let mut tangent = Vec::with_capacity(rates.len());
         for (row, col, rate) in rates {
             checkpoint()?;
-            let row = self.index[&row];
-            let col = self.index[&col];
+            let row = *self.index.get(&row).ok_or(ImplicitConductionError::Invalid(
+                "inactive implicit advection row",
+            ))?;
+            let col = *self.index.get(&col).ok_or(ImplicitConductionError::Invalid(
+                "inactive implicit advection column",
+            ))?;
             if matches!(self.topology, LinearTopology::Chain) && row.abs_diff(col) > 1 {
                 return Err(ImplicitConductionError::Invalid(
                     "nontridiagonal enthalpy transport requires the graph solver",
@@ -204,6 +306,7 @@ impl ImplicitConductionChain<'_> {
             liquid_tangent,
             reconstruction: None,
             entropy: false,
+            schedule,
         });
         checkpoint()?;
         Ok(self)
@@ -242,7 +345,9 @@ impl ImplicitConductionChain<'_> {
                 "reconstructed enthalpy transport requires its own entropy closure",
             ));
         }
-        advection.flow.endpoint_transport_with_entropy(thermal, &mut checkpoint)?;
+        let stage = advection.stage(thermal.time_s(), &mut checkpoint)?;
+        stage.flow.endpoint_transport_with_entropy(thermal, &mut checkpoint)?;
+        drop(stage);
         advection.entropy = true;
         checkpoint()?;
         Ok(self)
@@ -275,4 +380,12 @@ impl ImplicitConductionChain<'_> {
         checkpoint()?;
         Ok(result)
     }
+}
+
+pub(super) fn scaled_tangent(value: f64, multiplier: f64) -> Result<f64, DepositionError> {
+    let scaled = finite(value * multiplier)?;
+    if value != 0.0 && multiplier != 0.0 && scaled == 0.0 {
+        return Err(DepositionError::Arithmetic);
+    }
+    Ok(scaled)
 }

@@ -6,6 +6,8 @@ use crate::enthalpy::advection::{Advected, MassBoundary, MassFlow};
 mod liquid;
 #[path = "advection/species.rs"]
 mod species;
+#[path = "advection/schedule.rs"]
+mod schedule;
 
 fn circulating<O>(inner: O, rate: f64) -> Advected<O> {
     Advected::new(

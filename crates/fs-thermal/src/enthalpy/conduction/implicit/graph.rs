@@ -93,6 +93,32 @@ impl<'a> ImplicitConductionGraph<'a> {
         })
     }
 
+    /// Bind continuous prescribed pump/inlet histories to the native graph.
+    /// See the chain method for fixed-mass, stage-sampling and zero-flow rules.
+    pub fn with_scheduled_implicit_advection(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        flow: &crate::enthalpy::advection::Advected<()>,
+        schedule: &crate::enthalpy::advection::schedule::AdvectionSchedule,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_scheduled_implicit_advection(thermal, flow, schedule, checkpoint)?,
+        })
+    }
+
+    /// Schedule an already attached upwind or reconstructed flow.
+    pub fn with_implicit_advection_schedule(
+        self,
+        thermal: &DepositionSimulation<'_>,
+        schedule: &crate::enthalpy::advection::schedule::AdvectionSchedule,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Ok(Self {
+            inner: self.inner.with_implicit_advection_schedule(thermal, schedule, checkpoint)?,
+        })
+    }
+
     /// Classify the already attached bulk or liquid upwind flow on the native entropy
     /// account. See [`ImplicitConductionChain::with_implicit_advection_entropy`]
     /// for the caloric, stage-quadrature and reconstruction restrictions.
