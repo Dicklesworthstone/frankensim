@@ -25,6 +25,9 @@ pub mod hybrid;
 /// Original spatial gas sources in variable-density three-dimensional acoustics.
 pub mod heterogeneous;
 
+/// Complete structural displacement and spatial pressure fields with reciprocal work.
+pub mod structure;
+
 use fs_feec::acoustics::helmholtz::boundary_layer::thermal_wall::{
     ConductiveThermalWall, ThermalWall, ThermalWallDepth, WallThermalTransport,
 };
