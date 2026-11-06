@@ -10,12 +10,16 @@
 //! vibration guarantee or the stability tangent of evolving fracture. A state
 //! on the damage envelope can evolve under an arbitrarily small outward load.
 //! The caller establishes equilibrium if natural frequencies about equilibrium
-//! are required. Geometric initial-stress stiffness and active contact
-//! constraints are absent. Released paired faces must be strictly open in the
+//! are required. Geometric initial-stress stiffness is absent. The open-face
+//! pencil omits active contact; the `contact` child supplies held, preloaded
+//! normal constraints. Released paired faces for the open-face pencil must be strictly open in the
 //! original fixed-reference normal; tied crack-front vertices remain tied.
 //! This check does not establish a contact-free vibration amplitude or discover
 //! arbitrary fragment collisions. The result enters the existing `fs-modal`
 //! pencil consumers without a new eigensolver.
+
+/// Conditional modes with loaded released-face contact constraints.
+pub mod contact;
 
 use fs_evidence::{Ambition, ModelCard, ValidityDomain};
 use fs_exec::Cx;

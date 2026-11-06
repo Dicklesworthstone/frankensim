@@ -12,11 +12,56 @@
 use fs_exec::Cx;
 
 use super::ThermalBrittleTetMotion;
+use crate::brittle::solid::dynamics::modes::contact::assemble_contact_modes;
+pub use crate::brittle::solid::dynamics::modes::contact::{
+    FrozenBrittleContactControls, FrozenBrittleContactError, FrozenBrittleContactModes,
+};
 pub use crate::brittle::solid::dynamics::modes::{FrozenBrittleModesControls, FrozenBrittlePencil};
 use crate::brittle::solid::dynamics::modes::{assemble_frozen_pencil, require_open_released_faces};
 use crate::brittle::solid::{BrittleTetError, checkpoint};
 
 impl ThermalBrittleTetMotion<'_> {
+    /// Observe conditional modes with explicitly preloaded normal crack contact.
+    ///
+    /// The three entries of each `normal_preload_n` row are normal forces at
+    /// the retained face's three paired vertices. Loaded, matched, normally
+    /// resting pairs impose exact incremental normal constraints; tangential
+    /// motion remains free. Touching without strictly positive preload is a
+    /// unilateral branch switch and refuses. The caller holds the active set
+    /// and establishes equilibrium if equilibrium natural frequencies are
+    /// required; an interval-mean force receipt alone does not establish it.
+    ///
+    /// This shares the mechanical contact reduction and original reference
+    /// inertia. Current thermal coefficients and accepted mechanical strain
+    /// determine bulk stiffness. Temperature, eigenstrain, fracture history,
+    /// contact geometry and normal direction remain fixed. No contact spring,
+    /// contact inertia, heat, damping or finite-amplitude guarantee is added.
+    pub fn frozen_contact_modes(
+        &self,
+        normal_preload_n: &[[f64; 3]],
+        fixed_dofs: &[usize],
+        controls: FrozenBrittleContactControls,
+        cx: &Cx<'_>,
+    ) -> Result<FrozenBrittleContactModes, FrozenBrittleContactError> {
+        assemble_contact_modes(
+            self.solid.geometry,
+            self.solid.budget,
+            self.solid
+                .materials
+                .iter()
+                .map(|source| source.band().law()),
+            &self.solid.solution.element_states,
+            &self.solid.solution.displacement_m,
+            &self.velocity_mps,
+            &self.solid.released_faces,
+            &self.mass,
+            normal_preload_n,
+            fixed_dofs,
+            controls,
+            cx,
+        )
+    }
+
     /// Assemble the native `(K, M)` pencil at the accepted thermal state.
     ///
     /// `fixed_dofs` holds incremental displacements, independently of the

@@ -441,14 +441,16 @@ fn failed_original_body_splits_and_continues_with_native_mass_and_midpoint_momen
         // unchanged native bulk and consistent mass without a contact tangent.
         let history = motion.solid().solution().clone();
         let fracture_loss = motion.solid().fracture_dissipation_j();
-        let operator = motion.frozen_vibration_pencil(
-            &[],
-            fs_solid::brittle::solid::dynamics::modes::FrozenBrittleModesControls {
-                maximum_dofs: 24,
-                maximum_staged_entries: 288,
-            },
-            cx,
-        ).unwrap();
+        let operator = motion
+            .frozen_vibration_pencil(
+                &[],
+                fs_solid::brittle::solid::dynamics::modes::FrozenBrittleModesControls {
+                    maximum_dofs: 24,
+                    maximum_staged_entries: 288,
+                },
+                cx,
+            )
+            .unwrap();
         assert_eq!(operator.free_dofs(), &(0..24).collect::<Vec<_>>());
         close(operator.reference_mass_kg(), 2.0, 1e-15);
         assert_eq!(operator.element_damage(), &[1.0, 1.0]);
@@ -456,8 +458,18 @@ fn failed_original_body_splits_and_continues_with_native_mass_and_midpoint_momen
             for &b in &target.tetrahedra()[1] {
                 for component_a in 0..3 {
                     for component_b in 0..3 {
-                        assert_eq!(operator.stiffness_n_m().get(3*a+component_a, 3*b+component_b), 0.0);
-                        assert_eq!(operator.mass_kg().get(3*a+component_a, 3*b+component_b), 0.0);
+                        assert_eq!(
+                            operator
+                                .stiffness_n_m()
+                                .get(3 * a + component_a, 3 * b + component_b),
+                            0.0
+                        );
+                        assert_eq!(
+                            operator
+                                .mass_kg()
+                                .get(3 * a + component_a, 3 * b + component_b),
+                            0.0
+                        );
                     }
                 }
             }

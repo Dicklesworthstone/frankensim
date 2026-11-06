@@ -8,6 +8,9 @@ use fs_solid::brittle::solid::dynamics::fracture::contact::sustained::{
 };
 use fs_solver::NewtonKrylovConfig;
 
+#[path = "sustained/modes.rs"]
+mod modes;
+
 pub(super) fn sustained_controls() -> BrittleFaceSustainedControls {
     BrittleFaceSustainedControls {
         solve: SolveControls {

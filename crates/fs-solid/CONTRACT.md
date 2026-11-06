@@ -1,5 +1,48 @@
 # fs-solid CONTRACT
 
+## Preloaded brittle crack-contact vibration
+
+`BrittleTetMotion::frozen_contact_modes` and the corresponding thermal method
+admit an explicit normal preload at every retained face vertex. Strictly open
+pairs require zero preload. Touching, tangentially matched, normally resting
+independent pairs require a strictly positive preload; unloaded touching,
+penetration and unresolved modes refuse. Tied crack-front nodes require zero
+preload and introduce no independent constraint. Preloads select a conditional
+contact branch; neither supplied values nor interval-mean sustained forces
+prove equilibrium.
+
+Native paired normal rows impose `J phi = 0` on the same free coordinates as
+the original frozen bulk stiffness and retained consistent reference mass.
+Native `fs-la` Householder QR builds the complete nullspace `Z`;
+`fs-modal::eigh_gen_dense` solves `Z^T K Z, Z^T M Z`. Lifted shapes retain
+zero supported coordinates and original mass normalization. Contact-force
+increments are recovered in the original physical normal directions and
+independently checked against `K phi - lambda M phi = J^T delta_f`.
+No penalty stiffness, constraint inertia, damping, heat or eigenvalue clipping
+is introduced. Frictionless tangential motion remains unconstrained.
+
+This complete dense reduction is capped at 128 free displacement coordinates
+before contact reduction. Explicit row and dense-entry budgets include lifted
+full-node shapes; sparse assembly retains its own bounds. Rows identically
+satisfied by supports are omitted because their reactions are inseparable from
+support reactions. Other unresolved rank refuses without arbitrary constraint
+removal. A fully constrained displacement space has an empty physical spectrum.
+
+Mechanical and thermal owners share the same contact reduction. The thermal
+owner retains its accepted mechanical-strain branch, current coefficients and
+original reference mass. Damage, temperature, geometry and contact membership
+remain fixed. Equilibrium, a finite amplitude that keeps every preload positive,
+finite sliding, geometric prestress stiffness and new collision discovery are
+outside this conditional observation.
+
+G1 regressions use genuinely fractured and subsequently compressed mirror
+tetrahedra with original consistent mass: three mechanisms and eigenvalues
+`5E/3`, `20E/3` after normal pairing. They check lifted momentum/reaction
+balance, mass normalization, preload-scale independence, thermal density
+retention, and the fully failed open-material zero-stiffness branch despite
+loaded touching geometric faces. G0 cases cover mode switches, malformed
+preloads, moving pairs, cancellation and allocation bounds.
+
 ## Inertial motion of finite-strain viscoelastic membranes
 
 `membrane::visco::dynamics::FiniteViscoMembraneMotion` advances the original
