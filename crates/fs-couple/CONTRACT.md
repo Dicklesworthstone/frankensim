@@ -34,6 +34,40 @@ with source-admitted isotropic vector hysteresis and constant magnetic fits.
 Transported/rotated magnetic memory, temperature-dependent fit entropy, phase
 changes and empirical device qualification require their respective extensions.
 
+## Fatigue on original finite-rotation elastic rod motion
+
+With `rod-dynamics`, `rod_motion::fatigue::RodMotionFatiguePath` owns one native
+rod trajectory and the shared fixed-material-point fatigue observer. Both
+centered and eccentric reference inertia retain their original native motion
+step, support reactions and energy/momentum accounts. World-frame nodal loads
+and prepared material-point spatial loads use their existing kick/drift/kick
+owners. The fatigue observer receives the accepted pose, so unforced vibration
+still contributes actual signed stress cycles.
+
+Admission observes the supplied mechanical state once, including its preload
+and momentum, without reconstructing earlier damage or inserting a zero-stress
+sample. The rod observer retains original per-layer axial/bending/torsional
+stress, material-frame plane directions, typed source conditions, bounded S-N
+rainflow and optional explicitly closed Findley windows. Local transverse-force
+shear remains subject to the solid observer's explicit applicability allowance;
+it is not inferred from a section-averaged force.
+
+A native candidate is accepted only after every gauge accepts its tensor.
+Mechanical refusal, late gauge failure, sample/storage budget exhaustion and
+cancellation leave pose, momenta, clock, accepted-step count and all histories
+unchanged. Ordinary observation clones bounded rainflow residue and rolls back
+appended Findley prefixes, without copying the retained tensor window each
+step. Clones preserve continuation; provisional endpoint damage does not seal
+the live path. Fatigue introduces no mechanical force or heat.
+
+This consumer exposes immutable motion and uses the native conservative elastic
+step at fixed source conditions. Viscous constitutive stress, source-temperature
+refresh, impulses, contact and fracture are not silently omitted from a coupled
+evolution; those operations require their own compatible fatigue continuation
+and are not exposed by this path. Caller-selected time steps must resolve the
+actual stress extrema and any rotating shear trajectory. A finite plane set
+and empirical Miner or Findley estimate do not establish component service life.
+
 ## Original specific heat in coupled capacity admission
 
 Electrical, dielectric, magnetic, piezoelectric, thermoelastic, creep and

@@ -383,6 +383,9 @@ pub mod impulse;
 /// Reciprocal isolated normal impacts with an original finite rigid body.
 pub mod rigid_impact;
 
+/// Accepted elastic motion and bounded fatigue at original material points.
+pub mod fatigue;
+
 /// A force AT the material node and a pure couple held in the WORLD frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RodNodalWrench {
