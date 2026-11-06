@@ -11,6 +11,8 @@ use fs_solver::CheckedCgConfig;
 
 #[path = "motion/approach.rs"]
 mod approach;
+#[path = "motion/friction.rs"]
+mod friction;
 #[path = "motion/sustained.rs"]
 mod sustained;
 #[path = "motion/time.rs"]

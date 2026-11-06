@@ -1,5 +1,42 @@
 # fs-solid CONTRACT
 
+## Source-bound friction on mechanical and thermal brittle fragments
+
+The `contact::friction::source` adapter binds an explicit ordered interface,
+accepted source history, complete external conditions and static/kinetic role
+to each retained face vertex. Both principal interface sources must name the
+actual material states of the incident elements. Source face IDs must match
+the retained face order; texture coordinates are explicitly declared in the
+same contact frame. The original source sampler resolves each active vertex
+at its own actual incoming tangential speed and retains selected claims,
+authority and validity-domain checks. Declared accumulated-distance coordinates,
+native slip, transported texture and the last finite-step temperature history
+stay at their accepted values. Inactive and tied vertices do not query sources.
+
+Source samples remain private until the simultaneous contact, native momentum,
+actual endpoint and work audits all pass. The returned event contains both
+the complete mechanical successor and the active source candidates indexed by
+original face/vertex identity. Input histories are immutable, including after a
+late source or mechanical refusal. Pressure, time, travel, temperature change
+and impact heat are never inferred from an impulse. The coefficient role
+selects one event ellipse; it does not infer an intrastep static/kinetic switch.
+
+The thermal `expansion::dynamics::fracture::contact::friction` child provides
+both explicit and source-bound entry points through the same physical kernel.
+Thermal material identity is checked through the actual element's retained band
+source. Accepted bulk source bindings, thermal expansion reference, mechanical
+strain and fracture history, displacement, stored energy, fracture loss,
+reference density/mass, physical time and step budgets survive exactly; only
+velocity and kinetic storage change. Contact-source coefficient refresh is not
+a bulk-temperature update or thermal allocation.
+
+Focused native tests cover actual and distinct per-vertex slip queries,
+accepted history/path retention, wrong material identity, inactive queries,
+late refusal and deterministic retry. The thermal journey uses cooled source
+density with retained original mass, directional free slip/sticking, independent
+P1 momentum/work inventories and subsequent native motion. All fixed-pair
+geometry and contact-law limits of the frictional-impact owner remain in force.
+
 ## Native frictional impact of released brittle fragments
 
 The `brittle::solid::dynamics::fracture::contact::friction` owner accepts

@@ -7,13 +7,17 @@
 //! kinetic storage; it does not advance temperature, physical time or the
 //! physical-step allowance, and it does not infer impact heat.
 //!
-//! These are paired, fixed-reference, frictionless normal events. The approach
-//! and time children compose native motion and impacts at a held thermal state.
+//! These are paired, fixed-reference normal events; the friction child supplies
+//! coupled directional impulses. The approach and time children compose native
+//! motion and normal impacts at a held thermal state.
 //! The sustained child also admits explicit thermal transitions under normal
 //! contact forces. Finite sliding and new-pair discovery remain outside this model.
 
 /// Bounded native midpoint prefixes at the admitted thermal state.
 pub mod approach;
+
+/// Shared directional friction with retained thermal state and optional sources.
+pub mod friction;
 
 /// Native normal-force contact with explicitly resolved thermal transitions.
 pub mod sustained;

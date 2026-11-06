@@ -1,6 +1,9 @@
 //! Oblique post-fracture impacts against exact P1 consistent-mass oracles.
 //! Friction coefficients are explicit manufactured models, not material data.
 
+#[path = "friction/source.rs"]
+mod source;
+
 use super::*;
 use fs_contact::frictional_multicontact::{FrictionalContactConfig, FrictionalContactDeterminacy};
 use fs_solid::brittle::solid::dynamics::fracture::contact::friction::{

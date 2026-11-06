@@ -6,6 +6,9 @@
 //! The existing solid elliptic owner independently checks the physical law at
 //! the actual endpoint. No configuration, material history or clock changes.
 
+/// Original interface sources sampled at actual incoming relative slip.
+pub mod source;
+
 use std::sync::Arc;
 
 pub use fs_contact::frictional_multicontact::elliptic::EllipticFriction;
