@@ -49,7 +49,8 @@ use crate::rolling_contact::{
     ROLLING_CONTACT_ADAPTER_ID, RollingContactIdentity, RollingContactInput,
 };
 use crate::structural_acoustics::{
-    AcousticDirectivityControls, AcousticWorldObserver, BaffledPlateModalAudioModel,
+    AcousticDirectivityControls, AcousticWorldObserver, AcousticWorldReceiver,
+    BaffledPlateModalAudioModel,
     PhysicalModalInitialState, PhysicalPressureSignal, RectangularPlateModalBasis,
     RectangularPlateModeRequest, RectangularPlateSupport, ResolvedAcousticMedium,
     RetardedFarFieldObserverControls, RigidDiscBroadbandRadiationArtifact,
@@ -8854,7 +8855,7 @@ fn build_physical_audio(
             &stem,
             disc_basis,
             preroll_trajectory.trajectory(),
-            &observers,
+            &observers.map(AcousticWorldReceiver::Fixed),
             RetardedFarFieldObserverControls {
                 output_sample_rate_hz: CRITIQUE_RETARDED_SAMPLE_RATE_HZ,
                 source_bandwidth_hz: 0.5 * f64::from(stem.sample_rate_hz),
@@ -8895,7 +8896,7 @@ fn build_physical_audio(
                 &stem,
                 basis,
                 preroll_trajectory.trajectory(),
-                &observers,
+                &observers.map(AcousticWorldReceiver::Fixed),
                 RetardedFarFieldObserverControls {
                     output_sample_rate_hz: CRITIQUE_RETARDED_SAMPLE_RATE_HZ,
                     source_bandwidth_hz: 0.5 * f64::from(stem.sample_rate_hz),
@@ -9277,78 +9278,16 @@ fn decimate_retarded_pressure_observers(
 // physical delay from the retained sample timestamps. No source history is
 // reflected, padded or invented, and every microphone keeps the same clock.
 fn decimate_retarded_pressure_to_master(
-    mut signal: PhysicalPressureSignal,
+    signal: PhysicalPressureSignal,
     cx: &Cx<'_>,
 ) -> Result<PhysicalPressureSignal, CinematicFixtureError> {
-    let source_rate = f64::from(CRITIQUE_RETARDED_SAMPLE_RATE_HZ);
-    let coordinate = signal.start_time_s * source_rate;
-    let rounded = coordinate.round();
-    if signal.sample_rate_hz != CRITIQUE_RETARDED_SAMPLE_RATE_HZ
-        || !coordinate.is_finite()
-        || rounded.abs() > 9_007_199_254_740_991.0
-        || (coordinate - rounded).abs() > 1.0e-6
-    {
-        return Err(CinematicFixtureError::Pipeline(
-            "retarded pressure must retain its explicit twice-master sample clock".into(),
-        ));
-    }
-    // Each output is centered on an ORIGINAL master closing boundary. If the
-    // common retarded horizon starts halfway through a master cell, retain
-    // only the following complete cells rather than shifting their times.
-    let skipped_input = rounded.rem_euclid(2.0) as usize;
-    let input = signal.pressure_pa.get(skipped_input..).ok_or_else(|| {
-        CinematicFixtureError::Pipeline("retarded pressure has no complete input group".into())
-    })?;
-    let mut filter = fs_couple::pcm_wav::decimate::Decimator::new(2, 1)
-        .map_err(pipeline)?;
-    let delay = filter.delay_output_frames();
-    let unsupported_prefix = (2.0 * delay) as usize;
-    let retained = (input.len() / 2)
-        .checked_sub(unsupported_prefix)
-        .filter(|&count| count > 0)
-        .ok_or_else(|| {
-            CinematicFixtureError::Pipeline(
-                "retarded pressure has no complete antialias-filter interior".into(),
-            )
-        })?;
-    let start_time_s = signal.start_time_s
-        + skipped_input as f64 / source_rate
-        + (unsupported_prefix as f64 - delay) / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
-    let mut identity =
-        DomainHasher::new("org.frankensim.euler-disc.retarded-pressure-decimation.v1");
-    identity.update(signal.identity.as_bytes());
-    identity.update(b"blackman-harris-integer-decimator-v1");
-    identity.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
-    identity.update(&start_time_s.to_bits().to_le_bytes());
-    identity.update(&delay.to_bits().to_le_bytes());
-    identity.update(&(skipped_input as u64).to_le_bytes());
-    identity.update(&(retained as u64).to_le_bytes());
-    let mut output = Vec::new();
-    output.try_reserve_exact(retained).map_err(|_| {
-        CinematicFixtureError::Pipeline("retarded pressure decimation allocation refused".into())
-    })?;
-    let mut peak_abs_pressure_pa = 0.0_f64;
-    for (frame, samples) in input.chunks_exact(2).enumerate() {
-        if frame % 64 == 0 {
-            cx.checkpoint()
-                .map_err(|_| CinematicFixtureError::Cancelled)?;
-        }
-        let value = filter.preview(samples).map_err(pipeline)?[0];
-        filter.commit();
-        if frame >= unsupported_prefix {
-            output.push(value);
-            peak_abs_pressure_pa = peak_abs_pressure_pa.max(value.abs());
-            identity.update(&value.to_bits().to_le_bytes());
-        }
-    }
-    cx.checkpoint()
-        .map_err(|_| CinematicFixtureError::Cancelled)?;
-    signal.start_time_s = start_time_s;
-    signal.sample_rate_hz = SOUND_MASTER_SAMPLE_RATE_HZ;
-    signal.pressure_pa = output;
-    signal.peak_abs_pressure_pa = peak_abs_pressure_pa;
-    signal.identity = identity.finalize();
-    Ok(signal)
+    crate::physical_audio_artifact::decimate_retarded_pressure_to_master(signal, cx)
+        .map_err(|error| match error {
+            crate::physical_audio_artifact::PhysicalListeningMasterError::Artifact(
+                crate::audio_artifact::AudioArtifactError::Cancelled,
+            ) => CinematicFixtureError::Cancelled,
+            error => pipeline(error),
+        })
 }
 
 fn crop_physical_pressure_window(

@@ -36,6 +36,7 @@ cinematic-finalization = ["render-sharding-ledger"]
 cinematic-orchestration = ["render-sharding-ledger"]
 
 [dependencies]
+fs-aeroac = { path = "../fs-aeroac" }
 fs-blake3 = { path = "../fs-blake3" }
 fs-bem = { path = "../fs-bem" }
 fs-contact = { path = "../fs-contact" }

@@ -19,7 +19,15 @@ use crate::audio_artifact::{
     AudioArtifactBudget, AudioArtifactError, AudioMeters, StereoSample, WavCodecReceipt,
     WavMetadata, WavSampleEncoding, encode_stereo_wav, measure_audio,
 };
-use crate::structural_acoustics::PhysicalPressureSignal;
+use fs_evidence::cinematic_sound::SOUND_MASTER_SAMPLE_RATE_HZ;
+use crate::render_trajectory::RenderTrajectory;
+use crate::structural_acoustics::{
+    AcousticWorldReceiver, PhysicalPressureSignal, RetardedFarFieldObserverControls,
+    RigidDiscBroadbandRadiationArtifact, StructuralBroadbandRadiationArtifact,
+    StructuralBroadbandSourceStem, StructuralModalBasisError,
+    StructuralResidualFlexibilityEstimateBasis, synthesize_retarded_far_field_world_observers,
+    synthesize_rigid_disc_retarded_far_field_world_observers,
+};
 
 const PHYSICAL_LISTENING_MASTER_IDENTITY_DOMAIN: &str =
     "org.frankensim.euler-disc.physical-listening-master.v3";
@@ -166,6 +174,144 @@ impl PhysicalPressureListeningMaster {
     }
 }
 
+/// Existing broadband radiator consumed by the physical receiver audition.
+#[derive(Clone, Copy, Debug)]
+pub enum RetardedPressureSource<'a> {
+    /// Flexible structural modes with their original radiation and damping.
+    Structural(&'a StructuralBroadbandRadiationArtifact),
+    /// Existing rigid-disc translational radiation estimate.
+    RigidDisc(&'a RigidDiscBroadbandRadiationArtifact),
+}
+
+/// Physical inputs for one independently moving left/right receiver pair.
+/// This composes the existing renderer; it never applies artistic panning.
+pub struct RetardedPressureListeningInput<'a> {
+    /// Radiation model that produced the supplied coefficient stem.
+    pub source: RetardedPressureSource<'a>,
+    /// Original body-frame source coefficients, before listener propagation.
+    pub stem: &'a StructuralBroadbandSourceStem,
+    /// Exact structural geometry identity shared with the source trajectory.
+    pub basis: &'a StructuralResidualFlexibilityEstimateBasis,
+    /// Immutable accepted source mechanics.
+    pub trajectory: &'a RenderTrajectory,
+    /// Left/right microphones, each fixed or independently moving.
+    pub receivers: [AcousticWorldReceiver<'a>; 2],
+    /// Explicit source/output bands, low-Mach source scope and work caps.
+    /// The listening consumer accepts 48 kHz directly or 96 kHz with the
+    /// existing antialias filter; the shared renderer supports other clocks.
+    pub observation: RetardedFarFieldObserverControls,
+}
+
+/// Transactional physical moving-receiver audition and calibrated PCM24 WAV.
+#[derive(Clone, Debug)]
+pub struct RetardedPressureListeningArtifact {
+    /// Common 48 kHz left/right pressure in pascals, before digital gain or fades.
+    /// A 96 kHz observation is antialias-filtered onto these original master
+    /// boundaries, retaining only its complete real filter-history interior.
+    pub pressure: [PhysicalPressureSignal; 2],
+    /// Existing fixed-calibration listening derivative of exactly these signals.
+    pub listening_master: PhysicalPressureListeningMaster,
+}
+
+impl RetardedPressureListeningArtifact {
+    /// Render the actual receiver field and encode its audible derivative.
+    ///
+    /// All source, receiver, stencil, Doppler-band and far-field admission is
+    /// delegated to the shared retarded renderer. Moving receivers retain their
+    /// finite histories and common reception clock. No pressure amplitude factor,
+    /// gain normalization, extrapolated tail or microphone/head scattering is
+    /// introduced. The result retains the original estimate-only authority.
+    ///
+    /// # Errors
+    /// Refuses invalid physical inputs or budgets, unsupported listening clocks,
+    /// incomplete filter interiors, cancellation, silence or listening overload.
+    pub fn try_build(
+        input: RetardedPressureListeningInput<'_>,
+        policy: PressureListeningMasterPolicy,
+        metadata: &WavMetadata,
+        budget: AudioArtifactBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Self, RetardedPressureListeningError> {
+        if input.observation.output_sample_rate_hz != SOUND_MASTER_SAMPLE_RATE_HZ
+            && input.observation.output_sample_rate_hz != 2 * SOUND_MASTER_SAMPLE_RATE_HZ
+        {
+            return Err(PhysicalListeningMasterError::SignalMismatch {
+                field: "retarded listening observation must be 48 or 96 kHz",
+            }.into());
+        }
+        let signals = match input.source {
+            RetardedPressureSource::Structural(source) => {
+                synthesize_retarded_far_field_world_observers(
+                    source, input.stem, input.basis, input.trajectory, &input.receivers,
+                    input.observation, cx,
+                )?
+            }
+            RetardedPressureSource::RigidDisc(source) => {
+                synthesize_rigid_disc_retarded_far_field_world_observers(
+                    source, input.stem, input.basis, input.trajectory, &input.receivers,
+                    input.observation, cx,
+                )?
+            }
+        };
+        let [left, right]: [PhysicalPressureSignal; 2] = signals.try_into().map_err(|_| {
+            StructuralModalBasisError::InvalidRequest {
+                what: "retarded stereo renderer must return exactly two receivers",
+            }
+        })?;
+        let pressure = if input.observation.output_sample_rate_hz == 2 * SOUND_MASTER_SAMPLE_RATE_HZ {
+            [
+                decimate_retarded_pressure_to_master(left, cx)?,
+                decimate_retarded_pressure_to_master(right, cx)?,
+            ]
+        } else {
+            [left, right]
+        };
+        let listening_master = PhysicalPressureListeningMaster::try_build(
+            &pressure[0], &pressure[1], policy, metadata, budget, cx,
+        )?;
+        Ok(Self { pressure, listening_master })
+    }
+}
+
+/// Typed refusal of either the physical radiation or its listening derivative.
+#[derive(Debug)]
+pub enum RetardedPressureListeningError {
+    /// Original shared source/receiver radiation refusal.
+    Radiation(StructuralModalBasisError),
+    /// Antialias, calibration, metering or PCM24 publication refusal.
+    Listening(PhysicalListeningMasterError),
+}
+
+impl From<StructuralModalBasisError> for RetardedPressureListeningError {
+    fn from(error: StructuralModalBasisError) -> Self {
+        Self::Radiation(error)
+    }
+}
+
+impl From<PhysicalListeningMasterError> for RetardedPressureListeningError {
+    fn from(error: PhysicalListeningMasterError) -> Self {
+        Self::Listening(error)
+    }
+}
+
+impl fmt::Display for RetardedPressureListeningError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Radiation(error) => write!(formatter, "retarded physical pressure: {error}"),
+            Self::Listening(error) => write!(formatter, "retarded listening derivative: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for RetardedPressureListeningError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Radiation(error) => Some(error),
+            Self::Listening(error) => Some(error),
+        }
+    }
+}
+
 /// Typed refusal from physical-pressure listening-master construction.
 #[derive(Clone, Debug, PartialEq)]
 pub enum PhysicalListeningMasterError {
@@ -185,6 +331,8 @@ pub enum PhysicalListeningMasterError {
     },
     /// The fixed calibration exceeded the declared true-peak ceiling.
     PeakTargetExceeded { observed_fs: f64, target_fs: f64 },
+    /// Original pressure antialias filter or its finite-history admission refused.
+    PressureResampling(String),
     /// Canonical WAV/metering/cancellation refusal.
     Artifact(AudioArtifactError),
 }
@@ -202,6 +350,91 @@ impl fmt::Display for PhysicalListeningMasterError {
 }
 
 impl std::error::Error for PhysicalListeningMasterError {}
+
+/// Antialias one 96 kHz physical receiver onto the original 48 kHz master grid.
+///
+/// Reuses the native half-band decimator, full-history interior and group-delay
+/// compensation used by the cinematic fixed-microphone mix. Returned samples
+/// remain pascals; their identity binds the original pressure, filter and clock.
+///
+/// # Errors
+/// Refuses a different/off-grid clock, incomplete filter support, allocation,
+/// original filter errors or cancellation. No missing history is padded.
+pub fn decimate_retarded_pressure_to_master(
+    mut signal: PhysicalPressureSignal,
+    cx: &Cx<'_>,
+) -> Result<PhysicalPressureSignal, PhysicalListeningMasterError> {
+    let source_rate = f64::from(2 * SOUND_MASTER_SAMPLE_RATE_HZ);
+    let coordinate = signal.start_time_s * source_rate;
+    let rounded = coordinate.round();
+    if signal.sample_rate_hz != (2 * SOUND_MASTER_SAMPLE_RATE_HZ)
+        || !coordinate.is_finite()
+        || rounded.abs() > 9_007_199_254_740_991.0
+        || (coordinate - rounded).abs() > 1.0e-6
+    {
+        return Err(PhysicalListeningMasterError::PressureResampling(
+            "retarded pressure must retain its explicit twice-master sample clock".into(),
+        ));
+    }
+    // Each output is centered on an ORIGINAL master closing boundary. If the
+    // common retarded horizon starts halfway through a master cell, retain
+    // only the following complete cells rather than shifting their times.
+    let skipped_input = rounded.rem_euclid(2.0) as usize;
+    let input = signal.pressure_pa.get(skipped_input..).ok_or_else(|| {
+        PhysicalListeningMasterError::PressureResampling("retarded pressure has no complete input group".into())
+    })?;
+    let mut filter = fs_couple::pcm_wav::decimate::Decimator::new(2, 1)
+        .map_err(|error| PhysicalListeningMasterError::PressureResampling(error.to_string()))?;
+    let delay = filter.delay_output_frames();
+    let unsupported_prefix = (2.0 * delay) as usize;
+    let retained = (input.len() / 2)
+        .checked_sub(unsupported_prefix)
+        .filter(|&count| count > 0)
+        .ok_or_else(|| {
+            PhysicalListeningMasterError::PressureResampling(
+                "retarded pressure has no complete antialias-filter interior".into(),
+            )
+        })?;
+    let start_time_s = signal.start_time_s
+        + skipped_input as f64 / source_rate
+        + (unsupported_prefix as f64 - delay) / f64::from(SOUND_MASTER_SAMPLE_RATE_HZ);
+    let mut identity =
+        DomainHasher::new("org.frankensim.euler-disc.retarded-pressure-decimation.v1");
+    identity.update(signal.identity.as_bytes());
+    identity.update(b"blackman-harris-integer-decimator-v1");
+    identity.update(&SOUND_MASTER_SAMPLE_RATE_HZ.to_le_bytes());
+    identity.update(&start_time_s.to_bits().to_le_bytes());
+    identity.update(&delay.to_bits().to_le_bytes());
+    identity.update(&(skipped_input as u64).to_le_bytes());
+    identity.update(&(retained as u64).to_le_bytes());
+    let mut output = Vec::new();
+    output.try_reserve_exact(retained).map_err(|_| {
+        PhysicalListeningMasterError::PressureResampling("retarded pressure decimation allocation refused".into())
+    })?;
+    let mut peak_abs_pressure_pa = 0.0_f64;
+    for (frame, samples) in input.chunks_exact(2).enumerate() {
+        if frame % 64 == 0 {
+            cx.checkpoint()
+                .map_err(|_| PhysicalListeningMasterError::Artifact(AudioArtifactError::Cancelled))?;
+        }
+        let value = filter.preview(samples).map_err(|error| PhysicalListeningMasterError::PressureResampling(error.to_string()))?[0];
+        filter.commit();
+        if frame >= unsupported_prefix {
+            output.push(value);
+            peak_abs_pressure_pa = peak_abs_pressure_pa.max(value.abs());
+            identity.update(&value.to_bits().to_le_bytes());
+        }
+    }
+    cx.checkpoint()
+        .map_err(|_| PhysicalListeningMasterError::Artifact(AudioArtifactError::Cancelled))?;
+    signal.start_time_s = start_time_s;
+    signal.sample_rate_hz = SOUND_MASTER_SAMPLE_RATE_HZ;
+    signal.pressure_pa = output;
+    signal.peak_abs_pressure_pa = peak_abs_pressure_pa;
+    signal.identity = identity.finalize();
+    Ok(signal)
+}
+
 
 fn validate_pair(
     left: &PhysicalPressureSignal,
@@ -426,6 +659,49 @@ mod tests {
             radiation_identity: ContentHash([radiation; 32]),
             damping_model_identity: ContentHash([2; 32]),
             identity: ContentHash([radiation.wrapping_add(10); 32]),
+        }
+    }
+
+    #[test]
+    fn moving_pressure_antialias_and_pcm24_keep_physical_time_and_receiver_identity() {
+        use crate::structural_acoustics::PhysicalPressureObserver;
+
+        for opening_index in [0, 1] {
+            let mut input = signal(1.0e-4, 3);
+            input.start_time_s = f64::from(opening_index) / 96_000.0;
+            input.sample_rate_hz = 96_000;
+            input.pressure_pa = (0..4_097).map(|frame| {
+                let time = input.start_time_s + (frame + 1) as f64 / 96_000.0;
+                1.0e-4 * (
+                    0.8 * det::sin(core::f64::consts::TAU * 2_000.0 * time)
+                    + 0.5 * det::sin(core::f64::consts::TAU * 30_000.0 * time)
+                )
+            }).collect();
+            input.peak_abs_pressure_pa = input.pressure_pa.iter()
+                .fold(0.0_f64, |peak, value| peak.max(value.abs()));
+            input.observer = PhysicalPressureObserver::WorldMoving {
+                trajectory_identity: ContentHash([17; 32]),
+            };
+            let observer = input.observer;
+            let pressure = with_cx(|cx| decimate_retarded_pressure_to_master(input, cx)).unwrap();
+            assert_eq!(pressure.observer, observer);
+            let opening = pressure.start_time_s * 48_000.0;
+            assert!((opening - opening.round()).abs() < 1.0e-10);
+            for (frame, value) in pressure.pressure_pa.iter().enumerate() {
+                let time = pressure.start_time_s + (frame + 1) as f64 / 48_000.0;
+                let expected = 0.8e-4 * det::sin(core::f64::consts::TAU * 2_000.0 * time);
+                assert!((value - expected).abs() < 2.0e-9);
+            }
+            let master = with_cx(|cx| PhysicalPressureListeningMaster::try_build(
+                &pressure, &pressure, PressureListeningMasterPolicy::CRITIQUE,
+                &WavMetadata::default(), AudioArtifactBudget::DEFAULT, cx,
+            )).unwrap();
+            assert_eq!(master.left_pressure_identity, pressure.identity);
+            assert_eq!(master.right_pressure_identity, pressure.identity);
+            assert_eq!(master.wav.sample_frame_count(), pressure.pressure_pa.len() as u64);
+            assert_eq!(master.wav.encoding(), WavSampleEncoding::Pcm24);
+            assert!(master.meters.sample_peak_fs > 0.03);
+            assert!(master.meters.sample_peak_fs < 0.05);
         }
     }
 

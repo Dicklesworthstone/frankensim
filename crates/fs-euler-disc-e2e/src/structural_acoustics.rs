@@ -77,6 +77,10 @@ use crate::{
 };
 
 mod prony;
+mod receiver;
+mod retarded_clock;
+pub use receiver::{AcousticReceiverTrajectory, AcousticWorldReceiver};
+use retarded_clock::{RetardedClockError, bisect_root_bracket};
 pub use prony::{
     StructuralPronyAudioBudget, StructuralPronyAudioError, StructuralPronyAudioModel,
     StructuralPronyAudioRequest, StructuralPronyPressureFrame,
@@ -93,7 +97,7 @@ pub const STRUCTURAL_BROADBAND_SOURCE_NO_CLAIM: &str = "Estimate-only linear sou
 /// Limitation carried by the rigid-disc acceleration radiation artifact.
 pub const RIGID_DISC_BROADBAND_SOURCE_NO_CLAIM: &str = "Estimate-only linear low-Mach radiation from rigid center-of-mass translation of the undeformed reference disc: sampled BEM, SH truncation, rational fitting, discretization, moving-boundary, rotational, convective, near-field, room, calibration, and backreaction errors are not certified; rotational coordinates are excluded because their low-frequency boundary-work estimate is not passivity-admissible on the production mesh";
 /// Limitation carried by the retarded rigid-source far-field observer.
-pub const RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM: &str = "Estimate-only rigid low-Mach far-field observer: causal retarded delay, emission-pose direction, 1/r spreading, and deterministic multi-observer timing are modeled; no moving-boundary/FW-H, convective Green/Jacobian or exact Doppler amplitude, near field, deformation, room/support/head scattering, absorption, backreaction, impact radiation, calibration, or certified far-field enclosure is claimed";
+pub const RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM: &str = "Estimate-only rigid low-Mach far-field observer: causal retarded delay with fixed or subsonic moving receivers, emission-pose direction, 1/r spreading, and deterministic multi-observer timing are modeled; no moving-boundary/FW-H, convective Green/Jacobian or exact Doppler amplitude, near field, deformation, room/support/head scattering, absorption, backreaction, impact radiation, calibration, or certified far-field enclosure is claimed";
 /// Maximum number of simultaneous physical pressure observers in one pass.
 pub const MAX_PHYSICAL_PRESSURE_OBSERVERS: usize = 64;
 const STRUCTURAL_MODAL_BASIS_IDENTITY_DOMAIN: &str =
@@ -555,7 +559,7 @@ pub struct RetardedFarFieldObserverControls {
     /// Maximum admitted source-surface speed divided by sound speed.
     /// Zero admits stationary sources; the low-Mach ceiling remains 0.1.
     pub maximum_surface_mach: f64,
-    /// Absolute emission-time bisection tolerance [s].
+    /// Absolute source-emission and receiver-window bisection tolerance [s].
     pub root_time_tolerance_s: f64,
     /// Maximum deterministic bisection iterations.
     pub maximum_root_iterations: u32,
@@ -1088,8 +1092,14 @@ pub enum PhysicalModalInitialState {
 pub enum PhysicalPressureObserver {
     /// A legacy observer fixed in the undeformed specimen body frame.
     BodyFixed(AcousticObserver),
-    /// A stationary or externally animated observer in the inertial frame.
+    /// A stationary observer in the inertial frame.
     WorldFixed(AcousticWorldObserver),
+    /// A finite physical receiver path sampled at reception time. The identity
+    /// binds its complete native trajectory and acoustic motion admission.
+    WorldMoving {
+        /// Immutable original receiver trajectory identity.
+        trajectory_identity: ContentHash,
+    },
 }
 
 /// Unmastered physical pressure signal at one observer.
@@ -1351,8 +1361,10 @@ pub enum StructuralModalBasisError {
     BroadbandRadiation(BroadbandRadiationError),
     /// Conservative generalized-force reconstruction refused.
     ForceReconstruction(AudioResamplingError),
-    /// Pose reconstruction for a world-fixed observer refused.
+    /// Source pose reconstruction on the original mechanical timeline refused.
     Timeline(TimelineResamplingError),
+    /// Native continuous receiver-motion preparation or query refused.
+    ReceiverMotion(fs_aeroac::AeroacError),
     /// The requested band contains no elastic modes.
     NoModesInBand,
     /// A rigid-subspace, inertia-relief, or energy-closure check failed.
@@ -1495,6 +1507,9 @@ impl core::fmt::Display for StructuralModalBasisError {
                     "physical audio pose reconstruction refused: {source}"
                 )
             }
+            Self::ReceiverMotion(source) => {
+                write!(formatter, "physical acoustic receiver motion refused: {source}")
+            }
             Self::NoModesInBand => write!(formatter, "FS-EULER-STRUCTURAL-MODE-EMPTY-BAND"),
             Self::ResidualFlexibilityVerification {
                 what,
@@ -1586,6 +1601,7 @@ impl std::error::Error for StructuralModalBasisError {
             Self::BroadbandRadiation(_) => None,
             Self::ForceReconstruction(source) => Some(source),
             Self::Timeline(source) => Some(source),
+            Self::ReceiverMotion(source) => Some(source),
             _ => None,
         }
     }
@@ -1648,6 +1664,15 @@ impl From<BroadbandRadiationError> for StructuralModalBasisError {
 impl From<AudioResamplingError> for StructuralModalBasisError {
     fn from(source: AudioResamplingError) -> Self {
         Self::ForceReconstruction(source)
+    }
+}
+
+impl From<fs_aeroac::AeroacError> for StructuralModalBasisError {
+    fn from(source: fs_aeroac::AeroacError) -> Self {
+        match source {
+            fs_aeroac::AeroacError::Cancelled { .. } => Self::Cancelled,
+            source => Self::ReceiverMotion(source),
+        }
     }
 }
 
@@ -3896,6 +3921,10 @@ fn hash_pressure_observer(hasher: &mut DomainHasher, observer: PhysicalPressureO
                 hasher.update(&value.to_bits().to_le_bytes());
             }
         }
+        PhysicalPressureObserver::WorldMoving { trajectory_identity } => {
+            hasher.update(&[2]);
+            hasher.update(trajectory_identity.as_bytes());
+        }
     }
 }
 
@@ -5417,7 +5446,7 @@ pub fn synthesize_rigid_disc_retarded_far_field_world_observers(
     stem: &StructuralBroadbandSourceStem,
     basis: &StructuralResidualFlexibilityEstimateBasis,
     trajectory: &RenderTrajectory,
-    observers: &[AcousticWorldObserver],
+    observers: &[AcousticWorldReceiver<'_>],
     controls: RetardedFarFieldObserverControls,
     cx: &Cx<'_>,
 ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
@@ -5449,8 +5478,10 @@ pub fn synthesize_rigid_disc_retarded_far_field_world_observers(
     )
 }
 
-/// Synthesize simultaneous world-fixed pressure signals from body-frame
-/// broadband far-field coefficients using physical retarded time.
+/// Synthesize simultaneous fixed or moving world-receiver pressure signals
+/// from body-frame broadband far-field coefficients using physical retarded time.
+/// A moving receiver is sampled at reception time and held fixed during the
+/// emission solve; no Doppler pressure-amplitude multiplier is introduced.
 ///
 /// Version one is interior-only: every accepted emission query has a complete
 /// 16-tap Lanczos-8 stencil. Source interpolation stays on the original stem
@@ -5463,7 +5494,7 @@ pub fn synthesize_retarded_far_field_world_observers(
     stem: &StructuralBroadbandSourceStem,
     basis: &StructuralResidualFlexibilityEstimateBasis,
     trajectory: &RenderTrajectory,
-    observers: &[AcousticWorldObserver],
+    observers: &[AcousticWorldReceiver<'_>],
     controls: RetardedFarFieldObserverControls,
     cx: &Cx<'_>,
 ) -> Result<Vec<PhysicalPressureSignal>, StructuralModalBasisError> {
@@ -5474,27 +5505,21 @@ pub fn synthesize_retarded_far_field_world_observers(
     let timeline = TimelineResampler::new(trajectory);
     let mut arrival_bounds = Vec::with_capacity(observers.len());
     for observer in observers {
-        let first = arrival_time(
+        arrival_bounds.push(observer.reception_window(
             &timeline,
-            *observer,
-            first_emission_s,
+            [first_emission_s, last_emission_s],
             source.sound_speed_m_s,
-        )?;
-        let last = arrival_time(
-            &timeline,
-            *observer,
-            last_emission_s,
-            source.sound_speed_m_s,
-        )?;
-        arrival_bounds.push((first, last));
+            controls,
+            cx,
+        )?);
     }
     let common_start = arrival_bounds
         .iter()
-        .map(|bound| bound.0)
+        .map(|bound| bound[0])
         .fold(f64::NEG_INFINITY, f64::max);
     let common_end = arrival_bounds
         .iter()
-        .map(|bound| bound.1)
+        .map(|bound| bound[1])
         .fold(f64::INFINITY, f64::min);
     let (first_frame, frame_count, output_start_s) =
         retarded_output_window(stem.start_time_s, common_start, common_end, controls)?;
@@ -5528,9 +5553,10 @@ pub fn synthesize_retarded_far_field_world_observers(
         }
         let arrival_s = stem.start_time_s + (first_frame + frame) as f64 * period;
         for (observer_index, observer) in observers.iter().enumerate() {
+            let reception_position = observer.position_at(arrival_s)?;
             let (emission_s, pose, direction_world, radius_m) = retarded_emission(
                 &timeline,
-                *observer,
+                reception_position,
                 arrival_s,
                 first_emission_s,
                 last_emission_s,
@@ -5567,7 +5593,7 @@ pub fn synthesize_retarded_far_field_world_observers(
             let peak_abs_pressure_pa = pressure_pa
                 .iter()
                 .fold(0.0_f64, |peak, value| peak.max(value.abs()));
-            let observer = PhysicalPressureObserver::WorldFixed(observer);
+            let observer = observer.observer();
             let identity = retarded_pressure_identity(
                 source,
                 stem,
@@ -5599,11 +5625,19 @@ fn validate_retarded_observer_inputs(
     stem: &StructuralBroadbandSourceStem,
     basis: &StructuralResidualFlexibilityEstimateBasis,
     trajectory: &RenderTrajectory,
-    observers: &[AcousticWorldObserver],
+    observers: &[AcousticWorldReceiver<'_>],
     controls: RetardedFarFieldObserverControls,
     cx: &Cx<'_>,
 ) -> Result<(), StructuralModalBasisError> {
-    validate_retarded_sampling(stem.sample_rate_hz, controls)?;
+    if observers.is_empty() || observers.len() > MAX_PHYSICAL_PRESSURE_OBSERVERS {
+        return Err(StructuralModalBasisError::InvalidRequest {
+            what: "retarded receiver count must fit the explicit observer cap",
+        });
+    }
+    let maximum_receiver_mach = observers.iter()
+        .map(|observer| observer.maximum_mach())
+        .fold(0.0_f64, f64::max);
+    validate_retarded_sampling(stem.sample_rate_hz, maximum_receiver_mach, controls)?;
     drop(source.radiation.try_runtime()?);
     if source.identity == ContentHash([0; 32])
         || source.authority != BroadbandRadiationAuthority::EstimateOnly
@@ -5633,15 +5667,7 @@ fn validate_retarded_observer_inputs(
             what: "retarded observer source, stem, trajectory, gas, or basis identity is inconsistent",
         });
     }
-    if observers.is_empty()
-        || observers.len() > MAX_PHYSICAL_PRESSURE_OBSERVERS
-        || observers.iter().any(|observer| {
-            observer
-                .position_world_m
-                .iter()
-                .any(|value| !value.is_finite())
-        })
-        || !(controls.root_time_tolerance_s > 0.0 && controls.root_time_tolerance_s.is_finite())
+    if !(controls.root_time_tolerance_s > 0.0 && controls.root_time_tolerance_s.is_finite())
         || controls.maximum_root_iterations == 0
         || controls.maximum_root_iterations > 256
         || controls.interpolation_radius_frames != 8
@@ -5650,6 +5676,9 @@ fn validate_retarded_observer_inputs(
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "retarded observer set or controls are outside the version-one domain",
         });
+    }
+    for observer in observers {
+        observer.validate(source.sound_speed_m_s)?;
     }
     if source.recomputed_identity()? != source.identity {
         return Err(StructuralModalBasisError::IdentityMismatch {
@@ -5666,16 +5695,19 @@ fn validate_retarded_observer_inputs(
         let state = sample.state();
         let reconstructed =
             timeline.sample(sample.input().time_s, EventEvaluationSide::RightLimit)?;
+        validate_retarded_knot_motion(
+            source,
+            trajectory,
+            &reconstructed,
+            controls.maximum_surface_mach,
+        )?;
         for observer in observers {
-            let radius = observer_vector(*observer, state.pose().position_world()).1;
-            validate_retarded_state(
-                source,
-                trajectory,
-                &reconstructed,
-                radius,
-                minimum,
-                controls.maximum_surface_mach,
-            )?;
+            // A moving microphone has its own reception-time history. It must
+            // never be sampled at a mechanical source knot's emission time.
+            if let AcousticWorldReceiver::Fixed(observer) = observer {
+                let radius = observer_vector(*observer, state.pose().position_world()).1;
+                validate_retarded_radius(radius, minimum)?;
+            }
         }
     }
     validate_retarded_pose_motion(
@@ -5770,15 +5802,18 @@ fn validate_retarded_pose_speed(
     Ok(())
 }
 
-// For a fixed microphone, d tau/d t = 1/(1 - n.v/c). The admitted surface
-// speed bounds the translational speed, so this ceiling applies in every
-// direction without inferring bandwidth from the radiation fit or modal list.
+// d tau/d t = (1 - n.v_receiver/c)/(1 - n.v_source/c). Independently
+// admitted continuous speed bounds cover both motions in every direction;
+// neither radiation-fit frequencies nor a mode list establishes bandwidth.
 fn validate_retarded_sampling(
     source_rate_hz: u32,
+    maximum_receiver_mach: f64,
     controls: RetardedFarFieldObserverControls,
 ) -> Result<(), StructuralModalBasisError> {
     if source_rate_hz == 0
         || controls.output_sample_rate_hz == 0
+        || !maximum_receiver_mach.is_finite()
+        || !(0.0..1.0).contains(&maximum_receiver_mach)
         || !controls.maximum_surface_mach.is_finite()
         || !(0.0..=0.1).contains(&controls.maximum_surface_mach)
         || !controls.source_bandwidth_hz.is_finite()
@@ -5794,7 +5829,7 @@ fn validate_retarded_sampling(
         });
     }
     // Round outward; exact stationary/DC cases retain their original bandwidth.
-    let required_hz = if controls.maximum_surface_mach == 0.0
+    let source_compressed_hz = if controls.maximum_surface_mach == 0.0
         || controls.source_bandwidth_hz == 0.0
     {
         controls.source_bandwidth_hz
@@ -5803,9 +5838,14 @@ fn validate_retarded_sampling(
             / (1.0 - controls.maximum_surface_mach).next_down())
         .next_up()
     };
+    let required_hz = if maximum_receiver_mach == 0.0 || source_compressed_hz == 0.0 {
+        source_compressed_hz
+    } else {
+        (source_compressed_hz * (1.0 + maximum_receiver_mach).next_up()).next_up()
+    };
     if controls.receiver_bandwidth_hz < required_hz {
         return Err(StructuralModalBasisError::InvalidRequest {
-            what: "retarded receiver bandwidth does not include source Doppler compression",
+            what: "retarded receiver bandwidth does not include both endpoint Doppler compression",
         });
     }
     Ok(())
@@ -5882,15 +5922,12 @@ fn minimum_broadband_far_field_distance(
         .max(2.0 * source.source_diameter_m * source.source_diameter_m / wavelength)
 }
 
-fn validate_retarded_state(
+fn validate_retarded_knot_motion(
     source: &StructuralBroadbandRadiationArtifact,
     trajectory: &RenderTrajectory,
     sample: &crate::timeline_resampling::ResampledTimelineSample,
-    radius_m: f64,
-    minimum_far_field_m: f64,
     maximum_surface_mach: f64,
 ) -> Result<(), StructuralModalBasisError> {
-    validate_retarded_radius(radius_m, minimum_far_field_m)?;
     let properties = trajectory.metadata().mass_properties.properties;
     let kinematics_error = |_| StructuralModalBasisError::InvalidRequest {
         what: "retarded trajectory kinematics are invalid",
@@ -5947,7 +5984,10 @@ fn arrival_time(
     let position = timeline.position(emission_s)?;
     let (_, radius) = observer_vector(observer, position);
     let arrival = emission_s + radius / sound_speed_m_s;
-    if !(radius > 0.0 && radius.is_finite() && arrival.is_finite()) {
+    // A bisection probe can coincide geometrically at a time other than
+    // the solved emission. Its scalar distance remains defined; separation
+    // and far-field admission apply to the final causal source/receiver pair.
+    if !(radius >= 0.0 && radius.is_finite() && arrival.is_finite()) {
         return Err(StructuralModalBasisError::InvalidRequest {
             what: "retarded observer radius or arrival time is invalid",
         });
@@ -5984,42 +6024,37 @@ fn retarded_emission(
 
 fn bisect_retarded_emission_time(
     arrival_s: f64,
-    mut low: f64,
-    mut high: f64,
+    low: f64,
+    high: f64,
     tolerance_s: f64,
     maximum_iterations: u32,
     mut arrival_at: impl FnMut(f64) -> Result<f64, StructuralModalBasisError>,
 ) -> Result<f64, StructuralModalBasisError> {
-    let mut low_residual = arrival_at(low)? - arrival_s;
-    let high_residual = arrival_at(high)? - arrival_s;
-    if low_residual > 0.0 || high_residual < 0.0 {
-        return Err(StructuralModalBasisError::ControlTimeline {
-            what: "arrival time has no emission root inside the complete source stencil",
-        });
+    let [low, high] = bisect_root_bracket(
+        low,
+        high,
+        tolerance_s,
+        maximum_iterations,
+        |time| arrival_at(time).map(|arrival| arrival - arrival_s),
+    ).map_err(retarded_clock_error)?;
+    Ok(if low == high { low } else { 0.5 * (low + high) })
+}
+
+fn retarded_clock_error(
+    error: RetardedClockError<StructuralModalBasisError>,
+) -> StructuralModalBasisError {
+    match error {
+        RetardedClockError::Query(error) => error,
+        RetardedClockError::InvalidBracket => StructuralModalBasisError::ControlTimeline {
+            what: "retarded source and receiver histories have no complete common causal window",
+        },
+        RetardedClockError::NonFinite => StructuralModalBasisError::InvalidRequest {
+            what: "retarded clock residual became non-finite",
+        },
+        RetardedClockError::IterationLimit => StructuralModalBasisError::ControlTimeline {
+            what: "retarded clock root exceeded the deterministic bisection budget",
+        },
     }
-    for _ in 0..maximum_iterations {
-        let mid = 0.5 * (low + high);
-        let residual = arrival_at(mid)? - arrival_s;
-        if residual <= 0.0 {
-            low = mid;
-            low_residual = residual;
-        } else {
-            high = mid;
-        }
-        if high - low <= tolerance_s || residual == 0.0 {
-            break;
-        }
-    }
-    if high - low > tolerance_s && low_residual != 0.0 {
-        return Err(StructuralModalBasisError::ControlTimeline {
-            what: "retarded emission root exceeded the deterministic bisection budget",
-        });
-    }
-    Ok(if low_residual == 0.0 {
-        low
-    } else {
-        0.5 * (low + high)
-    })
 }
 
 fn interpolate_stem_lanczos8(
@@ -7921,7 +7956,7 @@ mod tests {
     #[test]
     fn retarded_sampling_requires_room_for_the_actual_doppler_band() {
         let stationary = retarded_test_controls();
-        validate_retarded_sampling(48_000, stationary).unwrap();
+        validate_retarded_sampling(48_000, 0.0, stationary).unwrap();
 
         let approaching = RetardedFarFieldObserverControls {
             maximum_surface_mach: 0.1,
@@ -7930,16 +7965,30 @@ mod tests {
         // A 23.5 kHz source becomes 26.111... kHz at Mach 0.1. Lanczos
         // reconstruction at 48 kHz cannot prevent its foldover to 21.889 kHz.
         assert!(23_500.0 / 0.9 > 24_000.0);
-        assert!(validate_retarded_sampling(48_000, approaching).is_err());
+        assert!(validate_retarded_sampling(48_000, 0.0, approaching).is_err());
         let resolved = RetardedFarFieldObserverControls {
             output_sample_rate_hz: 96_000,
             receiver_bandwidth_hz: 27_000.0,
             ..approaching
         };
-        validate_retarded_sampling(48_000, resolved).unwrap();
+        validate_retarded_sampling(48_000, 0.0, resolved).unwrap();
+        // Receiver approach can exceed even the source-only high-rate band.
+        assert!(validate_retarded_sampling(48_000, 0.2, resolved).is_err());
+        validate_retarded_sampling(
+            48_000,
+            0.2,
+            RetardedFarFieldObserverControls {
+                receiver_bandwidth_hz: 32_000.0,
+                ..resolved
+            },
+        ).unwrap();
+        for receiver_mach in [-0.1, 1.0, f64::NAN] {
+            assert!(validate_retarded_sampling(48_000, receiver_mach, resolved).is_err());
+        }
         assert!(
             validate_retarded_sampling(
                 48_000,
+                0.0,
                 RetardedFarFieldObserverControls {
                     output_sample_rate_hz: 48_000,
                     ..resolved
@@ -7950,6 +7999,7 @@ mod tests {
         assert!(
             validate_retarded_sampling(
                 48_000,
+                0.0,
                 RetardedFarFieldObserverControls {
                     receiver_bandwidth_hz: 26_000.0,
                     ..resolved
@@ -7961,6 +8011,7 @@ mod tests {
         assert!(
             validate_retarded_sampling(
                 48_000,
+                0.0,
                 RetardedFarFieldObserverControls {
                     source_bandwidth_hz: 24_001.0,
                     ..resolved
@@ -7972,6 +8023,7 @@ mod tests {
             assert!(
                 validate_retarded_sampling(
                     48_000,
+                    0.0,
                     RetardedFarFieldObserverControls {
                         source_bandwidth_hz: bandwidth,
                         ..resolved
@@ -7980,6 +8032,61 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn moving_receiver_uses_native_motion_domain_and_identity() {
+        use fs_aeroac::curle3d::moving::SourceKinematics;
+        use fs_aeroac::curle3d::moving::trajectory::{TimedSourceKinematics, TrajectoryBudget};
+        use fs_material::fluid_acoustics::FluidAcousticState;
+
+        let medium = FluidAcousticState::try_new(1.2, 340.0).unwrap();
+        let knots = [0.0, 2.0].map(|time| TimedSourceKinematics {
+            source_time_s: time,
+            kinematics: SourceKinematics {
+                position_m: [100.0 + 20.0 * time, 0.0, 0.0],
+                velocity_m_s: [20.0, 0.0, 0.0],
+                acceleration_m_s2: [0.0; 3],
+            },
+        });
+        let budget = TrajectoryBudget {
+            maximum_segments: 1,
+            maximum_payload_bytes: 1_000_000,
+            maximum_bound_nodes: 64,
+            maximum_subdivision_depth: 8,
+            maximum_root_iterations: 64,
+        };
+        let receiver = with_cx(|cx| {
+            AcousticReceiverTrajectory::new(medium, &knots, 0.1, budget, cx)
+        }).unwrap();
+        assert_eq!(receiver.time_interval_s(), [0.0, 2.0]);
+        assert!(receiver.maximum_mach() >= 20.0 / 340.0);
+        assert!(receiver.maximum_mach() < 0.1);
+        let view = AcousticWorldReceiver::Moving(&receiver);
+        assert_eq!(view.position_at(1.0).unwrap().position_world_m, [120.0, 0.0, 0.0]);
+        assert!(view.position_at(2.01).is_err());
+        assert!(view.validate(340.0).is_ok());
+        assert!(view.validate(343.0).is_err());
+
+        let mut changed = knots;
+        changed[1].kinematics.position_m[1] = 0.1;
+        let other = with_cx(|cx| {
+            AcousticReceiverTrajectory::new(medium, &changed, 0.1, budget, cx)
+        }).unwrap();
+        assert_ne!(receiver.identity(), other.identity());
+        assert_ne!(view.observer(), AcousticWorldReceiver::Moving(&other).observer());
+
+        // Zero endpoint velocity cannot hide an interior fast microphone path.
+        let hidden_speed = [0.0, 1.0].map(|time| TimedSourceKinematics {
+            source_time_s: time,
+            kinematics: SourceKinematics {
+                position_m: [100.0 + 20.0 * time, 0.0, 0.0],
+                ..SourceKinematics::default()
+            },
+        });
+        assert!(with_cx(|cx| {
+            AcousticReceiverTrajectory::new(medium, &hidden_speed, 0.1, budget, cx)
+        }).is_err());
     }
 
     #[test]

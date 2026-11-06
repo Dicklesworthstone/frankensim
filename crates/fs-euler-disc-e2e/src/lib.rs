@@ -102,6 +102,8 @@ pub use control_stream::{
 };
 pub use physical_audio_artifact::{
     PhysicalListeningMasterError, PhysicalPressureListeningMaster, PressureListeningMasterPolicy,
+    RetardedPressureListeningArtifact, RetardedPressureListeningError,
+    RetardedPressureListeningInput, RetardedPressureSource, decimate_retarded_pressure_to_master,
 };
 pub use render_trajectory::{
     DerivedEulerQois, EULER_RENDER_TRAJECTORY_SCHEMA_VERSION, MAX_RENDER_TRAJECTORY_NO_CLAIMS,
@@ -131,7 +133,8 @@ pub use spatial_audio::{
     SpatialStemComponent, StereoRoomImpulseResponse, bypass_dry_stereo,
 };
 pub use structural_acoustics::{
-    AcousticModeRadiation, AcousticObserver, FarFieldSourceCoefficientPaM, ModalAcousticRadiation,
+    AcousticModeRadiation, AcousticObserver, AcousticReceiverTrajectory, AcousticWorldObserver,
+    AcousticWorldReceiver, FarFieldSourceCoefficientPaM, ModalAcousticRadiation,
     ModalLossSpectrum, PhysicalContactForceSampling, PhysicalModalAudioModel,
     PhysicalModalInitialState, PhysicalModalPressureFrame, PhysicalPressureSignal,
     PointForceProjection, RETARDED_FAR_FIELD_OBSERVER_NO_CLAIM, ResolvedAcousticMedium,

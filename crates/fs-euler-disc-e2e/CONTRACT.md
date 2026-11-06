@@ -1715,21 +1715,50 @@ channel-ordered `Pa*m` coefficients. These are source coefficients, not listener
 listener propagation, room response, nonlinear structure, or two-way acoustic loading.
 
 The generic `InteriorOnly` retarded observer converts that body-frame source
-stem to simultaneous world-fixed pressure signals. Frame zero is explicitly at
-the closing boundary `start + 1/fs`. At each output boundary, deterministic
-bisection solves `tau + |x_observer-X(tau)|/c = t`; all real-tesseral source
+stem to simultaneous fixed or moving world-receiver pressure signals.
+`AcousticWorldReceiver` selects a fixed microphone or an immutable
+`AcousticReceiverTrajectory`; both use the same renderer for structural and
+rigid-disc sources. Moving microphones reuse the original `fs-aeroac`
+`PreparedKinematicTrajectory`: accepted position/velocity/acceleration knots,
+native C2 quintics, continuous outward subsonic speed bounds, and explicit
+storage/work/cancellation caps. They are prescribed observation paths in the
+same quiescent medium, with no extrapolation or mechanics feedback.
+
+Frame zero is explicitly at the closing boundary `start + 1/fs`. The receiver
+is sampled once at reception time `t` and held fixed during the source root:
+deterministic bisection solves `tau + |x_receiver(t)-X(tau)|/c = t`.
+The finite reception horizon is intersected with the actual wavefronts from
+both complete source-stencil endpoints by monotone root solves. Inward root
+brackets prevent a tolerated endpoint error from admitting missing source
+history; endpoint distance shortcuts are not used. All real-tesseral source
 coefficients use one complete 16-tap Lanczos-8 stencil at `tau`, and their
 direction is rotated by the emission pose before physical `1/r` spreading.
 All observers share the intersection of their complete arrival-time horizons
 and are returned transactionally in caller order. The output sample clock is
 explicit and independent of the original source-stem clock. Admission requires
 a declared source band within source Nyquist, a declared receiver band covering
-the outward-rounded fixed-microphone Doppler ceiling `f_source/(1-M_max)`,
-and receiver bandwidth strictly below output Nyquist. The receiver declaration
+the outward-rounded two-motion Doppler ceiling
+`f_source * (1+M_receiver)/(1-M_source)`, and receiver bandwidth strictly below
+output Nyquist. The actual admitted whole-path receiver speed supplies
+`M_receiver`; a stationary receiver reduces to the original source-only gate.
+Pressure remains the existing low-Mach far-field estimate sampled at the
+retarded event, without an additional Doppler amplitude factor. The receiver declaration
 also owns pose/directivity and geometric amplitude modulation; neither sampled
 BEM fit frequencies nor a modal list supplies spectral authority. Lanczos-8
 reconstruction is not an antialias filter for time compression. Pressure
-identities bind both clocks and both bandwidth declarations.
+identities bind both clocks and both bandwidth declarations. Moving-receiver
+pressure metadata additionally binds the immutable trajectory identity.
+
+`RetardedPressureListeningArtifact::try_build` is the direct physical audition
+consumer: it accepts either original broadband source family and two
+independently fixed/moving receivers, returns their common 48 kHz pressure
+signals in pascals, and emits the existing fixed-calibration PCM24 listening
+master. A directly admitted 48 kHz observation is retained; a 96 kHz observation
+uses the shared original pressure decimator before mastering. Both channels
+retain physical reception timing and receiver identity. There is no artistic
+panning or inferred normalization. The artistic `spatial_audio` contract is
+unchanged, and the cinematic plate-plus-disc mix continues to use its coherent
+fixed microphone array.
 
 The cinematic moving-disc paths reserve the complete discrete source band,
 observe at 96 kHz, and use the original `fs-couple` pressure half-band

@@ -1546,6 +1546,7 @@ dependencies = [
 name = "fs-euler-disc-e2e"
 version = "0.0.1"
 dependencies = [
+ "fs-aeroac",
  "fs-alloc",
  "fs-bem",
  "fs-blake3",
