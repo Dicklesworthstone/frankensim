@@ -3463,3 +3463,34 @@ event fit does not supply total opacity, excited levels, secondary electron
 cascades or relativistic/thermal validity for a gas consumer. Published source:
 <https://www.pa.uky.edu/~verner/photo.html> and
 <https://arxiv.org/abs/astro-ph/9601009>.
+
+## Reciprocal spontaneous radiative recombination
+
+`kinetics::atomic_ionization::radiative_recombination::AtomicRadiativeRecombinationV1`
+retains one original photon-ionization channel and inverts its cross section
+through the Milne relation. Electron spin and photon polarization cancel in
+this statistical-weight convention. A shared Maxwellian quadrature returns
+the event coefficient alpha [m^3/s], captured-electron kinetic-energy
+coefficient L [J m^3/s], and emitted-photon coefficient chi/NA*alpha+L.
+These multiply actual electron and ion number densities; molar concentration
+consumers must supply the corresponding Avogadro factors.
+
+The caller supplies a global nonnegative cross-section upper envelope and
+its separate provenance. Construction checks all known source values; beyond
+the source endpoint the bound remains an explicit caller assertion. Both
+event and kinetic-energy tails must resolve within the requested allowance.
+Unknown tails are not added as guessed rates or silently set to zero.
+Quadrature estimates describe integration of the declared source law, not
+uncertainty in that law. Source knots, thermal scales and bounded cancellation
+are retained; original electron caloric support and a declared nonrelativistic
+thermal-energy admission policy are enforced.
+
+The original photon onset remains distinct from the chemical gap. In
+particular, the rounded Verner H I onset retains the declared small
+zero-cross-section interval above the thermochemical threshold; numerical
+quadrature does not correct this source approximation. The law is spontaneous,
+source-resolved capture, not total Case A/B recombination or a Planck/Saha
+radiation equilibrium model. Stimulated recombination, excited-state cascades,
+photon trapping, dielectronic completion and recoil are not inferred.
+References: Castor, Radiation Hydrodynamics (2003), Eq. 8.58; Mao, Kaastra &
+Badnell (2017), A&A 599 A10, <https://arxiv.org/abs/1612.01017>.

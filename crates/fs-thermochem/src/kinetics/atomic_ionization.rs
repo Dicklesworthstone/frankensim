@@ -32,6 +32,8 @@
 
 /// Original-source single-photon ionization on the validated atomic channel.
 pub mod photoionization;
+/// Source-bound spontaneous radiative capture and Maxwellian energy moments.
+pub mod radiative_recombination;
 
 use super::{
     ElectronImpactRateV1, ElementaryReactionV1, ForwardRateV1, IdealGasKineticsV1, KineticsErrorV1,

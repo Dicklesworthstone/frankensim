@@ -212,6 +212,21 @@ impl AtomicPhotoionizationV1 {
     pub const fn threshold(&self) -> Energy {
         self.threshold
     }
+    /// Maximum of the immutable law inside its declared energy interval.
+    pub(super) fn maximum_cross_section_in_domain(&self) -> Result<Area, PhotoionizationErrorV1> {
+        match &self.law {
+            PhotoionizationLaw::Table(points) => Ok(Area::new(
+                points
+                    .iter()
+                    .map(|p| p.cross_section.value())
+                    .fold(0.0, f64::max),
+            )),
+            // For x>=13.6/0.4298, d ln(sigma)/d ln(x) is negative:
+            // 2x/(x-1)+P/2-5.5-P*sqrt(x/ya)/(2*(1+sqrt(x/ya))) < 0.
+            PhotoionizationLaw::HydrogenVerner => self.cross_section(self.threshold),
+        }
+    }
+
     /// Last supported original source energy [J].
     pub fn maximum_energy(&self) -> Energy {
         match &self.law {

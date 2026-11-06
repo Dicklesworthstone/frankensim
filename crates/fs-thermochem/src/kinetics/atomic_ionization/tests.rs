@@ -546,3 +546,4 @@ fn transformed_caloric_references_cannot_silently_reinterpret_raw_level_constant
 }
 
 mod photoionization;
+mod radiative_recombination;

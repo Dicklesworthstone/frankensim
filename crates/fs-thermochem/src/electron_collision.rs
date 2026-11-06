@@ -31,7 +31,7 @@ use fs_matdb::Provenance;
 use fs_math::det::{exp, ln};
 use fs_qty::{Area, Energy, Temperature};
 
-mod integrate;
+pub(crate) mod integrate;
 /// Published NIST SRD 107 generalized BEB ionization models.
 pub mod nist;
 
