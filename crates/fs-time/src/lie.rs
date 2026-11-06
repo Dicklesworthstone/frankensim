@@ -32,6 +32,10 @@ pub use configuration_torque::rigid_body_torque_function_step;
 #[path = "lie/gyrostat.rs"]
 pub mod gyrostat;
 
+/// Prepared full-inertia viscous torque and separate mechanical work accounts.
+#[path = "lie/viscous.rs"]
+pub mod viscous;
+
 fn torque_kick(momentum: Vec3, torque: Vec3, h: f64) -> Result<Vec3, LieStepError> {
     if ![torque.x, torque.y, torque.z]
         .iter()

@@ -329,6 +329,26 @@ where claimed below.
   `tests/gyrostat_locked.rs` specify analytic coaxial recoil/work, independent
   Euler-equation refinement, spatial covariance, empty-selection and zero-drive
   parity, reversal and atomic refusal.
+- `InertiaTensor3::viscous_stepper` prepares the full material-frame law
+  `tau = drive - D omega` for a fixed positive interval. Symmetric PSD damping
+  is admitted with compensated principal-minor checks, including zero-row
+  coupling refusal; no projection changes the supplied constitutive tensor.
+  One normalized native Cholesky factor of `I + dt D/4` is cached. Each
+  allocation-free step uses two implicit midpoint torque stages around the
+  existing compensated free rigid-body flow; spatial drive is transformed
+  at both actual endpoint attitudes. Impulse tails remain in DD until public
+  momentum rounding. Physical heat is the positive midpoint quadratic form;
+  drive work, viscous reaction impulse, native free-flow energy defect and
+  final-state numerical balance are separate outputs. The method is second
+  order for the held linear law. The numerical trace bound
+  `tr(I^-1 D)` admits only half-stage relaxation numbers at most two, avoiding
+  unresolved midpoint sign reversals; it is not an interval certificate or a
+  replacement for decay/phase refinement. The reference environment is
+  stationary. Nonlinear drag, dry friction, moving baths, varying tensors,
+  internal rotors and discrete adjoints are outside this API. G0/G1/G3 tests
+  in `tests/viscous_rigid_body.rs` specify exponential spin/phase/heat
+  refinement, passivity, material-frame covariance, the native zero-drag
+  limit and invalid/unresolved-input refusals.
 - `galpha::GeneralizedAlpha::new(m, c, k, n, h, rho_inf)` +
   `galpha_step(ga, q, v, a, f_next)` — Chung–Hulbert: αm = (2ρ−1)/(ρ+1),
   αf = ρ/(ρ+1), γ = ½ − αm + αf, β = ¼(1 − αm + αf)²; one prefactored
