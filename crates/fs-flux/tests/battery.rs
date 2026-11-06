@@ -321,6 +321,80 @@ fn flux_011_generalized_newtonian_couette_uses_physical_rate() {
     assert!(sys.velocity_error(&sol.x, &velocity).0 < 2e-11);
 }
 
+/// G1: the two-triangle sealed mesh has one free solenoidal velocity mode.
+/// A smooth positive shear-thickening law gives, in the creeping-flow limit,
+/// a_next = 1/(1+a^4) when amplitude is normalized by the zero-shear solve.
+/// At iteration two the update is 0.46875 but the endpoint defect is 0.67968:
+/// a tolerance of 0.5 must not accept that small update as momentum balance.
+#[test]
+fn flux_024_steady_picard_requires_nonlinear_endpoint_balance() {
+    let mesh = unit_mesh(1);
+    let sys = FluxSystem::new(&mesh);
+    let params = FluxParams::default();
+    let edge = mesh
+        .edges
+        .iter()
+        .position(|edge| edge.tris.1 != usize::MAX)
+        .unwrap();
+    let mut mode = vec![0.0; sys.n];
+    mode[2 * edge + 1] = 1.0;
+    let force = |point| {
+        let velocity = sys.velocity_at(&mode, point);
+        [1e-6 * velocity[0], 1e-6 * velocity[1]]
+    };
+    let wall = |_: [f64; 2]| [0.0; 2];
+    let (a, rhs) =
+        sys.assemble_variable_viscosity(params, &|_, _| 1.0, &force, &wall, None);
+    let initial = sys.solve_linear(&a, &rhs, params);
+    let reference_rates = sys.shear_rates(&initial.x);
+    assert!(reference_rates.iter().all(|rate| rate.is_finite() && *rate > 0.0));
+    let law = |cell: usize, _: [f64; 2], rate: f64| {
+        1.0 + (rate / reference_rates[cell]).powi(4)
+    };
+    let endpoint_residuals = |velocity: &[f64]| {
+        let rates = sys.shear_rates(velocity);
+        let (a, rhs) = sys.assemble_variable_viscosity(
+            params,
+            &|cell, point| law(cell, point, rates[cell]),
+            &force,
+            &wall,
+            Some(&velocity[..sys.n_u]),
+        );
+        let mut ax = vec![0.0; sys.n];
+        a.spmv(velocity, &mut ax);
+        let (mut defect, mut load, mut scaled_defect, mut scaled_load) =
+            (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+        for row in 0..sys.n {
+            let scale = a
+                .row(row)
+                .1
+                .iter()
+                .fold(f64::MIN_POSITIVE, |scale, entry| scale.max(entry.abs()));
+            defect = defect.hypot(ax[row] - rhs[row]);
+            load = load.hypot(rhs[row]);
+            scaled_defect = scaled_defect.hypot((ax[row] - rhs[row]) / scale);
+            scaled_load = scaled_load.hypot(rhs[row] / scale);
+        }
+        (defect / load, scaled_defect / scaled_load)
+    };
+    let tolerance = 0.5;
+    let (short, iterations, update) =
+        sys.picard_rheology(params, &law, &force, &wall, 2, tolerance);
+    let (original, scaled) = endpoint_residuals(&short.x);
+    assert_eq!(iterations, 2);
+    assert!(short.converged(params.tol)); // The frozen LINEAR solve did converge.
+    assert!(update < tolerance);
+    assert!(original > tolerance && scaled > tolerance);
+
+    let (accepted, iterations, update) =
+        sys.picard_rheology(params, &law, &force, &wall, 12, tolerance);
+    let (original, scaled) = endpoint_residuals(&accepted.x);
+    assert!(iterations > 2 && iterations < 12);
+    assert!(accepted.converged(params.tol));
+    assert!(update < tolerance);
+    assert!(original <= tolerance && scaled <= tolerance);
+}
+
 /// G1: a nonuniform-shear channel with an independently differentiated
 /// Carreau stress. For u=(A y(1-y),0), gamma=|A(1-2y)| and convection
 /// vanishes. With nu=nu_inf+delta_nu/sqrt(1+(lambda gamma)^2),

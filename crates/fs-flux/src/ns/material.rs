@@ -89,7 +89,7 @@ pub enum MaterialFluxError {
         /// Requested relative tolerance.
         tolerance: f64,
     },
-    /// The steady nonlinear iteration exhausted its update criterion.
+    /// The steady iteration failed its update or nonlinear endpoint criterion.
     NonlinearConvergence {
         /// Completed Picard iterations.
         iterations: usize,
@@ -383,7 +383,9 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
 
     /// Steady Navier–Stokes using the existing Picard iteration. Loads are
     /// N/m³ and boundary velocities m/s. Returns the physical solution, count,
-    /// and last relative velocity update; no unconverged result is published.
+    /// and last relative velocity update. Acceptance requires both nonlinear
+    /// endpoint residuals and the update to meet `relative_tolerance`, while
+    /// the last linear solve must meet the separate linear tolerance.
     ///
     /// # Errors
     /// Refuses invalid inputs, invalid budgets, failed convergence or overflow.
@@ -401,11 +403,11 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
                 "Picard needs a positive iteration budget and finite positive tolerance",
             ));
         }
-        let (solution, iterations, update) = self.with_inputs(
+        let report = self.with_inputs(
             force_density,
             boundary_velocity,
             |acceleration, velocity| {
-                self.system.picard(
+                self.system.picard_report(
                     self.params,
                     acceleration,
                     velocity,
@@ -414,10 +416,21 @@ impl<'s, 'm, 'a, F: FluidTransport + ?Sized> MaterialFluxSystem<'s, 'm, 'a, F> {
                 )
             },
         )?;
-        if !update.is_finite() || update >= relative_tolerance {
-            return Err(MaterialFluxError::NonlinearConvergence { iterations, update });
+        if !report.update.is_finite()
+            || report.update >= relative_tolerance
+            || !report.nonlinear_residual.is_finite()
+            || report.nonlinear_residual > relative_tolerance
+        {
+            return Err(MaterialFluxError::NonlinearConvergence {
+                iterations: report.iterations,
+                update: report.update,
+            });
         }
-        Ok((self.physical_solution(solution)?, iterations, update))
+        Ok((
+            self.physical_solution(report.solution)?,
+            report.iterations,
+            report.update,
+        ))
     }
 
     /// One IMEX BDF1 step in physical seconds. `previous_velocity` contains

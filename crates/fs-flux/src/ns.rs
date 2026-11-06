@@ -196,6 +196,15 @@ impl FluxSolution {
     }
 }
 
+// Keep linear-solve diagnostics and the measured update distinct from the
+// independently reassembled steady equations used for nonlinear acceptance.
+pub(crate) struct SteadyPicardReport {
+    pub(crate) solution: FluxSolution,
+    pub(crate) iterations: usize,
+    pub(crate) update: f64,
+    pub(crate) nonlinear_residual: f64,
+}
+
 /// Accepted fully implicit generalized-Newtonian time step. The nonlinear
 /// residual is independently reassembled at the returned velocity and viscosity.
 pub struct FluxRheologyStep {
@@ -1082,8 +1091,13 @@ impl<'m> FluxSystem<'m> {
     }
 
     /// Picard iteration for steady NS: Stokes start, then relinearized
-    /// convection until the velocity update stalls. Returns (solution,
-    /// picard iterations, last relative update).
+    /// convection. Early exit requires the velocity update and both original
+    /// and row-scaled nonlinear endpoint residuals to meet `picard_tol`, with
+    /// the last linear solve converged at `params.tol`.
+    ///
+    /// Returns (solution, Picard iterations, measured last relative update).
+    /// The solution retains its LINEAR residuals. Reaching `max_picard` is
+    /// not a nonlinear convergence certificate, even if the update is small.
     #[must_use]
     pub fn picard(
         &self,
@@ -1093,27 +1107,81 @@ impl<'m> FluxSystem<'m> {
         max_picard: usize,
         picard_tol: f64,
     ) -> (FluxSolution, usize, f64) {
+        let report = self.picard_report(params, f, g, max_picard, picard_tol);
+        (report.solution, report.iterations, report.update)
+    }
+
+    pub(crate) fn picard_report(
+        &self,
+        params: FluxParams,
+        f: &dyn Fn([f64; 2]) -> [f64; 2],
+        g: &dyn Fn([f64; 2]) -> [f64; 2],
+        max_picard: usize,
+        picard_tol: f64,
+    ) -> SteadyPicardReport {
         let (a, rhs) = self.assemble(params, f, g, None);
-        let mut sol = self.solve_linear(&a, &rhs, params);
+        let initial = self.solve_linear(&a, &rhs, params);
+        self.steady_picard(
+            params,
+            initial,
+            &|velocity| self.assemble(params, f, g, Some(velocity)),
+            max_picard,
+            picard_tol,
+        )
+    }
+
+    fn steady_picard(
+        &self,
+        params: FluxParams,
+        mut solution: FluxSolution,
+        assemble: &dyn Fn(&[f64]) -> (Csr, Vec<f64>),
+        max_picard: usize,
+        picard_tol: f64,
+    ) -> SteadyPicardReport {
         let mut update = f64::INFINITY;
-        let mut its = 0;
+        let mut iterations = 0;
+        let mut nonlinear_residual = f64::INFINITY;
+        let mut endpoint = None;
+        let mut residual = vec![0.0; self.n];
         for k in 0..max_picard {
-            let (a, rhs) = self.assemble(params, f, g, Some(&sol.x[..self.n_u]));
+            let (a, rhs) = endpoint
+                .take()
+                .unwrap_or_else(|| assemble(&solution.x[..self.n_u]));
             let next = self.solve_linear(&a, &rhs, params);
             let mut d2 = 0.0;
             let mut n2 = 0.0;
             for i in 0..self.n_u {
-                d2 += (next.x[i] - sol.x[i]).powi(2);
+                d2 += (next.x[i] - solution.x[i]).powi(2);
                 n2 += next.x[i].powi(2);
             }
             update = (d2 / n2.max(1e-300)).sqrt();
-            sol = next;
-            its = k + 1;
-            if update < picard_tol {
-                break;
+            solution = next;
+            iterations = k + 1;
+            if update < picard_tol || iterations == max_picard {
+                let (a, rhs) = assemble(&solution.x[..self.n_u]);
+                let (original, scaled) =
+                    sparse::residuals(&a, &rhs, &solution.x, &mut residual);
+                nonlinear_residual = if original.is_finite() && scaled.is_finite() {
+                    original.max(scaled)
+                } else {
+                    f64::INFINITY
+                };
+                if update < picard_tol
+                    && nonlinear_residual <= picard_tol
+                    && solution.converged(params.tol)
+                {
+                    break;
+                }
+                // The rejected endpoint is exactly the next frozen operator.
+                endpoint = Some((a, rhs));
             }
         }
-        (sol, its, update)
+        SteadyPicardReport {
+            solution,
+            iterations,
+            update,
+            nonlinear_residual,
+        }
     }
 
     /// Objective strain-rate invariant `sqrt(2 D:D)` [1/s] in each cell.
@@ -1146,16 +1214,18 @@ impl<'m> FluxSystem<'m> {
     }
 
     /// Steady generalized-Newtonian Navier–Stokes: update both apparent
-    /// viscosity and convection from the previous velocity until the
-    /// relative velocity update meets `picard_tol`.
+    /// viscosity and convection from the previous velocity. Early exit requires
+    /// the relative velocity update and both nonlinear endpoint residuals to
+    /// meet `picard_tol`, with the last linear solve converged at `params.tol`.
     ///
     /// `law(cell, point, shear_rate)` returns kinematic viscosity. The
     /// callback can capture a temperature/material field and evaluate a
     /// Carreau or regularized power law without a solver-specific fit.
     /// Its zero-shear value initializes the Stokes solve. Every iteration
     /// uses the full symmetric-stress operator, including face tractions.
-    /// Returns the solution, iteration count, and measured last update;
-    /// exhausting the budget does not claim nonlinear convergence.
+    /// Returns the solution, iteration count, and measured last update.
+    /// The solution retains its LINEAR residuals; exhausting the budget does
+    /// not certify nonlinear convergence, even when the update is small.
     ///
     /// # Panics
     /// If constitutive values, penalty, or the convergence controls are invalid.
@@ -1181,33 +1251,24 @@ impl<'m> FluxSystem<'m> {
             g,
             None,
         );
-        let mut sol = self.solve_linear(&a, &rhs, params);
-        let mut update = f64::INFINITY;
-        let mut its = 0;
-        for k in 0..max_picard {
-            let rates = self.shear_rates(&sol.x);
-            let (a, rhs) = self.assemble_variable_viscosity(
-                params,
-                &|cell, point| law(cell, point, rates[cell]),
-                f,
-                g,
-                Some(&sol.x[..self.n_u]),
-            );
-            let next = self.solve_linear(&a, &rhs, params);
-            let mut d2 = 0.0;
-            let mut n2 = 0.0;
-            for i in 0..self.n_u {
-                d2 += (next.x[i] - sol.x[i]).powi(2);
-                n2 += next.x[i].powi(2);
-            }
-            update = (d2 / n2.max(1e-300)).sqrt();
-            sol = next;
-            its = k + 1;
-            if update < picard_tol {
-                break;
-            }
-        }
-        (sol, its, update)
+        let initial = self.solve_linear(&a, &rhs, params);
+        let report = self.steady_picard(
+            params,
+            initial,
+            &|velocity| {
+                let rates = self.shear_rates(velocity);
+                self.assemble_variable_viscosity(
+                    params,
+                    &|cell, point| law(cell, point, rates[cell]),
+                    f,
+                    g,
+                    Some(velocity),
+                )
+            },
+            max_picard,
+            picard_tol,
+        );
+        (report.solution, report.iterations, report.update)
     }
 
     /// One IMEX BDF1 step: implicit Stokes, convection lagged at the

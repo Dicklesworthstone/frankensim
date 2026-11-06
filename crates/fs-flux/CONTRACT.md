@@ -165,8 +165,13 @@ adjoints.
   apparent viscosity and upwind convection together. A callback of
   `(cell, point, shear_rate)` can capture the temperature/material field and
   supply a Carreau or regularized power law; its finite zero-shear value
-  initializes the solve. The returned iteration count and relative velocity
-  update disclose budget exhaustion rather than claiming convergence.
+  initializes the solve. Steady constant-viscosity and rheological Picard
+  early exit require a small measured velocity update, independently assembled
+  endpoint residuals in both original and row-equilibrated equations, and a
+  converged last linear solve. A rejected endpoint operator is reused in the
+  next iteration. Returned linear residuals and measured relative updates retain
+  their original meanings; reaching the iteration budget does not certify
+  nonlinear convergence, even when the update is small.
   These APIs retain constant reference density and kinematic pressure; a
   dynamic material viscosity is divided by that SAME density throughout.
   They do not solve variable-density momentum, advect material interfaces,
@@ -204,7 +209,10 @@ adjoints.
   Picard iteration and IMEX BDF1 all use the existing operator; original source
   receipts remain available through `material()`. Invalid inputs, nonfinite
   outputs and failed convergence return `MaterialFluxError` without publishing
-  a physical solution. The primitive singular-mesh panic contract still applies.
+  a physical solution. Steady Picard publication checks the update and both
+  nonlinear endpoint residuals against its nonlinear tolerance, independently
+  of the final linear-solve tolerance. The primitive singular-mesh panic
+  contract still applies.
 - `MaterialFluxSystem::bdf1_rheology_step` resolves a retained `FluidTransport`
   owner per triangle at the current objective shear rate. The caller receives
   a `MaterialFluxRheologyPoint` containing the cell, centroid in metres, and
@@ -445,6 +453,8 @@ relation without adding a device-specific coil model.
 Stokes MMS orders + exact divergence; flux-003 pressure-robustness
 identity; flux-004 cavity Picard + Ghia coarse band; flux-005
 Taylor–Green BDF1; flux-006 adjoint gradient + annihilation.
+The steady shear-thickening regression `flux_024` distinguishes a small velocity
+update from a failed nonlinear endpoint balance on the original BDM field.
 The symmetric-stress lane adds flux-008 variable-viscosity rigid rotation
 (zero strain/stress), flux-009 exact nonuniform-viscosity shear with its
 reciprocal force and BDF1 fixed point, flux-010 layered Couette flow with
