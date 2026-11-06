@@ -396,6 +396,38 @@ impl RigidGravityField for QuadrupoleGravity {
         }
         .validate()
     }
+
+    fn potential_energy_increment(
+        &self,
+        frame: u64,
+        before: Pose,
+        after: Pose,
+        properties: MassProperties,
+    ) -> Result<Option<f64>, GravityError> {
+        properties.validate()?;
+        let trace = quadrupole_inertia_trace(properties, self.body_radius_m)?;
+        let mut correction = [0.0; 2];
+        for (value, pose) in correction.iter_mut().zip([before, after]) {
+            let (n, radius, potential) = self.source.radial(frame, pose.position_world())?;
+            if self.body_radius_m / radius > self.maximum_radius_ratio {
+                return Err(GravityError::OutsideExpansionDomain);
+            }
+            let mu_over_r3 = finite(-potential / radius / radius)?;
+            *value = quadrupole_correction(pose, properties, n, radius, mu_over_r3, trace)?
+                .potential_energy_j;
+        }
+        let central = self.source.specific_potential_change(
+            frame,
+            before.position_world(),
+            after.position_world(),
+        )?;
+        // Do not add a tiny tidal potential to the much larger monopole before
+        // taking the difference. Rotation-only tidal work can then survive
+        // even when both complete endpoint energies round to the same value.
+        let change = Dd::from_f64(properties.mass()) * central
+            + (Dd::from_f64(correction[1]) - Dd::from_f64(correction[0]));
+        Ok(Some(finite(change.to_f64())?))
+    }
 }
 
 // Shared second-mass-moment owner for fixed-source and recoiling pair gravity.

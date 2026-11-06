@@ -249,6 +249,59 @@ fn eccentric_kepler_orbit_refines_at_second_order_without_secular_energy_growth(
 }
 
 #[test]
+fn quadrupole_increment_retains_rotation_work_below_monopole_roundoff() {
+    let mu = 1e24;
+    let radius = 1e12;
+    let field = CentralGravity::new(FRAME, Vec3::ZERO, mu)
+        .unwrap()
+        .quadrupole(1.0, 0.1)
+        .unwrap();
+    let properties = body(3.0);
+    let before = Pose::new(Vec3::new(radius, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap();
+    let after = Pose::new(
+        before.position_world(),
+        UnitQuaternion::from_axis_angle(Vec3::new(0.0, 0.0, 1.0), core::f64::consts::FRAC_PI_2)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        field
+            .load(FRAME, before, properties)
+            .unwrap()
+            .potential_energy_j,
+        field
+            .load(FRAME, after, properties)
+            .unwrap()
+            .potential_energy_j,
+    );
+    let inertia = properties.principal_inertia_body();
+    let expected = 1.5 * (((mu / radius) / radius) / radius) * (inertia.y - inertia.x);
+    close(
+        field
+            .potential_energy_increment(FRAME, before, after, properties)
+            .unwrap()
+            .unwrap()
+            / expected,
+        1.0,
+        3e-15,
+    );
+    close(
+        field
+            .potential_energy_increment(FRAME, after, before, properties)
+            .unwrap()
+            .unwrap()
+            / expected,
+        -1.0,
+        3e-15,
+    );
+    let inside = Pose::new(Vec3::new(1.0, 0.0, 0.0), UnitQuaternion::IDENTITY).unwrap();
+    assert_eq!(
+        field.potential_energy_increment(FRAME, before, inside, properties),
+        Err(GravityError::OutsideExpansionDomain)
+    );
+}
+
+#[test]
 fn quadrupole_force_and_torque_are_gradients_of_the_same_potential() {
     let field = CentralGravity::new(FRAME, Vec3::ZERO, 100.0)
         .unwrap()

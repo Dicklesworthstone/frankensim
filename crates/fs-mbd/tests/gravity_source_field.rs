@@ -140,6 +140,15 @@ fn isotropic_inertia_reduces_exactly_and_source_translation_preserves_relative_f
         field.sample_point(FRAME, point).unwrap(),
         central.sample_point(FRAME, point).unwrap()
     );
+    let after = point.add(Vec3::new(1e-6, 0.0, 0.0));
+    assert_eq!(
+        field
+            .specific_potential_increment(FRAME, point, after)
+            .unwrap(),
+        central
+            .specific_potential_increment(FRAME, point, after)
+            .unwrap()
+    );
     let (pose, mass) = fixture();
     let shift = Vec3::new(10.0, -3.0, 7.0);
     let shifted = Pose::new(pose.position_world().add(shift), pose.orientation()).unwrap();
@@ -166,6 +175,58 @@ fn isotropic_inertia_reduces_exactly_and_source_translation_preserves_relative_f
             3e-16,
         );
     }
+}
+
+#[test]
+fn extended_source_increment_retains_tidal_work_hidden_by_the_monopole() {
+    let radius = 1e12;
+    let gravitational_constant = 1e24;
+    let properties = MassProperties::new(3.0, Vec3::ZERO, Vec3::new(0.2, 0.3, 0.4)).unwrap();
+    let field = QuadrupoleSourceGravity::new(
+        FRAME,
+        Pose::new(Vec3::ZERO, UnitQuaternion::IDENTITY).unwrap(),
+        properties,
+        gravitational_constant,
+        EXTENT,
+    )
+    .unwrap();
+    let before = Vec3::new(radius, 0.0, 0.0);
+    let after = Vec3::new(0.0, radius, 0.0);
+    assert_eq!(
+        field
+            .sample_point(FRAME, before)
+            .unwrap()
+            .specific_potential_j_kg,
+        field
+            .sample_point(FRAME, after)
+            .unwrap()
+            .specific_potential_j_kg,
+    );
+    let inertia = properties.principal_inertia_body();
+    let expected =
+        1.5 * (((gravitational_constant / radius) / radius) / radius) * (inertia.y - inertia.x);
+    close(
+        field
+            .specific_potential_increment(FRAME, before, after)
+            .unwrap()
+            .unwrap()
+            / expected,
+        1.0,
+        3e-15,
+    );
+    close(
+        field
+            .specific_potential_increment(FRAME, after, before)
+            .unwrap()
+            .unwrap()
+            / expected,
+        -1.0,
+        3e-15,
+    );
+    assert_eq!(
+        field.specific_potential_increment(FRAME, before, Vec3::new(1.0, 0.0, 0.0)),
+        Err(GravityError::OutsideExpansionDomain)
+    );
 }
 
 #[test]

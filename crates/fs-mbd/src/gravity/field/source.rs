@@ -6,6 +6,7 @@ use crate::gravity::{
 };
 use crate::{MassProperties, Pose, Vec3};
 use fs_ga::Mat3;
+use fs_math::dd::Dd;
 
 /// Caller-declared COM support radius and far-field approximation domain.
 /// The inertia/radius check is necessary, not a reconstruction of mass support
@@ -168,5 +169,40 @@ impl PointGravityField for QuadrupoleSourceGravity {
             }
         }
         sample.validate()
+    }
+
+    fn specific_potential_increment(
+        &self,
+        frame: u64,
+        before_world_m: Vec3,
+        after_world_m: Vec3,
+    ) -> Result<Option<f64>, GravityError> {
+        let mut correction = [0.0; 2];
+        for (value, position) in correction.iter_mut().zip([before_world_m, after_world_m]) {
+            let (direction, radius, _) = self.central.radial(frame, position)?;
+            if self.extent.radius_m / radius > self.extent.maximum_radius_ratio {
+                return Err(GravityError::OutsideExpansionDomain);
+            }
+            if !self.isotropic {
+                let g_over_r3 =
+                    finite((self.gravitational_constant_m3_kg_s2 / radius) / radius / radius)?;
+                *value = quadrupole_correction(
+                    self.pose,
+                    self.properties,
+                    direction,
+                    radius,
+                    g_over_r3,
+                    self.trace,
+                )?
+                .potential_energy_j;
+            }
+        }
+        let central =
+            self.central
+                .specific_potential_change(frame, before_world_m, after_world_m)?;
+        // Preserve the original correction before the monopole sum rounds it
+        // away; this uses the same native potential as force and tangent.
+        let change = central + (Dd::from_f64(correction[1]) - Dd::from_f64(correction[0]));
+        Ok(Some(finite(change.to_f64())?))
     }
 }

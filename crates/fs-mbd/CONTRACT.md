@@ -748,6 +748,9 @@ scaled rationalized inverse-radius difference, including transverse motion
 too small to change a rounded radius. Custom fields default to `None`; owners
 then subtract their already retained endpoint samples without another callback.
 These scalar differences do not replace endpoint force/domain admission.
+Rigid and point-source quadrupoles retain their correction's endpoint change
+separately from the monopole, so small tidal work survives the total potential's
+rounding. They reuse the original quadrupole correction and expansion domain.
 Native and articulated gravity receipts retain the direct potential change for
 work accounting while keeping the original absolute diagnostic energies.
 The field, force stages and integrator are unchanged, and finite-step work
