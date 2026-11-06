@@ -128,8 +128,14 @@ pub struct AdaptiveImplicitGasReport {
     pub accumulated_mass_residual_kg: f64,
     /// Actual final total-gas mass change minus accepted phase mass transfer.
     pub gas_mass_residual_kg: f64,
-    /// Same independent check using the actual volatile species inventory.
+    /// Signed sum of the independent volatile inventory defects below.
+    /// Each species is gated separately, so opposing defects cannot cancel.
     pub vapor_mass_residual_kg: f64,
+    /// Accepted thermal phase transfer for each declared volatile species.
+    /// Future declarations with no active phase interval retain zero transfer.
+    pub species_transferred_mass_kg: BTreeMap<SpeciesId, f64>,
+    /// Actual final-minus-initial species inventory minus its accepted transfer.
+    pub species_mass_residual_kg: BTreeMap<SpeciesId, f64>,
     /// Sum of native cell mass changes from their initial or actual birth
     /// inventories, plus the total-gas change. Incoming births cancel per cell.
     pub mass_residual_kg: f64,
@@ -348,6 +354,10 @@ pub(super) fn advance_window<'m, 'catalog, T>(
         .iter()
         .map(|species| species.species().clone())
         .collect();
+    let volatile_ids: BTreeSet<_> = surfaces
+        .iter()
+        .map(|surface| surface.binding.species.clone())
+        .collect();
     let mut next_thermal = thermal.clone();
     let mut next_gas = gas.clone();
     let mut active_surfaces = if let Some(roster) = &roster {
@@ -561,6 +571,17 @@ pub(super) fn advance_window<'m, 'catalog, T>(
         span = smaller - start;
         reductions = add_count(reductions, 1)?;
     }
+    let mut species_transferred_mass_kg = BTreeMap::new();
+    for id in &volatile_ids {
+        checkpoint()?;
+        let transferred = account
+            .species_mass
+            .get(id)
+            .map(Total::value)
+            .transpose()?
+            .unwrap_or(0.0);
+        species_transferred_mass_kg.insert(id.clone(), transferred);
+    }
     let mass = final_mass_balance(
         thermal,
         &next_thermal,
@@ -568,10 +589,7 @@ pub(super) fn advance_window<'m, 'catalog, T>(
         &next_gas,
         &births,
         &species_ids,
-        roster
-            .as_ref()
-            .and_then(Roster::species)
-            .or_else(|| surfaces.first().map(|surface| &surface.binding.species)),
+        &species_transferred_mass_kg,
         account.phase_mass.value()?,
         mass_tolerance(controls),
         &mut checkpoint,
@@ -595,6 +613,8 @@ pub(super) fn advance_window<'m, 'catalog, T>(
         accumulated_mass_residual_kg: account.coupled_mass.value()?,
         gas_mass_residual_kg: mass.gas,
         vapor_mass_residual_kg: mass.vapor,
+        species_transferred_mass_kg,
+        species_mass_residual_kg: mass.species,
         mass_residual_kg: mass.coupled,
         maximum_carrier_mass_residual_kg: mass.carrier,
         absolute_energy_residual_j: account.absolute_energy.value()?,
@@ -733,6 +753,7 @@ struct Account {
     incoming_offset: Total,
     surfaces: BTreeMap<CellId, SurfaceTotals>,
     phase_mass: Total,
+    species_mass: BTreeMap<SpeciesId, Total>,
     external: Total,
     thermal_energy: Total,
     gas_energy: Total,
@@ -795,6 +816,10 @@ impl Account {
             self.phase_mass.add(phase.transferred_mass_kg)?;
             local_energy.add(phase.energy_residual_j.abs())?;
             local_mass.add(phase.mass_rate_residual_kg.abs())?;
+        }
+        for (id, &mass) in &part.species_transferred_mass_kg {
+            checkpoint()?;
+            self.species_mass.entry(id.clone()).or_default().add(mass)?;
         }
         self.absolute_energy
             .add(native.energy_residual_j.abs().max(local_energy.value()?))?;
@@ -921,6 +946,7 @@ fn time_error(
 struct MassBalance {
     gas: f64,
     vapor: f64,
+    species: BTreeMap<SpeciesId, f64>,
     coupled: f64,
     carrier: f64,
 }
@@ -933,7 +959,7 @@ fn final_mass_balance(
     final_gas: &ClosedGasParcel,
     births: &BTreeMap<CellId, Birth>,
     species: &BTreeSet<SpeciesId>,
-    volatile: Option<&SpeciesId>,
+    transfers: &BTreeMap<SpeciesId, f64>,
     transfer: f64,
     tolerance_kg: f64,
     checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
@@ -958,29 +984,33 @@ fn final_mass_balance(
     let old = initial_gas.species_inventory_kg()?;
     let next = final_gas.species_inventory_kg()?;
     let mut carrier = 0.0_f64;
+    let mut vapor = Total::default();
+    let mut species_residuals = BTreeMap::new();
     for (index, id) in species.iter().enumerate() {
         if index % 256 == 0 {
             checkpoint()?;
         }
-        if Some(id) != volatile {
-            carrier = carrier.max(
-                finite(next.get(id).copied().unwrap_or(0.0) - old.get(id).copied().unwrap_or(0.0))?
-                    .abs(),
-            );
+        let change =
+            finite(next.get(id).copied().unwrap_or(0.0) - old.get(id).copied().unwrap_or(0.0))?;
+        if let Some(&mass) = transfers.get(id) {
+            let residual_kg = finite(change - mass)?;
+            if residual_kg.abs() > tolerance_kg {
+                return Err(ImplicitGasError::GasMassBalance {
+                    residual_kg,
+                    tolerance_kg,
+                }
+                .into());
+            }
+            vapor.add(residual_kg)?;
+            species_residuals.insert(id.clone(), residual_kg);
+        } else {
+            carrier = carrier.max(change.abs());
         }
     }
     let mass = MassBalance {
         gas: finite(gas_change - transfer)?,
-        vapor: if let Some(volatile) = volatile {
-            finite(
-                finite(
-                    next.get(volatile).copied().unwrap_or(0.0)
-                        - old.get(volatile).copied().unwrap_or(0.0),
-                )? - transfer,
-            )?
-        } else {
-            finite(-transfer)?
-        },
+        vapor: vapor.value()?,
+        species: species_residuals,
         coupled: coupled.value()?,
         carrier,
     };

@@ -23,19 +23,28 @@ pub(super) struct Prepared<'s, 'm, 'l, 'catalog> {
     gas: &'s ClosedGasParcel,
     catalog: &'catalog ThermochemicalGasModel,
     controls: ImplicitGasControls,
-    species: Option<SpeciesId>,
+    species: BTreeMap<SpeciesId, Volatile>,
     inventory: BTreeMap<SpeciesId, f64>,
-    old_vapor_mass_kg: f64,
-    vapor_gas_constant_j_kg_k: f64,
     temperature_scale_j_k: f64,
+}
+
+struct Volatile {
+    initial_mass_kg: f64,
+    gas_constant_j_kg_k: f64,
+}
+
+#[derive(Default)]
+struct SpeciesSums {
+    mass: Total,
+    condensation: Total,
+    relative_energy: Total,
 }
 
 pub(super) struct Trial<'m, T> {
     thermal: EvaporatingNetworkVaporEnthalpyTrial<'m, T>,
     sensible: BTreeMap<CellId, f64>,
     sensible_total_j: f64,
-    transferred_mass_kg: f64,
-    relative_energy_into_gas_j: f64,
+    transfers: Vec<SpeciesBoundaryRelativeTransfer>,
     gas_mass_residual_kg: f64,
     gas_energy_residual_j: f64,
     coupled_mass_residual_kg: f64,
@@ -67,15 +76,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             ));
         }
         admit_catalog(gas, catalog)?;
-        let species = surfaces
-            .first()
-            .map(|surface| surface.binding.species.clone());
         let inventory = gas.species_inventory_kg()?;
-        let old_vapor_mass_kg = species
-            .as_ref()
-            .and_then(|species| inventory.get(species))
-            .copied()
-            .unwrap_or(0.0);
         let state = gas.state().state();
         let temperature_scale_j_k = finite(gas.mass_kg() * state.specific_heat_cp / state.gamma)?;
         if !positive(temperature_scale_j_k)
@@ -88,16 +89,15 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             ));
         }
         let mut ordered = BTreeMap::new();
-        let mut molecular_mass = 0.0;
+        let mut species = BTreeMap::new();
         for surface in surfaces {
             checkpoint()?;
-            if Some(&surface.binding.species) != species.as_ref()
-                || !nonnegative(surface.mass_transfer_coefficient_m_s)
+            if !nonnegative(surface.mass_transfer_coefficient_m_s)
                 || !nonnegative(surface.heat_transfer_coefficient_w_m2_k)
                 || ordered.insert(surface.cell_id, *surface).is_some()
             {
                 return Err(ImplicitGasError::Invalid(
-                    "unique liquid cells, one volatile identity and finite nonnegative film coefficients required",
+                    "unique liquid cells and finite nonnegative film coefficients required",
                 ));
             }
             let cell = initial
@@ -114,9 +114,19 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
                 cell.specific_h_j_kg,
                 controls.phase,
             )?;
-            molecular_mass = source.molecular_mass;
+            species
+                .entry(surface.binding.species.clone())
+                .or_insert(Volatile {
+                    initial_mass_kg: inventory
+                        .get(&surface.binding.species)
+                        .copied()
+                        .unwrap_or(0.0),
+                    gas_constant_j_kg_k: finite(
+                        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / source.molecular_mass,
+                    )?,
+                });
         }
-        let initial_films = films(&ordered, gas, species.as_ref())?;
+        let initial_films = films(&ordered, gas, &species)?;
         let bindings: Vec<_> = ordered
             .iter()
             .map(|(&id, surface)| EvaporatingCellBinding {
@@ -133,11 +143,6 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             &mut *checkpoint,
         )?;
         checkpoint()?;
-        let vapor_gas_constant_j_kg_k = if species.is_some() {
-            finite(UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / molecular_mass)?
-        } else {
-            0.0
-        };
         Ok(Self {
             initial,
             step,
@@ -147,14 +152,12 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             controls,
             species,
             inventory,
-            old_vapor_mass_kg,
             temperature_scale_j_k,
-            vapor_gas_constant_j_kg_k,
         })
     }
 
     pub(super) fn dimension(&self) -> usize {
-        self.thermal_dimension() + if self.species.is_some() { 2 } else { 0 }
+        self.thermal_dimension() + self.species.len() + usize::from(!self.species.is_empty())
     }
 
     pub(super) fn thermal_dimension(&self) -> usize {
@@ -162,31 +165,35 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
     }
 
     /// Same representability projection as native heat, extended only to the
-    /// two numerical gas coordinates. Residuals still retain every mass/J.
+    /// species-mass and gas-temperature coordinates. Residuals retain every mass/J.
     pub(super) fn project(&self, coordinates: &[f64]) -> Vec<f64> {
         let n = self.thermal_dimension();
         if coordinates.len() != self.dimension() {
             return coordinates.to_vec();
         }
         let mut projected = self.step.resolvable_increments_j(&coordinates[..n]);
-        if self.species.is_none() {
+        if self.species.is_empty() {
             return projected;
         }
-        projected.push(
-            if self.old_vapor_mass_kg + coordinates[n] / self.controls.mass_coordinate_scale_j_kg
-                == self.old_vapor_mass_kg
-            {
-                0.0
-            } else {
-                coordinates[n]
-            },
-        );
+        for (index, species) in self.species.values().enumerate() {
+            let coordinate = coordinates[n + index];
+            projected.push(
+                if species.initial_mass_kg + coordinate / self.controls.mass_coordinate_scale_j_kg
+                    == species.initial_mass_kg
+                {
+                    0.0
+                } else {
+                    coordinate
+                },
+            );
+        }
         let t0 = self.gas.state().state().temperature;
+        let temperature_coordinate = coordinates[n + self.species.len()];
         projected.push(
-            if t0 + coordinates[n + 1] / self.temperature_scale_j_k == t0 {
+            if t0 + temperature_coordinate / self.temperature_scale_j_k == t0 {
                 0.0
             } else {
-                coordinates[n + 1]
+                temperature_coordinate
             },
         );
         projected
@@ -197,9 +204,9 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
     /// temperature endpoint is introduced. This trial spends the common budget.
     pub(super) fn initial_guess<T>(&self, predictor: &Trial<'_, T>) -> Vec<f64> {
         let mut guess = vec![0.0; self.dimension()];
-        if self.species.is_some() {
-            guess[self.thermal_dimension()] =
-                predictor.transferred_mass_kg * self.controls.mass_coordinate_scale_j_kg;
+        for (index, transfer) in predictor.transfers.iter().enumerate() {
+            guess[self.thermal_dimension() + index] =
+                transfer.mass_into_gas_kg * self.controls.mass_coordinate_scale_j_kg;
         }
         self.project(&guess)
     }
@@ -222,35 +229,38 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
                 "finite coupled coordinate vector required",
             ));
         }
-        let Some(species) = &self.species else {
+        if self.species.is_empty() {
             return self.evaluate_at_gas(coordinates, self.gas, resolve, checkpoint);
-        };
-        let t = finite(
-            self.gas.state().state().temperature + coordinates[n + 1] / self.temperature_scale_j_k,
-        )?;
-        let mass = finite(
-            self.old_vapor_mass_kg + coordinates[n] / self.controls.mass_coordinate_scale_j_kg,
-        )?;
-        if mass < 0.0 {
-            return Err(ImplicitGasError::Invalid(
-                "negative proposed vapor inventory",
-            ));
         }
-        let gas = if mass == self.old_vapor_mass_kg {
-            if t == self.gas.state().state().temperature {
-                self.gas.clone()
-            } else {
-                self.gas.at_model_mass_temperature(
-                    self.gas.model().clone(),
-                    self.gas.mass_kg(),
-                    t,
-                )?
+        let t = finite(
+            self.gas.state().state().temperature
+                + coordinates[n + self.species.len()] / self.temperature_scale_j_k,
+        )?;
+        let mut target = None;
+        for (index, (id, species)) in self.species.iter().enumerate() {
+            let mass = finite(
+                species.initial_mass_kg
+                    + coordinates[n + index] / self.controls.mass_coordinate_scale_j_kg,
+            )?;
+            if mass < 0.0 {
+                return Err(ImplicitGasError::Invalid(
+                    "negative proposed vapor inventory",
+                ));
             }
-        } else {
-            let mut target = self.inventory.clone();
-            target.insert(species.clone(), mass);
+            if mass != species.initial_mass_kg {
+                target
+                    .get_or_insert_with(|| self.inventory.clone())
+                    .insert(id.clone(), mass);
+            }
+        }
+        let gas = if let Some(target) = target {
             self.gas
                 .at_species_inventory_temperature(self.catalog, &target, t)?
+        } else if t == self.gas.state().state().temperature {
+            self.gas.clone()
+        } else {
+            self.gas
+                .at_model_mass_temperature(self.gas.model().clone(), self.gas.mass_kg(), t)?
         };
         self.evaluate_at_gas(&coordinates[..n], &gas, resolve, checkpoint)
     }
@@ -286,22 +296,22 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
         }
         let poll = RefCell::new(checkpoint);
         let mut sensible = BTreeMap::new();
-        let mut mass = Total::default();
-        let mut condensation = Total::default();
-        let mut relative = Total::default();
+        let mut species_sums: BTreeMap<_, _> = self
+            .species
+            .keys()
+            .map(|id| (id.clone(), SpeciesSums::default()))
+            .collect();
         let mut heat_total = Total::default();
         let thermal = self.step.evaluate_with_vapor_enthalpy(
             thermal_coordinates,
-            |_| films(&self.surfaces, gas, self.species.as_ref()),
+            |_| films(&self.surfaces, gas, &self.species),
             |thermal, liquids, _| {
                 (poll.borrow_mut())()?;
                 let mut heat = resolve(thermal, liquids, gas)?;
                 let mut excess = BTreeMap::new();
                 for (&id, surface) in &self.surfaces {
                     (poll.borrow_mut())()?;
-                    let species = self.species.as_ref().ok_or(ImplicitGasError::Invalid(
-                        "active liquid surface requires its volatile identity",
-                    ))?;
+                    let species = &surface.binding.species;
                     let liquid = liquids[&id];
                     let old = &self.initial.cells()[&id];
                     let tl = thermal.temperature_k(id)?;
@@ -330,10 +340,13 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
                         )
                         .into());
                     }
+                    let sums = species_sums
+                        .get_mut(species)
+                        .expect("prepared volatile species");
                     if dm < 0.0 {
-                        condensation.add(-dm)?;
+                        sums.condensation.add(-dm)?;
                     }
-                    mass.add(dm)?;
+                    sums.mass.add(dm)?;
                     let upstream = if dm < 0.0 { tg } else { tl };
                     let incoming_sensible = if dm < 0.0 {
                         self.catalog
@@ -342,7 +355,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
                         0.0
                     };
                     excess.insert(id, finite(source.alignment + incoming_sensible)?);
-                    relative.add(finite(
+                    sums.relative_energy.add(finite(
                         dm * self
                             .catalog
                             .species_specific_enthalpy_change_j_kg(species, t0, upstream)?,
@@ -356,14 +369,17 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
                     let slot = heat.transport.heat.bulk.sources_w.entry(id).or_default();
                     *slot = finite(*slot + power)?;
                 }
-                if condensation.value()?
-                    > self.controls.phase.maximum_inventory_fraction * self.old_vapor_mass_kg
-                {
-                    return Err(smaller_step(
-                        dt,
-                        "joint condensation exceeds the original gas vapor donor budget",
-                    )
-                    .into());
+                for (id, sums) in &species_sums {
+                    if sums.condensation.value()?
+                        > self.controls.phase.maximum_inventory_fraction
+                            * self.species[id].initial_mass_kg
+                    {
+                        return Err(smaller_step(
+                            dt,
+                            "joint condensation exceeds the original gas vapor donor budget",
+                        )
+                        .into());
+                    }
                 }
                 Ok::<_, ImplicitGasError>(VaporEnthalpyStepCoefficients {
                     heat,
@@ -372,25 +388,47 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             },
             || (poll.borrow_mut())(),
         )?;
+        let mut transfers = Vec::with_capacity(self.species.len());
+        let mut mass = Total::default();
+        let mut relative = Total::default();
+        let mut pressure_flow = Total::default();
+        // Retain zero-net rows: opposite streams can exchange energy without
+        // changing this species' inventory. Species order also owns coordinates.
+        for (id, sums) in species_sums {
+            let dm = sums.mass.value()?;
+            let relative_energy = sums.relative_energy.value()?;
+            mass.add(dm)?;
+            relative.add(relative_energy)?;
+            pressure_flow.add(finite(dm * self.species[&id].gas_constant_j_kg_k * t0)?)?;
+            transfers.push(SpeciesBoundaryRelativeTransfer {
+                species: id,
+                mass_into_gas_kg: dm,
+                relative_energy_into_gas_j: relative_energy,
+            });
+        }
         let transferred_mass_kg = mass.value()?;
         let relative_energy_into_gas_j = relative.value()?;
         let sensible_total_j = heat_total.value()?;
         let actual = gas.species_inventory_kg()?;
-        let vapor_residual = if let Some(species) = &self.species {
-            finite(
-                (actual.get(species).copied().unwrap_or(0.0) - self.old_vapor_mass_kg)
-                    - transferred_mass_kg,
-            )?
-        } else {
-            0.0
-        };
         let total_mass_residual =
             finite((gas.mass_kg() - self.gas.mass_kg()) - transferred_mass_kg)?;
-        let mut gas_mass_residual_kg = vapor_residual.abs().max(total_mass_residual.abs());
+        let mut gas_mass_residual_kg = total_mass_residual.abs();
+        let mut residual = thermal.residual_j().to_vec();
+        for transfer in &transfers {
+            let id = &transfer.species;
+            let vapor_residual = finite(
+                (actual.get(id).copied().unwrap_or(0.0) - self.species[id].initial_mass_kg)
+                    - transfer.mass_into_gas_kg,
+            )?;
+            gas_mass_residual_kg = gas_mass_residual_kg.max(vapor_residual.abs());
+            residual.push(finite(
+                vapor_residual * self.controls.mass_coordinate_scale_j_kg,
+            )?);
+        }
         for source in self.catalog.thermodynamics().components() {
             (poll.borrow_mut())()?;
             let id = source.species();
-            if Some(id) != self.species.as_ref() {
+            if !self.species.contains_key(id) {
                 let defect = finite(
                     actual.get(id).copied().unwrap_or(0.0)
                         - self.inventory.get(id).copied().unwrap_or(0.0),
@@ -410,7 +448,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             .value();
         let gas_energy_residual_j = sum([
             finite(gas.mass_kg() * increment)?,
-            -finite(transferred_mass_kg * self.vapor_gas_constant_j_kg_k * t0)?,
+            -pressure_flow.value()?,
             -relative_energy_into_gas_j,
             sensible_total_j,
         ])?;
@@ -422,11 +460,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             thermal.audit().thermal.energy_residual_j,
             gas_energy_residual_j,
         ])?;
-        let mut residual = thermal.residual_j().to_vec();
-        if self.species.is_some() {
-            residual.push(finite(
-                vapor_residual * self.controls.mass_coordinate_scale_j_kg,
-            )?);
+        if !self.species.is_empty() {
             residual.push(gas_energy_residual_j);
         }
         (poll.borrow_mut())()?;
@@ -434,8 +468,7 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
             thermal,
             sensible,
             sensible_total_j,
-            transferred_mass_kg,
-            relative_energy_into_gas_j,
+            transfers,
             gas_mass_residual_kg,
             gas_energy_residual_j,
             coupled_mass_residual_kg,
@@ -481,17 +514,9 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
     ) -> Result<GasSpeciesBoundaryCandidate<'catalog>, ImplicitGasError> {
         checkpoint()?;
         let mut interrupted = None;
-        let transfer = self
-            .species
-            .as_ref()
-            .map(|species| SpeciesBoundaryRelativeTransfer {
-                species: species.clone(),
-                mass_into_gas_kg: trial.transferred_mass_kg,
-                relative_energy_into_gas_j: trial.relative_energy_into_gas_j,
-            });
         let candidate = self.gas.exchange_species_boundary_relative_with_energy(
             self.catalog,
-            transfer.as_slice(),
+            &trial.transfers,
             |_| Ok(-trial.sensible_total_j),
             self.controls.phase.gas,
             || match checkpoint() {
@@ -535,6 +560,11 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
         let report = ImplicitGasReport {
             thermal: audit,
             sensible_heat_into_liquid_j: trial.sensible,
+            species_transferred_mass_kg: trial
+                .transfers
+                .into_iter()
+                .map(|transfer| (transfer.species, transfer.mass_into_gas_kg))
+                .collect(),
             gas_mass_residual_kg: trial.gas_mass_residual_kg,
             gas_energy_residual_j: trial.gas_energy_residual_j,
             mass_residual_kg: trial.coupled_mass_residual_kg,
@@ -558,13 +588,16 @@ impl<'s, 'm, 'l, 'catalog> Prepared<'s, 'm, 'l, 'catalog> {
 fn films(
     surfaces: &BTreeMap<CellId, ImplicitGasSurface<'_>>,
     gas: &ClosedGasParcel,
-    species: Option<&SpeciesId>,
+    species: &BTreeMap<SpeciesId, Volatile>,
 ) -> Result<BTreeMap<CellId, GasFilm>, ImplicitGasError> {
-    let Some(species) = species else {
+    if species.is_empty() {
         return Ok(BTreeMap::new());
-    };
+    }
     let state = gas.state().state();
-    let vapor_partial_pressure_pa = gas.species_partial_pressure_pa(species)?;
+    let mut partial_pressures = BTreeMap::new();
+    for id in species.keys() {
+        partial_pressures.insert(id.clone(), gas.species_partial_pressure_pa(id)?);
+    }
     Ok(surfaces
         .iter()
         .map(|(&id, surface)| {
@@ -572,7 +605,7 @@ fn films(
                 id,
                 GasFilm {
                     total_pressure_pa: state.pressure,
-                    vapor_partial_pressure_pa,
+                    vapor_partial_pressure_pa: partial_pressures[&surface.binding.species],
                     temperature_k: state.temperature,
                     mass_transfer_coefficient_m_s: surface.mass_transfer_coefficient_m_s,
                 },

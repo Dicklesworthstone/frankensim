@@ -6,17 +6,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fs_thermal::enthalpy::{
-    DepositionObserver, EnergyAudit, Event, StepConfig, ThermalStorageBasis,
-};
-use fs_thermochem::SpeciesId;
-
 use super::super::admit_liquid_source;
 use super::adaptive::{
     self, AdaptiveImplicitGasCandidate, AdaptiveImplicitGasControls, AdaptiveImplicitGasError,
 };
 use super::*;
 use crate::thermochemical_gas::energy::parcel::transfer::species::boundary::admit_catalog;
+use fs_thermal::enthalpy::{
+    DepositionObserver, EnergyAudit, Event, StepConfig, ThermalStorageBasis,
+};
 
 /// Advance the joint heat/phase/gas solution through native deposition events.
 ///
@@ -99,7 +97,7 @@ impl<'l> Roster<'l> {
             }
         }
         let mut ordered = BTreeMap::new();
-        let mut species = None;
+        let mut species = BTreeSet::new();
         for surface in surfaces {
             checkpoint()?;
             let [lo, hi] = surface.pure_liquid_enthalpy_range_j_kg;
@@ -110,16 +108,15 @@ impl<'l> Roster<'l> {
                 || !surface.binding.liquid_enthalpy_offset_j_kg.is_finite()
                 || !nonnegative(surface.mass_transfer_coefficient_m_s)
                 || !nonnegative(surface.heat_transfer_coefficient_w_m2_k)
-                || species.is_some_and(|species| species != &surface.binding.species)
                 || ordered.insert(surface.cell_id, *surface).is_some()
             {
                 return Err(AdaptiveImplicitGasError::Invalid(
-                    "unique known liquid cells, one volatile identity and finite admitted film/enthalpy data required",
+                    "unique known liquid cells and finite admitted film/enthalpy data required",
                 ));
             }
-            species = Some(&surface.binding.species);
+            species.insert(&surface.binding.species);
         }
-        if let Some(species) = species {
+        for species in species {
             if !catalog
                 .thermodynamics()
                 .components()
@@ -160,13 +157,6 @@ impl<'l> Roster<'l> {
         }
         checkpoint()?;
         Ok(active)
-    }
-
-    pub(super) fn species(&self) -> Option<&SpeciesId> {
-        self.surfaces
-            .values()
-            .next()
-            .map(|surface| &surface.binding.species)
     }
 
     #[allow(clippy::too_many_arguments)]

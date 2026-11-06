@@ -1,4 +1,7 @@
 //! G0 atomic bounded work and G1 independent original-NASA9 endpoint balances.
+#[path = "species_tests.rs"]
+mod species;
+
 #[path = "time_tests.rs"]
 mod time;
 

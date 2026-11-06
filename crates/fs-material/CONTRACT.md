@@ -11763,11 +11763,15 @@ retry/cancellation/zero-heat behavior, and complete-clock time refinement.
 ### Simultaneous thermal-network and finite-atmosphere phase endpoints
 
 `evaporation::gas::implicit::solve_deposition_with_gas` solves every original
-thermal cell, one shared volatile inventory and the original finite-gas energy
+thermal cell, each selected volatile inventory and the original finite-gas energy
 at the same backward-Euler endpoint. Selected positive liquid cells retain
 their individual phase laws, caloric offsets, pure-liquid domains and exposed
-reference areas. They share one explicit volatile identity, with all original
-carrier inventories, source identities, gas volume and query context preserved.
+reference areas. Distinct pure-liquid interfaces may name distinct original
+volatile species in the same finite atmosphere. At each interface the other
+gas species are nonabsorbing carriers under the supplied Stefan-film closure;
+this does not add mixed-liquid activities or multicomponent cross-diffusion.
+Unselected carrier inventories, source identities, gas volume and query context
+remain preserved.
 Endpoint total/vapor pressure and gas temperature feed the original Stefan
 films; native heat sources, contacts, baths and conservative heat transfers
 remain inside the same thermal solve. Each supplied sensible film coefficient
@@ -11779,14 +11783,21 @@ The shared corrected thermal ingress includes source alignment and incoming
 vapor sensible enthalpy in complete stream energy while retaining latent heat
 as `dm*L`. Opposing surfaces retain their individual receipts, gross withdrawal
 limits and energy transfers even when their net vapor mass is zero. Condensation
-shares the original gas donor budget; simultaneous evaporation cannot finance
-an oversized withdrawal. Every original liquid and source-domain gate remains.
+spends each species' own original gas inventory; simultaneous evaporation and
+another species' inventory cannot finance an oversized withdrawal. Every
+original liquid and source-domain gate remains.
 
 The original `fs_solver` finite-difference Newton--Krylov owner solves native
-cell-energy coordinates plus numerically scaled vapor mass and gas temperature.
+cell-energy coordinates plus one numerically scaled mass per selected volatile
+and one gas temperature. Species coordinates use canonical identity order.
 Initial gas Cv supplies only a coordinate scale. Each gas residual evaluates
 the original final-composition NASA-9 internal-energy increment directly:
-`dU_sensible - dm*Rv*Tgas0 - sum(dm_i*dh_v(Tgas0,Tupstream_i)) + Q_sensible`.
+`dU_sensible - Tgas0*sum(dm_species*R_species)
+- sum(dm_surface*dh_v_species(Tgas0,Tupstream_surface)) + Q_sensible`.
+Opposing transfers of different species retain their distinct gas constants,
+calorics and latent heats even when total gas mass is unchanged. Each initially
+absent vapor receives its own source-owned mass predictor; no trace inventory
+is manufactured. A species with zero net mass can still carry nonzero energy.
 Formation constants cancel before arithmetic; no frozen heat capacity or
 per-trial nested caloric root is used. One final original species-boundary
 reconstruction supplies the accepted gas, followed by a fresh thermal/film
@@ -11830,6 +11841,13 @@ cancellation discards the entire candidate. Source-domain/numerical failures
 propagate; only an admitted physical time-error estimate requests reduction.
 Events inside the requested window refuse upfront; exact-target events remain
 pending for the original timeline owner.
+
+Both endpoint and adaptive reports retain net transferred mass by original
+species identity. Whole-window closure independently gates the actual change
+of each volatile inventory against that species' accepted transfers; the signed
+aggregate vapor residual cannot conceal opposing species errors. Declared
+future species retain zero transfer until activation, and each new active
+species joins the same coupled endpoint without restarting request budgets.
 
 An empty phase roster uses only the original thermal energy coordinates. Native
 nonlinear heat and contact transport still advance, while the complete gas state

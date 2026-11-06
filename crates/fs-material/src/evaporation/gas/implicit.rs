@@ -1,13 +1,13 @@
 //! Simultaneous finite-atmosphere feedback on the original thermal network.
 //!
-//! One backward-Euler endpoint closes every native cell energy, one retained
+//! One backward-Euler endpoint closes every native cell energy, each selected
 //! volatile species inventory, and the original fixed-volume gas internal
 //! energy. Films see the endpoint gas pressure, composition and temperature.
 //! Evaporation carries surface vapor enthalpy; condensation carries upstream
 //! gas enthalpy. Reciprocal sensible film heat is exchanged exactly once.
 //!
 //! The numerical coordinates are joules: native cell energy increments, a
-//! scaled vapor-mass increment, and a scaled gas-temperature increment. These
+//! scaled mass increment per volatile, and a scaled gas-temperature increment. These
 //! scales condition the original Newton--Krylov solve; they do not replace the
 //! temperature-dependent NASA-9 calorics or the original gas equation of state.
 //! Each trial evaluates original caloric increments directly, with one original
@@ -15,7 +15,7 @@
 //! uses that reconstructed gas before either endpoint can be published.
 //!
 //! These are first-order intervals with native reference geometry,
-//! positive pure-liquid inventories, one volatile identity and caller-supplied
+//! positive pure-liquid inventories, explicit species identities and caller-supplied
 //! film coefficients. The endpoint solve supplies algebraic acceptance; the
 //! adaptive window also controls local physical time error. The timeline clips
 //! those same intervals around native births, contacts and boundary changes.
@@ -34,6 +34,7 @@ use fs_thermal::enthalpy::evaporation::implicit::{
     EvaporatingNetworkVaporEnthalpyAudit, EvaporationNetworkImplicitControls,
 };
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
+use fs_thermochem::SpeciesId;
 
 use super::{
     ClosedGasParcel, EvaporationLaw, GasEnergyError, GasEvaporationError, GasEvaporationSolve,
@@ -52,7 +53,10 @@ pub mod adaptive;
 pub mod timeline;
 
 /// One native liquid cell, with explicit original sources and film data.
-/// All selected cells share one volatile identity; caloric offsets may differ.
+/// Each selected cell is a pure-liquid interface with its own volatile identity
+/// and caloric offset. All other gas species act as nonabsorbing carriers at
+/// that interface under the original supplied-film approximation. This does
+/// not supply mixture-liquid activities or a multicomponent diffusion law.
 /// Endpoint/event-free solves require active cells; the timeline also admits
 /// declared future births, whose physical source is checked at activation.
 #[derive(Clone, Copy)]
@@ -158,6 +162,10 @@ impl std::error::Error for ImplicitGasError {}
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImplicitGasReport {
     pub thermal: EvaporatingNetworkVaporEnthalpyAudit,
+    /// Actual represented thermal phase transfer, grouped by original species.
+    /// Positive evaporation and negative condensation retain separate species
+    /// even when the total gas mass is unchanged.
+    pub species_transferred_mass_kg: BTreeMap<SpeciesId, f64>,
     pub sensible_heat_into_liquid_j: BTreeMap<CellId, f64>,
     /// Maximum magnitude of volatile, whole-gas or carrier inventory defects.
     /// This independently gates the represented mass at the returned gas state.
