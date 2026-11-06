@@ -13,6 +13,9 @@
 //! or a blanket TVD/convergence certificate for a coupled nonlinear solve.
 //! Smooth interior affine fields are reconstructed exactly (up to roundoff);
 //! absent stencils, junctions and extrema retain the original upwind trace.
+//! A stationary-skeleton liquid carrier reconstructs h_liquid=max(h,h_liquidus),
+//! preserving liquid superheat without transporting the solid's latent fraction.
+//! A dry stencil neighbor supplies no liquid gradient and retains donor upwind.
 //! Nonuniform-grid limiters require actual distances rather than uniform-grid
 //! jump ratios; see X. Zeng, "A general approach to enhance slope limiters on
 //! non-uniform rectilinear grids", <https://arxiv.org/abs/1301.0967>.
@@ -53,8 +56,10 @@ struct BoundCell {
 
 struct FaceIncrement {
     value: f64,
-    // The active limited increment depends on one neighbor and the donor
-    // with opposite coefficients. None selects the flat/extremum branch.
+    // Derivative with respect to carried enthalpy: the active increment
+    // depends on one neighbor and the donor with opposite coefficients.
+    // Each column's own carrier slope converts this to stored mixture h.
+    // None selects the flat/extremum branch.
     neighbor_partial: Option<(CellId, f64)>,
 }
 
@@ -172,11 +177,6 @@ impl LimitedEnthalpyReconstruction {
         flow: &Advected<()>,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), DepositionError> {
-        if flow.liquid_carrier.is_some() {
-            return Err(invalid(
-                "bulk-enthalpy reconstruction has no liquid-carrier phase closure",
-            ));
-        }
         for (&id, bound) in &self.cells {
             checkpoint()?;
             let cell = thermal
@@ -241,6 +241,7 @@ impl LimitedEnthalpyReconstruction {
     fn face_increment(
         &self,
         thermal: &DepositionSimulation<'_>,
+        flow: &Advected<()>,
         up: CellId,
         down: CellId,
     ) -> Result<FaceIncrement, DepositionError> {
@@ -250,9 +251,23 @@ impl LimitedEnthalpyReconstruction {
                 neighbor_partial: None,
             });
         };
-        let centre = thermal.cells()[&up].specific_h_j_kg;
-        let left = finite(centre - thermal.cells()[&stencil.previous].specific_h_j_kg)?;
-        let right = finite(thermal.cells()[&stencil.next].specific_h_j_kg - centre)?;
+        let centre = flow.carried_h(&thermal.cells()[&up])?;
+        let previous = &thermal.cells()[&stencil.previous];
+        let next = &thermal.cells()[&stencil.next];
+        if let Some(carrier) = flow.liquid_carrier() {
+            let solidus = carrier.plateau_enthalpy_bounds_j_kg()[0];
+            if previous.specific_h_j_kg <= solidus || next.specific_h_j_kg <= solidus {
+                // The native endpoint has already refused nonzero flow through
+                // a dry cell. A zero-flow geometric neighbor has no moving
+                // liquid state from which to infer a slope.
+                return Ok(FaceIncrement {
+                    value: 0.0,
+                    neighbor_partial: None,
+                });
+            }
+        }
+        let left = finite(centre - flow.carried_h(previous)?)?;
+        let right = finite(flow.carried_h(next)? - centre)?;
         // Limit physical derivatives times the SAME half-width. Fractions lie
         // in [0,1], avoiding overflow from dividing a finite jump by tiny length.
         let limited_left = left * stencil.left_fraction;
@@ -304,6 +319,9 @@ impl Advected<()> {
     /// local mass balance, component-datum subtraction and boundary heat. It then
     /// changes only the selected internal donor powers, equally and oppositely.
     /// Flow reversal uses the newly upstream cell's actual opposite face.
+    /// With a liquid carrier, traces and slopes use that original liquid h;
+    /// mixture h remains the storage coordinate. Dry stencil samples retain
+    /// first-order upwind, and nonzero flow through a solid cell still refuses.
     ///
     /// No observer/CFL, entropy-mixing account, physical step, nonlinear solver
     /// or accepted-state clamp is supplied by this query. Feed the result to
@@ -359,7 +377,7 @@ impl Advected<()> {
             if transfer.a != up || transfer.b != down {
                 return Err(invalid("native upwind transfer order changed"));
             }
-            let increment = reconstruction.face_increment(thermal, up, down)?;
+            let increment = reconstruction.face_increment(thermal, self, up, down)?;
             if increment.value != 0.0 {
                 transfer.power_w = finite(transfer.power_w + finite(rate * increment.value)?)?;
             }
@@ -369,14 +387,19 @@ impl Advected<()> {
                 if derivative == 0.0 {
                     return Err(DepositionError::Arithmetic);
                 }
-                // One power, two opposite physical accounts. Equal opposite
-                // column coefficients preserve the original enthalpy datum.
-                tangent.extend([
-                    (up, neighbor, -derivative),
-                    (down, neighbor, derivative),
-                    (up, up, derivative),
-                    (down, up, -derivative),
-                ]);
+                // One power, two opposite physical accounts. A liquid trace
+                // differentiates the moving liquid's h, not the solid's latent
+                // inventory: donor and neighbor can have different slopes.
+                for (col, partial) in [(neighbor, derivative), (up, -derivative)] {
+                    let slope = self.implicit_carried_enthalpy_slope(&thermal.cells()[&col])?;
+                    if slope != 0.0 {
+                        let value = finite(partial * slope)?;
+                        if value == 0.0 {
+                            return Err(DepositionError::Arithmetic);
+                        }
+                        tangent.extend([(up, col, -value), (down, col, value)]);
+                    }
+                }
             }
         }
         if transfers.next().is_some() {

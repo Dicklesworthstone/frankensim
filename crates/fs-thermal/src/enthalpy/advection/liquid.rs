@@ -214,8 +214,10 @@ impl<O> Advected<O> {
     /// physical energy gates remain authoritative. The carried-h slope is in
     /// [0,1], so the original outgoing-mass CFL remains conservative. The optional
     /// entropy audit uses liquid-side entropy for transport and the original
-    /// mixture entropy for storage. Species mixing and nonempty bulk-h
-    /// reconstruction remain unsupported.
+    /// mixture entropy for storage. Limited axial reconstruction uses this
+    /// same liquid h and its phase-dependent derivative; it falls back to
+    /// donor upwind beside a dry sample. Species mixing and an entropy audit
+    /// of reconstructed fluxes remain unsupported.
     /// Native implicit conduction can bind this same carrier: its exact
     /// phase-dependent endpoint tangent removes the explicit flow CFL while
     /// preserving the original caloric, inventory and liquid-support checks.

@@ -12,6 +12,8 @@ use crate::enthalpy::{
 mod open;
 #[path = "tests/entropy.rs"]
 mod entropy;
+#[path = "tests/reconstruction.rs"]
+mod reconstruction;
 
 const MAT: MaterialId = MaterialId(1);
 
@@ -214,6 +216,8 @@ fn phase_source_admission_and_incompatible_transport_modes_refuse() {
     assert!(selected.clone().with_stationary_species(vec!["liquid".into()], vec![], 3, 1).is_err());
     let reconstruction = LimitedEnthalpyReconstruction::try_new(&initial,
         &[AxialCellStencil { previous: CellId(0), cell: CellId(1), next: CellId(2) }], 1, || Ok(())).unwrap();
-    assert!(matches!(selected.endpoint_transport_with_reconstruction(&initial, &reconstruction, || Ok(())),
-        Err(DepositionError::InvalidInput("bulk-enthalpy reconstruction has no liquid-carrier phase closure"))));
+    let endpoint = selected.endpoint_transport_with_reconstruction(&initial, &reconstruction, || Ok(())).unwrap();
+    assert!(endpoint.transfers.iter().all(|transfer| transfer.power_w == 0.0));
+    assert!(matches!(selected.with_entropy_audit().endpoint_transport_with_reconstruction(&initial, &reconstruction, || Ok(())),
+        Err(DepositionError::InvalidInput("limited enthalpy reconstruction has no species or entropy-mixing closure"))));
 }

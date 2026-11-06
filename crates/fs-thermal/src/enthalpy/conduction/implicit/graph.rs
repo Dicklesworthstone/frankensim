@@ -109,8 +109,10 @@ impl<'a> ImplicitConductionGraph<'a> {
     /// Solve limited axial enthalpy transport with the original conduction
     /// residual, nonlinear iteration and energy accounts.
     ///
-    /// Every trial reconstructs the actual endpoint h on the supplied original
-    /// geometry. Its analytic active-minmod tangent joins the native upwind
+    /// Every trial reconstructs the actual endpoint carried h on the supplied
+    /// original geometry. A liquid carrier uses liquid h and its own phase
+    /// derivative, preserving stationary-solid latent energy. Its analytic
+    /// active-minmod tangent joins the native upwind
     /// tangent in the sparse nonsymmetric solver; the wider stencil requires
     /// this graph path even for a straight channel. At limiter switches Newton
     /// uses a deterministic generalized derivative and the existing line search.

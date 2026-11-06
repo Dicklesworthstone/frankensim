@@ -2365,6 +2365,18 @@ heat accounts and the original cell-mass conversion to joule coordinates.
 No finite-difference Jacobian, dense matrix, separate energy store or frozen
 starting-state reconstruction is introduced.
 
+The same reconstruction accepts the original stationary-skeleton liquid
+carrier. Its minmod samples are `h_liquid=max(h,h_liquidus)`, so an isothermal
+coexistence field has zero reconstructed liquid-enthalpy gradient even when
+stationary-solid fractions differ. Each active face derivative includes its
+own donor or neighbor carrier slope; a neighbor on the latent plateau supplies
+no derivative with respect to mixture enthalpy. These face corrections augment
+the current liquid upwind tangent, including the component reference, without
+adding a bulk-enthalpy tangent. Fully liquid flow recovers the original bulk
+reconstruction. A fully solid geometric sample on a zero-flow edge retains
+first-order donor upwind; nonzero liquid flow through solid still refuses.
+The bounded face trace stays between its original mobile-liquid samples.
+
 The limiter is continuous and piecewise linear. Equal nonzero slopes select
 the left active derivative; a zero or opposite-sign slope selects the flat
 branch. These are deterministic generalized derivatives at limiter switches,
@@ -2386,6 +2398,14 @@ time; native SDIRK2 and its adaptive controller use both stages' actual limited
 fluxes, with the smooth-solution qualifications above. These bounded checks do
 not establish a global TVD, arbitrary-source
 maximum-principle, experimental-validation or throughput claim.
+
+Liquid-reconstruction regression source covers stationary-solid latent
+preservation, the affine fully liquid limit on unequal cell lengths and
+reversed flow, complete endpoint tangents with different donor/neighbor phases,
+dry-sample fallback, and an independently solved high-Courant native graph
+interval that crosses the liquidus. Native Rust execution of these new cases
+was unavailable in the implementation session; separate numerical checks of
+their balances and derivatives do not substitute for executing the crate.
 
 ### Gray radiative links between finite enthalpy bodies
 

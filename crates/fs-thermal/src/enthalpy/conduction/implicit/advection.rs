@@ -75,18 +75,21 @@ impl ImplicitAdvection {
         ImplicitConductionError,
     >
     {
-        let Some(reconstruction) = &self.reconstruction else {
-            let mut tangent = Vec::new();
-            tangent
-                .try_reserve_exact(self.liquid_tangent.len())
-                .map_err(|_| TridiagonalError::Capacity)?;
-            for &(row, cell, coefficient) in &self.liquid_tangent {
-                checkpoint()?;
-                let slope = self.flow.implicit_carried_enthalpy_slope(&thermal.cells[&cell])?;
-                if slope != 0.0 {
-                    tangent.push((row, index[&cell], finite(coefficient * slope)?));
-                }
+        // Liquid upwind columns remain dynamic with or without reconstruction.
+        // Face corrections below augment this same carrier tangent; they must
+        // neither discard it nor reintroduce the bulk-storage derivative.
+        let mut tangent = Vec::new();
+        tangent
+            .try_reserve_exact(self.liquid_tangent.len())
+            .map_err(|_| TridiagonalError::Capacity)?;
+        for &(row, cell, coefficient) in &self.liquid_tangent {
+            checkpoint()?;
+            let slope = self.flow.implicit_carried_enthalpy_slope(&thermal.cells[&cell])?;
+            if slope != 0.0 {
+                tangent.push((row, index[&cell], finite(coefficient * slope)?));
             }
+        }
+        let Some(reconstruction) = &self.reconstruction else {
             if self.entropy && with_entropy {
                 let (transport, entropy) =
                     self.flow.endpoint_transport_entropy_state(thermal, checkpoint)?;
@@ -101,7 +104,6 @@ impl ImplicitAdvection {
         let (transport, rates) =
             self.flow
                 .reconstructed_endpoint(thermal, reconstruction, true, &mut checkpoint)?;
-        let mut tangent = Vec::new();
         tangent
             .try_reserve_exact(rates.len())
             .map_err(|_| TridiagonalError::Capacity)?;
