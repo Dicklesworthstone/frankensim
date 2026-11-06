@@ -8694,6 +8694,48 @@ asymmetric coverage, source-domain, disjoint-support, insulation and exact
 radiation-disabled contact limits. All 25 focused native original Cp/Cv and
 integrated exchange tests pass.
 
+## Coated Cp/Cv surfaces with separate material and exterior temperatures
+
+`IntegratedCaloricGrayBoundary` now admits the original boundary geometry's
+finite nonnegative coating/contact resistance, converted from areal m² K/W to
+total K/W once. The existing reservoir-layer owner solves
+`Q = M integral(Tmaterial..Tcell, k(T)dT)`,
+`Texterior = Tmaterial - R*Q`, and
+`Q = Qconvection(Texterior) + Qradiation(Texterior)`.
+The two physical temperatures are distinct: material support is enforced along
+the original conductivity path, while the exterior surface and prescribed baths
+may lie outside that chart. The callback's own exterior-temperature support
+remains authoritative. No conductivity or surface-source extrapolation occurs.
+
+`ReservoirLayerGeometry::evaluate_material_to_two_baths_with_resistance` reuses
+the original safeguarded power root and caloric-independent conductivity
+inverse. At most two existing material/film solves prepare the supported power
+bracket; no nested root occurs in its interior trials. The response exposes
+`material_face_temperature_k` separately from its exterior surface temperature.
+Frozen material/bath and bath/bath pair secants include the same series coating.
+The zero-resistance path delegates directly to the prior method and preserves
+its arithmetic, callback flow and cancellation checks.
+
+The native Cp/Cv tangent analytically eliminates the coating jump before
+combining the exterior flux derivative and original bulk-source coefficient
+response. It retains the original 1/Cp or 1/Cv and both conductivity-integral
+endpoints. Separate bath powers, their actual entropy temperatures, the original
+thermal inventory, and transactional native time integration remain owners.
+The resistance represents a fixed zero-storage coating/contact; finite coating
+heat inventory requires its explicitly represented thermal state or an admitted
+bonded-film storage model. The declared R excludes both the convective film and
+radiation. Geometry and source work constraints remain explicit.
+
+All 36 focused native material/thermal tests pass, including five existing
+shared-surface kernel tests and three new coated-boundary regressions. New
+checks use independent quadratic-material/quartic-radiation balances and full
+Cp/Cv/source tangents; a constant-k resistor network and exact zero-R recovery;
+actual BE energy/entropy with late cancellation/replay; and hot/cold exterior
+surfaces outside the material chart with supported material faces. The complete
+thermal crate and original numerical kernels compiled in the focused runner;
+full workspace Cargo/Clippy remains unrun because constellation dependencies
+are absent.
+
 ## Source-integrated Cp/Cv convection and radiation at one surface
 
 `thermal::transport::conduction::IntegratedCaloricGrayBoundary` couples one
@@ -8718,9 +8760,11 @@ No bulk dk/de term is added to the already differentiated integral.
 
 Only the actual material path requires its conductivity source support; a bath
 may lie outside it if the solved material face remains supported. Geometry is
-the original positive planar area and half-distance, with zero coating/contact
-resistance. Nonzero authored resistance refuses because this closure does not
-represent a separate coating jump. This remains a source-free quasi-steady
+the original positive planar area and half-distance, with an optional finite
+nonnegative coating/contact resistance before the shared exterior surface.
+That zero-storage resistance excludes convection and radiation. The supported
+material face and exterior coating surface are distinct when resistance is
+positive; conductivity support applies only to the actual material path. This remains a source-free quasi-steady
 single-phase half-cell, a prescribed gas bath and a large black gray-radiation
 surrounding, without finite enclosure storage or inferred view factors. Bulk
 surface coefficients are not laws of a separate evolving surface temperature

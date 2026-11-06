@@ -1,5 +1,8 @@
 //! G1/G3/G4: source-integrated Cp/Cv surfaces and the original two-bath accounts.
 
+#[path = "gray_boundary/coating.rs"]
+mod coating;
+
 use super::*;
 use fs_thermal::enthalpy::Reservoir;
 use fs_thermal::enthalpy::conduction::ConductiveReservoir;
@@ -525,7 +528,7 @@ fn g4_external_baths_need_only_supported_material_faces_and_failed_steps_preserv
         IntegratedCaloricGrayBoundary::new(
             &layer,
             ImplicitBoundaryGeometry {
-                surface_resistance_m2_k_w: 0.01,
+                surface_resistance_m2_k_w: -0.01,
                 ..face
             },
             0.1,

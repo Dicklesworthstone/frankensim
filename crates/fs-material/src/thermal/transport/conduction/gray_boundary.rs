@@ -40,12 +40,15 @@ struct SurfaceTangent {
 ///
 /// The layer is planar, homogeneous, source-free and quasi-steady. Its original
 /// Cp or Cv law remains the sole finite-body heat inventory. Both bath laws act
-/// on the SAME solved surface; material k(T) is integrated to that surface.
-/// Only the material path requires conductivity support, not the bath states.
+/// on the SAME exterior surface. Material k(T) is integrated to its supported
+/// material face; an optional coating/contact resistance separates that face
+/// from the exterior surface. Only the material path requires conductivity
+/// support, not the exterior coating face or bath states.
 ///
-/// This is a full-view gray boundary without coating/contact resistance,
-/// participating radiation or a finite enclosure. A nonzero authored surface
-/// resistance refuses rather than becoming an inferred second convective film.
+/// This is a full-view gray boundary with an optional fixed, zero-storage
+/// coating/contact resistance before its shared exterior surface. That
+/// resistance excludes the convective film and radiation. Participating
+/// radiation and finite enclosure storage require their own physical owners.
 /// The kernel allocates no memory; an optional original source retains its own
 /// evaluation costs. Spatial and temporal accuracy remain the native solver's
 /// responsibility rather than a consequence of this constitutive closure.
@@ -54,6 +57,7 @@ pub struct IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
     geometry: ImplicitBoundaryGeometry,
     flux_geometry: ReservoirLayerGeometry,
     material_multiplier_m: f64,
+    coating_resistance_k_w: f64,
     fixed: ImplicitGraySurfaceState,
     surface: Option<BoundSurface<'l>>,
     radiative_temperature_k: f64,
@@ -61,8 +65,9 @@ pub struct IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
 }
 
 impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
-    /// Bind the original positive area and centre-to-face distance, with zero
-    /// coating/contact resistance. HTC owns only the exterior convective film.
+    /// Bind the original positive area and centre-to-face distance, with a
+    /// nonnegative areal coating/contact resistance in m² K/W. It is converted
+    /// to total K/W once; HTC owns only the exterior convective film.
     /// Zero emissivity or HTC explicitly disables that exchange. To attach an
     /// original surface source, initially declare BOTH fixed coefficients zero.
     #[allow(clippy::too_many_arguments)]
@@ -85,7 +90,8 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
         if fixed.admit().is_err()
             || !radiative_temperature_k.is_finite()
             || radiative_temperature_k <= 0.0
-            || geometry.surface_resistance_m2_k_w != 0.0
+            || !geometry.surface_resistance_m2_k_w.is_finite()
+            || geometry.surface_resistance_m2_k_w < 0.0
             || config.max_iterations == 0
             || !config.absolute_heat_tolerance_w.is_finite()
             || config.absolute_heat_tolerance_w < 0.0
@@ -93,14 +99,21 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
             || config.relative_heat_tolerance < 0.0
         {
             return Err(DepositionError::InvalidInput(
-                "integrated gray boundary needs passive coefficients, a positive bath, zero coating resistance and bounded solve controls",
+                "integrated gray boundary needs passive coefficients, a positive bath, nonnegative coating resistance and bounded solve controls",
             ));
+        }
+        let coating_resistance_k_w = geometry.surface_resistance_m2_k_w / geometry.area_m2;
+        if !coating_resistance_k_w.is_finite()
+            || (geometry.surface_resistance_m2_k_w > 0.0 && coating_resistance_k_w == 0.0)
+        {
+            return Err(DepositionError::Arithmetic);
         }
         Ok(Self {
             layer,
             geometry,
             flux_geometry,
             material_multiplier_m: geometry.area_m2 / geometry.half_distance_m,
+            coating_resistance_k_w,
             fixed,
             surface: None,
             radiative_temperature_k,
@@ -176,13 +189,31 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
             self.fixed
         };
         let curve = self.layer.conductivity_curve();
+        // The bulk-owned gray coefficients require positive absolute surface
+        // temperature, not material-source coverage outside the coating.
+        // Keep the original support/arithmetic for the zero-resistance path.
+        let surface_span = if self.coating_resistance_k_w == 0.0 {
+            curve.temperature_range_k()
+        } else {
+            [
+                material
+                    .temperature_k
+                    .min(gas_temperature_k)
+                    .min(self.radiative_temperature_k),
+                material
+                    .temperature_k
+                    .max(gas_temperature_k)
+                    .max(self.radiative_temperature_k),
+            ]
+        };
         let response = self
             .flux_geometry
-            .evaluate_material_to_two_baths(
+            .evaluate_material_to_two_baths_with_resistance(
                 curve,
                 material.temperature_k,
                 [gas_temperature_k, self.radiative_temperature_k],
-                curve.temperature_range_k(),
+                surface_span,
+                self.coating_resistance_k_w,
                 self.config,
                 |surface| self.exterior_exchange(surface, gas_temperature_k, coefficients),
                 &mut *checkpoint,
@@ -193,19 +224,40 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayBoundary<'l, 'a, 'm> {
                     "integrated caloric gray surface balance did not converge",
                 ),
             })?;
-        let cell_slope = finite(self.material_multiplier_m * material.conductivity_w_m_k)?;
-        let surface_slope = finite(
+        let mut cell_slope = finite(self.material_multiplier_m * material.conductivity_w_m_k)?;
+        let mut surface_slope = finite(
             self.material_multiplier_m
-                * curve.conductivity_w_m_k(response.surface_temperature_k)?,
+                * curve.conductivity_w_m_k(response.material_face_temperature_k)?,
         )?;
         if cell_slope <= 0.0 || surface_slope <= 0.0 {
             return Err(DepositionError::Arithmetic);
         }
+        if self.coating_resistance_k_w > 0.0 {
+            // Eliminate Tmaterial = Texterior + R*Q analytically. The effective
+            // material derivatives are Gcell/(1+R*Gface) and Gface/(1+R*Gface).
+            // Split the arithmetic to retain tiny R without 1/R overflow and
+            // large R without R*Gface overflow in the denominator.
+            let ratio = self.coating_resistance_k_w * surface_slope;
+            if ratio <= 1.0 {
+                let factor = 1.0 / (1.0 + ratio);
+                cell_slope *= factor;
+                surface_slope *= factor;
+            } else {
+                let coating_slope = self.coating_resistance_k_w.recip();
+                let combined = coating_slope / (1.0 + coating_slope / surface_slope);
+                cell_slope = finite(combined * (cell_slope / surface_slope))?;
+                surface_slope = combined;
+            }
+            if cell_slope <= 0.0 || surface_slope <= 0.0 {
+                return Err(DepositionError::Arithmetic);
+            }
+        }
         let exterior_slope = response.film.temperature_derivative_w_k;
-        // Differentiate M*(K(Tcell)-K(Ts)) = F(Ts,e). The integral's two
-        // endpoint conductivities already include the entire k(T) response;
-        // adding a bulk dk/de term would double count it. Source F_e is taken
-        // at fixed Ts and may be signed, including zero-coefficient onset.
+        // Differentiate the material/coat/exterior balance with the eliminated
+        // leg slopes. The integral's two endpoint conductivities already
+        // include the entire k(T) response; adding a bulk dk/de term would
+        // double count it. Source F_e is taken at fixed exterior Ts and may
+        // be signed, including zero-coefficient onset.
         let storage = (fraction(exterior_slope, surface_slope) * cell_slope)
             * material.temperature_slope_kg_k_j;
         let derivative = finite(
@@ -306,7 +358,7 @@ impl ImplicitBoundaryExchangeLaw for IntegratedCaloricGrayBoundary<'_, '_, '_> {
         checkpoint()?;
         if geometry != self.geometry {
             return Err(DepositionError::InvalidInput(
-                "integrated caloric gray boundary requires its original area, distance and zero coating resistance",
+                "integrated caloric gray boundary requires its original area, distance and coating resistance",
             ));
         }
         self.evaluate(specific_h_j_kg, bath_temperature_k, checkpoint)
