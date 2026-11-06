@@ -436,6 +436,25 @@ zero normal wall velocity, translated/rotated walls, comparison with the
 original RK4 evolution of an antisymmetric physical-plus-image cloud, physical
 circulation exclusion, stage-crossing refusal and the unchanged scratch bound.
 
+### Planar slip-wall vorticity and gradients
+
+`PlanarWall2::induced_kinematics` samples the same physical-first,
+images-second velocity as the native wall owner, its full spatial Jacobian
+and analytic curl. The original finite-core kernel supplies each contribution;
+the opposite-circulation images contribute boundary-induced strain and axial
+vorticity without entering the physical particle inventory. Direct analytic
+curl accumulation retains thin-core tails even when rounded Jacobian
+differences lose them. This O(N), allocation-free query has the existing
+per-probe bounded-work obligation. Invalid physical clearance/reflection,
+singular active zero-core probes or unrepresentable fields refuse without
+source mutation. Positive-core centers remain regular. No no-slip vorticity
+generation, viscous wall diffusion or wall-load model is added.
+
+`tests/planar_wall_kinematics.rs` covers explicit-image/native-velocity parity,
+independent velocity finite differences, reflection and rotated-wall
+covariance, finite-core center/tail vorticity, and invalid/singular input
+refusal (G0/G1/G3).
+
 ## Conservative 2-D viscous diffusion
 
 The diffusion-focused implementation adds `diffusion::PseDiffusion` and two

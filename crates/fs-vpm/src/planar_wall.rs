@@ -114,6 +114,80 @@ impl PlanarWall2 {
         Ok(velocity)
     }
 
+    /// Sample the same real-plus-image velocity, full spatial Jacobian and
+    /// analytic curl used by this wall's flow. Sources must lie strictly in the
+    /// fluid; the probe may lie on the wall or in the reflected extension.
+    ///
+    /// Images are opposite-circulation boundary devices, never physical
+    /// particles. Their strain and axial vorticity are included. Curl is summed
+    /// from the original analytic kernel, retaining thin-core tails that a
+    /// subtraction of rounded Jacobian entries could lose.
+    ///
+    /// This query uses O(N) work and O(1) stack storage with no image cloud.
+    /// Like the original per-probe velocity query it has no execution receipt;
+    /// callers must bound bulk sampling. It supplies a slip-wall field, not
+    /// no-slip vorticity generation or viscous wall diffusion.
+    ///
+    /// # Errors
+    /// Original scalar/clearance/reflection refusals, or a singular zero-core
+    /// probe, unrepresentable source derivative or nonfinite accumulated field.
+    /// A positive-core source center remains regular.
+    pub fn induced_kinematics(
+        self,
+        particles: &[VortexParticle],
+        point: [f64; 2],
+        core: f64,
+    ) -> Result<crate::ParticleKinematics2, VpmError> {
+        if !core.is_finite() || core < 0.0 {
+            return Err(invalid_scalar("core", core, None));
+        }
+        for coordinate in point {
+            if !coordinate.is_finite() {
+                return Err(invalid_scalar("wall sample position", coordinate, None));
+            }
+        }
+        const PHASE: &str = "fs-vpm.planar-wall-kinematics";
+        let mut result = crate::ParticleKinematics2::default();
+        let mut add = |source: &VortexParticle, index| -> Result<(), VpmError> {
+            let sample = crate::induced_kinematics(core::slice::from_ref(source), point, core)
+                .ok_or(VpmError::NonFiniteResult {
+                    phase: PHASE,
+                    particle: index,
+                })?;
+            for i in 0..2 {
+                result.velocity[i] += sample.velocity[i];
+            }
+            result.gradient[0][0] += sample.gradient[0][0];
+            result.gradient[0][1] += sample.gradient[0][1];
+            result.gradient[1][0] += sample.gradient[1][0];
+            result.gradient[1][1] = -result.gradient[0][0];
+            result.vorticity += sample.vorticity;
+            if result
+                .velocity
+                .iter()
+                .chain(result.gradient.iter().flatten())
+                .chain(core::iter::once(&result.vorticity))
+                .any(|value| !value.is_finite())
+            {
+                return Err(VpmError::NonFiniteResult {
+                    phase: PHASE,
+                    particle: index,
+                });
+            }
+            Ok(())
+        };
+        // Match the original wall velocity's physical-first source ordering.
+        for (index, source) in particles.iter().enumerate() {
+            validate_particle(*source, index)?;
+            self.admit_position(source.pos, index)?;
+            add(source, index)?;
+        }
+        for (index, source) in particles.iter().enumerate() {
+            add(&self.image(source), index)?;
+        }
+        Ok(result)
+    }
+
     pub(super) fn admit_position(self, point: [f64; 2], particle: usize) -> Result<(), VpmError> {
         let (distance, image) = self.reflection(point);
         if !distance.is_finite() || image.iter().any(|value| !value.is_finite()) {
