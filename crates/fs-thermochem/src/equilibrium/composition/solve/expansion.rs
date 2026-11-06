@@ -114,7 +114,7 @@ impl EquilibriumThermodynamicStateV1 {
     pub const fn response(&self) -> EquilibriumThermodynamicResponseV1 {
         self.response
     }
-    /// Actual total entropy minus the requested SP target [J/K].
+    /// Actual total entropy minus the requested SP or SV target [J/K].
     pub fn entropy_residual_j_k(&self) -> Option<f64> {
         self.target_entropy_j_k.map(|s| self.entropy_j_k - s)
     }
@@ -224,7 +224,7 @@ impl Workspace {
         Ok(())
     }
 
-    fn entropy(&self, owner: &IdealGasEquilibriumV1, temperature: Temperature,
+    pub(super) fn entropy(&self, owner: &IdealGasEquilibriumV1, temperature: Temperature,
         cancelled: &mut impl FnMut() -> bool) -> Result<f64, E> {
         let mut total = Sum::default();
         for &i in &self.active { total.add(self.n[i]); }

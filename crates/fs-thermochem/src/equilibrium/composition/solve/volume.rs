@@ -1,4 +1,4 @@
-//! Ideal-gas equilibrium at fixed volume, with optional fixed energy.
+//! Ideal-gas equilibrium at fixed volume, with optional fixed energy or entropy.
 //!
 //! TV closes p V = N(T,p) R T around the original element/charge-constrained Gibbs
 //! minimizer. The pressure derivative is the same analytic equilibrium
@@ -12,6 +12,10 @@
 
 use super::*;
 use fs_qty::Volume;
+
+/// Reversible closed-chamber expansion/compression at prescribed volume.
+pub mod entropy;
+pub use entropy::EquilibriumVolumeEntropySolveV1;
 
 /// Work and residual limits for a fixed-temperature, fixed-volume equilibrium.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,7 +130,7 @@ impl IdealGasIsochoricEquilibriumV1 {
     pub const fn internal_energy(&self) -> Energy {
         self.internal_energy
     }
-    /// UV target, absent for a temperature-and-volume solve.
+    /// UV target, absent for a temperature-and-volume or entropy-and-volume solve.
     pub const fn target_internal_energy(&self) -> Option<Energy> {
         self.target_internal_energy
     }
