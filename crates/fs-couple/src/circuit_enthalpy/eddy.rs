@@ -12,9 +12,6 @@ pub mod hysteretic;
 /// Reversible nonlinear induction with physical Joule heating and a separately
 /// audited backward-Euler numerical loss on the same finite thermal timeline.
 pub mod nonlinear;
-/// Spatial vector hysteresis and resolved Joule heat on the same finite cells.
-#[cfg(feature = "hysteretic-eddy-heating")]
-pub mod hysteretic;
 /// Reversible permeability/temperature feedback on these same native owners.
 pub mod thermal;
 

@@ -1,3 +1,37 @@
+## Circuit-driven spatial hysteresis and finite heat
+
+The `hysteretic-eddy-heating` feature is an alias of `magnetic-hysteresis`;
+both select one shared field/heat owner, including complete heat assemblies.
+Original fitted magnetic claims are retained at the actual endpoint temperature.
+Static applicability and the full caloric source interval are admitted once per
+candidate before thermal trials.
+
+With the default-off `magnetic-hysteresis` feature,
+`WindingThermalNetwork::step_hysteretic_candidate` and
+`step_hysteretic_material_candidate` advance the original native circuit,
+vector magnetic history and finite caloric state in one immutable candidate.
+The material form also resolves original graph resistors at their receiving
+cells' endpoint temperatures. Stranded copper and core conductivity are
+resolved independently from their original material cards without replacing
+the fitted magnetic sources or resetting remanence.
+
+The existing terminal and enthalpy solvers retain ownership. Every discarded
+thermal or terminal trial restarts the same accepted circuit, field and branch
+polarizations; nested field work respects the original shared trial budget.
+Original cell routes receive core Joule, stranded copper, graph-resistor and
+all-triangle pinning heat once. Insulating magnetic cells require finite heat
+receivers when pinning dissipates. End and field numerical losses remain
+outside caloric deposition.
+
+The combined work check uses the native stable graph/field/end storage
+increment, external circuit work and actual finite enthalpy increment.
+Source-bound graph resistors require exact original routes, distinct whole
+thermal-cell volumes, material selections and physical conductor geometry.
+A source refusal, work mismatch, exhausted budget or cancellation returns no
+accepted circuit, magnetic or thermal history. Fixed geometry, constant
+source-admitted magnetic coefficients and wholly solid caloric charts retain
+the same first-order estimated MQS limitations as the field-driven adapter.
+
 ## Spatial hysteretic induction on the original finite thermal timeline
 
 The default-off `magnetic-hysteresis` feature adds

@@ -1,20 +1,16 @@
-//! Spatial hysteresis, eddy currents and finite material heat on one timeline.
+//! Spatial magnetic memory and both physical loss channels on one thermal clock.
 //!
-//! The native field owner retains every vector polarization and computes
-//! pinning and Joule heat separately. Both physical losses reach their original
-//! thermal cells exactly once; backward-Euler numerical dissipation is not heat.
-//! Each thermal trial restarts from the SAME accepted field/history. Constant
-//! magnetic fits retain their complete source-bounded temperature support,
-//! while electrical conductivity responds to the actual endpoint temperature.
-//!
-//! This is fixed-geometry, fixed-fit, first-order coupling. Changing hysteresis
-//! coefficients needs a separate entropy/parameter-work/history law. No fitted
-//! core-loss map is added to either resolved physical loss.
+//! Every thermal trial restarts the SAME accepted potential and vector play
+//! history. The native field solve computes resolved Ohmic and pinning heat;
+//! both reach their original finite cells exactly once. Backward-Euler loss
+//! remains numerical work, never heat. Source-backed conductivity changes with
+//! temperature, while every fitted magnetic coefficient must remain constant
+//! within its explicitly supported temperature interval.
 
 use super::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
-    DriverAccount, EddyThermalSample, ThermalDriver, cell_driver_candidate, deposit_cell_heat,
-    finite,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    DrivenCoefficients, DriverAccount, EddyThermalSample, ThermalDriver, cell_driver_candidate,
+    deposit_cell_heat, finite, native_error,
 };
 use crate::circuit_enthalpy::{
     magnetic::{
@@ -27,7 +23,7 @@ use fs_em::planar::{
     eddy::{
         EddyConductor,
         hysteretic::{
-            HystereticEddyControls, HystereticEddyError, HystereticEddyStep, PlanarHystereticEddy,
+            HystereticEddyControls, HystereticEddyStep, PlanarHystereticEddy,
             PlanarHystereticEddyCandidate,
         },
     },
@@ -39,38 +35,37 @@ use fs_material::{
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
 
-/// Atomic field/polarization/thermal candidate and the original physical audit.
-pub struct HystereticEddyEnthalpyCandidate<'t, 'm> {
+/// One accepted vector-memory field and finite caloric history, published together.
+pub struct HystereticEddyEnthalpyCandidate<'t, 'm, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     field: PlanarHystereticEddy<'m>,
-    report: CircuitEnthalpyReport<EddyThermalSample, HystereticEddyStep>,
+    pub(in crate::circuit_enthalpy) report:
+        CircuitEnthalpyReport<EddyThermalSample<S>, HystereticEddyStep>,
 }
-impl<'t, 'm> HystereticEddyEnthalpyCandidate<'t, 'm> {
+
+impl<'t, 'm, S> HystereticEddyEnthalpyCandidate<'t, 'm, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn field(&self) -> &PlanarHystereticEddy<'m> {
         &self.field
     }
-    /// The shared driver's `deposited_joule_j` counter contains total deposited
-    /// physical heat here: native Joule PLUS pinning heat. The original field
-    /// receipt retains both contributions and numerical dissipation separately.
-    pub fn report(&self) -> &CircuitEnthalpyReport<EddyThermalSample, HystereticEddyStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<EddyThermalSample<S>, HystereticEddyStep> {
         &self.report
     }
-    /// Native Joule plus pinning heat already deposited into finite cells [J].
-    /// This excludes the field integrator's separately reported numerical loss.
+    /// Native Joule plus pinning heat deposited into the finite cells [J].
+    /// Numerical dissipation is excluded from this physical heat total.
     pub fn deposited_heat_j(&self) -> f64 {
         self.report.deposited_joule_j
     }
-    /// Publish both histories together. All reported physical heat is already
-    /// deposited; numerical dissipation has never entered a thermal cell.
+    /// Physical Joule and pinning heat is already deposited. Numerical loss
+    /// has not been deposited and must not be added to any thermal cell.
     pub fn into_parts(
         self,
     ) -> (
         DepositionSimulation<'t>,
         PlanarHystereticEddy<'m>,
-        CircuitEnthalpyReport<EddyThermalSample, HystereticEddyStep>,
+        CircuitEnthalpyReport<EddyThermalSample<S>, HystereticEddyStep>,
     ) {
         (self.thermal, self.field, self.report)
     }
@@ -86,6 +81,8 @@ impl<'m> ThermalDriver for PlanarHystereticEddyCandidate<'m> {
             contacts: &[],
             heat_j: step.heat_j,
             numerical_dissipation_j: step.numerical_dissipation_j,
+            // The constitutive owner retains a stable increment beside a large
+            // magnetic bias; subtracting endpoint totals would discard it.
             stored_change_j: step.magnetic.stored_energy_change_j,
             supplied_j: step.supplied_work_j,
         }
@@ -95,13 +92,8 @@ impl<'m> ThermalDriver for PlanarHystereticEddyCandidate<'m> {
     }
 }
 
-fn induction(error: HystereticEddyError) -> Error {
-    match error {
-        HystereticEddyError::Cancelled => CircuitEnthalpyError::Cancelled,
-        other => CircuitEnthalpyError::Source(MagneticThermalError::NonlinearInduction(other)),
-    }
-}
-
+// Pinning also heats electrically insulating magnetic material. Conductor-only
+// Joule records cannot stand in for the complete original magnetic cell list.
 fn deposit_heat(
     proposal: &PlanarHystereticEddyCandidate<'_>,
     routes: &MagneticRoutes,
@@ -109,48 +101,124 @@ fn deposit_heat(
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<BTreeMap<CellId, f64>, Error> {
     let mut powers = deposit_cell_heat(&proposal.step().cells, routes, dt, checkpoint)?;
-    if proposal.step().magnetic.cells.len() != routes.magnetic.len() {
+    deposit_pinning_heat(
+        &proposal.step().magnetic.cells,
+        routes,
+        dt,
+        &mut powers,
+        checkpoint,
+    )?;
+    Ok(powers)
+}
+
+// Field-driven and circuit-driven magnetic histories deposit the identical
+// original per-cell pinning receipt, including electrically insulating cells.
+pub(in crate::circuit_enthalpy) fn deposit_pinning_heat(
+    losses: &[fs_em::planar::nonlinear::hysteretic::PlanarHystereticCellStep],
+    routes: &MagneticRoutes,
+    dt: f64,
+    powers: &mut BTreeMap<CellId, f64>,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(), Error> {
+    if losses.len() != routes.magnetic.len() {
         return Err(invalid(
-            "hysteresis heat changed magnetic triangle correspondence",
+            "pinning heat changed original magnetic cell correspondence",
         ));
     }
-    for loss in &proposal.step().magnetic.cells {
+    for loss in losses {
         checkpoint()?;
+        let receiver = routes
+            .magnetic
+            .get(&loss.triangle)
+            .ok_or_else(|| invalid("pinning heat lacks an original magnetic region"))?;
         let heat = finite(loss.irreversible_heat_j)?;
         if heat < 0.0 {
-            return Err(invalid("hysteresis heat must be nonnegative"));
+            return Err(invalid("negative native magnetic pinning heat"));
         }
         if heat == 0.0 {
             continue;
         }
-        let cell = routes
-            .magnetic
-            .get(&loss.triangle)
-            .copied()
-            .flatten()
-            .ok_or_else(|| {
-                invalid("every dissipating magnetic triangle needs an actual thermal receiver")
-            })?;
+        let cell = receiver.ok_or_else(|| {
+            invalid("every dissipating magnetic triangle needs an actual thermal heat destination")
+        })?;
         let power = finite(heat / dt)?;
         let previous = *powers.get(&cell).unwrap_or(&0.0);
         let combined = finite(previous + power)?;
         if power == 0.0 || combined == previous {
-            return Err(invalid("pinning heat disappeared in receiving-cell power"));
+            return Err(invalid(
+                "local pinning heat disappeared in receiving-cell sum",
+            ));
         }
         powers.insert(cell, combined);
     }
-    Ok(powers)
+    Ok(())
 }
 
 impl MagneticThermalNetwork<'_> {
-    fn hysteretic_materials_at(
+    // Source form and the complete supported interval do not depend on a
+    // thermal Newton trial. Admit them once for both field and winding drivers.
+    pub(in crate::circuit_enthalpy) fn admit_hysteretic_temperature_support(
+        &self,
+        problem: &PlanarHystereticMagnetostatics,
+        routes: &MagneticRoutes,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<(), Error> {
+        check(cancel)?;
+        let bindings: BTreeMap<_, _> = self.cells.iter().map(|cell| (cell.cell, cell)).collect();
+        for (&triangle, &cell) in &routes.magnetic {
+            check(cancel)?;
+            let Some(cell) = cell else { continue };
+            let binding = bindings
+                .get(&cell)
+                .ok_or_else(|| invalid("magnetic receiver lacks its original thermal binding"))?;
+            let law = problem
+                .materials()
+                .get(triangle)
+                .ok_or_else(|| invalid("magnetic material changed triangle correspondence"))?;
+            for property in law.material().properties() {
+                binding
+                    .point
+                    .admit_static(property)
+                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+            }
+            let knots = binding.curve.knots();
+            let (Some(first), Some(last)) = (knots.first(), knots.last()) else {
+                return Err(invalid(
+                    "magnetic receiver lacks its original caloric interval",
+                ));
+            };
+            let axis = binding.point.temperature_axis;
+            let mut interval = [first.temperature_k, last.temperature_k];
+            if let Some((_, temperature)) = law
+                .material()
+                .query_point()
+                .iter()
+                .find(|(name, _)| name == axis)
+            {
+                // The retained fit can predate this thermal endpoint. Cover
+                // its original query as well as every admitted trial endpoint.
+                interval[0] = interval[0].min(*temperature);
+                interval[1] = interval[1].max(*temperature);
+            }
+            law.admit_temperature_interval(axis, interval)
+                .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e)))?;
+        }
+        check(cancel)?;
+        Ok(())
+    }
+
+    // Each field triangle retains its own fitted magnetic source. Electrical
+    // bundles may select other properties from that SAME card, so re-resolve
+    // the magnetic requirements independently rather than inspecting sigma's
+    // receipt as if it established the pinning or saturation coefficients.
+    pub(in crate::circuit_enthalpy) fn hysteretic_materials_at(
         &self,
         thermal: &DepositionSimulation<'_>,
         problem: &PlanarHystereticMagnetostatics,
         conductors: &BTreeMap<usize, &ResolvedConductorState>,
         sample: &MaterialNetworkSample,
         routes: &MagneticRoutes,
-        cancelled: &RefCell<impl FnMut() -> bool>,
+        cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<
         (
             Vec<(usize, ResolvedConductorState)>,
@@ -158,56 +226,52 @@ impl MagneticThermalNetwork<'_> {
         ),
         Error,
     > {
-        let originals: Vec<_> = problem.materials().iter().map(|s| s.material()).collect();
+        let originals: Vec<_> = problem.materials().iter().map(|m| m.material()).collect();
         let (sources, mut magnetic) = self.materials_at_using(
-            thermal,
-            &originals,
-            conductors,
-            sample,
-            routes,
-            cancelled,
+            thermal, &originals, conductors, sample, routes, cancel,
             |_, original, snapshot, binding| {
                 if original.card_identity() != snapshot.card_identity()
                     || original.material() != snapshot.material()
                 {
-                    return Err(invalid(
-                        "magnetic fit, conductor and thermal cell must use the same original card",
-                    ));
+                    return Err(invalid("hysteretic and thermal cells must retain the same original material card"));
                 }
-                for property in original.properties() {
-                    binding
-                        .point
-                        .admit_static(property)
-                        .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+                for ((axis, before), (_, after)) in original.query_point().iter()
+                    .zip(snapshot.query_point())
+                {
+                    if before.to_bits() != after.to_bits() && axis != binding.point.temperature_axis {
+                        return Err(invalid("only the owned thermal temperature may change a hysteretic source query"));
+                    }
                 }
                 Ok(())
             },
         )?;
+        // A thermal/electrical bundle can select different properties from the
+        // same card. Keep the complete fitted magnetic claims at the actual
+        // endpoint in the magnetic receipt, resolving them only once per cell.
         for sample in &mut magnetic {
-            check(cancelled)?;
+            check(cancel)?;
             let original = &problem.materials()[sample.triangle];
+            let error = |e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e));
             let refreshed = original
                 .at_query_point(&sample.material.query())
-                .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e)))?;
+                .map_err(error)?;
             admit_source_temperature_refresh(original.material(), refreshed.material())
-                .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e)))?;
-            // Electrical bundles may select different property subsets. Keep
-            // the complete fitted magnetic claims in the magnetic receipt.
+                .map_err(error)?;
             sample.material = refreshed.material().clone();
         }
         Ok((sources, magnetic))
     }
 
-    /// Continue the same spatial vector magnetic memory and finite heat cells.
-    /// Conducting triangles require actual receivers. Insulating magnetic
-    /// triangles also require receivers whenever they dissipate pinning heat;
-    /// an explicitly fixed region cannot silently absorb an unaccounted loss.
+    /// Continue vector hysteresis, eddy diffusion and finite heat storage at
+    /// one endpoint. Native source conductivity responds to the solved cell
+    /// temperature. All thermal trials restart the same accepted field and
+    /// vector polarizations, and a refusal publishes neither state.
     ///
-    /// The full caloric temperature interval must be covered by each original
-    /// constant fit. Actual conductivity is refreshed from the same original
-    /// source at each thermal trial. All field and thermal acceptance gates
-    /// pass before either history can be retained. Refine time for this
-    /// first-order fixed-fit magnetoquasistatic/thermal model.
+    /// Every heated magnetic triangle needs an explicit original thermal
+    /// receiver, including insulating core cells. Fixed regions may dissipate
+    /// no pinning heat. Fits, geometry and solid caloric charts remain fixed;
+    /// changing magnetic coefficients, magnetic entropy, phase transitions and
+    /// empirical core-loss maps are not supplied by this first-order model.
     #[allow(clippy::too_many_arguments)]
     pub fn step_hysteretic_eddy_candidate<'t, 'm>(
         &self,
@@ -227,13 +291,6 @@ impl MagneticThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
         )?;
-        if field.time_s().to_bits() != thermal.time_s().to_bits()
-            || self.cells.len() != thermal.cells().len()
-        {
-            return Err(invalid(
-                "matching hysteretic field/thermal clocks and complete cell bindings required",
-            ));
-        }
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -242,21 +299,64 @@ impl MagneticThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
-        let triangles: Vec<_> = field.conductors().iter().map(|s| s.triangle).collect();
-        let routes = self.routes_for_mesh(thermal, field.problem().mesh(), &triangles, &cancel)?;
-        for (&triangle, &cell) in &routes.magnetic {
-            check(&cancel)?;
-            if let Some(cell) = cell {
-                let binding = self.cells.iter().find(|s| s.cell == cell).ok_or_else(|| {
-                    invalid("magnetic receiver lacks its original thermal binding")
-                })?;
-                let knots = binding.curve.knots();
-                let interval = [knots[0].temperature_k, knots[knots.len() - 1].temperature_k];
-                field.problem().materials()[triangle]
-                    .admit_temperature_interval(binding.point.temperature_axis, interval)
-                    .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e)))?;
-            }
+        self.step_hysteretic_eddy_resolved_candidate(
+            thermal,
+            target_s,
+            field,
+            impressed_jz_a_m2,
+            controls,
+            field_controls,
+            initial_energy_increments_j,
+            |trial| {
+                prepared
+                    .resolve(trial, || (*cancel.borrow_mut())())
+                    .map_err(material)
+            },
+            |sample| sample,
+            &cancel,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy) fn step_hysteretic_eddy_resolved_candidate<
+        't,
+        'm,
+        S,
+        E: From<MagneticThermalError>,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &PlanarHystereticEddy<'m>,
+        impressed_jz_a_m2: &[f64],
+        controls: CircuitEnthalpySolve,
+        field_controls: HystereticEddyControls,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'_>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        snapshot: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<HystereticEddyEnthalpyCandidate<'t, 'm, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(native_error)?;
+        crate::circuit_enthalpy::admit_driver_unknowns(
+            thermal,
+            controls,
+            initial_energy_increments_j,
+        )?;
+        if field.time_s().to_bits() != thermal.time_s().to_bits()
+            || self.cells.len() != thermal.cells().len()
+        {
+            return Err(native_error(invalid(
+                "matching hysteretic field/thermal clocks and complete cell bindings required",
+            )));
         }
+        let triangles: Vec<_> = field.conductors().iter().map(|s| s.triangle).collect();
+        let routes = self
+            .routes_for_mesh(thermal, field.problem().mesh(), &triangles, cancel)
+            .map_err(native_error)?;
+        self.admit_hysteretic_temperature_support(field.problem(), &routes, cancel)
+            .map_err(native_error)?;
         let conductors: BTreeMap<_, _> = field
             .conductors()
             .iter()
@@ -267,17 +367,17 @@ impl MagneticThermalNetwork<'_> {
             .iter()
             .map(|s| (s.triangle, s.region))
             .collect();
-        let initial = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
-        let (sources, _) = self.hysteretic_materials_at(
-            thermal,
-            field.problem(),
-            &conductors,
-            &initial.source,
-            &routes,
-            &cancel,
-        )?;
+        let initial = resolve(thermal)?;
+        let (sources, _) = self
+            .hysteretic_materials_at(
+                thermal,
+                field.problem(),
+                &conductors,
+                snapshot(&initial.source),
+                &routes,
+                cancel,
+            )
+            .map_err(native_error)?;
         if sources.len() != field.conductors().len()
             || sources
                 .iter()
@@ -289,9 +389,9 @@ impl MagneticThermalNetwork<'_> {
                         || !same_material(conductor.material(), original.conductor.material())
                 })
         {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "accepted hysteretic conductor sources must match the actual thermal state",
-            ));
+            )));
         }
         let (thermal, field, report) = cell_driver_candidate(
             thermal,
@@ -299,18 +399,18 @@ impl MagneticThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, _| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(state, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
-                let (sources, magnetic) = self.hysteretic_materials_at(
-                    state,
-                    field.problem(),
-                    &conductors,
-                    &coefficients.source,
-                    &routes,
-                    &cancel,
-                )?;
+                check(cancel).map_err(native_error)?;
+                let coefficients = resolve(state)?;
+                let (sources, magnetic) = self
+                    .hysteretic_materials_at(
+                        state,
+                        field.problem(),
+                        &conductors,
+                        snapshot(&coefficients.source),
+                        &routes,
+                        cancel,
+                    )
+                    .map_err(native_error)?;
                 let sources = sources
                     .into_iter()
                     .map(|(triangle, conductor)| EddyConductor {
@@ -327,7 +427,7 @@ impl MagneticThermalNetwork<'_> {
                         field_controls,
                         &mut || (*cancel.borrow_mut())(),
                     )
-                    .map_err(induction)?;
+                    .map_err(|e| native_error(super::nonlinear::induction(e)))?;
                 Ok(DrivenCoefficients {
                     circuit: proposal,
                     sources_w: coefficients.sources_w,
@@ -339,10 +439,12 @@ impl MagneticThermalNetwork<'_> {
                     circuit_trials: 1,
                 })
             },
-            |proposal, dt, checkpoint| deposit_heat(proposal, &routes, dt, checkpoint),
+            |proposal, dt, checkpoint| {
+                deposit_heat(proposal, &routes, dt, checkpoint).map_err(native_error)
+            },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(native_error)?;
         Ok(HystereticEddyEnthalpyCandidate {
             thermal,
             field,

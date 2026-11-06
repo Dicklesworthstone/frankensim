@@ -100,7 +100,7 @@ impl<'m> ThermalDriver for NonlinearWindingCandidate<'m> {
         NonlinearWindingCandidate::into_parts(self)
     }
 }
-fn electrical(error: NonlinearWindingError) -> Error {
+pub(super) fn electrical(error: NonlinearWindingError) -> Error {
     match error {
         NonlinearWindingError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(WindingThermalError::NonlinearWinding(other)),
