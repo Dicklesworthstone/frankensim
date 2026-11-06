@@ -3,18 +3,25 @@
 //! This composes the original coupled Whitney A–phi field with the original
 //! finite-cell enthalpy/Newton owner. Every endpoint temperature proposal starts
 //! from identical accepted magnetic and thermal histories. The original material
-//! source supplies sigma(T), affine mu(T), field entropy and internal energy.
-//! Actual local Ohmic heat and signed reversible heat have separate accounts;
-//! no fitted core loss is added. Geometry and conducting occupancy stay fixed.
+//! source supplies sigma(T) and, in the reversible lanes, magnetic field entropy
+//! and internal energy. The opt-in hysteretic lane instead retains the original
+//! fixed-fit vector memory and its irreversible pinning heat. Actual local
+//! Ohmic, pinning and reversible transfers have separate accounts; no fitted
+//! core loss is added. Geometry and conducting occupancy stay fixed.
 
 /// Source-pinned saturation/recoil and local conductivity-temperature feedback.
 pub mod nonlinear;
+/// Vector magnetic memory, local pinning heat and finite enthalpy.
+#[cfg(feature = "magnetic-hysteresis")]
+pub mod hysteretic;
 // Complete sourced heat transport uses these same retained field residuals.
 mod heat;
 pub use heat::{
     SpatialInductionHeatError, heat_assembly_candidate, nonlinear_heat_assembly_candidate,
     nonlinear_thermal_heat_assembly_candidate,
 };
+#[cfg(feature = "magnetic-hysteresis")]
+pub use heat::hysteretic_heat_assembly_candidate;
 
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,

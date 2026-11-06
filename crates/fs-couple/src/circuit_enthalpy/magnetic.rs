@@ -67,6 +67,10 @@ pub enum MagneticThermalError {
     SpatialNonlinearInduction(
         fs_em::spatial::vector_potential::induction::nonlinear::SpatialNonlinearInductionError,
     ),
+    #[cfg(feature = "magnetic-hysteresis")]
+    SpatialHystereticInduction(
+        fs_em::spatial::vector_potential::induction::hysteretic::SpatialHystereticInductionError,
+    ),
     NonlinearInduction(NonlinearEddyError),
     Magnetic(FieldStorageError),
     Invalid(&'static str),

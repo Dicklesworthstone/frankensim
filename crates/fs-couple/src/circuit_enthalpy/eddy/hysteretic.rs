@@ -27,10 +27,12 @@ use fs_em::planar::{
             PlanarHystereticEddyCandidate,
         },
     },
-    nonlinear::hysteretic::PlanarHystereticMagnetostatics,
 };
 use fs_material::{
-    conductor::ResolvedConductorState, field_storage::admit_source_temperature_refresh,
+    conductor::spatial::SpatialConductorMaterial,
+    field_storage::{
+        admit_source_temperature_refresh, hysteresis::source::ResolvedVectorHysteresis,
+    },
 };
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap};
@@ -159,7 +161,7 @@ impl MagneticThermalNetwork<'_> {
     // thermal Newton trial. Admit them once for both field and winding drivers.
     pub(in crate::circuit_enthalpy) fn admit_hysteretic_temperature_support(
         &self,
-        problem: &PlanarHystereticMagnetostatics,
+        materials: &[ResolvedVectorHysteresis],
         routes: &MagneticRoutes,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<(), Error> {
@@ -171,8 +173,7 @@ impl MagneticThermalNetwork<'_> {
             let binding = bindings
                 .get(&cell)
                 .ok_or_else(|| invalid("magnetic receiver lacks its original thermal binding"))?;
-            let law = problem
-                .materials()
+            let law = materials
                 .get(triangle)
                 .ok_or_else(|| invalid("magnetic material changed triangle correspondence"))?;
             for property in law.material().properties() {
@@ -211,22 +212,22 @@ impl MagneticThermalNetwork<'_> {
     // bundles may select other properties from that SAME card, so re-resolve
     // the magnetic requirements independently rather than inspecting sigma's
     // receipt as if it established the pinning or saturation coefficients.
-    pub(in crate::circuit_enthalpy) fn hysteretic_materials_at(
+    pub(in crate::circuit_enthalpy) fn hysteretic_materials_at<C: SpatialConductorMaterial>(
         &self,
         thermal: &DepositionSimulation<'_>,
-        problem: &PlanarHystereticMagnetostatics,
-        conductors: &BTreeMap<usize, &ResolvedConductorState>,
+        materials: &[ResolvedVectorHysteresis],
+        conductors: &BTreeMap<usize, &C>,
         sample: &MaterialNetworkSample,
         routes: &MagneticRoutes,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<
         (
-            Vec<(usize, ResolvedConductorState)>,
+            Vec<(usize, C)>,
             Vec<MagneticThermalSample>,
         ),
         Error,
     > {
-        let originals: Vec<_> = problem.materials().iter().map(|m| m.material()).collect();
+        let originals: Vec<_> = materials.iter().map(|m| m.material()).collect();
         let (sources, mut magnetic) = self.materials_at_using(
             thermal, &originals, conductors, sample, routes, cancel,
             |_, original, snapshot, binding| {
@@ -250,7 +251,7 @@ impl MagneticThermalNetwork<'_> {
         // endpoint in the magnetic receipt, resolving them only once per cell.
         for sample in &mut magnetic {
             check(cancel)?;
-            let original = &problem.materials()[sample.triangle];
+            let original = &materials[sample.triangle];
             let error = |e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e));
             let refreshed = original
                 .at_query_point(&sample.material.query())
@@ -355,7 +356,7 @@ impl MagneticThermalNetwork<'_> {
         let routes = self
             .routes_for_mesh(thermal, field.problem().mesh(), &triangles, cancel)
             .map_err(native_error)?;
-        self.admit_hysteretic_temperature_support(field.problem(), &routes, cancel)
+        self.admit_hysteretic_temperature_support(field.problem().materials(), &routes, cancel)
             .map_err(native_error)?;
         let conductors: BTreeMap<_, _> = field
             .conductors()
@@ -371,7 +372,7 @@ impl MagneticThermalNetwork<'_> {
         let (sources, _) = self
             .hysteretic_materials_at(
                 thermal,
-                field.problem(),
+                field.problem().materials(),
                 &conductors,
                 snapshot(&initial.source),
                 &routes,
@@ -404,7 +405,7 @@ impl MagneticThermalNetwork<'_> {
                 let (sources, magnetic) = self
                     .hysteretic_materials_at(
                         state,
-                        field.problem(),
+                        field.problem().materials(),
                         &conductors,
                         snapshot(&coefficients.source),
                         &routes,

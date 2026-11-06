@@ -1,3 +1,39 @@
+## Three-dimensional hysteretic induction and finite heat
+
+With `magnetic-hysteresis` (also selected by `hysteretic-eddy-heating`),
+`SpatialMagneticThermalNetwork::step_hysteretic_candidate` advances the retained
+three-dimensional Whitney A–phi field, all vector branch polarizations and
+the original finite caloric inventory in one immutable candidate.
+`spatial_induction::hysteretic_heat_assembly_candidate` supplies the same solve
+with the complete original contact, layer, radiation and finite-coolant heat
+assembly. No independent field or thermal history is restarted.
+
+Every endpoint trial resolves scalar or oriented tensor conductivity from its
+original material source at the actual proposed temperature. Planar and spatial
+hysteretic consumers share the same fitted-source and full caloric-interval
+admission. Magnetic branch coefficients remain constant over that supported
+interval; changing temperature cannot silently replace the fit or erase its
+memory. Complete magnetic source receipts retain the actual endpoint query.
+
+Exact native Joule and irreversible pinning heat enter their assigned finite
+cells once. Electrically insulating magnetic tetrahedra also need a real
+thermal destination whenever they dissipate. Original whole-volume, fully
+solid material correspondence, source identity and clocks are admitted before
+thermal trials. A fixed region with unreceived pinning heat refuses.
+Numerical endpoint dissipation is a separate energy export and never a heat
+source. The stable work account closes
+`delta W_magnetic + delta E_caloric + D_numerical = W_impressed + Q_external`.
+Both physical heat channels remain individually available in the native step;
+`deposited_heat_j()` reports their already-deposited total.
+
+Complete heat providers retain their original typed errors and closed-radiation
+balance, and refuse graph electrical work without an electrical owner. Native
+field and finite-enthalpy budgets, source failures and cancellation publish
+neither accepted history. This is stationary, fixed-geometry, first-order MQS
+with source-admitted isotropic vector hysteresis and constant magnetic fits.
+Transported/rotated magnetic memory, temperature-dependent fit entropy, phase
+changes and empirical device qualification require their respective extensions.
+
 ## Original specific heat in coupled capacity admission
 
 Electrical, dielectric, magnetic, piezoelectric, thermoelastic, creep and

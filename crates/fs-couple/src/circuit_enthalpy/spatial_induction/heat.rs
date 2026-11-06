@@ -4,6 +4,8 @@
 //! path is stepped and no closed-enclosure transfer becomes external supply.
 
 use super::nonlinear::SpatialNonlinearInductionThermalCandidate;
+#[cfg(feature = "magnetic-hysteresis")]
+use super::hysteretic::SpatialHystereticInductionThermalCandidate;
 use super::*;
 use crate::circuit_enthalpy::{
     contacts::heat::{
@@ -18,6 +20,10 @@ use fs_em::spatial::{
     },
 };
 use fs_exec::Cx;
+#[cfg(feature = "magnetic-hysteresis")]
+use fs_em::spatial::vector_potential::induction::hysteretic::{
+    SpatialHystereticInduction, SpatialHystereticInductionControls,
+};
 
 /// Original field/material refusal or the complete heat provider's typed error.
 /// Native cancellation, work exhaustion and thermal/numerical failures remain
@@ -76,6 +82,83 @@ fn close_heat_balance<D, S: AsRef<HeatNetworkSample>, E: From<HeatNetworkError>>
     report.external_heat_j = finite(report.external_heat_j - internal_net)?;
     report.total_energy_residual_j = finite(report.total_energy_residual_j + internal_net)?;
     Ok(())
+}
+
+/// Continue retained 3D vector hysteresis with the same complete material heat
+/// assembly, including sourced contacts, layers, radiation and finite coolant.
+///
+/// The native stationary A–phi field supplies local charge-conserving eddy and
+/// pinning heat. Every proposed finite temperature refreshes original conductor
+/// sources while preserving the accepted vector memory and fixed magnetic fit.
+/// Insulating magnetic material also needs a real receiver when it dissipates.
+/// Numerical magnetic loss remains separate; fitted core-loss maps are absent.
+/// Complete source payloads and closed-radiation accounting follow the existing
+/// spatial induction heat owner. No independent thermal history is introduced.
+#[cfg(feature = "magnetic-hysteresis")]
+#[allow(clippy::too_many_arguments)]
+pub fn hysteretic_heat_assembly_candidate<
+    't,
+    'm,
+    A: HeatAssembly + ?Sized,
+    C: SpatialConductorMaterial,
+>(
+    provider: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'t>,
+    target_s: f64,
+    field: &SpatialHystereticInduction<'m, C>,
+    endpoint_current_a_m2: &[[f64; 3]],
+    regions: &[SpatialMagneticRegion],
+    volume_tolerance_m3: f64,
+    controls: CircuitEnthalpySolve,
+    field_controls: SpatialHystereticInductionControls,
+    initial_energy_increments_j: &[f64],
+) -> Result<
+    SpatialHystereticInductionThermalCandidate<'t, 'm, A::Sample, C>,
+    HeatError<A::Error>,
+> {
+    let cancel = RefCell::new(|| cx.checkpoint().is_err());
+    check(&cancel).map_err(native_error)?;
+    let prepared = provider.prepared_heat_network();
+    let bulk = prepared.thermal_material_network().map_err(heat_error)?;
+    prepared
+        .admit_field_independent_boundaries(cx, &[])
+        .map_err(heat_error)?;
+    let layout = SpatialMagneticThermalNetwork {
+        cells: bulk.cells,
+        links: bulk.links,
+        magnetic_regions: regions,
+        volume_tolerance_m3,
+    };
+    let mut next = layout.step_hysteretic_resolved_candidate(
+        thermal,
+        target_s,
+        field,
+        endpoint_current_a_m2,
+        controls,
+        field_controls,
+        initial_energy_increments_j,
+        |trial| {
+            let coefficients = provider
+                .resolve_heat(cx, trial)
+                .map_err(|error| error.map_source(SpatialInductionHeatError::Heat))?;
+            if !coefficients.contacts.is_empty() || !coefficients.bulk.resistors.is_empty() {
+                return Err(native_error(invalid(
+                    "spatial hysteresis cannot discard graph electrical work",
+                )));
+            }
+            Ok(coefficients.bulk)
+        },
+        |sample: &A::Sample| &sample.as_ref().material,
+        &cancel,
+    )?;
+    close_heat_balance(
+        &mut next.report,
+        target_s - thermal.time_s(),
+        controls.total_energy_tolerance_j,
+    )?;
+    check(&cancel).map_err(native_error)?;
+    Ok(next)
 }
 
 /// Continue the original three-dimensional A–phi and finite-enthalpy histories

@@ -3,6 +3,10 @@
 #[path = "../../fs-em/tests/winding_ohmic/common.rs"]
 mod source;
 
+#[cfg(feature = "magnetic-hysteresis")]
+#[path = "spatial_induction_enthalpy/hysteretic.rs"]
+mod hysteretic;
+
 #[path = "spatial_induction_enthalpy/nonlinear.rs"]
 mod nonlinear;
 

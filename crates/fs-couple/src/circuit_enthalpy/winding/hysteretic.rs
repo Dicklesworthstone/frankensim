@@ -297,7 +297,7 @@ impl WindingThermalNetwork<'_> {
         )?;
         let layout = self.magnetic_layout();
         layout.admit_hysteretic_temperature_support(
-            circuit.field().problem(),
+            circuit.field().problem().materials(),
             &routes.magnetic,
             cancel,
         )?;
@@ -353,7 +353,7 @@ impl WindingThermalNetwork<'_> {
                                  source: &MaterialNetworkSample| {
             layout.hysteretic_materials_at(
                 state,
-                circuit.field().problem(),
+                circuit.field().problem().materials(),
                 &conductors,
                 source,
                 &routes.magnetic,
