@@ -86,6 +86,11 @@ fn each_segment_contributes_its_actual_axial_and_torsional_compliance() {
         let (force, moment) = rod.segment_resultants(i).unwrap();
         near(force[0], 0.5, 3e-5);
         near(moment[0], 0.01, 3e-5);
+        let stress = rod.segment_torsional_stress(i, 0, [0.05, 0.0]).unwrap();
+        let expected_shear = source.layer_shear_modulus_pa(0).unwrap() * 0.05 * 0.01 / gj;
+        near(stress.shear_stress_pa[1], expected_shear, 3e-5);
+        assert_eq!(stress.shear_stress_pa[0], 0.0);
+        assert_eq!(stress.stress_tensor_pa()[0], 0.0); // Axial stress is a separate contribution.
         extension += 0.4 * 0.5 / ea;
         angle += 0.4 * kappa[0];
         expected_energy += 0.5 * 0.4 * (0.5_f64.powi(2) / ea + 0.01_f64.powi(2) / gj);

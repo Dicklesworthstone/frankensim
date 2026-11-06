@@ -190,6 +190,17 @@ impl SpatialMaterialRod {
         self.resultants_from_strains(segment, g, k)
     }
 
+    /// Elastic torsional shear at local [y,z] [m] in the selected segment/layer.
+    /// The native elastic curvature already subtracts any intrinsic reference
+    /// twist. Local axes are its geodesic-midpoint material frame; this does not
+    /// add axial/bending stresses or invent a transverse-force shear profile.
+    pub fn segment_torsional_stress(
+        &self, segment: usize, layer: usize, position_yz_m: [f64; 2],
+    ) -> Result<fs_material::section::torsion::TorsionalStressPoint, SpatialRodError> {
+        let (_, curvature) = self.segment_strains(segment)?;
+        Ok(self.sections[segment].torsional_stress_at_twist(layer, position_yz_m, curvature[0])?)
+    }
+
     // The same constitutive response supplies observations and analytical
     // assembly. No separately copied thermal-force or intrinsic-strain law.
     fn resultants_from_strains(&self, segment: usize, g: [f64; 3], k: [f64; 3])

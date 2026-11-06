@@ -15,6 +15,9 @@ use super::{ConcentricShearSection, MaterialStatePointError, invalid, positive};
 use crate::visco::GeneralizedMaxwell;
 use fs_qty::{DynViscosity, QuantitySpec};
 
+mod stress;
+pub use stress::TorsionalStressPoint;
+
 /// Original source section with rotary mass and a separately selected shear law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ConcentricTorsionalSection {
@@ -27,6 +30,49 @@ pub struct ConcentricTorsionalSection {
 }
 
 impl ConcentricShearSection {
+    /// Resolve the elastic circular-torsion contribution at local [y,z] [m].
+    /// The member axis is local +x. Each perfectly bonded annulus shares the
+    /// signed twist per reference length, but uses its OWN original G, so shear
+    /// stress can jump across layer boundaries. Either side of an interface is
+    /// sampled by selecting that layer explicitly. There is no allocation.
+    ///
+    /// This small-strain Saint-Venant field has tau_xy=-G*kappa*z and
+    /// tau_xz=G*kappa*y. The transverse shear correction does not enter torsion.
+    /// Axial/bending stresses, transverse-force shear, viscous/Prony history,
+    /// end effects, interlayer slip and failure are outside this observation.
+    ///
+    /// # Errors
+    /// Invalid layer, point outside its annulus (including the bore), nonfinite
+    /// inputs, or unrepresentable point stress/strain/storage refuse.
+    pub fn torsional_stress_at_twist(
+        &self,
+        layer: usize,
+        position_yz_m: [f64; 2],
+        twist_per_length_rad_m: f64,
+    ) -> Result<TorsionalStressPoint, MaterialStatePointError> {
+        let outer = self.elastic().layers().get(layer)
+            .ok_or_else(|| invalid("torsional stress layer index is out of range"))?.outer_radius_m;
+        let inner = if layer == 0 { self.elastic().inner_radius_m() }
+            else { self.elastic().layers()[layer - 1].outer_radius_m };
+        stress::sample(inner, outer, self.layer_shear_modulus_pa(layer)?,
+            position_yz_m, twist_per_length_rad_m).map_err(invalid)
+    }
+
+    /// Elastic point stress under signed torque [N m] on the SAME section.
+    /// Uses kappa=T/sum(G_i J_i), not an averaged modulus in T*r/J.
+    pub fn torsional_stress_at_torque(
+        &self,
+        layer: usize,
+        position_yz_m: [f64; 2],
+        torque_n_m: f64,
+    ) -> Result<TorsionalStressPoint, MaterialStatePointError> {
+        let twist = torque_n_m / self.torsional_stiffness_n_m2();
+        if !torque_n_m.is_finite() || !twist.is_finite() || torque_n_m != 0.0 && twist == 0.0 {
+            return Err(invalid("torsional torque or derived twist is unrepresentable"));
+        }
+        self.torsional_stress_at_twist(layer, position_yz_m, twist)
+    }
+
     /// Bind torsional loss and inertia from the SAME ordered material bundles.
     ///
     /// Every layer must supply the named nonnegative shear viscosity [Pa s],

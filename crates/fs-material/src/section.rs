@@ -446,12 +446,14 @@ impl ConcentricElasticSection {
         if shear_correction > 1.0 { return Err(invalid("shear correction must not exceed one")); }
         let mut shear = 0.0;
         let mut torsion = 0.0;
+        let mut layer_shear_moduli_pa = Vec::with_capacity(self.layer_integrals.len());
         for (index, geometry) in self.layer_integrals.iter().enumerate() {
             let property = self.named_shear_source_property(index, property_name)?;
             if property.requirement().quantity() != QuantitySpec::dimensional(Pressure::DIMS) {
                 return Err(invalid("section shear modulus must be dimension-only Pa"));
             }
             let modulus = positive(property.value_si(), "positive finite layer shear modulus")?;
+            layer_shear_moduli_pa.push(modulus);
             let ga = positive(modulus * geometry.area_m2, "layer shear stiffness")?;
             let gj = positive(2.0 * (modulus * geometry.second_moment_m4), "layer torsional stiffness")?;
             shear = positive(shear + ga, "summed shear stiffness")?;
@@ -460,7 +462,7 @@ impl ConcentricElasticSection {
         let shear_stiffness_n = positive(shear_correction * shear, "corrected shear stiffness")?;
         Ok(ConcentricShearSection {
             elastic: self, shear_property: Some(property_name.into()), shear_correction,
-            shear_stiffness_n, torsional_stiffness_n_m2: torsion,
+            shear_stiffness_n, torsional_stiffness_n_m2: torsion, layer_shear_moduli_pa,
         })
     }
 
@@ -477,10 +479,12 @@ impl ConcentricElasticSection {
         }
         let mut shear = 0.0;
         let mut torsion = 0.0;
+        let mut layer_shear_moduli_pa = Vec::with_capacity(self.layer_integrals.len());
         for layer in &self.layer_integrals {
             let modulus = layer.isotropic_shear_modulus_pa.ok_or_else(|| {
                 invalid("derived shear requires an explicit isotropic binding on every layer")
             })?;
+            layer_shear_moduli_pa.push(modulus);
             shear = positive(
                 shear + positive(modulus * layer.area_m2, "layer shear stiffness")?,
                 "summed shear stiffness",
@@ -500,6 +504,7 @@ impl ConcentricElasticSection {
             shear_correction,
             shear_stiffness_n: positive(shear_correction * shear, "corrected shear stiffness")?,
             torsional_stiffness_n_m2: torsion,
+            layer_shear_moduli_pa,
         })
     }
 
@@ -583,6 +588,8 @@ pub struct ConcentricShearSection {
     shear_correction: f64,
     shear_stiffness_n: f64,
     torsional_stiffness_n_m2: f64,
+    // Exact admitted source values; point sampling must not allocate lookup keys.
+    layer_shear_moduli_pa: Vec<f64>,
 }
 impl ConcentricShearSection {
     /// Common geometry and every original material bundle.
@@ -655,20 +662,8 @@ impl ConcentricShearSection {
     }
     /// Original per-layer G [Pa], without recovering it from rounded GJ/A/I.
     pub fn layer_shear_modulus_pa(&self, layer: usize) -> Result<f64, MaterialStatePointError> {
-        let geometry = self
-            .elastic
-            .layer_integrals
-            .get(layer)
-            .ok_or_else(|| invalid("section layer index is out of range"))?;
-        match self.shear_property() {
-            Some(property) => self
-                .elastic
-                .named_shear_source_property(layer, property)
-                .map(ResolvedScalarProperty::value_si),
-            None => geometry
-                .isotropic_shear_modulus_pa
-                .ok_or_else(|| invalid("section lost its derived shear modulus")),
-        }
+        self.layer_shear_moduli_pa.get(layer).copied()
+            .ok_or_else(|| invalid("section layer index is out of range"))
     }
     /// Authored uniform-shear correction.
     #[must_use]
@@ -862,6 +857,19 @@ mod constitutive_tests {
         assert_eq!(loss.omega_band_rad_s(), (10.0, 10000.0));
         assert_eq!(loss.elastic(), &elastic);
         assert_eq!(shear.elastic().layers()[0].material, a);
+
+        // The original per-layer G and uncorrected GJ also own local torsion.
+        let torque = 0.07;
+        let point = [0.001, 0.0];
+        let inner = shear.torsional_stress_at_torque(0, point, torque).unwrap();
+        let outer = shear.torsional_stress_at_torque(1, point, torque).unwrap();
+        near(inner.shear_stress_pa[1], 8e10 * point[0] * torque / shear.torsional_stiffness_n_m2());
+        assert_eq!(inner.engineering_shear_strain, outer.engineering_shear_strain);
+        near(inner.shear_stress_pa[1], 2.0 * outer.shear_stress_pa[1]);
+        let corrected = elastic.with_shear_modulus("shear_modulus", 0.3).unwrap();
+        assert_eq!(corrected.torsional_stress_at_torque(1, point, torque).unwrap(), outer);
+        assert!(shear.torsional_stress_at_torque(2, point, torque).is_err());
+        assert!(shear.torsional_stress_at_torque(1, [0.0005, 0.0], torque).is_err());
     }
 
     #[test]

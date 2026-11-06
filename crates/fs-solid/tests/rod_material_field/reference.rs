@@ -55,6 +55,11 @@ fn g0_intrinsic_camber_and_twist_do_not_create_phantom_stress() {
     .unwrap();
     let rod = SpatialMaterialRod::try_from_reference(twisted, vec![section(1.0); 4]).unwrap();
     assert_eq!(rod.energy_j().unwrap(), 0.0);
+    for segment in 0..4 {
+        let stress = rod.segment_torsional_stress(segment, 0, [0.05, 0.0]).unwrap();
+        assert_eq!(stress.shear_stress_pa, [0.0; 2]);
+        assert_eq!(stress.stored_energy_density_j_m3, 0.0);
+    }
     assert!(
         rod.reference_geometry()
             .unwrap()

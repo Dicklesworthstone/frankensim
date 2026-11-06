@@ -1,5 +1,19 @@
 # fs-solid CONTRACT
 
+## Native rod torsional stress observations
+
+`MaterialRod::segment_torsional_stress` and the same method on
+`SpatialMaterialRod` recover a layer's local torsional shear field from the
+accepted native geodesic-midpoint elastic twist and original source section.
+The spatial owner subtracts intrinsic reference twist before recovery, so an
+unloaded pretwisted rod has zero torsional stress. The point is specified in
+the segment's local [y,z] coordinates; reported tensors share that material
+frame. These allocation-free observations do not alter equilibrium or history.
+Existing uniform/world-couple, heterogeneous-segment and intrinsic-shape tests
+exercise the adapter against analytic torsion. The underlying model remains
+small-strain circular torsion and does not resolve end effects or add the
+separate axial, bending and transverse-force stress contributions.
+
 ## Source-held and thermal frictional trajectories
 
 The same complete-duration friction driver now accepts the original material

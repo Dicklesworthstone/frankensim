@@ -1,5 +1,26 @@
 # fs-material — CONTRACT
 
+## Local shear stress in layered circular torsion
+
+`ConcentricShearSection::torsional_stress_at_twist` and
+`torsional_stress_at_torque` recover the elastic Saint-Venant torsion field
+from the original per-layer G and summed GJ. In the local x-axial frame,
+`tau_xy=-G*kappa*z`, `tau_xz=G*kappa*y`; tensor strain halves the engineering
+shear coordinates and point storage is their work-conjugate elastic energy.
+The section's transverse shear correction never changes this torsional field.
+See MIT 1.050, chapter 8, “Stresses/Deflections Shafts in Torsion”:
+<https://ocw.mit.edu/courses/1-050-solid-mechanics-fall-2004/8c30fdf15d9d50c02f4215903c847d7f_emech8_04.pdf>.
+
+Explicit layer selection admits either material side of an interface and refuses
+the bore, exterior, wrong indices, nonfinite inputs and unrepresentable output.
+Evaluation is bounded and allocation-free, changes no history, and retains the
+original frozen source state. G0/G1/G3 tests in `section/torsion/stress.rs` and
+the existing section tests cover signed stress, tensor work, annular integration,
+material jumps, subdivision and independence from transverse shear correction.
+This is small-strain elastic torsion of perfectly bonded circular layers;
+axial/bending stress, transverse-force shear, viscous history, end effects,
+slip and strength/failure remain separate models.
+
 ## Frozen brittle and cohesive stiffness
 
 `CohesivePoint::frozen_tangent_pa_m` differentiates the original recoverable

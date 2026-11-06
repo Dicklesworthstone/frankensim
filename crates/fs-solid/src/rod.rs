@@ -671,6 +671,17 @@ impl MaterialRod {
     #[must_use]
     pub const fn reference_mass_kg(&self) -> f64 { self.reference_mass_kg }
 
+    /// Elastic torsional stress at local [y,z] [m] in one solved segment.
+    /// Uses the native geodesic-midpoint strain and original layer G. This is
+    /// the torsional contribution only, excluding bending and transverse shear.
+    pub fn segment_torsional_stress(
+        &self, segment: usize, layer: usize, position_yz_m: [f64; 2],
+    ) -> Result<fs_material::section::torsion::TorsionalStressPoint, SolidError> {
+        let (_, curvature) = self.rod.strains(segment)?;
+        self.section.torsional_stress_at_twist(layer, position_yz_m, curvature[0])
+            .map_err(|error| SolidError::MaterialRefused { what: error.to_string() })
+    }
+
     /// Solve with the existing energy/Newton/Lie-group implementation.
     /// Only a fully successful, finite result replaces the previous geometry.
     /// This preserves the legacy solver's numerical and no-dynamics boundaries;
@@ -897,7 +908,12 @@ mod tests {
         let want = load.moment[0] / source.torsional_stiffness_n_m2();
         for segment in 0..2 {
             assert!((rod.rod().strains(segment).unwrap().1[0] - want).abs() < 1e-10);
+            let stress = rod.segment_torsional_stress(segment, 1, [0.1, 0.0]).unwrap();
+            assert!((stress.shear_stress_pa[1] - 8e5 * want * 0.1).abs() < 1e-5);
+            assert_eq!(stress.shear_stress_pa[0], 0.0);
         }
+        assert!(rod.segment_torsional_stress(2, 0, [0.01, 0.0]).is_err());
+        assert!(rod.segment_torsional_stress(0, 2, [0.01, 0.0]).is_err());
         assert_eq!(rod.material_section(), &source);
         let pose = rod.rod().positions.clone();
         assert!(
