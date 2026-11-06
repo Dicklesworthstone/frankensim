@@ -25,6 +25,9 @@ use super::mechanical::{SpatialLorentzLoadError, SpatialLorentzLoadLimits, Spati
 use super::*;
 use std::collections::BTreeSet;
 
+/// Total-current control with solved equipotential electrode voltages.
+pub mod current;
+
 /// Native stage reaction of one physical equipotential electrode.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpatialInductionTerminalTransfer {
@@ -245,6 +248,16 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalInduction<'m, C> {
         self.field.field(cancelled)
     }
 
+    /// Prepare one scalar unknown per non-reference electrode once, retaining
+    /// this exact accepted magnetic history for subsequent current-driven steps.
+    pub fn into_current_driven(
+        self,
+        limits: SpatialInductionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<current::SpatialCurrentInduction<'m, C>> {
+        current::SpatialCurrentInduction::from_voltage_driven(self, limits, cancelled)
+    }
+
     /// Advance the original midpoint A–phi equations with prescribed stage
     /// electrode voltages. The actual current distribution is solved, never
     /// supplied as a uniform current density. Source and velocity conventions
@@ -282,6 +295,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialTerminalInduction<'m, C> {
             layout: &self.terminals,
             potential_v,
             relative_voltage_v,
+            current: None,
         };
         let native = self.field.step_driven_candidate(
             Arc::clone(&self.field.prepared),
@@ -307,12 +321,40 @@ pub(super) struct TerminalDrive<'a> {
     layout: &'a TerminalLayout,
     pub potential_v: Vec<f64>,
     relative_voltage_v: Vec<f64>,
+    current: Option<CurrentDrive<'a>>,
+}
+struct CurrentDrive<'a> {
+    incoming_a: &'a [f64],
+    unknowns: &'a [Option<usize>],
 }
 impl TerminalDrive<'_> {
+    pub fn prescribed_potentials(&self) -> Option<&[f64]> {
+        self.current
+            .is_none()
+            .then_some(self.potential_v.as_slice())
+    }
+
+    pub fn add_current_rhs(
+        &self,
+        rhs: &mut [f64],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<()> {
+        if let Some(current) = &self.current {
+            for (&incoming, &unknown) in current.incoming_a.iter().zip(current.unknowns) {
+                poll(cancelled)?;
+                if let Some(i) = unknown {
+                    rhs[i] = finite(rhs[i] + incoming)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn transfers(
         &self,
         outward_charge_current_a: &[f64],
         duration_s: f64,
+        solution: &[f64],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Vec<SpatialInductionTerminalTransfer>, f64, f64)> {
         if outward_charge_current_a.len() != self.layout.charge_terminal.len() {
@@ -339,7 +381,13 @@ impl TerminalDrive<'_> {
             let component = self.layout.component[terminal];
             let balance = component_balance.entry(component).or_insert(0.0);
             *balance = finite(*balance + incoming_current_a)?;
-            let voltage_to_reference_v = self.relative_voltage_v[terminal];
+            let voltage_to_reference_v = if let Some(current) = &self.current {
+                residual =
+                    residual.max(finite(incoming_current_a - current.incoming_a[terminal])?.abs());
+                current.unknowns[terminal].map_or(Ok(0.0), |i| finite(solution[i] / duration_s))?
+            } else {
+                self.relative_voltage_v[terminal]
+            };
             let supplied_work_j = finite(duration_s * voltage_to_reference_v * incoming_current_a)?;
             work = finite(work + supplied_work_j)?;
             transfers.push(SpatialInductionTerminalTransfer {

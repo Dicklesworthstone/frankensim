@@ -304,6 +304,92 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
         ))
     }
 
+    /// One electric unknown per equipotential current electrode. Distinct
+    /// interior nodes retain their original charge equations. Each component's
+    /// reference electrode fixes only its otherwise arbitrary scalar offset.
+    pub fn with_current_charges(
+        &self,
+        g: Geometry<'_>,
+        charge_terminal: &[Option<usize>],
+        reference: &[usize],
+        limits: SpatialInductionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(Self, Vec<Option<usize>>)> {
+        poll(cancelled)?;
+        let nt = reference.len();
+        if charge_terminal.len() != self.charge_vertices.len()
+            || self.cells.len() > limits.maximum_conducting_cells
+            || reference.iter().any(|&r| r >= nt)
+            || charge_terminal.iter().flatten().any(|&t| t >= nt)
+        {
+            return Err(invalid(
+                "complete bounded equipotential charge groups required",
+            ));
+        }
+        let mut referenced = BTreeMap::new();
+        for (&(component, _), &terminal) in self.charge_vertices.iter().zip(charge_terminal) {
+            poll(cancelled)?;
+            if let Some(t) = terminal {
+                referenced.insert(component, reference[t]);
+            }
+        }
+        let mut unknowns = self.edge_unknown.iter().filter(|i| i.is_some()).count();
+        let mut terminal_unknown = vec![None; nt];
+        let mut charge_unknown = Vec::with_capacity(charge_terminal.len());
+        let mut previous = None;
+        for (&(component, _), &terminal) in self.charge_vertices.iter().zip(charge_terminal) {
+            poll(cancelled)?;
+            let gauge = terminal.is_some_and(|t| reference[t] == t)
+                || (!referenced.contains_key(&component) && previous != Some(component));
+            previous = Some(component);
+            let index = if gauge {
+                None
+            } else if let Some(i) = terminal.and_then(|t| terminal_unknown[t]) {
+                Some(i)
+            } else {
+                let i = unknowns;
+                unknowns = unknowns
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("charge dimension overflow"))?;
+                if let Some(t) = terminal {
+                    terminal_unknown[t] = Some(i);
+                }
+                Some(i)
+            };
+            charge_unknown.push(index);
+        }
+        let coupling = self.with_charge_unknowns(g, charge_unknown, unknowns, limits, cancelled)?;
+        Ok((coupling, terminal_unknown))
+    }
+
+    fn with_charge_unknowns(
+        &self,
+        g: Geometry<'_>,
+        charge_unknown: Vec<Option<usize>>,
+        unknowns: usize,
+        limits: SpatialInductionLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        if unknowns > limits.maximum_unknowns {
+            return Err(invalid("terminal induction unknown budget exceeded"));
+        }
+        let mut cells = self.cells.clone();
+        for c in &mut cells {
+            poll(cancelled)?;
+            for a in 0..4 {
+                c.indices[a + 6] = charge_unknown[c.charges[a]];
+            }
+        }
+        let (mass, physical_mass_diagonal) = assemble_mass(g, &cells, unknowns, cancelled)?;
+        Ok(Self {
+            cells,
+            charge_unknown,
+            mass,
+            physical_mass_diagonal,
+            ..self.clone()
+        })
+    }
+
     /// Reweight the SAME electric support and cached original local basis.
     /// The constitutive caller separately admits every retained source identity.
     pub fn refresh_sources(
@@ -409,24 +495,7 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
                 Some(index)
             });
         }
-        if unknowns > limits.maximum_unknowns {
-            return Err(invalid("terminal induction unknown budget exceeded"));
-        }
-        let mut cells = self.cells.clone();
-        for c in &mut cells {
-            poll(cancelled)?;
-            for a in 0..4 {
-                c.indices[a + 6] = charge_unknown[c.charges[a]];
-            }
-        }
-        let (mass, physical_mass_diagonal) = assemble_mass(g, &cells, unknowns, cancelled)?;
-        Ok(Self {
-            cells,
-            charge_unknown,
-            mass,
-            physical_mass_diagonal,
-            ..self.clone()
-        })
+        self.with_charge_unknowns(g, charge_unknown, unknowns, limits, cancelled)
     }
 
     /// Known scalar-potential contribution to the SAME Whitney/charge form.
@@ -740,7 +809,10 @@ fn assemble_mass(
                 }
                 if let (Some(i), Some(j)) = (c.indices[a], c.indices[b]) {
                     add(&mut mass, i, j, value)?;
-                    if i != j {
+                    // Grouped electrode nodes can share one global unknown.
+                    // Distinct LOCAL basis functions still contribute both
+                    // symmetric cross terms, even to the same global diagonal.
+                    if a != b {
                         add(&mut mass, j, i, value)?;
                     }
                 }

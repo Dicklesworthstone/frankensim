@@ -2687,6 +2687,33 @@ free-charge/electrode conservation, exact voltage common-mode invariance,
 motional open-voltage and short-circuit response, mechanical transfer, and
 budget/geometry/cancellation refusal without partial state publication.
 
+### Total-current electrodes on three-dimensional inducing conductors
+
+`SpatialTerminalInduction::into_current_driven` prepares
+`terminals::current::SpatialCurrentInduction` without changing accepted A,
+material sources or time. All charge nodes on a physical electrode share one
+scalar unknown; its equation prescribes the total incoming reaction current.
+Interior charge nodes remain independent. Each face-connected conductor keeps
+its own reference electrode, and prescribed current must balance separately on
+that conductor. The grouped mass is the original `P^T M P`: distinct local basis
+cross terms are counted twice even when they share a global diagonal entry.
+
+Preparation caches the electrode space and sparse operator. Each stage uses one
+original coupled A–phi solve; no pointwise current profile, DC resistance or
+sampled dense electrode response substitutes for induction. The solved scalar
+potential supplies the actual electrode voltage. All electrode currents,
+including the reference reaction, are independently checked against their
+inputs. The same native current supplies Ohmic heat, consistent mechanical
+loads and signed terminal work in the original midpoint energy balance.
+Conversion back to voltage control retains the identical accepted field/clock.
+
+G0/G1 regressions exercise an independently integrated current-driven cube
+transient and DC limit, voltage/current duality with interior charge nodes,
+motional open-circuit voltage and generator work, refusal of globally balanced
+but separately incompatible conductor currents, and budget/cancellation
+rollback. The parent fixed-geometry/material MQS scope remains in force; this
+adds no contact impedance, displacement current or moving material interface.
+
 ## Source-backed orthotropic conductivity in native 3D induction
 
 `fs_material::conductor::spatial` supplies a sealed shared conductor boundary

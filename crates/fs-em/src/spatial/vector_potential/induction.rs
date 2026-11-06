@@ -466,12 +466,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             }
         }
         if let Some(drive) = terminal_drive {
-            for (rhs, known) in rhs
-                .iter_mut()
-                .zip(p.potential_drive(&drive.potential_v, cancelled)?)
-            {
-                *rhs = finite(*rhs + known)?;
+            if let Some(potential) = drive.prescribed_potentials() {
+                for (rhs, known) in rhs.iter_mut().zip(p.potential_drive(potential, cancelled)?) {
+                    *rhs = finite(*rhs + known)?;
+                }
             }
+            drive.add_current_rhs(&mut rhs, cancelled)?;
         }
         let (motion, drive, maximum_cell_magnetic_peclet) = p.motion(
             g,
@@ -612,12 +612,12 @@ impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
             &stage_flux_density_t,
             velocity_m_s,
             duration_s,
-            terminal_drive.map(|drive| drive.potential_v.as_slice()),
+            terminal_drive.and_then(TerminalDrive::prescribed_potentials),
             cancelled,
         )?;
         let (terminals, terminal_work_j, maximum_charge_residual_a) =
             if let Some(drive) = terminal_drive {
-                drive.transfers(&current.charge_current_a, duration_s, cancelled)?
+                drive.transfers(&current.charge_current_a, duration_s, &x, cancelled)?
             } else {
                 (vec![], 0.0, current.maximum_charge_residual_a)
             };

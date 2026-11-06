@@ -1,5 +1,7 @@
 //! Physical terminal currents and work in the original coupled A–phi field.
 use super::*;
+#[path = "terminals/current.rs"]
+mod current;
 use fs_em::spatial::vector_potential::induction::{
     mechanical::SpatialLorentzLoadLimits, terminals::SpatialTerminalInduction,
 };
