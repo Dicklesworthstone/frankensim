@@ -497,3 +497,20 @@ hysteresis, skin/proximity loss or measured coefficient claims.
 Focused regression definitions cover local and total work, independence from
 unrelated mechanical momenta, reverse-step symmetry, endpoint derivatives,
 coincident states, the constant-law path and invalid-support refusal.
+
+## Annular DG terminal passages
+
+Fixed DG terminal passages accept concentric axial annuli through
+`DgTerminalChannelKind::Annular` and `dg_terminal_annular`. The original annular
+momentum owner retains the actual local gas, unequal radial cell masses, both
+no-slip walls, viscous history and separate pressure, kinetic, viscous, numerical
+and material-change work. Admission requires positive ordered radii,
+representable area, radial gap <= length/10, bounded radial cells and a resolved
+speed Mach ceiling <= 0.3. Attached-area and combined-state budgets still apply.
+Harmonic coupling retains every radial state. Finite-gas inventory includes the
+actual annular passage volume, with main and branch gas ownership kept distinct.
+This is a fixed concentric, axially developed Newtonian reduction. Eccentricity,
+radial moving-pad openings, entrance jets and transition prediction remain
+outside its scope. Existing terminal-group, gas-refresh, caloric-heat and
+harmonic-field regressions now include annular geometry and independent ring
+mass and logarithmic-shear calculations.

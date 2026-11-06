@@ -251,18 +251,20 @@ impl DgSourceInput {
     /// The axial outlet is matrix channel zero, followed by the authored order.
     ///
     /// After any side openings and before dg_radiation, an optional block
-    /// declares finite fixed slit/circular channels or exact closures in series with
+    /// declares finite fixed slit/circular/annular channels or exact closures in series with
     /// existing terminals:
     /// dg_terminal_channels COUNT MAX_TOTAL_TRANSVERSE_CELLS
     /// dg_terminal_closed PORT_ID
     /// dg_terminal_slit PORT_ID WIDTH_M HEIGHT_M LENGTH_M CELLS MAX_MACH
     /// dg_terminal_circular PORT_ID RADIUS_M LENGTH_M CELLS MAX_MACH
+    /// dg_terminal_annular PORT_ID INNER_RADIUS_M OUTER_RADIUS_M LENGTH_M CELLS MAX_MACH
     /// A closed finite chimney retains its complete DG volume and wall memory
     /// with a rigid distal boundary, and consumes no exterior matrix row.
     /// Omitted ports remain directly connected to the full exterior matrix.
     /// Each passage uses the actual terminal gas and the original unsteady transverse
     /// momentum owner. Its fluid memory has a separate explicit cell budget;
-    /// it is not a resolved moving pad, annular gap or turbulent jet model.
+    /// the annular passage has two fixed concentric walls and axial through-flow.
+    /// Moving pads, radial pad openings and turbulent jets are not resolved.
     ///
     /// Error type E lets callers retain their existing line-aware row reader.
     #[allow(clippy::too_many_arguments)]
@@ -548,7 +550,14 @@ impl DgSourceInput {
                             radial_cells: row.count(MAX_DG_TERMINAL_TRANSVERSE_CELLS)?,
                             maximum_mach: row.positive()?,
                         },
-                        _ => return Err(bad(line, "expected a closed terminal or finite slit/circular channel").into()),
+                        "dg_terminal_annular" => DgTerminalChannelKind::Annular {
+                            inner_radius_m: row.positive()?,
+                            outer_radius_m: row.positive()?,
+                            length_m: row.positive()?,
+                            radial_cells: row.count(MAX_DG_TERMINAL_TRANSVERSE_CELLS)?,
+                            maximum_mach: row.positive()?,
+                        },
+                        _ => return Err(bad(line, "expected a closed terminal or finite slit/circular/annular channel").into()),
                     };
                     row.finish()?;
                     let channel = DgTerminalChannelInput { port, kind };

@@ -165,6 +165,10 @@ pub(crate) fn admitted_volume<E>(
             DgTerminalChannelKind::Circular {
                 radius_m, length_m, ..
             } => core::f64::consts::PI * radius_m * radius_m * length_m,
+            DgTerminalChannelKind::Annular {
+                inner_radius_m, outer_radius_m, length_m, ..
+            } => core::f64::consts::PI * (outer_radius_m - inner_radius_m)
+                * (outer_radius_m + inner_radius_m) * length_m,
         };
     }
     if !volume.is_finite() || volume <= 0.0 {
@@ -493,7 +497,7 @@ impl DgPortLoad {
     /// owner must close that heat/enthalpy/work account before acoustic refresh.
     ///
     /// The well-mixed fixed volume is the original uniform circular main bore
-    /// PLUS every finite slit/circular terminal passage using its gas. Finite
+    /// PLUS every finite slit/circular/annular terminal passage using its gas. Finite
     /// branches and their passages keep their independent gas and are excluded
     /// from this inventory. Existing equal-pressure junction/exterior admission
     /// still applies. The bracket magnitude also bounds the sum of absolute

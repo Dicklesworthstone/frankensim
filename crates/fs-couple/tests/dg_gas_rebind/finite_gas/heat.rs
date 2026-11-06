@@ -118,6 +118,13 @@ fn complete_passage_heat_matches_resolved_shear_and_independent_caloric_balance(
             radial_cells: 8,
             maximum_mach: 0.2,
         },
+        DgTerminalChannelKind::Annular {
+            inner_radius_m: 2e-5,
+            outer_radius_m: 6e-5,
+            length_m: 0.001,
+            radial_cells: 8,
+            maximum_mach: 0.2,
+        },
     ] {
         let passage_volume = match kind {
             DgTerminalChannelKind::Slit {
@@ -129,6 +136,10 @@ fn complete_passage_heat_matches_resolved_shear_and_independent_caloric_balance(
             DgTerminalChannelKind::Circular {
                 radius_m, length_m, ..
             } => core::f64::consts::PI * radius_m * radius_m * length_m,
+            DgTerminalChannelKind::Annular {
+                inner_radius_m, outer_radius_m, length_m, ..
+            } => core::f64::consts::PI
+                * (outer_radius_m.powi(2) - inner_radius_m.powi(2)) * length_m,
             _ => unreachable!(),
         };
         let mut load = load(&cold, false)
@@ -216,6 +227,31 @@ fn complete_passage_heat_matches_resolved_shear_and_independent_caloric_balance(
                         .enumerate()
                         .map(|(i, (a, b))| (2 * i + 1) as f64 * (a - b).powi(2))
                         .sum::<f64>();
+                (shear, numerical)
+            }
+            DgTerminalChannelKind::Annular {
+                inner_radius_m, outer_radius_m, length_m, ..
+            } => {
+                let n = velocity.len();
+                let dr = (outer_radius_m - inner_radius_m) / n as f64;
+                let centre = |i: usize| inner_radius_m + (i as f64 + 0.5) * dr;
+                // Integrating cylindrical shear resistance gives
+                // g = 2*pi*mu*L / ln(r_right/r_left), including BOTH walls.
+                let gradients = velocity[0].powi(2)
+                    / fs_math::det::ln(centre(0) / inner_radius_m)
+                    + (1..n).map(|i| (velocity[i] - velocity[i - 1]).powi(2)
+                        / fs_math::det::ln(centre(i) / centre(i - 1))).sum::<f64>()
+                    + velocity[n - 1].powi(2)
+                        / fs_math::det::ln(outer_radius_m / centre(n - 1));
+                let shear = core::f64::consts::TAU * material.dynamic_viscosity
+                    * length_m * gradients * DT;
+                let numerical = 0.5 * material.density * length_m
+                    * velocity.iter().zip(previous).enumerate().map(|(i, (a, b))| {
+                        let left = inner_radius_m + i as f64 * dr;
+                        let right = inner_radius_m + (i + 1) as f64 * dr;
+                        core::f64::consts::PI * (right * right - left * left)
+                            * (a - b).powi(2)
+                    }).sum::<f64>();
                 (shear, numerical)
             }
             _ => unreachable!(),

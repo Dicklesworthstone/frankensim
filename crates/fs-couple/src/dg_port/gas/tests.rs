@@ -314,6 +314,17 @@ fn volumes(kind: DgTerminalChannelKind) -> Vec<f64> {
                 })
                 .collect()
         }
+        DgTerminalChannelKind::Annular {
+            inner_radius_m, outer_radius_m, length_m, radial_cells, ..
+        } => {
+            let dr = (outer_radius_m - inner_radius_m) / radial_cells as f64;
+            (0..radial_cells)
+                .map(|i| {
+                    core::f64::consts::PI * length_m * dr
+                        * (2.0 * inner_radius_m + (2 * i + 1) as f64 * dr)
+                })
+                .collect()
+        }
         DgTerminalChannelKind::Closed => Vec::new(),
     }
 }
@@ -331,7 +342,17 @@ fn g1_live_terminal_gas_preserves_cell_momenta_and_closes_aggregate_work() {
             maximum_mach: 0.2,
         },
     };
-    for outlet in [slit(OUTLET), round] {
+    let annular = DgTerminalChannelInput {
+        port: OUTLET,
+        kind: DgTerminalChannelKind::Annular {
+            inner_radius_m: 4e-5,
+            outer_radius_m: 8e-5,
+            length_m: 0.002,
+            radial_cells: 8,
+            maximum_mach: 0.2,
+        },
+    };
+    for outlet in [slit(OUTLET), round, annular] {
         let mut live = load(&before)
             .with_terminal_channels(vec![slit(SIDE), outlet], 16)
             .unwrap();

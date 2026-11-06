@@ -452,6 +452,37 @@ pub(super) fn gap_oracle(omega: f64, circular: bool) -> (C64, Vec<C64>, Vec<f64>
     }
 }
 
+fn annular_kind() -> DgTerminalChannelKind {
+    DgTerminalChannelKind::Annular {
+        inner_radius_m: 0.0005, outer_radius_m: 0.0015, length_m: 0.02,
+        radial_cells: 2, maximum_mach: 0.1,
+    }
+}
+
+// Independent two-ring momentum solve: neither radial face is a symmetry axis.
+// Logarithmic face resistances integrate cylindrical shear between the two
+// declared walls and the cell centres at 0.00075 and 0.00125 metres.
+fn annular_oracle(omega: f64) -> (C64, Vec<C64>, Vec<f64>, Vec<f64>) {
+    let gas = gas();
+    let s = C64::new(0.0, -omega);
+    let areas = [
+        core::f64::consts::PI * (0.001_f64.powi(2) - 0.0005_f64.powi(2)),
+        core::f64::consts::PI * (0.0015_f64.powi(2) - 0.001_f64.powi(2)),
+    ];
+    let masses = areas.map(|area| gas.density * 0.02 * area);
+    let shear = core::f64::consts::TAU * gas.dynamic_viscosity * 0.02;
+    let faces = [shear / det::ln(1.5), shear / det::ln(5.0 / 3.0), shear / det::ln(1.2)];
+    let inner_diagonal = C64::from_re(faces[0] + faces[1]) + s.scale(masses[0]);
+    let outer_diagonal = C64::from_re(faces[1] + faces[2]) + s.scale(masses[1]);
+    let determinant = inner_diagonal * outer_diagonal - C64::from_re(faces[1].powi(2));
+    let inner = (outer_diagonal.scale(areas[0]) + C64::from_re(faces[1] * areas[1]))
+        / determinant;
+    let outer = (inner_diagonal.scale(areas[1]) + C64::from_re(faces[1] * areas[0]))
+        / determinant;
+    let impedance = C64::ONE / (inner.scale(areas[0]) + outer.scale(areas[1]));
+    (impedance, vec![inner, outer], masses.to_vec(), faces.to_vec())
+}
+
 fn reference_with_gap(omega: f64, gap_impedance: C64, force: C64) -> (C64, C64, C64, C64) {
     let (zc, resistance, gain, column) = coefficients();
     let s = C64::new(0.0, -omega);
@@ -512,17 +543,21 @@ fn slit_complex_impedance_converges_to_continuous_unsteady_poiseuille_flow() {
 }
 
 #[test]
-fn continuous_slit_and_circular_fields_load_resonance_with_original_storage_and_heat() {
+fn continuous_slit_circular_and_annular_fields_load_resonance_with_original_storage_and_heat() {
     let system = oscillator();
     let (_, _, _, column) = coefficients();
     let force = C64::new(1e-5, -4e-6);
     let gate = CancelGate::new_clock_free();
-    for circular in [false, true] {
+    for kind in [gap_kind(false), gap_kind(true), annular_kind()] {
         let load = loaded(4, 25.0).with_terminal_channels(
-            vec![DgTerminalChannelInput { port: TERMINAL, kind: gap_kind(circular) }], 8,
+            vec![DgTerminalChannelInput { port: TERMINAL, kind }], 8,
         ).unwrap();
         for omega in [600.0, 1300.0, 1800.0] {
-            let (impedance, unit_velocity, masses, faces) = gap_oracle(omega, circular);
+            let (impedance, unit_velocity, masses, faces) = if matches!(kind, DgTerminalChannelKind::Annular { .. }) {
+                annular_oracle(omega)
+            } else {
+                gap_oracle(omega, matches!(kind, DgTerminalChannelKind::Circular { .. }))
+            };
             let expected = reference_with_gap(omega, impedance, force);
             let response = system.harmonic_response_with_load(
                 omega, &[force], &load, &[column], WORK, &gate,

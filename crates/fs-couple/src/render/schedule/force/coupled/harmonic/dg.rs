@@ -499,7 +499,8 @@ impl CoupledModalSystem {
                     )?;
                     let maximum_mach = match owner.input().kind {
                         DgTerminalChannelKind::Slit { maximum_mach, .. }
-                        | DgTerminalChannelKind::Circular { maximum_mach, .. } => maximum_mach,
+                        | DgTerminalChannelKind::Circular { maximum_mach, .. }
+                        | DgTerminalChannelKind::Annular { maximum_mach, .. } => maximum_mach,
                         DgTerminalChannelKind::Closed => return Err(invalid(
                             "continuous finite channel lost its physical geometry").into()),
                     };

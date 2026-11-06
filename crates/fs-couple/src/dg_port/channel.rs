@@ -9,6 +9,7 @@
 use super::*;
 use crate::bernoulli_aperture::slit_channel::{
     ChannelGasUpdate, FixedChannel, SlitChannel, SlitChannelSpec, SlitChannelStep, SlitExit,
+    annular::{AnnularChannel, AnnularChannelSpec},
     circular::{CircularChannel, CircularChannelSpec},
 };
 use fs_material::gas::GasState;
@@ -43,6 +44,17 @@ pub enum DgTerminalChannelKind {
         /// Maximum absolute resolved cell speed / local sound speed, in (0,.3].
         maximum_mach: f64,
     },
+    /// Fixed concentric no-slip passage with both material walls and its
+    /// original annular momentum field. Flow is axial through the supplied
+    /// length; eccentricity, radial pad openings and entrance jets are absent.
+    Annular {
+        inner_radius_m: f64,
+        outer_radius_m: f64,
+        length_m: f64,
+        radial_cells: usize,
+        /// Maximum absolute resolved cell speed / local sound speed, in (0,.3].
+        maximum_mach: f64,
+    },
 }
 
 impl DgTerminalChannelKind {
@@ -53,14 +65,17 @@ impl DgTerminalChannelKind {
                 Some((width_m * height_m, transverse_cells)),
             Self::Circular { radius_m, radial_cells, .. } =>
                 Some((core::f64::consts::PI * radius_m * radius_m, radial_cells)),
+            Self::Annular { inner_radius_m, outer_radius_m, radial_cells, .. } =>
+                Some((core::f64::consts::PI * (outer_radius_m - inner_radius_m)
+                    * (outer_radius_m + inner_radius_m), radial_cells)),
         }
     }
 
     fn maximum_mach(self) -> Option<f64> {
         match self {
             Self::Closed => None,
-            Self::Slit { maximum_mach, .. } | Self::Circular { maximum_mach, .. } =>
-                Some(maximum_mach),
+            Self::Slit { maximum_mach, .. } | Self::Circular { maximum_mach, .. }
+            | Self::Annular { maximum_mach, .. } => Some(maximum_mach),
         }
     }
 }
@@ -75,7 +90,8 @@ pub struct DgTerminalChannelInput {
 impl DgTerminalChannelInput {
     /// Geometry-only admission, usable before source preparation/material I/O.
     /// The planar reduction requires height <= width/10 and length/10;
-    /// the circular reduction requires radius <= length/10.
+    /// the circular reduction requires radius <= length/10, and the annular
+    /// reduction requires a positive radial gap <= length/10.
     pub fn validate(&self) -> Result<(), AcousticRealizeError> {
         if let DgTerminalChannelKind::Slit {
             width_m, height_m, length_m, transverse_cells, maximum_mach,
@@ -101,6 +117,20 @@ impl DgTerminalChannelInput {
                 || !(core::f64::consts::PI * radius_m * radius_m).is_finite()
             {
                 return Err(invalid("DG terminal circular passage requires a finite slender cylinder, 2..=4096 cells and Mach in (0,.3]"));
+            }
+        }
+        if let DgTerminalChannelKind::Annular {
+            inner_radius_m, outer_radius_m, length_m, radial_cells, maximum_mach,
+        } = self.kind {
+            let gap = outer_radius_m - inner_radius_m;
+            let area = core::f64::consts::PI * gap * (outer_radius_m + inner_radius_m);
+            if ![inner_radius_m, outer_radius_m, length_m, maximum_mach, gap, area].iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+                || gap > 0.1 * length_m
+                || !(2..=MAX_DG_TERMINAL_TRANSVERSE_CELLS).contains(&radial_cells)
+                || maximum_mach > 0.3
+            {
+                return Err(invalid("DG terminal annulus requires finite positive ordered radii, area and a slender gap, 2..=4096 cells and Mach in (0,.3]"));
             }
         }
         Ok(())
@@ -217,7 +247,7 @@ impl DgTerminalChannelFrame {
 }
 
 impl DgPortLoad {
-    /// Insert fixed finite slit/circular channels or rigid closures before the existing
+    /// Insert fixed finite slit/circular/annular channels or rigid closures before the existing
     /// full exterior impedance. Unspecified terminals retain their original
     /// direct connection. Material density, viscosity and sound speed come from
     /// the ACTUAL local terminal, including the end of a finite DG chimney.
@@ -225,8 +255,8 @@ impl DgPortLoad {
     /// All supplied geometry is cold; runtime opening changes would require
     /// moving-boundary work, displaced volume and conservative field transfer
     /// and are deliberately not exposed by this fixed-geometry constructor.
-    /// Both geometries use the original laminar unsteady Stokes owner. This
-    /// does not change the exterior surface geometry or resolve an annular pad
+    /// All geometries use the original laminar unsteady Stokes owner. This
+    /// does not change the exterior surface geometry or resolve a radial pad
     /// opening. Each channel is an additional supplied passage; it must not
     /// duplicate geometry or losses already resolved by a DG chimney.
     pub fn with_terminal_channels(
@@ -284,6 +314,14 @@ impl DgPortLoad {
                 DgTerminalChannelKind::Circular { radius_m, length_m, radial_cells, .. } => {
                     Some(CircularChannel::from_gas(&gas, CircularChannelSpec {
                         length_m, radius_m, radial_cells,
+                        sample_period_s: self.propagator.dt(), exit: SlitExit::StaticPressure,
+                    })?.into())
+                }
+                DgTerminalChannelKind::Annular {
+                    inner_radius_m, outer_radius_m, length_m, radial_cells, ..
+                } => {
+                    Some(AnnularChannel::from_gas(&gas, AnnularChannelSpec {
+                        length_m, inner_radius_m, outer_radius_m, radial_cells,
                         sample_period_s: self.propagator.dt(), exit: SlitExit::StaticPressure,
                     })?.into())
                 }

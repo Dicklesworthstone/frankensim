@@ -71,6 +71,13 @@ fn circular(port: PortId, radius_m: f64) -> DgTerminalChannelInput {
     } }
 }
 
+fn annular(port: PortId, inner_radius_m: f64, outer_radius_m: f64) -> DgTerminalChannelInput {
+    DgTerminalChannelInput { port, kind: DgTerminalChannelKind::Annular {
+        inner_radius_m, outer_radius_m, length_m: 0.002, radial_cells: 16,
+        maximum_mach: 0.2,
+    } }
+}
+
 fn near(actual: f64, expected: f64, scale: f64) {
     assert!((actual - expected).abs() <= 2e-9 * scale.max(1e-300),
         "actual={actual}, expected={expected}, scale={scale}");
@@ -78,10 +85,13 @@ fn near(actual: f64, expected: f64, scale: f64) {
 
 #[test]
 fn full_gap_group_matches_uncondensed_pressure_rows_and_original_fluid_histories() {
-    for (walls, round) in [(false, false), (true, false), (false, true), (true, true)] {
+    for (walls, side) in [
+        (false, slit(SIDE, 4e-5)), (true, slit(SIDE, 4e-5)),
+        (false, circular(SIDE, 8e-5)), (true, circular(SIDE, 8e-5)),
+        (false, annular(SIDE, 4e-5, 8e-5)), (true, annular(SIDE, 4e-5, 8e-5)),
+    ] {
         for branched in [false, true] {
-            let channels = if round { vec![circular(SIDE, 8e-5), slit(OUTLET, 7e-5)] }
-                else { vec![slit(SIDE, 4e-5), slit(OUTLET, 7e-5)] };
+            let channels = vec![side, slit(OUTLET, 7e-5)];
             let mut load = load(walls, branched.then(air)).with_terminal_channels(
                 channels, 32).unwrap();
             let main = load.propagator().clone();
@@ -343,6 +353,52 @@ fn retained_gap_kinetic_energy_can_return_signed_work_without_becoming_negative_
     near(storage_change + loss + external, trial.inlet_work_j(),
         storage_change.abs() + loss.abs() + external.abs() + trial.inlet_work_j().abs());
     trial.accept();
+}
+
+#[test]
+fn g0_annular_preflight_keeps_both_walls_stable_area_and_physical_limits() {
+    let source = load(false, None);
+    let valid = annular(SIDE, 4e-5, 8e-5);
+    let admitted = source.clone().with_terminal_channels(vec![valid], 16).unwrap();
+    let native = admitted.terminal_channels()[0].channel().unwrap().annular().unwrap();
+    assert_eq!(native.spec().inner_radius_m, 4e-5);
+    assert_eq!(native.spec().outer_radius_m, 8e-5);
+    assert_eq!(native.gas(), admitted.terminal_channels()[0].gas());
+    assert!(source.clone().with_terminal_channels(vec![valid], 15).is_err());
+    for (inner, outer, length, cells, mach) in [
+        (0.0, 8e-5, 0.002, 16, 0.2),
+        (-4e-5, 8e-5, 0.002, 16, 0.2),
+        (8e-5, 8e-5, 0.002, 16, 0.2),
+        (9e-5, 8e-5, 0.002, 16, 0.2),
+        (f64::NAN, 8e-5, 0.002, 16, 0.2),
+        (4e-5, f64::INFINITY, 0.002, 16, 0.2),
+        (4e-5, 8e-5, 0.0001, 16, 0.2),
+        (1e-200, 2e-200, 0.002, 16, 0.2),
+        (1e200, 2e200, 1e202, 16, 0.2),
+        (4e-5, 8e-5, 0.002, 1, 0.2),
+        (4e-5, 8e-5, 0.002, 4097, 0.2),
+        (4e-5, 8e-5, 0.002, 16, 0.0),
+        (4e-5, 8e-5, 0.002, 16, 0.31),
+    ] {
+        let input = DgTerminalChannelInput { port: SIDE, kind: DgTerminalChannelKind::Annular {
+            inner_radius_m: inner, outer_radius_m: outer, length_m: length,
+            radial_cells: cells, maximum_mach: mach,
+        } };
+        assert!(input.validate().is_err(), "admitted {input:?}");
+    }
+    let inner: f64 = 0.0005;
+    let outer = f64::from_bits(inner.to_bits() + 1);
+    let narrow = annular(SIDE, inner, outer);
+    narrow.validate().unwrap();
+    let (area, _) = narrow.kind.section().unwrap();
+    let thin_limit = core::f64::consts::TAU * inner * (outer - inner);
+    assert!((area / thin_limit - 1.0).abs() < 1e-14);
+    let wide = DgTerminalChannelInput { port: SIDE, kind: DgTerminalChannelKind::Annular {
+        inner_radius_m: 0.002, outer_radius_m: 0.003, length_m: 0.02,
+        radial_cells: 16, maximum_mach: 0.2,
+    } };
+    wide.validate().unwrap();
+    assert!(source.with_terminal_channels(vec![wide], 16).is_err());
 }
 
 #[test]
