@@ -159,6 +159,8 @@ impl<'m> PreparedIonizedGasLayerIllumination<'m> {
             incident,
             exit,
             omega_rad_s,
+            wave_number_rad_m: stack.wave_number,
+            reference_admittance_s: reference,
             excitation,
             boundary,
             layers: admitted,

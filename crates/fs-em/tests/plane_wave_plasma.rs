@@ -9,6 +9,9 @@ mod layer_fields;
 #[path = "plane_wave_plasma/one_sided.rs"]
 mod one_sided;
 
+#[path = "plane_wave_plasma/depth_heat.rs"]
+mod depth_heat;
+
 use fs_em::plane_wave::{
     DielectricResponse, IonizedGasWaveResponse, PlanarDielectricInterface, Polarization,
     ReflectionError,

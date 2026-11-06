@@ -4814,3 +4814,37 @@ cancellation and source/depth/port restrictions. Pinned Rust formatting/parser,
 bounded API/physics review and independent fixture-based power-balance
 calculations passed. Native Rust regressions were authored but not executed
 in the shared editing environment.
+
+## Conservative heat cells inside admitted ionized-gas films
+
+The admitted film owner now exposes
+`layer_absorbed_power_in_depth_interval_w_m2` and
+`layer_carrier_heating_in_depth_interval` for its original physical wave.
+Both simultaneous two-face sources and one-sided illumination with a passive
+exit retain the same amplitude and whole-film drift admission.
+
+Each query restricts the existing positive slab loss operator to two actual
+cached E/H traces. Original wave coefficients and reference admittance are
+retained at preparation; DD endpoint differences preserve the interval phase.
+The two positive loss modes are summed in DD. This O(1), allocation-free
+calculation preserves standing-wave interference and longitudinal TM loss
+without depth quadrature, boundary-flux subtraction, new material evaluation
+or another stack/carrier solve. A complete-film interval returns the cached
+original result exactly; disjoint cells recover that integrated film power.
+
+Gas-cell heat retains the original electron/heavy fractions and signed
+exchange correction. That correction is included in the partition and must
+not be deposited a second time. Empty gas cells and zero-thickness identity
+films return an explicit zero partition; ordinary films return no carrier
+partition. Invalid indices or depth ranges refuse before either outcome.
+A thermal consumer owns area/time conversion and one deposition per cell;
+these spectral cycle means do not evolve a reservoir or population.
+
+Three focused regression groups specify independent coherent two-wave volume
+integrals for TE/TM, positive cell heat below boundary-flux subtraction
+resolution, cell additivity and exact whole-film recovery; original Coulomb
+partitions under absorbing/critical exits; and opaque skin-depth heat,
+zero-volume/lossless cases and depth/index restrictions. Pinned Rust
+formatting/parser checks and bounded source/API/math review passed. The
+native Rust regressions were authored but not executed in the shared editing
+environment.

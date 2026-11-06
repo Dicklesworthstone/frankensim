@@ -9,6 +9,7 @@
 use super::*;
 
 mod one_sided;
+mod thermal;
 use fs_material::{
     field_storage::linear_electric_permittivity,
     ionized_gas::{IonizedGasError, IonizedGasHarmonicResponse},
@@ -36,6 +37,7 @@ pub struct IonizedGasLayerHeating {
 
 struct AdmittedLayer<'m> {
     source: DielectricLayer<'m>,
+    wave: WaveMedium,
     kernel: Option<LayerFieldKernel>,
     longitudinal: C64,
     root_loss: f64,
@@ -68,6 +70,8 @@ pub struct PreparedIonizedGasLayerIllumination<'m> {
     incident: DielectricResponse<'m>,
     exit: DielectricResponse<'m>,
     omega_rad_s: f64,
+    wave_number_rad_m: f64,
+    reference_admittance_s: f64,
     excitation: IonizedGasLayerExcitation,
     boundary: CoherentLayerIllumination,
     layers: Vec<AdmittedLayer<'m>>,
@@ -183,6 +187,8 @@ impl<'m> PreparedIonizedGasLayerIllumination<'m> {
             incident,
             exit,
             omega_rad_s,
+            wave_number_rad_m: stack.wave_number,
+            reference_admittance_s: illumination.port_admittance_s()[0],
             excitation,
             boundary,
             layers: admitted,
@@ -335,6 +341,7 @@ fn admit_layer<'m>(
     }
     let mut layer = AdmittedLayer {
         source,
+        wave: selected.wave,
         kernel,
         longitudinal,
         root_loss,
