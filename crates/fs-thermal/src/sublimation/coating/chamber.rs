@@ -12,7 +12,7 @@
 //! independent. Gas sensible heat, nucleation, porosity, moving geometry and
 //! through-coating thermal resistance are not inferred by this operation.
 
-use super::{SupportedSurfaceState, SupportedSurfaceStep, advance_supported_surface};
+use super::{SupportedSurfaceState, SupportedSurfaceStep, advance_supported_surface_with_heat};
 use crate::sublimation::chamber::{
     ChamberExchange, ChamberSolverConfig, InitialSurface, compensated_add, solve_chamber,
 };
@@ -50,7 +50,9 @@ pub struct SupportedChamberStep {
     pub mass_residual_kg: f64,
     /// Trial-pressure mass closure, separate from represented inventory, kg.
     pub nonlinear_mass_residual_kg: f64,
-    /// Substrate and deposit storage changes plus carried vapor energy, J.
+    /// Signed heat supplied to substrates and deposits, counted once, J.
+    pub supplied_heat_j: f64,
+    /// Substrate and deposit storage plus vapor energy minus supplied heat, J.
     pub energy_residual_j: f64,
     pub pressure_iterations: usize,
 }
@@ -66,7 +68,7 @@ impl ChamberExchange for SupportedSurfaceStep {
 
 /// Advance shared vapor, original substrate calorics and supported deposits.
 ///
-/// The existing bounded pressure root calls `advance_supported_surface` at one
+/// The existing bounded pressure root calls the original supported-surface solve at one
 /// prescribed trial pressure for each surface; final vapor mass is reconstructed
 /// from those same accepted transfers. This is first-order backward-Euler mass
 /// coupling, not the independent finite-bath exponential used by a single
@@ -83,6 +85,60 @@ pub fn advance_supported_chamber(
     duration_s: f64,
     config: ChamberSolverConfig,
     substrate_temperature: impl Fn(usize, f64) -> Result<f64, SublimationError>,
+    checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<SupportedChamberStep, SublimationError> {
+    advance_supported_chamber_impl(
+        surfaces,
+        reservoir,
+        duration_s,
+        |_| 0.0,
+        config,
+        substrate_temperature,
+        checkpoint,
+    )
+}
+
+/// Supply signed heat to every selected substrate/deposit pair while they share
+/// one vapor inventory. Entries follow input surface order; positive values
+/// heat that pair, negative values cool it. Every entry must be finite.
+///
+/// Each original substrate chart keeps its own datum. The deposits and vapor
+/// share their original common datum. Heat, latent transfer, both stored
+/// materials and common endpoint pressure participate in one coupled solve.
+/// A bare or unheated substrate still receives vapor from warmer deposits.
+pub fn advance_supported_chamber_with_heat(
+    surfaces: &[SupportedChamberSurface<'_>],
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    supplied_heat_j: &[f64],
+    config: ChamberSolverConfig,
+    substrate_temperature: impl Fn(usize, f64) -> Result<f64, SublimationError>,
+    mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
+) -> Result<SupportedChamberStep, SublimationError> {
+    checkpoint()?;
+    if supplied_heat_j.len() != surfaces.len() {
+        return Err(SublimationError::Invalid(
+            "supported chamber heat must match the input surface count",
+        ));
+    }
+    advance_supported_chamber_impl(
+        surfaces,
+        reservoir,
+        duration_s,
+        |index| supplied_heat_j[index],
+        config,
+        substrate_temperature,
+        checkpoint,
+    )
+}
+
+fn advance_supported_chamber_impl(
+    surfaces: &[SupportedChamberSurface<'_>],
+    reservoir: VaporReservoir,
+    duration_s: f64,
+    supplied_heat_j: impl Fn(usize) -> f64,
+    config: ChamberSolverConfig,
+    substrate_temperature: impl Fn(usize, f64) -> Result<f64, SublimationError>,
     mut checkpoint: impl FnMut() -> Result<(), SublimationError>,
 ) -> Result<SupportedChamberStep, SublimationError> {
     let solution = solve_chamber(
@@ -93,6 +149,9 @@ pub fn advance_supported_chamber(
         |index| {
             let surface = surfaces[index];
             let state = surface.state;
+            if !supplied_heat_j(index).is_finite() {
+                return Err(SublimationError::Invalid("nonfinite supplied chamber heat"));
+            }
             if !positive(state.substrate_mass_kg)
                 || !state.substrate_specific_enthalpy_j_kg.is_finite()
                 || !nonnegative(state.deposit_mass_kg)
@@ -113,12 +172,13 @@ pub fn advance_supported_chamber(
         },
         |index, reservoir, checkpoint| {
             let surface = surfaces[index];
-            let value = advance_supported_surface(
+            let value = advance_supported_surface_with_heat(
                 surface.law,
                 surface.kinetics,
                 surface.state,
                 reservoir,
                 duration_s,
+                supplied_heat_j(index),
                 config.surface_solver,
                 |h| substrate_temperature(index, h),
                 surface.deposit_enthalpy,
@@ -134,6 +194,8 @@ pub fn advance_supported_chamber(
     let mut substrate_correction = 0.0;
     let mut deposit_energy = 0.0;
     let mut deposit_correction = 0.0;
+    let mut supplied = 0.0;
+    let mut supplied_correction = 0.0;
     for surface in &solution.surfaces {
         checkpoint()?;
         compensated_add(
@@ -146,6 +208,11 @@ pub fn advance_supported_chamber(
             &mut deposit_correction,
             surface.deposit_energy_change_j,
         );
+        compensated_add(
+            &mut supplied,
+            &mut supplied_correction,
+            surface.phase.supplied_heat_j,
+        );
     }
     Ok(SupportedChamberStep {
         surfaces: solution.surfaces,
@@ -157,6 +224,7 @@ pub fn advance_supported_chamber(
         deposit_energy_change_j: finite(deposit_energy + deposit_correction)?,
         mass_residual_kg: solution.mass_residual_kg,
         nonlinear_mass_residual_kg: solution.nonlinear_mass_residual_kg,
+        supplied_heat_j: finite(supplied + supplied_correction)?,
         energy_residual_j: solution.energy_residual_j,
         pressure_iterations: solution.pressure_iterations,
     })

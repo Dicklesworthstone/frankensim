@@ -134,7 +134,8 @@ fn conservation(
             .sum::<f64>();
     close(new_mass, old_mass, 1e-18, 1e-13);
     close(
-        step.substrate_energy_change_j + step.deposit_energy_change_j + step.vapor_energy_j,
+        step.substrate_energy_change_j + step.deposit_energy_change_j + step.vapor_energy_j
+            - step.supplied_heat_j,
         0.0,
         5e-9,
         0.0,
@@ -406,4 +407,107 @@ fn g0_caps_bad_species_and_cancellation_refuse_atomically() {
     assert_eq!(empty.reservoir, bath);
     assert!(empty.surfaces.is_empty());
     assert_eq!(empty.pressure_iterations, 0);
+}
+
+#[test]
+fn g1_supplied_heat_matches_a_manufactured_hot_coating_and_bare_cold_receiver() {
+    let mut surfaces = [
+        surface(0.001, 1e-3, TEMPERATURE),
+        surface(0.001, 0.0, TEMPERATURE),
+    ];
+    for surface in &mut surfaces {
+        surface.law = &CLAUSIUS;
+    }
+    let targets = [260.0_f64, 225.0_f64];
+    let dt = 0.1;
+    let latent = 500_000.0;
+    let coefficient =
+        0.001 * (MOLAR_MASS / (2.0 * core::f64::consts::PI * MOLAR_GAS_CONSTANT)).sqrt();
+    let conductance = coefficient / TEMPERATURE.sqrt();
+    let emission = targets.map(|t| {
+        let p =
+            100.0 * ((latent * MOLAR_MASS / MOLAR_GAS_CONSTANT) * (1.0 / 250.0 - 1.0 / t)).exp();
+        coefficient / t.sqrt() * p
+    });
+    // Independent simultaneous backward-Euler closure at manufactured endpoint
+    // temperatures. The cold bare support is on the condensing branch.
+    let pressure =
+        beta() * dt * (emission[0] + emission[1]) / (1.0 + beta() * dt * 2.0 * conductance);
+    let transfer = emission.map(|source| dt * (source - conductance * pressure));
+    assert!(transfer[0] > 0.0 && transfer[1] < 0.0);
+    let heat = [0, 1].map(|i| {
+        (surfaces[i].state.substrate_mass_kg * SUBSTRATE_CP
+            + surfaces[i].state.deposit_mass_kg * DEPOSIT_CP)
+            * (targets[i] - TEMPERATURE)
+            + transfer[i] * latent
+    });
+    assert!(heat[0] > 0.0 && heat[1] < 0.0);
+    for (offsets, deposit_offset) in [([0.0, 0.0], 0.0), ([1e6, -3e6], -4e6)] {
+        let deposit_h = |t| Ok(DEPOSIT_CP * t + deposit_offset);
+        let mut shifted = surfaces;
+        for (i, surface) in shifted.iter_mut().enumerate() {
+            surface.state.substrate_specific_enthalpy_j_kg += offsets[i];
+            surface.deposit_enthalpy = &deposit_h;
+        }
+        let step = advance_supported_chamber_with_heat(
+            &shifted,
+            reservoir(0.0),
+            dt,
+            &heat,
+            config(),
+            |i, h| Ok((h - offsets[i]) / SUBSTRATE_CP),
+            || Ok(()),
+        )
+        .unwrap();
+        close(mass(step.reservoir) * beta(), pressure, 1e-7, 1e-10);
+        close(step.supplied_heat_j, heat.iter().sum(), 1e-11, 0.0);
+        assert!(step.surfaces[1].state.deposit_mass_kg > 0.0);
+        for (i, surface) in step.surfaces.iter().enumerate() {
+            close(surface.phase.surface_temperature_k, targets[i], 1e-7, 0.0);
+            close(surface.phase.transferred_mass_kg, transfer[i], 1e-13, 1e-9);
+            assert_eq!(surface.phase.supplied_heat_j, heat[i]);
+            close(
+                surface.substrate_energy_change_j
+                    + surface.deposit_energy_change_j
+                    + surface.phase.vapor_energy_j
+                    - heat[i],
+                surface.phase.energy_residual_j,
+                5e-9,
+                0.0,
+            );
+        }
+        conservation(&shifted, reservoir(0.0), &step);
+    }
+}
+
+#[test]
+fn g0_shared_supported_heat_validates_inputs_and_preserves_zero_heat_results() {
+    let surfaces = [surface(0.001, 1e-3, 240.0), surface(0.002, 0.0, 220.0)];
+    let bath = reservoir(30.0);
+    let original = run(&surfaces, bath, 0.1);
+    let zero = advance_supported_chamber_with_heat(
+        &surfaces,
+        bath,
+        0.1,
+        &[0.0, 0.0],
+        config(),
+        |_, h| Ok(h / SUBSTRATE_CP),
+        || Ok(()),
+    )
+    .unwrap();
+    assert_eq!(zero, original);
+    for heat in [&[1.0][..], &[f64::NAN, 0.0], &[0.0, f64::INFINITY]] {
+        assert!(matches!(
+            advance_supported_chamber_with_heat(
+                &surfaces,
+                bath,
+                0.1,
+                heat,
+                config(),
+                |_, h| Ok(h / SUBSTRATE_CP),
+                || Ok(()),
+            ),
+            Err(SublimationError::Invalid(_)),
+        ));
+    }
 }

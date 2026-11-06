@@ -745,6 +745,25 @@ latent energy is already part of the transported vapor energy. Compensated
 accounts include substrate, deposit and vapor energy. Work is linear in active
 surface count per bounded pressure trial, with no dense coupled matrix.
 
+`advance_supported_chamber_with_heat` couples one signed heat input per
+supported surface to that common pressure and inventory. Heating and cooling
+participate in the same latent/storage endpoint, so the pressure bracket may
+expand beyond the initial equilibrium envelope. Each receipt and the aggregate
+account record supplied heat once, preserving independent substrate datums and
+the common deposit/vapor datum.
+
+`CoatingSimulation::exchange_chamber_with_heat` accepts sparse heat entries
+keyed by persistent cell identity. Every active coated substrate participates,
+including bare or unheated receivers; future births cannot consume vapor.
+Duplicate, inactive, unknown and nonfinite heat entries refuse. The method
+validates original substrate calorics and represented inventory/storage before
+one joint publication of all cells, coatings and the shared gas. Per-surface
+energy admission uses physical heat, sensible storage and latent scales rather
+than arbitrary absolute enthalpy references. Authored sources and elapsed time
+remain caller-owned. Four regressions cover an independently manufactured
+hot-coating/cold-bare endpoint, datum shifts, zero-heat compatibility, identity
+mapping, competing receivers, conservation, budgets and final cancellation.
+
 G0/G1/G3 regressions cover analytical common backpressure with gas-film
 resistance, warm-to-bare transfer from an empty chamber, exhaustion, independent
 caloric reference shifts, live first-order timestep refinement, surface-order

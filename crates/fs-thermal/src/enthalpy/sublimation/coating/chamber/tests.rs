@@ -321,3 +321,118 @@ fn invalid_shared_controls_late_cancellation_and_individual_replacement_preserve
         born.shared_reservoir()
     );
 }
+
+fn ready_for_supplied_chamber_heat() -> CoatingSimulation<'static> {
+    shared(
+        vec![
+            birth(0.0, cell(1, INITIAL_T, 11.0)),
+            birth(0.0, cell(2, INITIAL_T, -3.0)),
+            birth(1.0, cell(3, INITIAL_T, 0.0)),
+        ],
+        &[selected(1, 1e-3), selected(2, 0.0), selected(3, 0.0)],
+        &deposit_h,
+    )
+    .advance_chamber_to(0.0, config(0.1), chamber_config(), || Ok(()))
+    .unwrap()
+    .0
+}
+
+#[test]
+fn supplied_chamber_heat_uses_ids_and_keeps_unheated_bare_receivers() {
+    let original = ready_for_supplied_chamber_heat();
+    let mut next = original.clone();
+    let (ids, step) = next
+        .exchange_chamber_with_heat(0.1, &[(CellId(1), 120.0)], chamber_config(), || Ok(()))
+        .unwrap();
+    assert_eq!(ids, vec![CellId(1), CellId(2)]);
+    assert_eq!(step.supplied_heat_j, 120.0);
+    assert_eq!(step.surfaces[0].phase.supplied_heat_j, 120.0);
+    assert_eq!(step.surfaces[1].phase.supplied_heat_j, 0.0);
+    assert!(next.coatings()[&CellId(2)].mass_kg > 0.0);
+    assert!(next.temperature_k(CellId(1)).unwrap() > next.temperature_k(CellId(2)).unwrap());
+    for id in &ids {
+        assert_eq!(next.cells()[id].mass_kg, original.cells()[id].mass_kg);
+        assert_eq!(next.cells()[id].boundary, original.cells()[id].boundary);
+        assert_eq!(Some(next.coatings()[id].reservoir), next.shared_reservoir());
+    }
+    assert_eq!(next.time_s(), original.time_s());
+    assert_eq!(next.pending_events(), original.pending_events());
+    close(
+        next.mass_kg() + gas_mass(next.shared_reservoir().unwrap()),
+        original.mass_kg() + gas_mass(original.shared_reservoir().unwrap()),
+        1e-16,
+    );
+    close(
+        next.energy_j() - original.energy_j() + step.vapor_energy_j - step.supplied_heat_j,
+        step.energy_residual_j,
+        1e-7,
+    );
+    close(step.energy_residual_j, 0.0, 1e-7);
+    let mut explicit_zero = original;
+    let (other_ids, other_step) = explicit_zero
+        .exchange_chamber_with_heat(
+            0.1,
+            &[(CellId(2), 0.0), (CellId(1), 120.0)],
+            chamber_config(),
+            || Ok(()),
+        )
+        .unwrap();
+    assert_eq!(other_ids, ids);
+    assert_eq!(other_step, step);
+    same_state(&next, &explicit_zero);
+    assert_eq!(next.shared_reservoir(), explicit_zero.shared_reservoir());
+}
+
+#[test]
+fn supplied_shared_heat_refusal_and_final_cancellation_preserve_every_owner() {
+    let original = ready_for_supplied_chamber_heat();
+    for invalid in [
+        &[(CellId(1), 1.0), (CellId(1), 2.0)][..],
+        &[(CellId(99), 1.0)][..],
+        &[(CellId(3), 1.0)][..],
+        &[(CellId(1), f64::NAN)][..],
+        &[(CellId(2), f64::INFINITY)][..],
+    ] {
+        let mut next = original.clone();
+        assert!(
+            next.exchange_chamber_with_heat(0.1, invalid, chamber_config(), || Ok(()))
+                .is_err()
+        );
+        same_state(&next, &original);
+        assert_eq!(next.shared_reservoir(), original.shared_reservoir());
+    }
+    let mut restricted = chamber_config();
+    restricted.max_surfaces = 1;
+    let mut next = original.clone();
+    assert!(
+        next.exchange_chamber_with_heat(0.1, &[(CellId(1), 120.0)], restricted, || Ok(()))
+            .is_err()
+    );
+    same_state(&next, &original);
+    assert_eq!(next.shared_reservoir(), original.shared_reservoir());
+
+    let mut probe = original.clone();
+    let mut checkpoints = 0;
+    probe
+        .exchange_chamber_with_heat(0.1, &[(CellId(1), 120.0)], chamber_config(), || {
+            checkpoints += 1;
+            Ok(())
+        })
+        .unwrap();
+    let mut calls = 0;
+    let result =
+        next.exchange_chamber_with_heat(0.1, &[(CellId(1), 120.0)], chamber_config(), || {
+            calls += 1;
+            if calls == checkpoints {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+    assert_eq!(
+        result,
+        Err(ThermalSublimationError::Thermal(DepositionError::Cancelled))
+    );
+    same_state(&next, &original);
+    assert_eq!(next.shared_reservoir(), original.shared_reservoir());
+}
