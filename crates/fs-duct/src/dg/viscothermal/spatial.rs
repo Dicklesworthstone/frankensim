@@ -203,15 +203,50 @@ impl DgDuct {
     /// Repeated attachment, source/phase failure, invalid quadrature/pole band,
     /// nonfinite coefficients, or total state above the existing dense cap.
     pub fn with_spatial_viscothermal(
+        self,
+        resolution: DgWallResolution,
+    ) -> Result<Self, GasFieldDuctError> {
+        self.with_spatial_viscothermal_poles(resolution, false)
+    }
+
+    /// As [`Self::with_spatial_viscothermal`], but `resolution.poles_per_field` is a CEILING:
+    /// every wall quadrature point takes the smallest pole count, at most the ceiling, at which
+    /// its own local radius and gas resolve the declared band to the declared error.
+    ///
+    /// A fixed count must be the widest section's need at every point, and a pole's decay rate
+    /// grows as the square of its index over the radius squared, so the thin sections then carry
+    /// poles hundreds of times faster than they need. That costs memory states and, in the sparse
+    /// Krylov propagator, Arnoldi vectors (an oboe bore at 40 poles puts a pole near 1e8 per
+    /// second at its 0.87 mm reed end; 10 poles resolve that radius). The count is found by
+    /// walking from the previous point's count, down while one fewer still resolves and up while
+    /// it does not, which is the smallest count when resolution is monotone in the count; every
+    /// law kept is one the exact Bessel owner accepted at its own count. The admission still
+    /// reports the supplied ceiling as `resolution` and the actual state as `memory_dofs`.
+    ///
+    /// The live gas refresh rebuilds with a fixed count and refuses a duct attached this way.
+    ///
+    /// # Errors
+    /// As [`Self::with_spatial_viscothermal`]; a point the ceiling itself does not resolve refuses
+    /// with the same wall-diffusion error.
+    pub fn with_spatial_viscothermal_min_poles(
+        self,
+        resolution: DgWallResolution,
+    ) -> Result<Self, GasFieldDuctError> {
+        self.with_spatial_viscothermal_poles(resolution, true)
+    }
+
+    fn with_spatial_viscothermal_poles(
         mut self,
         resolution: DgWallResolution,
+        min_poles: bool,
     ) -> Result<Self, GasFieldDuctError> {
         let geometry = self.geometry.clone();
         let field = self.gas_field.clone();
         let uniform = self.gas;
-        self.attach_spatial_viscothermal::<GasFieldDuctError, _>(
+        self.attach_spatial_viscothermal_poles::<GasFieldDuctError, _>(
             &geometry,
             resolution,
+            min_poles,
             &mut |x| match &field {
                 Some(field) => Ok(*field.state_at(x)?.state()),
                 None => Ok(uniform),
@@ -221,11 +256,55 @@ impl DgDuct {
     }
 }
 
+/// The smallest count in `1..=ceiling` at which `build` succeeds, found by walking from `start`:
+/// up from `start` until `build` succeeds (the ceiling's own error if it never does), then down
+/// while one fewer still succeeds. Returns the count and the law `build` produced at it.
+fn smallest_resolving<T, R>(
+    build: impl Fn(usize) -> Result<T, R>,
+    start: usize,
+    ceiling: usize,
+) -> Result<(usize, T), R> {
+    let mut count = start.clamp(1, ceiling);
+    let mut law = loop {
+        match build(count) {
+            Ok(law) => break law,
+            Err(reason) if count >= ceiling => return Err(reason),
+            Err(_) => count += 1,
+        }
+    };
+    while count > 1 {
+        match build(count - 1) {
+            Ok(fewer) => {
+                law = fewer;
+                count -= 1;
+            }
+            Err(_) => break,
+        }
+    }
+    Ok((count, law))
+}
+
 impl<M: DgMedium> DgDuct<M> {
     pub(in crate::dg) fn attach_spatial_viscothermal<E: From<DuctError>, A: SpatialWallMedium>(
         &mut self,
         duct: &Duct,
         resolution: DgWallResolution,
+        gas_at: &mut impl FnMut(f64) -> Result<A, E>,
+    ) -> Result<(), E> {
+        self.attach_spatial_viscothermal_poles(duct, resolution, false, gas_at)
+    }
+
+    /// `min_poles` false: every point takes `resolution.poles_per_field` poles. True: every
+    /// point takes the smallest count at most that, at which its own radius and gas resolve the
+    /// band (see `with_spatial_viscothermal_min_poles`).
+    pub(in crate::dg) fn attach_spatial_viscothermal_poles<
+        E: From<DuctError>,
+        A: SpatialWallMedium,
+    >(
+        &mut self,
+        duct: &Duct,
+        resolution: DgWallResolution,
+        min_poles: bool,
         gas_at: &mut impl FnMut(f64) -> Result<A, E>,
     ) -> Result<(), E> {
         if self.compliant_wall.is_some() || self.molecular.is_some() {
@@ -259,6 +338,8 @@ impl<M: DgMedium> DgDuct<M> {
         let (nodes, weights) = gauss_legendre_rule(resolution.quadrature_points);
         let mut channels = Vec::new();
         let mut cursor = acoustic_dofs;
+        // The walk starts at half the ceiling, then follows the previous point's count.
+        let mut last_poles = (resolution.poles_per_field / 2).max(1);
         let mut admission = DgWallAdmission {
             resolution,
             memory_dofs: 0,
@@ -277,16 +358,28 @@ impl<M: DgMedium> DgDuct<M> {
                 let area = core::f64::consts::PI * radius * radius;
                 let gas = gas_at(x)?;
                 gas.admit()?;
-                let law = ZkDiffusive::new(
-                    radius,
-                    gas.density_kg_m3(),
-                    gas.dynamic_viscosity_pa_s(),
-                    gas.heat_capacity_ratio(),
-                    gas.prandtl(),
-                    resolution.poles_per_field,
-                    resolution.band_rad_s,
-                    resolution.maximum_relative_error,
-                )
+                let build = |poles: usize| {
+                    ZkDiffusive::new(
+                        radius,
+                        gas.density_kg_m3(),
+                        gas.dynamic_viscosity_pa_s(),
+                        gas.heat_capacity_ratio(),
+                        gas.prandtl(),
+                        poles,
+                        resolution.band_rad_s,
+                        resolution.maximum_relative_error,
+                    )
+                };
+                let law = if min_poles {
+                    smallest_resolving(build, last_poles, resolution.poles_per_field).map(
+                        |(poles, law)| {
+                            last_poles = poles;
+                            law
+                        },
+                    )
+                } else {
+                    build(resolution.poles_per_field)
+                }
                 .map_err(|reason| DuctError::WallDiffusionUnresolved {
                     reason,
                     radius_m: radius,

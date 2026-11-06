@@ -161,6 +161,8 @@ pub struct DgSourceInput {
     exponential_tolerance: f64,
     maximum_dofs: usize,
     wall_quadrature: Option<usize>,
+    /// POLES is a ceiling: every wall point takes the smallest count that resolves the band.
+    min_poles: bool,
     molecular: Option<fs_material::relaxation::RelaxationState>,
     molecular_law: Option<fs_material::relaxation::RelaxationAbsorption>,
     line: usize,
@@ -350,6 +352,13 @@ impl DgSourceInput {
         {
             return Err(bad(line, "unresolved DG mesh, band, wall rule or tolerance").into());
         }
+        // Optional `min_poles` after the wall quadrature: POLES is then a ceiling and every wall
+        // point takes the smallest pole count that resolves the band at its own radius.
+        let min_poles = wall_quadrature.is_some()
+            && matches!(row.fields.clone().next(), Some("min_poles"));
+        if min_poles {
+            row.word()?;
+        }
         let mut steady_input = None;
         let columns = if matches!(row.fields.clone().next(), Some("gas_field" | "gas_steady")) {
             if wall_quadrature.is_none() {
@@ -397,7 +406,7 @@ impl DgSourceInput {
             side_openings: Vec::new(), chimneys: Vec::new(), mesh, poles, band_hz,
             terminal_channels: Vec::new(), maximum_terminal_transverse_cells: 0,
             maximum_relative_error, exponential_tolerance, maximum_dofs, wall_quadrature,
-            molecular: None, molecular_law: None, line,
+            min_poles, molecular: None, molecular_law: None, line,
         };
         // Admission before collecting/evaluating a potentially large field.
         source.check_state_budget(ambient)?;
@@ -902,13 +911,22 @@ impl DgSourceInput {
                 }
             }
         }
+        if self.min_poles && (self.molecular.is_some() || self.molecular_law.is_some()) {
+            return Err(bad(self.line, "min_poles does not combine with a molecular relaxation law"));
+        }
         let owner = if let Some(points) = self.wall_quadrature {
-            owner.with_spatial_viscothermal(DgWallResolution {
+            let resolution = DgWallResolution {
                 poles_per_field: self.poles,
                 quadrature_points: points,
                 band_rad_s: self.band_hz.map(|f| core::f64::consts::TAU * f),
                 maximum_relative_error: self.maximum_relative_error,
-            }).map_err(|error| field_error(self.line, error))?
+            };
+            if self.min_poles {
+                owner.with_spatial_viscothermal_min_poles(resolution)
+            } else {
+                owner.with_spatial_viscothermal(resolution)
+            }
+            .map_err(|error| field_error(self.line, error))?
         } else {
             owner.with_viscothermal(self.poles, self.band_hz, self.maximum_relative_error)
                 .map_err(|error| DgSourceError::Physics(AcousticRealizeError::Duct(error)))?

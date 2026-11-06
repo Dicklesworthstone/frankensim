@@ -245,3 +245,135 @@ fn an_oboe_sized_bore_certifies_and_steps_on_the_krylov_kernel() {
     assert_eq!(report.dofs, 6396);
     assert!(report.build_estimate <= TOL && report.max_dimension < STATE_MAX_DIM, "{report:?}");
 }
+
+fn wall_resolution(ceiling: usize, quadrature: usize) -> DgWallResolution {
+    DgWallResolution {
+        poles_per_field: ceiling,
+        quadrature_points: quadrature,
+        band_rad_s: [core::f64::consts::TAU * 50.0, core::f64::consts::TAU * 4800.0],
+        maximum_relative_error: 0.01,
+    }
+}
+
+/// A port-driven, closed-ended duct on `segments`, wall memory attached with a fixed pole count or with the
+/// per-point minimum under that ceiling.
+fn walled(segments: Vec<Segment>, elements: usize, quadrature: usize, ceiling: usize, min_poles: bool) -> DgDuct {
+    let duct = DgDuct::new(&Duct { segments }, &gas(), DgMesh { elements, order: 1 }, DgBoundary::Port(PortId(0)), DgBoundary::Closed)
+        .unwrap()
+        .with_dof_cap(MAX_DG_SPARSE_DOFS)
+        .unwrap();
+    let resolution = wall_resolution(ceiling, quadrature);
+    if min_poles {
+        duct.with_spatial_viscothermal_min_poles(resolution).unwrap()
+    } else {
+        duct.with_spatial_viscothermal(resolution).unwrap()
+    }
+}
+
+fn cone() -> Vec<Segment> {
+    vec![Segment::Cone { inlet_radius: 0.00087, outlet_radius: 0.019, length: 0.634 }]
+}
+
+fn oboe_like() -> Vec<Segment> {
+    vec![
+        Segment::Cylinder { radius: 0.00087, length: 0.007 },
+        Segment::Cone { inlet_radius: 0.00087, outlet_radius: 0.00825, length: 0.532 },
+        Segment::Cone { inlet_radius: 0.00825, outlet_radius: 0.019, length: 0.095 },
+    ]
+}
+
+/// The largest diagonal decay rate of the kernel's generator times dt: the stiffness the Arnoldi dimension follows.
+fn stiffness(propagator: &DgPropagator) -> f64 {
+    let g = &kernel_of(propagator).generator;
+    let mut worst = 0.0_f64;
+    for i in 0..g.n {
+        for k in g.row_start[i]..g.row_start[i + 1] {
+            if g.col[k] as usize == i {
+                worst = worst.max(g.val[k].abs());
+            }
+        }
+    }
+    worst * DT
+}
+
+#[test]
+fn min_poles_is_the_smallest_resolving_count_on_a_uniform_bore() {
+    // Every point of a uniform bore has the same radius and gas, so the per-point minimum is one count: the first
+    // count an independent scan from 1 finds. 3 elements, order 1, 4 wall points.
+    let radius = 0.00087;
+    let g = gas();
+    let law = |poles: usize| {
+        fs_phs::ZkDiffusive::new(radius, g.density_kg_m3(), g.dynamic_viscosity, g.gamma, g.prandtl, poles, wall_resolution(40, 4).band_rad_s, 0.01)
+    };
+    let smallest = (1..=40).find(|p| law(*p).is_ok()).expect("40 poles resolve 0.87 mm");
+    assert!(smallest < 40, "the ceiling is not the need: {smallest}");
+    let uniform = vec![Segment::Cylinder { radius, length: 0.57 }];
+    let fixed = walled(uniform.clone(), 3, 4, 40, false);
+    let adaptive = walled(uniform, 3, 4, 40, true);
+    let memory = |d: &DgDuct| d.spatial_viscothermal_admission().unwrap().memory_dofs;
+    assert_eq!(memory(&fixed), 2 * 3 * 4 * 40);
+    assert_eq!(memory(&adaptive), 2 * 3 * 4 * smallest);
+    // a ceiling below the need still refuses, with the same error as the fixed count
+    let narrow = DgDuct::new(&Duct { segments: vec![Segment::Cylinder { radius: 0.019, length: 0.57 }] }, &g, DgMesh { elements: 3, order: 1 }, DgBoundary::Port(PortId(0)), DgBoundary::Closed).unwrap();
+    assert!(narrow.with_spatial_viscothermal_min_poles(wall_resolution(8, 4)).is_err());
+}
+
+#[test]
+fn min_poles_on_a_cone_lowers_the_dofs_and_the_stiffness_and_matches_the_dense_propagator() {
+    // 4 elements, order 1, 2 wall points, ceiling 40 on a 0.87 mm to 19 mm cone: the thin end needs few poles.
+    let fixed = walled(cone(), 4, 2, 40, false);
+    let adaptive = walled(cone(), 4, 2, 40, true);
+    let memory = |d: &DgDuct| d.spatial_viscothermal_admission().unwrap().memory_dofs;
+    assert!(memory(&adaptive) * 10 < memory(&fixed) * 8, "{} against {}", memory(&adaptive), memory(&fixed));
+    let (pf, pa) = (fixed.build_krylov_propagator(DT, TOL).unwrap(), adaptive.build_krylov_propagator(DT, TOL).unwrap());
+    println!("KRYLOV-MEASURE cone E4: fixed {} DOFs stiffness {:.1}; min poles {} DOFs stiffness {:.1}", fixed.total_dofs(), stiffness(&pf), adaptive.total_dofs(), stiffness(&pa));
+    assert!(stiffness(&pa) * 5.0 < stiffness(&pf));
+    // the adaptive operator is still exactly what the dense propagator exponentiates
+    assert_matches_dense(&adaptive, 200);
+}
+
+#[test]
+fn min_poles_and_the_fixed_ceiling_agree_in_the_time_domain() {
+    // Both resolve the same physics to the declared wall error, so the port mean pressure of a driven duct agrees to well
+    // under that error. Compared on the Krylov kernel for both (the fixed duct is above what a debug dense build can do).
+    let (fixed, adaptive) = (walled(cone(), 4, 2, 40, false), walled(cone(), 4, 2, 40, true));
+    let (pf, pa) = (fixed.build_krylov_propagator(DT, TOL).unwrap(), adaptive.build_krylov_propagator(DT, TOL).unwrap());
+    let (mut sf, mut sa) = (fixed.zero_state(), adaptive.zero_state());
+    let (mut num, mut den) = (0.0_f64, 0.0_f64);
+    for k in 0..200 {
+        let a = pf.step(&mut sf, &input(effort(k))).unwrap().port_outputs[0].conjugate_rate;
+        let b = pa.step(&mut sa, &input(effort(k))).unwrap().port_outputs[0].conjugate_rate;
+        num += (a - b) * (a - b);
+        den += a * a;
+    }
+    let difference = det::sqrt(num / den);
+    println!("KRYLOV-MEASURE min poles against the fixed ceiling, port mean pressure over 200 steps: relative rms difference {difference:e}");
+    assert!(difference < 1e-2, "{difference}");
+}
+
+#[test]
+fn an_oboe_sized_bore_with_min_poles_is_small_stiffness_light_and_one_substep() {
+    // The oboe bore of the test above, 39 elements, order 1, 2 wall points, with the ceiling 40 the bell needs.
+    let duct = walled(oboe_like(), 39, 2, 40, true);
+    assert!(duct.total_dofs() <= 4800, "{} DOFs", duct.total_dofs());
+    let propagator = duct.propagator(DT, TOL).unwrap();
+    let mut state = duct.zero_state();
+    let mut previous = f64::INFINITY;
+    for k in 0..40 {
+        let response = propagator.port_response(&state, PortId(0)).unwrap();
+        let u = effort(k);
+        let out = propagator.step(&mut state, &input(u)).unwrap();
+        let promised = response.history_pressure_pa + response.impedance_pa_s_m3 * u;
+        let delivered = out.port_outputs[0].conjugate_rate;
+        assert!((promised - delivered).abs() <= 1e-9 * (promised.abs() + delivered.abs()).max(1e-30), "step {k}: {promised} vs {delivered}");
+        if k >= 24 {
+            assert!(out.ledger.stored_energy_j <= previous * (1.0 + 1e-12) + 1e-300, "step {k}");
+        }
+        previous = out.ledger.stored_energy_j;
+    }
+    let report = propagator.krylov_report().expect("above the dense cap");
+    println!("KRYLOV-MEASURE oboe-sized bore, min poles: {report:?}, stiffness {:.1}", stiffness(&propagator));
+    assert_eq!(report.substeps, 1, "{report:?}");
+    assert!(report.max_dimension <= 30, "{report:?}");
+    assert!(stiffness(&propagator) <= 60.0, "{}", stiffness(&propagator));
+}
