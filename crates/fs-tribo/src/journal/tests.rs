@@ -100,6 +100,122 @@ fn g3_almost_constant_source_keeps_the_newtonian_limit() {
 }
 
 #[test]
+fn g1_g3_shear_thinning_retains_positive_wall_rates_near_rest() {
+    let g = geometry();
+    let controls = JournalShearSolve { absolute_angular_rate_tolerance_per_s: 1e-40,
+        relative_angular_rate_tolerance: 1e-13, ..solve() };
+    let thinning = GeneralizedNewtonianJournal::new(g,
+        vec![point(0., 1.), point(100., 0.75)], controls).unwrap();
+    let limit = GeneralizedNewtonianJournal::new(g,
+        vec![point(0., 1.), point(100., 1.)], controls).unwrap();
+    for omega in [-1e-20, 1e-20] {
+        let response = thinning.response(omega).unwrap();
+        let expected = limit.response(omega).unwrap();
+        // This affine law tends to mu(0)=1; neither positive wall rate may be
+        // obtained by subtracting a large inverse increment from gamma=100.
+        assert!(response.shear_rate_per_s[0] > response.shear_rate_per_s[1]);
+        assert!(response.shear_rate_per_s[1] > 0.0);
+        for wall in 0..2 {
+            close(response.shear_rate_per_s[wall], expected.shear_rate_per_s[wall], 2e-12);
+        }
+        close(response.resisting_torque_nm, expected.resisting_torque_nm, 2e-12);
+        close(response.dissipated_power_w, expected.dissipated_power_w, 2e-12);
+    }
+}
+
+#[test]
+fn g1_g3_narrow_clearance_preserves_nonlinear_wall_stress_torque_and_heat() {
+    let inner_radius_m = 0.1_f64;
+    for outer_radius_m in [0.1001, 0.1000001, 0.1000000001,
+        f64::from_bits(inner_radius_m.to_bits() + 1)] {
+        let g = JournalGeometry { inner_radius_m, outer_radius_m, length_m: 0.2 };
+        let controls = JournalShearSolve { absolute_angular_rate_tolerance_per_s: 1e-30,
+            relative_angular_rate_tolerance: 2e-14, ..solve() };
+        let k = 0.01;
+        let inner = 20.0;
+        let journal = GeneralizedNewtonianJournal::new(g,
+            vec![point(0., 5. * k), point(5., 5. * k), point(100., 100. * k)],
+            controls).unwrap();
+        // For mu=k*gamma, gamma(r)=gamma_i*ri/r. Keep the actual clearance
+        // in this closed form instead of evaluating 1-ri/ro near one.
+        let speed = inner * ((outer_radius_m - inner_radius_m) / outer_radius_m);
+        for omega in [-speed, speed] {
+            let response = journal.response(omega).unwrap();
+            let torque = -omega.signum() * 2. * core::f64::consts::PI
+                * g.length_m * inner_radius_m.powi(2) * k * inner.powi(2);
+            close(response.shear_rate_per_s[0], inner, 2e-12);
+            close(response.shear_rate_per_s[1], inner * inner_radius_m / outer_radius_m, 2e-12);
+            close(response.resisting_torque_nm, torque, 2e-12);
+            close(response.dissipated_power_w, -torque * omega, 2e-12);
+            assert!(response.dissipated_power_w > 0.0);
+            assert!(response.angular_rate_defect_per_s.abs()
+                <= controls.absolute_angular_rate_tolerance_per_s
+                    + controls.relative_angular_rate_tolerance * speed);
+        }
+    }
+}
+
+#[test]
+fn g1_narrow_gap_crosses_a_constitutive_kink_without_losing_work() {
+    // Below gamma=16 the active source is mu=gamma/64; above it mu=1/4.
+    // Binary-exact source knots and stress increments isolate radial-gap error.
+    for gap in [2.0_f64.powi(-24), 2.0_f64.powi(-34), 2.0_f64.powi(-44)] {
+        let g = JournalGeometry { inner_radius_m: 0.125,
+            outer_radius_m: 0.125 + gap, length_m: 0.25 };
+        let journal = GeneralizedNewtonianJournal::new(g,
+            vec![point(0., 0.125), point(8., 0.125), point(16., 0.25), point(64., 0.25)],
+            JournalShearSolve { absolute_angular_rate_tolerance_per_s: 1e-30,
+                relative_angular_rate_tolerance: 2e-14, ..solve() }).unwrap();
+        let inner = 16.0 + 64.0 * gap;
+        let radius_ratio = g.inner_radius_m / g.outer_radius_m;
+        let delta = (inner - 16.0) / 16.0;
+        let root = (1.0 + delta).sqrt();
+        // Independent closed form: half the constant-viscosity rate change,
+        // plus the power-law rate change. Rationalize 1-q*sqrt(1+delta).
+        let speed = 0.5 * (inner - 16.0) + 16.0
+            * (gap / g.outer_radius_m - radius_ratio * delta / (1.0 + root));
+        for omega in [-speed, speed] {
+            let response = journal.response(omega).unwrap();
+            let torque = -omega.signum() * 2. * core::f64::consts::PI
+                * g.length_m * g.inner_radius_m.powi(2) * 0.25 * inner;
+            assert!(response.shear_rate_per_s[0] > 16.0);
+            assert!(response.shear_rate_per_s[1] < 16.0);
+            close(response.shear_rate_per_s[0], inner, 2e-12);
+            close(response.shear_rate_per_s[1], 16.0 * root * radius_ratio, 2e-12);
+            close(response.resisting_torque_nm, torque, 2e-12);
+            close(response.dissipated_power_w, -torque * omega, 2e-12);
+        }
+    }
+}
+
+#[test]
+fn g1_exact_tangent_resolves_wide_source_support_with_a_small_solve_budget() {
+    let g = geometry();
+    let controls = JournalShearSolve { maximum_iterations: 12,
+        absolute_angular_rate_tolerance_per_s: 1e-24,
+        relative_angular_rate_tolerance: 1e-13 };
+    let journal = GeneralizedNewtonianJournal::new(g,
+        vec![point(0., 0.05), point(5., 0.05), point(1e6, 1e4)], controls).unwrap();
+    for omega in [-2.0_f64, 2.0, -1e-9, 1e-9] {
+        let response = journal.response(omega).unwrap();
+        let (inner, stress) = if omega.abs() > 1e-6 {
+            let inner = omega.abs() * g.outer_radius_m / (g.outer_radius_m - g.inner_radius_m);
+            (inner, 0.01 * inner.powi(2))
+        } else {
+            let inner = 2. * omega.abs() * g.outer_radius_m.powi(2)
+                / ((g.outer_radius_m - g.inner_radius_m) * (g.outer_radius_m + g.inner_radius_m));
+            (inner, 0.05 * inner)
+        };
+        let torque = -omega.signum() * 2. * core::f64::consts::PI
+            * g.length_m * g.inner_radius_m.powi(2) * stress;
+        close(response.shear_rate_per_s[0], inner, 2e-12);
+        close(response.resisting_torque_nm, torque, 2e-12);
+        close(response.dissipated_power_w, -torque * omega, 2e-12);
+        assert!(response.iterations <= controls.maximum_iterations);
+    }
+}
+
+#[test]
 fn g0_source_domain_nonmonotonicity_and_solver_exhaustion_refuse() {
     let good = vec![point(0., 0.05), point(5., 0.05), point(100., 1.)];
     let model = GeneralizedNewtonianJournal::new(geometry(), good.clone(), solve()).unwrap();

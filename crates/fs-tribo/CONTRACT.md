@@ -1099,8 +1099,13 @@ the stress derivative is positive at both endpoints of every segment. This
 admits monotone shear thinning and thickening without inventing a power law.
 The original angular-momentum relation `tau(r)=tau_i*(ri/r)^2` and no-slip
 angular-speed integral determine the actual nonlinear torque. Stress inversion
-and segment integrals are analytic; a capped scalar stress solve carries an
-explicit angular-rate residual. Each response allocates nothing. The constant
+and segment integrals are analytic; a capped, bracketed Newton solve uses the
+exact angular-speed derivative and carries an explicit angular-rate residual.
+Its fallback is bisection. Factored radial stress widths survive narrow
+clearances and source-knot crossings; segment rate differences come from the
+quadratic stress secant instead of subtracting nearly equal wall rates.
+Thinning inverses and integrals use nonnegative discriminant and integral
+terms. Each response allocates nothing. The constant
 line retains the exact Newtonian torque path. Geometry and the source line are
 immutable during a solve; the coupled source owner compiles a new thermal
 endpoint and keeps its original receipts.
@@ -1111,9 +1116,11 @@ caller owns Reynolds/quasisteady admission, mechanical integration, heat and
 source support. This owner does not infer yield surfaces, viscoelastic memory,
 pressure-supported loading, fluid inertia/storage, radial motion, end leakage
 or Taylor instability. Independent tests recover finite-gap Newtonian and
-power-law solutions, compare a piecewise thinning line against separate radial
-quadrature, retain the nearly constant limit, and refuse nonmonotone stress,
-unsupported shear and exhausted solve budgets.
+power-law solutions through representable narrow-clearance limits, cross a
+constitutive kink inside the gap, compare a piecewise thinning line against
+separate radial quadrature, and retain the nearly constant limit. A bounded
+solve regression spans broad source support down to the zero-shear plateau.
+Nonmonotone stress, unsupported shear and exhausted solve budgets are refused.
 
 ## Quasistatic Reynolds film
 

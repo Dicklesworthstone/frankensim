@@ -162,7 +162,7 @@ impl GeneralizedNewtonianJournal {
     }
 
     /// Evaluate the actual nonlinear torque and its SAME mechanical power.
-    /// The immutable line is shared by every bounded bisection evaluation.
+    /// The immutable line is shared by every safeguarded Newton evaluation.
     pub fn response(&self, omega: f64) -> Result<JournalShearResponse, TriboError> {
         if !omega.is_finite() { return invalid("journal_angular_velocity"); }
         if omega == 0.0 {
@@ -171,7 +171,13 @@ impl GeneralizedNewtonianJournal {
                 angular_rate_defect_per_s: 0.0, iterations: 0 });
         }
         let g = self.geometry;
-        let ratio = (g.inner_radius_m / g.outer_radius_m).powi(2);
+        let radius_ratio = g.inner_radius_m / g.outer_radius_m;
+        let ratio = radius_ratio.powi(2);
+        // Keep the small radial stress drop rather than subtracting a ratio
+        // rounded close to one. Wide gaps retain their small outer-wall stress.
+        let drop = if radius_ratio < 0.5 { 1.0 - ratio } else {
+            (g.outer_radius_m - g.inner_radius_m) / g.outer_radius_m * (1.0 + radius_ratio)
+        };
         let speed = omega.abs();
         if let Some(mu) = self.constant_viscosity {
             let inner = 2.0 * g.outer_radius_m.powi(2) * speed
@@ -184,18 +190,30 @@ impl GeneralizedNewtonianJournal {
         }
         let mut lower = 0.0;
         let mut upper = *self.stresses.last().expect("admitted line");
-        let (_, maximum) = self.angular_speed(upper, ratio)?;
+        let (_, maximum, _) = self.angular_speed(upper, ratio, drop)?;
         if speed > maximum { return invalid("journal_source_shear_rate_exceeded"); }
         let tolerance = self.solve.absolute_angular_rate_tolerance_per_s
             + self.solve.relative_angular_rate_tolerance * speed;
+        // A Newtonian wall rate only seeds the solve; every accepted response
+        // still uses the complete nonlinear source line and its exact integral.
+        let seed_rate = (2.0 * speed / drop)
+            .min(self.knots.last().expect("admitted line").shear_rate_per_s);
+        let mut stress = seed_rate * self.viscosity_at_shear_rate(seed_rate)?;
+        let mut previous_step = upper - lower;
         for iteration in 1..=self.solve.maximum_iterations {
-            let stress = lower + 0.5 * (upper - lower);
-            let (rates, actual) = self.angular_speed(stress, ratio)?;
+            let (rates, actual, tangent) = self.angular_speed(stress, ratio, drop)?;
             let defect = actual - speed;
             if defect.abs() <= tolerance {
                 return self.finish(omega, stress, rates, defect, iteration, None);
             }
             if actual < speed { lower = stress; } else { upper = stress; }
+            let candidate = stress - defect / tangent;
+            let next = if tangent > 0.0 && tangent.is_finite()
+                && candidate > lower && candidate < upper
+                && (candidate - stress).abs() <= 0.5 * previous_step
+            { candidate } else { lower + 0.5 * (upper - lower) };
+            previous_step = (next - stress).abs();
+            stress = next;
         }
         invalid("journal_angular_rate_solve_exhausted")
     }
@@ -219,61 +237,100 @@ impl GeneralizedNewtonianJournal {
         if hi == self.stresses.len() { return invalid("journal_source_stress_exceeded"); }
         if stress == self.stresses[hi] { return Ok(self.knots[hi].shear_rate_per_s); }
         let lo = hi - 1;
-        let p = self.knots[lo];
         let slope = self.slopes[lo];
-        let tangent = p.dynamic_viscosity_pa_s + slope * p.shear_rate_per_s;
-        let delta_stress = stress - self.stresses[lo];
-        let discriminant = tangent * tangent + 4.0 * slope * delta_stress;
-        let delta = 2.0 * delta_stress / (tangent + det::sqrt(discriminant));
-        let rate = p.shear_rate_per_s + delta;
-        if !rate.is_finite() || rate < p.shear_rate_per_s || rate > self.knots[hi].shear_rate_per_s {
+        // Evaluate the inverse tangent from the endpoint with the smaller
+        // tangent, so the discriminant adds nonnegative terms under thinning.
+        let lower = self.knots[lo];
+        let upper = self.knots[hi];
+        let lower_tangent = lower.dynamic_viscosity_pa_s + slope * lower.shear_rate_per_s;
+        let upper_tangent = upper.dynamic_viscosity_pa_s + slope * upper.shear_rate_per_s;
+        let from_lower = stress - self.stresses[lo];
+        let from_upper = self.stresses[hi] - stress;
+        let discriminant = if slope < 0.0 {
+            upper_tangent * upper_tangent - 4.0 * slope * from_upper
+        } else { lower_tangent * lower_tangent + 4.0 * slope * from_lower };
+        let inverse_tangent = det::sqrt(discriminant);
+        // Accumulate from the nearer stress endpoint. In particular, a large
+        // decrement from the upper knot must not erase tiny positive rates.
+        let rate = if from_lower <= from_upper {
+            lower.shear_rate_per_s + 2.0 * from_lower / (lower_tangent + inverse_tangent)
+        } else {
+            upper.shear_rate_per_s - 2.0 * from_upper / (upper_tangent + inverse_tangent)
+        };
+        if !rate.is_finite() || rate < self.knots[lo].shear_rate_per_s
+            || rate > self.knots[hi].shear_rate_per_s {
             return invalid("journal_source_inverse_unrepresentable");
         }
         Ok(rate)
     }
 
-    fn angular_speed(&self, inner_stress: f64, ratio: f64)
-        -> Result<([f64; 2], f64), TriboError> {
+    fn angular_speed(&self, inner_stress: f64, ratio: f64, drop: f64)
+        -> Result<([f64; 2], f64, f64), TriboError> {
+        if inner_stress == 0.0 {
+            return Ok(([0.0; 2], 0.0, 0.5 * drop / self.knots[0].dynamic_viscosity_pa_s));
+        }
         let inner = self.shear_rate(inner_stress)?;
         let outer = self.shear_rate(inner_stress * ratio)?;
         let mut integral = 0.0;
-        for (i, pair) in self.knots.windows(2).enumerate() {
-            let a = outer.max(pair[0].shear_rate_per_s);
-            let b = inner.min(pair[1].shear_rate_per_s);
-            if b <= a { continue; }
-            let delta = b - a;
+        let mut rate_span = 0.0;
+        let mut remaining = inner_stress * drop;
+        let mut b = inner;
+        let hi = self.stresses.partition_point(|value| *value < inner_stress);
+        // Descend through source knots, retaining the remaining stress width.
+        // In a narrow gap gamma_i-gamma_o loses digits; neither this integral
+        // nor its Newton tangent may recover a width by subtracting wall rates.
+        for i in (0..hi).rev() {
+            let available = inner_stress.min(self.stresses[i + 1]) - self.stresses[i];
+            let width = remaining.min(available);
+            let last = remaining <= available;
+            let a = if last { outer.max(self.knots[i].shear_rate_per_s).min(b) }
+                else { self.knots[i].shear_rate_per_s };
             let slope = self.slopes[i];
-            let mu_a = pair[0].dynamic_viscosity_pa_s
-                + slope * (a - pair[0].shear_rate_per_s);
-            let x = slope * delta / mu_a;
-            let ratio_log = log1p_over_x(x);
-            // Equivalent to 2Δγ-(intercept/slope) log(mu_b/mu_a),
-            // without dividing by a tiny constitutive slope.
-            let value = delta * (2.0 - ratio_log) + a * x * ratio_log;
+            let p = self.knots[i];
+            let mu_a = p.dynamic_viscosity_pa_s + slope * (a - p.shear_rate_per_s);
+            let mu_b = p.dynamic_viscosity_pa_s + slope * (b - p.shear_rate_per_s);
+            let tangent_a = mu_a + slope * a;
+            let tangent_b = mu_b + slope * b;
+            // tau is quadratic: its secant is exactly the mean endpoint tangent.
+            let delta = width / (0.5 * tangent_a + 0.5 * tangent_b);
+            let (mu, tangent) = if slope < 0.0 { (mu_b, tangent_b) }
+                else { (mu_a, tangent_a) };
+            let x = slope.abs() * delta / mu;
+            let (ratio_log, complement) = log1p_ratio(x);
+            // Anchor at the smaller viscosity: x >= 0 and both contributions
+            // are nonnegative, including near the monotone thinning limit.
+            let value = delta * ((tangent / mu) * ratio_log + 2.0 * complement);
             if !value.is_finite() || value < 0.0 {
                 return invalid("journal_source_integral_unrepresentable");
             }
             integral += value;
+            rate_span += delta;
+            if last { break; }
+            remaining -= width;
+            b = a;
         }
         let speed = 0.5 * integral;
         if !speed.is_finite() { return invalid("journal_angular_rate_overflow"); }
-        Ok(([inner, outer], speed))
+        // Differentiate the stress-coordinate integral at both moving walls:
+        // d omega / d tau_i = (gamma_i - gamma_o) / (2 tau_i).
+        Ok(([inner, outer], speed, 0.5 * rate_span / inner_stress))
     }
 }
 
-// log(1+x)/x, using a fixed convergent series near zero so constant-viscosity
-// limits retain relative accuracy. The outer logarithm uses the shared det owner.
-fn log1p_over_x(x: f64) -> f64 {
-    if x.abs() < 0.125 {
-        let mut sum = 1.0;
+// Return log(1+x)/x AND its complement without subtracting near one. The
+// nonnegative argument follows from anchoring at the smaller viscosity.
+fn log1p_ratio(x: f64) -> (f64, f64) {
+    if x < 0.125 {
+        let mut complement = 0.0;
         let mut power = 1.0;
         for n in 1..=20 {
             power *= -x;
-            sum += power / f64::from(n + 1);
+            complement -= power / f64::from(n + 1);
         }
-        sum
+        (1.0 - complement, complement)
     } else {
-        det::ln(1.0 + x) / x
+        let ratio = det::ln(1.0 + x) / x;
+        (ratio, 1.0 - ratio)
     }
 }
 
