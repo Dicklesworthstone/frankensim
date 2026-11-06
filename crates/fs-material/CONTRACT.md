@@ -15699,6 +15699,15 @@ native structured solve retains its own checks. A final checked swap publishes
 history and time together; source refusal, exhausted work or late cancellation
 leaves the accepted state unchanged and the workspace exactly retryable.
 
+`RadialCarreauPipe::step_from` evaluates an immutable initial radial history
+into a separate reusable output state using the same candidate solve as
+`step`. Pressure trials therefore retain their actual initial velocity field
+without allocating or advancing accepted history. Model identity, source,
+nonlinear work and final cancellation checks precede the output swap; refusal
+leaves that output unchanged. The `fs_airflow::graph::rheology::transient`
+consumer uses this operation for coupled nodal pressure and linear storage
+solves, while this material owner remains a single original radial pipe.
+
 This is a spatially and temporally convergent discretization, not an exact
 propagator. Midpoint is second order but under-resolved stiff modes can oscillate;
 energy balance alone does not establish time accuracy or monotonicity. The

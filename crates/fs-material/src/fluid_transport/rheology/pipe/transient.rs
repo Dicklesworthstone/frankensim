@@ -469,6 +469,61 @@ impl RadialCarreauPipe {
         controls: RadialCarreauControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<RadialCarreauStep, RadialCarreauError> {
+        let report = self.prepare_step(
+            state,
+            workspace,
+            pressure_drop_pa,
+            duration_s,
+            controls,
+            &mut cancelled,
+        )?;
+        core::mem::swap(&mut state.velocity_m_s, &mut workspace.candidate);
+        state.accepted_time_s += duration_s;
+        Ok(report)
+    }
+
+    /// Resolve a candidate from immutable initial history into a reusable
+    /// output state. Network pressure trials can share the original radial
+    /// solve without advancing accepted branches or allocating new profiles.
+    /// Both states must belong to this model. Refusal or cancellation preserves
+    /// the output exactly; success replaces its whole history and time.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_from(
+        &self,
+        initial: &RadialCarreauState,
+        output: &mut RadialCarreauState,
+        workspace: &mut RadialCarreauWorkspace,
+        pressure_drop_pa: f64,
+        duration_s: f64,
+        controls: RadialCarreauControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RadialCarreauStep, RadialCarreauError> {
+        if !Arc::ptr_eq(&self.identity, &output.identity) {
+            return Err(RadialCarreauError::StateMismatch);
+        }
+        let report = self.prepare_step(
+            initial,
+            workspace,
+            pressure_drop_pa,
+            duration_s,
+            controls,
+            &mut cancelled,
+        )?;
+        core::mem::swap(&mut output.velocity_m_s, &mut workspace.candidate);
+        output.accepted_time_s = initial.accepted_time_s + duration_s;
+        Ok(report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_step(
+        &self,
+        state: &RadialCarreauState,
+        workspace: &mut RadialCarreauWorkspace,
+        pressure_drop_pa: f64,
+        duration_s: f64,
+        controls: RadialCarreauControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<RadialCarreauStep, RadialCarreauError> {
         poll(&mut cancelled)?;
         controls.admit()?;
         if !Arc::ptr_eq(&self.identity, &state.identity)
@@ -638,8 +693,6 @@ impl RadialCarreauPipe {
             material_evaluations: evaluations,
         };
         poll(&mut cancelled)?;
-        core::mem::swap(&mut state.velocity_m_s, &mut workspace.candidate);
-        state.accepted_time_s = next_time;
         Ok(report)
     }
 }

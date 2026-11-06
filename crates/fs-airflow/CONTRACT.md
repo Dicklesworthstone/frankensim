@@ -1,5 +1,60 @@
 # CONTRACT: fs-airflow
 
+## Transient original Carreau hydraulic networks and storage
+
+`graph::rheology::transient::TransientCarreauGraph` connects original
+`RadialCarreauPipe` histories through ideal pressure junctions and explicitly
+authored linear hydraulic storage. Every branch retains its complete annular
+velocity field, original thermal Carreau law and rate ceiling. Density and
+prepared temperature are fixed. This consumer adds coupled dynamics to the
+existing Carreau topology; it does not fit an effective resistance or replace
+the radial field with a mean-flow inertance.
+
+All branches advance from the same accepted initial histories and duration.
+Unknown midpoint pressures satisfy `Q_out - injection + C*(p_next-p_old)/dt = 0`,
+with `p_next = 2*p_mid-p_old` at storage nodes. The positive branch derivative
+comes from the accepted original radial tangent. The existing checked-CG
+conductance Laplacian gains only the positive `2*C/dt` storage diagonal, with
+the same Jacobi preconditioner and checked residual. Bounded Newton and line
+search retain every original source bound. A separate branch-solve budget
+counts all attempted original solves, including rejected pressure trials.
+
+An absent storage law denotes a zero-volume ideal junction. Its initial
+radial flows must satisfy the held injections, and accepted midpoint and final
+flows must both meet continuity tolerances. A discontinuous prescribed-flow
+change at such a node refuses rather than inventing an impulsive pressure.
+Each connected component retains the existing explicit pressure-reservoir
+anchor requirement. A storage node cannot also be an ideal pressure reservoir.
+Each positive constant compliance has a declared pressure interval; both
+physical storage endpoints must remain inside it. Storage pressure uses the
+same reference as all pressure ports, with incremental energy `C*p*p/2`.
+
+Reports retain original per-branch kinetic-energy change and nonnegative
+viscous heat, storage volume and energy change, signed reservoir work and
+prescribed-flow work. Free-node residual work, original radial work defects
+and midpoint storage roundoff remain separate from heat. An arithmetic work
+identity is checked before publication; its tolerance is not a source,
+discretization or physical-error certificate. Trial radial histories and
+evaluation buffers are reusable. Existing CG corrections and owned returned
+reports still allocate graph-sized storage. Only a complete globally admitted
+step swaps all branch histories, storage pressures and common time. Source
+refusal, work exhaustion, invalid storage and cancellation preserve accepted
+history and permit an identical retry.
+
+The model is a radially resolved, axially developed, laminar, fixed-density
+hydraulic network with lumped incremental compliance. It does not infer a bulk
+modulus or nominal fluid volume, resolve axial acoustic waves/water hammer,
+model junction/entrance losses, advance thermal state or predict cavitation.
+Implicit midpoint still requires temporal and radial resolution; it can
+oscillate when stiff modes are under-resolved. G1/G3 tests compare a coupled
+Newtonian velocity/storage step against an independent simultaneous dense
+system, preserve the original nonlinear series trajectory, resolve loop
+continuity and reversal, differentiate the nonlinear Schur tangent, retain
+different radial histories at equal mean flow, and check separate storage,
+injection and reservoir work. Source, partial-work and cancellation refusals
+leave the complete state unchanged. Existing steady Carreau regressions apply
+to the shared pressure operator.
+
 ## Steady shear-thinning hydraulic networks
 
 `graph::rheology::CarreauPipeGraph` connects original `LaminarCarreauPipe`

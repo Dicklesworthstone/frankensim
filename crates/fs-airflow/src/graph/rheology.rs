@@ -27,6 +27,8 @@ use fs_sparse::precond::Precond;
 
 use super::{FixedPressure, GraphError, Sum, checkpoint, finite, periodic_checkpoint};
 
+pub mod transient;
+
 /// Original physical pipe and its oriented pressure ports.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CarreauPipeBranch {
@@ -647,15 +649,41 @@ impl CarreauPipeGraph {
         config: CheckedCgConfig,
         cx: &Cx<'_>,
     ) -> Result<Vec<f64>, CarreauGraphError> {
+        self.pressure_correction(
+            layout,
+            &state.residuals,
+            &state.conductance,
+            None,
+            config,
+            cx,
+        )
+    }
+
+    /// The same original conductance operator serves steady pipes and the
+    /// transient Schur complement. An explicit storage slope adds only a
+    /// nonnegative diagonal; it never replaces a branch constitutive tangent.
+    #[allow(clippy::too_many_arguments)]
+    fn pressure_correction(
+        &self,
+        layout: &BoundaryLayout,
+        residuals: &[f64],
+        conductance: &[f64],
+        storage_slope: Option<&[f64]>,
+        config: CheckedCgConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<f64>, CarreauGraphError> {
         let mut rhs = Vec::with_capacity(layout.free_nodes.len());
         let mut inverse_diagonal = Vec::with_capacity(layout.free_nodes.len());
-        for &node in &layout.free_nodes {
+        for (free, &node) in layout.free_nodes.iter().enumerate() {
             checkpoint(cx)?;
-            rhs.push(-state.residuals[node]);
+            rhs.push(-residuals[node]);
             let mut diagonal = Sum::default();
+            if let Some(storage) = storage_slope {
+                diagonal.add(storage[free])?;
+            }
             for (ordinal, &edge) in self.adjacency[node].iter().enumerate() {
                 periodic_checkpoint(ordinal, cx)?;
-                diagonal.add(state.conductance[edge])?;
+                diagonal.add(conductance[edge])?;
             }
             let inverse = finite(1.0 / diagonal.value()?, "Carreau graph diagonal inverse")?;
             if inverse <= 0.0 {
@@ -668,7 +696,8 @@ impl CarreauPipeGraph {
         let operator = ConductanceLaplacian {
             graph: self,
             layout,
-            conductance: &state.conductance,
+            conductance,
+            storage_slope,
             inverse_diagonal,
             cx,
             failure: RefCell::new(None),
@@ -821,6 +850,7 @@ struct ConductanceLaplacian<'a, 'cx> {
     graph: &'a CarreauPipeGraph,
     layout: &'a BoundaryLayout,
     conductance: &'a [f64],
+    storage_slope: Option<&'a [f64]>,
     inverse_diagonal: Vec<f64>,
     cx: &'a Cx<'cx>,
     failure: RefCell<Option<CarreauGraphError>>,
@@ -847,6 +877,9 @@ impl ConductanceLaplacian<'_, '_> {
         for (index, &node) in self.layout.free_nodes.iter().enumerate() {
             periodic_checkpoint(index, self.cx)?;
             let mut sum = Sum::default();
+            if let Some(storage) = self.storage_slope {
+                sum.add(storage[index] * x[index])?;
+            }
             for (ordinal, &edge) in self.graph.adjacency[node].iter().enumerate() {
                 periodic_checkpoint(ordinal, self.cx)?;
                 let other = self.graph.other(edge, node);

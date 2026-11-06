@@ -71,6 +71,124 @@ fn balance(step: &RadialCarreauStep) {
     assert!(step.midpoint_pressure_conductance_m3_s_pa > 0.0);
 }
 
+#[test]
+fn immutable_pressure_trials_share_the_original_solve_and_publish_only_complete_outputs() {
+    let pipe = model(24, true);
+    let mut initial = pipe.rest_state().unwrap();
+    let mut work = pipe.workspace().unwrap();
+    pipe.step(&mut initial, &mut work, 40.0, 0.02, controls(), || false)
+        .unwrap();
+    let initial_bits: Vec<_> = initial
+        .velocities_m_s()
+        .iter()
+        .map(|x| x.to_bits())
+        .collect();
+    let initial_time = initial.accepted_time_s();
+    let mut output = pipe.rest_state().unwrap();
+    let mut polls = 0;
+    let accepted = pipe
+        .step_from(
+            &initial,
+            &mut output,
+            &mut work,
+            -12.0,
+            0.03,
+            controls(),
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    let mut ordinary = initial.clone();
+    let ordinary_report = pipe
+        .step(&mut ordinary, &mut work, -12.0, 0.03, controls(), || false)
+        .unwrap();
+    assert_eq!(accepted, ordinary_report);
+    assert_eq!(output.velocities_m_s(), ordinary.velocities_m_s());
+    assert_eq!(output.accepted_time_s(), ordinary.accepted_time_s());
+    assert_eq!(initial.accepted_time_s(), initial_time);
+    assert_eq!(
+        initial
+            .velocities_m_s()
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        initial_bits
+    );
+    for stop in [1, polls / 2, polls] {
+        let mut rejected = output.clone();
+        let before = rejected.velocities_m_s().to_vec();
+        let before_time = rejected.accepted_time_s();
+        let mut calls = 0;
+        assert_eq!(
+            pipe.step_from(
+                &initial,
+                &mut rejected,
+                &mut work,
+                -12.0,
+                0.03,
+                controls(),
+                || {
+                    calls += 1;
+                    calls == stop
+                }
+            ),
+            Err(RadialCarreauError::Interrupted)
+        );
+        assert_eq!(rejected.velocities_m_s(), before);
+        assert_eq!(rejected.accepted_time_s(), before_time);
+        assert_eq!(
+            pipe.step_from(
+                &initial,
+                &mut rejected,
+                &mut work,
+                -12.0,
+                0.03,
+                controls(),
+                || false
+            )
+            .unwrap(),
+            accepted
+        );
+        assert_eq!(rejected.velocities_m_s(), output.velocities_m_s());
+    }
+    let limited = RadialCarreauControls {
+        maximum_material_evaluations: 1,
+        ..controls()
+    };
+    let before = output.velocities_m_s().to_vec();
+    let time = output.accepted_time_s();
+    assert_eq!(
+        pipe.step_from(
+            &initial,
+            &mut output,
+            &mut work,
+            20.0,
+            0.03,
+            limited,
+            || false
+        ),
+        Err(RadialCarreauError::MaterialBudget)
+    );
+    assert_eq!(output.velocities_m_s(), before);
+    assert_eq!(output.accepted_time_s(), time);
+    let other = model(24, true);
+    let mut foreign = other.rest_state().unwrap();
+    assert_eq!(
+        pipe.step_from(
+            &initial,
+            &mut foreign,
+            &mut work,
+            20.0,
+            0.03,
+            controls(),
+            || false
+        ),
+        Err(RadialCarreauError::StateMismatch)
+    );
+}
+
 // Independent convergent Bessel series; the production radial discretization
 // uses neither Bessel functions nor pre-fitted exponential memory arms.
 fn j0(x: f64) -> f64 {
