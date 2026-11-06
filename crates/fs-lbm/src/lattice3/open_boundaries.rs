@@ -10,8 +10,9 @@
 //! Open faces occupy one Cartesian axis. At wall/open seams, only open-owned
 //! incoming rows are replaced: prescribed full moments apply to face interiors,
 //! not to the intersection of incompatible wall and reservoir conditions.
-//! Geometry and the uniform body force remain fixed; moving walls, spatial
-//! profiles, characteristic outlets and a thermal-energy equation are separate.
+//! Pressure profiles are held on their native face planes; geometry and the
+//! uniform body force remain fixed. Moving walls, velocity profiles,
+//! characteristic outlets and a thermal-energy equation are separate.
 
 use super::{
     EquilibriumLattice3, FirstError, Grid3, GridError3, Lattice3, StepData, coordinates, initial,
@@ -25,13 +26,17 @@ use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, TileKernel, TilePlan};
 use fs_math::dd::Dd;
 use std::sync::Mutex;
 
+mod pressure;
 mod rheology;
+
+use pressure::PressureProfile3;
 
 /// Original native grid with fixed-topology velocity/pressure face ownership.
 /// Populations, physical time and measured reservoir exchange publish together.
 pub struct OpenBoundaryGrid3<L: EquilibriumLattice3<Q>, const Q: usize> {
     grid: Grid3<L, Q>,
     plan: FacePlan,
+    pressure_profiles: [Option<PressureProfile3>; 6],
 }
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
@@ -60,7 +65,11 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
             }
         }
         cx.checkpoint().map_err(|_| GridError3::Cancelled)?;
-        Ok(Self { grid, plan })
+        Ok(Self {
+            grid,
+            plan,
+            pressure_profiles: core::array::from_fn(|_| None),
+        })
     }
 
     /// Grid extents in x/y/z order; cell storage is x-fastest.
@@ -91,6 +100,8 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
     /// Atomically replace values on existing velocity/pressure faces.
     /// Changing kinds, wall motion or periodicity requires a different owner;
     /// this update performs no streaming, impulse or hidden population reset.
+    /// A spatial pressure profile remains authoritative: clear or update it
+    /// explicitly before changing that face's held uniform density.
     pub fn rebind_open_boundaries(
         &mut self,
         boundaries: BoundarySpec3,
@@ -109,6 +120,13 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
                         "open target update changes boundary kind",
                     ));
                 }
+            }
+            if self.plan.boundaries.face(face) != boundaries.face(face)
+                && self.pressure_profiles[face as usize].is_some()
+            {
+                return Err(GridError3::Input(
+                    "clear or update the pressure profile before changing its uniform target",
+                ));
             }
         }
         let candidate = FacePlan::admit(&self.grid, boundaries)?;
@@ -150,6 +168,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         let view = OpenStep {
             data,
             plan: self.plan,
+            pressure_profiles: &self.pressure_profiles,
         };
         for (tile, chunk) in grid.next.chunks_mut(64).enumerate() {
             poll()?;
@@ -196,6 +215,7 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenBoundaryGrid3<L, Q> {
         let view = OpenStep {
             data,
             plan: self.plan,
+            pressure_profiles: &self.pressure_profiles,
         };
         {
             let kernel = OpenStream {
@@ -315,6 +335,12 @@ impl FacePlan {
         is_open(self.boundaries.face(face)).then_some((face, donor))
     }
 
+    // Remove the fixed normal coordinate, retaining x-fast plane ordering.
+    fn plane_index(&self, cell: usize) -> usize {
+        let axis = self.axis.expect("only open faces have profile coordinates");
+        cell / (self.stride * self.dims[axis]) * self.stride + cell % self.stride
+    }
+
     // Enumerate only exposed planes, still in the original x-fast cell order.
     // Admission and receipts scale with surface area and allocate no cell map.
     fn cells(self) -> impl Iterator<Item = usize> {
@@ -381,6 +407,7 @@ impl FacePlan {
 struct OpenStep<'a, L: EquilibriumLattice3<Q>, const Q: usize> {
     data: StepData<'a, L, Q>,
     plan: FacePlan,
+    pressure_profiles: &'a [Option<PressureProfile3>; 6],
 }
 
 impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
@@ -461,7 +488,14 @@ impl<L: EquilibriumLattice3<Q>, const Q: usize> OpenStep<'_, L, Q> {
         }
         let (rho, velocity) = match self.plan.boundaries.face(face) {
             FaceBoundary3::Velocity { velocity } => (rho_source, velocity),
-            FaceBoundary3::Pressure { density } => (density, velocity_source),
+            FaceBoundary3::Pressure { density } => (
+                self.pressure_profiles[face as usize]
+                    .as_ref()
+                    .map_or(density, |profile| {
+                        profile.values[self.plan.plane_index(cell)]
+                    }),
+                velocity_source,
+            ),
             _ => unreachable!("only open faces have a reservoir reconstruction"),
         };
         let law = self

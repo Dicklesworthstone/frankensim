@@ -24,12 +24,22 @@ reflection and every actual regularization change, with canonical compensated
 reduction; it is not a pressure-work or thermodynamic-energy balance. Target
 rebinds alter held values atomically without advancing or resetting fluid state.
 
+`OpenBoundaryGrid3::set_pressure_profile` supplies a held scalar density field
+on either pressure face for transverse hydrostatic heads and localized pressure
+loads, including full D3Q27 collisions. Two reusable face buffers preserve the
+accepted trace on source, density or cancellation refusal. Serial/pooled steps,
+wall ownership and actual linear/angular exchange retain the original kernels;
+sampling never occurs in a worker. An installed profile cannot be silently
+overridden by a uniform-target rebind. `tests/native_pressure_profiles.rs`
+exercises two-direction hydrostatics in every reservoir axis, off-axis pressure
+impulse/torque, wall seams, worker parity and transactional face-buffer reuse.
+
 `tests/lattice3_open_boundaries.rs` covers uniform flow for native collision
 families, physical forced velocities/stress, independent total momentum/mass
 balance, wall/open ownership, moment-origin covariance, worker invariance and
 late cancellation/admission rollback. This owner currently retains uniform
 body forces and fixed geometry; spatial/endpoint force fields, moving walls,
-spatial inlet profiles and nonreflecting characteristics remain separate.
+spatial velocity profiles and nonreflecting characteristics remain separate.
 
 `OpenBoundaryGrid3::{step_serial_with_material_rheology_workspace,
 step_pooled_with_material_rheology_workspace}` resolves each original material
