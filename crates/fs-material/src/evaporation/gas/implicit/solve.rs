@@ -10,6 +10,10 @@ use std::cell::{Cell, RefCell};
 
 /// Solve one event-free thermal/finite-gas interval on the original owners.
 ///
+/// An empty surface roster advances the existing heat cells with the same
+/// residual and solver while preserving the gas. It introduces no volatile
+/// identity or gas coordinates; an empty heat geometry remains inadmissible.
+///
 /// Every actual residual evaluation, including the physical initial predictor,
 /// fresh converged endpoint and reconstructed-gas recheck, spends the same
 /// explicit evaluation budget. Only the original gas boundary owner reconstructs
@@ -138,7 +142,7 @@ pub fn solve_deposition_with_gas<'m, 'catalog, T>(
     // never install a thermal endpoint whose opposite gas account is stale.
     spend_evaluation(&evaluations, controls.thermal.maximum_evaluations)?;
     let trial = prepared.evaluate_at_gas(
-        &coordinates[..prepared.dimension() - 2],
+        &coordinates[..prepared.thermal_dimension()],
         gas.gas(),
         &mut *source.borrow_mut(),
         &mut || (poll.borrow_mut())(),

@@ -2,6 +2,9 @@
 #[path = "time_tests.rs"]
 mod time;
 
+#[path = "idle_tests.rs"]
+mod idle;
+
 use super::*;
 use crate::evaporation::gas::tests::{
     Phase, binding, catalog, controls as phase_controls, gas, liquid, temperature,
