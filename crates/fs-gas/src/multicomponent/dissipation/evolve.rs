@@ -830,9 +830,8 @@ pub(in crate::multicomponent) fn heat_capacity_density(
         let model = &gas.source().models()[k];
         capacity[k] = (state[k] / model.molar_mass().value())
             * (model
-                .evaluate_properties(Temperature::new(primitive.temperature))
+                .evaluate_heat_capacity(Temperature::new(primitive.temperature))
                 .map_err(super::FlowError::from)?
-                .cp()
                 .value()
                 - R);
     }

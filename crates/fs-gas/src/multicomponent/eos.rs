@@ -196,7 +196,7 @@ impl MixtureGas {
             let energy_term = c * model
                 .molar_internal_energy_change(reference, temperature)?
                 .value();
-            let cv_term = c * (model.evaluate_properties(temperature)?.cp().value() - R);
+            let cv_term = c * (model.evaluate_heat_capacity(temperature)?.value() - R);
             let y = energy_term - energy_correction;
             let next = energy + y;
             energy_correction = (next - energy) - y;

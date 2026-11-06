@@ -149,6 +149,83 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
 }
 
 #[test]
+fn g1_heat_capacity_frozen_inversion_and_acoustic_expansion_use_the_same_source() {
+    let gas = frozen_gas();
+    for t in [0.1, 1.0, 7.0, 35.0] {
+        let q = gas.conserved(0.8, 17.0, 0.8 * t).unwrap();
+        let p = gas.primitive(q, || false).unwrap();
+        let cv = 2.5 + 0.2 * t;
+        let expected_energy =
+            0.8 * (2.5 * (t - 0.001) + 0.1 * (t * t - 0.001_f64.powi(2)) + 0.5 * 17.0_f64.powi(2));
+        close(q.energy, expected_energy, 3e-12);
+        close(p.temperature, t, 2e-10);
+        close(p.sound_speed, ((cv + 1.0) / cv * t).sqrt(), 2e-10);
+    }
+    let q = gas.conserved(1.0, 0.0, 10.0).unwrap();
+    let before = gas.primitive(q, || false).unwrap();
+    let after = gas.end_wave(before, 1.0, 5.0, || false).unwrap().primitive;
+    // For this analytic Cp=3.5+0.2*T and R_specific=1, the exact
+    // isentropic relation integrates Cp/T rather than freezing gamma.
+    let entropy_change = 3.5 * (after.temperature / before.temperature).ln()
+        + 0.2 * (after.temperature - before.temperature)
+        - (after.pressure / before.pressure).ln();
+    close(entropy_change, 0.0, 2e-10);
+    assert!(after.temperature < before.temperature && after.velocity > 0.0);
+    assert!(gas.end_wave(before, 1.0, 0.0, || false).is_err());
+}
+
+#[test]
+fn g1_heat_capacity_inversion_tracks_local_mixture_composition() {
+    let gas = mixture_gas();
+    for densities in [[0.8, 0.2, 0.0], [0.0, 0.7, 0.3], [0.1, 0.2, 0.9]] {
+        for t in [0.1, 1.0, 7.0, 35.0] {
+            let rho: f64 = densities.iter().sum();
+            let r_density = densities[0] + 0.5 * densities[1] + densities[2];
+            let cp_density = densities[0] * (3.5 + 0.2 * t)
+                + 0.5 * densities[1] * (4.0 + 0.1 * t)
+                + densities[2] * (3.0 + 0.3 * t);
+            let q = gas.conserved(&densities, -13.0, r_density * t).unwrap();
+            let p = gas.primitive(q.as_cell(), || false).unwrap();
+            let sound_speed = (cp_density / (cp_density - r_density) * r_density * t / rho).sqrt();
+            close(p.temperature, t, 2e-10);
+            close(p.sound_speed, sound_speed, 2e-10);
+        }
+    }
+}
+
+#[test]
+fn g0_heat_capacity_queries_do_not_bypass_positive_cv_path_admission() {
+    let unstable = source("A", R, 0.5, 0.0, 0.0);
+    assert!(
+        unstable
+            .evaluate_heat_capacity(Temperature::new(1.0))
+            .unwrap()
+            .value()
+            < R
+    );
+    let mixture = FrozenIdealGasMixtureModelV1::new(
+        vec![unstable.clone()],
+        Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+    )
+    .unwrap();
+    let domain = CaloricDomain::new(Temperature::new(0.001), Temperature::new(50.0));
+    assert!(FrozenGas::new(mixture, domain, || false).is_err());
+    let ids = vec![unstable.species().clone()];
+    let bank = IdealGasEquilibriumV1::new(
+        ElementalMatrix::new(
+            vec![ElementId::new("H").unwrap()],
+            ids.clone(),
+            vec![vec![1]],
+        )
+        .unwrap(),
+        ChargeVector::new(ids, vec![0]).unwrap(),
+        vec![unstable],
+    )
+    .unwrap();
+    assert!(MixtureGas::new(bank, domain, || false).is_err());
+}
+
+#[test]
 fn g1_frozen_exact_work_includes_braking_reversal_and_galilean_boost() {
     for boost in [0.0, 25.0] {
         let mut flow = frozen(-1.2 + boost);

@@ -8,6 +8,7 @@ pub(crate) mod shared;
 
 use super::{CaloricDomain, Conserved, Error, FaceFlux, FrozenGas, Primitive, poll, positive};
 use fs_qty::{Pressure, Temperature};
+use fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1;
 use shared::{CaloricLaw, HeatCapacities, WallError, WallSolver, WallState};
 
 impl FrozenGas {
@@ -101,9 +102,17 @@ impl CaloricLaw for FrozenGas {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<HeatCapacities, Error> {
         poll(cancelled)?;
+        // This adapter still admits its pressure-bearing trial state, while
+        // the ideal-gas derivative itself has no pressure dependence.
+        if !positive(p) {
+            return Err(FrozenIdealGasMixtureErrorV1::InvalidPressure {
+                bits: p.to_bits(),
+            }
+            .into());
+        }
         let properties = self
             .source()
-            .evaluate_properties(Temperature::new(t), Pressure::new(p))?;
+            .evaluate_heat_capacities(Temperature::new(t))?;
         Ok(HeatCapacities {
             cp: properties.mass_specific_cp().value(),
             cv: properties.mass_specific_cv().value(),

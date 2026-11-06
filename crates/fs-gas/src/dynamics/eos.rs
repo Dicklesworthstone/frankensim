@@ -43,7 +43,6 @@ pub struct FrozenGas {
     gas_constant: f64,
     energy_reference: f64,
     maximum_energy: f64,
-    reference_pressure: f64,
 }
 
 impl FrozenGas {
@@ -111,7 +110,6 @@ impl FrozenGas {
             gas_constant,
             energy_reference,
             maximum_energy,
-            reference_pressure,
         })
     }
     /// Exact original source models and frozen composition.
@@ -246,7 +244,7 @@ impl FrozenGas {
         }
         let p = self
             .source
-            .evaluate_properties(Temperature::new(t), Pressure::new(pressure))?;
+            .evaluate_heat_capacities(Temperature::new(t))?;
         let gamma = p.mass_specific_cp().value() / p.mass_specific_cv().value();
         let a2 = gamma * self.gas_constant * t;
         if !positive(p.mass_specific_cv().value()) || !positive(a2) {
@@ -306,7 +304,7 @@ impl FrozenGas {
             }
             let p = self
                 .source
-                .evaluate_properties(Temperature::new(t), Pressure::new(self.reference_pressure))?;
+                .evaluate_heat_capacities(Temperature::new(t))?;
             let cv = p.mass_specific_cv().value();
             if !positive(cv) {
                 return Err(Error::CaloricPath("nonpositive trial Cv"));

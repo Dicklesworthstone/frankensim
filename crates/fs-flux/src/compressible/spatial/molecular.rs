@@ -550,7 +550,7 @@ fn spatial<L: TransportLaw>(
         *p = q.primitive(gas, &mut *cancelled)?;
         let props = gas
             .source()
-            .evaluate_properties(Temperature::new(p.temperature), Pressure::new(p.pressure))
+            .evaluate_heat_capacities(Temperature::new(p.temperature))
             .map_err(Error::from)?;
         let volumetric_cv = p.density * props.mass_specific_cv().value();
         if !positive(volumetric_cv) {

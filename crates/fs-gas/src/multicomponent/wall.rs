@@ -149,7 +149,7 @@ impl CaloricLaw for LocalCaloric<'_> {
             if self.densities[i] == 0.0 {
                 continue;
             }
-            let value = model.evaluate_properties(temperature)?.cp().value();
+            let value = model.evaluate_heat_capacity(temperature)?.value();
             let weight = self.weight(i);
             accumulate(&mut cp, &mut cp_correction, weight * value);
             accumulate(&mut cv, &mut cv_correction, weight * (value - R));
