@@ -2,6 +2,9 @@
 #[path = "prepared/voltage.rs"]
 mod voltage;
 
+#[path = "prepared/tones.rs"]
+mod tones;
+
 use super::{near, rod};
 use fs_couple::piezoelectric::prepared::{
     ExactPiezoelectricControls, PreparedPiezoelectricCurrent,

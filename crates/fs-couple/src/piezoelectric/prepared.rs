@@ -1,15 +1,18 @@
-//! Exact held-current or fixed-voltage motion through the quadratic-flow owner.
+//! Exact electrical-drive motion through the native quadratic-flow owner.
 //!
 //! The original material, consistent rod inertia, reciprocal coupling and
-//! charge remain owned together. Cold preparation caches the exact held-input
-//! flow: current control retains coupled charge and its voltage integral, while
-//! fixed voltage eliminates only the algebraic constraint. Warm stepping uses
-//! fixed buffers without a Newton solve, exponential or material clone.
-//! "Exact" means the linear held-input model up to floating-point error; it
-//! does not remove the rod's spatial reduction or certify a real-time deadline.
+//! charge remain owned together. Prepared current and fixed-voltage paths cache
+//! held-input flow; continuous tones retain their carrier phase and integrate
+//! both physical source powers. Warm stepping uses fixed buffers without a
+//! Newton solve, exponential or material clone. Exact means the admitted linear
+//! source model up to floating-point error; the rod's spatial reduction and
+//! material-domain limits remain, with no real-time deadline claim.
 
 mod voltage;
 pub use voltage::PreparedPiezoelectricVoltage;
+
+mod tones;
+pub use tones::{ExactPiezoelectricToneStep, PiezoelectricTone, PreparedPiezoelectricTones};
 
 use super::{PiezoelectricBody, PiezoelectricCouplingError, Result, invalid, poll, positive};
 use fs_phs::PreparedStepError;
