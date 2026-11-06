@@ -14,6 +14,9 @@ const SIGMA: f64 = 5.670_374_419e-8;
 pub struct GrayLayerGap {
     effective_emissivity: f64,
     conductance_w_m2_k: f64,
+    // Keep a supplied resistance exact when lowering to the original contact
+    // kernel; R -> HTC -> R need not round back to the same source value.
+    original_resistance_m2_k_w: Option<f64>,
 }
 
 impl GrayLayerGap {
@@ -43,6 +46,35 @@ impl GrayLayerGap {
         Ok(Self {
             effective_emissivity,
             conductance_w_m2_k,
+            original_resistance_m2_k_w: None,
+        })
+    }
+
+    /// Replace zero authored gap HTC with one explicit nonradiative resistance.
+    ///
+    /// R'' describes only the conducting gap, in m² K/W. It must exclude
+    /// radiation, both material half cells and any coating. The original gray
+    /// emissivities and full-view declaration remain unchanged. An original
+    /// state-dependent source can prepare this value once per energy trial;
+    /// the same surface kernel then resolves conduction and radiation together.
+    /// Strictly positive finite R'' and a representable positive reciprocal
+    /// are required. Perfect contact and a second authored gap HTC refuse.
+    pub fn with_nonradiative_resistance(
+        self,
+        resistance_m2_k_w: f64,
+    ) -> Result<Self, DepositionError> {
+        if self.conductance_w_m2_k != 0.0
+            || !resistance_m2_k_w.is_finite()
+            || resistance_m2_k_w <= 0.0
+        {
+            return Err(invalid(
+                "gray gap resistance must uniquely replace zero HTC with a positive finite nonradiative resistance",
+            ));
+        }
+        Ok(Self {
+            conductance_w_m2_k: positive(resistance_m2_k_w.recip())?,
+            original_resistance_m2_k_w: Some(resistance_m2_k_w),
+            ..self
         })
     }
 
@@ -89,6 +121,12 @@ pub struct GrayLayerConductionResponse {
     pub interface_temperature_k: [f64; 2],
     /// Full derivatives [dQ/dTa, dQ/dTb], with material charts and gap fixed.
     pub endpoint_derivative_w_k: [f64; 2],
+    /// dQ/dR'' for the nonradiative gap R''=1/HTC, with endpoint temperatures,
+    /// material charts and emissivities fixed, in W²/(m² K). This includes both
+    /// solved surfaces' response and therefore the resulting radiation change.
+    /// Zero when the nonradiative gap is insulating or the endpoints agree.
+    /// A source-dependent gap chains this with its own original dR''/de.
+    pub gap_resistance_derivative_w2_m2_k: f64,
     pub gap_conduction_power_w: f64,
     pub radiation_power_w: f64,
     /// Hot-layer outgoing minus cold-layer incoming power [W].
@@ -134,7 +172,10 @@ impl TwoLayerConduction<'_> {
             // Preserve the exact original contact result and its near-perfect
             // contact representation gate, not merely its mathematical limit.
             let model = Self {
-                contact_resistance_m2_k_w: positive(gap.conductance_w_m2_k.recip())?,
+                contact_resistance_m2_k_w: match gap.original_resistance_m2_k_w {
+                    Some(resistance) => resistance,
+                    None => positive(gap.conductance_w_m2_k.recip())?,
+                },
                 ..*self
             };
             let response = model.evaluate(temperatures_k, config, &mut checkpoint)?;
@@ -144,6 +185,7 @@ impl TwoLayerConduction<'_> {
                 conductance_w_k: response.conductance_w_k,
                 interface_temperature_k: response.interface_temperature_k,
                 endpoint_derivative_w_k: response.endpoint_derivative_w_k,
+                gap_resistance_derivative_w2_m2_k: response.contact_resistance_derivative_w2_m2_k,
                 gap_conduction_power_w: gap_power,
                 radiation_power_w: 0.0,
                 layer_heat_residual_w: response.layer_heat_residual_w,
@@ -172,6 +214,7 @@ impl TwoLayerConduction<'_> {
                 conductance_w_k: g,
                 interface_temperature_k: temperatures_k,
                 endpoint_derivative_w_k: [g, -g],
+                gap_resistance_derivative_w2_m2_k: 0.0,
                 gap_conduction_power_w: 0.0,
                 radiation_power_w: 0.0,
                 layer_heat_residual_w: 0.0,
@@ -217,11 +260,20 @@ impl TwoLayerConduction<'_> {
                     * positive(
                         (self.area_m2 * (b / denominator)) * (kc.conductivity_w_m_k(tc)? / kv),
                     )?;
+                // At fixed surfaces dQ/dR''=-Q_gap/R''. Differentiating the
+                // SAME two integral profiles divides this by D. Form HTC/D
+                // rather than R''² or a separate reciprocal derivative.
+                let gap_resistance_derivative = if gap.conductance_w_m2_k == 0.0 {
+                    0.0
+                } else {
+                    finite(-sign * gap_power * (gap.conductance_w_m2_k / denominator))?
+                };
                 return Ok(LayerFluxUpdate::Accepted(GrayLayerConductionResponse {
                     power_a_to_b_w: sign * qh,
                     conductance_w_k: positive(qh / (th - tc))?,
                     interface_temperature_k: interface,
                     endpoint_derivative_w_k: derivatives,
+                    gap_resistance_derivative_w2_m2_k: gap_resistance_derivative,
                     gap_conduction_power_w: sign * gap_power,
                     radiation_power_w: sign * radiation_power,
                     layer_heat_residual_w: layer_residual,

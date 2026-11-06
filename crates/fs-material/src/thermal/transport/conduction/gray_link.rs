@@ -1,12 +1,15 @@
 //! One gray conducting gap on the original finite Cp/Cv thermal network.
 
-use super::{CaloricConductionLayer, admit_original_link};
+use super::{BoundCaloricContact, CaloricConductionLayer, admit_original_link};
 use crate::thermal::conduction::{
     GrayLayerConductionResponse, GrayLayerGap, LayerConductionConfig, LayerGeometry,
 };
 use fs_thermal::enthalpy::conduction::{
     ConductiveLink,
-    implicit::link::{ImplicitLinkLaw, ImplicitLinkState},
+    implicit::{
+        contact::ImplicitContactLaw,
+        link::{ImplicitLinkLaw, ImplicitLinkState},
+    },
 };
 use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, ThermalLaw};
 
@@ -22,7 +25,8 @@ use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, 
 /// `GrayLayerGap::equal_area_full_view` explicitly supplies the equal-area,
 /// opaque diffuse-gray, nonparticipating-gap/full-view model. This adapter
 /// admits planar geometry only; it does not infer view factors for curved or
-/// unequal-area faces. Gap coefficients and physical geometry remain fixed.
+/// unequal-area faces. Emissivities and physical geometry remain fixed; an
+/// optional original source supplies the nonradiative gap resistance.
 /// Material profiles are source-free and quasi-steady within each half-cell;
 /// transient accuracy still requires the original spatial/time refinement.
 #[derive(Debug)]
@@ -32,6 +36,7 @@ pub struct IntegratedCaloricGrayLink<'l, 'a, 'm> {
     geometry: LayerGeometry,
     gap: GrayLayerGap,
     config: LayerConductionConfig,
+    gap_resistance: Option<BoundCaloricContact<'l>>,
 }
 
 impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
@@ -58,6 +63,71 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
         config: LayerConductionConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, DepositionError> {
+        Self::prepare(
+            thermal,
+            link_id,
+            layers,
+            geometry,
+            gap,
+            config,
+            None,
+            &mut checkpoint,
+        )
+    }
+
+    /// Bind one original energy-dependent NONRADIATIVE gap resistance.
+    ///
+    /// The declared gray gap must have zero fixed HTC. Its emissivities remain
+    /// fixed, while this source supplies R''(e_A,e_B) at the actual ordered
+    /// original bulk h/u pair, with its complete derivatives. Each resistance
+    /// must be strictly positive and finite with a representable reciprocal.
+    /// It includes neither radiation nor either material half-cell, coating,
+    /// or any additional heat source. External source conditions remain fixed
+    /// by that law; solved surface temperatures do not replace its coordinates.
+    ///
+    /// The same source/identity/bounds owner serves ordinary integrated
+    /// contacts. Initial admission and every subsequent trial use the actual
+    /// source immediately, once per energy pair. Both dR''/de contributions
+    /// enter the complete native tangent after the original gray surface solve.
+    /// Valid resistance feedback may reverse a differential heat-flow slope
+    /// while positive R'' still gives a passive signed transfer. The source
+    /// retains its own evaluation costs and introduces no thermal inventory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_gap_resistance(
+        thermal: &DepositionSimulation<'_>,
+        link_id: u64,
+        layers: [&'l CaloricConductionLayer<'a, 'm>; 2],
+        geometry: LayerGeometry,
+        gap: GrayLayerGap,
+        source: &'l dyn ImplicitContactLaw,
+        config: LayerConductionConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        let bound = BoundCaloricContact::new(source, layers)?;
+        Self::prepare(
+            thermal,
+            link_id,
+            layers,
+            geometry,
+            gap,
+            config,
+            Some(bound),
+            &mut checkpoint,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        thermal: &DepositionSimulation<'_>,
+        link_id: u64,
+        layers: [&'l CaloricConductionLayer<'a, 'm>; 2],
+        geometry: LayerGeometry,
+        gap: GrayLayerGap,
+        config: LayerConductionConfig,
+        gap_resistance: Option<BoundCaloricContact<'l>>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
         checkpoint()?;
         if geometry.radial_coordinates_m().is_some() {
             return Err(DepositionError::InvalidInput(
@@ -65,7 +135,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
             ));
         }
         let (patch, energies) =
-            admit_original_link(thermal, link_id, layers, geometry, &mut checkpoint)?;
+            admit_original_link(thermal, link_id, layers, geometry, checkpoint)?;
         if patch.covered_area_m2 != [patch.link.area_m2; 2] {
             return Err(DepositionError::InvalidInput(
                 "integrated caloric gray gap requires both physical covered areas to equal its area",
@@ -77,8 +147,9 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
             geometry,
             gap,
             config,
+            gap_resistance,
         };
-        link.evaluate(energies, &mut checkpoint)?;
+        link.evaluate(energies, &mut *checkpoint)?;
         checkpoint()?;
         Ok(link)
     }
@@ -112,10 +183,12 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
 
     /// Resolved material surfaces and the components of one conservative flux.
     ///
-    /// The response's endpoint derivatives are with respect to temperature.
-    /// The native trait below chains them through each original caloric
-    /// inverse. Gap conduction and radiation are diagnostics of this SAME
-    /// transfer; neither is deposited as an additional thermal source.
+    /// The response's endpoint derivatives are with respect to temperature,
+    /// holding the evaluated gap resistance fixed. The native trait below
+    /// chains them through each original caloric inverse and includes the
+    /// original gap-resistance derivatives. Gap conduction and radiation are
+    /// diagnostics of this SAME transfer; neither is deposited as an additional
+    /// thermal source.
     pub fn evaluate(
         &self,
         energies_j_kg: [f64; 2],
@@ -133,6 +206,17 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
         checkpoint()?;
         let a = self.layers[0].state_at_specific_energy(energies_j_kg[0])?;
         let b = self.layers[1].state_at_specific_energy(energies_j_kg[1])?;
+        let resistance = if let Some(bound) = &self.gap_resistance {
+            Some(bound.evaluate(energies_j_kg, checkpoint)?)
+        } else {
+            None
+        };
+        let gap = if let Some(state) = resistance {
+            self.gap
+                .with_nonradiative_resistance(state.resistance_m2_k_w)?
+        } else {
+            self.gap
+        };
         let response = self
             .geometry
             .conduction(
@@ -141,7 +225,7 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
             )?
             .evaluate_gray_gap(
                 [a.temperature_k, b.temperature_k],
-                self.gap,
+                gap,
                 self.config,
                 &mut *checkpoint,
             )?;
@@ -152,16 +236,23 @@ impl<'l, 'a, 'm> IntegratedCaloricGrayLink<'l, 'a, 'm> {
         let allowance = self.config.absolute_heat_tolerance_w
             + self.config.relative_heat_tolerance
                 * applied.abs().max(response.power_a_to_b_w.abs());
-        let derivatives = [
+        let mut derivatives = [
             response.endpoint_derivative_w_k[0] * a.temperature_slope_kg_k_j,
             response.endpoint_derivative_w_k[1] * b.temperature_slope_kg_k_j,
         ];
+        if let Some(state) = resistance {
+            for side in 0..2 {
+                derivatives[side] = response.gap_resistance_derivative_w2_m2_k.mul_add(
+                    state.resistance_enthalpy_derivatives_m2_kg_k_w_j[side],
+                    derivatives[side],
+                );
+            }
+        }
         if !applied.is_finite()
             || !allowance.is_finite()
             || (applied - response.power_a_to_b_w).abs() > allowance
             || derivatives.iter().any(|value| !value.is_finite())
-            || derivatives[0] < 0.0
-            || derivatives[1] > 0.0
+            || (resistance.is_none() && (derivatives[0] < 0.0 || derivatives[1] > 0.0))
         {
             return Err(DepositionError::Arithmetic);
         }

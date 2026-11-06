@@ -1,5 +1,8 @@
 //! G1/G3/G4: integrated gray gaps on the original finite Cp/Cv heat stores.
 
+#[path = "gray_link/source.rs"]
+mod source;
+
 use super::*;
 use crate::thermal::conduction::GrayLayerGap;
 use fs_thermal::enthalpy::ContactPatchUpdate;

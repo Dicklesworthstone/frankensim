@@ -30,7 +30,7 @@ use fs_matdb::PropertyLineSlice;
 use fs_thermal::enthalpy::conduction::ConductiveLink;
 use fs_thermal::enthalpy::conduction::implicit::{
     ImplicitConductionLaw, ImplicitConductionState,
-    contact::ImplicitContactLaw,
+    contact::{ImplicitContactLaw, ImplicitContactState},
     link::{ImplicitLinkLaw, ImplicitLinkState},
 };
 use fs_thermal::enthalpy::{ContactPatch, DepositionError, DepositionSimulation, ThermalLaw};
@@ -218,6 +218,23 @@ impl<'a> BoundCaloricContact<'a> {
         }
         Ok(Self { law, bounds_j_kg })
     }
+
+    fn evaluate(
+        &self,
+        energies_j_kg: [f64; 2],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<ImplicitContactState, DepositionError> {
+        for (energy, [lo, hi]) in energies_j_kg.into_iter().zip(self.bounds_j_kg) {
+            if !(lo..=hi).contains(&energy) {
+                return Err(DepositionError::MaterialDomain);
+            }
+        }
+        checkpoint()?;
+        let state = self.law.state_at_specific_enthalpies(energies_j_kg)?;
+        state.admit()?;
+        checkpoint()?;
+        Ok(state)
+    }
 }
 
 impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
@@ -369,16 +386,7 @@ impl<'l, 'a, 'm> IntegratedCaloricLink<'l, 'a, 'm> {
         let a = self.layers[0].state_at_specific_energy(energies_j_kg[0])?;
         let b = self.layers[1].state_at_specific_energy(energies_j_kg[1])?;
         let contact = if let Some(bound) = &self.contact {
-            for (energy, [lo, hi]) in energies_j_kg.into_iter().zip(bound.bounds_j_kg) {
-                if !(lo..=hi).contains(&energy) {
-                    return Err(DepositionError::MaterialDomain);
-                }
-            }
-            checkpoint()?;
-            let state = bound.law.state_at_specific_enthalpies(energies_j_kg)?;
-            state.admit()?;
-            checkpoint()?;
-            Some(state)
+            Some(bound.evaluate(energies_j_kg, checkpoint)?)
         } else {
             None
         };

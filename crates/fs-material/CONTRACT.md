@@ -8616,6 +8616,49 @@ bounded/nonrectangular support and disjoint-temperature contact admission.
 All 18 focused native Cp/Cv conduction, integrated-link, boundary and contact
 tests pass with the original full thermal owner and numerical solver kernels.
 
+## Original Cp/Cv source feedback in conducting and radiating gaps
+
+`IntegratedCaloricGrayLink::new_with_gap_resistance` binds one original
+`ImplicitContactLaw` to the nonradiative part of an integrated gray gap. It
+shares ordinary integrated contact's ordered caloric identity, supported energy
+bounds and immutable source-trial admission. The source supplies strictly
+positive finite R''(e_A,e_B) and both original energy derivatives; its reciprocal
+must be representable. The declared gap's fixed HTC must be zero. Radiation,
+material half-cell resistance and coatings cannot be included in this R''.
+The native geometric resistance stays zero and the existing thermal owner
+prevents a second contact attachment from owning the same interface.
+
+Every initial or nonlinear trial queries the actual source once at the
+original bulk h/u pair. The existing gray-gap kernel solves the two material
+profiles and both surface transfers together. Its analytic resistance
+sensitivity includes the resulting change in BOTH surface temperatures and
+radiation: `dQ/dR'' = -Q_gap * (HTC / D)`, with D the existing coupled surface
+derivative denominator. No extra surface solve or finite difference is used.
+The native endpoint tangent adds `(dQ/dR'')*(dR''/de_i)` to the original
+conductivity-integral and 1/Cp or 1/Cv chain. Finite source-dependent tangents
+may reverse sign while strictly positive R'' retains passive signed heat flow.
+Fixed-gap links keep their existing differential admission and arithmetic.
+
+`GrayLayerGap::with_nonradiative_resistance` retains the exact authored R''.
+Disabling radiation delegates to the original contact kernel with that exact
+value, avoiding a reciprocal round trip through HTC. Existing fixed-HTC gaps
+keep their previous fallback arithmetic. The response's temperature and
+resistance derivatives are partials; the native source-bound link composes
+their full original-energy chain. No additional heat store, surface-law state,
+source authority or timestepper is introduced. Original source coordinates,
+geometry, emissivities and external conditions remain fixed as declared.
+
+Three new native regressions pass: independent radiative resistance and both
+original caloric derivatives, including passive negative differential response
+and one source query per trial; actual implicit evolution with energy/entropy
+closure and late cancellation/replay; and original source/support ownership
+with initial disjoint-temperature admission. The radiation-disabled test uses
+a resistance whose reciprocal round trip differs by one ULP and verifies exact
+recovery of the original contact flux and complete tangent. All 28 focused
+native Cp/Cv and integrated exchange tests pass against the original thermal
+owner and numerical kernels. Full workspace Cargo/Clippy gates remain unrun
+because the declared external constellation dependency directories are absent.
+
 ## Source-integrated Cp/Cv radiation between finite bodies
 
 `thermal::transport::conduction::IntegratedCaloricGrayLink` attaches the existing
