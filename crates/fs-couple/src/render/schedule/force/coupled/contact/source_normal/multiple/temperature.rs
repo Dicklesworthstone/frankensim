@@ -1,4 +1,4 @@
-//! Atomic mixed JKR/Maugis source changes at held native coordinates.
+//! Atomic mixed JKR/DMT/Maugis source changes at held native coordinates.
 //!
 //! Only selected contact sources change. Every original modal, connection,
 //! material and radiation state, the clock, and the last mechanical frame stay
@@ -12,7 +12,8 @@
 //! source, receiver or cancellation publishes none of the replacements.
 
 use super::super::temperature::{
-    SourceNormalThermalChange, prepare_jkr_contact_refresh, prepare_maugis_contact_refresh,
+    SourceNormalThermalChange, prepare_dmt_contact_refresh, prepare_jkr_contact_refresh,
+    prepare_maugis_contact_refresh,
 };
 use super::{
     BoundNormalContact, CancelGate, MultipleSourceNormalModalSystem, SourceNormalModalError,
@@ -21,7 +22,7 @@ use super::{
 };
 use fs_blake3::ContentHash;
 use fs_contact::normal_patch::adhesive::temperature::{
-    SourceJkrThermalRefresh, SourceMaugisThermalRefresh,
+    SourceDmtThermalRefresh, SourceJkrThermalRefresh, SourceMaugisThermalRefresh,
 };
 use fs_math::dd::Dd;
 
@@ -33,6 +34,10 @@ pub enum NormalSourceRefresh<'a> {
         contact: usize,
         refreshed: &'a SourceJkrThermalRefresh,
     },
+    Dmt {
+        contact: usize,
+        refreshed: &'a SourceDmtThermalRefresh,
+    },
     Maugis {
         contact: usize,
         refreshed: &'a SourceMaugisThermalRefresh,
@@ -41,7 +46,9 @@ pub enum NormalSourceRefresh<'a> {
 impl NormalSourceRefresh<'_> {
     pub const fn contact_index(&self) -> usize {
         match self {
-            Self::Jkr { contact, .. } | Self::Maugis { contact, .. } => *contact,
+            Self::Jkr { contact, .. }
+            | Self::Dmt { contact, .. }
+            | Self::Maugis { contact, .. } => *contact,
         }
     }
 }
@@ -175,6 +182,13 @@ impl MultipleSourceNormalModalSystem {
                 let request = requests.next().unwrap();
                 let (candidate, change) = match *request {
                     NormalSourceRefresh::Jkr { refreshed, .. } => prepare_jkr_contact_refresh(
+                        &point.contact,
+                        point.config,
+                        approach,
+                        refreshed,
+                        gate,
+                    )?,
+                    NormalSourceRefresh::Dmt { refreshed, .. } => prepare_dmt_contact_refresh(
                         &point.contact,
                         point.config,
                         approach,

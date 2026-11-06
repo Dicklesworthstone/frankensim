@@ -1,4 +1,5 @@
 //! Original-source changes preserve the complete native mechanical history.
+mod dmt;
 mod maugis;
 
 use super::*;

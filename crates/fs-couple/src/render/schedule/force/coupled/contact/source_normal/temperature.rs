@@ -5,7 +5,9 @@
 //! contact-potential change is parameter work supplied by the explicit driver;
 //! it is not inferred caloric heat, thermal expansion or autonomous feedback.
 
+mod dmt;
 mod maugis;
+pub use dmt::SourceNormalDmtRefreshReport;
 pub use maugis::SourceNormalMaugisRefreshReport;
 
 use super::{
@@ -14,7 +16,8 @@ use super::{
     finite, invalid, limit, poll, solve,
 };
 use fs_contact::normal_patch::adhesive::temperature::{
-    AdhesiveThermalControl, SourceJkrThermalRefresh, SourceMaugisThermalRefresh,
+    AdhesiveThermalControl, SourceDmtThermalRefresh, SourceJkrThermalRefresh,
+    SourceMaugisThermalRefresh,
 };
 use fs_math::dd::Dd;
 
@@ -172,6 +175,60 @@ pub(super) fn prepare_jkr_contact_refresh(
     )?;
     let candidate = BoundNormalContact::new(
         NormalLawSource::JkrAttached(Box::new(next.clone())),
+        contact.work_column().to_vec(),
+        contact.gap_m(),
+    )
+    .map_err(ModalCouplingError::ContactLaw)?;
+    poll(Some(gate))?;
+    Ok((candidate, change))
+}
+
+pub(super) fn prepare_dmt_contact_refresh(
+    contact: &BoundNormalContact,
+    config: SourceNormalModalConfig,
+    approach: f64,
+    refreshed: &SourceDmtThermalRefresh,
+    gate: &CancelGate,
+) -> Result<(BoundNormalContact, SourceNormalThermalChange), SourceNormalModalError> {
+    poll(Some(gate))?;
+    let NormalLawSource::DmtSphere(previous) = contact.source() else {
+        return Err(invalid(
+            "DMT temperature continuation requires the original finite-range DMT source",
+        )
+        .into());
+    };
+    let before = previous
+        .evaluate(approach)
+        .map_err(NormalLawSourceError::Dmt)?;
+    let next = refreshed.source();
+    let after = next.evaluate(approach).map_err(NormalLawSourceError::Dmt)?;
+    if refreshed.original_model_identity() != previous.identity()
+        || refreshed.control() != AdhesiveThermalControl::HeldIndentation
+        || refreshed.mechanical_work_j() != 0.0
+        || *refreshed.before() != before
+        || *refreshed.response() != after
+        || previous.effective_radius_m() != next.effective_radius_m()
+        || previous.interaction_range_m() != next.interaction_range_m()
+        || previous.envelope() != next.envelope()
+        || before.regime != after.regime
+    {
+        return Err(invalid("DMT refresh must retain its original source, actual held signed approach, range and geometry").into());
+    }
+    limit(
+        "refreshed native DMT force",
+        after.normal_force_n.abs(),
+        config.maximum_force_n,
+    )?;
+    let change = thermal_change(
+        approach,
+        before.reversible_energy_j,
+        after.reversible_energy_j,
+        refreshed.parameter_work_j(),
+        refreshed.potential_change_j(),
+        config,
+    )?;
+    let candidate = BoundNormalContact::new(
+        NormalLawSource::DmtSphere(Box::new(next.clone())),
         contact.work_column().to_vec(),
         contact.gap_m(),
     )

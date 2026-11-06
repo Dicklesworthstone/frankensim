@@ -46,14 +46,14 @@ fn slope(
     Ok(finite(1.0 + compliance * derivative)?)
 }
 
-pub(super) fn solve(
+/// The original finite-range DMT tail must remain admissible even at a held
+/// touch/cutoff corner whose coincident-path derivative is a one-sided value.
+/// Mechanical steps and source changes use the SAME declared-window screen.
+pub(super) fn check_dmt_tail_stability(
     source: &NormalLawSource,
-    from: f64,
-    free_increment: f64,
     compliance: f64,
     config: SourceNormalModalConfig,
-    gate: &CancelGate,
-) -> Result<Solution, SourceNormalModalError> {
+) -> Result<(), SourceNormalModalError> {
     // DMT's only negative tangent is its original linear attraction tail.
     // A positive lower bound makes the complete finite-range load line
     // monotone, including both original corners. A coarse ambiguous step
@@ -72,6 +72,18 @@ pub(super) fn solve(
             }
         }
     }
+    Ok(())
+}
+
+pub(super) fn solve(
+    source: &NormalLawSource,
+    from: f64,
+    free_increment: f64,
+    compliance: f64,
+    config: SourceNormalModalConfig,
+    gate: &CancelGate,
+) -> Result<Solution, SourceNormalModalError> {
+    check_dmt_tail_stability(source, compliance, config)?;
     let evaluate = |to: f64| -> Result<Trial, SourceNormalModalError> {
         poll(Some(gate))?;
         let force = mean_force(source, from, to)?;
