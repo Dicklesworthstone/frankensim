@@ -26,6 +26,8 @@ use fs_blake3::ContentHash;
 use fs_matdb::{MaterialCard, PropertyKey, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::hyper::cards::ResolvedHyperelastic;
+use fs_material::hyper::incompressible_plane_stress::IncompressiblePlaneStressPotential;
+use fs_material::hyper::mixed::RemainderResponse;
 use fs_material::state_point::{
     MaterialPropertySelection, MeanThermalExpansionStrain, is_fixed_external_coordinate,
     resolve_mean_thermal_expansion_strain,
@@ -259,10 +261,58 @@ impl ThermalReference {
 fn check_response<'a>(mut values: impl Iterator<Item = &'a f64>) -> Result<(), MaterialError> {
     if values.any(|value| !value.is_finite()) {
         Err(MaterialError::State {
-            what: "nonfinite thermal-reference stress or tangent".into(),
+            what: "nonfinite thermal-reference constitutive response".into(),
         })
     } else {
         Ok(())
+    }
+}
+
+// The native 2-D owner retains this complete material, including source and
+// thermal reference. A bare-law mean-dilatation shortcut is not advertised.
+impl fs_solid::hyper2d::PlaneMaterial for FiniteSolidMaterial {}
+
+impl IncompressiblePlaneStressPotential for FiniteSolidMaterial {
+    fn incompressible_reference_volume_ratio(&self) -> f64 {
+        self.thermal
+            .as_ref()
+            .map_or(1.0, ThermalReference::volume_ratio)
+    }
+
+    fn incompressible_remainder_stress_and_potential(
+        &self,
+        total: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        let Some(thermal) = &self.thermal else {
+            return self
+                .law
+                .incompressible_remainder_stress_and_potential(total);
+        };
+        let (piola, potential) = self
+            .law
+            .incompressible_remainder_stress_and_potential(&thermal.elastic_deformation(total))?;
+        let potential = thermal.volume_ratio() * potential;
+        check_response(core::iter::once(&potential))?;
+        Ok((thermal.pullback_piola(piola)?, potential))
+    }
+
+    fn incompressible_remainder_response(
+        &self,
+        total: &[f64; 9],
+    ) -> Result<RemainderResponse, MaterialError> {
+        let Some(thermal) = &self.thermal else {
+            return self.law.incompressible_remainder_response(total);
+        };
+        let elastic = self
+            .law
+            .incompressible_remainder_response(&thermal.elastic_deformation(total))?;
+        let potential_pa = thermal.volume_ratio() * elastic.potential_pa;
+        check_response(core::iter::once(&potential_pa))?;
+        Ok(RemainderResponse {
+            potential_pa,
+            first_piola_pa: thermal.pullback_piola(elastic.first_piola_pa)?,
+            tangent_pa: thermal.pullback_tangent(elastic.tangent_pa)?,
+        })
     }
 }
 
