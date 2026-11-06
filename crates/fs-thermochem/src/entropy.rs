@@ -55,6 +55,33 @@ impl Nasa9StandardStateModelV1 {
         initial: Temperature,
         final_temperature: Temperature,
     ) -> Result<MolarEntropyV1, ThermochemErrorV1> {
+        self.entropy_change(initial, final_temperature, false)
+            .map(MolarEntropyV1::new)
+    }
+
+    /// Molar entropy change at fixed volume and frozen species amount, J/(mol K).
+    ///
+    /// Integrates Cv/T from the original NASA-9 chart. The constant Cp/R
+    /// coefficient is reduced by one BEFORE integration, preserving small Cv
+    /// without subtracting separately rounded Delta s° and R ln(T1/T0).
+    /// Common entropy references cancel before rounding. Raw source jumps and
+    /// explicitly continuous caloric seams follow `molar_entropy_change`.
+    /// Endpoint support alone does not admit the intervening temperature path.
+    pub fn molar_isochoric_entropy_change(
+        &self,
+        initial: Temperature,
+        final_temperature: Temperature,
+    ) -> Result<MolarEntropyV1, ThermochemErrorV1> {
+        self.entropy_change(initial, final_temperature, true)
+            .map(MolarEntropyV1::new)
+    }
+
+    fn entropy_change(
+        &self,
+        initial: Temperature,
+        final_temperature: Temperature,
+        isochoric: bool,
+    ) -> Result<f64, ThermochemErrorV1> {
         let t0 = initial.value();
         let t1 = final_temperature.value();
         for t in [t0, t1] {
@@ -66,7 +93,7 @@ impl Nasa9StandardStateModelV1 {
             }
         }
         if t0 == t1 {
-            return Ok(MolarEntropyV1::new(0.0));
+            return Ok(0.0);
         }
         let (lo, hi, sign) = if t1 > t0 {
             (t0, t1, 1.0)
@@ -75,11 +102,18 @@ impl Nasa9StandardStateModelV1 {
         };
         let (first, lower) = self.region_for_temperature(lo).expect("validated lower endpoint");
         let (last, upper) = self.region_for_temperature(hi).expect("validated upper endpoint");
+        let difference = |mut lower: [f64; 9], mut upper: [f64; 9], lo, hi| {
+            if isochoric {
+                lower[2] -= 1.0;
+                upper[2] -= 1.0;
+            }
+            entropy_difference(lower, upper, lo, hi)
+        };
         let value = sign * if self.caloric_reference().is_some() && first != last {
             self.integrate_caloric_regions(first, last, lo, hi,
-                |coefficients, start, end| entropy_difference(coefficients, coefficients, start, end))
+                |coefficients, start, end| difference(coefficients, coefficients, start, end))
         } else {
-            entropy_difference(lower.coefficients, upper.coefficients, lo, hi)
+            difference(lower.coefficients, upper.coefficients, lo, hi)
         };
         if !value.is_finite() {
             return Err(ThermochemErrorV1::NonFiniteEvaluation {
@@ -87,7 +121,7 @@ impl Nasa9StandardStateModelV1 {
                 bits: value.to_bits(),
             });
         }
-        Ok(MolarEntropyV1::new(value))
+        Ok(value)
     }
 }
 
@@ -147,9 +181,8 @@ impl FrozenIdealGasMixtureModelV1 {
     ) -> Result<MolarEntropyV1, FrozenIdealGasMixtureErrorV1> {
         self.entropy_difference(
             initial_temperature,
-            initial_pressure,
             final_temperature,
-            final_pressure,
+            Some([initial_pressure, final_pressure]),
         )
         .map(|(entropy, _)| MolarEntropyV1::new(entropy))
     }
@@ -164,10 +197,41 @@ impl FrozenIdealGasMixtureModelV1 {
     ) -> Result<MassSpecificThermalQuantityV1, FrozenIdealGasMixtureErrorV1> {
         let (entropy, molar_mass) = self.entropy_difference(
             initial_temperature,
-            initial_pressure,
             final_temperature,
-            final_pressure,
+            Some([initial_pressure, final_pressure]),
         )?;
+        let value = entropy / molar_mass;
+        if !value.is_finite() {
+            return Err(FrozenIdealGasMixtureErrorV1::NonFiniteEvaluation {
+                property: FrozenMixturePropertyV1::MolarEntropy,
+                bits: value.to_bits(),
+            });
+        }
+        Ok(MassSpecificThermalQuantityV1::new(value))
+    }
+
+    /// Frozen-composition molar entropy change at fixed volume, J/(mol K).
+    /// Each species integrates its original Cv/T before mixture reduction.
+    /// No rounded endpoint pressure or arbitrary reference pressure is needed.
+    pub fn molar_isochoric_entropy_change(
+        &self,
+        initial_temperature: Temperature,
+        final_temperature: Temperature,
+    ) -> Result<MolarEntropyV1, FrozenIdealGasMixtureErrorV1> {
+        self.entropy_difference(initial_temperature, final_temperature, None)
+            .map(|(entropy, _)| MolarEntropyV1::new(entropy))
+    }
+
+    /// Same frozen-mixture isochoric entropy change in J/(kg K).
+    /// Reference-invariant original-source differences use the model's own
+    /// molar mass. This is not the entropy of reaction or composition change.
+    pub fn specific_isochoric_entropy_change(
+        &self,
+        initial_temperature: Temperature,
+        final_temperature: Temperature,
+    ) -> Result<MassSpecificThermalQuantityV1, FrozenIdealGasMixtureErrorV1> {
+        let (entropy, molar_mass) =
+            self.entropy_difference(initial_temperature, final_temperature, None)?;
         let value = entropy / molar_mass;
         if !value.is_finite() {
             return Err(FrozenIdealGasMixtureErrorV1::NonFiniteEvaluation {
@@ -181,13 +245,14 @@ impl FrozenIdealGasMixtureModelV1 {
     fn entropy_difference(
         &self,
         initial_temperature: Temperature,
-        initial_pressure: Pressure,
         final_temperature: Temperature,
-        final_pressure: Pressure,
+        pressures: Option<[Pressure; 2]>,
     ) -> Result<(f64, f64), FrozenIdealGasMixtureErrorV1> {
-        for p in [initial_pressure.value(), final_pressure.value()] {
-            if !p.is_finite() || p <= 0.0 {
-                return Err(FrozenIdealGasMixtureErrorV1::InvalidPressure { bits: p.to_bits() });
+        if let Some(pressures) = pressures {
+            for p in pressures.map(|pressure| pressure.value()) {
+                if !p.is_finite() || p <= 0.0 {
+                    return Err(FrozenIdealGasMixtureErrorV1::InvalidPressure { bits: p.to_bits() });
+                }
             }
         }
         let mut entropy = 0.0;
@@ -200,21 +265,23 @@ impl FrozenIdealGasMixtureModelV1 {
             .enumerate()
         {
             let change = model
-                .molar_entropy_change(initial_temperature, final_temperature)
+                .entropy_change(initial_temperature, final_temperature, pressures.is_none())
                 .map_err(|source| FrozenIdealGasMixtureErrorV1::ComponentEvaluation {
                     component,
                     species: model.species().clone(),
                     source: Box::new(source),
                 })?;
-            accumulate(&mut entropy, &mut correction, fraction * change.value());
+            accumulate(&mut entropy, &mut correction, fraction * change);
             molar_mass += fraction * model.molar_mass().value();
         }
-        accumulate(
-            &mut entropy,
-            &mut correction,
-            -UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
-                * log_ratio(final_pressure.value(), initial_pressure.value()),
-        );
+        if let Some([initial_pressure, final_pressure]) = pressures {
+            accumulate(
+                &mut entropy,
+                &mut correction,
+                -UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+                    * log_ratio(final_pressure.value(), initial_pressure.value()),
+            );
+        }
         if !entropy.is_finite() {
             return Err(FrozenIdealGasMixtureErrorV1::NonFiniteEvaluation {
                 property: FrozenMixturePropertyV1::MolarEntropy,
