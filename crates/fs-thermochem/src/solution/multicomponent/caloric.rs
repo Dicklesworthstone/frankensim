@@ -15,6 +15,8 @@
 /// Conserved heating, mixing and demixing on admitted seeded local phase branches.
 pub mod equilibrium;
 
+mod entropy;
+
 use super::{
     MAX_REGULAR_SOLUTION_SPECIES_V1, MulticomponentRegularSolutionV1,
     MulticomponentSolutionErrorV1, MulticomponentSolutionStateV1, R, Sum,

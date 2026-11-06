@@ -8,6 +8,8 @@
 
 mod response;
 pub use response::ResolvedMulticomponentLiquidCaloricResponse;
+/// Homogeneous source calorics on the native conservative thermal timeline.
+pub mod storage;
 /// Finite heat exchange along an accepted local equilibrium phase branch.
 pub mod equilibrium;
 pub use equilibrium::{

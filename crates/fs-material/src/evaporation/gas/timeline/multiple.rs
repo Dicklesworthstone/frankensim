@@ -129,7 +129,9 @@ impl<'thermal, 'catalog> GasLiquidChamberTimelineCandidate<'thermal, 'catalog> {
 }
 
 #[derive(Clone)]
-struct Branches(BTreeMap<CellId, Branch>);
+// This public multi-film lane accepts only pure-liquid surfaces, with no
+// borrowed equilibrium phase inventory. Partial-liquid admission is separate.
+struct Branches(BTreeMap<CellId, Branch<'static>>);
 impl DepositionObserver for Branches {
     type Error = DepositionError;
     fn event(
@@ -350,6 +352,7 @@ fn advance_deposition<'thermal, 'catalog>(
             id,
             range: [lo, hi],
             born_mass_kg: 0.0,
+            inventory: None,
         };
         branch.check(thermal)?;
         branches.0.insert(id, branch);

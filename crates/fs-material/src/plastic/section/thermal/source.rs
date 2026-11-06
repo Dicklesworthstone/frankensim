@@ -84,7 +84,10 @@ pub trait ThermalSectionSourceFamily<'a>: Clone + core::fmt::Debug {
 
     fn caloric_source(&self) -> &'a ResolvedHeatCapacityCurve;
     fn reference_density_kg_m3(&self) -> f64;
-    fn thermal_material_point(&self) -> ThermalMaterialPoint<'_>;
+    /// Borrow the original point no longer than either the family or its sources.
+    fn thermal_material_point<'s>(&'s self) -> ThermalMaterialPoint<'s>
+    where
+        'a: 's;
     fn admit_section_enthalpy(
         &self,
         h: f64,
@@ -175,7 +178,10 @@ impl<'a, S: ThermoplasticSourceFamily<'a>> ThermalSectionSourceFamily<'a> for S 
     fn reference_density_kg_m3(&self) -> f64 {
         self.thermal_source().density_kg_m3()
     }
-    fn thermal_material_point(&self) -> ThermalMaterialPoint<'_> {
+    fn thermal_material_point<'s>(&'s self) -> ThermalMaterialPoint<'s>
+    where
+        'a: 's,
+    {
         self.thermal_source().thermal_material_point()
     }
     fn admit_section_enthalpy(
@@ -330,7 +336,10 @@ impl<'a, S: CreepSourceFamily<'a>> ThermalSectionSourceFamily<'a> for CaloricCre
     fn reference_density_kg_m3(&self) -> f64 {
         self.density_kg_m3
     }
-    fn thermal_material_point(&self) -> ThermalMaterialPoint<'_> {
+    fn thermal_material_point<'s>(&'s self) -> ThermalMaterialPoint<'s>
+    where
+        'a: 's,
+    {
         ThermalMaterialPoint {
             material: self.card,
             context: &self.context,

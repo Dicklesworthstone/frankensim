@@ -54,7 +54,7 @@ mod capacity;
 
 // Shared scalar source conductivity and exact caloric tangents for Cp and Cv.
 #[path = "transport/conductivity.rs"]
-mod conductivity;
+pub(crate) mod conductivity;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{

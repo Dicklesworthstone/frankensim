@@ -18183,6 +18183,32 @@ Focused G1/G3 integration tests cover ternary nonideal mixing, original receipt
 retention, actual material refresh, variable source Cp heating/cooling, pressure
 and datum mismatch, foreign source provenance and atomic final-source refusal.
 
+### Homogeneous multicomponent thermal storage, conduction and streams
+
+`homogeneous_thermal_storage` binds those original calorics to `ThermalLaw`:
+mass-normalized h, original safeguarded inversion, exact Cp/T entropy and a
+conservative source-knot CFL bound. Closed storage uses a cold-endpoint datum.
+`MulticomponentLiquidConductionLaw` pins the original mixture conductivity
+role on the actual composition/pressure path, retaining every source knot and
+receipt through the existing scalar conductivity owner. One caloric inverse
+supplies exact dT/dh=1/Cp and dk/dh=(dk/dT)/Cp to the native implicit solvers.
+
+`homogeneous_stream_storage_from_mass_fractions` additionally retains the
+common pure-species enthalpy datum and original species-reduced entropy.
+Different compositions and thermal brackets share compatible source references;
+the native stationary-species, advection and entropy owners retain transport
+and accepted-stage accounting. Original nonideal mixing heat and entropy enter
+once. Authored mass fractions, positive traces and complete source identities
+are preserved. The homogeneous constraint, fixed pressure and reference
+geometry remain explicit; no phase conductivity, pressure evolution or
+transient composition storage is inferred. Numeric caloric trials do not
+refresh unrelated mixture transport properties.
+
+`tests/liquid_multicomponent/caloric/storage` checks nonlinear Cp, reference and
+inventory scaling, source conductivity/tangents, native two-cell implicit heat
+exchange and ternary BE/SDIRK mixing against independent energy/entropy
+expressions, with original-source and cancellation refusals.
+
 ## Source-resolved multicomponent equilibrium phases
 
 `liquid::solution::multicomponent::equilibrium` resolves every positive phase

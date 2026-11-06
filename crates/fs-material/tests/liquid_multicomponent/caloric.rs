@@ -10,6 +10,9 @@ use fs_material::thermal::transport::isobaric::{
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 use fs_thermochem::solution::multicomponent::caloric::MulticomponentCaloricSolveV1;
 
+#[path = "caloric/storage.rs"]
+mod storage;
+
 fn liquid(card: &MaterialCard) -> MulticomponentLiquidSolutionLaw<'_> {
     MulticomponentLiquidSolutionLaw::try_new(
         MulticomponentRegularSolutionV1::new(

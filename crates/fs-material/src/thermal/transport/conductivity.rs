@@ -10,7 +10,7 @@ use fs_qty::{
 use fs_thermal::enthalpy::conduction::implicit::ImplicitConductionState;
 
 #[derive(Clone, Debug)]
-pub(super) struct PreparedScalarConductivity {
+pub(crate) struct PreparedScalarConductivity {
     source: PropertyLineSlice,
     knots: Vec<[f64; 2]>,
     slopes: Vec<f64>,
@@ -19,7 +19,7 @@ pub(super) struct PreparedScalarConductivity {
 impl PreparedScalarConductivity {
     // The wrapper supplies its original caloric endpoints and separately
     // requires support for the thermodynamic constraint (pressure or density).
-    pub(super) fn try_new(
+    pub(crate) fn try_new(
         card: &MaterialCard,
         conductivity: &PropertyKey,
         temperature_axis: &str,
@@ -86,7 +86,7 @@ impl PreparedScalarConductivity {
         })
     }
 
-    pub(super) const fn source_line(&self) -> &PropertyLineSlice {
+    pub(crate) const fn source_line(&self) -> &PropertyLineSlice {
         &self.source
     }
 
@@ -115,7 +115,7 @@ impl PreparedScalarConductivity {
 
     // Right derivative at interior source knots; left derivative at the upper
     // endpoint. No source query, allocation or capacity lookup during evaluation.
-    pub(super) fn at_temperature(
+    pub(crate) fn at_temperature(
         &self,
         temperature: f64,
     ) -> Result<(f64, f64), ThermalTransportError> {
@@ -149,7 +149,7 @@ impl PreparedScalarConductivity {
 
     // The caller owns de/dT, choosing Cp for h or Cv for u on its exact chart.
     // Historical native h-labelled tangent fields carry the same selected e.
-    pub(super) fn state(
+    pub(crate) fn state(
         &self,
         temperature: f64,
         capacity: f64,

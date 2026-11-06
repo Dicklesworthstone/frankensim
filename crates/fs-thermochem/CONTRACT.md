@@ -588,6 +588,13 @@ and cooling, reduction to the original binary caloric owner, all 128 species
 with exact absences and a retained dilute inventory, an entropy-decreasing
 constrained homogeneous endpoint, source identity and atomic refusal.
 
+`MulticomponentCaloricStateV1::reduced_entropy_j_per_k` retains the original
+pure Cp/T integrals and homogeneous mixing entropy while analytically removing
+one shared set of linear pure-species constants at the original datum. This
+coordinate supports different stationary stream compositions; it does not
+infer absolute entropy or pressure dependence. Direct same-inventory entropy
+increments remain the stable owner for nearby thermal states.
+
 ### Multicomponent local equilibrium heat capacity
 
 `solution::multicomponent::equilibrium::caloric` differentiates the SAME
