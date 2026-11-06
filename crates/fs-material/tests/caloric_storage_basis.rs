@@ -8,6 +8,7 @@ use fs_matdb::{
 use fs_material::thermal::transport::{
     storage::{
         HeatStorageAmount, HeatStorageComponentQuery, HeatStorageThermalLaw, PreparedHeatStorage,
+        conduction::HeatStorageConductionLaw,
     },
     volumetric::{
         PreparedVolumetricThermalTransport, VOLUMETRIC_HEAT_CAPACITY_DIMS,
@@ -18,14 +19,19 @@ use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use fs_thermal::enthalpy::{
     Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
-    DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalStorageBasis,
+    DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, ThermalLink, ThermalStorageBasis,
     TimedEvent,
     advection::{Advected, MassBoundary, MassFlow},
+    conduction::{ConductionObserver, ConductiveLink, ConductivityLaw},
+    conduction::implicit::{
+        ImplicitConductionControls, ImplicitConductionError, ImplicitConductionGraph,
+        ImplicitConductionLaw, ImplicitConductionLinearControls, ImplicitConductionWorkspace,
+    },
     evaporation::LiquidCellExchange,
 };
 use fs_thermal::evaporation::LiquidSurfaceState;
 
-fn sources() -> (PreparedVolumetricThermalTransport, PreparedHeatStorage) {
+fn sources() -> (MaterialCard, PreparedVolumetricThermalTransport, PreparedHeatStorage) {
     let temperature = QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature,
         ValueForm::Static,
@@ -41,17 +47,23 @@ fn sources() -> (PreparedVolumetricThermalTransport, PreparedHeatStorage) {
             VOLUMETRIC_HEAT_CAPACITY_DIMS,
             [20.0, 60.0],
         ),
-        (conductivity.clone(), Dims([1, 1, -3, -1, 0, 0]), [1.0, 1.0]),
+        (conductivity.clone(), Dims([1, 1, -3, -1, 0, 0]), [1.0, 3.0]),
     ] {
+        let knots = if key == conductivity {
+            // An independent source breakpoint must survive the assembled C(T).
+            vec![(300.0, 1.0), (307.0, 2.0), (320.0, 3.0)]
+        } else {
+            [300.0, 304.25, 310.0, 317.5, 320.0].into_iter()
+                .map(|t| (t, values[0] + (t - 300.0) / 20.0 * (values[1] - values[0])))
+                .collect()
+        };
         claims
             .insert_claim(PropertyClaim {
                 key,
                 value: PropertyValue::Curve {
                     abscissa: "T".into(),
                     abscissa_dims: Temperature::DIMS,
-                    knots: [300.0, 304.25, 310.0, 317.5, 320.0].into_iter()
-                        .map(|t| (t, values[0] + (t - 300.0) / 20.0 * (values[1] - values[0])))
-                        .collect(),
+                    knots,
                     dims,
                 },
                 validity: ValidityDomain::unconstrained().with_quantity(
@@ -124,12 +136,12 @@ fn sources() -> (PreparedVolumetricThermalTransport, PreparedHeatStorage) {
         },
     ])
     .unwrap();
-    (path, storage)
+    (card, path, storage)
 }
 
 #[test]
 fn g1_indexed_sensible_storage_keeps_mass_scaling_and_small_heat() {
-    let (path, storage) = sources();
+    let (_, path, storage) = sources();
     for datum in [300.0_f64, 303.125, 310.0, 319.0, 320.0] {
         let volume = FixedVolumeThermalLaw::try_new(&path, 10.0, datum).unwrap();
         let assembly = HeatStorageThermalLaw::try_new(&storage, 2.0, datum).unwrap();
@@ -212,7 +224,7 @@ fn initial(law: &dyn ThermalLaw, cells: usize, source_w: f64) -> DepositionSimul
 
 #[test]
 fn g1_declared_sensible_capacity_keeps_nonlinear_heat_and_entropy_on_the_native_timeline() {
-    let (path, storage) = sources();
+    let (_, path, storage) = sources();
     let volume_law = FixedVolumeThermalLaw::try_new(&path, 10.0, 300.0).unwrap();
     let assembly_law = HeatStorageThermalLaw::try_new(&storage, 2.0, 300.0).unwrap();
     for law in [&volume_law as &dyn ThermalLaw, &assembly_law] {
@@ -254,7 +266,7 @@ fn g1_declared_sensible_capacity_keeps_nonlinear_heat_and_entropy_on_the_native_
 
 #[test]
 fn g0_declared_capacity_cannot_supply_stream_or_evaporation_enthalpy() {
-    let (path, storage) = sources();
+    let (_, path, storage) = sources();
     let volume_law = FixedVolumeThermalLaw::try_new(&path, 10.0, 300.0)
         .unwrap()
         .with_sensible_entropy();
@@ -333,4 +345,188 @@ fn g0_declared_capacity_cannot_supply_stream_or_evaporation_enthalpy() {
         assert_eq!(state.cells(), &before);
         assert_eq!(state.time_s(), 0.0);
     }
+}
+
+fn temperature_point(t: f64) -> QueryPoint {
+    QueryPoint::new()
+        .with_quantity(
+            "T",
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::AbsoluteTemperature,
+                ValueForm::Static,
+            )),
+            t,
+        )
+        .unwrap()
+}
+
+#[test]
+fn g1_assembly_conduction_uses_total_capacity_and_original_source_tangents() {
+    let (card, _, storage) = sources();
+    let caloric = HeatStorageThermalLaw::try_new(&storage, 2.0, 300.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let conductivity = PropertyKey::new("conductivity", Dims([1, 1, -3, -1, 0, 0]));
+    let lower = temperature_point(300.0);
+    let upper = temperature_point(320.0);
+    let selection = ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly);
+    let law = HeatStorageConductionLaw::try_new(
+        &card, &caloric, &conductivity, "T", &lower, &upper, selection,
+    )
+    .unwrap();
+    assert!(core::ptr::eq(law.caloric(), &caloric));
+    assert_eq!(law.conductivity_card_identity(), card.content_hash());
+    assert_eq!(
+        law.caloric_law().storage_basis(),
+        ThermalStorageBasis::DeclaredSensibleStorage
+    );
+    assert_eq!(law.enthalpy_bounds_j_kg(), caloric.specific_storage_span_j_kg());
+    assert_eq!(
+        law.source_line().knots.iter().map(|knot| knot.0).collect::<Vec<_>>(),
+        vec![300.0, 307.0, 320.0]
+    );
+    for t in [300.0, 304.25, 306.999, 307.001, 310.0, 317.5, 320.0] {
+        // Independent amount-weighted capacity: 1 kg * c(T) + 0.1 m³ * c_vol(T).
+        // C_total=4+0.4*(T-300) J/K, while this body has fixed mass 2 kg.
+        let theta = t - 300.0;
+        let e = (4.0 * theta + 0.2 * theta * theta) / 2.0;
+        let d_t_de = 2.0 / (4.0 + 0.4 * theta);
+        let (k, d_k_d_t) = if t < 307.0 {
+            (1.0 + theta / 7.0, 1.0 / 7.0)
+        } else {
+            (2.0 + (t - 307.0) / 13.0, 1.0 / 13.0)
+        };
+        let state = law.state_at_specific_enthalpy(e).unwrap();
+        assert!((state.temperature_k - t).abs() < 2e-12);
+        assert!((state.temperature_slope_kg_k_j - d_t_de).abs() < 2e-14);
+        assert!((state.conductivity_w_m_k - k).abs() < 2e-13);
+        assert!((state.conductivity_slope_kg_w_m_k_j - d_k_d_t * d_t_de).abs() < 2e-14);
+        assert_eq!(law.conductivity_w_m_k(e).unwrap(), state.conductivity_w_m_k);
+        let observable = law.time_observables(e).unwrap();
+        assert_eq!(observable.temperature_k, state.temperature_k);
+        assert_eq!(observable.phase_mass_fraction, None);
+    }
+    for outside in [-1.0, 81.0, f64::NAN, f64::INFINITY] {
+        assert!(law.state_at_specific_storage(outside).is_err());
+        assert!(law.conductivity_w_m_k(outside).is_err());
+    }
+    assert!(HeatStorageConductionLaw::try_new(
+        &card, &caloric, &conductivity, "T", &temperature_point(301.0), &upper, selection,
+    ).is_err());
+    let wrong_role = PropertyKey::new("selected-sensible-capacity", Dims([2, 0, -2, -1, 0, 0]));
+    assert!(HeatStorageConductionLaw::try_new(
+        &card, &caloric, &wrong_role, "T", &lower, &upper, selection,
+    ).is_err());
+
+    // Register the very same caloric owner supplied to the implicit adapter;
+    // native event admission must still reject rescaling its fixed inventory.
+    let mut changed = initial(law.caloric_law(), 1, 0.0).cells()[&CellId(0)].clone();
+    changed.mass_kg = 3.0;
+    let pending = DepositionSimulation::new(
+        vec![TimedEvent { time_s: 0.0, event: Event::Birth(changed) }],
+        &[(MaterialId(1), law.caloric_law())],
+        DepositionBudget { max_cells: 1, max_links: 0, max_events: 1, max_substeps: 16 },
+    ).unwrap();
+    assert!(pending.advance_to(0.0, step(), || Ok(())).is_err());
+    assert!(pending.cells().is_empty());
+}
+
+#[test]
+fn g1_assembly_native_graph_conserves_nonlinear_storage_across_a_conductivity_knot() {
+    let (card, _, storage) = sources();
+    let caloric = HeatStorageThermalLaw::try_new(&storage, 2.0, 300.0)
+        .unwrap()
+        .with_sensible_entropy();
+    let law = HeatStorageConductionLaw::try_new(
+        &card,
+        &caloric,
+        &PropertyKey::new("conductivity", Dims([1, 1, -3, -1, 0, 0])),
+        "T",
+        &temperature_point(300.0),
+        &temperature_point(320.0),
+        ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+    ).unwrap();
+    let mut events: Vec<_> = initial(&caloric, 4, 0.0).cells().values().cloned()
+        .map(|mut cell| {
+            cell.specific_h_j_kg = if cell.id == CellId(0) { 136.8 / 2.0 } else { 8.8 / 2.0 };
+            cell.geometry.surface_area_m2 = 4.0;
+            TimedEvent { time_s: 0.0, event: Event::Birth(cell) }
+        })
+        .collect();
+    for id in 0..3 {
+        events.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(ThermalLink {
+                id, a: CellId(0), b: CellId(id + 1), area_m2: 1.0, conductance_w_k: 0.0,
+            }),
+        });
+    }
+    let old = DepositionSimulation::new(
+        events,
+        &[(MaterialId(1), &caloric)],
+        DepositionBudget { max_cells: 4, max_links: 3, max_events: 7, max_substeps: 16 },
+    ).unwrap().advance_to(0.0, step(), || Ok(())).unwrap().0;
+    let geometry: Vec<_> = (0..3).map(|id| ConductiveLink {
+        link_id: id, half_distances_m: [0.5, 0.5], contact_resistance_m2_k_w: 0.2,
+    }).collect();
+    let observer = ConductionObserver::new(
+        &old, &[(MaterialId(1), &law)], &geometry, &[], || Ok(()),
+    ).unwrap();
+    let graph = ImplicitConductionGraph::new(
+        &old, &observer, &[(MaterialId(1), &law)],
+        ImplicitConductionLinearControls::default(), || Ok(()),
+    ).unwrap();
+    let dt = 20.0;
+    let controls = ImplicitConductionControls {
+        maximum_dt_s: dt, cell_tolerance_j: 1e-10, total_tolerance_j: 1e-9,
+        ..ImplicitConductionControls::default()
+    };
+    let mut workspace = ImplicitConductionWorkspace::new(4).unwrap();
+    let (next, report) = graph.advance_to(&old, dt, controls, &mut workspace, || Ok(())).unwrap();
+
+    // Independent scalar energy balance for this symmetric three-leaf graph.
+    // Solve q=dt*G(T_hot,T_cold)*(T_hot-T_cold) for heat to EACH cold body.
+    // Invert E=4*theta+0.2*theta² without using the material law or native graph.
+    let temperature = |energy: f64| 300.0 + 2.0 * energy / (4.0 + (16.0 + 0.8 * energy).sqrt());
+    let conductivity = |t: f64| if t < 307.0 {
+        1.0 + (t - 300.0) / 7.0
+    } else {
+        2.0 + (t - 307.0) / 13.0
+    };
+    let mut bracket = [0.0, 32.0];
+    for _ in 0..80 {
+        let heat = 0.5 * (bracket[0] + bracket[1]);
+        let hot = temperature(136.8 - 3.0 * heat);
+        let cold = temperature(8.8 + heat);
+        let conductance = 1.0 / (0.5 / conductivity(hot) + 0.2 + 0.5 / conductivity(cold));
+        if heat - dt * conductance * (hot - cold) > 0.0 {
+            bracket[1] = heat;
+        } else {
+            bracket[0] = heat;
+        }
+    }
+    let heat = 0.5 * (bracket[0] + bracket[1]);
+    assert!(temperature(8.8 + heat) > 307.0);
+    for cell in next.cells().values() {
+        let energy = if cell.id == CellId(0) { 136.8 - 3.0 * heat } else { 8.8 + heat };
+        assert_eq!(cell.mass_kg, 2.0);
+        assert!((cell.mass_kg * cell.specific_h_j_kg - energy).abs() < 1e-8);
+        assert!((next.temperature_k(cell.id).unwrap() - temperature(energy)).abs() < 1e-9);
+    }
+    assert_eq!(report.energy.substeps, 1);
+    assert_eq!(report.energy.external_heat_j, 0.0);
+    assert!(report.energy.stored_energy_change_j.abs() < 1e-9);
+    assert!(report.energy.residual_j.abs() < 1e-9);
+    assert!(report.entropy.thermal_storage_change_j_k > 0.0);
+    assert!(report.entropy.conduction_generation_j_k > 0.0);
+    let replay = graph.advance_to(&old, dt, controls, &mut workspace, || Ok(())).unwrap();
+    assert_eq!(replay.0.cells(), next.cells());
+    assert_eq!(replay.1, report);
+    assert!(matches!(
+        graph.advance_to(&old, dt, controls, &mut workspace, || Err(DepositionError::Cancelled)),
+        Err(ImplicitConductionError::Thermal(DepositionError::Cancelled))
+    ));
+    assert_eq!(old.time_s(), 0.0);
+    assert_eq!(old.cells()[&CellId(0)].specific_h_j_kg, 136.8 / 2.0);
+    assert_eq!(old.cells()[&CellId(1)].specific_h_j_kg, 8.8 / 2.0);
 }

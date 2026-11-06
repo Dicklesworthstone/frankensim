@@ -11,6 +11,10 @@
 mod timeline;
 pub use timeline::HeatStorageThermalLaw;
 
+/// Explicit assembly conductivity on the original additive storage law.
+#[path = "storage/conduction.rs"]
+pub mod conduction;
+
 use super::{
     SPECIFIC_HEAT, ThermalTransportError, admit_temperature_point, capacity::CapacityCurve,
     positive, source_line, source_value, volumetric::VOLUMETRIC_HEAT_CAPACITY_DIMS,

@@ -10184,6 +10184,18 @@ timeline invokes each law's `validate_cell` before birth or inventory change;
 `admit_cell` also permits an explicit precheck. The timeline owns power, evolution, cancellation
 and energy acceptance. Sensible entropy is opt-in and changes the law identity.
 
+`storage::conduction::HeatStorageConductionLaw` connects this same amount-bound
+caloric owner to the native implicit chain and graph solvers. The caller selects
+an effective scalar conductivity source for the assembly; preparation retains
+its original knots, fixed conditions and card identity across the entire storage
+interval. Conductivity is not inferred from constituent capacities. Same-state
+tangents use `dT/de = m_ref/C_total(T)` and `dk/de = (dk/dT)*dT/de`, preserving both
+mass- and volume-based contributions, fixed reference mass and declared sensible
+storage semantics. Focused public regressions cover original source tangents,
+support and inventory refusals, and a branched nonlinear heat balance crossing a
+conductivity breakpoint, with replay and cancellation. These new regressions are
+authored but not executed in the current resource-constrained workspace.
+
 Four focused assembly tests exercise independent mass/volume integrals,
 inversion, entropy, amount scaling, source choice, permutation, domain refusals
 and actual thermal timelines. Compiled MDF plus acrylic/mineral countertop works
