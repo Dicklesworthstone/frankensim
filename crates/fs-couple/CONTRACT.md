@@ -426,3 +426,13 @@ reservoirs and cancellation. These are numerical checks with authored material
 data, not experimental validation. Temperature and external faces are constant
 within an interval. Ordinary `advance` remains backward Euler; no second-order
 finite-atmosphere/solution coupling or global error bound is implied.
+
+`MoistureCartesian::advance_sdirk2_adaptive_to` applies the same complete-duration
+controller as the slab SDIRK path. The accepted two-half result uses the
+second-order local-error factor (one third for equal halves), cubic step-growth
+criterion and two-stage work charge per attempted endpoint. Range failures may
+shorten the interval; source/domain failures remain terminal. Only accepted
+RK-weighted six-face transfers contribute to the fixed whole-window water
+budget. Rejected probes and accepted prefixes of a later failed call remain
+private. Focused regressions specify the analytic error ratio, stiff-drying
+recovery, complete-stage charging and late work-limit refusal.

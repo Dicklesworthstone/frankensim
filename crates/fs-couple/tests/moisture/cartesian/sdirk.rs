@@ -1,5 +1,6 @@
 //! G1 discrete modes and analytic nonlinear rates; G4 physical-stage refusal.
 use super::*;
+use fs_couple::moisture::adaptive::{MoistureAdvanceError, MoistureTimeControls};
 
 fn decay(z: f64) -> f64 {
     let gamma = 1.0 - core::f64::consts::FRAC_1_SQRT_2;
@@ -232,6 +233,119 @@ fn g0_cartesian_sdirk_preserves_stiff_equilibrium_and_cancellation() {
                 1.0, &sealed(), config(), nonlinear(), &cancelled,
             ), Err(MoistureError::Cancelled)));
         });
+        assert_eq!(initial.time_s(), 0.0);
+    });
+}
+
+fn time_controls(dt: f64, absolute: f64) -> MoistureTimeControls {
+    MoistureTimeControls {
+        initial_step_s: dt,
+        minimum_step_s: dt / 4096.0,
+        maximum_step_s: dt,
+        maximum_evaluations: 100_000,
+        moisture_absolute_tolerance: absolute,
+        activity_absolute_tolerance: 1e-8,
+        reservoir_water_absolute_tolerance_kg: 1e-9,
+        relative_tolerance: 0.0,
+        water_balance_tolerance_kg: 1e-9,
+    }
+}
+
+#[test]
+fn g1_cartesian_sdirk_adaptive_uses_cubic_error_and_weighted_water() {
+    with_cx(|cx| {
+        let initial = grid(card([0.01; 2], 0.3),
+            grid_geometry([1.0; 3], [1; 3]), vec![0.1], cx);
+        let boundaries = std::array::from_fn(|_| MoistureFace::PrescribedDryBasis(0.2));
+        // Six half-cell faces give lambda=12D/L^2=.12.
+        let coarse = 0.2 - 0.1 * decay(0.12);
+        let fine = 0.2 - 0.1 * decay(0.06).powi(2);
+        let mut controls = time_controls(1.0, (coarse - fine).abs() / (3.0 * 0.2));
+        controls.maximum_step_s = 2.0;
+        let (next, report) = initial.advance_sdirk2_adaptive_to(
+            1.0, &boundaries, config(), nonlinear(), controls, cx,
+        ).unwrap();
+        near(next.moisture()[0], fine, 3e-13);
+        near(report.maximum_accepted_error_ratio, 0.2, 2e-8);
+        assert_eq!(report.comparisons, 1);
+        assert_eq!(report.accepted_intervals, 1);
+        assert_eq!(report.accepted_substeps, 2);
+        assert_eq!(report.evaluations, 6);
+        assert_eq!(report.rejected_intervals, 0);
+        assert_eq!(report.suggested_step_s, 1.0);
+        assert_eq!(report.last_substep.endpoint.interval_s, [0.5, 1.0]);
+        let water = initial.dry_mass_kg() * (fine - 0.1);
+        for transfer in report.boundary_water_kg {
+            near(transfer, water / 6.0, 2e-10);
+        }
+        near(report.water_change_kg, water, 2e-10);
+        near(report.water_balance_residual_kg, 0.0, 1e-9);
+        controls.moisture_absolute_tolerance *= 2.0;
+        let (_, growing) = initial.advance_sdirk2_adaptive_to(
+            1.0, &boundaries, config(), nonlinear(), controls, cx,
+        ).unwrap();
+        assert_eq!(growing.suggested_step_s, 2.0);
+        assert_eq!(initial.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn g4_cartesian_sdirk_adaptive_recovers_stiff_drying_without_clipping() {
+    with_cx(|cx| {
+        let initial = grid(card([0.01; 2], 0.3),
+            grid_geometry([1.0; 3], [1; 3]), vec![0.2], cx);
+        let boundaries = std::array::from_fn(|_| MoistureFace::PrescribedDryBasis(0.0));
+        let mut controls = time_controls(50.0, 1e-5);
+        let (next, report) = initial.advance_sdirk2_adaptive_to(
+            50.0, &boundaries, config(), nonlinear(), controls, cx,
+        ).unwrap();
+        near(next.moisture()[0], 0.2 * (-6.0_f64).exp(), 1e-4);
+        assert!(next.moisture()[0] > 0.0);
+        assert_eq!(next.time_s(), 50.0);
+        assert!(report.rejected_intervals > 0);
+        assert!(report.evaluations < 6 * report.comparisons);
+        assert_eq!(report.evaluations % 2, 0);
+        assert_eq!(report.accepted_substeps, 2 * report.accepted_intervals);
+        near(report.boundary_water_kg.iter().sum(),
+            initial.dry_mass_kg() * (next.moisture()[0] - 0.2), 1e-9);
+        controls.minimum_step_s = 50.0;
+        assert!(matches!(initial.advance_sdirk2_adaptive_to(
+            50.0, &boundaries, config(), nonlinear(), controls, cx,
+        ), Err(MoistureAdvanceError::Step {
+            evaluations: 2, error: MoistureError::StageRange { .. }, ..
+        })));
+        assert_eq!(initial.moisture(), &[0.2]);
+        assert_eq!(initial.time_s(), 0.0);
+    });
+}
+
+#[test]
+fn g4_cartesian_sdirk_adaptive_charges_complete_stages_and_discards_prefixes() {
+    with_cx(|cx| {
+        let initial = grid(card([0.01; 2], 0.3),
+            grid_geometry([1.0; 3], [2; 3]), vec![0.1; 8], cx);
+        let mut controls = time_controls(1.0, 1e-4);
+        controls.maximum_evaluations = 5;
+        assert!(matches!(initial.advance_sdirk2_adaptive_to(
+            1.0, &sealed(), config(), nonlinear(), controls, cx,
+        ), Err(MoistureAdvanceError::WorkLimit {
+            evaluations: 4, accepted_intervals: 0, ..
+        })));
+        controls.maximum_evaluations = 11;
+        assert!(matches!(initial.advance_sdirk2_adaptive_to(
+            2.0, &sealed(), config(), nonlinear(), controls, cx,
+        ), Err(MoistureAdvanceError::WorkLimit {
+            evaluations: 10, accepted_intervals: 1, ..
+        })));
+        controls.maximum_evaluations = 12;
+        let (next, report) = initial.advance_sdirk2_adaptive_to(
+            2.0, &sealed(), config(), nonlinear(), controls, cx,
+        ).unwrap();
+        assert_eq!(report.evaluations, 12);
+        assert_eq!(report.accepted_intervals, 2);
+        assert_eq!(report.accepted_substeps, 4);
+        assert_eq!(next.moisture(), initial.moisture());
+        assert_eq!(next.time_s(), 2.0);
         assert_eq!(initial.time_s(), 0.0);
     });
 }

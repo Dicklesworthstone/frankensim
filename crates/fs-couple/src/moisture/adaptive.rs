@@ -27,7 +27,9 @@ pub use shared::{
 };
 
 use super::binding::MoistureField;
-use super::cartesian::{MoistureCartesian, MoistureCartesianReport};
+use super::cartesian::{
+    MoistureCartesian, MoistureCartesianReport, MoistureCartesianSdirk2Report,
+};
 use super::reservoir::ReservoirField;
 use super::*;
 
@@ -216,6 +218,11 @@ impl WaterStep<2> for MoistureSdirk2Report {
 impl WaterStep<6> for MoistureCartesianReport {
     fn boundary_water(&self) -> [f64; 6] {
         self.boundary_water_kg
+    }
+}
+impl WaterStep<6> for MoistureCartesianSdirk2Report {
+    fn boundary_water(&self) -> [f64; 6] {
+        self.endpoint.boundary_water_kg
     }
 }
 
@@ -1021,5 +1028,48 @@ impl MoistureCartesian {
             field_snapshot::<Self, 6>,
             cx,
         )
+    }
+
+    /// Evolve a complete 3D duration with second-order implicit source stages.
+    ///
+    /// The original full-versus-two-half controller uses cubic local-error
+    /// scaling and the correct factor for unequal representable halves.
+    /// Each attempted endpoint charges two implicit stages, including failed
+    /// attempts. Only accepted physical half intervals and their RK-weighted
+    /// six-face transfers enter the whole-duration water account.
+    ///
+    /// Physical stage-range failures shorten the proposal without clipping or
+    /// a first-order fallback. A later failure publishes no accepted prefix.
+    /// Temperature and external faces remain fixed over the complete call;
+    /// this is an asymptotic local error estimate, not a global error bound
+    /// or an adaptive finite-reservoir RK coupling.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_sdirk2_adaptive_to(
+        &self,
+        target_s: f64,
+        faces: &[MoistureFace; 6],
+        step: MoistureStepConfig,
+        nonlinear: MoistureNonlinearConfig,
+        time: MoistureTimeControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Self, MoistureAdvanceReport<MoistureCartesianSdirk2Report, 6>),
+        MoistureAdvanceError<MoistureError>,
+    > {
+        let (state, report) = evolve_fields_with_method(
+            self,
+            target_s,
+            time,
+            TimeMethod::Sdirk2,
+            |state, dt| {
+                state
+                    .advance_sdirk2(dt, faces, step, nonlinear, cx)
+                    .map(|(state, report)| (state, OneReport(report)))
+            },
+            field_snapshot::<Self, 6>,
+            |_, _, _| Ok(0.0),
+            cx,
+        )?;
+        Ok((state, report.summary.map_step(|step| step.0)))
     }
 }
