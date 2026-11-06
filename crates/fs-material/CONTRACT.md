@@ -16695,6 +16695,27 @@ hydrostatic volume/storage/heat, all nine tangent columns and potential
 gradient after mixed history, objectivity and exact holds, native J2,
 logarithmic small-strain correspondence, unit scaling and refusals.
 
+### Source-defined finite porous compression
+
+`plastic::finite::porous::source::ResolvedFinitePorous` binds the explicit
+`finite-porous-hencky-kirchhoff` model card (law/state version 1) to this same
+native owner. All four pressure-valued coefficients, dimensionless ellipse
+sensitivity, and four native deformation/history limits are mandatory. Source
+identity, validity and the complete typed fixed context remain available.
+Virgin history means the identity inverse plastic metric, including its volume,
+and zero accumulated work-conjugate strain. Unknown parameters, nonvirgin
+initialization, evolving mechanical/rate coordinates, or a Cauchy/small-strain
+law selector refuse. No measured stress-strain table is silently converted.
+
+`FinitePorousMaterial` lets structural consumers borrow either this source or
+the authored native law. Source admission occurs once; existing frozen-history
+potentials, return mapping, analytic tangents and energy accounting remain the
+hot path. G0/G1 tests in `plastic_finite_porous_source` cover independent
+hydrostatic crush, permanent volume loss and elastic reload, the Kirchhoff/
+Cauchy distinction, physical yield heat, explicit J2/perfect-plastic limits,
+source domains and propagation of native bounds. This adds no calibration,
+thermal evolution, porosity evolution or cell-wall densification model.
+
 ## Original density for brittle reference-mass dynamics
 
 `brittle::source::dynamics` resolves original fracture coefficients and positive

@@ -16,6 +16,9 @@
 //! pressure, temperature or rate dependence. The yield surface is symmetric
 //! in mean Kirchhoff stress. All physical applicability bounds are explicit.
 
+/// Explicit source binding for the native finite pressure-sensitive law.
+pub mod source;
+
 use super::{
     FiniteJ2Error, IDENTITY6, ROUND_OFF, Spectrum, determinant, deviator, dot,
     elastic_metric_spectrum, expand, inverse, left_metric_increment, multiply, norm, pack,
@@ -65,6 +68,24 @@ pub struct FinitePorous {
     parameters: FinitePorousParameters,
     limits: FinitePorousLimits,
     kernel: ReturnParameters,
+}
+
+/// Borrow the same native law from an authored or source-resolved material.
+pub trait FinitePorousMaterial {
+    /// Immutable coefficients and native compression/history limits.
+    fn finite_porous(&self) -> &FinitePorous;
+}
+
+impl FinitePorousMaterial for FinitePorous {
+    fn finite_porous(&self) -> &FinitePorous {
+        self
+    }
+}
+
+impl<T: FinitePorousMaterial + ?Sized> FinitePorousMaterial for &T {
+    fn finite_porous(&self) -> &FinitePorous {
+        (*self).finite_porous()
+    }
 }
 
 /// Caller commits the candidate only after its complete coupled step succeeds.
