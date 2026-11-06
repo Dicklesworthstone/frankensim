@@ -546,6 +546,7 @@ fn g1_homogeneous_dilation_uses_original_secant_pressure_and_support_work() {
                     near(r, 0.0, VOLUME * 1e-9);
                 }
                 let bulk = VOLUME * bulk_energy(logarithmic, KAPPA, after_j);
+                let bulk_change = bulk - VOLUME * bulk_energy(logarithmic, KAPPA, before_j);
                 let kinetic = independent_motion(
                     &nodes,
                     &elements[0],
@@ -555,6 +556,8 @@ fn g1_homogeneous_dilation_uses_original_secant_pressure_and_support_work() {
                 .0;
                 near(step.solid.bulk_stored_energy_j(), bulk, 2e-10);
                 near(step.solid.stored_energy_j(), bulk, 2e-10);
+                near(step.energy.bulk_stored_change_j, bulk_change, 2e-10);
+                near(step.energy.stored_change_j, bulk_change, 2e-10);
                 near(
                     step.energy.pressure_work_j,
                     VOLUME * pressure * (after_j - before_j),

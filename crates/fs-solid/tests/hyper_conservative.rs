@@ -613,3 +613,80 @@ fn g0_moving_support_work_and_rejected_candidates_preserve_accepted_state() {
         );
     });
 }
+
+#[test]
+fn g0_small_shear_and_cumulative_work_survive_large_volumetric_storage() {
+    with_cx(false, |cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = Hyperelastic::new(
+            HyperelasticModel::MooneyRivlin {
+                c10: 900.0,
+                c01: 600.0,
+                kappa: 1e12,
+            },
+            4.0,
+        )
+        .unwrap();
+        let densities = [DENSITY];
+        let zero = vec![[0.0; 3]; nodes.len()];
+        // F = diag(2,1,1) + gamma e_y tensor e_z: the volume stays two
+        // while a small shear exchanges energy below the bulk storage's ulp.
+        let initial: Vec<_> = nodes.iter().map(|x| [x[0], 0.0, 0.0]).collect();
+        let mut definition = definition(&nodes, &elements, &material, &densities);
+        definition
+            .material_settings
+            .minimum_relative_strain_increment = 1e-12;
+        let mut solid = definition.prepare(&initial, &zero, cx).unwrap();
+        assert!(solid.stored_energy_j() > 1e10);
+        let shear_coefficient =
+            VOLUME * (900.0 * 2.0_f64.powf(-2.0 / 3.0) + 2400.0 * 2.0_f64.powf(-4.0 / 3.0));
+        // The original assembled nodal forces still carry the 1e12 Pa preload;
+        // their roundoff is distinct from resolving the potential increment.
+        let work_allowance = 3e-8;
+        let mut previous_gamma = 0.0_f64;
+        let mut accumulated_defect = 0.0;
+        for gamma in [1e-4_f64, 2e-4, 0.0] {
+            let prescribed: Vec<_> = nodes
+                .iter()
+                .enumerate()
+                .flat_map(|(node, x)| {
+                    [x[0], gamma * x[2], 0.0]
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(axis, value)| (3 * node + axis, value))
+                })
+                .collect();
+            let step = solid
+                .advance(
+                    1.0,
+                    &prescribed,
+                    &[],
+                    [0.0; 3],
+                    settings(),
+                    work_allowance,
+                    cx,
+                )
+                .unwrap();
+            let expected = shear_coefficient * (gamma - previous_gamma) * (gamma + previous_gamma);
+            near(step.energy.stored_change_j, expected, 2e-12);
+            near(step.energy.material_work_j, expected, 1e-8);
+            assert_eq!(step.energy.bulk_stored_change_j, 0.0);
+            if previous_gamma == 0.0 {
+                assert!(
+                    ((step.energy.stored_after_j - step.energy.stored_before_j) - expected).abs()
+                        > 1e-8,
+                    "fixture must expose loss in subtracting rounded absolute storage"
+                );
+            }
+            accumulated_defect += step.energy.balance_error_j;
+            near(
+                step.energy.cumulative_balance_error_j,
+                accumulated_defect,
+                1e-20,
+            );
+            near(step.energy.cumulative_balance_error_j, 0.0, work_allowance);
+            previous_gamma = gamma;
+            solid = step.solid;
+        }
+    });
+}

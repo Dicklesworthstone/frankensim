@@ -32,6 +32,7 @@ use fs_material::hyper::discrete_gradient::{
     DiscreteGradientPoint, DiscreteGradientSettings, EnergyPart,
 };
 use fs_material::hyper::reference::ReferenceDeformation;
+use fs_math::dd::Dd;
 use fs_solver::nonlinear::{NewtonKrylovState, NewtonReport, NonlinearProblem, SolverRunProgress};
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
 
@@ -660,9 +661,7 @@ impl<'a> ConservativeTetDefinition<'a> {
             stored_energy_j: frozen.stored_energy_j,
             bulk_stored_energy_j: frozen.bulk_stored_energy_j,
             kinetic_energy_j,
-            initial_total_energy_j,
-            cumulative_work_j: 0.0,
-            work_correction_j: 0.0,
+            cumulative_work_defect_j: Dd::ZERO,
             time_s: 0.0,
         })
     }
@@ -678,7 +677,7 @@ impl<'a> ConservativeTetDefinition<'a> {
     ) -> Result<FrozenState<'a>, ConservativeTetError> {
         let count = mesh.elements.len() * mesh.points_per_element;
         let mut points = Vec::with_capacity(count);
-        let mut energy = 0.0;
+        let mut energy = Dd::ZERO;
         let mixed = self.formulation.volume_controls().is_some();
         let bulk_settings = self.formulation.bulk_settings();
         if retained_bulk_volumes
@@ -690,7 +689,7 @@ impl<'a> ConservativeTetDefinition<'a> {
         }
         let mut bulk_points = Vec::with_capacity(if bulk_settings.is_some() { count } else { 0 });
         let mut bulk_volume_ratios = Vec::with_capacity(bulk_points.capacity());
-        let mut bulk_stored_energy_j = 0.0;
+        let mut bulk_energy = Dd::ZERO;
         let mut pressure_residual_m3 = vec![0.0; if mixed { mesh.pressure_nodes.len() } else { 0 }];
         for (e, element) in mesh.elements.iter().enumerate() {
             for (q, point) in element.points.iter().enumerate() {
@@ -718,7 +717,8 @@ impl<'a> ConservativeTetDefinition<'a> {
                     None => DiscreteGradientPoint::try_new(law, part, f, self.material_settings),
                 }
                 .map_err(|error| material_error(e, q, error))?;
-                energy += point.weight_m3 * frozen.energy_before_pa();
+                let weight = Dd::from_f64(point.weight_m3);
+                energy = energy + weight * Dd::from_f64(frozen.energy_before_pa());
                 let bulk_volume = if let Some(settings) = bulk_settings {
                     // A compatible initial endpoint pressure avoids unresolved
                     // volume components that would alternate under a quadratic
@@ -753,7 +753,7 @@ impl<'a> ConservativeTetDefinition<'a> {
                     }
                     .map_err(|error| material_error(e, q, error))?;
                     let ratio = bulk.accepted_volume_ratio();
-                    bulk_stored_energy_j += point.weight_m3 * bulk.energy_before_pa();
+                    bulk_energy = bulk_energy + weight * Dd::from_f64(bulk.energy_before_pa());
                     bulk_points.push(bulk);
                     bulk_volume_ratios.push(ratio);
                     ratio
@@ -770,8 +770,11 @@ impl<'a> ConservativeTetDefinition<'a> {
                 points.push(frozen);
             }
         }
-        let stored_energy_j = energy + bulk_stored_energy_j;
-        if !energy.is_finite() || !bulk_stored_energy_j.is_finite() || !stored_energy_j.is_finite()
+        let stored_energy_j = (energy + bulk_energy).to_f64();
+        let bulk_stored_energy_j = bulk_energy.to_f64();
+        if !energy.to_f64().is_finite()
+            || !bulk_stored_energy_j.is_finite()
+            || !stored_energy_j.is_finite()
         {
             return Err(invalid("physical elastic storage is unrepresentable"));
         }
@@ -900,9 +903,10 @@ pub struct ConservativeTetSolid<'a> {
     stored_energy_j: f64,
     bulk_stored_energy_j: f64,
     kinetic_energy_j: f64,
-    initial_total_energy_j: f64,
-    cumulative_work_j: f64,
-    work_correction_j: f64,
+    /// Sum of independently measured work minus source-owned physical energy
+    /// increments. Neither the initial storage nor large through-work enters
+    /// this subtraction, so small accepted defects persist across intervals.
+    cumulative_work_defect_j: Dd,
     time_s: f64,
 }
 
@@ -910,9 +914,14 @@ pub struct ConservativeTetSolid<'a> {
 pub struct ConservativeTetEnergy {
     pub stored_before_j: f64,
     pub stored_after_j: f64,
+    /// Direct original material plus bulk increment, resolved at quadrature.
+    /// It may remain nonzero when the two rounded endpoint totals coincide.
+    pub stored_change_j: f64,
     /// Original U at retained mixed quadrature volumes; zero in other modes.
     pub bulk_stored_before_j: f64,
     pub bulk_stored_after_j: f64,
+    /// Direct original bulk increment; zero in the other formulations.
+    pub bulk_stored_change_j: f64,
     /// Algorithmic bulk work p*(Jbar_after-Jbar_before).
     pub bulk_work_j: f64,
     pub bulk_constitutive_work_error_j: f64,
@@ -934,8 +943,8 @@ pub struct ConservativeTetEnergy {
     /// External/support and constraint-reference work minus physical stored
     /// and kinetic changes, measured after any fixed-F reference event.
     pub balance_error_j: f64,
-    /// All accumulated work, including reference events, minus physical total
-    /// energy change from the original prepared state.
+    /// Compensated sum of work minus direct physical energy increments,
+    /// including all reference and impulse events since preparation.
     pub cumulative_balance_error_j: f64,
 }
 
@@ -957,10 +966,12 @@ struct Evaluation {
     tangent: Option<Csr>,
     stored_j: f64,
     bulk_stored_j: f64,
-    bulk_work_j: f64,
+    material_change_j: Dd,
+    bulk_change_j: Dd,
+    bulk_work_j: Dd,
     bulk_volume_ratios: Vec<f64>,
-    material_work_j: f64,
-    pressure_work_j: f64,
+    material_work_j: Dd,
+    pressure_work_j: Dd,
     pressure_residual_m3: Vec<f64>,
     min_det_f: f64,
 }
@@ -1327,30 +1338,32 @@ impl<'a> ConservativeTetSolid<'a> {
             .as_flattened()
             .iter()
             .zip(self.displacement_m.as_flattened())
-            .map(|(a, b)| a - b)
+            .map(|(a, b)| Dd::from_f64(*a) - Dd::from_f64(*b))
             .collect();
         let dead_load_work_j = external_n
             .iter()
             .zip(&du)
-            .fold(0.0, |s, (f, u)| f.mul_add(*u, s));
+            .fold(Dd::ZERO, |s, (f, u)| s + Dd::from_f64(*f) * *u);
         let support_work_j = reactions_n
             .iter()
-            .fold(0.0, |s, (d, f)| f.mul_add(du[*d], s));
+            .fold(Dd::ZERO, |s, (d, f)| s + Dd::from_f64(*f) * du[*d]);
         let work_j = dead_load_work_j + support_work_j;
         // P = P_remainder + p_alg Gd uses a tensile-positive multiplier.
         // Changing the weak target supplies -p_alg Delta(J_ref), so pressure
         // work still closes against physical storage rather than creating energy.
-        let constraint_reference_work_j = reference_change.as_ref().map_or(0.0, |change| {
+        let constraint_reference_work_j = reference_change.as_ref().map_or(Dd::ZERO, |change| {
             pressure_pa
                 .iter()
                 .zip(change.natural_volume_change_m3)
-                .fold(0.0, |s, (p, volume)| (-p).mul_add(*volume, s))
+                .fold(Dd::ZERO, |s, (p, volume)| {
+                    s - Dd::from_f64(*p) * Dd::from_f64(*volume)
+                })
         });
-        let stored_change_j = evaluation.stored_j - self.stored_energy_j;
-        let bulk_change_j = evaluation.bulk_stored_j - self.bulk_stored_energy_j;
-        let increment = (work_j + constraint_reference_work_j) - self.work_correction_j;
-        let cumulative_work_j = self.cumulative_work_j + increment;
-        let work_correction_j = (cumulative_work_j - self.cumulative_work_j) - increment;
+        let stored_change_j = evaluation.material_change_j + evaluation.bulk_change_j;
+        let balance_error_j = work_j + constraint_reference_work_j
+            - stored_change_j
+            - Dd::from_f64(inertia_energy.kinetic_change_j);
+        let cumulative_work_defect_j = self.cumulative_work_defect_j + balance_error_j;
         let algebraic_pressure_work_j = pressure_pa
             .iter()
             .zip(&evaluation.pressure_residual_m3)
@@ -1361,34 +1374,37 @@ impl<'a> ConservativeTetSolid<'a> {
                         change.pressure_residual_before_m3
                     }),
             )
-            .fold(0.0, |s, ((p, after), before)| p.mul_add(after - before, s));
+            .fold(Dd::ZERO, |s, ((p, after), before)| {
+                s + Dd::from_f64(*p) * (Dd::from_f64(*after) - Dd::from_f64(*before))
+            });
         let energy = ConservativeTetEnergy {
             stored_before_j: self.stored_energy_j,
             stored_after_j: evaluation.stored_j,
+            stored_change_j: stored_change_j.to_f64(),
             bulk_stored_before_j: self.bulk_stored_energy_j,
             bulk_stored_after_j: evaluation.bulk_stored_j,
-            bulk_work_j: evaluation.bulk_work_j,
-            bulk_constitutive_work_error_j: evaluation.bulk_work_j - bulk_change_j,
-            material_work_j: evaluation.material_work_j,
-            pressure_work_j: evaluation.pressure_work_j,
-            dead_load_work_j,
-            support_work_j,
-            constraint_reference_work_j,
-            constitutive_work_error_j: evaluation.material_work_j
-                - (stored_change_j - bulk_change_j),
-            constraint_work_error_j: evaluation.pressure_work_j + constraint_reference_work_j
+            bulk_stored_change_j: evaluation.bulk_change_j.to_f64(),
+            bulk_work_j: evaluation.bulk_work_j.to_f64(),
+            bulk_constitutive_work_error_j: (evaluation.bulk_work_j - evaluation.bulk_change_j)
+                .to_f64(),
+            material_work_j: evaluation.material_work_j.to_f64(),
+            pressure_work_j: evaluation.pressure_work_j.to_f64(),
+            dead_load_work_j: dead_load_work_j.to_f64(),
+            support_work_j: support_work_j.to_f64(),
+            constraint_reference_work_j: constraint_reference_work_j.to_f64(),
+            constitutive_work_error_j: (evaluation.material_work_j - evaluation.material_change_j)
+                .to_f64(),
+            constraint_work_error_j: (evaluation.pressure_work_j + constraint_reference_work_j
                 - evaluation.bulk_work_j
-                - algebraic_pressure_work_j,
-            equilibrium_work_error_j: work_j
+                - algebraic_pressure_work_j)
+                .to_f64(),
+            equilibrium_work_error_j: (work_j
                 - evaluation.material_work_j
                 - evaluation.pressure_work_j
-                - inertia_energy.inertial_work_j,
-            balance_error_j: work_j + constraint_reference_work_j
-                - stored_change_j
-                - inertia_energy.kinetic_change_j,
-            cumulative_balance_error_j: cumulative_work_j
-                - (evaluation.stored_j + inertia_energy.kinetic_after_j
-                    - self.initial_total_energy_j),
+                - Dd::from_f64(inertia_energy.inertial_work_j))
+            .to_f64(),
+            balance_error_j: balance_error_j.to_f64(),
+            cumulative_balance_error_j: cumulative_work_defect_j.to_f64(),
         };
         for (quantity, value) in [
             ("constitutive work", energy.constitutive_work_error_j),
@@ -1396,7 +1412,9 @@ impl<'a> ConservativeTetSolid<'a> {
             ("constraint work identity", energy.constraint_work_error_j),
             (
                 "pressure storage work",
-                energy.pressure_work_j + constraint_reference_work_j - bulk_change_j,
+                (evaluation.pressure_work_j + constraint_reference_work_j
+                    - evaluation.bulk_change_j)
+                    .to_f64(),
             ),
             ("momentum work", energy.equilibrium_work_error_j),
             ("kinetic work", inertia_energy.balance_error_j),
@@ -1446,9 +1464,7 @@ impl<'a> ConservativeTetSolid<'a> {
                 stored_energy_j: frozen.stored_energy_j,
                 bulk_stored_energy_j: frozen.bulk_stored_energy_j,
                 kinetic_energy_j: inertia_energy.kinetic_after_j,
-                initial_total_energy_j: self.initial_total_energy_j,
-                cumulative_work_j,
-                work_correction_j,
+                cumulative_work_defect_j,
                 time_s,
             },
             newton: report,

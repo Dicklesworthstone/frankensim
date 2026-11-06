@@ -16,11 +16,13 @@
 use std::sync::Arc;
 
 use fs_exec::Cx;
+use fs_material::hyper::reference::ReferenceDeformation;
+use fs_math::dd::Dd;
 
 use super::{
     ConservativeFormulation, ConservativeReferenceField, ConservativeTetDefinition,
     ConservativeTetError, ConservativeTetSolid, ConservativeTetStep, ConstraintReferenceChange,
-    MixedLawField, MixedUpSettings, checkpoint, gate, invalid,
+    MixedLawField, MixedUpSettings, checkpoint, gate, invalid, material_error,
 };
 
 /// Fixed-deformation physical storage and its signed source input [J].
@@ -29,13 +31,17 @@ use super::{
 pub struct ConservativeReferenceEnergy {
     pub stored_before_j: f64,
     pub stored_after_j: f64,
+    /// Source-owned finite change, independent of rounded absolute storage.
+    pub stored_change_j: f64,
     pub bulk_stored_before_j: f64,
     pub bulk_stored_after_j: f64,
+    pub bulk_stored_change_j: f64,
     pub reference_work_j: f64,
     pub bulk_reference_work_j: f64,
-    /// Pointwise integrated reference work minus the accepted storage change.
+    /// Reference input is defined by the prescribed potential change, so this
+    /// is zero for an admitted event; it is not an independent heat audit.
     pub balance_error_j: f64,
-    /// All prior input plus this event, relative to the original total energy.
+    /// Retained cumulative physical work defect, without resetting its history.
     pub cumulative_balance_error_j: f64,
 }
 
@@ -61,13 +67,6 @@ struct PreparedReferenceChange<'a> {
     solid: ConservativeTetSolid<'a>,
     energy: ConservativeReferenceEnergy,
     natural_volume_change_m3: Option<Vec<f64>>,
-}
-
-fn add_compensated(sum: &mut f64, correction: &mut f64, value: f64) {
-    let increment = value - *correction;
-    let next = *sum + increment;
-    *correction = (next - *sum) - increment;
-    *sum = next;
 }
 
 impl<'a> ConservativeTetSolid<'a> {
@@ -243,76 +242,85 @@ impl<'a> ConservativeTetSolid<'a> {
             definition.admit_volume(&self.mesh, &frozen.pressure_residual_m3)?;
         }
 
-        let mut material_work_j = 0.0;
-        let mut material_correction_j = 0.0;
-        let mut bulk_reference_work_j = 0.0;
-        let mut bulk_correction_j = 0.0;
+        let mut material_change_j = Dd::ZERO;
+        let mut bulk_change_j = Dd::ZERO;
         let mut natural_volume_change_m3 =
-            (exact && allow_constraint_change).then(|| vec![0.0; np]);
+            (exact && allow_constraint_change).then(|| vec![Dd::ZERO; np]);
+        let identity = ReferenceDeformation::identity();
         for (element_index, element) in self.mesh.elements.iter().enumerate() {
             for (point_index, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let index = element_index * self.mesh.points_per_element + point_index;
-                add_compensated(
-                    &mut material_work_j,
-                    &mut material_correction_j,
-                    point.weight_m3
-                        * (frozen.points[index].energy_before_pa()
-                            - self.points[index].energy_before_pa()),
-                );
+                let weight = Dd::from_f64(point.weight_m3);
+                let change = self.points[index]
+                    .energy_increment_to(&frozen.points[index])
+                    .map_err(|error| material_error(element_index, point_index, error))?;
+                material_change_j = material_change_j + weight * Dd::from_f64(change);
                 if !self.bulk_points.is_empty() {
-                    add_compensated(
-                        &mut bulk_reference_work_j,
-                        &mut bulk_correction_j,
-                        point.weight_m3
-                            * (frozen.bulk_points[index].energy_before_pa()
-                                - self.bulk_points[index].energy_before_pa()),
-                    );
+                    let change = self.bulk_points[index]
+                        .energy_increment_to(&frozen.bulk_points[index])
+                        .map_err(|error| material_error(element_index, point_index, error))?;
+                    bulk_change_j = bulk_change_j + weight * Dd::from_f64(change);
                 }
                 if let Some(change) = &mut natural_volume_change_m3 {
-                    let old_volume = self
+                    let old_reference = self
                         .references
                         .at(element_index, point_index, self.mesh.points_per_element)
-                        .map_or(1.0, |reference| reference.volume_ratio());
-                    let new_volume = references
+                        .unwrap_or(&identity);
+                    let new_reference = references
                         .at(element_index, point_index, self.mesh.points_per_element)
-                        .map_or(1.0, |reference| reference.volume_ratio());
+                        .unwrap_or(&identity);
                     // Integrate natural-volume change directly. Subtracting two
                     // geometric residuals can erase a small prescribed change.
-                    let delta = new_volume - old_volume;
+                    let delta =
+                        Dd::from_f64(old_reference.volume_ratio_increment_to(new_reference));
                     for a in 0..4 {
-                        change[element.pressure_indices[a]] +=
-                            point.weight_m3 * point.pressure_shapes[a] * delta;
+                        let row = element.pressure_indices[a];
+                        change[row] =
+                            change[row] + weight * Dd::from_f64(point.pressure_shapes[a]) * delta;
                     }
                 }
             }
         }
+        let natural_volume_change_m3 = natural_volume_change_m3
+            .map(|values| values.into_iter().map(Dd::to_f64).collect::<Vec<_>>());
         if natural_volume_change_m3
             .as_ref()
             .is_some_and(|change| change.iter().any(|v| !v.is_finite()))
         {
             return Err(invalid("natural-volume actuation is unrepresentable"));
         }
-        let reference_work_j = material_work_j + bulk_reference_work_j;
-        let increment = reference_work_j - self.work_correction_j;
-        let cumulative_work_j = self.cumulative_work_j + increment;
-        let work_correction_j = (cumulative_work_j - self.cumulative_work_j) - increment;
+        let stored_change_j = material_change_j + bulk_change_j;
+        if ![material_change_j, bulk_change_j, stored_change_j]
+            .iter()
+            .all(|value| value.to_f64().is_finite())
+        {
+            return Err(invalid(
+                "prescribed reference storage change is unrepresentable",
+            ));
+        }
+        // This prescribed source's input IS its original potential change.
+        // Neither absolute endpoint subtraction nor a rounded public work sum
+        // supplies an independent physical defect. Retain prior defects exactly;
+        // the following mechanical interval audits its own actuation work.
+        let cumulative_work_defect_j = self.cumulative_work_defect_j;
         let energy = ConservativeReferenceEnergy {
             stored_before_j: self.stored_energy_j,
             stored_after_j: frozen.stored_energy_j,
+            stored_change_j: stored_change_j.to_f64(),
             bulk_stored_before_j: self.bulk_stored_energy_j,
             bulk_stored_after_j: frozen.bulk_stored_energy_j,
-            reference_work_j,
-            bulk_reference_work_j,
-            balance_error_j: reference_work_j - (frozen.stored_energy_j - self.stored_energy_j),
-            cumulative_balance_error_j: cumulative_work_j
-                - (frozen.stored_energy_j + self.kinetic_energy_j - self.initial_total_energy_j),
+            bulk_stored_change_j: bulk_change_j.to_f64(),
+            reference_work_j: stored_change_j.to_f64(),
+            bulk_reference_work_j: bulk_change_j.to_f64(),
+            balance_error_j: 0.0,
+            cumulative_balance_error_j: cumulative_work_defect_j.to_f64(),
         };
         for (quantity, value) in [
             ("reference storage work", energy.balance_error_j),
             (
                 "reference original bulk work",
-                bulk_reference_work_j - (frozen.bulk_stored_energy_j - self.bulk_stored_energy_j),
+                energy.bulk_reference_work_j - energy.bulk_stored_change_j,
             ),
             (
                 "accumulated reference work",
@@ -339,9 +347,7 @@ impl<'a> ConservativeTetSolid<'a> {
                 stored_energy_j: frozen.stored_energy_j,
                 bulk_stored_energy_j: frozen.bulk_stored_energy_j,
                 kinetic_energy_j: self.kinetic_energy_j,
-                initial_total_energy_j: self.initial_total_energy_j,
-                cumulative_work_j,
-                work_correction_j,
+                cumulative_work_defect_j,
                 time_s: self.time_s,
             },
             energy,

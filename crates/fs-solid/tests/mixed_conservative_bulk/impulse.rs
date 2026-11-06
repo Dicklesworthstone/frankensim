@@ -29,6 +29,66 @@ fn controls() -> MixedImpulseControls {
 }
 
 #[test]
+fn small_impulse_work_survives_large_elastic_storage_and_following_interval() {
+    with_cx(false, |cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = Hyperelastic::new(
+            HyperelasticModel::Ogden {
+                terms: vec![OgdenTerm {
+                    mu_pa: 1e12,
+                    alpha: 2.0,
+                }],
+                volumetric: Volumetric::Quadratic { kappa: KAPPA },
+            },
+            4.0,
+        )
+        .unwrap();
+        let densities = [DENSITY];
+        let initial: Vec<_> = nodes.iter().map(|x| [x[0], 0.0, 0.0]).collect();
+        let zero = vec![[0.0; 3]; nodes.len()];
+        let speed = 1e-4;
+        let impulses: Vec<_> = elements[0]
+            .iter()
+            .enumerate()
+            .map(|(a, &node)| {
+                let weight = if a < 4 { -1.0 / 20.0 } else { 1.0 / 5.0 };
+                (3 * node, DENSITY * VOLUME * weight * speed)
+            })
+            .collect();
+        let held: Vec<_> = initial.as_flattened().iter().copied().enumerate().collect();
+        for full in [false, true] {
+            let mut source = definition(
+                &nodes,
+                &elements,
+                MixedLawField::Uniform(&material),
+                &densities,
+            );
+            if full {
+                source.formulation = ConservativeFormulation::FullMaterial;
+            }
+            let solid = source
+                .prepare_with_pressure(&initial, &zero, if full { &[] } else { &[KAPPA; 4] }, cx)
+                .unwrap();
+            let event = solid
+                .impulse_candidate(&[], &impulses, None, [0.0; 3], controls(), cx)
+                .unwrap();
+            let expected = 0.5 * DENSITY * VOLUME * speed * speed;
+            near(event.impulse.external_work_j, expected, 1e-20);
+            near(event.impulse.momentum.kinetic_change_j, expected, 1e-20);
+            assert_eq!(event.solid.total_energy_j(), solid.total_energy_j());
+            assert_eq!(event.solid.stored_energy_j(), solid.stored_energy_j());
+            let step = event
+                .solid
+                .advance(0.01, &held, &[], [0.0; 3], settings(), 1e-10, cx)
+                .unwrap();
+            near(step.energy.stored_change_j, 0.0, 1e-15);
+            near(step.energy.cumulative_balance_error_j, 0.0, 1e-10);
+            near(step.solid.kinetic_energy_j(), expected, 1e-20);
+        }
+    });
+}
+
+#[test]
 fn full_and_original_bulk_impulses_keep_state_and_continue_the_original_work_account() {
     with_cx(false, |cx| {
         let (nodes, elements) = mesh(cx);

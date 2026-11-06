@@ -5,6 +5,7 @@
 //! centered consistent mass is added before the single global CSR assembly.
 
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use fs_sparse::Coo;
 
 use super::{
@@ -46,12 +47,14 @@ impl ConservativeTetSolid<'_> {
         let mut forces_n = vec![0.0; nu];
         let mut pressure_residual_m3 = vec![0.0; np];
         let mut matrix = with_tangent.then(|| Coo::new(nu + np, nu + np));
-        let mut stored_j = 0.0;
-        let mut bulk_stored_j = 0.0;
-        let mut bulk_work_j = 0.0;
+        let mut stored_j = Dd::ZERO;
+        let mut bulk_stored_j = Dd::ZERO;
+        let mut material_change_j = Dd::ZERO;
+        let mut bulk_change_j = Dd::ZERO;
+        let mut bulk_work_j = Dd::ZERO;
         let mut bulk_volume_ratios = Vec::with_capacity(self.bulk_points.len());
-        let mut material_work_j = 0.0;
-        let mut pressure_work_j = 0.0;
+        let mut material_work_j = Dd::ZERO;
+        let mut pressure_work_j = Dd::ZERO;
         let mut min_det_f = f64::INFINITY;
         for (e, element) in self.mesh.elements.iter().enumerate() {
             checkpoint(cx)?;
@@ -125,14 +128,18 @@ impl ConservativeTetSolid<'_> {
                             .map_err(|error| material_error(e, q, error))?,
                     )
                 };
+                let weight = Dd::from_f64(point.weight_m3);
                 if let Some(bulk) = &bulk {
-                    bulk_stored_j = point.weight_m3.mul_add(bulk.energy_after_pa, bulk_stored_j);
-                    bulk_work_j = point.weight_m3.mul_add(bulk.work_pa, bulk_work_j);
+                    bulk_stored_j = bulk_stored_j + weight * Dd::from_f64(bulk.energy_after_pa);
+                    bulk_change_j = bulk_change_j + weight * Dd::from_f64(bulk.energy_change_pa);
+                    bulk_work_j = bulk_work_j + weight * Dd::from_f64(bulk.work_pa);
                     bulk_volume_ratios.push(bulk.volume_ratio_after);
                 }
                 min_det_f = min_det_f.min(det_f);
-                stored_j = point.weight_m3.mul_add(state.energy_after_pa, stored_j);
-                material_work_j = point.weight_m3.mul_add(state.work_pa, material_work_j);
+                stored_j = stored_j + weight * Dd::from_f64(state.energy_after_pa);
+                material_change_j =
+                    material_change_j + weight * Dd::from_f64(state.energy_change_pa);
+                material_work_j = material_work_j + weight * Dd::from_f64(state.work_pa);
                 let stress: [f64; 9] = core::array::from_fn(|ij| {
                     volume_state
                         .as_ref()
@@ -141,9 +148,8 @@ impl ConservativeTetSolid<'_> {
                         })
                 });
                 if let Some(volume) = &volume_state {
-                    pressure_work_j = point
-                        .weight_m3
-                        .mul_add(pressure * volume.volume_work, pressure_work_j);
+                    pressure_work_j = pressure_work_j
+                        + weight * Dd::from_f64(pressure) * Dd::from_f64(volume.volume_work);
                     for a in 0..4 {
                         let target_volume = bulk
                             .as_ref()
@@ -152,12 +158,18 @@ impl ConservativeTetSolid<'_> {
                             point.weight_m3 * point.pressure_shapes[a] * (det_f - target_volume);
                     }
                 }
-                if !stored_j.is_finite()
-                    || !bulk_stored_j.is_finite()
-                    || !bulk_work_j.is_finite()
-                    || !material_work_j.is_finite()
+                if [
+                    stored_j,
+                    bulk_stored_j,
+                    material_change_j,
+                    bulk_change_j,
+                    bulk_work_j,
+                    material_work_j,
+                    pressure_work_j,
+                ]
+                .iter()
+                .any(|value| !value.hi.is_finite() || !value.lo.is_finite())
                     || !pressure.is_finite()
-                    || !pressure_work_j.is_finite()
                     || !det_f.is_finite()
                     || det_f <= 0.0
                 {
@@ -285,17 +297,30 @@ impl ConservativeTetSolid<'_> {
             }
         }
         checkpoint(cx)?;
-        stored_j += bulk_stored_j;
-        if !stored_j.is_finite() {
+        stored_j = stored_j + bulk_stored_j;
+        if [
+            stored_j,
+            bulk_stored_j,
+            material_change_j,
+            bulk_change_j,
+            bulk_work_j,
+            material_work_j,
+            pressure_work_j,
+        ]
+        .iter()
+        .any(|value| !value.hi.is_finite() || !value.lo.is_finite())
+        {
             return Err(invalid(
-                "total conservative elastic storage is unrepresentable",
+                "conservative elastic storage, increment or work is unrepresentable",
             ));
         }
         Ok(Evaluation {
             forces_n,
             tangent,
-            stored_j,
-            bulk_stored_j,
+            stored_j: stored_j.to_f64(),
+            bulk_stored_j: bulk_stored_j.to_f64(),
+            material_change_j,
+            bulk_change_j,
             bulk_work_j,
             bulk_volume_ratios,
             material_work_j,

@@ -31,6 +31,151 @@ fn affine_displacement(nodes: &[[f64; 3]], f: [f64; 9]) -> Vec<[f64; 3]> {
 }
 
 #[test]
+fn g1_fixed_deformation_reference_shear_retains_work_beneath_large_bulk_storage() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let material = law(1e24);
+        let density = [DENSITY];
+        let deformation = [2.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let displacement = affine_displacement(&nodes, deformation);
+        let velocity = vec![[0.0; 3]; nodes.len()];
+        let definition = ConservativeTetDefinition {
+            formulation: ConservativeFormulation::FullMaterial,
+            ..definition(&nodes, &elements, &material, &density)
+        };
+        let accepted = definition.prepare(&displacement, &velocity, cx).unwrap();
+        let original_bits = state_bits(&accepted);
+        let shear = 2.0_f64.powi(-12);
+        let reference =
+            ReferenceDeformation::try_new([1.0, shear, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]).unwrap();
+        let changed = accepted
+            .change_reference(
+                MixedLawField::Uniform(&material),
+                ConservativeReferenceField::Uniform(&reference),
+                &[],
+                1e-15,
+                cx,
+            )
+            .unwrap();
+        // Fe=diag(2,1,1)-2*shear e_x (x) e_y has unchanged J=2.
+        // Both original Mooney-Rivlin invariants gain 4*shear^2 before
+        // their respective J^(-2/3), J^(-4/3) factors.
+        let expected = VOLUME
+            * 4.0
+            * shear
+            * shear
+            * (4.0 * 2.0_f64.powf(-2.0 / 3.0) + 2.0 * 2.0_f64.powf(-4.0 / 3.0));
+        assert_eq!(
+            changed.energy.stored_before_j,
+            changed.energy.stored_after_j
+        );
+        near(changed.energy.stored_change_j, expected, 1e-16);
+        near(changed.energy.reference_work_j, expected, 1e-16);
+        near(changed.energy.bulk_stored_change_j, 0.0, 0.0);
+        near(changed.energy.balance_error_j, 0.0, 0.0);
+        near(changed.energy.cumulative_balance_error_j, 0.0, 0.0);
+        assert_eq!(changed.solid.displacement_m(), accepted.displacement_m());
+        assert_eq!(changed.solid.velocity_mps(), accepted.velocity_mps());
+        assert_eq!(changed.solid.time_s(), accepted.time_s());
+        assert_eq!(state_bits(&accepted), original_bits);
+        let reversed = changed
+            .solid
+            .change_reference(
+                MixedLawField::Uniform(&material),
+                ConservativeReferenceField::Identity,
+                &[],
+                1e-15,
+                cx,
+            )
+            .unwrap();
+        near(reversed.energy.reference_work_j, -expected, 1e-16);
+        near(reversed.energy.cumulative_balance_error_j, 0.0, 0.0);
+        assert_eq!(state_bits(&reversed.solid), original_bits);
+    });
+}
+
+#[test]
+fn g1_bulk_reference_event_resolves_cancelling_modulus_work_without_resetting_volume() {
+    with_cx(|cx| {
+        let (nodes, elements) = mesh(cx);
+        let kappa = 2.0_f64.powi(80);
+        let h = 2.0_f64.powi(-40);
+        let next_kappa = kappa * (1.0 + 3.0 * h);
+        let (material, target_material) = (law(kappa), law(next_kappa));
+        let density = [DENSITY];
+        let displacement =
+            affine_displacement(&nodes, [2.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        let velocity = vec![[0.0; 3]; nodes.len()];
+        let definition = ConservativeTetDefinition {
+            formulation: ConservativeFormulation::OriginalMaterial {
+                bulk: DiscreteBulkSettings {
+                    minimum_volume_ratio: 0.8,
+                    maximum_volume_ratio: 2.2,
+                    maximum_iterations: 128,
+                    absolute_pressure_tolerance_pa: 1e-12 * kappa,
+                    relative_pressure_tolerance: 1e-12,
+                    absolute_work_tolerance_pa: 1e-12,
+                    relative_work_tolerance: 1e-12,
+                },
+                maximum_relative_volume_residual: 1e-9,
+                maximum_point_volume_work_defect: 1e-12,
+            },
+            ..definition(&nodes, &elements, &material, &density)
+        };
+        let accepted = definition
+            .prepare_with_pressure(&displacement, &velocity, &[kappa; 4], cx)
+            .unwrap();
+        let retained = accepted.bulk_volume_ratios().to_vec();
+        let reference =
+            ReferenceDeformation::try_new([1.0 + h, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+                .unwrap();
+        let changed = accepted
+            .change_reference(
+                MixedLawField::Uniform(&target_material),
+                ConservativeReferenceField::Uniform(&reference),
+                &[],
+                1e-12,
+                cx,
+            )
+            .unwrap();
+        // Integrate the exact rational source change at each retained q. The
+        // pressure-space projection, including its original quadrature bits,
+        // must not be replaced by the geometric value two for this audit.
+        let expected = duffy_quadrature(4)
+            .iter()
+            .zip(&retained)
+            .map(|((_, weight), q)| {
+                let a = q - 1.0;
+                weight * 0.5 * kappa * h * (2.0 * a * (q - 2.0) + h * (1.0 - 6.0 * a) + 3.0 * h * h)
+                    / (1.0 + h)
+            })
+            .sum::<f64>();
+        assert_eq!(
+            changed.energy.bulk_stored_before_j,
+            changed.energy.bulk_stored_after_j
+        );
+        near(changed.energy.bulk_stored_change_j, expected, 2e-12);
+        near(changed.energy.bulk_reference_work_j, expected, 2e-12);
+        assert_eq!(changed.solid.bulk_volume_ratios(), retained);
+        assert_eq!(changed.solid.displacement_m(), accepted.displacement_m());
+        near(changed.energy.cumulative_balance_error_j, 0.0, 0.0);
+        let reversed = changed
+            .solid
+            .change_reference(
+                MixedLawField::Uniform(&material),
+                ConservativeReferenceField::Identity,
+                &[],
+                1e-12,
+                cx,
+            )
+            .unwrap();
+        near(reversed.energy.bulk_reference_work_j, -expected, 2e-12);
+        near(reversed.energy.cumulative_balance_error_j, 0.0, 0.0);
+        assert_eq!(reversed.solid.bulk_volume_ratios(), retained);
+    });
+}
+
+#[test]
 fn g1_large_reference_free_motion_preserves_natural_volume_and_original_mass() {
     with_cx(|cx| {
         let (nodes, elements) = mesh(cx);

@@ -4999,7 +4999,8 @@ required. Custom material adapters that retain the default endpoint subtraction
 retain its precision limits. Force equilibrium and material/load admission are
 unchanged. Numerical solve regressions retain the same nonlinear path with a
 `1e20 Pa` material energy offset and resolve a pressure-loaded small cell beside
-an immobile `1e21 m3` cell whose rounded global volume does not change.
+an immobile cell of approximately `1.7e20 m3` whose rounded global volume does
+not change.
 
 `HyperelasticLawField::Uniform` and `PerElement` use this same owner. A
 per-element field follows tetrahedron connectivity order and must cover the
@@ -8009,6 +8010,30 @@ against the caller's allowance in joules. Kinetic work and numerical loss remain
 separate fields. Invalid domains, exhausted budgets, failed solves, failed work
 gates or cancellation return no changed accepted state. One physical interval
 requires one load step; Newton backtracking does not advance material history.
+
+The mixed conservative owner carries `DiscreteGradientState::energy_change_pa`
+and the original bulk increment through its existing quadrature sweep.
+`ConservativeTetEnergy::stored_change_j` and `bulk_stored_change_j` expose these
+physical increments even when the absolute before/after totals round equal.
+Material, bulk, pressure, dead-load and support work use compensated products
+and sums through the final balance. The cumulative gate sums each independently
+computed work-minus-energy defect in double-double precision; neither a large
+initial energy nor large accumulated through-work masks a small defect. Nodal
+and point impulses add their original direct kinetic increment to the same
+account, preserving all local work and atomic refusal gates.
+
+Prescribed reference events integrate the material and bulk point-to-point
+potential increments while retaining physical mixed volumes. Their source input
+is defined by that potential change, so the event's local balance is zero by
+construction and does not claim an independent thermal or entropy closure.
+Previous cumulative defects remain intact. Both direct changes are exposed in
+`ConservativeReferenceEnergy`, and any following native interval separately
+audits mechanical and exact-volume actuation work. Natural-volume actuation
+moments use the reference owner's direct determinant increment. Focused solve
+regressions exercise weak shear under high bulk preload, small impulses under
+large strain storage, and cancelling reference/modulus work; original full,
+exact-constraint and finite-bulk motion and reference-event fixtures remain
+covered by the same numerical owners.
 
 G0/G1 evidence in `tests/hyper_conservative.rs` includes independent consistent
 mass and original-energy checks for a freely translating, rotating and deforming

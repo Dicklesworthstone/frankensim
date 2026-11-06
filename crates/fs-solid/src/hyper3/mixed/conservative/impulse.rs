@@ -11,6 +11,7 @@ use crate::hyper3::mixed::impulse::{
 use crate::inertia::point::tet10;
 use crate::inertia::{SolidMomentum, admit_reference_impulses};
 use fs_exec::Cx;
+use fs_math::dd::Dd;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -166,15 +167,13 @@ impl<'a> ConservativeTetSolid<'a> {
     ) -> Result<ConservativeTetImpulse<'a>, ConservativeTetError> {
         // Only external/support work enters the conservative trajectory ledger.
         // Pressure work is independently zero-gated; it is not supplied energy.
-        let work = impulse.external_work_j + impulse.momentum.support_work_j;
-        let increment = work - self.work_correction_j;
-        let cumulative_work_j = self.cumulative_work_j + increment;
-        let work_correction_j = (cumulative_work_j - self.cumulative_work_j) - increment;
+        let work =
+            Dd::from_f64(impulse.external_work_j) + Dd::from_f64(impulse.momentum.support_work_j);
+        let event_defect_j = work - Dd::from_f64(impulse.momentum.kinetic_change_j);
+        let cumulative_work_defect_j = self.cumulative_work_defect_j + event_defect_j;
         gate(
             "impulsive accumulated total work",
-            cumulative_work_j
-                - (self.stored_energy_j + impulse.momentum.kinetic_after_j
-                    - self.initial_total_energy_j),
+            cumulative_work_defect_j.to_f64(),
             work_tolerance_j,
         )?;
         let solid = Self {
@@ -193,9 +192,7 @@ impl<'a> ConservativeTetSolid<'a> {
             stored_energy_j: self.stored_energy_j,
             bulk_stored_energy_j: self.bulk_stored_energy_j,
             kinetic_energy_j: impulse.momentum.kinetic_after_j,
-            initial_total_energy_j: self.initial_total_energy_j,
-            cumulative_work_j,
-            work_correction_j,
+            cumulative_work_defect_j,
             time_s: self.time_s,
         };
         checkpoint(cx)?;
