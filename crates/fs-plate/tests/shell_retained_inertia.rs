@@ -1,7 +1,9 @@
 //! Original reference inertia without an elastic section, for retained motion.
 
 use fs_plate::PlateSection;
-use fs_plate::shell::inertia::{prepare_reference_mass, reference_kinetic_bilinear};
+use fs_plate::shell::inertia::{
+    prepare_reference_mass, reference_kinetic_bilinear, reference_kinetic_increment,
+};
 use fs_plate::shell::{
     ReferenceDensityMoments, ShellMesh, ShellSupport,
     assemble_shell_sections_with_reference_density_moments,
@@ -100,6 +102,23 @@ fn split_mass_matches_original_pencil_in_flat_and_oblique_frames() {
                 reference_kinetic_bilinear(&g, [h; 3], moments, &a, &b).unwrap();
             close(physical, product(&prepared.physical, &a, &b));
             close(drilling, product(&prepared.drilling, &a, &b));
+            let (physical, drilling) =
+                reference_kinetic_increment(&g, [h; 3], moments, &a, &b).unwrap();
+            let delta = core::array::from_fn(|i| b[i] - a[i]);
+            let mean = core::array::from_fn(|i| 0.5 * a[i] + 0.5 * b[i]);
+            for (account, matrix) in [
+                (physical, &prepared.physical),
+                (drilling, &prepared.drilling),
+            ] {
+                close(account.kinetic_before_j, 0.5 * product(matrix, &a, &a));
+                close(account.kinetic_after_j, 0.5 * product(matrix, &b, &b));
+                close(account.kinetic_change_j, product(matrix, &mean, &delta));
+                close(
+                    account.numerical_loss_j,
+                    0.5 * product(matrix, &delta, &delta),
+                );
+                close(account.inertial_work_j, product(matrix, &b, &delta));
+            }
         }
     }
 }
@@ -253,4 +272,43 @@ fn mass_only_ingress_refuses_invalid_geometry_inventory_and_products() {
     assert!(
         reference_kinetic_bilinear(&g, [0.07; 3], moments, &[f64::NAN; 18], &[0.0; 18]).is_err()
     );
+}
+
+#[test]
+fn low_density_nearly_rigid_increment_retains_the_tiny_gauge_work_identity() {
+    let mesh = triangle(true);
+    let g = mesh.facet(0).unwrap();
+    let moments = [ReferenceDensityMoments::from_uniform(1e-18).unwrap(); 3];
+    let mut before = [0.0; 18];
+    let mut after = [0.0; 18];
+    let old_spin = 0.37;
+    let new_spin = old_spin * (1.0 + 1e-12);
+    for i in 0..3 {
+        before[6 * i] = 0.11 - old_spin * g.y[i];
+        before[6 * i + 1] = -0.07 + old_spin * g.x[i];
+        before[6 * i + 2] = 0.02;
+        before[6 * i + 5] = old_spin;
+        after[6 * i] = 0.110000000003 - new_spin * g.y[i];
+        after[6 * i + 1] = -0.069999999998 + new_spin * g.x[i];
+        after[6 * i + 2] = 0.020000000001;
+        after[6 * i + 5] = new_spin;
+    }
+    after[11] += 2e-16;
+    let (physical, gauge) =
+        reference_kinetic_increment(&g, [0.07; 3], moments, &before, &after).unwrap();
+    assert!(physical.kinetic_after_j > 0.0);
+    assert!(gauge.kinetic_after_j < 1e-25 * physical.kinetic_after_j);
+    for account in [physical, gauge] {
+        assert!(account.kinetic_before_j >= 0.0 && account.kinetic_after_j >= 0.0);
+        assert!(account.numerical_loss_j >= 0.0);
+        let scale = account
+            .kinetic_before_j
+            .max(account.kinetic_after_j)
+            .max(account.numerical_loss_j)
+            .max(account.inertial_work_j.abs());
+        assert!(
+            (account.inertial_work_j - account.kinetic_change_j - account.numerical_loss_j).abs()
+                <= 4096.0 * f64::EPSILON * scale
+        );
+    }
 }

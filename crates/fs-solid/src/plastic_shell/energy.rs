@@ -6,8 +6,9 @@
 //! drilling integration loss remain separate. Transverse residual work is
 //! signed and explicitly included in the balance, rather than treated as heat.
 
+use super::dynamics::{PlasticShellReferenceInertia, ShellInertialEnergy};
 use super::{
-    Operator, SmallStrainShellProblem, SmallStrainShellSolution, checkpoint, dot, invalid,
+    Element, Operator, SmallStrainShellProblem, SmallStrainShellSolution, checkpoint, dot, invalid,
 };
 use crate::plastic3::SmallStrainTetError;
 use crate::plastic3::increment::IncrementOperator;
@@ -61,8 +62,12 @@ pub struct PlasticShellEnergy {
     pub drilling_numerical_loss_j: f64,
     pub dead_load_endpoint_work_j: f64,
     pub support_endpoint_work_j: f64,
+    /// Signed endpoint inertia work, including any separately reported drilling
+    /// rate gauge. Zero in a static solve; never physical material heat.
+    pub inertial_work_j: f64,
     pub equilibrium_work_residual_j: f64,
-    /// External plus transverse work minus material and drilling storage/losses.
+    /// External plus transverse work minus material/drilling storage and losses
+    /// and the signed endpoint inertia work.
     pub balance_residual_j: f64,
 }
 impl PlasticShellEnergy {
@@ -80,6 +85,25 @@ pub struct PlasticShellEnergyStep<S> {
     pub energy: PlasticShellEnergy,
 }
 
+/// Complete one-step motion, published only after material and inertial work
+/// close. Physical director kinetics and numerical drilling-gauge kinetics
+/// remain separate in `inertia`; neither backward-Euler loss heats the material.
+#[derive(Debug)]
+pub struct PlasticShellDynamicEnergyStep<S> {
+    pub solution: SmallStrainShellSolution<S>,
+    /// Physical translation rates [m/s] followed by axial rotation rates [rad/s].
+    pub velocity: Vec<[f64; 6]>,
+    pub inertia: ShellInertialEnergy,
+    pub energy: PlasticShellEnergy,
+}
+impl<S> PlasticShellDynamicEnergyStep<S> {
+    /// External plus transverse work minus all physical and numerical storage
+    /// changes and losses, including the independently computed kinetic work.
+    pub fn balance_residual_j(&self) -> f64 {
+        self.energy.balance_residual_j + self.inertia.total.balance_error_j
+    }
+}
+
 fn gate(what: &str, value: f64, tolerance: f64) -> Result<(), SmallStrainTetError> {
     if !value.is_finite() || value.abs() > tolerance {
         return Err(invalid(format!(
@@ -89,7 +113,106 @@ fn gate(what: &str, value: f64, tolerance: f64) -> Result<(), SmallStrainTetErro
     Ok(())
 }
 
+fn validate_tolerances(tolerances: ShellEnergyTolerances) -> Result<(), SmallStrainTetError> {
+    if [
+        tolerances.material.energy_j_m3,
+        tolerances.material.yield_pa,
+        tolerances.section_work_j_m2,
+        tolerances.shell_work_j,
+    ]
+    .iter()
+    .any(|x| !x.is_finite() || *x <= 0.0)
+    {
+        return Err(invalid("positive finite shell energy allowances required"));
+    }
+    Ok(())
+}
+
 impl<L: NativeSectionEnergyLaw> SmallStrainShellProblem<'_, L> {
+    /// Solve one endpoint momentum equation and audit its exact native material
+    /// return. The reference inertia remains bound to its original inventory;
+    /// accepted coordinates, velocities and histories are never mutated.
+    /// `load_path` must be `[1.0]`, and timed native laws must have exactly the
+    /// same original physical duration as `dt_s`. This does not retime a law or
+    /// transport material heat. Refine `dt_s` to control backward-Euler damping.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_backward_euler_with_energy(
+        &self,
+        initial: Option<&SmallStrainShellSolution<L::State>>,
+        velocity: &[[f64; 6]],
+        reference: &PlasticShellReferenceInertia<'_>,
+        dt_s: f64,
+        tolerances: ShellEnergyTolerances,
+        cx: &Cx<'_>,
+    ) -> Result<PlasticShellDynamicEnergyStep<L::State>, SmallStrainTetError> {
+        checkpoint(cx)?;
+        validate_tolerances(tolerances)?;
+        if self.load_path != [1.0] || !dt_s.is_finite() || dt_s <= 0.0 {
+            return Err(invalid(
+                "one endpoint shell load and positive physical duration required",
+            ));
+        }
+        let elements = self.prepare(cx)?;
+        for e in 0..elements.len() {
+            checkpoint(cx)?;
+            for layer in self.sections.at(e).layers() {
+                if layer
+                    .law
+                    .physical_duration_s()
+                    .is_some_and(|duration| duration != dt_s)
+                {
+                    return Err(invalid(
+                        "shell inertia and timed material durations must agree",
+                    ));
+                }
+            }
+        }
+        let step = self
+            .advance_backward_euler_prepared(&elements, initial, velocity, reference, dt_s, cx)?;
+        let energy = self.audit_solution(
+            &elements,
+            initial,
+            &step.solution,
+            step.inertia.total.inertial_work_j,
+            tolerances,
+            cx,
+        )?;
+        for (what, residual) in [
+            ("inertial work", step.inertia.total.balance_error_j),
+            (
+                "physical kinetic work",
+                step.inertia.physical.inertial_work_j
+                    - step.inertia.physical.kinetic_change_j
+                    - step.inertia.physical.numerical_loss_j,
+            ),
+            (
+                "drilling kinetic work",
+                step.inertia.drilling_gauge.inertial_work_j
+                    - step.inertia.drilling_gauge.kinetic_change_j
+                    - step.inertia.drilling_gauge.numerical_loss_j,
+            ),
+            (
+                "inertial partition",
+                step.inertia.total.inertial_work_j
+                    - step.inertia.physical.inertial_work_j
+                    - step.inertia.drilling_gauge.inertial_work_j,
+            ),
+            (
+                "complete dynamic balance",
+                energy.balance_residual_j + step.inertia.total.balance_error_j,
+            ),
+        ] {
+            gate(what, residual, tolerances.shell_work_j)?;
+        }
+        checkpoint(cx)?;
+        Ok(PlasticShellDynamicEnergyStep {
+            solution: step.solution,
+            velocity: step.velocity,
+            inertia: step.inertia,
+            energy,
+        })
+    }
+
     /// Solve and audit one physical endpoint from virgin state or a complete
     /// accepted checkpoint. Exactly one `load_path` entry is required. The same
     /// law coefficients, reference geometry and energy interpretation must own
@@ -106,32 +229,57 @@ impl<L: NativeSectionEnergyLaw> SmallStrainShellProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<PlasticShellEnergyStep<L::State>, SmallStrainTetError> {
         checkpoint(cx)?;
-        if self.load_path.len() != 1
-            || [
-                tolerances.material.energy_j_m3,
-                tolerances.material.yield_pa,
-                tolerances.section_work_j_m2,
-                tolerances.shell_work_j,
-            ]
-            .iter()
-            .any(|x| !x.is_finite() || *x <= 0.0)
-        {
-            return Err(invalid(
-                "one shell physical interval and positive finite energy allowances required",
-            ));
+        validate_tolerances(tolerances)?;
+        if self.load_path.len() != 1 {
+            return Err(invalid("one shell physical interval required"));
         }
         let elements = self.prepare(cx)?;
         let solution = self.solve_prepared(
             &elements,
             initial.map(|old| (old.coordinates.as_slice(), old.section_states.as_slice())),
+            None,
             cx,
         )?;
+        let energy = self.audit_solution(&elements, initial, &solution, 0.0, tolerances, cx)?;
+        Ok(PlasticShellEnergyStep { solution, energy })
+    }
+
+    /// Audit the same accepted native return for static and inertial endpoints.
+    /// The motion owner supplies separately gated physical and gauge inertia;
+    /// their endpoint work is removed here, never inferred as material heat.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn audit_solution(
+        &self,
+        elements: &[Element],
+        initial: Option<&SmallStrainShellSolution<L::State>>,
+        solution: &SmallStrainShellSolution<L::State>,
+        inertial_work_j: f64,
+        tolerances: ShellEnergyTolerances,
+        cx: &Cx<'_>,
+    ) -> Result<PlasticShellEnergy, SmallStrainTetError> {
+        checkpoint(cx)?;
+        validate_tolerances(tolerances)?;
+        if self.load_path.len() != 1
+            || solution.increments.len() != 1
+            || solution.coordinates.len() != self.mesh.nodes.len()
+            || solution.section_states.len() != 3 * elements.len()
+            || initial.is_some_and(|old| {
+                old.coordinates.len() != self.mesh.nodes.len()
+                    || old.section_states.len() != 3 * elements.len()
+            })
+            || !inertial_work_j.is_finite()
+        {
+            return Err(invalid(
+                "complete single shell endpoints and finite inertia work required",
+            ));
+        }
         let operator = Operator {
             problem: self,
-            elements: &elements,
+            elements,
             workspace: RefCell::new(
                 PlaneStressWorkspace::new().map_err(|e| invalid(e.to_string()))?,
             ),
+            inertia: None,
         };
         let virgin = if initial.is_none() {
             operator.initial_states()
@@ -155,7 +303,10 @@ impl<L: NativeSectionEnergyLaw> SmallStrainShellProblem<'_, L> {
                     .map(move |(c, x)| x * if c < 3 { 1.0 } else { length })
             })
             .collect();
-        let mut energy = PlasticShellEnergy::default();
+        let mut energy = PlasticShellEnergy {
+            inertial_work_j,
+            ..PlasticShellEnergy::default()
+        };
         for (e, element) in elements.iter().enumerate() {
             checkpoint(cx)?;
             for q in 0..3 {
@@ -208,13 +359,14 @@ impl<L: NativeSectionEnergyLaw> SmallStrainShellProblem<'_, L> {
         }
         let external = energy.dead_load_endpoint_work_j + energy.support_endpoint_work_j;
         energy.equilibrium_work_residual_j =
-            external - energy.generalized_work_j - energy.drilling_work_j;
+            external - energy.generalized_work_j - energy.drilling_work_j - energy.inertial_work_j;
         energy.balance_residual_j = external + energy.transverse_residual_work_j
             - energy.stored_change_j()
             - energy.physical_dissipation_j
             - energy.material_numerical_dissipation_j
             - (energy.drilling_final_j - energy.drilling_initial_j)
-            - energy.drilling_numerical_loss_j;
+            - energy.drilling_numerical_loss_j
+            - energy.inertial_work_j;
         for (what, residual) in [
             ("equilibrium work", energy.equilibrium_work_residual_j),
             (
@@ -249,6 +401,6 @@ impl<L: NativeSectionEnergyLaw> SmallStrainShellProblem<'_, L> {
             ));
         }
         checkpoint(cx)?;
-        Ok(PlasticShellEnergyStep { solution, energy })
+        Ok(energy)
     }
 }

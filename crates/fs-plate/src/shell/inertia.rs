@@ -7,7 +7,10 @@ use super::FacetGeometry;
 use crate::{PlateError, PlateSection};
 
 mod retained;
-pub use retained::{ShellReferenceMass, prepare_reference_mass, reference_kinetic_bilinear};
+pub use retained::{
+    ReferenceKineticIncrement, ShellReferenceMass, prepare_reference_mass,
+    reference_kinetic_bilinear, reference_kinetic_increment,
+};
 
 /// Mass discretization of the flat-facet CST/DKT shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

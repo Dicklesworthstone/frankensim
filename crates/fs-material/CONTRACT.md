@@ -17763,3 +17763,11 @@ requirements remain unchanged. `tests/plastic_hill_calibration.rs` checks
 independent 0/45/90-degree tension and compression endpoints, rolling/shear
 yield normalization and explicit refusals; `tests/plastic_hill_planar_source.rs`
 checks original receipts, fixed conditions, orientation and missing data.
+
+
+`NativeSectionEnergyLaw::physical_duration_s` exposes each timed native
+return's original interval; rate-independent laws return no interval. Linear,
+power and Voce overstress and borrowed-law adapters retain their actual native
+duration. The audited dynamic shell consumer refuses a different inertia
+interval rather than advancing plastic history on an inconsistent physical
+clock. This metadata performs no material retiming or temperature evolution.

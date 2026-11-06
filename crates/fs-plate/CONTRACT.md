@@ -1863,3 +1863,13 @@ graded layers, signed reference-surface shifts, rigid-spin/pure-drilling energy
 separation and domain refusal. Rustfmt and scoped whitespace checks passed.
 Native compilation and regression execution remain unverified because the
 shared runner exhausted its available disk and memory.
+
+
+The retained motion API also exposes `reference_kinetic_increment`: all five
+before/after kinetic, numerical-loss and endpoint-work products are formed in
+one traversal from the same original point amplitudes. This preserves the
+relative-drilling work identity near rigid motion without a loose absolute
+floor or subtraction from large physical energy. The native implementation is
+allocation-free for one facet. A sixth focused regression covers a low-density
+nearly rigid transition with gauge energy over 25 orders of magnitude below
+physical energy and checks every product against the original mass matrices.

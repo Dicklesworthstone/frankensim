@@ -9458,3 +9458,51 @@ add finite forging, contact, evolving texture, buckling, necking or damage.
 The additional FE cases are authored and statically reviewed; their full
 native Cargo execution remains outstanding under shared executor resource
 constraints. Focused constitutive execution is not an FE integration pass.
+
+
+### Retained plastic-shell momentum and physical kinetic work
+
+`plastic_shell::dynamics` prepares immutable original layer-density moments and
+one full consistent sparse mass before essential-boundary elimination.
+Reference geometry, physical layer bounds and numerical coordinate length are
+checked on reuse. Signed first moments retain translation/director coupling
+for eccentric or unequal-density stacks. Reference inventory is actual
+material mass; the numerical relative-drilling gauge adds no matter.
+
+`advance_backward_euler` uses the original shell constitutive history and
+solid Newton owner with the original dimension-independent reference inertia.
+The same mass supplies force, M/dt² tangent, free-row force scaling and full
+support reactions. Coordinates and velocities retain physical translations
+and axial rotations; the explicit numerical length transforms mass by
+congruence. The physical load path contains exactly one factor-one endpoint.
+Material trials always start from the accepted old history. Failure or
+cancellation leaves the complete supplied checkpoint and reference mass intact.
+The dynamic tangent budget includes both material and retained inertia entries.
+
+The native one-pass kinetic integral reports physical and numerical drilling
+storage, changes, backward-Euler losses and endpoint work separately. Both
+partitions must agree with the mass actually used by the solve. Only one global
+mass is retained; compact original facet moments drive kinetic partitioning
+without extra sparse mass matrices. Nearly rigid gauge motion uses common
+before/after point amplitudes rather than independently subtracting large terms.
+
+`advance_backward_euler_with_energy` shares prepared geometry between momentum
+and the original section/material energy audit. It gates applied/support work,
+physical kinetics, numerical gauge kinetics, recoverable material storage,
+physical dissipation and numerical losses before returning a candidate.
+Supported timed native laws must expose the same physical duration as the
+inertia interval. Neither numerical kinetic damping nor stabilization storage
+is deposited as material heat. Temperature evolution and heat transport are
+not performed. This remains first-order small-strain, small-rotation CST/DKT
+motion with the native P1 midsurface/director kinetic field; finite forming,
+contact impulses and a temporal-error or performance certificate are outside
+this extension.
+
+Four dynamics and three dynamic-energy regressions define unrestrained oblique
+ballistic motion, consistent-mass moving-support equilibrium and reactions,
+yielded release with coordinate-scale invariance, retained-mass/refusal and
+cancellation behavior, yielded bending/unloading with independent yield heat,
+physical/gauge kinetic separation, and material/inertial duration mismatch.
+Rustfmt, scoped whitespace and source/API/physical-account reviews completed.
+Native compilation and execution remain unverified under the shared runner's
+disk and memory exhaustion; these are regression definitions, not pass results.

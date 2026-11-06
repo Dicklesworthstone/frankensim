@@ -95,6 +95,64 @@ fn validate(
     )
 }
 
+fn membrane_spin(geometry: &FacetGeometry, v: &[f64; 18]) -> f64 {
+    let mut gradient = 0.0;
+    for i in 1..3 {
+        gradient += geometry.gradient[i][0] * (v[6 * i + 1] - v[1])
+            - geometry.gradient[i][1] * (v[6 * i] - v[0]);
+    }
+    0.5 * gradient
+}
+
+fn point_velocity(n: [f64; 3], v: &[f64; 18]) -> [f64; 6] {
+    core::array::from_fn(|c| v[c] + n[1] * (v[6 + c] - v[c]) + n[2] * (v[12 + c] - v[c]))
+}
+
+// Pivoted square completion of the same physical I0/I1/I2 matrix. Sharing
+// amplitudes preserves small relative motion beside large common velocities.
+struct PhysicalBasis {
+    weights: [f64; 5],
+    coupling: f64,
+    translation_dominant: bool,
+}
+impl PhysicalBasis {
+    fn new(translation: f64, first: f64, rotary: f64) -> Result<Self, PlateError> {
+        let coupling = first / translation.max(rotary);
+        let variance = (-first).mul_add(coupling, translation.min(rotary));
+        if !variance.is_finite() || variance <= 0.0 {
+            return Err(PlateError::BadSection {
+                what: "shell kinetic mass variance must remain positive and representable",
+            });
+        }
+        let pivot = translation.max(rotary);
+        Ok(Self {
+            weights: [translation, pivot, pivot, variance, variance],
+            coupling,
+            translation_dominant: translation >= rotary,
+        })
+    }
+
+    fn amplitudes(&self, v: [f64; 6]) -> [f64; 5] {
+        if self.translation_dominant {
+            [
+                v[2],
+                v[0] + self.coupling * v[4],
+                v[1] - self.coupling * v[3],
+                v[3],
+                v[4],
+            ]
+        } else {
+            [
+                v[2],
+                v[4] + self.coupling * v[0],
+                v[3] - self.coupling * v[1],
+                v[0],
+                v[1],
+            ]
+        }
+    }
+}
+
 /// Evaluate `a^T M_physical b` and `a^T M_drilling b` without building matrices.
 ///
 /// Inputs have the same local physical ordering as [`ShellReferenceMass`].
@@ -121,44 +179,20 @@ pub fn reference_kinetic_bilinear(
             what: "shell kinetic products require finite physical coordinates",
         });
     }
-    let spin = |v: &[f64; 18]| {
-        let mut gradient = 0.0;
-        for i in 1..3 {
-            gradient += geometry.gradient[i][0] * (v[6 * i + 1] - v[1])
-                - geometry.gradient[i][1] * (v[6 * i] - v[0]);
-        }
-        0.5 * gradient
-    };
-    let spin_a = spin(a);
-    let spin_b = spin(b);
+    let spin_a = membrane_spin(geometry, a);
+    let spin_b = membrane_spin(geometry, b);
     let mut physical = 0.0;
     let mut drilling = 0.0;
     for_each_reference_point(|n, weight| {
         let (translation, first, rotary) =
             reference_point_moments(geometry, thickness, moments, n, weight)?;
-        let at = |v: &[f64; 18]| -> [f64; 6] {
-            core::array::from_fn(|c| v[c] + n[1] * (v[6 + c] - v[c]) + n[2] * (v[12 + c] - v[c]))
-        };
-        let av = at(a);
-        let bv = at(b);
-        let coupling = first / translation.max(rotary);
-        let variance = (-first).mul_add(coupling, translation.min(rotary));
-        if !variance.is_finite() || variance <= 0.0 {
-            return Err(PlateError::BadSection {
-                what: "shell kinetic mass variance must remain positive and representable",
-            });
-        }
-        physical += translation * av[2] * bv[2];
-        if translation >= rotary {
-            physical += translation
-                * ((av[0] + coupling * av[4]) * (bv[0] + coupling * bv[4])
-                    + (av[1] - coupling * av[3]) * (bv[1] - coupling * bv[3]))
-                + variance * (av[3] * bv[3] + av[4] * bv[4]);
-        } else {
-            physical += rotary
-                * ((av[4] + coupling * av[0]) * (bv[4] + coupling * bv[0])
-                    + (av[3] - coupling * av[1]) * (bv[3] - coupling * bv[1]))
-                + variance * (av[0] * bv[0] + av[1] * bv[1]);
+        let av = point_velocity(n, a);
+        let bv = point_velocity(n, b);
+        let basis = PhysicalBasis::new(translation, first, rotary)?;
+        let aa = basis.amplitudes(av);
+        let ba = basis.amplitudes(bv);
+        for i in 0..5 {
+            physical += basis.weights[i] * aa[i] * ba[i];
         }
         drilling += rotary * (av[5] - spin_a) * (bv[5] - spin_b);
         Ok(())
@@ -169,4 +203,104 @@ pub fn reference_kinetic_bilinear(
         });
     }
     Ok((physical, drilling))
+}
+
+/// One physical or numerical-gauge contribution to an inertial step, in joules.
+/// Storage and work include the conventional factor of one half where required.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ReferenceKineticIncrement {
+    pub kinetic_before_j: f64,
+    pub kinetic_after_j: f64,
+    pub kinetic_change_j: f64,
+    /// Backward-Euler loss `0.5 * delta_velocity^T M delta_velocity`.
+    pub numerical_loss_j: f64,
+    /// Endpoint momentum work `velocity_after^T M delta_velocity`.
+    pub inertial_work_j: f64,
+}
+impl ReferenceKineticIncrement {
+    fn accumulate(&mut self, weight: f64, before: f64, after: f64) {
+        let delta = after - before;
+        let mean = 0.5 * after + 0.5 * before;
+        let impulse = weight * delta;
+        self.kinetic_before_j += 0.5 * before * (weight * before);
+        self.kinetic_after_j += 0.5 * after * (weight * after);
+        self.kinetic_change_j += mean * impulse;
+        self.numerical_loss_j += 0.5 * delta * impulse;
+        self.inertial_work_j += after * impulse;
+    }
+
+    fn validate(self) -> Result<Self, PlateError> {
+        let scale = self
+            .kinetic_before_j
+            .max(self.kinetic_after_j)
+            .max(self.numerical_loss_j)
+            .max(self.inertial_work_j.abs());
+        if [
+            self.kinetic_before_j,
+            self.kinetic_after_j,
+            self.numerical_loss_j,
+        ]
+        .iter()
+        .any(|x| !x.is_finite() || *x < 0.0)
+            || !self.kinetic_change_j.is_finite()
+            || !self.inertial_work_j.is_finite()
+            || (self.inertial_work_j - self.kinetic_change_j - self.numerical_loss_j).abs()
+                > 2048.0 * f64::EPSILON * scale
+        {
+            return Err(PlateError::BadSection {
+                what: "shell native kinetic increment misses its work identity",
+            });
+        }
+        Ok(self)
+    }
+}
+
+/// Integrate one backward-Euler kinetic-work account in one native traversal.
+///
+/// The first result belongs to physical midsurface/director motion; the second
+/// belongs to the original numerical relative-drilling gauge. They use the
+/// same inventory and local physical velocity ordering as
+/// [`reference_kinetic_bilinear`]. Endpoint, mean and difference products are
+/// formed from the same original point amplitudes. Nearly rigid velocities
+/// therefore preserve the tiny gauge account's work identity without imposing
+/// a large absolute tolerance or relabeling a roundoff deficit as heat.
+///
+/// No matrices or heap allocations are needed. These are reference kinetic
+/// integrals only; material dissipation and external work retain their owners.
+///
+/// # Errors
+/// Invalid reference data or velocities, unrepresentable positive mass
+/// variance, nonfinite energies, or failure of the native kinetic-work identity.
+pub fn reference_kinetic_increment(
+    geometry: &FacetGeometry,
+    thickness: [f64; 3],
+    moments: [ReferenceDensityMoments; 3],
+    before: &[f64; 18],
+    after: &[f64; 18],
+) -> Result<(ReferenceKineticIncrement, ReferenceKineticIncrement), PlateError> {
+    validate(geometry, thickness, moments)?;
+    if before.iter().chain(after).any(|x| !x.is_finite()) {
+        return Err(PlateError::BadSection {
+            what: "shell kinetic increments require finite physical velocities",
+        });
+    }
+    let spin_before = membrane_spin(geometry, before);
+    let spin_after = membrane_spin(geometry, after);
+    let mut physical = ReferenceKineticIncrement::default();
+    let mut drilling = ReferenceKineticIncrement::default();
+    for_each_reference_point(|n, weight| {
+        let (translation, first, rotary) =
+            reference_point_moments(geometry, thickness, moments, n, weight)?;
+        let av = point_velocity(n, before);
+        let bv = point_velocity(n, after);
+        let basis = PhysicalBasis::new(translation, first, rotary)?;
+        let aa = basis.amplitudes(av);
+        let ba = basis.amplitudes(bv);
+        for i in 0..5 {
+            physical.accumulate(basis.weights[i], aa[i], ba[i]);
+        }
+        drilling.accumulate(rotary, av[5] - spin_before, bv[5] - spin_after);
+        Ok(())
+    })?;
+    Ok((physical.validate()?, drilling.validate()?))
 }

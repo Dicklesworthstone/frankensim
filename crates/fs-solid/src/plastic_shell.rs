@@ -31,6 +31,9 @@ use std::cell::RefCell;
 /// Native physical/numerical energy and drilling work for a single accepted step.
 pub mod energy;
 
+/// Retained reference inertia and native momentum evolution of plastic shells.
+pub mod dynamics;
+
 /// Original immutable section assignments; no material averaging across facets.
 #[derive(Debug, Clone, Copy)]
 pub enum PlasticShellSections<'a, L: SmallStrainLaw> {
@@ -59,7 +62,8 @@ pub struct PlasticShellBudget {
     pub maximum_material_points: usize,
     /// Unconstrained displacement and rotation coordinates.
     pub maximum_free_dofs: usize,
-    /// Element tangent entries before sparse duplicate assembly.
+    /// Tangent entries before sparse duplicate assembly. Dynamic steps also
+    /// count the retained mass entries added by the original inertia owner.
     pub maximum_tangent_entries: usize,
     /// Chronological load entries and their retained records.
     pub maximum_load_steps: usize,
@@ -336,13 +340,14 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<SmallStrainShellSolution<L::State>, SmallStrainTetError> {
         let elements = self.prepare(cx)?;
-        self.solve_prepared(&elements, initial, cx)
+        self.solve_prepared(&elements, initial, None, cx)
     }
 
     fn solve_prepared(
         &self,
         elements: &[Element],
         initial: Option<(&[[f64; 6]], &[LayeredPlaneStressState<L::State>])>,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<SmallStrainShellSolution<L::State>, SmallStrainTetError> {
         let length = self.coordinate_length_m;
@@ -381,6 +386,7 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
         let operator = Operator {
             problem: self,
             elements,
+            inertia,
             workspace: RefCell::new(
                 PlaneStressWorkspace::new().map_err(|e| invalid(e.to_string()))?,
             ),
@@ -422,7 +428,7 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
                 settings: self.settings,
             },
             initial.map(|(_, states)| (coordinates.as_slice(), states)),
-            None,
+            inertia,
             cx,
         )?;
         let coordinates = result
@@ -458,6 +464,7 @@ impl<L: SmallStrainLaw> SmallStrainShellProblem<'_, L> {
 struct Operator<'a, 'm, L: SmallStrainLaw> {
     problem: &'a SmallStrainShellProblem<'m, L>,
     elements: &'a [Element],
+    inertia: Option<&'a crate::inertia::BackwardEulerInertia<'a>>,
     workspace: RefCell<PlaneStressWorkspace>,
 }
 
@@ -599,6 +606,9 @@ impl<L: SmallStrainLaw> Operator<'_, '_, L> {
             .fold(0.0_f64, |n, (_, &v)| n.hypot(v));
         if !force_scale.is_finite() || force.iter().any(|x| !x.is_finite()) {
             return Err(invalid("assembled shell force is not representable"));
+        }
+        if let (Some(inertia), Some(matrix)) = (self.inertia, matrix.as_mut()) {
+            inertia.add_tangent(matrix, cx)?;
         }
         Ok((force, force_scale, matrix.map(|coo| coo.assemble())))
     }

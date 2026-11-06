@@ -108,3 +108,6 @@ fn pure_drilling_energy_is_numerical_and_cannot_become_material_heat() {
         );
     });
 }
+
+#[path = "dynamics_energy.rs"]
+mod dynamics_energy;

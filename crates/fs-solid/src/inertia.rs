@@ -500,12 +500,26 @@ impl ReferenceMass {
         Self::from_matrix(mass.assemble(), reference_mass_kg, ndofs, cx)
     }
 
-    fn from_matrix(
+    /// Admit a reference-mass kernel prepared by another native element owner.
+    /// That owner establishes symmetry and positive energy; this boundary
+    /// retains every full coordinate before essential-boundary elimination.
+    pub(crate) fn from_matrix(
         matrix: Csr,
         reference_mass_kg: f64,
         ndofs: usize,
         cx: &Cx<'_>,
     ) -> Result<Self, InertiaError> {
+        checkpoint(cx)?;
+        if ndofs == 0
+            || matrix.nrows() != ndofs
+            || matrix.ncols() != ndofs
+            || !reference_mass_kg.is_finite()
+            || reference_mass_kg <= 0.0
+        {
+            return Err(invalid(
+                "reference mass requires a complete square matrix and positive inventory",
+            ));
+        }
         for row in 0..ndofs {
             if row % 256 == 0 {
                 checkpoint(cx)?;

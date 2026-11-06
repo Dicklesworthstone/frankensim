@@ -18,6 +18,13 @@ use crate::{MaterialError, SmallStrainLaw, Voigt};
 /// Explicit opt-in to a native mechanical energy account. Implementations must
 /// use exactly the same update and physical duration as `SmallStrainLaw`.
 pub trait NativeSectionEnergyLaw: SmallStrainLaw {
+    /// Original physical interval of a timed native return. `None` is valid
+    /// only for a rate-independent law. Motion and material must advance over
+    /// the same interval; this metadata does not rescale or rebuild the law.
+    fn physical_duration_s(&self) -> Option<f64> {
+        None
+    }
+
     fn native_energy_increment(
         &self,
         old_strain: &Voigt,
@@ -29,7 +36,15 @@ pub trait NativeSectionEnergyLaw: SmallStrainLaw {
 
 macro_rules! native_energy {
     ($law:ty, $validate:expr) => {
+        native_energy!($law, $validate, |_| None);
+    };
+    ($law:ty, $validate:expr, $duration:expr) => {
         impl NativeSectionEnergyLaw for $law {
+            fn physical_duration_s(&self) -> Option<f64> {
+                let duration: fn(&$law) -> Option<f64> = $duration;
+                duration(self)
+            }
+
             fn native_energy_increment(
                 &self,
                 old_strain: &Voigt,
@@ -56,16 +71,24 @@ macro_rules! native_energy {
 }
 native_energy!(J2Plasticity, J2Plasticity::validate_committed_history);
 native_energy!(VoceJ2, VoceJ2::validate_committed_history);
-native_energy!(LinearOverstressJ2, |law, strain, state, _| law
-    .backbone()
-    .validate_overstress_history(strain, state));
-native_energy!(PowerLawOverstressJ2, |law, strain, state, _| law
-    .backbone()
-    .validate_overstress_history(strain, state));
-native_energy!(VoceOverstressJ2, |law, strain, state, _| law
-    .backbone()
-    .backbone()
-    .validate_overstress_history(strain, state));
+native_energy!(
+    LinearOverstressJ2,
+    |law, strain, state, _| law.backbone().validate_overstress_history(strain, state),
+    |law| Some(law.duration_s())
+);
+native_energy!(
+    PowerLawOverstressJ2,
+    |law, strain, state, _| law.backbone().validate_overstress_history(strain, state),
+    |law| Some(law.duration_s())
+);
+native_energy!(
+    VoceOverstressJ2,
+    |law, strain, state, _| law
+        .backbone()
+        .backbone()
+        .validate_overstress_history(strain, state),
+    |law| Some(law.duration_s())
+);
 
 impl<const N: usize> NativeSectionEnergyLaw for ChabocheJ2<N> {
     fn native_energy_increment(
@@ -98,6 +121,10 @@ impl<const N: usize> NativeSectionEnergyLaw for ChabocheJ2<N> {
 }
 
 impl<L: NativeSectionEnergyLaw + ?Sized> NativeSectionEnergyLaw for &L {
+    fn physical_duration_s(&self) -> Option<f64> {
+        (**self).physical_duration_s()
+    }
+
     fn native_energy_increment(
         &self,
         old_strain: &Voigt,

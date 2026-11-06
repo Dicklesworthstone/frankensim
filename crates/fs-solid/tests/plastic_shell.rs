@@ -469,3 +469,6 @@ fn g0_checkpoint_resume_late_refusal_and_cancellation_keep_original_state() {
 
 #[path = "plastic_shell/energy.rs"]
 mod energy;
+
+#[path = "plastic_shell/dynamics.rs"]
+mod dynamics;
